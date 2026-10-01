@@ -353,7 +353,9 @@ impl DynamicAabbTree {
         // swept motion path would silently drop fast-body pairs that the
         // other backends emit. The extra margin absorbs small velocity
         // changes between updates without forcing a re-insert.
-        let margin = Vec3::splat(HALF_SPEC_MARGIN * 4.0);
+        /// Multiplier on half-spec margin for the fat AABB envelope.
+        const FAT_MARGIN_MUL: f32 = 4.0;
+        let margin = Vec3::splat(HALF_SPEC_MARGIN * FAT_MARGIN_MUL);
         AABB {
             min: swept.min - margin,
             max: swept.max + margin,

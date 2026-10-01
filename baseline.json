@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "quality_score": 0.2685500907866345,
-  "iosp_score": 0.9006174654513378,
+  "quality_score": 0.28655309275203034,
+  "iosp_score": 0.9005589879376287,
   "violations": 338,
   "total": 5459,
   "complexity_warnings": 58,
-  "magic_number_warnings": 870,
+  "magic_number_warnings": 788,
   "nesting_depth_warnings": 16,
   "function_length_warnings": 104,
   "unsafe_warnings": 8,
   "error_handling_warnings": 175,
-  "duplicate_groups": 83,
+  "duplicate_groups": 84,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
-  "fragment_groups": 522,
+  "fragment_groups": 526,
   "boilerplate_warnings": 271,
   "srp_struct_warnings": 20,
   "srp_module_warnings": 82,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 3277,
+  "total_findings": 3200,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -68,7 +68,7 @@
     {
       "name": "set_rigid_field",
       "file": "crates/app/src/sync_harness.rs",
-      "line": 149
+      "line": 152
     },
     {
       "name": "EditorSession::default",
@@ -83,12 +83,12 @@
     {
       "name": "PhysicsRuntime::sync_soft_in",
       "file": "crates/app/src/physics_runtime.rs",
-      "line": 238
+      "line": 240
     },
     {
       "name": "normalized_rotation",
       "file": "crates/app/src/physics_runtime.rs",
-      "line": 547
+      "line": 549
     },
     {
       "name": "check_builtin_arity",
@@ -113,27 +113,27 @@
     {
       "name": "assemble_clips",
       "file": "crates/gltf/src/anim.rs",
-      "line": 176
+      "line": 180
     },
     {
       "name": "read_channel",
       "file": "crates/gltf/src/anim.rs",
-      "line": 402
+      "line": 406
     },
     {
       "name": "make_vec_track",
       "file": "crates/gltf/src/anim.rs",
-      "line": 497
+      "line": 501
     },
     {
       "name": "make_quat_track",
       "file": "crates/gltf/src/anim.rs",
-      "line": 506
+      "line": 510
     },
     {
       "name": "import_gltf",
       "file": "crates/gltf/src/import.rs",
-      "line": 118
+      "line": 129
     },
     {
       "name": "setup",
@@ -918,27 +918,27 @@
     {
       "name": "DynamicAabbTree::update",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 372
+      "line": 374
     },
     {
       "name": "DynamicAabbTree::sync_proxies",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 426
+      "line": 428
     },
     {
       "name": "DynamicAabbTree::refresh_proxies",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 451
+      "line": 453
     },
     {
       "name": "DynamicAabbTree::insert_new",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 543
+      "line": 545
     },
     {
       "name": "DynamicAabbTree::query_dynamic",
       "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 572
+      "line": 574
     },
     {
       "name": "Shape::aabb",
@@ -1228,142 +1228,142 @@
     {
       "name": "SequentialImpulseEngine::integrate_velocities",
       "file": "crates/physics/src/sequential_impulse/step.rs",
-      "line": 272
+      "line": 278
     },
     {
       "name": "SequentialImpulseEngine::apply_gyroscopic",
       "file": "crates/physics/src/sequential_impulse/step.rs",
-      "line": 322
+      "line": 328
     },
     {
       "name": "SequentialImpulseEngine::integrate_positions",
       "file": "crates/physics/src/sequential_impulse/step.rs",
-      "line": 379
+      "line": 385
     },
     {
       "name": "SequentialImpulseEngine::apply_driver_velocity",
       "file": "crates/physics/src/sequential_impulse/step.rs",
-      "line": 451
+      "line": 457
     },
     {
       "name": "SequentialImpulseEngine::solve_kinematic_sweep",
       "file": "crates/physics/src/sequential_impulse/step.rs",
-      "line": 511
+      "line": 517
     },
     {
       "name": "SequentialImpulseEngine::solve_continuous",
       "file": "crates/physics/src/sequential_impulse/step.rs",
-      "line": 610
+      "line": 616
     },
     {
       "name": "SequentialImpulseEngine::solve_joints_velocity",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 81
+      "line": 84
     },
     {
       "name": "SequentialImpulseEngine::solve_joints_position",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 168
+      "line": 171
     },
     {
       "name": "SequentialImpulseEngine::solve_gears_velocity",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 233
+      "line": 236
     },
     {
       "name": "joint_warm_start",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 327
+      "line": 330
     },
     {
       "name": "joint_linear_velocity_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 360
+      "line": 363
     },
     {
       "name": "joint_angular_velocity_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 384
+      "line": 387
     },
     {
       "name": "joint_prismatic_linear_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 415
+      "line": 418
     },
     {
       "name": "joint_prismatic_drive_velocity_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 441
+      "line": 444
     },
     {
       "name": "joint_drive_velocity_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 517
+      "line": 520
     },
     {
       "name": "joint_linear_position_step",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 568
+      "line": 571
     },
     {
       "name": "joint_angular_position_pass",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 594
+      "line": 597
     },
     {
       "name": "gear_side_data",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 687
+      "line": 690
     },
     {
       "name": "gear_apply_delta",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 737
+      "line": 740
     },
     {
       "name": "joint_angular_lock_velocity_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 749
+      "line": 752
     },
     {
       "name": "joint_angular_lock_warm_start",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 774
+      "line": 777
     },
     {
       "name": "joint_angular_lock_position_pass",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 794
+      "line": 797
     },
     {
       "name": "joint_distance_velocity_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 845
+      "line": 848
     },
     {
       "name": "joint_wheel_spring_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 883
+      "line": 886
     },
     {
       "name": "joint_sixdof_linear_limit_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 927
+      "line": 930
     },
     {
       "name": "joint_sixdof_angular_limit_iteration",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 984
+      "line": 987
     },
     {
       "name": "solve_new_joint_velocity",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 1039
+      "line": 1042
     },
     {
       "name": "solve_new_joint_position",
       "file": "crates/physics/src/sequential_impulse/joints.rs",
-      "line": 1186
+      "line": 1189
     },
     {
       "name": "apply_warm_start",
@@ -1633,52 +1633,52 @@
     {
       "name": "TypeAnalyzer::visit_type",
       "file": "crates/macros/src/pipeline_config.rs",
-      "line": 70
+      "line": 95
     },
     {
       "name": "TypeAnalyzer::type_to_string",
       "file": "crates/macros/src/pipeline_config.rs",
-      "line": 111
+      "line": 136
     },
     {
       "name": "TypeAnalyzer::analyze_type",
       "file": "crates/macros/src/pipeline_config.rs",
-      "line": 228
+      "line": 257
     },
     {
       "name": "TypeAnalyzer::visit_data_struct",
       "file": "crates/macros/src/pipeline_config.rs",
-      "line": 269
+      "line": 298
     },
     {
       "name": "derive",
       "file": "crates/macros/src/pipeline_config.rs",
-      "line": 644
+      "line": 675
     },
     {
       "name": "player_input",
       "file": "crates/gameplay/src/lib.rs",
-      "line": 261
+      "line": 266
     },
     {
       "name": "blend_position",
       "file": "crates/animation/src/lib.rs",
-      "line": 1143
+      "line": 1145
     },
     {
       "name": "blend_normal",
       "file": "crates/animation/src/lib.rs",
-      "line": 1163
+      "line": 1165
     },
     {
       "name": "normalized_skel_quat",
       "file": "crates/animation/src/lib.rs",
-      "line": 1395
+      "line": 1397
     },
     {
       "name": "bake_bind_transform",
       "file": "crates/animation/src/lib.rs",
-      "line": 1791
+      "line": 1793
     },
     {
       "name": "blend_vertex_reference",
@@ -1688,32 +1688,32 @@
     {
       "name": "EventLog::push",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 235
+      "line": 250
     },
     {
       "name": "EventLog::after",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 244
+      "line": 259
     },
     {
       "name": "serve",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 270
+      "line": 285
     },
     {
       "name": "serve_events_stream",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 622
+      "line": 638
     },
     {
       "name": "push_pending",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 742
+      "line": 758
     },
     {
       "name": "route_request",
       "file": "crates/editor-backend/src/remote.rs",
-      "line": 1241
+      "line": 1257
     },
     {
       "name": "quality",

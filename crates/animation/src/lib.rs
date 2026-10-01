@@ -38,6 +38,8 @@ const DEGENERATE_LEN2: f32 = 1e-12;
 const NEAR_ZERO: f32 = 1e-6;
 /// Max joint influences per skinned vertex (glTF / engine contract).
 const MAX_INFLUENCES: usize = 4;
+/// Indices per triangle (flat soup alignment).
+const TRIANGLE_VERTS: usize = 3;
 
 /// Phase D GPU-skinning contract: [`SkinningMode`], [`JointCount`] /
 /// [`JointLimit`], [`SkinningResources`], [`SkinError`] and the shader-mirror
@@ -1746,7 +1748,7 @@ pub fn skinned_mesh_from_import(
         return Err(SkinBuildError::LengthMismatch);
     }
     if import.indices.is_empty()
-        || !import.indices.len().is_multiple_of(3)
+        || !import.indices.len().is_multiple_of(TRIANGLE_VERTS)
         || import
             .indices
             .iter()

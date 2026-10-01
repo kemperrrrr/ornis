@@ -16,6 +16,31 @@ use syn::{
     WhereClause, WherePredicate, parse_macro_input, visit, visit::Visit,
 };
 
+/// Fallback byte-size estimate for an unrecognized type path.
+const UNKNOWN_TYPE_SIZE: usize = 64;
+/// Byte size of a GPU handle / small uniform blob estimate.
+const GPU_HANDLE_SIZE: usize = 16;
+/// Bytes in `f32` / `i32` / `u32`.
+const SIZE_OF_U32: usize = 4;
+/// Bytes in `f64` / `i64` / `u64` / pointer-width integers.
+const SIZE_OF_U64: usize = 8;
+/// Bytes in `Vec2`.
+const SIZE_OF_VEC2: usize = 8;
+/// Bytes in `Vec3` / `Vec3A`.
+const SIZE_OF_VEC3: usize = 12;
+/// Bytes in `Vec4` / `Quat`.
+const SIZE_OF_VEC4: usize = 16;
+/// Bytes in `Mat4`.
+const SIZE_OF_MAT4: usize = 64;
+/// Bytes in `String` / `Vec` fat pointer.
+const SIZE_OF_STRING: usize = 24;
+/// Bytes in `Box` / `Rc` / `Arc` / `Option` estimate.
+const SIZE_OF_BOX: usize = 8;
+/// Bytes estimate for hash/BTree containers.
+const SIZE_OF_HASHMAP: usize = 48;
+/// Bytes estimate for `Result`.
+const SIZE_OF_RESULT: usize = 16;
+
 #[derive(Default)]
 struct TypeProfile {
     size_estimate: usize,
@@ -104,7 +129,7 @@ impl TypeAnalyzer {
             let path = &tp.path;
             self.estimate_type_size(path)
         } else {
-            64
+            UNKNOWN_TYPE_SIZE
         }
     }
 
@@ -216,13 +241,17 @@ impl TypeAnalyzer {
 
     fn estimate_type_size(&self, path: &syn::Path) -> usize {
         let Some(seg) = path.segments.last() else {
-            return 64;
+            return UNKNOWN_TYPE_SIZE;
         };
         let name = seg.ident.to_string();
         if let Some(size) = fixed_type_size(&name) {
             return size;
         }
-        if self.is_gpu_type(path) { 16 } else { 64 }
+        if self.is_gpu_type(path) {
+            GPU_HANDLE_SIZE
+        } else {
+            UNKNOWN_TYPE_SIZE
+        }
     }
 
     fn analyze_type(&mut self, ty: &Type) {
@@ -391,8 +420,8 @@ fn fixed_type_size(name: &str) -> Option<usize> {
 /// Byte sizes of fixed-width scalars.
 fn scalar_type_size(name: &str) -> Option<usize> {
     Some(match name {
-        "f32" | "i32" | "u32" => 4,
-        "f64" | "i64" | "u64" | "usize" | "isize" => 8,
+        "f32" | "i32" | "u32" => SIZE_OF_U32,
+        "f64" | "i64" | "u64" | "usize" | "isize" => SIZE_OF_U64,
         "i16" | "u16" => 2,
         "i8" | "u8" | "bool" => 1,
         _ => return None,
@@ -402,15 +431,17 @@ fn scalar_type_size(name: &str) -> Option<usize> {
 /// Byte sizes of composite handle / container types.
 fn composite_type_size(name: &str) -> Option<usize> {
     Some(match name {
-        "Vec2" | "Vec2A" => 8,
-        "Vec3" | "Vec3A" => 12,
-        "Vec4" | "Quat" => 16,
-        "Mat4" => 64,
-        "String" | "Vec" => 24,
-        "Box" | "Rc" | "Arc" => 8,
-        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "LinkedList" => 48,
-        "Option" => 8,
-        "Result" => 16,
+        "Vec2" | "Vec2A" => SIZE_OF_VEC2,
+        "Vec3" | "Vec3A" => SIZE_OF_VEC3,
+        "Vec4" | "Quat" => SIZE_OF_VEC4,
+        "Mat4" => SIZE_OF_MAT4,
+        "String" | "Vec" => SIZE_OF_STRING,
+        "Box" | "Rc" | "Arc" => SIZE_OF_BOX,
+        "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" | "VecDeque" | "LinkedList" => {
+            SIZE_OF_HASHMAP
+        }
+        "Option" => SIZE_OF_BOX,
+        "Result" => SIZE_OF_RESULT,
         _ => return None,
     })
 }

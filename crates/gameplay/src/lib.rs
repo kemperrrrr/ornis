@@ -24,13 +24,18 @@ use ornis_core::{Engine, FixedTime, Resources, SmartStore, System, SystemAccess,
 use ornis_input::{InputMap, InputState};
 use ornis_macros::RegisterComponent;
 
+/// Squared-length / dt floor for near-zero gameplay intent.
+const NEAR_ZERO: f32 = 1e-6;
+/// Components in a `Vec3` serde tuple.
+const VEC3_COMPONENTS: usize = 3;
+
 /// Serializes a [`Vec3`]-backed component as its `[x, y, z]` array.
 ///
 /// Manual impl (not `glam/serde`) so gameplay never toggles a workspace-wide
 /// feature: the canonical JSON form matches `glam`'s own (`[x, y, z]`).
 fn serialize_vec3<S: serde::Serializer>(v: Vec3, serializer: S) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeTupleStruct;
-    let mut state = serializer.serialize_tuple_struct("Vec3", 3)?;
+    let mut state = serializer.serialize_tuple_struct("Vec3", VEC3_COMPONENTS)?;
     state.serialize_field(&v.x)?;
     state.serialize_field(&v.y)?;
     state.serialize_field(&v.z)?;
@@ -62,7 +67,7 @@ fn deserialize_vec3<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
         }
     }
 
-    deserializer.deserialize_tuple_struct("Vec3", 3, Vec3Visitor)
+    deserializer.deserialize_tuple_struct("Vec3", VEC3_COMPONENTS, Vec3Visitor)
 }
 
 /// Marker for the locally controlled player entity.
@@ -297,7 +302,7 @@ pub fn player_input(resources: &Resources, speed: f32) {
     }
     // Normalize to keep diagonal speed bounded.
     let mut intent = Vec3::new(dx, 0.0, dz);
-    if intent.length_squared() > 1e-6 {
+    if intent.length_squared() > NEAR_ZERO {
         intent = intent.normalize() * speed;
     }
     let Some(player_lane) = store.read_lane::<Player>() else {
@@ -368,7 +373,7 @@ pub fn transform_update(resources: &Resources) {
         return;
     };
     let dt = time.delta_seconds();
-    if dt <= 1e-6 {
+    if dt <= NEAR_ZERO {
         return;
     }
     let Some(store) = resources.get::<SmartStore>() else {
@@ -397,7 +402,7 @@ pub fn transform_update(resources: &Resources) {
         .get::<FixedTime>()
         .map(|f| f.alpha())
         .unwrap_or(0.0);
-    if alpha <= 1e-6 {
+    if alpha <= NEAR_ZERO {
         return;
     }
     let residual = snapshot

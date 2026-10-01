@@ -24,6 +24,10 @@ use crate::ImportStats;
 
 /// Squared length below which a quaternion is treated as degenerate.
 const DEGENERATE_LEN2: f32 = 1e-12;
+/// Spatial components in a translation / scale key.
+const VEC3_COMPONENTS: usize = 3;
+/// Components in a quaternion key.
+const QUAT_COMPONENTS: usize = 4;
 
 /// How to blend between the keys of a [`LoadedKeyTrack`].
 ///
@@ -429,7 +433,7 @@ fn read_channel(
             let ReadOutputs::Translations(outputs) = reader.read_outputs()? else {
                 return None;
             };
-            let values: Vec<[f32; 3]> = outputs.collect();
+            let values: Vec<[f32; VEC3_COMPONENTS]> = outputs.collect();
             check_counts(times.len(), values.len())?;
             let keys = times
                 .into_iter()
@@ -442,7 +446,7 @@ fn read_channel(
             let ReadOutputs::Scales(outputs) = reader.read_outputs()? else {
                 return None;
             };
-            let values: Vec<[f32; 3]> = outputs.collect();
+            let values: Vec<[f32; VEC3_COMPONENTS]> = outputs.collect();
             check_counts(times.len(), values.len())?;
             let keys = times
                 .into_iter()
@@ -458,7 +462,7 @@ fn read_channel(
             let ReadOutputs::Rotations(outputs) = reader.read_outputs()? else {
                 return None;
             };
-            let values: Vec<[f32; 4]> = outputs.into_f32().collect();
+            let values: Vec<[f32; QUAT_COMPONENTS]> = outputs.into_f32().collect();
             check_counts(times.len(), values.len())?;
             let keys = times
                 .into_iter()

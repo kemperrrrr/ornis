@@ -13,6 +13,9 @@ use crate::joint::{
     AxisConfig, PrismaticLimit, PrismaticMotor, RevoluteLimit, RevoluteMotor, WheelSuspension,
 };
 
+/// Translational DOFs before angular slots in a 6-DOF joint.
+const LINEAR_DOF_COUNT: usize = 3;
+
 /// Numerical zero for effective-mass guards: rows with `k`/`k_eff` below
 /// this are skipped as degenerate (infinite mass ratio, collapsed axes).
 /// Same magnitude as [`NEAR_ZERO`] (length/residual domain), not the
@@ -1160,7 +1163,7 @@ fn solve_new_joint_velocity(
                     joint_sixdof_angular_limit_iteration(
                         bodies,
                         &mut joint.acc_6dof,
-                        3 + i,
+                        LINEAR_DOF_COUNT + i,
                         a,
                         b,
                         dir,

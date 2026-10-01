@@ -36,6 +36,8 @@ use ornis_render::extract_render_data;
 
 /// Squared length below which a quaternion is treated as degenerate.
 const DEGENERATE_LEN2: f32 = 1e-12;
+/// Spatial components in a world-space position.
+const VEC3_COMPONENTS: usize = 3;
 
 /// Render parameters for a chain/rope soft body (PLAN B2/D1 leftover #3).
 ///
@@ -328,7 +330,7 @@ impl PhysicsRuntime {
                 }
                 continue;
             }
-            let positions: Vec<[f32; 3]> = body
+            let positions: Vec<[f32; VEC3_COMPONENTS]> = body
                 .positions_snapshot()
                 .iter()
                 .map(Vec3::to_array)

@@ -39,6 +39,21 @@ use tungstenite::{Bytes, Message, Utf8Bytes, WebSocket, accept_hdr_with_config};
 
 use crate::ipc::{EditorCommand, EventSeq, GameEvent, RequestId, SetComponentPayload, UiCommand};
 
+/// HTTP accept poll interval (ms).
+const HTTP_ACCEPT_POLL_MS: u64 = 100;
+/// TCP accept backoff on `WouldBlock` (ms).
+const TCP_ACCEPT_BACKOFF_MS: u64 = 50;
+/// WebSocket sniff poll interval while the head is incomplete (ms).
+const SNIFF_POLL_MS: u64 = 10;
+/// HTTP 400 Bad Request.
+const HTTP_BAD_REQUEST: u16 = 400;
+/// HTTP 403 Forbidden.
+const HTTP_FORBIDDEN: u16 = 403;
+/// HTTP 413 Payload Too Large.
+const HTTP_PAYLOAD_TOO_LARGE: u16 = 413;
+/// HTTP 415 Unsupported Media Type.
+const HTTP_UNSUPPORTED_MEDIA: u16 = 415;
+
 /// Editor frontend root. Resolution order:
 ///   1. `--editor-dir <path>` CLI argument
 ///   2. `ORNIS_EDITOR_DIR` environment variable
@@ -291,11 +306,12 @@ fn serve(
         }
 
         // Accept one request with a short timeout.
-        let mut request = match server.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Some(r)) => r,
-            Ok(None) => continue,
-            Err(_) => break,
-        };
+        let mut request =
+            match server.recv_timeout(std::time::Duration::from_millis(HTTP_ACCEPT_POLL_MS)) {
+                Ok(Some(r)) => r,
+                Ok(None) => continue,
+                Err(_) => break,
+            };
 
         let response = route_request(
             &root,
@@ -456,9 +472,9 @@ fn accept_loop(
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(TCP_ACCEPT_BACKOFF_MS));
             }
-            Err(_) => thread::sleep(Duration::from_millis(50)),
+            Err(_) => thread::sleep(Duration::from_millis(TCP_ACCEPT_BACKOFF_MS)),
         }
     }
 }
@@ -572,7 +588,7 @@ fn classify_connection(stream: &TcpStream) -> ConnectionRoute {
                     if Instant::now() >= deadline {
                         return ConnectionRoute::Http;
                     }
-                    thread::sleep(Duration::from_millis(10));
+                    thread::sleep(Duration::from_millis(SNIFF_POLL_MS));
                 }
             },
             Err(_) => return ConnectionRoute::Http,
@@ -999,9 +1015,9 @@ impl ApiGuardError {
     #[must_use]
     pub fn status_code(self) -> u16 {
         match self {
-            Self::ForbiddenOrigin | Self::ForbiddenHost => 403,
-            Self::UnsupportedMediaType => 415,
-            Self::PayloadTooLarge => 413,
+            Self::ForbiddenOrigin | Self::ForbiddenHost => HTTP_FORBIDDEN,
+            Self::UnsupportedMediaType => HTTP_UNSUPPORTED_MEDIA,
+            Self::PayloadTooLarge => HTTP_PAYLOAD_TOO_LARGE,
         }
     }
 }
@@ -1290,7 +1306,7 @@ fn route_request(
                 json_response(r#"{"accepted":true}"#)
             } else {
                 Response::from_string(r#"{"accepted":false,"error":"invalid input"}"#)
-                    .with_status_code(400)
+                    .with_status_code(HTTP_BAD_REQUEST)
                     .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
             }
         }

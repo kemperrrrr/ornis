@@ -249,11 +249,17 @@ impl SequentialImpulseEngine {
         base_iters: u32,
     ) -> u32 {
         const MIN_SUBSTEPS: u32 = 4;
+        /// Above this base-iter budget, resting islands keep 2 velocity iters.
+        const ADAPTIVE_ITERS_GATE: u32 = 4;
         const SUB_DT_TARGET: f32 = 1.0 / 240.0;
         const PEN_SLOP: f32 = 0.01;
         // Keep at least 2 velocity / 1 position iteration so even resting
         // islands still correct residual penetration.
-        let min_iters = if base_iters > 4 { 2 } else { 1 };
+        let min_iters = if base_iters > ADAPTIVE_ITERS_GATE {
+            2
+        } else {
+            1
+        };
         let max_sub = self.substeps.max(1);
         let lower = MIN_SUBSTEPS.min(max_sub);
         let wanted_vel = (max_speed * dt / SUB_DT_TARGET).ceil() as u32;

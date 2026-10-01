@@ -6,6 +6,31 @@
 //! would drag the `image` crate into a geometry-only loader (textures are
 //! an explicit non-goal, see the crate docs).
 
+/// Symbols per base64 quantum.
+const QUANTUM: usize = 4;
+/// Decoded bytes per full quantum (before padding).
+const BYTES_PER_QUANTUM: usize = 3;
+/// Max padding `=` characters in a quantum.
+const MAX_PADDING: usize = 2;
+/// Bit shift for the first sextet in a 24-bit quantum.
+const SEXTET0_SHIFT: u32 = 18;
+/// Bit shift for the second sextet.
+const SEXTET1_SHIFT: u32 = 12;
+/// Bit shift for the third sextet.
+const SEXTET2_SHIFT: u32 = 6;
+/// Bit shift extracting the first output byte.
+const BYTE0_SHIFT: u32 = 16;
+/// Bit shift extracting the second output byte.
+const BYTE1_SHIFT: u32 = 8;
+/// Offset of lowercase letters in the standard alphabet.
+const ALPHA_LOWER_OFFSET: u8 = 26;
+/// Offset of digits in the standard alphabet.
+const DIGIT_OFFSET: u8 = 52;
+/// Alphabet value of `+`.
+const PLUS_VALUE: u8 = 62;
+/// Alphabet value of `/`.
+const SLASH_VALUE: u8 = 63;
+
 /// Decodes standard-alphabet base64, tolerating ASCII whitespace.
 ///
 /// Padding (`=`) may only appear as the final one or two characters;
@@ -27,22 +52,22 @@ pub(crate) fn decode(input: &str) -> Result<Vec<u8>, DecodeError> {
         }
         values.push(decode_symbol(byte)?);
     }
-    if values.len() % 4 != 0 {
+    if values.len() % QUANTUM != 0 {
         return Err(DecodeError::BadLength);
     }
-    if padding > 2 {
+    if padding > MAX_PADDING {
         return Err(DecodeError::BadPadding);
     }
-    let data_len = values.len() / 4 * 3 - padding;
-    let mut out = Vec::with_capacity(data_len / 4 * 3);
-    for quad in values.chunks_exact(4) {
-        let n = (u32::from(quad[0]) << 18)
-            | (u32::from(quad[1]) << 12)
-            | (u32::from(quad[2]) << 6)
+    let data_len = values.len() / QUANTUM * BYTES_PER_QUANTUM - padding;
+    let mut out = Vec::with_capacity(data_len);
+    for quad in values.chunks_exact(QUANTUM) {
+        let n = (u32::from(quad[0]) << SEXTET0_SHIFT)
+            | (u32::from(quad[1]) << SEXTET1_SHIFT)
+            | (u32::from(quad[2]) << SEXTET2_SHIFT)
             | u32::from(quad[3]);
-        out.push((n >> 16) as u8);
+        out.push((n >> BYTE0_SHIFT) as u8);
         if out.len() < data_len {
-            out.push((n >> 8) as u8);
+            out.push((n >> BYTE1_SHIFT) as u8);
         }
         if out.len() < data_len {
             out.push(n as u8);
@@ -68,10 +93,10 @@ pub(crate) enum DecodeError {
 fn decode_symbol(byte: u8) -> Result<u8, DecodeError> {
     match byte {
         b'A'..=b'Z' => Ok(byte - b'A'),
-        b'a'..=b'z' => Ok(byte - b'a' + 26),
-        b'0'..=b'9' => Ok(byte - b'0' + 52),
-        b'+' => Ok(62),
-        b'/' => Ok(63),
+        b'a'..=b'z' => Ok(byte - b'a' + ALPHA_LOWER_OFFSET),
+        b'0'..=b'9' => Ok(byte - b'0' + DIGIT_OFFSET),
+        b'+' => Ok(PLUS_VALUE),
+        b'/' => Ok(SLASH_VALUE),
         other => Err(DecodeError::BadSymbol(other)),
     }
 }
