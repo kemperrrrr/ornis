@@ -186,15 +186,19 @@ fn setup_heterogeneous(n: u32) -> SequentialImpulseEngine {
     physics
 }
 
-fn parse_value<T>(flag: &str, value: Option<String>) -> T
+fn parse_value<T>(flag: &str, value: Option<String>) -> Option<T>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
 {
-    let value = value.unwrap_or_else(|| panic!("{flag} requires a value"));
-    value
-        .parse()
-        .unwrap_or_else(|error| panic!("invalid value for {flag}: {error}"))
+    let value = value?;
+    match value.parse() {
+        Ok(parsed) => Some(parsed),
+        Err(error) => {
+            eprintln!("invalid value for {flag}: {error}");
+            None
+        }
+    }
 }
 
 fn print_usage() {
@@ -393,18 +397,39 @@ fn main() {
             "--tree" => backend = BroadPhaseKind::DynamicAabbTree,
             "--auto" => backend = BroadPhaseKind::Auto,
             "--cell-size" => {
-                cell_size = Some(parse_value("--cell-size", args.next()));
+                let Some(value) = parse_value("--cell-size", args.next()) else {
+                    return;
+                };
+                cell_size = Some(value);
                 backend = BroadPhaseKind::UniformGrid;
             }
-            "--scene" => scene = parse_value("--scene", args.next()),
-            "--bodies" => bodies = parse_value("--bodies", args.next()),
-            "--steps" => steps = parse_value("--steps", args.next()),
+            "--scene" => {
+                let Some(value) = parse_value("--scene", args.next()) else {
+                    return;
+                };
+                scene = value;
+            }
+            "--bodies" => {
+                let Some(value) = parse_value("--bodies", args.next()) else {
+                    return;
+                };
+                bodies = value;
+            }
+            "--steps" => {
+                let Some(value) = parse_value("--steps", args.next()) else {
+                    return;
+                };
+                steps = value;
+            }
             "--kill-plane" => kill_plane = true,
             "--help" | "-h" => {
                 print_usage();
                 return;
             }
-            unknown => panic!("unknown argument {unknown}; use --help for usage"),
+            unknown => {
+                eprintln!("unknown argument {unknown}; use --help for usage");
+                return;
+            }
         }
     }
     run_probe(

@@ -732,15 +732,9 @@ impl SystemSet {
         id
     }
 
-    /// The `ResourceId` of a registered resource.
-    ///
-    /// # Panics
-    /// Panics if `R` was not registered.
-    pub fn resource_id<R: FrameResource>(&self) -> ResourceId {
-        *self
-            .ids
-            .get(&TypeId::of::<R>())
-            .unwrap_or_else(|| panic!("typed resource '{}' is not registered", R::NAME))
+    /// The `ResourceId` of a registered resource, if `R` was registered.
+    pub fn resource_id<R: FrameResource>(&self) -> Option<ResourceId> {
+        self.ids.get(&TypeId::of::<R>()).copied()
     }
 
     /// Adds a pass, wiring reads/writes from `P::Reads`/`P::Writes`.

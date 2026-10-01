@@ -3421,11 +3421,19 @@ impl Renderer3D {
         );
         queue.submit(std::iter::once(enc.finish()));
         let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map"));
-        device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll");
-        let data = slice.get_mapped_range().expect("range");
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+            return Vec::new();
+        }
+        let Ok(Ok(())) = rx.recv() else {
+            return Vec::new();
+        };
+        let Ok(data) = slice.get_mapped_range() else {
+            return Vec::new();
+        };
         let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         buf.unmap();

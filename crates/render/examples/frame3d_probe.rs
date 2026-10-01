@@ -103,8 +103,14 @@ fn main() {
     let scene_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "assets/scene.ron".to_string());
-    let ron_text = std::fs::read_to_string(&scene_path).expect("read scene.ron");
-    let scene = Scene::from_ron(&ron_text).expect("parse scene.ron");
+    let Ok(ron_text) = std::fs::read_to_string(&scene_path) else {
+        eprintln!("failed to read {scene_path}");
+        return;
+    };
+    let Ok(scene) = Scene::from_ron(&ron_text) else {
+        eprintln!("failed to parse {scene_path}");
+        return;
+    };
     println!(
         "scene '{}': {} entities, {} lights",
         scene.name,
@@ -115,7 +121,7 @@ fn main() {
 }
 
 /// Headless adapter + device for offscreen probing.
-async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
+async fn create_headless_device(label: &str) -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),
@@ -129,7 +135,7 @@ async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
             ..Default::default()
         })
         .await
-        .expect("adapter");
+        .ok()?;
     println!("adapter: {:?}", adapter.get_info().name);
 
     let (device, queue) = adapter
@@ -141,8 +147,8 @@ async fn create_headless_device(label: &str) -> (wgpu::Device, wgpu::Queue) {
             ..Default::default()
         })
         .await
-        .expect("device");
-    (device, queue)
+        .ok()?;
+    Some((device, queue))
 }
 
 fn surface_config_for(format: wgpu::TextureFormat) -> wgpu::SurfaceConfiguration {
@@ -186,8 +192,8 @@ fn make_target(
 fn build_scene_data(
     device: &wgpu::Device,
     scene: &Scene,
-) -> (ornis_render::Mesh, Vec<OpenPBRMaterial>, Vec<InstanceData>) {
-    let first = scene.entities.first().expect("scene has no entities");
+) -> Option<(ornis_render::Mesh, Vec<OpenPBRMaterial>, Vec<InstanceData>)> {
+    let first = scene.entities.first()?;
     let mesh = match &first.mesh {
         MeshDesc::Sphere {
             radius,
@@ -212,7 +218,7 @@ fn build_scene_data(
         ),
         // This probe renders procedural scenes; Custom soups have no
         // upload path here yet.
-        MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),
+        MeshDesc::Custom { .. } => return None,
     };
 
     let mut materials = Vec::new();
@@ -232,7 +238,7 @@ fn build_scene_data(
             material_index: MaterialIdx::from(i as u32),
         });
     }
-    (mesh, materials, instances)
+    Some((mesh, materials, instances))
 }
 
 fn camera_view_proj(cam: &CameraDesc) -> [[f32; 4]; 4] {
@@ -290,11 +296,22 @@ async fn read_target(
     );
     queue.submit(std::iter::once(encoder.finish()));
     let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let data = slice.get_mapped_range().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        eprintln!("GPU poll failed during readback");
+        return (Vec::new(), unpadded);
+    }
+    let Ok(Ok(())) = rx.recv() else {
+        eprintln!("map readback failed");
+        return (Vec::new(), unpadded);
+    };
+    let Ok(data) = slice.get_mapped_range() else {
+        eprintln!("get_mapped_range failed");
+        return (Vec::new(), unpadded);
+    };
     let mut pixels = vec![0u8; (unpadded * HEIGHT) as usize];
     for y in 0..HEIGHT as usize {
         let src = &data[y * padded as usize..][..unpadded as usize];
@@ -484,7 +501,10 @@ impl TechniqueStats {
 
 async fn run(scene: &Scene) {
     // ── Headless device ───────────────────────────────────────────────
-    let (device, queue) = create_headless_device("frame3d_probe").await;
+    let Some((device, queue)) = create_headless_device("frame3d_probe").await else {
+        eprintln!("no GPU adapter/device for frame3d_probe");
+        return;
+    };
 
     // ── Two identical offscreen targets ───────────────────────────────
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -495,7 +515,10 @@ async fn run(scene: &Scene) {
     let renderer = Renderer3D::new(&device, &surface_config, 1);
 
     // ── Scene → GPU data ──────────────────────────────────────────────
-    let (mesh, materials, instances) = build_scene_data(&device, scene);
+    let Some((mesh, materials, instances)) = build_scene_data(&device, scene) else {
+        eprintln!("scene has no renderable entities");
+        return;
+    };
     let lights: Vec<LightDesc> = scene.lights.clone();
 
     renderer.upload_materials(&device, &queue, &materials);
@@ -760,13 +783,23 @@ fn diff_count(a: &[u8], b: &[u8]) -> usize {
 }
 
 fn save_png(path: &str, pixels: &[u8], unpadded: u32) {
-    let file = std::fs::File::create(path).expect("create png");
+    let Ok(file) = std::fs::File::create(path) else {
+        eprintln!("failed to create {path}");
+        return;
+    };
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), WIDTH, HEIGHT);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().expect("png header");
-    writer
+    let Ok(mut writer) = encoder.write_header() else {
+        eprintln!("failed to write png header for {path}");
+        return;
+    };
+    if writer
         .write_image_data(&pixels[..(unpadded * HEIGHT) as usize])
-        .expect("png data");
+        .is_err()
+    {
+        eprintln!("failed to write png data for {path}");
+        return;
+    }
     println!("saved {path}");
 }

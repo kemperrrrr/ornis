@@ -107,11 +107,20 @@ fn main() {
         "forward" => Technique::Forward,
         "deferred" => Technique::Deferred,
         "hybrid" => Technique::Hybrid,
-        other => panic!("unknown technique `{other}` (forward|deferred|hybrid)"),
+        other => {
+            eprintln!("unknown technique `{other}` (forward|deferred|hybrid)");
+            return;
+        }
     };
 
-    let ron_text = std::fs::read_to_string(&scene_path).expect("read scene.ron");
-    let scene = Scene::from_ron(&ron_text).expect("parse scene.ron");
+    let Ok(ron_text) = std::fs::read_to_string(&scene_path) else {
+        eprintln!("failed to read {scene_path}");
+        return;
+    };
+    let Ok(scene) = Scene::from_ron(&ron_text) else {
+        eprintln!("failed to parse {scene_path}");
+        return;
+    };
     pollster::block_on(run(&scene, technique, &out_path));
 }
 
@@ -123,14 +132,17 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
         memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         display: None,
     });
-    let adapter = instance
+    let Ok(adapter) = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
         })
         .await
-        .expect("adapter");
-    let (device, queue) = adapter
+    else {
+        eprintln!("no suitable GPU adapter");
+        return;
+    };
+    let Ok((device, queue)) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("technique_probe"),
             required_features: wgpu::Features::empty(),
@@ -139,7 +151,10 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
             ..Default::default()
         })
         .await
-        .expect("device");
+    else {
+        eprintln!("failed to create GPU device");
+        return;
+    };
 
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let surface_config = wgpu::SurfaceConfiguration {
@@ -155,7 +170,10 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     };
     let renderer = Renderer3D::new(&device, &surface_config, 1);
 
-    let first = scene.entities.first().expect("scene has no entities");
+    let Some(first) = scene.entities.first() else {
+        eprintln!("scene has no entities");
+        return;
+    };
     let mesh = match &first.mesh {
         MeshDesc::Sphere {
             radius,
@@ -180,7 +198,10 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
         ),
         // This probe renders procedural scenes; Custom soups have no
         // upload path here yet.
-        MeshDesc::Custom { .. } => panic!("Custom mesh not supported by this probe"),
+        MeshDesc::Custom { .. } => {
+            eprintln!("Custom mesh not supported by this probe");
+            return;
+        }
     };
     let mut materials = Vec::new();
     let mut instances = Vec::new();
@@ -285,11 +306,22 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     );
     queue.submit(std::iter::once(encoder.finish()));
     let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |r| r.expect("map readback"));
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let data = slice.get_mapped_range().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        eprintln!("GPU poll failed during readback");
+        return;
+    }
+    let Ok(Ok(())) = rx.recv() else {
+        eprintln!("map readback failed");
+        return;
+    };
+    let Ok(data) = slice.get_mapped_range() else {
+        eprintln!("get_mapped_range failed");
+        return;
+    };
     let mut pixels = vec![0u8; (unpadded * HEIGHT) as usize];
     for y in 0..HEIGHT as usize {
         pixels[y * unpadded as usize..][..unpadded as usize]
@@ -298,14 +330,20 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     drop(data);
     readback.unmap();
 
-    let file = std::fs::File::create(out_path).expect("create png");
+    let Ok(file) = std::fs::File::create(out_path) else {
+        eprintln!("failed to create {out_path}");
+        return;
+    };
     let mut encoder_png = png::Encoder::new(std::io::BufWriter::new(file), WIDTH, HEIGHT);
     encoder_png.set_color(png::ColorType::Rgba);
     encoder_png.set_depth(png::BitDepth::Eight);
-    encoder_png
-        .write_header()
-        .expect("png header")
-        .write_image_data(&pixels)
-        .expect("png data");
+    let Ok(mut writer) = encoder_png.write_header() else {
+        eprintln!("failed to write png header for {out_path}");
+        return;
+    };
+    if writer.write_image_data(&pixels).is_err() {
+        eprintln!("failed to write png data for {out_path}");
+        return;
+    }
     println!("saved {out_path}");
 }

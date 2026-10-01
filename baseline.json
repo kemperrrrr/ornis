@@ -1,7 +1,7 @@
 {
   "version": 2,
-  "quality_score": 0.47407153688261094,
-  "iosp_score": 0.9005297233666862,
+  "quality_score": 0.476697320333183,
+  "iosp_score": 0.9005882352941177,
   "violations": 338,
   "total": 5466,
   "complexity_warnings": 58,
@@ -9,14 +9,14 @@
   "nesting_depth_warnings": 16,
   "function_length_warnings": 105,
   "unsafe_warnings": 8,
-  "error_handling_warnings": 25,
+  "error_handling_warnings": 13,
   "duplicate_groups": 81,
   "dead_code_warnings": 374,
   "dead_type_warnings": 6,
   "fragment_groups": 496,
   "boilerplate_warnings": 270,
   "srp_struct_warnings": 20,
-  "srp_module_warnings": 82,
+  "srp_module_warnings": 83,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2380,
+  "total_findings": 2369,
   "violation_details": [
     {
       "name": "GameApp::showcase_engine",
@@ -273,32 +273,32 @@
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 3475
+      "line": 3483
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3639
+      "line": 3647
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3659
+      "line": 3667
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 3740
+      "line": 3748
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 3767
+      "line": 3775
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 4209
+      "line": 4217
     },
     {
       "name": "RenderFrame3D::build",
@@ -308,22 +308,22 @@
     {
       "name": "run",
       "file": "crates/render/examples/technique_probe.rs",
-      "line": 118
+      "line": 127
     },
     {
       "name": "build_scene_data",
       "file": "crates/render/examples/render_probe.rs",
-      "line": 180
+      "line": 186
     },
     {
       "name": "build_scene_data",
       "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 186
+      "line": 192
     },
     {
       "name": "run",
       "file": "crates/render/examples/frame3d_probe.rs",
-      "line": 485
+      "line": 502
     },
     {
       "name": "setup_islands_grid",
@@ -1533,7 +1533,7 @@
     {
       "name": "run_probe",
       "file": "crates/physics/examples/probe_100k.rs",
-      "line": 216
+      "line": 220
     },
     {
       "name": "PositiveUsize::expect_valid",
