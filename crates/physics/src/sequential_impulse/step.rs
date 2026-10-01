@@ -357,7 +357,9 @@ impl SequentialImpulseEngine {
                 [h * (u.y - a * w2.y), h * (b * w2.x - u.x), c, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ];
-            let Some(d) = solve_small(&j, &[-r.x, -r.y, -r.z, 0.0], 3) else {
+            /// Spatial DOF of the gyroscopic Newton step (ωₓωᵧω_z).
+            const GYRO_DOF: usize = 3;
+            let Some(d) = solve_small(&j, &[-r.x, -r.y, -r.z, 0.0], GYRO_DOF) else {
                 break;
             };
             w2 += Vec3::new(d[0], d[1], d[2]);

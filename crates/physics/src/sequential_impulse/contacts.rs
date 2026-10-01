@@ -162,6 +162,9 @@ pub(crate) fn stack_path_for_island(manifold_count: usize) -> bool {
     manifold_count >= STACK_PATH_MIN_MANIFOLDS
 }
 
+/// Cap on stack-path velocity iters as a multiple of the base count.
+const STACK_ITERS_CAP_MUL: u32 = 3;
+
 /// Tall-stack velocity budget for an island with `manifold_count` manifolds:
 /// the full base budget (never the resting downscale) plus one extra sweep
 /// per two chain levels above the gate — support propagates a few levels per
@@ -173,9 +176,11 @@ pub(crate) fn stack_path_for_island(manifold_count: usize) -> bool {
 #[inline]
 pub(crate) fn stack_velocity_iters(base_iters: u32, manifold_count: usize) -> u32 {
     let extra = manifold_count.saturating_sub(STACK_PATH_MIN_MANIFOLDS) as u32 / 2;
-    base_iters
-        .saturating_add(extra)
-        .min(base_iters.saturating_mul(3).max(base_iters))
+    base_iters.saturating_add(extra).min(
+        base_iters
+            .saturating_mul(STACK_ITERS_CAP_MUL)
+            .max(base_iters),
+    )
 }
 
 /// WarmStart stage: apply cached impulses once (Box2D pattern). Capped so the

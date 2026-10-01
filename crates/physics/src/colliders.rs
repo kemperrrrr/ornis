@@ -80,11 +80,13 @@ fn validated_triangles(
     vertices: &[Vec3],
     indices: &[u32],
 ) -> Result<Vec<crate::shape::Triangle>, ColliderError> {
-    if !indices.len().is_multiple_of(3) {
+    /// Vertices per triangle index triple.
+    const TRI_VERTS: usize = 3;
+    if !indices.len().is_multiple_of(TRI_VERTS) {
         return Err(ColliderError::BadIndexCount { len: indices.len() });
     }
     let triangles: Vec<crate::shape::Triangle> = indices
-        .chunks_exact(3)
+        .chunks_exact(TRI_VERTS)
         .map(|c| crate::shape::Triangle::from_raw([c[0], c[1], c[2]]))
         .collect();
     for (t, tri) in triangles.iter().enumerate() {

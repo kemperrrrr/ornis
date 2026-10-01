@@ -1071,7 +1071,9 @@ fn ray_heightfield_hit(
     };
     let (y_min, _) = hf.height_range();
     // Bounded walk: at most one full grid diagonal plus margin.
-    let max_steps = 4 * (hf.rows + hf.cols) + 8;
+    const HF_WALK_DIAG_MUL: usize = 4;
+    const HF_WALK_MARGIN: usize = 8;
+    let max_steps = HF_WALK_DIAG_MUL * (hf.rows + hf.cols) + HF_WALK_MARGIN;
     let mut best: Option<(f32, Vec3)> = None;
     // Degenerate ray (straight down the Y axis): a single cell owns the
     // whole walk — test it and return.

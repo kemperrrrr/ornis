@@ -40,6 +40,8 @@ use crate::engine::{Manifold, ManifoldState};
 const WIDE_LANES: usize = 4;
 /// Body-index slots reserved while packing a batch (2 bodies × lanes).
 const WIDE_BODY_SLOTS: usize = WIDE_LANES * 2;
+/// Spatial axes for world-inertia matrix rows.
+const SPATIAL_AXES: usize = 3;
 
 // ---------------------------------------------------------------------------
 // 4-lane SoA primitives
@@ -138,8 +140,8 @@ pub struct WideBatch {
     apply_w_a: Vec3x4,
     apply_w_b: Vec3x4,
     /// World-space inverse inertia matrix rows per lane: `w_mat[lane][row]`.
-    wa_mat: [[Vec3; 3]; WIDE_LANES],
-    wb_mat: [[Vec3; 3]; WIDE_LANES],
+    wa_mat: [[Vec3; SPATIAL_AXES]; WIDE_LANES],
+    wb_mat: [[Vec3; SPATIAL_AXES]; WIDE_LANES],
     target: Fx4,
     mu: Fx4,
     /// Transverse Coulomb coefficient per lane (ODE `mu2` parity).
@@ -173,7 +175,7 @@ impl WideBatch {
     /// World-space inverse inertia tensor rows for one body:
     /// `I⁻¹_world = R · diag(1/Ix, 1/Iy, 1/Iz) · Rᵀ`, as 3 row vectors.
     #[inline]
-    fn world_inertia(rot: glam::Quat, inertia: Vec3) -> [Vec3; 3] {
+    fn world_inertia(rot: glam::Quat, inertia: Vec3) -> [Vec3; SPATIAL_AXES] {
         let inv = Vec3::new(
             if inertia.x > 0.0 {
                 1.0 / inertia.x
@@ -204,7 +206,7 @@ impl WideBatch {
     }
 
     #[inline]
-    fn matvec(m: &[Vec3; 3], v: Vec3) -> Vec3 {
+    fn matvec(m: &[Vec3; SPATIAL_AXES], v: Vec3) -> Vec3 {
         Vec3::new(m[0].dot(v), m[1].dot(v), m[2].dot(v))
     }
 
@@ -235,8 +237,8 @@ impl WideBatch {
             apply_n_b: Vec3x4::zero(),
             apply_w_a: Vec3x4::zero(),
             apply_w_b: Vec3x4::zero(),
-            wa_mat: [[Vec3::ZERO; 3]; WIDE_LANES],
-            wb_mat: [[Vec3::ZERO; 3]; WIDE_LANES],
+            wa_mat: [[Vec3::ZERO; SPATIAL_AXES]; WIDE_LANES],
+            wb_mat: [[Vec3::ZERO; SPATIAL_AXES]; WIDE_LANES],
             target: Fx4::zero(),
             mu: Fx4::zero(),
             mu2: Fx4::zero(),

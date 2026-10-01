@@ -28,7 +28,11 @@ const FALLBACK_TANGENT: Vec3 = Vec3::NEG_Y;
 
 /// Squared length below which a chain segment counts as degenerate
 /// (zero-length) and reuses the last valid tangent.
-const MIN_SEGMENT_LEN_SQ: f32 = 1e-12;
+const MIN_SEGMENT_LEN_SQ: f32 = crate::constants::DEGENERATE_LEN2;
+/// Minimum ring sides for a usable tube cross-section (a triangle).
+const MIN_TUBE_SIDES: u32 = 3;
+/// Indices per side quad (two triangles).
+const INDICES_PER_QUAD: usize = 6;
 
 /// Triangle index list for a tube of `count` rings with `sides` vertices each.
 ///
@@ -40,11 +44,11 @@ const MIN_SEGMENT_LEN_SQ: f32 = 1e-12;
 /// Returns exactly `(count - 1) * sides * 6` indices, or an empty vector when
 /// no tube can be formed (`count < 2` or `sides < 3`).
 pub fn tube_indices(count: usize, sides: u32) -> Vec<u32> {
-    if count < 2 || sides < 3 {
+    if count < 2 || sides < MIN_TUBE_SIDES {
         return Vec::new();
     }
     let sides_usize = sides as usize;
-    let mut indices = Vec::with_capacity((count - 1) * sides_usize * 6);
+    let mut indices = Vec::with_capacity((count - 1) * sides_usize * INDICES_PER_QUAD);
     for ring in 0..count - 1 {
         let r0 = (ring * sides_usize) as u32;
         let r1 = ((ring + 1) * sides_usize) as u32;
@@ -74,7 +78,7 @@ pub fn tube_indices(count: usize, sides: u32) -> Vec<u32> {
 /// `sides < 3`, or a non-positive/non-finite `radius`).
 pub fn tube_positions(particles: &[Particle], radius: f32, sides: u32) -> Vec<[f32; 3]> {
     let count = particles.len();
-    if count < 2 || sides < 3 || !radius.is_finite() || radius <= 0.0 {
+    if count < 2 || sides < MIN_TUBE_SIDES || !radius.is_finite() || radius <= 0.0 {
         return Vec::new();
     }
     let centers: Vec<Vec3> = particles.iter().map(|p| p.position).collect();

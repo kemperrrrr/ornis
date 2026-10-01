@@ -241,17 +241,20 @@ impl FrictionFrame {
     }
 }
 
-/// Capped inline vector of at most 4 `Copy` points with a count invariant.
+/// Capacity of [`Capped4`] / [`NonEmpty4`] (and SI manifolds).
+const CAP4: usize = 4;
+
+/// Capped inline vector of at most [`CAP4`] `Copy` points with a count invariant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Capped4<T: Copy> {
-    buf: [Option<T>; 4],
+    buf: [Option<T>; CAP4],
     len: u8,
 }
 
 impl<T: Copy> Default for Capped4<T> {
     fn default() -> Self {
         Self {
-            buf: [None; 4],
+            buf: [None; CAP4],
             len: 0,
         }
     }
@@ -265,7 +268,7 @@ impl<T: Copy> Capped4<T> {
 
     /// Push a point; `Err(point)` when full.
     pub fn try_push(&mut self, v: T) -> Result<(), T> {
-        if self.len >= 4 {
+        if self.len as usize >= CAP4 {
             return Err(v);
         }
         self.buf[self.len as usize] = Some(v);
@@ -277,7 +280,7 @@ impl<T: Copy> Capped4<T> {
     /// (empty input yields an empty vector; [`NonEmpty4`] is the
     /// non-empty counterpart).
     pub fn try_from_slice(v: &[T]) -> Option<Self> {
-        if v.len() > 4 {
+        if v.len() > CAP4 {
             return None;
         }
         let mut out = Self::new();
@@ -329,7 +332,7 @@ impl<T: Copy> NonEmpty4<T> {
 
     /// Checked construction from a slice: `None` when empty or longer than 4.
     pub fn try_from_slice(v: &[T]) -> Option<Self> {
-        if v.is_empty() || v.len() > 4 {
+        if v.is_empty() || v.len() > CAP4 {
             return None;
         }
         let mut inner = Capped4::new();

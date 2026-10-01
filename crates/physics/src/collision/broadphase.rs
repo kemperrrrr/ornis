@@ -16,6 +16,11 @@ use crate::math::AABB;
 pub(crate) const HALF_SPEC_MARGIN: f32 = 0.025;
 const DEFAULT_GRID_CELL_SIZE: f32 = 2.0;
 const DEFAULT_MAX_CELLS_PER_BODY: usize = 4096;
+/// Spatial axes for SAP sort-axis rotation (X→Y→Z).
+const SPATIAL_AXES: usize = 3;
+/// Reciprocal of the body-count change fraction that re-evaluates grid cell
+/// size (`* 4 > last` ≡ change > 25%).
+const CELL_REEVAL_COUNT_DENOM: usize = 4;
 
 /// Summary of the last broadphase update.
 ///
@@ -390,7 +395,7 @@ impl SweepAndPrune {
 impl BroadPhase for SweepAndPrune {
     fn update(&mut self, bodies: &[RigidBody], sub_dt: f32, prev: Option<&[PrevPose]>) {
         self.aabbs = swept_aabbs(bodies, sub_dt, prev);
-        self.sort_axis = (self.sort_axis + 1) % 3;
+        self.sort_axis = (self.sort_axis + 1) % SPATIAL_AXES;
         self.active.clear();
 
         self.stats = BroadPhaseStats {
@@ -1014,7 +1019,8 @@ impl BroadPhase for AdaptiveBroadphase {
                 // moves >25%. `set_cell_size` forces a full rebuild, so the
                 // incremental state always matches the active cell size.
                 let count = bodies.len();
-                let count_moved = count.abs_diff(self.last_cell_n) * 4 > self.last_cell_n;
+                let count_moved =
+                    count.abs_diff(self.last_cell_n) * CELL_REEVAL_COUNT_DENOM > self.last_cell_n;
                 if self.updates == 1
                     || self.updates - self.last_cell_eval >= AUTO_CELL_REEVAL_INTERVAL
                     || count_moved

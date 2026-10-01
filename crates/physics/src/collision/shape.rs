@@ -55,6 +55,10 @@ const TRI_VERTS: usize = 3;
 const MIN_HULL_VERTS: usize = 4;
 /// Corners of an AABB/OBB.
 const BOX_CORNERS: usize = 8;
+/// AABB-corner bit selecting the max endpoint on X / Y / Z.
+const AABB_BIT_X: usize = 4;
+const AABB_BIT_Y: usize = 2;
+const AABB_BIT_Z: usize = 1;
 /// Heightfield column treated as flat when height span is below this (m).
 const HEIGHTFIELD_FLAT_EPS: f32 = 1e-4;
 /// Floor for heightfield cell size when building a skirt (m).
@@ -1358,7 +1362,7 @@ impl TriMesh {
             return Err(MeshError::BadIndexCount { len: indices.len() });
         }
         let triangles: Vec<Triangle> = indices
-            .chunks_exact(3)
+            .chunks_exact(TRI_VERTS)
             .map(|c| Triangle::from_raw([c[0], c[1], c[2]]))
             .collect();
         Self::from_triangles(vertices, &triangles)
@@ -1510,17 +1514,17 @@ impl TriMesh {
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
         for i in 0..BOX_CORNERS {
             let corner = Vec3::new(
-                if i & 4 == 0 {
+                if i & AABB_BIT_X == 0 {
                     self.local_min.x
                 } else {
                     self.local_max.x
                 },
-                if i & 2 == 0 {
+                if i & AABB_BIT_Y == 0 {
                     self.local_min.y
                 } else {
                     self.local_max.y
                 },
-                if i & 1 == 0 {
+                if i & AABB_BIT_Z == 0 {
                     self.local_min.z
                 } else {
                     self.local_max.z

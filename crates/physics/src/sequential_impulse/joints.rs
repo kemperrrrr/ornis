@@ -1113,7 +1113,7 @@ fn solve_new_joint_velocity(
             // (frame-independent, like the prismatic perp basis).
             joint_warm_start(bodies, joint, a, b, ra, rb, None);
             // Locked angular axes, X/Y/Z order, slots aligned 1:1.
-            let mut lock = [Vec3::ZERO; 3];
+            let mut lock = [Vec3::ZERO; FRAME.len()];
             let mut n_lock = 0;
             for (i, e) in FRAME.iter().enumerate() {
                 if angular[i] == AxisConfig::Locked {
@@ -1254,7 +1254,7 @@ fn solve_new_joint_position(
                 return;
             };
             // Locked angular subset, X/Y/Z order (same order as velocity).
-            let mut lock = [Vec3::ZERO; 3];
+            let mut lock = [Vec3::ZERO; FRAME.len()];
             for _ in 0..iterations {
                 let ra = bodies[a].orientation * la;
                 let rb = bodies[b].orientation * lb;
