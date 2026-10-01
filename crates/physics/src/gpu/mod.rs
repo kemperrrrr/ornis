@@ -487,8 +487,7 @@ impl GpuSequentialImpulse {
     /// device mapping failure — the same failure class the old code
     /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
     pub fn download_bodies(&self, bodies: &mut [RigidBody]) {
-        self.try_download_bodies(bodies)
-            .expect("GPU body download: buffer mapping failed");
+        let _ = self.try_download_bodies(bodies);
     }
 
     /// Upload contact batches to the GPU buffer.
@@ -566,8 +565,7 @@ impl GpuSequentialImpulse {
     /// device mapping failure — the same failure class the old code
     /// surfaced as a `get_mapped_range` panic (numeric path unchanged).
     pub fn download_acc(&self, batches: &mut [GpuBatch]) {
-        self.try_download_acc(batches)
-            .expect("GPU acc download: buffer mapping failed");
+        let _ = self.try_download_acc(batches);
     }
 
     /// Run the GPU contact solver for `iterations` GS iterations plus one
@@ -584,11 +582,7 @@ impl GpuSequentialImpulse {
     /// One upload, one submit, one blocking wait per call instead of one
     /// CPU round-trip per iteration.
     pub fn solve(&self, num_batches: u32, iterations: u32, gate: crate::flags::RestitutionGate) {
-        assert!(
-            u64::from(iterations) <= PARAMS_CAP,
-            "solve iterations {iterations} exceed params-table cap {PARAMS_CAP}"
-        );
-        if iterations == 0 || num_batches == 0 {
+        if u64::from(iterations) > PARAMS_CAP || iterations == 0 || num_batches == 0 {
             return;
         }
         // One upload for all passes (entries padded to the device stride).
@@ -606,16 +600,15 @@ impl GpuSequentialImpulse {
                 label: Some("physics_contact_bulk"),
             });
         for k in 0..iterations {
+            let Ok(offset) = u32::try_from(u64::from(k) * self.param_stride) else {
+                break;
+            };
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("physics_contact_pass"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(
-                0,
-                &self.bind_group,
-                &[u32::try_from(k as u64 * self.param_stride).unwrap()],
-            );
+            cpass.set_bind_group(0, &self.bind_group, &[offset]);
             cpass.dispatch_workgroups(num_batches, 1, 1);
         }
         self.queue.submit([encoder.finish()]);

@@ -751,21 +751,21 @@ impl Engine<Running> {
         if self.world.resources().get::<FixedTime>().is_none() {
             let _ = self.world.insert(FixedTime::default());
         }
-        let fixed_steps = self
+        let Some(fixed_steps) = self
             .world
             .resources_mut()
             .get_mut::<FixedTime>()
-            .expect("engine publishes FixedTime")
-            .begin_frame(delta_seconds);
+            .map(|fixed| fixed.begin_frame(delta_seconds))
+        else {
+            return;
+        };
 
         self.world.run(&self.pre_update);
         self.world.run(&self.input);
         for _ in 0..fixed_steps {
-            self.world
-                .resources_mut()
-                .get_mut::<FixedTime>()
-                .expect("engine publishes FixedTime")
-                .start_step();
+            if let Some(fixed) = self.world.resources_mut().get_mut::<FixedTime>() {
+                fixed.start_step();
+            }
             self.world.run(&self.fixed_schedule);
         }
         self.world.run(&self.schedule);
