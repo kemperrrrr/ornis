@@ -129,7 +129,7 @@ fn vec3_track_from_loaded(track: &LoadedKeyTrack<[f32; 3]>) -> KeyTrack<Vec3> {
             value: Vec3::from_array(key.value),
         })
         .collect();
-    with_interpolation(keys, track.interpolation)
+    with_interpolation(keys, &track.interpolation, Vec3::from_array)
 }
 
 /// Maps a `(x, y, z, w)` mirror channel to a [`Quat`] track, exactly.
@@ -142,14 +142,35 @@ fn quat_track_from_loaded(track: &LoadedKeyTrack<[f32; 4]>) -> KeyTrack<Quat> {
             value: Quat::from_xyzw(key.value[0], key.value[1], key.value[2], key.value[3]),
         })
         .collect();
-    with_interpolation(keys, track.interpolation)
+    with_interpolation(keys, &track.interpolation, |value| {
+        Quat::from_xyzw(value[0], value[1], value[2], value[3])
+    })
 }
 
-/// Wraps converted keys with the mirror interpolation (linear/stepped).
-fn with_interpolation<T>(keys: Vec<Key<T>>, interpolation: LoadedInterpolation) -> KeyTrack<T> {
+/// Wraps converted keys with the mirror interpolation (linear/stepped/cubic),
+/// mapping cubic tangents with the same value conversion as the keys.
+fn with_interpolation<T, M: Copy>(
+    keys: Vec<Key<T>>,
+    interpolation: &LoadedInterpolation<M>,
+    convert: impl Fn(M) -> T,
+) -> KeyTrack<T> {
     match interpolation {
         LoadedInterpolation::Linear => KeyTrack::linear(keys),
         LoadedInterpolation::Step => KeyTrack::stepped(keys),
+        LoadedInterpolation::Cubic {
+            in_tangents,
+            out_tangents,
+        } => KeyTrack::cubic(
+            keys,
+            in_tangents
+                .iter()
+                .map(|tangent| convert(*tangent))
+                .collect(),
+            out_tangents
+                .iter()
+                .map(|tangent| convert(*tangent))
+                .collect(),
+        ),
     }
 }
 
@@ -231,6 +252,130 @@ mod tests {
             track.translation.sample(0.99),
             Some(Vec3::new(4.0, 5.0, 6.0))
         );
+    }
+
+    #[test]
+    fn cubic_interpolation_converts_tangents_on_all_joint_channels() {
+        use ornis_gltf::LoadedKeyTrack as MirrorTrack;
+        let clip = LoadedSkelClip {
+            duration: 2.0,
+            tracks: vec![LoadedJointTrack {
+                joint: 0,
+                translation: MirrorTrack::cubic(
+                    vec![
+                        LoadedKey {
+                            time: 0.0,
+                            value: [0.0, 0.0, 0.0],
+                        },
+                        LoadedKey {
+                            time: 2.0,
+                            value: [2.0, 0.0, 0.0],
+                        },
+                    ],
+                    vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                    vec![[2.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                ),
+                rotation: MirrorTrack::cubic(
+                    vec![
+                        LoadedKey {
+                            time: 0.0,
+                            value: [0.0, 0.0, 0.0, 1.0],
+                        },
+                        LoadedKey {
+                            time: 1.0,
+                            value: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    ],
+                    vec![[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+                    vec![[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+                ),
+                scale: MirrorTrack::cubic(Vec::new(), Vec::new(), Vec::new()),
+            }],
+        };
+        let live = skel_clip_from_loaded(&clip);
+        let track = &live.tracks[0];
+        // Full round-trip: keys plus tangents convert value-for-value.
+        assert_eq!(
+            track.translation,
+            KeyTrack::cubic(
+                vec![
+                    Key {
+                        time: 0.0,
+                        value: Vec3::ZERO,
+                    },
+                    Key {
+                        time: 2.0,
+                        value: Vec3::new(2.0, 0.0, 0.0),
+                    },
+                ],
+                vec![Vec3::ZERO, Vec3::ZERO],
+                vec![Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO],
+            )
+        );
+        assert!(matches!(
+            track.rotation.interpolation,
+            Interpolation::Cubic { .. }
+        ));
+        assert_eq!(track.rotation.keys[0].value, Quat::IDENTITY);
+        // Tangent shapes the midpoint (1.0 + 0.125 · m0·dt = 1.5 at s = 0.5).
+        let mid = track.translation.sample(1.0).expect("mid key");
+        assert!(
+            (mid.x - 1.5).abs() < 1e-6,
+            "converted tangent must shape the midpoint, got {mid:?}"
+        );
+        // Cubic rotation samples stay unit.
+        let spun = track.rotation.sample(0.5).expect("mid key");
+        assert!((spun.length() - 1.0).abs() < 1e-5);
+        // Empty cubic round-trips to an empty cubic (channel reads identity).
+        assert!(track.scale.keys.is_empty());
+        assert!(matches!(
+            track.scale.interpolation,
+            Interpolation::Cubic { .. }
+        ));
+        assert_eq!(track.scale.sample(0.5), None);
+    }
+
+    #[test]
+    fn cubic_object_tracks_convert_through_node_mapping() {
+        use ornis_gltf::LoadedKeyTrack as MirrorTrack;
+        let loader = Entity::new(0);
+        let world = Entity::new(41);
+        let clip = LoadedAnimClip {
+            name: "cubic".to_string(),
+            duration: 1.0,
+            looping: true,
+            tracks: vec![LoadedAnimTrack {
+                entity: loader,
+                translation: MirrorTrack::cubic(
+                    vec![
+                        LoadedKey {
+                            time: 0.0,
+                            value: [0.0, 0.0, 0.0],
+                        },
+                        LoadedKey {
+                            time: 1.0,
+                            value: [1.0, 1.0, 1.0],
+                        },
+                    ],
+                    vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                    vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+                ),
+                rotation: MirrorTrack::cubic(Vec::new(), Vec::new(), Vec::new()),
+                scale: MirrorTrack::cubic(Vec::new(), Vec::new(), Vec::new()),
+            }],
+        };
+        let map = HashMap::from([(loader, world)]);
+        let (live, dropped) = anim_clip_from_loaded("cubic".to_string(), &clip, &map);
+        assert_eq!(dropped, 0);
+        assert_eq!(live.tracks.len(), 1);
+        assert_eq!(live.tracks[0].entity, world);
+        // Zero tangents degrade to smoothstep: 0.5 at the midpoint.
+        let mid = live.tracks[0].translation.sample(0.5).expect("mid key");
+        assert!(
+            (mid - Vec3::splat(0.5)).length() < 1e-6,
+            "object cubic must smoothstep, got {mid:?}"
+        );
+        assert_eq!(live.tracks[0].rotation.sample(0.5), None);
     }
 
     #[test]

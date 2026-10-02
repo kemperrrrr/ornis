@@ -3,9 +3,12 @@
 //! Consumes sampler `input` times plus `output` TRS values per
 //! `channel.target.path`; routes skinned nodes (joints of the imported
 //! skins) to joint tracks and the rest to object tracks. `LINEAR` maps to
-//! [`LoadedKeyTrack::linear`], `STEP` to [`LoadedKeyTrack::stepped`];
-//! `CUBICSPLINE` channels skip honestly with a counter, morph-target
-//! channels are ignored (documented in the crate skip-rules table).
+//! [`LoadedKeyTrack::linear`], `STEP` to [`LoadedKeyTrack::stepped`],
+//! `CUBICSPLINE` to [`LoadedKeyTrack::cubic`] (the output accessor holds
+//! `3N` entries per key — in-tangent, value, out-tangent — split into keys
+//! plus the two tangent lanes); malformed cubic channels skip honestly with
+//! a counter, morph-target channels are ignored (documented in the crate
+//! skip-rules table).
 //!
 //! Clip containers mirror `ornis-animation` field-for-field (plain arrays,
 //! no `glam` dependency — the same seam as [`LoadedSkin`](crate::LoadedSkin),
@@ -28,17 +31,28 @@ const DEGENERATE_LEN2: f32 = 1e-12;
 const VEC3_COMPONENTS: usize = 3;
 /// Components in a quaternion key.
 const QUAT_COMPONENTS: usize = 4;
+/// Output entries per key in a `CUBICSPLINE` accessor (in-tangent, value,
+/// out-tangent).
+const CUBIC_STRIDE: usize = 3;
 
 /// How to blend between the keys of a [`LoadedKeyTrack`].
 ///
 /// Mirrors `ornis-animation` `Interpolation` field-for-field; the wiring
-/// maps variants one-to-one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadedInterpolation {
+/// maps variants one-to-one (cubic tangents are per-second derivatives,
+/// one entry per key, in key order).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LoadedInterpolation<T> {
     /// Blend between surrounding keys (`lerp`/`slerp`).
     Linear,
     /// Hold the earlier key (glTF `STEP`).
     Step,
+    /// Hermite blend between surrounding keys (glTF `CUBICSPLINE`).
+    Cubic {
+        /// Per-second in-tangent per key (`len == keys.len()`).
+        in_tangents: Vec<T>,
+        /// Per-second out-tangent per key (`len == keys.len()`).
+        out_tangents: Vec<T>,
+    },
 }
 
 /// One animation key: the channel value at `time` seconds from clip start.
@@ -63,7 +77,7 @@ pub struct LoadedKeyTrack<T> {
     /// Keys sorted by ascending `time`.
     pub keys: Vec<LoadedKey<T>>,
     /// How to blend between keys.
-    pub interpolation: LoadedInterpolation,
+    pub interpolation: LoadedInterpolation<T>,
 }
 
 impl<T> LoadedKeyTrack<T> {
@@ -80,6 +94,19 @@ impl<T> LoadedKeyTrack<T> {
         Self {
             keys,
             interpolation: LoadedInterpolation::Step,
+        }
+    }
+
+    /// Builds a Hermite track (glTF `CUBICSPLINE`): per-second tangents, one
+    /// entry per key in key order (`in_tangents.len() == keys.len()` and
+    /// `out_tangents.len() == keys.len()` by contract).
+    pub fn cubic(keys: Vec<LoadedKey<T>>, in_tangents: Vec<T>, out_tangents: Vec<T>) -> Self {
+        Self {
+            keys,
+            interpolation: LoadedInterpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            },
         }
     }
 }
@@ -173,9 +200,11 @@ pub fn node_to_joint_map(document: &Document) -> HashMap<usize, usize> {
 ///
 /// Each clip `duration` is the maximum input time over its assembled keys.
 /// A side with no tracks emits nothing; an animation with neither side
-/// bumps [`ImportStats::skipped_clips`]. `CUBICSPLINE` channels bump
+/// bumps [`ImportStats::skipped_clips`]. Well-formed `CUBICSPLINE` channels
+/// assemble to cubic tracks; malformed ones (unreadable or count-mismatched
+/// accessors, output count != `3`× input count) bump
 /// [`ImportStats::skipped_cubicspline`]; morph-target channels are ignored.
-/// Malformed channels (unreadable or count-mismatched accessors) skip
+/// Other malformed channels (unreadable or count-mismatched accessors) skip
 /// silently. Duplicate channels for the same node and path keep the first.
 pub fn assemble_clips(
     document: &Document,
@@ -399,10 +428,15 @@ fn track_max<T>(keys: &[LoadedKey<T>]) -> f32 {
 
 /// Decodes one channel to path-dispatched keys (`None` = skip honestly).
 ///
-/// `CUBICSPLINE` bumps [`ImportStats::skipped_cubicspline`]; unreadable or
-/// count-mismatched accessors return `None`. Rotation outputs decode
-/// through `into_f32` (normalized integers included) and normalize to unit
-/// length, falling back to identity on degenerate input — never NaN.
+/// Well-formed `CUBICSPLINE` channels assemble to cubic tracks (output
+/// count `3`× input count, split per key as in-tangent, value,
+/// out-tangent); malformed ones bump
+/// [`ImportStats::skipped_cubicspline`]. Other unreadable or
+/// count-mismatched accessors return `None` silently. Rotation outputs
+/// decode through `into_f32` (normalized integers included) and normalize
+/// values to unit length, falling back to identity on degenerate input —
+/// never NaN (cubic tangents stay verbatim: they are derivatives, not
+/// orientations).
 fn read_channel(
     channel: &gltf::animation::Channel<'_>,
     buffers: &[Vec<u8>],
@@ -412,13 +446,10 @@ fn read_channel(
     // `property()` / `interpolation()` / `node()` unwraps below only fire
     // on hand-built nonsense that validation already rejected as `Parse`.
     let sampler = channel.sampler();
-    if matches!(
+    let cubic = matches!(
         sampler.interpolation(),
         gltf::animation::Interpolation::CubicSpline
-    ) {
-        stats.skipped_cubicspline += 1;
-        return None;
-    }
+    );
     let stepped = matches!(
         sampler.interpolation(),
         gltf::animation::Interpolation::Step
@@ -430,49 +461,109 @@ fn read_channel(
     }
     match channel.target().property() {
         Property::Translation => {
-            let ReadOutputs::Translations(outputs) = reader.read_outputs()? else {
-                return None;
+            let outputs = match reader.read_outputs() {
+                Some(ReadOutputs::Translations(outputs)) => outputs,
+                _ => {
+                    if cubic {
+                        stats.skipped_cubicspline += 1;
+                    }
+                    return None;
+                }
             };
             let values: Vec<[f32; VEC3_COMPONENTS]> = outputs.collect();
-            check_counts(times.len(), values.len())?;
-            let keys = times
-                .into_iter()
-                .zip(values)
-                .map(|(time, value)| LoadedKey { time, value })
-                .collect();
-            Some(ChannelKeys::Translation(make_vec_track(keys, stepped)))
+            if cubic {
+                let Some((keys, in_tangents, out_tangents)) = split_cubic_vec3(times, values)
+                else {
+                    stats.skipped_cubicspline += 1;
+                    return None;
+                };
+                Some(ChannelKeys::Translation(LoadedKeyTrack::cubic(
+                    keys,
+                    in_tangents,
+                    out_tangents,
+                )))
+            } else {
+                check_counts(times.len(), values.len())?;
+                let keys = times
+                    .into_iter()
+                    .zip(values)
+                    .map(|(time, value)| LoadedKey { time, value })
+                    .collect();
+                Some(ChannelKeys::Translation(make_vec_track(keys, stepped)))
+            }
         }
         Property::Scale => {
-            let ReadOutputs::Scales(outputs) = reader.read_outputs()? else {
-                return None;
+            let outputs = match reader.read_outputs() {
+                Some(ReadOutputs::Scales(outputs)) => outputs,
+                _ => {
+                    if cubic {
+                        stats.skipped_cubicspline += 1;
+                    }
+                    return None;
+                }
             };
             let values: Vec<[f32; VEC3_COMPONENTS]> = outputs.collect();
-            check_counts(times.len(), values.len())?;
-            let keys = times
-                .into_iter()
-                .zip(values)
-                .map(|(time, value)| LoadedKey { time, value })
-                .collect();
-            Some(ChannelKeys::Scale(make_vec_track(keys, stepped)))
+            if cubic {
+                let Some((keys, in_tangents, out_tangents)) = split_cubic_vec3(times, values)
+                else {
+                    stats.skipped_cubicspline += 1;
+                    return None;
+                };
+                Some(ChannelKeys::Scale(LoadedKeyTrack::cubic(
+                    keys,
+                    in_tangents,
+                    out_tangents,
+                )))
+            } else {
+                check_counts(times.len(), values.len())?;
+                let keys = times
+                    .into_iter()
+                    .zip(values)
+                    .map(|(time, value)| LoadedKey { time, value })
+                    .collect();
+                Some(ChannelKeys::Scale(make_vec_track(keys, stepped)))
+            }
         }
         Property::Rotation => {
             if !valid_rotation_output(&sampler.output()) {
+                if cubic {
+                    stats.skipped_cubicspline += 1;
+                }
                 return None;
             }
-            let ReadOutputs::Rotations(outputs) = reader.read_outputs()? else {
-                return None;
+            let outputs = match reader.read_outputs() {
+                Some(ReadOutputs::Rotations(outputs)) => outputs,
+                _ => {
+                    if cubic {
+                        stats.skipped_cubicspline += 1;
+                    }
+                    return None;
+                }
             };
             let values: Vec<[f32; QUAT_COMPONENTS]> = outputs.into_f32().collect();
-            check_counts(times.len(), values.len())?;
-            let keys = times
-                .into_iter()
-                .zip(values)
-                .map(|(time, value)| LoadedKey {
-                    time,
-                    value: normalize_quat(value),
-                })
-                .collect();
-            Some(ChannelKeys::Rotation(make_quat_track(keys, stepped)))
+            if cubic {
+                let Some((keys, in_tangents, out_tangents)) = split_cubic_quat(times, values)
+                else {
+                    stats.skipped_cubicspline += 1;
+                    return None;
+                };
+                Some(ChannelKeys::Rotation(LoadedKeyTrack::cubic(
+                    keys,
+                    in_tangents,
+                    out_tangents,
+                )))
+            } else {
+                check_counts(times.len(), values.len())?;
+                let keys = times
+                    .into_iter()
+                    .zip(values)
+                    .map(|(time, value)| LoadedKey {
+                        time,
+                        value: normalize_quat(value),
+                    })
+                    .collect();
+                Some(ChannelKeys::Rotation(make_quat_track(keys, stepped)))
+            }
         }
         Property::MorphTargetWeights => None,
     }
@@ -495,6 +586,60 @@ fn check_counts(inputs: usize, outputs: usize) -> Option<()> {
     } else {
         Some(())
     }
+}
+
+/// One split `CUBICSPLINE` stream: keys plus per-second tangent lanes.
+type CubicSplit<T> = (Vec<LoadedKey<T>>, Vec<T>, Vec<T>);
+
+/// Splits one `CUBICSPLINE` translation/scale output stream into keys plus
+/// per-second tangent lanes.
+///
+/// The accessor holds `3N` entries per key in (in-tangent, value,
+/// out-tangent) order; `None` on count mismatch (the caller counts the
+/// skip).
+fn split_cubic_vec3(
+    times: Vec<f32>,
+    values: Vec<[f32; VEC3_COMPONENTS]>,
+) -> Option<CubicSplit<[f32; 3]>> {
+    if values.len() != times.len() * CUBIC_STRIDE {
+        return None;
+    }
+    let mut keys = Vec::with_capacity(times.len());
+    let mut in_tangents = Vec::with_capacity(times.len());
+    let mut out_tangents = Vec::with_capacity(times.len());
+    for (key, triple) in times.into_iter().zip(values.chunks_exact(CUBIC_STRIDE)) {
+        in_tangents.push(triple[0]);
+        keys.push(LoadedKey {
+            time: key,
+            value: triple[1],
+        });
+        out_tangents.push(triple[2]);
+    }
+    Some((keys, in_tangents, out_tangents))
+}
+
+/// Splits one `CUBICSPLINE` rotation output stream into keys plus verbatim
+/// tangent lanes; values normalize to unit length (identity fallback, as in
+/// the linear path), tangents stay raw derivatives.
+fn split_cubic_quat(
+    times: Vec<f32>,
+    values: Vec<[f32; QUAT_COMPONENTS]>,
+) -> Option<CubicSplit<[f32; 4]>> {
+    if values.len() != times.len() * CUBIC_STRIDE {
+        return None;
+    }
+    let mut keys = Vec::with_capacity(times.len());
+    let mut in_tangents = Vec::with_capacity(times.len());
+    let mut out_tangents = Vec::with_capacity(times.len());
+    for (key, triple) in times.into_iter().zip(values.chunks_exact(CUBIC_STRIDE)) {
+        in_tangents.push(triple[0]);
+        keys.push(LoadedKey {
+            time: key,
+            value: normalize_quat(triple[1]),
+        });
+        out_tangents.push(triple[2]);
+    }
+    Some((keys, in_tangents, out_tangents))
 }
 
 /// Builds a translation/scale track through the constructors only.

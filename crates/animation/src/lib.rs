@@ -68,12 +68,20 @@ pub struct Key<T> {
 /// An empty track means "channel absent": sampling returns [`None`] and the
 /// sampler leaves the placement component untouched instead of zeroing it
 /// (so entity size survives when no scale track exists).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Interpolation {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Interpolation<T> {
     /// Blend between surrounding keys (`lerp`/`slerp`).
     Linear,
     /// Hold the earlier key (glTF `STEP`).
     Step,
+    /// Cubic Hermite blend (glTF `CUBICSPLINE`): per-second derivatives, one
+    /// per key in key order (the loader contract; `keys.len()` entries each).
+    Cubic {
+        /// Derivative arriving at each key.
+        in_tangents: Vec<T>,
+        /// Derivative leaving each key.
+        out_tangents: Vec<T>,
+    },
 }
 
 /// One sorted channel of keys (translation, rotation or scale).
@@ -86,7 +94,7 @@ pub struct KeyTrack<T> {
     /// Keys sorted by ascending `time`.
     pub keys: Vec<Key<T>>,
     /// How to blend between keys.
-    pub interpolation: Interpolation,
+    pub interpolation: Interpolation<T>,
 }
 
 impl<T> KeyTrack<T> {
@@ -105,19 +113,65 @@ impl<T> KeyTrack<T> {
             interpolation: Interpolation::Step,
         }
     }
+
+    /// Builds a cubic Hermite track (glTF `CUBICSPLINE`).
+    ///
+    /// `in_tangents`/`out_tangents` hold per-second derivatives, one per key
+    /// in key order. Lengths must match `keys.len()` (checked with
+    /// `debug_assert` in test builds; the sampler never panics on a
+    /// mismatch and reads missing tangents as zero instead).
+    pub fn cubic(keys: Vec<Key<T>>, in_tangents: Vec<T>, out_tangents: Vec<T>) -> Self {
+        debug_assert_eq!(
+            in_tangents.len(),
+            keys.len(),
+            "cubic in-tangents must match keys one-to-one"
+        );
+        debug_assert_eq!(
+            out_tangents.len(),
+            keys.len(),
+            "cubic out-tangents must match keys one-to-one"
+        );
+        Self {
+            keys,
+            interpolation: Interpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            },
+        }
+    }
 }
 
 impl KeyTrack<Vec3> {
     /// Samples the translation/scale channel at clip time `t` seconds.
     ///
     /// Linear blends between the surrounding keys, Step holds the earlier
-    /// key; both clamp to the end keys outside the key range. Returns
-    /// [`None`] when the track is empty (channel absent).
+    /// key, Cubic blends with the Hermite basis over the segment tangents;
+    /// all clamp to the end keys outside the key range. Returns [`None`]
+    /// when the track is empty (channel absent).
     pub fn sample(&self, t: f32) -> Option<Vec3> {
-        let (before, after, alpha) = segment(&self.keys, t)?;
-        match self.interpolation {
-            Interpolation::Linear => Some(before.value.lerp(after.value, alpha)),
+        let (before_idx, after_idx, s) = segment_index(&self.keys, t)?;
+        let (before, after) = (&self.keys[before_idx], &self.keys[after_idx]);
+        match &self.interpolation {
+            Interpolation::Linear => Some(before.value.lerp(after.value, s)),
             Interpolation::Step => Some(before.value),
+            // Missing tangents mean a loader bug: read them as zero vectors
+            // (documented fallback — the hot path never panics), which
+            // degrades that segment to smoothstep between the keys.
+            Interpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                if before_idx == after_idx {
+                    return Some(before.value);
+                }
+                let dt = after.time - before.time;
+                if dt <= NEAR_ZERO {
+                    return Some(before.value);
+                }
+                let m0 = out_tangents.get(before_idx).copied().unwrap_or(Vec3::ZERO);
+                let m1 = in_tangents.get(after_idx).copied().unwrap_or(Vec3::ZERO);
+                Some(hermite_vec3(before.value, m0, after.value, m1, dt, s))
+            }
         }
     }
 }
@@ -126,33 +180,95 @@ impl KeyTrack<Quat> {
     /// Samples the rotation channel at clip time `t` seconds.
     ///
     /// Linear blends ([`Quat::slerp`]) between the surrounding keys, Step
-    /// holds the earlier key; both clamp to the end keys outside the key
+    /// holds the earlier key, Cubic blends per-component with the Hermite
+    /// basis and renormalizes; all clamp to the end keys outside the key
     /// range. Returns [`None`] when the track is empty (channel absent).
     pub fn sample(&self, t: f32) -> Option<Quat> {
-        let (before, after, alpha) = segment(&self.keys, t)?;
-        match self.interpolation {
-            Interpolation::Linear => Some(before.value.slerp(after.value, alpha)),
+        let (before_idx, after_idx, s) = segment_index(&self.keys, t)?;
+        let (before, after) = (&self.keys[before_idx], &self.keys[after_idx]);
+        match &self.interpolation {
+            Interpolation::Linear => Some(before.value.slerp(after.value, s)),
             Interpolation::Step => Some(before.value),
+            // Missing tangents mean a loader bug: read them as zero quats
+            // (the `(0,0,0,0)` derivative, not identity — the hot path never
+            // panics), which degrades that segment to smoothstep.
+            Interpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                if before_idx == after_idx {
+                    return Some(before.value);
+                }
+                let dt = after.time - before.time;
+                if dt <= NEAR_ZERO {
+                    return Some(before.value);
+                }
+                let zero = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+                let m0 = out_tangents.get(before_idx).copied().unwrap_or(zero);
+                let m1 = in_tangents.get(after_idx).copied().unwrap_or(zero);
+                Some(hermite_quat(before.value, m0, after.value, m1, dt, s))
+            }
         }
     }
 }
 
-/// Locates the key segment surrounding `t`: the two keys to blend plus the
-/// blend factor in `0.0..=1.0`. Returns [`None`] for an empty track.
-fn segment<T: Copy>(keys: &[Key<T>], t: f32) -> Option<(&Key<T>, &Key<T>, f32)> {
+/// Cubic Hermite basis over one segment (glTF 2.0 `CUBICSPLINE` model):
+/// `m0` is the out-tangent at `p0`, `m1` the in-tangent at `p1` (both
+/// per-second derivatives), `dt` the key span, `s` the clamped factor.
+fn hermite_scalar(p0: f32, m0: f32, p1: f32, m1: f32, dt: f32, s: f32) -> f32 {
+    let s2 = s * s;
+    let s3 = s2 * s;
+    (2.0 * s3 - 3.0 * s2 + 1.0) * p0
+        + (s3 - 2.0 * s2 + s) * m0 * dt
+        + (-2.0 * s3 + 3.0 * s2) * p1
+        + (s3 - s2) * m1 * dt
+}
+
+/// Vector Hermite: the scalar basis applied per component.
+fn hermite_vec3(p0: Vec3, m0: Vec3, p1: Vec3, m1: Vec3, dt: f32, s: f32) -> Vec3 {
+    Vec3::new(
+        hermite_scalar(p0.x, m0.x, p1.x, m1.x, dt, s),
+        hermite_scalar(p0.y, m0.y, p1.y, m1.y, dt, s),
+        hermite_scalar(p0.z, m0.z, p1.z, m1.z, dt, s),
+    )
+}
+
+/// Quaternion Hermite: the scalar basis applied per `(x, y, z, w)`
+/// component, then renormalized. A degenerate blend (antipodal keys at
+/// `s = 0.5` with cancelling tangents) falls back to [`Quat::slerp`] so the
+/// result stays a unit quaternion, never NaN.
+fn hermite_quat(p0: Quat, m0: Quat, p1: Quat, m1: Quat, dt: f32, s: f32) -> Quat {
+    let blended = Quat::from_xyzw(
+        hermite_scalar(p0.x, m0.x, p1.x, m1.x, dt, s),
+        hermite_scalar(p0.y, m0.y, p1.y, m1.y, dt, s),
+        hermite_scalar(p0.z, m0.z, p1.z, m1.z, dt, s),
+        hermite_scalar(p0.w, m0.w, p1.w, m1.w, dt, s),
+    );
+    let length_squared = blended.length_squared();
+    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
+        blended.normalize()
+    } else {
+        p0.slerp(p1, s)
+    }
+}
+
+/// Locates the key segment surrounding `t`: the indices of the two keys to
+/// blend plus the blend factor in `0.0..=1.0`. Returns [`None`] for an empty
+/// track; clamped ends report the same index twice with factor `0.0`.
+fn segment_index<T>(keys: &[Key<T>], t: f32) -> Option<(usize, usize, f32)> {
     if keys.is_empty() {
         return None;
     }
     if keys.len() == 1 {
-        return Some((&keys[0], &keys[0], 0.0));
+        return Some((0, 0, 0.0));
     }
     let upper = keys.partition_point(|key| key.time <= t);
     if upper == 0 {
-        return Some((&keys[0], &keys[0], 0.0));
+        return Some((0, 0, 0.0));
     }
     if upper >= keys.len() {
         let last = keys.len() - 1;
-        return Some((&keys[last], &keys[last], 0.0));
+        return Some((last, last, 0.0));
     }
     let (before, after) = (&keys[upper - 1], &keys[upper]);
     let span = after.time - before.time;
@@ -161,7 +277,7 @@ fn segment<T: Copy>(keys: &[Key<T>], t: f32) -> Option<(&Key<T>, &Key<T>, f32)> 
     } else {
         0.0
     };
-    Some((before, after, alpha))
+    Some((upper - 1, upper, alpha))
 }
 
 /// Object-space tracks for one animated entity inside an [`AnimClip`].
@@ -594,6 +710,176 @@ mod tests {
         let track = stepped_vec_track(&[(0.0, Vec3::new(1.0, 2.0, 3.0))]);
         assert_eq!(track.sample(0.0), Some(Vec3::new(1.0, 2.0, 3.0)));
         assert_eq!(track.sample(57.0), Some(Vec3::new(1.0, 2.0, 3.0)));
+    }
+
+    #[test]
+    fn cubic_zero_tangents_midpoint_is_smoothstep() {
+        let track = KeyTrack::cubic(
+            vec![
+                Key {
+                    time: 0.0,
+                    value: Vec3::ZERO,
+                },
+                Key {
+                    time: 1.0,
+                    value: Vec3::ONE,
+                },
+            ],
+            vec![Vec3::ZERO, Vec3::ZERO],
+            vec![Vec3::ZERO, Vec3::ZERO],
+        );
+        assert_eq!(track.sample(0.0), Some(Vec3::ZERO));
+        assert_eq!(track.sample(1.0), Some(Vec3::ONE));
+        let mid = track.sample(0.5).expect("mid key");
+        assert!(
+            (mid - Vec3::splat(0.5)).length() < 1e-6,
+            "zero-tangent cubic must smoothstep to 0.5, got {mid:?}"
+        );
+    }
+
+    #[test]
+    fn cubic_nonzero_tangent_shifts_midpoint() {
+        // p(0.5) = 0.5·(p0+p1) + 0.125·(m0-m1)·dt: m0·dt = (4,0,0) lifts the
+        // midpoint from 1.0 to 1.5.
+        let track = KeyTrack::cubic(
+            vec![
+                Key {
+                    time: 0.0,
+                    value: Vec3::ZERO,
+                },
+                Key {
+                    time: 2.0,
+                    value: Vec3::new(2.0, 0.0, 0.0),
+                },
+            ],
+            vec![Vec3::ZERO, Vec3::ZERO],
+            vec![Vec3::new(2.0, 0.0, 0.0), Vec3::ZERO],
+        );
+        let mid = track.sample(1.0).expect("mid key");
+        assert!(
+            (mid.x - 1.5).abs() < 1e-6 && mid.y.abs() < 1e-6 && mid.z.abs() < 1e-6,
+            "tangent must shape the midpoint, got {mid:?}"
+        );
+    }
+
+    #[test]
+    fn cubic_quat_output_is_unit() {
+        let from = Quat::IDENTITY;
+        let to = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let track = KeyTrack::cubic(
+            vec![
+                Key {
+                    time: 0.0,
+                    value: from,
+                },
+                Key {
+                    time: 1.0,
+                    value: to,
+                },
+            ],
+            vec![
+                Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+                Quat::from_xyzw(-1.0, 0.0, 0.0, 0.0),
+            ],
+            vec![
+                Quat::from_xyzw(1.0, 0.0, 0.0, 0.0),
+                Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+            ],
+        );
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let got = track.sample(t).expect("sample");
+            assert!(
+                (got.length() - 1.0).abs() < 1e-5,
+                "cubic quat must stay unit at t={t}, got {got:?}"
+            );
+        }
+        assert!(track.sample(0.0).expect("start").angle_between(from) < 1e-5);
+        // Clamped ends return the stored key bit-exact (`to` itself is only
+        // unit to 1e-7 under `from_rotation_y`, so no angle check here).
+        assert_eq!(track.sample(1.0), Some(to));
+    }
+
+    #[test]
+    fn cubic_missing_tangents_fall_back_to_zero() {
+        // Loader-bug path: built literally to bypass `KeyTrack::cubic`
+        // (whose `debug_assert`s pin the one-to-one lens) — the sampler
+        // reads missing entries as zero, degrading to smoothstep.
+        let track: KeyTrack<Vec3> = KeyTrack {
+            keys: vec![
+                Key {
+                    time: 0.0,
+                    value: Vec3::ZERO,
+                },
+                Key {
+                    time: 1.0,
+                    value: Vec3::ONE,
+                },
+            ],
+            interpolation: Interpolation::Cubic {
+                in_tangents: Vec::new(),
+                out_tangents: Vec::new(),
+            },
+        };
+        let mid = track.sample(0.5).expect("mid key");
+        assert!(
+            (mid - Vec3::splat(0.5)).length() < 1e-6,
+            "missing tangents must degrade to smoothstep, got {mid:?}"
+        );
+        let quat_track: KeyTrack<Quat> = KeyTrack {
+            keys: vec![
+                Key {
+                    time: 0.0,
+                    value: Quat::IDENTITY,
+                },
+                Key {
+                    time: 1.0,
+                    value: Quat::from_rotation_y(1.0),
+                },
+            ],
+            interpolation: Interpolation::Cubic {
+                in_tangents: Vec::new(),
+                out_tangents: Vec::new(),
+            },
+        };
+        let got = quat_track.sample(0.5).expect("mid key");
+        assert!(
+            (got.length() - 1.0).abs() < 1e-5,
+            "missing quat tangents must stay unit, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn cubic_empty_single_and_clamp_match_linear() {
+        let empty: KeyTrack<Vec3> = KeyTrack::cubic(Vec::new(), Vec::new(), Vec::new());
+        assert_eq!(empty.sample(0.5), None);
+        let empty_quat: KeyTrack<Quat> = KeyTrack::cubic(Vec::new(), Vec::new(), Vec::new());
+        assert_eq!(empty_quat.sample(0.5), None);
+        let single = KeyTrack::cubic(
+            vec![Key {
+                time: 0.0,
+                value: Vec3::new(1.0, 2.0, 3.0),
+            }],
+            vec![Vec3::ZERO],
+            vec![Vec3::ZERO],
+        );
+        assert_eq!(single.sample(0.0), Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(single.sample(57.0), Some(Vec3::new(1.0, 2.0, 3.0)));
+        let track = KeyTrack::cubic(
+            vec![
+                Key {
+                    time: 1.0,
+                    value: Vec3::ONE,
+                },
+                Key {
+                    time: 2.0,
+                    value: Vec3::new(3.0, 3.0, 3.0),
+                },
+            ],
+            vec![Vec3::ZERO, Vec3::ZERO],
+            vec![Vec3::ZERO, Vec3::ZERO],
+        );
+        assert_eq!(track.sample(0.0), Some(Vec3::ONE));
+        assert_eq!(track.sample(99.0), Some(Vec3::new(3.0, 3.0, 3.0)));
     }
 
     #[test]

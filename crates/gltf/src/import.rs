@@ -1062,13 +1062,200 @@ mod tests {
     }
 
     #[test]
-    fn cubicspline_channels_skip_with_counter() {
-        // `CUBICSPLINE` never assembles: the channel counts, the clip has no
-        // tracks and counts as skipped too.
+    fn cubicspline_translation_assembles_cubic_track() {
+        // `CUBICSPLINE` assembles now: keys carry the vertex values,
+        // tangents land in the cubic lanes in (in, value, out) order —
+        // no skip counters, duration from the cubic keys.
         let mut fixture = triangle();
         fixture.animations = 1;
         fixture.anim_interp = crate::fixtures::FixtureInterp::CubicSpline;
         let scene = load_slice(&build_glb(&fixture)).expect("spline parses");
+        assert_eq!(scene.anim_clips.len(), 1);
+        assert_eq!(scene.anim_clips[0].duration, 1.0);
+        let track = &scene.anim_clips[0].tracks[0];
+        assert_eq!(track.translation.keys.len(), 2);
+        assert_eq!(track.translation.keys[0].time, 0.0);
+        assert_eq!(track.translation.keys[1].time, 1.0);
+        assert_eq!(track.translation.keys[0].value, [0.0, 0.0, 0.0]);
+        assert_eq!(track.translation.keys[1].value, [1.0, 0.0, 0.0]);
+        match &track.translation.interpolation {
+            crate::LoadedInterpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                assert_eq!(in_tangents, &vec![[10.0, 0.0, 0.0], [11.0, 0.0, 0.0]]);
+                assert_eq!(out_tangents, &vec![[20.0, 0.0, 0.0], [21.0, 0.0, 0.0]]);
+            }
+            other => panic!("expected cubic interpolation, got {other:?}"),
+        }
+        assert!(track.rotation.keys.is_empty());
+        assert!(track.scale.keys.is_empty());
+        assert_eq!(scene.stats.skipped_cubicspline, 0);
+        assert_eq!(scene.stats.skipped_clips, 0);
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn cubicspline_on_joint_assembles_skel_track() {
+        // Same split on the joint side: the skinned node routes to a
+        // skeletal clip with a cubic translation lane.
+        let mut fixture = skinned_triangle();
+        fixture.animations = 1;
+        fixture.anim_interp = crate::fixtures::FixtureInterp::CubicSpline;
+        let scene = load_slice(&build_glb(&fixture)).expect("spline parses");
+        assert_eq!(scene.skel_clips.len(), 1);
+        assert!(scene.anim_clips.is_empty());
+        assert_eq!(scene.skel_clips[0].duration, 1.0);
+        let track = &scene.skel_clips[0].tracks[0];
+        assert_eq!(track.joint, 0);
+        assert_eq!(track.translation.keys.len(), 2);
+        assert_eq!(track.translation.keys[1].value, [1.0, 0.0, 0.0]);
+        match &track.translation.interpolation {
+            crate::LoadedInterpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                assert_eq!(in_tangents, &vec![[10.0, 0.0, 0.0], [11.0, 0.0, 0.0]]);
+                assert_eq!(out_tangents, &vec![[20.0, 0.0, 0.0], [21.0, 0.0, 0.0]]);
+            }
+            other => panic!("expected cubic interpolation, got {other:?}"),
+        }
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn cubicspline_rotation_normalizes_values_keeps_tangents_raw() {
+        // Rotation values normalize to unit length (identity fallback, as
+        // in the linear path); tangents stay raw derivatives.
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        fixture.anim_path = crate::fixtures::FixtureAnimPath::Rotation;
+        fixture.anim_interp = crate::fixtures::FixtureInterp::CubicSpline;
+        let scene = load_slice(&build_glb(&fixture)).expect("spline parses");
+        assert_eq!(scene.anim_clips.len(), 1);
+        let track = &scene.anim_clips[0].tracks[0];
+        assert_eq!(track.rotation.keys.len(), 2);
+        for key in &track.rotation.keys {
+            assert_eq!(key.value, [0.0, 0.0, 0.0, 1.0]);
+        }
+        match &track.rotation.interpolation {
+            crate::LoadedInterpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                assert_eq!(
+                    in_tangents,
+                    &vec![[10.0, 0.0, 0.0, 0.0], [11.0, 0.0, 0.0, 0.0]]
+                );
+                assert_eq!(
+                    out_tangents,
+                    &vec![[20.0, 0.0, 0.0, 0.0], [21.0, 0.0, 0.0, 0.0]]
+                );
+            }
+            other => panic!("expected cubic interpolation, got {other:?}"),
+        }
+        assert!(track.translation.keys.is_empty());
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn cubicspline_scale_assembles_skel_scale() {
+        let mut fixture = skinned_triangle();
+        fixture.animations = 1;
+        fixture.anim_path = crate::fixtures::FixtureAnimPath::Scale;
+        fixture.anim_interp = crate::fixtures::FixtureInterp::CubicSpline;
+        let scene = load_slice(&build_glb(&fixture)).expect("spline parses");
+        assert_eq!(scene.skel_clips.len(), 1);
+        let track = &scene.skel_clips[0].tracks[0];
+        assert_eq!(track.scale.keys.len(), 2);
+        assert_eq!(track.scale.keys[0].value, [1.0, 1.0, 1.0]);
+        assert_eq!(track.scale.keys[1].value, [2.0, 2.0, 2.0]);
+        match &track.scale.interpolation {
+            crate::LoadedInterpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                assert_eq!(in_tangents, &vec![[10.0, 0.0, 0.0], [11.0, 0.0, 0.0]]);
+                assert_eq!(out_tangents, &vec![[20.0, 0.0, 0.0], [21.0, 0.0, 0.0]]);
+            }
+            other => panic!("expected cubic interpolation, got {other:?}"),
+        }
+        assert!(track.translation.keys.is_empty());
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn mixed_interpolations_assemble_in_one_clip() {
+        // One animation, three channels: `LINEAR` translation, `STEP`
+        // scale, `CUBICSPLINE` rotation — each lane keeps its own blend.
+        // The cubic channel runs longest, so the clip duration (2.0)
+        // proves cubic keys feed the duration.
+        use crate::fixtures::{
+            FixtureAnimPath, FixtureChannel, FixtureInterp, build_mixed_clip_glb,
+        };
+        let glb = build_mixed_clip_glb(&[
+            FixtureChannel {
+                node: 0,
+                path: FixtureAnimPath::Translation,
+                interp: FixtureInterp::Linear,
+                times: vec![0.0, 1.0],
+            },
+            FixtureChannel {
+                node: 0,
+                path: FixtureAnimPath::Rotation,
+                interp: FixtureInterp::CubicSpline,
+                times: vec![0.0, 2.0],
+            },
+            FixtureChannel {
+                node: 0,
+                path: FixtureAnimPath::Scale,
+                interp: FixtureInterp::Step,
+                times: vec![0.0, 1.0],
+            },
+        ]);
+        let scene = load_slice(&glb).expect("mixed parses");
+        assert!(scene.skel_clips.is_empty());
+        assert_eq!(scene.anim_clips.len(), 1);
+        let clip = &scene.anim_clips[0];
+        assert_eq!(clip.name, "mixed");
+        assert_eq!(clip.duration, 2.0);
+        assert_eq!(clip.tracks.len(), 1);
+        let track = &clip.tracks[0];
+        assert_eq!(
+            track.translation.interpolation,
+            crate::LoadedInterpolation::Linear
+        );
+        assert_eq!(track.translation.keys.len(), 2);
+        assert_eq!(track.scale.interpolation, crate::LoadedInterpolation::Step);
+        assert_eq!(track.scale.keys.len(), 2);
+        assert_eq!(track.rotation.keys.len(), 2);
+        assert_eq!(track.rotation.keys[1].time, 2.0);
+        match &track.rotation.interpolation {
+            crate::LoadedInterpolation::Cubic {
+                in_tangents,
+                out_tangents,
+            } => {
+                assert_eq!(in_tangents.len(), 2);
+                assert_eq!(out_tangents.len(), 2);
+                assert_eq!(in_tangents[0], [10.0, 0.0, 0.0, 0.0]);
+                assert_eq!(out_tangents[1], [21.0, 0.0, 0.0, 0.0]);
+            }
+            other => panic!("expected cubic interpolation, got {other:?}"),
+        }
+        assert_eq!(scene.stats.skipped_cubicspline, 0);
+        assert_eq!(scene.stats.skipped_clips, 0);
+        assert!(scene.stats.is_clean());
+    }
+
+    #[test]
+    fn malformed_cubicspline_skips_with_counter() {
+        // Output count (`4`) is not `3`× the input count (`2`): genuinely
+        // unassemblable, so the channel counts and the trackless clip too.
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        fixture.anim_interp = crate::fixtures::FixtureInterp::CubicSpline;
+        fixture.anim_output_len_override = Some(4);
+        let scene = load_slice(&build_glb(&fixture)).expect("malformed spline parses");
         assert!(scene.skel_clips.is_empty());
         assert!(scene.anim_clips.is_empty());
         assert_eq!(scene.stats.skipped_cubicspline, 1);

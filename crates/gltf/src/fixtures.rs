@@ -207,6 +207,10 @@ pub(crate) struct Fixture {
     pub(crate) animations: usize,
     /// Sampler interpolation of the dummy animation clips.
     pub(crate) anim_interp: FixtureInterp,
+    /// Overrides the emitted output accessor `count` (error-path tests: a
+    /// short count reads fewer entries than pushed, so the loader must skip
+    /// honestly on the count mismatch).
+    pub(crate) anim_output_len_override: Option<usize>,
     /// Target path of the dummy animation clips.
     pub(crate) anim_path: FixtureAnimPath,
     /// Node tree; scene roots at node `0`.
@@ -242,6 +246,7 @@ pub(crate) fn triangle() -> Fixture {
         skins: Vec::new(),
         animations: 0,
         anim_interp: FixtureInterp::Linear,
+        anim_output_len_override: None,
         anim_path: FixtureAnimPath::Translation,
         nodes: vec![FixtureNode {
             name: Some("tri-node".to_string()),
@@ -288,6 +293,163 @@ pub(crate) fn skinned_triangle() -> Fixture {
         skeleton: None,
     }];
     fixture
+}
+
+/// One channel of a multi-channel fixture animation (mixed-interpolation
+/// clip case): target path, sampler interpolation, and input times.
+#[derive(Debug, Clone)]
+pub(crate) struct FixtureChannel {
+    /// Target node index.
+    pub(crate) node: usize,
+    /// Channel target path.
+    pub(crate) path: FixtureAnimPath,
+    /// Sampler interpolation.
+    pub(crate) interp: FixtureInterp,
+    /// Input times in seconds (one per key).
+    pub(crate) times: Vec<f32>,
+}
+
+/// Output values for one animation channel with `keys` input times: one
+/// entry per key for `LINEAR`/`STEP`, tripled (in-tangent, value,
+/// out-tangent) per key for `CUBICSPLINE`.
+///
+/// Values step `+X` per key (translation), grow uniformly (scale), or hold
+/// identity (rotation); cubic tangents are distinctive per key and slot
+/// (`10 + key` in, `20 + key` out) so tests can prove slot placement —
+/// every entry of a channel is pairwise distinct.
+fn anim_output_values(path: FixtureAnimPath, interp: FixtureInterp, keys: usize) -> Vec<Vec<f32>> {
+    let mut out = Vec::new();
+    for key in 0..keys {
+        let value: Vec<f32> = match path {
+            FixtureAnimPath::Translation => vec![key as f32, 0.0, 0.0],
+            FixtureAnimPath::Scale => vec![1.0 + key as f32, 1.0 + key as f32, 1.0 + key as f32],
+            FixtureAnimPath::Rotation => vec![0.0, 0.0, 0.0, 1.0],
+        };
+        if interp == FixtureInterp::CubicSpline {
+            let (in_tangent, out_tangent) = match path {
+                FixtureAnimPath::Rotation => (
+                    vec![10.0 + key as f32, 0.0, 0.0, 0.0],
+                    vec![20.0 + key as f32, 0.0, 0.0, 0.0],
+                ),
+                FixtureAnimPath::Translation | FixtureAnimPath::Scale => (
+                    vec![10.0 + key as f32, 0.0, 0.0],
+                    vec![20.0 + key as f32, 0.0, 0.0],
+                ),
+            };
+            out.push(in_tangent);
+            out.push(value);
+            out.push(out_tangent);
+        } else {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Builds a `.glb` whose single animation holds one channel per entry in
+/// `channels` (mixed-interpolation clip case): the mesh is the default
+/// triangle on node 0, each channel gets its own sampler with patterned
+/// outputs from [`anim_output_values`].
+pub(crate) fn build_mixed_clip_glb(channels: &[FixtureChannel]) -> Vec<u8> {
+    let mut bin: Vec<u8> = Vec::new();
+    // (offset, length) per buffer view, in push order.
+    let mut views: Vec<(usize, usize)> = Vec::new();
+    let push = |bytes: &[u8], bin: &mut Vec<u8>, views: &mut Vec<(usize, usize)>| {
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let offset = bin.len();
+        bin.extend_from_slice(bytes);
+        views.push((offset, bytes.len()));
+        views.len() - 1
+    };
+
+    // Default triangle geometry (positions plus `u16` indices).
+    let mut raw = Vec::new();
+    for position in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+        for component in position {
+            raw.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    let positions_view = push(&raw, &mut bin, &mut views);
+    let mut raw = Vec::new();
+    for index in [0u16, 1, 2] {
+        raw.extend_from_slice(&index.to_le_bytes());
+    }
+    let indices_view = push(&raw, &mut bin, &mut views);
+
+    let mut accessors: Vec<String> = Vec::new();
+    accessors.push(accessor_json_bounds(
+        positions_view,
+        3,
+        &[0.0, 0.0, 0.0],
+        &[1.0, 1.0, 0.0],
+    ));
+    accessors.push(accessor_json(indices_view, 5123, 3, "SCALAR"));
+
+    let mut sampler_json: Vec<String> = Vec::new();
+    let mut channel_json: Vec<String> = Vec::new();
+    for channel in channels {
+        let mut raw = Vec::new();
+        for time in &channel.times {
+            raw.extend_from_slice(&time.to_le_bytes());
+        }
+        let input_view = push(&raw, &mut bin, &mut views);
+        let input = accessors.len();
+        accessors.push(accessor_json(
+            input_view,
+            5126,
+            channel.times.len(),
+            "SCALAR",
+        ));
+        let values = anim_output_values(channel.path, channel.interp, channel.times.len());
+        let kind = match channel.path {
+            FixtureAnimPath::Rotation => "VEC4",
+            FixtureAnimPath::Translation | FixtureAnimPath::Scale => "VEC3",
+        };
+        let output_len = values.len();
+        let mut raw = Vec::new();
+        for value in &values {
+            for component in value {
+                raw.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let output_view = push(&raw, &mut bin, &mut views);
+        let output = accessors.len();
+        accessors.push(accessor_json(output_view, 5126, output_len, kind));
+        let sampler = sampler_json.len();
+        sampler_json.push(format!(
+            "{{\"input\":{input},\"interpolation\":\"{}\",\"output\":{output}}}",
+            channel.interp.as_str()
+        ));
+        channel_json.push(format!(
+            "{{\"sampler\":{sampler},\"target\":{{\"node\":{},\"path\":\"{}\"}}}}",
+            channel.node,
+            channel.path.as_str()
+        ));
+    }
+    let views_json = views
+        .iter()
+        .map(|(offset, length)| {
+            format!("{{\"buffer\":0,\"byteOffset\":{offset},\"byteLength\":{length}}}")
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let accessors_json = accessors.join(",");
+    let json = format!(
+        "{{\"asset\":{{\"version\":\"2.0\",\"generator\":\"ornis-gltf-fixture\"}},\
+        \"scene\":0,\"scenes\":[{{\"nodes\":[0]}}],\
+        \"nodes\":[{{\"mesh\":0}}],\
+        \"meshes\":[{{\"primitives\":[{{\"attributes\":{{\"POSITION\":0}},\"indices\":1}}]}}],\
+        \"animations\":[{{\"name\":\"mixed\",\"channels\":[{}],\
+        \"samplers\":[{}]}}],\
+        \"buffers\":[{{\"byteLength\":{}}}],\
+        \"bufferViews\":[{views_json}],\"accessors\":[{accessors_json}]}}",
+        channel_json.join(","),
+        sampler_json.join(","),
+        bin.len()
+    );
+    assemble_glb(&json, &bin)
 }
 
 /// Assembles a `.glb` container (JSON + BIN chunks, 4-byte aligned).
@@ -488,7 +650,8 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
     // Animation clip data: one input/output pair per dummy clip (input
     // times + TRS outputs), referenced by the `animations` JSON below.
     // `CUBICSPLINE` needs triple outputs per input (in-tangent, vertex,
-    // out-tangent); tangents are zero, vertices carry the key values.
+    // out-tangent) with distinctive tangents per key so tests can prove
+    // slot placement; see [`anim_output_values`].
     let mut anim_parts: Vec<(usize, usize, usize)> = Vec::new();
     for _ in 0..fixture.animations {
         let mut raw = Vec::new();
@@ -497,30 +660,7 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
         }
         push(&raw, &mut bin, &mut views);
         let input_view = views.len() - 1;
-        let keys: Vec<Vec<f32>> = match (fixture.anim_path, fixture.anim_interp) {
-            (FixtureAnimPath::Rotation, FixtureInterp::CubicSpline) => vec![vec![0.0; 4]; 6],
-            (FixtureAnimPath::Rotation, _) => {
-                vec![vec![0.0, 0.0, 0.0, 1.0], vec![0.0, 0.0, 0.0, 1.0]]
-            }
-            (FixtureAnimPath::Scale, FixtureInterp::CubicSpline) => vec![
-                vec![0.0, 0.0, 0.0],
-                vec![1.0, 1.0, 1.0],
-                vec![0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0],
-                vec![2.0, 2.0, 2.0],
-                vec![0.0, 0.0, 0.0],
-            ],
-            (FixtureAnimPath::Scale, _) => vec![vec![1.0, 1.0, 1.0], vec![2.0, 2.0, 2.0]],
-            (_, FixtureInterp::CubicSpline) => vec![
-                vec![0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0],
-                vec![1.0, 0.0, 0.0],
-                vec![0.0, 0.0, 0.0],
-            ],
-            (_, _) => vec![vec![0.0, 0.0, 0.0], vec![1.0, 0.0, 0.0]],
-        };
+        let keys: Vec<Vec<f32>> = anim_output_values(fixture.anim_path, fixture.anim_interp, 2);
         let output_len = keys.len();
         let mut raw = Vec::new();
         for value in &keys {
@@ -795,6 +935,7 @@ fn build_document(fixture: &Fixture, buffer_uri: Option<String>) -> DocumentPart
             FixtureAnimPath::Rotation => ("VEC4", *output_len),
             FixtureAnimPath::Translation | FixtureAnimPath::Scale => ("VEC3", *output_len),
         };
+        let count = fixture.anim_output_len_override.unwrap_or(count);
         accessors.push(accessor_json(*output_view, 5126, count, kind));
         let path = fixture.anim_path.as_str();
         let interp = fixture.anim_interp.as_str();

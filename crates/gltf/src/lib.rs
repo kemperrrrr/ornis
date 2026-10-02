@@ -41,8 +41,8 @@
 //! | `mode != TRIANGLES` (points/lines/strips/fans) | primitive skipped, no triangulation in v1 | [`ImportStats::skipped_non_triangle`] |
 //! | `JOINTS_0`/`WEIGHTS_0` malformed (missing set, count or width mismatch) | primitive skipped, no stub skin | [`ImportStats::skipped_skinned`] |
 //! | more than 4 nonzero influences across sets | top-4 kept, renormalized, one stderr warn per load | — (no counter: shape stays importable) |
-//! | `animations[]` with only `CUBICSPLINE`/morph/malformed channels | clip skipped (no tracks assembled) | [`ImportStats::skipped_clips`] |
-//! | `CUBICSPLINE` sampler channel | channel skipped, other channels of the clip still assemble | [`ImportStats::skipped_cubicspline`] |
+//! | `animations[]` with only malformed `CUBICSPLINE`/morph/malformed channels | clip skipped (no tracks assembled) | [`ImportStats::skipped_clips`] |
+//! | malformed `CUBICSPLINE` sampler channel (unreadable accessor, output count != `3`× input count) | channel skipped, other channels of the clip still assemble | [`ImportStats::skipped_cubicspline`] |
 //! | no `POSITION` attribute | primitive skipped | [`ImportStats::skipped_no_position`] |
 //! | empty positions or indices | primitive skipped | [`ImportStats::skipped_empty`] |
 //! | index out of range, or unindexed count not a multiple of 3 | primitive skipped | [`ImportStats::skipped_bad_index`] |
@@ -59,8 +59,9 @@
 //!    ignored on import).
 //! 2. `SkelClip`/`AnimClip` assembly from `animations[]` per `docs/animation-design.md`
 //!    §4 lands here ([`LoadedScene::skel_clips`], [`LoadedScene::anim_clips`];
-//!    `LINEAR`/`STEP` assemble, `CUBICSPLINE` skips with
-//!    [`ImportStats::skipped_cubicspline`], morph targets stay ignored).
+//!    `LINEAR`/`STEP`/`CUBICSPLINE` assemble, malformed `CUBICSPLINE`
+//!    channels skip with [`ImportStats::skipped_cubicspline`], morph targets
+//!    stay ignored).
 //! 3. Wiring: `LoadedScene` → `ornis-render` `Scene` (host keeps its own
 //!    camera/lights/ambient; [`LoadedMesh::into_custom`] feeds
 //!    `MeshDesc::Custom`; [`LoadedMaterial::is_metallic`] picks the
