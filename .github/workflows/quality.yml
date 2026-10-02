@@ -162,6 +162,14 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Doctest binaries link whole dependency closures (wry/webkit,
+      # gltf/image) outside mold's reach and SIGBUS otherwise: free the
+      # ~15GB of preinstalled toolchains the build never touches.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          df -h / /tmp | head -5
+
       - name: Install system dependencies
         timeout-minutes: 20
         run: |
@@ -190,6 +198,9 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold
+          # Doctest links bypass RUSTFLAGS: route them through mold too,
+          # or heavy closures (wry/webkit, gltf/image) SIGBUS the BFD link.
+          RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
           cargo xtask quality --ci --only test 2>&1 | tee target/quality-test.log
@@ -219,6 +230,12 @@ jobs:
       # mesa-vulkan-drivers — software Vulkan (lavapipe) for wgpu tests:
       # Ubuntu runners have no GPU; without an ICD no adapter is found
       # (no compatible GPU adapter found in ornis-wgpu-backend).
+      # Free disk space first (same doctest-link rationale as test shard).
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          df -h / /tmp | head -5
+
       - name: Install system dependencies
         timeout-minutes: 20
         run: |
@@ -247,6 +264,8 @@ jobs:
         shell: bash
         env:
           RUSTFLAGS: -C link-arg=-fuse-ld=mold
+          # Same doctest-link rationale as the test shard.
+          RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
           cargo xtask quality --ci --only test-physics,smoke 2>&1 | tee target/quality-gpu.log
