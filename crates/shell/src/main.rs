@@ -60,6 +60,8 @@ fn parse_options() -> Options {
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            // Skip the conventional separator (`cargo run -p … -- <flags>`).
+            "--" => {}
             "--editor-dir" => {
                 options.editor_dir = args.next();
             }
@@ -189,6 +191,15 @@ impl ShellApp {
     }
 }
 
+/// Full-window bounds for the child webview (position origin, initial
+/// size; kept in sync with the window in `window_event` below).
+fn full_window_bounds() -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::LogicalPosition::new(0, 0).into(),
+        size: wry::dpi::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT).into(),
+    }
+}
+
 impl ApplicationHandler<ShellEvent> for ShellApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -216,7 +227,15 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
         builder = builder.with_ipc_handler(move |request| {
             let _ = ipc.send_event(ShellEvent::Ipc(request.body().clone()));
         });
-        let webview = builder.build(&window).expect("shell webview");
+        // Child view, not a content-view takeover: `build` replaces the
+        // window's content view with its own, which breaks winit's
+        // `view()` accessor on focus loss (`windowDidResignKey` abort,
+        // winit#4203 / wry#1477). As a child, winit keeps its own view and
+        // the crash path is gone; bounds are synced on resize below.
+        let webview = builder
+            .with_bounds(full_window_bounds())
+            .build_as_child(&window)
+            .expect("shell webview");
         self.window = Some(window);
         self.webview = Some(webview);
     }
@@ -234,8 +253,19 @@ impl ApplicationHandler<ShellEvent> for ShellApp {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        if matches!(event, WindowEvent::CloseRequested) {
-            event_loop.exit();
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            // Keep the child webview filling the window (child views do
+            // not track resizes by themselves).
+            WindowEvent::Resized(size) => {
+                if let Some(webview) = &self.webview {
+                    let _ = webview.set_bounds(wry::Rect {
+                        position: wry::dpi::LogicalPosition::new(0, 0).into(),
+                        size: wry::dpi::LogicalSize::new(size.width, size.height).into(),
+                    });
+                }
+            }
+            _ => {}
         }
     }
 }

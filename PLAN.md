@@ -574,6 +574,14 @@ runtime без отдельной extract-фазы — будущая цель, 
   с нуля (дубль taffy/parley/vello/usvg), NURBS-ядро, `dynamic_lod`,
   RmlUi (Rust-биндингов нет — только как FFI-проект, не «взять»).
 
+> Вердикты спайка ⓪ (2026-10-02, измерено на Tahoe aarch64):
+> WebGPU в WKWebView **отсутствует** (`navigator.gpu` missing при
+> WebKit 26.x) — WASM-вьюпорту в шелле нужен другой путь (нативное
+> wgpu-окно + оверлей, либо стриминг кадров); фокус-аборт winit
+> (`windowDidResignKey`, winit#4203/wry#1477) лечится child-view
+> (`build_as_child` + `set_bounds` на resize — шелл уже переведён,
+> 5+ переключений фокуса переживает).
+
 ### k. 2D-игры как вырожденный 3D (план, подход Unreal Paper2D)
 
 > Зафиксировано 2026-10-01, не начато. Тезис: отдельного 2D-движка
