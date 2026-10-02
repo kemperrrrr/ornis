@@ -2769,8 +2769,11 @@ dependencies = [
 name = "ornis-editor"
 version = "0.1.0"
 dependencies = [
+ "glam",
+ "ornis-assets",
  "ornis-core",
  "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -6,8 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+glam = "0.33"
+ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
+# Typed picking failures (`thiserror::Error` on `PickError`).
+thiserror = "2.0"
 
 [lints]
 workspace = true

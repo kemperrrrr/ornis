@@ -1,34 +1,34 @@
 {
   "version": 2,
-  "quality_score": 0.48293402725812584,
-  "iosp_score": 0.9029098242581388,
-  "violations": 337,
-  "total": 5573,
-  "complexity_warnings": 59,
-  "magic_number_warnings": 158,
+  "quality_score": 0.4788058032999213,
+  "iosp_score": 0.9020720976440534,
+  "violations": 345,
+  "total": 5659,
+  "complexity_warnings": 61,
+  "magic_number_warnings": 164,
   "nesting_depth_warnings": 16,
-  "function_length_warnings": 109,
+  "function_length_warnings": 110,
   "unsafe_warnings": 8,
   "error_handling_warnings": 4,
   "duplicate_groups": 82,
   "dead_code_warnings": 373,
   "dead_type_warnings": 4,
-  "fragment_groups": 510,
-  "boilerplate_warnings": 270,
+  "fragment_groups": 536,
+  "boilerplate_warnings": 277,
   "srp_struct_warnings": 20,
-  "srp_module_warnings": 83,
+  "srp_module_warnings": 84,
   "wildcard_import_warnings": 22,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 6,
-  "tq_untested_warnings": 146,
+  "tq_untested_warnings": 145,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 27,
   "structural_coupling_warnings": 24,
-  "total_findings": 2395,
+  "total_findings": 2450,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -301,44 +301,54 @@
       "line": 238
     },
     {
+      "name": "KeyTrack<Quat>::sample",
+      "file": "crates/animation/src/lib.rs",
+      "line": 190
+    },
+    {
+      "name": "hermite_quat",
+      "file": "crates/animation/src/lib.rs",
+      "line": 244
+    },
+    {
       "name": "blend_position",
       "file": "crates/animation/src/lib.rs",
-      "line": 1145
+      "line": 1435
     },
     {
       "name": "blend_normal",
       "file": "crates/animation/src/lib.rs",
-      "line": 1165
+      "line": 1455
     },
     {
       "name": "normalized_skel_quat",
       "file": "crates/animation/src/lib.rs",
-      "line": 1397
+      "line": 1687
     },
     {
       "name": "bake_bind_transform",
       "file": "crates/animation/src/lib.rs",
-      "line": 1793
+      "line": 2083
     },
     {
       "name": "assemble_clips",
       "file": "crates/gltf/src/anim.rs",
-      "line": 180
+      "line": 209
     },
     {
       "name": "read_channel",
       "file": "crates/gltf/src/anim.rs",
-      "line": 406
+      "line": 440
     },
     {
       "name": "make_vec_track",
       "file": "crates/gltf/src/anim.rs",
-      "line": 501
+      "line": 646
     },
     {
       "name": "make_quat_track",
       "file": "crates/gltf/src/anim.rs",
-      "line": 510
+      "line": 655
     },
     {
       "name": "import_gltf",
@@ -1689,6 +1699,36 @@
       "name": "LightDesc::spot_units",
       "file": "crates/assets/src/scene.rs",
       "line": 580
+    },
+    {
+      "name": "pick_closest_with_epsilon",
+      "file": "crates/editor/src/picking.rs",
+      "line": 536
+    },
+    {
+      "name": "intersect_entity",
+      "file": "crates/editor/src/picking.rs",
+      "line": 575
+    },
+    {
+      "name": "model_matrix",
+      "file": "crates/editor/src/picking.rs",
+      "line": 653
+    },
+    {
+      "name": "scaled_size",
+      "file": "crates/editor/src/picking.rs",
+      "line": 666
+    },
+    {
+      "name": "normalized_rotation",
+      "file": "crates/editor/src/picking.rs",
+      "line": 673
+    },
+    {
+      "name": "cylinder_triangles",
+      "file": "crates/editor/src/picking.rs",
+      "line": 751
     },
     {
       "name": "quality",
