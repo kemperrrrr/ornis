@@ -21,6 +21,7 @@ members = [
     "crates/mesh-editor",
     "crates/gltf",
     "crates/shell",
+    "crates/runner",
     "xtask",
 ]
 # Vendored rustqual fork: standalone crate with its own lockfile, built via
@@ -56,6 +57,8 @@ ornis-physics = { path = "crates/physics" }
 ornis-render = { path = "crates/render" }
 ornis-app = { path = "crates/app" }
 ornis-audio = { path = "crates/audio" }
+ornis-gltf = { path = "crates/gltf" }
+ornis-runner = { path = "crates/runner" }
 editor-backend = { path = "crates/editor-backend" }
 wgpu = "30"
 winit = "0.30"

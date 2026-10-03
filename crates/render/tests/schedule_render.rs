@@ -44,6 +44,7 @@ fn buffers_path_matches_sequential_pixels() {
                 mesh: &scene.mesh,
                 instance_count: 1,
                 buffers: &buffers,
+                customs: &[],
             })
             .expect("E2 projection: production plans are typed");
             buffers.flush(context.queue);

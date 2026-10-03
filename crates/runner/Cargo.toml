@@ -1,0 +1,19 @@
+[package]
+name = "ornis-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ornis-app = { path = "../app" }
+ornis-core = { path = "../core" }
+ornis-render = { path = "../render" }
+crossbeam-channel = "0.5"
+editor-backend = { path = "../editor-backend" }
+pollster = "1.0"
+wgpu = "30"
+winit = "0.30"
+
+[lints]
+workspace = true

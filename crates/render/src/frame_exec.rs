@@ -21,7 +21,7 @@ use crate::frame_passes::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
 use crate::mesh::Mesh;
-use crate::renderer::Renderer3D;
+use crate::renderer::{CustomGbufferDraw, Renderer3D};
 use crate::schedule_bridge::ProjectionError;
 use crate::system::{Frame, SystemSet};
 use crate::transient_pool::{
@@ -772,6 +772,22 @@ impl RenderFrame3D {
         mesh: &Mesh,
         instance_count: u32,
     ) {
+        self.render_with_custom(context, renderer, mesh, instance_count, &[]);
+    }
+
+    /// Like [`render`](Self::render), plus the staged per-entity custom
+    /// draws (`RenderSubmit` output via [`custom_draw_items`](crate::renderer::custom_draw_items)):
+    /// sphere instances occupy `0..instance_count`, custom instances the
+    /// slots above. Empty `customs` renders exactly like
+    /// [`render`](Self::render).
+    pub fn render_with_custom(
+        &mut self,
+        context: crate::render_backend::RenderContext<'_>,
+        renderer: &Renderer3D,
+        mesh: &Mesh,
+        instance_count: u32,
+        customs: &[CustomGbufferDraw<'_>],
+    ) {
         let Self {
             executor,
             parallel_recording,
@@ -798,6 +814,7 @@ impl RenderFrame3D {
             renderer,
             mesh,
             instance_count,
+            customs,
         };
         if *parallel_recording {
             executor.execute_parallel(device, queue, &layout, |_index, pass, enc| {
@@ -835,6 +852,26 @@ impl RenderFrame3D {
         mesh: &Mesh,
         instance_count: u32,
     ) -> Result<(), ProjectionError> {
+        self.render_schedule_with_custom(context, renderer, mesh, instance_count, &[])
+    }
+
+    /// Like [`render_schedule`](Self::render_schedule), plus the staged
+    /// per-entity custom draws (see
+    /// [`render_with_custom`](Self::render_with_custom)). Empty `customs`
+    /// renders exactly like [`render_schedule`](Self::render_schedule).
+    ///
+    /// # Errors
+    /// Returns the [`ProjectionError`] of
+    /// [`schedule_bridge::try_project_schedule`](crate::schedule_bridge::try_project_schedule)
+    /// when a pass touches a resource without a typed registry identity.
+    pub fn render_schedule_with_custom(
+        &mut self,
+        context: crate::render_backend::RenderContext<'_>,
+        renderer: &Renderer3D,
+        mesh: &Mesh,
+        instance_count: u32,
+        customs: &[CustomGbufferDraw<'_>],
+    ) -> Result<(), ProjectionError> {
         let Self {
             executor,
             ids,
@@ -850,6 +887,7 @@ impl RenderFrame3D {
             renderer,
             mesh,
             instance_count,
+            customs,
         };
         executor.execute_in_order(
             context.device,
@@ -899,6 +937,7 @@ impl RenderFrame3D {
             renderer: context.renderer,
             mesh: context.mesh,
             instance_count: context.instance_count,
+            customs: context.customs,
         };
         executor.record_in_order(
             context.device,
@@ -944,6 +983,7 @@ struct PassDispatch<'a> {
     renderer: &'a Renderer3D,
     mesh: &'a Mesh,
     instance_count: u32,
+    customs: &'a [CustomGbufferDraw<'a>],
 }
 
 /// Frame inputs for [`RenderFrame3D::render_to_buffers`] (E2): GPU
@@ -965,6 +1005,9 @@ pub struct BufferRenderContext<'a> {
     pub instance_count: u32,
     /// E2 handover sink for the per-pass command buffers.
     pub buffers: &'a FrameCommandBuffers,
+    /// Staged per-entity custom draws (empty when the scene holds no
+    /// custom geometry — spheres-unchanged).
+    pub customs: &'a [CustomGbufferDraw<'a>],
 }
 
 /// Runs one pass through the registry dispatch: builds the
@@ -981,6 +1024,7 @@ fn dispatch_pass(
         renderer: dispatch.renderer,
         mesh: dispatch.mesh,
         instance_count: dispatch.instance_count,
+        customs: dispatch.customs,
     };
     if !dispatch.systems.run_pass(pass.pass().id, pass, &mut frame) {
         unreachable!(

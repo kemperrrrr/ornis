@@ -277,6 +277,9 @@ pub struct Frame<'a> {
     pub mesh: &'a Mesh,
     /// Number of uploaded instances to draw.
     pub instance_count: u32,
+    /// Per-entity custom draws of this frame (staged by `RenderSubmit`,
+    /// empty when the scene holds no custom geometry — spheres-unchanged).
+    pub customs: &'a [crate::renderer::CustomGbufferDraw<'a>],
 }
 
 /// A pass declared through its signature: `Reads`/`Writes` type-level sets
