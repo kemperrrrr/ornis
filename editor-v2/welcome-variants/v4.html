@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<!-- Ornis start-screen concept: Bottom sheet. Standalone mockup (static data). -->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ornis — Welcome (Bottom sheet)</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+:root { --accent: #7c8aff; --accent-soft: rgba(124, 138, 255, 0.16); --accent-line: rgba(124, 138, 255, 0.55); }
+html, body { height: 100%; }
+body { display: block; overflow: hidden; background: var(--panel); color: var(--text); -webkit-font-smoothing: antialiased; }
+.ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.wordmark { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif; font-weight: 700; letter-spacing: -0.02em; }
+kbd { font: 500 11px/1 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; color: var(--muted); padding: 3px 6px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04); }
+.thumb svg { display: block; width: 100%; height: 100%; }
+button { cursor: pointer; }
+
+body { background: var(--bg); }
+.editor { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+.scrim { position: fixed; inset: 0; background: linear-gradient(180deg, rgba(10,10,14,0.15) 0%, rgba(10,10,14,0.35) 55%, rgba(10,10,14,0.7) 100%); animation: scrim-in .45s ease both; }
+@keyframes scrim-in { from { opacity: 0; } }
+.sheet { position: fixed; left: 0; right: 0; bottom: 0; height: 232px; display: grid; grid-template-columns: 300px 1fr; background: rgba(30,30,34,0.86); -webkit-backdrop-filter: blur(24px) saturate(1.3); backdrop-filter: blur(24px) saturate(1.3); border-top: 1px solid rgba(255,255,255,0.1); border-radius: 20px 20px 0 0; box-shadow: 0 -20px 60px rgba(0,0,0,0.45); animation: sheet-up .5s cubic-bezier(0.2, 0.9, 0.25, 1) both; }
+@keyframes sheet-up { from { transform: translateY(100%); } }
+.grab { position: absolute; top: 7px; left: 50%; width: 38px; height: 4px; margin-left: -19px; border-radius: 999px; background: rgba(255,255,255,0.18); }
+.dismiss { position: absolute; top: 14px; right: 16px; display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 6px 0 10px; border-radius: 8px; border: 0; background: none; color: var(--muted); font-size: 12px; }
+.dismiss:hover { background: rgba(255,255,255,0.07); color: #fff; }
+.sl { padding: 26px 26px 22px 32px; border-right: 1px solid rgba(255,255,255,0.07); display: flex; flex-direction: column; }
+.sl h1 { margin: 0; font-size: 20px; line-height: 1.15; font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; font-weight: 700; letter-spacing: -0.01em; }
+.sl p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
+.btns { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
+.b { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.05); font-size: 13px; text-align: left; transition: background .12s, border-color .12s; }
+.b:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.14); }
+.b.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+.b.primary:hover { background: #8e9aff; }
+.b kbd { margin-left: auto; }
+.b.primary kbd { color: rgba(255,255,255,0.85); border-color: rgba(255,255,255,0.25); background: rgba(255,255,255,0.12); }
+.sr { padding: 22px 28px 22px 28px; min-width: 0; display: flex; flex-direction: column; }
+.rh { display: flex; align-items: baseline; gap: 12px; padding-right: 150px; }
+.rh h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.rh a { font-size: 12px; color: var(--muted); text-decoration: none; display: inline-flex; align-items: center; gap: 4px; }
+.rh a .ico { width: 13px; height: 13px; }
+.rh a:hover { color: #fff; }
+.tiles { margin-top: 14px; display: flex; gap: 14px; }
+.tile { width: 236px; flex: none; display: flex; flex-direction: column; border-radius: 12px; padding: 6px; transition: background .12s; cursor: default; }
+.tile:hover { background: rgba(255,255,255,0.06); }
+.tile .thumb { height: 104px; border-radius: 8px; overflow: hidden; position: relative; box-shadow: 0 0 0 1px rgba(255,255,255,0.07); transition: box-shadow .12s; }
+.tile:hover .thumb { box-shadow: 0 0 0 1px rgba(255,255,255,0.2); }
+.tile.current .thumb { box-shadow: 0 0 0 2px var(--accent); }
+.tile .row { display: flex; align-items: center; gap: 8px; margin-top: 9px; padding: 0 4px; }
+.tile .n { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .d { margin-left: auto; font-size: 11.5px; color: var(--muted); flex: none; }
+.tile .p { font-size: 11.5px; color: var(--muted); padding: 1px 4px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.open-pill { position: absolute; right: 8px; bottom: 8px; display: flex; align-items: center; gap: 4px; height: 24px; padding: 0 9px; border-radius: 999px; background: var(--accent); color: #fff; font-size: 11.5px; font-weight: 600; opacity: 0; transform: translateY(4px); transition: opacity .15s, transform .15s; }
+.open-pill .ico { width: 12px; height: 12px; }
+.tile:hover .open-pill, .tile.current .open-pill { opacity: 1; transform: none; }
+</style>
+</head>
+<body>
+
+<iframe class="editor" src="../index.html?nowelcome" title="Editor" tabindex="-1"></iframe>
+<div class="scrim"></div>
+<section class="sheet" role="dialog" aria-label="Welcome">
+  <div class="grab"></div>
+  <button class="dismiss" id="close">Dismiss<kbd>Esc</kbd></button>
+  <div class="sl">
+    <h1>Welcome back</h1>
+    <p>Ornis 0.1 · last session 12 minutes ago</p>
+    <div class="btns">
+      <button class="b primary" data-action="new"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Project<kbd>⌘N</kbd></button>
+      <button class="b" data-action="open"><svg class="ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Project<kbd>⌘O</kbd></button>
+      <button class="b" data-action="clone"><svg class="ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg>Clone Repository</button>
+    </div>
+  </div>
+  <div class="sr">
+    <div class="rh"><h2>Recent projects</h2><a href="#">View all<svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+    <div class="tiles">
+      <article class="tile current" tabindex="0"><div class="thumb" data-thumb="demo"><span class="open-pill">Open<svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="row"><span class="n">demo</span><span class="d">12 minutes ago</span></div><div class="p">~/AI-Projects/ornis/demo</div></article>
+      <article class="tile" tabindex="0"><div class="thumb" data-thumb="terrain"><span class="open-pill">Open<svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="row"><span class="n">terrain_test</span><span class="d">Yesterday</span></div><div class="p">~/AI-Projects/terrain_test</div></article>
+      <article class="tile" tabindex="0"><div class="thumb" data-thumb="physics"><span class="open-pill">Open<svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="row"><span class="n">physics_sandbox</span><span class="d">3 days ago</span></div><div class="p">~/AI-Projects/ornis/examples/physics_sandbox</div></article>
+      <article class="tile" tabindex="0"><div class="thumb" data-thumb="showcase"><span class="open-pill">Open<svg class="ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="row"><span class="n">ornis_showcase</span><span class="d">Sep 18</span></div><div class="p">~/Projects/ornis_showcase</div></article>
+    </div>
+  </div>
+</section>
+<script>
+
+var PROJECTS = [
+  { id: "demo", name: "demo", path: "~/AI-Projects/ornis/demo", date: "12 minutes ago", short: "12m ago", scenes: 1, pinned: true },
+  { id: "terrain", name: "terrain_test", path: "~/AI-Projects/terrain_test", date: "Yesterday", short: "Yesterday", scenes: 3 },
+  { id: "physics", name: "physics_sandbox", path: "~/AI-Projects/ornis/examples/physics_sandbox", date: "3 days ago", short: "3d ago", scenes: 5 },
+  { id: "showcase", name: "ornis_showcase", path: "~/Projects/ornis_showcase", date: "Sep 18", short: "2w ago", scenes: 8 }
+];
+function _sphere(p, i, cx, cy, r, col) {
+  var id = p + "s" + i;
+  return '<defs><radialGradient id="' + id + '" cx="36%" cy="30%" r="78%">' +
+    '<stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".16" stop-color="' + col + '"/>' +
+    '<stop offset=".7" stop-color="' + col + '"/><stop offset="1" stop-color="#0b0b12"/></radialGradient></defs>' +
+    '<ellipse cx="' + cx + '" cy="' + (cy + r * 0.96) + '" rx="' + r * 0.95 + '" ry="' + r * 0.2 + '" fill="#000" opacity=".38"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="url(#' + id + ')"/>';
+}
+function _cube(x, y, s, col) {           // isometric cube, (x, y) = bottom-front corner
+  var h = s * 0.5, w = s * 0.866;
+  var top = [[x, y - 2 * s + 0], [x + w, y - s - h], [x, y - s - 2 * h + 0], [x - w, y - s - h]];
+  top = [[x, y - s], [x + w, y - s - h], [x, y - s - 2 * h], [x - w, y - s - h]];
+  var L = [[x - w, y - s - h], [x, y - s], [x, y], [x - w, y - h]];
+  var R = [[x, y - s], [x + w, y - s - h], [x + w, y - h], [x, y]];
+  function pts(a) { return a.map(function (q) { return q[0].toFixed(1) + "," + q[1].toFixed(1); }).join(" "); }
+  return '<ellipse cx="' + x + '" cy="' + (y - h * 0.4) + '" rx="' + w * 1.15 + '" ry="' + h * 0.75 + '" fill="#000" opacity=".3"/>' +
+    '<polygon points="' + pts(L) + '" fill="' + col + '"/><polygon points="' + pts(L) + '" fill="#000" opacity=".28"/>' +
+    '<polygon points="' + pts(R) + '" fill="' + col + '"/><polygon points="' + pts(R) + '" fill="#000" opacity=".5"/>' +
+    '<polygon points="' + pts(top) + '" fill="' + col + '"/><polygon points="' + pts(top) + '" fill="#fff" opacity=".12"/>';
+}
+function _floor(p, hy, col, line) {
+  var s = '<rect x="0" y="' + hy + '" width="320" height="' + (200 - hy) + '" fill="' + col + '"/><g stroke="' + line + '" stroke-width="1">';
+  for (var i = -10; i <= 10; i++) s += '<line x1="' + (160 + i * 12) + '" y1="' + hy + '" x2="' + (160 + i * 64) + '" y2="200"/>';
+  for (var k = 1; k <= 6; k++) { var y = hy + (200 - hy) * Math.pow(k / 6, 1.8); s += '<line x1="0" y1="' + y.toFixed(1) + '" x2="320" y2="' + y.toFixed(1) + '"/>'; }
+  return s + '</g>';
+}
+function sceneSVG(id, prefix) {
+  var p = (prefix || "t") + id, sky, body = "";
+  if (id === "demo") {
+    sky = ["#2f3240", "#1b1c22"];
+    body = _floor(p, 128, "#24252c", "rgba(255,255,255,.06)");
+    [["#d23b3b", 70], ["#3cae4a", 115], ["#3f6fe0", 160], ["#e0b021", 205], ["#d9d9de", 250]].forEach(function (c, i) {
+      body += _sphere(p, i, c[1], 118, 18, c[0]); });
+  } else if (id === "terrain") {
+    sky = ["#e08a5c", "#5b3a6e"];
+    body = '<circle cx="232" cy="92" r="20" fill="#ffd9a0" opacity=".9"/>' +
+      '<polygon points="0,130 40,96 78,118 120,78 168,120 210,92 262,126 320,100 320,200 0,200" fill="#3d2a52"/>' +
+      '<polygon points="0,150 50,124 96,142 150,112 204,146 252,128 320,146 320,200 0,200" fill="#2a1f3b"/>' +
+      '<polygon points="0,172 70,154 140,170 214,150 320,168 320,200 0,200" fill="#1c1628"/>';
+  } else if (id === "physics") {
+    sky = ["#20403f", "#141d20"];
+    body = _floor(p, 132, "#18272a", "rgba(120,255,230,.07)") +
+      _cube(118, 182, 26, "#2fb3a0") + _cube(164, 182, 26, "#2fb3a0") + _cube(141, 141, 26, "#45d1bd") +
+      _cube(214, 176, 18, "#e0a03a") + _sphere(p, 0, 236, 58, 13, "#ff6b5a") +
+      '<path d="M236 76v10M231 82l5 6 5-6" stroke="#ff6b5a" stroke-width="1.6" fill="none" opacity=".5" stroke-linecap="round"/>';
+  } else {
+    sky = ["#3a2f6b", "#15131f"];
+    body = '<ellipse cx="160" cy="112" rx="120" ry="70" fill="#7c8aff" opacity=".18"/>' +
+      _floor(p, 136, "#1c1a2a", "rgba(124,138,255,.12)") +
+      _sphere(p, 0, 128, 112, 32, "#8d97ff") + _cube(206, 160, 30, "#c25bd6");
+  }
+  return '<svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><linearGradient id="' + p + 'sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + sky[0] + '"/><stop offset="1" stop-color="' + sky[1] + '"/></linearGradient></defs>' +
+    '<rect width="320" height="200" fill="url(#' + p + 'sky)"/>' + body + '</svg>';
+}
+function fillThumbs(root) {
+  (root || document).querySelectorAll("[data-thumb]").forEach(function (el, i) {
+    el.insertAdjacentHTML("afterbegin", sceneSVG(el.getAttribute("data-thumb"), "t" + i + "_"));
+  });
+}
+
+fillThumbs();
+document.querySelectorAll("[data-action]").forEach(function (b) { b.onclick = function () { console.log("[welcome v4] " + b.dataset.action); }; });
+function dismiss() {
+  var s = document.querySelector(".sheet"), c = document.querySelector(".scrim");
+  s.style.transition = "transform .3s cubic-bezier(.4,0,1,1)"; s.style.transform = "translateY(100%)";
+  c.style.transition = "opacity .3s"; c.style.opacity = "0";
+  setTimeout(function () { s.remove(); c.remove(); document.querySelector(".editor").style.pointerEvents = "auto"; }, 320);
+}
+document.getElementById("close").onclick = dismiss;
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") dismiss(); });
+</script>
+</body>
+</html>

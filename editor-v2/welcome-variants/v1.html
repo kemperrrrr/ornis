@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<!-- Ornis start-screen concept: Hub. Standalone mockup (static data). -->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ornis — Welcome (Hub)</title>
+<link rel="stylesheet" href="../styles.css" />
+<style>
+:root { --accent: #7c8aff; --accent-soft: rgba(124, 138, 255, 0.16); --accent-line: rgba(124, 138, 255, 0.55); }
+html, body { height: 100%; }
+body { display: block; overflow: hidden; background: var(--panel); color: var(--text); -webkit-font-smoothing: antialiased; }
+.ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.wordmark { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", system-ui, sans-serif; font-weight: 700; letter-spacing: -0.02em; }
+kbd { font: 500 11px/1 -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; color: var(--muted); padding: 3px 6px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04); }
+.thumb svg { display: block; width: 100%; height: 100%; }
+button { cursor: pointer; }
+
+.hub { display: grid; grid-template-columns: 248px 1fr; height: 100vh; }
+.side { background: var(--panel); border-right: 1px solid rgba(255,255,255,0.06); display: flex; flex-direction: column; padding: 22px 16px 16px; }
+.side .wordmark { font-size: 22px; padding: 0 8px; height: 32px; display: flex; align-items: center; }
+.side .ver { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 8px; padding: 2px 6px; border-radius: 5px; background: rgba(255,255,255,0.06); letter-spacing: 0; }
+.actions { display: flex; flex-direction: column; gap: 6px; margin: 22px 0 26px; }
+.btn { display: flex; align-items: center; gap: 10px; height: 36px; padding: 0 12px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.04); font-size: 13px; text-align: left; transition: background .12s, border-color .12s; }
+.btn:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); }
+.btn.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+.btn.primary:hover { background: #8e9aff; }
+.btn kbd { margin-left: auto; }
+.btn.primary kbd { color: rgba(255,255,255,0.8); border-color: rgba(255,255,255,0.25); background: rgba(255,255,255,0.12); }
+.nav-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); padding: 0 10px 8px; }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav a { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-radius: 8px; color: #cfcfd3; text-decoration: none; font-size: 13px; transition: background .12s, color .12s; }
+.nav a:hover { background: rgba(255,255,255,0.05); color: #fff; }
+.nav a.active { background: var(--accent-soft); color: #fff; }
+.nav a.active .ico { color: var(--accent); }
+.nav .count { margin-left: auto; font-size: 11px; color: var(--muted); }
+.side-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; padding: 12px 10px 0; border-top: 1px solid rgba(255,255,255,0.06); color: var(--muted); font-size: 12px; }
+.side-foot button { background: none; border: 0; color: var(--muted); padding: 6px; border-radius: 6px; display: flex; }
+.side-foot button:hover { color: #fff; background: rgba(255,255,255,0.06); }
+.main { background: color-mix(in srgb, var(--panel) 50%, var(--field)); overflow: hidden; padding: 26px 40px 40px; display: flex; flex-direction: column; }
+.top { display: flex; align-items: center; gap: 12px; }
+.top h1 { margin: 0; font-size: 22px; font-weight: 700; font-family: -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif; letter-spacing: -0.01em; }
+.top .sub { color: var(--muted); font-size: 13px; margin-left: 4px; margin-top: 3px; }
+.hub-search { margin-left: auto; display: flex; align-items: center; gap: 8px; width: 320px; height: 36px; padding: 0 10px 0 12px; border-radius: 9px; background: var(--field); border: 1px solid rgba(255,255,255,0.07); color: var(--muted); }
+.hub-search:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
+.hub-search input { flex: 1; min-width: 0; background: none; border: 0; outline: 0; color: var(--text); font: inherit; }
+.hub-search input::placeholder { color: var(--muted); }
+.select { display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px 0 12px; border-radius: 9px; border: 1px solid rgba(255,255,255,0.07); background: rgba(255,255,255,0.03); color: #cfcfd3; font-size: 13px; }
+.select:hover { background: rgba(255,255,255,0.07); }
+.seg { display: flex; padding: 3px; border-radius: 9px; background: var(--field); border: 1px solid rgba(255,255,255,0.07); }
+.seg button { width: 30px; height: 28px; border: 0; border-radius: 6px; background: none; color: var(--muted); display: flex; align-items: center; justify-content: center; }
+.seg button.on { background: rgba(255,255,255,0.09); color: #fff; }
+.chips { display: flex; gap: 6px; margin: 22px 0 18px; }
+.chip { height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.08); background: none; color: #cfcfd3; font-size: 12px; }
+.chip:hover { background: rgba(255,255,255,0.05); }
+.chip.on { background: #fff; color: #111; border-color: #fff; font-weight: 600; }
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+.card { background: var(--panel); border-radius: 14px; border: 1px solid rgba(255,255,255,0.06); overflow: hidden; transition: transform .16s ease, border-color .16s, box-shadow .16s; cursor: default; }
+.card:hover { transform: translateY(-2px); border-color: rgba(255,255,255,0.14); box-shadow: 0 14px 30px rgba(0,0,0,0.35); }
+.card.current { border-color: var(--accent-line); box-shadow: 0 0 0 1px var(--accent-line); }
+.card .thumb { position: relative; height: 196px; overflow: hidden; }
+.card .thumb > svg { transition: transform .4s ease; }
+.card:hover .thumb > svg { transform: scale(1.04); }
+.badge { position: absolute; top: 10px; left: 10px; font-size: 11px; font-weight: 600; padding: 4px 8px; border-radius: 6px; background: rgba(15,15,20,0.6); backdrop-filter: blur(8px); color: #fff; }
+.badge.accent { background: var(--accent); }
+.card .info { padding: 12px 14px 14px; }
+.card .row { display: flex; align-items: center; gap: 8px; }
+.card .name { font-weight: 600; font-size: 14px; }
+.card .more { margin-left: auto; width: 26px; height: 26px; border: 0; border-radius: 6px; background: none; color: var(--muted); display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .12s; }
+.card:hover .more { opacity: 1; }
+.card .more:hover { background: rgba(255,255,255,0.08); color: #fff; }
+.card .path { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .meta { display: flex; gap: 12px; margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+.card .meta span + span::before { content: "·"; margin-right: 12px; }
+.card.new { border: 1.5px dashed rgba(255,255,255,0.14); background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 13px; min-height: 274px; }
+.card.new .plus { width: 44px; height: 44px; border-radius: 12px; background: rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: center; color: #cfcfd3; }
+.card.new .plus .ico { width: 20px; height: 20px; }
+.card.new:hover { border-color: var(--accent-line); color: #fff; box-shadow: none; }
+.card.new:hover .plus { background: var(--accent-soft); color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="hub">
+  <aside class="side">
+    <div class="wordmark">Ornis<span class="ver">0.1</span></div>
+    <div class="actions">
+      <button class="btn primary" data-action="new"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Project<kbd>⌘N</kbd></button>
+      <button class="btn" data-action="open"><svg class="ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Project<kbd>⌘O</kbd></button>
+      <button class="btn" data-action="clone"><svg class="ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg>Clone Repository</button>
+    </div>
+    <div class="nav-label">Library</div>
+    <nav class="nav">
+      <a href="#" class="active"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg>Projects<span class="count">4</span></a>
+      <a href="#"><svg class="ico" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M4 9.5h16M9.5 9.5V20"/></svg>Templates<span class="count">6</span></a>
+      <a href="#"><svg class="ico" viewBox="0 0 24 24"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h5.5v15H6a1.5 1.5 0 0 0-1.5 1.5zM19.5 5.5A1.5 1.5 0 0 0 18 4h-5.5v15H18a1.5 1.5 0 0 1 1.5 1.5z"/></svg>Learn</a>
+    </nav>
+    <div class="side-foot"><span>Ornis 0.1 · dev build</span><button title="Settings"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4L18 18M6 18l1.6-1.6M16.4 7.6L18 6"/></svg></button></div>
+  </aside>
+  <main class="main">
+    <div class="top">
+      <h1>Projects</h1><span class="sub">4 projects</span>
+      <label class="hub-search"><svg class="ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg><input placeholder="Search projects" /><kbd>⌘F</kbd></label>
+      <button class="select">Last opened<svg class="ico" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg></button>
+      <div class="seg"><button class="on" title="Grid"><svg class="ico" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg></button><button title="List"><svg class="ico" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg></button></div>
+    </div>
+    <div class="chips"><button class="chip on">All</button><button class="chip">Pinned</button><button class="chip">Local</button><button class="chip">Git</button></div>
+    <section class="grid">
+      <article class="card current" tabindex="0">
+        <div class="thumb" data-thumb="demo"><span class="badge accent">Last opened</span></div>
+        <div class="info">
+          <div class="row"><span class="name">demo</span><button class="more" title="More"><svg class="ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+          <div class="path">~/AI-Projects/ornis/demo</div>
+          <div class="meta"><span>12 minutes ago</span><span>1 scene</span></div>
+        </div>
+      </article>
+      <article class="card" tabindex="0">
+        <div class="thumb" data-thumb="terrain"></div>
+        <div class="info">
+          <div class="row"><span class="name">terrain_test</span><button class="more" title="More"><svg class="ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+          <div class="path">~/AI-Projects/terrain_test</div>
+          <div class="meta"><span>Yesterday</span><span>3 scenes</span></div>
+        </div>
+      </article>
+      <article class="card" tabindex="0">
+        <div class="thumb" data-thumb="physics"></div>
+        <div class="info">
+          <div class="row"><span class="name">physics_sandbox</span><button class="more" title="More"><svg class="ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+          <div class="path">~/AI-Projects/ornis/examples/physics_sandbox</div>
+          <div class="meta"><span>3 days ago</span><span>5 scenes</span></div>
+        </div>
+      </article>
+      <article class="card" tabindex="0">
+        <div class="thumb" data-thumb="showcase"></div>
+        <div class="info">
+          <div class="row"><span class="name">ornis_showcase</span><button class="more" title="More"><svg class="ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+          <div class="path">~/Projects/ornis_showcase</div>
+          <div class="meta"><span>Sep 18</span><span>8 scenes</span></div>
+        </div>
+      </article>
+      <article class="card new" tabindex="0"><div class="plus"><svg class="ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>New project from template</article>
+    </section>
+  </main>
+</div>
+<script>
+
+var PROJECTS = [
+  { id: "demo", name: "demo", path: "~/AI-Projects/ornis/demo", date: "12 minutes ago", short: "12m ago", scenes: 1, pinned: true },
+  { id: "terrain", name: "terrain_test", path: "~/AI-Projects/terrain_test", date: "Yesterday", short: "Yesterday", scenes: 3 },
+  { id: "physics", name: "physics_sandbox", path: "~/AI-Projects/ornis/examples/physics_sandbox", date: "3 days ago", short: "3d ago", scenes: 5 },
+  { id: "showcase", name: "ornis_showcase", path: "~/Projects/ornis_showcase", date: "Sep 18", short: "2w ago", scenes: 8 }
+];
+function _sphere(p, i, cx, cy, r, col) {
+  var id = p + "s" + i;
+  return '<defs><radialGradient id="' + id + '" cx="36%" cy="30%" r="78%">' +
+    '<stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".16" stop-color="' + col + '"/>' +
+    '<stop offset=".7" stop-color="' + col + '"/><stop offset="1" stop-color="#0b0b12"/></radialGradient></defs>' +
+    '<ellipse cx="' + cx + '" cy="' + (cy + r * 0.96) + '" rx="' + r * 0.95 + '" ry="' + r * 0.2 + '" fill="#000" opacity=".38"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="url(#' + id + ')"/>';
+}
+function _cube(x, y, s, col) {           // isometric cube, (x, y) = bottom-front corner
+  var h = s * 0.5, w = s * 0.866;
+  var top = [[x, y - 2 * s + 0], [x + w, y - s - h], [x, y - s - 2 * h + 0], [x - w, y - s - h]];
+  top = [[x, y - s], [x + w, y - s - h], [x, y - s - 2 * h], [x - w, y - s - h]];
+  var L = [[x - w, y - s - h], [x, y - s], [x, y], [x - w, y - h]];
+  var R = [[x, y - s], [x + w, y - s - h], [x + w, y - h], [x, y]];
+  function pts(a) { return a.map(function (q) { return q[0].toFixed(1) + "," + q[1].toFixed(1); }).join(" "); }
+  return '<ellipse cx="' + x + '" cy="' + (y - h * 0.4) + '" rx="' + w * 1.15 + '" ry="' + h * 0.75 + '" fill="#000" opacity=".3"/>' +
+    '<polygon points="' + pts(L) + '" fill="' + col + '"/><polygon points="' + pts(L) + '" fill="#000" opacity=".28"/>' +
+    '<polygon points="' + pts(R) + '" fill="' + col + '"/><polygon points="' + pts(R) + '" fill="#000" opacity=".5"/>' +
+    '<polygon points="' + pts(top) + '" fill="' + col + '"/><polygon points="' + pts(top) + '" fill="#fff" opacity=".12"/>';
+}
+function _floor(p, hy, col, line) {
+  var s = '<rect x="0" y="' + hy + '" width="320" height="' + (200 - hy) + '" fill="' + col + '"/><g stroke="' + line + '" stroke-width="1">';
+  for (var i = -10; i <= 10; i++) s += '<line x1="' + (160 + i * 12) + '" y1="' + hy + '" x2="' + (160 + i * 64) + '" y2="200"/>';
+  for (var k = 1; k <= 6; k++) { var y = hy + (200 - hy) * Math.pow(k / 6, 1.8); s += '<line x1="0" y1="' + y.toFixed(1) + '" x2="320" y2="' + y.toFixed(1) + '"/>'; }
+  return s + '</g>';
+}
+function sceneSVG(id, prefix) {
+  var p = (prefix || "t") + id, sky, body = "";
+  if (id === "demo") {
+    sky = ["#2f3240", "#1b1c22"];
+    body = _floor(p, 128, "#24252c", "rgba(255,255,255,.06)");
+    [["#d23b3b", 70], ["#3cae4a", 115], ["#3f6fe0", 160], ["#e0b021", 205], ["#d9d9de", 250]].forEach(function (c, i) {
+      body += _sphere(p, i, c[1], 118, 18, c[0]); });
+  } else if (id === "terrain") {
+    sky = ["#e08a5c", "#5b3a6e"];
+    body = '<circle cx="232" cy="92" r="20" fill="#ffd9a0" opacity=".9"/>' +
+      '<polygon points="0,130 40,96 78,118 120,78 168,120 210,92 262,126 320,100 320,200 0,200" fill="#3d2a52"/>' +
+      '<polygon points="0,150 50,124 96,142 150,112 204,146 252,128 320,146 320,200 0,200" fill="#2a1f3b"/>' +
+      '<polygon points="0,172 70,154 140,170 214,150 320,168 320,200 0,200" fill="#1c1628"/>';
+  } else if (id === "physics") {
+    sky = ["#20403f", "#141d20"];
+    body = _floor(p, 132, "#18272a", "rgba(120,255,230,.07)") +
+      _cube(118, 182, 26, "#2fb3a0") + _cube(164, 182, 26, "#2fb3a0") + _cube(141, 141, 26, "#45d1bd") +
+      _cube(214, 176, 18, "#e0a03a") + _sphere(p, 0, 236, 58, 13, "#ff6b5a") +
+      '<path d="M236 76v10M231 82l5 6 5-6" stroke="#ff6b5a" stroke-width="1.6" fill="none" opacity=".5" stroke-linecap="round"/>';
+  } else {
+    sky = ["#3a2f6b", "#15131f"];
+    body = '<ellipse cx="160" cy="112" rx="120" ry="70" fill="#7c8aff" opacity=".18"/>' +
+      _floor(p, 136, "#1c1a2a", "rgba(124,138,255,.12)") +
+      _sphere(p, 0, 128, 112, 32, "#8d97ff") + _cube(206, 160, 30, "#c25bd6");
+  }
+  return '<svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><linearGradient id="' + p + 'sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + sky[0] + '"/><stop offset="1" stop-color="' + sky[1] + '"/></linearGradient></defs>' +
+    '<rect width="320" height="200" fill="url(#' + p + 'sky)"/>' + body + '</svg>';
+}
+function fillThumbs(root) {
+  (root || document).querySelectorAll("[data-thumb]").forEach(function (el, i) {
+    el.insertAdjacentHTML("afterbegin", sceneSVG(el.getAttribute("data-thumb"), "t" + i + "_"));
+  });
+}
+
+fillThumbs();
+document.querySelectorAll("[data-action]").forEach(function (b) { b.onclick = function () { console.log("[welcome v1] " + b.dataset.action); }; });
+</script>
+</body>
+</html>

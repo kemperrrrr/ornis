@@ -668,3 +668,247 @@
 
   renderTree(); renderShapes(); renderInspector(); renderBrowser();
 })();
+
+// ---- Welcome flow ---------------------------------------------------------------
+// start (#wl-start, shown on load unless ?nowelcome) ─View all→ all projects (#wl-all, Esc/back → start)
+// editor: click the project name in the top bar or ⇧⌘O → project sheet (#wl-sheet, Esc/Dismiss closes)
+// sheet ─View all→ hub (#wl-hub, Esc/close → editor). Opening "demo" anywhere returns to the editor.
+(function () {
+  "use strict";
+  var start = document.getElementById("wl-start");
+  if (!start) return;
+
+var PROJECTS = [
+  { id: "demo", name: "demo", path: "~/AI-Projects/ornis/demo", date: "12 minutes ago", short: "12m ago", scenes: 1, pinned: true },
+  { id: "terrain", name: "terrain_test", path: "~/AI-Projects/terrain_test", date: "Yesterday", short: "Yesterday", scenes: 3 },
+  { id: "physics", name: "physics_sandbox", path: "~/AI-Projects/ornis/examples/physics_sandbox", date: "3 days ago", short: "3d ago", scenes: 5 },
+  { id: "showcase", name: "ornis_showcase", path: "~/Projects/ornis_showcase", date: "Sep 18", short: "2w ago", scenes: 8 }
+];
+function _sphere(p, i, cx, cy, r, col) {
+  var id = p + "s" + i;
+  return '<defs><radialGradient id="' + id + '" cx="36%" cy="30%" r="78%">' +
+    '<stop offset="0" stop-color="#fff" stop-opacity=".95"/><stop offset=".16" stop-color="' + col + '"/>' +
+    '<stop offset=".7" stop-color="' + col + '"/><stop offset="1" stop-color="#0b0b12"/></radialGradient></defs>' +
+    '<ellipse cx="' + cx + '" cy="' + (cy + r * 0.96) + '" rx="' + r * 0.95 + '" ry="' + r * 0.2 + '" fill="#000" opacity=".38"/>' +
+    '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="url(#' + id + ')"/>';
+}
+function _cube(x, y, s, col) {           // isometric cube, (x, y) = bottom-front corner
+  var h = s * 0.5, w = s * 0.866;
+  var top = [[x, y - 2 * s + 0], [x + w, y - s - h], [x, y - s - 2 * h + 0], [x - w, y - s - h]];
+  top = [[x, y - s], [x + w, y - s - h], [x, y - s - 2 * h], [x - w, y - s - h]];
+  var L = [[x - w, y - s - h], [x, y - s], [x, y], [x - w, y - h]];
+  var R = [[x, y - s], [x + w, y - s - h], [x + w, y - h], [x, y]];
+  function pts(a) { return a.map(function (q) { return q[0].toFixed(1) + "," + q[1].toFixed(1); }).join(" "); }
+  return '<ellipse cx="' + x + '" cy="' + (y - h * 0.4) + '" rx="' + w * 1.15 + '" ry="' + h * 0.75 + '" fill="#000" opacity=".3"/>' +
+    '<polygon points="' + pts(L) + '" fill="' + col + '"/><polygon points="' + pts(L) + '" fill="#000" opacity=".28"/>' +
+    '<polygon points="' + pts(R) + '" fill="' + col + '"/><polygon points="' + pts(R) + '" fill="#000" opacity=".5"/>' +
+    '<polygon points="' + pts(top) + '" fill="' + col + '"/><polygon points="' + pts(top) + '" fill="#fff" opacity=".12"/>';
+}
+function _floor(p, hy, col, line) {
+  var s = '<rect x="0" y="' + hy + '" width="320" height="' + (200 - hy) + '" fill="' + col + '"/><g stroke="' + line + '" stroke-width="1">';
+  for (var i = -10; i <= 10; i++) s += '<line x1="' + (160 + i * 12) + '" y1="' + hy + '" x2="' + (160 + i * 64) + '" y2="200"/>';
+  for (var k = 1; k <= 6; k++) { var y = hy + (200 - hy) * Math.pow(k / 6, 1.8); s += '<line x1="0" y1="' + y.toFixed(1) + '" x2="320" y2="' + y.toFixed(1) + '"/>'; }
+  return s + '</g>';
+}
+function sceneSVG(id, prefix) {
+  var p = (prefix || "t") + id, sky, body = "";
+  if (id === "demo") {
+    sky = ["#2f3240", "#1b1c22"];
+    body = _floor(p, 128, "#24252c", "rgba(255,255,255,.06)");
+    [["#d23b3b", 70], ["#3cae4a", 115], ["#3f6fe0", 160], ["#e0b021", 205], ["#d9d9de", 250]].forEach(function (c, i) {
+      body += _sphere(p, i, c[1], 118, 18, c[0]); });
+  } else if (id === "terrain") {
+    sky = ["#e08a5c", "#5b3a6e"];
+    body = '<circle cx="232" cy="92" r="20" fill="#ffd9a0" opacity=".9"/>' +
+      '<polygon points="0,130 40,96 78,118 120,78 168,120 210,92 262,126 320,100 320,200 0,200" fill="#3d2a52"/>' +
+      '<polygon points="0,150 50,124 96,142 150,112 204,146 252,128 320,146 320,200 0,200" fill="#2a1f3b"/>' +
+      '<polygon points="0,172 70,154 140,170 214,150 320,168 320,200 0,200" fill="#1c1628"/>';
+  } else if (id === "physics") {
+    sky = ["#20403f", "#141d20"];
+    body = _floor(p, 132, "#18272a", "rgba(120,255,230,.07)") +
+      _cube(118, 182, 26, "#2fb3a0") + _cube(164, 182, 26, "#2fb3a0") + _cube(141, 141, 26, "#45d1bd") +
+      _cube(214, 176, 18, "#e0a03a") + _sphere(p, 0, 236, 58, 13, "#ff6b5a") +
+      '<path d="M236 76v10M231 82l5 6 5-6" stroke="#ff6b5a" stroke-width="1.6" fill="none" opacity=".5" stroke-linecap="round"/>';
+  } else if (id === "empty") {
+    sky = ["#2a2b33", "#17181d"];
+    body = _floor(p, 120, "#202127", "rgba(255,255,255,.07)") +
+      '<line x1="160" y1="150" x2="200" y2="150" stroke="#d24b4b" stroke-width="2"/><line x1="160" y1="150" x2="160" y2="112" stroke="#57c785" stroke-width="2"/><line x1="160" y1="150" x2="136" y2="166" stroke="#5796e8" stroke-width="2"/><circle cx="160" cy="150" r="3" fill="#fff"/>';
+  } else if (id === "materials") {
+    sky = ["#2b2b38", "#15151b"];
+    body = _floor(p, 130, "#1e1e26", "rgba(255,255,255,.06)") +
+      _sphere(p, 0, 92, 116, 24, "#c8ccd6") + _sphere(p, 1, 160, 116, 24, "#b0563a") + _sphere(p, 2, 228, 116, 24, "#8d97ff");
+  } else if (id === "character") {
+    sky = ["#3d5a80", "#1c2433"];
+    body = _floor(p, 128, "#1d2633", "rgba(160,200,255,.08)") + _cube(96, 176, 22, "#6b7b93") + _cube(236, 168, 16, "#6b7b93") +
+      '<ellipse cx="160" cy="166" rx="18" ry="5" fill="#000" opacity=".35"/><rect x="146" y="104" width="28" height="62" rx="14" fill="#e8b04a"/><rect x="146" y="104" width="28" height="62" rx="14" fill="url(#' + p + 'cap)"/>' +
+      '<defs><linearGradient id="' + p + 'cap" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity=".35"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".35"/></linearGradient></defs>';
+  } else if (id === "lighting") {
+    sky = ["#1b1d2c", "#0d0e14"];
+    body = _floor(p, 132, "#14151d", "rgba(255,255,255,.04)") +
+      '<polygon points="150,0 170,0 214,170 106,170" fill="#ffd27a" opacity=".1"/><ellipse cx="160" cy="168" rx="56" ry="12" fill="#ffd27a" opacity=".14"/>' + _sphere(p, 0, 160, 136, 26, "#e9e4da");
+  } else {
+    sky = ["#3a2f6b", "#15131f"];
+    body = '<ellipse cx="160" cy="112" rx="120" ry="70" fill="#7c8aff" opacity=".18"/>' +
+      _floor(p, 136, "#1c1a2a", "rgba(124,138,255,.12)") +
+      _sphere(p, 0, 128, 112, 32, "#8d97ff") + _cube(206, 160, 30, "#c25bd6");
+  }
+  return '<svg viewBox="0 0 320 200" preserveAspectRatio="xMidYMid slice" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><linearGradient id="' + p + 'sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="' + sky[0] + '"/><stop offset="1" stop-color="' + sky[1] + '"/></linearGradient></defs>' +
+    '<rect width="320" height="200" fill="url(#' + p + 'sky)"/>' + body + '</svg>';
+}
+function fillThumbs(root) {
+  (root || document).querySelectorAll("[data-thumb]").forEach(function (el, i) {
+    el.insertAdjacentHTML("afterbegin", sceneSVG(el.getAttribute("data-thumb"), "wlt" + i + "_"));
+  });
+}
+
+var LEARN_BG = { start: ["#7c8aff", "#3b2f9a"], editor: ["#3fb2a6", "#185259"], physics: ["#e08a5c", "#7d3047"],
+  materials: ["#c25bd6", "#4f2380"], lighting: ["#e0b021", "#7d4c10"], scripting: ["#5796e8", "#1e3a73"] };
+function fillLearn(root) {
+  (root || document).querySelectorAll("[data-learn-bg]").forEach(function (el) {
+    var c = LEARN_BG[el.getAttribute("data-learn-bg")] || ["#555", "#222"];
+    el.style.background = "linear-gradient(135deg, " + c[0] + ", " + c[1] + ")";
+    if (!el.style.position) el.style.position = "relative";
+  });
+}
+
+  fillThumbs(); fillLearn();
+  var S = { start: start, all: document.getElementById("wl-all"), sheet: document.getElementById("wl-sheet"), hub: document.getElementById("wl-hub") };
+  var ORDER = ["hub", "all", "start", "sheet"];            // top-most first
+  var layout = document.querySelector(".layout");
+  var startQ = document.getElementById("wl-start-q"), hubQ = document.getElementById("wl-hub-q");
+  var params = new URLSearchParams(location.search);
+  var lastFocus = null;
+
+  function isOn(n) { return S[n].classList.contains("wl-on"); }
+  function top() { for (var i = 0; i < ORDER.length; i++) if (isOn(ORDER[i])) return ORDER[i]; return null; }
+  function sync() { if (layout) layout.inert = !!top(); }
+  function show(n, instant) {
+    var el = S[n];
+    if (instant) { el.classList.add("wl-instant"); el.classList.add("wl-on"); void el.offsetWidth; el.classList.remove("wl-instant"); }
+    else el.classList.add("wl-on");
+    sync(); el.focus({ preventScroll: true });
+  }
+  function hide(n, instant) {
+    var el = S[n];
+    if (instant) { el.classList.add("wl-instant"); el.classList.remove("wl-on"); void el.offsetWidth; el.classList.remove("wl-instant"); }
+    else el.classList.remove("wl-on");
+    sync();
+  }
+  function toEditor() {
+    ORDER.forEach(function (n) { if (isOn(n)) hide(n); });
+    if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+    if (lastFocus && document.contains(lastFocus) && !lastFocus.classList.contains("wl-project-btn")) { try { lastFocus.focus({ preventScroll: true }); } catch (e) {} }
+    lastFocus = null;
+  }
+  function go(where) {
+    if (where === "all") {
+      setTab("all", "projects"); show("all");
+      setTimeout(function () { if (isOn("all") && isOn("start")) hide("start", true); }, 330);
+    } else if (where === "start") {
+      show("start", true); hide("all"); S.start.focus({ preventScroll: true });
+    } else if (where === "sheet") {
+      if (!top()) lastFocus = document.activeElement;
+      show("sheet");
+    } else if (where === "hub") {
+      setTab("hub", "projects"); show("hub"); hide("sheet");
+    } else {
+      toEditor();
+    }
+  }
+  function openProject(id) {
+    if (id === "demo") { console.log("[welcome] open project demo"); toEditor(); }
+    else console.log("[welcome] open project " + id + " (mock)");
+  }
+
+  // Tabs inside the all-projects panel (v3) and the hub sidebar (v1).
+  function setTab(screen, tab) {
+    var p = screen === "all" ? "wl3-" : "wl1-";
+    var root = S[screen];
+    root.querySelectorAll("[data-wl-tab]").forEach(function (b) {
+      if (b.classList.contains("wl1-new")) return;
+      b.classList.toggle(screen === "all" ? "wl3-on" : "wl1-active", b.getAttribute("data-wl-tab") === tab);
+      b.setAttribute("aria-selected", b.getAttribute("data-wl-tab") === tab ? "true" : "false");
+    });
+    root.querySelectorAll("[data-wl-pane]").forEach(function (pn) { pn.classList.toggle(p + "on", pn.getAttribute("data-wl-pane") === tab); });
+    if (screen === "hub") {
+      var meta = { projects: ["Projects", "4 projects", "Search projects"], templates: ["Templates", "6 templates", "Search templates"], learn: ["Learn", "6 guides", "Search guides"] }[tab];
+      document.getElementById("wl-hub-title").textContent = meta[0];
+      document.getElementById("wl-hub-sub").textContent = meta[1];
+      hubQ.placeholder = meta[2]; hubQ.value = "";
+      S.hub.querySelector(".wl1-select").style.display = tab === "projects" ? "" : "none";
+    }
+  }
+
+  // One delegated click handler for every welcome surface.
+  document.addEventListener("click", function (ev) {
+    var t = ev.target.closest && ev.target.closest(".wl-root [data-wl-go], .wl-root [data-wl-project], .wl-root [data-wl-tab], .wl-root [data-wl-action], .wl-root [data-wl-template], .wl-root [data-wl-guide]");
+    if (!t) return;
+    ev.preventDefault();
+    var screen = t.closest("#wl-all") ? "all" : t.closest("#wl-hub") ? "hub" : t.closest("#wl-sheet") ? "sheet" : "start";
+    if (t.hasAttribute("data-wl-action")) { ev.stopPropagation(); console.log("[welcome] " + t.getAttribute("data-wl-action") + " (stub)"); return; }
+    if (t.hasAttribute("data-wl-go")) go(t.getAttribute("data-wl-go"));
+    else if (t.hasAttribute("data-wl-project")) openProject(t.getAttribute("data-wl-project"));
+    else if (t.hasAttribute("data-wl-tab")) setTab(screen, t.getAttribute("data-wl-tab"));
+    else if (t.hasAttribute("data-wl-template")) console.log("[welcome] new project from template " + t.getAttribute("data-wl-template") + " (stub)");
+    else if (t.hasAttribute("data-wl-guide")) console.log("[welcome] open guide " + t.getAttribute("data-wl-guide") + " (stub)");
+  });
+  // Chips / grid-list toggles in the hub: purely visual.
+  S.hub.addEventListener("click", function (ev) {
+    var c = ev.target.closest(".wl1-chip, .wl1-seg button");
+    if (!c) return;
+    c.parentNode.querySelectorAll(c.tagName).forEach(function (x) { x.classList.toggle(c.classList.contains("wl1-chip") ? "wl1-on" : "wl1-on", x === c); });
+  });
+
+  // Start-screen search: filters recent cards; Enter opens the first match or logs a command.
+  var cards = Array.prototype.slice.call(start.querySelectorAll("[data-wl-project]"));
+  var empty = start.querySelector(".wl2-empty");
+  startQ.addEventListener("input", function () {
+    var q = startQ.value.trim().toLowerCase(), n = 0;
+    cards.forEach(function (c) { var m = !q || c.getAttribute("data-wl-name").toLowerCase().indexOf(q) >= 0; c.hidden = !m; if (m) n++; });
+    empty.hidden = n > 0;
+  });
+  startQ.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter") return;
+    var first = cards.filter(function (c) { return !c.hidden; })[0];
+    if (first && startQ.value.trim()) openProject(first.getAttribute("data-wl-project"));
+    else if (startQ.value.trim()) console.log("[welcome] command: " + startQ.value.trim() + " (mock)");
+  });
+
+  // Keyboard: Enter/Space activates focused cards & rows; Esc steps back; ⌘K focuses the overlay search; ⇧⌘O toggles the sheet.
+  window.addEventListener("keydown", function (ev) {
+    var k = ev.key, mod = ev.metaKey || ev.ctrlKey, t = top();
+    var isO = mod && ev.shiftKey && k.toLowerCase() === "o";
+    if (!t) {
+      if (isO) { ev.preventDefault(); ev.stopPropagation(); go("sheet"); }
+      return;
+    }
+    var a = document.activeElement;
+    if (k === "Escape") {
+      ev.preventDefault(); ev.stopPropagation();
+      if (a && a.tagName === "INPUT" && a.value) { a.value = ""; a.dispatchEvent(new Event("input")); return; }
+      if (t === "all") go("start"); else go("editor");
+    } else if (mod && k.toLowerCase() === "k") {
+      ev.preventDefault(); ev.stopPropagation();
+      if (t === "start") startQ.focus(); else if (t === "hub") hubQ.focus();
+    } else if (isO && t === "sheet") {
+      ev.preventDefault(); ev.stopPropagation(); go("editor");
+    } else if ((k === "Enter" || k === " ") && a && a.closest && a.closest(".wl-root") && a.matches("[data-wl-project], [data-wl-template], [data-wl-guide], [data-wl-tab], a[data-wl-go]")) {
+      ev.preventDefault(); ev.stopPropagation(); a.click();
+    }
+  }, true);
+
+  // The project name in the top bar opens the sheet.
+  var proj = document.querySelector(".center-top .project");
+  if (proj) {
+    proj.classList.add("wl-project-btn");
+    proj.title = "Projects (⇧⌘O)";
+    proj.setAttribute("role", "button"); proj.tabIndex = 0;
+    proj.insertAdjacentHTML("beforeend", '<svg class="wl-ico" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg>');
+    proj.addEventListener("click", function () { go("sheet"); });
+    proj.addEventListener("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go("sheet"); } });
+  }
+
+  if (params.has("nowelcome") && !params.has("welcome")) hide("start", true);
+  else { sync(); start.focus({ preventScroll: true }); }
+})();

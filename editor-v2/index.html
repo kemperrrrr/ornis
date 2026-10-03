@@ -127,6 +127,265 @@
   </aside>
 </main>
 
+<!-- ===== Welcome flow: start (v2) → all projects (v3); editor sheet (v4, ⇧⌘O / click project name) → hub (v1).
+     ?nowelcome skips the start screen. All classes are prefixed wl-. ===== -->
+<svg class="wl-sprite" width="0" height="0" aria-hidden="true" focusable="false"><defs><symbol id="wl-i-box" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol><symbol id="wl-i-template" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M4 9.5h16M9.5 9.5V20"/></symbol><symbol id="wl-i-book" viewBox="0 0 24 24"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h5.5v15H6a1.5 1.5 0 0 0-1.5 1.5zM19.5 5.5A1.5 1.5 0 0 0 18 4h-5.5v15H18a1.5 1.5 0 0 1 1.5 1.5z"/></symbol></defs></svg>
+<div id="wl-start" class="wl-root wl-screen wl-on" tabindex="-1" role="dialog" aria-modal="true" aria-label="Welcome to Ornis">
+  <div class="wl2-col">
+    <div class="wl2-hero">
+      <div class="wl-wordmark">Ornis</div>
+      <p>Version 0.1</p>
+    </div>
+    <label class="wl2-cmd"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg><input id="wl-start-q" placeholder="Search projects or type a command…" autocomplete="off" spellcheck="false" /><kbd>⌘K</kbd></label>
+    <div class="wl2-sec"><h2>Recent</h2><a data-wl-go="all" tabindex="0">View all<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+    <section class="wl2-recents" id="wl-start-recents">
+      <article class="wl2-rc wl2-current" tabindex="0" title="~/AI-Projects/ornis/demo" data-wl-project="demo" data-wl-name="demo">
+        <div class="wl-thumb" data-thumb="demo"></div>
+        <div class="wl2-t"><div class="wl2-n">demo</div><div class="wl2-d"><span>12 minutes ago</span><span class="wl2-dot"></span></div></div>
+      </article>
+      <article class="wl2-rc" tabindex="0" title="~/AI-Projects/terrain_test" data-wl-project="terrain" data-wl-name="terrain_test">
+        <div class="wl-thumb" data-thumb="terrain"></div>
+        <div class="wl2-t"><div class="wl2-n">terrain_test</div><div class="wl2-d"><span>Yesterday</span></div></div>
+      </article>
+      <article class="wl2-rc" tabindex="0" title="~/AI-Projects/ornis/examples/physics_sandbox" data-wl-project="physics" data-wl-name="physics_sandbox">
+        <div class="wl-thumb" data-thumb="physics"></div>
+        <div class="wl2-t"><div class="wl2-n">physics_sandbox</div><div class="wl2-d"><span>3 days ago</span></div></div>
+      </article>
+      <article class="wl2-rc" tabindex="0" title="~/Projects/ornis_showcase" data-wl-project="showcase" data-wl-name="ornis_showcase">
+        <div class="wl-thumb" data-thumb="showcase"></div>
+        <div class="wl2-t"><div class="wl2-n">ornis_showcase</div><div class="wl2-d"><span>Sep 18</span></div></div>
+      </article>
+      <div class="wl2-empty" hidden>No matching projects. Press Enter to run it as a command.</div>
+    </section>
+    <div class="wl2-links">
+      <button data-wl-action="new"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Project<kbd>⌘N</kbd></button><span class="wl2-sep"></span>
+      <button data-wl-action="open"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Project<kbd>⌘O</kbd></button><span class="wl2-sep"></span>
+      <button data-wl-action="clone"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg>Clone Repository<kbd>⇧⌘C</kbd></button>
+    </div>
+  </div>
+  <div class="wl2-foot"><a data-wl-action="docs">Docs</a><a data-wl-action="changelog">Changelog</a><a data-wl-action="settings">Settings</a></div>
+</div>
+<div id="wl-all" class="wl-root wl-screen" tabindex="-1" role="dialog" aria-modal="true" aria-label="All projects">
+  <div class="wl3-stage" aria-hidden="true">
+    <div class="wl3-floor"></div>
+    <div class="wl3-scene">
+      <div class="wl3-horizon"></div>
+      <div class="wl3-comp">
+        <div class="wl3-shadow wl3-a"></div>
+        <div class="wl3-obj wl3-fl-cube"><img src="icons/cube-pbr.svg" alt="" /></div>
+        <div class="wl3-obj wl3-fl-sphere"><img src="icons/material-pbr.svg" alt="" /></div>
+        <div class="wl3-obj wl3-sphere2"><img src="icons/material-toon.svg" alt="" /></div>
+      </div>
+    </div>
+  </div>
+  <div class="wl3-caption"><span class="wl3-live"></span>Rendered with Ornis PBR · toon</div>
+  <aside class="wl3-panel-glass">
+    <div class="wl3-topbar"><button class="wl3-back" data-wl-go="start" title="Back (Esc)" aria-label="Back"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></svg></button><span class="wl3-crumb"><a data-wl-go="start">Start</a><i>/</i><b>All projects</b></span></div>
+    <div class="wl-wordmark">Ornis</div>
+    <div class="wl3-tag">Version 0.1</div>
+    <div class="wl3-acts">
+      <button class="wl3-act wl3-primary" data-wl-action="new"><span class="wl3-ib"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span><span><div class="wl3-tt">New Project</div><div class="wl3-ds">Start from an empty scene or a template</div></span><kbd>⌘N</kbd></button>
+      <button class="wl3-act" data-wl-action="open"><span class="wl3-ib"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></span><span><div class="wl3-tt">Open Project</div><div class="wl3-ds">Browse for a folder on this Mac</div></span><kbd>⌘O</kbd></button>
+      <button class="wl3-act" data-wl-action="clone"><span class="wl3-ib"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg></span><span><div class="wl3-tt">Clone Repository</div><div class="wl3-ds">Get a project from a Git URL</div></span><kbd>⇧⌘C</kbd></button>
+    </div>
+    <div class="wl3-tabs" role="tablist">
+      <button class="wl3-tab wl3-on" data-wl-tab="projects" role="tab"><svg class="wl-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#wl-i-box"/></svg>Projects <span>4</span></button>
+      <button class="wl3-tab" data-wl-tab="templates" role="tab"><svg class="wl-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#wl-i-template"/></svg>Templates <span>4</span></button>
+      <button class="wl3-tab" data-wl-tab="learn" role="tab"><svg class="wl-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#wl-i-book"/></svg>Learn <span>4</span></button>
+    </div>
+    <div class="wl3-panes">
+    <div class="wl3-pane wl3-on" data-wl-pane="projects"><div class="wl3-recent">
+        <div class="wl3-ri wl3-current" tabindex="0" data-wl-project="demo"><div class="wl-thumb" data-thumb="demo"></div><div class="wl3-tx"><div class="wl3-n">demo</div><div class="wl3-p">~/AI-Projects/ornis/demo</div></div><span class="wl3-dt">12m ago</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-project="terrain"><div class="wl-thumb" data-thumb="terrain"></div><div class="wl3-tx"><div class="wl3-n">terrain_test</div><div class="wl3-p">~/AI-Projects/terrain_test</div></div><span class="wl3-dt">Yesterday</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-project="physics"><div class="wl-thumb" data-thumb="physics"></div><div class="wl3-tx"><div class="wl3-n">physics_sandbox</div><div class="wl3-p">~/AI-Projects/ornis/examples/physics_sandbox</div></div><span class="wl3-dt">3d ago</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-project="showcase"><div class="wl-thumb" data-thumb="showcase"></div><div class="wl3-tx"><div class="wl3-n">ornis_showcase</div><div class="wl3-p">~/Projects/ornis_showcase</div></div><span class="wl3-dt">2w ago</span></div>
+    </div></div>
+    <div class="wl3-pane" data-wl-pane="templates"><div class="wl3-recent">
+        <div class="wl3-ri" tabindex="0" data-wl-template="empty"><div class="wl-thumb" data-thumb="empty"></div><div class="wl3-tx"><div class="wl3-n">Empty scene</div><div class="wl3-p">Camera, light and a ground plane</div></div><span class="wl3-go">Use</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-template="physics"><div class="wl-thumb" data-thumb="physics"></div><div class="wl3-tx"><div class="wl3-n">Physics sandbox</div><div class="wl3-p">Stackable rigid bodies with colliders</div></div><span class="wl3-go">Use</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-template="terrain"><div class="wl-thumb" data-thumb="terrain"></div><div class="wl3-tx"><div class="wl3-n">Terrain</div><div class="wl3-p">Heightfield landscape with a sky</div></div><span class="wl3-go">Use</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-template="materials"><div class="wl-thumb" data-thumb="materials"></div><div class="wl3-tx"><div class="wl3-n">Material showcase</div><div class="wl3-p">PBR and toon material presets</div></div><span class="wl3-go">Use</span></div>
+    </div></div>
+    <div class="wl3-pane" data-wl-pane="learn"><div class="wl3-recent">
+        <div class="wl3-ri" tabindex="0" data-wl-guide="start"><div class="wl3-icn" data-learn-bg="start"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h5.5v15H6a1.5 1.5 0 0 0-1.5 1.5zM19.5 5.5A1.5 1.5 0 0 0 18 4h-5.5v15H18a1.5 1.5 0 0 1 1.5 1.5z"/></svg></div><div class="wl3-tx"><div class="wl3-n">Getting started</div><div class="wl3-p">Create a project and run your first scene.</div></div><span class="wl3-dt"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>5 min</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-guide="editor"><div class="wl3-icn" data-learn-bg="editor"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M6 4l12 7-5.5 1.5L10 18z"/></svg></div><div class="wl3-tx"><div class="wl3-n">Editor basics</div><div class="wl3-p">Hierarchy, inspector, gizmos and shortcuts.</div></div><span class="wl3-dt"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>8 min</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-guide="physics"><div class="wl3-icn" data-learn-bg="physics"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></div><div class="wl3-tx"><div class="wl3-n">Physics</div><div class="wl3-p">Rigid bodies, colliders and solver settings.</div></div><span class="wl3-dt"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>12 min</span></div>
+        <div class="wl3-ri" tabindex="0" data-wl-guide="materials"><div class="wl3-icn" data-learn-bg="materials"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4.5 10.5c4 2 11 2 15 0"/></svg></div><div class="wl3-tx"><div class="wl3-n">Materials</div><div class="wl3-p">PBR and toon shading, roughness, metalness.</div></div><span class="wl3-dt"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>10 min</span></div>
+    </div></div>
+    </div>
+    <div class="wl3-tip"><span class="wl3-tip-k">Tip</span>Press <kbd>⇧⌘O</kbd> in the editor to switch projects without leaving your scene.</div>
+    <div class="wl3-gfoot"><label class="wl3-toggle"><input type="checkbox" checked />Show on startup</label></div>
+  </aside>
+</div>
+<div id="wl-sheet" class="wl-root" tabindex="-1">
+  <div class="wl4-scrim" data-wl-go="editor"></div>
+  <section class="wl4-sheet" role="dialog" aria-label="Projects">
+    <div class="wl4-grab"></div>
+    <button class="wl4-dismiss" data-wl-go="editor">Dismiss<kbd>Esc</kbd></button>
+    <div class="wl4-sl">
+      <h1>Projects</h1>
+      <p>Ornis 0.1 · demo is open</p>
+      <div class="wl4-btns">
+        <button class="wl4-b wl4-primary" data-wl-action="new"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Project<kbd>⌘N</kbd></button>
+        <button class="wl4-b" data-wl-action="open"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Project<kbd>⌘O</kbd></button>
+        <button class="wl4-b" data-wl-action="clone"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg>Clone Repository</button>
+      </div>
+    </div>
+    <div class="wl4-sr">
+      <div class="wl4-rh"><h2>Recent projects</h2><a data-wl-go="hub" tabindex="0">View all<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
+      <div class="wl4-tiles">
+      <article class="wl4-tile wl4-current" tabindex="0" data-wl-project="demo"><div class="wl-thumb" data-thumb="demo"><span class="wl4-open-pill wl4-cur">Open now</span></div><div class="wl4-row"><span class="wl4-n">demo</span><span class="wl4-d">12 minutes ago</span></div><div class="wl4-p">~/AI-Projects/ornis/demo</div></article>
+      <article class="wl4-tile" tabindex="0" data-wl-project="terrain"><div class="wl-thumb" data-thumb="terrain"><span class="wl4-open-pill">Open<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="wl4-row"><span class="wl4-n">terrain_test</span><span class="wl4-d">Yesterday</span></div><div class="wl4-p">~/AI-Projects/terrain_test</div></article>
+      <article class="wl4-tile" tabindex="0" data-wl-project="physics"><div class="wl-thumb" data-thumb="physics"><span class="wl4-open-pill">Open<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="wl4-row"><span class="wl4-n">physics_sandbox</span><span class="wl4-d">3 days ago</span></div><div class="wl4-p">~/AI-Projects/ornis/examples/physics_sandbox</div></article>
+      <article class="wl4-tile" tabindex="0" data-wl-project="showcase"><div class="wl-thumb" data-thumb="showcase"><span class="wl4-open-pill">Open<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div><div class="wl4-row"><span class="wl4-n">ornis_showcase</span><span class="wl4-d">Sep 18</span></div><div class="wl4-p">~/Projects/ornis_showcase</div></article>
+      </div>
+    </div>
+  </section>
+</div>
+<div id="wl-hub" class="wl-root wl-screen" tabindex="-1" role="dialog" aria-modal="true" aria-label="Project hub">
+  <div class="wl1-hub">
+    <aside class="wl1-side">
+      <button class="wl1-side-back" data-wl-go="editor" title="Back to editor (Esc)"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></svg>Back to editor</button>
+      <div class="wl-wordmark">Ornis<span class="wl1-ver">0.1</span></div>
+      <div class="wl1-actions">
+        <button class="wl1-btn wl1-primary" data-wl-action="new"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Project<kbd>⌘N</kbd></button>
+        <button class="wl1-btn" data-wl-action="open"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Project<kbd>⌘O</kbd></button>
+        <button class="wl1-btn" data-wl-action="clone"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg>Clone Repository</button>
+      </div>
+      <div class="wl1-nav-label">Library</div>
+      <nav class="wl1-nav">
+        <a class="wl1-active" data-wl-tab="projects" tabindex="0"><svg class="wl-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#wl-i-box"/></svg>Projects<span class="wl1-count">4</span></a>
+        <a data-wl-tab="templates" tabindex="0"><svg class="wl-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#wl-i-template"/></svg>Templates<span class="wl1-count">6</span></a>
+        <a data-wl-tab="learn" tabindex="0"><svg class="wl-ico" viewBox="0 0 24 24" aria-hidden="true"><use href="#wl-i-book"/></svg>Learn<span class="wl1-count">6</span></a>
+      </nav>
+      <div class="wl1-side-foot"><span>Ornis 0.1 · dev build</span><button title="Settings" data-wl-action="settings"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4L18 18M6 18l1.6-1.6M16.4 7.6L18 6"/></svg></button></div>
+    </aside>
+    <main class="wl1-main">
+      <div class="wl1-top">
+        <h1 id="wl-hub-title">Projects</h1><span class="wl1-sub" id="wl-hub-sub">4 projects</span>
+        <label class="wl1-hub-search"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg><input id="wl-hub-q" placeholder="Search projects" autocomplete="off" spellcheck="false" /><kbd>⌘F</kbd></label>
+        <button class="wl1-select" data-wl-action="sort">Last opened<svg class="wl-ico" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></svg></button>
+        <div class="wl1-seg"><button class="wl1-on" title="Grid"><svg class="wl-ico" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.5"/></svg></button><button title="List"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg></button></div>
+        <button class="wl1-close-x" data-wl-go="editor" title="Close (Esc)" aria-label="Close"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17"/></svg></button>
+      </div>
+      <div class="wl1-pane wl1-on" data-wl-pane="projects">
+        <div class="wl1-chips"><button class="wl1-chip wl1-on">All</button><button class="wl1-chip">Pinned</button><button class="wl1-chip">Local</button><button class="wl1-chip">Git</button></div>
+        <section class="wl1-grid">
+        <article class="wl1-card wl1-current" tabindex="0" data-wl-project="demo">
+          <div class="wl-thumb" data-thumb="demo"><span class="wl1-badge wl1-accent">Last opened</span></div>
+          <div class="wl1-info">
+            <div class="wl1-row"><span class="wl1-name">demo</span><button class="wl1-more" title="More" data-wl-action="more"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+            <div class="wl1-path">~/AI-Projects/ornis/demo</div>
+            <div class="wl1-meta"><span>12 minutes ago</span><span>1 scene</span></div>
+          </div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-project="terrain">
+          <div class="wl-thumb" data-thumb="terrain"></div>
+          <div class="wl1-info">
+            <div class="wl1-row"><span class="wl1-name">terrain_test</span><button class="wl1-more" title="More" data-wl-action="more"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+            <div class="wl1-path">~/AI-Projects/terrain_test</div>
+            <div class="wl1-meta"><span>Yesterday</span><span>3 scenes</span></div>
+          </div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-project="physics">
+          <div class="wl-thumb" data-thumb="physics"></div>
+          <div class="wl1-info">
+            <div class="wl1-row"><span class="wl1-name">physics_sandbox</span><button class="wl1-more" title="More" data-wl-action="more"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+            <div class="wl1-path">~/AI-Projects/ornis/examples/physics_sandbox</div>
+            <div class="wl1-meta"><span>3 days ago</span><span>5 scenes</span></div>
+          </div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-project="showcase">
+          <div class="wl-thumb" data-thumb="showcase"></div>
+          <div class="wl1-info">
+            <div class="wl1-row"><span class="wl1-name">ornis_showcase</span><button class="wl1-more" title="More" data-wl-action="more"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button></div>
+            <div class="wl1-path">~/Projects/ornis_showcase</div>
+            <div class="wl1-meta"><span>Sep 18</span><span>8 scenes</span></div>
+          </div>
+        </article>
+          <article class="wl1-card wl1-new" tabindex="0" data-wl-tab="templates"><div class="wl1-plus"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></div>New project from template</article>
+        </section>
+      </div>
+      <div class="wl1-pane" data-wl-pane="templates">
+        <div class="wl1-chips"><button class="wl1-chip wl1-on">All</button><button class="wl1-chip">Starter</button><button class="wl1-chip">Physics</button><button class="wl1-chip">Rendering</button><button class="wl1-chip">Gameplay</button></div>
+        <section class="wl1-grid">
+        <article class="wl1-card" tabindex="0" data-wl-template="empty">
+          <div class="wl-thumb" data-thumb="empty"><span class="wl1-badge">Starter</span><span class="wl1-use">Use template<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Empty scene</span></div><div class="wl1-desc">Camera, light and a ground plane</div>
+            <div class="wl1-meta"><span>Official</span><span>Ornis 0.1</span></div></div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-template="physics">
+          <div class="wl-thumb" data-thumb="physics"><span class="wl1-badge">Physics</span><span class="wl1-use">Use template<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Physics sandbox</span></div><div class="wl1-desc">Stackable rigid bodies with colliders</div>
+            <div class="wl1-meta"><span>Official</span><span>Ornis 0.1</span></div></div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-template="terrain">
+          <div class="wl-thumb" data-thumb="terrain"><span class="wl1-badge">World</span><span class="wl1-use">Use template<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Terrain</span></div><div class="wl1-desc">Heightfield landscape with a sky</div>
+            <div class="wl1-meta"><span>Official</span><span>Ornis 0.1</span></div></div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-template="materials">
+          <div class="wl-thumb" data-thumb="materials"><span class="wl1-badge">Rendering</span><span class="wl1-use">Use template<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Material showcase</span></div><div class="wl1-desc">PBR and toon material presets</div>
+            <div class="wl1-meta"><span>Official</span><span>Ornis 0.1</span></div></div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-template="character">
+          <div class="wl-thumb" data-thumb="character"><span class="wl1-badge">Gameplay</span><span class="wl1-use">Use template<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Third-person controller</span></div><div class="wl1-desc">Capsule character and obstacles</div>
+            <div class="wl1-meta"><span>Official</span><span>Ornis 0.1</span></div></div>
+        </article>
+        <article class="wl1-card" tabindex="0" data-wl-template="lighting">
+          <div class="wl-thumb" data-thumb="lighting"><span class="wl1-badge">Rendering</span><span class="wl1-use">Use template<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Lighting study</span></div><div class="wl1-desc">Three-point lighting setup</div>
+            <div class="wl1-meta"><span>Official</span><span>Ornis 0.1</span></div></div>
+        </article>
+        </section>
+      </div>
+      <div class="wl1-pane" data-wl-pane="learn">
+        <div class="wl1-chips"><button class="wl1-chip wl1-on">All</button><button class="wl1-chip">Basics</button><button class="wl1-chip">Systems</button><button class="wl1-chip">Rendering</button><button class="wl1-chip">Advanced</button></div>
+        <section class="wl1-grid">
+        <article class="wl1-card wl1-learn" tabindex="0" data-wl-guide="start">
+          <div class="wl-thumb" data-learn-bg="start"><span class="wl1-badge">Basics</span><span class="wl1-big"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h5.5v15H6a1.5 1.5 0 0 0-1.5 1.5zM19.5 5.5A1.5 1.5 0 0 0 18 4h-5.5v15H18a1.5 1.5 0 0 1 1.5 1.5z"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Getting started</span></div><div class="wl1-desc">Create a project and run your first scene.</div>
+            <div class="wl1-meta"><span>5 min read</span><span>Completed</span></div>
+            <div class="wl1-progress"><i style="width:100%"></i></div></div>
+        </article>
+        <article class="wl1-card wl1-learn" tabindex="0" data-wl-guide="editor">
+          <div class="wl-thumb" data-learn-bg="editor"><span class="wl1-badge">Basics</span><span class="wl1-big"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M6 4l12 7-5.5 1.5L10 18z"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Editor basics</span></div><div class="wl1-desc">Hierarchy, inspector, gizmos and shortcuts.</div>
+            <div class="wl1-meta"><span>8 min read</span><span>In progress</span></div>
+            <div class="wl1-progress"><i style="width:60%"></i></div></div>
+        </article>
+        <article class="wl1-card wl1-learn" tabindex="0" data-wl-guide="physics">
+          <div class="wl-thumb" data-learn-bg="physics"><span class="wl1-badge">Systems</span><span class="wl1-big"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Physics</span></div><div class="wl1-desc">Rigid bodies, colliders and solver settings.</div>
+            <div class="wl1-meta"><span>12 min read</span><span>New</span></div>
+            <div class="wl1-progress"><i style="width:0%"></i></div></div>
+        </article>
+        <article class="wl1-card wl1-learn" tabindex="0" data-wl-guide="materials">
+          <div class="wl-thumb" data-learn-bg="materials"><span class="wl1-badge">Rendering</span><span class="wl1-big"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M4.5 10.5c4 2 11 2 15 0"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Materials</span></div><div class="wl1-desc">PBR and toon shading, roughness, metalness.</div>
+            <div class="wl1-meta"><span>10 min read</span><span>New</span></div>
+            <div class="wl1-progress"><i style="width:0%"></i></div></div>
+        </article>
+        <article class="wl1-card wl1-learn" tabindex="0" data-wl-guide="lighting">
+          <div class="wl-thumb" data-learn-bg="lighting"><span class="wl1-badge">Rendering</span><span class="wl1-big"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Lighting</span></div><div class="wl1-desc">Key, fill and rim lights for readable scenes.</div>
+            <div class="wl1-meta"><span>7 min read</span><span>New</span></div>
+            <div class="wl1-progress"><i style="width:0%"></i></div></div>
+        </article>
+        <article class="wl1-card wl1-learn" tabindex="0" data-wl-guide="scripting">
+          <div class="wl-thumb" data-learn-bg="scripting"><span class="wl1-badge">Advanced</span><span class="wl1-big"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg></span></div>
+          <div class="wl1-info"><div class="wl1-row"><span class="wl1-name">Scripting</span></div><div class="wl1-desc">Hook game logic into the Ornis runtime.</div>
+            <div class="wl1-meta"><span>15 min read</span><span>New</span></div>
+            <div class="wl1-progress"><i style="width:0%"></i></div></div>
+        </article>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+
 <script src="./app.js"></script>
 </body>
 </html>
