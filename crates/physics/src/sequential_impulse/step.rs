@@ -13,7 +13,7 @@ use crate::engine::Manifold;
 use super::SequentialImpulseEngine;
 use super::math::vec3_finite;
 use super::queries::{
-    ccd_impact_velocity, find_continuous_hit, kinematic_cast, shape_min_dimension,
+    ccd_impact_velocity, find_continuous_hit_with_budget, kinematic_cast, shape_min_dimension,
     swept_orientation,
 };
 use super::*;
@@ -627,13 +627,21 @@ impl SequentialImpulseEngine {
             sub_dt.is_finite() && sub_dt > 0.0,
             "sub_dt must be positive finite, got {sub_dt}"
         );
+        let budget = self.max_ccd_substeps;
         for h in 0..self.bodies.len() {
             if self.bodies[h].body_type != BodyType::Dynamic || self.asleep[h] {
                 continue;
             }
             let disp = self.bodies[h].velocity * sub_dt;
             debug_assert!(vec3_finite(disp), "velocity*sub_dt overflowed for body {h}");
-            let Some(hit) = find_continuous_hit(&self.bodies, h, disp, sub_dt) else {
+            let (hit, capped) =
+                find_continuous_hit_with_budget(&self.bodies, h, disp, sub_dt, budget);
+            if capped {
+                // Cap fallback applied below: best-effort clamp without the
+                // tunnel-free TOI proof (observable via `last_ccd_caps`).
+                self.last_ccd_caps = self.last_ccd_caps.saturating_add(1);
+            }
+            let Some(hit) = hit else {
                 continue;
             };
             let orientation = swept_orientation(&self.bodies[h], sub_dt, hit.fraction);

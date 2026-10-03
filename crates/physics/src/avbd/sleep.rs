@@ -17,6 +17,8 @@ impl AvbdEngine {
 
     fn joint_driven(&self, j: &AvbdJoint) -> bool {
         j.mot.is_some_and(|[speed, cap]| speed != 0.0 && cap > 0.0)
+            || j.servo.is_some_and(|m| m.keeps_awake())
+            || j.spec.spring_motor().is_some_and(|m| m.keeps_awake())
             || self.joint_members(j).into_iter().any(|h| {
                 let b = &self.bodies[h];
                 b.body_type != BodyType::Dynamic
@@ -36,6 +38,18 @@ impl AvbdEngine {
                 .length()
                 .max(quat_diff_vec(a.orientation.conjugate() * b.orientation, j.q_ref).length()),
             AvbdJointKind::Distance => (delta.length() - j.ref_val).abs(),
+            // Slack is rest (zero residual); a stretched rope reports
+            // the overshoot.
+            AvbdJointKind::Rope => (delta.length() - j.ref_val).max(0.0),
+            // Spring rest comes from the spec motor when present.
+            AvbdJointKind::Spring => {
+                let rest = j
+                    .spec
+                    .spring_motor()
+                    .map(|m| m.target_position)
+                    .unwrap_or(j.ref_val);
+                (delta.length() - rest).abs()
+            }
             AvbdJointKind::Prismatic | AvbdJointKind::Wheel => {
                 let perpendicular = delta - axis * delta.dot(axis);
                 let mut error = perpendicular.length();

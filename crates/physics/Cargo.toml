@@ -14,6 +14,8 @@ dashmap = "6"
 ornis-macros = { path = "../macros" }
 ornis-schedule = { path = "../schedule" }
 thiserror = "2.0"
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
 wgpu = { version = "30" }
 naga = { version = "30", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }

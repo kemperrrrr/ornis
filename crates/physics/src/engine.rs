@@ -17,7 +17,7 @@ use crate::joint::{JointHandle, JointKind};
 use crate::math::{Ray, RaycastHit};
 use crate::sequential_impulse::MAX_MANIFOLD_POINTS;
 use crate::shape::Shape;
-use crate::trigger::{ContactEvent, TriggerEvent};
+use crate::trigger::{ContactEvent, ContactForceEvent, TriggerEvent};
 
 /// Physics engine trait: a single step of simulation, plus body/joint management
 /// and queries. Implementations may be CPU or GPU-based, single-threaded or multi-threaded.
@@ -100,6 +100,14 @@ pub trait PhysicsEngine: Send + Sync {
     /// steps (Box3D `b3ContactEvents` parity). Empty by default; the sequential-impulse
     /// engine reports them in deterministic pair order.
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
+        Vec::new()
+    }
+    /// Drain per-pair contact-force reports produced by completed steps
+    /// (Rapier `CONTACT_FORCE_EVENTS` parity). Empty by default and empty
+    /// unless a body opts in via its contact-force threshold; the
+    /// sequential-impulse engine reports them in deterministic canonical
+    /// pair order.
+    fn drain_contact_force_events(&mut self) -> Vec<ContactForceEvent> {
         Vec::new()
     }
     /// Wake a sleeping body/island (default: no-op). Host edits through
@@ -241,11 +249,12 @@ pub(crate) use crate::sequential_impulse::raycast_shape_hit;
 /// solver-state and query kernels. [`PhysicsEngine`], [`Contact`] and
 /// [`Manifold`] stay defined here.
 pub use crate::sequential_impulse::{
-    ContactHooks, ContactView, ContinuousHit, ManifoldState, ModifyContext, NarrowShardPool,
-    PairFilterContext, SatCache, SatCacheEntry, SequentialImpulseEngine, apply_impulse,
-    box_manifold, ccd_impact_velocity, detect_collisions_into, effective_mass,
-    find_angular_continuous_hit, inv_inertia_axis, kinematic_cast, mul_inv_inertia, obb_sat,
-    point_velocity, remove_angular_approach, solve_normal_block, solve_small, sweep_gap,
+    ContactHooks, ContactPointView, ContactView, ContinuousHit, ManifoldState, ModifyContext,
+    NarrowShardPool, OneWayPlatform, PairFilterContext, SatCache, SatCacheEntry,
+    SequentialImpulseEngine, SolverFlags, apply_impulse, box_manifold, ccd_impact_velocity,
+    detect_collisions_into, effective_mass, find_angular_continuous_hit, inv_inertia_axis,
+    kinematic_cast, mul_inv_inertia, obb_sat, point_velocity, remove_angular_approach,
+    solve_normal_block, solve_small, sweep_gap,
 };
 
 #[cfg(test)]

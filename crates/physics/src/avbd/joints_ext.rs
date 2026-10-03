@@ -160,6 +160,66 @@ impl AvbdEngine {
         Some((sa, sb))
     }
 
+    /// One-sided velocity catch for rope joints (SI rope-row parity): when
+    /// stretched past the maximum, kills the separating anchor velocity
+    /// deadbeat through the full (lever-aware) effective mass — no clamp,
+    /// a rope is inextensible and the catch is as violent as the arrival.
+    /// Slack separates freely; approach runs free. Runs once per step with
+    /// the motors, before the sweep: the position rows then only ever see
+    /// quasi-static residuals the dual converges on. Without this a fast
+    /// catch outruns the weak initial penalty while the dual (which runs
+    /// per-iteration on post-primal poses) winds its force into a cannon
+    /// (measured: 6 m/s catch → 70 m teleport, then a slow reel-in).
+    pub(super) fn rope_impulse(&mut self) {
+        for ji in 0..self.joints.len() {
+            if self.joints[ji].kind != AvbdJointKind::Rope {
+                continue;
+            }
+            let (a, b, la, lb, max) = {
+                let j = &self.joints[ji];
+                (j.a, j.b, j.la, j.lb, j.ref_val)
+            };
+            let (pa, pb) = (
+                self.bodies[a].position + self.bodies[a].orientation * la,
+                self.bodies[b].position + self.bodies[b].orientation * lb,
+            );
+            let delta = pb - pa;
+            let len = delta.length();
+            // Validation guarantees `max > 0`, so a stretched rope has a
+            // safe divide (no separate segment floor needed).
+            if len <= max {
+                continue;
+            }
+            let n = delta / len;
+            let (ra, rb) = (pa - self.bodies[a].position, pb - self.bodies[b].position);
+            let ka = eff_inv_mass(&self.bodies[a]);
+            let kb = eff_inv_mass(&self.bodies[b]);
+            let ta = ra.cross(n);
+            let tb = rb.cross(n);
+            let k = ka + kb + self.ang_inv_wa(a, ta).dot(ta) + self.ang_inv_wa(b, tb).dot(tb);
+            if k < MIN_EFFECTIVE_MASS {
+                continue;
+            }
+            let va = self.bodies[a].velocity + self.bodies[a].angular_velocity.cross(ra);
+            let vb = self.bodies[b].velocity + self.bodies[b].angular_velocity.cross(rb);
+            let vsep = (vb - va).dot(n);
+            if vsep <= 0.0 {
+                continue;
+            }
+            let dj = -vsep / k;
+            if self.solvable(a) {
+                let ia = self.ang_inv_wa(a, ta);
+                self.bodies[a].velocity -= n * (dj * ka);
+                self.bodies[a].angular_velocity -= ia * dj;
+            }
+            if self.solvable(b) {
+                let ib = self.ang_inv_wa(b, tb);
+                self.bodies[b].velocity += n * (dj * kb);
+                self.bodies[b].angular_velocity += ib * dj;
+            }
+        }
+    }
+
     /// Deadbeat motor impulses (official impulse semantics): the exact
     /// clamped velocity step through the pair effective mass, applied to
     /// the velocity fields BEFORE warmstart so the sweep integrates them
@@ -168,14 +228,31 @@ impl AvbdEngine {
     /// half the spin every step.) Runs once per step; motors need no
     /// iteration and no dual state. Pauses while a limit is violated
     /// (Box2D order).
+    ///
+    /// The drive is the unified [`crate::joint::JointMotor`] equation: the
+    /// servo override (if set) replaces the spec motor, otherwise the spec
+    /// velocity motor converts into it (bit-identical deadbeat). Position
+    /// and servo kinds add the shared [`crate::joint::JointMotor::servo_impulse`]
+    /// spring about the assembly reference.
     pub(super) fn motor_impulse(&mut self) {
         for ji in 0..self.joints.len() {
-            let (kind, mot) = {
+            let (kind, eff) = {
                 let j = &self.joints[ji];
-                (j.kind, j.mot)
+                let eff = j.servo.or_else(|| {
+                    j.mot.map(|[target, max]| crate::joint::JointMotor {
+                        kind: crate::joint::MotorKind::Velocity,
+                        target_position: 0.0,
+                        target_velocity: target,
+                        stiffness: 0.0,
+                        damping: 0.0,
+                        max_force: max,
+                        model: crate::joint::MotorModel::default(),
+                    })
+                });
+                (j.kind, eff)
             };
-            let Some([target, max]) = mot else { continue };
-            if max <= 0.0 || self.joint_limit_violated(ji) {
+            let Some(m) = eff else { continue };
+            if m.max_force <= 0.0 || self.joint_limit_violated(ji) {
                 continue;
             }
             let (a, b) = {
@@ -194,7 +271,22 @@ impl AvbdEngine {
                     if k < MIN_EFFECTIVE_MASS {
                         continue;
                     }
-                    let dj = ((target - w) / k).clamp(-max * DT_STEP, max * DT_STEP);
+                    let dj = match m.kind {
+                        crate::joint::MotorKind::Velocity => {
+                            m.velocity_impulse(m.target_velocity - w, k, DT_STEP)
+                        }
+                        crate::joint::MotorKind::Position | crate::joint::MotorKind::Servo => {
+                            let angle = wrap_pi(
+                                hinge_twist(
+                                    self.bodies[a].orientation,
+                                    self.bodies[b].orientation,
+                                    self.joints[ji].ax_a,
+                                ) - self.joints[ji].ref_val,
+                            );
+                            let pos_err = wrap_pi(m.target_position - angle);
+                            m.servo_impulse(pos_err, m.target_velocity - w, k, DT_STEP)
+                        }
+                    };
                     if self.solvable(a) {
                         self.bodies[a].angular_velocity += -dj * ia;
                     }
@@ -212,7 +304,23 @@ impl AvbdEngine {
                     if k < MIN_EFFECTIVE_MASS {
                         continue;
                     }
-                    let dj = ((target - v) / k).clamp(-max * DT_STEP, max * DT_STEP);
+                    let dj = match m.kind {
+                        crate::joint::MotorKind::Velocity => {
+                            m.velocity_impulse(m.target_velocity - v, k, DT_STEP)
+                        }
+                        crate::joint::MotorKind::Position | crate::joint::MotorKind::Servo => {
+                            let j = &self.joints[ji];
+                            let pa = self.bodies[a].position + self.bodies[a].orientation * j.la;
+                            let pb = self.bodies[b].position + self.bodies[b].orientation * j.lb;
+                            let s = (pb - pa).dot(wa) - j.ref_val;
+                            m.servo_impulse(
+                                m.target_position - s,
+                                m.target_velocity - v,
+                                k,
+                                DT_STEP,
+                            )
+                        }
+                    };
                     if self.solvable(a) {
                         self.bodies[a].velocity += -dj * ka * wa;
                     }
@@ -233,7 +341,22 @@ impl AvbdEngine {
                     if k < MIN_EFFECTIVE_MASS {
                         continue;
                     }
-                    let dj = ((target - w) / k).clamp(-max * DT_STEP, max * DT_STEP);
+                    let dj = match m.kind {
+                        crate::joint::MotorKind::Velocity => {
+                            m.velocity_impulse(m.target_velocity - w, k, DT_STEP)
+                        }
+                        crate::joint::MotorKind::Position | crate::joint::MotorKind::Servo => {
+                            let angle = wrap_pi(
+                                hinge_twist(
+                                    self.bodies[a].orientation,
+                                    self.bodies[b].orientation,
+                                    self.joints[ji].bx_a,
+                                ) - self.joints[ji].spin_ref,
+                            );
+                            let pos_err = wrap_pi(m.target_position - angle);
+                            m.servo_impulse(pos_err, m.target_velocity - w, k, DT_STEP)
+                        }
+                    };
                     if self.solvable(a) {
                         self.bodies[a].angular_velocity += -dj * ia;
                     }
@@ -441,6 +564,34 @@ impl AvbdEngine {
                         j.lam_l[0] += j.pen_l[0] * c;
                         j.pen_l[0] = (j.pen_l[0] + BETA * c.abs()).min(PENALTY_MAX);
                     }
+                }
+                AvbdJointKind::Rope => {
+                    // One-sided dual: only a stretched rope commits (same
+                    // C as the primal). Tension memory never pushes
+                    // (`lam >= 0`, SI `acc_rope` parity) and unwinds:
+                    // over-pull commits negative `c` back down, slack
+                    // forgets the force entirely (a rope carries no
+                    // compression memory). Without the unwind a fast
+                    // catch ratchets `lam` up forever — equality rows
+                    // self-correct through negative `c`, one-sided rows
+                    // must do it explicitly (measured: unwoundable `lam`
+                    // reached 3000 N on a 20 N load and seesawed the
+                    // bob). Penalty capped at LIM_PEN_MAX (limit-row
+                    // discipline: a hanging load is a persistent bias).
+                    let len = live.length();
+                    if len > j.ref_val {
+                        let c = (len - j.ref_val) - ALPHA * (c0v.length() - j.ref_val);
+                        if c.abs() >= C_EPS {
+                            j.lam_l[0] = (j.lam_l[0] + j.pen_l[0] * c).max(0.0);
+                            j.pen_l[0] = (j.pen_l[0] + BETA * c.abs()).min(LIM_PEN_MAX);
+                        }
+                    } else {
+                        j.lam_l[0] = 0.0;
+                    }
+                }
+                AvbdJointKind::Spring => {
+                    // The live spring carries no dual state (wheel parity:
+                    // fixed penalty, sag holds the load).
                 }
                 AvbdJointKind::SixDof => {
                     // Same C as the primal per axis: locked accumulate,

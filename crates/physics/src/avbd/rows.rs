@@ -272,6 +272,22 @@ fn bound_radius(shape: &Shape) -> f32 {
             .map(|v| v.length())
             .fold(0.0f32, f32::max),
         Shape::Heightfield(_) | Shape::TriMesh(_) => f32::INFINITY,
+        // P5 compat (new-shape arms only): worst child bound plus its
+        // offset (unbounded children propagate); rounded shapes grow by the
+        // skin; half-spaces are unbounded (prefilter never rejects them —
+        // same standing as terrain/mesh soup).
+        Shape::Compound { shapes } => {
+            let mut bound = 0.0f32;
+            for (child, pose) in shapes {
+                bound = bound.max(bound_radius(child) + pose.position.length());
+            }
+            bound
+        }
+        Shape::Round {
+            inner,
+            border_radius,
+        } => bound_radius(inner) + border_radius.max(0.0),
+        Shape::HalfSpace { .. } => f32::INFINITY,
     }
 }
 
@@ -319,6 +335,19 @@ pub(super) fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::ConvexHull(hull) => HALF * hull.min_extent(),
         Shape::Heightfield(hf) => HALF * hf.cell(),
         Shape::TriMesh(mesh) => HALF * mesh.min_feature(),
+        // P5 compat (new-shape arms only): thinnest child wins (empty
+        // unions never sweep); rounded gate is the tighter of the inner
+        // gate and the skin diameter; half-spaces are static-only and never
+        // sweep as movers.
+        Shape::Compound { shapes } => shapes
+            .iter()
+            .map(|(child, _)| shape_min_dimension(child))
+            .fold(f32::INFINITY, f32::min),
+        Shape::Round {
+            inner,
+            border_radius,
+        } => shape_min_dimension(inner).min(border_radius.max(0.0) * 2.0),
+        Shape::HalfSpace { .. } => f32::INFINITY,
     }
 }
 
@@ -355,13 +384,15 @@ impl AvbdEngine {
             return None;
         }
         // No-collide for pin-jointed bodies (builtin `joint_pairs`
-        // parity, narrowed: Ball/Revolute/Prismatic/Distance/Wheel — a
-        // hinge pin passes through its mount, so contact friction there
-        // is a phantom brake on the joint. Measured: a motor-driven
-        // hinge buried 0.2 in its mount never turned — the mount's spin
-        // friction saturated the motor. Triggers still report overlap
-        // below; gears carry no entry, so geared bodies keep colliding
-        // like in the builtin.
+        // parity, narrowed: Ball/Revolute/Prismatic/Distance/Rope/Spring/
+        // Wheel — a hinge pin passes through its mount, so contact
+        // friction there is a phantom brake on the joint. Measured: a
+        // motor-driven hinge buried 0.2 in its mount never turned — the
+        // mount's spin friction saturated the motor. Rope/Spring tethers
+        // join the list (Distance parity — Rapier disables contacts
+        // between joined bodies by default too). Triggers still report
+        // overlap below; gears carry no entry, so geared bodies keep
+        // colliding like in the builtin.
         //
         // Fixed/SixDof are EXCLUDED (weld-like assemblies): their tests
         // bury boxes by construction and the joint rows alone do not
@@ -379,6 +410,8 @@ impl AvbdEngine {
                         | AvbdJointKind::Revolute
                         | AvbdJointKind::Prismatic
                         | AvbdJointKind::Distance
+                        | AvbdJointKind::Rope
+                        | AvbdJointKind::Spring
                         | AvbdJointKind::Wheel
                 ) && ((j.a == ia && j.b == ib) || (j.a == ib && j.b == ia))
             })

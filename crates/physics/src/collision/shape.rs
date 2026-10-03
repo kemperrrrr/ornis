@@ -1,5 +1,5 @@
 //! Convex collision primitives: sphere, box, capsule, cylinder, cone,
-//! convex hull and heightfield.
+//! convex hull, heightfield, triangle mesh, compound, rounded and half-space.
 //!
 //! All [`Shape`] variants are centered on the body origin (box, capsule,
 //! cylinder and cone are symmetric about local +Y; the cone's apex sits at
@@ -14,11 +14,19 @@
 //! convex hull resolve through the GJK/EPA fallback in `crate::gjk` (single
 //! contacts, same standing as the capsule paths); heightfields collide
 //! column-wise and never go through GJK (they are not convex).
+//!
+//! P5 adds three shapes closing the worst rapier-audit gaps: [`Shape::Compound`]
+//! (a rigid union of placed children), [`Shape::Round`] (a convex primitive
+//! dilated by a border radius) and [`Shape::HalfSpace`] (a static infinite
+//! plane for floors). Deliberately out of scope (follow-up, not a gap
+//! denial): segment, triangle, polyline and voxel shapes — none of the
+//! current scenes needs them, and each wants its own query kernel.
 
 use glam::{Quat, Vec2, Vec3};
 
 use crate::constants::{COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZERO, TET_VOLUME_DIVISOR};
-use crate::errors::MeshError;
+use crate::errors::{MeshError, ShapeError};
+use crate::invariants::UnitVec3;
 use crate::math::AABB;
 
 // ---- Analytic inertia coefficients (standard rigid-body formulas) ----
@@ -65,6 +73,66 @@ const AABB_BIT_Z: usize = 1;
 const HEIGHTFIELD_FLAT_EPS: f32 = 1e-4;
 /// Floor for heightfield cell size when building a skirt (m).
 const HEIGHTFIELD_MIN_CELL: f32 = 1e-3;
+/// Thin-shell skin factor for rounded-shape inertia: the border skin is
+/// charged as a full-mass spherical shell (`(2/3) m r²` per axis) on top of
+/// the inner inertia. A conservative over-estimate (stable direction: the
+/// body feels angularly heavier, never livelier); the linear dilation term
+/// is neglected, so the query is exact only as `radius → 0`.
+const ROUND_SKIN_FACTOR: f32 = 2.0 / 3.0;
+/// Fat half-extent (m) of a half-space AABB on the two tangent axes. The
+/// normal axis stays infinite (see [`Shape::HalfSpace`]); the tangent fat
+/// box keeps the AABB finite where finiteness costs nothing (grid cell math
+/// saturates on infinities either way, SAP only compares).
+const HALFSPACE_TANGENT_FAT: f32 = 1e4;
+
+/// Rigid placement of one compound child in the compound's local frame.
+///
+/// Position plus unit-quaternion rotation; composing with the body pose
+/// gives the child's world transform (`body_rot * position + body_pos`,
+/// `body_rot * rotation`). Stored unvalidated — see
+/// [`Shape::try_compound`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pose {
+    /// Child origin in the compound's local frame.
+    pub position: Vec3,
+    /// Child orientation in the compound's local frame.
+    pub rotation: Quat,
+}
+
+impl Pose {
+    /// Identity placement (child frame coincides with the compound frame).
+    pub const IDENTITY: Self = Self {
+        position: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    };
+
+    /// Placement from a local offset and a local rotation.
+    pub const fn new(position: Vec3, rotation: Quat) -> Self {
+        Self { position, rotation }
+    }
+
+    /// Child origin in the `parent` frame (`parent_pos + parent_rot * position`).
+    pub fn world_pos(self, parent_pos: Vec3, parent_rot: Quat) -> Vec3 {
+        parent_pos + parent_rot * self.position
+    }
+
+    /// Child orientation under `parent_rot` (normalized — a raw scale
+    /// would shear the child). Degenerate child quaternions fall back to
+    /// `parent_rot` instead of producing NaN.
+    pub fn world_rot(self, parent_rot: Quat) -> Quat {
+        let q = parent_rot * self.rotation;
+        if q.x.is_finite()
+            && q.y.is_finite()
+            && q.z.is_finite()
+            && q.w.is_finite()
+            && q.length_squared() > DEGENERATE_LEN2
+        {
+            q.normalize()
+        } else {
+            parent_rot
+        }
+    }
+}
 
 /// Convex collision primitives supported by the sequential-impulse engine.
 ///
@@ -122,6 +190,53 @@ pub enum Shape {
     /// Mesh-vs-mesh reports no contact (concave-concave is undefined —
     /// split compound colliders with `Fixed` joints instead).
     TriMesh(TriMesh),
+    /// Rigid union of placed children in body-local space: each child owns
+    /// a [`Pose`] (position + quaternion) in the compound frame. Narrow
+    /// phase expands the union and keeps the deepest child contact
+    /// (minimum distance wins, deterministic child order); AABB is the
+    /// union of child boxes; inertia splits the mass evenly across children
+    /// with parallel-axis terms (exact for split boxes, see
+    /// [`Shape::try_inertia`]).
+    /// Compound-vs-compound reports no contact (concave-concave is
+    /// undefined — same standing as TriMesh-vs-TriMesh, see
+    /// [`Shape::pair_support`]). An empty compound collides with nothing
+    /// (separation, never a panic); build it with [`Shape::try_compound`].
+    Compound {
+        /// Children with their compound-local placements.
+        shapes: Vec<(Shape, Pose)>,
+    },
+    /// Convex primitive dilated by `border_radius` (Minkowski sum with a
+    /// ball): `distance = inner_distance − radius`, the contact normal is
+    /// the inner normal, witnesses shift outward by `radius` along it.
+    /// Meaningful for convex inners (concave inners dilate the distance
+    /// field instead — still defined, only less geometric). The
+    /// speculative `margin` applies to the ROUNDED surface (narrow phase
+    /// compares the offset distance), so rounded bodies gain contacts a
+    /// full `radius` earlier — that is the point of the shape, not a
+    /// margin interaction to tune around. Build with [`Shape::try_round`]
+    /// (`radius` must be finite and `> 0`).
+    Round {
+        /// Inner shape whose distance field is dilated.
+        inner: Box<Shape>,
+        /// Dilation radius in meters.
+        border_radius: f32,
+    },
+    /// Infinite plane through the body position with outward unit `normal`
+    /// (free space is `dot(x − pos, n) > 0`): the static-floor primitive.
+    /// AABB is infinite along the normal and fat ([`HALFSPACE_TANGENT_FAT`])
+    /// on the tangent axes, so every broadphase backend pairs it with
+    /// everything it can touch (the uniform grid routes it through the
+    /// large-body escape path, like giant floors). Narrow phase is the
+    /// analytic point-plane distance against the other shape's support.
+    /// Static-only: [`RigidBody::try_new_halfspace`](crate::body::RigidBody::try_new_halfspace)
+    /// rejects dynamic mass with [`ShapeError::DynamicHalfSpace`](crate::errors::ShapeError)
+    /// instead of silently grounding the body. Half-space-vs-half-space
+    /// reports no contact (parallel infinite planes have no bounded
+    /// manifold — same loud marker as the other concave-concave skips).
+    HalfSpace {
+        /// Outward unit normal in body-local space.
+        normal: UnitVec3,
+    },
 }
 
 /// Vertex index into a mesh vertex list.
@@ -427,6 +542,71 @@ impl Shape {
             .map(Self::Heightfield)
     }
 
+    /// Checked compound: `Err` on an empty child list (an empty union
+    /// collides with nothing — a typed error, not a silent no-op).
+    ///
+    /// Child poses are stored verbatim (a non-unit child quaternion
+    /// normalizes at query time, so queries never see NaN rotations).
+    /// Nested compounds terminate: every query recurses into strictly
+    /// smaller subtrees.
+    ///
+    /// # Errors
+    ///
+    /// [`ShapeError::EmptyCompound`] when `shapes` is empty.
+    pub fn try_compound(shapes: Vec<(Shape, Pose)>) -> Result<Self, ShapeError> {
+        if shapes.is_empty() {
+            return Err(ShapeError::EmptyCompound);
+        }
+        Ok(Self::Compound { shapes })
+    }
+
+    /// Checked rounded shape: `None` unless `border_radius` is finite and
+    /// `> 0`. A non-positive radius is a caller error (erosion is not a
+    /// shape), never a silent clamp.
+    pub fn try_round(inner: Shape, border_radius: f32) -> Option<Self> {
+        if border_radius.is_finite() && border_radius > 0.0 {
+            Some(Self::Round {
+                inner: Box::new(inner),
+                border_radius,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Checked half-space: normalizes any finite non-zero `normal`;
+    /// `None` on zero/non-finite input (a plane without a direction is a
+    /// caller error, never a default axis).
+    pub fn try_halfspace(normal: Vec3) -> Option<Self> {
+        UnitVec3::normalize_checked(normal).map(|n| Self::HalfSpace { normal: n })
+    }
+
+    /// Compound children with their local placements, or `None` for every
+    /// other shape.
+    pub fn compound_children(&self) -> Option<&[(Shape, Pose)]> {
+        match self {
+            Self::Compound { shapes } => Some(shapes),
+            _ => None,
+        }
+    }
+
+    /// Border radius of a rounded shape, or `None` for other shapes.
+    pub fn border_radius(&self) -> Option<f32> {
+        match self {
+            Self::Round { border_radius, .. } => Some(*border_radius),
+            _ => None,
+        }
+    }
+
+    /// Outward unit normal of a half-space in body-local space, or `None`
+    /// for other shapes.
+    pub fn halfspace_normal(&self) -> Option<UnitVec3> {
+        match self {
+            Self::HalfSpace { normal } => Some(*normal),
+            _ => None,
+        }
+    }
+
     /// Sphere radius in meters, or `None` for non-sphere shapes.
     pub fn sphere_radius(&self) -> Option<ornis_core::units::Meters> {
         match self {
@@ -494,22 +674,42 @@ impl Shape {
             Shape::ConvexHull(hull) => hull.aabb(position, orientation),
             Shape::Heightfield(hf) => hf.aabb(position, orientation),
             Shape::TriMesh(mesh) => mesh.aabb(position, orientation),
+            Shape::Compound { shapes } => compound_aabb(shapes, position, orientation),
+            Shape::Round {
+                inner,
+                border_radius,
+            } => {
+                let aabb = inner.aabb(position, orientation);
+                let r = Vec3::splat(*border_radius);
+                AABB::new(aabb.min - r, aabb.max + r)
+            }
+            Shape::HalfSpace { normal } => halfspace_aabb(position, orientation, normal.get()),
         }
     }
 
     /// Fallible diagonal (body-frame) inertia tensor for a given mass.
     /// `Ok` on every shape with exact inertia (sphere/box/capsule/
-    /// cylinder/cone, plus hull/mesh soup with usable volume); `Err` when
+    /// cylinder/cone, plus hull/mesh soup with usable volume, compounds of
+    /// exact children and rounded convex inners); `Err` when
     /// no exact inertia exists — hull/mesh [`MeshError::DegenerateMesh`]
-    /// (empty faces/soup, non-positive mass, near-zero volume) or the
-    /// heightfield box fallback below. The solver-facing total query is
+    /// (empty faces/soup, non-positive mass, near-zero volume), compounds
+    /// with no children, rounded shapes with a degenerate radius, or the
+    /// heightfield/half-space box fallback below. The solver-facing total query is
     /// [`Shape::inertia`], which substitutes the bounding-box fallback.
+    ///
+    /// Compound inertia splits `mass` evenly across children and sums each
+    /// child's tensor with its parallel-axis term about the compound
+    /// origin (child origins count as their centers of mass — exact for
+    /// centered primitives, an approximation for cones). Splitting one box
+    /// into two half-boxes reproduces the full-box tensor bit-for-bit.
     ///
     /// # Errors
     ///
     /// [`MeshError::DegenerateMesh`] for hull/mesh soup without usable
-    /// volume, and for heightfields (terrain has no exact inertia — use
-    /// the bounding box like [`Shape::inertia`] does).
+    /// volume, for empty compounds, for rounded shapes with a non-finite
+    /// radius, and for heightfields/half-spaces (terrain and infinite
+    /// planes have no exact inertia — use the bounding box like
+    /// [`Shape::inertia`] does).
     pub fn try_inertia(&self, mass: f32) -> Result<Vec3, MeshError> {
         match self {
             Self::Sphere { radius } => {
@@ -518,6 +718,28 @@ impl Shape {
                 }
                 Ok(Vec3::splat(SPHERE_INERTIA_FACTOR * mass * radius * radius))
             }
+            Self::Compound { shapes } => compound_try_inertia(shapes, mass),
+            Self::Round {
+                inner,
+                border_radius,
+            } => {
+                if !border_radius.is_finite() || *border_radius < 0.0 {
+                    return Err(MeshError::DegenerateMesh);
+                }
+                inner
+                    .try_inertia(mass)
+                    .map(|i| {
+                        i + Vec3::splat(mass * border_radius * border_radius * ROUND_SKIN_FACTOR)
+                    })
+                    .and_then(|i| {
+                        if i.is_finite() {
+                            Ok(i)
+                        } else {
+                            Err(MeshError::DegenerateMesh)
+                        }
+                    })
+            }
+            Self::HalfSpace { .. } => Err(MeshError::DegenerateMesh),
             _ => self
                 .convex_try_inertia(mass)
                 .or_else(|_| self.soup_try_inertia(mass)),
@@ -635,32 +857,59 @@ impl Shape {
             .convex_try_inertia(mass)
             .unwrap_or(Vec3::ZERO),
             Shape::TriMesh(mesh) => mesh.fallback_inertia(mass),
+            Shape::Compound { shapes } => compound_try_inertia(shapes, mass).unwrap_or(Vec3::ZERO),
+            Shape::Round {
+                inner,
+                border_radius,
+            } => {
+                let skin = if border_radius.is_finite() && *border_radius >= 0.0 {
+                    mass * border_radius * border_radius * ROUND_SKIN_FACTOR
+                } else {
+                    0.0
+                };
+                inner.inertia(mass) + Vec3::splat(skin)
+            }
+            // Static-only infinite plane: the solver never reads a dynamic
+            // inertia for it (construction refuses dynamic mass).
+            Shape::HalfSpace { .. } => Vec3::ZERO,
             _ => Vec3::ZERO,
         }
     }
 
     /// Whether the shape answers GJK support queries (`gjk` module).
     ///
-    /// Only convex primitives answer directly: heightfields collide
-    /// column-wise and triangle meshes resolve per triangle (see
-    /// `distance::shape_distance`), so both report `false` here and their
-    /// `support` arms are unreachable-by-construction fallbacks. A custom
+    /// Convex primitives answer directly; rounded shapes delegate to their
+    /// inner. Heightfields collide column-wise, triangle meshes resolve per
+    /// triangle and compounds expand per child (see
+    /// `distance::shape_distance`), so all three report `false` here and
+    /// their `support` arms are unreachable-by-construction fallbacks.
+    /// Half-spaces are unbounded (no finite support point exists). A custom
     /// render soup has no implicit collider: hosts must build it explicitly
     /// with [`TriMesh::from_triangles`] ([`RigidBody::try_new_trimesh`] for bodies)
     /// — physics never substitutes a sphere placeholder.
     pub fn has_gjk_support(&self) -> bool {
-        !matches!(self, Shape::Heightfield(_) | Shape::TriMesh(_))
+        match self {
+            Shape::Heightfield(_)
+            | Shape::TriMesh(_)
+            | Shape::Compound { .. }
+            | Shape::HalfSpace { .. } => false,
+            Shape::Round { inner, .. } => inner.has_gjk_support(),
+            _ => true,
+        }
     }
 
     /// Closed supported-pair list for discrete contacts: every pair EXCEPT
-    /// the two variants below produces contacts through
-    /// `distance::shape_distance` (heightfields column-wise, triangle meshes
-    /// per triangle — both dispatched before GJK, so [`has_gjk_support`](Self::has_gjk_support)
+    /// the variants below produces contacts through
+    /// `distance::shape_distance` (compounds expand per child, rounded
+    /// shapes peel to their inner, half-spaces resolve point-plane,
+    /// heightfields column-wise, triangle meshes per triangle — all
+    /// dispatched before GJK, so [`has_gjk_support`](Self::has_gjk_support)
     /// staying `false` for them is not a gap).
     ///
-    /// The two [`PairSupport::UnsupportedPair`] cases (terrain-vs-terrain,
-    /// mesh-vs-mesh) are concave-concave and undefined: the query reports
-    /// separation, so no contact and no cast hit ever forms. This marker is
+    /// The [`PairSupport::UnsupportedPair`] cases (terrain-vs-terrain,
+    /// mesh-vs-mesh, compound-vs-compound, half-space-vs-half-space) are
+    /// concave-concave or unbounded-unbounded and undefined: the query
+    /// reports separation, so no contact and no cast hit ever forms. This marker is
     /// the loud counterpart of that silent separation — hosts bridging
     /// per-entity custom colliders must check it up front (a custom render
     /// soup arrives as [`TriMesh::from_triangles`], which pairs with every
@@ -668,17 +917,33 @@ impl Shape {
     /// with `Fixed` joints or fail loudly instead of expecting contacts
     /// that never come. The solver behavior is unchanged by this query.
     pub fn pair_support(&self, other: &Shape) -> PairSupport {
-        match (self, other) {
+        // Peel rounded wrappers: support is a property of the paired
+        // geometry, not of the border skin.
+        let (a, b) = (self.peel_round(), other.peel_round());
+        match (a, b) {
             (Shape::Heightfield(_), Shape::Heightfield(_))
-            | (Shape::TriMesh(_), Shape::TriMesh(_)) => PairSupport::UnsupportedPair,
+            | (Shape::TriMesh(_), Shape::TriMesh(_))
+            | (Shape::Compound { .. }, Shape::Compound { .. })
+            | (Shape::HalfSpace { .. }, Shape::HalfSpace { .. }) => PairSupport::UnsupportedPair,
             _ => PairSupport::Supported,
+        }
+    }
+
+    /// Innermost non-rounded shape (peels [`Shape::Round`] layers).
+    fn peel_round(&self) -> &Shape {
+        match self {
+            Shape::Round { inner, .. } => inner.peel_round(),
+            other => other,
         }
     }
 
     /// Closest surface point (world) to `p` for a placed shape. Exact for
     /// sphere/box/capsule/cylinder; cone picks the nearest of the wall,
     /// base-disk and apex candidates; hull scans its triangles; the
-    /// heightfield clamps into the home column's solid box. Interior query
+    /// heightfield clamps into the home column's solid box; the compound
+    /// takes the nearest child surface; the rounded shape pushes the inner
+    /// point out by the border radius; the half-space projects onto the
+    /// plane. Interior query
     /// points project to the nearest boundary face (never return the query
     /// itself): witness repair shifts queries inside the other solid by
     /// construction, and an interior "closest point" would freeze the
@@ -688,6 +953,9 @@ impl Shape {
     /// slide (rim circle), offsetting the contact meters sideways with a
     /// correct normal — a phantom-torque sink.
     pub(crate) fn closest_point(&self, pos: Vec3, rot: Quat, p: Vec3) -> Vec3 {
+        if let Shape::Compound { shapes } = self {
+            return closest_compound_point(shapes, pos, rot, p);
+        }
         let local = rot.conjugate() * (p - pos);
         let q = match self {
             Shape::Sphere { radius } => local.normalize_or(Vec3::X) * *radius,
@@ -711,9 +979,118 @@ impl Shape {
             Shape::ConvexHull(hull) => closest_hull_point(hull, local),
             Shape::Heightfield(hf) => closest_heightfield_point(hf, local),
             Shape::TriMesh(mesh) => mesh.closest_point_local(local),
+            Shape::Compound { .. } => local,
+            Shape::Round {
+                inner,
+                border_radius,
+            } => closest_round_point(inner, *border_radius, pos, rot, p),
+            Shape::HalfSpace { normal } => {
+                let n = normal.get();
+                local - n * local.dot(n)
+            }
         };
         pos + rot * q
     }
+}
+
+/// World-space AABB union over compound children. Empty unions degrade to
+/// a point at the body position (separation downstream, never a panic).
+fn compound_aabb(shapes: &[(Shape, Pose)], position: Vec3, orientation: Quat) -> AABB {
+    let mut aabb = AABB::from_point(position);
+    for (child, pose) in shapes {
+        let child_aabb = child.aabb(
+            pose.world_pos(position, orientation),
+            pose.world_rot(orientation),
+        );
+        aabb.expand(child_aabb.min);
+        aabb.expand(child_aabb.max);
+    }
+    aabb
+}
+
+/// Half-space AABB: infinite into the solid side along the world normal
+/// (the plane never ends), tight at the plane on the free side, and
+/// fat-but-finite on the tangent axes. Every backend pairs it with
+/// anything it can touch via plain comparisons (grid: the cell span
+/// overflows into the large-body escape path). The free side stays tight
+/// so bodies kilometers above a floor never become candidate pairs.
+fn halfspace_aabb(position: Vec3, orientation: Quat, local_normal: Vec3) -> AABB {
+    let n = orientation * local_normal;
+    // +inf exactly where the (unit) normal points, else 0 — branchless
+    // over components and NaN-free (a zero component times infinity would
+    // be NaN, so the selection happens before the scale).
+    let toward = |c: f32| if c > 0.0 { f32::INFINITY } else { 0.0 };
+    let solid_side = Vec3::new(toward(n.x), toward(n.y), toward(n.z));
+    let free_side = Vec3::new(toward(-n.x), toward(-n.y), toward(-n.z));
+    // Tangent-only fat: full width perpendicular to the normal, zero along
+    // it (component-wise `1 − n²`: exact for axis-aligned planes, a mild
+    // under-cover on diagonal ones — still infinite along the normal, so
+    // normal-direction contacts are never missed).
+    let fat = Vec3::splat(HALFSPACE_TANGENT_FAT) * (Vec3::ONE - n * n);
+    AABB::new(position - fat - solid_side, position + fat + free_side)
+}
+
+/// Compound inertia: `mass` split evenly across children, each child
+/// tensor shifted to the compound origin with its diagonal parallel-axis
+/// term (`m_c · (|d|² − d_i²)` per axis, `d` = child offset). Children
+/// without exact inertia fall back to their local-box tensor; unbounded
+/// children (half-spaces) contribute zero. `Err` on empty lists and
+/// non-positive/non-finite mass.
+fn compound_try_inertia(shapes: &[(Shape, Pose)], mass: f32) -> Result<Vec3, MeshError> {
+    if shapes.is_empty() || !mass.is_finite() || mass <= 0.0 {
+        return Err(MeshError::DegenerateMesh);
+    }
+    let child_mass = mass / shapes.len() as f32;
+    let mut total = Vec3::ZERO;
+    for (child, pose) in shapes {
+        let local = child.try_inertia(child_mass).unwrap_or_else(|_| {
+            let box_aabb = child.aabb(Vec3::ZERO, Quat::IDENTITY);
+            Shape::Box {
+                half_extents: box_aabb.half_extents().max(Vec3::ZERO),
+            }
+            .convex_try_inertia(child_mass)
+            .unwrap_or(Vec3::ZERO)
+        });
+        let d = pose.position;
+        total += local
+            + Vec3::new(
+                child_mass * (d.y * d.y + d.z * d.z),
+                child_mass * (d.z * d.z + d.x * d.x),
+                child_mass * (d.x * d.x + d.y * d.y),
+            );
+    }
+    if total.is_finite() {
+        Ok(total)
+    } else {
+        Err(MeshError::DegenerateMesh)
+    }
+}
+
+/// Nearest child surface point (world) to `p`. Empty unions return the
+/// query itself (no surface exists — separation downstream, never a panic).
+fn closest_compound_point(shapes: &[(Shape, Pose)], pos: Vec3, rot: Quat, p: Vec3) -> Vec3 {
+    let mut best = p;
+    let mut best_d2 = f32::INFINITY;
+    for (child, pose) in shapes {
+        let q = child.closest_point(pose.world_pos(pos, rot), pose.world_rot(rot), p);
+        let d2 = (p - q).length_squared();
+        if d2 < best_d2 {
+            best = q;
+            best_d2 = d2;
+        }
+    }
+    best
+}
+
+/// Closest point on a rounded shape (compound-local frame): the inner
+/// surface point pushed out by `border_radius` along the query direction.
+/// Matches the distance offset (`inner − radius`), so projection and
+/// narrow phase agree on the surface. Interior queries push out through
+/// the nearest inner face (same outward convention as the dilation).
+fn closest_round_point(inner: &Shape, border_radius: f32, pos: Vec3, rot: Quat, p: Vec3) -> Vec3 {
+    let world_q = inner.closest_point(pos, rot, p);
+    let dir = (world_q - p).normalize_or((world_q - pos).normalize_or(Vec3::X));
+    rot.conjugate() * (world_q + dir * border_radius - pos)
 }
 
 /// Closest boundary point on a box (local frame): clamp for exterior
@@ -1411,7 +1788,9 @@ impl TriMesh {
     /// Median-split AABB BVH over the triangle bounds (mesh-local space).
     /// Splits the longest axis at the centroid median; all-equal centroids
     /// become a leaf (no empty children, no infinite recursion).
-    fn build_bvh(tris: &[Shape], centroids: &[Vec3]) -> (Vec<BvhNode>, Vec<u32>) {
+    /// `pub(crate)` for the world-snapshot restore path, which rebuilds the
+    /// derived BVH from the snapshotted triangles bit-identically.
+    pub(crate) fn build_bvh(tris: &[Shape], centroids: &[Vec3]) -> (Vec<BvhNode>, Vec<u32>) {
         // Per-triangle local bounds from the centroid-relative verts.
         let mut bounds = Vec::with_capacity(tris.len());
         for (tri, c) in tris.iter().zip(centroids.iter()) {
@@ -2008,5 +2387,147 @@ mod tests {
         // Symmetry: the marker does not depend on argument order.
         assert_eq!(mesh.pair_support(&terrain), PairSupport::Supported);
         assert_eq!(terrain.pair_support(&mesh), PairSupport::Supported);
+    }
+
+    /// Two half-boxes forming a unit cube: the compound AABB must equal the
+    /// plain-box AABB exactly (union of child boxes, no padding).
+    fn split_cube() -> Shape {
+        let left = (
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 1.0, 1.0),
+            },
+            Pose::new(Vec3::new(-0.5, 0.0, 0.0), Quat::IDENTITY),
+        );
+        let right = (
+            Shape::Box {
+                half_extents: Vec3::new(0.5, 1.0, 1.0),
+            },
+            Pose::new(Vec3::new(0.5, 0.0, 0.0), Quat::IDENTITY),
+        );
+        Shape::try_compound(vec![left, right]).expect("two boxes build")
+    }
+
+    #[test]
+    fn compound_aabb_matches_equivalent_box() {
+        let compound = split_cube();
+        let boxed = Shape::Box {
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        };
+        assert_eq!(
+            compound.aabb(Vec3::ZERO, Quat::IDENTITY),
+            boxed.aabb(Vec3::ZERO, Quat::IDENTITY)
+        );
+        let at = Vec3::new(1.0, 2.0, 3.0);
+        assert_eq!(
+            compound.aabb(at, Quat::IDENTITY),
+            boxed.aabb(at, Quat::IDENTITY)
+        );
+    }
+
+    #[test]
+    fn compound_inertia_matches_split_box_exactly() {
+        // Full box, mass 6, sides (2,2,2): I = (6/12)(4+4) = 4 per axis.
+        let boxed = Shape::Box {
+            half_extents: Vec3::ONE,
+        };
+        // The even mass split plus parallel-axis terms reproduces the
+        // full-box tensor bit-for-bit (see `compound_try_inertia`).
+        assert_eq!(split_cube().inertia(6.0), boxed.inertia(6.0));
+        assert_vec3_close(split_cube().inertia(6.0), Vec3::splat(4.0));
+    }
+
+    #[test]
+    fn checked_constructors_reject_degenerates() {
+        use crate::errors::ShapeError;
+        assert_eq!(
+            Shape::try_compound(vec![]).expect_err("empty refused"),
+            ShapeError::EmptyCompound
+        );
+        assert!(Shape::try_round(Shape::Sphere { radius: 1.0 }, 0.0).is_none());
+        assert!(Shape::try_round(Shape::Sphere { radius: 1.0 }, -0.5).is_none());
+        assert!(Shape::try_round(Shape::Sphere { radius: 1.0 }, f32::NAN).is_none());
+        assert!(Shape::try_halfspace(Vec3::ZERO).is_none());
+        assert!(Shape::try_halfspace(Vec3::NAN).is_none());
+        assert!(Shape::try_halfspace(Vec3::Y).is_some());
+    }
+
+    #[test]
+    fn empty_compound_degrades_without_panic() {
+        // Built literally (bypassing `try_compound`): every query must stay
+        // total — point AABB, zero inertia, identity closest point.
+        let empty = Shape::Compound { shapes: vec![] };
+        let aabb = empty.aabb(Vec3::new(1.0, 2.0, 3.0), Quat::IDENTITY);
+        assert_eq!(aabb.min, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(aabb.max, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(empty.inertia(1.0), Vec3::ZERO);
+        let p = Vec3::new(4.0, 5.0, 6.0);
+        assert_eq!(empty.closest_point(Vec3::ZERO, Quat::IDENTITY, p), p);
+    }
+
+    #[test]
+    fn round_aabb_grows_by_radius_and_keeps_inertia_finite() {
+        let inner = Shape::Box {
+            half_extents: Vec3::ONE,
+        };
+        let round = Shape::try_round(inner.clone(), 0.5).expect("valid radius builds");
+        let aabb = round.aabb(Vec3::ZERO, Quat::IDENTITY);
+        assert_vec3_close(aabb.min, Vec3::splat(-1.5));
+        assert_vec3_close(aabb.max, Vec3::splat(1.5));
+        assert_eq!(round.border_radius(), Some(0.5));
+        assert!(round.inertia(2.0).is_finite());
+        assert!(round.has_gjk_support());
+    }
+
+    #[test]
+    fn halfspace_aabb_is_infinite_into_solid_only() {
+        let plane = Shape::try_halfspace(Vec3::Y).expect("up builds");
+        assert_eq!(plane.halfspace_normal().map(|n| n.get()), Some(Vec3::Y));
+        let aabb = plane.aabb(Vec3::ZERO, Quat::IDENTITY);
+        // Solid side (below) is unbounded; the free side stays tight at the
+        // plane so high bodies never pair with the floor.
+        assert_eq!(aabb.min.y, f32::NEG_INFINITY);
+        assert_eq!(aabb.max.y, 0.0);
+        assert_eq!(aabb.min.x, -1e4);
+        assert_eq!(aabb.max.x, 1e4);
+        assert_eq!(aabb.min.z, -1e4);
+        assert_eq!(aabb.max.z, 1e4);
+        // Static-only plane: no inertia, no GJK support.
+        assert_eq!(plane.inertia(1.0), Vec3::ZERO);
+        assert!(!plane.has_gjk_support());
+        assert!(
+            plane
+                .closest_point(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 2.0, 3.0))
+                .y
+                .abs()
+                < 1e-6
+        );
+    }
+
+    #[test]
+    fn pair_support_marks_new_undefined_pairs() {
+        use super::PairSupport;
+        let a = split_cube();
+        let b = split_cube();
+        assert_eq!(a.pair_support(&b), PairSupport::UnsupportedPair);
+        let p = Shape::try_halfspace(Vec3::Y).expect("up builds");
+        let q = Shape::try_halfspace(Vec3::Y).expect("up builds");
+        assert_eq!(p.pair_support(&q), PairSupport::UnsupportedPair);
+        // Rounded wrappers peel: support follows the paired geometry.
+        let r = Shape::try_round(
+            Shape::Box {
+                half_extents: Vec3::ONE,
+            },
+            0.1,
+        )
+        .expect("round builds");
+        assert_eq!(
+            r.pair_support(&Shape::Sphere { radius: 1.0 }),
+            PairSupport::Supported
+        );
+        assert_eq!(a.pair_support(&r), PairSupport::Supported);
+        assert_eq!(
+            r.pair_support(&Shape::TriMesh(cube_mesh())),
+            PairSupport::Supported
+        );
     }
 }

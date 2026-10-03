@@ -116,6 +116,15 @@
   CPU-only или отдельный fixed-point путь. Остатки G7: angular sweep в CCD,
   per-iteration interleaving joints/contacts и полная масштабируемость
   broadphase.
+- **Temporal coherency sort (IDEAS §22, бэклог, не начато)**: переупорядочивание
+  dense-массивов под горячие кластеры (игрок + окрестность) поверх нынешнего
+  `defrag` (тот лишь восстанавливает id-порядок). Обязательно stable +
+  детерминированный tiebreak по id, иначе конфликт со Strong Confluence.
+  Гейт: ±процент на фокусных сценах + confluence 1-vs-32 зелёный.
+- **Аудио DSP + стриминг (IDEAS §26, бэклог, не начато)**: цепочка DSP
+  (reverb/EQ/compression) чистыми функциями + стриминг длинной музыки через
+  кольцевой буфер; GPU-аудио (свёртка/FFT) — только после, если вообще.
+  База (`AudioSource`/`AudioListener`, cpal/Web Audio, symphonia) есть.
 
 ## Дорожная карта (по приоритетам)
 
@@ -299,8 +308,8 @@ criterion/performance-профилирование и flamegraph/dhat на perf-
 Deferred/Forward hybrid рендер и B1-R7 уже реализованы; подробности и
 пиксельные проверки записаны в [`docs/rendering/render-graph.md`](docs/rendering/render-graph.md).
 Остаются NUMA-aware allocation → кроссплатформенные прогоны
-(Linux/Windows CI, miri) → адаптеры Rapier/Jolt за `PhysicsEngine` →
-документация API и релизная упаковка.
+(Linux/Windows CI, miri) → документация API и релизная упаковка.
+Внешние физические движки не подключаем (см. «Не делать» ниже).
 
 **Rust → WGSL:** принято направление на типизированный shader-context и
 собственный промежуточный IR (`Rust AST → Shader IR → WGSL writer → naga`).
@@ -407,6 +416,19 @@ host-level orchestration для подключённых physics systems; пол
 Physics живёт в production editor-only и native showcase циклах;
 browser-side physics остаётся за serialization boundary. Полный unified
 runtime без отдельной extract-фазы — будущая цель, не текущий статус.
+
+**Спайк cube-scheduler (IDEAS §24.3, не начат):** источник — Taelin et al.,
+«BendRT: A Parallel Runtime for CPUs and GPUs» (§The Task Cube):
+фиксированная решётка lock-free FIFO-колец 128×128, фазы grow/work вместо
+work-stealing, отдельный executor рядом с rayon-`run_levels`
+(`crates/schedule`), не замена. Условия приёма: равные сплиты (контракт
+пейпера; skewed-нагрузка молча теряет параллелизм — stealing нет) +
+confluence 1-vs-N. Обязательное условие честности спайка — замер на
+**нерегулярной** нагрузке (острова физики) против rayon, а не только
+uniform-микробенч (пейпер: divergent проигрывает 16 тредам). «CPU и GPU
+никогда не вместе» из пейпера не импортируем (конфликт с G8) — берём
+только CPU-половину. При успехе — executor-choice как R7 макро-трека
+(однородное → куб, динамическое → rayon).
 
 > **Прогресс 2026-08-28:** `ornis_core::Engine` с `Time`/`FixedTime`/`InputState`
 > исполняет native showcase и browser-side `RenderWorld` frames; общий
@@ -648,6 +670,44 @@ runtime без отдельной extract-фазы — будущая цель, 
 **Вне скоупа v1:** полноценная репликация состояния, RPC, WebRTC,
 браузерный WebTransport-бэкенд, raw UDP (покрывается QUIC-датаграмами).
 
+### m. Макро-трек: вывод доступов и executor-choice (IDEAS §1, не начат)
+
+> Зафиксировано 2026-10-01. Позиция: «невидимость данных, явность
+> оркестрации» (см. уточнение §1). Текущий `#[smart_pipeline]`
+> (`crates/macros/src/smart_pipeline.rs`): биндинги лейнов через turbofish,
+> `zip` до 2 лейнов → rayon на месте, недоказанное — последовательно +
+> warning. Шедулер не прячем: уровни и регистрация остаются явными, макрос
+> только проверяет.
+
+**Срезы (каждый — независимо мержимый, со своим гейтом):**
+- **R1 — `zip` 3+ лейнов** (сейчас только 2 уходят в параллель).
+- **R2 — `e.field`-доступ через `#[entity]`-реестр** (поле → компонент):
+  из кадра уходят типы лейнов, остаётся `e.position`.
+- **R3 — вывод access-множества + сверка с декларацией шедулера**
+  (mismatch = compile error; профит для контракта §28).
+- **R4 — структурные опсы** (`add`/`remove`/`spawn`) → auto-defer / ошибка
+  в параллельном контексте.
+- **R5 — захваченное изменяемое состояние** → `atomic`/`reduce`-трансформация
+  (сейчас только warning).
+- **R6 — `Send`/`Sync`-проверка компонентов.**
+- **R7 — executor-choice** (после успеха cube-спайка из §g: однородное
+  с доказанной равномерностью → куб, динамическое → rayon).
+
+Гейт каждого среза: юнит-тесты макроса + паритет «сгенерированный код
+побитово = ручной lane-цикл» + confluence 1-vs-32 зелёный.
+
+**Порядок реализации — волнами (R-номера — стабильные ID, не порядок):**
+- **Волна 1 (строгость + ценность): R6 → R3.** R6 дёшев (Send/Sync-проверка —
+  фундамент, без него нельзя расширять параллелизацию), R3 даёт доказанные
+  декларации для §28. Опора есть: `SystemAccess`-декларации в ядре.
+- **Волна 2 (красота): R1 → R2.** R1 — простое обобщение zip-2 (механика уже
+  есть), R2 — `#[entity]`-прокси поверх готового `FieldPath`/`FieldMeta`
+  (2026-09-27). После волны 2 §1-data закрыт для пользователя.
+- **Волна 3 (строгость): R4 → R5.** Нужна поддержка рантайма (очередь
+  структурных опсов до `Last`; atomic/reduce-трансформация захваченного
+  состояния).
+- **Волна 4: R7** — только после успеха cube-спайка из §g.
+
 ## ❌ Не делать / отложено (решения владельца)
 
 - **Нативный UI** — удалён (`29e3547`): доведение собственного
@@ -659,6 +719,15 @@ runtime без отдельной extract-фазы — будущая цель, 
   активной работы нет.
 - **Формальная верификация** — отложено бессрочно; вместо неё
   proptest + mutants + fuzz.
+- **Внешние физические движки (Rapier/Jolt/PhysX-адаптеры)** — не делаем
+  (решение 2026-10-01): фокус на своём SI/AVBD/XPBD; трейт `PhysicsEngine`
+  остаётся швом для тестов и bench-сравнений, prod-адаптеры не поддерживаем.
+- **Второй рендер-бэкенд** — не делаем (решение 2026-10-01, та же причина:
+  фокус на своём wgpu-рендере); трейт `RenderBackend` остаётся швом для
+  `render_probe` (пиксельные гейты) и тестов, prod-замен не поддерживаем.
+- **NUMA-aware allocation** — не делаем (решение 2026-10-01: не наш скоуп —
+  нет ни многосокетных таргетов, ни MMO-шардов); при появлении шардов —
+  переоткрыть отдельным решением.
 
 ---
 ## Приложение B — Рендерер и физика: план работ
@@ -1326,6 +1395,44 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   read-only impulse/approach/penetration) перед velocity solve;
   `None` ⇒ бит-в-бит legacy (снапшот цел), с хуками — scalar island-путь.
   Тесты: односторонняя платформа, конвейер, contact force, no-op снапшот.
+- **Добор parity с Rapier (программа 2026-10-01, по rapier-аудиту):**
+  P1 QueryPipeline (cast/intersect/project + фильтры), P5 шейпы
+  (compound + RoundShape + half-space), P2 хуки до гранулярности Rapier
+  (solver-флаги на пару, intersection-фильтр), P4 rotational CCD +
+  bullet-режим, P6 rope/spring + motor-модели (+multibody — вердикт),
+  P8 contact-force пороги + serde-снапшот мира.   Волна 1: P1+P5
+  параллельно; дальше последовательно (все трогают solver-ядро).
+  ✅ Волна 1 закрыта 2026-10-01 (верифицировано: 451 тест, clippy/fmt
+  чисто): P1 — `query_pipeline.rs` (cast_ray+normal, intersect
+  ray/point/aabb, project_point+feature, cast_shape, intersect_shape,
+  `QueryFilter`, 16 тестов, read-only без пробуждений); P5 — `Compound`
+  (рекурсия, deepest-child), `Round` (peel первым, margin по скруглённой
+  поверхности), `HalfSpace` (только static, large-body escape), дегенераты
+  с явными отказами,   `ColliderDesc`-проекция обновлена.
+  ✅ P2 закрыт 2026-10-01 (верифицировано: 459 тестов): `SolverFlags`
+  (COMPUTE/READ_ONLY/SKIP, `From<bool>` обе стороны), READ_ONLY пишет
+  манифолд без импульсов, `filter_intersection_pair` для сенсоров,
+  библиотечный `OneWayPlatform`, `retain_points` на `ContactView`,
+  no-op бит-идентичность сохранена.
+  ✅ P4 закрыт 2026-10-01 (ядро было в дереве, верифицировано: 465
+  тестов): нелинейный свип (`pos+quat` по доле, Липшиц `span`,
+  угловые сабслайсы 30°/max 16, бинарный добор), bullet (`ccd_enabled`,
+  обход travel-gate), `max_ccd_substeps` (дефолт 32, `Capped`-кламп,
+  счётчик `last_ccd_caps`); бокс 65 рад/с в стену 0.04 м держится.
+  ✅ P6 закрыт 2026-10-01 (верифицировано: 485 тестов): `Rope`
+  (one-sided, слабина бесплатно) и `Spring` (implicit/explicit) во всех
+  трёх солверах; обобщённый `JointMotor` (Velocity/Position/Servo ×
+  Acceleration/Force-based, legacy-путь бит-идентичен); cross rope
+  роутится, cross spring — явный `Unsupported`; multibody-вердикт:
+  Featherstone не строится (цепочки из существующих джойнтов покрывают,
+  reduced-координаты не переиспользуют contact/island/sleep).
+  ✅ P8 закрыт 2026-10-01 (верифицировано: 495 тестов):
+  `ContactForceEvent { a, b, force, point }` (степ-пик импульса,
+  opt-in порог на теле, дефолт off, drain в каноническом порядке) +
+  `WorldSnapshot` v1 (RON, версионный гейт, round-trip бит-идентичен,
+  AVBD/XPBD/Islands — явный `Unsupported`); новых зависимостей нет
+  (`serde`/`ron` уже были), `deny` чист, overhead ниже шума.
+  ✅ Программа parity с Rapier закрыта целиком (P1/P2/P4/P5/P6/P8).
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

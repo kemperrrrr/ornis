@@ -80,6 +80,36 @@ pub struct ContactEvent {
     pub kind: ContactEventKind,
 }
 
+/// A contact-force report for one solid pair, drained after the step like
+/// [`ContactEvent`] (Rapier `ActiveEvents::CONTACT_FORCE_EVENTS` /
+/// `ContactForceEvent` parity).
+///
+/// Emission is opt-in per body via
+/// [`RigidBody::contact_force_threshold`](crate::body::RigidBody::contact_force_threshold):
+/// the default threshold is infinity (disabled). A pair reports when at
+/// least one side is enabled and the pair force reaches the smaller of the
+/// two enabled thresholds. The force is the step peak of the per-substep
+/// total normal impulse divided by the substep length (newtons) — the same
+/// `impulse / sub_dt` estimate the
+/// [`ContactView`](crate::engine::ContactView) hook input documents,
+/// tracked across every substep so transient impacts are not lost when
+/// they resolve before the last substep. Resting weight, impacts and
+/// joint-free presses all read through this one number; read-only hook
+/// pairs (zero impulses by construction) never report. Reports arrive in
+/// deterministic canonical pair order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ContactForceEvent {
+    /// Lower body handle of the canonical pair.
+    pub a: BodyHandle,
+    /// Higher body handle of the canonical pair.
+    pub b: BodyHandle,
+    /// Total normal impulse over the last substep divided by the substep
+    /// length (N). Always finite and non-negative on emission.
+    pub force: f32,
+    /// Deepest-penetration contact point of the last substep (world space).
+    pub point: Vec3,
+}
+
 /// A body split by the [`crate::Engine`] fracture pass, drained after the
 /// step like [`TriggerEvent`]. Fracture is orchestrator policy (uniform
 /// across solvers): a dynamic box whose [`crate::body::RigidBody`]'s

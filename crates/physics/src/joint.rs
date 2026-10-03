@@ -3,6 +3,28 @@
 //! Modeled on Box3D `spherical_joint`/`revolute_joint` and Jolt `Constraint`:
 //! joints are persistent equality constraints with warm-started accumulated
 //! impulses, solved as dedicated sub-solvers inside the substep loop.
+//!
+//! P6 adds Rapier-style rope/spring joints and a generalized motor model
+//! (`MotorModel`/`JointMotor`, after Rapier `motor_model.rs` + `JointMotor`):
+//! velocity, position and servo drives with force- or acceleration-based
+//! spring interpretation, shared by every engine through one drive equation
+//! (see [`JointMotor::servo_impulse`]) instead of per-joint duplicates.
+//!
+//! # Multibody verdict (P6): maximal coordinates stand, no Featherstone solver
+//!
+//! A reduced-coordinate (Featherstone-style) articulated-body solver was
+//! evaluated against the maximal-coordinate joint solvers in this crate (SI
+//! substep-interleaved equalities, AVBD penalty rows, XPBD compliant rows).
+//! Verdict: chains assembled from the existing joints already cover the
+//! articulated case — ball-joint chains hang, hinge chains swing about one
+//! axis, gears couple coordinates — all held by the current solvers. A
+//! dedicated reduced-coordinate pass would buy O(n) exact tree dynamics and
+//! zero joint drift for long chains, but it cannot reuse the contact, island
+//! and sleep machinery (contacts couple the tree to the world outside it),
+//! so it would be a second dynamics core with its own integration, sleeping
+//! and SIMD/GPU story — out of scope, and unnecessary at our chain lengths
+//! (drift stays inside the position-pass tolerance). No new solver is built;
+//! articulated assemblies keep composing [`JointKind`]s directly.
 
 use glam::{Quat, Vec3};
 
@@ -256,6 +278,39 @@ pub enum JointKind {
         /// Anchor point in body B's local frame (rod end).
         local_anchor_b: Vec3,
     },
+    /// Rope (Rapier `RopeJoint` idea): a distance INEQUALITY — the anchor
+    /// separation may shrink freely but never exceeds `max_distance`.
+    /// 1 one-sided linear constraint along the anchor delta axis; slack is
+    /// free (a slack rope pushes nothing), tension pulls like a rod.
+    /// Unlike [`JointKind::Distance`] the limit is explicit, not captured
+    /// from the assembly pose, so a rope is always assembled slack-or-taut
+    /// and never shorter than its own maximum.
+    Rope {
+        /// Anchor point in body A's local frame (rope end).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (rope end).
+        local_anchor_b: Vec3,
+        /// Maximum anchor separation in meters (must be finite and `> 0`).
+        max_distance: f32,
+    },
+    /// Spring (Rapier `SpringJoint` idea): a compliant distance row pulling
+    /// the anchors toward the motor's target position (the rest length)
+    /// with stiffness/damping from [`JointMotor`]. A velocity-kind motor is
+    /// a pure damper (shock absorber without centering); position/servo
+    /// kinds center on the rest length. Solved implicitly by default
+    /// (unconditionally stable, wheel-spring discipline); [`SpringIntegration::Explicit`]
+    /// selects semi-explicit Euler (conditionally stable — see its docs).
+    Spring {
+        /// Anchor point in body A's local frame (spring end).
+        local_anchor_a: Vec3,
+        /// Anchor point in body B's local frame (spring end).
+        local_anchor_b: Vec3,
+        /// Spring-damper drive: rest length, stiffness, damping, force
+        /// budget and force/acceleration interpretation.
+        motor: JointMotor,
+        /// Implicit (stable) or explicit (cheap, bounded) integration.
+        integration: SpringIntegration,
+    },
     /// Wheel (suspension, Box2D `b2WheelJoint` formulation): a prismatic
     /// slide along the suspension axis with a spring (frequency/damping)
     /// instead of a rigid drive, plus free spin about a designated axle
@@ -348,6 +403,61 @@ impl JointKind {
     pub fn gear_ratio_units(&self) -> Option<ornis_core::units::GearRatio> {
         match self {
             Self::Gear { ratio, .. } => ornis_core::units::GearRatio::try_new(*ratio),
+            _ => None,
+        }
+    }
+
+    /// Checked rope: `None` unless `max_distance` is finite and `> 0`
+    /// (a rope must allow some separation).
+    pub fn rope_checked(
+        local_anchor_a: Vec3,
+        local_anchor_b: Vec3,
+        max_distance: ornis_core::units::Meters,
+    ) -> Option<Self> {
+        if max_distance.get().is_finite() && max_distance.get() > 0.0 {
+            Some(Self::Rope {
+                local_anchor_a,
+                local_anchor_b,
+                max_distance: max_distance.get(),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Checked spring: `None` unless the motor is valid
+    /// (see [`JointMotor::check`]).
+    pub fn spring_checked(
+        local_anchor_a: Vec3,
+        local_anchor_b: Vec3,
+        motor: JointMotor,
+        integration: SpringIntegration,
+    ) -> Option<Self> {
+        if motor.check() {
+            Some(Self::Spring {
+                local_anchor_a,
+                local_anchor_b,
+                motor,
+                integration,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Maximum separation of a [`JointKind::Rope`] in meters,
+    /// or `None` for other joints.
+    pub fn rope_max_units(&self) -> Option<ornis_core::units::Meters> {
+        match self {
+            Self::Rope { max_distance, .. } => Some(ornis_core::units::Meters::new(*max_distance)),
+            _ => None,
+        }
+    }
+
+    /// Spring motor of a [`JointKind::Spring`], or `None` for other joints.
+    pub fn spring_motor(&self) -> Option<JointMotor> {
+        match self {
+            Self::Spring { motor, .. } => Some(*motor),
             _ => None,
         }
     }
@@ -471,6 +581,20 @@ impl PrismaticMotor {
     pub fn target_speed_raw(&self) -> f32 {
         self.target_speed
     }
+
+    /// Generalized velocity drive with the same target and budget
+    /// (stiffness/damping zero, model inert for a pure velocity solve).
+    pub fn as_general(&self) -> JointMotor {
+        JointMotor {
+            kind: MotorKind::Velocity,
+            target_position: 0.0,
+            target_velocity: self.target_speed,
+            stiffness: 0.0,
+            damping: 0.0,
+            max_force: self.max_force,
+            model: MotorModel::default(),
+        }
+    }
 }
 
 /// Angular travel window for a revolute joint, in radians relative to the
@@ -559,6 +683,316 @@ impl RevoluteMotor {
     pub fn target_speed_raw(&self) -> f32 {
         self.target_speed
     }
+
+    /// Generalized velocity drive with the same target and budget
+    /// (stiffness/damping zero, model inert for a pure velocity solve).
+    pub fn as_general(&self) -> JointMotor {
+        JointMotor {
+            kind: MotorKind::Velocity,
+            target_position: 0.0,
+            target_velocity: self.target_speed,
+            stiffness: 0.0,
+            damping: 0.0,
+            max_force: self.max_torque,
+            model: MotorModel::default(),
+        }
+    }
+}
+
+/// How spring constants are interpreted: mass-dependent
+/// (acceleration targets) vs mass-independent (force targets).
+/// Rapier `MotorModel` parity, including the default.
+///
+/// - [`MotorModel::AccelerationBased`] (default, recommended): spring
+///   constants auto-scale with the driven effective mass, so heavy and
+///   light assemblies respond alike —
+///   `acceleration = stiffness * error + damping * velocity_error`.
+/// - [`MotorModel::ForceBased`]: constants produce absolute forces —
+///   `force = stiffness * error + damping * velocity_error` — so the same
+///   values behave differently across masses (more physical, retune on
+///   mass changes, Rapier `SpringJoint` default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MotorModel {
+    /// Spring constants auto-scale with mass (easier to tune, recommended).
+    #[default]
+    AccelerationBased,
+    /// Spring constants produce absolute forces (mass-dependent response).
+    ForceBased,
+}
+
+impl MotorModel {
+    /// Combines the stiffness/damping coefficients for a step of size `dt`
+    /// (Rapier `combine_coefficients` parity): returns
+    /// `(erp_inv_dt, cfm_coeff, cfm_gain)`. Acceleration-based legs put the
+    /// compliance on the mass-scaled term, force-based legs on the gain.
+    /// A zero denominator yields zero (no division by dust), never NaN.
+    pub fn combine_coefficients(self, dt: f32, stiffness: f32, damping: f32) -> (f32, f32, f32) {
+        fn inv(x: f32) -> f32 {
+            if x == 0.0 || !x.is_finite() {
+                0.0
+            } else {
+                1.0 / x
+            }
+        }
+        match self {
+            MotorModel::AccelerationBased => {
+                let erp_inv_dt = stiffness * inv(dt * stiffness + damping);
+                let cfm_coeff = inv(dt * dt * stiffness + dt * damping);
+                (erp_inv_dt, cfm_coeff, 0.0)
+            }
+            MotorModel::ForceBased => {
+                let erp_inv_dt = stiffness * inv(dt * stiffness + damping);
+                let cfm_gain = inv(dt * dt * stiffness + dt * damping);
+                (erp_inv_dt, 0.0, cfm_gain)
+            }
+        }
+    }
+}
+
+/// What a generalized [`JointMotor`] drives toward (Rapier `JointMotor`
+/// control-mode parity: velocity control, position control, or both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotorKind {
+    /// Constant-speed drive toward `target_velocity` (spring terms inert).
+    Velocity,
+    /// Spring-damper toward `target_position` (`target_velocity` is the
+    /// settle-point velocity, usually 0).
+    Position,
+    /// Servo: position spring plus velocity tracking combined.
+    Servo,
+}
+
+/// Generalized joint motor (Rapier `JointMotor` idea): one drive type for
+/// every powered axis — revolute hinges (radians), prismatic slides and
+/// springs (meters), wheel spin about the axle (radians, a revolute
+/// special case) — instead of per-joint duplicates.
+///
+/// Position targets are RELATIVE to the assembly pose (the same Box2D
+/// `m_referenceAngle` convention as the travel limits): radians of twist
+/// from the assembly twist for hinges, meters of separation from the
+/// assembly separation for slides, meters from the rest length for
+/// springs. The solvers convert the legacy [`RevoluteMotor`] /
+/// [`PrismaticMotor`] into [`JointMotor::velocity`] internally, so all
+/// three engines share one drive equation ([`JointMotor::servo_impulse`]).
+///
+/// Attach to an assembled joint with the engine's `set_joint_motor`
+/// (an explicit override — `None` clears it and the spec motor resumes);
+/// a [`JointKind::Spring`] carries its motor inline in the spec instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JointMotor {
+    /// Control mode (which targets participate).
+    pub kind: MotorKind,
+    /// Position target (rad or m, assembly-relative; see above).
+    pub target_position: f32,
+    /// Velocity target (rad/s or m/s).
+    pub target_velocity: f32,
+    /// Spring constant (force/length for [`MotorModel::ForceBased`],
+    /// 1/s² for [`MotorModel::AccelerationBased`]).
+    pub stiffness: f32,
+    /// Damping coefficient (force·time/length vs 1/s, same split).
+    pub damping: f32,
+    /// Force/torque budget: bounds the per-step motor impulse
+    /// (`max_force * dt`).
+    pub max_force: f32,
+    /// Force vs acceleration interpretation of the spring terms.
+    pub model: MotorModel,
+}
+
+impl JointMotor {
+    /// Checked constructor: `None` unless every scalar is finite,
+    /// `stiffness`/`damping`/`max_force` are `>= 0`.
+    pub fn try_new(
+        kind: MotorKind,
+        target_position: f32,
+        target_velocity: f32,
+        stiffness: f32,
+        damping: f32,
+        max_force: f32,
+        model: MotorModel,
+    ) -> Option<Self> {
+        let m = Self {
+            kind,
+            target_position,
+            target_velocity,
+            stiffness,
+            damping,
+            max_force,
+            model,
+        };
+        m.check().then_some(m)
+    }
+
+    /// Pure velocity drive (the [`RevoluteMotor`]/[`PrismaticMotor`]
+    /// semantics, generalized): `None` unless the target is finite and the
+    /// budget is finite and `>= 0`.
+    pub fn velocity(target_velocity: f32, max_force: f32) -> Option<Self> {
+        Self::try_new(
+            MotorKind::Velocity,
+            0.0,
+            target_velocity,
+            0.0,
+            0.0,
+            max_force,
+            MotorModel::default(),
+        )
+    }
+
+    /// Position spring-damper settling at `target_position`:
+    /// `None` unless the targets are finite and
+    /// stiffness/damping/max are finite with stiffness `> 0`
+    /// (a spring with no stiffness is not a spring — use
+    /// [`JointMotor::velocity`] for a pure damper... which still needs
+    /// `damping > 0` to do anything) and damping/max `>= 0`.
+    pub fn position(
+        target_position: f32,
+        stiffness: f32,
+        damping: f32,
+        max_force: f32,
+    ) -> Option<Self> {
+        if !(stiffness.is_finite() && stiffness > 0.0) {
+            return None;
+        }
+        Self::try_new(
+            MotorKind::Position,
+            target_position,
+            0.0,
+            stiffness,
+            damping,
+            max_force,
+            MotorModel::default(),
+        )
+    }
+
+    /// Servo: position spring plus velocity tracking. Same admission as
+    /// [`JointMotor::position`] (stiffness `> 0`), plus a finite
+    /// `target_velocity`.
+    pub fn servo(
+        target_position: f32,
+        target_velocity: f32,
+        stiffness: f32,
+        damping: f32,
+        max_force: f32,
+    ) -> Option<Self> {
+        if !(stiffness.is_finite() && stiffness > 0.0) {
+            return None;
+        }
+        Self::try_new(
+            MotorKind::Servo,
+            target_position,
+            target_velocity,
+            stiffness,
+            damping,
+            max_force,
+            MotorModel::default(),
+        )
+    }
+
+    /// Builder-style model override (force vs acceleration targets).
+    pub fn with_model(mut self, model: MotorModel) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Builder-style force-budget override.
+    pub fn with_max_force(mut self, max_force: f32) -> Self {
+        self.max_force = max_force;
+        self
+    }
+
+    /// Validity predicate behind [`JointMotor::try_new`]: finite targets,
+    /// finite non-negative spring terms and budget.
+    pub fn check(&self) -> bool {
+        self.target_position.is_finite()
+            && self.target_velocity.is_finite()
+            && self.stiffness.is_finite()
+            && self.stiffness >= 0.0
+            && self.damping.is_finite()
+            && self.damping >= 0.0
+            && self.max_force.is_finite()
+            && self.max_force >= 0.0
+    }
+
+    /// Whether this motor disturbs sleep (a live drive vote for the
+    /// engine sleep heuristics): any budgeted drive with a nonzero target
+    /// (velocity), or a live spring (position/servo with stiffness).
+    /// Mirrors the legacy "nonzero speed" vote, extended to springs.
+    pub fn keeps_awake(&self) -> bool {
+        if self.max_force <= 0.0 {
+            return false;
+        }
+        match self.kind {
+            MotorKind::Velocity => self.target_velocity != 0.0,
+            MotorKind::Position | MotorKind::Servo => {
+                self.stiffness > 0.0 || self.target_velocity != 0.0
+            }
+        }
+    }
+
+    /// Spring terms as absolute (force, damping-force) coefficients for an
+    /// axis with inverse effective mass `inv_eff_mass` (linear + angular
+    /// terms, what the solvers call `k_eff`): force-based values pass
+    /// through, acceleration-based values scale by the driven mass
+    /// (`1 / inv_eff_mass`). Non-positive mass reads as zero (no drive).
+    pub fn pd_coefficients(&self, inv_eff_mass: f32) -> (f32, f32) {
+        match self.model {
+            MotorModel::ForceBased => (self.stiffness, self.damping),
+            MotorModel::AccelerationBased => {
+                if inv_eff_mass > 0.0 {
+                    let m = 1.0 / inv_eff_mass;
+                    (self.stiffness * m, self.damping * m)
+                } else {
+                    (0.0, 0.0)
+                }
+            }
+        }
+    }
+
+    /// Desired servo force for position error `pos_err` (target − current,
+    /// rad or m) and velocity error `vel_err` (target rate − current rate):
+    /// `stiffness * pos_err + damping * vel_err`, model-scaled by
+    /// [`JointMotor::pd_coefficients`]. Unclamped — clamp with
+    /// [`JointMotor::servo_impulse`].
+    pub fn servo_force(&self, pos_err: f32, vel_err: f32, inv_eff_mass: f32) -> f32 {
+        let (k, c) = self.pd_coefficients(inv_eff_mass);
+        k * pos_err + c * vel_err
+    }
+
+    /// Budget-clamped servo impulse for a step of size `dt`
+    /// (`servo_force * dt`, clamped to `±max_force * dt`). Non-positive
+    /// `dt` or budget yields zero (never NaN).
+    pub fn servo_impulse(&self, pos_err: f32, vel_err: f32, inv_eff_mass: f32, dt: f32) -> f32 {
+        if dt <= 0.0 || self.max_force <= 0.0 {
+            return 0.0;
+        }
+        (self.servo_force(pos_err, vel_err, inv_eff_mass) * dt)
+            .clamp(-self.max_force * dt, self.max_force * dt)
+    }
+
+    /// Budget-clamped deadbeat velocity impulse: the exact impulse driving
+    /// the axis rate to the target (`rate_error / inv_eff_mass`, clamped
+    /// to `±max_force * dt`). The velocity-kind drive equation shared by
+    /// every engine; the model is inert here (no spring terms).
+    pub fn velocity_impulse(&self, rate_error: f32, inv_eff_mass: f32, dt: f32) -> f32 {
+        if dt <= 0.0 || self.max_force <= 0.0 || inv_eff_mass <= 0.0 {
+            return 0.0;
+        }
+        (rate_error / inv_eff_mass).clamp(-self.max_force * dt, self.max_force * dt)
+    }
+}
+
+/// Spring integration tactic for [`JointKind::Spring`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpringIntegration {
+    /// Implicit (closed-form, wheel-spring discipline): unconditionally
+    /// stable for any stiffness at any substep count. Default.
+    #[default]
+    Implicit,
+    /// Semi-explicit Euler force (`F = −(k·s + c·v)` applied as an
+    /// impulse): cheaper per step, conditionally stable — needs
+    /// `stiffness * dt² * inv_eff_mass < ~4` (stiff springs on light
+    /// bodies at large steps explode; halve the step or switch to
+    /// [`SpringIntegration::Implicit`).
+    Explicit,
 }
 
 /// Solver-agnostic joint setup, resolved once at creation from a
@@ -700,6 +1134,24 @@ pub fn resolve_joint(
             let rb = qb * r.lb;
             r.ref_distance = ((pb + rb) - (pa + ra)).length();
         }
+        JointKind::Rope {
+            local_anchor_a,
+            local_anchor_b,
+            ..
+        }
+        | JointKind::Spring {
+            local_anchor_a,
+            local_anchor_b,
+            ..
+        } => {
+            r.la = *local_anchor_a;
+            r.lb = *local_anchor_b;
+            // Assembly separation as a diagnostic baseline (the live limit
+            // — rope maximum, spring rest length — rides in the spec).
+            let ra = qa * r.la;
+            let rb = qb * r.lb;
+            r.ref_distance = ((pb + rb) - (pa + ra)).length();
+        }
         JointKind::Wheel {
             local_anchor_a,
             local_anchor_b,
@@ -760,19 +1212,26 @@ pub enum CrossRowKind {
     Ball,
     /// Rigid-rod rest-length row (1 equality along the anchor delta axis).
     Distance,
+    /// Rope maximum-length row (1 one-sided inequality along the anchor
+    /// delta: pulls a stretched rope, ignores a slack one).
+    Rope,
 }
 
 /// Cross-solver row of a joint spec, or `None` when the kind has no
-/// structural point row. Ball and distance couple across solvers;
-/// revolute, prismatic, fixed, wheel, gear and six-DOF return `None`
-/// explicitly — a cross joint of those kinds is never half-solved.
+/// structural point row. Ball, distance and rope couple across solvers
+/// (rope one-sided: the coupling pass only pulls a stretched rope);
+/// revolute, prismatic, fixed, spring, wheel, gear and six-DOF return
+/// `None` explicitly — a cross joint of those kinds is never half-solved
+/// (springs have no compliant cross row in v1 — see `split.rs`).
 pub fn cross_row_kind(kind: &JointKind) -> Option<CrossRowKind> {
     match kind {
         JointKind::Ball { .. } => Some(CrossRowKind::Ball),
         JointKind::Distance { .. } => Some(CrossRowKind::Distance),
+        JointKind::Rope { .. } => Some(CrossRowKind::Rope),
         JointKind::Revolute { .. }
         | JointKind::Prismatic { .. }
         | JointKind::Fixed { .. }
+        | JointKind::Spring { .. }
         | JointKind::Wheel { .. }
         | JointKind::Gear { .. }
         | JointKind::SixDof { .. } => None,
@@ -821,6 +1280,16 @@ pub(crate) struct Joint {
     pub acc_limit: f32,
     /// Accumulated rod-constraint impulse (distance joints only).
     pub acc_dist: f32,
+    /// One-sided rope accumulator (rope joints only): non-positive pulling
+    /// impulse along the anchor delta (upper-bound convention, like the
+    /// hinge/slide limit clamps). Clamp memory, not a warm start — slack
+    /// zeroes it instead of re-applying a stale pull.
+    pub acc_rope: f32,
+    /// Generalized motor override (`set_joint_motor`: revolute, prismatic
+    /// and wheel-axle joints). `Some` replaces the spec motor for the
+    /// solve; `None` resumes the spec motor. Rides the migration snapshot
+    /// so solver switches never silently drop it.
+    pub servo: Option<JointMotor>,
     /// Accumulated gear-constraint impulse (gear joints only).
     pub acc_gear: f32,
     /// Raw and continuous coordinates of the gear's two referenced joints.
@@ -845,6 +1314,8 @@ impl Joint {
             reference_anchor_delta: Vec3::ZERO,
             acc_limit: 0.0,
             acc_dist: 0.0,
+            acc_rope: 0.0,
+            servo: None,
             acc_gear: 0.0,
             gear_mem: None,
             acc_6dof: [0.0; 6],
@@ -859,6 +1330,8 @@ impl Joint {
             | JointKind::Prismatic { .. }
             | JointKind::Fixed { .. }
             | JointKind::Distance { .. }
+            | JointKind::Rope { .. }
+            | JointKind::Spring { .. }
             | JointKind::Wheel { .. }
             | JointKind::Gear { .. }
             | JointKind::SixDof { .. } => (None, None),
@@ -873,6 +1346,8 @@ impl Joint {
             | JointKind::Revolute { .. }
             | JointKind::Fixed { .. }
             | JointKind::Distance { .. }
+            | JointKind::Rope { .. }
+            | JointKind::Spring { .. }
             | JointKind::Wheel { .. }
             | JointKind::Gear { .. }
             | JointKind::SixDof { .. } => (None, None),
@@ -891,6 +1366,8 @@ impl Joint {
             | JointKind::Revolute { .. }
             | JointKind::Fixed { .. }
             | JointKind::Distance { .. }
+            | JointKind::Rope { .. }
+            | JointKind::Spring { .. }
             | JointKind::Wheel { .. }
             | JointKind::Gear { .. }
             | JointKind::SixDof { .. } => None,
@@ -949,6 +1426,16 @@ impl Joint {
             | JointKind::Distance {
                 local_anchor_a,
                 local_anchor_b,
+            }
+            | JointKind::Rope {
+                local_anchor_a,
+                local_anchor_b,
+                ..
+            }
+            | JointKind::Spring {
+                local_anchor_a,
+                local_anchor_b,
+                ..
             }
             | JointKind::Wheel {
                 local_anchor_a,
@@ -1061,5 +1548,130 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn motor_model_combine_splits_force_and_acceleration_legs() {
+        let dt = 1.0 / 60.0;
+        let (erp_a, cfm_a, gain_a) =
+            MotorModel::AccelerationBased.combine_coefficients(dt, 100.0, 10.0);
+        let (erp_f, cfm_f, gain_f) = MotorModel::ForceBased.combine_coefficients(dt, 100.0, 10.0);
+        // Same error reduction, compliance on opposite legs (Rapier parity).
+        assert!((erp_a - erp_f).abs() < 1e-6);
+        assert!(cfm_a > 0.0 && gain_a == 0.0);
+        assert!(cfm_f == 0.0 && gain_f > 0.0);
+        // Zero step never divides by dust (safe inverse yields zero).
+        assert_eq!(
+            MotorModel::ForceBased.combine_coefficients(0.0, 100.0, 10.0),
+            (10.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn joint_motor_constructors_validate_ranges() {
+        assert!(JointMotor::velocity(3.0, 50.0).is_some());
+        assert!(JointMotor::velocity(f32::NAN, 50.0).is_none());
+        assert!(JointMotor::velocity(3.0, -1.0).is_none());
+        assert!(JointMotor::position(1.0, 40.0, 5.0, 50.0).is_some());
+        // A spring with no stiffness is not a spring.
+        assert!(JointMotor::position(1.0, 0.0, 5.0, 50.0).is_none());
+        assert!(JointMotor::servo(1.0, 2.0, 40.0, 5.0, 50.0).is_some());
+        assert!(JointMotor::servo(1.0, f32::INFINITY, 40.0, 5.0, 50.0).is_none());
+        // Legacy velocity motors convert losslessly into the unified drive.
+        let legacy = RevoluteMotor {
+            target_speed: 3.0,
+            max_torque: 50.0,
+        };
+        let general = legacy.as_general();
+        assert_eq!(general.kind, MotorKind::Velocity);
+        assert_eq!(general.target_velocity, 3.0);
+        assert_eq!(general.max_force, 50.0);
+        let slide = PrismaticMotor {
+            target_speed: -1.5,
+            max_force: 20.0,
+        };
+        assert_eq!(slide.as_general().target_velocity, -1.5);
+    }
+
+    #[test]
+    fn servo_impulse_is_budget_clamped_and_deadbeat_is_exact() {
+        let servo = JointMotor::position(1.0, 100.0, 10.0, 50.0).expect("valid servo");
+        // At rest on target with no rate error: zero impulse.
+        assert_eq!(servo.servo_impulse(0.0, 0.0, 1.0, 1.0 / 60.0), 0.0);
+        // A huge error clamps to the budget, never past it.
+        let big = servo.servo_impulse(10.0, 0.0, 1.0, 1.0 / 60.0);
+        assert!((big - 50.0 / 60.0).abs() < 1e-6 && big <= 50.0 / 60.0 + 1e-6);
+        // Force-based values pass through; acceleration-based scale by mass.
+        let force = JointMotor::position(1.0, 100.0, 10.0, 50.0)
+            .expect("valid")
+            .with_model(MotorModel::ForceBased);
+        assert_eq!(force.pd_coefficients(0.5), (100.0, 10.0));
+        let accel = force.with_model(MotorModel::AccelerationBased);
+        assert_eq!(accel.pd_coefficients(0.5), (200.0, 20.0));
+        // Velocity deadbeat: exact rate correction clamped by the budget.
+        let vel = JointMotor::velocity(3.0, 50.0).expect("valid");
+        assert!((vel.velocity_impulse(2.0, 0.5, 1.0 / 60.0) - 50.0 / 60.0).abs() < 1e-6);
+        assert_eq!(vel.velocity_impulse(0.5, 0.5, 1.0), 1.0);
+    }
+
+    #[test]
+    fn rope_and_spring_checked_constructors_gate_ranges() {
+        use ornis_core::units::Meters;
+        assert!(JointKind::rope_checked(Vec3::ZERO, Vec3::ZERO, Meters::new(2.0)).is_some());
+        assert!(JointKind::rope_checked(Vec3::ZERO, Vec3::ZERO, Meters::new(0.0)).is_none());
+        assert!(JointKind::rope_checked(Vec3::ZERO, Vec3::ZERO, Meters::new(f32::NAN)).is_none());
+        let motor = JointMotor::position(1.0, 40.0, 5.0, 100.0).expect("valid");
+        assert!(
+            JointKind::spring_checked(Vec3::ZERO, Vec3::ZERO, motor, SpringIntegration::Implicit)
+                .is_some()
+        );
+        let bad = JointMotor {
+            stiffness: f32::NAN,
+            ..motor
+        };
+        assert!(
+            JointKind::spring_checked(Vec3::ZERO, Vec3::ZERO, bad, SpringIntegration::Explicit)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_rope_and_spring_capture_assembly_distance() {
+        let rope =
+            JointKind::rope_checked(Vec3::ZERO, Vec3::ZERO, ornis_core::units::Meters::new(2.0))
+                .expect("valid rope");
+        let r = resolve_joint(&rope, Vec3::ZERO, ID, Vec3::new(0.0, -1.5, 0.0), ID)
+            .expect("rope resolves");
+        assert!((r.ref_distance - 1.5).abs() < 1e-6);
+        assert_eq!(rope.rope_max_units().map(|m| m.get()), Some(2.0));
+        let motor = JointMotor::position(1.0, 40.0, 5.0, 100.0).expect("valid");
+        let spring =
+            JointKind::spring_checked(Vec3::ZERO, Vec3::ZERO, motor, SpringIntegration::Implicit)
+                .expect("valid spring");
+        assert_eq!(spring.spring_motor().map(|m| m.target_position), Some(1.0));
+        // Rope couples across solvers (one-sided); spring has no cross row.
+        assert_eq!(cross_row_kind(&rope), Some(CrossRowKind::Rope));
+        assert_eq!(cross_row_kind(&spring), None);
+        let (la, lb) = Joint {
+            body_a: BodyHandle::from_raw(0),
+            body_b: BodyHandle::from_raw(1),
+            kind: rope,
+            acc_lin: [0.0; 3],
+            acc_ang: [0.0; 3],
+            reference_angle: 0.0,
+            reference_length: 0.0,
+            reference_distance: 0.0,
+            reference_quat: Quat::IDENTITY,
+            reference_anchor_delta: Vec3::ZERO,
+            acc_limit: 0.0,
+            acc_dist: 0.0,
+            acc_rope: 0.0,
+            servo: None,
+            acc_gear: 0.0,
+            gear_mem: None,
+            acc_6dof: [0.0; 6],
+        }
+        .local_anchors();
+        assert_eq!((la, lb), (Vec3::ZERO, Vec3::ZERO));
     }
 }

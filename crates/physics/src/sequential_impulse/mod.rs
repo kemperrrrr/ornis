@@ -19,18 +19,23 @@ mod step;
 pub(crate) use crate::engine::{Manifold, ManifoldPoint, PhysicsEngine};
 pub use caches::{NarrowShardPool, SatCache, SatCacheEntry};
 pub(crate) use hooks::HookOverride;
-pub use hooks::{ContactHooks, ContactView, ModifyContext, PairFilterContext};
+pub use hooks::{
+    ContactHooks, ContactPointView, ContactView, ModifyContext, OneWayPlatform, PairFilterContext,
+    SolverFlags,
+};
 pub use math::{
     apply_impulse, effective_mass, inv_inertia_axis, mul_inv_inertia, point_velocity,
     solve_normal_block, solve_small,
 };
 pub use narrow::{box_manifold, detect_collisions_into, obb_sat};
-pub(crate) use queries::raycast_shape_hit;
+pub(crate) use queries::DEFAULT_MAX_CCD_SUBSTEPS;
 pub use queries::{
     ContinuousHit, ccd_impact_velocity, find_angular_continuous_hit, kinematic_cast,
     remove_angular_approach, sweep_gap,
 };
+pub(crate) use queries::{raycast_body_hit, raycast_shape_hit};
 pub use step::ManifoldState;
+pub(crate) use step::{WarmCache, WarmPoint};
 
 use self::caches::*;
 use self::events::*;
@@ -56,7 +61,7 @@ use crate::broadphase::{
     StepTiming,
 };
 use crate::distance;
-use crate::errors::QueryError;
+use crate::errors::{QueryError, SnapshotError};
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuSequentialImpulse;
 use crate::joint::{Joint, JointHandle, JointKind};
@@ -64,7 +69,8 @@ use crate::math::{Ray, RaycastHit};
 use crate::migration::{JointReference, JointSnapshot};
 use crate::shape::Shape;
 use crate::trigger::{
-    CONTACT_BEGIN_SLOP, ContactEvent, ContactEventKind, TriggerEvent, TriggerEventKind,
+    CONTACT_BEGIN_SLOP, ContactEvent, ContactEventKind, ContactForceEvent, TriggerEvent,
+    TriggerEventKind,
 };
 use crate::wide::{SolverStep, build_solver_steps};
 
@@ -155,6 +161,15 @@ pub struct SequentialImpulseEngine {
     /// pre-solve every substep with per-step dedupe, begin/end reconciled
     /// at step end).
     contact_events: Vec<ContactEvent>,
+    /// Per-pair contact-force reports waiting for the caller to drain
+    /// (emitted at step end from the tracked step peak; empty unless a
+    /// body opts in via its contact-force threshold).
+    contact_force_events: Vec<ContactForceEvent>,
+    /// Running per-pair peak of per-substep contact force (total normal
+    /// impulse over the substep length), tracked only while at least one
+    /// body enables contact-force reports. Cleared at every step start;
+    /// step-end emission reads this, never the solver state directly.
+    force_peak: FxHashMap<(usize, usize), f32>,
     /// Pairs that already emitted a hit this step (dedupe for sustained
     /// crushes); cleared at s==0 of every step.
     scratch_hit_pairs: FxHashSet<(usize, usize)>,
@@ -167,6 +182,16 @@ pub struct SequentialImpulseEngine {
     /// full speed-requested count ran). Observable marker for the fallback,
     /// read via [`SequentialImpulseEngine::last_substep_shed`].
     last_shed: u32,
+    /// Maximum conservative-advancement iterations per pair in the angular
+    /// (nonlinear) CCD sweep — the Rapier `max_ccd_substeps` analog.
+    /// `0` disables the angular sweep entirely. Default matches the legacy
+    /// fixed loop, so default scenes are bit-identical.
+    max_ccd_substeps: usize,
+    /// Angular sweeps that exhausted the iteration cap on the last completed
+    /// `step` (0 when every applied clamp carried the tunnel-free proof).
+    /// Observable marker for the best-effort fallback, read via
+    /// [`SequentialImpulseEngine::last_ccd_caps`].
+    last_ccd_caps: u32,
     /// Enter/exit transitions waiting for the caller to drain.
     trigger_events: Vec<TriggerEvent>,
     /// G7: SIMD-wide contact solver path for single-point manifolds.
@@ -202,10 +227,16 @@ pub struct SequentialImpulseEngine {
     narrow_cache: FxHashMap<(usize, usize), NarrowCacheEntry>,
     sat_cache: SatCache,
     /// Optional Rapier-style contact hooks (`filter_pair` at the narrow
-    /// input, `modify_contact` pre-solve). `None` (default) is the legacy
+    /// input, `filter_intersection_pair` over the trigger overlaps,
+    /// `modify_contact` pre-solve). `None` (default) is the legacy
     /// bit-exact path; see the [`hooks`](crate::sequential_impulse::hooks)
     /// module docs for the determinism contract.
     contact_hooks: Option<Box<dyn ContactHooks>>,
+    /// Canonical pair keys whose [`SolverFlags`](hooks::SolverFlags) say
+    /// `READ_ONLY` this step: manifolds are built and events emitted, but
+    /// the islands never solve them. Rebuilt by [`apply_hook_filter`](hooks)
+    /// every step; empty without hooks (or with all-`COMPUTE` hooks).
+    hook_read_only: FxHashSet<(usize, usize)>,
 }
 
 /// Dense joint rebuild after removals: drops the marked joints, remaps
@@ -295,6 +326,387 @@ impl SequentialImpulseEngine {
             .collect();
     }
 
+    /// Captures a versioned plain-data [`WorldSnapshot`](crate::snapshot::WorldSnapshot)
+    /// of this engine: tuning, every body field verbatim, sleep/island
+    /// state, driver and event baselines, pending queues, joint specs with
+    /// assembly references and warm accumulators, and the contact
+    /// warm-start cache. Reads state only — the engine is untouched.
+    ///
+    /// # Errors
+    ///
+    /// [`SnapshotError::Unsupported`] while contact hooks or a GPU solver
+    /// are attached (host callbacks and device state are not serializable —
+    /// detach them first; the no-hooks path is the bit-exact baseline).
+    pub(crate) fn capture_world_snapshot(
+        &self,
+    ) -> Result<crate::snapshot::WorldSnapshot, SnapshotError> {
+        use crate::snapshot::{
+            BodySnapshot, BroadPhaseSnapshot, ContactEventSnapshot, ContactForceEventSnapshot,
+            JointMotorSnapshot, JointReferenceSnapshot, JointSnapshot as SnapshotJoint,
+            PoseSnapshot, TriggerEventSnapshot, TuningSnapshot, WORLD_SNAPSHOT_VERSION,
+            WarmPairSnapshot, WarmPointSnapshot, WorldSnapshot,
+        };
+        if self.contact_hooks.is_some() {
+            return Err(SnapshotError::Unsupported {
+                detail: "cannot snapshot with contact hooks attached".to_string(),
+            });
+        }
+        #[cfg(feature = "gpu")]
+        if self.gpu_solver.is_some() {
+            return Err(SnapshotError::Unsupported {
+                detail: "cannot snapshot with a GPU solver attached".to_string(),
+            });
+        }
+        let mut island_timers: Vec<(u32, f32)> =
+            self.island_timers.iter().map(|(&k, &v)| (k, v)).collect();
+        island_timers.sort_by_key(|&(k, _)| k);
+        let mut island_grace: Vec<(u32, u32)> =
+            self.island_grace.iter().map(|(&k, &v)| (k, v)).collect();
+        island_grace.sort_unstable();
+        let mut event_contacts: Vec<(u32, u32)> = self
+            .contact_touch
+            .iter()
+            .map(|&(a, b)| (a as u32, b as u32))
+            .collect();
+        event_contacts.sort_unstable();
+        let mut event_triggers: Vec<(u32, u32)> = self
+            .trigger_pairs
+            .iter()
+            .map(|&(a, b)| (a as u32, b as u32))
+            .collect();
+        event_triggers.sort_unstable();
+        let mut warm: Vec<WarmPairSnapshot> = self
+            .warm_impulses
+            .iter()
+            .map(|(&pair, (pts, count))| WarmPairSnapshot {
+                pair,
+                points: pts
+                    .iter()
+                    .take(*count)
+                    .map(WarmPointSnapshot::from_point)
+                    .collect(),
+            })
+            .collect();
+        warm.sort_by_key(|w| w.pair);
+        Ok(WorldSnapshot {
+            version: WORLD_SNAPSHOT_VERSION,
+            gravity: self.gravity.to_array(),
+            tuning: TuningSnapshot {
+                substeps: self.substeps,
+                velocity_iterations: self.velocity_iterations,
+                position_iterations: self.position_iterations,
+                contact_softness: self.contact_softness,
+                step_budget: self
+                    .step_budget
+                    .map(|b| (b.max_pair_substeps, b.min_substeps)),
+                max_ccd_substeps: self.max_ccd_substeps,
+                broadphase: match self.broadphase_kind() {
+                    BroadPhaseKind::SweepAndPrune => BroadPhaseSnapshot::SweepAndPrune,
+                    BroadPhaseKind::UniformGrid => BroadPhaseSnapshot::UniformGrid,
+                    BroadPhaseKind::DynamicAabbTree => BroadPhaseSnapshot::DynamicAabbTree,
+                    BroadPhaseKind::Auto => BroadPhaseSnapshot::Auto,
+                },
+                wide_solver: self.wide_solver.use_wide(),
+            },
+            bodies: self.bodies.iter().map(BodySnapshot::from_body).collect(),
+            asleep: self.asleep.clone(),
+            moved: self.body_moved.clone(),
+            islands: self.island.clone(),
+            island_timers,
+            island_grace,
+            prev: self
+                .prev_pose
+                .iter()
+                .map(|p| PoseSnapshot::from_parts(p.pos, p.rot))
+                .collect(),
+            event_contacts,
+            event_triggers,
+            pending_contacts: self
+                .contact_events
+                .iter()
+                .map(ContactEventSnapshot::from_event)
+                .collect(),
+            pending_triggers: self
+                .trigger_events
+                .iter()
+                .map(TriggerEventSnapshot::from_event)
+                .collect(),
+            pending_forces: self
+                .contact_force_events
+                .iter()
+                .map(ContactForceEventSnapshot::from_event)
+                .collect(),
+            warm,
+            joints: self
+                .joints
+                .iter()
+                .map(|j| SnapshotJoint {
+                    a: j.body_a.as_u32(),
+                    b: j.body_b.as_u32(),
+                    spec: crate::snapshot::JointKindSnapshot::from_spec(j.kind),
+                    reference: JointReferenceSnapshot {
+                        angle: j.reference_angle,
+                        length: j.reference_length,
+                        distance: j.reference_distance,
+                        rotation: [
+                            j.reference_quat.x,
+                            j.reference_quat.y,
+                            j.reference_quat.z,
+                            j.reference_quat.w,
+                        ],
+                        anchor_delta: j.reference_anchor_delta.to_array(),
+                    },
+                    servo: j.servo.map(JointMotorSnapshot::from_motor),
+                    acc_lin: j.acc_lin,
+                    acc_ang: j.acc_ang,
+                    acc_limit: j.acc_limit,
+                    acc_dist: j.acc_dist,
+                    acc_rope: j.acc_rope,
+                    acc_gear: j.acc_gear,
+                    gear_mem: j.gear_mem,
+                    acc_6dof: j.acc_6dof,
+                })
+                .collect(),
+            soft_bodies: Vec::new(),
+            soft_touch: Vec::new(),
+            soft_friction: None,
+            soft_contact_events: Vec::new(),
+            fracture_events: Vec::new(),
+        })
+    }
+
+    /// Replaces this engine's state with a captured [`WorldSnapshot`](crate::snapshot::WorldSnapshot):
+    /// fresh engine from the snapshot gravity and tuning, bodies and
+    /// driver/sleep/event state restored verbatim, joints pushed directly
+    /// (no assembly re-solve, so axes and references keep their exact
+    /// bits), warm caches and pending queues requeued. Stepping afterwards
+    /// continues the captured trajectory bit-identically.
+    ///
+    /// # Errors
+    ///
+    /// [`SnapshotError::InvalidData`] on length skew, dangling handles,
+    /// non-finite scalars or rejected shapes/joints;
+    /// [`SnapshotError::Unsupported`] when the snapshot carries soft
+    /// bodies (a bare sequential-impulse engine cannot own them).
+    pub(crate) fn restore_world(
+        &mut self,
+        snap: &crate::snapshot::WorldSnapshot,
+    ) -> Result<(), SnapshotError> {
+        use crate::snapshot::{check_joint_motor, check_joint_spec};
+        let bad = |detail: &str| SnapshotError::InvalidData {
+            detail: detail.to_string(),
+        };
+        let n = snap.bodies.len();
+        for (name, len) in [
+            ("asleep", snap.asleep.len()),
+            ("moved", snap.moved.len()),
+            ("islands", snap.islands.len()),
+            ("prev", snap.prev.len()),
+        ] {
+            if len != n {
+                return Err(bad(&format!("`{name}` length {len} != bodies {n}")));
+            }
+        }
+        if !snap.soft_bodies.is_empty() {
+            return Err(SnapshotError::Unsupported {
+                detail:
+                    "snapshot holds soft bodies: restore through Engine::restore_world_snapshot"
+                        .to_string(),
+            });
+        }
+        // Validate everything before mutating: a failed restore must not
+        // leave a half-built engine behind.
+        let mut bodies = Vec::with_capacity(n);
+        for b in &snap.bodies {
+            bodies.push(b.to_body()?);
+        }
+        for (i, j) in snap.joints.iter().enumerate() {
+            let spec = j.spec.to_spec();
+            check_joint_spec(&spec, j.a as usize, j.b as usize, n, i)?;
+            if let JointKind::Gear {
+                joint_a, joint_b, ..
+            } = spec
+            {
+                for r in [joint_a, joint_b] {
+                    if !matches!(
+                        snap.joints[r.index()].spec,
+                        crate::snapshot::JointKindSnapshot::Revolute { .. }
+                            | crate::snapshot::JointKindSnapshot::Prismatic { .. }
+                    ) {
+                        return Err(bad("gear coordinates a non-hinge/slider joint"));
+                    }
+                }
+            }
+            if let Some(m) = j.servo {
+                check_joint_motor(&m.to_motor())?;
+            }
+            for (name, v) in [
+                ("reference.angle", j.reference.angle),
+                ("reference.length", j.reference.length),
+                ("reference.distance", j.reference.distance),
+            ] {
+                if !v.is_finite() {
+                    return Err(bad(&format!("non-finite joint `{name}`")));
+                }
+            }
+        }
+        for &(a, b) in snap.event_contacts.iter().chain(snap.event_triggers.iter()) {
+            if a as usize >= n || b as usize >= n {
+                return Err(bad("event baseline references out-of-range bodies"));
+            }
+        }
+        for e in &snap.pending_contacts {
+            if e.a as usize >= n || e.b as usize >= n {
+                return Err(bad("pending contact references out-of-range bodies"));
+            }
+        }
+        for e in snap
+            .pending_triggers
+            .iter()
+            .map(|e| (e.a, e.b))
+            .chain(snap.pending_forces.iter().map(|e| (e.a, e.b)))
+        {
+            if e.0 as usize >= n || e.1 as usize >= n {
+                return Err(bad("pending event references out-of-range bodies"));
+            }
+        }
+        for f in &snap.pending_forces {
+            if !(f.force.is_finite() && f.force >= 0.0) {
+                return Err(bad("pending force event is not finite non-negative"));
+            }
+        }
+        for w in &snap.warm {
+            if w.pair.0 >= n || w.pair.1 >= n {
+                return Err(bad("warm cache references out-of-range bodies"));
+            }
+            if w.points.is_empty() || w.points.len() > MAX_MANIFOLD_POINTS {
+                return Err(bad("warm cache point count outside 1..=4"));
+            }
+        }
+        for (root, _) in snap
+            .island_timers
+            .iter()
+            .map(|&(r, t)| (r, t))
+            .chain(snap.island_grace.iter().map(|&(r, g)| (r, g as f32)))
+        {
+            if root as usize >= n {
+                return Err(bad("sleep map references out-of-range island root"));
+            }
+        }
+        // Rebuild from scratch: tuning first (backend switches clear the
+        // warm cache, so state lands after), then bodies, joints, and the
+        // event/sleep/warm-start state verbatim.
+        *self = Self::new(Vec3::new(snap.gravity[0], snap.gravity[1], snap.gravity[2]));
+        self.set_substeps(snap.tuning.substeps);
+        self.set_velocity_iterations(snap.tuning.velocity_iterations);
+        self.set_position_iterations(snap.tuning.position_iterations);
+        self.set_contact_softness(snap.tuning.contact_softness);
+        self.set_step_budget(
+            snap.tuning
+                .step_budget
+                .map(|(max_pair_substeps, min_substeps)| StepBudget {
+                    max_pair_substeps,
+                    min_substeps,
+                }),
+        );
+        self.set_max_ccd_substeps(snap.tuning.max_ccd_substeps);
+        self.set_broadphase(match snap.tuning.broadphase {
+            crate::snapshot::BroadPhaseSnapshot::SweepAndPrune => BroadPhaseKind::SweepAndPrune,
+            crate::snapshot::BroadPhaseSnapshot::UniformGrid => BroadPhaseKind::UniformGrid,
+            crate::snapshot::BroadPhaseSnapshot::DynamicAabbTree => BroadPhaseKind::DynamicAabbTree,
+            crate::snapshot::BroadPhaseSnapshot::Auto => BroadPhaseKind::Auto,
+        });
+        self.set_solve_path(crate::flags::SolvePath::from(snap.tuning.wide_solver));
+        for (i, body) in bodies.into_iter().enumerate() {
+            let h = self.add_body(body);
+            debug_assert_eq!(h.index(), i);
+            self.asleep[i] = snap.asleep[i];
+            self.body_moved[i] = snap.moved[i];
+            self.island[i] = snap.islands[i];
+            self.prev_pose[i] = PrevPose {
+                pos: Vec3::new(
+                    snap.prev[i].position[0],
+                    snap.prev[i].position[1],
+                    snap.prev[i].position[2],
+                ),
+                rot: Quat::from_xyzw(
+                    snap.prev[i].rotation[0],
+                    snap.prev[i].rotation[1],
+                    snap.prev[i].rotation[2],
+                    snap.prev[i].rotation[3],
+                ),
+            };
+        }
+        for j in &snap.joints {
+            let spec = j.spec.to_spec();
+            let (a, b) = (j.a as usize, j.b as usize);
+            let is_gear = matches!(spec, JointKind::Gear { .. });
+            self.joints.push(Joint {
+                body_a: BodyHandle::from(a),
+                body_b: BodyHandle::from(b),
+                kind: spec,
+                acc_lin: j.acc_lin,
+                acc_ang: j.acc_ang,
+                reference_angle: j.reference.angle,
+                reference_length: j.reference.length,
+                reference_distance: j.reference.distance,
+                reference_quat: Quat::from_xyzw(
+                    j.reference.rotation[0],
+                    j.reference.rotation[1],
+                    j.reference.rotation[2],
+                    j.reference.rotation[3],
+                ),
+                reference_anchor_delta: Vec3::new(
+                    j.reference.anchor_delta[0],
+                    j.reference.anchor_delta[1],
+                    j.reference.anchor_delta[2],
+                ),
+                acc_limit: j.acc_limit,
+                acc_dist: j.acc_dist,
+                acc_rope: j.acc_rope,
+                servo: j.servo.map(crate::snapshot::JointMotorSnapshot::to_motor),
+                acc_gear: j.acc_gear,
+                gear_mem: j.gear_mem,
+                acc_6dof: j.acc_6dof,
+            });
+            if !is_gear {
+                self.joint_pairs.insert((a.min(b), a.max(b)));
+            }
+        }
+        self.contact_touch = snap
+            .event_contacts
+            .iter()
+            .map(|&(a, b)| ((a as usize).min(b as usize), (a as usize).max(b as usize)))
+            .collect();
+        self.trigger_pairs = snap
+            .event_triggers
+            .iter()
+            .map(|&(a, b)| ((a as usize).min(b as usize), (a as usize).max(b as usize)))
+            .collect();
+        self.contact_events = snap.pending_contacts.iter().map(|e| e.to_event()).collect();
+        self.trigger_events = snap.pending_triggers.iter().map(|e| e.to_event()).collect();
+        self.contact_force_events = snap.pending_forces.iter().map(|e| e.to_event()).collect();
+        self.warm_impulses = snap
+            .warm
+            .iter()
+            .map(|w| {
+                let mut pts = [crate::sequential_impulse::WarmPoint {
+                    la: Vec3::ZERO,
+                    lb: Vec3::ZERO,
+                    normal: Vec3::ZERO,
+                    impulse: 0.0,
+                }; MAX_MANIFOLD_POINTS];
+                for (k, p) in w.points.iter().enumerate() {
+                    pts[k] = p.to_point();
+                }
+                (w.pair, (pts, w.points.len()))
+            })
+            .collect();
+        self.island_timers = snap.island_timers.iter().copied().collect();
+        self.island_grace = snap.island_grace.iter().copied().collect();
+        Ok(())
+    }
+
     /// Physical joint state in handle order, independent of warm impulses.
     pub(crate) fn joint_snapshots(&self) -> Vec<JointSnapshot> {
         self.joints
@@ -331,6 +743,7 @@ impl SequentialImpulseEngine {
                     b: j.body_b,
                     spec: j.kind,
                     reference,
+                    servo: j.servo,
                 }
             })
             .collect()
@@ -387,6 +800,89 @@ impl SequentialImpulseEngine {
         self.restore_joint_reference(JointHandle::from(h), r);
     }
 
+    /// Generalized motor override on an assembled joint (see
+    /// [`crate::joint::JointMotor`]): `Some` replaces the spec motor for
+    /// the drive, `None` clears the override. Only revolute, prismatic and
+    /// wheel joints take a motor (the wheel spin is the revolute special
+    /// case); every other kind is refused explicitly. Wakes the island so
+    /// the drive takes effect immediately.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::JointError::UnknownRef`] for a stale handle,
+    /// `Unsupported` for a joint kind without a driven axis, `NonFinite`
+    /// for an invalid motor (see [`crate::migration::validate_motor`]).
+    pub fn set_joint_motor(
+        &mut self,
+        handle: JointHandle,
+        motor: Option<crate::joint::JointMotor>,
+    ) -> Result<(), crate::errors::JointError> {
+        use crate::errors::JointError;
+        if let Some(m) = motor {
+            crate::migration::validate_motor(&m)?;
+        }
+        let Some(j) = self.joints.get(handle.index()) else {
+            return Err(JointError::UnknownRef {
+                handle: handle.index(),
+            });
+        };
+        if !matches!(
+            j.kind,
+            JointKind::Revolute { .. } | JointKind::Prismatic { .. } | JointKind::Wheel { .. }
+        ) {
+            return Err(JointError::Unsupported {
+                detail: "set_joint_motor needs a revolute, prismatic or wheel joint".to_string(),
+            });
+        }
+        self.joints[handle.index()].servo = motor;
+        let (a, b) = (
+            self.joints[handle.index()].body_a,
+            self.joints[handle.index()].body_b,
+        );
+        for h in [a, b] {
+            if self.bodies[h.index()].body_type == BodyType::Dynamic {
+                self.wake_island(h.index());
+            }
+        }
+        Ok(())
+    }
+
+    /// Current motor override of a joint (`None` = spec motor applies, if
+    /// any). `None` for an invalid handle.
+    pub fn joint_motor(&self, handle: JointHandle) -> Option<crate::joint::JointMotor> {
+        self.joints.get(handle.index())?.servo
+    }
+
+    /// Restore the motor override after a solver migration (verbatim —
+    /// like the assembly references, the drive rides along).
+    pub(crate) fn restore_joint_motor(
+        &mut self,
+        h: JointHandle,
+        motor: Option<crate::joint::JointMotor>,
+    ) {
+        if let Some(j) = self.joints.get_mut(h.index()) {
+            j.servo = motor;
+        }
+    }
+
+    /// Local-space motor restore: `h` is an SI-table index.
+    pub(crate) fn restore_joint_motor_local(
+        &mut self,
+        h: crate::joint::LocalSiJoint,
+        motor: Option<crate::joint::JointMotor>,
+    ) {
+        self.restore_joint_motor(JointHandle::from(h), motor);
+    }
+
+    /// Local-space motor override: `h` is an SI-table index.
+    pub(crate) fn set_joint_motor_local(
+        &mut self,
+        h: crate::joint::LocalSiJoint,
+        motor: Option<crate::joint::JointMotor>,
+    ) -> Result<(), crate::errors::JointError> {
+        self.set_joint_motor(JointHandle::from(h), motor)
+    }
+
     /// Local-space joint creation: inputs and output are SI-table indices.
     /// Returns the local joint handle (a lossless `u32` reinterpretation of
     /// the engine's dense [`JointHandle`]).
@@ -433,10 +929,14 @@ impl SequentialImpulseEngine {
             trigger_pairs: FxHashSet::default(),
             contact_touch: FxHashSet::default(),
             contact_events: Vec::new(),
+            contact_force_events: Vec::new(),
+            force_peak: FxHashMap::default(),
             scratch_hit_pairs: FxHashSet::default(),
             last_step_timing: StepTiming::default(),
             step_budget: Some(StepBudget::default()),
             last_shed: 0,
+            max_ccd_substeps: DEFAULT_MAX_CCD_SUBSTEPS,
+            last_ccd_caps: 0,
             trigger_events: Vec::new(),
             wide_solver: crate::flags::SolvePath::Wide,
             scratch_manifolds: Vec::new(),
@@ -451,6 +951,7 @@ impl SequentialImpulseEngine {
             narrow_cache: FxHashMap::default(),
             sat_cache: DashMap::default(),
             contact_hooks: None,
+            hook_read_only: FxHashSet::default(),
             #[cfg(feature = "gpu")]
             gpu_solver: None,
         }
@@ -561,6 +1062,29 @@ impl SequentialImpulseEngine {
         self.last_shed
     }
 
+    /// Maximum conservative-advancement iterations per pair in the angular
+    /// (nonlinear) CCD sweep (Rapier `max_ccd_substeps` analog). `0`
+    /// disables the angular sweep entirely. Exhausted sweeps fall back to
+    /// a best-effort clamp and are counted in
+    /// [`Self::last_ccd_caps`].
+    pub fn set_max_ccd_substeps(&mut self, n: usize) {
+        self.max_ccd_substeps = n;
+    }
+
+    /// Current angular-sweep iteration budget (default matches the legacy
+    /// fixed loop).
+    pub fn max_ccd_substeps(&self) -> usize {
+        self.max_ccd_substeps
+    }
+
+    /// Angular sweeps that exhausted the iteration cap on the last completed
+    /// `step`: accepted clamps without the tunnel-free TOI proof (0 when
+    /// every applied clamp was proven, or when the world slept through the
+    /// step). Diagnostics for tuning; not part of the simulation contract.
+    pub fn last_ccd_caps(&self) -> u32 {
+        self.last_ccd_caps
+    }
+
     /// Sequential-impulse velocity iterations per substep (default 8).
     pub fn set_velocity_iterations(&mut self, n: u32) {
         self.velocity_iterations = n;
@@ -592,6 +1116,81 @@ impl SequentialImpulseEngine {
             .iter()
             .filter(|&&(a, b)| a == hi || b == hi)
             .count()
+    }
+}
+
+impl SequentialImpulseEngine {
+    /// Folds one substep's merged warm impulses into the running per-pair
+    /// force peak (`impulse / sub_dt` per pair, maximum wins). Read-only:
+    /// the solver never observes this pass.
+    fn track_force_peak(&mut self, sub_dt: f32) {
+        if !(sub_dt.is_finite() && sub_dt > 0.0) {
+            return;
+        }
+        for (&key, (pts, count)) in self.warm_impulses.iter() {
+            let impulse: f32 = pts.iter().take(*count).map(|p| p.impulse).sum();
+            let force = impulse / sub_dt;
+            if force.is_finite() && force >= 0.0 {
+                let peak = self.force_peak.entry(key).or_insert(0.0);
+                if force > *peak {
+                    *peak = force;
+                }
+            }
+        }
+    }
+
+    /// Contact-force emission for one completed step (called at the end of
+    /// [`PhysicsEngine::step`](crate::engine::PhysicsEngine::step)): one
+    /// report per opted-in pair whose tracked step peak reaches the
+    /// smaller enabled threshold, in canonical pair order. Reads the peak
+    /// map and the last manifolds only — the solver never observes this
+    /// pass, so untracked scenes stay bit-identical.
+    fn emit_contact_force_events(&mut self, manifolds: &[Manifold], track: bool) {
+        // Opt-in gate (mirrors the per-step decision in `step`): the
+        // default scene pays one linear flag scan per step and nothing else.
+        if !track {
+            return;
+        }
+        let n = self.bodies.len();
+        for m in manifolds {
+            let (a, b) = (m.body_a.index(), m.body_b.index());
+            if a >= n || b >= n {
+                continue;
+            }
+            let (lo, hi) = (a.min(b), a.max(b));
+            let threshold = self.bodies[lo]
+                .contact_force_threshold
+                .min(self.bodies[hi].contact_force_threshold);
+            if !threshold.is_finite() {
+                continue;
+            }
+            // Read-only hook pairs carry zeroed impulses by construction —
+            // reporting them would manufacture zero-force events.
+            if self.hook_read_only.contains(&(lo, hi)) {
+                continue;
+            }
+            let force = self.force_peak.get(&(lo, hi)).copied().unwrap_or(0.0);
+            // NaN forces never report: emission is finite-only.
+            if force.is_nan() || force < threshold {
+                continue;
+            }
+            // Deepest point wins (first maximum on ties: manifold order).
+            let mut point = m.points[0].world_point;
+            let mut deepest = f32::NEG_INFINITY;
+            for k in 0..m.point_count.min(MAX_MANIFOLD_POINTS) {
+                if m.points[k].penetration > deepest {
+                    deepest = m.points[k].penetration;
+                    point = m.points[k].world_point;
+                }
+            }
+            self.contact_force_events.push(ContactForceEvent {
+                a: BodyHandle::from(lo),
+                b: BodyHandle::from(hi),
+                force,
+                point,
+            });
+        }
+        self.contact_force_events.sort_by_key(|e| (e.a, e.b));
     }
 }
 
@@ -632,6 +1231,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
             // happened this step.
             self.last_step_timing = StepTiming::default();
             self.last_shed = 0;
+            self.last_ccd_caps = 0;
             return;
         }
         let eff_substeps_before_budget = self.effective_substeps(dt);
@@ -670,6 +1270,9 @@ impl PhysicsEngine for SequentialImpulseEngine {
         let (eff_substeps, shed) =
             self.apply_step_budget(eff_substeps_before_budget, broad_active.len());
         self.last_shed = shed;
+        // Fresh CCD-cap window for this step: `solve_continuous`
+        // accumulates capped sweeps across all substeps below.
+        self.last_ccd_caps = 0;
         let sub_dt = dt / eff_substeps as f32;
         let mut timing = StepTiming {
             substeps: eff_substeps,
@@ -806,6 +1409,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // full set, so shedding and the solve path are sleep-independent.
         broad_active.retain(|&(a, b)| !(self.asleep[a] && self.asleep[b]));
         let mut flat_shards = std::mem::take(&mut self.scratch_flat_shards);
+        // Contact-force tracking gate, decided once per step: the default
+        // scene (no finite threshold) pays one linear flag scan per step
+        // and skips every per-substep/per-pair read below.
+        let track_forces = self.bodies.iter().any(|b| b.contact_force_events_enabled());
+        self.force_peak.clear();
         for s in 0..eff_substeps {
             // Per-step hit dedupe window opens here (see collect_active).
             if s == 0 {
@@ -886,6 +1494,13 @@ impl PhysicsEngine for SequentialImpulseEngine {
             }
             self.scratch_clamped = clamped_buf;
             self.scratch_manifolds = manifolds_buf;
+            // Contact-force peak tracking (read-only over the merged warm
+            // cache): the step peak of per-substep force, so a transient
+            // impact that resolves mid-step still reports. Gated above —
+            // untracked scenes never enter this loop body.
+            if track_forces {
+                self.track_force_peak(sub_dt);
+            }
         }
         self.scratch_narrow_shards = narrow_shards;
         self.scratch_pairs = sorted_pairs;
@@ -921,6 +1536,9 @@ impl PhysicsEngine for SequentialImpulseEngine {
             self.broadphase
                 .update(&self.bodies, 0.0, Some(&self.prev_pose));
             let current_triggers = detect_trigger_overlaps(&self.bodies, self.broadphase.active());
+            // Intersection-pair filter: sensor veto before event
+            // reconciliation (no-op without hooks, order-preserving).
+            let current_triggers = self.apply_hook_intersection_filter(current_triggers);
             let previous_triggers = std::mem::take(&mut self.trigger_pairs);
             self.trigger_pairs = update_trigger_events(
                 &previous_triggers,
@@ -983,6 +1601,13 @@ impl PhysicsEngine for SequentialImpulseEngine {
         }
         self.contact_events
             .sort_by_key(|e| (e.body_a.min(e.body_b), e.body_a.max(e.body_b)));
+        // Contact-force reports (Rapier `CONTACT_FORCE_EVENTS` parity):
+        // one report per opted-in pair whose tracked step peak reaches
+        // its threshold, in canonical pair order. The opt-in scan is the
+        // only work on the default path (no body enabled): per-pair peak
+        // reads happen strictly below it, so untracked scenes pay one
+        // linear flag scan per step and nothing else.
+        self.emit_contact_force_events(&last_manifolds_snapshot, track_forces);
         self.last_step_timing.trigger_ms += t_trigger.elapsed().as_secs_f64() * MS_PER_SEC;
         // Hand the velocity fields back to the driver: solver impulses must
         // never corrupt driver-owned kinematic state across steps. Then
@@ -1073,6 +1698,8 @@ impl PhysicsEngine for SequentialImpulseEngine {
             // surviving contacts re-begin on the next step.
             self.contact_touch.clear();
             self.contact_events.clear();
+            self.contact_force_events.clear();
+            self.force_peak.clear();
             // swap_remove shifts the last body's index; warm-start keys are
             // body indices, so the cache is no longer valid.
             self.warm_impulses.clear();
@@ -1241,7 +1868,9 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // The distance rod keeps its assembly anchor distance; the gear
         // captures its constraint constant.
         let reference_distance = match &kind {
-            JointKind::Distance { .. } => resolved.map(|r| r.ref_distance).unwrap_or(0.0),
+            JointKind::Distance { .. } | JointKind::Rope { .. } | JointKind::Spring { .. } => {
+                resolved.map(|r| r.ref_distance).unwrap_or(0.0)
+            }
             JointKind::Gear {
                 joint_a,
                 joint_b,
@@ -1362,6 +1991,10 @@ impl PhysicsEngine for SequentialImpulseEngine {
 
     fn drain_contact_events(&mut self) -> Vec<ContactEvent> {
         std::mem::take(&mut self.contact_events)
+    }
+
+    fn drain_contact_force_events(&mut self) -> Vec<ContactForceEvent> {
+        std::mem::take(&mut self.contact_force_events)
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {

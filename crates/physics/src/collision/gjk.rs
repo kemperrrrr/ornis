@@ -57,8 +57,10 @@ pub(crate) struct GjkDistance {
 
 /// Support point of a convex shape in world direction `dir` (farthest
 /// point along `dir`). Closed forms per shape; hulls scan vertices in
-/// index order (first maximum wins — deterministic).
-fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
+/// index order (first maximum wins — deterministic). Compounds take the
+/// farthest child support (deterministic child order); rounded shapes
+/// offset the inner support along `dir`.
+pub(crate) fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
     match shape {
         Shape::Sphere { radius } => pos + dir.normalize_or(Vec3::X) * *radius,
         Shape::Box { half_extents } => {
@@ -145,6 +147,34 @@ fn support(shape: &Shape, pos: Vec3, rot: Quat, dir: Vec3) -> Vec3 {
             // triangles enter as prebuilt hull primitives, never the mesh
             // (`Shape::has_gjk_support` is false for this variant).
             debug_assert!(false, "mesh has no support function");
+            pos
+        }
+        Shape::Compound { shapes } => {
+            // Unreachable by construction: compounds expand per child in
+            // `distance::shape_distance` before GJK (`has_gjk_support` is
+            // false). The max-child fallback keeps direct callers total.
+            let mut best = pos;
+            let mut best_d = f32::MIN;
+            for (child, pose) in shapes {
+                let s = support(child, pos + rot * pose.position, pose.world_rot(rot), dir);
+                let d = s.dot(dir);
+                if d > best_d {
+                    best_d = d;
+                    best = s;
+                }
+            }
+            best
+        }
+        Shape::Round {
+            inner,
+            border_radius,
+        } => support(inner, pos, rot, dir) + dir.normalize_or(Vec3::X) * *border_radius,
+        Shape::HalfSpace { .. } => {
+            // Unreachable by construction: half-space pairs dispatch to the
+            // analytic point-plane arm (`distance::halfspace_distance`)
+            // before GJK — an unbounded plane has no finite support point
+            // (`Shape::has_gjk_support` is false for this variant).
+            debug_assert!(false, "half-space has no support function");
             pos
         }
     }

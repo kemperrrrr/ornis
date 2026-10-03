@@ -63,6 +63,10 @@ pub(crate) struct JointSnapshot {
     pub b: BodyHandle,
     pub spec: JointKind,
     pub reference: JointReference,
+    /// Generalized motor override (see `crate::joint::Joint::servo`):
+    /// solver switches carry it verbatim so a servo never silently drops.
+    /// `None` for fresh joints (the spec motor, if any, applies).
+    pub servo: Option<crate::joint::JointMotor>,
 }
 
 /// Remove dependent gears before constructing the dense old-to-new map.
@@ -207,6 +211,16 @@ pub(crate) fn validate_joint(kind: &JointKind) -> Result<(), crate::errors::Join
             local_anchor_a,
             local_anchor_b,
         }
+        | JointKind::Rope {
+            local_anchor_a,
+            local_anchor_b,
+            ..
+        }
+        | JointKind::Spring {
+            local_anchor_a,
+            local_anchor_b,
+            ..
+        }
         | JointKind::Revolute {
             local_anchor_a,
             local_anchor_b,
@@ -304,8 +318,50 @@ pub(crate) fn validate_joint(kind: &JointKind) -> Result<(), crate::errors::Join
             }
             Ok(())
         }
+        JointKind::Rope { max_distance, .. } => {
+            if max_distance.is_finite() && max_distance > 0.0 {
+                Ok(())
+            } else {
+                Err(JointError::BadBounds {
+                    min: 0.0,
+                    max: max_distance,
+                })
+            }
+        }
+        JointKind::Spring { motor, .. } => validate_motor(&motor),
         _ => Ok(()),
     }
+}
+
+/// Typed validation for a generalized [`crate::joint::JointMotor`]:
+/// `Ok(())` admits it (including into a [`crate::joint::JointKind::Spring`]
+/// spec or a `set_joint_motor` override), `Err` names the flaw with the
+/// same [`crate::errors::JointError`] vocabulary as [`validate_joint`].
+pub(crate) fn validate_motor(
+    motor: &crate::joint::JointMotor,
+) -> Result<(), crate::errors::JointError> {
+    use crate::errors::JointError;
+    if !motor.target_position.is_finite() || !motor.target_velocity.is_finite() {
+        return Err(JointError::NonFinite {
+            field: "motor target".to_string(),
+        });
+    }
+    if !motor.stiffness.is_finite() || motor.stiffness < 0.0 {
+        return Err(JointError::NonFinite {
+            field: "motor stiffness".to_string(),
+        });
+    }
+    if !motor.damping.is_finite() || motor.damping < 0.0 {
+        return Err(JointError::NonFinite {
+            field: "motor damping".to_string(),
+        });
+    }
+    if !motor.max_force.is_finite() || motor.max_force < 0.0 {
+        return Err(JointError::NonFinite {
+            field: "motor max_force".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Registry transfer without recapturing rest poses or driver history.
@@ -373,5 +429,40 @@ mod tests {
             validate_joint(&gear),
             Err(JointError::NonFinite { .. })
         ));
+    }
+
+    #[test]
+    fn validate_rope_and_spring_name_the_flaw() {
+        use crate::joint::{JointMotor, SpringIntegration};
+        use ornis_core::units::Meters;
+        let rope =
+            JointKind::rope_checked(Vec3::ZERO, Vec3::ZERO, Meters::new(2.0)).expect("valid rope");
+        assert!(validate_joint(&rope).is_ok());
+        let tight = JointKind::Rope {
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: Vec3::ZERO,
+            max_distance: 0.0,
+        };
+        assert!(matches!(
+            validate_joint(&tight),
+            Err(JointError::BadBounds { .. })
+        ));
+        let motor = JointMotor::position(1.0, 40.0, 5.0, 100.0).expect("valid motor");
+        let spring =
+            JointKind::spring_checked(Vec3::ZERO, Vec3::ZERO, motor, SpringIntegration::Implicit)
+                .expect("valid spring");
+        assert!(validate_joint(&spring).is_ok());
+        let weak = JointMotor {
+            max_force: -1.0,
+            ..motor
+        };
+        assert!(validate_motor(&weak).is_err());
+        let limp = JointKind::Spring {
+            local_anchor_a: Vec3::ZERO,
+            local_anchor_b: Vec3::ZERO,
+            motor: weak,
+            integration: SpringIntegration::Explicit,
+        };
+        assert!(validate_joint(&limp).is_err());
     }
 }

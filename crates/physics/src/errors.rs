@@ -72,6 +72,30 @@ pub enum MeshError {
     },
 }
 
+/// Compound/rounded/half-space construction failure (P5 shapes).
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum ShapeError {
+    /// Compound with no children (an empty union collides with nothing).
+    #[error("compound shape has no children")]
+    EmptyCompound,
+    /// Rounded-shape border radius is non-positive or non-finite.
+    #[error("border radius must be finite and > 0, got {radius}")]
+    BadBorderRadius {
+        /// Offending radius value.
+        radius: f32,
+    },
+    /// Half-space normal is zero-length or non-finite.
+    #[error("half-space normal must be a finite non-zero vector")]
+    BadNormal,
+    /// Half-space body requested with dynamic mass (half-spaces are
+    /// static-only: an infinite plane has no finite inertia).
+    #[error("half-space shapes are static-only, got mass {mass}")]
+    DynamicHalfSpace {
+        /// Offending mass value.
+        mass: f32,
+    },
+}
+
 /// Collider projection failure: `Ok(None)` means "no collider", `Err` means "broken".
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum ColliderError {
@@ -92,6 +116,15 @@ pub enum ColliderError {
     /// Underlying mesh construction failed.
     #[error("invalid mesh: {0}")]
     InvalidMesh(#[from] MeshError),
+    /// Underlying compound/rounded/half-space construction failed.
+    #[error("invalid shape: {0}")]
+    InvalidShape(#[from] ShapeError),
+    /// A compound/rounded recipe names no buildable geometry.
+    #[error("collider recipe has no buildable geometry: {detail}")]
+    EmptyRecipe {
+        /// What was missing.
+        detail: &'static str,
+    },
 }
 
 /// Raycast/shapecast input failure: `Ok(None)` is a clean miss.
@@ -156,6 +189,40 @@ pub enum JointError {
     },
 }
 
+/// World-snapshot (`serde` RON) failure: version gate, decode, invalid data
+/// or an engine/path that cannot be captured or restored (P8).
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum SnapshotError {
+    /// Snapshot `version` does not match
+    /// [`WORLD_SNAPSHOT_VERSION`](crate::snapshot::WORLD_SNAPSHOT_VERSION).
+    #[error("unsupported snapshot version {found}, expected {expected}")]
+    VersionMismatch {
+        /// Required version.
+        expected: u32,
+        /// Version found in the input.
+        found: u32,
+    },
+    /// RON decoding failed (malformed input or a shape the format rejects).
+    #[error("snapshot decode failed: {detail}")]
+    Decode {
+        /// Underlying parser message.
+        detail: String,
+    },
+    /// Decoded data fails validation (dangling handles, non-finite
+    /// scalars, empty compounds, unknown enum tags).
+    #[error("invalid snapshot data: {detail}")]
+    InvalidData {
+        /// What was wrong.
+        detail: String,
+    },
+    /// Engine or routing path outside the v1 snapshot scope (see
+    /// [`crate::snapshot`] for the supported surface).
+    #[error("snapshot not supported here: {detail}")]
+    Unsupported {
+        /// What was requested and why it is refused.
+        detail: String,
+    },
+}
 /// Validate a raycast query without touching any body.
 pub(crate) fn check_ray_input(
     origin: glam::Vec3,

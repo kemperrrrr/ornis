@@ -341,6 +341,88 @@ impl AvbdEngine {
                         fl = dir * f;
                     }
                 }
+                AvbdJointKind::Rope => {
+                    // One-sided rod row: only a stretched rope stamps —
+                    // slack never pushes (the dual gates the same way).
+                    let len = live.length();
+                    if len > j.ref_val {
+                        let dir = if len > NEAR_ZERO { live / len } else { Vec3::Y };
+                        let c = (len - j.ref_val) - ALPHA * (c0v.length() - j.ref_val);
+                        let f = j.pen_l[0] * c + j.lam_l[0];
+                        if row_live(c, f) {
+                            let r_side = if is_a {
+                                a.orientation * j.la
+                            } else {
+                                b.orientation * j.lb
+                            };
+                            Self::stamp_row(&mut lhs, &mut rhs, dir, j.pen_l[0], f, r_side, sign);
+                            fl = dir * f;
+                        }
+                    }
+                }
+                AvbdJointKind::Spring => {
+                    // Position-level spring about the rest length (the
+                    // wheel-suspension discipline along the anchor delta):
+                    // fixed penalty from the stiffness, velocity damping
+                    // from the step delta, no dual state. Explicit/implicit
+                    // is an SI-only distinction (see `JointKind::Spring`) —
+                    // AVBD always solves at position level.
+                    let Some(motor) = j.spec.spring_motor() else {
+                        continue;
+                    };
+                    let len = live.length();
+                    let dir = if len > NEAR_ZERO { live / len } else { Vec3::Y };
+                    let rest = motor.target_position;
+                    let s = len - rest;
+                    let s0 = c0v.length() - rest;
+                    let ka = eff_inv_mass(a);
+                    let kb = eff_inv_mass(b);
+                    // Reduced linear mass (wheel parity — lever terms ride
+                    // the stamped gradient, not the penalty).
+                    let m = if ka + kb > NEAR_ZERO {
+                        1.0 / (ka + kb)
+                    } else {
+                        0.0
+                    };
+                    if m <= 0.0 {
+                        continue;
+                    }
+                    // Absolute spring coefficients (force-based pass
+                    // through, acceleration-based scale by the driven
+                    // mass — the `pd_coefficients` equation, shared with
+                    // the SI spring row).
+                    let (stiff, dampc) = match motor.model {
+                        crate::joint::MotorModel::ForceBased => (motor.stiffness, motor.damping),
+                        crate::joint::MotorModel::AccelerationBased => {
+                            (motor.stiffness * m, motor.damping * m)
+                        }
+                    };
+                    if stiff <= 0.0 && dampc <= 0.0 {
+                        // Neither centering nor damping (a zeroed motor):
+                        // inert in every solver (SI applies zero force too).
+                        continue;
+                    }
+                    let r_side = if is_a {
+                        a.orientation * j.la
+                    } else {
+                        b.orientation * j.lb
+                    };
+                    // Violation form (wheel parity: positive `f` pushes
+                    // along +dir, i.e. against +C — the physical spring
+                    // force has the opposite sign).
+                    if stiff > 0.0 {
+                        let f = stiff * s + dampc * (s - s0) / DT_STEP;
+                        Self::stamp_row(&mut lhs, &mut rhs, dir, stiff, f, r_side, sign);
+                    } else {
+                        // Pure damper (velocity-kind motor): viscous row
+                        // only — explicit-Euler stability (`dampc * DT_STEP
+                        // * inv_mass < 2`), same bound as the SI explicit
+                        // spring.
+                        let pen_v = dampc / DT_STEP;
+                        let f = dampc * (s - s0) / DT_STEP;
+                        Self::stamp_row(&mut lhs, &mut rhs, dir, pen_v, f, r_side, sign);
+                    }
+                }
                 AvbdJointKind::Gear => {
                     // Position-level gear row (closer to Box2D than the
                     // builtin velocity-only pass): C = ca + ratio*cb - const

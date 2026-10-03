@@ -533,9 +533,182 @@ fn trimesh_convex(
     }
 }
 
+/// Rounded-shape distance offset: `d` is the inner-pair distance with
+/// witnesses on the inner surface; the rounded surface sits `radius`
+/// closer along the witness axis, with the same normal. Infinite
+/// (unsupported inner pair) stays infinite, witnesses untouched.
+fn round_offset(d: Distance, radius: f32, side: Order, pos_a: Vec3, pos_b: Vec3) -> Distance {
+    if !d.dist.is_finite() {
+        return d;
+    }
+    let mut axis = d.point_b - d.point_a;
+    if axis.length_squared() <= COINCIDENT_LEN2 {
+        axis = pos_b - pos_a;
+    }
+    let n = axis.normalize_or(Vec3::X);
+    if side.is_first() {
+        Distance {
+            dist: d.dist - radius,
+            point_a: d.point_a + n * radius,
+            point_b: d.point_b,
+        }
+    } else {
+        Distance {
+            dist: d.dist - radius,
+            point_a: d.point_a,
+            point_b: d.point_b - n * radius,
+        }
+    }
+}
+
+/// Compound-vs-other minimum over children in deterministic child order
+/// (deepest penetration wins). `side` selects which end owns `point_a`.
+/// Empty unions report separation.
+fn compound_distance(
+    children: &[(crate::shape::Shape, crate::shape::Pose)],
+    pos: Vec3,
+    rot: Quat,
+    other: ShapeRef,
+    side: Order,
+) -> Distance {
+    let mut best: Option<Distance> = None;
+    for (child, pose) in children {
+        let d = shape_distance(
+            ShapeRef {
+                shape: child,
+                pos: pose.world_pos(pos, rot),
+                rot: pose.world_rot(rot),
+            },
+            other,
+        );
+        if best.is_none_or(|b: Distance| d.dist < b.dist) {
+            best = Some(d);
+        }
+    }
+    match best {
+        None => Distance {
+            dist: f32::INFINITY,
+            point_a: if side.is_first() { pos } else { other.pos },
+            point_b: if side.is_first() { other.pos } else { pos },
+        },
+        Some(d) if side.is_first() => d,
+        Some(d) => Distance {
+            dist: d.dist,
+            point_a: d.point_b,
+            point_b: d.point_a,
+        },
+    }
+}
+
+/// Half-space vs a non-compound, non-rounded shape: analytic point-plane
+/// distance against the other shape's support in `-n` (`point_a` on the
+/// plane, `point_b` on the shape). Half-space-vs-half-space has no bounded
+/// manifold: separation. `side` selects which end owns `point_a`.
+fn halfspace_distance(
+    hs_pos: Vec3,
+    hs_rot: Quat,
+    local_normal: Vec3,
+    other: ShapeRef,
+    side: Order,
+) -> Distance {
+    let no_contact = || Distance {
+        dist: f32::INFINITY,
+        point_a: if side.is_first() { hs_pos } else { other.pos },
+        point_b: if side.is_first() { other.pos } else { hs_pos },
+    };
+    if matches!(other.shape, Shape::HalfSpace { .. }) {
+        return no_contact();
+    }
+    let n = hs_rot * local_normal;
+    if !n.is_finite() {
+        return no_contact();
+    }
+    let s = crate::gjk::support(other.shape, other.pos, other.rot, -n);
+    let dist = (s - hs_pos).dot(n);
+    let d = Distance {
+        dist,
+        point_a: s - n * dist,
+        point_b: s,
+    };
+    if side.is_first() {
+        d
+    } else {
+        Distance {
+            dist: d.dist,
+            point_a: d.point_b,
+            point_b: d.point_a,
+        }
+    }
+}
+
 /// Exact surface-to-surface distance between two placed shapes. Negative
 /// distance means penetration (witnesses then are best-effort).
+///
+/// P5 dispatch order (outermost wrappers first, each step recursing into
+/// strictly smaller subtrees, so termination is structural): rounded shapes
+/// peel to their inner (`dist − radius`, witnesses shifted along the
+/// witness axis); compounds expand to the deepest child (minimum distance
+/// wins, deterministic child order) except compound-vs-compound, which is
+/// undefined (separation, like mesh-vs-mesh); half-spaces resolve
+/// analytically against the other side's support point.
 pub(crate) fn shape_distance(a: ShapeRef, b: ShapeRef) -> Distance {
+    // Rounded wrappers peel first: the offset applies to whatever the
+    // inner pair reports (including compound inners and half-space pairs).
+    if let Shape::Round {
+        inner,
+        border_radius,
+    } = a.shape
+    {
+        let d = shape_distance(
+            ShapeRef {
+                shape: inner,
+                pos: a.pos,
+                rot: a.rot,
+            },
+            b,
+        );
+        return round_offset(d, *border_radius, Order::First, a.pos, b.pos);
+    }
+    if let Shape::Round {
+        inner,
+        border_radius,
+    } = b.shape
+    {
+        let d = shape_distance(
+            a,
+            ShapeRef {
+                shape: inner,
+                pos: b.pos,
+                rot: b.rot,
+            },
+        );
+        return round_offset(d, *border_radius, Order::Second, a.pos, b.pos);
+    }
+    // Compounds expand per child; compound-vs-compound is concave-concave
+    // and undefined (separation — the loud marker is `pair_support`).
+    if let Shape::Compound { shapes } = a.shape {
+        if matches!(b.shape, Shape::Compound { .. }) {
+            return Distance {
+                dist: f32::INFINITY,
+                point_a: a.pos,
+                point_b: b.pos,
+            };
+        }
+        return compound_distance(shapes, a.pos, a.rot, b, Order::First);
+    }
+    if let Shape::Compound { shapes } = b.shape {
+        return compound_distance(shapes, b.pos, b.rot, a, Order::Second);
+    }
+    // Half-spaces resolve analytically (point-plane against the other
+    // side's support). Heightfield/mesh dispatch below recurses per
+    // column/triangle back into this arm, so those pairs need no special
+    // case here; half-space-vs-half-space has no bounded manifold.
+    if let Shape::HalfSpace { normal } = a.shape {
+        return halfspace_distance(a.pos, a.rot, normal.get(), b, Order::First);
+    }
+    if let Shape::HalfSpace { normal } = b.shape {
+        return halfspace_distance(b.pos, b.rot, normal.get(), a, Order::Second);
+    }
     // Heightfields dispatch first (they are not convex and never enter
     // GJK); cylinder/cone/hull pairs fall through to the GJK/EPA query;
     // the classic sphere/box/capsule pairs keep their analytic oracles.
@@ -1192,5 +1365,130 @@ mod tests {
         .expect("must hit");
         assert_eq!(hit.handle, crate::body::BodyHandle::from_raw(2));
         assert!((hit.t - 3.0).abs() < 2e-3, "t = {}", hit.t);
+    }
+
+    // ── P5 shapes ────────────────────────────────────────────────────
+
+    fn round_box(half: Vec3, radius: f32) -> Shape {
+        Shape::try_round(Shape::Box { half_extents: half }, radius).expect("valid radius builds")
+    }
+
+    #[test]
+    fn round_distance_offsets_inner_by_radius() {
+        // Box half 1 at the origin vs sphere r=0.25 at x=2: inner gap 0.75.
+        let (inner, sphere) = (cuboid(Vec3::ONE), sphere(0.25));
+        let d_inner = shape_distance(
+            at(&inner, Vec3::ZERO),
+            at(&sphere, Vec3::new(2.0, 0.0, 0.0)),
+        );
+        assert!((d_inner.dist - 0.75).abs() < EPS);
+        // Rounded by 0.5: gap 0.25, witnesses shifted along the same axis.
+        let rounded = round_box(Vec3::ONE, 0.5);
+        let d = shape_distance(
+            at(&rounded, Vec3::ZERO),
+            at(&sphere, Vec3::new(2.0, 0.0, 0.0)),
+        );
+        assert!((d.dist - 0.25).abs() < EPS, "dist = {}", d.dist);
+        assert_vec3_close(d.point_a, Vec3::new(1.5, 0.0, 0.0));
+        assert_vec3_close(d.point_b, Vec3::new(1.75, 0.0, 0.0));
+        // The normal is the inner normal (pointing from A toward B here).
+        let n = (d.point_b - d.point_a).normalize();
+        assert_vec3_close(n, Vec3::X);
+    }
+
+    #[test]
+    fn round_penetration_matches_inner_minus_radius() {
+        // Overlapping pair: penetration grows by the radius too.
+        let (inner, sphere) = (cuboid(Vec3::ONE), sphere(0.25));
+        let rounded = round_box(Vec3::ONE, 0.5);
+        let d_inner = shape_distance(
+            at(&inner, Vec3::ZERO),
+            at(&sphere, Vec3::new(1.0, 0.0, 0.0)),
+        );
+        let d = shape_distance(
+            at(&rounded, Vec3::ZERO),
+            at(&sphere, Vec3::new(1.0, 0.0, 0.0)),
+        );
+        assert!((d.dist - (d_inner.dist - 0.5)).abs() < EPS);
+        assert!(d.dist < 0.0, "must penetrate, got {}", d.dist);
+    }
+
+    #[test]
+    fn compound_picks_deepest_child() {
+        use crate::shape::Pose;
+        // Two boxes at x=±2 (half 0.5): a sphere at x=0.75, r=0.25 sits
+        // 0.5 left of the right box's face... the LEFT box is far.
+        let left = (
+            cuboid(Vec3::splat(0.5)),
+            Pose::new(Vec3::new(-2.0, 0.0, 0.0), Quat::IDENTITY),
+        );
+        let right = (
+            cuboid(Vec3::splat(0.5)),
+            Pose::new(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY),
+        );
+        let compound = Shape::try_compound(vec![left, right]).expect("two boxes build");
+        let sphere_shape = sphere(0.25);
+        let d = shape_distance(
+            at(&compound, Vec3::ZERO),
+            at(&sphere_shape, Vec3::new(0.75, 0.0, 0.0)),
+        );
+        // Right box face at x=1.5, sphere surface at x=1.0: gap 0.5.
+        assert!((d.dist - 0.5).abs() < EPS, "dist = {}", d.dist);
+        assert_vec3_close(d.point_a, Vec3::new(1.5, 0.0, 0.0));
+    }
+
+    #[test]
+    fn compound_vs_compound_reports_separation() {
+        use crate::shape::Pose;
+        let one = Shape::try_compound(vec![(
+            cuboid(Vec3::ONE),
+            Pose::new(Vec3::ZERO, Quat::IDENTITY),
+        )])
+        .expect("single box builds");
+        let two = Shape::try_compound(vec![(
+            cuboid(Vec3::ONE),
+            Pose::new(Vec3::ZERO, Quat::IDENTITY),
+        )])
+        .expect("single box builds");
+        // Deeply overlapping, yet no contact: concave-concave is undefined.
+        let d = shape_distance(at(&one, Vec3::ZERO), at(&two, Vec3::ZERO));
+        assert_eq!(d.dist, f32::INFINITY);
+    }
+
+    #[test]
+    fn halfspace_box_gap_and_penetration() {
+        let plane = Shape::try_halfspace(Vec3::Y).expect("up builds");
+        let boxed = cuboid(Vec3::splat(0.5));
+        // Box bottom at y=1: gap 1 (box support lands on a bottom corner,
+        // so the witnesses share that corner's x/z, not the face center).
+        let d = shape_distance(at(&plane, Vec3::ZERO), at(&boxed, Vec3::new(0.0, 1.5, 0.0)));
+        assert!((d.dist - 1.0).abs() < EPS, "dist = {}", d.dist);
+        assert!(d.point_a.y.abs() < EPS, "plane witness: {d:?}");
+        assert!((d.point_b.y - 1.0).abs() < EPS, "box witness: {d:?}");
+        assert_vec3_close(
+            Vec3::new(d.point_a.x, 0.0, d.point_a.z),
+            Vec3::new(d.point_b.x, 0.0, d.point_b.z),
+        );
+        // Box sunk 0.25 below the plane: penetration 0.25.
+        let d = shape_distance(
+            at(&plane, Vec3::ZERO),
+            at(&boxed, Vec3::new(0.0, 0.25, 0.0)),
+        );
+        assert!((d.dist + 0.25).abs() < EPS, "dist = {}", d.dist);
+        // Flipped order swaps the witnesses, keeps the distance.
+        let d = shape_distance(
+            at(&boxed, Vec3::new(0.0, 0.25, 0.0)),
+            at(&plane, Vec3::ZERO),
+        );
+        assert!((d.dist + 0.25).abs() < EPS, "dist = {}", d.dist);
+        assert!(d.point_a.y < 0.5 && d.point_b.y.abs() < EPS);
+    }
+
+    #[test]
+    fn halfspace_vs_halfspace_reports_separation() {
+        let a = Shape::try_halfspace(Vec3::Y).expect("up builds");
+        let b = Shape::try_halfspace(Vec3::Y).expect("up builds");
+        let d = shape_distance(at(&a, Vec3::ZERO), at(&b, Vec3::ZERO));
+        assert_eq!(d.dist, f32::INFINITY);
     }
 }

@@ -124,6 +124,8 @@ fn joint_kind_name(kind: &JointKind) -> &'static str {
         JointKind::Prismatic { .. } => "prismatic",
         JointKind::Fixed { .. } => "fixed",
         JointKind::Distance { .. } => "distance",
+        JointKind::Rope { .. } => "rope",
+        JointKind::Spring { .. } => "spring",
         JointKind::Wheel { .. } => "wheel",
         JointKind::Gear { .. } => "gear",
         JointKind::SixDof { .. } => "six-dof",
@@ -201,6 +203,16 @@ fn solve_cross_position(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
             a.position += correction * wa;
             b.position -= correction * wb;
         }
+        CrossRowKind::Rope => {
+            // One-sided: only a stretched rope projects (slack is free).
+            let len = delta.length();
+            if len < NEAR_ZERO || !len.is_finite() || !w.rest.is_finite() || len <= w.rest {
+                return;
+            }
+            let correction = delta / len * (len - w.rest);
+            a.position += correction * wa;
+            b.position -= correction * wb;
+        }
     }
 }
 
@@ -257,6 +269,17 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
             let n = delta / len;
             [n, Vec3::ZERO, Vec3::ZERO]
         }
+        CrossRowKind::Rope => {
+            // One-sided: only a stretched rope kills the separating
+            // velocity (slack separates freely).
+            let delta = (b.position + rb) - (a.position + ra);
+            let len = delta.length();
+            if len < NEAR_ZERO || !len.is_finite() || len <= w.rest {
+                return;
+            }
+            let n = delta / len;
+            [n, Vec3::ZERO, Vec3::ZERO]
+        }
     };
     for dir in dirs {
         if dir.length_squared() < MIN_DIR_LEN2 {
@@ -267,6 +290,11 @@ fn solve_cross_velocity(a: &mut RigidBody, b: &mut RigidBody, w: &CrossWork) {
             continue;
         }
         let vrel = (cross_point_velocity(b, rb) - cross_point_velocity(a, ra)).dot(dir);
+        // Ropes only oppose separation (vrel > 0 along the delta):
+        // approach runs free, like the SI one-sided velocity row.
+        if w.row == CrossRowKind::Rope && vrel <= 0.0 {
+            continue;
+        }
         cross_apply_impulse(a, b, dir * (-vrel / k), ra, rb);
     }
 }
@@ -507,8 +535,73 @@ impl SplitState {
             b,
             spec,
             reference,
+            servo: None,
         }));
         Ok(h)
+    }
+
+    /// Generalized motor override on a registry joint (see
+    /// [`crate::joint::JointMotor`]): validates, stores in the registry
+    /// state and pushes to every live engine mirror (no rebuild — the
+    /// override is solver state, not structure), then wakes both members.
+    /// Cross-solver revolute/prismatic/wheel joints stay explicitly
+    /// unsupported (no cross row); a same-solver servo rides its native
+    /// mirror.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::JointError`] for stale handles, joint kinds
+    /// without a driven axis, or invalid motors (engine mirrors agree —
+    /// kinds match by construction).
+    pub(super) fn set_joint_motor(
+        &mut self,
+        handle: JointHandle,
+        motor: Option<crate::joint::JointMotor>,
+    ) -> Result<(), crate::errors::JointError> {
+        use crate::errors::JointError;
+        if let Some(m) = motor {
+            crate::migration::validate_motor(&m)?;
+        }
+        let state = self
+            .joints
+            .get(handle.index())
+            .ok_or(JointError::UnknownRef {
+                handle: handle.index(),
+            })?;
+        if !matches!(
+            state.state.spec,
+            JointKind::Revolute { .. } | JointKind::Prismatic { .. } | JointKind::Wheel { .. }
+        ) {
+            return Err(JointError::Unsupported {
+                detail: "set_joint_motor needs a revolute, prismatic or wheel joint".to_string(),
+            });
+        }
+        self.joints[handle.index()].state.servo = motor;
+        let j = &self.joints[handle.index()];
+        if let Some(h) = j.local_si {
+            self.si.set_joint_motor_local(h, motor)?;
+        }
+        if let Some(h) = j.local_avbd {
+            self.avbd.set_joint_motor_local(h, motor)?;
+        }
+        if let Some(h) = j.local_xpbd {
+            // XPBD stores the payload (lossless migration) and ignores it
+            // at solve time, like the spec motors.
+            self.xpbd.restore_joint_motor(JointHandle::from(h), motor);
+        }
+        let (a, b) = (
+            self.joints[handle.index()].state.a,
+            self.joints[handle.index()].state.b,
+        );
+        self.wake_global(a);
+        self.wake_global(b);
+        Ok(())
+    }
+
+    /// Current motor override of a registry joint (`None` = spec motor, or
+    /// an invalid handle).
+    pub(super) fn joint_motor(&self, handle: JointHandle) -> Option<crate::joint::JointMotor> {
+        self.joints.get(handle.index())?.state.servo
     }
 
     fn coordinate(&self, h: JointHandle) -> Option<f32> {
@@ -600,6 +693,7 @@ impl SplitState {
                     && let Ok(h) = self.avbd.add_joint_local(a, b, spec)
                 {
                     self.avbd.restore_joint_reference_local(h, j.reference);
+                    self.avbd.restore_joint_motor_local(h, j.servo);
                     self.joints[i].local_avbd = Some(h);
                 }
             }
@@ -612,6 +706,7 @@ impl SplitState {
                     && let Ok(h) = self.si.add_joint_local(a, b, spec)
                 {
                     self.si.restore_joint_reference_local(h, j.reference);
+                    self.si.restore_joint_motor_local(h, j.servo);
                     self.joints[i].local_si = Some(h);
                 }
             }
@@ -631,6 +726,7 @@ impl SplitState {
                     && let Ok(h) = self.xpbd.add_joint(a.into(), b.into(), spec)
                 {
                     self.xpbd.restore_joint_reference(h, j.reference);
+                    self.xpbd.restore_joint_motor(h, j.servo);
                     self.joints[i].local_xpbd = Some(XpbdJoint(h.as_u32()));
                 }
             }
@@ -945,7 +1041,17 @@ impl SplitState {
     /// global. After all three engines advance, cross-solver joints run in
     /// [`SplitState::couple_cross_joints`] (canonical registry order) and
     /// only then does `pull` sync the registry.
-    pub(super) fn step(&mut self) -> (Vec<ContactEvent>, Vec<TriggerEvent>) {
+    ///
+    /// Contact-force reports ride the same remap as hits (the SI engine is
+    /// currently the only producer — AVBD/XPBD drain empty — but the path
+    /// is solver-agnostic, so a future AVBD producer needs no replumbing).
+    pub(super) fn step(
+        &mut self,
+    ) -> (
+        Vec<ContactEvent>,
+        Vec<TriggerEvent>,
+        Vec<crate::trigger::ContactForceEvent>,
+    ) {
         let timer = Instant::now();
         self.avbd.step(DT);
         self.timing.avbd += timer.elapsed();
@@ -1044,6 +1150,28 @@ impl SplitState {
         contacts.extend(hits);
         contacts.sort_by_key(|e| (e.body_a, e.body_b));
         contacts.dedup_by(|a, b| a == b);
+        // Contact-force reports: same local→global remap as hits (force
+        // and point travel verbatim; only the handles are translated),
+        // canonical pair order for determinism.
+        let mut forces = Vec::new();
+        for (events, map) in [
+            (self.avbd.drain_contact_force_events(), &av),
+            (self.si.drain_contact_force_events(), &si_map),
+            (self.xpbd.drain_contact_force_events(), &xp_map),
+        ] {
+            for event in events {
+                let (Some(a), Some(b)) = (map[event.a.index()], map[event.b.index()]) else {
+                    continue;
+                };
+                forces.push(crate::trigger::ContactForceEvent {
+                    a: a.min(b),
+                    b: a.max(b),
+                    force: event.force,
+                    point: event.point,
+                });
+            }
+        }
+        forces.sort_by_key(|e| (e.a, e.b));
         let triggers = now
             .triggers
             .symmetric_difference(&self.events.triggers)
@@ -1063,7 +1191,7 @@ impl SplitState {
         self.couple_cross_joints();
         self.pull();
         self.steps += 1;
-        (contacts, triggers)
+        (contacts, triggers, forces)
     }
 
     /// Cross-solver coupling pass (v1): every registry joint whose dynamic
@@ -1104,8 +1232,19 @@ impl SplitState {
                 | JointKind::Distance {
                     local_anchor_a,
                     local_anchor_b,
+                }
+                | JointKind::Rope {
+                    local_anchor_a,
+                    local_anchor_b,
+                    ..
                 } => (local_anchor_a, local_anchor_b),
                 _ => continue,
+            };
+            // Rope maximum rides in the spec (immutable); distance rest in
+            // the assembly reference.
+            let rest = match j.state.spec {
+                JointKind::Rope { max_distance, .. } => max_distance,
+                _ => j.state.reference.distance.0,
             };
             work.push(CrossWork {
                 a: j.state.a,
@@ -1113,7 +1252,7 @@ impl SplitState {
                 la,
                 lb,
                 row,
-                rest: j.state.reference.distance.0,
+                rest,
             });
         }
         // Relaxation sweeps over the (tiny) cross set, then one velocity

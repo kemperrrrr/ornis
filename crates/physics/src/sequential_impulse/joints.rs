@@ -10,7 +10,8 @@ use glam::Vec3;
 use super::*;
 use crate::constants::{DEGENERATE_LEN2, NEAR_ZERO, POS_CORRECTION_EPS};
 use crate::joint::{
-    AxisConfig, PrismaticLimit, PrismaticMotor, RevoluteLimit, RevoluteMotor, WheelSuspension,
+    AxisConfig, JointMotor, MotorKind, PrismaticLimit, RevoluteLimit, SpringIntegration,
+    WheelSuspension,
 };
 
 /// Translational DOFs before angular slots in a 6-DOF joint.
@@ -144,20 +145,24 @@ impl SequentialImpulseEngine {
             // --- Limit/motor drive on the free axis (revolute hinge or
             // prismatic slide). Motor first, then the limit wins past the
             // bounds (Box2D order); the motor pauses while a limit is
-            // violated.
+            // violated. The generalized servo override (if set) replaces
+            // the spec motor; otherwise the spec motor converts into the
+            // unified drive (velocity semantics, bit-identical).
             if prism_axis_a.is_some() {
                 let (limit, motor) = joint.prismatic_drive();
-                if limit.is_some() || motor.is_some() {
+                let servo = joint.servo;
+                let eff = servo.or_else(|| motor.map(|m| m.as_general()));
+                if limit.is_some() || eff.is_some() {
                     joint_prismatic_drive_velocity_iteration(
-                        bodies, joint, a, b, ra, rb, limit, motor, sub_dt,
+                        bodies, joint, a, b, ra, rb, limit, eff, sub_dt,
                     );
                 }
             } else if let Some((axis_a, _)) = align_axes {
                 let (limit, motor) = joint.drive();
-                if limit.is_some() || motor.is_some() {
-                    joint_drive_velocity_iteration(
-                        bodies, joint, a, b, axis_a, limit, motor, sub_dt,
-                    );
+                let servo = joint.servo;
+                let eff = servo.or_else(|| motor.map(|m| m.as_general()));
+                if limit.is_some() || eff.is_some() {
+                    joint_drive_velocity_iteration(bodies, joint, a, b, axis_a, limit, eff, sub_dt);
                 }
             }
         }
@@ -436,10 +441,13 @@ fn joint_prismatic_linear_iteration(
     apply_impulse(bodies, a, b, t * dl, ra, rb);
 }
 
-/// Slide-axis drive: velocity motor toward its target speed, then the
-/// one-sided travel limit (Box2D order — the limit wins past the bounds).
-/// Linear mirror of [`joint_drive_velocity_iteration`]: same accumulator
-/// discipline (`acc_limit`), force clamp instead of torque clamp.
+/// Slide-axis drive: generalized motor toward its velocity/position/servo
+/// target, then the one-sided travel limit (Box2D order — the limit wins
+/// past the bounds). Linear mirror of [`joint_drive_velocity_iteration`]:
+/// same accumulator discipline (`acc_limit`), force clamp instead of
+/// torque clamp. A [`MotorKind::Velocity`] motor reproduces the legacy
+/// [`PrismaticMotor`] solve op-for-op; position/servo kinds add the shared
+/// [`JointMotor::servo_impulse`] spring.
 #[allow(clippy::too_many_arguments)]
 fn joint_prismatic_drive_velocity_iteration(
     bodies: &mut [RigidBody],
@@ -449,7 +457,7 @@ fn joint_prismatic_drive_velocity_iteration(
     ra: Vec3,
     rb: Vec3,
     limit: Option<PrismaticLimit>,
-    motor: Option<PrismaticMotor>,
+    motor: Option<JointMotor>,
     sub_dt: f32,
 ) {
     const LINEAR_SLOP: f32 = 0.002;
@@ -474,8 +482,12 @@ fn joint_prismatic_drive_velocity_iteration(
                 && sub_dt > 0.0
                 && m.max_force > 0.0
             {
-                let dl = ((m.target_speed - v) / k_eff)
-                    .clamp(-m.max_force * sub_dt, m.max_force * sub_dt);
+                let dl = match m.kind {
+                    MotorKind::Velocity => m.velocity_impulse(m.target_velocity - v, k_eff, sub_dt),
+                    MotorKind::Position | MotorKind::Servo => {
+                        m.servo_impulse(m.target_position - s, m.target_velocity - v, k_eff, sub_dt)
+                    }
+                };
                 apply_impulse(bodies, a, b, wa * dl, ra, rb);
             }
         }
@@ -494,14 +506,17 @@ fn joint_prismatic_drive_velocity_iteration(
         }
     }
 }
-/// Hinge-axis drive: velocity motor toward its target speed, then the
-/// one-sided travel limit (Box2D order — the limit wins past the bounds).
-/// The motor pauses while a limit is violated and resumes inside the window.
+/// Hinge-axis drive: generalized motor toward its velocity/position/servo
+/// target, then the one-sided travel limit (Box2D order — the limit wins
+/// past the bounds). The motor pauses while a limit is violated and
+/// resumes inside the window.
 ///
 /// Limits are velocity-only (Box2D parity): no position correction, the
 /// accumulated one-sided impulse plus a small slop holds the bound. Motor
 /// needs no accumulator: the torque-clamped target solve converges in one
-/// iteration.
+/// iteration. A [`MotorKind::Velocity`] motor reproduces the legacy
+/// [`RevoluteMotor`] solve op-for-op; position/servo kinds add the shared
+/// [`JointMotor::servo_impulse`] spring about the assembly twist.
 ///
 /// Which travel bound (if any) the hinge violates: `Some(Lower)` vs
 /// `Some(Upper)`, `None` = freely inside the window (or no limit).
@@ -524,7 +539,7 @@ fn joint_drive_velocity_iteration(
     b: usize,
     axis_a: Vec3,
     limit: Option<RevoluteLimit>,
-    motor: Option<RevoluteMotor>,
+    motor: Option<JointMotor>,
     sub_dt: f32,
 ) {
     let wa = (bodies[a].orientation * axis_a).normalize_or(Vec3::Z);
@@ -543,10 +558,15 @@ fn joint_drive_velocity_iteration(
             joint.acc_limit = 0.0;
             if let Some(m) = motor
                 && sub_dt > 0.0
-                && m.max_torque > 0.0
+                && m.max_force > 0.0
             {
-                let dl = ((m.target_speed - w) / k_eff)
-                    .clamp(-m.max_torque * sub_dt, m.max_torque * sub_dt);
+                let dl = match m.kind {
+                    MotorKind::Velocity => m.velocity_impulse(m.target_velocity - w, k_eff, sub_dt),
+                    MotorKind::Position | MotorKind::Servo => {
+                        let pos_err = (m.target_position - angle + PI).rem_euclid(TAU) - PI;
+                        m.servo_impulse(pos_err, m.target_velocity - w, k_eff, sub_dt)
+                    }
+                };
                 apply_angular_impulse(bodies, a, b, wa * dl);
             }
         }
@@ -869,6 +889,90 @@ fn joint_distance_velocity_iteration(
     apply_impulse(bodies, a, b, n * dl, ra, rb);
 }
 
+/// Rope velocity row (one-sided distance inequality): when stretched
+/// (`len > max`), kills the separating anchor velocity with the
+/// upper-bound clamp discipline (pulling impulse only — a slack or
+/// approaching rope is never pushed). Slack zeroes the clamp memory;
+/// there is no warm-start re-application (a stale pull would phantom-drag
+/// a slack pair — the same reason hinge/slide limits keep clamp memory
+/// instead of re-applying).
+fn joint_rope_velocity_iteration(
+    bodies: &mut [RigidBody],
+    joint: &mut Joint,
+    a: usize,
+    b: usize,
+    ra: Vec3,
+    rb: Vec3,
+    max_distance: f32,
+) {
+    let delta = (bodies[b].position + rb) - (bodies[a].position + ra);
+    let len = delta.length();
+    if len < MIN_SEGMENT_LENGTH || len <= max_distance {
+        joint.acc_rope = 0.0;
+        return;
+    }
+    let n = delta / len;
+    let k_eff = effective_mass(bodies, a, b, n, ra, rb);
+    if k_eff < MIN_EFFECTIVE_MASS {
+        return;
+    }
+    let vrel = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(n);
+    // Upper-bound convention shared with the hinge/slide limits: the
+    // pulling impulse is non-positive along +n (toward each other), the
+    // clamp self-corrects when the stretch closes.
+    let dl = -vrel / k_eff;
+    let prev = joint.acc_rope;
+    let next = (prev + dl).min(0.0);
+    joint.acc_rope = next;
+    apply_impulse(bodies, a, b, n * (next - prev), ra, rb);
+}
+
+/// Spring velocity row: the generalized [`JointMotor`] drive along the
+/// anchor delta axis about the rest length (`target_position`), implicit
+/// by default (the wheel-spring closed form — unconditionally stable) or
+/// semi-explicit Euler ([`SpringIntegration::Explicit`], conditionally
+/// stable). Stateless like the wheel spring (no accumulator that could
+/// walk); the motor budget clamps both variants.
+#[allow(clippy::too_many_arguments)]
+fn joint_spring_velocity_iteration(
+    bodies: &mut [RigidBody],
+    a: usize,
+    b: usize,
+    ra: Vec3,
+    rb: Vec3,
+    motor: JointMotor,
+    integration: SpringIntegration,
+    sub_dt: f32,
+) {
+    let delta = (bodies[b].position + rb) - (bodies[a].position + ra);
+    let len = delta.length();
+    if len < MIN_SEGMENT_LENGTH || sub_dt <= 0.0 {
+        return;
+    }
+    let n = delta / len;
+    let k_eff = effective_mass(bodies, a, b, n, ra, rb);
+    if k_eff < MIN_EFFECTIVE_MASS {
+        return;
+    }
+    // Stretch from rest (positive = over-extended) and its rate.
+    let s = len - motor.target_position;
+    let v = (point_velocity(&bodies[b], rb) - point_velocity(&bodies[a], ra)).dot(n);
+    let (stiff, damp) = motor.pd_coefficients(k_eff);
+    let cap = motor.max_force * sub_dt;
+    let dl = match integration {
+        SpringIntegration::Implicit => {
+            let denom = 1.0 + sub_dt * (stiff * sub_dt + damp) * k_eff;
+            if denom <= 0.0 {
+                0.0
+            } else {
+                (sub_dt * (-stiff * s - (stiff * sub_dt + damp) * v) / denom).clamp(-cap, cap)
+            }
+        }
+        SpringIntegration::Explicit => ((-(stiff * s + damp * v)) * sub_dt).clamp(-cap, cap),
+    };
+    apply_impulse(bodies, a, b, n * dl, ra, rb);
+}
+
 /// Wheel suspension spring (semi-implicit Euler in generalized
 /// coordinates — a deliberate deviation from the Box2D gamma/bias
 /// formulation, which goes unstable when the substep is small: its
@@ -1074,6 +1178,23 @@ fn solve_new_joint_velocity(
                 joint_distance_velocity_iteration(bodies, joint, a, b, ra, rb);
             }
         }
+        JointKind::Rope { max_distance, .. } => {
+            let ra = bodies[a].orientation * la;
+            let rb = bodies[b].orientation * lb;
+            // No warm-start re-application (one-sided clamp memory only —
+            // see `joint_rope_velocity_iteration`).
+            for _ in 0..iterations {
+                joint_rope_velocity_iteration(bodies, joint, a, b, ra, rb, max_distance);
+            }
+        }
+        JointKind::Spring {
+            motor, integration, ..
+        } => {
+            let ra = bodies[a].orientation * la;
+            let rb = bodies[b].orientation * lb;
+            // Stateless spring (no accumulator): one drive per substep.
+            joint_spring_velocity_iteration(bodies, a, b, ra, rb, motor, integration, sub_dt);
+        }
         JointKind::Wheel { .. } => {
             let Some((susp_a, axle_a, suspension, motor)) = joint.wheel_drive() else {
                 return;
@@ -1100,8 +1221,11 @@ fn solve_new_joint_velocity(
                 joint_angular_lock_velocity_iteration(bodies, &mut joint.acc_ang, a, b, &lock);
             }
             joint_wheel_spring_iteration(bodies, joint, a, b, ra, rb, suspension, sub_dt);
-            if let Some(m) = motor {
-                joint_drive_velocity_iteration(bodies, joint, a, b, axle_a, None, Some(m), sub_dt);
+            // Wheel spin is the revolute special case: the spec motor
+            // converts into the unified drive, overridden by a servo.
+            let eff = joint.servo.or_else(|| motor.map(|m| m.as_general()));
+            if eff.is_some() {
+                joint_drive_velocity_iteration(bodies, joint, a, b, axle_a, None, eff, sub_dt);
             }
         }
         JointKind::SixDof { .. } => {
@@ -1183,7 +1307,7 @@ fn solve_new_joint_velocity(
     }
 }
 
-/// Position stage for the fixed/distance/wheel/six-DOF joints (split
+/// Position stage for the fixed/distance/rope/wheel/six-DOF joints (split
 /// impulse, positions only). Locked axes get Baumgarte steps; limited axes
 /// and gears are velocity-only (same standing as the hinge/slide limits).
 fn solve_new_joint_position(
@@ -1228,6 +1352,21 @@ fn solve_new_joint_position(
                     len - joint.reference_distance,
                     delta / len,
                 );
+            }
+        }
+        JointKind::Rope { max_distance, .. } => {
+            // One-sided position projection: only a stretched rope
+            // corrects (slack never pushes — the position twin of the
+            // one-sided velocity row).
+            for _ in 0..iterations {
+                let ra = bodies[a].orientation * la;
+                let rb = bodies[b].orientation * lb;
+                let delta = (bodies[b].position + rb) - (bodies[a].position + ra);
+                let len = delta.length();
+                if len < MIN_SEGMENT_LENGTH || len <= max_distance {
+                    continue;
+                }
+                joint_linear_position_step(bodies, a, b, ra, rb, len - max_distance, delta / len);
             }
         }
         JointKind::Wheel { .. } => {
@@ -1290,7 +1429,12 @@ fn solve_new_joint_position(
                 }
             }
         }
-        // Legacy kinds and gears never reach here (dispatched by the caller).
+        // Springs are velocity-only (the spring drive converges the length;
+        // a position projection would fight the compliance — the same
+        // standing as the wheel suspension, which carries no slide position
+        // row either). Legacy kinds and gears never reach here (dispatched
+        // by the caller).
+        JointKind::Spring { .. } => {}
         JointKind::Ball { .. }
         | JointKind::Revolute { .. }
         | JointKind::Prismatic { .. }

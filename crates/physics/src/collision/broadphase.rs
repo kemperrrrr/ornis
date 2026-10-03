@@ -873,7 +873,16 @@ const AUTO_SWITCH_COOLDOWN: u64 = 60;
 const AUTO_TREE_MIN_RAW: f32 = 12.0;
 
 fn body_max_extent(body: &RigidBody) -> f32 {
-    match &body.shape {
+    shape_max_extent(&body.shape)
+}
+
+/// Longest axis span of one shape (routing heuristic, not a contact
+/// query). Compounds take the worst child span plus its offset diameter
+/// (empty unions span nothing); rounded shapes grow by the skin diameter;
+/// half-spaces are unbounded — coarse by definition, so the grid takes the
+/// large-body escape path and the density estimate skips them.
+fn shape_max_extent(shape: &crate::shape::Shape) -> f32 {
+    match shape {
         crate::shape::Shape::Sphere { radius } => radius * 2.0,
         crate::shape::Shape::Box { half_extents } => half_extents.max_element() * 2.0,
         crate::shape::Shape::Capsule {
@@ -904,6 +913,18 @@ fn body_max_extent(body: &RigidBody) -> f32 {
             let e = (hi - lo) * HALF;
             e.x.max(e.y).max(e.z).max(HALF) * 2.0
         }
+        crate::shape::Shape::Compound { shapes } => {
+            let mut extent = 0.0f32;
+            for (child, pose) in shapes {
+                extent = extent.max(shape_max_extent(child) + pose.position.length() * 2.0);
+            }
+            extent
+        }
+        crate::shape::Shape::Round {
+            inner,
+            border_radius,
+        } => shape_max_extent(inner) + border_radius.max(0.0) * 2.0,
+        crate::shape::Shape::HalfSpace { .. } => f32::INFINITY,
     }
 }
 

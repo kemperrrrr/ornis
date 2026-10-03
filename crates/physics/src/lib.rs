@@ -8,13 +8,17 @@
 //! - [`body`] — rigid bodies and their handles/mass model.
 //! - [`shape`] — collision shapes (sphere, box, capsule, cylinder, cone,
 //!   convex hull, heightfield terrain, triangle-soup [`shape::TriMesh`]
-//!   under a median-split AABB BVH) with AABB projection and inertia
+//!   under a median-split AABB BVH, rigid [`shape::Compound`] unions,
+//!   [`shape::Shape::Round`] border skins and static [`shape::Shape::HalfSpace`]
+//!   planes) with AABB projection and inertia
 //!   tensors; cylinder/cone/hull pairs resolve through the GJK/EPA
 //!   fallback (`gjk` module).
 //! - [`math`] — geometric queries used by broadphase and raycasts.
 //! - `broadphase` — candidate-pair backends and benchmark diagnostics.
 //! - [`joint`] — persistent equality constraints (ball, revolute,
-//!   prismatic, fixed, distance, wheel, gear, six-DOF) with limits/motors.
+//!   prismatic, fixed, distance, rope, spring, wheel, gear, six-DOF) with
+//!   limits and the generalized [`joint::JointMotor`] drive
+//!   (velocity/position/servo, force- or acceleration-based).
 //! - [`engine`] — the sequential-impulse step pipeline: broadphase → narrowphase → island
 //!   partitioning → substepped velocity/position solving, with optional
 //!   SIMD-wide (`wide` module) and GPU (`gpu` feature) solver paths.
@@ -43,6 +47,10 @@ pub mod errors;
 pub mod flags;
 /// Scene snapshots and joint-remap helpers for solver migration.
 pub mod migration;
+/// Versioned serde world snapshots (P8): deterministic capture plus RON
+/// round-trips. Unlike [`migration`]'s transient handoff struct, these are
+/// serializable and bit-faithful (warm starts, sleep and tuning included).
+pub mod snapshot;
 mod split;
 
 #[cfg(test)]
@@ -70,6 +78,8 @@ pub mod gpu;
 pub mod invariants;
 pub mod joint;
 pub mod math;
+/// Rapier-style read-only scene queries (ray / point / AABB / shape casts).
+pub mod query_pipeline;
 /// Sequential-impulse solver internals (Genesis-style `solvers/rigid/` box).
 pub mod sequential_impulse;
 /// Collision shapes with AABB projection and inertia tensors.
@@ -98,7 +108,7 @@ pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, LocalAvbdBody, LocalSiBody, RigidBody};
 pub use collision::broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{PhysicsEngine, SequentialImpulseEngine};
-pub use errors::{ColliderError, JointError, MeshError, QueryError};
+pub use errors::{ColliderError, JointError, MeshError, QueryError, ShapeError, SnapshotError};
 pub use flags::{
     AxisStatus, BodyRole, CachePolicy, CoordKind, Dispatch, HitKind, LimitSide, Order,
     RestitutionGate, RollAxis, RoutePhase, SolvePath, SolverSide, StructuralState,
@@ -108,19 +118,21 @@ pub use invariants::{
     NonEmpty4, PositiveF32, Radians, UnitVec3, validate_heightfield,
 };
 pub use joint::{
-    AxisConfig, CrossRowKind, JointHandle, JointKind, LocalAvbdJoint, LocalSiJoint, PrismaticLimit,
-    PrismaticMotor, ResolvedJoint, RevoluteLimit, RevoluteMotor, WheelSuspension, cross_row_kind,
-    resolve_joint,
+    AxisConfig, CrossRowKind, JointHandle, JointKind, JointMotor, LocalAvbdJoint, LocalSiJoint,
+    MotorKind, MotorModel, PrismaticLimit, PrismaticMotor, ResolvedJoint, RevoluteLimit,
+    RevoluteMotor, SpringIntegration, WheelSuspension, cross_row_kind, resolve_joint,
 };
 pub use math::{AABB, Ray, RaycastHit};
-pub use shape::{ConvexHull, Heightfield, PairSupport, Shape, TriIndex, TriMesh, Triangle};
+pub use query_pipeline::{PointProjection, QueryFilter, QueryPipeline, QueryPredicate};
+pub use shape::{ConvexHull, Heightfield, PairSupport, Pose, Shape, TriIndex, TriMesh, Triangle};
+pub use snapshot::{WORLD_SNAPSHOT_VERSION, WorldSnapshot};
 pub use soft::{
     ClothPin, DeformConstraint, DeformKind, Particle, ParticleIdx, SoftBody, SoftHandle,
 };
 pub use soft_render::{tube_indices, tube_positions};
 pub use trigger::{
-    CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, FractureEvent,
-    TriggerEvent, TriggerEventKind,
+    CONTACT_BEGIN_SLOP, CONTACT_HIT_THRESHOLD, ContactEvent, ContactEventKind, ContactForceEvent,
+    FractureEvent, TriggerEvent, TriggerEventKind,
 };
 pub use xpbd::XpbdEngine;
 
@@ -265,6 +277,11 @@ pub struct Engine {
     /// (the fracture pass consumes the inner queue, so the orchestrator
     /// re-serves them here — see `drain_contact_events`).
     contact_events: Vec<ContactEvent>,
+    /// Contact-force reports drained from the inner engine during `step`
+    /// (same pump as [`Engine::contact_events`], plus the split-registry
+    /// remap under Islands routing — see
+    /// [`Engine::drain_contact_force_events`]).
+    contact_force_events: Vec<ContactForceEvent>,
     /// Globally remapped trigger transitions, independent of rebuilt locals.
     trigger_events: Vec<TriggerEvent>,
     /// Soft↔rigid begin/end transitions drained from the XPBD engine during
@@ -327,6 +344,7 @@ impl Engine {
             inner,
             fracture_events: Vec::new(),
             contact_events: Vec::new(),
+            contact_force_events: Vec::new(),
             trigger_events: Vec::new(),
             soft_contact_events: Vec::new(),
             parked_soft: Vec::new(),
@@ -424,6 +442,7 @@ impl Engine {
         }
         let snapshot = self.snapshot();
         let triggers = self.drain_trigger_events();
+        let forces = self.drain_contact_force_events();
         let mut split = Box::new(SplitState::new(self.gravity));
         for (h, body) in snapshot.bodies.into_iter().enumerate() {
             let mut record = SplitBody::new(body, self.single_kind);
@@ -440,6 +459,7 @@ impl Engine {
         self.structural_dirty = StructuralState::Clean;
         self.wake_set.clear();
         self.trigger_events.extend(triggers);
+        self.contact_force_events.extend(forces);
     }
 
     /// Collapse Islands routing into a fresh `Single(kind)` engine from
@@ -488,6 +508,7 @@ impl Engine {
             }
         }
         next.contact_events = std::mem::take(&mut self.contact_events);
+        next.contact_force_events = std::mem::take(&mut self.contact_force_events);
         next.fracture_events = std::mem::take(&mut self.fracture_events);
         next.soft_contact_events = std::mem::take(&mut self.soft_contact_events);
         next.trigger_events = triggers;
@@ -629,11 +650,59 @@ impl Engine {
                 continue;
             };
             match &mut self.inner {
-                EngineInner::SequentialImpulse(e) => e.restore_joint_reference(h, j.reference),
-                EngineInner::Avbd(e) => e.restore_joint_reference(h, j.reference),
-                EngineInner::Xpbd(e) => e.restore_joint_reference(h, j.reference),
+                EngineInner::SequentialImpulse(e) => {
+                    e.restore_joint_reference(h, j.reference);
+                    e.restore_joint_motor(h, j.servo);
+                }
+                EngineInner::Avbd(e) => {
+                    e.restore_joint_reference(h, j.reference);
+                    e.restore_joint_motor(h, j.servo);
+                }
+                EngineInner::Xpbd(e) => {
+                    e.restore_joint_reference(h, j.reference);
+                    e.restore_joint_motor(h, j.servo);
+                }
             }
             remap[old] = Some(h);
+        }
+    }
+
+    /// Generalized motor override on an assembled joint (see
+    /// [`joint::JointMotor`]): `Some` replaces the spec motor for the
+    /// drive, `None` clears the override. Only revolute, prismatic and
+    /// wheel joints take one (XPBD stores the payload for lossless
+    /// migration but never drives it). Under Islands routing the override
+    /// is pushed to every live mirror without a rebuild.
+    ///
+    /// # Errors
+    ///
+    /// [`JointError`] for stale handles, joint kinds without a driven
+    /// axis, or invalid motors.
+    pub fn set_joint_motor(
+        &mut self,
+        handle: JointHandle,
+        motor: Option<joint::JointMotor>,
+    ) -> Result<(), JointError> {
+        if let Some(s) = &mut self.split {
+            return s.set_joint_motor(handle, motor);
+        }
+        match &mut self.inner {
+            EngineInner::SequentialImpulse(e) => e.set_joint_motor(handle, motor),
+            EngineInner::Avbd(e) => e.set_joint_motor(handle, motor),
+            EngineInner::Xpbd(e) => e.set_joint_motor(handle, motor),
+        }
+    }
+
+    /// Current motor override of a joint (`None` = spec motor applies, if
+    /// any). `None` for an invalid handle.
+    pub fn joint_motor(&self, handle: JointHandle) -> Option<joint::JointMotor> {
+        if let Some(s) = &self.split {
+            return s.joint_motor(handle);
+        }
+        match &self.inner {
+            EngineInner::SequentialImpulse(e) => e.joint_motor(handle),
+            EngineInner::Avbd(e) => e.joint_motor(handle),
+            EngineInner::Xpbd(e) => e.joint_motor(handle),
         }
     }
 
@@ -780,6 +849,137 @@ impl Engine {
         std::mem::take(&mut self.fracture_events)
     }
 
+    /// Captures a versioned serde [`WorldSnapshot`]: the inner
+    /// sequential-impulse state (bodies, joints, warm starts, sleep,
+    /// tuning, pending queues) plus the orchestrator stashes (contact /
+    /// trigger / force / fracture / soft queues, parked soft bodies and
+    /// their touch baseline, soft friction). Restoring it through
+    /// [`Engine::restore_world_snapshot`] continues bit-identically.
+    ///
+    /// # Errors
+    ///
+    /// [`errors::SnapshotError::Unsupported`] outside
+    /// [`RoutingKind::Single`] or off the sequential-impulse solver
+    /// (AVBD/XPBD engines and Islands routing are follow-ups — collapse
+    /// first). Engine capture failures (hooks/GPU attached inside)
+    /// propagate verbatim.
+    pub fn world_snapshot(&self) -> Result<WorldSnapshot, errors::SnapshotError> {
+        use snapshot::{
+            ContactEventSnapshot, ContactForceEventSnapshot, FractureEventSnapshot,
+            SoftBodySnapshot, SoftContactEventSnapshot, TriggerEventSnapshot,
+        };
+        if self.routing != RoutingKind::Single {
+            return Err(errors::SnapshotError::Unsupported {
+                detail: "world snapshots need RoutingKind::Single".to_string(),
+            });
+        }
+        let EngineInner::SequentialImpulse(e) = &self.inner else {
+            return Err(errors::SnapshotError::Unsupported {
+                detail: "world snapshots need SolverKind::SequentialImpulse in v1".to_string(),
+            });
+        };
+        let mut snap = e.capture_world_snapshot()?;
+        // Stash first, then the inner queues the engine capture already
+        // cloned (empty post-step by invariant): the same order the
+        // `drain_*` methods serve.
+        let mut pending: Vec<ContactEventSnapshot> = self
+            .contact_events
+            .iter()
+            .map(ContactEventSnapshot::from_event)
+            .collect();
+        pending.extend(snap.pending_contacts);
+        snap.pending_contacts = pending;
+        let mut triggers: Vec<TriggerEventSnapshot> = self
+            .trigger_events
+            .iter()
+            .map(TriggerEventSnapshot::from_event)
+            .collect();
+        triggers.extend(snap.pending_triggers);
+        snap.pending_triggers = triggers;
+        let mut forces: Vec<ContactForceEventSnapshot> = self
+            .contact_force_events
+            .iter()
+            .map(ContactForceEventSnapshot::from_event)
+            .collect();
+        forces.extend(snap.pending_forces);
+        snap.pending_forces = forces;
+        snap.fracture_events = self
+            .fracture_events
+            .iter()
+            .map(FractureEventSnapshot::from_event)
+            .collect();
+        snap.soft_contact_events = self
+            .soft_contact_events
+            .iter()
+            .map(SoftContactEventSnapshot::from_event)
+            .collect();
+        snap.soft_bodies = self
+            .parked_soft
+            .iter()
+            .map(SoftBodySnapshot::from_soft)
+            .collect();
+        snap.soft_touch = self
+            .parked_soft_touch
+            .iter()
+            .map(|&(a, b, c)| (a as u32, b as u32, c as u32))
+            .collect();
+        snap.soft_friction = Some(self.soft_friction);
+        Ok(snap)
+    }
+
+    /// Replaces this world with a captured [`WorldSnapshot`]: rebuilds as
+    /// [`RoutingKind::Single`] on the sequential-impulse solver with the
+    /// snapshot's tuning, bodies, joints, warm/sleep/event state and
+    /// stashes; soft bodies re-park (they step only on the XPBD path).
+    /// Whatever solver or routing was active is dropped — this is a load,
+    /// not a migration.
+    ///
+    /// # Errors
+    ///
+    /// [`errors::SnapshotError::InvalidData`] on dangling handles,
+    /// non-finite scalars or rejected shapes/joints/soft bodies.
+    pub fn restore_world_snapshot(
+        &mut self,
+        snap: &WorldSnapshot,
+    ) -> Result<(), errors::SnapshotError> {
+        let mut next = Self::new(
+            SolverKind::SequentialImpulse,
+            glam::Vec3::from_array(snap.gravity),
+        );
+        if let Some(friction) = snap.soft_friction {
+            next.soft_friction = friction;
+        }
+        // The bare engine cannot own soft bodies: restore its share from
+        // a soft-stripped view, then re-park the soft payload here.
+        let mut inner_snap = snap.clone();
+        inner_snap.soft_bodies.clear();
+        match &mut next.inner {
+            EngineInner::SequentialImpulse(e) => e.restore_world(&inner_snap)?,
+            EngineInner::Avbd(_) | EngineInner::Xpbd(_) => unreachable!("just built SI"),
+        }
+        next.contact_events = snap.pending_contacts.iter().map(|e| e.to_event()).collect();
+        next.trigger_events = snap.pending_triggers.iter().map(|e| e.to_event()).collect();
+        next.contact_force_events = snap.pending_forces.iter().map(|e| e.to_event()).collect();
+        next.fracture_events = snap.fracture_events.iter().map(|e| e.to_event()).collect();
+        next.soft_contact_events = snap
+            .soft_contact_events
+            .iter()
+            .map(|e| e.to_event())
+            .collect();
+        next.parked_soft = snap
+            .soft_bodies
+            .iter()
+            .map(|b| b.to_soft())
+            .collect::<Result<_, _>>()?;
+        next.parked_soft_touch = snap
+            .soft_touch
+            .iter()
+            .map(|&(a, b, c)| (a as usize, b as usize, c as usize))
+            .collect();
+        *self = next;
+        Ok(())
+    }
+
     /// Rebuild split engines from the registry when structural changes
     /// (add/remove) are pending. Cheap flag check on the hot path.
     fn split_ensure_built(&mut self) {
@@ -819,10 +1019,11 @@ impl Engine {
             for h in edited {
                 s.push_global(h);
             }
-            let (contacts, triggers) = s.step();
+            let (contacts, triggers, forces) = s.step();
             self.trigger_events.extend(triggers);
             self.fracture_split(&contacts);
             self.contact_events.extend(contacts);
+            self.contact_force_events.extend(forces);
             steps += 1;
         }
     }
@@ -1004,12 +1205,20 @@ impl Engine {
         let inner = &mut self.inner;
         // The inner queue is consumed here, so every event is stashed for
         // re-serve: fracture must never swallow the host's contact stream.
+        // Contact-force reports ride the same pump (fracture ignores them,
+        // the host drains them through `drain_contact_force_events`).
         let drained: Vec<ContactEvent> = match inner {
             EngineInner::SequentialImpulse(e) => e.drain_contact_events(),
             EngineInner::Avbd(e) => e.drain_contact_events(),
             EngineInner::Xpbd(e) => e.drain_contact_events(),
         };
+        let forces: Vec<ContactForceEvent> = match inner {
+            EngineInner::SequentialImpulse(e) => e.drain_contact_force_events(),
+            EngineInner::Avbd(e) => e.drain_contact_force_events(),
+            EngineInner::Xpbd(e) => e.drain_contact_force_events(),
+        };
         self.contact_events.extend(drained.iter().cloned());
+        self.contact_force_events.extend(forces);
         let hits: Vec<(BodyHandle, BodyHandle, f32)> = drained
             .into_iter()
             .filter_map(|ev| match ev.kind {
@@ -1244,6 +1453,21 @@ impl PhysicsEngine for Engine {
         // Served from the orchestrator stash (filled by `step`): the
         // fracture pass sits between the inner queue and the host.
         std::mem::take(&mut self.contact_events)
+    }
+
+    fn drain_contact_force_events(&mut self) -> Vec<ContactForceEvent> {
+        // Same discipline as triggers (stash first, then the live inner
+        // queue in `Single` routing): the fracture/split pumps sit between
+        // the inner queue and the host.
+        let mut events = std::mem::take(&mut self.contact_force_events);
+        if self.routing == RoutingKind::Single {
+            events.extend(match &mut self.inner {
+                EngineInner::SequentialImpulse(e) => e.drain_contact_force_events(),
+                EngineInner::Avbd(e) => e.drain_contact_force_events(),
+                EngineInner::Xpbd(e) => e.drain_contact_force_events(),
+            });
+        }
+        events
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {

@@ -8,7 +8,7 @@ use crate::constants::{CCD_TRAVEL_GATE_FRACTION, NEAR_ZERO, SHAPE_TOUCH};
 use crate::distance;
 use crate::flags::HitKind;
 use crate::math::{Ray, RaycastHit};
-use crate::shape::Shape;
+use crate::shape::{Pose, Shape};
 
 use super::SequentialImpulseEngine;
 use super::math::vec3_finite;
@@ -35,10 +35,91 @@ const ANGULAR_CCD_TOUCH: f32 = 1e-5;
 const BINARY_REFINE_ITERS: usize = 10;
 /// Minimum fractional advance of the angular CA loop.
 const CA_FRACTION_EPS: f32 = 1e-4;
+/// Max rotation per adaptive CCD slice (rad, 30°): the sweep range is split
+/// into `ceil(angle / this)` slices so the per-slice Lipschitz bound stays
+/// tight for fast spinners; slow spins keep the single-slice path.
+const MAX_ROT_PER_CCD_SLICE: f32 = std::f32::consts::FRAC_PI_6;
+/// Hard cap on adaptive slices: bounds per-pair oracle calls for extreme
+/// spins; the CA loop inside each slice still converges by its bound.
+const MAX_CCD_SLICES: usize = 16;
+/// Default sweep budget (Rapier `max_ccd_substeps` analog): matches the
+/// legacy fixed 32-iteration CA loop, so default scenes are bit-identical.
+pub(crate) const DEFAULT_MAX_CCD_SUBSTEPS: usize = 32;
 /// Explicit BVH walk stack for mesh raycasts (same depth as distance).
 const BVH_STACK_CAP: usize = 64;
 /// Midpoint / half-span scale for CCD and heightfield grid math.
 const HALF: f32 = 0.5;
+
+/// P5 compat: compound raycast — minimum over children, each queried in
+/// its own local frame (deterministic child order; ties keep the first
+/// child via [`keep_closest_hit`]).
+fn ray_compound_hit(
+    children: &[(Shape, Pose)],
+    origin: Vec3,
+    direction: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let mut best = None;
+    for (child, pose) in children {
+        let inv = pose.world_rot(Quat::IDENTITY).inverse();
+        let hit = raycast_shape_hit(
+            child,
+            inv * (origin - pose.position),
+            inv * direction,
+            max_dist,
+        );
+        best = keep_closest_hit(best, hit);
+    }
+    best
+}
+
+/// P5 compat: rounded raycast — the inner hit pulled back to the offset
+/// surface along the ray. Exact on planar faces, first-order on curved
+/// ones; grazing shell-only misses (the ray clips the skin but misses the
+/// inner) report no hit. The discrete narrow phase still collides there —
+/// queries are read-only hints, never the solver.
+fn ray_round_hit(
+    inner: &Shape,
+    radius: f32,
+    origin: Vec3,
+    direction: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let speed = direction.length();
+    if speed <= DEGENERATE_EPS || !radius.is_finite() {
+        return None;
+    }
+    let (t_in, normal) = raycast_shape_hit(inner, origin, direction, max_dist + radius / speed)?;
+    let approach = (-direction / speed).dot(normal);
+    if approach <= DEGENERATE_EPS {
+        return Some((t_in.min(max_dist).max(0.0), normal));
+    }
+    let t = t_in - radius / (approach * speed);
+    if t > max_dist {
+        return None;
+    }
+    Some((t.max(0.0), normal))
+}
+
+/// P5 compat: half-space raycast — analytic plane hit in the shape's
+/// local frame (the plane runs through the local origin with unit
+/// `normal`). Both entry and exit report the outward plane normal.
+fn ray_halfspace_hit(
+    origin: Vec3,
+    direction: Vec3,
+    normal: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let denom = direction.dot(normal);
+    if denom.abs() <= DEGENERATE_EPS {
+        return None;
+    }
+    let t = -origin.dot(normal) / denom;
+    if t < 0.0 || t > max_dist {
+        return None;
+    }
+    Some((t, normal))
+}
 
 /// Shared exact ray/shape query for engine implementations: hit distance
 /// plus the surface normal in shape-local coordinates, or `None`.
@@ -70,6 +151,14 @@ pub(crate) fn raycast_shape_hit(
         Shape::ConvexHull(hull) => ray_hull_hit(origin, direction, hull, max_dist),
         Shape::Heightfield(hf) => ray_heightfield_hit(origin, direction, hf, max_dist),
         Shape::TriMesh(mesh) => ray_trimesh_hit(origin, direction, mesh, max_dist),
+        // P5 compat (new-shape arms only; owned by the shape change, not the
+        // query pipeline): compound minima, rounded pullback, plane hit.
+        Shape::Compound { shapes } => ray_compound_hit(shapes, origin, direction, max_dist),
+        Shape::Round {
+            inner,
+            border_radius,
+        } => ray_round_hit(inner, *border_radius, origin, direction, max_dist),
+        Shape::HalfSpace { normal } => ray_halfspace_hit(origin, direction, normal.get(), max_dist),
     }
 }
 
@@ -113,6 +202,19 @@ pub(crate) fn shape_min_dimension(shape: &Shape) -> f32 {
         Shape::ConvexHull(hull) => HALF * hull.min_extent(),
         Shape::Heightfield(hf) => HALF * hf.cell(),
         Shape::TriMesh(mesh) => HALF * mesh.min_feature(),
+        // P5 compat: thinnest child wins (empty unions never sweep); the
+        // rounded gate is the tighter of the inner gate and the skin
+        // diameter (conservative: extra sweeps, never tunneling);
+        // half-spaces are static-only and never sweep as movers.
+        Shape::Compound { shapes } => shapes
+            .iter()
+            .map(|(child, _)| shape_min_dimension(child))
+            .fold(f32::INFINITY, f32::min),
+        Shape::Round {
+            inner,
+            border_radius,
+        } => shape_min_dimension(inner).min(border_radius.max(0.0) * 2.0),
+        Shape::HalfSpace { .. } => f32::INFINITY,
     }
 }
 
@@ -139,6 +241,23 @@ fn shape_max_radius(shape: &Shape) -> f32 {
             .fold(0.0f32, f32::max),
         Shape::Heightfield(hf) => hf.local_extents().length() + hf.local_center().length(),
         Shape::TriMesh(mesh) => mesh.bound_radius(),
+        // P5 compat: worst child radius plus its offset (empty unions span
+        // nothing); rounded shapes grow by the skin. Half-spaces use a
+        // large FINITE stand-in (not infinity: the angular CCD bound
+        // multiplies by the angle, and `inf * 0.0` is NaN — the travel
+        // gates still always skip them, see `shape_min_dimension`).
+        Shape::Compound { shapes } => {
+            let mut bound = 0.0f32;
+            for (child, pose) in shapes {
+                bound = bound.max(shape_max_radius(child) + pose.position.length());
+            }
+            bound
+        }
+        Shape::Round {
+            inner,
+            border_radius,
+        } => shape_max_radius(inner) + border_radius.max(0.0),
+        Shape::HalfSpace { .. } => f32::MAX,
     }
 }
 
@@ -478,6 +597,21 @@ fn find_linear_continuous_hit(
     })
 }
 
+/// Outcome of one budgeted angular sweep against one target.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AngularSweep {
+    /// No overlap on the whole range (or resting at fraction 0, which is
+    /// the discrete solver's job).
+    Miss,
+    /// First overlap bracketed and binary-refined: tunnel-free TOI.
+    Hit(f32),
+    /// The iteration budget ran out before the sweep finished: `f` is the
+    /// proven-safe lower bound reached so far (every advance was `≤ gap/μ`,
+    /// so no crossing happened before it). Clamping there is the explicit
+    /// fallback — early and safe, but without the TOI precision guarantee.
+    Capped(f32),
+}
+
 /// Conservative-advancement first overlap for the combined linear+angular
 /// sweep. Uses the exact distance at each pose and the uniform bound
 /// `|displacement| + max_radius*angle` per unit fraction.
@@ -491,65 +625,120 @@ fn find_linear_continuous_hit(
 /// crossing for any feature thickness. Any "tighter" witness-based bound
 /// would break this (witness switches mid-step), trading a proof for fewer
 /// iterations — not worth it; separated pairs already exit in 1–2 oracle
-/// calls, only grazing approaches walk the full 32.
-fn first_angular_overlap_fraction(
+/// calls, only grazing approaches walk the full budget.
+///
+/// Budgeted sweep core: adaptive angular slices with conservative
+/// advancement inside each slice.
+///
+/// P4 rotational sweep: the range is split into adaptive slices
+/// (`ceil(|w|*sub_dt / 30°)` slices, capped). Each slice head is skipped
+/// when the exact gap proves it empty (`gap > span*slice_width` under the
+/// global `span` Lipschitz bound); otherwise the slice runs the legacy
+/// conservative-advancement loop under that same global bound, so the
+/// single-slice path is bit-identical to it. The binary refine stays as
+/// the fallback precision stage inside the bracketing slice. `max_iters`
+/// of `0` disables the sweep (explicit off, never counted as a cap).
+fn first_angular_overlap_fraction_budgeted(
     body: &RigidBody,
     target: distance::ShapeRef<'_>,
     displacement: Vec3,
     sub_dt: f32,
-) -> Option<f32> {
+    max_iters: usize,
+) -> AngularSweep {
     if swept_shape_overlaps(body, target, displacement, sub_dt, 0.0) {
-        return None;
+        return AngularSweep::Miss;
     }
     let angle = (body.angular_velocity * sub_dt).length();
-    let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
-    if bound < MIN_SEGMENT_LENGTH {
-        return None;
+    let span = displacement.length() + shape_max_radius(&body.shape) * angle;
+    if span < MIN_SEGMENT_LENGTH || max_iters == 0 {
+        return AngularSweep::Miss;
     }
-    const MAX_ITERS: usize = 32;
+    // Adaptive slice count from the substep rotation: one slice for slow
+    // spins (bit-identical to the legacy single-range loop), more for fast
+    // ones so the per-slice bound stays tight. Never more slices than the
+    // iteration budget (each slice costs at least one oracle call).
+    let slices = ((angle / MAX_ROT_PER_CCD_SLICE).ceil() as usize)
+        .clamp(1, MAX_CCD_SLICES)
+        .min(max_iters);
+    let mut remaining = max_iters;
     let mut f = 0.0f32;
     let mut prev_f = 0.0f32;
-    for _ in 0..MAX_ITERS {
-        if f >= 1.0 {
-            break;
-        }
-        if swept_shape_overlaps(body, target, displacement, sub_dt, f) {
-            if f <= 0.0 {
-                return None;
+    for s in 0..slices {
+        let slice_end = (s as f32 + 1.0) / slices as f32;
+        // Sound skip-ahead over a provably empty slice head: the gap is
+        // `span`-Lipschitz in the fraction (rigid mover, frozen target), so
+        // `gap(f) > span*(slice_end - f)` means no touch is possible before
+        // the slice end. Skips never consume the iteration budget (at most
+        // `MAX_CCD_SLICES` of them, statically bounded); the budget guards
+        // the unbounded CA loop below.
+        // (The slice width must NOT be used as a stepping divisor instead:
+        // it bounds the total variation over the slice, not the rate — a
+        // `gap/local` step could jump over the surface.)
+        if f < slice_end {
+            if remaining == 0 {
+                return AngularSweep::Capped(f.clamp(CA_FRACTION_EPS, 1.0));
             }
-            // Binary refine the bracket [prev_f, f] for sub-sample precision.
-            let mut low = prev_f;
-            let mut high = f;
-            for _ in 0..BINARY_REFINE_ITERS {
-                let mid = (low + high) * HALF;
-                if swept_shape_overlaps(body, target, displacement, sub_dt, mid) {
-                    high = mid;
-                } else {
-                    low = mid;
+            let d = swept_distance(body, target, displacement, sub_dt, f);
+            let gap = d.dist - ANGULAR_CCD_TOUCH * HALF;
+            if gap > span * (slice_end - f) {
+                prev_f = f;
+                f = slice_end;
+                continue;
+            }
+        }
+        loop {
+            if f >= slice_end {
+                break;
+            }
+            if remaining == 0 {
+                return AngularSweep::Capped(f.clamp(CA_FRACTION_EPS, 1.0));
+            }
+            if swept_shape_overlaps(body, target, displacement, sub_dt, f) {
+                if f <= 0.0 {
+                    return AngularSweep::Miss;
                 }
+                // Binary refine the bracket [prev_f, f] for sub-sample precision.
+                let mut low = prev_f;
+                let mut high = f;
+                for _ in 0..BINARY_REFINE_ITERS {
+                    let mid = (low + high) * HALF;
+                    if swept_shape_overlaps(body, target, displacement, sub_dt, mid) {
+                        high = mid;
+                    } else {
+                        low = mid;
+                    }
+                }
+                return AngularSweep::Hit(high);
             }
-            return Some(high);
-        }
-        let d = swept_distance(body, target, displacement, sub_dt, f);
-        // `d.dist` is the exact surface gap (positive = separated). Advance
-        // by at most the gap over the worst-case point speed.
-        let gap = d.dist - ANGULAR_CCD_TOUCH * HALF;
-        if gap <= 0.0 {
-            // Numerically touching — treat as overlap at next fraction.
-            let next = (f + CA_FRACTION_EPS).min(1.0);
-            if swept_shape_overlaps(body, target, displacement, sub_dt, next) {
-                return Some(next);
+            let d = swept_distance(body, target, displacement, sub_dt, f);
+            // `d.dist` is the exact surface gap (positive = separated). Advance
+            // by at most the gap over the worst-case point speed.
+            let gap = d.dist - ANGULAR_CCD_TOUCH * HALF;
+            if gap <= 0.0 {
+                // Numerically touching — treat as overlap at next fraction.
+                let next = (f + CA_FRACTION_EPS).min(slice_end);
+                if swept_shape_overlaps(body, target, displacement, sub_dt, next) {
+                    return AngularSweep::Hit(next);
+                }
+                return AngularSweep::Miss;
             }
-            break;
+            // `room.max(EPS)`: advancing past the slice end by < EPS only
+            // moves the next probe onto the boundary (the bracket stays
+            // valid); without the floor `clamp` would panic on `min > max`
+            // a hair before any range end — including 1.0 in the legacy
+            // single-slice loop.
+            let room = slice_end - f;
+            let step = (gap / span).clamp(CA_FRACTION_EPS, room.max(CA_FRACTION_EPS));
+            remaining -= 1;
+            prev_f = f;
+            f += step;
+            if f <= prev_f {
+                return AngularSweep::Miss;
+            }
         }
-        let step = (gap / bound).clamp(CA_FRACTION_EPS, 1.0 - f);
         prev_f = f;
-        f += step;
-        if f <= prev_f {
-            break;
-        }
     }
-    None
+    AngularSweep::Miss
 }
 
 /// Fully analytic angular CCD: conservative advancement along the screw
@@ -562,29 +751,57 @@ pub fn find_angular_continuous_hit(
     displacement: Vec3,
     sub_dt: f32,
 ) -> Option<ContinuousHit> {
+    find_angular_continuous_hit_with_budget(
+        bodies,
+        mover_index,
+        displacement,
+        sub_dt,
+        DEFAULT_MAX_CCD_SUBSTEPS,
+    )
+    .0
+}
+
+/// Budgeted angular sweep (P4 rotational CCD, Rapier-bullet parity):
+/// bullets ([`RigidBody::ccd_enabled`]) always sweep the nonlinear path
+/// regardless of the travel gate; non-bullet bodies keep the legacy gated
+/// policy. Returns the earliest hit plus whether the accepted clamp is a
+/// best-effort cap fallback (the iteration budget ran out on the winning
+/// pair — clamp without the TOI precision guarantee). A capped rival that
+/// loses to an earlier clean hit is NOT reported: the applied clamp is
+/// proven then.
+pub(crate) fn find_angular_continuous_hit_with_budget(
+    bodies: &[RigidBody],
+    mover_index: usize,
+    displacement: Vec3,
+    sub_dt: f32,
+    max_iters: usize,
+) -> (Option<ContinuousHit>, bool) {
     let body = &bodies[mover_index];
     if body.is_trigger || !shape_rotation_sensitive(&body.shape) {
-        return None;
+        return (None, false);
     }
     // Travel gate, mirror of the linear one (`0.5 * min_dimension` on
     // displacement): rotation alone cannot defeat the discrete phase unless
     // its fastest surface point moves more than half the thinnest feature
     // within the substep. Thin bodies arm CCD at small angles (they tunnel
     // easily); chunky bodies only at large ones — cheaper than a flat angle
-    // for cubes, stricter than one for blades.
+    // for cubes, stricter than one for blades. Bullets bypass the gate and
+    // always sweep (Rapier `ccd_enabled` parity).
     let angle = (body.angular_velocity * sub_dt).length();
-    if shape_max_radius(&body.shape) * angle
-        <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&body.shape)
+    if !body.ccd_enabled
+        && shape_max_radius(&body.shape) * angle
+            <= CCD_TRAVEL_GATE_FRACTION * shape_min_dimension(&body.shape)
     {
-        return None;
+        return (None, false);
     }
     let bound = displacement.length() + shape_max_radius(&body.shape) * angle;
     if bound < MIN_SEGMENT_LENGTH {
-        return None;
+        return (None, false);
     }
     let mover_layer = body.collision_layer;
     let mover_mask = body.collision_mask;
-    let mut best = None;
+    let mut best: Option<ContinuousHit> = None;
+    let mut best_capped = false;
 
     for (handle, target) in bodies.iter().enumerate() {
         if handle == mover_index
@@ -599,24 +816,41 @@ pub fn find_angular_continuous_hit(
             pos: target.position,
             rot: target.orientation,
         };
-        let Some(fraction) = first_angular_overlap_fraction(body, target_ref, displacement, sub_dt)
-        else {
-            continue;
+        let (fraction, capped) = match first_angular_overlap_fraction_budgeted(
+            body,
+            target_ref,
+            displacement,
+            sub_dt,
+            max_iters,
+        ) {
+            AngularSweep::Miss => continue,
+            AngularSweep::Hit(f) => (f, false),
+            AngularSweep::Capped(f) => (f, true),
         };
+        // Earliest fraction wins regardless of proof status (a capped bound
+        // is still a safe lower bound: no crossing happened before it, so
+        // accepting it can only stop early, never tunnel).
+        let earliest = match &best {
+            None => true,
+            Some(b) => fraction < b.fraction,
+        };
+        if !earliest {
+            continue;
+        }
         let distance = swept_distance(body, target_ref, displacement, sub_dt, fraction);
         let position = body.position + displacement * fraction;
         let fallback = (position - target.position).normalize_or(Vec3::Y);
         let normal = (distance.point_a - distance.point_b).normalize_or(fallback);
-        let candidate = ContinuousHit {
+        best = Some(ContinuousHit {
             fraction,
             normal,
             handle: crate::body::BodyHandle::from(handle),
             kind: HitKind::Angular,
             contact: Some(distance.point_a),
-        };
-        best = choose_continuous_hit(best, Some(candidate));
+        });
+        best_capped = capped;
     }
-    best
+    (best, best_capped)
 }
 
 fn choose_continuous_hit(
@@ -634,16 +868,37 @@ fn choose_continuous_hit(
     }
 }
 
-/// Find the earliest linear or angular time of impact for one dynamic body.
-pub(crate) fn find_continuous_hit(
+/// Find the earliest linear or angular time of impact for one dynamic body,
+/// threading the angular sweep budget through. Reports whether the accepted
+/// clamp is a cap fallback (see
+/// [`find_angular_continuous_hit_with_budget`]). The linear sweep is
+/// unbudgeted (fixed 24-iteration loop, unchanged); a capped angular rival
+/// that loses to an earlier linear hit is not reported.
+pub(crate) fn find_continuous_hit_with_budget(
     bodies: &[RigidBody],
     mover_index: usize,
     displacement: Vec3,
     sub_dt: f32,
-) -> Option<ContinuousHit> {
+    max_iters: usize,
+) -> (Option<ContinuousHit>, bool) {
     let linear = find_linear_continuous_hit(bodies, mover_index, displacement);
-    let angular = find_angular_continuous_hit(bodies, mover_index, displacement, sub_dt);
-    choose_continuous_hit(linear, angular)
+    let (angular, angular_capped) = find_angular_continuous_hit_with_budget(
+        bodies,
+        mover_index,
+        displacement,
+        sub_dt,
+        max_iters,
+    );
+    // The cap flag belongs to the angular candidate: it counts only when
+    // the angular clamp is the one applied (earlier than any linear hit).
+    let capped = angular_capped
+        && match (&linear, &angular) {
+            (Some(l), Some(a)) => a.fraction < l.fraction,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+    let hit = choose_continuous_hit(linear, angular);
+    (hit, capped)
 }
 
 /// Ray/sphere intersection in the shape's local frame. The returned normal is
@@ -1254,6 +1509,59 @@ fn ray_aabb_hit(
     Some((near, normal))
 }
 
+/// Exact ray hit against one body: the local-frame shape raycast wrapped
+/// with the world transform. Shared by the engine's raycast path and the
+/// read-only `QueryPipeline` (both directions agree by construction).
+/// Pure: reads `body` only.
+pub(crate) fn raycast_body_hit(
+    body: &RigidBody,
+    handle: crate::body::BodyHandle,
+    ray: &Ray,
+    max_dist: f32,
+) -> Option<RaycastHit> {
+    if max_dist.is_nan() || max_dist < 0.0 || !vec3_finite(ray.direction) {
+        return None;
+    }
+    let inverse = body.orientation.inverse();
+    let origin = inverse * (ray.origin - body.position);
+    let direction = inverse * ray.direction;
+    let hit = match &body.shape {
+        Shape::Sphere { radius } => {
+            ray_sphere_hit(origin, direction, Vec3::ZERO, *radius, max_dist)
+        }
+        Shape::Box { half_extents } => ray_obb_hit(origin, direction, *half_extents, max_dist),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => ray_capsule_hit(origin, direction, *radius, *half_height, max_dist),
+        Shape::Cylinder {
+            radius,
+            half_height,
+        } => ray_cylinder_hit(origin, direction, *radius, *half_height, max_dist),
+        Shape::Cone {
+            radius,
+            half_height,
+        } => ray_cone_hit(origin, direction, *radius, *half_height, max_dist),
+        Shape::ConvexHull(hull) => ray_hull_hit(origin, direction, hull, max_dist),
+        Shape::Heightfield(hf) => ray_heightfield_hit(origin, direction, hf, max_dist),
+        Shape::TriMesh(mesh) => ray_trimesh_hit(origin, direction, mesh, max_dist),
+        // P5 compat: the body frame IS the shape frame here, so the shared
+        // shape raycast answers directly (same kernels, no second match).
+        Shape::Compound { .. } | Shape::Round { .. } | Shape::HalfSpace { .. } => {
+            raycast_shape_hit(&body.shape, origin, direction, max_dist)
+        }
+    }?;
+    let (distance, local_normal) = hit;
+    let point = ray.point_at(distance);
+    let normal = (body.orientation * local_normal).normalize_or(Vec3::Y);
+    Some(RaycastHit {
+        handle,
+        point,
+        normal,
+        distance,
+    })
+}
+
 impl SequentialImpulseEngine {
     pub(crate) fn raycast_body(
         &self,
@@ -1261,42 +1569,6 @@ impl SequentialImpulseEngine {
         handle: crate::body::BodyHandle,
         max_dist: f32,
     ) -> Option<RaycastHit> {
-        if max_dist.is_nan() || max_dist < 0.0 || !vec3_finite(ray.direction) {
-            return None;
-        }
-        let body = &self.bodies[handle.index()];
-        let inverse = body.orientation.inverse();
-        let origin = inverse * (ray.origin - body.position);
-        let direction = inverse * ray.direction;
-        let hit = match &body.shape {
-            Shape::Sphere { radius } => {
-                ray_sphere_hit(origin, direction, Vec3::ZERO, *radius, max_dist)
-            }
-            Shape::Box { half_extents } => ray_obb_hit(origin, direction, *half_extents, max_dist),
-            Shape::Capsule {
-                radius,
-                half_height,
-            } => ray_capsule_hit(origin, direction, *radius, *half_height, max_dist),
-            Shape::Cylinder {
-                radius,
-                half_height,
-            } => ray_cylinder_hit(origin, direction, *radius, *half_height, max_dist),
-            Shape::Cone {
-                radius,
-                half_height,
-            } => ray_cone_hit(origin, direction, *radius, *half_height, max_dist),
-            Shape::ConvexHull(hull) => ray_hull_hit(origin, direction, hull, max_dist),
-            Shape::Heightfield(hf) => ray_heightfield_hit(origin, direction, hf, max_dist),
-            Shape::TriMesh(mesh) => ray_trimesh_hit(origin, direction, mesh, max_dist),
-        }?;
-        let (distance, local_normal) = hit;
-        let point = ray.point_at(distance);
-        let normal = (body.orientation * local_normal).normalize_or(Vec3::Y);
-        Some(RaycastHit {
-            handle,
-            point,
-            normal,
-            distance,
-        })
+        raycast_body_hit(&self.bodies[handle.index()], handle, ray, max_dist)
     }
 }

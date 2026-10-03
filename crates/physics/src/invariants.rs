@@ -63,6 +63,19 @@ impl UnitVec3 {
     pub fn get(self) -> Vec3 {
         self.0
     }
+
+    /// Wraps an already-unit vector without checking (snapshot restore:
+    /// the stored normal came from a validated [`UnitVec3`], so
+    /// re-normalizing would cost a bit of precision for nothing).
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `v` is finite and of unit length; a
+    /// non-unit input silently propagates the invariant break into every
+    /// downstream query.
+    pub(crate) unsafe fn from_unit_unchecked(v: Vec3) -> Self {
+        Self(v)
+    }
 }
 
 /// Length in meters (joint references, rest distances).

@@ -539,6 +539,33 @@ impl SequentialImpulseEngine {
         // the manifolds into the islands.
         let overrides = self.apply_hook_modify(manifolds, &active, sub_dt);
 
+        // --- H1 solver flags + H2 reduction (hooks attached only) ---
+        // `READ_ONLY` pairs keep their manifolds and the events recorded
+        // above, but never enter the islands (zero impulses); manifolds a
+        // hook fully cleared (`point_count == 0`) carry nothing to solve.
+        // Without hooks every manifold is valid and the list passes
+        // through untouched.
+        let active: Vec<usize> = if self.contact_hooks.is_some() {
+            let read_only = &self.hook_read_only;
+            active
+                .into_iter()
+                .filter(|&mi| {
+                    let m = &manifolds[mi];
+                    if !m.has_valid_count() {
+                        return false;
+                    }
+                    let (a, b) = (m.body_a.index(), m.body_b.index());
+                    !read_only.contains(&(a.min(b), a.max(b)))
+                })
+                .collect()
+        } else {
+            active
+        };
+        if active.is_empty() {
+            self.warm_impulses.clear();
+            return Vec::new();
+        }
+
         // --- Partition into islands + dispatch (G7) ---
         // Islands are disjoint over dynamic bodies by construction, so
         // concurrent solves are race-free and bit-identical for any thread
@@ -645,6 +672,12 @@ impl SequentialImpulseEngine {
         const WAKE_IMPACT_SPEED: f32 = 0.5;
         let mut active: Vec<usize> = Vec::with_capacity(manifolds.len());
         for (mi, m) in manifolds.iter().enumerate() {
+            // Reduction point: a hook may have cleared every point of this
+            // manifold (narrowphase output is always valid, so without
+            // hooks this never fires).
+            if !m.has_valid_count() {
+                continue;
+            }
             let (i, j) = (m.body_a.index(), m.body_b.index());
             let ai = self.asleep[i];
             let aj = self.asleep[j];

@@ -39,10 +39,12 @@
 //!   stronger than witness-proximity matching because particle identity is
 //!   stable): a resting stack inherits last step's support instead of
 //!   rebuilding it from zero, which is what keeps it still.
-//! - Joints supported structurally: ball, distance, fixed, revolute and
-//!   prismatic. Limits, motors and springs are NOT driven (accepted joints
-//!   constrain the free axes and ignore the drive). Wheel, gear and six-DOF
-//!   joints are rejected (`add_joint` returns `None`).
+//! - Joints supported structurally: ball, distance, rope (one-sided),
+//!   spring (compliant row plus the velocity damping pass), fixed,
+//!   revolute and prismatic. Limits and motors are NOT driven (accepted
+//!   joints constrain the free axes and ignore the drive — a stored servo
+//!   override migrates losslessly but never fires here). Wheel, gear and
+//!   six-DOF joints are rejected (`add_joint` returns `None`).
 //! - No islands, single-threaded: bodies sleep individually (never as one
 //!   coherent island), so a jointed assembly has no group freeze — an awake
 //!   neighbour re-wakes a sleeper on impact instead. Soft↔rigid begin/end
@@ -77,7 +79,7 @@ use crate::constants::{AXIS_REST_LEN2, COINCIDENT_LEN2, DEGENERATE_LEN2, NEAR_ZE
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::errors::{JointError, QueryError};
-use crate::joint::{JointHandle, JointKind, resolve_joint};
+use crate::joint::{JointHandle, JointKind, JointMotor, resolve_joint};
 use crate::math::{Ray, RaycastHit, tangent_basis};
 use crate::migration::{JointReference, JointSnapshot, validate_joint};
 use crate::shape::Shape;
@@ -98,6 +100,11 @@ enum XpbdJointKind {
     Fixed,
     /// Single distance row between the anchors (rod with ball ends).
     Distance,
+    /// One-sided distance row (pulls past the maximum, ignores slack).
+    Rope,
+    /// Compliant distance row about the spec rest length (stiffness via
+    /// per-joint compliance, damping via the velocity pass below).
+    Spring,
 }
 
 /// Persistent joint state: structural kind plus assembly-time frames.
@@ -127,10 +134,18 @@ struct XpbdJoint {
     ax_a: Vec3,
     /// Hinge/slide axis in B's local frame.
     ax_b: Vec3,
-    /// Rest length of a distance rod, captured at creation.
+    /// Rest length of a distance rod, captured at creation. For rope
+    /// joints the spec maximum, for spring joints the spec rest length
+    /// (both spec-immutable — restores never overwrite them, see
+    /// [`XpbdEngine::restore_joint_reference`]).
     rest_length: f32,
     /// Relative rotation `qa⁻¹·qb` at creation (fixed joints).
     q_ref: Quat,
+    /// Generalized motor override (`set_joint_motor`, revolute/prismatic
+    /// only): migration payload, ignored by the solve — XPBD drives no
+    /// motors (see the module scope docs). Spring joints carry their motor
+    /// inline in the spec and never use this slot.
+    servo: Option<JointMotor>,
 }
 
 /// One discrete contact for a single substep: fixed normal and body-local
@@ -523,6 +538,7 @@ impl XpbdEngine {
                 b: BodyHandle::from(j.b),
                 spec: j.spec,
                 reference: j.reference,
+                servo: j.servo,
             })
             .collect()
     }
@@ -536,8 +552,62 @@ impl XpbdEngine {
             return;
         };
         j.reference = r;
-        j.rest_length = r.distance.0;
+        // Distance rest length follows the assembly reference; rope
+        // maximum and spring rest ride in the spec (immutable after
+        // creation) and must survive the restore untouched.
+        if j.kind == XpbdJointKind::Distance {
+            j.rest_length = r.distance.0;
+        }
         j.q_ref = r.rotation;
+    }
+
+    /// Generalized motor override on an assembled joint (see
+    /// [`crate::joint::JointMotor`]): stored as a migration payload and
+    /// reported by [`XpbdEngine::joint_motor`], but never driven — XPBD
+    /// solves no motors (see the module scope docs). Only revolute and
+    /// prismatic joints take one (there are no wheel joints here); spring
+    /// joints carry theirs inline in the spec.
+    ///
+    /// # Errors
+    ///
+    /// [`JointError::UnknownRef`] for a stale handle, `Unsupported` for a
+    /// joint kind without a driven axis, `NonFinite` for an invalid motor.
+    pub fn set_joint_motor(
+        &mut self,
+        handle: JointHandle,
+        motor: Option<JointMotor>,
+    ) -> Result<(), JointError> {
+        if let Some(m) = motor {
+            crate::migration::validate_motor(&m)?;
+        }
+        let Some(j) = self.joints.get(handle.index()) else {
+            return Err(JointError::UnknownRef {
+                handle: handle.index(),
+            });
+        };
+        if !matches!(j.kind, XpbdJointKind::Revolute | XpbdJointKind::Prismatic) {
+            return Err(JointError::Unsupported {
+                detail: "set_joint_motor needs a revolute or prismatic joint".to_string(),
+            });
+        }
+        self.joints[handle.index()].servo = motor;
+        let (a, b) = (self.joints[handle.index()].a, self.joints[handle.index()].b);
+        self.wake_rigid(a);
+        self.wake_rigid(b);
+        Ok(())
+    }
+
+    /// Current motor override of a joint (`None` = spec motor applies, if
+    /// any — still undriven here). `None` for an invalid handle.
+    pub fn joint_motor(&self, handle: JointHandle) -> Option<JointMotor> {
+        self.joints.get(handle.index())?.servo
+    }
+
+    /// Restore the motor override after a solver migration (verbatim).
+    pub(crate) fn restore_joint_motor(&mut self, h: JointHandle, motor: Option<JointMotor>) {
+        if let Some(j) = self.joints.get_mut(h.index()) {
+            j.servo = motor;
+        }
     }
 
     /// Soft bodies in handle order, cloned for solver migration (the
@@ -641,7 +711,7 @@ impl XpbdEngine {
                 self.solve_contact(i, &mut contacts, alpha_c);
             }
             for j in 0..self.joints.len() {
-                self.solve_joint(j, alpha_j);
+                self.solve_joint(j, alpha_j, h);
             }
             for (s, body) in self.soft_bodies.iter_mut().enumerate() {
                 if self.soft_sleep[s].asleep {
@@ -686,6 +756,7 @@ impl XpbdEngine {
         }
         self.solve_velocities(&contacts, h);
         self.solve_soft_velocities(&soft_contacts, h);
+        self.solve_spring_damping(h);
     }
 
     /// Discrete contact discovery at the current poses: AABB prefilter plus
@@ -958,9 +1029,11 @@ impl XpbdEngine {
         }
     }
 
-    /// Position-level joint solve (equalities, one `λ` per scalar row).
-    /// A fully sleeping pair is frozen: no correction can move either side.
-    fn solve_joint(&mut self, j: usize, alpha_tilde: f32) {
+    /// Position-level joint solve (equalities, one `λ` per scalar row;
+    /// rope is the one-sided twin, spring the compliant twin of the
+    /// distance row). A fully sleeping pair is frozen: no correction can
+    /// move either side.
+    fn solve_joint(&mut self, j: usize, alpha_tilde: f32, h: f32) {
         let joint = self.joints[j];
         if self.rigid_asleep[joint.a] && self.rigid_asleep[joint.b] {
             return;
@@ -981,18 +1054,41 @@ impl XpbdEngine {
                 }
             }
             XpbdJointKind::Distance => {
+                // C = |pa − pb| − rest; λ state would need persistence
+                // across iterations for exact compliant behavior — with the
+                // default single iteration per substep λ starts at 0, which
+                // is exactly the Small-Steps regime this engine implements.
+                self.solve_anchor_distance(&joint, joint.rest_length, alpha_tilde);
+            }
+            XpbdJointKind::Rope => {
+                // One-sided distance: only a stretched rope corrects —
+                // slack never pushes (the position twin of the SI
+                // one-sided velocity row).
+                let (ba, bb) = (&self.bodies[joint.a], &self.bodies[joint.b]);
+                let pa = ba.position + ba.orientation * joint.la;
+                let pb = bb.position + bb.orientation * joint.lb;
+                let dist = (pa - pb).length();
+                if dist <= joint.rest_length {
+                    return;
+                }
+                self.solve_anchor_distance(&joint, joint.rest_length, alpha_tilde);
+            }
+            XpbdJointKind::Spring => {
+                // Compliant distance about the rest length: per-joint
+                // compliance from the stiffness (force-based `1/k`,
+                // acceleration-based scaled by the live reduced mass),
+                // damping runs as the velocity pass below.
+                let Some(motor) = joint.spec.spring_motor() else {
+                    return;
+                };
                 let (ba, bb) = (&self.bodies[joint.a], &self.bodies[joint.b]);
                 let pa = ba.position + ba.orientation * joint.la;
                 let pb = bb.position + bb.orientation * joint.lb;
                 let delta = pa - pb;
                 let dist = delta.length();
-                if dist < NEAR_ZERO {
+                if dist < NEAR_ZERO || h <= 0.0 {
                     return;
                 }
-                // C = |pa − pb| − rest; λ state would need persistence
-                // across iterations for exact compliant behavior — with the
-                // default single iteration per substep λ starts at 0, which
-                // is exactly the Small-Steps regime this engine implements.
                 let w = generalized_inverse_mass(
                     ba,
                     bb,
@@ -1000,16 +1096,14 @@ impl XpbdEngine {
                     pa - ba.position,
                     pb - bb.position,
                 );
-                if w <= 0.0 {
+                if w <= 0.0 || !motor.stiffness.is_finite() || motor.stiffness <= 0.0 {
                     return;
                 }
-                let dlambda = (joint.rest_length - dist) / (w + alpha_tilde);
-                if dlambda != 0.0 {
-                    let (ba, bb) = pair_mut(&mut self.bodies, joint.a, joint.b);
-                    let n = delta / dist;
-                    apply_position_correction(ba, 1.0, n, pa - ba.position, dlambda);
-                    apply_position_correction(bb, -1.0, n, pb - bb.position, dlambda);
-                }
+                let alpha = match motor.model {
+                    crate::joint::MotorModel::ForceBased => 1.0 / motor.stiffness,
+                    crate::joint::MotorModel::AccelerationBased => w / motor.stiffness,
+                };
+                self.solve_anchor_distance(&joint, joint.rest_length, alpha / (h * h));
             }
             XpbdJointKind::Fixed => {
                 for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
@@ -1061,6 +1155,89 @@ impl XpbdEngine {
                     }
                 }
                 self.solve_axis_alignment(&joint, alpha_tilde);
+            }
+        }
+    }
+
+    /// Shared distance-row solve for distance/rope/spring joints:
+    /// `C = |pa − pb| − rest` with compliance `alpha_tilde` (rigid when 0).
+    /// Rope gates on the stretched side before calling; spring passes its
+    /// own per-joint compliance. Stateless across iterations (see the
+    /// distance arm above).
+    fn solve_anchor_distance(&mut self, joint: &XpbdJoint, rest: f32, alpha_tilde: f32) {
+        let (ba, bb) = (&self.bodies[joint.a], &self.bodies[joint.b]);
+        let pa = ba.position + ba.orientation * joint.la;
+        let pb = bb.position + bb.orientation * joint.lb;
+        let delta = pa - pb;
+        let dist = delta.length();
+        if dist < NEAR_ZERO {
+            return;
+        }
+        let w = generalized_inverse_mass(ba, bb, delta / dist, pa - ba.position, pb - bb.position);
+        if w <= 0.0 {
+            return;
+        }
+        let dlambda = (rest - dist) / (w + alpha_tilde);
+        if dlambda != 0.0 {
+            let (ba, bb) = pair_mut(&mut self.bodies, joint.a, joint.b);
+            let n = delta / dist;
+            apply_position_correction(ba, 1.0, n, pa - ba.position, dlambda);
+            apply_position_correction(bb, -1.0, n, pb - bb.position, dlambda);
+        }
+    }
+
+    /// Velocity-level spring damping over the substep's spring joints
+    /// (mirrors the friction velocity pass): a viscous impulse
+    /// `−c·v_sep·h` along the anchor delta, with the force/acceleration
+    /// interpretation folded into `c`. Position-level XPBD rows carry no
+    /// damping, so without this a stiffness-only spring would ring —
+    /// with it the oscillator settles. Explicit Euler: needs
+    /// `damping · h · inverse_mass < 2` (same bound as the SI explicit
+    /// spring); the motor budget clamps the impulse like everywhere else.
+    fn solve_spring_damping(&mut self, h: f32) {
+        if h <= 0.0 {
+            return;
+        }
+        for j in 0..self.joints.len() {
+            let joint = self.joints[j];
+            if joint.kind != XpbdJointKind::Spring {
+                continue;
+            }
+            let Some(motor) = joint.spec.spring_motor() else {
+                continue;
+            };
+            if motor.damping <= 0.0 || motor.max_force < 0.0 {
+                continue;
+            }
+            let (ba, bb) = (&self.bodies[joint.a], &self.bodies[joint.b]);
+            let pa = ba.position + ba.orientation * joint.la;
+            let pb = bb.position + bb.orientation * joint.lb;
+            let delta = pa - pb;
+            let dist = delta.length();
+            if dist < NEAR_ZERO {
+                continue;
+            }
+            let n = delta / dist;
+            let ra = pa - ba.position;
+            let rb = pb - bb.position;
+            let w = generalized_inverse_mass(ba, bb, n, ra, rb);
+            if w <= 0.0 {
+                continue;
+            }
+            // Separation rate of B away from A in the `pa − pb` frame:
+            // `(va − vb)·n` grows as B recedes along `−n`. The damper
+            // opposes it (`jt < 0` pulls the pair back together).
+            let vrel = (point_velocity(ba, ra) - point_velocity(bb, rb)).dot(n);
+            let c = match motor.model {
+                crate::joint::MotorModel::ForceBased => motor.damping,
+                crate::joint::MotorModel::AccelerationBased => motor.damping / w,
+            };
+            let cap = motor.max_force * h;
+            let jt = (-c * vrel * h).clamp(-cap, cap);
+            if jt != 0.0 {
+                let (ba, bb) = pair_mut(&mut self.bodies, joint.a, joint.b);
+                apply_velocity_impulse(ba, 1.0, n, ra, jt);
+                apply_velocity_impulse(bb, -1.0, n, rb, jt);
             }
         }
     }
@@ -1592,12 +1769,15 @@ impl PhysicsEngine for XpbdEngine {
             JointKind::Prismatic { .. } => XpbdJointKind::Prismatic,
             JointKind::Fixed { .. } => XpbdJointKind::Fixed,
             JointKind::Distance { .. } => XpbdJointKind::Distance,
-            // Wheel needs a compliant suspension spring, gear couples other
-            // joints and six-DOF needs per-axis configs: all rejected rather
-            // than silently mis-solved.
+            JointKind::Rope { .. } => XpbdJointKind::Rope,
+            JointKind::Spring { .. } => XpbdJointKind::Spring,
+            // Wheel needs a suspension spring with axle lock, gear couples
+            // other joints and six-DOF needs per-axis configs: all rejected
+            // rather than silently mis-solved.
             JointKind::Wheel { .. } | JointKind::Gear { .. } | JointKind::SixDof { .. } => {
                 return Err(JointError::Unsupported {
-                    detail: "xpbd supports ball/revolute/prismatic/fixed/distance only".to_string(),
+                    detail: "xpbd supports ball/revolute/prismatic/fixed/distance/rope/spring only"
+                        .to_string(),
                 });
             }
         };
@@ -1611,6 +1791,13 @@ impl PhysicsEngine for XpbdEngine {
         .ok_or_else(|| JointError::BadAxis {
             detail: "unresolvable joint frames".to_string(),
         })?;
+        // Distance rest length is the assembly separation; rope maximum and
+        // spring rest ride in the spec (immutable after creation).
+        let rest_length = match kind {
+            JointKind::Rope { max_distance, .. } => max_distance,
+            JointKind::Spring { motor, .. } => motor.target_position,
+            _ => resolved.ref_distance,
+        };
         self.joints.push(XpbdJoint {
             a: ia,
             b: ib,
@@ -1621,8 +1808,9 @@ impl PhysicsEngine for XpbdEngine {
             lb: resolved.lb,
             ax_a: resolved.ax_a,
             ax_b: resolved.ax_b,
-            rest_length: resolved.ref_distance,
+            rest_length,
             q_ref: resolved.ref_quat,
+            servo: None,
         });
         self.rebuild_joint_pairs();
         // A new joint changes the constraint set: wake both members so a
@@ -1685,11 +1873,12 @@ impl PhysicsEngine for XpbdEngine {
 }
 
 /// Whether the [`crate::Engine`] orchestrator can migrate this joint onto
-/// the XPBD path: ball, revolute, prismatic, fixed and distance solve
-/// structurally here (see [`XpbdEngine::add_joint`]). Wheel needs a
-/// compliant suspension spring, gear couples other joints and six-DOF needs
-/// per-axis configs — all rejected rather than silently mis-solved, so the
-/// orchestrator parks them outside the migration instead of panicking.
+/// the XPBD path: ball, revolute, prismatic, fixed, distance, rope and
+/// spring solve structurally here (see [`XpbdEngine::add_joint`]). Wheel
+/// needs a suspension spring with axle lock, gear couples other joints and
+/// six-DOF needs per-axis configs — all rejected rather than silently
+/// mis-solved, so the orchestrator parks them outside the migration
+/// instead of panicking.
 pub(crate) fn xpbd_supports_joint(kind: &JointKind) -> bool {
     matches!(
         kind,
@@ -1698,6 +1887,8 @@ pub(crate) fn xpbd_supports_joint(kind: &JointKind) -> bool {
             | JointKind::Prismatic { .. }
             | JointKind::Fixed { .. }
             | JointKind::Distance { .. }
+            | JointKind::Rope { .. }
+            | JointKind::Spring { .. }
     )
 }
 

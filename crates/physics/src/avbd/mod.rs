@@ -140,7 +140,7 @@ use crate::constants::CCD_TRAVEL_GATE_FRACTION;
 use crate::distance::{ShapeRef, cast_shape, shape_distance};
 use crate::engine::{PhysicsEngine, raycast_shape_hit};
 use crate::errors::{JointError, QueryError};
-use crate::joint::{AxisConfig, JointHandle, JointKind};
+use crate::joint::{AxisConfig, JointHandle, JointKind, JointMotor};
 use crate::math::{Ray, RaycastHit, tangent_basis};
 use crate::migration::{JointReference, JointSnapshot};
 use crate::shape::Shape;
@@ -285,6 +285,11 @@ enum AvbdJointKind {
     Prismatic,
     Fixed,
     Distance,
+    /// One-sided distance row (pulls past the maximum, ignores slack).
+    Rope,
+    /// Compliant distance row about the spec rest length (position-level
+    /// spring, wheel-suspension discipline; carries no dual state).
+    Spring,
     Wheel,
     Gear,
     SixDof,
@@ -333,12 +338,21 @@ struct AvbdJoint {
     /// Travel reference: revolute reference twist (rad), prismatic reference
     /// length (m), distance rest length (m); unused otherwise.
     ref_val: f32,
+    /// Wheel axle twist at assembly (rad): the position reference for an
+    /// axle servo (the SI engine keeps the same value in its
+    /// `reference_angle`). Unused by every other kind.
+    spin_ref: f32,
     /// Fixed-joint assembly relative rotation (`qa^-1 * qb` at creation).
     q_ref: Quat,
     /// Travel window `[min, max]` (revolute rad / prismatic m); `None` = free.
     lim: Option<[f32; 2]>,
     /// Servo drive `[target_speed, max_force_or_torque]`; `None` = unpowered.
     mot: Option<[f32; 2]>,
+    /// Generalized motor override (`set_joint_motor`: revolute, prismatic
+    /// and wheel-axle joints). `Some` replaces the spec motor in
+    /// `motor_impulse`; `None` resumes the spec motor. Spring joints carry
+    /// their motor inline in the spec and never use this slot.
+    servo: Option<JointMotor>,
     /// One-sided limit accumulator (mirrors the official `acc_limit`).
     acc_lim: f32,
     /// Dual-side limit state (official joint `updateDual` discipline):
@@ -552,10 +566,19 @@ impl AvbdEngine {
                     AvbdJointKind::Revolute => {
                         reference.angle = crate::invariants::Radians(j.ref_val);
                     }
-                    AvbdJointKind::Prismatic | AvbdJointKind::Wheel => {
+                    AvbdJointKind::Wheel => {
+                        // Slide length rides `length`, axle twist `angle`
+                        // (the SI engine keeps the same split).
+                        reference.length = crate::invariants::Meters(j.ref_val);
+                        reference.angle = crate::invariants::Radians(j.spin_ref);
+                    }
+                    AvbdJointKind::Prismatic => {
                         reference.length = crate::invariants::Meters(j.ref_val);
                     }
-                    AvbdJointKind::Distance | AvbdJointKind::Gear => {
+                    // Rope constraint constant IS the maximum (like the
+                    // distance rest length and the gear constant); spring
+                    // rest rides in the spec motor, not the reference.
+                    AvbdJointKind::Distance | AvbdJointKind::Rope | AvbdJointKind::Gear => {
                         reference.distance = crate::invariants::Meters(j.ref_val);
                     }
                     _ => {}
@@ -578,6 +601,7 @@ impl AvbdEngine {
                     b: crate::body::BodyHandle::from(j.b),
                     spec: j.spec,
                     reference,
+                    servo: j.servo,
                 }
             })
             .collect()
@@ -590,10 +614,16 @@ impl AvbdEngine {
         };
         j.q_ref = r.rotation;
         j.dref = r.anchor_delta;
+        if j.kind == AvbdJointKind::Wheel {
+            j.spin_ref = r.angle.0;
+        }
         j.ref_val = match j.kind {
             AvbdJointKind::Revolute => r.angle.0,
             AvbdJointKind::Prismatic | AvbdJointKind::Wheel => r.length.0,
             AvbdJointKind::Distance | AvbdJointKind::Gear => r.distance.0,
+            // Rope maximum and spring rest ride in the spec (immutable
+            // after creation) — restoring the assembly length here would
+            // clobber them. Ball, Fixed and SixDof need nothing either.
             _ => j.ref_val,
         };
     }
@@ -635,6 +665,77 @@ impl AvbdEngine {
         r: JointReference,
     ) {
         self.restore_joint_reference(JointHandle::from(h), r);
+    }
+
+    /// Generalized motor override on an assembled joint (see
+    /// [`crate::joint::JointMotor`]): `Some` replaces the spec motor for
+    /// the deadbeat drive in `motor_impulse`, `None` clears the override.
+    /// Only revolute, prismatic and wheel joints take a motor; spring
+    /// joints carry theirs inline in the spec. Wakes both members.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::JointError::UnknownRef`] for a stale handle,
+    /// `Unsupported` for a joint kind without a driven axis, `NonFinite`
+    /// for an invalid motor (see [`crate::migration::validate_motor`]).
+    pub fn set_joint_motor(
+        &mut self,
+        handle: JointHandle,
+        motor: Option<JointMotor>,
+    ) -> Result<(), JointError> {
+        use crate::errors::JointError;
+        if let Some(m) = motor {
+            crate::migration::validate_motor(&m)?;
+        }
+        let Some(j) = self.joints.get(handle.index()) else {
+            return Err(JointError::UnknownRef {
+                handle: handle.index(),
+            });
+        };
+        if !matches!(
+            j.kind,
+            AvbdJointKind::Revolute | AvbdJointKind::Prismatic | AvbdJointKind::Wheel
+        ) {
+            return Err(JointError::Unsupported {
+                detail: "set_joint_motor needs a revolute, prismatic or wheel joint".to_string(),
+            });
+        }
+        self.joints[handle.index()].servo = motor;
+        let (a, b) = (self.joints[handle.index()].a, self.joints[handle.index()].b);
+        self.wake_body(a);
+        self.wake_body(b);
+        Ok(())
+    }
+
+    /// Current motor override of a joint (`None` = spec motor applies, if
+    /// any). `None` for an invalid handle.
+    pub fn joint_motor(&self, handle: JointHandle) -> Option<JointMotor> {
+        self.joints.get(handle.index())?.servo
+    }
+
+    /// Restore the motor override after a solver migration (verbatim).
+    pub(crate) fn restore_joint_motor(&mut self, h: JointHandle, motor: Option<JointMotor>) {
+        if let Some(j) = self.joints.get_mut(h.index()) {
+            j.servo = motor;
+        }
+    }
+
+    /// Local-space motor restore: `h` is an AVBD-table index.
+    pub(crate) fn restore_joint_motor_local(
+        &mut self,
+        h: crate::joint::LocalAvbdJoint,
+        motor: Option<JointMotor>,
+    ) {
+        self.restore_joint_motor(JointHandle::from(h), motor);
+    }
+
+    /// Local-space motor override: `h` is an AVBD-table index.
+    pub(crate) fn set_joint_motor_local(
+        &mut self,
+        h: crate::joint::LocalAvbdJoint,
+        motor: Option<JointMotor>,
+    ) -> Result<(), JointError> {
+        self.set_joint_motor(JointHandle::from(h), motor)
     }
 
     /// Local-space joint creation: inputs and output are AVBD-table indices.
@@ -762,6 +863,7 @@ impl AvbdEngine {
             b.angular_velocity += mat3_vec(iw_inv, torque) * DT_STEP;
         }
         self.motor_impulse();
+        self.rope_impulse();
         for (velocity, body) in self.pre_vel.iter_mut().zip(&self.bodies) {
             *velocity = body.velocity;
         }
@@ -1268,9 +1370,11 @@ impl PhysicsEngine for AvbdEngine {
                 kind: AvbdJointKind::Gear,
                 spec: kind,
                 ref_val: ca + ratio * cb,
+                spin_ref: 0.0,
                 q_ref: Quat::IDENTITY,
                 lim: None,
                 mot: None,
+                servo: None,
                 acc_lim: 0.0,
                 lim_dual: 0.0,
                 gb: [joint_a.index(), joint_b.index()],
@@ -1316,9 +1420,11 @@ impl PhysicsEngine for AvbdEngine {
             kind: AvbdJointKind::Ball,
             spec: kind,
             ref_val: 0.0,
+            spin_ref: r.ref_angle,
             q_ref: r.ref_quat,
             lim: None,
             mot: None,
+            servo: None,
             acc_lim: 0.0,
             lim_dual: 0.0,
             gb: [0; 2],
@@ -1366,6 +1472,17 @@ impl PhysicsEngine for AvbdEngine {
             JointKind::Distance { .. } => {
                 joint.kind = AvbdJointKind::Distance;
                 joint.ref_val = r.ref_distance;
+            }
+            JointKind::Rope { max_distance, .. } => {
+                joint.kind = AvbdJointKind::Rope;
+                joint.ref_val = max_distance;
+            }
+            JointKind::Spring { motor, .. } => {
+                // Rest length rides in the spec motor (`target_position`,
+                // read live from `j.spec` by the spring rows); the row
+                // reference mirrors it for snapshots and sleep residuals.
+                joint.kind = AvbdJointKind::Spring;
+                joint.ref_val = motor.target_position;
             }
             JointKind::Wheel {
                 suspension, motor, ..

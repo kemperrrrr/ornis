@@ -10,7 +10,7 @@
 use glam::{Quat, Vec3};
 
 use crate::invariants::{FrictionFrame, FrictionFrameError, Mass, MassKind, PositiveF32, UnitVec3};
-use crate::shape::Shape;
+use crate::shape::{Pose, Shape};
 
 // Default material coefficients for constructor helpers. Named so the
 // shape-specific recipes (`new_box` vs `new_sphere` vs hull rolling) stay
@@ -321,6 +321,24 @@ pub struct RigidBody {
     pub fracture_impact_speed: f32,
     /// Simulation role; derived from mass at construction, settable after.
     pub body_type: BodyType,
+    /// Bullet (full-CCD) upgrade in the Rapier sense (`ccd.ccd_enabled`):
+    /// a dynamic body that always sweeps the nonlinear (rotating) TOI path,
+    /// bypassing the travel gate. Non-bullet bodies keep the legacy policy
+    /// (linear sweep plus the gated angular sweep). Default `false`, so
+    /// existing scenes are bit-identical.
+    pub ccd_enabled: bool,
+    /// Contact-force report threshold (N) for this body (Rapier
+    /// `ContactForceEventThreshold` parity): the pair force (total normal
+    /// impulse over the last substep divided by the substep length) at or
+    /// above which a [`crate::trigger::ContactForceEvent`] is emitted.
+    /// `INFINITY` (default) disables reporting for this side — existing
+    /// scenes are bit-identical and the force pass early-outs with zero
+    /// per-pair work. Set a finite value (opt-in, like Rapier's
+    /// `ActiveEvents::CONTACT_FORCE_EVENTS`) to observe load-bearing
+    /// contacts, impacts and presses involving this body; use
+    /// [`Self::set_contact_force_threshold`] so negative/non-finite input
+    /// folds to the documented states instead of poisoning comparisons.
+    pub contact_force_threshold: f32,
 }
 
 impl RigidBody {
@@ -346,6 +364,8 @@ impl RigidBody {
             collision_layer: 1,
             collision_mask: u32::MAX,
             is_trigger: false,
+            ccd_enabled: false,
+            contact_force_threshold: f32::INFINITY,
             fracture_impact_speed: f32::INFINITY,
             body_type: if mass > 0.0 {
                 BodyType::Dynamic
@@ -790,6 +810,84 @@ impl RigidBody {
         Ok(body)
     }
 
+    /// Checked compound body from placed child shapes: each child owns a
+    /// [`Pose`] in the compound frame (see [`Shape::try_compound`]).
+    /// Default material ([`RESTITUTION_DEFAULT`] / [`FRICTION_DEFAULT`]);
+    /// mass splits evenly across children with parallel-axis terms.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::ShapeError::EmptyCompound`] when `shapes` is empty.
+    pub fn try_new_compound(
+        position: Vec3,
+        shapes: Vec<(Shape, Pose)>,
+        mass: f32,
+    ) -> Result<Self, crate::errors::ShapeError> {
+        Ok(Self::build(
+            position,
+            mass,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
+            Shape::try_compound(shapes)?,
+        ))
+    }
+
+    /// Checked rounded body: `inner` dilated by `border_radius` (see
+    /// [`Shape::try_round`]). Default material ([`RESTITUTION_DEFAULT`] /
+    /// [`FRICTION_DEFAULT`]).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::ShapeError::BadBorderRadius`] unless the radius is
+    /// finite and `> 0`.
+    pub fn try_new_round(
+        position: Vec3,
+        inner: Shape,
+        border_radius: f32,
+        mass: f32,
+    ) -> Result<Self, crate::errors::ShapeError> {
+        let shape = Shape::try_round(inner, border_radius).ok_or(
+            crate::errors::ShapeError::BadBorderRadius {
+                radius: border_radius,
+            },
+        )?;
+        Ok(Self::build(
+            position,
+            mass,
+            RESTITUTION_DEFAULT,
+            FRICTION_DEFAULT,
+            shape,
+        ))
+    }
+
+    /// Checked static half-space body: the infinite plane through
+    /// `position` with outward `normal` (see [`Shape::HalfSpace`]).
+    /// Restitution 0.3, friction 0.6 (floors want grip, like terrain).
+    /// Static-only: an infinite plane has no finite inertia, so dynamic
+    /// mass is a typed error instead of a silently grounded body.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::errors::ShapeError::BadNormal`] on zero/non-finite input,
+    /// [`crate::errors::ShapeError::DynamicHalfSpace`] on dynamic mass.
+    pub fn try_new_halfspace(
+        position: Vec3,
+        normal: Vec3,
+        mass: f32,
+    ) -> Result<Self, crate::errors::ShapeError> {
+        if !MassKind::from_f32(mass).is_fixed() {
+            return Err(crate::errors::ShapeError::DynamicHalfSpace { mass });
+        }
+        let shape = Shape::try_halfspace(normal).ok_or(crate::errors::ShapeError::BadNormal)?;
+        Ok(Self::build(
+            position,
+            mass,
+            RESTITUTION_DEFAULT,
+            FRICTION_TERRAIN,
+            shape,
+        ))
+    }
+
     /// Builder-style collision-layer and mask configuration.
     ///
     /// A pair is eligible only when both directions agree: `self`'s mask
@@ -842,6 +940,58 @@ impl RigidBody {
     /// Current collision role as a [`crate::flags::BodyRole`].
     pub fn role(&self) -> crate::flags::BodyRole {
         crate::flags::BodyRole::from(self.is_trigger)
+    }
+
+    /// Builder-style bullet (full-CCD) configuration.
+    ///
+    /// A bullet always sweeps the nonlinear (rotating) TOI path,
+    /// bypassing the travel gate; non-bullet bodies keep the legacy
+    /// policy (linear sweep plus the gated angular sweep).
+    pub fn with_ccd_enabled(mut self, ccd_enabled: bool) -> Self {
+        self.set_ccd_enabled(ccd_enabled);
+        self
+    }
+
+    /// Enables or disables the bullet (full-CCD) upgrade in place.
+    pub fn set_ccd_enabled(&mut self, ccd_enabled: bool) {
+        self.ccd_enabled = ccd_enabled;
+    }
+
+    /// Sets the contact-force report threshold (N) for this body (Rapier
+    /// `ContactForceEventThreshold` parity): finite values opt in
+    /// (negatives clamp to `0.0` — every touching pair reports),
+    /// non-finite values opt out (`INFINITY`, the default).
+    pub fn set_contact_force_threshold(&mut self, threshold: f32) {
+        self.contact_force_threshold = if threshold.is_finite() {
+            threshold.max(0.0)
+        } else {
+            f32::INFINITY
+        };
+    }
+
+    /// Builder-style variant of [`Self::set_contact_force_threshold`].
+    pub fn with_contact_force_threshold(mut self, threshold: f32) -> Self {
+        self.set_contact_force_threshold(threshold);
+        self
+    }
+
+    /// Disables contact-force reporting for this body (restores the
+    /// `INFINITY` default).
+    pub fn clear_contact_force_threshold(&mut self) {
+        self.contact_force_threshold = f32::INFINITY;
+    }
+
+    /// `true` when this body opts into
+    /// [`crate::trigger::ContactForceEvent`] reporting (finite threshold).
+    pub fn contact_force_events_enabled(&self) -> bool {
+        self.contact_force_threshold.is_finite()
+    }
+
+    /// `true` when this body carries the bullet (full-CCD) upgrade and
+    /// takes part in dynamics (Rapier `is_bullet`: dynamic plus
+    /// `ccd_enabled`).
+    pub fn is_bullet(&self) -> bool {
+        self.ccd_enabled && self.body_type == BodyType::Dynamic
     }
 
     /// Builder-style variant of [`RigidBody::set_orientation`].
@@ -1002,5 +1152,58 @@ mod tests {
         body.make_dynamic(PositiveF32::try_new(1.0).expect("valid mass"));
         assert_eq!(body.body_type, BodyType::Dynamic);
         assert!((body.inv_mass - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn halfspace_body_is_static_and_rejects_dynamics() {
+        use crate::errors::ShapeError;
+        // Dynamic mass is a typed error, never a silent grounding.
+        assert_eq!(
+            RigidBody::try_new_halfspace(Vec3::ZERO, Vec3::Y, 1.0).expect_err("dynamic refused"),
+            ShapeError::DynamicHalfSpace { mass: 1.0 }
+        );
+        assert_eq!(
+            RigidBody::try_new_halfspace(Vec3::ZERO, Vec3::ZERO, 0.0)
+                .expect_err("zero normal refused"),
+            ShapeError::BadNormal
+        );
+        let floor =
+            RigidBody::try_new_halfspace(Vec3::ZERO, Vec3::Y, 0.0).expect("static plane builds");
+        assert_eq!(floor.body_type, BodyType::Static);
+        assert_eq!(floor.inv_mass, 0.0);
+        assert!(matches!(floor.shape, Shape::HalfSpace { .. }));
+    }
+
+    #[test]
+    fn compound_and_round_bodies_reject_degenerates() {
+        use crate::errors::ShapeError;
+        assert_eq!(
+            RigidBody::try_new_compound(Vec3::ZERO, vec![], 1.0).expect_err("empty refused"),
+            ShapeError::EmptyCompound
+        );
+        assert_eq!(
+            RigidBody::try_new_round(Vec3::ZERO, Shape::Sphere { radius: 1.0 }, 0.0, 1.0)
+                .expect_err("zero radius refused"),
+            ShapeError::BadBorderRadius { radius: 0.0 }
+        );
+        let body = RigidBody::try_new_compound(
+            Vec3::ZERO,
+            vec![(
+                Shape::Box {
+                    half_extents: Vec3::ONE,
+                },
+                Pose::IDENTITY,
+            )],
+            2.0,
+        )
+        .expect("single-box compound builds");
+        assert_eq!(body.body_type, BodyType::Dynamic);
+        assert_eq!(
+            body.inertia,
+            Shape::Box {
+                half_extents: Vec3::ONE
+            }
+            .inertia(2.0)
+        );
     }
 }

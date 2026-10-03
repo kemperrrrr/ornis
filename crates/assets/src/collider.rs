@@ -44,9 +44,45 @@ pub enum ColliderDesc {
     /// contact is undefined in the solver, so prefer this for static
     /// level geometry, not dynamic bodies.
     TriMesh,
+    /// Rigid union of placed child recipes (P5): each child owns a local
+    /// [`CompoundChild`] placement. `None` children are skipped (a
+    /// render-only part inside a compound); an all-`None`/empty union is a
+    /// projection error, not a silent empty body.
+    Compound {
+        /// Child recipes with their compound-local placements.
+        children: Vec<CompoundChild>,
+    },
+    /// Convex recipe dilated by `border_radius` (P5): contacts form a full
+    /// radius earlier than the inner surface. The inner `None` recipe is a
+    /// projection error (a rounded nothing is meaningless).
+    Round {
+        /// Inner recipe to dilate.
+        inner: Box<ColliderDesc>,
+        /// Dilation radius in world units (must be finite and `> 0`).
+        border_radius: f32,
+    },
+    /// Infinite static plane through the entity position with outward
+    /// `normal` (P5): the floor primitive. Static-only — projecting with a
+    /// dynamic mass is a projection error, never a silent grounding.
+    HalfSpace {
+        /// Outward plane normal in local space (need not be unit).
+        normal: [f32; 3],
+    },
     /// Explicitly no collider: suppresses even the exact auto recipes.
     /// This is how a render-only sphere opts out of physics.
     None,
+}
+
+/// One compound child: a collider recipe with its compound-local placement
+/// (translation plus unit quaternion `[x, y, z, w]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompoundChild {
+    /// Child collider recipe (`None` skips this part).
+    pub shape: ColliderDesc,
+    /// Child origin in the compound frame.
+    pub translation: [f32; 3],
+    /// Child orientation in the compound frame (`[x, y, z, w]`).
+    pub rotation: [f32; 4],
 }
 
 /// Exact auto recipe for `mesh`, or `None` when no exact recipe exists.
