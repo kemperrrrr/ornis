@@ -3,11 +3,12 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "editor-only")]
 use crossbeam_channel::unbounded;
+#[cfg(feature = "editor-only")]
 use editor_backend::RemoteEditor;
-// Only the native-mode loop types the channels explicitly.
 #[cfg(not(feature = "editor-only"))]
-use editor_backend::{GameEvent, UiCommand};
+use glam::Vec3;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::physics_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
@@ -15,32 +16,25 @@ use ornis_app::{
     GameWorld, install_gameplay_physics_bridge, install_object_animation, spawn_static_floor,
 };
 #[cfg(not(feature = "editor-only"))]
+use ornis_assets::scene::Scene;
+#[cfg(not(feature = "editor-only"))]
 use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::bridge::install_gameplay_audio_bridge;
 #[cfg(not(feature = "editor-only"))]
 use ornis_gameplay::install_gameplay;
+#[cfg(not(feature = "editor-only"))]
+use ornis_physics::RigidBody;
+#[cfg(not(feature = "editor-only"))]
+use ornis_render::{OrbitCamera, install_orbit_camera};
+#[cfg(not(feature = "editor-only"))]
+use ornis_runner::{NativeOptions, run_native};
 
-/// Default editor HTTP port (loopback).
-const EDITOR_HTTP_PORT: u16 = 3420;
-/// Native window width (px).
-const WINDOW_WIDTH: u32 = 800;
-/// Native window height (px).
-const WINDOW_HEIGHT: u32 = 600;
-/// Storage buffers required by the showcase shader stage.
-const MAX_STORAGE_BUFFERS_PER_STAGE: u32 = 8;
-/// Default procedural sphere sector count.
-const DEFAULT_SPHERE_SEGMENTS: u32 = 32;
-/// Default procedural sphere stack count.
-const DEFAULT_SPHERE_RINGS: u32 = 24;
+#[cfg(feature = "editor-only")]
+use ornis_runner::EDITOR_HTTP_PORT;
+
 /// Earth-surface gravity along −Y (m/s²).
 const DEFAULT_GRAVITY_Y: f32 = -9.81;
-/// Pixel-delta → line-delta scale for mouse wheel.
-const WHEEL_PIXELS_PER_LINE: f32 = 100.0;
-/// Raw wire code for mouse Back.
-const MOUSE_BACK: u8 = 3;
-/// Raw wire code for mouse Forward.
-const MOUSE_FORWARD: u8 = 4;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // "BROWSER-ONLY EDITOR" MODE (editor-only)
@@ -87,580 +81,74 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Run with: cargo run
 // winit window, wgpu rendering, a 3D scene of spheres (OpenPBR).
+// Animation demo: `cargo run --example anim` (starter character via
+// the shared [`ornis_runner`] shell, not a binary flag).
 // The browser editor server is opt-in here: `cargo run -- --remote-editor`
 // serves it on port 3420 (off by default — audit §6.2, backlog #16).
 // The native UI overlay was removed with the ornis-ui crate — the editor
 // lives in the browser (see editor-only mode / cargo xtask editor).
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// Spheres showcase world: RON scene plus physics bodies, audio and
+/// object animation. The shell ([`ornis_runner::run_native`]) owns the
+/// window; content builders like this one stay here.
 #[cfg(not(feature = "editor-only"))]
-mod native {
-    pub use crossbeam_channel::{Receiver, Sender};
-    pub use glam::Vec3;
-    pub use ornis_core::InputState;
-    pub use ornis_physics::RigidBody;
-    pub use winit::application::ApplicationHandler;
-    pub use winit::dpi::PhysicalSize;
-    pub use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-    pub use winit::event_loop::{ActiveEventLoop, EventLoop};
-    pub use winit::keyboard::PhysicalKey;
-    pub use winit::window::WindowAttributes;
-
-    pub use ornis_assets::scene::Scene;
-    pub use ornis_render::{
-        OrbitCamera, RenderFrame3D, Renderer3D, Technique, create_sphere, install_orbit_camera,
+fn showcase_engine() -> (GameWorld, u32) {
+    let Ok(scene) = Scene::from_ron(include_str!("../assets/demo_scene.ron")) else {
+        let runtime = GameWorld::default();
+        return (runtime, 0);
     };
-}
-
-#[cfg(not(feature = "editor-only"))]
-use native::*;
-
-#[cfg(not(feature = "editor-only"))]
-use ornis_app::session::clamp_frame_dt;
-#[cfg(not(feature = "editor-only"))]
-use std::time::Instant;
-
-#[cfg(not(feature = "editor-only"))]
-struct GameApp {
-    context: Option<GameContext>,
-    remote_editor: Option<RemoteEditor>,
-}
-
-#[cfg(not(feature = "editor-only"))]
-struct GameContext {
-    window: winit::window::Window,
-    runtime: GameWorld,
-    remote_cmd_rx: Receiver<UiCommand>,
-    remote_ev_tx: Sender<GameEvent>,
-    entity_count: u32,
-    /// Wall clock of the last presented frame: `render_frame` measures the
-    /// real delta against it (clamped, see [`clamp_frame_dt`]).
-    last_frame: Instant,
-}
-
-#[cfg(not(feature = "editor-only"))]
-impl GameApp {
-    fn new() -> Self {
-        GameApp {
-            context: None,
-            remote_editor: None,
-        }
+    let entity_count = scene.entities.len() as u32;
+    let mut runtime = GameWorld::from_scene(&scene);
+    install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
+    install_physics(runtime.engine_mut(), Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
+    install_gameplay(runtime.engine_mut());
+    install_gameplay_physics_bridge(runtime.engine_mut());
+    // Audio steps in the same DAG (after motion); silently skipped when
+    // no output device is available. No showcase entity carries an
+    // AudioSource yet, so this is a no-op until content arrives.
+    if let Some(audio) = AudioPlugin::try_default() {
+        audio.install(runtime.engine_mut());
     }
-
-    fn context(&mut self) -> Option<&mut GameContext> {
-        self.context.as_mut()
-    }
-
-    fn initialize(
-        event_loop: &ActiveEventLoop,
-        remote_cmd_rx: Receiver<UiCommand>,
-        remote_ev_tx: Sender<GameEvent>,
-    ) -> Result<GameContext, String> {
-        let window_attrs = WindowAttributes::default()
-            .with_title("Ornis Engine")
-            .with_inner_size(PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
-        let window = event_loop
-            .create_window(window_attrs)
-            .map_err(|e| format!("window creation: {e}"))?;
-
-        let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            memory_budget_thresholds: Default::default(),
-            backend_options: Default::default(),
-            display: None,
-        });
-
-        let surface_target =
-            unsafe { wgpu::SurfaceTargetUnsafe::from_display_and_window(event_loop, &window) }
-                .map_err(|e| format!("surface target: {e}"))?;
-        let surface: wgpu::Surface<'static> = unsafe {
-            instance
-                .create_surface_unsafe(surface_target)
-                .map_err(|e| format!("surface creation: {e}"))?
+    // Listener pose/gain sync; no-op until a host is installed.
+    install_gameplay_audio_bridge(runtime.engine_mut());
+    // Object animation in the same DAG (after body poses); no-op
+    // until an entity carries animation lanes.
+    install_object_animation(runtime.engine_mut());
+    {
+        let entities = runtime.entities().to_vec();
+        let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
+            return (runtime, entity_count);
         };
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-            apply_limit_buckets: false,
-        }))
-        .map_err(|_| "no adapter found".to_string())?;
-
-        let mut limits = adapter.limits();
-        limits.max_storage_buffers_per_shader_stage = MAX_STORAGE_BUFFERS_PER_STAGE;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("ornis device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            memory_hints: wgpu::MemoryHints::Performance,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            trace: wgpu::Trace::Off,
-        }))
-        .map_err(|e| format!("device request: {e}"))?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| {
-                matches!(
-                    f,
-                    wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Bgra8UnormSrgb
-                )
-            })
-            .unwrap_or_else(|| {
-                surface_caps
-                    .formats
-                    .first()
-                    .copied()
-                    .unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb)
-            });
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-        surface.configure(&device, &surface_config);
-
-        let renderer3d = Renderer3D::new(&device, &surface_config, 1);
-        let frame3d = RenderFrame3D::new_with(
-            surface_format,
-            (surface_config.width, surface_config.height),
-            Technique::Hybrid,
-            ornis_render::Bloom::Off,
-        );
-        let sphere_mesh =
-            create_sphere(&device, 1.0, DEFAULT_SPHERE_SEGMENTS, DEFAULT_SPHERE_RINGS);
-
-        let (mut runtime, entity_count) = Self::showcase_engine();
-        // S7: GPU state lives as Engine resources, RenderSubmit/RenderPresent run in schedule.
-        {
-            use ornis_render::gpu_resources::{
-                GpuFrameState, GpuMesh, GpuSurfaceState, install_gpu_resources,
+        for (index, entity) in entities.into_iter().enumerate() {
+            let description = &scene.entities[index];
+            let radius = match &description.mesh {
+                ornis_assets::scene::MeshDesc::Sphere { radius, .. } => radius.get(),
+                // Custom/Box/Plane/Cylinder need an explicit validated collider recipe.
+                ornis_assets::scene::MeshDesc::Custom { .. }
+                | ornis_assets::scene::MeshDesc::Box { .. }
+                | ornis_assets::scene::MeshDesc::Plane { .. }
+                | ornis_assets::scene::MeshDesc::Cylinder { .. } => continue,
             };
-            install_gpu_resources(
-                runtime.engine_mut(),
-                device.clone(),
-                queue.clone(),
-                surface,
-                GpuSurfaceState {
-                    size: (surface_config.width, surface_config.height),
-                    format: surface_format,
-                },
-                GpuFrameState {
-                    renderer: renderer3d,
-                    frame3d,
-                },
-                GpuMesh {
-                    mesh: sphere_mesh,
-                    params: (DEFAULT_SPHERE_SEGMENTS, DEFAULT_SPHERE_RINGS),
-                },
+            let mass = if index == 0 { 1.0 } else { 0.0 };
+            store.insert(
+                entity,
+                RigidBody::new_sphere(
+                    Vec3::from_array(description.transform.translation),
+                    radius,
+                    mass,
+                ),
             );
         }
-
-        Ok(GameContext {
-            window,
-            runtime,
-            remote_cmd_rx,
-            remote_ev_tx,
-            entity_count,
-            last_frame: Instant::now(),
-        })
+        // Hidden static floor: it has a physics component but no render
+        // components, so it does not enter the frame upload.
+        let _ = spawn_static_floor(runtime.engine_mut());
     }
-
-    fn showcase_engine() -> (GameWorld, u32) {
-        let Ok(scene) = Scene::from_ron(include_str!("../assets/demo_scene.ron")) else {
-            let runtime = GameWorld::default();
-            return (runtime, 0);
-        };
-        let entity_count = scene.entities.len() as u32;
-        let mut runtime = GameWorld::from_scene(&scene);
-        install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
-        install_physics(runtime.engine_mut(), Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
-        install_gameplay(runtime.engine_mut());
-        install_gameplay_physics_bridge(runtime.engine_mut());
-        // Audio steps in the same DAG (after motion); silently skipped when
-        // no output device is available. No showcase entity carries an
-        // AudioSource yet, so this is a no-op until content arrives.
-        if let Some(audio) = AudioPlugin::try_default() {
-            audio.install(runtime.engine_mut());
-        }
-        // Listener pose/gain sync; no-op until a host is installed.
-        install_gameplay_audio_bridge(runtime.engine_mut());
-        // Object animation in the same DAG (after body poses); no-op
-        // until an entity carries animation lanes.
-        install_object_animation(runtime.engine_mut());
-        {
-            let entities = runtime.entities().to_vec();
-            let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
-                return (runtime, entity_count);
-            };
-            for (index, entity) in entities.into_iter().enumerate() {
-                let description = &scene.entities[index];
-                let radius = match &description.mesh {
-                    ornis_assets::scene::MeshDesc::Sphere { radius, .. } => radius.get(),
-                    // Custom/Box/Plane/Cylinder need an explicit validated collider recipe.
-                    ornis_assets::scene::MeshDesc::Custom { .. }
-                    | ornis_assets::scene::MeshDesc::Box { .. }
-                    | ornis_assets::scene::MeshDesc::Plane { .. }
-                    | ornis_assets::scene::MeshDesc::Cylinder { .. } => continue,
-                };
-                let mass = if index == 0 { 1.0 } else { 0.0 };
-                store.insert(
-                    entity,
-                    RigidBody::new_sphere(
-                        Vec3::from_array(description.transform.translation),
-                        radius,
-                        mass,
-                    ),
-                );
-            }
-            // Hidden static floor: it has a physics component but no render
-            // components, so it does not enter the frame upload.
-            let _ = spawn_static_floor(runtime.engine_mut());
-        }
-        runtime.frame(0.0);
-        (runtime, entity_count)
-    }
-
-    fn update_input(ctx: &mut GameContext, update: impl FnOnce(&mut InputState)) {
-        if let Some(input) = ctx
-            .runtime
-            .engine_mut()
-            .world_mut()
-            .resources_mut()
-            .get_mut::<InputState>()
-        {
-            update(input);
-        }
-    }
-
-    fn process_remote_commands(ctx: &mut GameContext) {
-        while let Ok(command) = ctx.remote_cmd_rx.try_recv() {
-            // Browser input channel (WS bidirectionally + POST /api/input):
-            // replace authoritative InputState in the unified World (single
-            // World/Engine/Schedule, no polling / scene.ron fallback). The
-            // unwrap path handles WithRequestId(Input) for completeness even
-            // though the transport never wraps input.
-            let input = match &command {
-                UiCommand::Input { input } => Some(input.clone()),
-                UiCommand::WithRequestId { command, .. } => match &**command {
-                    UiCommand::Input { input } => Some(input.clone()),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(input) = input {
-                Self::apply_browser_input(ctx, &input);
-                continue;
-            }
-            let (request_id, command) = match command {
-                UiCommand::WithRequestId {
-                    request_id,
-                    command,
-                } => (Some(request_id), *command),
-                command => (None, command),
-            };
-            let success = Self::execute_native_command(ctx, &command);
-            if let Some(request_id) = request_id {
-                ctx.remote_ev_tx
-                    .send(GameEvent::CommandCompleted {
-                        request_id,
-                        command: Self::command_name(&command),
-                        success,
-                        error: (!success).then_some("native showcase command is a stub".into()),
-                    })
-                    .ok();
-            }
-        }
-    }
-
-    fn execute_native_command(ctx: &mut GameContext, command: &UiCommand) -> bool {
-        let UiCommand::Custom {
-            cmd_type,
-            json_data: _,
-        } = command
-        else {
-            return false;
-        };
-        match cmd_type.as_str() {
-            "create_entity" => {
-                ctx.entity_count += 1;
-                let id = ctx.entity_count;
-                ctx.remote_ev_tx
-                    .send(GameEvent::CustomEvent {
-                        cmd_type: "entity_created".into(),
-                        json_data: format!(r#"{{"entity_id":{id}}}"#),
-                    })
-                    .ok();
-                true
-            }
-            "list_entities" => {
-                ctx.remote_ev_tx
-                    .send(GameEvent::CustomEvent {
-                        cmd_type: "entity_list".into(),
-                        json_data: format!(r#"{{"count":{}}}"#, ctx.entity_count),
-                    })
-                    .ok();
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn command_name(command: &UiCommand) -> editor_backend::ipc::EditorCommand {
-        use editor_backend::ipc::EditorCommand;
-        match command {
-            UiCommand::CreateEntity => EditorCommand::CreateEntity,
-            UiCommand::DestroyEntity { .. } => EditorCommand::DestroyEntity,
-            UiCommand::SetComponent { .. } => EditorCommand::SetComponent,
-            UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
-            UiCommand::Input { .. } => EditorCommand::Input,
-            UiCommand::WithRequestId { command, .. } => Self::command_name(command),
-        }
-    }
-
-    fn apply_browser_input(ctx: &mut GameContext, input: &editor_backend::BrowserInput) {
-        let world = ctx.runtime.engine_mut().world_mut();
-        let state = world.resources_mut().get_mut::<InputState>();
-        // Always ensure the resource exists even if never initialized elsewhere.
-        let state = if let Some(s) = state {
-            s
-        } else {
-            world.resources_mut().insert(InputState::default());
-            let Some(s) = world.resources_mut().get_mut::<InputState>() else {
-                return;
-            };
-            s
-        };
-        state.apply_snapshot(
-            &input.pressed_keys,
-            &input.pressed_mouse_buttons,
-            input.pointer_position,
-            input.pointer_delta,
-            input.wheel_delta,
-        );
-    }
-
-    fn render_frame(ctx: &mut GameContext) {
-        // S7 step 2: the whole GPU frame (upload + acquire → record → submit → present)
-        // runs in Engine::schedule as RenderSubmit/RenderPresent. Only the
-        // frame stays here (fixed + variable schedules + CPU extraction); the Present
-        // system acquires via surface.get_current_texture and renders via frame3d itself.
-        //
-        // Vsync is OFF: the surface is configured with
-        // `wgpu::PresentMode::AutoNoVsync` (see `initialize` and the
-        // `Resized` handler), so frames are unthrottled and the wall-clock
-        // interval varies with load. The simulation therefore measures the
-        // real delta since the last frame (clamped against hitches by
-        // `clamp_frame_dt`, at most ~6 fixed steps) instead of assuming
-        // 1/60 s — sim speed is independent of FPS; the engine's bounded
-        // fixed accumulator absorbs the residual jitter.
-        let elapsed = ctx.last_frame.elapsed();
-        ctx.last_frame = Instant::now();
-        ctx.runtime.frame_secs(clamp_frame_dt(elapsed));
-    }
-}
-
-#[cfg(not(feature = "editor-only"))]
-impl ApplicationHandler for GameApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let (cmd_tx, cmd_rx) = unbounded();
-            let (ev_tx, ev_rx) = unbounded();
-            // The remote editor server is a dev-tool: opt-in in native
-            // mode; when off, the channels simply idle (`process_remote_commands`
-            // polls an empty/disconnected receiver, sends are `.ok()`-dropped).
-            if remote_editor_requested() {
-                self.remote_editor = Some(RemoteEditor::start(EDITOR_HTTP_PORT, cmd_tx, ev_rx));
-            }
-            match Self::initialize(event_loop, cmd_rx, ev_tx) {
-                Ok(ctx) => {
-                    self.context = Some(ctx);
-                }
-                Err(e) => {
-                    eprintln!("ornis: failed to initialize: {e}");
-                }
-            }
-        }));
-        if let Err(e) = result {
-            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown cause".to_string()
-            };
-            eprintln!("ornis: initialization panicked: {msg}");
-        }
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: winit::window::WindowId,
-        event: WindowEvent,
-    ) {
-        let ctx = self.context();
-        let Some(ctx) = ctx else { return };
-        match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-            }
-            WindowEvent::RedrawRequested => {
-                Self::render_frame(ctx);
-            }
-            WindowEvent::Resized(size) => {
-                let (w, h) = (size.width.max(1), size.height.max(1));
-                // Sync the ECS resources with the new size — reconfigure the
-                // Surface (held in a resource) and update GpuFrameState.
-                let device = ctx
-                    .runtime
-                    .engine()
-                    .world()
-                    .resources()
-                    .get::<ornis_render::gpu_resources::GpuDevice>()
-                    .map(|d| d.0.clone());
-                if let Some(state) = ctx
-                    .runtime
-                    .engine_mut()
-                    .world_mut()
-                    .resources_mut()
-                    .get_mut::<ornis_render::gpu_resources::GpuSurfaceState>()
-                {
-                    state.size = (w, h);
-                }
-                if let (Some(device), Some(surface)) = (
-                    device,
-                    ctx.runtime
-                        .engine()
-                        .world()
-                        .resources()
-                        .get::<ornis_render::gpu_resources::GpuSurface>(),
-                ) {
-                    let guard = surface.0.lock().unwrap_or_else(|e| e.into_inner());
-                    // Take the format from the updated GpuSurfaceState.
-                    let format = ctx
-                        .runtime
-                        .engine()
-                        .world()
-                        .resources()
-                        .get::<ornis_render::gpu_resources::GpuSurfaceState>()
-                        .map(|s| s.format)
-                        .unwrap_or(wgpu::TextureFormat::Bgra8UnormSrgb);
-                    guard.configure(
-                        &device,
-                        &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format,
-                            width: w,
-                            height: h,
-                            present_mode: wgpu::PresentMode::AutoNoVsync,
-                            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                            view_formats: vec![],
-                            desired_maximum_frame_latency: 2,
-                            color_space: wgpu::SurfaceColorSpace::Auto,
-                        },
-                    );
-                }
-                if let (Some(fs), Some(dev)) = (
-                    ctx.runtime
-                        .engine()
-                        .world()
-                        .resources()
-                        .get::<std::sync::Mutex<ornis_render::gpu_resources::GpuFrameState>>(),
-                    ctx.runtime
-                        .engine()
-                        .world()
-                        .resources()
-                        .get::<ornis_render::gpu_resources::GpuDevice>(),
-                ) {
-                    let mut fs = fs.lock().unwrap_or_else(|e| e.into_inner());
-                    fs.renderer.resize(&dev.0, w, h);
-                    fs.frame3d.set_surface_size(w, h);
-                }
-                ctx.window.request_redraw();
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                let pressed = matches!(event.state, ElementState::Pressed);
-                if let PhysicalKey::Code(code) = event.physical_key {
-                    Self::update_input(ctx, |input| input.set_key(code as u32, pressed));
-                }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                let code = match button {
-                    MouseButton::Left => 0,
-                    MouseButton::Right => 1,
-                    MouseButton::Middle => 2,
-                    MouseButton::Back => MOUSE_BACK,
-                    MouseButton::Forward => MOUSE_FORWARD,
-                    MouseButton::Other(code) => code.min(u16::from(u8::MAX)) as u8,
-                };
-                let pressed = matches!(state, ElementState::Pressed);
-                Self::update_input(ctx, |input| {
-                    if pressed {
-                        input.clear_frame_transients();
-                    }
-                    input.set_mouse_button(code, pressed);
-                });
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                Self::update_input(ctx, |input| {
-                    input.set_pointer_position([position.x as f32, position.y as f32]);
-                });
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let amount = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(position) => {
-                        position.y as f32 / WHEEL_PIXELS_PER_LINE
-                    }
-                };
-                Self::update_input(ctx, |input| input.add_wheel_delta(amount));
-            }
-            WindowEvent::Focused(false) => {
-                Self::update_input(ctx, InputState::clear_all);
-            }
-            _ => {}
-        }
-    }
-
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(ctx) = &mut self.context {
-            Self::process_remote_commands(ctx);
-            ctx.window.request_redraw();
-        }
-    }
-
-    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        self.context = None;
-    }
-}
-
-/// Native mode: the remote editor HTTP server is opt-in (`--remote-editor`,
-/// serves on port 3420), not on by default — the engine binary runs fine
-/// without the editor dev-tool (audit §6.2, backlog #16). The `editor-only`
-/// mode always serves it: that mode IS the editor.
-#[cfg(not(feature = "editor-only"))]
-fn remote_editor_requested() -> bool {
-    std::env::args().any(|a| a == "--remote-editor")
+    runtime.frame(0.0);
+    (runtime, entity_count)
 }
 
 #[cfg(not(feature = "editor-only"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoop::new()?;
-    let mut app = GameApp::new();
-    event_loop.run_app(&mut app)?;
-    Ok(())
+    run_native(showcase_engine, NativeOptions::from_env("Ornis Engine"))
 }

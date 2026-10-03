@@ -173,9 +173,14 @@ impl FramePass for GbufferPass {
             material_params,
             depth,
         };
-        frame
-            .renderer
-            .render_gbuffer(frame.encoder, &g, frame.mesh, frame.instance_count);
+        frame.renderer.render_gbuffer_with_custom(
+            frame.device,
+            frame.encoder,
+            &g,
+            frame.mesh,
+            frame.instance_count,
+            frame.customs,
+        );
     }
 }
 
@@ -217,11 +222,12 @@ impl FramePass for LightingPass {
             material_params,
             depth,
         };
-        frame.renderer.render_shadows(
+        frame.renderer.render_shadows_with_custom(
             frame.device,
             frame.encoder,
             frame.mesh,
             frame.instance_count,
+            frame.customs,
         );
         frame
             .renderer
@@ -394,23 +400,25 @@ impl<M: ForwardMode> FramePass for Forward<M> {
         // runs in that technique, so without this the shadow maps stay
         // at texture-init zero and every shadowed light goes fully dark.
         if M::SHADOWS.is_enabled() {
-            frame.renderer.render_shadows(
+            frame.renderer.render_shadows_with_custom(
                 frame.device,
                 frame.encoder,
                 frame.mesh,
                 frame.instance_count,
+                frame.customs,
             );
         }
         let (Some(depth), Some(hdr_fwd)) = (views.get::<Depth>(), views.get::<HdrFwd>()) else {
             return;
         };
-        frame.renderer.render_forward(
+        frame.renderer.render_forward_with_custom(
             frame.encoder,
             depth,
             hdr_fwd,
             frame.mesh,
             frame.instance_count,
             M::DEPTH.clears_depth(),
+            frame.customs,
         );
     }
 }

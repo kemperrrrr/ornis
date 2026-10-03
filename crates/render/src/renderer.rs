@@ -4,17 +4,19 @@
 //! [`crate::render_backend::RenderBackend`]; see also [`crate::frame_exec`]
 //! for the render-graph-driven equivalent.
 
+use crate::extraction::CustomMeshEntry;
 use crate::mesh::{Mesh, SkinnedVertex, Vertex};
 use crate::shaders;
 use crate::skinning::{
-    GBUFFER_SKINNED_RESOURCES, PALETTE_BYTE_SIZE, PaletteHandle, skinned_entry_point,
-    wgsl_vertex_source_skinned,
+    GBUFFER_SKINNED_RESOURCES, PALETTE_BYTE_SIZE, PaletteHandle, SkinnedDraw, palette_upload_bytes,
+    skinned_entry_point, wgsl_vertex_source_skinned,
 };
 use crate::textures::{
     CpuImage, GpuTexture, MaterialTextureSet, TextureCache, TextureRole,
     sampler_descriptor_for_role, upload_texture,
 };
 use glam::Mat4;
+use ornis_animation::SkinningMode;
 use ornis_assets::scene::LightDesc;
 use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
 use ornis_macros::WgslStruct;
@@ -1108,6 +1110,120 @@ pub fn upload_skinned_mesh(
         num_indices: indices.len() as u32,
         vertex_count: vertices.len() as u32,
     })
+}
+
+/// Upload already-converted classic [`Vertex`] rows as their own [`Mesh`].
+///
+/// Production path for [`CustomMeshEntry`](crate::extraction::CustomMeshEntry)
+/// vertices: the extraction's [`SoupCache`](crate::mesh_upload::SoupCache)
+/// already converted the soup (normals, box-projection UVs, fallback
+/// tangents), so this only moves the rows into buffers created exactly like
+/// [`upload_custom_mesh`]. Classic-row counterpart of
+/// [`upload_skinned_mesh`] with the same validation shape.
+///
+/// # Errors
+///
+/// Returns [`crate::mesh_upload::UploadError::EmptyMesh`] when either slice
+/// is empty, [`crate::mesh_upload::UploadError::InvalidMesh`] when the
+/// index list is not a multiple of three or points past the vertices —
+/// callers skip the entry, never a stub mesh.
+pub fn upload_vertex_rows(
+    device: &wgpu::Device,
+    vertices: &[Vertex],
+    indices: &[u32],
+) -> Result<Mesh, crate::mesh_upload::UploadError> {
+    use crate::mesh_upload::UploadError;
+    use ornis_mesh_editor::MeshError;
+    if vertices.is_empty() || indices.is_empty() {
+        return Err(UploadError::EmptyMesh);
+    }
+    if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
+        return Err(UploadError::InvalidMesh(
+            MeshError::IndexCountNotMultipleOfThree,
+        ));
+    }
+    if indices
+        .iter()
+        .any(|index| (*index as usize) >= vertices.len())
+    {
+        return Err(UploadError::InvalidMesh(MeshError::IndexOutOfBounds));
+    }
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("custom mesh vertex buffer"),
+        contents: bytemuck::cast_slice(vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("custom mesh index buffer"),
+        contents: bytemuck::cast_slice(indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    Ok(Mesh {
+        vertex_buffer,
+        index_buffer,
+        num_indices: indices.len() as u32,
+        vertex_count: vertices.len() as u32,
+    })
+}
+
+/// One staged per-entity custom mesh: its GPU buffers plus the instance and
+/// the resolved color/depth draw decisions.
+///
+/// Produced per frame by
+/// [`Renderer3D::stage_custom_meshes`] from
+/// [`FrameUpload::custom_meshes`](crate::extraction::FrameUpload);
+/// consumed by the `*_with_custom` draw methods through
+/// [`CustomGbufferDraw`]. Entries that fail upload are skipped before this
+/// is built — a staged entry always draws, never a stub.
+pub struct StagedCustomMesh {
+    /// Per-entity GPU buffers (classic or interleaved skinned rows).
+    pub mesh: Mesh,
+    /// Model/normal matrices plus the merged-material-table index.
+    pub instance: InstanceData,
+    /// Color-draw decision (`Gpu` binds the staged palette slot).
+    pub draw: SkinnedDraw,
+    /// Depth-pre-pass decision (same rule, shadow failure variant).
+    pub shadow: SkinnedDraw,
+}
+
+/// One custom draw inside a shared g-buffer/shadow/forward pass: the staged
+/// mesh plus its slot in the uploaded per-object buffer.
+///
+/// Slots are dense: sphere instances occupy `0..instance_count`, custom
+/// instances follow in extraction order (see
+/// [`Renderer3D::stage_custom_meshes`]), so each entry draws the
+/// single-instance range `instance_slot..instance_slot + 1` — no per-draw
+/// `queue.write_buffer` rewrite of slot 0, which would collapse every draw
+/// onto the last-written instance under a single ordered submit.
+#[derive(Clone, Copy)]
+pub struct CustomGbufferDraw<'a> {
+    /// Staged per-entity mesh (classic or skinned rows).
+    pub mesh: &'a Mesh,
+    /// Per-object slot holding this entry's instance.
+    pub instance_slot: u32,
+    /// Color-draw decision for this entry.
+    pub draw: SkinnedDraw,
+    /// Depth-pre-pass decision for this entry.
+    pub shadow: SkinnedDraw,
+}
+
+/// Draw items for `staged` entries whose instances were uploaded at
+/// `base_slot..base_slot + staged.len()` (spheres occupy the slots below
+/// `base_slot`). Order-preserving: item `i` borrows staged entry `i`.
+pub fn custom_draw_items(
+    staged: &[StagedCustomMesh],
+    base_slot: u32,
+) -> Vec<CustomGbufferDraw<'_>> {
+    staged
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| CustomGbufferDraw {
+            mesh: &entry.mesh,
+            instance_slot: base_slot + index as u32,
+            draw: entry.draw,
+            shadow: entry.shadow,
+        })
+        .collect()
 }
 
 /// Identity clip matrix for lights that cast no shadow.
@@ -2415,7 +2531,31 @@ impl Renderer3D {
         mesh: &Mesh,
         instance_count: u32,
     ) {
-        if instance_count == 0 {
+        self.render_shadows_with_custom(device, encoder, mesh, instance_count, &[]);
+    }
+
+    /// Depth pre-pass with per-entity custom draws: the same layers and
+    /// cube faces [`render_shadows`](Self::render_shadows) covers, one
+    /// render pass per layer/face cleared once.
+    ///
+    /// The shared `mesh` batch draws first, then each entry of `customs`
+    /// in order: [`SkinnedDraw::Cpu`] entries (from
+    /// [`CustomGbufferDraw::shadow`]) draw through the classic depth
+    /// pipeline from their per-object slot, [`SkinnedDraw::Gpu`] entries
+    /// through the skinned depth pipeline with their palette slot — never
+    /// bind-pose depth for a GPU claim. A stale handle records no commands
+    /// for that entry. With empty `customs` the command stream matches
+    /// [`render_shadows`](Self::render_shadows) exactly. A no-op without
+    /// shadowed lights, or when both the batch and `customs` are empty.
+    pub fn render_shadows_with_custom(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mesh: &Mesh,
+        instance_count: u32,
+        customs: &[CustomGbufferDraw<'_>],
+    ) {
+        if instance_count == 0 && customs.is_empty() {
             return;
         }
         let count = self
@@ -2429,55 +2569,57 @@ impl Renderer3D {
         if count == 0 && cubes == 0 {
             return;
         }
-        let per_object = read_lock(&self.per_object_buffer);
-        let material = read_lock(&self.material_buffer);
         for layer in 0..count as usize {
-            self.render_shadow_layer(
+            self.render_shadow_view_with_custom(
                 device,
                 encoder,
                 mesh,
                 instance_count,
+                customs,
                 &self.shadow_pipeline,
+                &self.skinned_shadow_pipeline,
                 &self.shadow_vp_buffers[layer],
                 &self.shadow_views[layer],
-                &per_object,
-                &material,
             );
         }
         for cube in 0..cubes as usize {
             for face in 0..CUBE_FACE_COUNT {
                 let idx = cube * CUBE_FACE_COUNT + face;
-                self.render_shadow_layer(
+                self.render_shadow_view_with_custom(
                     device,
                     encoder,
                     mesh,
                     instance_count,
+                    customs,
                     &self.shadow_cube_pipeline,
+                    &self.skinned_shadow_cube_pipeline,
                     &self.shadow_cube_vp_buffers[idx],
                     &self.shadow_cube_views[idx],
-                    &per_object,
-                    &material,
                 );
             }
         }
     }
 
-    /// One depth-only draw into a shadow view with the given light-space
-    /// VP bound into the gbuffer `camera` slot. Shared by 2D layers and
-    /// cube faces (same layout, mirrored pipeline for faces).
+    /// One depth-only draw set into a shadow view: the shared batch plus
+    /// the custom entries through the classic pipeline, then the
+    /// GPU-skinned entries through `skinned_pipeline` — a single pass with
+    /// one clear. Shared by 2D layers and cube faces (same layouts,
+    /// mirrored pipeline for faces).
     #[allow(clippy::too_many_arguments)]
-    fn render_shadow_layer(
+    fn render_shadow_view_with_custom(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         mesh: &Mesh,
         instance_count: u32,
-        pipeline: &wgpu::RenderPipeline,
+        customs: &[CustomGbufferDraw<'_>],
+        classic_pipeline: &wgpu::RenderPipeline,
+        skinned_pipeline: &wgpu::RenderPipeline,
         vp_buffer: &wgpu::Buffer,
         view: &wgpu::TextureView,
-        per_object: &wgpu::Buffer,
-        material: &wgpu::Buffer,
     ) {
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow bind group"),
             layout: &self.gbuffer_bind_group_layout,
@@ -2507,11 +2649,74 @@ impl Renderer3D {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(pipeline);
+        pass.set_pipeline(classic_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+        if instance_count > 0 {
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+        }
+        for custom in customs {
+            match custom.shadow {
+                SkinnedDraw::Cpu => {
+                    pass.set_vertex_buffer(0, custom.mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(
+                        custom.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        0..custom.mesh.num_indices,
+                        0,
+                        custom.instance_slot..custom.instance_slot + 1,
+                    );
+                }
+                SkinnedDraw::Gpu(handle) => {
+                    if handle.index()
+                        >= self
+                            .palette_count
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as usize
+                    {
+                        continue;
+                    }
+                    let palette = read_lock(&self.palette_buffer);
+                    let skinned_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("skinned shadow bind group"),
+                        layout: &self.skinned_bind_group_layout,
+                        entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| {
+                            match r.name {
+                                "camera" => Some(vp_buffer.as_entire_binding()),
+                                "per_objects" => Some(per_object.as_entire_binding()),
+                                "materials" => Some(material.as_entire_binding()),
+                                "palette" => {
+                                    Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &palette,
+                                        offset: handle.byte_offset(),
+                                        size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                                    }))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or_default(),
+                    });
+                    pass.set_pipeline(skinned_pipeline);
+                    pass.set_bind_group(0, &skinned_bind_group, &[]);
+                    pass.set_vertex_buffer(0, custom.mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(
+                        custom.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(
+                        0..custom.mesh.num_indices,
+                        0,
+                        custom.instance_slot..custom.instance_slot + 1,
+                    );
+                    pass.set_pipeline(classic_pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                }
+            }
+        }
     }
 
     /// Render skinned depth pre-passes for one skinned entry: the same
@@ -3762,6 +3967,98 @@ impl Renderer3D {
         }
     }
 
+    /// Stage one frame's custom entries into per-entity GPU meshes.
+    ///
+    /// Production upload for
+    /// [`FrameUpload::custom_meshes`](crate::extraction::FrameUpload)
+    /// (called from `RenderSubmit`): GPU-mode entries upload their joint
+    /// palette ([`palette_upload_bytes`], one slot per entry, in order)
+    /// plus interleaved rows ([`upload_skinned_mesh`]); every other entry
+    /// uploads its converted rows ([`upload_vertex_rows`]). Draw decisions
+    /// come from [`CustomMeshEntry::draw`](crate::extraction::CustomMeshEntry::draw)
+    /// / `shadow_draw` with the uploaded handle — a `MissingPalette` /
+    /// `ShadowWithoutPalette` failure degrades to [`SkinnedDraw::Cpu`],
+    /// never a panic and never a stub draw (unreachable for extracted
+    /// entries — the extraction and upload staging limits agree —
+    /// defensive only). Entries whose buffers fail
+    /// validation, or GPU entries without interleaved rows, are skipped
+    /// (no sphere stub, no invented geometry).
+    ///
+    /// Caching: per-frame re-upload (correctness fallback). CPU-side
+    /// conversion is already deduplicated upstream by the extraction's
+    /// [`SoupCache`](crate::mesh_upload::SoupCache) (identical soups
+    /// convert once per frame); the GPU buffers here are rebuilt every
+    /// frame instead of keyed across frames. A cross-frame GPU cache
+    /// (content-hash → shared buffers with eviction) is the follow-up —
+    /// it needs buffer sharing plus a growth bound this change
+    /// deliberately does not introduce.
+    ///
+    /// Deterministic: output order matches `entries` order (dense lane
+    /// order); no randomness. The caller uploads
+    /// `staged.iter().map(|entry| &entry.instance)` contiguously after
+    /// the sphere instances and builds [`custom_draw_items`] over the
+    /// result, so slots stay dense.
+    pub fn stage_custom_meshes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        entries: &[CustomMeshEntry],
+    ) -> Vec<StagedCustomMesh> {
+        // Palettes first, in entry order: one upload call stages every
+        // GPU-mode palette, so handles come back densely (`0..count`).
+        // Entries that cannot stage bytes keep `None` and resolve through
+        // the `draw()` / `shadow_draw()` CPU fallback below.
+        let palette_bytes: Vec<Option<Vec<u8>>> = entries
+            .iter()
+            .map(|entry| match entry.skinning {
+                SkinningMode::Gpu => entry
+                    .joint_palette
+                    .as_ref()
+                    .and_then(|palette| palette_upload_bytes(palette).ok()),
+                SkinningMode::Cpu => None,
+            })
+            .collect();
+        let staged_palettes: Vec<Vec<u8>> = palette_bytes
+            .iter()
+            .filter_map(|bytes| bytes.clone())
+            .collect();
+        let handles = self.upload_skin_palettes(device, queue, &staged_palettes);
+        // `handles[i]` is the slot of the `i`-th staged palette; walk the
+        // entries with a cursor over them so each GPU entry reclaims its
+        // own handle in order.
+        let mut palette_cursor = 0usize;
+        let mut staged = Vec::with_capacity(entries.len());
+        for (entry, bytes) in entries.iter().zip(&palette_bytes) {
+            let handle = match bytes {
+                Some(_) => {
+                    let handle = handles.get(palette_cursor).copied();
+                    palette_cursor += 1;
+                    handle
+                }
+                None => None,
+            };
+            let draw = entry.draw(handle).unwrap_or(SkinnedDraw::Cpu);
+            let shadow = entry.shadow_draw(handle).unwrap_or(SkinnedDraw::Cpu);
+            let mesh = match draw {
+                SkinnedDraw::Gpu(_) => match entry.skinned_gpu_vertices() {
+                    Some(rows) => upload_skinned_mesh(device, &rows, &entry.indices),
+                    None => continue,
+                },
+                SkinnedDraw::Cpu => upload_vertex_rows(device, &entry.vertices, &entry.indices),
+            };
+            let Ok(mesh) = mesh else {
+                continue;
+            };
+            staged.push(StagedCustomMesh {
+                mesh,
+                instance: entry.instance,
+                draw,
+                shadow,
+            });
+        }
+        staged
+    }
+
     /// Pack one frame's joint palettes into the palette storage buffer and
     /// return one [`PaletteHandle`] per entry, in order.
     ///
@@ -4070,6 +4367,189 @@ impl Renderer3D {
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
     }
 
+    /// Record the gbuffer pass with per-entity custom draws: the shared
+    /// `mesh` batch first, then each entry of `customs` in order — one
+    /// render pass, cleared once.
+    ///
+    /// [`SkinnedDraw::Cpu`] entries draw through the classic pipeline from
+    /// their per-object slot; [`SkinnedDraw::Gpu`] entries draw through
+    /// the skinned pipeline with their palette slot bound. A stale handle
+    /// (at or past the last staged count) records no commands for that
+    /// entry. With empty `customs` the command stream matches
+    /// [`render_gbuffer`](Self::render_gbuffer) exactly (spheres-unchanged
+    /// by construction).
+    pub fn render_gbuffer_with_custom(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        g: &GbufferTargets<'_>,
+        mesh: &Mesh,
+        instance_count: u32,
+        customs: &[CustomGbufferDraw<'_>],
+    ) {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gbuffer pass"),
+            color_attachments: &[
+                Some(wgpu::RenderPassColorAttachment {
+                    view: g.albedo,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: g.normal,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: g.material_id,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: g.world_position,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: g.material_params,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+            ],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: g.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        rpass.set_pipeline(&self.gbuffer_pipeline);
+        {
+            let bind_group = read_lock(&self.gbuffer_bind_group);
+            rpass.set_bind_group(0, &*bind_group, &[]);
+        }
+        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+        for custom in customs {
+            match custom.draw {
+                SkinnedDraw::Cpu => {
+                    rpass.set_pipeline(&self.gbuffer_pipeline);
+                    {
+                        let bind_group = read_lock(&self.gbuffer_bind_group);
+                        rpass.set_bind_group(0, &*bind_group, &[]);
+                    }
+                    rpass.set_vertex_buffer(0, custom.mesh.vertex_buffer.slice(..));
+                    rpass.set_index_buffer(
+                        custom.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    rpass.draw_indexed(
+                        0..custom.mesh.num_indices,
+                        0,
+                        custom.instance_slot..custom.instance_slot + 1,
+                    );
+                }
+                SkinnedDraw::Gpu(handle) => {
+                    if handle.index()
+                        >= self
+                            .palette_count
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as usize
+                    {
+                        continue;
+                    }
+                    let palette = read_lock(&self.palette_buffer);
+                    let per_object = read_lock(&self.per_object_buffer);
+                    let material = read_lock(&self.material_buffer);
+                    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("skinned gbuffer bind group"),
+                        layout: &self.skinned_bind_group_layout,
+                        entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| {
+                            match r.name {
+                                "camera" => Some(self.camera_buffer.as_entire_binding()),
+                                "per_objects" => Some(per_object.as_entire_binding()),
+                                "materials" => Some(material.as_entire_binding()),
+                                "palette" => {
+                                    Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &palette,
+                                        offset: handle.byte_offset(),
+                                        size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                                    }))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .unwrap_or_default(),
+                    });
+                    rpass.set_pipeline(&self.skinned_pipeline);
+                    rpass.set_bind_group(0, &bind_group, &[]);
+                    rpass.set_vertex_buffer(0, custom.mesh.vertex_buffer.slice(..));
+                    rpass.set_index_buffer(
+                        custom.mesh.index_buffer.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    rpass.draw_indexed(
+                        0..custom.mesh.num_indices,
+                        0,
+                        custom.instance_slot..custom.instance_slot + 1,
+                    );
+                }
+            }
+        }
+    }
+
     /// Record the deferred lighting pass: reconstructs surface data from the
     /// g-buffer in `g`, evaluates the OpenPBR BRDF and writes HDR color into `output`.
     pub fn render_lighting(
@@ -4198,6 +4678,86 @@ impl Renderer3D {
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+    }
+
+    /// Record the forward pass with per-entity custom draws: the shared
+    /// `mesh` batch first, then each [`SkinnedDraw::Cpu`] entry of
+    /// `customs` in order — one render pass, cleared once.
+    ///
+    /// There is no skinned forward pipeline (skinned entries are carried
+    /// by the deferred layer), so [`SkinnedDraw::Gpu`] entries are skipped
+    /// here — a deliberate gap, not a silent drop: follow-up work is a
+    /// skinned forward pipeline or routing transparent skinned materials
+    /// through it. With empty `customs` the command stream matches
+    /// [`render_forward`](Self::render_forward) exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_forward_with_custom(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        depth: &wgpu::TextureView,
+        output: &wgpu::TextureView,
+        mesh: &Mesh,
+        instance_count: u32,
+        clear_depth: bool,
+        customs: &[CustomGbufferDraw<'_>],
+    ) {
+        let depth_ops = wgpu::Operations {
+            load: if clear_depth {
+                wgpu::LoadOp::Clear(1.0)
+            } else {
+                wgpu::LoadOp::Load
+            },
+            store: wgpu::StoreOp::Store,
+        };
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("forward pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: output,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(depth_ops),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        rpass.set_pipeline(&self.forward_pass.pipeline);
+        {
+            let bind_group = read_lock(&self.forward_pass.bind_group);
+            rpass.set_bind_group(0, &*bind_group, &[]);
+        }
+        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+        for custom in customs {
+            let SkinnedDraw::Cpu = custom.draw else {
+                continue;
+            };
+            rpass.set_vertex_buffer(0, custom.mesh.vertex_buffer.slice(..));
+            rpass.set_index_buffer(
+                custom.mesh.index_buffer.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            rpass.draw_indexed(
+                0..custom.mesh.num_indices,
+                0,
+                custom.instance_slot..custom.instance_slot + 1,
+            );
+        }
     }
 
     /// Record the textured-forward pass: draws lit geometry with one bound

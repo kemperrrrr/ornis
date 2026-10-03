@@ -57,7 +57,8 @@ use crate::camera::camera_view_projection;
 use crate::extraction::{RenderLights, extract_render_data, max_mesh_params};
 use crate::frame_exec::{BufferRenderContext, RenderFrame3D};
 use crate::mesh::Mesh;
-use crate::renderer::Renderer3D;
+use crate::renderer::{CustomGbufferDraw, Renderer3D, StagedCustomMesh, custom_draw_items};
+use ornis_animation::{JointPose, Skeleton, SkinnedMesh};
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
 /// Wrapper over `wgpu::Device` as an ECS resource.
@@ -154,6 +155,22 @@ pub struct GpuMesh {
     pub params: (u32, u32),
 }
 
+/// Per-frame staged custom meshes as a separate resource (custom-geometry
+/// half of X2, Extract-free).
+///
+/// `RenderSubmit` rebuilds this every frame from the `custom_meshes` lane
+/// of [`extract_render_data`](crate::extraction::extract_render_data)
+/// (see [`Renderer3D::stage_custom_meshes`](crate::renderer::Renderer3D::stage_custom_meshes)):
+/// per-entity GPU meshes plus joint palettes, in dense lane order.
+/// `RenderPresent` draws it after the shared sphere batch (custom instances
+/// were uploaded contiguously above the sphere slots, so slots stay dense).
+/// Stored as `Mutex<Vec<…>>` — interior mutability, as in `GpuFrameState`.
+/// Rebuilt per frame (correctness fallback — see the caching note on
+/// `stage_custom_meshes`); a repeat install replaces the resource (never
+/// called in steady state).
+#[derive(Default)]
+pub struct GpuCustomMeshes(pub Mutex<Vec<StagedCustomMesh>>);
+
 /// Registers [`GpuMesh`] in the world plus its rebuild system (X2).
 ///
 /// `RenderMesh` reads the lanes (`reads_lane`, S5d canon) and writes only
@@ -200,6 +217,7 @@ pub fn install_gpu_resources(
     let _ = engine.world_mut().insert(GpuSurface(Mutex::new(surface)));
     let _ = engine.world_mut().insert(surface_state);
     let _ = engine.world_mut().insert(Mutex::new(frame_state));
+    let _ = engine.world_mut().insert(GpuCustomMeshes::default());
     let _ = engine.world_mut().insert(FramePresentTarget::default());
     insert_render_lights_default(engine);
     install_render_mesh(engine, mesh);
@@ -260,8 +278,11 @@ impl System for RenderMesh {
 /// lane reads (S5d canon) through `extract_render_data`.
 /// X2: mesh rebuild moved to `RenderMesh` (the `GpuMesh` resource).
 /// X3: lights come from the `RenderLights` resource (scene loader), not
-/// hardcoded. `frame3d.render_to_buffers` lives in `RenderPresent`
-/// (S7 step 2).
+/// hardcoded. Custom geometry (`custom_meshes`, incl. skinned) is staged
+/// into the `GpuCustomMeshes` resource
+/// ([`Renderer3D::stage_custom_meshes`](crate::renderer::Renderer3D::stage_custom_meshes))
+/// with its instances uploaded contiguously above the sphere slots.
+/// `frame3d.render_to_buffers` lives in `RenderPresent` (S7 step 2).
 struct RenderSubmit;
 
 impl System for RenderSubmit {
@@ -275,9 +296,13 @@ impl System for RenderSubmit {
             .reads_lane::<TransformDesc>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<MaterialDesc>()
+            .reads_lane::<SkinnedMesh>()
+            .reads_lane::<Skeleton>()
+            .reads_lane::<JointPose>()
             .reads::<Mutex<crate::camera::OrbitCamera>>()
             .reads::<RenderLights>()
             .writes::<Mutex<GpuFrameState>>()
+            .writes::<GpuCustomMeshes>()
             .reads::<GpuDevice>()
             .reads::<GpuQueue>()
             .reads::<GpuSurfaceState>()
@@ -308,6 +333,9 @@ impl System for RenderSubmit {
         let Some(frame_state) = resources.get::<Mutex<GpuFrameState>>() else {
             return;
         };
+        let Some(custom_meshes) = resources.get::<GpuCustomMeshes>() else {
+            return;
+        };
         let fs = frame_state.lock().unwrap_or_else(|e| e.into_inner());
 
         // X1/X4: direct lane read through the shared canon — no snapshot.
@@ -323,8 +351,22 @@ impl System for RenderSubmit {
             .set_lights(&queue.0, lights.ambient, &lights.set_lights_args());
         fs.renderer
             .upload_materials(&device.0, &queue.0, &extracted.materials);
+        // Custom geometry (loaded `.glb` / sculpted soups, incl. skinned):
+        // stage per-entity meshes + palettes, then upload sphere and custom
+        // instances contiguously — spheres occupy `0..n`, customs follow in
+        // dense lane order, so `RenderPresent` draws slot ranges.
+        let staged = fs
+            .renderer
+            .stage_custom_meshes(&device.0, &queue.0, &extracted.custom_meshes);
+        let mut instances = Vec::with_capacity(extracted.instances.len() + staged.len());
+        instances.extend_from_slice(&extracted.instances);
+        instances.extend(staged.iter().map(|entry| entry.instance));
         fs.renderer
-            .upload_instances(&device.0, &queue.0, &extracted.instances);
+            .upload_instances(&device.0, &queue.0, &instances);
+        *custom_meshes
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = staged;
     }
 }
 
@@ -336,7 +378,10 @@ impl System for RenderSubmit {
 /// the acquired frame travels in `FramePresentTarget`; a separate
 /// `RenderFlush` system performs submit + present (registered right after —
 /// WaW over both handover resources). X2: the mesh is read from the
-/// `GpuMesh` resource (RaW after `RenderMesh`). X4: instance count is a
+/// `GpuMesh` resource (RaW after `RenderMesh`). Custom geometry staged by
+/// `RenderSubmit` is read from `GpuCustomMeshes` (RaW after `RenderSubmit`)
+/// and drawn after the sphere batch through the `*_with_custom` passes.
+/// X4: instance count is a
 /// direct lane read (`extract_render_data`), not a snapshot. The dependency
 /// on `RenderSubmit` derives as WaW over `Mutex<GpuFrameState>`; ordering
 /// comes from registering after `RenderSubmit`.
@@ -357,7 +402,11 @@ impl System for RenderPresent {
             .reads_lane::<TransformDesc>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<MaterialDesc>()
+            .reads_lane::<SkinnedMesh>()
+            .reads_lane::<Skeleton>()
+            .reads_lane::<JointPose>()
             .reads::<Mutex<GpuMesh>>()
+            .reads::<GpuCustomMeshes>()
             .writes::<Mutex<GpuFrameState>>()
             .writes::<FrameCommandBuffers>()
             .writes::<FramePresentTarget>()
@@ -383,6 +432,9 @@ impl System for RenderPresent {
             return;
         };
         let Some(mesh_resource) = resources.get::<Mutex<GpuMesh>>() else {
+            return;
+        };
+        let Some(custom_meshes) = resources.get::<GpuCustomMeshes>() else {
             return;
         };
         let Some(buffers) = resources.get::<FrameCommandBuffers>() else {
@@ -445,6 +497,14 @@ impl System for RenderPresent {
             let mesh_state = mesh_resource
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let customs_state = custom_meshes
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Custom instances were uploaded contiguously above the sphere
+            // slots, so each item draws its single-instance range.
+            let customs: Vec<CustomGbufferDraw<'_>> =
+                custom_draw_items(&customs_state, instance_count);
             let mut fs = frame_state.lock().unwrap_or_else(|e| e.into_inner());
             // renderer + frame3d from the same Mutex<GpuFrameState>.
             // Raw pointers avoid double &mut borrow of disjoint fields through
@@ -463,6 +523,7 @@ impl System for RenderPresent {
                     mesh: &mesh_state.mesh,
                     instance_count,
                     buffers,
+                    customs: &customs,
                 };
                 let _ = (*frame3d).render_to_buffers(context);
             }
@@ -537,6 +598,7 @@ mod tests {
         assert_send_sync::<wgpu::CommandBuffer>();
         assert_send_sync::<FramePresentTarget>();
         assert_send_sync::<wgpu::SurfaceTexture>();
+        assert_send_sync::<GpuCustomMeshes>();
 
         let mut engine = Engine::new();
         install_frame_buffers(&mut engine);
@@ -628,15 +690,23 @@ mod tests {
         assert_eq!(mesh.writes, vec![TypeId::of::<Mutex<GpuMesh>>()]);
         assert!(mesh.reads.contains(&TypeId::of::<GpuDevice>()));
 
-        // RenderSubmit writes only the frame slot (X1/X3: lanes and
-        // lights in, no snapshot).
+        // RenderSubmit writes the frame slot plus the staged custom meshes
+        // (X1/X3: lanes and lights in, no snapshot).
         let submit = RenderSubmit.access();
-        assert_eq!(submit.writes, vec![TypeId::of::<Mutex<GpuFrameState>>()]);
+        assert_eq!(
+            submit.writes,
+            vec![
+                TypeId::of::<Mutex<GpuFrameState>>(),
+                TypeId::of::<GpuCustomMeshes>()
+            ]
+        );
         assert!(submit.reads.contains(&TypeId::of::<RenderLights>()));
 
-        // RenderPresent bridges into both handover resources (E2).
+        // RenderPresent bridges into both handover resources (E2) and reads
+        // the staged custom meshes (RaW after RenderSubmit).
         let present = RenderPresent.access();
         assert!(present.reads.contains(&TypeId::of::<Mutex<GpuMesh>>()));
+        assert!(present.reads.contains(&TypeId::of::<GpuCustomMeshes>()));
         assert!(
             present
                 .writes

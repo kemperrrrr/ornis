@@ -250,6 +250,17 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 (`install_skeletal_animation`, `AssetServer` удерживает `LoadedScene`,
 autoplay `playing: true`; стартер `assets/starter/ual1_standard.glb`,
 регрессия `starter_pack_playback_moves_joints`).
+✅ **2026-10-03 — шелл библиотекой + viewer (проверено глазом).**
+`crates/runner` (`run_native`, окно/GPU/цикл из бинаря), демо переехало
+в `cargo run --example anim` (бинарь — только showcase сфер); по пути
+починен skills-gap натива: `initialize` не конфигурировал surface,
+`render_submit`/`render_present` не декларировали skinned-лейны.
+Скриншот: оранжевый манекен в T-позе, освещение корректно.
+✅ **2026-10-01 — нативный viewer (`--demo-anim`, `src/demo.rs`).**
+Стартер-персонаж с первым клипом вместо сфер + `--frames N` для
+smoke-прогонов; по пути пойманы два незадекларированных чтения
+`SkinnedMesh`/`Skeleton`/`JointPose` в `render_submit`/`render_present`
+(демо доказало ценность: сферы их не трогали).
 ✅ **2026-10-01 — CUBICSPLINE (проверено).** Generic `Interpolation<T>`
 с вариантом `Cubic` (тангенты — per-second деривативы glTF), Hermite в
 `sample()` (Vec3 напрямую, Quat покомпонентно + normalize, slerp-фолбэк
