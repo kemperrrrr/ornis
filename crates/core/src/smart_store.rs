@@ -284,6 +284,11 @@ impl SmartStore {
     /// Inserts or replaces the hot component `T` for `entity`, creating
     /// the lane on first use. Dispatches to the RwLock or lock-free
     /// implementation depending on how `T` was registered.
+    ///
+    /// There is no insert hook. A raw [`ChildOf`](crate::ChildOf) insert
+    /// does not update [`Children`](crate::Children) until
+    /// [`reconcile_children`](crate::reconcile_children) or
+    /// [`propagate_transforms`](crate::propagate_transforms).
     pub fn insert<T: 'static + Clone + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_lane::<T>();
         let tid = TypeId::of::<T>();

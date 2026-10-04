@@ -236,6 +236,7 @@ impl System for RenderMesh {
         SystemAccess::new()
             .reads::<SmartStore>()
             .reads_lane::<TransformDesc>()
+            .reads_lane::<ornis_core::GlobalTransform>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<MaterialDesc>()
             .reads::<GpuDevice>()

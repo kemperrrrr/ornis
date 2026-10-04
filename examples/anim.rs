@@ -7,16 +7,17 @@
 
 use glam::Vec3;
 use ornis_app::{AnimatorAccess, GameWorld};
+use ornis_assets::Handle;
 use ornis_assets::scene::Scene;
-use ornis_assets::{AssetServer, Handle};
 use ornis_core::{Color, Degrees, Lux, UnitVec3};
 use ornis_render::{DirectionalLight, OrbitCamera};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut assets = AssetServer::new();
-    let mannequin: Handle<Scene> = assets.load("assets/starter/ual1_standard.glb")?;
     let mut world = GameWorld::new();
-    let hero = world.spawn_scene(&assets, &mannequin)?;
+    let mannequin: Handle<Scene> = world
+        .assets_mut()
+        .load("assets/starter/ual1_standard.glb")?;
+    let hero = world.spawn_scene(&mannequin)?;
     world.set_ambient(Color::hex("#1A1A26")?);
     world.spawn(DirectionalLight {
         direction: UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0))?,
@@ -26,5 +27,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     world.spawn(OrbitCamera::looking_at(Vec3::new(2.5, 1.8, 3.5), Vec3::Y).with_fov(Degrees(45.0)));
     world.entity_mut(hero).animator()?.play("Walk_Loop")?;
-    ornis_runner::run_native(world, "Ornis — Animation Demo")
+    ornis::run(world)
 }

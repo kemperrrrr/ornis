@@ -37,9 +37,9 @@ HTTP-сервер на порту 3420 и раздаёт фронтенд из `
 Нативный режим (`cargo run` без фичи) сервер **не поднимает** — движку
 редактор не нужен; браузерный редактор рядом с нативным окном доступен
 по явному флагу: `cargo run -- --remote-editor`. Демо анимаций
-(стартер-персонаж через `AssetServer::load::<Scene>` и
-`GameWorld::spawn_scene`, клип `Walk_Loop` на корне персонажа):
-`cargo run --example anim`.
+(стартер-персонаж через `world.assets_mut().load::<Scene>` и
+`GameWorld::spawn_scene`, запуск `ornis::run`, клип `Walk_Loop` на корне
+персонажа): `cargo run --example anim`.
 
 ## Качество
 
@@ -229,8 +229,10 @@ jobs and line-table debug info (debug assertions stay enabled).
 render loops уже используют общий `GameWorld`/`RenderExtract`/`RenderFrame3D`
 контракт после serialization boundary. Свет и клиентская камера ставятся через
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
-`OrbitCamera`); `spawn_scene` возвращает один корень, клип запускается
-через `entity_mut(root).animator()?.play(name)`. Иерархия живёт в
+`OrbitCamera`); реестр ассетов живёт на мире (`assets` / `assets_mut`),
+`spawn_scene` возвращает один корень, клип запускается
+через `entity_mut(root).animator()?.play(name)`, окно открывает
+`ornis::run`. Иерархия живёт в
 `ornis_core`: локальный `Transform`, мировой `GlobalTransform` (система
 `propagate_transforms` до извлечения кадра и до physics sync), связь
 `ChildOf` и кэш `Children`, имя `Name`. Скрытый пол витрины живёт

@@ -100,7 +100,6 @@ use ornis_assets::collider::ColliderDesc;
 use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
-use ornis_assets::server::AssetServer;
 use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 
 use editor_backend::ipc::{EditorCommand, GameEvent, RequestId, UiCommand};
@@ -293,10 +292,6 @@ pub struct EditorSession {
     /// underlying number, so `/api/status` and `/api/scene` payloads keep
     /// their `"version": <n>` shape.
     version: SceneVersion,
-    /// Asset registry: parse entry point, retained sources and the
-    /// reload dirty-set. Survives world replacement (see
-    /// [`EditorSession::load_scene`]).
-    assets: AssetServer,
     /// Fingerprint of the last host-initiated [`EditorSession::save_scene_file`]
     /// write, sample by sample. The hot-reload gate compares the watched file
     /// against it and swallows exactly the save's own mtime bump instead of
@@ -359,7 +354,6 @@ impl Default for EditorSession {
             alive: Vec::new(),
             scene_name: "scene".into(),
             version: SceneVersion::ZERO,
-            assets: AssetServer::new(),
             last_saved: None,
             scene_roots: SceneRoots::workspace_defaults(),
         }
@@ -463,13 +457,14 @@ impl EditorSession {
     /// programmatic hosts mark dirty assets directly. Returns true when
     /// the world was replaced.
     fn drain_assets(&mut self) -> bool {
-        let dirty = self.assets.take_dirty();
+        let dirty = self.world.assets_mut().take_dirty();
         if dirty.is_empty() {
             return false;
         }
         let mut changed = false;
         for id in dirty {
-            if let Some(scene) = self.assets.get_scene(id).cloned() {
+            let scene = self.world.assets().get_scene(id).cloned();
+            if let Some(scene) = scene {
                 self.load_scene(scene);
                 changed = true;
             }
@@ -631,13 +626,13 @@ impl EditorSession {
         }
         fresh.scene_name = scene.name;
         fresh.version = fresh.version.max(self.version.bumped());
-        // The asset registry (load history, retained sources) survives the
-        // replacement — it describes files, not the live world. The pending
-        // self-save fingerprint survives with it: the file on disk is still
-        // the bytes the session wrote, so the next watcher poll must keep
-        // swallowing the save's own mtime bump instead of reloading over
-        // the freshly loaded world.
-        fresh.assets = std::mem::take(&mut self.assets);
+        // The asset registry (load history, retained sources) lives on the
+        // game world and survives the replacement — it describes files, not
+        // the live entities. The pending self-save fingerprint survives with
+        // it: the file on disk is still the bytes the session wrote, so the
+        // next watcher poll must keep swallowing the save's own mtime bump
+        // instead of reloading over the freshly loaded world.
+        *fresh.world.assets_mut() = std::mem::take(self.world.assets_mut());
         fresh.last_saved = self.last_saved.take();
         fresh.scene_roots = self.scene_roots.clone();
         *self = fresh;
@@ -654,8 +649,8 @@ impl EditorSession {
     /// [`SceneLoadError`](ornis_assets::SceneLoadError) when the text is
     /// not a valid scene; the world is untouched.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, ornis_assets::SceneLoadError> {
-        let id = self.assets.load_scene_ron(ron_str)?;
-        let Some(scene) = self.assets.get_scene(id).cloned() else {
+        let id = self.world.assets_mut().load_scene_ron(ron_str)?;
+        let Some(scene) = self.world.assets().get_scene(id).cloned() else {
             return Ok(0);
         };
         Ok(self.load_scene(scene))
@@ -715,16 +710,18 @@ impl EditorSession {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("glb") || ext.eq_ignore_ascii_case("gltf"));
         if is_gltf {
             let id = self
-                .assets
+                .world
+                .assets_mut()
                 .load_gltf_file(resolved)
                 .map_err(|e| SceneFileError::Parse(e.to_string()))?;
-            let Some(scene) = self.assets.get_scene(id).cloned() else {
+            let Some(scene) = self.world.assets().get_scene(id).cloned() else {
                 return Ok(0);
             };
             let count = self.load_scene(scene);
             // Animation wiring reads the retained `LoadedScene`: node
-            // indices never reach the converted `Scene`.
-            let added = match self.assets.loaded_scene(id).cloned() {
+            // indices never reach the converted `Scene`. The server moved
+            // onto the fresh world with the replace above.
+            let added = match self.world.assets().loaded_scene(id).cloned() {
                 Some(loaded) => self.wire_gltf_animation(&loaded),
                 None => 0,
             };
@@ -2104,21 +2101,19 @@ mod tests {
     /// channel, not a dead API.
     #[test]
     fn drain_assets_replaces_world_on_tick() {
-        use ornis_assets::server::AssetServer;
         let mut world = EditorSession::new();
         assert_eq!(world.entity_count(), 0);
-        let mut server = AssetServer::new();
-        let a = server
+        let a = world
+            .world
+            .assets_mut()
             .load_scene_ron("Scene(name: \"a\", entities: [], lights: [], camera: (position: (0.0, 2.5, 9.0), target: (0.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), fov: 60.0, near: 0.1, far: 100.0), ambient: (0.1, 0.1, 0.1))")
             .expect("scene a loads");
         let version_before = world.version;
-        // Swap in a server holding one dirty scene, then tick.
-        world.assets = server;
-        assert!(world.assets.request_reload(a));
+        assert!(world.world.assets_mut().request_reload(a));
         assert!(world.tick(1.0 / 60.0), "asset reload must mark changed");
         assert!(world.version > version_before);
         assert_eq!(world.scene_name, "a");
-        assert!(world.assets.take_dirty().is_empty());
+        assert!(world.world.assets_mut().take_dirty().is_empty());
     }
 
     /// Invalid RON is a typed [`SceneLoadError`](ornis_assets::SceneLoadError),

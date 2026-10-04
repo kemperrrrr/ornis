@@ -232,6 +232,12 @@ fn div_axis(value: f32, scale: f32, fallback: f32) -> f32 {
 }
 
 /// Parent pointer. The parent's [`Children`] cache lists this entity.
+///
+/// [`set_parent`] and [`clear_parent`] write this link and the cache
+/// together. [`SmartStore`] has no insert hook, so
+/// [`SmartStore::insert`] of [`ChildOf`] leaves
+/// [`Children`] stale until [`reconcile_children`] or
+/// [`propagate_transforms`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChildOf(pub Entity);
 
@@ -246,7 +252,9 @@ impl ChildOf {
 ///
 /// [`set_parent`], [`clear_parent`], [`despawn_recursive`], and
 /// [`reconcile_children`] keep it aligned with [`ChildOf`]. Replacing the
-/// vec by hand is repaired on the next reconcile.
+/// vec by hand, or inserting [`ChildOf`] through [`SmartStore::insert`],
+/// is repaired on the next reconcile ([`propagate_transforms`] reconciles
+/// first). [`SmartStore`] has no insert hook that could do this itself.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Children(pub Vec<Entity>);
 
