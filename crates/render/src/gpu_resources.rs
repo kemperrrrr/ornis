@@ -191,7 +191,8 @@ pub fn install_render_mesh(engine: &mut ornis_core::Engine, mesh: GpuMesh) {
 /// in the `schedule` observe the same objects without copying.
 ///
 /// No light rig is published here: worlds start dark, lights arrive
-/// explicitly (scene descriptions, [`GameWorld::add_directional_light`](ornis_app::GameWorld::add_directional_light)).
+/// explicitly (scene descriptions, [`GameWorld::set_ambient`](ornis_app::GameWorld::set_ambient)
+/// and [`GameWorld::spawn`](ornis_app::GameWorld::spawn)).
 /// Viewport lighting for lightless scenes is the editor's job (Blender-style
 /// shading modes), not a silent engine default.
 pub fn install_gpu_resources(

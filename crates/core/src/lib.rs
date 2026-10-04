@@ -80,8 +80,8 @@ pub use typestate::{
 /// `f32`-soup consolidation). [`units::Seconds`] is the frame-boundary
 /// [`Seconds`] re-exported, so there is exactly one duration type.
 pub use units::{
-    Clamped01, Clamped01Error, Degrees, GearRatio, Hertz, Ior, IorError, Kilograms, LinearRgb,
-    LinearRgba, Meters, MetersPerSecond, PositiveF32, PositiveF32Error, Radians, RadiansPerSecond,
-    SecondsExt, UnitQuat, UnitQuatError, UnitVec3, UnitVec3Error,
+    Clamped01, Clamped01Error, Color, Degrees, GearRatio, Hertz, HexColorError, Ior, IorError,
+    Kilograms, LinearRgb, LinearRgba, Lux, Meters, MetersPerSecond, PositiveF32, PositiveF32Error,
+    Radians, RadiansPerSecond, SecondsExt, UnitQuat, UnitQuatError, UnitVec3, UnitVec3Error,
 };
 pub use world::World;

@@ -9,10 +9,16 @@
 //! ([`PositiveF32`], [`Clamped01`], [`UnitVec3`], [`UnitQuat`]) turn the
 //! old comment-invariants ("must be > 0", "must be normalized") into
 //! checked constructors instead of silent defaults.
+//!
+//! [`Color`] stores [`LinearRgba`] and serializes as the scene file's linear
+//! RGB array. [`Lux`] is the light-intensity `f32` under a newtype.
 
 use glam::{Quat, Vec3};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+mod color;
+pub use color::{Color, HexColorError, Lux};
 
 /// Duration in seconds at the frame boundary (canonical definition).
 ///
@@ -165,6 +171,20 @@ impl From<Degrees> for f32 {
 impl From<Radians> for Degrees {
     fn from(value: Radians) -> Self {
         Self::new(value.get().to_degrees())
+    }
+}
+
+impl Serialize for Degrees {
+    /// Wire form is the raw degree `f32` (camera `fov`, spot angles).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Degrees {
+    /// Reads the raw degree `f32`.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self(f32::deserialize(deserializer)?))
     }
 }
 
@@ -669,7 +689,8 @@ impl From<Clamped01> for f64 {
 const DEGENERATE_LEN2: f32 = 1e-12;
 
 /// Rejected [`UnitVec3`] input (must be finite and non-zero).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("vector must be finite and non-zero")]
 pub struct UnitVec3Error;
 
 /// Unit-length direction vector.
@@ -686,6 +707,19 @@ impl UnitVec3 {
     pub const Y: Self = Self(Vec3::Y);
     /// Axis constants.
     pub const Z: Self = Self(Vec3::Z);
+
+    /// Normalizes `value` into a unit direction.
+    ///
+    /// # Errors
+    ///
+    /// [`UnitVec3Error`] when `value` is zero or any component is non-finite.
+    ///
+    /// [`Self::try_from_vec`] rejects vectors that are not already unit
+    /// length. This constructor rescales any finite non-zero input, which is
+    /// what `UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0))?` needs.
+    pub fn new(value: Vec3) -> Result<Self, UnitVec3Error> {
+        Self::normalize(value).ok_or(UnitVec3Error)
+    }
 
     /// Accepts only finite vectors already of unit length (within tolerance).
     pub fn try_from_vec(value: Vec3) -> Result<Self, UnitVec3Error> {
@@ -729,6 +763,23 @@ impl TryFrom<Vec3> for UnitVec3 {
 impl From<UnitVec3> for Vec3 {
     fn from(value: UnitVec3) -> Self {
         value.get()
+    }
+}
+
+impl Serialize for UnitVec3 {
+    /// Wire form is the unit vector as `[f32; 3]`.
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_array().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UnitVec3 {
+    /// Reads `[f32; 3]` and normalizes it, so a scene direction such as
+    /// `(1, 1, 1)` still loads. A later save writes the normalized
+    /// components.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let xyz = <[f32; 3]>::deserialize(deserializer)?;
+        Self::new(Vec3::from_array(xyz)).map_err(D::Error::custom)
     }
 }
 
@@ -865,10 +916,41 @@ mod tests {
         assert!(UnitVec3::try_from_vec(Vec3::X).is_ok());
         assert!(UnitVec3::try_from_vec(Vec3::ZERO).is_err());
         assert!(UnitVec3::try_from_vec(Vec3::splat(2.0)).is_err());
+        assert!(UnitVec3::new(Vec3::new(2.0, 0.0, 0.0)).is_ok());
+        assert!(UnitVec3::new(Vec3::ZERO).is_err());
+        let diagonal = UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0)).expect("non-zero");
+        assert!((diagonal.get().length() - 1.0).abs() < 1e-5);
+        assert!(diagonal.get().x < 0.0);
         assert!(UnitVec3::normalize(Vec3::new(2.0, 0.0, 0.0)).is_some());
         assert!(UnitVec3::normalize(Vec3::ZERO).is_none());
         let v: Vec3 = UnitVec3::X.into();
         assert_eq!(v, Vec3::X);
+    }
+
+    #[test]
+    fn degrees_and_unit_vec3_match_scene_ron() {
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct Wire {
+            direction: UnitVec3,
+            fov: Degrees,
+        }
+
+        assert_eq!(
+            ron::ser::to_string(&Degrees(45.0)).unwrap(),
+            ron::ser::to_string(&45.0_f32).unwrap()
+        );
+        assert_eq!(
+            ron::ser::to_string(&UnitVec3::X).unwrap(),
+            ron::ser::to_string(&[1.0_f32, 0.0, 0.0]).unwrap()
+        );
+        let parsed: Wire =
+            ron::de::from_str("(direction: (1.0, 1.0, 1.0), fov: 60.0)").expect("scene tuple");
+        assert!((parsed.direction.get().length() - 1.0).abs() < 1e-5);
+        assert_eq!(parsed.fov.get(), 60.0);
+        let again: Wire = ron::de::from_str(&ron::ser::to_string(&parsed).unwrap()).unwrap();
+        assert_eq!(again.fov, parsed.fov);
+        assert!((again.direction.get() - parsed.direction.get()).length() < 1e-5);
+        assert!(ron::de::from_str::<UnitVec3>("(0.0, 0.0, 0.0)").is_err());
     }
 
     #[test]

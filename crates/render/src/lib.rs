@@ -22,6 +22,8 @@ pub mod frame_passes;
 /// `RenderWorld` extraction + `ornis-wasm`, not through this module.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_resources;
+/// Typed directional light spawned into a world light rig.
+pub mod light;
 /// GPU mesh representation and primitive generation.
 pub mod mesh;
 /// Upload of `ornis-mesh-editor` mesh data to the GPU.
@@ -60,6 +62,7 @@ pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Techniqu
 pub use frame_passes::{
     FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor,
 };
+pub use light::DirectionalLight;
 pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};
 pub use mesh_upload::{
     ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,

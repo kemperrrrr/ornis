@@ -12,9 +12,7 @@ use glam::Vec3;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::physics_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
-use ornis_app::{
-    GameWorld, install_gameplay_physics_bridge, install_object_animation, spawn_static_floor,
-};
+use ornis_app::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
 #[cfg(not(feature = "editor-only"))]
 use ornis_assets::scene::Scene;
 #[cfg(not(feature = "editor-only"))]
@@ -22,11 +20,13 @@ use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::bridge::install_gameplay_audio_bridge;
 #[cfg(not(feature = "editor-only"))]
+use ornis_core::{Engine, Entity};
+#[cfg(not(feature = "editor-only"))]
 use ornis_gameplay::install_gameplay;
 #[cfg(not(feature = "editor-only"))]
 use ornis_physics::RigidBody;
 #[cfg(not(feature = "editor-only"))]
-use ornis_render::{OrbitCamera, install_orbit_camera};
+use ornis_render::OrbitCamera;
 #[cfg(not(feature = "editor-only"))]
 use ornis_runner::{NativeOptions, run_native};
 
@@ -34,6 +34,7 @@ use ornis_runner::{NativeOptions, run_native};
 use ornis_runner::EDITOR_HTTP_PORT;
 
 /// Earth-surface gravity along −Y (m/s²).
+#[cfg(not(feature = "editor-only"))]
 const DEFAULT_GRAVITY_Y: f32 = -9.81;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -100,7 +101,7 @@ fn showcase_engine() -> (GameWorld, u32) {
     };
     let entity_count = scene.entities.len() as u32;
     let mut runtime = GameWorld::from_scene(&scene);
-    install_orbit_camera(runtime.engine_mut(), OrbitCamera::from_desc(&scene.camera));
+    runtime.spawn(OrbitCamera::from_desc(&scene.camera));
     install_physics(runtime.engine_mut(), Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
     install_gameplay(runtime.engine_mut());
     install_gameplay_physics_bridge(runtime.engine_mut());
@@ -136,12 +137,60 @@ fn showcase_engine() -> (GameWorld, u32) {
                 RigidBody::new_sphere(description.transform.translation, radius, mass),
             );
         }
-        // Hidden static floor: it has a physics component but no render
-        // components, so it does not enter the frame upload.
-        let _ = spawn_static_floor(runtime.engine_mut());
+    }
+    // Hidden static floor: physics only, so it stays out of the frame upload.
+    if let Err(error) = spawn_showcase_floor(runtime.engine_mut()) {
+        eprintln!("showcase floor was not spawned: {error}");
     }
     runtime.frame(0.0);
     (runtime, entity_count)
+}
+
+/// Centre of the hidden showcase static floor in world units.
+#[cfg(not(feature = "editor-only"))]
+const SHOWCASE_FLOOR_CENTER: [f32; 3] = [0.0, -2.0, 0.0];
+/// Half-extents of the hidden showcase static floor in world units.
+#[cfg(not(feature = "editor-only"))]
+const SHOWCASE_FLOOR_HALF_EXTENTS: [f32; 3] = [20.0, 1.0, 20.0];
+
+/// The showcase world has no component store, so the floor cannot be placed.
+#[cfg(not(feature = "editor-only"))]
+#[derive(Debug)]
+struct ShowcaseFloorError;
+
+#[cfg(not(feature = "editor-only"))]
+impl std::fmt::Display for ShowcaseFloorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("showcase world has no component store")
+    }
+}
+
+#[cfg(not(feature = "editor-only"))]
+impl std::error::Error for ShowcaseFloorError {}
+
+/// Spawns the hidden showcase static floor.
+///
+/// The floor carries only a physics component, so it never enters the frame
+/// upload; it exists so dynamic showcase bodies have ground to rest on.
+///
+/// # Errors
+///
+/// [`ShowcaseFloorError`] when the world has no component store.
+#[cfg(not(feature = "editor-only"))]
+fn spawn_showcase_floor(engine: &mut Engine) -> Result<Entity, ShowcaseFloorError> {
+    let Some(store) = engine.world_mut().store_mut() else {
+        return Err(ShowcaseFloorError);
+    };
+    let floor = store.create_entity();
+    store.insert(
+        floor,
+        RigidBody::new_box(
+            Vec3::from_array(SHOWCASE_FLOOR_CENTER),
+            Vec3::from_array(SHOWCASE_FLOOR_HALF_EXTENTS),
+            0.0,
+        ),
+    );
+    Ok(floor)
 }
 
 #[cfg(not(feature = "editor-only"))]

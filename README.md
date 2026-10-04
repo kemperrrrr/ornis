@@ -226,7 +226,9 @@ jobs and line-table debug info (debug assertions stay enabled).
 `Time`/`FixedTime`: fixed schedule выполняется bounded 60 Hz accumulator'ом,
 после чего once-per-frame schedule запускается один раз. Native и WASM
 render loops уже используют общий `GameWorld`/`RenderExtract`/`RenderFrame3D`
-контракт после serialization boundary. `InputState` теперь является
+контракт после serialization boundary. Свет и клиентская камера ставятся через
+`GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
+`OrbitCamera`); скрытый пол витрины живёт в `src/main.rs`, не в `GameWorld`. `InputState` теперь является
 backend-neutral resource; native winit и WASM orbit adapters записывают
 keyboard, mouse, pointer and wheel input, а browser render frame публикует
 его через `Engine`. Gameplay consumers подключены через
@@ -319,8 +321,8 @@ reload сцены уже есть: editor-world следит за mtime `editor/
    веб-приложение, сцена — WASM/WebGPU в `<canvas>`. История нативного стека —
    в git-истории.
 8. **Проектирование на уровне типов.** Инварианты — в типах: newtype-хендлы
-   (`BodyHandle`, `EntityId`, `TextureHandle`), единицы (`Meters`, `Seconds`,
-   `LinearRgb`, `UnitVec3`, `PositiveF32`, `Clamped01`), `enum` вместо
+   (`BodyHandle`, `EntityId`, `TextureHandle`), единицы    (`Meters`, `Seconds`,
+   `LinearRgb`, `Color`, `Lux`, `UnitVec3`, `PositiveF32`, `Clamped01`), `enum` вместо
    `bool`-флагов, `Result`/`thiserror` вместо `String`-ошибок, typestate фаз
    (`World<Building/Running>`, `GameWorld<Authoritative/Replica>`).
    GPU-контракт — подмена типа в DSL (`MaterialIdx` → `u32`, прецедент

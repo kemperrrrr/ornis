@@ -12,19 +12,13 @@
 
 use std::marker::PhantomData;
 
-use glam::Vec3;
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
-    Authoritative, Engine, Entity, Replica, SceneEntities, SceneRole, SceneVersion, Seconds,
+    Authoritative, Color, Engine, Entity, LinearRgb, Replica, SceneEntities, SceneRole,
+    SceneVersion, Seconds,
 };
-use ornis_physics::RigidBody;
-use ornis_render::FrameUpload;
 use ornis_render::extraction::{RenderLights, extract_render_data};
-
-/// Centre of the hidden showcase static floor in world units.
-pub const FLOOR_CENTER: [f32; 3] = [0.0, -2.0, 0.0];
-/// Half-extents of the hidden showcase static floor in world units.
-const FLOOR_HALF_EXTENTS: [f32; 3] = [20.0, 1.0, 20.0];
+use ornis_render::{DirectionalLight, FrameUpload, OrbitCamera, install_orbit_camera};
 
 /// Single scene-backed game world: one [`Engine`] plus its scene entities.
 ///
@@ -235,72 +229,6 @@ impl GameWorld {
         }
     }
 
-    /// Appends one directional light to the world. Worlds start dark —
-    /// there is no silent default rig (viewport lighting is the editor's
-    /// job, like Blender's shading modes): call this (and
-    /// [`GameWorld::set_ambient`]) explicitly or nothing renders lit.
-    /// `direction` is normalized; a zero or non-finite direction adds no
-    /// light.
-    pub fn add_directional_light(&mut self, direction: [f32; 3], intensity: f32, color: [f32; 3]) {
-        use ornis_assets::scene::{LightDesc, ShadowCast};
-        let Some(direction) = ornis_core::units::UnitVec3::normalize(Vec3::from_array(direction))
-        else {
-            return;
-        };
-        let resources = self.engine_mut().world_mut().resources_mut();
-        if resources.get_mut::<RenderLights>().is_none() {
-            resources.insert(RenderLights {
-                ambient: [0.0; 3],
-                lights: Vec::new(),
-                ambient_intensity: 1.0,
-                exposure: 1.0,
-            });
-        }
-        let rig = resources.get_mut::<RenderLights>().expect("just inserted");
-        rig.lights.push(LightDesc::Directional {
-            direction,
-            intensity,
-            color,
-            shadow: ShadowCast::Disabled,
-        });
-    }
-
-    /// Sets the ambient term (default black — see
-    /// [`GameWorld::add_directional_light`]).
-    pub fn set_ambient(&mut self, color: [f32; 3]) {
-        let resources = self.engine_mut().world_mut().resources_mut();
-        if resources.get_mut::<RenderLights>().is_none() {
-            resources.insert(RenderLights {
-                ambient: [0.0; 3],
-                lights: Vec::new(),
-                ambient_intensity: 1.0,
-                exposure: 1.0,
-            });
-        }
-        resources
-            .get_mut::<RenderLights>()
-            .expect("just inserted")
-            .ambient = color;
-    }
-
-    /// Adds an orbit camera looking at `target` from `position` (up `+Y`,
-    /// 45° fov, 0.1/100 clip — orbit input stays live).
-    pub fn add_orbit_camera(&mut self, position: [f32; 3], target: [f32; 3]) {
-        use ornis_assets::scene::CameraDesc;
-        use ornis_render::{OrbitCamera, install_orbit_camera};
-        install_orbit_camera(
-            self.engine_mut(),
-            OrbitCamera::from_desc(&CameraDesc {
-                position: Vec3::from_array(position),
-                target: Vec3::from_array(target),
-                up: ornis_core::units::UnitVec3::Y,
-                fov: ornis_core::units::Degrees::new(45.0),
-                near: ornis_core::units::Meters::new(0.1),
-                far: ornis_core::units::Meters::new(100.0),
-            }),
-        );
-    }
-
     /// Starts the entity's animation player (skeletal or object).
     /// Returns whether a player was found. Loading never autoplays —
     /// hosts start playback explicitly, like a video player.
@@ -473,11 +401,30 @@ impl<Role: SceneRole> GameWorld<Role> {
             }
         }
         self.entities = insert_scene_entities(&mut self.engine, &scene.entities).into();
-        let _ = self
-            .engine
-            .world_mut()
-            .insert(RenderLights::from_scene(scene));
+        self.publish_render_lights(RenderLights::from_scene(scene));
         self.version.bump();
+    }
+
+    /// Sets the linear ambient color.
+    ///
+    /// Alpha is not part of the ambient channel. Creates an empty
+    /// [`RenderLights`] rig when the world has none, and leaves lights
+    /// already published by [`Self::spawn`] or [`Self::replace_scene`] in
+    /// place. [`Self::replace_scene`] replaces the whole rig, including
+    /// this ambient.
+    pub fn set_ambient(&mut self, color: Color) {
+        self.ensure_render_lights().ambient = color.to_linear_rgb().as_array();
+    }
+
+    /// Places `value` into the world.
+    ///
+    /// [`DirectionalLight`] is appended to the [`RenderLights`] rig.
+    /// [`OrbitCamera`] replaces the client-side view and registers its
+    /// input system once. Neither call returns a success flag: a light
+    /// the renderer cannot upload is reported by that rig, and the camera
+    /// install does not fail.
+    pub fn spawn<S: Spawn>(&mut self, value: S) -> S::Output {
+        value.spawn_into(self)
     }
 
     /// Reads the frame payload directly from the component lanes.
@@ -508,6 +455,34 @@ impl<Role: SceneRole> GameWorld<Role> {
         self.engine.run_frame_secs(delta);
         self.frame_upload()
     }
+
+    /// Single write of the light rig. [`Self::new`] does not publish one,
+    /// so a world that never calls [`Self::replace_scene`], [`Self::set_ambient`]
+    /// or [`Self::spawn`] stays without lights until the platform's fallback.
+    fn publish_render_lights(&mut self, lights: RenderLights) {
+        let _ = self.engine.world_mut().insert(lights);
+    }
+
+    fn ensure_render_lights(&mut self) -> &mut RenderLights {
+        if self
+            .engine
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .is_none()
+        {
+            self.publish_render_lights(RenderLights {
+                ambient: LinearRgb::BLACK.as_array(),
+                lights: Vec::new(),
+                ..RenderLights::default()
+            });
+        }
+        self.engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<RenderLights>()
+            .expect("RenderLights was just published")
+    }
 }
 
 fn insert_scene_entities(engine: &mut Engine, entities: &[EntityDesc]) -> Vec<Entity> {
@@ -525,30 +500,46 @@ fn insert_scene_entities(engine: &mut Engine, entities: &[EntityDesc]) -> Vec<En
     handles
 }
 
-/// Spawns the hidden showcase static floor into `engine`.
+/// Value [`GameWorld::spawn`] can place into the world.
 ///
-/// The floor carries only a physics component, so it never enters the frame
-/// upload; it exists so dynamic showcase bodies have ground to rest on.
-pub fn spawn_static_floor(engine: &mut Engine) -> Option<Entity> {
-    let store = engine.world_mut().store_mut()?;
-    let floor = store.create_entity();
-    store.insert(
-        floor,
-        RigidBody::new_box(
-            Vec3::from_array(FLOOR_CENTER),
-            Vec3::from_array(FLOOR_HALF_EXTENTS),
-            0.0,
-        ),
-    );
-    Some(floor)
+/// Infallible values use `Output = ()`. A fallible spawn uses
+/// `Output = Result<_, _>` rather than a `bool` or a count.
+pub trait Spawn {
+    /// What a spawn hands back.
+    type Output;
+
+    /// Inserts `self` into `world`.
+    fn spawn_into<Role: SceneRole>(self, world: &mut GameWorld<Role>) -> Self::Output;
+}
+
+impl Spawn for DirectionalLight {
+    type Output = ();
+
+    fn spawn_into<Role: SceneRole>(self, world: &mut GameWorld<Role>) -> Self::Output {
+        let desc = self.to_light_desc();
+        world.ensure_render_lights().lights.push(desc);
+    }
+}
+
+impl Spawn for OrbitCamera {
+    type Output = ();
+
+    fn spawn_into<Role: SceneRole>(self, world: &mut GameWorld<Role>) -> Self::Output {
+        install_orbit_camera(world.engine_mut(), self);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_assets::scene::{CameraDesc, MaterialDesc, MeshDesc, ShadowCast, TransformDesc};
+    use glam::Vec3;
+    use ornis_assets::scene::{
+        CameraDesc, LightDesc, MaterialDesc, MeshDesc, ShadowCast, TransformDesc,
+    };
     use ornis_core::units::{Clamped01, PositiveF32};
-    use ornis_core::{Stage as CoreStage, Time};
+    use ornis_core::{Color, Degrees, Lux, Stage as CoreStage, Time, UnitVec3};
+    use ornis_physics::RigidBody;
+    use ornis_render::{DirectionalLight, OrbitCamera, read_orbit_camera};
 
     /// Minimal probe system for staged-plan lookups.
     struct StageProbe(&'static str);
@@ -665,7 +656,15 @@ mod tests {
     fn hidden_floor_never_enters_frame_upload() {
         let scene = two_sphere_scene();
         let mut world = GameWorld::from_scene(&scene);
-        let floor = spawn_static_floor(world.engine_mut()).expect("store registered");
+        let floor = {
+            let store = world.engine_mut().world_mut().store_mut().expect("store");
+            let floor = store.create_entity();
+            store.insert(
+                floor,
+                RigidBody::new_box(Vec3::new(0.0, -2.0, 0.0), Vec3::new(20.0, 1.0, 20.0), 0.0),
+            );
+            floor
+        };
         assert!(
             world
                 .engine()
@@ -679,6 +678,98 @@ mod tests {
         let upload = world.frame(1.0 / 60.0);
         assert_eq!(upload.instances.len(), 2);
         assert!(upload.custom_meshes.is_empty());
+    }
+
+    fn render_lights(world: &GameWorld) -> RenderLights {
+        world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("RenderLights")
+            .clone()
+    }
+
+    #[test]
+    fn typed_light_ambient_and_camera_publish_one_rig() {
+        let mut world = GameWorld::new();
+        let ambient = Color::hex("#1A1A26").expect("hex");
+        world.set_ambient(ambient);
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0)).expect("direction"),
+            illuminance: Lux(0.6),
+            color: Color::WHITE,
+            ..Default::default()
+        });
+        world.spawn(
+            OrbitCamera::looking_at(Vec3::new(2.5, 1.8, 3.5), Vec3::Y).with_fov(Degrees(45.0)),
+        );
+
+        let rig = render_lights(&world);
+        assert_eq!(rig.lights.len(), 1);
+        assert_eq!(rig.ambient, ambient.to_linear_rgb().as_array());
+        let camera = read_orbit_camera(world.engine()).expect("camera");
+        assert_eq!(camera.view_parameters().3, 45.0);
+
+        world.spawn(OrbitCamera::looking_at(
+            Vec3::new(1.0, 1.0, 1.0),
+            Vec3::ZERO,
+        ));
+        assert_eq!(
+            world
+                .engine()
+                .schedule()
+                .mermaid()
+                .matches("orbit_camera_input")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn replace_scene_replaces_spawned_lights() {
+        let mut world = GameWorld::new();
+        world.set_ambient(Color::WHITE);
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::Y,
+            illuminance: Lux(0.6),
+            color: Color::WHITE,
+            ..Default::default()
+        });
+        world.replace_scene(&scene());
+        let rig = render_lights(&world);
+        assert!(rig.lights.is_empty());
+        assert_eq!(rig.ambient, [0.1, 0.1, 0.1]);
+    }
+
+    #[test]
+    fn spawn_after_replace_appends_one_light_and_keeps_ambient() {
+        let mut world = GameWorld::from_scene(&scene());
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::Y,
+            illuminance: Lux(1.0),
+            color: Color::WHITE,
+            ..Default::default()
+        });
+        let rig = render_lights(&world);
+        assert_eq!(rig.lights.len(), 1);
+        assert_eq!(rig.ambient, [0.1, 0.1, 0.1]);
+    }
+
+    #[test]
+    fn set_ambient_after_from_scene_keeps_scene_lights() {
+        let mut lit = scene();
+        lit.lights.push(LightDesc::Directional {
+            direction: UnitVec3::Y,
+            intensity: 1.0,
+            color: [1.0, 1.0, 1.0],
+            shadow: ShadowCast::Disabled,
+        });
+        let mut world = GameWorld::from_scene(&lit);
+        world.set_ambient(Color::WHITE);
+        let rig = render_lights(&world);
+        assert_eq!(rig.lights.len(), 1);
+        assert_eq!(rig.ambient, [1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -1045,8 +1136,13 @@ mod tests {
         assert!(!spawned.wiring.roots.is_empty());
         assert!(!spawned.wiring.skel_playlists.is_empty());
 
-        world.set_ambient([0.1, 0.1, 0.15]);
-        world.add_directional_light([1.0, 1.0, 1.0], 0.6, [1.0, 1.0, 1.0]);
+        world.set_ambient(Color::linear_rgb(0.1, 0.1, 0.15));
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::new(Vec3::new(1.0, 1.0, 1.0)).expect("direction"),
+            illuminance: Lux(0.6),
+            color: Color::WHITE,
+            ..Default::default()
+        });
         let rig = world
             .engine()
             .world()
@@ -1056,7 +1152,10 @@ mod tests {
         assert_eq!(rig.ambient, [0.1, 0.1, 0.15]);
         assert_eq!(rig.lights.len(), 1);
 
-        world.add_orbit_camera([2.5, 1.8, 3.5], [0.0, 1.0, 0.0]);
+        world.spawn(
+            OrbitCamera::looking_at(Vec3::new(2.5, 1.8, 3.5), Vec3::new(0.0, 1.0, 0.0))
+                .with_fov(Degrees(45.0)),
+        );
         assert!(
             world
                 .engine()
