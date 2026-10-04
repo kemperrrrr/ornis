@@ -37,9 +37,8 @@ HTTP-сервер на порту 3420 и раздаёт фронтенд из `
 Нативный режим (`cargo run` без фичи) сервер **не поднимает** — движку
 редактор не нужен; браузерный редактор рядом с нативным окном доступен
 по явному флагу: `cargo run -- --remote-editor`. Демо анимаций
-(стартер-персонаж через `world.assets_mut().load::<Model>` и
-`world.spawn`, запуск `ornis::run`, клип `Walk_Loop` на корне
-персонажа): `cargo run --example anim`.
+(стартер-персонаж через `world.load::<Model>` и `world.spawn`?, запуск
+`ornis::run`, клип `Walk_Loop` на корне персонажа): `cargo run --example anim`.
 
 ## Качество
 
@@ -230,10 +229,12 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 контракт после serialization boundary. Свет и клиентская камера ставятся через
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
 `OrbitCamera`); реестр ассетов живёт на мире (`assets` / `assets_mut`),
-`spawn(Handle<Model>)` строит иерархию узлов (локальный `Transform`,
-`ChildOf`, примитивы — дети узла), `spawn_scene` — корень RON-сцены.
-Клип запускается через `entity_mut(root).animator()?.play(name)`,
-окно открывает `ornis::run`. Иерархия живёт в
+`world.load::<Model>(path)` грузит модель, `spawn(Handle<Model>)` возвращает
+корень иерархии узлов (локальный `Transform`, `ChildOf`, примитивы — дети
+узла) или `SpawnModelError`, если хендл не загружен (мир не меняется).
+`spawn_scene` — корень RON-сцены. Клип запускается через
+`entity_mut(root).animator()?.play(name)`, окно открывает `ornis::run`
+с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Иерархия живёт в
 `ornis_core`: локальный `Transform`, мировой `GlobalTransform` (система
 `propagate_transforms` до извлечения кадра и до physics sync), связь
 `ChildOf` и кэш `Children`, имя `Name`. Скрытый пол витрины живёт
