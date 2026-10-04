@@ -26,8 +26,8 @@ pub mod physics_runtime;
 pub mod session;
 pub mod sync_harness;
 
-pub use game_world::{GameWorld, ReplicaGameWorld, Spawn};
-pub use ornis_animation::try_animator;
+pub use game_world::{EntityMut, GameWorld, PlaybackError, ReplicaGameWorld, Spawn};
+pub use ornis_animation::{AnimatorAccess, try_animator};
 
 /// Installs the unified runtime into `engine`.
 ///

@@ -37,8 +37,9 @@ HTTP-сервер на порту 3420 и раздаёт фронтенд из `
 Нативный режим (`cargo run` без фичи) сервер **не поднимает** — движку
 редактор не нужен; браузерный редактор рядом с нативным окном доступен
 по явному флагу: `cargo run -- --remote-editor`. Демо анимаций
-(стартер-персонаж поверх общего шелла `ornis-runner`, клип `Walk_Loop`
-по имени через `AssetServer`): `cargo run --example anim`.
+(стартер-персонаж через `AssetServer::load::<Scene>` и
+`GameWorld::spawn_scene`, клип `Walk_Loop` на корне персонажа):
+`cargo run --example anim`.
 
 ## Качество
 
@@ -228,7 +229,9 @@ jobs and line-table debug info (debug assertions stay enabled).
 render loops уже используют общий `GameWorld`/`RenderExtract`/`RenderFrame3D`
 контракт после serialization boundary. Свет и клиентская камера ставятся через
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
-`OrbitCamera`); скрытый пол витрины живёт в `src/main.rs`, не в `GameWorld`. `InputState` теперь является
+`OrbitCamera`); `spawn_scene` возвращает один корень, клип запускается
+через `entity_mut(root).animator()?.play(name)`. Скрытый пол витрины живёт
+в `src/main.rs`, не в `GameWorld`. `InputState` теперь является
 backend-neutral resource; native winit и WASM orbit adapters записывают
 keyboard, mouse, pointer and wheel input, а browser render frame публикует
 его через `Engine`. Gameplay consumers подключены через

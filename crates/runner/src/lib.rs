@@ -76,24 +76,68 @@ impl NativeOptions {
     }
 }
 
-/// Runs one [`GameWorld`] in a native window: builds the world via
-/// `build`, opens the window, and pumps frames until close (or the
-/// `--frames` budget runs out).
+/// Turns a world source into the builder [`run_native`] runs.
+pub trait IntoWorldBuild {
+    /// Ready world plus the remote-editor entity counter seed.
+    fn into_world_build(self) -> BuildWorld;
+}
+
+impl<F> IntoWorldBuild for F
+where
+    F: FnOnce() -> (GameWorld, u32) + 'static,
+{
+    fn into_world_build(self) -> BuildWorld {
+        Box::new(self)
+    }
+}
+
+impl IntoWorldBuild for GameWorld {
+    fn into_world_build(self) -> BuildWorld {
+        let count = u32::try_from(self.entity_count()).unwrap_or(u32::MAX);
+        Box::new(move || (self, count))
+    }
+}
+
+/// Window options [`run_native`] accepts.
+pub trait IntoNativeOptions {
+    /// Resolved native options.
+    fn into_native_options(self) -> NativeOptions;
+}
+
+impl IntoNativeOptions for NativeOptions {
+    fn into_native_options(self) -> NativeOptions {
+        self
+    }
+}
+
+impl IntoNativeOptions for &'static str {
+    fn into_native_options(self) -> NativeOptions {
+        NativeOptions::from_env(self)
+    }
+}
+
+/// Runs one [`GameWorld`] in a native window.
+///
+/// `build` is either a `FnOnce() -> (GameWorld, u32)` or a ready
+/// [`GameWorld`]. `options` is [`NativeOptions`] or a title `&'static str`
+/// (still reads `--frames` and `--remote-editor` from the environment).
+/// The window stays open until close, or until the `--frames` budget
+/// runs out.
 ///
 /// # Errors
 ///
 /// When the event loop or GPU init fails; runtime frame errors never
 /// surface here (initialization failures print to stderr instead).
 pub fn run_native(
-    build: impl FnOnce() -> (GameWorld, u32) + 'static,
-    options: NativeOptions,
+    build: impl IntoWorldBuild,
+    options: impl IntoNativeOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
     let mut app = GameApp {
         context: None,
         remote_editor: None,
-        build: Some(Box::new(build)),
-        options,
+        build: Some(build.into_world_build()),
+        options: options.into_native_options(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
