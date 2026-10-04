@@ -7,16 +7,16 @@
 
 use glam::Vec3;
 use ornis_app::{AnimatorAccess, GameWorld};
-use ornis_assets::{Handle, Model};
+use ornis_assets::Model;
 use ornis_core::{Color, Degrees, Lux, UnitVec3};
 use ornis_render::{DirectionalLight, OrbitCamera};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = GameWorld::new();
-    let mannequin: Handle<Model> = world
+    let mannequin = world
         .assets_mut()
-        .load("assets/starter/ual1_standard.glb")?;
-    let hero = world.spawn_model(&mannequin)?;
+        .load::<Model>("assets/starter/ual1_standard.glb")?;
+    let hero = world.spawn(mannequin);
     world.set_ambient(Color::hex("#1A1A26")?);
     world.spawn(DirectionalLight {
         direction: UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0))?,

@@ -190,18 +190,21 @@ fn with_interpolation<T, M: Copy>(
 pub struct GltfSpawn {
     /// Mesh entities, 1:1 with [`Model::primitives`], in primitive order.
     pub entities: Vec<Entity>,
-    /// [`NodeIdx`] → world entity. First primitive of a node wins.
+    /// [`NodeIdx`] → world entity.
     ///
-    /// Mesh-less nodes are absent: object tracks that address them are
-    /// dropped by the flat spawn. The hierarchical spawn (Core track) is
-    /// what keeps those nodes as entities.
+    /// [`spawn_gltf_world`] records the first primitive of a node and omits
+    /// mesh-less nodes, so object tracks on those nodes are dropped. The
+    /// hierarchical [`GameWorld::spawn`](crate::GameWorld::spawn) of a
+    /// [`Handle<Model>`](ornis_assets::Handle) fills this map from
+    /// [`ModelInstance`](crate::ModelInstance) (every node, parent before
+    /// child) so those tracks bind to the node entity.
     pub node_to_entity: HashMap<NodeIdx, Entity>,
     /// Character root that receives [`Animator`].
     ///
     /// `None` (what [`spawn_gltf_world`] leaves) tells
     /// [`wire_loaded_animation`] to fall back to the first mesh entity.
     /// Set this before wiring when the real scene root is a different
-    /// entity — that is the hook for `GameWorld::spawn_model`.
+    /// entity — that is the hook for hierarchical `Handle<Model>` spawn.
     /// The entity must already exist.
     pub scene_root: Option<Entity>,
 }
@@ -228,8 +231,8 @@ impl AnimationWiring {
 
     /// Inserts an [`Animator`] on `scene_root` for this wiring's skeletal clips.
     ///
-    /// Flat glTF spawn (`GameWorld::spawn_model`) should pass the
-    /// character root. Skeleton roots are not given a [`SkelPlayer`] until
+    /// Hierarchical model spawn passes the synthetic character root.
+    /// Skeleton roots are not given a [`SkelPlayer`] until
     /// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play). Calling
     /// this again on the same entity replaces the component; it does not
     /// clear an animator previously attached to a different entity.
@@ -335,11 +338,17 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
 /// are the target, not a guessed clip); hosts start them with
 /// [`set_playing`]. [`GltfSpawn::scene_root`], when set, receives the
 /// animator; otherwise the first mesh entity does, which is the stand-in
-/// until `GameWorld::spawn_model` returns the character root.
+/// until hierarchical model spawn supplies the synthetic character root.
 ///
-/// `spawn.entities` must be the load-order mesh entities (see
-/// [`spawn_gltf_world`]); `spawn.node_to_entity` resolves loader-local
-/// node handles to them. Sources without skins or clips wire nothing.
+/// `spawn.entities` is one entity per primitive, in primitive order (the
+/// flat [`spawn_gltf_world`] list, or the primitive children of a
+/// hierarchical spawn). `spawn.node_to_entity` resolves [`NodeIdx`] to the
+/// entity object tracks write: a mesh entity for the flat spawn, the node
+/// entity from [`ModelInstance`](crate::ModelInstance) for the hierarchy.
+/// Joint clips still sample [`LoadedJointTrack::joint`](ornis_gltf::LoadedJointTrack::joint);
+/// [`LoadedJointTrack::node`](ornis_gltf::LoadedJointTrack::node) is the
+/// hierarchy address and is not a second joint index. Sources without
+/// skins or clips wire nothing.
 /// Lanes are registered idempotently.
 pub fn wire_loaded_animation(
     store: &mut SmartStore,

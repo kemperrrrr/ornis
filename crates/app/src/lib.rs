@@ -27,7 +27,7 @@ pub mod physics_runtime;
 pub mod session;
 pub mod sync_harness;
 
-pub use game_world::{EntityMut, GameWorld, PlaybackError, ReplicaGameWorld, Spawn};
+pub use game_world::{EntityMut, GameWorld, ModelInstance, PlaybackError, ReplicaGameWorld, Spawn};
 pub use ornis_animation::{AnimatorAccess, try_animator};
 
 /// Inserts the flat authored pose as both local [`Transform`] and world

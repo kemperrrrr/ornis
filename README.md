@@ -38,7 +38,7 @@ HTTP-сервер на порту 3420 и раздаёт фронтенд из `
 редактор не нужен; браузерный редактор рядом с нативным окном доступен
 по явному флагу: `cargo run -- --remote-editor`. Демо анимаций
 (стартер-персонаж через `world.assets_mut().load::<Model>` и
-`GameWorld::spawn_model`, запуск `ornis::run`, клип `Walk_Loop` на корне
+`world.spawn`, запуск `ornis::run`, клип `Walk_Loop` на корне
 персонажа): `cargo run --example anim`.
 
 ## Качество
@@ -230,8 +230,9 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 контракт после serialization boundary. Свет и клиентская камера ставятся через
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
 `OrbitCamera`); реестр ассетов живёт на мире (`assets` / `assets_mut`),
-`spawn_model` возвращает корень glTF-модели, `spawn_scene` — корень
-RON-сцены. Клип запускается через `entity_mut(root).animator()?.play(name)`,
+`spawn(Handle<Model>)` строит иерархию узлов (локальный `Transform`,
+`ChildOf`, примитивы — дети узла), `spawn_scene` — корень RON-сцены.
+Клип запускается через `entity_mut(root).animator()?.play(name)`,
 окно открывает `ornis::run`. Иерархия живёт в
 `ornis_core`: локальный `Transform`, мировой `GlobalTransform` (система
 `propagate_transforms` до извлечения кадра и до physics sync), связь
