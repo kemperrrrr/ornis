@@ -55,11 +55,14 @@ impl AssetId {
     }
 }
 
-/// Asset kinds the server can load (today only scenes).
+/// Asset kinds the server can load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AssetKind {
-    /// Scene asset ([`Scene`]): `.ron`, `.gltf`/`.glb`, ...
+    /// Scene asset ([`Scene`]): `.ron`.
     Scene,
+    /// glTF model ([`crate::Model`]): `.gltf`/`.glb`.
+    #[cfg(feature = "gltf")]
+    Model,
 }
 
 impl AssetKind {
@@ -67,6 +70,8 @@ impl AssetKind {
     pub fn name(self) -> &'static str {
         match self {
             AssetKind::Scene => "scene",
+            #[cfg(feature = "gltf")]
+            AssetKind::Model => "model",
         }
     }
 }
@@ -148,12 +153,9 @@ pub struct AssetServer {
     registry: ImporterRegistry,
     kinds: HashMap<AssetId, AssetKind>,
     scenes: HashMap<AssetId, Scene>,
-    /// Retained glTF sources behind glTF-loaded ids: the converted
-    /// [`Scene`] drops node indices and animation data, so animation wiring
-    /// reads the [`LoadedScene`](ornis_gltf::LoadedScene) here instead.
-    /// `.ron` and manual loads have no entry.
+    /// glTF models ([`crate::Model`]). `.ron` loads have no entry.
     #[cfg(feature = "gltf")]
-    loaded: HashMap<AssetId, ornis_gltf::LoadedScene>,
+    models: HashMap<AssetId, crate::Model>,
     sources: HashMap<AssetId, String>,
     /// Requested file per file-backed asset (as given by the caller).
     paths: HashMap<AssetId, PathBuf>,
@@ -184,7 +186,7 @@ impl AssetServer {
             kinds: HashMap::new(),
             scenes: HashMap::new(),
             #[cfg(feature = "gltf")]
-            loaded: HashMap::new(),
+            models: HashMap::new(),
             sources: HashMap::new(),
             paths: HashMap::new(),
             by_path: HashMap::new(),
@@ -206,7 +208,7 @@ impl AssetServer {
 
     /// Whether no assets are loaded.
     pub fn is_empty(&self) -> bool {
-        self.scenes.is_empty()
+        self.kinds.is_empty()
     }
 
     /// Number of loaded scene assets.
@@ -216,7 +218,7 @@ impl AssetServer {
 
     /// Whether `id` addresses a loaded scene.
     pub fn contains(&self, id: AssetId) -> bool {
-        self.scenes.contains_key(&id)
+        self.kinds.contains_key(&id)
     }
 
     /// Loads the asset at `path` as `T`, dispatching by extension.
@@ -281,15 +283,15 @@ impl AssetServer {
         Ok(())
     }
 
-    /// Drops an asset and everything retained for it (source text, glTF
-    /// sidecar, path index, dirty mark). Returns whether it existed;
+    /// Drops an asset and everything retained for it (source text, model,
+    /// path index, dirty mark). Returns whether it existed;
     /// handles to it resolve to `None` afterwards.
     pub fn unload<T: Asset>(&mut self, handle: &Handle<T>) -> bool {
         let id = handle.id();
         let existed = self.kinds.remove(&id).is_some();
         self.scenes.remove(&id);
         #[cfg(feature = "gltf")]
-        self.loaded.remove(&id);
+        self.models.remove(&id);
         self.sources.remove(&id);
         self.dirty.remove(&id);
         if let Some(path) = self.paths.remove(&id) {
@@ -341,15 +343,15 @@ impl AssetServer {
         self.scenes.get(&id)
     }
 
-    /// Borrows the retained glTF source behind a glTF-loaded id.
+    /// Borrows a loaded glTF [`Model`](crate::Model) by id.
     ///
     /// Only glTF loads ([`AssetServer::load`] of a `.gltf`/`.glb`,
     /// [`AssetServer::load_gltf`]/[`load_gltf_file`](AssetServer::load_gltf_file))
-    /// retain a source (alongside the converted [`Scene`]); `.ron` and
-    /// manual loads plus unknown ids return `None`.
+    /// store a model. `.ron` loads, manual scenes, and unknown ids return
+    /// `None`. A flat editor scene is [`scene_from_model`](crate::scene_from_model).
     #[cfg(feature = "gltf")]
-    pub fn loaded_scene(&self, id: AssetId) -> Option<&ornis_gltf::LoadedScene> {
-        self.loaded.get(&id)
+    pub fn model(&self, id: AssetId) -> Option<&crate::Model> {
+        self.models.get(&id)
     }
 
     /// Re-serializes a loaded scene to `.ron`.
@@ -360,12 +362,11 @@ impl AssetServer {
         self.scenes.get(&id)?.to_ron().ok()
     }
 
-    /// Parses glTF bytes (`.glb` or `.gltf`) into a [`Scene`] via
-    /// [`crate::import`] and stores it. Textured slots keep their scalar
-    /// fallback until the GPU upload step learns images. The
-    /// [`LoadedScene`](ornis_gltf::LoadedScene) is retained alongside (see
-    /// [`AssetServer::loaded_scene`]) so animation wiring can map node
-    /// indices the converted [`Scene`] drops.
+    /// Parses glTF bytes (`.glb` or `.gltf`) into a [`Model`](crate::Model)
+    /// and stores it. Textured slots keep their scalar fallback until the
+    /// GPU upload step learns images. The editor flattens with
+    /// [`scene_from_model`](crate::scene_from_model) when it needs a
+    /// [`Scene`].
     ///
     /// # Errors
     ///
@@ -376,17 +377,15 @@ impl AssetServer {
     pub fn load_gltf(&mut self, bytes: &[u8]) -> Result<AssetId, AssetError> {
         match crate::importer::GltfImporter.import_slice(bytes) {
             Ok(imported) => Ok(self.store(imported, None)),
-            Err(error) => Err(self.fail(AssetKind::Scene, None, error)),
+            Err(error) => Err(self.fail(AssetKind::Model, None, error)),
         }
     }
 
     /// Reads a glTF file (resolving sibling `.bin` like
-    /// [`ornis_gltf::load_path`]) and stores it as a scene, remembering the
-    /// path. Unlike [`AssetServer::load`] this always re-imports (the
-    /// editor re-reads files on hot reload) and returns a fresh id; the
-    /// path index then points at the newest id. The
-    /// [`LoadedScene`](ornis_gltf::LoadedScene) is retained alongside (see
-    /// [`AssetServer::loaded_scene`]).
+    /// [`ornis_gltf::load_path`]) and stores it as a [`Model`](crate::Model),
+    /// remembering the path. Unlike [`AssetServer::load`] this always
+    /// re-imports (the editor re-reads files on hot reload) and returns a
+    /// fresh id; the path index then points at the newest id.
     ///
     /// # Errors
     ///
@@ -396,7 +395,7 @@ impl AssetServer {
     pub fn load_gltf_file(&mut self, path: &Path) -> Result<AssetId, AssetError> {
         match crate::importer::GltfImporter.import_path(path) {
             Ok(imported) => Ok(self.store(imported, Some(path))),
-            Err(error) => Err(self.fail(AssetKind::Scene, Some(path), error)),
+            Err(error) => Err(self.fail(AssetKind::Model, Some(path), error)),
         }
     }
 
@@ -406,7 +405,7 @@ impl AssetServer {
     /// reloads by re-reading files (see below); this set is for hosts
     /// that detect staleness another way.
     pub fn request_reload(&mut self, id: AssetId) -> bool {
-        if !self.scenes.contains_key(&id) {
+        if !self.kinds.contains_key(&id) {
             return false;
         }
         self.dirty.insert(id);
@@ -499,15 +498,22 @@ impl AssetServer {
         match imported {
             ImportedAsset::Scene(import) => {
                 match import.source_text {
-                    Some(text) => self.sources.insert(id, text),
-                    None => self.sources.remove(&id),
+                    Some(text) => {
+                        self.sources.insert(id, text);
+                    }
+                    None => {
+                        self.sources.remove(&id);
+                    }
                 };
                 #[cfg(feature = "gltf")]
-                match import.gltf {
-                    Some(loaded) => self.loaded.insert(id, loaded),
-                    None => self.loaded.remove(&id),
-                };
+                self.models.remove(&id);
                 self.scenes.insert(id, import.scene);
+            }
+            #[cfg(feature = "gltf")]
+            ImportedAsset::Model(model) => {
+                self.sources.remove(&id);
+                self.scenes.remove(&id);
+                self.models.insert(id, model);
             }
         }
     }
@@ -798,13 +804,17 @@ mod tests {
 
     #[cfg(feature = "gltf")]
     #[test]
-    fn load_gltf_stores_scene_end_to_end() {
+    fn load_gltf_stores_model_end_to_end() {
         // Real bytes (not hand-built structs): JSON + base64 buffer.
         let mut server = AssetServer::new();
         let id = server
             .load_gltf(triangle_gltf_json().as_bytes())
             .expect("triangle gltf loads");
-        let scene = server.get_scene(id).expect("stored");
+        let model = server.model(id).expect("stored model");
+        assert_eq!(model.nodes.len(), 1);
+        assert_eq!(model.nodes[0].name.as_deref(), Some("tri"));
+        assert_eq!(model.primitives.len(), 1);
+        let scene = crate::scene_from_model(model);
         assert_eq!(scene.entities.len(), 1);
         assert_eq!(scene.entities[0].name, "tri");
         assert_eq!(scene.entities[0].transform.translation, glam::Vec3::ZERO);
@@ -816,42 +826,40 @@ mod tests {
             scene.entities[0].material,
             crate::scene::MaterialDesc::Metal { .. }
         ));
+        assert!(server.get_scene(id).is_none(), "glTF is not a Scene");
         assert_eq!(
             server.take_events(),
             vec![AssetEvent::Loaded {
                 id,
-                kind: AssetKind::Scene
+                kind: AssetKind::Model
             }]
         );
     }
 
     #[cfg(feature = "gltf")]
     #[test]
-    fn load_gltf_retains_loaded_scene_alongside_converted() {
-        // The converted `Scene` drops node indices; the retained source
-        // keeps them for animation wiring.
+    fn load_gltf_keeps_the_node_on_the_model() {
         let mut server = AssetServer::new();
         let id = server
             .load_gltf(triangle_gltf_json().as_bytes())
             .expect("triangle gltf loads");
-        let scene = server.get_scene(id).expect("converted scene");
-        assert_eq!(scene.entities.len(), 1);
-        let loaded = server.loaded_scene(id).expect("loaded retained");
-        assert_eq!(loaded.entities.len(), 1);
-        assert_eq!(loaded.entities[0].name, "tri");
-        assert_eq!(loaded.entities[0].node, 0);
-        assert!(loaded.skins.is_empty());
+        let model = server.model(id).expect("model");
+        assert_eq!(model.primitives.len(), 1);
+        assert_eq!(model.primitives[0].node, crate::NodeIdx(0));
+        assert_eq!(model.nodes[0].name.as_deref(), Some("tri"));
+        assert!(model.skins.is_empty());
+        assert!(server.get_scene(id).is_none());
     }
 
     #[cfg(feature = "gltf")]
     #[test]
-    fn ron_and_manual_loads_retain_no_loaded_scene() {
+    fn ron_and_manual_loads_store_no_model() {
         let mut server = AssetServer::new();
         let ron = server.load_scene_ron(DEMO_RON).expect("demo scene loads");
-        assert!(server.loaded_scene(ron).is_none());
+        assert!(server.model(ron).is_none());
         let manual = server.load_scene(two_entity_scene(), None);
-        assert!(server.loaded_scene(manual).is_none());
-        assert!(server.loaded_scene(AssetId { index: 999 }).is_none());
+        assert!(server.model(manual).is_none());
+        assert!(server.model(AssetId { index: 999 }).is_none());
     }
 
     #[cfg(feature = "gltf")]
@@ -877,7 +885,7 @@ mod tests {
         assert_eq!(
             server.take_events(),
             vec![AssetEvent::Failed {
-                kind: AssetKind::Scene,
+                kind: AssetKind::Model,
                 path: None,
                 error,
             }]
@@ -1041,12 +1049,14 @@ mod tests {
     fn generic_load_glb_retains_source_and_path() {
         let path = starter_glb();
         let mut server = AssetServer::new();
-        let handle: Handle<Scene> = server.load(&path).expect("starter loads");
-        assert!(!server.get(&handle).expect("scene").entities.is_empty());
-        let loaded = server.loaded_scene(handle.id()).expect("glTF sidecar");
-        assert!(!loaded.skel_clips.is_empty(), "starter ships clips");
+        let handle: Handle<crate::Model> = server.load(&path).expect("starter loads");
+        let model = server.get(&handle).expect("model");
+        assert!(!model.nodes.is_empty());
+        assert!(!model.skel_clips.is_empty(), "starter ships clips");
         assert_eq!(server.path(handle.id()), Some(path.as_path()));
-        assert_eq!(server.load::<Scene>(&path).expect("dedup"), handle);
+        assert_eq!(server.load::<crate::Model>(&path).expect("dedup"), handle);
+        let wrong = server.load::<Scene>(&path).expect_err("glb is not a scene");
+        assert!(matches!(wrong, AssetError::WrongKind { .. }), "{wrong:?}");
     }
 
     #[cfg(feature = "gltf")]
@@ -1057,7 +1067,7 @@ mod tests {
         let id = server.load_gltf_file(&path).expect("starter loads");
         assert_eq!(server.path(id), Some(path.as_path()));
         // The generic loader reuses the legacy load through the path index.
-        assert_eq!(server.load::<Scene>(&path).expect("dedup").id(), id);
+        assert_eq!(server.load::<crate::Model>(&path).expect("dedup").id(), id);
         server.take_events();
 
         let missing = Path::new("definitely/missing.glb");
@@ -1066,7 +1076,7 @@ mod tests {
         assert_eq!(
             server.take_events(),
             vec![AssetEvent::Failed {
-                kind: AssetKind::Scene,
+                kind: AssetKind::Model,
                 path: Some(missing.to_path_buf()),
                 error,
             }]

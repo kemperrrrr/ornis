@@ -6,7 +6,7 @@
 //!
 //! Test-only: declared under `#[cfg(test)]` in the crate root.
 
-use super::LoadedScene;
+use super::Model;
 use super::import::load_slice;
 
 /// Built document: JSON, raw buffer bytes, plus sibling files for
@@ -270,7 +270,7 @@ pub(crate) fn triangle() -> Fixture {
 }
 
 /// Parses the default triangle fixture straight from generated `.glb` bytes.
-pub(crate) fn load_triangle() -> LoadedScene {
+pub(crate) fn load_triangle() -> Model {
     load_slice(&build_glb(&triangle())).expect("fixture parses")
 }
 

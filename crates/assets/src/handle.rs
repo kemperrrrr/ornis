@@ -1,11 +1,12 @@
 //! Typed asset handles.
 //!
 //! [`Handle<T>`] is an [`AssetId`] tagged with the asset type at compile
-//! time: `Handle<Scene>` cannot be passed where another asset type is
+//! time: `Handle<Scene>` cannot be passed where `Handle<Model>` is
 //! expected, yet it is `Copy` and costs exactly one id. [`Asset`] ties a
 //! Rust type to its runtime [`AssetKind`] and to its storage in the
 //! [`AssetServer`]; adding a new asset type means a new [`AssetKind`]
-//! variant, a storage lane in the server and one `Asset` impl.
+//! variant, a storage lane in the server and one `Asset` impl. `.ron` is
+//! [`Scene`]; `.glb`/`.gltf` is [`Model`](crate::Model).
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -41,6 +42,18 @@ impl Asset for Scene {
     }
 }
 
+#[cfg(feature = "gltf")]
+impl sealed::Sealed for crate::Model {}
+
+#[cfg(feature = "gltf")]
+impl Asset for crate::Model {
+    const KIND: AssetKind = AssetKind::Model;
+
+    fn get(server: &AssetServer, id: AssetId) -> Option<&Self> {
+        server.model(id)
+    }
+}
+
 /// Typed, copyable reference to a loaded asset of type `T`.
 ///
 /// Obtained from [`AssetServer::load`]; resolve with [`AssetServer::get`].
@@ -62,7 +75,7 @@ impl<T: Asset> Handle<T> {
     }
 
     /// Untyped id, for the id-based legacy API
-    /// ([`AssetServer::get_scene`], [`AssetServer::loaded_scene`], ...).
+    /// ([`AssetServer::get_scene`], [`AssetServer::model`], ...).
     pub fn id(self) -> AssetId {
         self.id
     }
