@@ -118,6 +118,7 @@ impl GameWorld {
         for desc in &scene.entities {
             let entity = store.create_entity();
             store.insert(entity, desc.transform.clone());
+            crate::insert_flat_pose(store, entity, &desc.transform);
             store.insert(entity, desc.mesh.clone());
             store.insert(entity, desc.material.clone());
         }
@@ -369,8 +370,33 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// render payload (same contract as [`Self::frame`]: finite and
     /// non-negative).
     pub fn frame_secs(&mut self, delta: Seconds) -> FrameUpload {
+        ornis_core::install_transform_propagation(self.engine_mut());
         self.engine.run_frame_secs(delta);
         self.frame_upload()
+    }
+
+    /// Destroys `entity` and its descendants, and drops them from the scene
+    /// list and from the parent's [`Children`](ornis_core::Children) cache.
+    pub fn despawn_recursive(&mut self, entity: Entity) {
+        {
+            let Some(store) = self.engine.world_mut().store_mut() else {
+                return;
+            };
+            ornis_core::despawn_recursive(store, entity);
+        }
+        let Some(store) = self.engine.world().store() else {
+            return;
+        };
+        let live: Vec<Entity> = self
+            .entities
+            .iter()
+            .copied()
+            .filter(|entity| store.is_alive(*entity))
+            .collect();
+        if live.len() != self.entities.len() {
+            self.entities = live.into();
+            self.version.bump();
+        }
     }
 
     /// Single write of the light rig. [`Self::new`] does not publish one,
@@ -410,6 +436,7 @@ fn insert_scene_entities(engine: &mut Engine, entities: &[EntityDesc]) -> Vec<En
     for entity in entities {
         let handle = store.create_entity();
         store.insert(handle, entity.transform.clone());
+        crate::insert_flat_pose(store, handle, &entity.transform);
         store.insert(handle, entity.mesh.clone());
         store.insert(handle, entity.material.clone());
         handles.push(handle);
@@ -1349,5 +1376,22 @@ mod tests {
             .expect("player");
         assert!(!player.playing);
         assert_eq!(player.time, Seconds::ZERO);
+    }
+
+    #[test]
+    fn despawn_recursive_drops_the_scene_subtree() {
+        use ornis_core::set_parent;
+        let mut world = GameWorld::from_scene(&two_sphere_scene());
+        let entities = world.entities().to_vec();
+        assert!(entities.len() >= 2);
+        {
+            let store = world.engine_mut().world_mut().store_mut().expect("store");
+            set_parent(store, entities[1], entities[0]).expect("parent");
+        }
+        world.despawn_recursive(entities[0]);
+        assert_eq!(world.entity_count(), entities.len() - 2);
+        let store = world.engine().world().store().expect("store");
+        assert!(!store.is_alive(entities[0]));
+        assert!(!store.is_alive(entities[1]));
     }
 }

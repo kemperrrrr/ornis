@@ -264,6 +264,7 @@ pub fn spawn_gltf_world(store: &mut SmartStore, loaded: &ornis_gltf::LoadedScene
     for (desc, loaded_entity) in scene.entities.iter().zip(loaded.entities.iter()) {
         let entity = store.create_entity();
         store.insert(entity, desc.transform.clone());
+        crate::insert_flat_pose(store, entity, &desc.transform);
         store.insert(entity, desc.mesh.clone());
         store.insert(entity, desc.material.clone());
         node_to_entity

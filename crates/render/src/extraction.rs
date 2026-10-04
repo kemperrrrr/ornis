@@ -29,6 +29,7 @@ use crate::mesh_upload::{SoupCache, UploadCache};
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
 use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
+use ornis_core::GlobalTransform;
 use ornis_core::units::{PositiveF32, UnitVec3};
 
 /// Indices per triangle (flat soup alignment).
@@ -483,6 +484,19 @@ pub struct ExtractionStats {
     pub custom_cache_misses: u32,
 }
 
+/// World TRS for one renderable.
+///
+/// [`GlobalTransform`] is the hierarchy pose. Entities that have not been
+/// propagated still use [`TransformDesc`], which flat scenes store in world
+/// space.
+fn world_trs(global: Option<&GlobalTransform>, desc: &TransformDesc) -> (Vec3, glam::Quat, Vec3) {
+    if let Some(global) = global {
+        (global.translation, global.rotation.get(), global.scale)
+    } else {
+        (desc.translation, desc.rotation.get(), desc.scale)
+    }
+}
+
 /// Extracts complete renderable entities from the ECS store.
 ///
 /// Thin wrapper over [`extract_render_data_with_stats`] discarding the
@@ -519,6 +533,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
     let Some(transforms) = store.read_lane::<TransformDesc>() else {
         return (extracted, stats);
     };
+    let globals = store.read_lane::<GlobalTransform>();
     let Some(meshes) = store.read_lane::<MeshDesc>() else {
         return (extracted, stats);
     };
@@ -602,6 +617,10 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             });
             continue;
         }
+        let (translation, rotation, scale) = world_trs(
+            globals.as_ref().and_then(|lane| lane.get(entity)),
+            transform,
+        );
         // Per-entity Custom path: CPU-side vertices via the mesh_upload
         // bridge, deduplicated by soup hash within the frame (identical
         // soups convert once). An empty or invalid soup skips the entity —
@@ -628,11 +647,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                     stats.custom_cache_misses = stats.custom_cache_misses.saturating_add(1);
                 }
             }
-            let model = Mat4::from_scale_rotation_translation(
-                transform.scale,
-                transform.rotation.get(),
-                transform.translation,
-            );
+            let model = Mat4::from_scale_rotation_translation(scale, rotation, translation);
             let material_index =
                 deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
             let instance = InstanceData {
@@ -663,20 +678,16 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             } => {
                 extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
                 extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
-                transform.scale * radius.get()
+                scale * radius.get()
             }
-            MeshDesc::Box { size } => {
-                transform.scale * Vec3::from_array(size.map(PositiveF32::get))
+            MeshDesc::Box { size } => scale * Vec3::from_array(size.map(PositiveF32::get)),
+            MeshDesc::Plane { size } => {
+                Vec3::new(scale[0] * size[0].get(), scale[1], scale[2] * size[1].get())
             }
-            MeshDesc::Plane { size } => Vec3::new(
-                transform.scale[0] * size[0].get(),
-                transform.scale[1],
-                transform.scale[2] * size[1].get(),
-            ),
             MeshDesc::Cylinder { radius, height, .. } => Vec3::new(
-                transform.scale[0] * radius.get(),
-                transform.scale[1] * height.get(),
-                transform.scale[2] * radius.get(),
+                scale[0] * radius.get(),
+                scale[1] * height.get(),
+                scale[2] * radius.get(),
             ),
             // `as_custom` above handles every `Custom`; this arm is only
             // the match-exhaustiveness fallback (never a stub).
@@ -685,11 +696,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 continue;
             }
         };
-        let model = Mat4::from_scale_rotation_translation(
-            size_scale,
-            transform.rotation.get(),
-            transform.translation,
-        );
+        let model = Mat4::from_scale_rotation_translation(size_scale, rotation, translation);
         let material_index =
             deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
         extracted.instances.push(InstanceData {
@@ -1117,6 +1124,45 @@ fn skinned_tangent(normal: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
     use ornis_core::units::{Clamped01, Ior};
+
+    #[test]
+    fn extraction_uses_global_transform_not_the_local_desc() {
+        use ornis_core::{SmartStore, Transform, propagate_transforms, set_parent};
+        let mut store = SmartStore::new();
+        let parent = store.create_entity();
+        let child = store.create_entity();
+        store.insert(
+            parent,
+            Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+        );
+        store.insert(child, Transform::from_translation(glam::Vec3::X));
+        store.insert(child, TransformDesc::from_translation(glam::Vec3::X));
+        store.insert(
+            child,
+            MeshDesc::Sphere {
+                radius: PositiveF32::expect_valid(1.0),
+                segments: 8,
+                rings: 6,
+            },
+        );
+        store.insert(
+            child,
+            MaterialDesc::Dielectric {
+                base_color: [0.8, 0.2, 0.2],
+                roughness: Clamped01::new(0.4),
+                emission: [0.0, 0.0, 0.0],
+            },
+        );
+        set_parent(&mut store, child, parent).expect("parent");
+        propagate_transforms(&mut store);
+        let extracted = extract_render_data(&store);
+        assert_eq!(extracted.instances.len(), 1);
+        let translation = extracted.instances[0].model_matrix.w_axis.truncate();
+        assert!(
+            (translation - glam::Vec3::new(11.0, 0.0, 0.0)).length() < 1e-4,
+            "model matrix follows the world pose, got {translation:?}"
+        );
+    }
 
     #[test]
     fn custom_quad_routes_per_entity_and_bad_soups_skip_without_stub() {

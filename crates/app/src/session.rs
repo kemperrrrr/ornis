@@ -78,7 +78,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use glam::Vec3;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ornis_animation::{Animator, JointPose, SkelClip, SkelPlayer, Skeleton, SkinnedMesh};
@@ -107,10 +106,9 @@ use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 use editor_backend::ipc::{EditorCommand, GameEvent, RequestId, UiCommand};
 use editor_backend::remote::{ScenePath, ScenePathError, SceneRoots};
 
-/// Editor-side name component attached to every spawned entity.
-/// Newtype over `String`: its serde-canonical JSON is a plain string.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Name(pub String);
+/// Editor-side name. The component is [`ornis_core::Name`] so glTF and
+/// asset nodes share one type; its JSON form is still a plain string.
+pub use ornis_core::Name;
 
 /// Components editable through the generic protocol (F0; audit §10 D2).
 /// Built once: registry ops cover `set_component`, scene snapshots and
@@ -563,7 +561,8 @@ impl EditorSession {
             return entity;
         };
         store.insert(entity, Name(name));
-        store.insert(entity, transform);
+        store.insert(entity, transform.clone());
+        crate::insert_flat_pose(store, entity, &transform);
         store.insert(entity, mesh);
         store.insert(entity, material);
         // A broken collider (`Err`) spawns without a body, like the
@@ -578,14 +577,22 @@ impl EditorSession {
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
-        let store = self.store()?;
-        if !store.is_alive(entity) {
-            return None;
+        {
+            let store = self.store()?;
+            if !store.is_alive(entity) {
+                return None;
+            }
+            ornis_core::despawn_recursive(store, entity);
         }
-        self.alive.retain(|e| *e != entity);
-        if let Some(store) = self.store() {
-            store.destroy_entity(entity);
-        }
+        let still_alive: Vec<Entity> = {
+            let store = self.store();
+            self.alive
+                .iter()
+                .copied()
+                .filter(|entity| store.is_some_and(|store| store.is_alive(*entity)))
+                .collect()
+        };
+        self.alive = still_alive;
         self.version.bump();
         Some(entity)
     }

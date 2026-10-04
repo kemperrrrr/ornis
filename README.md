@@ -230,7 +230,10 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 контракт после serialization boundary. Свет и клиентская камера ставятся через
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
 `OrbitCamera`); `spawn_scene` возвращает один корень, клип запускается
-через `entity_mut(root).animator()?.play(name)`. Скрытый пол витрины живёт
+через `entity_mut(root).animator()?.play(name)`. Иерархия живёт в
+`ornis_core`: локальный `Transform`, мировой `GlobalTransform` (система
+`propagate_transforms` до извлечения кадра и до physics sync), связь
+`ChildOf` и кэш `Children`, имя `Name`. Скрытый пол витрины живёт
 в `src/main.rs`, не в `GameWorld`. `InputState` теперь является
 backend-neutral resource; native winit и WASM orbit adapters записывают
 keyboard, mouse, pointer and wheel input, а browser render frame публикует

@@ -11,7 +11,8 @@ use glam::Vec3;
 use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem, SkelSampleSystem, SkelSkinSystem};
 use ornis_assets::scene::TransformDesc;
 use ornis_core::{
-    Engine, FixedTime, InputState, Resources, SmartStore, System, SystemAccess, World,
+    Engine, Entity, FixedTime, GlobalTransform, InputState, Resources, SmartStore, System,
+    SystemAccess, Transform, World,
 };
 use ornis_physics::RigidBody;
 
@@ -28,6 +29,22 @@ pub mod sync_harness;
 
 pub use game_world::{EntityMut, GameWorld, PlaybackError, ReplicaGameWorld, Spawn};
 pub use ornis_animation::{AnimatorAccess, try_animator};
+
+/// Inserts the flat authored pose as both local [`Transform`] and world
+/// [`GlobalTransform`].
+///
+/// Today's scene and glTF spawns are still one level deep, so local and
+/// world match. Hierarchy propagation overwrites [`GlobalTransform`] once
+/// a [`ornis_core::ChildOf`] link exists.
+pub(crate) fn insert_flat_pose(store: &mut SmartStore, entity: Entity, desc: &TransformDesc) {
+    let local = Transform {
+        translation: desc.translation,
+        rotation: desc.rotation,
+        scale: desc.scale,
+    };
+    store.insert(entity, local);
+    store.insert(entity, GlobalTransform::from_local(local));
+}
 
 /// Installs the unified runtime into `engine`.
 ///
