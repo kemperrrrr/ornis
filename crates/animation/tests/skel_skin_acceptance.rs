@@ -48,11 +48,7 @@ fn skel_engine() -> Engine {
 }
 
 fn identity_transform() -> TransformDesc {
-    TransformDesc {
-        translation: Vec3::ZERO.to_array(),
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: Vec3::ONE.to_array(),
-    }
+    TransformDesc::IDENTITY
 }
 
 /// What the importer emits for a two-joint primitive: root plus one child,

@@ -618,7 +618,8 @@ mod tests {
         let custom = RenderLights {
             ambient: [0.5, 0.4, 0.3],
             lights: vec![ornis_assets::scene::LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, -1.0, 0.0))
+                    .expect("non-zero direction"),
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
                 shadow: ShadowCast::Disabled,

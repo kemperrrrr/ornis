@@ -7,12 +7,25 @@ license.workspace = true
 
 [dependencies]
 ornis-core = { path = "../core" }
-ornis-gltf = { path = "../gltf" }
+# glTF importer (feature `gltf`, default on): pulls the `gltf`/`image` tree.
+ornis-gltf = { path = "../gltf", optional = true }
+# `Vec3`/`Quat` behind the typed scene descriptors (same version as ornis-core).
+glam = "0.33"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Scene `.ron` is the canonical scene format: always available (no feature).
 ron = "0.12"
-# Typed loader errors (`thiserror::Error` on `SceneLoadError`).
+# Typed loader errors (`thiserror::Error` on `SceneLoadError`, `AssetError`).
 thiserror = "2.0"
+
+[features]
+default = ["gltf"]
+# `.gltf`/`.glb` importer (`GltfImporter`, `AssetServer::load_gltf*`,
+# `scene_from_gltf`, retained `LoadedScene` for animation wiring).
+gltf = ["dep:ornis-gltf"]
+# Placeholder: registers the `.fbx` extension with an importer that returns
+# `AssetError::UnsupportedFormat` (no parser, no new dependencies yet).
+fbx = []
 
 [lints]
 workspace = true

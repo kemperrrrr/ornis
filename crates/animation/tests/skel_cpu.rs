@@ -50,11 +50,7 @@ fn skel_engine() -> Engine {
 }
 
 fn identity_transform() -> TransformDesc {
-    TransformDesc {
-        translation: Vec3::ZERO.to_array(),
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: Vec3::ONE.to_array(),
-    }
+    TransformDesc::IDENTITY
 }
 
 fn vec_keys(value: Vec3) -> KeyTrack<Vec3> {
@@ -447,14 +443,7 @@ fn classic_custom_entries_report_unskinned() {
     // are never pre-skinned, so the new mode reads CPU with no palette.
     let mut store = SmartStore::new();
     let entity = store.create_entity();
-    store.insert(
-        entity,
-        TransformDesc {
-            translation: Vec3::ZERO.to_array(),
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: Vec3::ONE.to_array(),
-        },
-    );
+    store.insert(entity, TransformDesc::IDENTITY);
     store.insert(
         entity,
         MeshDesc::Custom {

@@ -92,7 +92,8 @@ impl HeadlessScene {
             &queue,
             [0.1, 0.1, 0.1],
             &[ornis_assets::scene::LightDesc::Directional {
-                direction: [0.3, -1.0, 0.5],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.3, -1.0, 0.5))
+                    .expect("non-zero direction"),
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
                 shadow: ShadowCast::Disabled,

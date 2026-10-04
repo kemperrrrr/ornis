@@ -140,10 +140,10 @@ mod tests {
         assert_eq!(live.scene.entities.len(), 1);
         assert_eq!(live.scene.lights.len(), 1);
         assert_eq!(live.scene.ambient, [0.10, 0.10, 0.15]);
-        assert_eq!(live.scene.camera.position, [0.0, 2.5, 9.0]);
-        assert!((live.scene.camera.fov - 60.0).abs() < f32::EPSILON);
+        assert_eq!(live.scene.camera.position.to_array(), [0.0, 2.5, 9.0]);
+        assert!((live.scene.camera.fov.0 - 60.0).abs() < f32::EPSILON);
         let e = &live.scene.entities[0];
-        assert_eq!(e.transform.translation, [-5.6, 0.0, 0.0]);
+        assert_eq!(e.transform.translation.to_array(), [-5.6, 0.0, 0.0]);
         assert!(matches!(
             e.mesh,
             MeshDesc::Sphere {

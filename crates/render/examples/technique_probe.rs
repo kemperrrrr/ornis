@@ -7,7 +7,7 @@
 //! Additive diagnostic used to bisect deferred-only vs shared shading
 //! artifacts; touches no library code.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::Mat4;
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
 use ornis_core::units::PositiveF32;
@@ -208,11 +208,7 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     for (i, entity) in scene.entities.iter().enumerate() {
         materials.push(build_material(&entity.material));
         let t = &entity.transform;
-        let model = Mat4::from_scale_rotation_translation(
-            Vec3::from(t.scale),
-            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]).normalize(),
-            Vec3::from(t.translation),
-        );
+        let model = Mat4::from_scale_rotation_translation(t.scale, t.rotation.get(), t.translation);
         instances.push(InstanceData {
             model_matrix: model,
             normal_matrix: model.inverse().transpose(),
@@ -225,18 +221,18 @@ async fn run(scene: &Scene, technique: Technique, out_path: &str) {
     renderer.set_lights(&queue, scene.ambient, &lights);
     let cam = &scene.camera;
     let aspect = WIDTH as f32 / HEIGHT as f32;
-    let view = glam::camera::rh::view::look_at_mat4(
-        Vec3::from(cam.position),
-        Vec3::from(cam.target),
-        Vec3::from(cam.up),
-    );
+    let view = glam::camera::rh::view::look_at_mat4(cam.position, cam.target, cam.up.get());
     let proj = glam::camera::rh::proj::directx::perspective(
-        cam.fov.to_radians(),
+        cam.fov.to_radians().get(),
         aspect,
-        cam.near,
-        cam.far,
+        cam.near.get(),
+        cam.far.get(),
     );
-    renderer.set_camera(&queue, &(proj * view).to_cols_array_2d(), cam.position);
+    renderer.set_camera(
+        &queue,
+        &(proj * view).to_cols_array_2d(),
+        cam.position.to_array(),
+    );
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("technique target"),

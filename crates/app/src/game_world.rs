@@ -144,13 +144,76 @@ impl GameWorld {
         let Some(loaded) = self.assets.get(&handle).cloned() else {
             return Err(SpawnError::UnknownAsset(handle.0));
         };
+        Ok(self.spawn_loaded(&loaded))
+    }
+
+    /// Spawns a scene loaded through [`AssetServer::load`]
+    /// (`ornis_assets`): the unified asset path. glTF scenes keep their
+    /// loader data on the server and get the same mesh + animation wiring
+    /// as [`GameWorld::spawn_asset`]; other scene formats (RON) spawn
+    /// their entities with no animation wiring. Loading never autoplays.
+    ///
+    /// Minimal bridge for the asset track: the world-local registry
+    /// ([`GameWorld::load_asset`]/[`AssetHandle`]) is still here and is to
+    /// be retired by the core track in favour of this entry point.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::UnknownAsset`] when `handle` is not (or no longer)
+    /// loaded on `assets`; the world is untouched.
+    ///
+    /// [`AssetServer::load`]: ornis_assets::AssetServer::load
+    pub fn spawn_scene(
+        &mut self,
+        assets: &ornis_assets::AssetServer,
+        handle: &ornis_assets::Handle<Scene>,
+    ) -> Result<SpawnedGltf, SpawnError> {
+        if let Some(loaded) = assets.loaded_scene(handle.id()) {
+            return Ok(self.spawn_loaded(loaded));
+        }
+        let Some(scene) = assets.get(handle) else {
+            return Err(SpawnError::UnknownAsset(handle.id().index()));
+        };
+        let store = self
+            .engine_mut()
+            .world_mut()
+            .store_mut()
+            .expect("engine always carries a store");
+        store.register::<ornis_assets::scene::TransformDesc>();
+        store.register::<ornis_assets::scene::MeshDesc>();
+        store.register::<ornis_assets::scene::MaterialDesc>();
+        let mesh_entities = scene
+            .entities
+            .iter()
+            .map(|desc| {
+                let entity = store.create_entity();
+                store.insert(entity, desc.transform.clone());
+                store.insert(entity, desc.mesh.clone());
+                store.insert(entity, desc.material.clone());
+                entity
+            })
+            .collect();
+        Ok(SpawnedGltf {
+            mesh_entities,
+            wiring: crate::anim_wiring::AnimationWiring {
+                roots: Vec::new(),
+                skel_playlists: Vec::new(),
+                anim_playlists: Vec::new(),
+            },
+        })
+    }
+
+    /// Shared body of [`GameWorld::spawn_asset`] and
+    /// [`GameWorld::spawn_scene`]: mesh entities plus animation wiring,
+    /// installing the sampler systems the wiring needs.
+    fn spawn_loaded(&mut self, loaded: &ornis_gltf::LoadedScene) -> SpawnedGltf {
         let spawn = {
             let store = self
                 .engine_mut()
                 .world_mut()
                 .store_mut()
                 .expect("engine always carries a store");
-            crate::anim_wiring::spawn_gltf_world(store, &loaded)
+            crate::anim_wiring::spawn_gltf_world(store, loaded)
         };
         let wiring = {
             let store = self
@@ -158,7 +221,7 @@ impl GameWorld {
                 .world_mut()
                 .store_mut()
                 .expect("engine always carries a store");
-            crate::anim_wiring::wire_loaded_animation(store, &loaded, &spawn)
+            crate::anim_wiring::wire_loaded_animation(store, loaded, &spawn)
         };
         if !wiring.roots.is_empty() || !wiring.skel_playlists.is_empty() {
             crate::install_skeletal_animation(self.engine_mut());
@@ -166,18 +229,24 @@ impl GameWorld {
         if !wiring.anim_playlists.is_empty() {
             crate::install_object_animation(self.engine_mut());
         }
-        Ok(SpawnedGltf {
+        SpawnedGltf {
             mesh_entities: spawn.entities,
             wiring,
-        })
+        }
     }
 
     /// Appends one directional light to the world. Worlds start dark —
     /// there is no silent default rig (viewport lighting is the editor's
     /// job, like Blender's shading modes): call this (and
     /// [`GameWorld::set_ambient`]) explicitly or nothing renders lit.
+    /// `direction` is normalized; a zero or non-finite direction adds no
+    /// light.
     pub fn add_directional_light(&mut self, direction: [f32; 3], intensity: f32, color: [f32; 3]) {
         use ornis_assets::scene::{LightDesc, ShadowCast};
+        let Some(direction) = ornis_core::units::UnitVec3::normalize(Vec3::from_array(direction))
+        else {
+            return;
+        };
         let resources = self.engine_mut().world_mut().resources_mut();
         if resources.get_mut::<RenderLights>().is_none() {
             resources.insert(RenderLights {
@@ -222,12 +291,12 @@ impl GameWorld {
         install_orbit_camera(
             self.engine_mut(),
             OrbitCamera::from_desc(&CameraDesc {
-                position,
-                target,
-                up: [0.0, 1.0, 0.0],
-                fov: 45.0,
-                near: 0.1,
-                far: 100.0,
+                position: Vec3::from_array(position),
+                target: Vec3::from_array(target),
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(45.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             }),
         );
     }
@@ -497,11 +566,7 @@ mod tests {
     fn two_sphere_scene() -> Scene {
         let entity = |name: &str, x: f32| EntityDesc {
             name: name.into(),
-            transform: TransformDesc {
-                translation: [x, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            transform: TransformDesc::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
             mesh: MeshDesc::Sphere {
                 radius: PositiveF32::expect_valid(1.0),
                 segments: 16,
@@ -518,12 +583,12 @@ mod tests {
             entities: vec![entity("a", -1.0), entity("b", 1.0)],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -534,11 +599,7 @@ mod tests {
             name: "test".into(),
             entities: vec![EntityDesc {
                 name: "sphere".into(),
-                transform: TransformDesc {
-                    translation: [1.0, 2.0, 3.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: [1.0, 1.0, 1.0],
-                },
+                transform: TransformDesc::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
                 mesh: MeshDesc::Sphere {
                     radius: PositiveF32::expect_valid(2.0),
                     segments: 48,
@@ -552,12 +613,12 @@ mod tests {
             }],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -763,11 +824,7 @@ mod tests {
             entities: vec![
                 EntityDesc {
                     name: "dielectric".into(),
-                    transform: TransformDesc {
-                        translation: [1.0, 2.0, 3.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(2.0),
                         segments: 24,
@@ -781,11 +838,11 @@ mod tests {
                 },
                 EntityDesc {
                     name: "metal".into(),
-                    transform: TransformDesc {
-                        translation: [-1.0, 0.0, 2.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [2.0, 2.0, 2.0],
-                    },
+                    transform: TransformDesc::from_arrays(
+                        [-1.0, 0.0, 2.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                        [2.0, 2.0, 2.0],
+                    ),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(0.5),
                         segments: 48,
@@ -799,11 +856,11 @@ mod tests {
                 },
                 EntityDesc {
                     name: "coat".into(),
-                    transform: TransformDesc {
-                        translation: [0.0, 5.0, -3.0],
-                        rotation: [0.3, 0.2, 0.1, 0.9],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::from_arrays(
+                        [0.0, 5.0, -3.0],
+                        [0.3, 0.2, 0.1, 0.9],
+                        [1.0, 1.0, 1.0],
+                    ),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(1.0),
                         segments: 32,
@@ -819,12 +876,12 @@ mod tests {
             ],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         };
@@ -863,11 +920,7 @@ mod tests {
             entities: vec![
                 EntityDesc {
                     name: "fine".into(),
-                    transform: TransformDesc {
-                        translation: [0.0, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::IDENTITY,
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(1.0),
                         segments: 48,
@@ -881,11 +934,7 @@ mod tests {
                 },
                 EntityDesc {
                     name: "coarse".into(),
-                    transform: TransformDesc {
-                        translation: [2.0, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::from_translation(glam::Vec3::new(2.0, 0.0, 0.0)),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(1.0),
                         segments: 16,
@@ -900,12 +949,12 @@ mod tests {
             ],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         };
@@ -946,7 +995,8 @@ mod tests {
         use ornis_assets::scene::LightDesc;
         let world = GameWorld::from_scene(&Scene {
             lights: vec![LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, -1.0, 0.0))
+                    .expect("non-zero direction"),
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
                 shadow: ShadowCast::Disabled,
@@ -965,11 +1015,11 @@ mod tests {
         assert!(matches!(
             lights.set_lights_args().as_slice(),
             [LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
+                direction: d,
                 intensity: v,
                 color: [1.0, 0.9, 0.8],
                 shadow: ShadowCast::Disabled,
-            }] if *v == 2.0
+            }] if *v == 2.0 && d.as_array() == [0.0, -1.0, 0.0]
         ));
     }
 
@@ -1019,6 +1069,58 @@ mod tests {
 
         let missing = world.spawn_gltf(std::path::Path::new("nope.glb"));
         assert!(missing.is_err(), "missing file rejects");
+    }
+
+    /// The unified asset path: `AssetServer::load::<Scene>` + `spawn_scene`
+    /// matches the world-local `spawn_gltf` result (entities and wiring),
+    /// and the same handle spawns more than once.
+    #[test]
+    fn spawn_scene_from_asset_server_matches_spawn_gltf() {
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mut assets = ornis_assets::AssetServer::new();
+        let mannequin: ornis_assets::Handle<Scene> = assets.load(&starter).expect("starter loads");
+
+        let mut world = GameWorld::new();
+        let hero = world
+            .spawn_scene(&assets, &mannequin)
+            .expect("loaded handle spawns");
+        let mut reference = GameWorld::new();
+        let legacy = reference.spawn_gltf(&starter).expect("starter loads");
+        assert_eq!(hero.mesh_entities.len(), legacy.mesh_entities.len());
+        assert_eq!(hero.wiring.roots.len(), legacy.wiring.roots.len());
+        assert_eq!(
+            hero.wiring.skel_playlists.len(),
+            legacy.wiring.skel_playlists.len()
+        );
+        assert!(!hero.wiring.roots.is_empty());
+        assert!(world.play_all_animations() > 0);
+
+        let again = world
+            .spawn_scene(&assets, &mannequin)
+            .expect("parse once, spawn many");
+        assert_eq!(again.mesh_entities.len(), hero.mesh_entities.len());
+    }
+
+    /// RON scenes spawn their entities with empty wiring; unloaded
+    /// handles reject without touching the world.
+    #[test]
+    fn spawn_scene_ron_and_unknown_handle() {
+        let ron_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/scene.ron");
+        let mut assets = ornis_assets::AssetServer::new();
+        let handle: ornis_assets::Handle<Scene> = assets.load(&ron_path).expect("ron loads");
+        let expected = assets.get(&handle).expect("loaded").entities.len();
+        let mut world = GameWorld::new();
+        let spawned = world.spawn_scene(&assets, &handle).expect("ron spawns");
+        assert_eq!(spawned.mesh_entities.len(), expected);
+        assert_eq!(spawned.wiring.added(), 0);
+
+        assert!(assets.unload(&handle));
+        assert!(matches!(
+            world.spawn_scene(&assets, &handle),
+            Err(SpawnError::UnknownAsset(_))
+        ));
     }
 
     /// Autoplay picks a *moving* clip (not the baked TPose first in most

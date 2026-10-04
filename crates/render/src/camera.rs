@@ -36,21 +36,21 @@ impl OrbitCamera {
 
     /// Creates an orbit camera from a serialized look-at camera description.
     pub fn from_desc(cam: &CameraDesc) -> Self {
-        let target = Vec3::from_array(cam.target);
-        let offset = Vec3::from_array(cam.position) - target;
+        let target = cam.target;
+        let offset = cam.position - target;
         let radius = offset.length().max(Self::MIN_RADIUS);
         // offset = radius * (cos(el)*cos(az), sin(el), cos(el)*sin(az))
         let elevation = (offset.y / radius).clamp(-1.0, 1.0).asin();
         let azimuth = offset.z.atan2(offset.x);
         Self {
             target,
-            up: Vec3::from_array(cam.up),
+            up: cam.up.get(),
             azimuth,
             elevation,
             radius,
-            fov: cam.fov,
-            near: cam.near,
-            far: cam.far,
+            fov: cam.fov.get(),
+            near: cam.near.get(),
+            far: cam.far.get(),
         }
     }
 
@@ -243,12 +243,12 @@ mod tests {
 
     fn camera() -> CameraDesc {
         CameraDesc {
-            position: [0.0, 2.5, 9.0],
-            target: [0.0, 0.0, 0.0],
-            up: [0.0, 1.0, 0.0],
-            fov: 60.0,
-            near: 0.1,
-            far: 100.0,
+            position: glam::Vec3::new(0.0, 2.5, 9.0),
+            target: glam::Vec3::ZERO,
+            up: ornis_core::units::UnitVec3::Y,
+            fov: ornis_core::units::Degrees::new(60.0),
+            near: ornis_core::units::Meters::new(0.1),
+            far: ornis_core::units::Meters::new(100.0),
         }
     }
 

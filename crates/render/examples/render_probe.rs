@@ -7,7 +7,7 @@
 //! Prints the final view/proj matrices, the first two instance transforms and
 //! buffer expectations so the browser (WASM) path can be compared against it.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::Mat4;
 use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
 use ornis_core::units::PositiveF32;
@@ -224,11 +224,7 @@ fn build_scene_data(
     for (i, entity) in scene.entities.iter().enumerate() {
         materials.push(build_material(&entity.material));
         let t = &entity.transform;
-        let model = Mat4::from_scale_rotation_translation(
-            Vec3::from(t.scale),
-            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]).normalize(),
-            Vec3::from(t.translation),
-        );
+        let model = Mat4::from_scale_rotation_translation(t.scale, t.rotation.get(), t.translation);
         let normal_matrix = model.inverse().transpose();
         instances.push(InstanceData {
             model_matrix: model,
@@ -245,16 +241,12 @@ fn lights_of(scene: &Scene) -> Vec<LightDesc> {
 
 fn camera_view_proj(cam: &CameraDesc) -> (Mat4, Mat4, [[f32; 4]; 4]) {
     let aspect = WIDTH as f32 / HEIGHT as f32;
-    let view = glam::camera::rh::view::look_at_mat4(
-        Vec3::from(cam.position),
-        Vec3::from(cam.target),
-        Vec3::from(cam.up),
-    );
+    let view = glam::camera::rh::view::look_at_mat4(cam.position, cam.target, cam.up.get());
     let proj = glam::camera::rh::proj::directx::perspective(
-        cam.fov.to_radians(),
+        cam.fov.to_radians().get(),
         aspect,
-        cam.near,
-        cam.far,
+        cam.near.get(),
+        cam.far.get(),
     );
     (view, proj, (proj * view).to_cols_array_2d())
 }
@@ -421,10 +413,14 @@ async fn run(scene: &Scene, out_path: &str) {
     // ── Camera ────────────────────────────────────────────────────────
     let cam = &scene.camera;
     let (view, proj, view_proj) = camera_view_proj(cam);
-    renderer.set_camera(&queue, &view_proj, cam.position);
+    renderer.set_camera(&queue, &view_proj, cam.position.to_array());
 
     // ── Validation dump ───────────────────────────────────────────────
-    println!("fov_deg={} fov_rad={}", cam.fov, cam.fov.to_radians());
+    println!(
+        "fov_deg={} fov_rad={}",
+        cam.fov.get(),
+        cam.fov.to_radians().get()
+    );
     println!("view = {:.3?}", view.to_cols_array_2d());
     println!("proj = {:.3?}", proj.to_cols_array_2d());
     print_instance_dump(&instances);

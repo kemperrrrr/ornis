@@ -91,9 +91,7 @@ use ornis_editor::{EditorMarks, install_editor, is_editor_only};
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
-use crate::anim_wiring::{
-    anim_clip_from_loaded, skel_clip_from_loaded, skeleton_from_loaded, skinned_mesh_from_loaded,
-};
+use crate::anim_wiring::{GltfSpawn, wire_loaded_animation};
 use crate::physics_runtime::{PhysicsRuntime, install_physics};
 use crate::{
     GameWorld, install_gameplay_physics_bridge, install_object_animation,
@@ -265,12 +263,12 @@ impl Default for SceneEnvironment {
         Self {
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.10, 0.10, 0.15],
         }
@@ -1429,11 +1427,7 @@ fn resync_collider_body(store: &mut SmartStore, entity: Entity) {
 }
 
 fn default_transform() -> TransformDesc {
-    TransformDesc {
-        translation: [0.0, 0.0, 0.0],
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: [1.0, 1.0, 1.0],
-    }
+    TransformDesc::IDENTITY
 }
 
 fn default_mesh() -> MeshDesc {
@@ -2185,11 +2179,7 @@ mod tests {
         drop(lane);
         world.spawn_with(
             Some("box".into()),
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            TransformDesc::IDENTITY,
             MeshDesc::Box {
                 size: [
                     PositiveF32::expect_valid(2.0),
@@ -2283,7 +2273,12 @@ mod tests {
         // Environment resource: serde-canonical enum tagging here too.
         let lights = scene["lights"].as_array().unwrap();
         assert_eq!(lights.len(), 2);
-        assert_f32_seq(&lights[0]["Directional"]["direction"], &[1.0, 1.0, 1.0]);
+        // Directions are unit vectors once loaded: `(1, 1, 1)` in the file
+        // reads back normalized (same light, the renderer normalized anyway).
+        assert_f32_seq(
+            &lights[0]["Directional"]["direction"],
+            &[0.577_350_26, 0.577_350_26, 0.577_350_26],
+        );
         assert_f32(&lights[0]["Directional"]["intensity"], 0.6);
         assert_f32_seq(&lights[1]["Directional"]["color"], &[0.8, 0.8, 1.0]);
         assert_f32_seq(&scene["camera"]["position"], &[0.0, 2.5, 9.0]);
@@ -2712,11 +2707,7 @@ mod tests {
         // A runtime-created entity must round-trip too.
         world.spawn_with(
             Some("Extra".into()),
-            TransformDesc {
-                translation: [9.0, 1.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [2.0, 2.0, 2.0],
-            },
+            TransformDesc::from_arrays([9.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 2.0, 2.0]),
             MeshDesc::Sphere {
                 radius: PositiveF32::expect_valid(HALF),
                 segments: 8,
@@ -3067,7 +3058,7 @@ mod tests {
             .and_then(|store| read_component(store, gizmo))
             .expect("gizmo transform");
         assert_eq!(
-            gizmo_pose.translation,
+            gizmo_pose.translation.to_array(),
             [0.0, 0.0, 0.0],
             "chrome body never bound, pose untouched"
         );
@@ -3112,12 +3103,12 @@ mod tests {
             entities: vec![desc("skinned"), desc("plain")],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         }

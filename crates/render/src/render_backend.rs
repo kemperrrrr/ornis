@@ -291,7 +291,10 @@ mod tests {
                 &queue,
                 [0.1, 0.1, 0.15],
                 &[ornis_assets::scene::LightDesc::Directional {
-                    direction: [1.0, 1.0, 1.0],
+                    direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(
+                        1.0, 1.0, 1.0,
+                    ))
+                    .expect("non-zero direction"),
                     intensity: 1.0,
                     color: [1.0, 1.0, 1.0],
                     shadow: ornis_assets::scene::ShadowCast::Disabled,
@@ -488,7 +491,8 @@ mod tests {
             &queue,
             [0.1, 0.1, 0.1],
             &[LightDesc::Directional {
-                direction: [0.0, 1.0, 1.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, 1.0, 1.0))
+                    .expect("non-zero direction"),
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
                 shadow: ornis_assets::scene::ShadowCast::Disabled,
@@ -703,10 +707,9 @@ mod tests {
             materials.push(mat);
             let t = &ent.transform;
             let model = glam::Mat4::from_scale_rotation_translation(
-                glam::Vec3::from(t.scale),
-                glam::Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3])
-                    .normalize(),
-                glam::Vec3::from(t.translation),
+                t.scale,
+                t.rotation.get(),
+                t.translation,
             );
             instances.push(crate::renderer::InstanceData {
                 model_matrix: model,
@@ -720,21 +723,17 @@ mod tests {
         let (view, proj) = {
             let cam = &scene.camera;
             let aspect = W as f32 / H as f32;
-            let view = glam::camera::rh::view::look_at_mat4(
-                glam::Vec3::from(cam.position),
-                glam::Vec3::from(cam.target),
-                glam::Vec3::from(cam.up),
-            );
+            let view = glam::camera::rh::view::look_at_mat4(cam.position, cam.target, cam.up.get());
             let proj = glam::camera::rh::proj::directx::perspective(
-                cam.fov.to_radians(),
+                cam.fov.to_radians().get(),
                 aspect,
-                cam.near,
-                cam.far,
+                cam.near.get(),
+                cam.far.get(),
             );
             (view, proj)
         };
         let view_proj = (proj * view).to_cols_array_2d();
-        backend.set_camera(&queue, &view_proj, scene.camera.position);
+        backend.set_camera(&queue, &view_proj, scene.camera.position.to_array());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("golden probe encoder"),
@@ -970,7 +969,10 @@ mod tests {
                 &queue,
                 [0.05, 0.05, 0.08],
                 &[ornis_assets::scene::LightDesc::Directional {
-                    direction: [0.42, 0.84, 0.3],
+                    direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(
+                        0.42, 0.84, 0.3,
+                    ))
+                    .expect("non-zero direction"),
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
                     shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
@@ -1155,7 +1157,10 @@ mod tests {
                 &queue,
                 [0.05, 0.05, 0.08],
                 &[ornis_assets::scene::LightDesc::Directional {
-                    direction: [0.42, 0.84, 0.3],
+                    direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(
+                        0.42, 0.84, 0.3,
+                    ))
+                    .expect("non-zero direction"),
                     intensity: 1.2,
                     color: [1.0, 1.0, 1.0],
                     shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
@@ -1324,10 +1329,10 @@ mod tests {
                 &queue,
                 [0.05, 0.05, 0.08],
                 &[ornis_assets::scene::LightDesc::Point {
-                    position: [5.0, 4.0, 6.0],
+                    position: glam::Vec3::new(5.0, 4.0, 6.0),
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
-                    range: 30.0,
+                    range: ornis_core::units::Meters::new(30.0),
                     shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
@@ -1500,13 +1505,16 @@ mod tests {
                 &queue,
                 [0.05, 0.05, 0.08],
                 &[ornis_assets::scene::LightDesc::Spot {
-                    position: [0.0, 8.0, 0.0],
-                    direction: [0.0, -1.0, 0.0],
+                    position: glam::Vec3::new(0.0, 8.0, 0.0),
+                    direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(
+                        0.0, -1.0, 0.0,
+                    ))
+                    .expect("non-zero direction"),
                     intensity: 2000.0,
                     color: [1.0, 1.0, 1.0],
-                    range: 30.0,
-                    inner_angle: 25.0,
-                    outer_angle: 35.0,
+                    range: ornis_core::units::Meters::new(30.0),
+                    inner_angle: ornis_core::units::Degrees::new(25.0),
+                    outer_angle: ornis_core::units::Degrees::new(35.0),
                     shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
@@ -1646,13 +1654,14 @@ mod tests {
             &queue,
             [0.05, 0.05, 0.08],
             &[ornis_assets::scene::LightDesc::Spot {
-                position: [0.0, 8.0, 0.0],
-                direction: [0.0, -1.0, 0.0],
+                position: glam::Vec3::new(0.0, 8.0, 0.0),
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, -1.0, 0.0))
+                    .expect("non-zero direction"),
                 intensity: 2000.0,
                 color: [1.0, 1.0, 1.0],
-                range: 30.0,
-                inner_angle: 25.0,
-                outer_angle: 35.0,
+                range: ornis_core::units::Meters::new(30.0),
+                inner_angle: ornis_core::units::Degrees::new(25.0),
+                outer_angle: ornis_core::units::Degrees::new(35.0),
                 shadow: ornis_assets::scene::ShadowCast::Enabled,
             }],
         );
@@ -1801,10 +1810,10 @@ mod tests {
                 &queue,
                 [0.05, 0.05, 0.08],
                 &[ornis_assets::scene::LightDesc::Point {
-                    position: [5.0, 4.0, 6.0],
+                    position: glam::Vec3::new(5.0, 4.0, 6.0),
                     intensity: 200.0,
                     color: [1.0, 1.0, 1.0],
-                    range: 30.0,
+                    range: ornis_core::units::Meters::new(30.0),
                     shadow: ornis_assets::scene::ShadowCast::from(shadow.is_enabled()),
                 }],
             );
@@ -1920,7 +1929,8 @@ mod tests {
     fn ten_scene_lights_preview_two_dropped() {
         let lights: Vec<ornis_assets::scene::LightDesc> = (0..10)
             .map(|_| ornis_assets::scene::LightDesc::Directional {
-                direction: [1.0, 1.0, 1.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(1.0, 1.0, 1.0))
+                    .expect("non-zero direction"),
                 intensity: 0.6,
                 color: [1.0, 1.0, 1.0],
                 shadow: ornis_assets::scene::ShadowCast::Disabled,
@@ -2004,7 +2014,8 @@ mod tests {
         );
         let lights: Vec<ornis_assets::scene::LightDesc> = (0..10)
             .map(|_| ornis_assets::scene::LightDesc::Directional {
-                direction: [0.0, 1.0, 1.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, 1.0, 1.0))
+                    .expect("non-zero direction"),
                 intensity: 1.0,
                 color: [1.0, 1.0, 1.0],
                 shadow: ornis_assets::scene::ShadowCast::Disabled,
@@ -2120,7 +2131,8 @@ mod tests {
             &queue,
             [0.05, 0.05, 0.08],
             &[ornis_assets::scene::LightDesc::Directional {
-                direction: [0.2, 1.0, 0.3],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.2, 1.0, 0.3))
+                    .expect("non-zero direction"),
                 intensity: 1.2,
                 color: [1.0, 1.0, 1.0],
                 shadow: ornis_assets::scene::ShadowCast::Disabled,

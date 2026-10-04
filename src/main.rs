@@ -133,11 +133,7 @@ fn showcase_engine() -> (GameWorld, u32) {
             let mass = if index == 0 { 1.0 } else { 0.0 };
             store.insert(
                 entity,
-                RigidBody::new_sphere(
-                    Vec3::from_array(description.transform.translation),
-                    radius,
-                    mass,
-                ),
+                RigidBody::new_sphere(description.transform.translation, radius, mass),
             );
         }
         // Hidden static floor: it has a physics component but no render

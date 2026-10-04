@@ -3,11 +3,25 @@
 //! The `*Desc` types are the serde-canonical contract shared by the demo
 //! asset (`assets/scene.ron`), the editor protocol and the WASM viewport:
 //! component payloads travel over the wire in exactly this shape.
+//!
+//! Placement, light and camera fields are typed (`Vec3`, [`UnitVec3`],
+//! [`UnitQuat`], [`Meters`], [`Degrees`]) but serialize through
+//! `serde(with = ...)` adapters (`crate::wire`) as the legacy `[f32; 3]` /
+//! `[x, y, z, w]` / `f32` shapes, so RON files and the editor/WASM JSON
+//! protocol are byte-compatible. On read, non-unit directions and
+//! quaternions are normalized; zero-length or non-finite ones are a parse
+//! error (see `crate::wire`).
 
+use glam::{Quat, Vec3};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use ornis_core::units::{Clamped01, Degrees, Ior, LinearRgb, Meters, PositiveF32};
+use ornis_core::units::{
+    Clamped01, Degrees, Ior, LinearRgb, Meters, PositiveF32, UnitQuat, UnitVec3,
+};
 
+#[cfg(not(feature = "gltf"))]
+pub use crate::tri::{TriIndex, Triangle};
+#[cfg(feature = "gltf")]
 pub use ornis_gltf::{TriIndex, Triangle};
 
 /// Indices per triangle (flat soup alignment).
@@ -52,14 +66,62 @@ pub struct EntityDesc {
 }
 
 /// Placement of an entity in world space.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Wire form (RON/JSON) is unchanged: `translation`/`scale` as `[f32; 3]`,
+/// `rotation` as `[x, y, z, w]`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransformDesc {
     /// Translation in world units.
-    pub translation: [f32; 3],
-    /// Orientation as a quaternion in `(x, y, z, w)` order.
-    pub rotation: [f32; 4],
+    #[serde(with = "crate::wire::vec3")]
+    pub translation: Vec3,
+    /// Orientation (unit quaternion; serialized in `(x, y, z, w)` order,
+    /// normalized on load).
+    #[serde(with = "crate::wire::unit_quat")]
+    pub rotation: UnitQuat,
     /// Non-uniform scale per axis.
-    pub scale: [f32; 3],
+    #[serde(with = "crate::wire::vec3")]
+    pub scale: Vec3,
+}
+
+impl Default for TransformDesc {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl TransformDesc {
+    /// Origin, no rotation, unit scale.
+    pub const IDENTITY: Self = Self {
+        translation: Vec3::ZERO,
+        rotation: UnitQuat::IDENTITY,
+        scale: Vec3::ONE,
+    };
+
+    /// Placement at `translation` with no rotation and unit scale.
+    pub const fn from_translation(translation: Vec3) -> Self {
+        Self {
+            translation,
+            rotation: UnitQuat::IDENTITY,
+            scale: Vec3::ONE,
+        }
+    }
+
+    /// Builds from raw wire arrays (`rotation` in `(x, y, z, w)` order).
+    /// The quaternion is normalized; a zero/non-finite one falls back to
+    /// identity (same policy as glTF imports of degenerate nodes).
+    pub fn from_arrays(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> Self {
+        Self {
+            translation: Vec3::from_array(translation),
+            rotation: crate::wire::stable_unit_quat(Quat::from_array(rotation))
+                .unwrap_or(UnitQuat::IDENTITY),
+            scale: Vec3::from_array(scale),
+        }
+    }
+
+    /// Rotation as a raw `[x, y, z, w]` array (wire/GPU order).
+    pub fn rotation_array(&self) -> [f32; 4] {
+        self.rotation.get().to_array()
+    }
 }
 
 /// Geometry description (procedurally generated at load time).
@@ -455,11 +517,14 @@ impl From<ShadowCast> for bool {
 pub enum LightDesc {
     /// Infinitely distant light shining from a fixed direction.
     Directional {
-        /// Direction toward the light (from the scene).
-        direction: [f32; 3],
+        /// Direction toward the light (from the scene); unit length.
+        #[serde(with = "crate::wire::unit_vec3")]
+        direction: UnitVec3,
         /// Radiometric strength multiplier.
+        // TODO(core): switch to `ornis_core::Lux` once the Core track lands it.
         intensity: f32,
         /// Emission color in linear space.
+        // TODO(core): switch to `ornis_core::Color` once the Core track lands it.
         color: [f32; 3],
         /// Cast a shadow map (depth pre-pass + PCF in the evaluators).
         /// Absent in older files — defaults to off. Wire form is the
@@ -470,13 +535,17 @@ pub enum LightDesc {
     /// Local light with inverse-square falloff and a finite range.
     Point {
         /// World-space position.
-        position: [f32; 3],
+        #[serde(with = "crate::wire::vec3")]
+        position: Vec3,
         /// Radiometric strength multiplier.
+        // TODO(core): switch to `ornis_core::Lux` once the Core track lands it.
         intensity: f32,
         /// Emission color in linear space.
+        // TODO(core): switch to `ornis_core::Color` once the Core track lands it.
         color: [f32; 3],
-        /// Cutoff distance in world units (must be > 0).
-        range: f32,
+        /// Cutoff distance (must be > 0).
+        #[serde(with = "crate::wire::meters")]
+        range: Meters,
         /// Cast a shadow cube (6 depth faces + analytic major-axis
         /// sample in the evaluators).
         /// Absent in older files — defaults to off. Wire form is the
@@ -487,19 +556,26 @@ pub enum LightDesc {
     /// Local light inside a cone aimed into the scene.
     Spot {
         /// World-space position.
-        position: [f32; 3],
-        /// Spotlight axis, from the light into the scene.
-        direction: [f32; 3],
+        #[serde(with = "crate::wire::vec3")]
+        position: Vec3,
+        /// Spotlight axis, from the light into the scene; unit length.
+        #[serde(with = "crate::wire::unit_vec3")]
+        direction: UnitVec3,
         /// Radiometric strength multiplier.
+        // TODO(core): switch to `ornis_core::Lux` once the Core track lands it.
         intensity: f32,
         /// Emission color in linear space.
+        // TODO(core): switch to `ornis_core::Color` once the Core track lands it.
         color: [f32; 3],
-        /// Cutoff distance in world units (must be > 0).
-        range: f32,
-        /// Inner cone angle in degrees (full brightness inside).
-        inner_angle: f32,
-        /// Outer cone angle in degrees (zero outside, soft edge between).
-        outer_angle: f32,
+        /// Cutoff distance (must be > 0).
+        #[serde(with = "crate::wire::meters")]
+        range: Meters,
+        /// Inner cone angle (full brightness inside).
+        #[serde(with = "crate::wire::degrees")]
+        inner_angle: Degrees,
+        /// Outer cone angle (zero outside, soft edge between).
+        #[serde(with = "crate::wire::degrees")]
+        outer_angle: Degrees,
         /// Cast a shadow map (depth pre-pass + PCF in the evaluators).
         /// Absent in older files — defaults to off. Wire form is the
         /// legacy `bool`.
@@ -510,16 +586,8 @@ pub enum LightDesc {
 
 impl LightDesc {
     /// Normalizes a raw direction; `None` for zero/non-finite input.
-    fn checked_dir(direction: [f32; 3]) -> Option<[f32; 3]> {
-        let len = (direction[0] * direction[0]
-            + direction[1] * direction[1]
-            + direction[2] * direction[2])
-            .sqrt();
-        if len.is_finite() && len > DEGENERATE_LEN2 {
-            Some([direction[0] / len, direction[1] / len, direction[2] / len])
-        } else {
-            None
-        }
+    fn checked_dir(direction: [f32; 3]) -> Option<UnitVec3> {
+        crate::wire::stable_unit_vec3(Vec3::from_array(direction))
     }
 
     /// Checked intensity: `Some` only for finite values `>= 0`.
@@ -556,12 +624,11 @@ impl LightDesc {
         range: Meters,
         shadow: ShadowCast,
     ) -> Option<Self> {
-        let position = [position[0].get(), position[1].get(), position[2].get()];
-        if !position.iter().all(|v| v.is_finite()) {
+        let position = Vec3::new(position[0].get(), position[1].get(), position[2].get());
+        if !position.is_finite() {
             return None;
         }
-        let range = range.get();
-        if !range.is_finite() || range <= 0.0 {
+        if !range.is_finite() || range.get() <= 0.0 {
             return None;
         }
         Some(Self::Point {
@@ -587,12 +654,11 @@ impl LightDesc {
         outer_angle: Degrees,
         shadow: ShadowCast,
     ) -> Option<Self> {
-        let position = [position[0].get(), position[1].get(), position[2].get()];
-        if !position.iter().all(|v| v.is_finite()) {
+        let position = Vec3::new(position[0].get(), position[1].get(), position[2].get());
+        if !position.is_finite() {
             return None;
         }
-        let range = range.get();
-        if !range.is_finite() || range <= 0.0 {
+        if !range.is_finite() || range.get() <= 0.0 {
             return None;
         }
         let (inner, outer) = (inner_angle.get(), outer_angle.get());
@@ -605,8 +671,8 @@ impl LightDesc {
             intensity: Self::checked_intensity(intensity)?,
             color: color.as_array(),
             range,
-            inner_angle: inner,
-            outer_angle: outer,
+            inner_angle,
+            outer_angle,
             shadow,
         })
     }
@@ -644,26 +710,35 @@ impl LightDesc {
     pub fn range_units(&self) -> Option<Meters> {
         match self {
             Self::Directional { .. } => None,
-            Self::Point { range, .. } | Self::Spot { range, .. } => Some(Meters::new(*range)),
+            Self::Point { range, .. } | Self::Spot { range, .. } => Some(*range),
         }
     }
 }
 
 /// Viewing camera described look-at style.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Wire form unchanged: vectors as `[f32; 3]`, `fov`/`near`/`far` as `f32`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraDesc {
     /// Eye position in world units.
-    pub position: [f32; 3],
+    #[serde(with = "crate::wire::vec3")]
+    pub position: Vec3,
     /// Point the camera looks at.
-    pub target: [f32; 3],
-    /// Up vector (should not be parallel to the view direction).
-    pub up: [f32; 3],
-    /// Vertical field of view in degrees.
-    pub fov: f32,
-    /// Near clip distance in world units.
-    pub near: f32,
-    /// Far clip distance in world units.
-    pub far: f32,
+    #[serde(with = "crate::wire::vec3")]
+    pub target: Vec3,
+    /// Up direction, unit length (should not be parallel to the view
+    /// direction; normalized on load).
+    #[serde(with = "crate::wire::unit_vec3")]
+    pub up: UnitVec3,
+    /// Vertical field of view.
+    #[serde(with = "crate::wire::degrees")]
+    pub fov: Degrees,
+    /// Near clip distance.
+    #[serde(with = "crate::wire::meters")]
+    pub near: Meters,
+    /// Far clip distance.
+    #[serde(with = "crate::wire::meters")]
+    pub far: Meters,
 }
 
 impl CameraDesc {
@@ -684,12 +759,10 @@ impl CameraDesc {
         if !position.iter().chain(target.iter()).all(|v| v.is_finite()) {
             return None;
         }
-        let fov = fov.get();
-        if !fov.is_finite() || fov <= 0.0 || fov >= FOV_OPEN_MAX_DEG {
+        if !fov.is_finite() || fov.get() <= 0.0 || fov.get() >= FOV_OPEN_MAX_DEG {
             return None;
         }
-        let (near, far) = (near.get(), far.get());
-        if !near.is_finite() || near <= 0.0 || !far.is_finite() || far <= near {
+        if !near.is_finite() || near.get() <= 0.0 || !far.is_finite() || far.get() <= near.get() {
             return None;
         }
         if !up.iter().all(|v| v.is_finite()) {
@@ -715,9 +788,9 @@ impl CameraDesc {
             return None;
         }
         Some(Self {
-            position,
-            target,
-            up,
+            position: Vec3::from_array(position),
+            target: Vec3::from_array(target),
+            up: crate::wire::stable_unit_vec3(Vec3::from_array(up))?,
             fov,
             near,
             far,
@@ -726,17 +799,17 @@ impl CameraDesc {
 
     /// Vertical field of view in degrees.
     pub fn fov_units(&self) -> Degrees {
-        Degrees::new(self.fov)
+        self.fov
     }
 
     /// Near clip distance in meters.
     pub fn near_units(&self) -> Meters {
-        Meters::new(self.near)
+        self.near
     }
 
     /// Far clip distance in meters.
     pub fn far_units(&self) -> Meters {
-        Meters::new(self.far)
+        self.far
     }
 }
 
@@ -862,8 +935,14 @@ Scene(
             // files stay Sphere-only.
             other => panic!("expected Sphere, got {other:?}"),
         }
-        assert_eq!(scene.entities[0].transform.translation, [1.0, 2.0, 3.0]);
-        assert_eq!(scene.entities[0].transform.rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            scene.entities[0].transform.translation.to_array(),
+            [1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            scene.entities[0].transform.rotation_array(),
+            [0.0, 0.0, 0.0, 1.0]
+        );
 
         match &scene.lights[0] {
             LightDesc::Directional {
@@ -872,15 +951,17 @@ Scene(
                 color,
                 ..
             } => {
-                assert_eq!(*direction, [1.0, 1.0, 1.0]);
+                // `(1, 1, 1)` on the wire is normalized on load.
+                let n = 1.0 / 3.0_f32.sqrt();
+                assert!(direction.get().abs_diff_eq(Vec3::splat(n), 1e-6));
                 assert_eq!(*intensity, 0.6);
                 assert_eq!(*color, [1.0, 1.0, 1.0]);
             }
             _ => panic!("expected the directional test light"),
         }
-        assert_eq!(scene.camera.fov, 60.0);
-        assert_eq!(scene.camera.near, 0.1);
-        assert_eq!(scene.camera.far, 100.0);
+        assert_eq!(scene.camera.fov.get(), 60.0);
+        assert_eq!(scene.camera.near.get(), 0.1);
+        assert_eq!(scene.camera.far.get(), 100.0);
         assert_eq!(scene.ambient, [0.1, 0.1, 0.15]);
     }
 
@@ -1000,7 +1081,290 @@ Scene(
         assert_eq!(scene.name, "demo");
         assert_eq!(scene.entities.len(), 5);
         assert_eq!(scene.lights.len(), 2);
-        assert_eq!(scene.camera.fov, 60.0);
+        assert_eq!(scene.camera.fov.get(), 60.0);
+    }
+
+    /// Shipped scene files (the wire contract under test).
+    const SHIPPED_RON: [(&str, &str); 2] = [
+        ("scene.ron", include_str!("../../../assets/scene.ron")),
+        (
+            "demo_scene.ron",
+            include_str!("../../../assets/demo_scene.ron"),
+        ),
+    ];
+
+    /// Legacy, untyped mirror of the pre-typing descriptors: the exact
+    /// serde shape the RON files and the editor/WASM JSON protocol used.
+    mod legacy {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub struct Transform {
+            pub translation: [f32; 3],
+            pub rotation: [f32; 4],
+            pub scale: [f32; 3],
+        }
+
+        /// Only the typed parts of a scene; other fields are ignored.
+        #[derive(Debug, Clone, Deserialize)]
+        pub struct Scene {
+            pub lights: Vec<Light>,
+            #[allow(dead_code)]
+            pub camera: Camera,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub struct Camera {
+            pub position: [f32; 3],
+            pub target: [f32; 3],
+            pub up: [f32; 3],
+            pub fov: f32,
+            pub near: f32,
+            pub far: f32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub enum Light {
+            Directional {
+                direction: [f32; 3],
+                intensity: f32,
+                color: [f32; 3],
+                #[serde(default)]
+                shadow: bool,
+            },
+            Point {
+                position: [f32; 3],
+                intensity: f32,
+                color: [f32; 3],
+                range: f32,
+                #[serde(default)]
+                shadow: bool,
+            },
+            Spot {
+                position: [f32; 3],
+                direction: [f32; 3],
+                intensity: f32,
+                color: [f32; 3],
+                range: f32,
+                inner_angle: f32,
+                outer_angle: f32,
+                #[serde(default)]
+                shadow: bool,
+            },
+        }
+    }
+
+    fn unit(v: [f32; 3]) -> [f32; 3] {
+        Vec3::from_array(v).normalize().to_array()
+    }
+
+    #[test]
+    fn shipped_ron_round_trips_equivalently_and_stably() {
+        for (name, text) in SHIPPED_RON {
+            let scene = Scene::from_ron(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let first = scene.to_ron().expect("serialize");
+            let reparsed = Scene::from_ron(&first).expect("re-parse");
+            // Idempotent after the first (normalizing) load: byte-identical.
+            assert_eq!(first, reparsed.to_ron().expect("re-serialize"), "{name}");
+            // Equivalent to the source: same entities/transforms/camera;
+            // directions equal up to normalization.
+            assert_eq!(reparsed.entities.len(), scene.entities.len());
+            for (a, b) in scene.entities.iter().zip(&reparsed.entities) {
+                assert_eq!(a.transform, b.transform, "{name}: {}", a.name);
+            }
+            assert_eq!(scene.camera, reparsed.camera, "{name}");
+            // The typed re-serialization reads back through the legacy
+            // untyped mirror (shape unchanged) with matching values.
+            let legacy: Vec<legacy::Light> = reparsed
+                .lights
+                .iter()
+                .map(|light| {
+                    ron::de::from_str(&ron::ser::to_string(light).expect("ser")).expect("legacy")
+                })
+                .collect();
+            let source: Vec<legacy::Light> = scene_lights_legacy(text);
+            assert_eq!(legacy.len(), source.len());
+            for (typed, raw) in legacy.iter().zip(&source) {
+                match (typed, raw) {
+                    (
+                        legacy::Light::Directional { direction: a, .. },
+                        legacy::Light::Directional { direction: b, .. },
+                    ) => {
+                        let (a, b) = (Vec3::from_array(*a), Vec3::from_array(unit(*b)));
+                        assert!(a.abs_diff_eq(b, 1e-6), "{name}: {a} vs {b}");
+                    }
+                    other => panic!("{name}: unexpected light pair {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Lights of a shipped file parsed through the legacy mirror.
+    fn scene_lights_legacy(text: &str) -> Vec<legacy::Light> {
+        let scene: legacy::Scene = ron::de::from_str(text).expect("legacy mirror parses");
+        scene.lights
+    }
+
+    #[test]
+    fn typed_wire_shape_matches_legacy_in_ron_and_json() {
+        let transform = TransformDesc {
+            translation: Vec3::new(1.0, -2.5, 3.0),
+            rotation: UnitQuat::normalize(Quat::from_xyzw(0.0, 0.6, 0.0, 0.8)).expect("unit"),
+            scale: Vec3::new(2.0, 2.0, 0.5),
+        };
+        let legacy_transform = legacy::Transform {
+            translation: [1.0, -2.5, 3.0],
+            rotation: transform.rotation_array(),
+            scale: [2.0, 2.0, 0.5],
+        };
+        assert_eq!(
+            ron::ser::to_string(&transform).expect("ron"),
+            ron::ser::to_string(&legacy_transform).expect("ron")
+        );
+        assert_eq!(
+            serde_json::to_string(&transform).expect("json"),
+            serde_json::to_string(&legacy_transform).expect("json")
+        );
+        // Rotation stays (x, y, z, w) on the wire.
+        assert!(
+            serde_json::to_string(&transform)
+                .expect("json")
+                .contains("\"rotation\":[0.0,0.6,0.0,0.8]")
+        );
+
+        let camera = CameraDesc {
+            position: Vec3::new(0.0, 2.5, 9.0),
+            target: Vec3::ZERO,
+            up: UnitVec3::Y,
+            fov: Degrees::new(60.0),
+            near: Meters::new(0.1),
+            far: Meters::new(100.0),
+        };
+        let legacy_camera = legacy::Camera {
+            position: [0.0, 2.5, 9.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov: 60.0,
+            near: 0.1,
+            far: 100.0,
+        };
+        assert_eq!(
+            serde_json::to_string(&camera).expect("json"),
+            serde_json::to_string(&legacy_camera).expect("json")
+        );
+        assert_eq!(
+            ron::ser::to_string(&camera).expect("ron"),
+            ron::ser::to_string(&legacy_camera).expect("ron")
+        );
+
+        let spot = LightDesc::spot_units(
+            [Meters::new(1.0), Meters::new(4.0), Meters::new(0.0)],
+            [0.0, -1.0, 0.0],
+            8.0,
+            LinearRgb::WHITE,
+            Meters::new(12.0),
+            Degrees::new(15.0),
+            Degrees::new(30.0),
+            ShadowCast::Enabled,
+        )
+        .expect("valid spot");
+        let legacy_spot = legacy::Light::Spot {
+            position: [1.0, 4.0, 0.0],
+            direction: [0.0, -1.0, 0.0],
+            intensity: 8.0,
+            color: [1.0, 1.0, 1.0],
+            range: 12.0,
+            inner_angle: 15.0,
+            outer_angle: 30.0,
+            shadow: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&spot).expect("json"),
+            serde_json::to_string(&legacy_spot).expect("json")
+        );
+        let point = LightDesc::point_units(
+            [Meters::new(0.0), Meters::new(3.0), Meters::new(0.0)],
+            5.0,
+            LinearRgb::WHITE,
+            Meters::new(10.0),
+            ShadowCast::Disabled,
+        )
+        .expect("valid point");
+        let legacy_point = legacy::Light::Point {
+            position: [0.0, 3.0, 0.0],
+            intensity: 5.0,
+            color: [1.0, 1.0, 1.0],
+            range: 10.0,
+            shadow: false,
+        };
+        assert_eq!(
+            ron::ser::to_string(&point).expect("ron"),
+            ron::ser::to_string(&legacy_point).expect("ron")
+        );
+        // Legacy JSON reads back into the typed descriptor.
+        let parsed: LightDesc =
+            serde_json::from_str(&serde_json::to_string(&legacy_spot).expect("json"))
+                .expect("legacy JSON parses");
+        assert_eq!(
+            serde_json::to_string(&parsed).expect("json"),
+            serde_json::to_string(&legacy_spot).expect("json")
+        );
+    }
+
+    #[test]
+    fn non_unit_rotation_and_direction_are_normalized_on_load() {
+        let ron = FULL_SCENE_RON
+            .replace(
+                "rotation: (0.0, 0.0, 0.0, 1.0),\n                scale: (1.0, 1.0, 1.0),\n            ),\n            mesh: Sphere(radius: 2.0",
+                "rotation: (0.0, 0.0, 0.0, 2.0),\n                scale: (1.0, 1.0, 1.0),\n            ),\n            mesh: Sphere(radius: 2.0",
+            )
+            .replace("up: (0.0, 1.0, 0.0)", "up: (0.0, 3.0, 0.0)");
+        assert_ne!(ron, FULL_SCENE_RON, "fixture replacement applied");
+        let scene = Scene::from_ron(&ron).expect("non-unit values normalize");
+        assert_eq!(
+            scene.entities[0].transform.rotation_array(),
+            [0.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(scene.camera.up, UnitVec3::Y);
+        // The 0.7071 hand-typed quaternion is accepted and normalized.
+        let q = scene.entities[1].transform.rotation.get();
+        assert!((q.length() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn degenerate_rotation_and_direction_are_parse_errors() {
+        let zero_quat = FULL_SCENE_RON.replacen(
+            "rotation: (0.0, 0.0, 0.0, 1.0)",
+            "rotation: (0.0, 0.0, 0.0, 0.0)",
+            1,
+        );
+        let error = Scene::from_ron(&zero_quat).expect_err("zero quaternion rejected");
+        assert!(error.to_string().contains("rotation"), "{error}");
+
+        let zero_dir =
+            FULL_SCENE_RON.replace("direction: (1.0, 1.0, 1.0)", "direction: (0.0, 0.0, 0.0)");
+        let error = Scene::from_ron(&zero_dir).expect_err("zero direction rejected");
+        assert!(error.to_string().contains("direction"), "{error}");
+
+        let zero_up = FULL_SCENE_RON.replace("up: (0.0, 1.0, 0.0)", "up: (0.0, 0.0, 0.0)");
+        assert!(Scene::from_ron(&zero_up).is_err(), "zero up rejected");
+
+        // Same policy over JSON (editor/WASM protocol).
+        let json = r#"{"translation":[0,0,0],"rotation":[0,0,0,0],"scale":[1,1,1]}"#;
+        assert!(serde_json::from_str::<TransformDesc>(json).is_err());
+        let json = r#"{"translation":[0,0,0],"rotation":[0,0,0,3],"scale":[1,1,1]}"#;
+        let t: TransformDesc = serde_json::from_str(json).expect("normalized");
+        assert_eq!(t.rotation, UnitQuat::IDENTITY);
+    }
+
+    #[test]
+    fn transform_from_arrays_normalizes_or_falls_back_to_identity() {
+        let t = TransformDesc::from_arrays([1.0, 2.0, 3.0], [0.0, 0.0, 0.0, 0.0], [1.0; 3]);
+        assert_eq!(t.rotation, UnitQuat::IDENTITY);
+        assert_eq!(t.translation, Vec3::new(1.0, 2.0, 3.0));
+        let t = TransformDesc::from_arrays([0.0; 3], [0.0, 0.0, 2.0, 0.0], [1.0; 3]);
+        assert_eq!(t.rotation_array(), [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(TransformDesc::default(), TransformDesc::IDENTITY);
     }
 
     #[test]
@@ -1103,10 +1467,7 @@ Scene(
 
     #[test]
     fn checked_dir_normalizes_or_rejects() {
-        assert_eq!(
-            LightDesc::checked_dir([2.0, 0.0, 0.0]),
-            Some([1.0, 0.0, 0.0])
-        );
+        assert_eq!(LightDesc::checked_dir([2.0, 0.0, 0.0]), Some(UnitVec3::X));
         assert!(LightDesc::checked_dir([0.0, 0.0, 0.0]).is_none());
         assert!(LightDesc::checked_dir([f32::NAN, 0.0, 0.0]).is_none());
         assert!(LightDesc::checked_dir([f32::INFINITY, 0.0, 0.0]).is_none());

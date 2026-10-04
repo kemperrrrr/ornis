@@ -12,7 +12,7 @@ use gltf::Gltf;
 use image::GenericImageView as _;
 
 use crate::base64;
-use crate::import::{is_data_uri, reject_remote_uri};
+use crate::import::{is_data_uri, resolve_local_uri};
 use crate::{ImportError, LoadedImage};
 
 /// Resolves every document image to RGBA8 pixels, in index order.
@@ -87,10 +87,10 @@ fn image_bytes(
             } else {
                 let base = base_dir
                     .ok_or_else(|| ImportError::ExternalBuffer(std::path::PathBuf::from(uri)))?;
-                reject_remote_uri(uri)?;
-                let extension = Path::new(uri).extension().and_then(|stem| stem.to_str());
+                let resolved = resolve_local_uri(base, uri)?;
+                let extension = resolved.extension().and_then(|stem| stem.to_str());
                 check_mime(mime_type, extension, context)?;
-                Ok(std::fs::read(base.join(uri))?)
+                Ok(std::fs::read(&resolved)?)
             }
         }
     }
