@@ -234,7 +234,10 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 узла) или `SpawnModelError`, если хендл не загружен (мир не меняется).
 `spawn_scene` — корень RON-сцены. Клип запускается через
 `entity_mut(root).animator()?.play(name)`, окно открывает `ornis::run`
-с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Иерархия живёт в
+с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет
+локальный `Transform` целевого узла (object-треки и суставы, отображённые
+через `node_to_entity`), поэтому дети двигаются распространением позы.
+Иерархия живёт в
 `ornis_core`: локальный `Transform`, мировой `GlobalTransform` (система
 `propagate_transforms` до извлечения кадра и до physics sync), связь
 `ChildOf` и кэш `Children`, имя `Name`. Скрытый пол витрины живёт

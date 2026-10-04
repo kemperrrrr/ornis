@@ -33,11 +33,22 @@ use super::session::Name;
 /// with interpolation preserved. Rotation arrays are `(x, y, z, w)` unit
 /// quaternions on the mirror side (normalized at import) and convert with
 /// [`Quat::from_xyzw`] exactly — no silent renormalization here.
-pub fn skel_clip_from_loaded(clip: &LoadedSkelClip) -> SkelClip {
+/// [`LoadedJointTrack::node`](ornis_gltf::LoadedJointTrack::node) resolves
+/// through `node_to_entity` onto [`JointTrack::node`](ornis_animation::JointTrack::node)
+/// so sampling can write that node's local transform. A missing entry
+/// leaves `node` empty; the joint index is unchanged.
+pub fn skel_clip_from_loaded(
+    clip: &LoadedSkelClip,
+    node_to_entity: &HashMap<NodeIdx, Entity>,
+) -> SkelClip {
     SkelClip {
         name: clip.name.clone(),
         duration: clip.duration,
-        tracks: clip.tracks.iter().map(joint_track_from_loaded).collect(),
+        tracks: clip
+            .tracks
+            .iter()
+            .map(|track| joint_track_from_loaded(track, node_to_entity))
+            .collect(),
     }
 }
 
@@ -120,10 +131,14 @@ pub fn skinned_mesh_from_loaded(skeleton: Entity, mesh: &LoadedMesh) -> Option<S
     ))
 }
 
-/// Maps one mirror joint track (joint index plus three channels).
-fn joint_track_from_loaded(track: &LoadedJointTrack) -> JointTrack {
+/// Maps one mirror joint track (joint index, hierarchy node, three channels).
+fn joint_track_from_loaded(
+    track: &LoadedJointTrack,
+    node_to_entity: &HashMap<NodeIdx, Entity>,
+) -> JointTrack {
     JointTrack {
         joint: JointId::from_raw(track.joint),
+        node: node_to_entity.get(&track.node).copied(),
         translation: vec3_track_from_loaded(&track.translation),
         rotation: quat_track_from_loaded(&track.rotation),
         scale: vec3_track_from_loaded(&track.scale),
@@ -347,7 +362,8 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
 /// entity from [`ModelInstance`](crate::ModelInstance) for the hierarchy.
 /// Joint clips still sample [`LoadedJointTrack::joint`](ornis_gltf::LoadedJointTrack::joint);
 /// [`LoadedJointTrack::node`](ornis_gltf::LoadedJointTrack::node) is the
-/// hierarchy address and is not a second joint index. Sources without
+/// hierarchy address (mapped onto the live track, not a second joint index)
+/// so sampling writes that node's local transform. Sources without
 /// skins or clips wire nothing.
 /// Lanes are registered idempotently.
 pub fn wire_loaded_animation(
@@ -392,7 +408,7 @@ pub fn wire_loaded_animation(
         } else {
             clip.name.clone()
         };
-        let live = skel_clip_from_loaded(clip);
+        let live = skel_clip_from_loaded(clip, &spawn.node_to_entity);
         let playlist = store.create_entity();
         store.insert(playlist, Name(name.clone()));
         store.insert_cold(playlist, live);
@@ -560,11 +576,12 @@ mod tests {
             duration: 2.5,
             tracks: vec![joint_fixture()],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         assert_eq!(live.duration, 2.5);
         assert_eq!(live.tracks.len(), 1);
         let track = &live.tracks[0];
         assert_eq!(track.joint, JointId::from_raw(3));
+        assert!(track.node.is_none(), "unmapped joint node stays unbound");
         assert_eq!(
             track.translation.keys,
             vec![Key {
@@ -575,6 +592,22 @@ mod tests {
         assert_eq!(track.translation.interpolation, Interpolation::Linear);
         assert_eq!(track.rotation.keys[0].value, Quat::IDENTITY);
         assert_eq!(track.scale.keys[0].value, Vec3::ONE);
+    }
+
+    #[test]
+    fn skel_clip_maps_joint_node_through_node_to_entity() {
+        let clip = LoadedSkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks: vec![joint_fixture()],
+        };
+        let store = SmartStore::new();
+        let entity = store.create_entity();
+        let mut map = HashMap::new();
+        map.insert(NodeIdx(3), entity);
+        let live = skel_clip_from_loaded(&clip, &map);
+        assert_eq!(live.tracks[0].node, Some(entity));
+        assert_eq!(live.tracks[0].joint, JointId::from_raw(3));
     }
 
     #[test]
@@ -599,7 +632,7 @@ mod tests {
                 }]),
             }],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         let track = &live.tracks[0];
         assert_eq!(track.translation.interpolation, Interpolation::Step);
         assert_eq!(track.rotation.interpolation, Interpolation::Step);
@@ -651,7 +684,7 @@ mod tests {
                 scale: MirrorTrack::cubic(Vec::new(), Vec::new(), Vec::new()),
             }],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         let track = &live.tracks[0];
         // Full round-trip: keys plus tangents convert value-for-value.
         assert_eq!(
@@ -754,7 +787,7 @@ mod tests {
                 scale: LoadedKeyTrack::linear(Vec::new()),
             }],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         let got = live.tracks[0].rotation.keys[0].value;
         let want = Quat::from_xyzw(0.0, FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2);
         assert_eq!(got, want);
@@ -881,7 +914,7 @@ mod tests {
             duration: 0.0,
             tracks: Vec::new(),
         };
-        let live_skel = skel_clip_from_loaded(&skel);
+        let live_skel = skel_clip_from_loaded(&skel, &HashMap::new());
         assert_eq!(live_skel.duration, 0.0);
         assert!(live_skel.tracks.is_empty());
 

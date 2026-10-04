@@ -55,7 +55,8 @@ pub use gpu_types::GpuBool;
 pub use hierarchy::{
     ChildOf, Children, GlobalTransform, HierarchyError, Name, PropagateTransforms, Transform,
     clear_parent, despawn_recursive, install_fixed_transform_propagation,
-    install_transform_propagation, propagate_transforms, reconcile_children, set_parent,
+    install_transform_propagation, propagate_registered, propagate_transforms, reconcile_children,
+    set_parent,
 };
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Backend-neutral input (re-exported from `ornis-input` so downstream
