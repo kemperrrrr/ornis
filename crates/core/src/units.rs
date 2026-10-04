@@ -9,10 +9,16 @@
 //! ([`PositiveF32`], [`Clamped01`], [`UnitVec3`], [`UnitQuat`]) turn the
 //! old comment-invariants ("must be > 0", "must be normalized") into
 //! checked constructors instead of silent defaults.
+//!
+//! [`Color`] stores [`LinearRgba`] and serializes as the scene file's linear
+//! RGB array. [`Lux`] is the light-intensity `f32` under a newtype.
 
 use glam::{Quat, Vec3};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+mod color;
+pub use color::{Color, HexColorError, Lux};
 
 /// Duration in seconds at the frame boundary (canonical definition).
 ///
