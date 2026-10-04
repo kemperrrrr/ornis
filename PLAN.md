@@ -275,6 +275,14 @@ Wire оставляет плееры на паузе (возврат к диза
 расширению, слот под FBX); имена клипов идут сквозь цепочку в плейлисты.
 MSAA 4x доделано (pool wiring, шелл на negotiate, гейты зелёные).
 Пол остаётся в `app` (зовёт только бинарь — смешения сцен нет).
+✅ **2026-10-04 — именованный `Animator`.** Скелетный клип выбирается
+явно: `Animator` на корне персонажа (имя → `ClipId`),
+`play`/`pause`/`stop`/`set_looping`, ошибка `UnknownClip`. Эвристика
+`first_moving_skel_clip` и `play/pause/stop_all_animations` сняты;
+курсор `SkelPlayer` появляется только после `play` (`time`/`speed`:
+`Seconds`, `weight`: `Clamped01`, флаг `looping`). Object-плееры
+остаются на паузе на сущностях, которые называет трек. Пример грузит
+стартер через `AssetServer::load::<Scene>`.
 ✅ **2026-10-03 — шелл библиотекой + viewer (проверено глазом).**
 `crates/runner` (`run_native`, окно/GPU/цикл из бинаря), демо переехало
 в `cargo run --example anim` (бинарь — только showcase сфер); по пути

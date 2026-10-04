@@ -1,7 +1,8 @@
 //! Pure `ornis-gltf` mirror → `ornis-animation` converters, plus the
 //! shared spawn/wire routines built on them: [`spawn_gltf_world`]
 //! (mesh entities from a loaded scene) and [`wire_loaded_animation`]
-//! (skeleton roots, clip playlists, autoplay players, skinned meshes).
+//! (skeleton roots, named clip playlists, a character-root [`Animator`],
+//! paused object players, skinned meshes).
 //!
 //! Field-for-field mapping with no I/O beyond the caller's store: joint
 //! beyond the output clips: joint indices pass through
@@ -14,11 +15,11 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimPlayer, AnimTrack, ClipId, JointId, JointPose, JointTrack, Key, KeyTrack,
-    SkelClip, SkelPlayer, Skeleton, SkinnedMesh,
+    AnimClip, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointPose, JointTrack, Key,
+    KeyTrack, SkelClip, SkelPlayer, Skeleton, SkinnedMesh,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::{Entity, SmartStore};
+use ornis_core::{Entity, Seconds, SmartStore};
 use ornis_gltf::{
     LoadedAnimClip, LoadedInterpolation, LoadedJointTrack, LoadedKeyTrack, LoadedMesh,
     LoadedSkelClip, LoadedSkin,
@@ -191,6 +192,14 @@ pub struct GltfSpawn {
     /// Loader-local node handle (`Entity::new(node)`) → world entity.
     /// First mesh entity wins per node.
     pub node_to_entity: std::collections::HashMap<Entity, Entity>,
+    /// Character root that receives [`Animator`].
+    ///
+    /// `None` (what [`spawn_gltf_world`] leaves) tells
+    /// [`wire_loaded_animation`] to fall back to the first mesh entity.
+    /// Set this before wiring when the real scene root is a different
+    /// entity — that is the hook for `GameWorld::spawn_scene` (Core track).
+    /// The entity must already exist.
+    pub scene_root: Option<Entity>,
 }
 
 /// Entities created by [`wire_loaded_animation`] that outlive mesh
@@ -203,6 +212,8 @@ pub struct AnimationWiring {
     pub skel_playlists: Vec<Entity>,
     /// One playlist entity per object clip, in clip order.
     pub anim_playlists: Vec<Entity>,
+    /// Skeletal clip name → playlist. The first name wins on duplicates.
+    pub clips: HashMap<String, ClipId>,
 }
 
 impl AnimationWiring {
@@ -210,6 +221,31 @@ impl AnimationWiring {
     pub fn added(&self) -> usize {
         self.roots.len() + self.skel_playlists.len() + self.anim_playlists.len()
     }
+
+    /// Inserts an [`Animator`] on `scene_root` for this wiring's skeletal clips.
+    ///
+    /// Scene spawn (`GameWorld::spawn_scene`, Core track) should pass the
+    /// character root. Skeleton roots are not given a [`SkelPlayer`] until
+    /// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play). Calling
+    /// this again on the same entity replaces the component; it does not
+    /// clear an animator previously attached to a different entity.
+    pub fn attach_animator(&self, store: &mut SmartStore, scene_root: Entity) {
+        attach_animator(store, scene_root, self.clips.clone(), self.roots.clone());
+    }
+}
+
+/// Inserts an [`Animator`] on `scene_root` that indexes `clips` and drives
+/// `targets` (skeleton roots).
+///
+/// No [`SkelPlayer`] is created. Targets stay empty until a named `play`.
+pub fn attach_animator(
+    store: &mut SmartStore,
+    scene_root: Entity,
+    clips: HashMap<String, ClipId>,
+    targets: Vec<Entity>,
+) {
+    store.register::<Animator>();
+    store.insert(scene_root, Animator::new(clips, targets));
 }
 
 /// Spawns the mesh entities of a loaded glTF scene: `TransformDesc` +
@@ -238,22 +274,8 @@ pub fn spawn_gltf_world(store: &mut SmartStore, loaded: &ornis_gltf::LoadedScene
     GltfSpawn {
         entities,
         node_to_entity,
+        scene_root: None,
     }
-}
-
-/// Motion epsilon for autoplay selection: value drift below this is
-/// exporter noise, not visible motion.
-const MOTION_EPS: f32 = 1e-6;
-
-/// Whether a scalar channel visibly moves (key *count* alone lies:
-/// bind poses ship dozens of identical keys).
-fn channel_moves(values: &[[f32; 3]]) -> bool {
-    values.windows(2).any(|pair| {
-        pair[0]
-            .iter()
-            .zip(pair[1])
-            .any(|(a, b)| (a - b).abs() > MOTION_EPS)
-    })
 }
 
 /// Sets `playing` on the entity's player (skeletal first, then
@@ -281,7 +303,7 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
     if let Some(mut lane) = store.write_lane::<SkelPlayer>()
         && let Some(player) = lane.get_mut(entity)
     {
-        player.time = 0.0;
+        player.time = Seconds::ZERO;
         return true;
     }
     if let Some(mut lane) = store.write_lane::<AnimPlayer>()
@@ -293,83 +315,24 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
     false
 }
 
-/// Sets `playing` on every player in both lanes. Returns players touched.
-pub fn set_playing_all(store: &SmartStore, playing: bool) -> usize {
-    let mut touched = 0;
-    if let Some(mut lane) = store.write_lane::<SkelPlayer>() {
-        for player in lane.iter_mut() {
-            player.playing = playing;
-            touched += 1;
-        }
-    }
-    if let Some(mut lane) = store.write_lane::<AnimPlayer>() {
-        for player in lane.iter_mut() {
-            player.playing = playing;
-            touched += 1;
-        }
-    }
-    touched
-}
-
-/// Rewinds every player clock to zero. Returns players touched.
-pub fn rewind_all_players(store: &SmartStore) -> usize {
-    let mut touched = 0;
-    if let Some(mut lane) = store.write_lane::<SkelPlayer>() {
-        for player in lane.iter_mut() {
-            player.time = 0.0;
-            touched += 1;
-        }
-    }
-    if let Some(mut lane) = store.write_lane::<AnimPlayer>() {
-        for player in lane.iter_mut() {
-            player.time = 0.0;
-            touched += 1;
-        }
-    }
-    touched
-}
-
-/// Index of the first skeletal clip with motion, for autoplay: static
-/// bind poses (TPose first in most packs, dozens of identical keys)
-/// would otherwise play visibly nothing. `None` when no clip moves —
-/// the caller falls back to the first clip.
-pub fn first_moving_skel_clip(clips: &[ornis_gltf::LoadedSkelClip]) -> Option<usize> {
-    clips.iter().position(|clip| {
-        clip.tracks.iter().any(|track| {
-            channel_moves(
-                &track
-                    .translation
-                    .keys
-                    .iter()
-                    .map(|key| key.value)
-                    .collect::<Vec<_>>(),
-            ) || channel_moves(
-                &track
-                    .scale
-                    .keys
-                    .iter()
-                    .map(|key| key.value)
-                    .collect::<Vec<_>>(),
-            ) || track.rotation.keys.windows(2).any(|pair| {
-                pair[0]
-                    .value
-                    .iter()
-                    .zip(pair[1].value)
-                    .any(|(a, b)| (a - b).abs() > MOTION_EPS)
-            })
-        })
-    })
-}
-
 /// Wires animation from a loaded glTF scene into an already-spawned
 /// world: skeleton roots (`Skeleton` + [`JointPose`]), cold clip
-/// playlists, paused players (hosts start playback explicitly — see
-/// [`set_playing_all`]) and [`SkinnedMesh`] lanes on skinned mesh
-/// entities.
+/// playlists named with the glTF animation name, an [`Animator`] on the
+/// character root when any skeletal clip exists, and [`SkinnedMesh`] lanes
+/// on skinned mesh entities.
 ///
-/// `mesh_entities` must be the load-order mesh entities (see
-/// [`spawn_gltf_world`]); `node_to_entity` resolves loader-local node
-/// handles to them. Sources without skins or clips wire nothing.
+/// Skeletal players are not created. The animator map is clip name →
+/// playlist, and playback starts only at
+/// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play). Object
+/// players stay paused on the entities their tracks name (those tracks
+/// are the target, not a guessed clip); hosts start them with
+/// [`set_playing`]. [`GltfSpawn::scene_root`], when set, receives the
+/// animator; otherwise the first mesh entity does, which is the stand-in
+/// until `GameWorld::spawn_scene` returns the character root.
+///
+/// `spawn.entities` must be the load-order mesh entities (see
+/// [`spawn_gltf_world`]); `spawn.node_to_entity` resolves loader-local
+/// node handles to them. Sources without skins or clips wire nothing.
 /// Lanes are registered idempotently.
 pub fn wire_loaded_animation(
     store: &mut SmartStore,
@@ -389,6 +352,7 @@ pub fn wire_loaded_animation(
         roots: Vec::with_capacity(loaded.skins.len()),
         skel_playlists: Vec::with_capacity(loaded.skel_clips.len()),
         anim_playlists: Vec::with_capacity(loaded.anim_clips.len()),
+        clips: HashMap::new(),
     };
     if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
         return wiring;
@@ -403,32 +367,21 @@ pub fn wire_loaded_animation(
         store.insert(root, JointPose::identity(joints));
         wiring.roots.push(root);
     }
-    // Skeletal playlists, one per clip and shared across roots; every
-    // root autoplays the first *moving* clip (one player lane per root —
-    // further clips stay retained for editor clip selection, a follow-up).
-    for clip in &loaded.skel_clips {
+    // Skeletal playlists, one per clip and shared across roots. No player
+    // is inserted: the character-root [`Animator`] starts a clip by name.
+    // An empty glTF name falls back to `skel_clip_{index}` so `play` has a key.
+    for (index, clip) in loaded.skel_clips.iter().enumerate() {
+        let name = if clip.name.is_empty() {
+            format!("skel_clip_{index}")
+        } else {
+            clip.name.clone()
+        };
         let live = skel_clip_from_loaded(clip);
         let playlist = store.create_entity();
-        store.insert(playlist, Name(live.name.clone()));
+        store.insert(playlist, Name(name.clone()));
         store.insert_cold(playlist, live);
         wiring.skel_playlists.push(playlist);
-    }
-    let play = first_moving_skel_clip(&loaded.skel_clips)
-        .and_then(|index| wiring.skel_playlists.get(index).copied())
-        .or(wiring.skel_playlists.first().copied());
-    if let Some(first) = play {
-        // Paused: the host starts playback explicitly
-        // ([`set_playing_all`]) — the engine never autoplays.
-        let player = SkelPlayer {
-            clip: ClipId(first),
-            time: 0.0,
-            speed: 1.0,
-            weight: 1.0,
-            playing: false,
-        };
-        for root in &wiring.roots {
-            store.insert(*root, player);
-        }
+        wiring.clips.entry(name).or_insert(ClipId(playlist));
     }
     // Skinned meshes: `SkinnedMesh.skeleton` points at the skin's root.
     // `None` (unskinned primitive) keeps the regular `Custom` mesh.
@@ -444,9 +397,10 @@ pub fn wire_loaded_animation(
         };
         store.insert(*entity, skinned);
     }
-    // Object playlists, one per clip; every mapped track entity gets an
-    // autoplay player (last clip wins on shared entities — one player
-    // lane per entity).
+    // Object playlists, one per clip; every mapped track entity gets a
+    // paused player (last clip wins on shared entities — one player
+    // lane per entity). The track names the target, so this is not a
+    // guessed clip; hosts start it with [`set_playing`].
     for clip in &loaded.anim_clips {
         let (live, dropped) = anim_clip_from_loaded(clip.name.clone(), clip, &spawn.node_to_entity);
         // Dropped (unmapped) tracks stay dropped: the count is covered
@@ -470,14 +424,20 @@ pub fn wire_loaded_animation(
             );
         }
     }
+    if !wiring.clips.is_empty()
+        && let Some(root) = spawn.scene_root.or_else(|| spawn.entities.first().copied())
+    {
+        wiring.attach_animator(store, root);
+    }
     wiring
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_animation::Interpolation;
-    use ornis_gltf::{LoadedAnimTrack, LoadedKey};
+    use ornis_animation::{AnimatorError, Interpolation, try_animator};
+    use ornis_core::{Clamped01, Seconds};
+    use ornis_gltf::{LoadedAnimTrack, LoadedKey, LoadedSkelClip, LoadedSkin};
 
     /// Minimal unskinned entity mirror (node index drives the map).
     fn entity_fixture(node: u32) -> ornis_gltf::LoadedEntity {
@@ -510,70 +470,6 @@ mod tests {
 
     /// Spawn maps loader-local node handles to world entities, 1:1 and in
     /// load order, with placement components inserted.
-    #[test]
-    fn first_moving_skel_clip_skips_static_poses() {
-        use ornis_gltf::{LoadedJointTrack, LoadedKey, LoadedKeyTrack, LoadedSkelClip};
-        fn pose() -> LoadedJointTrack {
-            LoadedJointTrack {
-                joint: 0,
-                translation: LoadedKeyTrack::linear(vec![LoadedKey {
-                    time: 0.0,
-                    value: [0.0, 0.0, 0.0],
-                }]),
-                rotation: LoadedKeyTrack::linear(Vec::new()),
-                scale: LoadedKeyTrack::linear(Vec::new()),
-            }
-        }
-        fn step() -> LoadedJointTrack {
-            LoadedJointTrack {
-                joint: 0,
-                translation: LoadedKeyTrack::linear(vec![
-                    LoadedKey {
-                        time: 0.0,
-                        value: [0.0, 0.0, 0.0],
-                    },
-                    LoadedKey {
-                        time: 1.0,
-                        value: [1.0, 0.0, 0.0],
-                    },
-                ]),
-                rotation: LoadedKeyTrack::linear(Vec::new()),
-                scale: LoadedKeyTrack::linear(Vec::new()),
-            }
-        }
-        fn clip(tracks: Vec<LoadedJointTrack>) -> LoadedSkelClip {
-            LoadedSkelClip {
-                name: String::new(),
-                duration: 1.0,
-                tracks,
-            }
-        }
-        assert_eq!(first_moving_skel_clip(&[]), None);
-        assert_eq!(first_moving_skel_clip(&[clip(vec![pose()])]), None);
-        // Key count alone lies: 76 identical keys (a baked TPose) is
-        // still no motion.
-        let frozen = LoadedJointTrack {
-            joint: 0,
-            translation: LoadedKeyTrack::linear(vec![
-                LoadedKey {
-                    time: 0.0,
-                    value: [0.0, 0.0, 0.0],
-                };
-                76
-            ]),
-            rotation: LoadedKeyTrack::linear(Vec::new()),
-            scale: LoadedKeyTrack::linear(Vec::new()),
-        };
-        assert_eq!(
-            first_moving_skel_clip(&[clip(vec![frozen]), clip(vec![step()])]),
-            Some(1)
-        );
-        assert_eq!(
-            first_moving_skel_clip(&[clip(vec![step()]), clip(vec![pose()])]),
-            Some(0)
-        );
-    }
-
     #[test]
     fn spawn_maps_nodes_to_world_entities() {
         use ornis_assets::scene::TransformDesc;
@@ -967,5 +863,119 @@ mod tests {
             rotation: LoadedKeyTrack::linear(Vec::new()),
             scale: LoadedKeyTrack::linear(Vec::new()),
         }
+    }
+
+    fn named_clip(name: &str) -> LoadedSkelClip {
+        LoadedSkelClip {
+            name: name.to_string(),
+            duration: 1.0,
+            tracks: Vec::new(),
+        }
+    }
+
+    fn skinned_scene(clips: Vec<LoadedSkelClip>) -> ornis_gltf::LoadedScene {
+        let mut mesh = entity_fixture(0);
+        mesh.skin = Some(0);
+        ornis_gltf::LoadedScene {
+            name: "character".into(),
+            entities: vec![mesh],
+            skins: vec![LoadedSkin {
+                parents: vec![-1],
+                inverse_bind: vec![[
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]],
+                joint_names: vec!["root".into()],
+            }],
+            skel_clips: clips,
+            anim_clips: Vec::new(),
+            stats: ornis_gltf::ImportStats::default(),
+        }
+    }
+
+    /// Clip names index the character root. The first clip is not selected,
+    /// and a duplicate name keeps the earlier playlist.
+    #[test]
+    fn wiring_indexes_clips_by_name_without_a_player() {
+        let loaded = skinned_scene(vec![
+            named_clip("Crouch_Fwd_Loop"),
+            named_clip("Walk_Loop"),
+            named_clip(""),
+            named_clip("Walk_Loop"),
+        ]);
+        let mut store = SmartStore::new();
+        let spawn = spawn_gltf_world(&mut store, &loaded);
+        let wiring = wire_loaded_animation(&mut store, &loaded, &spawn);
+
+        assert!(
+            store
+                .read_lane::<SkelPlayer>()
+                .is_none_or(|lane| lane.is_empty()),
+            "skeletal players stay empty until play"
+        );
+        let hero = spawn.entities[0];
+        let animator = store
+            .read_lane::<Animator>()
+            .expect("animator lane")
+            .get(hero)
+            .cloned()
+            .expect("animator on the first mesh");
+        assert_eq!(
+            animator.clip("Crouch_Fwd_Loop").map(|id| id.0),
+            Some(wiring.skel_playlists[0])
+        );
+        assert_eq!(
+            animator.clip("Walk_Loop").map(|id| id.0),
+            Some(wiring.skel_playlists[1]),
+            "duplicate Walk_Loop keeps the earlier playlist"
+        );
+        assert_eq!(
+            animator.clip("skel_clip_2").map(|id| id.0),
+            Some(wiring.skel_playlists[2])
+        );
+        let names = store.read_lane::<Name>().expect("names");
+        assert_eq!(names.get(wiring.skel_playlists[1]).unwrap().0, "Walk_Loop");
+        drop(names);
+
+        let err = try_animator(&mut store, hero)
+            .unwrap()
+            .play("Nope")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AnimatorError::UnknownClip {
+                name: "Nope".into()
+            }
+        );
+        try_animator(&mut store, hero)
+            .unwrap()
+            .play("Walk_Loop")
+            .unwrap();
+        let cursor = store
+            .read_lane::<SkelPlayer>()
+            .unwrap()
+            .get(wiring.roots[0])
+            .copied()
+            .unwrap();
+        assert!(cursor.playing);
+        assert_eq!(cursor.clip.0, wiring.skel_playlists[1]);
+        assert_eq!(cursor.time, Seconds::ZERO);
+        assert_eq!(cursor.weight, Clamped01::ONE);
+    }
+
+    /// An explicit scene root receives the animator instead of the first mesh.
+    #[test]
+    fn scene_root_override_receives_the_animator() {
+        let loaded = skinned_scene(vec![named_clip("Walk_Loop")]);
+        let mut store = SmartStore::new();
+        let mut spawn = spawn_gltf_world(&mut store, &loaded);
+        let root = store.create_entity();
+        spawn.scene_root = Some(root);
+        wire_loaded_animation(&mut store, &loaded, &spawn);
+        let animators = store.read_lane::<Animator>().unwrap();
+        assert!(animators.get(root).is_some());
+        assert!(animators.get(spawn.entities[0]).is_none());
     }
 }

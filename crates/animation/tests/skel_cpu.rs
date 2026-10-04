@@ -18,7 +18,7 @@ use ornis_animation::{
     SkinnedMesh, run_skel_sample, run_skel_skin,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::units::Clamped01;
+use ornis_core::units::{Clamped01, Seconds};
 use ornis_core::{Engine, Entity, Resources, SmartStore, Stage, System, Time};
 use ornis_render::extract_render_data;
 
@@ -97,10 +97,11 @@ fn spawn_root(engine: &mut Engine, clip: SkelClip) -> Entity {
         root,
         SkelPlayer {
             clip: ClipId(root),
-            time: 0.0,
-            speed: 1.0,
-            weight: 1.0,
+            time: Seconds::ZERO,
+            speed: Seconds::new(1.0),
+            weight: Clamped01::ONE,
             playing: true,
+            looping: true,
         },
     );
     root
@@ -240,7 +241,7 @@ fn skin_two_bone_chain_with_known_matrices() {
     let store = engine.world().store().expect("world owns SmartStore");
     let players = store.read_lane::<SkelPlayer>().expect("lane registered");
     let player = *players.get(root).expect("player kept");
-    assert!((player.time - 0.5).abs() < 1e-6);
+    assert!((player.time.get() - 0.5).abs() < 1e-6);
     let pose = pose_of(&engine, root);
     assert!(close(
         pose[1].transform_point3(Vec3::ZERO),
@@ -386,10 +387,11 @@ fn joint_cap_is_128() {
         root,
         SkelPlayer {
             clip: ClipId(root),
-            time: 0.0,
-            speed: 1.0,
-            weight: 1.0,
+            time: Seconds::ZERO,
+            speed: Seconds::new(1.0),
+            weight: Clamped01::ONE,
             playing: true,
+            looping: true,
         },
     );
     let mut resources = Resources::new();
@@ -415,10 +417,11 @@ fn joint_cap_is_128() {
             orphan,
             SkelPlayer {
                 clip: ClipId(ghost),
-                time: 0.0,
-                speed: 1.0,
-                weight: 1.0,
+                time: Seconds::ZERO,
+                speed: Seconds::new(1.0),
+                weight: Clamped01::ONE,
                 playing: true,
+                looping: true,
             },
         );
     }
@@ -521,4 +524,37 @@ fn systems_advertise_names_accesses_and_edge() {
     let mermaid = engine.stage_schedule(Stage::PostFrame).mermaid();
     assert!(mermaid.contains("skel_sample"));
     assert!(mermaid.contains("skel_skin_cpu"));
+}
+
+/// A non-looping cursor clamps at the clip duration instead of wrapping.
+#[test]
+fn non_looping_cursor_clamps_at_duration() {
+    let mut engine = skel_engine();
+    let root = spawn_root(
+        &mut engine,
+        SkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks: Vec::new(),
+        },
+    );
+    {
+        let store = engine
+            .world_mut()
+            .store_mut()
+            .expect("world owns SmartStore");
+        let mut players = store.write_lane::<SkelPlayer>().expect("players");
+        players.get_mut(root).expect("player").looping = false;
+    }
+    engine.run_frame(2.0);
+    let time = engine
+        .world()
+        .store()
+        .expect("world owns SmartStore")
+        .read_lane::<SkelPlayer>()
+        .expect("players")
+        .get(root)
+        .expect("player")
+        .time;
+    assert!((time.get() - 1.0).abs() < 1e-5);
 }
