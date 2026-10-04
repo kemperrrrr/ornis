@@ -46,7 +46,7 @@ pub type BuildWorld = Box<dyn FnOnce() -> (GameWorld, u32)>;
 /// (`--remote-editor`, `--frames N`); see [`NativeOptions::from_env`].
 pub struct NativeOptions {
     /// Window title.
-    pub title: &'static str,
+    pub title: String,
     /// Smoke-test budget: exit after N presented frames (`None` = forever).
     pub frames: Option<u64>,
     /// Serve the browser editor alongside the native window.
@@ -57,7 +57,7 @@ impl NativeOptions {
     /// Parses the shell CLI conventions with the given window title:
     /// `--remote-editor` serves the editor on
     /// [`EDITOR_HTTP_PORT`], `--frames N` exits after N frames.
-    pub fn from_env(title: &'static str) -> Self {
+    pub fn from_env(title: impl Into<String>) -> Self {
         let mut args = std::env::args();
         let mut frames = None;
         let mut remote_editor = false;
@@ -69,7 +69,7 @@ impl NativeOptions {
             }
         }
         Self {
-            title,
+            title: title.into(),
             frames,
             remote_editor,
         }
@@ -174,7 +174,7 @@ impl GameApp {
         remote_cmd_rx: Receiver<editor_backend::ipc::UiCommand>,
         remote_ev_tx: Sender<editor_backend::ipc::GameEvent>,
         build: BuildWorld,
-        title: &'static str,
+        title: String,
         frames: Option<u64>,
     ) -> Result<GameContext, String> {
         let window_attrs = WindowAttributes::default()
@@ -478,7 +478,7 @@ impl ApplicationHandler for GameApp {
                 ));
             }
             let build = self.build.take();
-            let options_title = self.options.title;
+            let options_title = self.options.title.clone();
             let options_frames = self.options.frames;
             match build {
                 Some(build) => match Self::initialize(

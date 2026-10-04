@@ -46,9 +46,11 @@ pub struct GameWorld<Role: SceneRole = Authoritative> {
     engine: Engine,
     entities: SceneEntities,
     version: SceneVersion,
-    /// Asset registry for this world. Users load through [`Self::assets_mut`]
-    /// rather than constructing a standalone server.
+    /// Asset registry for this world. Users load through [`Self::load`] or
+    /// [`Self::assets_mut`] rather than constructing a standalone server.
     assets: ornis_assets::AssetServer,
+    /// Window title. Default is `Ornis Engine`; [`Self::set_title`] replaces it.
+    title: String,
     role: PhantomData<Role>,
 }
 
@@ -203,6 +205,7 @@ impl<Role: SceneRole> GameWorld<Role> {
             entities: SceneEntities::new(),
             version: SceneVersion::ZERO,
             assets: ornis_assets::AssetServer::new(),
+            title: "Ornis Engine".to_owned(),
             role: PhantomData,
         }
     }
@@ -214,11 +217,41 @@ impl<Role: SceneRole> GameWorld<Role> {
 
     /// The asset registry owned by this world.
     ///
-    /// Load with `assets_mut().load::<T>(path)`. The returned [`Handle`](ornis_assets::Handle)
-    /// is owned, so the borrow ends before [`Self::spawn`] or
-    /// [`GameWorld::spawn_scene`].
+    /// Load with [`Self::load`] or `assets_mut().load::<T>(path)`. The returned
+    /// [`Handle`](ornis_assets::Handle) is owned, so the borrow ends before
+    /// [`Self::spawn`] or [`GameWorld::spawn_scene`].
     pub fn assets_mut(&mut self) -> &mut ornis_assets::AssetServer {
         &mut self.assets
+    }
+
+    /// Loads the asset at `path` as `A`.
+    ///
+    /// Same contract as [`AssetServer::load`](ornis_assets::AssetServer::load):
+    /// the type parameter selects the asset and the extension selects the
+    /// importer. Delegates to [`Self::assets_mut`].
+    ///
+    /// # Errors
+    ///
+    /// The same [`AssetError`](ornis_assets::AssetError) values as
+    /// [`AssetServer::load`](ornis_assets::AssetServer::load).
+    pub fn load<A: ornis_assets::Asset>(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<ornis_assets::Handle<A>, ornis_assets::AssetError> {
+        self.assets_mut().load(path)
+    }
+
+    /// Stores the window title.
+    ///
+    /// The default, set by [`GameWorld::new`] and
+    /// [`ReplicaGameWorld::new_replica`], is `Ornis Engine`.
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = title.into();
+    }
+
+    /// Window title stored by [`Self::set_title`].
+    pub fn title(&self) -> &str {
+        &self.title
     }
 
     /// Monotonic scene-mutation counter: bumped by every
@@ -303,7 +336,9 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// [`OrbitCamera`] replaces the client-side view and registers its
     /// input system once. Neither call returns a success flag: a light
     /// the renderer cannot upload is reported by that rig, and the camera
-    /// install does not fail.
+    /// install does not fail. A [`Handle<Model>`](ornis_assets::Handle)
+    /// returns the character root, or [`SpawnModelError`] when the handle
+    /// is not loaded — that path creates no entities.
     pub fn spawn<S: Spawn>(&mut self, value: S) -> S::Output {
         value.spawn_into(self)
     }
@@ -453,12 +488,13 @@ fn insert_scene_entities(engine: &mut Engine, entities: &[EntityDesc]) -> Vec<En
 /// Value [`GameWorld::spawn`] can place into the world.
 ///
 /// Infallible values use `Output = ()`. A fallible spawn uses
-/// `Output = Result<_, _>` rather than a `bool` or a count. An owned
-/// asset handle can use `Output = Entity`: [`GameWorld::assets_mut`]
-/// `load` returns that handle and ends the borrow before `spawn`, so the
-/// two calls do not overlap. The implementor copies asset data out of
-/// [`GameWorld::assets`] before [`GameWorld::engine_mut`], because both
-/// methods borrow the whole world.
+/// `Output = Result<_, _>` rather than a `bool` or a count.
+/// [`Handle<Model>`](ornis_assets::Handle) returns
+/// [`Result<Entity, SpawnModelError>`]: an unknown handle creates nothing.
+/// [`GameWorld::load`] (or [`GameWorld::assets_mut`]) returns that handle
+/// and ends the borrow before `spawn`, so the two calls do not overlap.
+/// The implementor copies asset data out of [`GameWorld::assets`] before
+/// [`GameWorld::engine_mut`], because both methods borrow the whole world.
 pub trait Spawn {
     /// What a spawn hands back.
     type Output;
@@ -485,14 +521,32 @@ impl Spawn for OrbitCamera {
 }
 
 impl Spawn for ornis_assets::Handle<ornis_assets::Model> {
-    type Output = Entity;
+    type Output = Result<Entity, SpawnModelError>;
 
     fn spawn_into<Role: SceneRole>(self, world: &mut GameWorld<Role>) -> Self::Output {
-        match world.assets().get(&self).cloned() {
-            Some(model) => spawn_model_hierarchy(world, self, &model),
-            None => spawn_unloaded_model_root(world),
-        }
+        let Some(model) = world.assets().get(&self).cloned() else {
+            return Err(SpawnModelError::UnknownHandle {
+                index: self.id().index(),
+            });
+        };
+        Ok(spawn_model_hierarchy(world, self, &model))
     }
+}
+
+/// Why [`GameWorld::spawn`] of a [`Handle<Model>`](ornis_assets::Handle) failed.
+///
+/// The world is unchanged: no entities are created. A failed
+/// [`GameWorld::load`] never produces a handle, so spawn only sees a handle
+/// that is absent from this world's asset server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SpawnModelError {
+    /// The handle is not present on this world's asset server (never loaded
+    /// here, or already unloaded).
+    #[error("model handle {index} is not loaded")]
+    UnknownHandle {
+        /// Raw [`AssetId::index`](ornis_assets::AssetId::index).
+        index: u64,
+    },
 }
 
 /// Live instance of one [`Model`](ornis_assets::Model).
@@ -507,18 +561,6 @@ pub struct ModelInstance {
     pub model: ornis_assets::Handle<ornis_assets::Model>,
     /// One entity per model node, in [`Model::nodes`](ornis_assets::Model::nodes) order.
     pub nodes: Vec<Entity>,
-}
-
-fn spawn_unloaded_model_root<Role: SceneRole>(world: &mut GameWorld<Role>) -> Entity {
-    let store = world
-        .engine_mut()
-        .world_mut()
-        .store_mut()
-        .expect("engine always carries a store");
-    let root = store.create_entity();
-    store.insert(root, ornis_core::Transform::IDENTITY);
-    store.insert(root, ornis_core::GlobalTransform::IDENTITY);
-    root
 }
 
 fn spawn_model_hierarchy<Role: SceneRole>(
@@ -1281,7 +1323,7 @@ mod tests {
             .join("../../assets/starter/ual1_standard.glb");
         let mannequin: ornis_assets::Handle<ornis_assets::Model> =
             world.assets_mut().load(&starter).expect("starter loads");
-        let hero = world.spawn(mannequin);
+        let hero = world.spawn(mannequin).expect("starter spawns");
         let meshes = mesh_entities(&world);
         assert!(!meshes.is_empty());
         assert_ne!(hero, meshes[0], "character root is not the first mesh");
@@ -1351,7 +1393,7 @@ mod tests {
         let mut world = GameWorld::new();
         let mannequin: ornis_assets::Handle<ornis_assets::Model> =
             world.assets_mut().load(&starter).expect("starter loads");
-        let hero = world.spawn(mannequin);
+        let hero = world.spawn(mannequin).expect("starter spawns");
         let meshes = mesh_entities(&world);
         assert!(!meshes.is_empty());
         world
@@ -1366,7 +1408,7 @@ mod tests {
             .assets_mut()
             .load(&starter)
             .expect("other world loads");
-        let other_hero = other.spawn(other_handle);
+        let other_hero = other.spawn(other_handle).expect("starter spawns");
         assert_eq!(mesh_entities(&other).len(), meshes.len());
         other
             .entity_mut(other_hero)
@@ -1375,7 +1417,7 @@ mod tests {
             .play("Walk_Loop")
             .expect("Walk_Loop");
 
-        let again = world.spawn(mannequin);
+        let again = world.spawn(mannequin).expect("starter spawns");
         assert_ne!(again, hero);
         assert_eq!(mesh_entities(&world).len(), meshes.len() * 2);
     }
@@ -1432,7 +1474,7 @@ mod tests {
             .join("../../assets/starter/ual1_standard.glb");
         let mannequin: ornis_assets::Handle<ornis_assets::Model> =
             world.assets_mut().load(&starter).expect("starter loads");
-        let hero = world.spawn(mannequin);
+        let hero = world.spawn(mannequin).expect("starter spawns");
         let meshes = mesh_entities(&world);
         assert_ne!(hero, meshes[0]);
 
@@ -1617,7 +1659,7 @@ mod tests {
         let mut world = GameWorld::new();
         let mannequin: ornis_assets::Handle<ornis_assets::Model> =
             world.assets_mut().load(&starter).expect("starter loads");
-        let hero = world.spawn(mannequin);
+        let hero = world.spawn(mannequin).expect("starter spawns");
         {
             let store = world.engine_mut().world_mut().store_mut().expect("store");
             propagate_transforms(store);
@@ -1707,40 +1749,70 @@ mod tests {
         assert!(!store.is_alive(primitive));
     }
 
-    /// An unloaded model handle still spawns a root. It carries a transform
-    /// and no animator.
+    /// An unknown model handle is an error. Scene entity count and the
+    /// transform lane stay as they were: no root is created.
     #[test]
-    fn spawn_unknown_model_handle_returns_an_empty_root() {
-        use ornis_animation::{AnimatorError, try_animator};
+    fn spawn_unknown_model_handle_leaves_the_world_untouched() {
         use ornis_core::Transform;
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
-        let mut world = GameWorld::new();
+        let mut world = GameWorld::from_scene(&two_sphere_scene());
+        let before = world.entity_count();
+        let transforms_before = {
+            let store = world.engine().world().store().expect("store");
+            store
+                .read_lane::<Transform>()
+                .map(|lane| lane.len())
+                .unwrap_or(0)
+        };
         let handle: ornis_assets::Handle<ornis_assets::Model> =
             world.assets_mut().load(&starter).expect("starter loads");
         assert!(world.assets_mut().unload(&handle));
-        let root = world.spawn(handle);
-        {
-            let store = world.engine().world().store().expect("store");
-            assert!(store.is_alive(root));
-            assert_eq!(
-                store
-                    .read_lane::<Transform>()
-                    .expect("transforms")
-                    .get(root)
-                    .copied(),
-                Some(Transform::IDENTITY)
-            );
-            assert!(
-                store
-                    .read_lane::<ModelInstance>()
-                    .is_none_or(|lane| lane.get(root).is_none())
-            );
-        }
-        let store = world.engine_mut().world_mut().store_mut().expect("store");
-        assert!(matches!(
-            try_animator(store, root),
-            Err(AnimatorError::Missing)
-        ));
+        let err = world.spawn(handle).expect_err("unknown handle");
+        assert_eq!(
+            err,
+            SpawnModelError::UnknownHandle {
+                index: handle.id().index(),
+            }
+        );
+        assert_eq!(world.entity_count(), before);
+        let store = world.engine().world().store().expect("store");
+        let transforms_after = store
+            .read_lane::<Transform>()
+            .map(|lane| lane.len())
+            .unwrap_or(0);
+        assert_eq!(transforms_after, transforms_before);
+        assert!(
+            store
+                .read_lane::<ModelInstance>()
+                .is_none_or(|lane| lane.is_empty())
+        );
+    }
+
+    /// `load` is the world's asset server. A missing file rejects and a
+    /// loaded handle resolves.
+    #[test]
+    fn load_delegates_to_the_asset_server() {
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mut world = GameWorld::new();
+        let handle = world
+            .load::<ornis_assets::Model>(&starter)
+            .expect("starter loads");
+        assert!(world.assets().get(&handle).is_some());
+        let missing = world.load::<ornis_assets::Model>(std::path::Path::new("nope.glb"));
+        assert!(missing.is_err());
+    }
+
+    /// The window title defaults to `Ornis Engine` and `set_title` stores
+    /// the replacement on both roles.
+    #[test]
+    fn set_title_stores_the_window_title() {
+        let mut world = GameWorld::new();
+        assert_eq!(world.title(), "Ornis Engine");
+        world.set_title("Ornis — Animation Demo");
+        assert_eq!(world.title(), "Ornis — Animation Demo");
+        let replica = ReplicaGameWorld::new_replica();
+        assert_eq!(replica.title(), "Ornis Engine");
     }
 }

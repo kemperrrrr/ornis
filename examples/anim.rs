@@ -13,10 +13,9 @@ use ornis_render::{DirectionalLight, OrbitCamera};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = GameWorld::new();
-    let mannequin = world
-        .assets_mut()
-        .load::<Model>("assets/starter/ual1_standard.glb")?;
-    let hero = world.spawn(mannequin);
+    world.set_title("Ornis — Animation Demo");
+    let mannequin = world.load::<Model>("assets/starter/ual1_standard.glb")?;
+    let hero = world.spawn(mannequin)?;
     world.set_ambient(Color::hex("#1A1A26")?);
     world.spawn(DirectionalLight {
         direction: UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0))?,
