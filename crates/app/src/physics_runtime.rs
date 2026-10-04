@@ -35,8 +35,6 @@ use ornis_physics::{
 #[cfg(test)]
 use ornis_render::extract_render_data;
 
-/// Squared length below which a quaternion is treated as degenerate.
-const DEGENERATE_LEN2: f32 = 1e-12;
 /// Spatial components in a world-space position.
 const VEC3_COMPONENTS: usize = 3;
 
@@ -236,13 +234,11 @@ impl PhysicsRuntime {
                 *destination = body.clone();
             }
             if let Some(destination) = transforms.get_mut(entity) {
-                destination.translation = body.position.to_array();
-                destination.rotation = [
-                    body.orientation.x,
-                    body.orientation.y,
-                    body.orientation.z,
-                    body.orientation.w,
-                ];
+                destination.translation = body.position;
+                // Degenerate solver orientation keeps the previous pose.
+                if let Some(rotation) = ornis_core::units::UnitQuat::normalize(body.orientation) {
+                    destination.rotation = rotation;
+                }
             }
         }
     }
@@ -344,9 +340,9 @@ impl PhysicsRuntime {
                     meshes.insert(entity, desc);
                 }
                 if let Some(transform) = transforms.get_mut(entity) {
-                    transform.translation = [0.0, 0.0, 0.0];
-                    transform.rotation = [0.0, 0.0, 0.0, 1.0];
-                    transform.scale = [1.0, 1.0, 1.0];
+                    transform.translation = glam::Vec3::ZERO;
+                    transform.rotation = ornis_core::units::UnitQuat::IDENTITY;
+                    transform.scale = glam::Vec3::ONE;
                 }
                 continue;
             }
@@ -367,9 +363,9 @@ impl PhysicsRuntime {
                 meshes.insert(entity, desc);
             }
             if let Some(transform) = transforms.get_mut(entity) {
-                transform.translation = [0.0, 0.0, 0.0];
-                transform.rotation = [0.0, 0.0, 0.0, 1.0];
-                transform.scale = [1.0, 1.0, 1.0];
+                transform.translation = glam::Vec3::ZERO;
+                transform.rotation = ornis_core::units::UnitQuat::IDENTITY;
+                transform.scale = glam::Vec3::ONE;
             }
         }
     }
@@ -568,20 +564,10 @@ impl System for SoftSyncOut {
     }
 }
 
-fn normalized_rotation(rotation: [f32; 4]) -> Quat {
-    let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-    let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
-        orientation.normalize()
-    } else {
-        Quat::IDENTITY
-    }
-}
-
 /// Applies an ECS transform to a physics body's pose.
 pub(crate) fn apply_transform_to_body(body: &mut RigidBody, transform: &TransformDesc) {
-    body.position = Vec3::from_array(transform.translation);
-    body.orientation = normalized_rotation(transform.rotation);
+    body.position = transform.translation;
+    body.orientation = transform.rotation.get();
 }
 
 #[cfg(test)]
@@ -594,11 +580,7 @@ mod tests {
     }
 
     fn transform(position: Vec3) -> TransformDesc {
-        TransformDesc {
-            translation: position.to_array(),
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-        }
+        TransformDesc::from_translation(position)
     }
 
     #[test]
@@ -698,7 +680,10 @@ mod tests {
         let store = engine.world().store().expect("world store");
         let lane = store.read_lane::<TransformDesc>().expect("transform lane");
         assert_eq!(
-            lane.get(entity).expect("entity transform").translation,
+            lane.get(entity)
+                .expect("entity transform")
+                .translation
+                .to_array(),
             [2.0, 3.0, 4.0]
         );
     }
@@ -1039,8 +1024,8 @@ mod tests {
         assert!(swung, "free cloth swung under its initial kick");
         let transform_lane = store.read_lane::<TransformDesc>().expect("transform lane");
         let transform = transform_lane.get(entity).expect("entity transform");
-        assert_eq!(transform.translation, [0.0, 0.0, 0.0]);
-        assert_eq!(transform.rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(transform.translation.to_array(), [0.0, 0.0, 0.0]);
+        assert_eq!(transform.rotation_array(), [0.0, 0.0, 0.0, 1.0]);
         // The pre-existing extraction path draws the soup unchanged.
         let extracted = extract_render_data(store);
         assert_eq!(extracted.custom_meshes.len(), 1);
@@ -1137,8 +1122,8 @@ mod tests {
         assert!(swung, "free chain swung under its initial kick");
         let transform_lane = store.read_lane::<TransformDesc>().expect("transform lane");
         let transform = transform_lane.get(entity).expect("entity transform");
-        assert_eq!(transform.translation, [0.0, 0.0, 0.0]);
-        assert_eq!(transform.rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(transform.translation.to_array(), [0.0, 0.0, 0.0]);
+        assert_eq!(transform.rotation_array(), [0.0, 0.0, 0.0, 1.0]);
         // The pre-existing extraction path draws the soup unchanged.
         let extracted = extract_render_data(store);
         assert_eq!(extracted.custom_meshes.len(), 1);

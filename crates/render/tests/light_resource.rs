@@ -25,11 +25,7 @@ fn legacy_scene() -> Scene {
         name: "light probe".into(),
         entities: vec![EntityDesc {
             name: "sphere".into(),
-            transform: TransformDesc {
-                translation: [1.0, 2.0, 3.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            transform: TransformDesc::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
             mesh: MeshDesc::Sphere {
                 radius: PositiveF32::expect_valid(2.0),
                 segments: 48,
@@ -43,25 +39,27 @@ fn legacy_scene() -> Scene {
         }],
         lights: vec![
             LightDesc::Directional {
-                direction: [1.0, 1.0, 1.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(1.0, 1.0, 1.0))
+                    .expect("non-zero direction"),
                 intensity: 0.6,
                 color: [1.0, 1.0, 1.0],
                 shadow: ShadowCast::Disabled,
             },
             LightDesc::Directional {
-                direction: [-0.5, 0.5, -0.5],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(-0.5, 0.5, -0.5))
+                    .expect("non-zero direction"),
                 intensity: 0.3,
                 color: [0.8, 0.8, 1.0],
                 shadow: ShadowCast::Disabled,
             },
         ],
         camera: CameraDesc {
-            position: [0.0, 2.5, 9.0],
-            target: [0.0, 0.0, 0.0],
-            up: [0.0, 1.0, 0.0],
-            fov: 60.0,
-            near: 0.1,
-            far: 100.0,
+            position: glam::Vec3::new(0.0, 2.5, 9.0),
+            target: glam::Vec3::ZERO,
+            up: ornis_core::units::UnitVec3::Y,
+            fov: ornis_core::units::Degrees::new(60.0),
+            near: ornis_core::units::Meters::new(0.1),
+            far: ornis_core::units::Meters::new(100.0),
         },
         ambient: [0.10, 0.10, 0.15],
     }
@@ -77,13 +75,19 @@ fn world_lights_reproduce_legacy_rig_pixels() {
                 [0.10, 0.10, 0.15],
                 &[
                     LightDesc::Directional {
-                        direction: [1.0, 1.0, 1.0],
+                        direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(
+                            1.0, 1.0, 1.0,
+                        ))
+                        .expect("non-zero direction"),
                         intensity: 0.6,
                         color: [1.0, 1.0, 1.0],
                         shadow: ShadowCast::Disabled,
                     },
                     LightDesc::Directional {
-                        direction: [-0.5, 0.5, -0.5],
+                        direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(
+                            -0.5, 0.5, -0.5,
+                        ))
+                        .expect("non-zero direction"),
                         intensity: 0.3,
                         color: [0.8, 0.8, 1.0],
                         shadow: ShadowCast::Disabled,

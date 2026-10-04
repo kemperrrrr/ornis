@@ -9,7 +9,7 @@
 //! layout dump (transient windows + pool slots) to stdout. Prints PASS and
 //! exits 0 when the two paths match pixel-for-pixel.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::Mat4;
 use ornis_assets::scene::{CameraDesc, LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
 use ornis_core::units::PositiveF32;
@@ -226,11 +226,7 @@ fn build_scene_data(
     for (i, entity) in scene.entities.iter().enumerate() {
         materials.push(build_material(&entity.material));
         let t = &entity.transform;
-        let model = Mat4::from_scale_rotation_translation(
-            Vec3::from(t.scale),
-            Quat::from_xyzw(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]).normalize(),
-            Vec3::from(t.translation),
-        );
+        let model = Mat4::from_scale_rotation_translation(t.scale, t.rotation.get(), t.translation);
         let normal_matrix = model.inverse().transpose();
         instances.push(InstanceData {
             model_matrix: model,
@@ -243,16 +239,12 @@ fn build_scene_data(
 
 fn camera_view_proj(cam: &CameraDesc) -> [[f32; 4]; 4] {
     let aspect = WIDTH as f32 / HEIGHT as f32;
-    let view = glam::camera::rh::view::look_at_mat4(
-        Vec3::from(cam.position),
-        Vec3::from(cam.target),
-        Vec3::from(cam.up),
-    );
+    let view = glam::camera::rh::view::look_at_mat4(cam.position, cam.target, cam.up.get());
     let proj = glam::camera::rh::proj::directx::perspective(
-        cam.fov.to_radians(),
+        cam.fov.to_radians().get(),
         aspect,
-        cam.near,
-        cam.far,
+        cam.near.get(),
+        cam.far.get(),
     );
     (proj * view).to_cols_array_2d()
 }
@@ -526,7 +518,7 @@ async fn run(scene: &Scene) {
     renderer.set_lights(&queue, scene.ambient, &lights);
 
     let cam = &scene.camera;
-    renderer.set_camera(&queue, &camera_view_proj(cam), cam.position);
+    renderer.set_camera(&queue, &camera_view_proj(cam), cam.position.to_array());
 
     let probe = Probe {
         device: &device,

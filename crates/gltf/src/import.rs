@@ -1,7 +1,7 @@
 //! Document traversal and primitive decoding behind [`load_slice`]/[`load_path`].
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use gltf::accessor::DataType;
 use gltf::mesh::Semantic;
@@ -83,8 +83,7 @@ fn resolve_buffers(gltf: &Gltf, base_dir: Option<&Path>) -> Result<Vec<Vec<u8>>,
             gltf::buffer::Source::Uri(uri) => {
                 let base = base_dir
                     .ok_or_else(|| ImportError::ExternalBuffer(std::path::PathBuf::from(uri)))?;
-                reject_remote_uri(uri)?;
-                std::fs::read(base.join(uri))?
+                std::fs::read(resolve_local_uri(base, uri)?)?
             }
         };
         if data.len() < buffer.length() {
@@ -112,12 +111,76 @@ pub(crate) fn decode_data_uri(uri: &str) -> Result<Vec<u8>, ImportError> {
     })
 }
 
-/// Rejects absolute paths and remote schemes before any filesystem access.
+/// Rejects remote schemes before any filesystem access.
 pub(crate) fn reject_remote_uri(uri: &str) -> Result<(), ImportError> {
     if uri.contains("://") || uri.starts_with("//") || uri.starts_with("data:") {
         return Err(ImportError::ExternalBuffer(std::path::PathBuf::from(uri)));
     }
     Ok(())
+}
+
+/// Resolves a relative glTF URI to a file strictly inside `base`.
+///
+/// The URI is percent-decoded first (`my%20file.bin` → `my file.bin`, per
+/// the glTF spec URIs are RFC 3986 references), then confined: remote
+/// schemes stay [`ImportError::ExternalBuffer`]; absolute paths (`/x`,
+/// `\\x`, `C:\x`), any `..` segment and NUL bytes are
+/// [`ImportError::UnsafeUri`] — a file can never reach outside its own
+/// directory (subdirectories are fine).
+///
+/// # Errors
+///
+/// [`ImportError::ExternalBuffer`] for remote schemes,
+/// [`ImportError::UnsafeUri`] for escaping or undecodable URIs.
+pub(crate) fn resolve_local_uri(base: &Path, uri: &str) -> Result<PathBuf, ImportError> {
+    reject_remote_uri(uri)?;
+    let unsafe_uri = |reason: &'static str| ImportError::UnsafeUri {
+        uri: short_head(uri),
+        reason,
+    };
+    let decoded = percent_decode(uri).ok_or_else(|| unsafe_uri("invalid percent-encoding"))?;
+    if decoded.is_empty() {
+        return Err(unsafe_uri("empty path"));
+    }
+    if decoded.contains('\0') {
+        return Err(unsafe_uri("NUL byte"));
+    }
+    let bytes = decoded.as_bytes();
+    let has_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if decoded.starts_with('/') || decoded.starts_with('\\') || has_drive {
+        return Err(unsafe_uri("absolute path"));
+    }
+    if decoded.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(unsafe_uri("parent-directory segment"));
+    }
+    let relative = Path::new(&decoded);
+    if relative
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(unsafe_uri("non-relative component"));
+    }
+    Ok(base.join(relative))
+}
+
+/// Decodes `%XX` escapes; `None` on a truncated/non-hex escape or when the
+/// decoded bytes are not UTF-8.
+fn percent_decode(uri: &str) -> Option<String> {
+    let bytes = uri.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hex = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// First 48 characters of a URI for error messages (URIs can be megabytes).
@@ -1518,6 +1581,123 @@ mod tests {
             gltf_scene.entities[0].mesh.positions,
             vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         );
+        std::fs::remove_dir_all(&dir).expect("temp cleanup");
+    }
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "ornis-gltf-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn resolve_local_uri_confines_to_base_dir() {
+        let base = Path::new("/assets/models");
+        assert_eq!(
+            resolve_local_uri(base, "mesh.bin").expect("plain"),
+            base.join("mesh.bin")
+        );
+        assert_eq!(
+            resolve_local_uri(base, "sub/dir/mesh.bin").expect("subdir"),
+            base.join("sub/dir/mesh.bin")
+        );
+        assert_eq!(
+            resolve_local_uri(base, "./mesh.bin").expect("cur dir"),
+            base.join("./mesh.bin")
+        );
+        for bad in [
+            "../secret.bin",
+            "sub/../../secret.bin",
+            "..\\secret.bin",
+            "/etc/passwd",
+            "\\\\server\\share\\x.bin",
+            "C:\\Windows\\x.bin",
+            "c:/x.bin",
+            "%2e%2e/secret.bin",
+            "%2Fetc%2Fpasswd",
+            "a%00b.bin",
+            "",
+            "bad%zzescape.bin",
+            "trunc%2",
+        ] {
+            assert!(
+                matches!(
+                    resolve_local_uri(base, bad),
+                    Err(ImportError::UnsafeUri { .. })
+                ),
+                "must reject {bad:?}"
+            );
+        }
+        for remote in ["https://example.com/x.bin", "//host/x.bin", "file:///x.bin"] {
+            assert!(
+                matches!(
+                    resolve_local_uri(base, remote),
+                    Err(ImportError::ExternalBuffer(_))
+                ),
+                "must reject remote {remote:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_local_uri_percent_decodes() {
+        let base = Path::new("/assets");
+        assert_eq!(
+            resolve_local_uri(base, "my%20file.bin").expect("space"),
+            base.join("my file.bin")
+        );
+        assert_eq!(
+            resolve_local_uri(base, "%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D1%8C.bin").expect("utf-8"),
+            base.join("модель.bin")
+        );
+        // Invalid UTF-8 after decoding is rejected, not lossily replaced.
+        assert!(matches!(
+            resolve_local_uri(base, "%FF.bin"),
+            Err(ImportError::UnsafeUri { .. })
+        ));
+    }
+
+    #[test]
+    fn load_path_rejects_buffer_escaping_asset_dir() {
+        let root = unique_temp_dir("escape");
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).expect("assets dir");
+        let (json, bin) = fixtures::build_external_parts_with_uri("../outside.bin");
+        // The escaping target exists: rejection must come from the URI
+        // check, not from a missing file.
+        std::fs::write(root.join("outside.bin"), &bin).expect("write outside");
+        std::fs::write(assets.join("evil.gltf"), json).expect("write gltf");
+        assert!(matches!(
+            load_path(&assets.join("evil.gltf")),
+            Err(ImportError::UnsafeUri { .. })
+        ));
+
+        let absolute = root.join("outside.bin");
+        let (json, _) =
+            fixtures::build_external_parts_with_uri(absolute.to_str().expect("utf-8 temp path"));
+        std::fs::write(assets.join("abs.gltf"), json).expect("write gltf");
+        assert!(matches!(
+            load_path(&assets.join("abs.gltf")),
+            Err(ImportError::UnsafeUri { .. })
+        ));
+        std::fs::remove_dir_all(&root).expect("temp cleanup");
+    }
+
+    #[test]
+    fn load_path_resolves_percent_encoded_sibling() {
+        let dir = unique_temp_dir("pct");
+        let (json, bin) = fixtures::build_external_parts_with_uri("my%20mesh.bin");
+        std::fs::write(dir.join("pct.gltf"), json).expect("write gltf");
+        std::fs::write(dir.join("my mesh.bin"), bin).expect("write bin");
+        let scene = load_path(&dir.join("pct.gltf")).expect("percent-decoded sibling loads");
+        assert_eq!(scene.entities.len(), 1);
         std::fs::remove_dir_all(&dir).expect("temp cleanup");
     }
 }

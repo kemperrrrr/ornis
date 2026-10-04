@@ -15,7 +15,7 @@
 //! server/editor world authoritative while allowing a native or browser
 //! client to build its own physical GPU representation.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use ornis_animation::{
     JointPose, Skeleton, SkinnedMesh, SkinningMode, SkinningResources, canonical_staged_weights,
     skinning_matrices,
@@ -29,10 +29,8 @@ use crate::mesh_upload::{SoupCache, UploadCache};
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
 use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
-use ornis_core::units::PositiveF32;
+use ornis_core::units::{PositiveF32, UnitVec3};
 
-/// Squared length below which a direction is treated as degenerate.
-const DEGENERATE_LEN2: f32 = 1e-12;
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
 
@@ -273,24 +271,30 @@ fn default_ibl_factor() -> f32 {
 /// default, so a runtime that never loads a scene renders exactly as it
 /// did (gate: zero pixel differences).
 const LEGACY_AMBIENT: [f32; 3] = [0.10, 0.10, 0.15];
-const LEGACY_KEY_LIGHT: LightDesc = LightDesc::Directional {
-    direction: [1.0, 1.0, 1.0],
-    intensity: 0.6,
-    color: [1.0, 1.0, 1.0],
-    shadow: ShadowCast::Disabled,
-};
-const LEGACY_FILL_LIGHT: LightDesc = LightDesc::Directional {
-    direction: [-0.5, 0.5, -0.5],
-    intensity: 0.3,
-    color: [0.8, 0.8, 1.0],
-    shadow: ShadowCast::Disabled,
-};
+/// Legacy key light (`(1, 1, 1)` direction, stored normalized).
+fn legacy_key_light() -> LightDesc {
+    LightDesc::Directional {
+        direction: UnitVec3::normalize(Vec3::ONE).unwrap_or(UnitVec3::Y),
+        intensity: 0.6,
+        color: [1.0, 1.0, 1.0],
+        shadow: ShadowCast::Disabled,
+    }
+}
+/// Legacy fill light (`(-0.5, 0.5, -0.5)` direction, stored normalized).
+fn legacy_fill_light() -> LightDesc {
+    LightDesc::Directional {
+        direction: UnitVec3::normalize(Vec3::new(-0.5, 0.5, -0.5)).unwrap_or(UnitVec3::Y),
+        intensity: 0.3,
+        color: [0.8, 0.8, 1.0],
+        shadow: ShadowCast::Disabled,
+    }
+}
 
 impl Default for RenderLights {
     fn default() -> Self {
         Self {
             ambient: LEGACY_AMBIENT,
-            lights: vec![LEGACY_KEY_LIGHT, LEGACY_FILL_LIGHT],
+            lights: vec![legacy_key_light(), legacy_fill_light()],
             ambient_intensity: default_ibl_factor(),
             exposure: default_ibl_factor(),
         }
@@ -625,9 +629,9 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 }
             }
             let model = Mat4::from_scale_rotation_translation(
-                Vec3::from_array(transform.scale),
-                normalized_rotation(transform.rotation),
-                Vec3::from_array(transform.translation),
+                transform.scale,
+                transform.rotation.get(),
+                transform.translation,
             );
             let material_index =
                 deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
@@ -659,10 +663,10 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             } => {
                 extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
                 extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
-                Vec3::from_array(transform.scale) * radius.get()
+                transform.scale * radius.get()
             }
             MeshDesc::Box { size } => {
-                Vec3::from_array(transform.scale) * Vec3::from_array(size.map(PositiveF32::get))
+                transform.scale * Vec3::from_array(size.map(PositiveF32::get))
             }
             MeshDesc::Plane { size } => Vec3::new(
                 transform.scale[0] * size[0].get(),
@@ -683,8 +687,8 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
         };
         let model = Mat4::from_scale_rotation_translation(
             size_scale,
-            normalized_rotation(transform.rotation),
-            Vec3::from_array(transform.translation),
+            transform.rotation.get(),
+            transform.translation,
         );
         let material_index =
             deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
@@ -958,16 +962,6 @@ fn apply_emission(output: &mut OpenPBRMaterial, emission: [f32; 3]) {
     }
 }
 
-fn normalized_rotation(rotation: [f32; 4]) -> Quat {
-    let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-    let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
-        orientation.normalize()
-    } else {
-        Quat::IDENTITY
-    }
-}
-
 /// Validated vertex count of one [`SkinnedMesh`] lane set: every bind and
 /// output array agrees on the length, and every index lands inside it.
 ///
@@ -1135,14 +1129,7 @@ mod tests {
         let mut add = |mesh: MeshDesc| {
             let store = engine.world_mut().store_mut().expect("store");
             let handle = store.create_entity();
-            store.insert(
-                handle,
-                TransformDesc {
-                    translation: Vec3::ZERO.to_array(),
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
-            );
+            store.insert(handle, TransformDesc::IDENTITY);
             store.insert(handle, mesh);
             store.insert(
                 handle,
@@ -1220,11 +1207,7 @@ mod tests {
             let handle = store.create_entity();
             store.insert(
                 handle,
-                TransformDesc {
-                    translation: [i as f32, 0.0, 0.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
+                TransformDesc::from_translation(glam::Vec3::new(i as f32, 0.0, 0.0)),
             );
             store.insert(
                 handle,
@@ -1320,11 +1303,7 @@ mod tests {
             let handle = store.create_entity();
             store.insert(
                 handle,
-                TransformDesc {
-                    translation: [i as f32, 0.0, 0.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
+                TransformDesc::from_translation(glam::Vec3::new(i as f32, 0.0, 0.0)),
             );
             store.insert(
                 handle,
@@ -1364,14 +1343,7 @@ mod tests {
         let mut add = |mesh: MeshDesc| {
             let store = engine.world_mut().store_mut().expect("store");
             let handle = store.create_entity();
-            store.insert(
-                handle,
-                TransformDesc {
-                    translation: Vec3::ZERO.to_array(),
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
-            );
+            store.insert(handle, TransformDesc::IDENTITY);
             store.insert(handle, mesh);
             store.insert(handle, material());
         };
@@ -1459,14 +1431,11 @@ mod tests {
             .store_mut()
             .expect("store")
             .create_entity();
-        engine.world_mut().store_mut().expect("store").insert(
-            entity,
-            TransformDesc {
-                translation: Vec3::ZERO.to_array(),
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: Vec3::ONE.to_array(),
-            },
-        );
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, TransformDesc::IDENTITY);
         assert!(
             extract_render_data(engine.world().store().expect("store"))
                 .instances
@@ -1483,14 +1452,7 @@ mod tests {
     ) {
         let store = engine.world_mut().store_mut().expect("store");
         let handle = store.create_entity();
-        store.insert(
-            handle,
-            TransformDesc {
-                translation: Vec3::ZERO.to_array(),
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: Vec3::ONE.to_array(),
-            },
-        );
+        store.insert(handle, TransformDesc::IDENTITY);
         if let Some(mesh) = mesh {
             store.insert(handle, mesh);
         }
@@ -1671,22 +1633,26 @@ mod tests {
         // (gate: zero pixel differences).
         let rig = RenderLights::default();
         assert_eq!(rig.ambient, [0.10, 0.10, 0.15]);
+        // Directions are stored normalized (`UnitVec3`); the evaluators
+        // normalize anyway, so the lit result is unchanged.
+        let key_dir = UnitVec3::normalize(Vec3::ONE).expect("non-zero");
+        let fill_dir = UnitVec3::normalize(Vec3::new(-0.5, 0.5, -0.5)).expect("non-zero");
         assert!(matches!(
             rig.set_lights_args().as_slice(),
             [
                 LightDesc::Directional {
-                    direction: [1.0, 1.0, 1.0],
+                    direction: key_d,
                     intensity: key,
                     color: [1.0, 1.0, 1.0],
                     shadow: ShadowCast::Disabled,
                 },
                 LightDesc::Directional {
-                    direction: [-0.5, 0.5, -0.5],
+                    direction: fill_d,
                     intensity: fill,
                     color: [0.8, 0.8, 1.0],
                     shadow: ShadowCast::Disabled,
                 },
-            ] if *key == 0.6 && *fill == 0.3
+            ] if *key == 0.6 && *fill == 0.3 && *key_d == key_dir && *fill_d == fill_dir
         ));
     }
 
@@ -1702,11 +1668,7 @@ mod tests {
             let handle = store.create_entity();
             store.insert(
                 handle,
-                TransformDesc {
-                    translation: [x, 0.0, 0.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
+                TransformDesc::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
             );
             store.insert(handle, test_sphere());
             store.insert(handle, test_material());
@@ -1805,11 +1767,7 @@ mod tests {
             let handle = store.create_entity();
             store.insert(
                 handle,
-                TransformDesc {
-                    translation: [i as f32 * 0.05, 0.0, -(i as f32)],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
+                TransformDesc::from_translation(glam::Vec3::new(i as f32 * 0.05, 0.0, -(i as f32))),
             );
             store.insert(handle, test_sphere());
             store.insert(handle, test_material());
@@ -1903,14 +1861,7 @@ mod tests {
         {
             let store = engine.world_mut().store_mut().expect("store");
             let mesh = store.create_entity();
-            store.insert(
-                mesh,
-                TransformDesc {
-                    translation: Vec3::ZERO.to_array(),
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
-            );
+            store.insert(mesh, TransformDesc::IDENTITY);
             store.insert(
                 mesh,
                 MeshDesc::Custom {
@@ -2045,14 +1996,7 @@ mod tests {
             );
             store.insert(root, JointPose::identity(over));
             let mesh = store.create_entity();
-            store.insert(
-                mesh,
-                TransformDesc {
-                    translation: Vec3::ZERO.to_array(),
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
-            );
+            store.insert(mesh, TransformDesc::IDENTITY);
             store.insert(
                 mesh,
                 MeshDesc::Custom {
@@ -2124,14 +2068,7 @@ mod tests {
         {
             let store = engine.world_mut().store_mut().expect("store");
             let mesh = store.create_entity();
-            store.insert(
-                mesh,
-                TransformDesc {
-                    translation: Vec3::ZERO.to_array(),
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: Vec3::ONE.to_array(),
-                },
-            );
+            store.insert(mesh, TransformDesc::IDENTITY);
             store.insert(
                 mesh,
                 MeshDesc::Custom {

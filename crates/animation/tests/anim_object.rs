@@ -91,11 +91,7 @@ fn spawn_sphere(engine: &mut Engine) -> Entity {
     let entity = store.create_entity();
     store.insert(
         entity,
-        TransformDesc {
-            translation: [0.0, 0.0, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [2.0, 2.0, 2.0],
-        },
+        TransformDesc::from_arrays([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 2.0, 2.0]),
     );
     store.insert(
         entity,
@@ -140,12 +136,7 @@ fn transform_of(engine: &Engine, entity: Entity) -> TransformDesc {
 }
 
 fn rotation_of(desc: &TransformDesc) -> Quat {
-    Quat::from_xyzw(
-        desc.rotation[0],
-        desc.rotation[1],
-        desc.rotation[2],
-        desc.rotation[3],
-    )
+    desc.rotation.get()
 }
 
 #[test]
@@ -166,7 +157,7 @@ fn sphere_rides_keys_and_track() {
         mid.rotation
     );
     // Empty scale track leaves the entity size alone.
-    assert_eq!(mid.scale, [2.0, 2.0, 2.0]);
+    assert_eq!(mid.scale.to_array(), [2.0, 2.0, 2.0]);
 
     engine.run_frame(0.5);
     let end = transform_of(&engine, sphere);
@@ -196,8 +187,8 @@ fn physics_entity_is_ignored() {
 
     // Physics is authoritative: neither placement lane moves...
     let desc = transform_of(&engine, sphere);
-    assert_eq!(desc.translation, [0.0, 0.0, 0.0]);
-    assert_eq!(desc.rotation, [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(desc.translation.to_array(), [0.0, 0.0, 0.0]);
+    assert_eq!(desc.rotation_array(), [0.0, 0.0, 0.0, 1.0]);
     let position = engine
         .world()
         .store()
@@ -238,7 +229,7 @@ fn paused_player_holds_pose() {
     engine.run_frame(0.5);
 
     let desc = transform_of(&engine, sphere);
-    assert_eq!(desc.translation, [0.0, 0.0, 0.0]);
+    assert_eq!(desc.translation.to_array(), [0.0, 0.0, 0.0]);
 }
 
 #[test]

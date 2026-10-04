@@ -56,14 +56,7 @@ fn push_two_joint_triangle(engine: &mut Engine) {
     {
         let store = engine.world_mut().store_mut().expect("store");
         let mesh = store.create_entity();
-        store.insert(
-            mesh,
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        );
+        store.insert(mesh, TransformDesc::IDENTITY);
         store.insert(
             mesh,
             MeshDesc::Custom {

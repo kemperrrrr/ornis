@@ -114,7 +114,8 @@ fn bench_recording(c: &mut Criterion) {
         &queue,
         AMBIENT,
         &[ornis_assets::scene::LightDesc::Directional {
-            direction: LIGHT_DIR,
+            direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::from_array(LIGHT_DIR))
+                .expect("non-zero light direction"),
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
             shadow: ShadowCast::Disabled,

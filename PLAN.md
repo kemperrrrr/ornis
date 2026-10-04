@@ -259,6 +259,22 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 (`install_skeletal_animation`, `AssetServer` удерживает `LoadedScene`,
 autoplay `playing: true`; стартер `assets/starter/ual1_standard.glb`,
 регрессия `starter_pack_playback_moves_joints`).
+✅ **2026-10-03 — сцена-first фасад + честный свет (проверено).**
+`GameWorld::spawn_gltf/add_directional_light/set_ambient/add_orbit_camera`
+(`SpawnError`), пример — ~25 строк без engine (`ornis_runner::run_native`
+одной строкой вместо матрёшки); autoplay — первый *движущийся* клип
+(TPose c 76 одинаковыми ключами пропускается — счётчик ключей врал,
+смотрит дельту значений); тихий дефолтный свет удалён (мир стартует
+тёмным, вьюпорт-режимы — дело редактора, follow-up); физика и
+object-install убраны из примера; «лисичка» переименована. MSAA принят
+пунктом трека рендера (белые speckles — алиасинг без MSAA, данные чисты).
+✅ **2026-10-03 — playback-контролы + load/spawn split (проверено).**
+Wire оставляет плееры на паузе (возврат к дизайну §4.5), хосты стартуют
+явно: `play/pause/stop[_all]` на `GameWorld`, сессия жмёт play после
+загрузки; `load_asset`/`spawn_asset` + one-shot `spawn_gltf` (диспетч по
+расширению, слот под FBX); имена клипов идут сквозь цепочку в плейлисты.
+MSAA 4x доделано (pool wiring, шелл на negotiate, гейты зелёные).
+Пол остаётся в `app` (зовёт только бинарь — смешения сцен нет).
 ✅ **2026-10-03 — шелл библиотекой + viewer (проверено глазом).**
 `crates/runner` (`run_native`, окно/GPU/цикл из бинаря), демо переехало
 в `cargo run --example anim` (бинарь — только showcase сфер); по пути

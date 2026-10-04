@@ -1281,15 +1281,6 @@ fn build_lighting_uniform(
             [0.0, 0.0, 1.0, 0.0]
         }
     }
-    /// Same as [`norm_dir`](norm_dir) as a [`glam::Vec3`].
-    fn norm3(d: [f32; VEC3_COMPONENTS]) -> glam::Vec3 {
-        let v = glam::Vec3::from_array(d);
-        if v.length_squared() > 0.0 {
-            v.normalize()
-        } else {
-            glam::Vec3::Z
-        }
-    }
     let count = lights.len().min(MAX_LIGHTS);
     let mut gpu_lights = [GpuLight {
         kind: [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0],
@@ -1328,7 +1319,10 @@ fn build_lighting_uniform(
                 color,
                 shadow,
             } => {
-                let to_light = norm3(*direction);
+                // Typed descriptor fields → raw wire values for the GPU pack.
+                // Already unit (normalized once on load/construction):
+                // used as-is so results match the legacy `norm3(raw)`.
+                let to_light = direction.get();
                 let vp = match fit {
                     None => dir_shadow_vp(to_light),
                     Some((center, half)) => dir_shadow_vp_fitted(to_light, center, half),
@@ -1341,7 +1335,7 @@ fn build_lighting_uniform(
                     shadow_layer_vps.push(vp);
                 }
                 GpuLight {
-                    direction: norm_dir(*direction),
+                    direction: norm_dir(direction.as_array()),
                     color: pack_light_color(*color, *intensity, exposure),
                     params: [0.0, 0.0, 0.0, layer],
                     shadow_vp: vp,
@@ -1355,6 +1349,7 @@ fn build_lighting_uniform(
                 range,
                 shadow,
             } => {
+                let (position, range) = (&position.to_array(), &range.get());
                 // Cube slots live in a separate index space from the
                 // 2D layers (the evaluator picks the pool by kind).
                 let slot = if shadow.is_enabled() && (cube_count as usize) < POINT_SHADOW_CUBES {
@@ -1386,6 +1381,10 @@ fn build_lighting_uniform(
                 outer_angle,
                 shadow,
             } => {
+                let axis = direction.get();
+                let (position, direction, range) =
+                    (&position.to_array(), &direction.as_array(), &range.get());
+                let (inner_angle, outer_angle) = (&inner_angle.get(), &outer_angle.get());
                 // Cosineordered: inner must be the tighter cone.
                 let ci = ornis_core::units::Degrees::new(*inner_angle)
                     .to_radians()
@@ -1395,7 +1394,6 @@ fn build_lighting_uniform(
                     .to_radians()
                     .get()
                     .cos();
-                let axis = norm3(*direction);
                 let (layer, vp) = shadow_layer!(
                     shadow.is_enabled(),
                     spot_shadow_vp(*position, axis, *outer_angle, *range)
@@ -5355,7 +5353,8 @@ mod tests {
             1.0,
             1.0,
             &[ornis_assets::scene::LightDesc::Directional {
-                direction: [0.2, 1.0, 0.3],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.2, 1.0, 0.3))
+                    .expect("non-zero direction"),
                 intensity: 1.2,
                 color: [1.0, 1.0, 1.0],
                 shadow: ShadowCast::Enabled,
@@ -5540,7 +5539,8 @@ mod tests {
 
     fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::ShadowCast) -> LightDesc {
         LightDesc::Directional {
-            direction,
+            direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::from_array(direction))
+                .expect("non-zero direction"),
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
             shadow,
@@ -5639,10 +5639,10 @@ mod tests {
         // Three shadowed points over two cubes.
         let points: Vec<LightDesc> = (0..3)
             .map(|i| LightDesc::Point {
-                position: [i as f32, 4.0, 6.0],
+                position: glam::Vec3::new(i as f32, 4.0, 6.0),
                 intensity: 100.0,
                 color: [1.0, 1.0, 1.0],
-                range: 30.0,
+                range: ornis_core::units::Meters::new(30.0),
                 shadow: ShadowCast::Enabled,
             })
             .collect();
@@ -5788,7 +5788,8 @@ mod tests {
     #[test]
     fn ibl_multipliers_scale_upload_and_default_is_noop() {
         let lights = vec![LightDesc::Directional {
-            direction: [1.0, 1.0, 1.0],
+            direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(1.0, 1.0, 1.0))
+                .expect("non-zero direction"),
             intensity: 2.0,
             color: [HALF, 0.25, 0.125],
             shadow: ShadowCast::Disabled,

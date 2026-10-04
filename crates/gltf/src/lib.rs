@@ -467,6 +467,16 @@ pub enum ImportError {
     /// bare `String`) so hosts can join it against an asset directory.
     #[error("external buffer '{0}' needs the filesystem: use load_path")]
     ExternalBuffer(std::path::PathBuf),
+    /// A relative buffer/image URI that would leave the asset directory
+    /// (absolute path, `..` segment, NUL byte) or has broken
+    /// percent-encoding. Rejected before any filesystem access.
+    #[error("unsafe glTF URI '{uri}': {reason}")]
+    UnsafeUri {
+        /// First 48 characters of the offending (raw) URI.
+        uri: String,
+        /// Why it was rejected.
+        reason: &'static str,
+    },
     /// Declared `byteLength` exceeds the resolved buffer bytes.
     #[error("buffer {index} too short: declared {expected} bytes, got {actual}")]
     BufferTooShort {

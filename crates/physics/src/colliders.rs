@@ -47,9 +47,8 @@ pub fn body_for(
     if matches!(recipe, ColliderDesc::None) {
         return Ok(None);
     }
-    let position = Vec3::from_array(transform.translation);
-    let rotation = transform.rotation;
-    let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
+    let position = transform.translation;
+    let orientation = transform.rotation.get();
     let mut body = match recipe {
         ColliderDesc::Sphere { radius } => RigidBody::new_sphere(position, radius, mass),
         ColliderDesc::Box { half } => RigidBody::new_box(position, Vec3::from_array(half), mass),
@@ -206,9 +205,8 @@ mod tests {
 
     fn transform() -> TransformDesc {
         TransformDesc {
-            translation: [1.0, 2.0, 3.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
+            translation: Vec3::new(1.0, 2.0, 3.0),
+            ..TransformDesc::IDENTITY
         }
     }
 

@@ -91,9 +91,7 @@ use ornis_editor::{EditorMarks, install_editor, is_editor_only};
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
-use crate::anim_wiring::{
-    anim_clip_from_loaded, skel_clip_from_loaded, skeleton_from_loaded, skinned_mesh_from_loaded,
-};
+use crate::anim_wiring::{GltfSpawn, wire_loaded_animation};
 use crate::physics_runtime::{PhysicsRuntime, install_physics};
 use crate::{
     GameWorld, install_gameplay_physics_bridge, install_object_animation,
@@ -265,12 +263,12 @@ impl Default for SceneEnvironment {
         Self {
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.10, 0.10, 0.15],
         }
@@ -756,13 +754,12 @@ impl EditorSession {
     /// tests and nothing is stored at runtime.
     ///
     /// Returns the number of spawned animation entities (roots + playlists).
+    /// Wires animation from a retained glTF scene into the live world
+    /// (thin wrapper over [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)):
+    /// node indices resolve against the pre-wire `alive` prefix (mesh
+    /// entities spawn in load order), created roots/playlists join `alive`.
     fn wire_gltf_animation(&mut self, loaded: &ornis_gltf::LoadedScene) -> usize {
         if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
-            return 0;
-        }
-        if let Some(store) = self.store_mut() {
-            ensure_anim_lanes(store);
-        } else {
             return 0;
         }
         // Mesh-entity snapshot: `alive` grows below (roots + playlists), so
@@ -776,122 +773,27 @@ impl EditorSession {
                 .entry(Entity::new(desc.node))
                 .or_insert(*entity);
         }
-        let mut added = 0usize;
-        let mut touched = false;
-        // Skeleton roots, one per skin.
-        let mut roots: Vec<Entity> = Vec::with_capacity(loaded.skins.len());
-        for (index, skin) in loaded.skins.iter().enumerate() {
-            let skeleton = skeleton_from_loaded(skin);
-            let joints = skeleton.joint_count();
-            let root = {
-                let Some(store) = self.store_mut() else {
-                    continue;
-                };
-                let root = store.create_entity();
-                store.insert(root, Name(format!("skeleton_{index}")));
-                store.insert(root, skeleton);
-                store.insert(root, JointPose::identity(joints));
-                root
-            };
-            self.alive.push(root);
-            self.version.bump();
-            roots.push(root);
-            added += 1;
+        let spawn = GltfSpawn {
+            entities: mesh_entities,
+            node_to_entity,
+        };
+        let Some(store) = self.store_mut() else {
+            return 0;
+        };
+        let wiring = wire_loaded_animation(store, loaded, &spawn);
+        // Explicit start: wiring leaves players paused (the engine never
+        // autoplays); the editor host starts loaded content visibly.
+        crate::anim_wiring::set_playing_all(store, true);
+        let added = wiring.added();
+        for entity in wiring
+            .roots
+            .iter()
+            .chain(wiring.skel_playlists.iter())
+            .chain(wiring.anim_playlists.iter())
+        {
+            self.alive.push(*entity);
         }
-        // Skeletal playlists, one per clip and shared across roots; every
-        // root autoplays the first clip (one player lane per root — further
-        // clips stay retained for editor clip selection, a follow-up).
-        let mut skel_playlists = Vec::with_capacity(loaded.skel_clips.len());
-        for (index, clip) in loaded.skel_clips.iter().enumerate() {
-            let live = skel_clip_from_loaded(clip);
-            let playlist = {
-                let Some(store) = self.store_mut() else {
-                    continue;
-                };
-                let playlist = store.create_entity();
-                store.insert(playlist, Name(format!("skel_clip_{index}")));
-                store.insert_cold(playlist, live);
-                playlist
-            };
-            self.alive.push(playlist);
-            self.version.bump();
-            skel_playlists.push(playlist);
-            added += 1;
-        }
-        if let Some(&first) = skel_playlists.first() {
-            // DELIBERATE deviation from docs/animation-design.md §4.5
-            // (paused default): loaded demo content autoplays so the editor
-            // visibly runs; editor pause control is a separate follow-up.
-            let player = SkelPlayer {
-                clip: ClipId(first),
-                time: 0.0,
-                speed: 1.0,
-                weight: 1.0,
-                playing: true,
-            };
-            if let Some(store) = self.store_mut() {
-                for root in &roots {
-                    store.insert(*root, player);
-                }
-            }
-        }
-        // Skinned meshes: `SkinnedMesh.skeleton` points at the skin's root.
-        // `None` (unskinned primitive) keeps the regular `Custom` mesh.
-        for (desc, entity) in loaded.entities.iter().zip(mesh_entities.iter()) {
-            let Some(skin) = desc.skin else {
-                continue;
-            };
-            let Some(&root) = roots.get(skin) else {
-                continue;
-            };
-            let Some(skinned) = skinned_mesh_from_loaded(root, &desc.mesh) else {
-                continue;
-            };
-            if let Some(store) = self.store_mut() {
-                store.insert(*entity, skinned);
-                touched = true;
-            }
-        }
-        // Object playlists, one per clip; every mapped track entity gets an
-        // autoplay player (last clip wins on shared entities — one player
-        // lane per entity).
-        for clip in &loaded.anim_clips {
-            let (live, dropped) = anim_clip_from_loaded(clip.name.clone(), clip, &node_to_entity);
-            // Dropped (unmapped) tracks stay dropped: the count is covered
-            // by converter unit tests, nothing is stored at runtime.
-            let _ = dropped;
-            let targets: Vec<Entity> = live.tracks.iter().map(|track| track.entity).collect();
-            let playlist = {
-                let Some(store) = self.store_mut() else {
-                    continue;
-                };
-                let playlist = store.create_entity();
-                store.insert(playlist, Name(live.name.clone()));
-                store.insert_cold(playlist, live);
-                playlist
-            };
-            self.alive.push(playlist);
-            self.version.bump();
-            added += 1;
-            // DELIBERATE autoplay (see above): loaded demo content visibly
-            // runs; editor pause control is a separate follow-up.
-            if let Some(store) = self.store_mut() {
-                for target in &targets {
-                    store.insert(
-                        *target,
-                        AnimPlayer {
-                            clip: ClipId(playlist),
-                            time: 0.0,
-                            speed: 1.0,
-                            weight: 1.0,
-                            playing: true,
-                        },
-                    );
-                }
-                touched = true;
-            }
-        }
-        if touched {
+        if added > 0 {
             self.version.bump();
         }
         added
@@ -1525,11 +1427,7 @@ fn resync_collider_body(store: &mut SmartStore, entity: Entity) {
 }
 
 fn default_transform() -> TransformDesc {
-    TransformDesc {
-        translation: [0.0, 0.0, 0.0],
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: [1.0, 1.0, 1.0],
-    }
+    TransformDesc::IDENTITY
 }
 
 fn default_mesh() -> MeshDesc {
@@ -2281,11 +2179,7 @@ mod tests {
         drop(lane);
         world.spawn_with(
             Some("box".into()),
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            TransformDesc::IDENTITY,
             MeshDesc::Box {
                 size: [
                     PositiveF32::expect_valid(2.0),
@@ -2379,7 +2273,12 @@ mod tests {
         // Environment resource: serde-canonical enum tagging here too.
         let lights = scene["lights"].as_array().unwrap();
         assert_eq!(lights.len(), 2);
-        assert_f32_seq(&lights[0]["Directional"]["direction"], &[1.0, 1.0, 1.0]);
+        // Directions are unit vectors once loaded: `(1, 1, 1)` in the file
+        // reads back normalized (same light, the renderer normalized anyway).
+        assert_f32_seq(
+            &lights[0]["Directional"]["direction"],
+            &[0.577_350_26, 0.577_350_26, 0.577_350_26],
+        );
         assert_f32(&lights[0]["Directional"]["intensity"], 0.6);
         assert_f32_seq(&lights[1]["Directional"]["color"], &[0.8, 0.8, 1.0]);
         assert_f32_seq(&scene["camera"]["position"], &[0.0, 2.5, 9.0]);
@@ -2808,11 +2707,7 @@ mod tests {
         // A runtime-created entity must round-trip too.
         world.spawn_with(
             Some("Extra".into()),
-            TransformDesc {
-                translation: [9.0, 1.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [2.0, 2.0, 2.0],
-            },
+            TransformDesc::from_arrays([9.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [2.0, 2.0, 2.0]),
             MeshDesc::Sphere {
                 radius: PositiveF32::expect_valid(HALF),
                 segments: 8,
@@ -3163,7 +3058,7 @@ mod tests {
             .and_then(|store| read_component(store, gizmo))
             .expect("gizmo transform");
         assert_eq!(
-            gizmo_pose.translation,
+            gizmo_pose.translation.to_array(),
             [0.0, 0.0, 0.0],
             "chrome body never bound, pose untouched"
         );
@@ -3208,12 +3103,12 @@ mod tests {
             entities: vec![desc("skinned"), desc("plain")],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -3274,6 +3169,7 @@ mod tests {
                 joint_names: vec!["j0".into()],
             }],
             skel_clips: vec![LoadedSkelClip {
+                name: String::new(),
                 duration: 1.0,
                 tracks: vec![LoadedJointTrack {
                     joint: 0,

@@ -28,12 +28,12 @@ const DEFAULT_CAMERA_FAR: f32 = 100.0;
 /// Default viewing camera for imported scenes (matches the editor default).
 fn default_camera() -> CameraDesc {
     CameraDesc {
-        position: [0.0, DEFAULT_CAMERA_EYE_Y, DEFAULT_CAMERA_EYE_Z],
-        target: [0.0, 0.0, 0.0],
-        up: [0.0, 1.0, 0.0],
-        fov: DEFAULT_CAMERA_FOV_DEG,
-        near: DEFAULT_CAMERA_NEAR,
-        far: DEFAULT_CAMERA_FAR,
+        position: glam::Vec3::new(0.0, DEFAULT_CAMERA_EYE_Y, DEFAULT_CAMERA_EYE_Z),
+        target: glam::Vec3::ZERO,
+        up: ornis_core::units::UnitVec3::Y,
+        fov: ornis_core::units::Degrees::new(DEFAULT_CAMERA_FOV_DEG),
+        near: ornis_core::units::Meters::new(DEFAULT_CAMERA_NEAR),
+        far: ornis_core::units::Meters::new(DEFAULT_CAMERA_FAR),
     }
 }
 
@@ -64,11 +64,9 @@ fn entity_from_gltf(entity: &ornis_gltf::LoadedEntity) -> EntityDesc {
         .collect();
     EntityDesc {
         name: entity.name.clone(),
-        transform: TransformDesc {
-            translation: entity.translation,
-            rotation: entity.rotation,
-            scale: entity.scale,
-        },
+        // Degenerate glTF rotations fall back to identity (normalized
+        // otherwise), see `TransformDesc::from_arrays`.
+        transform: TransformDesc::from_arrays(entity.translation, entity.rotation, entity.scale),
         mesh: MeshDesc::Custom { positions, indices },
         material: material_from_gltf(&entity.material),
     }
@@ -135,7 +133,7 @@ mod tests {
         assert_eq!(scene.name, "wired");
         assert_eq!(scene.entities.len(), 1);
         let entity = &scene.entities[0];
-        assert_eq!(entity.transform.translation, [1.0, 2.0, 3.0]);
+        assert_eq!(entity.transform.translation.to_array(), [1.0, 2.0, 3.0]);
         assert!(matches!(entity.mesh, MeshDesc::Custom { .. }));
         assert!(matches!(entity.material, MaterialDesc::Metal { .. }));
         assert!(scene.lights.is_empty());

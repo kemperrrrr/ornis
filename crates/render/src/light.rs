@@ -33,7 +33,7 @@ impl DirectionalLight {
     /// Scene light the renderer already knows how to upload.
     pub fn to_light_desc(self) -> LightDesc {
         LightDesc::Directional {
-            direction: self.direction.as_array(),
+            direction: self.direction,
             intensity: self.illuminance.get(),
             color: self.color.to_linear_rgb().as_array(),
             shadow: self.shadow,
@@ -69,12 +69,9 @@ mod tests {
                 color,
                 shadow,
             } => {
-                let len = (direction[0] * direction[0]
-                    + direction[1] * direction[1]
-                    + direction[2] * direction[2])
-                    .sqrt();
-                assert!((len - 1.0).abs() < 1e-5);
-                assert!(direction[0] > 0.0 && direction[1] > 0.0 && direction[2] > 0.0);
+                let xyz = direction.get();
+                assert!((xyz.length() - 1.0).abs() < 1e-5);
+                assert!(xyz.x > 0.0 && xyz.y > 0.0 && xyz.z > 0.0);
                 assert_eq!(intensity, DirectionalLight::DEFAULT_ILLUMINANCE.get());
                 assert_eq!(color, [1.0, 1.0, 1.0]);
                 assert_eq!(shadow, ShadowCast::Disabled);

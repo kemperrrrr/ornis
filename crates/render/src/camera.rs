@@ -43,11 +43,14 @@ impl OrbitCamera {
     pub const DEFAULT_FAR: Meters = Meters(100.0);
 
     /// Creates an orbit camera from a serialized look-at camera description.
+    ///
+    /// Eye, target, up, field of view and clip planes come from `cam`.
+    /// [`Self::looking_at`] only supplies the orbit basis.
     pub fn from_desc(cam: &CameraDesc) -> Self {
-        Self::looking_at(Vec3::from_array(cam.position), Vec3::from_array(cam.target))
-            .with_up(Vec3::from_array(cam.up))
-            .with_fov(Degrees::new(cam.fov))
-            .with_clip(Meters::new(cam.near), Meters::new(cam.far))
+        Self::looking_at(cam.position, cam.target)
+            .with_up(cam.up.get())
+            .with_fov(cam.fov)
+            .with_clip(cam.near, cam.far)
     }
 
     /// Orbit camera aimed from `eye` at `target`.
@@ -294,15 +297,16 @@ impl Frustum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::UnitVec3;
 
     fn camera() -> CameraDesc {
         CameraDesc {
-            position: [0.0, 2.5, 9.0],
-            target: [0.0, 0.0, 0.0],
-            up: [0.0, 1.0, 0.0],
-            fov: OrbitCamera::DEFAULT_FOV.get(),
-            near: OrbitCamera::DEFAULT_NEAR.get(),
-            far: OrbitCamera::DEFAULT_FAR.get(),
+            position: Vec3::new(0.0, 2.5, 9.0),
+            target: Vec3::ZERO,
+            up: UnitVec3::Y,
+            fov: Degrees::new(60.0),
+            near: Meters::new(0.1),
+            far: Meters::new(100.0),
         }
     }
 

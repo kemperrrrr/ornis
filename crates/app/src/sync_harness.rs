@@ -479,14 +479,7 @@ mod tests {
         store.insert(dynamic, Velocity(Vec3::new(3.0, 0.0, 4.0)));
         store.insert(dynamic, RigidBody::new_sphere(Vec3::ZERO, 0.5, 1.0));
         store.insert(dynamic, Position(Vec3::ZERO));
-        store.insert(
-            dynamic,
-            TransformDesc {
-                translation: [0.0; 3],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0; 3],
-            },
-        );
+        store.insert(dynamic, TransformDesc::IDENTITY);
 
         let stuck = store.create_entity();
         store.insert(stuck, Velocity(Vec3::new(5.0, 0.0, 6.0)));
@@ -494,14 +487,7 @@ mod tests {
         heavy.make_static();
         store.insert(stuck, heavy);
         store.insert(stuck, Position(Vec3::ZERO));
-        store.insert(
-            stuck,
-            TransformDesc {
-                translation: [0.0; 3],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0; 3],
-            },
-        );
+        store.insert(stuck, TransformDesc::IDENTITY);
 
         let disembodied = store.create_entity();
         store.insert(disembodied, Velocity(Vec3::new(1.0, 2.0, 3.0)));

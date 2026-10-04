@@ -18,7 +18,7 @@
 //!
 //! [`SmartStore`]: ornis_core::SmartStore
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{Entity, PositiveF32, SmartStore, UnitVec3};
 use thiserror::Error;
@@ -580,8 +580,8 @@ fn intersect_entity(
 ) -> Option<PositiveF32> {
     match mesh {
         MeshDesc::Sphere { radius, .. } => {
-            let scale = Vec3::from_array(transform.scale);
-            let center = Vec3::from_array(transform.translation);
+            let scale = transform.scale;
+            let center = transform.translation;
             if !scale.is_finite() || !center.is_finite() {
                 return None;
             }
@@ -616,7 +616,7 @@ fn intersect_entity(
             proxy_hit(ray, &model, &cylinder_triangles(), UNIT_CYLINDER_BOUND, eps)
         }
         MeshDesc::Custom { positions, indices } => {
-            let scale = Vec3::from_array(transform.scale);
+            let scale = transform.scale;
             if !scale.is_finite() {
                 return None;
             }
@@ -651,33 +651,21 @@ fn intersect_entity(
 /// Model matrix with the primitive size baked in the scale (extraction
 /// canon). `None` on non-finite translation or scale.
 fn model_matrix(transform: &TransformDesc, size_scale: Vec3) -> Option<Mat4> {
-    let translation = Vec3::from_array(transform.translation);
+    let translation = transform.translation;
     if !translation.is_finite() || !size_scale.is_finite() {
         return None;
     }
     Some(Mat4::from_scale_rotation_translation(
         size_scale,
-        normalized_rotation(transform.rotation),
+        transform.rotation.get(),
         translation,
     ))
 }
 
 /// Base scale times the primitive size, checked finite.
-fn scaled_size(base: [f32; 3], mul: Vec3) -> Option<Vec3> {
-    let scaled = Vec3::from_array(base) * mul;
+fn scaled_size(base: Vec3, mul: Vec3) -> Option<Vec3> {
+    let scaled = base * mul;
     scaled.is_finite().then_some(scaled)
-}
-
-/// Orientation with degenerate quaternions mapped to identity (extraction
-/// canon: zero-length or non-finite input never propagates `NaN`).
-fn normalized_rotation(rotation: [f32; 4]) -> Quat {
-    let orientation = Quat::from_array(rotation);
-    let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
-        orientation.normalize()
-    } else {
-        Quat::IDENTITY
-    }
 }
 
 /// Longest model-matrix axis (same canon as the extraction bounding
@@ -803,11 +791,7 @@ mod tests {
         let entity = store.create_entity();
         store.insert(
             entity,
-            TransformDesc {
-                translation,
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            TransformDesc::from_translation(glam::Vec3::from_array(translation)),
         );
         store.insert(
             entity,
@@ -956,14 +940,7 @@ mod tests {
         let mut engine = Engine::new();
         let store = store_with_lanes(&mut engine);
         let cube = store.create_entity();
-        store.insert(
-            cube,
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        );
+        store.insert(cube, TransformDesc::IDENTITY);
         store.insert(
             cube,
             MeshDesc::Box {
@@ -977,11 +954,7 @@ mod tests {
         let soup = store.create_entity();
         store.insert(
             soup,
-            TransformDesc {
-                translation: [10.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            TransformDesc::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
         );
         store.insert(
             soup,
@@ -1017,14 +990,7 @@ mod tests {
         let mut engine = Engine::new();
         let store = store_with_lanes(&mut engine);
         let rod = store.create_entity();
-        store.insert(
-            rod,
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        );
+        store.insert(rod, TransformDesc::IDENTITY);
         store.insert(
             rod,
             MeshDesc::Cylinder {

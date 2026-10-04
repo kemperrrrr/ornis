@@ -2722,6 +2722,7 @@ dependencies = [
 name = "ornis-assets"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "ornis-core",
  "ornis-gltf",
  "ron",

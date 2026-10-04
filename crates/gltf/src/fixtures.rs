@@ -512,6 +512,12 @@ pub(crate) fn build_external_parts() -> (String, Vec<u8>) {
     build_parts(&triangle(), Some("mesh.bin".to_string()))
 }
 
+/// Same triangle as [`build_external_parts`] with a caller-chosen buffer
+/// URI (path-confinement and percent-decoding tests).
+pub(crate) fn build_external_parts_with_uri(uri: &str) -> (String, Vec<u8>) {
+    build_parts(&triangle(), Some(uri.to_string()))
+}
+
 /// Builds the document JSON plus the raw buffer bytes.
 ///
 /// `buffer_uri`: `None` → `BIN`-chunk buffer (`.glb`); `Some(uri)` → that URI

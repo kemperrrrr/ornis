@@ -47,7 +47,17 @@ pub struct GameWorld<Role: SceneRole = Authoritative> {
     entities: SceneEntities,
     version: SceneVersion,
     role: PhantomData<Role>,
+    /// Loaded-but-unspawned assets by handle (parse once, spawn many).
+    assets: std::collections::HashMap<AssetHandle, std::rc::Rc<ornis_gltf::LoadedScene>>,
+    /// Next asset handle.
+    next_asset: u64,
 }
+
+/// Handle to a loaded asset in [`GameWorld`]: parse once via
+/// [`GameWorld::load_asset`], instantiate with [`GameWorld::spawn_asset`]
+/// any number of times, drop the id to release (last `Rc` wins).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AssetHandle(u64);
 
 /// Browser replica of the scene-backed world: same layout as the
 /// authoritative [`GameWorld`], only the transport differs (snapshots cross
@@ -73,6 +83,234 @@ impl GameWorld {
         world.replace_scene(scene);
         world
     }
+
+    /// One-shot convenience: [`GameWorld::load_asset`] plus
+    /// [`GameWorld::spawn_asset`]. Prefer the split form when the same
+    /// asset spawns more than once.
+    ///
+    /// # Errors
+    ///
+    /// Same as the two calls it wraps.
+    pub fn spawn_gltf(&mut self, path: &std::path::Path) -> Result<SpawnedGltf, SpawnError> {
+        let handle = self.load_asset(path)?;
+        self.spawn_asset(handle)
+    }
+
+    /// Loads an asset file without spawning anything: parse once, spawn
+    /// many times via [`GameWorld::spawn_asset`]. The format dispatches
+    /// by extension (glTF today; FBX is a future arm, not user code).
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError`] when the format is unsupported or the file cannot
+    /// be read or parsed; nothing is retained.
+    pub fn load_asset(&mut self, path: &std::path::Path) -> Result<AssetHandle, SpawnError> {
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let loaded = match extension.as_str() {
+            "glb" | "gltf" => ornis_gltf::load_path(path)?,
+            _ => {
+                return Err(SpawnError::UnsupportedFormat {
+                    path: path.display().to_string(),
+                    extension,
+                });
+            }
+        };
+        let handle = AssetHandle(self.next_asset);
+        self.next_asset += 1;
+        self.assets.insert(handle, std::rc::Rc::new(loaded));
+        Ok(handle)
+    }
+
+    /// Spawns a loaded asset into the world: mesh entities plus animation
+    /// wiring (skeleton roots, clip playlists, paused players) with the
+    /// needed sampler systems installed. Call
+    /// [`GameWorld::play_all_animations`] to start playback — loading
+    /// never autoplays.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::UnknownAsset`] for a stale handle.
+    pub fn spawn_asset(&mut self, handle: AssetHandle) -> Result<SpawnedGltf, SpawnError> {
+        let Some(loaded) = self.assets.get(&handle).cloned() else {
+            return Err(SpawnError::UnknownAsset(handle.0));
+        };
+        Ok(self.spawn_loaded(&loaded))
+    }
+
+    /// Spawns a scene loaded through [`AssetServer::load`]
+    /// (`ornis_assets`): the unified asset path. glTF scenes keep their
+    /// loader data on the server and get the same mesh + animation wiring
+    /// as [`GameWorld::spawn_asset`]; other scene formats (RON) spawn
+    /// their entities with no animation wiring. Loading never autoplays.
+    ///
+    /// Minimal bridge for the asset track: the world-local registry
+    /// ([`GameWorld::load_asset`]/[`AssetHandle`]) is still here and is to
+    /// be retired by the core track in favour of this entry point.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::UnknownAsset`] when `handle` is not (or no longer)
+    /// loaded on `assets`; the world is untouched.
+    ///
+    /// [`AssetServer::load`]: ornis_assets::AssetServer::load
+    pub fn spawn_scene(
+        &mut self,
+        assets: &ornis_assets::AssetServer,
+        handle: &ornis_assets::Handle<Scene>,
+    ) -> Result<SpawnedGltf, SpawnError> {
+        if let Some(loaded) = assets.loaded_scene(handle.id()) {
+            return Ok(self.spawn_loaded(loaded));
+        }
+        let Some(scene) = assets.get(handle) else {
+            return Err(SpawnError::UnknownAsset(handle.id().index()));
+        };
+        let store = self
+            .engine_mut()
+            .world_mut()
+            .store_mut()
+            .expect("engine always carries a store");
+        store.register::<ornis_assets::scene::TransformDesc>();
+        store.register::<ornis_assets::scene::MeshDesc>();
+        store.register::<ornis_assets::scene::MaterialDesc>();
+        let mesh_entities = scene
+            .entities
+            .iter()
+            .map(|desc| {
+                let entity = store.create_entity();
+                store.insert(entity, desc.transform.clone());
+                store.insert(entity, desc.mesh.clone());
+                store.insert(entity, desc.material.clone());
+                entity
+            })
+            .collect();
+        Ok(SpawnedGltf {
+            mesh_entities,
+            wiring: crate::anim_wiring::AnimationWiring {
+                roots: Vec::new(),
+                skel_playlists: Vec::new(),
+                anim_playlists: Vec::new(),
+            },
+        })
+    }
+
+    /// Shared body of [`GameWorld::spawn_asset`] and
+    /// [`GameWorld::spawn_scene`]: mesh entities plus animation wiring,
+    /// installing the sampler systems the wiring needs.
+    fn spawn_loaded(&mut self, loaded: &ornis_gltf::LoadedScene) -> SpawnedGltf {
+        let spawn = {
+            let store = self
+                .engine_mut()
+                .world_mut()
+                .store_mut()
+                .expect("engine always carries a store");
+            crate::anim_wiring::spawn_gltf_world(store, loaded)
+        };
+        let wiring = {
+            let store = self
+                .engine_mut()
+                .world_mut()
+                .store_mut()
+                .expect("engine always carries a store");
+            crate::anim_wiring::wire_loaded_animation(store, loaded, &spawn)
+        };
+        if !wiring.roots.is_empty() || !wiring.skel_playlists.is_empty() {
+            crate::install_skeletal_animation(self.engine_mut());
+        }
+        if !wiring.anim_playlists.is_empty() {
+            crate::install_object_animation(self.engine_mut());
+        }
+        SpawnedGltf {
+            mesh_entities: spawn.entities,
+            wiring,
+        }
+    }
+
+    /// Starts the entity's animation player (skeletal or object).
+    /// Returns whether a player was found. Loading never autoplays —
+    /// hosts start playback explicitly, like a video player.
+    pub fn play_animation(&mut self, entity: Entity) -> bool {
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return false;
+        };
+        crate::anim_wiring::set_playing(store, entity, true)
+    }
+
+    /// Pauses the entity's animation player at the current clock.
+    /// Returns whether a player was found.
+    pub fn pause_animation(&mut self, entity: Entity) -> bool {
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return false;
+        };
+        crate::anim_wiring::set_playing(store, entity, false)
+    }
+
+    /// Stops the entity's animation player: pauses and rewinds to zero.
+    /// Returns whether a player was found.
+    pub fn stop_animation(&mut self, entity: Entity) -> bool {
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return false;
+        };
+        crate::anim_wiring::set_playing(store, entity, false);
+        crate::anim_wiring::rewind_player(store, entity)
+    }
+
+    /// Starts every animation player in the world. Returns players touched.
+    pub fn play_all_animations(&mut self) -> usize {
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return 0;
+        };
+        crate::anim_wiring::set_playing_all(store, true)
+    }
+
+    /// Pauses every animation player in the world. Returns players touched.
+    pub fn pause_all_animations(&mut self) -> usize {
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return 0;
+        };
+        crate::anim_wiring::set_playing_all(store, false)
+    }
+
+    /// Stops every animation player in the world (pause + rewind).
+    /// Returns players touched.
+    pub fn stop_all_animations(&mut self) -> usize {
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return 0;
+        };
+        crate::anim_wiring::set_playing_all(store, false);
+        crate::anim_wiring::rewind_all_players(store)
+    }
+}
+
+/// What [`GameWorld::spawn_gltf`] created: mesh entities plus the
+/// animation wiring over them.
+pub struct SpawnedGltf {
+    /// Mesh entities in load order.
+    pub mesh_entities: Vec<Entity>,
+    /// Skeleton roots, clip playlists and players.
+    pub wiring: crate::anim_wiring::AnimationWiring,
+}
+
+/// Failure to [`GameWorld::spawn_gltf`]: the world is untouched.
+#[derive(Debug, thiserror::Error)]
+pub enum SpawnError {
+    /// The file cannot be read or parsed (loader message preserved).
+    #[error(transparent)]
+    Import(#[from] ornis_gltf::ImportError),
+    /// Extension dispatch knows no loader for this format (glTF today).
+    #[error("unsupported asset format for {path}: .{extension}")]
+    UnsupportedFormat {
+        /// Requested path.
+        path: String,
+        /// Lowercased extension (empty when absent).
+        extension: String,
+    },
+    /// Stale asset handle (never loaded or already released).
+    #[error("unknown asset #{0}")]
+    UnknownAsset(u64),
 }
 
 impl GameWorld<Replica> {
@@ -97,6 +335,8 @@ impl<Role: SceneRole> GameWorld<Role> {
             entities: SceneEntities::new(),
             version: SceneVersion::ZERO,
             role: PhantomData,
+            assets: std::collections::HashMap::new(),
+            next_asset: 0,
         }
     }
 
@@ -299,7 +539,7 @@ mod tests {
     use ornis_core::units::{Clamped01, PositiveF32};
     use ornis_core::{Color, Degrees, Lux, Stage as CoreStage, Time, UnitVec3};
     use ornis_physics::RigidBody;
-    use ornis_render::{DirectionalLight, read_orbit_camera};
+    use ornis_render::{DirectionalLight, OrbitCamera, read_orbit_camera};
 
     /// Minimal probe system for staged-plan lookups.
     struct StageProbe(&'static str);
@@ -317,11 +557,7 @@ mod tests {
     fn two_sphere_scene() -> Scene {
         let entity = |name: &str, x: f32| EntityDesc {
             name: name.into(),
-            transform: TransformDesc {
-                translation: [x, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            transform: TransformDesc::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
             mesh: MeshDesc::Sphere {
                 radius: PositiveF32::expect_valid(1.0),
                 segments: 16,
@@ -338,12 +574,12 @@ mod tests {
             entities: vec![entity("a", -1.0), entity("b", 1.0)],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -354,11 +590,7 @@ mod tests {
             name: "test".into(),
             entities: vec![EntityDesc {
                 name: "sphere".into(),
-                transform: TransformDesc {
-                    translation: [1.0, 2.0, 3.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: [1.0, 1.0, 1.0],
-                },
+                transform: TransformDesc::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
                 mesh: MeshDesc::Sphere {
                     radius: PositiveF32::expect_valid(2.0),
                     segments: 48,
@@ -372,12 +604,12 @@ mod tests {
             }],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -528,7 +760,7 @@ mod tests {
     fn set_ambient_after_from_scene_keeps_scene_lights() {
         let mut lit = scene();
         lit.lights.push(LightDesc::Directional {
-            direction: [0.0, 1.0, 0.0],
+            direction: UnitVec3::Y,
             intensity: 1.0,
             color: [1.0, 1.0, 1.0],
             shadow: ShadowCast::Disabled,
@@ -683,11 +915,7 @@ mod tests {
             entities: vec![
                 EntityDesc {
                     name: "dielectric".into(),
-                    transform: TransformDesc {
-                        translation: [1.0, 2.0, 3.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::from_translation(glam::Vec3::new(1.0, 2.0, 3.0)),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(2.0),
                         segments: 24,
@@ -701,11 +929,11 @@ mod tests {
                 },
                 EntityDesc {
                     name: "metal".into(),
-                    transform: TransformDesc {
-                        translation: [-1.0, 0.0, 2.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [2.0, 2.0, 2.0],
-                    },
+                    transform: TransformDesc::from_arrays(
+                        [-1.0, 0.0, 2.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                        [2.0, 2.0, 2.0],
+                    ),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(0.5),
                         segments: 48,
@@ -719,11 +947,11 @@ mod tests {
                 },
                 EntityDesc {
                     name: "coat".into(),
-                    transform: TransformDesc {
-                        translation: [0.0, 5.0, -3.0],
-                        rotation: [0.3, 0.2, 0.1, 0.9],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::from_arrays(
+                        [0.0, 5.0, -3.0],
+                        [0.3, 0.2, 0.1, 0.9],
+                        [1.0, 1.0, 1.0],
+                    ),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(1.0),
                         segments: 32,
@@ -739,12 +967,12 @@ mod tests {
             ],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         };
@@ -783,11 +1011,7 @@ mod tests {
             entities: vec![
                 EntityDesc {
                     name: "fine".into(),
-                    transform: TransformDesc {
-                        translation: [0.0, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::IDENTITY,
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(1.0),
                         segments: 48,
@@ -801,11 +1025,7 @@ mod tests {
                 },
                 EntityDesc {
                     name: "coarse".into(),
-                    transform: TransformDesc {
-                        translation: [2.0, 0.0, 0.0],
-                        rotation: [0.0, 0.0, 0.0, 1.0],
-                        scale: [1.0, 1.0, 1.0],
-                    },
+                    transform: TransformDesc::from_translation(glam::Vec3::new(2.0, 0.0, 0.0)),
                     mesh: MeshDesc::Sphere {
                         radius: PositiveF32::expect_valid(1.0),
                         segments: 16,
@@ -820,12 +1040,12 @@ mod tests {
             ],
             lights: Vec::new(),
             camera: CameraDesc {
-                position: [0.0, 2.5, 9.0],
-                target: [0.0, 0.0, 0.0],
-                up: [0.0, 1.0, 0.0],
-                fov: 60.0,
-                near: 0.1,
-                far: 100.0,
+                position: glam::Vec3::new(0.0, 2.5, 9.0),
+                target: glam::Vec3::ZERO,
+                up: ornis_core::units::UnitVec3::Y,
+                fov: ornis_core::units::Degrees::new(60.0),
+                near: ornis_core::units::Meters::new(0.1),
+                far: ornis_core::units::Meters::new(100.0),
             },
             ambient: [0.1, 0.1, 0.1],
         };
@@ -866,7 +1086,8 @@ mod tests {
         use ornis_assets::scene::LightDesc;
         let world = GameWorld::from_scene(&Scene {
             lights: vec![LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, -1.0, 0.0))
+                    .expect("non-zero direction"),
                 intensity: 2.0,
                 color: [1.0, 0.9, 0.8],
                 shadow: ShadowCast::Disabled,
@@ -885,11 +1106,206 @@ mod tests {
         assert!(matches!(
             lights.set_lights_args().as_slice(),
             [LightDesc::Directional {
-                direction: [0.0, -1.0, 0.0],
+                direction: d,
                 intensity: v,
                 color: [1.0, 0.9, 0.8],
                 shadow: ShadowCast::Disabled,
-            }] if *v == 2.0
+            }] if *v == 2.0 && d.as_array() == [0.0, -1.0, 0.0]
         ));
+    }
+
+    /// Scene-first facade: empty world, spawned asset, explicit light and
+    /// camera — no engine, store, or installer calls. The world starts
+    /// dark (no silent rig) and the starter's moving clip autoplays.
+    #[test]
+    fn facade_spawns_asset_with_explicit_light_and_camera() {
+        let mut world = GameWorld::new();
+        assert!(
+            world
+                .engine()
+                .world()
+                .resources()
+                .get::<RenderLights>()
+                .is_none(),
+            "world starts dark"
+        );
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let spawned = world.spawn_gltf(&starter).expect("starter loads");
+        assert!(!spawned.mesh_entities.is_empty());
+        assert!(!spawned.wiring.roots.is_empty());
+        assert!(!spawned.wiring.skel_playlists.is_empty());
+
+        world.set_ambient(Color::linear_rgb(0.1, 0.1, 0.15));
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::new(Vec3::new(1.0, 1.0, 1.0)).expect("direction"),
+            illuminance: Lux(0.6),
+            color: Color::WHITE,
+            ..Default::default()
+        });
+        let rig = world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("explicit light");
+        assert_eq!(rig.ambient, [0.1, 0.1, 0.15]);
+        assert_eq!(rig.lights.len(), 1);
+
+        world.spawn(
+            OrbitCamera::looking_at(Vec3::new(2.5, 1.8, 3.5), Vec3::new(0.0, 1.0, 0.0))
+                .with_fov(Degrees(45.0)),
+        );
+        assert!(
+            world
+                .engine()
+                .world()
+                .resources()
+                .get::<std::sync::Mutex<ornis_render::camera::OrbitCamera>>()
+                .is_some(),
+            "orbit camera installed"
+        );
+
+        let missing = world.spawn_gltf(std::path::Path::new("nope.glb"));
+        assert!(missing.is_err(), "missing file rejects");
+    }
+
+    /// The unified asset path: `AssetServer::load::<Scene>` + `spawn_scene`
+    /// matches the world-local `spawn_gltf` result (entities and wiring),
+    /// and the same handle spawns more than once.
+    #[test]
+    fn spawn_scene_from_asset_server_matches_spawn_gltf() {
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mut assets = ornis_assets::AssetServer::new();
+        let mannequin: ornis_assets::Handle<Scene> = assets.load(&starter).expect("starter loads");
+
+        let mut world = GameWorld::new();
+        let hero = world
+            .spawn_scene(&assets, &mannequin)
+            .expect("loaded handle spawns");
+        let mut reference = GameWorld::new();
+        let legacy = reference.spawn_gltf(&starter).expect("starter loads");
+        assert_eq!(hero.mesh_entities.len(), legacy.mesh_entities.len());
+        assert_eq!(hero.wiring.roots.len(), legacy.wiring.roots.len());
+        assert_eq!(
+            hero.wiring.skel_playlists.len(),
+            legacy.wiring.skel_playlists.len()
+        );
+        assert!(!hero.wiring.roots.is_empty());
+        assert!(world.play_all_animations() > 0);
+
+        let again = world
+            .spawn_scene(&assets, &mannequin)
+            .expect("parse once, spawn many");
+        assert_eq!(again.mesh_entities.len(), hero.mesh_entities.len());
+    }
+
+    /// RON scenes spawn their entities with empty wiring; unloaded
+    /// handles reject without touching the world.
+    #[test]
+    fn spawn_scene_ron_and_unknown_handle() {
+        let ron_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/scene.ron");
+        let mut assets = ornis_assets::AssetServer::new();
+        let handle: ornis_assets::Handle<Scene> = assets.load(&ron_path).expect("ron loads");
+        let expected = assets.get(&handle).expect("loaded").entities.len();
+        let mut world = GameWorld::new();
+        let spawned = world.spawn_scene(&assets, &handle).expect("ron spawns");
+        assert_eq!(spawned.mesh_entities.len(), expected);
+        assert_eq!(spawned.wiring.added(), 0);
+
+        assert!(assets.unload(&handle));
+        assert!(matches!(
+            world.spawn_scene(&assets, &handle),
+            Err(SpawnError::UnknownAsset(_))
+        ));
+    }
+
+    /// Autoplay picks a *moving* clip (not the baked TPose first in most
+    /// packs) and joints visibly travel: pose snapshots over 90 frames
+    /// take more than one distinct value.
+    #[test]
+    fn autoplay_moves_joints_over_time() {
+        use ornis_animation::{JointPose, SkelPlayer};
+        let mut world = GameWorld::new();
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let spawned = world.spawn_gltf(&starter).expect("starter loads");
+        assert!(spawned.wiring.skel_playlists.len() > 1);
+
+        let store = world.engine().world().store().expect("store");
+        {
+            let players = store.read_lane::<SkelPlayer>().expect("players");
+            let played: Vec<_> = players
+                .entities
+                .iter()
+                .map(|e| players.get(*e).unwrap().clip)
+                .collect();
+            assert!(!played.is_empty());
+            // Not the first (static TPose) playlist.
+            assert!(
+                played
+                    .iter()
+                    .all(|clip| clip.0 != spawned.wiring.skel_playlists[0]),
+                "autoplay must skip the static first clip"
+            );
+        }
+
+        // Loading leaves players paused; explicit start moves joints.
+        assert!(world.play_all_animations() > 0);
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..90 {
+            world.engine_mut().run_frame(1.0 / 60.0);
+            let store = world.engine().world().store().expect("store");
+            let poses = store.read_lane::<JointPose>().expect("poses");
+            // Whole pose: the no-root-motion export keeps the root joint
+            // static, motion lives in the descendants.
+            let pose = poses
+                .entities
+                .iter()
+                .find_map(|e| poses.get(*e))
+                .expect("pose");
+            seen.insert(format!("{:?}", pose.matrices));
+        }
+        assert!(seen.len() > 1, "joints must travel, TPose would repeat");
+    }
+
+    /// Playback controls behave like a video player: play starts a
+    /// paused player, pause holds the clock, stop pauses and rewinds.
+    #[test]
+    fn playback_controls_play_pause_stop() {
+        use ornis_animation::{ClipId, SkelPlayer};
+        let mut world = GameWorld::new();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let entity = store.create_entity();
+        store.insert(
+            entity,
+            SkelPlayer {
+                clip: ClipId(entity),
+                time: 5.0,
+                speed: 1.0,
+                weight: 1.0,
+                playing: false,
+            },
+        );
+        assert!(world.play_animation(entity));
+        assert!(!world.pause_animation(Entity::new(999)));
+        assert!(world.pause_animation(entity));
+        assert!(world.stop_animation(entity));
+        assert!(!world.play_animation(Entity::new(999)));
+
+        let store = world.engine().world().store().expect("store");
+        let player = *store
+            .read_lane::<SkelPlayer>()
+            .expect("lane")
+            .get(entity)
+            .expect("player");
+        assert!(!player.playing);
+        assert_eq!(player.time, 0.0);
+
+        assert_eq!(world.play_all_animations(), 1);
+        assert_eq!(world.stop_all_animations(), 1);
     }
 }

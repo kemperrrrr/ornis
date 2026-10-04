@@ -423,11 +423,7 @@ mod tests {
         let entity = store.create_entity();
         store.insert(
             entity,
-            TransformDesc {
-                translation,
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
+            TransformDesc::from_translation(glam::Vec3::from_array(translation)),
         );
         store.insert(
             entity,
@@ -566,7 +562,7 @@ mod tests {
         {
             let store = engine.world().store().expect("world store");
             let mut lane = store.write_lane::<TransformDesc>().expect("transform lane");
-            lane.get_mut(near).expect("near transform").translation = [100.0, 0.0, 0.0];
+            lane.get_mut(near).expect("near transform").translation = Vec3::new(100.0, 0.0, 0.0);
         }
         click_frame(&mut engine, true, [100.0, 100.0]);
         assert!(!has::<Selected>(&engine, near));
@@ -626,14 +622,7 @@ mod tests {
         store.register::<TransformDesc>();
         store.register::<MeshDesc>();
         let entity = store.create_entity();
-        store.insert(
-            entity,
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        );
+        store.insert(entity, TransformDesc::IDENTITY);
         store.insert(
             entity,
             MeshDesc::Sphere {

@@ -26,11 +26,7 @@ fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
             .iter()
             .map(|&(segments, rings)| EntityDesc {
                 name: "sphere".into(),
-                transform: TransformDesc {
-                    translation: [0.0, 0.0, 0.0],
-                    rotation: [0.0, 0.0, 0.0, 1.0],
-                    scale: [1.0, 1.0, 1.0],
-                },
+                transform: TransformDesc::IDENTITY,
                 mesh: MeshDesc::Sphere {
                     radius: PositiveF32::expect_valid(1.0),
                     segments,
@@ -45,12 +41,12 @@ fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
             .collect(),
         lights: Vec::new(),
         camera: CameraDesc {
-            position: [0.0, 2.5, 9.0],
-            target: [0.0, 0.0, 0.0],
-            up: [0.0, 1.0, 0.0],
-            fov: 60.0,
-            near: 0.1,
-            far: 100.0,
+            position: glam::Vec3::new(0.0, 2.5, 9.0),
+            target: glam::Vec3::ZERO,
+            up: ornis_core::units::UnitVec3::Y,
+            fov: ornis_core::units::Degrees::new(60.0),
+            near: ornis_core::units::Meters::new(0.1),
+            far: ornis_core::units::Meters::new(100.0),
         },
         ambient: [0.1, 0.1, 0.1],
     }

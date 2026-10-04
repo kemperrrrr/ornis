@@ -31,6 +31,7 @@ use ornis_core::{
 use ornis_gameplay::Position;
 
 use ornis_assets::scene::{MeshDesc, TransformDesc};
+use ornis_core::units::UnitQuat;
 
 /// Squared length / determinant floor for degenerate skinning joints.
 const DEGENERATE_LEN2: f32 = 1e-12;
@@ -534,13 +535,14 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
             && let Some(desc) = descs.as_mut().and_then(|lane| lane.get_mut(item.entity))
         {
             if let Some(translation) = item.pose.translation {
-                desc.translation = translation.to_array();
+                desc.translation = translation;
             }
-            if let Some(rotation) = item.pose.rotation {
-                desc.rotation = [rotation.x, rotation.y, rotation.z, rotation.w];
+            // A degenerate sampled rotation keeps the previous orientation.
+            if let Some(rotation) = item.pose.rotation.and_then(UnitQuat::normalize) {
+                desc.rotation = rotation;
             }
             if let Some(scale) = item.pose.scale {
-                desc.scale = scale.to_array();
+                desc.scale = scale;
             }
         }
         // Translation mirror (renderables) or marker placement (no MeshDesc):
@@ -1141,6 +1143,8 @@ pub struct JointTrack {
 /// non-positive `duration` holds the pose.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkelClip {
+    /// Clip name (glTF animation name; diagnostics and clip selection).
+    pub name: String,
     /// Clip length in seconds; player time wraps against it.
     pub duration: f32,
     /// Per-joint tracks; first track per joint wins on duplicates.
@@ -1671,23 +1675,9 @@ fn root_matrix(transforms: Option<&ComponentStore<TransformDesc>>, entity: Entit
     let Some(desc) = transforms.and_then(|lane| lane.get(entity)) else {
         return Mat4::IDENTITY;
     };
-    Mat4::from_scale_rotation_translation(
-        Vec3::from_array(desc.scale),
-        normalized_skel_quat(desc.rotation),
-        Vec3::from_array(desc.translation),
-    )
-}
-
-/// Normalizes a placement quaternion, identity on degenerate input (same
-/// honesty as the render extraction: never NaN into matrices).
-fn normalized_skel_quat(rotation: [f32; 4]) -> Quat {
-    let orientation = Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]);
-    let length_squared = orientation.length_squared();
-    if length_squared.is_finite() && length_squared > DEGENERATE_LEN2 {
-        orientation.normalize()
-    } else {
-        Quat::IDENTITY
-    }
+    // `TransformDesc::rotation` is a `UnitQuat`: normalized by type, so
+    // no degenerate-quaternion guard is needed before the matrix.
+    Mat4::from_scale_rotation_translation(desc.scale, desc.rotation.get(), desc.translation)
 }
 
 /// CPU skinning pass (system name `skel_skin_cpu`).

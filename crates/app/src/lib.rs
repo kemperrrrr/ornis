@@ -228,8 +228,10 @@ impl System for BodyToTransformSystem {
         if let Some(mut desc_lane) = store.write_lane::<TransformDesc>() {
             for (entity, position, orientation) in snapshot {
                 if let Some(desc) = desc_lane.get_mut(entity) {
-                    desc.translation = position.to_array();
-                    desc.rotation = [orientation.x, orientation.y, orientation.z, orientation.w];
+                    desc.translation = position;
+                    if let Some(rotation) = ornis_core::units::UnitQuat::normalize(orientation) {
+                        desc.rotation = rotation;
+                    }
                 }
             }
         }
@@ -320,14 +322,11 @@ mod tests {
         let mut engine = Engine::new();
         install_unified_runtime(&mut engine);
         let entity = engine.world().store().unwrap().create_entity();
-        engine.world_mut().store_mut().unwrap().insert(
-            entity,
-            TransformDesc {
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        );
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(entity, TransformDesc::IDENTITY);
         engine.world_mut().store_mut().unwrap().insert(
             entity,
             MeshDesc::Sphere {
@@ -453,14 +452,11 @@ mod tests {
             .store_mut()
             .unwrap()
             .insert(e, Position(Vec3::ZERO));
-        engine.world_mut().store_mut().unwrap().insert(
-            e,
-            TransformDesc {
-                translation: Vec3::ZERO.to_array(),
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-            },
-        );
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(e, TransformDesc::IDENTITY);
         engine
             .world_mut()
             .store_mut()

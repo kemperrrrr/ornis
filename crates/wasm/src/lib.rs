@@ -1198,10 +1198,10 @@ mod integration_tests {
             ornis_assets::scene::LightDesc::Directional { intensity, .. }
                 if (*intensity - 0.6).abs() < f32::EPSILON
         ));
-        assert_eq!(live.scene.camera.position, [0.0, 2.5, 9.0]);
-        assert!((live.scene.camera.fov - 60.0).abs() < f32::EPSILON);
+        assert_eq!(live.scene.camera.position.to_array(), [0.0, 2.5, 9.0]);
+        assert!((live.scene.camera.fov.0 - 60.0).abs() < f32::EPSILON);
         assert_eq!(
-            (live.scene.camera.near, live.scene.camera.far),
+            (live.scene.camera.near.0, live.scene.camera.far.0),
             (0.1, 100.0)
         );
     }
@@ -1220,7 +1220,7 @@ mod integration_tests {
 
         // v6: moved entity — the extraction must follow the replacement.
         let mut moved = live.scene.clone();
-        moved.entities[0].transform.translation = [1.0, 2.0, 3.0];
+        moved.entities[0].transform.translation = glam::Vec3::new(1.0, 2.0, 3.0);
         render_world.replace_scene(&moved);
         render_world.frame(0.0);
         let extracted = render_world.frame_upload();

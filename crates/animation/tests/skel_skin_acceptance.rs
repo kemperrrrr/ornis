@@ -48,11 +48,7 @@ fn skel_engine() -> Engine {
 }
 
 fn identity_transform() -> TransformDesc {
-    TransformDesc {
-        translation: Vec3::ZERO.to_array(),
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: Vec3::ONE.to_array(),
-    }
+    TransformDesc::IDENTITY
 }
 
 /// What the importer emits for a two-joint primitive: root plus one child,
@@ -86,6 +82,7 @@ fn triangle_mesh_import() -> SkinnedMeshImport {
 /// about Z (`M1 = T·R`), so the pose is time-independent and exact.
 fn two_bone_clip() -> SkelClip {
     SkelClip {
+        name: String::new(),
         duration: 1.0,
         tracks: vec![JointTrack {
             joint: JointId::from_raw(1),

@@ -135,6 +135,8 @@ pub struct LoadedJointTrack {
 /// time wraps past `duration` by contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedSkelClip {
+    /// glTF animation name (`clip_{index}` fallback at assembly).
+    pub name: String,
     /// Clip length in seconds (maximum input time over assembled keys).
     pub duration: f32,
     /// Per-joint tracks; first track per joint wins on duplicates.
@@ -235,6 +237,7 @@ pub fn assemble_clips(
         let mut emitted = false;
         if !joint_tracks.is_empty() {
             skel_clips.push(LoadedSkelClip {
+                name: name.clone(),
                 duration,
                 tracks: joint_tracks,
             });
