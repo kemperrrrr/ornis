@@ -8,7 +8,7 @@
 use std::sync::Mutex;
 
 use glam::{Mat4, Vec3, Vec4};
-use ornis_core::{Engine, InputState, Resources, System, SystemAccess};
+use ornis_core::{Degrees, Engine, InputState, Meters, Resources, System, SystemAccess};
 
 use ornis_assets::scene::CameraDesc;
 
@@ -33,25 +33,65 @@ impl OrbitCamera {
     const ELEVATION_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const ROTATE_SPEED: f32 = 0.005;
     const ZOOM_SPEED: f32 = 0.001;
+    /// `|view · up|` above which the default up axis would be parallel.
+    const VIEW_UP_PARALLEL: f32 = 0.999;
+    /// Vertical field of view used by [`Self::looking_at`].
+    pub const DEFAULT_FOV: Degrees = Degrees(60.0);
+    /// Near clip distance used by [`Self::looking_at`].
+    pub const DEFAULT_NEAR: Meters = Meters(0.1);
+    /// Far clip distance used by [`Self::looking_at`].
+    pub const DEFAULT_FAR: Meters = Meters(100.0);
 
     /// Creates an orbit camera from a serialized look-at camera description.
     pub fn from_desc(cam: &CameraDesc) -> Self {
-        let target = Vec3::from_array(cam.target);
-        let offset = Vec3::from_array(cam.position) - target;
+        Self::looking_at(Vec3::from_array(cam.position), Vec3::from_array(cam.target))
+            .with_up(Vec3::from_array(cam.up))
+            .with_fov(Degrees::new(cam.fov))
+            .with_clip(Meters::new(cam.near), Meters::new(cam.far))
+    }
+
+    /// Orbit camera aimed from `eye` at `target`.
+    ///
+    /// Field of view and clip planes start at [`Self::DEFAULT_FOV`],
+    /// [`Self::DEFAULT_NEAR`] and [`Self::DEFAULT_FAR`]. Up is [`Vec3::Y`],
+    /// or [`Vec3::Z`] when the view is parallel to Y so the basis does not
+    /// collapse. A zero offset uses the minimum orbit radius along +X.
+    pub fn looking_at(eye: Vec3, target: Vec3) -> Self {
+        let offset = eye - target;
         let radius = offset.length().max(Self::MIN_RADIUS);
         // offset = radius * (cos(el)*cos(az), sin(el), cos(el)*sin(az))
         let elevation = (offset.y / radius).clamp(-1.0, 1.0).asin();
         let azimuth = offset.z.atan2(offset.x);
         Self {
             target,
-            up: Vec3::from_array(cam.up),
+            up: up_for_offset(offset),
             azimuth,
             elevation,
             radius,
-            fov: cam.fov,
-            near: cam.near,
-            far: cam.far,
+            fov: Self::DEFAULT_FOV.get(),
+            near: Self::DEFAULT_NEAR.get(),
+            far: Self::DEFAULT_FAR.get(),
         }
+    }
+
+    /// Replaces the up axis. The caller is responsible for keeping it
+    /// non-parallel to the view direction.
+    pub fn with_up(mut self, up: Vec3) -> Self {
+        self.up = up;
+        self
+    }
+
+    /// Sets the vertical field of view in degrees.
+    pub fn with_fov(mut self, fov: Degrees) -> Self {
+        self.fov = fov.get();
+        self
+    }
+
+    /// Sets the near and far clip distances.
+    pub fn with_clip(mut self, near: Meters, far: Meters) -> Self {
+        self.near = near.get();
+        self.far = far.get();
+        self
     }
 
     /// Returns the current eye position around the orbit target.
@@ -102,10 +142,24 @@ impl OrbitCamera {
 ///
 /// The camera is intentionally stored in a mutex because systems receive a
 /// shared `Resources` reference. This is a small view-state resource, not a
-/// second authoritative world or a GPU representation.
+/// second authoritative world or a GPU representation. A repeat call replaces
+/// the camera and does not register the input system twice.
 pub fn install_orbit_camera(engine: &mut Engine, camera: OrbitCamera) {
     let _ = engine.world_mut().insert(Mutex::new(camera));
+    if engine.schedule().mermaid().contains("orbit_camera_input") {
+        return;
+    }
     engine.schedule_mut().add_system(OrbitCameraSystem);
+}
+
+/// Up axis for an offset from the look-at target.
+fn up_for_offset(offset: Vec3) -> Vec3 {
+    let len = offset.length();
+    if len > f32::EPSILON && (offset.y / len).abs() > OrbitCamera::VIEW_UP_PARALLEL {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    }
 }
 
 /// Clones the current client-side orbit camera from an engine resource.
@@ -246,9 +300,9 @@ mod tests {
             position: [0.0, 2.5, 9.0],
             target: [0.0, 0.0, 0.0],
             up: [0.0, 1.0, 0.0],
-            fov: 60.0,
-            near: 0.1,
-            far: 100.0,
+            fov: OrbitCamera::DEFAULT_FOV.get(),
+            near: OrbitCamera::DEFAULT_NEAR.get(),
+            far: OrbitCamera::DEFAULT_FAR.get(),
         }
     }
 
@@ -265,7 +319,38 @@ mod tests {
 
         assert_ne!(orbit.position(), initial);
         assert!(orbit.position().length() > 0.5);
-        assert_eq!(orbit.view_parameters().3, 60.0);
+        assert_eq!(orbit.view_parameters().3, OrbitCamera::DEFAULT_FOV.get());
+    }
+
+    #[test]
+    fn looking_at_places_the_eye_and_names_the_defaults() {
+        let eye = Vec3::new(2.5, 1.8, 3.5);
+        let orbit = OrbitCamera::looking_at(eye, Vec3::Y).with_fov(Degrees(45.0));
+        let (position, target, up, fov, near, far) = orbit.view_parameters();
+        assert!((position - eye).length() < 1e-4);
+        assert_eq!(target, Vec3::Y);
+        assert_eq!(up, Vec3::Y);
+        assert_eq!(fov, 45.0);
+        assert_eq!(near, OrbitCamera::DEFAULT_NEAR.get());
+        assert_eq!(far, OrbitCamera::DEFAULT_FAR.get());
+        let overhead = OrbitCamera::looking_at(Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
+        assert_eq!(overhead.view_parameters().2, Vec3::Z);
+    }
+
+    #[test]
+    fn install_orbit_camera_replaces_without_a_second_system() {
+        let mut engine = Engine::new();
+        let camera = OrbitCamera::from_desc(&camera());
+        install_orbit_camera(&mut engine, camera.clone());
+        install_orbit_camera(&mut engine, camera);
+        assert_eq!(
+            engine
+                .schedule()
+                .mermaid()
+                .matches("orbit_camera_input")
+                .count(),
+            1
+        );
     }
 
     #[test]

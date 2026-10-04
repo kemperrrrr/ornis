@@ -26,7 +26,7 @@ pub mod physics_runtime;
 pub mod session;
 pub mod sync_harness;
 
-pub use game_world::{GameWorld, ReplicaGameWorld, spawn_static_floor};
+pub use game_world::{GameWorld, ReplicaGameWorld, Spawn};
 
 /// Installs the unified runtime into `engine`.
 ///

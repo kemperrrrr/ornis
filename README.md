@@ -226,7 +226,9 @@ jobs and line-table debug info (debug assertions stay enabled).
 `Time`/`FixedTime`: fixed schedule выполняется bounded 60 Hz accumulator'ом,
 после чего once-per-frame schedule запускается один раз. Native и WASM
 render loops уже используют общий `GameWorld`/`RenderExtract`/`RenderFrame3D`
-контракт после serialization boundary. `InputState` теперь является
+контракт после serialization boundary. Свет и клиентская камера ставятся через
+`GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
+`OrbitCamera`); скрытый пол витрины живёт в `src/main.rs`, не в `GameWorld`. `InputState` теперь является
 backend-neutral resource; native winit и WASM orbit adapters записывают
 keyboard, mouse, pointer and wheel input, а browser render frame публикует
 его через `Engine`. Gameplay consumers подключены через

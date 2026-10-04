@@ -22,7 +22,7 @@ use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_render::{
     FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
-    install_orbit_camera, read_orbit_camera,
+    read_orbit_camera,
 };
 
 mod scene_api;
@@ -827,10 +827,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     // then the same `GameWorld` frame contract as native is used locally
     // through the `Replica` role.
     let mut render_world = ReplicaGameWorld::from_scene_replica(&scene);
-    install_orbit_camera(
-        render_world.engine_mut(),
-        OrbitCamera::from_desc(&scene.camera),
-    );
+    render_world.spawn(OrbitCamera::from_desc(&scene.camera));
     render_world.frame(0.0);
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
