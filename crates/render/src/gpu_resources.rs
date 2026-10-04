@@ -183,25 +183,17 @@ pub fn install_render_mesh(engine: &mut ornis_core::Engine, mesh: GpuMesh) {
     engine.schedule_mut().add_system(RenderMesh);
 }
 
-/// Publishes the legacy light rig, but only if the scene loader has not yet published one.
-///
-/// `GameWorld::replace_scene` writes `RenderLights` from the scene, while
-/// `install_gpu_resources` in `GameApp::initialize` runs after it — a blind
-/// `insert` would silently reset the scene lights to the default (`insert`
-/// replaces). Both rigs match for the shipped scene; the guard matters for
-/// every other scene.
-fn insert_render_lights_default(engine: &mut ornis_core::Engine) {
-    if engine.world().resources().get::<RenderLights>().is_none() {
-        let _ = engine.world_mut().insert(RenderLights::default());
-    }
-}
-
 /// Registers the GPU resources in `engine`.
 ///
 /// Call after creating `Device`/`Queue`/`Surface`/`Renderer3D`/
-/// `RenderFrame3D`/`Mesh` in `GameApp::initialize` — before the first `run_frame`.
+/// `RenderFrame3D`/`Mesh` in the shell initialize — before the first `run_frame`.
 /// After that `RenderMesh`/`RenderSubmit`/`RenderPresent`/`RenderFlush`
 /// in the `schedule` observe the same objects without copying.
+///
+/// No light rig is published here: worlds start dark, lights arrive
+/// explicitly (scene descriptions, [`GameWorld::add_directional_light`](ornis_app::GameWorld::add_directional_light)).
+/// Viewport lighting for lightless scenes is the editor's job (Blender-style
+/// shading modes), not a silent engine default.
 pub fn install_gpu_resources(
     engine: &mut ornis_core::Engine,
     device: wgpu::Device,
@@ -219,7 +211,6 @@ pub fn install_gpu_resources(
     let _ = engine.world_mut().insert(Mutex::new(frame_state));
     let _ = engine.world_mut().insert(GpuCustomMeshes::default());
     let _ = engine.world_mut().insert(FramePresentTarget::default());
-    insert_render_lights_default(engine);
     install_render_mesh(engine, mesh);
     engine.schedule_mut().add_system(RenderSubmit);
     engine.schedule_mut().add_system(RenderPresent);
@@ -636,7 +627,7 @@ mod tests {
             exposure: 1.0,
         };
         let _ = engine.world_mut().insert(custom);
-        insert_render_lights_default(&mut engine);
+        install_frame_buffers(&mut engine);
         let kept = engine
             .world()
             .resources()
@@ -646,16 +637,11 @@ mod tests {
         assert_eq!(kept.lights.len(), 1);
 
         let mut fresh = Engine::new();
-        insert_render_lights_default(&mut fresh);
-        let defaulted = fresh
-            .world()
-            .resources()
-            .get::<RenderLights>()
-            .expect("lights resource");
-        assert_eq!(defaulted.ambient, RenderLights::default().ambient);
-        assert_eq!(defaulted.lights.len(), RenderLights::default().lights.len());
-        assert_eq!(defaulted.ambient_intensity, 1.0);
-        assert_eq!(defaulted.exposure, 1.0);
+        install_frame_buffers(&mut fresh);
+        assert!(
+            fresh.world().resources().get::<RenderLights>().is_none(),
+            "no scene, no lights: the world starts dark"
+        );
     }
 
     #[test]

@@ -1141,6 +1141,8 @@ pub struct JointTrack {
 /// non-positive `duration` holds the pose.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkelClip {
+    /// Clip name (glTF animation name; diagnostics and clip selection).
+    pub name: String,
     /// Clip length in seconds; player time wraps against it.
     pub duration: f32,
     /// Per-joint tracks; first track per joint wins on duplicates.

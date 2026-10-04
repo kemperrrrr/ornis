@@ -171,6 +171,7 @@ fn sample_resolves_parent_chain() {
     // carry the parent rotation (local +X offset lands on +Y).
     let mut engine = skel_engine();
     let clip = SkelClip {
+        name: String::new(),
         duration: 1.0,
         tracks: vec![
             JointTrack {
@@ -214,6 +215,7 @@ fn skin_two_bone_chain_with_known_matrices() {
     // model space (identity inverse bind), so hand-computed targets apply.
     let mut engine = skel_engine();
     let clip = SkelClip {
+        name: String::new(),
         duration: 1.0,
         tracks: vec![JointTrack {
             joint: JointId::from_raw(1),
@@ -379,6 +381,7 @@ fn joint_cap_is_128() {
     store.insert_cold(
         root,
         SkelClip {
+            name: String::new(),
             duration: 1.0,
             tracks: Vec::new(),
         },

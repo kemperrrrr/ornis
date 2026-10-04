@@ -1,6 +1,9 @@
-//! Pure `ornis-gltf` mirror → `ornis-animation` converters.
+//! Pure `ornis-gltf` mirror → `ornis-animation` converters, plus the
+//! shared spawn/wire routines built on them: [`spawn_gltf_world`]
+//! (mesh entities from a loaded scene) and [`wire_loaded_animation`]
+//! (skeleton roots, clip playlists, autoplay players, skinned meshes).
 //!
-//! Field-for-field mapping with no I/O, no ECS access, and no allocation
+//! Field-for-field mapping with no I/O beyond the caller's store: joint
 //! beyond the output clips: joint indices pass through
 //! [`JointId::from_raw`](ornis_animation::JointId), rotations arrive as
 //! `(x, y, z, w)` unit quaternions via [`Quat::from_xyzw`](glam::Quat), and
@@ -31,6 +34,7 @@ use super::session::Name;
 /// [`Quat::from_xyzw`] exactly — no silent renormalization here.
 pub fn skel_clip_from_loaded(clip: &LoadedSkelClip) -> SkelClip {
     SkelClip {
+        name: clip.name.clone(),
         duration: clip.duration,
         tracks: clip.tracks.iter().map(joint_track_from_loaded).collect(),
     }
@@ -178,6 +182,297 @@ fn with_interpolation<T, M: Copy>(
     }
 }
 
+/// World entities spawned from one [`LoadedScene`](ornis_gltf::LoadedScene):
+/// mesh entities in load order plus the loader-local node → world map
+/// animation wiring resolves through.
+pub struct GltfSpawn {
+    /// Mesh entities, 1:1 with the loaded entities, in load order.
+    pub entities: Vec<Entity>,
+    /// Loader-local node handle (`Entity::new(node)`) → world entity.
+    /// First mesh entity wins per node.
+    pub node_to_entity: std::collections::HashMap<Entity, Entity>,
+}
+
+/// Entities created by [`wire_loaded_animation`] that outlive mesh
+/// entities: skeleton roots and clip playlists (for `alive` bookkeeping
+/// and version bumps at the call site).
+pub struct AnimationWiring {
+    /// One skeleton root per skin, in skin order.
+    pub roots: Vec<Entity>,
+    /// One playlist entity per skeletal clip, in clip order.
+    pub skel_playlists: Vec<Entity>,
+    /// One playlist entity per object clip, in clip order.
+    pub anim_playlists: Vec<Entity>,
+}
+
+impl AnimationWiring {
+    /// Entities the call site must track (roots + playlists).
+    pub fn added(&self) -> usize {
+        self.roots.len() + self.skel_playlists.len() + self.anim_playlists.len()
+    }
+}
+
+/// Spawns the mesh entities of a loaded glTF scene: `TransformDesc` +
+/// `MeshDesc::Custom` + `MaterialDesc` per primitive, no physics bodies
+/// (pure visual spawn — the solver never sees these entities).
+///
+/// Lanes are registered idempotently; entities follow load order so the
+/// caller can zip them back against the loaded entities.
+pub fn spawn_gltf_world(store: &mut SmartStore, loaded: &ornis_gltf::LoadedScene) -> GltfSpawn {
+    store.register::<TransformDesc>();
+    store.register::<MeshDesc>();
+    store.register::<MaterialDesc>();
+    let scene = ornis_assets::import::scene_from_gltf(loaded);
+    let mut entities = Vec::with_capacity(scene.entities.len());
+    let mut node_to_entity = std::collections::HashMap::new();
+    for (desc, loaded_entity) in scene.entities.iter().zip(loaded.entities.iter()) {
+        let entity = store.create_entity();
+        store.insert(entity, desc.transform.clone());
+        store.insert(entity, desc.mesh.clone());
+        store.insert(entity, desc.material.clone());
+        node_to_entity
+            .entry(Entity::new(loaded_entity.node))
+            .or_insert(entity);
+        entities.push(entity);
+    }
+    GltfSpawn {
+        entities,
+        node_to_entity,
+    }
+}
+
+/// Motion epsilon for autoplay selection: value drift below this is
+/// exporter noise, not visible motion.
+const MOTION_EPS: f32 = 1e-6;
+
+/// Whether a scalar channel visibly moves (key *count* alone lies:
+/// bind poses ship dozens of identical keys).
+fn channel_moves(values: &[[f32; 3]]) -> bool {
+    values.windows(2).any(|pair| {
+        pair[0]
+            .iter()
+            .zip(pair[1])
+            .any(|(a, b)| (a - b).abs() > MOTION_EPS)
+    })
+}
+
+/// Sets `playing` on the entity's player (skeletal first, then
+/// object). Returns whether a player was found. Players are fellow
+/// components, not commands: the engine never touches them, only hosts do.
+pub fn set_playing(store: &SmartStore, entity: Entity, playing: bool) -> bool {
+    if let Some(mut lane) = store.write_lane::<SkelPlayer>()
+        && let Some(player) = lane.get_mut(entity)
+    {
+        player.playing = playing;
+        return true;
+    }
+    if let Some(mut lane) = store.write_lane::<AnimPlayer>()
+        && let Some(player) = lane.get_mut(entity)
+    {
+        player.playing = playing;
+        return true;
+    }
+    false
+}
+
+/// Rewinds the entity's player clock to zero (keeps the playing state).
+/// Returns whether a player was found.
+pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
+    if let Some(mut lane) = store.write_lane::<SkelPlayer>()
+        && let Some(player) = lane.get_mut(entity)
+    {
+        player.time = 0.0;
+        return true;
+    }
+    if let Some(mut lane) = store.write_lane::<AnimPlayer>()
+        && let Some(player) = lane.get_mut(entity)
+    {
+        player.time = 0.0;
+        return true;
+    }
+    false
+}
+
+/// Sets `playing` on every player in both lanes. Returns players touched.
+pub fn set_playing_all(store: &SmartStore, playing: bool) -> usize {
+    let mut touched = 0;
+    if let Some(mut lane) = store.write_lane::<SkelPlayer>() {
+        for player in lane.iter_mut() {
+            player.playing = playing;
+            touched += 1;
+        }
+    }
+    if let Some(mut lane) = store.write_lane::<AnimPlayer>() {
+        for player in lane.iter_mut() {
+            player.playing = playing;
+            touched += 1;
+        }
+    }
+    touched
+}
+
+/// Rewinds every player clock to zero. Returns players touched.
+pub fn rewind_all_players(store: &SmartStore) -> usize {
+    let mut touched = 0;
+    if let Some(mut lane) = store.write_lane::<SkelPlayer>() {
+        for player in lane.iter_mut() {
+            player.time = 0.0;
+            touched += 1;
+        }
+    }
+    if let Some(mut lane) = store.write_lane::<AnimPlayer>() {
+        for player in lane.iter_mut() {
+            player.time = 0.0;
+            touched += 1;
+        }
+    }
+    touched
+}
+
+/// Index of the first skeletal clip with motion, for autoplay: static
+/// bind poses (TPose first in most packs, dozens of identical keys)
+/// would otherwise play visibly nothing. `None` when no clip moves —
+/// the caller falls back to the first clip.
+pub fn first_moving_skel_clip(clips: &[ornis_gltf::LoadedSkelClip]) -> Option<usize> {
+    clips.iter().position(|clip| {
+        clip.tracks.iter().any(|track| {
+            channel_moves(
+                &track
+                    .translation
+                    .keys
+                    .iter()
+                    .map(|key| key.value)
+                    .collect::<Vec<_>>(),
+            ) || channel_moves(
+                &track
+                    .scale
+                    .keys
+                    .iter()
+                    .map(|key| key.value)
+                    .collect::<Vec<_>>(),
+            ) || track.rotation.keys.windows(2).any(|pair| {
+                pair[0]
+                    .value
+                    .iter()
+                    .zip(pair[1].value)
+                    .any(|(a, b)| (a - b).abs() > MOTION_EPS)
+            })
+        })
+    })
+}
+
+/// Wires animation from a loaded glTF scene into an already-spawned
+/// world: skeleton roots (`Skeleton` + [`JointPose`]), cold clip
+/// playlists, paused players (hosts start playback explicitly — see
+/// [`set_playing_all`]) and [`SkinnedMesh`] lanes on skinned mesh
+/// entities.
+///
+/// `mesh_entities` must be the load-order mesh entities (see
+/// [`spawn_gltf_world`]); `node_to_entity` resolves loader-local node
+/// handles to them. Sources without skins or clips wire nothing.
+/// Lanes are registered idempotently.
+pub fn wire_loaded_animation(
+    store: &mut SmartStore,
+    loaded: &ornis_gltf::LoadedScene,
+    spawn: &GltfSpawn,
+) -> AnimationWiring {
+    use ornis_animation::{AnimClip, SkelClip};
+    store.register::<Skeleton>();
+    store.register::<JointPose>();
+    store.register::<SkinnedMesh>();
+    store.register::<SkelPlayer>();
+    store.register_cold::<SkelClip>();
+    store.register::<AnimPlayer>();
+    store.register_cold::<AnimClip>();
+
+    let mut wiring = AnimationWiring {
+        roots: Vec::with_capacity(loaded.skins.len()),
+        skel_playlists: Vec::with_capacity(loaded.skel_clips.len()),
+        anim_playlists: Vec::with_capacity(loaded.anim_clips.len()),
+    };
+    if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
+        return wiring;
+    }
+    // Skeleton roots, one per skin.
+    for (index, skin) in loaded.skins.iter().enumerate() {
+        let skeleton = skeleton_from_loaded(skin);
+        let joints = skeleton.joint_count();
+        let root = store.create_entity();
+        store.insert(root, Name(format!("skeleton_{index}")));
+        store.insert(root, skeleton);
+        store.insert(root, JointPose::identity(joints));
+        wiring.roots.push(root);
+    }
+    // Skeletal playlists, one per clip and shared across roots; every
+    // root autoplays the first *moving* clip (one player lane per root —
+    // further clips stay retained for editor clip selection, a follow-up).
+    for clip in &loaded.skel_clips {
+        let live = skel_clip_from_loaded(clip);
+        let playlist = store.create_entity();
+        store.insert(playlist, Name(live.name.clone()));
+        store.insert_cold(playlist, live);
+        wiring.skel_playlists.push(playlist);
+    }
+    let play = first_moving_skel_clip(&loaded.skel_clips)
+        .and_then(|index| wiring.skel_playlists.get(index).copied())
+        .or(wiring.skel_playlists.first().copied());
+    if let Some(first) = play {
+        // Paused: the host starts playback explicitly
+        // ([`set_playing_all`]) — the engine never autoplays.
+        let player = SkelPlayer {
+            clip: ClipId(first),
+            time: 0.0,
+            speed: 1.0,
+            weight: 1.0,
+            playing: false,
+        };
+        for root in &wiring.roots {
+            store.insert(*root, player);
+        }
+    }
+    // Skinned meshes: `SkinnedMesh.skeleton` points at the skin's root.
+    // `None` (unskinned primitive) keeps the regular `Custom` mesh.
+    for (desc, entity) in loaded.entities.iter().zip(spawn.entities.iter()) {
+        let Some(skin) = desc.skin else {
+            continue;
+        };
+        let Some(&root) = wiring.roots.get(skin) else {
+            continue;
+        };
+        let Some(skinned) = skinned_mesh_from_loaded(root, &desc.mesh) else {
+            continue;
+        };
+        store.insert(*entity, skinned);
+    }
+    // Object playlists, one per clip; every mapped track entity gets an
+    // autoplay player (last clip wins on shared entities — one player
+    // lane per entity).
+    for clip in &loaded.anim_clips {
+        let (live, dropped) = anim_clip_from_loaded(clip.name.clone(), clip, &spawn.node_to_entity);
+        // Dropped (unmapped) tracks stay dropped: the count is covered
+        // by converter unit tests, nothing is stored at runtime.
+        let _ = dropped;
+        let targets: Vec<Entity> = live.tracks.iter().map(|track| track.entity).collect();
+        let playlist = store.create_entity();
+        store.insert(playlist, Name(live.name.clone()));
+        store.insert_cold(playlist, live);
+        wiring.anim_playlists.push(playlist);
+        for target in &targets {
+            store.insert(
+                *target,
+                AnimPlayer {
+                    clip: ClipId(playlist),
+                    time: 0.0,
+                    speed: 1.0,
+                    weight: 1.0,
+                    playing: false,
+                },
+            );
+        }
+    }
+    wiring
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +510,70 @@ mod tests {
 
     /// Spawn maps loader-local node handles to world entities, 1:1 and in
     /// load order, with placement components inserted.
+    #[test]
+    fn first_moving_skel_clip_skips_static_poses() {
+        use ornis_gltf::{LoadedJointTrack, LoadedKey, LoadedKeyTrack, LoadedSkelClip};
+        fn pose() -> LoadedJointTrack {
+            LoadedJointTrack {
+                joint: 0,
+                translation: LoadedKeyTrack::linear(vec![LoadedKey {
+                    time: 0.0,
+                    value: [0.0, 0.0, 0.0],
+                }]),
+                rotation: LoadedKeyTrack::linear(Vec::new()),
+                scale: LoadedKeyTrack::linear(Vec::new()),
+            }
+        }
+        fn step() -> LoadedJointTrack {
+            LoadedJointTrack {
+                joint: 0,
+                translation: LoadedKeyTrack::linear(vec![
+                    LoadedKey {
+                        time: 0.0,
+                        value: [0.0, 0.0, 0.0],
+                    },
+                    LoadedKey {
+                        time: 1.0,
+                        value: [1.0, 0.0, 0.0],
+                    },
+                ]),
+                rotation: LoadedKeyTrack::linear(Vec::new()),
+                scale: LoadedKeyTrack::linear(Vec::new()),
+            }
+        }
+        fn clip(tracks: Vec<LoadedJointTrack>) -> LoadedSkelClip {
+            LoadedSkelClip {
+                name: String::new(),
+                duration: 1.0,
+                tracks,
+            }
+        }
+        assert_eq!(first_moving_skel_clip(&[]), None);
+        assert_eq!(first_moving_skel_clip(&[clip(vec![pose()])]), None);
+        // Key count alone lies: 76 identical keys (a baked TPose) is
+        // still no motion.
+        let frozen = LoadedJointTrack {
+            joint: 0,
+            translation: LoadedKeyTrack::linear(vec![
+                LoadedKey {
+                    time: 0.0,
+                    value: [0.0, 0.0, 0.0],
+                };
+                76
+            ]),
+            rotation: LoadedKeyTrack::linear(Vec::new()),
+            scale: LoadedKeyTrack::linear(Vec::new()),
+        };
+        assert_eq!(
+            first_moving_skel_clip(&[clip(vec![frozen]), clip(vec![step()])]),
+            Some(1)
+        );
+        assert_eq!(
+            first_moving_skel_clip(&[clip(vec![step()]), clip(vec![pose()])]),
+            Some(0)
+        );
+    }
+
     #[test]
     fn spawn_maps_nodes_to_world_entities() {
         use ornis_assets::scene::TransformDesc;
@@ -259,6 +618,7 @@ mod tests {
     #[test]
     fn skel_clip_converts_joint_and_channels_verbatim() {
         let clip = LoadedSkelClip {
+            name: String::new(),
             duration: 2.5,
             tracks: vec![joint_fixture()],
         };
@@ -282,6 +642,7 @@ mod tests {
     #[test]
     fn stepped_interpolation_survives_on_all_channels() {
         let clip = LoadedSkelClip {
+            name: String::new(),
             duration: 1.0,
             tracks: vec![LoadedJointTrack {
                 joint: 0,
@@ -315,6 +676,7 @@ mod tests {
     fn cubic_interpolation_converts_tangents_on_all_joint_channels() {
         use ornis_gltf::LoadedKeyTrack as MirrorTrack;
         let clip = LoadedSkelClip {
+            name: String::new(),
             duration: 2.0,
             tracks: vec![LoadedJointTrack {
                 joint: 0,
@@ -439,6 +801,7 @@ mod tests {
     fn rotation_quat_maps_xyzw_exactly() {
         use std::f32::consts::FRAC_1_SQRT_2;
         let clip = LoadedSkelClip {
+            name: String::new(),
             duration: 1.0,
             tracks: vec![LoadedJointTrack {
                 joint: 1,
@@ -573,6 +936,7 @@ mod tests {
     #[test]
     fn empty_clips_convert_to_empty_clips() {
         let skel = LoadedSkelClip {
+            name: String::new(),
             duration: 0.0,
             tracks: Vec::new(),
         };
@@ -604,170 +968,4 @@ mod tests {
             scale: LoadedKeyTrack::linear(Vec::new()),
         }
     }
-}
-
-/// World entities spawned from one [`LoadedScene`](ornis_gltf::LoadedScene):
-/// mesh entities in load order plus the loader-local node → world map
-/// animation wiring resolves through.
-pub struct GltfSpawn {
-    /// Mesh entities, 1:1 with the loaded entities, in load order.
-    pub entities: Vec<Entity>,
-    /// Loader-local node handle (`Entity::new(node)`) → world entity.
-    /// First mesh entity wins per node.
-    pub node_to_entity: std::collections::HashMap<Entity, Entity>,
-}
-
-/// Entities created by [`wire_loaded_animation`] that outlive mesh
-/// entities: skeleton roots and clip playlists (for `alive` bookkeeping
-/// and version bumps at the call site).
-pub struct AnimationWiring {
-    /// One skeleton root per skin, in skin order.
-    pub roots: Vec<Entity>,
-    /// One playlist entity per skeletal clip, in clip order.
-    pub skel_playlists: Vec<Entity>,
-    /// One playlist entity per object clip, in clip order.
-    pub anim_playlists: Vec<Entity>,
-}
-
-impl AnimationWiring {
-    /// Entities the call site must track (roots + playlists).
-    pub fn added(&self) -> usize {
-        self.roots.len() + self.skel_playlists.len() + self.anim_playlists.len()
-    }
-}
-
-/// Spawns the mesh entities of a loaded glTF scene: `TransformDesc` +
-/// `MeshDesc::Custom` + `MaterialDesc` per primitive, no physics bodies
-/// (pure visual spawn — the solver never sees these entities).
-///
-/// Lanes are registered idempotently; entities follow load order so the
-/// caller can zip them back against the loaded entities.
-pub fn spawn_gltf_world(store: &mut SmartStore, loaded: &ornis_gltf::LoadedScene) -> GltfSpawn {
-    store.register::<TransformDesc>();
-    store.register::<MeshDesc>();
-    store.register::<MaterialDesc>();
-    let scene = ornis_assets::import::scene_from_gltf(loaded);
-    let mut entities = Vec::with_capacity(scene.entities.len());
-    let mut node_to_entity = std::collections::HashMap::new();
-    for (desc, loaded_entity) in scene.entities.iter().zip(loaded.entities.iter()) {
-        let entity = store.create_entity();
-        store.insert(entity, desc.transform.clone());
-        store.insert(entity, desc.mesh.clone());
-        store.insert(entity, desc.material.clone());
-        node_to_entity
-            .entry(Entity::new(loaded_entity.node))
-            .or_insert(entity);
-        entities.push(entity);
-    }
-    GltfSpawn {
-        entities,
-        node_to_entity,
-    }
-}
-
-/// Wires animation from a loaded glTF scene into an already-spawned
-/// world: skeleton roots (`Skeleton` + [`JointPose`]), cold clip
-/// playlists, autoplay players (`playing: true` — loaded demo content
-/// visibly runs; editor pause control is a separate follow-up) and
-/// [`SkinnedMesh`] lanes on skinned mesh entities.
-///
-/// `mesh_entities` must be the load-order mesh entities (see
-/// [`spawn_gltf_world`]); `node_to_entity` resolves loader-local node
-/// handles to them. Sources without skins or clips wire nothing.
-/// Lanes are registered idempotently.
-pub fn wire_loaded_animation(
-    store: &mut SmartStore,
-    loaded: &ornis_gltf::LoadedScene,
-    spawn: &GltfSpawn,
-) -> AnimationWiring {
-    use ornis_animation::{AnimClip, SkelClip};
-    store.register::<Skeleton>();
-    store.register::<JointPose>();
-    store.register::<SkinnedMesh>();
-    store.register::<SkelPlayer>();
-    store.register_cold::<SkelClip>();
-    store.register::<AnimPlayer>();
-    store.register_cold::<AnimClip>();
-
-    let mut wiring = AnimationWiring {
-        roots: Vec::with_capacity(loaded.skins.len()),
-        skel_playlists: Vec::with_capacity(loaded.skel_clips.len()),
-        anim_playlists: Vec::with_capacity(loaded.anim_clips.len()),
-    };
-    if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
-        return wiring;
-    }
-    // Skeleton roots, one per skin.
-    for (index, skin) in loaded.skins.iter().enumerate() {
-        let skeleton = skeleton_from_loaded(skin);
-        let joints = skeleton.joint_count();
-        let root = store.create_entity();
-        store.insert(root, Name(format!("skeleton_{index}")));
-        store.insert(root, skeleton);
-        store.insert(root, JointPose::identity(joints));
-        wiring.roots.push(root);
-    }
-    // Skeletal playlists, one per clip and shared across roots; every
-    // root autoplays the first clip (one player lane per root — further
-    // clips stay retained for editor clip selection, a follow-up).
-    for (index, clip) in loaded.skel_clips.iter().enumerate() {
-        let live = skel_clip_from_loaded(clip);
-        let playlist = store.create_entity();
-        store.insert(playlist, Name(format!("skel_clip_{index}")));
-        store.insert_cold(playlist, live);
-        wiring.skel_playlists.push(playlist);
-    }
-    if let Some(&first) = wiring.skel_playlists.first() {
-        let player = SkelPlayer {
-            clip: ClipId(first),
-            time: 0.0,
-            speed: 1.0,
-            weight: 1.0,
-            playing: true,
-        };
-        for root in &wiring.roots {
-            store.insert(*root, player);
-        }
-    }
-    // Skinned meshes: `SkinnedMesh.skeleton` points at the skin's root.
-    // `None` (unskinned primitive) keeps the regular `Custom` mesh.
-    for (desc, entity) in loaded.entities.iter().zip(spawn.entities.iter()) {
-        let Some(skin) = desc.skin else {
-            continue;
-        };
-        let Some(&root) = wiring.roots.get(skin) else {
-            continue;
-        };
-        let Some(skinned) = skinned_mesh_from_loaded(root, &desc.mesh) else {
-            continue;
-        };
-        store.insert(*entity, skinned);
-    }
-    // Object playlists, one per clip; every mapped track entity gets an
-    // autoplay player (last clip wins on shared entities — one player
-    // lane per entity).
-    for clip in &loaded.anim_clips {
-        let (live, dropped) = anim_clip_from_loaded(clip.name.clone(), clip, &spawn.node_to_entity);
-        // Dropped (unmapped) tracks stay dropped: the count is covered
-        // by converter unit tests, nothing is stored at runtime.
-        let _ = dropped;
-        let targets: Vec<Entity> = live.tracks.iter().map(|track| track.entity).collect();
-        let playlist = store.create_entity();
-        store.insert(playlist, Name(live.name.clone()));
-        store.insert_cold(playlist, live);
-        wiring.anim_playlists.push(playlist);
-        for target in &targets {
-            store.insert(
-                *target,
-                AnimPlayer {
-                    clip: ClipId(playlist),
-                    time: 0.0,
-                    speed: 1.0,
-                    weight: 1.0,
-                    playing: true,
-                },
-            );
-        }
-    }
-    wiring
 }

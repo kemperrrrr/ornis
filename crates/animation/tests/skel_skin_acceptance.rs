@@ -86,6 +86,7 @@ fn triangle_mesh_import() -> SkinnedMeshImport {
 /// about Z (`M1 = T·R`), so the pose is time-independent and exact.
 fn two_bone_clip() -> SkelClip {
     SkelClip {
+        name: String::new(),
         duration: 1.0,
         tracks: vec![JointTrack {
             joint: JointId::from_raw(1),
