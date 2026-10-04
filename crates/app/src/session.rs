@@ -78,7 +78,6 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use glam::Vec3;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use ornis_animation::{Animator, JointPose, SkelClip, SkelPlayer, Skeleton, SkinnedMesh};
@@ -101,16 +100,14 @@ use ornis_assets::collider::ColliderDesc;
 use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
-use ornis_assets::server::AssetServer;
 use ornis_audio::{AudioPlugin, bridge::install_gameplay_audio_bridge};
 
 use editor_backend::ipc::{EditorCommand, GameEvent, RequestId, UiCommand};
 use editor_backend::remote::{ScenePath, ScenePathError, SceneRoots};
 
-/// Editor-side name component attached to every spawned entity.
-/// Newtype over `String`: its serde-canonical JSON is a plain string.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Name(pub String);
+/// Editor-side name. The component is [`ornis_core::Name`] so glTF and
+/// asset nodes share one type; its JSON form is still a plain string.
+pub use ornis_core::Name;
 
 /// Components editable through the generic protocol (F0; audit §10 D2).
 /// Built once: registry ops cover `set_component`, scene snapshots and
@@ -295,10 +292,6 @@ pub struct EditorSession {
     /// underlying number, so `/api/status` and `/api/scene` payloads keep
     /// their `"version": <n>` shape.
     version: SceneVersion,
-    /// Asset registry: parse entry point, retained sources and the
-    /// reload dirty-set. Survives world replacement (see
-    /// [`EditorSession::load_scene`]).
-    assets: AssetServer,
     /// Fingerprint of the last host-initiated [`EditorSession::save_scene_file`]
     /// write, sample by sample. The hot-reload gate compares the watched file
     /// against it and swallows exactly the save's own mtime bump instead of
@@ -361,7 +354,6 @@ impl Default for EditorSession {
             alive: Vec::new(),
             scene_name: "scene".into(),
             version: SceneVersion::ZERO,
-            assets: AssetServer::new(),
             last_saved: None,
             scene_roots: SceneRoots::workspace_defaults(),
         }
@@ -465,13 +457,14 @@ impl EditorSession {
     /// programmatic hosts mark dirty assets directly. Returns true when
     /// the world was replaced.
     fn drain_assets(&mut self) -> bool {
-        let dirty = self.assets.take_dirty();
+        let dirty = self.world.assets_mut().take_dirty();
         if dirty.is_empty() {
             return false;
         }
         let mut changed = false;
         for id in dirty {
-            if let Some(scene) = self.assets.get_scene(id).cloned() {
+            let scene = self.world.assets().get_scene(id).cloned();
+            if let Some(scene) = scene {
                 self.load_scene(scene);
                 changed = true;
             }
@@ -563,7 +556,8 @@ impl EditorSession {
             return entity;
         };
         store.insert(entity, Name(name));
-        store.insert(entity, transform);
+        store.insert(entity, transform.clone());
+        crate::insert_flat_pose(store, entity, &transform);
         store.insert(entity, mesh);
         store.insert(entity, material);
         // A broken collider (`Err`) spawns without a body, like the
@@ -578,14 +572,22 @@ impl EditorSession {
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
-        let store = self.store()?;
-        if !store.is_alive(entity) {
-            return None;
+        {
+            let store = self.store()?;
+            if !store.is_alive(entity) {
+                return None;
+            }
+            ornis_core::despawn_recursive(store, entity);
         }
-        self.alive.retain(|e| *e != entity);
-        if let Some(store) = self.store() {
-            store.destroy_entity(entity);
-        }
+        let still_alive: Vec<Entity> = {
+            let store = self.store();
+            self.alive
+                .iter()
+                .copied()
+                .filter(|entity| store.is_some_and(|store| store.is_alive(*entity)))
+                .collect()
+        };
+        self.alive = still_alive;
         self.version.bump();
         Some(entity)
     }
@@ -624,13 +626,13 @@ impl EditorSession {
         }
         fresh.scene_name = scene.name;
         fresh.version = fresh.version.max(self.version.bumped());
-        // The asset registry (load history, retained sources) survives the
-        // replacement — it describes files, not the live world. The pending
-        // self-save fingerprint survives with it: the file on disk is still
-        // the bytes the session wrote, so the next watcher poll must keep
-        // swallowing the save's own mtime bump instead of reloading over
-        // the freshly loaded world.
-        fresh.assets = std::mem::take(&mut self.assets);
+        // The asset registry (load history, retained sources) lives on the
+        // game world and survives the replacement — it describes files, not
+        // the live entities. The pending self-save fingerprint survives with
+        // it: the file on disk is still the bytes the session wrote, so the
+        // next watcher poll must keep swallowing the save's own mtime bump
+        // instead of reloading over the freshly loaded world.
+        *fresh.world.assets_mut() = std::mem::take(self.world.assets_mut());
         fresh.last_saved = self.last_saved.take();
         fresh.scene_roots = self.scene_roots.clone();
         *self = fresh;
@@ -647,8 +649,8 @@ impl EditorSession {
     /// [`SceneLoadError`](ornis_assets::SceneLoadError) when the text is
     /// not a valid scene; the world is untouched.
     pub fn load_scene_ron(&mut self, ron_str: &str) -> Result<usize, ornis_assets::SceneLoadError> {
-        let id = self.assets.load_scene_ron(ron_str)?;
-        let Some(scene) = self.assets.get_scene(id).cloned() else {
+        let id = self.world.assets_mut().load_scene_ron(ron_str)?;
+        let Some(scene) = self.world.assets().get_scene(id).cloned() else {
             return Ok(0);
         };
         Ok(self.load_scene(scene))
@@ -708,19 +710,20 @@ impl EditorSession {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("glb") || ext.eq_ignore_ascii_case("gltf"));
         if is_gltf {
             let id = self
-                .assets
+                .world
+                .assets_mut()
                 .load_gltf_file(resolved)
                 .map_err(|e| SceneFileError::Parse(e.to_string()))?;
-            let Some(scene) = self.assets.get_scene(id).cloned() else {
+            let Some(model) = self.world.assets().model(id).cloned() else {
                 return Ok(0);
             };
+            // The editor instantiates a flat scene (world TRS per primitive).
+            // The retained model keeps the node tree for animation wiring.
+            let scene = ornis_assets::scene_from_model(&model);
             let count = self.load_scene(scene);
-            // Animation wiring reads the retained `LoadedScene`: node
-            // indices never reach the converted `Scene`.
-            let added = match self.assets.loaded_scene(id).cloned() {
-                Some(loaded) => self.wire_gltf_animation(&loaded),
-                None => 0,
-            };
+            // `load_scene` moves the asset server onto the fresh world. The
+            // cloned model is the node tree animation wiring reads.
+            let added = self.wire_gltf_animation(&model);
             return Ok(count + added);
         }
         let ron = fs::read_to_string(resolved).map_err(|e| SceneFileError::Read {
@@ -731,32 +734,32 @@ impl EditorSession {
             .map_err(|e| SceneFileError::Parse(e.to_string()))
     }
 
-    /// Wires animation from a retained glTF scene into the live world
-    /// (thin wrapper over [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)).
+    /// Wires animation from a retained glTF [`Model`](ornis_gltf::Model) into
+    /// the live world (thin wrapper over
+    /// [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)).
     ///
-    /// Mesh entities are already spawned in `loaded` order, so
-    /// `loaded.entities` zips with the pre-wire [`EditorSession::alive`]
-    /// prefix. Skeletal clips land on an [`Animator`] on the first mesh
+    /// Mesh entities are already spawned in primitive order (see
+    /// [`scene_from_model`](ornis_assets::scene_from_model)), so
+    /// `loaded.primitives` zips with the pre-wire [`EditorSession::alive`]
+    /// prefix. The first primitive of a node wins in the node map.
+    /// Skeletal clips land on an [`Animator`] on the first mesh
     /// entity (stand-in until a scene root is supplied). No skeletal
     /// cursor exists until `Animator::play`. Object players are inserted
     /// paused on the entities their tracks name. Created roots and
     /// playlists join `alive`.
     ///
     /// Returns the number of spawned animation entities (roots + playlists).
-    fn wire_gltf_animation(&mut self, loaded: &ornis_gltf::LoadedScene) -> usize {
+    fn wire_gltf_animation(&mut self, loaded: &ornis_gltf::Model) -> usize {
         if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
             return 0;
         }
         // Mesh-entity snapshot: `alive` grows below (roots + playlists), so
-        // the `loaded`-order zip must pin the pre-wire prefix.
+        // the primitive-order zip must pin the pre-wire prefix.
         let mesh_entities: Vec<Entity> = self.alive.clone();
-        // Loader-local handles are `Entity::new(node)` (see the `ornis-gltf`
-        // clip assembly): first mesh entity wins per node.
-        let mut node_to_entity: HashMap<Entity, Entity> = HashMap::new();
-        for (desc, entity) in loaded.entities.iter().zip(mesh_entities.iter()) {
-            node_to_entity
-                .entry(Entity::new(desc.node))
-                .or_insert(*entity);
+        // First mesh entity of a node wins (flat spawn has no mesh-less nodes).
+        let mut node_to_entity: HashMap<ornis_gltf::NodeIdx, Entity> = HashMap::new();
+        for (primitive, entity) in loaded.primitives.iter().zip(mesh_entities.iter()) {
+            node_to_entity.entry(primitive.node).or_insert(*entity);
         }
         let spawn = GltfSpawn {
             entities: mesh_entities,
@@ -2097,21 +2100,19 @@ mod tests {
     /// channel, not a dead API.
     #[test]
     fn drain_assets_replaces_world_on_tick() {
-        use ornis_assets::server::AssetServer;
         let mut world = EditorSession::new();
         assert_eq!(world.entity_count(), 0);
-        let mut server = AssetServer::new();
-        let a = server
+        let a = world
+            .world
+            .assets_mut()
             .load_scene_ron("Scene(name: \"a\", entities: [], lights: [], camera: (position: (0.0, 2.5, 9.0), target: (0.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), fov: 60.0, near: 0.1, far: 100.0), ambient: (0.1, 0.1, 0.1))")
             .expect("scene a loads");
         let version_before = world.version;
-        // Swap in a server holding one dirty scene, then tick.
-        world.assets = server;
-        assert!(world.assets.request_reload(a));
+        assert!(world.world.assets_mut().request_reload(a));
         assert!(world.tick(1.0 / 60.0), "asset reload must mark changed");
         assert!(world.version > version_before);
         assert_eq!(world.scene_name, "a");
-        assert!(world.assets.take_dirty().is_empty());
+        assert!(world.world.assets_mut().take_dirty().is_empty());
     }
 
     /// Invalid RON is a typed [`SceneLoadError`](ornis_assets::SceneLoadError),
@@ -3102,10 +3103,12 @@ mod tests {
     /// Hand-built animated source: node 0 skinned (single-joint skin), node
     /// 1 plain; one skeletal clip plus one object clip carrying an extra
     /// unmapped track (node 99) that the converter must drop.
-    fn animated_loaded() -> ornis_gltf::LoadedScene {
+    fn animated_loaded() -> ornis_gltf::Model {
+        use ornis_core::Transform;
         use ornis_gltf::{
             LoadedAnimClip, LoadedAnimTrack, LoadedJointTrack, LoadedKey, LoadedKeyTrack,
-            LoadedMaterial, LoadedMesh, LoadedScene, LoadedSkelClip, LoadedSkin,
+            LoadedMaterial, LoadedMesh, LoadedSkelClip, LoadedSkin, ModelNode, ModelPrimitive,
+            NodeIdx,
         };
         fn mesh(skinned: bool) -> LoadedMesh {
             LoadedMesh {
@@ -3128,21 +3131,34 @@ mod tests {
                 emissive_texture: None,
             }
         }
-        fn entity(name: &str, node: u32, skinned: bool) -> ornis_gltf::LoadedEntity {
-            ornis_gltf::LoadedEntity {
-                name: name.into(),
-                node,
-                translation: [0.0, 0.0, 0.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [1.0, 1.0, 1.0],
-                mesh: mesh(skinned),
-                skin: skinned.then_some(0),
-                material: material(),
+        fn node(name: &str, primitives: Vec<usize>, skin: Option<usize>) -> ModelNode {
+            ModelNode {
+                name: Some(name.into()),
+                parent: None,
+                local: Transform::IDENTITY,
+                primitives,
+                skin,
             }
         }
-        LoadedScene {
+        ornis_gltf::Model {
             name: "anim-fixture".into(),
-            entities: vec![entity("skinned", 0, true), entity("plain", 1, false)],
+            nodes: vec![
+                node("skinned", vec![0], Some(0)),
+                node("plain", vec![1], None),
+            ],
+            roots: vec![NodeIdx(0), NodeIdx(1)],
+            primitives: vec![
+                ModelPrimitive {
+                    node: NodeIdx(0),
+                    mesh: mesh(true),
+                    material: material(),
+                },
+                ModelPrimitive {
+                    node: NodeIdx(1),
+                    mesh: mesh(false),
+                    material: material(),
+                },
+            ],
             skins: vec![LoadedSkin {
                 parents: vec![-1],
                 inverse_bind: vec![[
@@ -3158,6 +3174,7 @@ mod tests {
                 duration: 1.0,
                 tracks: vec![LoadedJointTrack {
                     joint: 0,
+                    node: NodeIdx(0),
                     translation: LoadedKeyTrack::linear(vec![
                         LoadedKey {
                             time: 0.0,
@@ -3178,7 +3195,7 @@ mod tests {
                 looping: true,
                 tracks: vec![
                     LoadedAnimTrack {
-                        entity: Entity::new(1),
+                        node: NodeIdx(1),
                         translation: LoadedKeyTrack::linear(vec![LoadedKey {
                             time: 0.0,
                             value: [0.0, 0.0, 0.0],
@@ -3187,7 +3204,7 @@ mod tests {
                         scale: LoadedKeyTrack::linear(Vec::new()),
                     },
                     LoadedAnimTrack {
-                        entity: Entity::new(99),
+                        node: NodeIdx(99),
                         translation: LoadedKeyTrack::linear(vec![LoadedKey {
                             time: 0.0,
                             value: [5.0, 5.0, 5.0],
@@ -3280,8 +3297,8 @@ mod tests {
         bare.skins.clear();
         bare.skel_clips.clear();
         bare.anim_clips.clear();
-        for entity in &mut bare.entities {
-            entity.skin = None;
+        for node in &mut bare.nodes {
+            node.skin = None;
         }
         assert_eq!(world.wire_gltf_animation(&bare), 0);
         assert_eq!(world.entity_count(), 2);

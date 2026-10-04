@@ -18,7 +18,7 @@ bytemuck = { version = "1", features = ["derive"] }
 mutants = "0.0.4"
 # F0 (audit 2026-08-22, §10): component registry JSON operations —
 # without derive in main code (derive is pulled in by tests below).
-serde = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 # Typed errors (`thiserror::Error` derives on registry/mutation/schedule errors).
 thiserror = "2.0"

@@ -1,6 +1,6 @@
 //! Document traversal and primitive decoding behind [`load_slice`]/[`load_path`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use gltf::accessor::DataType;
@@ -12,11 +12,9 @@ use gltf::{Buffer, Document, Gltf, Node, Primitive, Skin};
 use crate::anim::{assemble_clips, node_to_joint_map};
 use crate::base64;
 use crate::geom::{self, Mat4};
+use crate::model::{Model, ModelNode, ModelPrimitive, NodeIdx, transform_from_decomposed};
 use crate::textures::resolve_images;
-use crate::{
-    ImportError, ImportStats, LoadedEntity, LoadedImage, LoadedMaterial, LoadedMesh, LoadedScene,
-    LoadedSkin,
-};
+use crate::{ImportError, ImportStats, LoadedImage, LoadedMaterial, LoadedMesh, LoadedSkin};
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
@@ -40,7 +38,7 @@ const NEAR_ZERO: f32 = 1e-6;
 ///
 /// [`ImportError::Parse`] on malformed bytes, [`ImportError::NoScene`] on a
 /// sceneless document, buffer errors as documented per variant.
-pub fn load_slice(bytes: &[u8]) -> Result<LoadedScene, ImportError> {
+pub fn load_slice(bytes: &[u8]) -> Result<Model, ImportError> {
     let gltf = Gltf::from_slice(bytes).map_err(|error| ImportError::Parse {
         message: error.to_string(),
     })?;
@@ -58,7 +56,7 @@ pub fn load_slice(bytes: &[u8]) -> Result<LoadedScene, ImportError> {
 /// # Errors
 ///
 /// Same as [`load_slice`], plus [`ImportError::Io`] for unreadable files.
-pub fn load_path(path: &Path) -> Result<LoadedScene, ImportError> {
+pub fn load_path(path: &Path) -> Result<Model, ImportError> {
     let bytes = std::fs::read(path)?;
     let gltf = Gltf::from_slice(&bytes).map_err(|error| ImportError::Parse {
         message: error.to_string(),
@@ -188,12 +186,13 @@ pub(crate) fn short_head(uri: &str) -> String {
     uri.chars().take(48).collect()
 }
 
-/// Traverses the picked scene, flattening node hierarchies to entities.
+/// Traverses the picked scene and keeps the node tree (local TRS, parents,
+/// mesh-less nodes included).
 fn import_gltf(
     gltf: &Gltf,
     buffers: &[Vec<u8>],
     images: &[LoadedImage],
-) -> Result<LoadedScene, ImportError> {
+) -> Result<Model, ImportError> {
     let document = &gltf.document;
     let scene = document
         .default_scene()
@@ -201,7 +200,7 @@ fn import_gltf(
         .ok_or(ImportError::NoScene)?;
     let mut import = Import::new(buffers, images, parent_map(document));
     for node in scene.nodes() {
-        import.visit_node(&node, &geom::IDENTITY);
+        import.visit_node(&node, None);
     }
     if import.truncated_influences {
         eprintln!(
@@ -211,11 +210,18 @@ fn import_gltf(
         );
     }
     let node_to_joint = node_to_joint_map(document);
-    let (skel_clips, anim_clips) =
-        assemble_clips(document, buffers, &node_to_joint, &mut import.stats);
-    Ok(LoadedScene {
+    let (skel_clips, anim_clips) = assemble_clips(
+        document,
+        buffers,
+        &node_to_joint,
+        &import.doc_to_model,
+        &mut import.stats,
+    );
+    Ok(Model {
         name: scene.name().unwrap_or("scene").to_string(),
-        entities: import.entities,
+        nodes: import.nodes,
+        roots: import.roots,
+        primitives: import.primitives,
         skins: import.skins,
         skel_clips,
         anim_clips,
@@ -235,15 +241,24 @@ fn parent_map(document: &Document) -> HashMap<usize, usize> {
     map
 }
 
-/// Traversal state: output entities plus counters.
+/// Traversal state: node tree, primitives, and counters.
 struct Import<'a> {
     /// Resolved buffer bytes indexed by document buffer index.
     buffers: &'a [Vec<u8>],
     /// Resolved image pixels indexed by document image index.
     images: &'a [LoadedImage],
-    /// Finished entities in traversal order.
-    entities: Vec<LoadedEntity>,
-    /// Resolved skins in document order (see [`LoadedScene::skins`]).
+    /// Scene nodes in topological (preorder) order.
+    nodes: Vec<ModelNode>,
+    /// Scene roots, in glTF scene order.
+    roots: Vec<NodeIdx>,
+    /// Imported primitives, in traversal order.
+    primitives: Vec<ModelPrimitive>,
+    /// glTF document node index → [`NodeIdx`].
+    doc_to_model: HashMap<usize, NodeIdx>,
+    /// Document nodes already placed (a second parent edge is a cycle or a
+    /// shared child; the first parent wins and the walk does not recurse).
+    seen: HashSet<usize>,
+    /// Resolved skins in first-use order (see [`Model::skins`]).
     skins: Vec<LoadedSkin>,
     /// Document skin index → [`Import::skins`] position.
     skin_index: HashMap<usize, usize>,
@@ -266,7 +281,11 @@ impl<'a> Import<'a> {
         Self {
             buffers,
             images,
-            entities: Vec::new(),
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            primitives: Vec::new(),
+            doc_to_model: HashMap::new(),
+            seen: HashSet::new(),
             skins: Vec::new(),
             skin_index: HashMap::new(),
             parents,
@@ -275,42 +294,58 @@ impl<'a> Import<'a> {
         }
     }
 
-    /// Visits a node: emits one entity per mesh primitive, then recurses
-    /// into children with the composed world matrix.
-    fn visit_node(&mut self, node: &Node<'_>, parent: &Mat4) {
+    /// Visits a node: records local TRS and parent, attaches primitives,
+    /// then recurses into children. Mesh-less nodes are kept.
+    ///
+    /// A node already placed (cycle, or a child listed twice) is skipped
+    /// so the walk stays finite and parent indices stay topological.
+    fn visit_node(&mut self, node: &Node<'_>, parent: Option<NodeIdx>) {
+        if !self.seen.insert(node.index()) {
+            return;
+        }
         self.stats.nodes_visited += 1;
-        let world = geom::mat_mul(parent, &local_matrix(&node.transform()));
+        let index = NodeIdx(self.nodes.len() as u32);
+        self.doc_to_model.insert(node.index(), index);
+        if parent.is_none() {
+            self.roots.push(index);
+        }
+        let skin = node.skin().and_then(|skin| self.resolve_skin(&skin));
+        self.nodes.push(ModelNode {
+            name: node.name().map(str::to_string),
+            parent,
+            local: local_transform(node),
+            primitives: Vec::new(),
+            skin,
+        });
         if let Some(mesh) = node.mesh() {
-            let mesh_index = mesh.index();
-            let mesh_name = mesh.name().map(str::to_string);
             for primitive in mesh.primitives() {
                 self.stats.primitives_total += 1;
-                if let Some(entity) =
-                    self.import_primitive(node, mesh_index, &mesh_name, &primitive, &world)
-                {
+                if let Some((loaded_mesh, material)) = self.import_primitive(&primitive) {
                     self.stats.entities += 1;
-                    self.entities.push(entity);
+                    let primitive_index = self.primitives.len();
+                    self.primitives.push(ModelPrimitive {
+                        node: index,
+                        mesh: loaded_mesh,
+                        material,
+                    });
+                    self.nodes[index.index()].primitives.push(primitive_index);
                 }
             }
         }
         for child in node.children() {
-            self.visit_node(&child, &world);
+            self.visit_node(&child, Some(index));
         }
     }
 
-    /// Decodes one primitive to an entity, or counts a skip (never a stub).
+    /// Decodes one primitive, or counts a skip (never a stub).
     ///
     /// Skinned primitives (`JOINTS_0`/`WEIGHTS_0`) import like classic ones
     /// plus the influence arrays; only malformed skin attributes skip the
-    /// primitive ([`ImportStats::skipped_skinned`]).
+    /// primitive ([`ImportStats::skipped_skinned`]). Pose stays on the node.
     fn import_primitive(
         &mut self,
-        node: &Node<'_>,
-        mesh_index: usize,
-        mesh_name: &Option<String>,
         primitive: &Primitive<'_>,
-        world: &Mat4,
-    ) -> Option<LoadedEntity> {
+    ) -> Option<(LoadedMesh, LoadedMaterial)> {
         if primitive.mode() != gltf::mesh::Mode::Triangles {
             self.stats.skipped_non_triangle += 1;
             return None;
@@ -389,16 +424,9 @@ impl<'a> Import<'a> {
             .read_tex_coords(0)
             .map(collect_tex_coords)
             .filter(|uvs: &Vec<[f32; 2]>| uvs.len() == vertex_count);
-        let (translation, rotation, scale) = geom::decompose(world);
         let (joints, weights) = influences.unzip();
-        let skin = node.skin().and_then(|skin| self.resolve_skin(&skin));
-        Some(LoadedEntity {
-            name: entity_name(node, mesh_name, mesh_index, primitive.index()),
-            node: node.index() as u32,
-            translation,
-            rotation,
-            scale,
-            mesh: LoadedMesh {
+        Some((
+            LoadedMesh {
                 positions,
                 indices,
                 normals,
@@ -406,9 +434,8 @@ impl<'a> Import<'a> {
                 joints,
                 weights,
             },
-            skin,
-            material: read_material(primitive, self.images),
-        })
+            read_material(primitive, self.images),
+        ))
     }
 
     /// Resolves a node skin to the scene-level [`LoadedSkin`] table,
@@ -629,6 +656,12 @@ fn normalize_weights(weights: [f32; MAX_INFLUENCES]) -> [f32; MAX_INFLUENCES] {
     }
 }
 
+/// Local node TRS. An explicit matrix is decomposed (mirror bakes into
+/// scale, same as the old world-matrix flattener).
+fn local_transform(node: &Node<'_>) -> ornis_core::Transform {
+    transform_from_decomposed(geom::decompose(&local_matrix(&node.transform())))
+}
+
 /// Local node matrix: TRS composes through the crate convention, an
 /// explicit matrix passes through verbatim.
 fn local_matrix(transform: &Transform) -> Mat4 {
@@ -640,22 +673,6 @@ fn local_matrix(transform: &Transform) -> Mat4 {
             scale,
         } => geom::mat_from_trs(translation, rotation, scale),
     }
-}
-
-/// Entity name: node name → mesh name → `mesh_{mesh}_{primitive}` fallback.
-fn entity_name(
-    node: &Node<'_>,
-    mesh_name: &Option<String>,
-    mesh_index: usize,
-    primitive_index: usize,
-) -> String {
-    if let Some(name) = node.name() {
-        return name.to_string();
-    }
-    if let Some(name) = mesh_name {
-        return name.clone();
-    }
-    format!("mesh_{mesh_index}_{primitive_index}")
 }
 
 /// Scalar PBR factors plus decoded texture slots; untextured slots are `None`.
@@ -708,29 +725,46 @@ mod tests {
         FixtureWeightsKind, build_glb, build_gltf, load_triangle, skinned_triangle, triangle,
     };
 
+    fn local_arrays(transform: &ornis_core::Transform) -> ([f32; 3], [f32; 4], [f32; 3]) {
+        (
+            transform.translation.to_array(),
+            transform.rotation.get().to_array(),
+            transform.scale.to_array(),
+        )
+    }
+
     #[test]
     fn parses_triangle_glb_verbatim() {
         let scene = load_triangle();
         assert_eq!(scene.name, "tri-scene");
-        assert_eq!(scene.entities.len(), 1);
-        let entity = &scene.entities[0];
-        assert_eq!(entity.name, "tri-node");
-        assert_eq!(entity.translation, [1.0, 2.0, 3.0]);
-        assert_eq!(entity.rotation, [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(entity.scale, [1.0, 1.0, 1.0]);
+        assert_eq!(scene.primitives.len(), 1);
+        assert_eq!(scene.nodes.len(), 1);
+        assert_eq!(scene.nodes[0].name.as_deref(), Some("tri-node"));
+        assert_eq!(scene.nodes[0].parent, None);
+        assert_eq!(scene.roots, vec![crate::NodeIdx(0)]);
+        let (translation, rotation, scale) = local_arrays(&scene.nodes[0].local);
+        assert_eq!(translation, [1.0, 2.0, 3.0]);
+        assert_eq!(rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(scale, [1.0, 1.0, 1.0]);
         assert_eq!(
-            entity.mesh.positions,
+            scene.primitives[0].mesh.positions,
             vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         );
-        assert_eq!(entity.mesh.indices, vec![0, 1, 2]);
-        assert_eq!(entity.mesh.normals, Some(vec![[0.0, 0.0, 1.0]; 3]));
+        assert_eq!(scene.primitives[0].mesh.indices, vec![0, 1, 2]);
         assert_eq!(
-            entity.mesh.uvs,
+            scene.primitives[0].mesh.normals,
+            Some(vec![[0.0, 0.0, 1.0]; 3])
+        );
+        assert_eq!(
+            scene.primitives[0].mesh.uvs,
             Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
         );
-        assert_eq!(entity.mesh.resolved_normals(), vec![[0.0, 0.0, 1.0]; 3]);
         assert_eq!(
-            entity.mesh.resolved_uvs(),
+            scene.primitives[0].mesh.resolved_normals(),
+            vec![[0.0, 0.0, 1.0]; 3]
+        );
+        assert_eq!(
+            scene.primitives[0].mesh.resolved_uvs(),
             vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]
         );
         assert_eq!(scene.stats.nodes_visited, 1);
@@ -743,12 +777,12 @@ mod tests {
     fn parses_same_document_as_gltf_data_uri() {
         let json = build_gltf(&triangle());
         let scene = load_slice(json.as_bytes()).expect("data-uri gltf parses");
-        assert_eq!(scene.entities.len(), 1);
+        assert_eq!(scene.primitives.len(), 1);
         assert_eq!(
-            scene.entities[0].mesh.positions,
+            scene.primitives[0].mesh.positions,
             vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         );
-        assert_eq!(scene.entities[0].mesh.indices, vec![0, 1, 2]);
+        assert_eq!(scene.primitives[0].mesh.indices, vec![0, 1, 2]);
         assert!(scene.stats.is_clean());
     }
 
@@ -757,7 +791,7 @@ mod tests {
         let mut fixture = triangle();
         fixture.indices = FixtureIndices::Sequential;
         let scene = load_slice(&build_glb(&fixture)).expect("unindexed parses");
-        assert_eq!(scene.entities[0].mesh.indices, vec![0, 1, 2]);
+        assert_eq!(scene.primitives[0].mesh.indices, vec![0, 1, 2]);
         assert!(scene.stats.is_clean());
     }
 
@@ -770,7 +804,7 @@ mod tests {
             let mut fixture = triangle();
             fixture.indices = indices;
             let scene = load_slice(&build_glb(&fixture)).expect("indices decode");
-            assert_eq!(scene.entities[0].mesh.indices, vec![0, 1, 2]);
+            assert_eq!(scene.primitives[0].mesh.indices, vec![0, 1, 2]);
             assert!(scene.stats.is_clean());
         }
     }
@@ -782,16 +816,16 @@ mod tests {
         fixture.nodes[0].rotation = Some([0.0, half.sin(), 0.0, half.cos()]);
         fixture.nodes[0].scale = Some([2.0, 0.5, 4.0]);
         let scene = load_slice(&build_glb(&fixture)).expect("trs parses");
-        let entity = &scene.entities[0];
-        assert_eq!(entity.translation, [1.0, 2.0, 3.0]);
-        // World TRS round-trips through matrices: exact for translation,
+        let (translation, rotation, scale) = local_arrays(&scene.nodes[0].local);
+        assert_eq!(translation, [1.0, 2.0, 3.0]);
+        // Local TRS round-trips through matrices: exact for translation,
         // epsilon for rotation/scale.
         let want_rotation = [0.0, half.sin(), 0.0, half.cos()];
-        for (got, want) in entity.rotation.iter().zip(want_rotation) {
-            assert!((got - want).abs() < 1e-6, "rotation {:?}", entity.rotation);
+        for (got, want) in rotation.iter().zip(want_rotation) {
+            assert!((got - want).abs() < 1e-6, "rotation {rotation:?}");
         }
-        for (got, want) in entity.scale.iter().zip([2.0, 0.5, 4.0]) {
-            assert!((got - want).abs() < 1e-6, "scale {:?}", entity.scale);
+        for (got, want) in scale.iter().zip([2.0, 0.5, 4.0]) {
+            assert!((got - want).abs() < 1e-6, "scale {scale:?}");
         }
     }
 
@@ -821,10 +855,22 @@ mod tests {
             },
         ];
         let scene = load_slice(&build_glb(&fixture)).expect("hierarchy parses");
-        assert_eq!(scene.entities.len(), 1);
-        assert_eq!(scene.entities[0].name, "child");
-        assert_eq!(scene.entities[0].translation, [10.0, 5.0, 0.0]);
+        assert_eq!(scene.nodes.len(), 2, "mesh-less parent is kept");
+        assert!(scene.nodes[0].primitives.is_empty());
+        assert_eq!(scene.nodes[0].parent, None);
+        assert_eq!(scene.primitives.len(), 1);
+        assert_eq!(scene.primitives[0].node, crate::NodeIdx(1));
+        assert_eq!(scene.nodes[1].name.as_deref(), Some("child"));
+        assert_eq!(scene.nodes[1].parent, Some(crate::NodeIdx(0)));
+        assert_eq!(
+            scene
+                .world_transform(crate::NodeIdx(1))
+                .translation
+                .to_array(),
+            [10.0, 5.0, 0.0]
+        );
         assert_eq!(scene.stats.nodes_visited, 2);
+        assert!(scene.children(crate::NodeIdx(0)).eq([crate::NodeIdx(1)]));
     }
 
     #[test]
@@ -839,10 +885,10 @@ mod tests {
             7.0, 8.0, 9.0, 1.0,
         ]);
         let scene = load_slice(&build_glb(&fixture)).expect("matrix parses");
-        let entity = &scene.entities[0];
-        assert_eq!(entity.translation, [7.0, 8.0, 9.0]);
-        assert_eq!(entity.rotation, [0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(entity.scale, [1.0, 1.0, 1.0]);
+        let (translation, rotation, scale) = local_arrays(&scene.nodes[0].local);
+        assert_eq!(translation, [7.0, 8.0, 9.0]);
+        assert_eq!(rotation, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(scale, [1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -851,19 +897,22 @@ mod tests {
         // influences import verbatim (already canonical here) and the node
         // `skin` resolves to the scene-level table.
         let scene = load_slice(&build_glb(&skinned_triangle())).expect("skinned parses");
-        assert_eq!(scene.entities.len(), 1);
-        let entity = &scene.entities[0];
+        assert_eq!(scene.primitives.len(), 1);
         assert_eq!(
-            entity.mesh.joints,
+            scene.primitives[0].mesh.joints,
             Some(vec![[0, 0, 0, 0]; 3]),
             "u8 joints widen to u16"
         );
         assert_eq!(
-            entity.mesh.weights,
+            scene.primitives[0].mesh.weights,
             Some(vec![[1.0, 0.0, 0.0, 0.0]; 3]),
             "unit weights stay canonical"
         );
-        assert_eq!(entity.skin, Some(0), "node skin links to skins[0]");
+        assert_eq!(
+            scene.nodes[scene.primitives[0].node.index()].skin,
+            Some(0),
+            "node skin links to skins[0]"
+        );
         assert_eq!(scene.skins.len(), 1);
         assert_eq!(scene.skins[0].parents, vec![-1], "single joint is a root");
         assert_eq!(scene.skins[0].joint_names, vec!["tri-node".to_string()]);
@@ -877,9 +926,9 @@ mod tests {
     fn unskinned_primitive_has_no_influences() {
         // Classic path is untouched: no skin attributes, no skin link.
         let scene = load_triangle();
-        assert_eq!(scene.entities[0].mesh.joints, None);
-        assert_eq!(scene.entities[0].mesh.weights, None);
-        assert_eq!(scene.entities[0].skin, None);
+        assert_eq!(scene.primitives[0].mesh.joints, None);
+        assert_eq!(scene.primitives[0].mesh.weights, None);
+        assert_eq!(scene.nodes[scene.primitives[0].node.index()].skin, None);
         assert!(scene.skins.is_empty());
     }
 
@@ -896,7 +945,7 @@ mod tests {
         ];
         let scene = load_slice(&build_glb(&fixture)).expect("weights parse");
         assert_eq!(
-            scene.entities[0].mesh.weights,
+            scene.primitives[0].mesh.weights,
             Some(vec![
                 [0.5, 0.5, 0.0, 0.0],
                 [1.0, 0.0, 0.0, 0.0],
@@ -919,11 +968,11 @@ mod tests {
         influence.weights = vec![[1.0, 0.0, 0.0, 0.0]; 3];
         let scene = load_slice(&build_glb(&fixture)).expect("widths parse");
         assert_eq!(
-            scene.entities[0].mesh.joints,
+            scene.primitives[0].mesh.joints,
             Some(vec![[1, 2, 3, 4], [0, 0, 0, 0], [5, 6, 7, 8]])
         );
         assert_eq!(
-            scene.entities[0].mesh.weights,
+            scene.primitives[0].mesh.weights,
             Some(vec![[1.0, 0.0, 0.0, 0.0]; 3])
         );
         assert!(scene.stats.is_clean());
@@ -932,7 +981,7 @@ mod tests {
         influence.weights_kind = FixtureWeightsKind::U16;
         let scene = load_slice(&build_glb(&fixture)).expect("u16 weights parse");
         assert_eq!(
-            scene.entities[0].mesh.weights,
+            scene.primitives[0].mesh.weights,
             Some(vec![[1.0, 0.0, 0.0, 0.0]; 3])
         );
         assert!(scene.stats.is_clean());
@@ -959,8 +1008,12 @@ mod tests {
         ));
         let scene = load_slice(&build_glb(&fixture)).expect("two sets parse");
         let (joints, weights) = (
-            scene.entities[0].mesh.joints.clone().expect("joints kept"),
-            scene.entities[0]
+            scene.primitives[0]
+                .mesh
+                .joints
+                .clone()
+                .expect("joints kept"),
+            scene.primitives[0]
                 .mesh
                 .weights
                 .clone()
@@ -1017,8 +1070,8 @@ mod tests {
             skeleton: Some(0),
         }];
         let scene = load_slice(&build_glb(&fixture)).expect("hierarchy skin parses");
-        assert_eq!(scene.entities.len(), 1);
-        assert_eq!(scene.entities[0].skin, Some(0));
+        assert_eq!(scene.primitives.len(), 1);
+        assert_eq!(scene.nodes[scene.primitives[0].node.index()].skin, Some(0));
         assert_eq!(scene.skins[0].parents, vec![-1, 0]);
         assert_eq!(
             scene.skins[0].joint_names,
@@ -1057,7 +1110,7 @@ mod tests {
         let mut fixture = skinned_triangle();
         fixture.animations = 2;
         let scene = load_slice(&build_glb(&fixture)).expect("animated parses");
-        assert_eq!(scene.entities.len(), 1, "skin still imports");
+        assert_eq!(scene.primitives.len(), 1, "skin still imports");
         assert_eq!(scene.skel_clips.len(), 2);
         assert!(scene.anim_clips.is_empty());
         for clip in &scene.skel_clips {
@@ -1065,6 +1118,7 @@ mod tests {
             assert_eq!(clip.tracks.len(), 1);
             let track = &clip.tracks[0];
             assert_eq!(track.joint, 0);
+            assert_eq!(track.node, crate::NodeIdx(0));
             assert_eq!(track.translation.keys.len(), 2);
             assert_eq!(track.translation.keys[0].time, 0.0);
             assert_eq!(track.translation.keys[1].time, 1.0);
@@ -1097,7 +1151,7 @@ mod tests {
         assert!(clip.looping);
         assert_eq!(clip.tracks.len(), 1);
         let track = &clip.tracks[0];
-        assert_eq!(track.entity, ornis_core::Entity::new(0));
+        assert_eq!(track.node, crate::NodeIdx(0));
         assert_eq!(track.translation.keys.len(), 2);
         assert_eq!(track.translation.keys[1].value, [1.0, 0.0, 0.0]);
         assert_eq!(
@@ -1375,7 +1429,7 @@ mod tests {
             extra: None,
         });
         let scene = load_slice(&build_glb(&fixture)).expect("mismatched parses");
-        assert!(scene.entities.is_empty());
+        assert!(scene.primitives.is_empty());
         assert_eq!(scene.stats.skipped_skinned, 1);
         assert!(!scene.stats.is_clean());
     }
@@ -1385,7 +1439,7 @@ mod tests {
         let mut fixture = triangle();
         fixture.mode = Some(1);
         let scene = load_slice(&build_glb(&fixture)).expect("lines parses");
-        assert!(scene.entities.is_empty());
+        assert!(scene.primitives.is_empty());
         assert_eq!(scene.stats.skipped_non_triangle, 1);
     }
 
@@ -1395,7 +1449,7 @@ mod tests {
         fixture.normals = None;
         fixture.uvs = None;
         let scene = load_slice(&build_glb(&fixture)).expect("bare soup parses");
-        let mesh = &scene.entities[0].mesh;
+        let mesh = &scene.primitives[0].mesh;
         assert_eq!(mesh.normals, None);
         assert_eq!(mesh.uvs, None);
         // (1,0,0)×(0,1,0) = (0,0,1): recomputed, not transported.
@@ -1412,7 +1466,7 @@ mod tests {
         let mut fixture = triangle();
         fixture.indices = FixtureIndices::U16(vec![0, 1, 9]);
         let scene = load_slice(&build_glb(&fixture)).expect("bad index parses");
-        assert!(scene.entities.is_empty());
+        assert!(scene.primitives.is_empty());
         assert_eq!(scene.stats.skipped_bad_index, 1);
     }
 
@@ -1423,7 +1477,7 @@ mod tests {
         fixture.normals = None;
         fixture.uvs = None;
         let scene = load_slice(&build_glb(&fixture)).expect("empty parses");
-        assert!(scene.entities.is_empty());
+        assert!(scene.primitives.is_empty());
         assert_eq!(scene.stats.skipped_empty, 1);
     }
 
@@ -1435,20 +1489,24 @@ mod tests {
         fixture.uvs = Some(vec![[0.0, 0.0]; 4]);
         fixture.indices = FixtureIndices::Sequential;
         let scene = load_slice(&build_glb(&fixture)).expect("quad soup parses");
-        assert!(scene.entities.is_empty());
+        assert!(scene.primitives.is_empty());
         assert_eq!(scene.stats.skipped_bad_index, 1);
     }
 
     #[test]
-    fn entity_naming_falls_back_to_mesh_then_position() {
+    fn unnamed_node_stores_none_and_still_imports() {
+        // Mesh-name fallbacks live in `scene_from_model` (the node itself
+        // only stores the glTF name). An unnamed node stays `None`.
         let mut fixture = triangle();
         fixture.nodes[0].name = None;
-        let scene = load_slice(&build_glb(&fixture)).expect("mesh-named parses");
-        assert_eq!(scene.entities[0].name, "tri-mesh");
+        let scene = load_slice(&build_glb(&fixture)).expect("unnamed parses");
+        assert_eq!(scene.nodes[0].name, None);
+        assert_eq!(scene.primitives.len(), 1);
 
         fixture.mesh_name = None;
         let scene = load_slice(&build_glb(&fixture)).expect("anonymous parses");
-        assert_eq!(scene.entities[0].name, "mesh_0_0");
+        assert_eq!(scene.nodes[0].name, None);
+        assert_eq!(scene.primitives[0].node, crate::NodeIdx(0));
     }
 
     #[test]
@@ -1461,7 +1519,7 @@ mod tests {
             emission: [1.0, 0.0, 0.0],
         });
         let scene = load_slice(&build_glb(&fixture)).expect("material parses");
-        let material = &scene.entities[0].material;
+        let material = &scene.primitives[0].material;
         assert_eq!(material.base_color, [0.25, 0.5, 1.0]);
         assert_eq!(material.metallic, 0.0);
         assert_eq!(material.roughness, 0.3);
@@ -1469,13 +1527,13 @@ mod tests {
         assert!(!material.is_metallic());
 
         let scene = load_triangle();
-        assert!(scene.entities[0].material.is_metallic());
+        assert!(scene.primitives[0].material.is_metallic());
     }
 
     #[test]
     fn into_custom_drops_attributes() {
         let scene = load_triangle();
-        let (positions, indices) = scene.entities[0].mesh.clone().into_custom();
+        let (positions, indices) = scene.primitives[0].mesh.clone().into_custom();
         assert_eq!(positions.len(), 3);
         assert_eq!(indices, vec![0, 1, 2]);
     }
@@ -1484,7 +1542,7 @@ mod tests {
     fn triangles_view_round_trips_raw() {
         use crate::{TriIndex, Triangle};
         let scene = load_triangle();
-        let tris = scene.entities[0].mesh.triangles();
+        let tris = scene.primitives[0].mesh.triangles();
         assert_eq!(tris, vec![Triangle::from_raw([0, 1, 2])]);
         assert_eq!(tris[0].as_u32(), [0, 1, 2]);
         assert_eq!(tris[0].index(2), TriIndex::from_raw(2));
@@ -1547,7 +1605,7 @@ mod tests {
         let skipped = load_slice(&build_glb(&fixture)).expect("lines load");
         assert_eq!(skipped.stats.primitives_total, 2);
         assert_eq!(skipped.stats.skipped_non_triangle, 2);
-        assert!(skipped.entities.is_empty());
+        assert!(skipped.primitives.is_empty());
 
         fixture.mode = None;
         let imported = load_slice(&build_glb(&fixture)).expect("triangles load");
@@ -1570,15 +1628,15 @@ mod tests {
         let glb_path = dir.join("tri.glb");
         std::fs::write(&glb_path, build_glb(&triangle())).expect("write glb");
         let glb_scene = load_path(&glb_path).expect("glb loads from path");
-        assert_eq!(glb_scene.entities.len(), 1);
+        assert_eq!(glb_scene.primitives.len(), 1);
 
         let (json, bin) = fixtures::build_external_parts();
         std::fs::write(dir.join("ext.gltf"), json).expect("write gltf");
         std::fs::write(dir.join("mesh.bin"), bin).expect("write bin");
         let gltf_scene = load_path(&dir.join("ext.gltf")).expect("external gltf loads");
-        assert_eq!(gltf_scene.entities.len(), 1);
+        assert_eq!(gltf_scene.primitives.len(), 1);
         assert_eq!(
-            gltf_scene.entities[0].mesh.positions,
+            gltf_scene.primitives[0].mesh.positions,
             vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
         );
         std::fs::remove_dir_all(&dir).expect("temp cleanup");
@@ -1697,7 +1755,147 @@ mod tests {
         std::fs::write(dir.join("pct.gltf"), json).expect("write gltf");
         std::fs::write(dir.join("my mesh.bin"), bin).expect("write bin");
         let scene = load_path(&dir.join("pct.gltf")).expect("percent-decoded sibling loads");
-        assert_eq!(scene.entities.len(), 1);
+        assert_eq!(scene.primitives.len(), 1);
         std::fs::remove_dir_all(&dir).expect("temp cleanup");
+    }
+
+    #[test]
+    fn meshless_parent_keeps_its_animation_track() {
+        // Node 0 is a transform-only parent; the fixture clip targets it.
+        // The track must survive and address that node, not be dropped
+        // because the parent has no mesh.
+        let mut fixture = triangle();
+        fixture.nodes = vec![
+            FixtureNode {
+                name: Some("pivot".to_string()),
+                mesh: false,
+                skin: None,
+                translation: Some([3.0, 0.0, 0.0]),
+                rotation: None,
+                scale: None,
+                matrix: None,
+                children: vec![1],
+            },
+            FixtureNode {
+                name: Some("child".to_string()),
+                mesh: true,
+                skin: None,
+                translation: Some([0.0, 4.0, 0.0]),
+                rotation: None,
+                scale: None,
+                matrix: None,
+                children: Vec::new(),
+            },
+        ];
+        fixture.roots = vec![0];
+        fixture.animations = 1;
+        let model = load_slice(&build_glb(&fixture)).expect("parent clip parses");
+        assert_eq!(model.nodes.len(), 2);
+        assert!(model.nodes[0].primitives.is_empty(), "parent has no mesh");
+        assert_eq!(model.node_by_name("pivot"), Some(crate::NodeIdx(0)));
+        assert_eq!(model.nodes[1].parent, Some(crate::NodeIdx(0)));
+        assert!(model.nodes[0].parent.is_none());
+        for (index, node) in model.nodes.iter().enumerate() {
+            if let Some(parent) = node.parent {
+                assert!(parent.index() < index, "parent before child");
+            }
+        }
+        assert_eq!(model.anim_clips.len(), 1);
+        assert!(model.skel_clips.is_empty());
+        assert_eq!(model.anim_clips[0].tracks.len(), 1);
+        assert_eq!(model.anim_clips[0].tracks[0].node, crate::NodeIdx(0));
+        assert_eq!(
+            model
+                .world_transform(crate::NodeIdx(1))
+                .translation
+                .to_array(),
+            [3.0, 4.0, 0.0]
+        );
+    }
+
+    /// Starter mannequin: `hand_r` (the file's spelling) sits under
+    /// `lowerarm_r`, has no mesh, and its world TRS matches the old
+    /// flattened matrix product. A skeletal track still addresses it.
+    #[test]
+    fn starter_hand_r_keeps_hierarchy_and_world_trs() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let bytes = std::fs::read(&path).expect("starter glb");
+        let model = load_slice(&bytes).expect("starter imports");
+        let hand = model.node_by_name("hand_r").expect("hand_r");
+        let parent = model.nodes[hand.index()]
+            .parent
+            .expect("hand_r has a parent");
+        assert_eq!(
+            model.nodes[parent.index()].name.as_deref(),
+            Some("lowerarm_r")
+        );
+        assert!(
+            model.nodes[hand.index()].primitives.is_empty(),
+            "hand_r is mesh-less"
+        );
+        assert!(
+            model.nodes.len() > model.primitives.len(),
+            "mesh-less nodes are present"
+        );
+        assert!(model.children(parent).any(|child| child == hand));
+        for (index, node) in model.nodes.iter().enumerate() {
+            if let Some(parent) = node.parent {
+                assert!(
+                    parent.index() < index,
+                    "node {index} parent {} is not earlier",
+                    parent.index()
+                );
+            }
+        }
+        for root in &model.roots {
+            assert!(model.nodes[root.index()].parent.is_none());
+        }
+
+        let gltf = gltf::Gltf::from_slice(&bytes).expect("reparse");
+        let document = &gltf.document;
+        let hand_doc = document
+            .nodes()
+            .find(|node| node.name() == Some("hand_r"))
+            .expect("document hand_r")
+            .index();
+        let (want_t, want_r, want_s) = geom::decompose(&document_world(document, hand_doc));
+        let got = model.world_transform(hand);
+        for (got, want) in got.translation.to_array().into_iter().zip(want_t) {
+            assert!((got - want).abs() < 1e-4, "translation {got} vs {want}");
+        }
+        for (got, want) in got.rotation.get().to_array().into_iter().zip(want_r) {
+            assert!((got - want).abs() < 1e-4, "rotation {got} vs {want}");
+        }
+        for (got, want) in got.scale.to_array().into_iter().zip(want_s) {
+            assert!((got - want).abs() < 1e-4, "scale {got} vs {want}");
+        }
+
+        assert!(
+            model
+                .skel_clips
+                .iter()
+                .any(|clip| clip.tracks.iter().any(|track| track.node == hand)),
+            "hand_r joint track is kept and addressed by node index"
+        );
+    }
+
+    /// Old flattener: parent world matrix times the node's raw local matrix.
+    fn document_world(document: &gltf::Document, index: usize) -> geom::Mat4 {
+        let parents = parent_map(document);
+        let nodes: Vec<gltf::Node<'_>> = document.nodes().collect();
+        let mut chain = vec![index];
+        let mut cursor = index;
+        while let Some(&parent) = parents.get(&cursor) {
+            chain.push(parent);
+            cursor = parent;
+        }
+        chain.reverse();
+        let mut world = geom::IDENTITY;
+        for node_index in chain {
+            let local = local_matrix(&nodes[node_index].transform());
+            world = geom::mat_mul(&world, &local);
+        }
+        world
     }
 }

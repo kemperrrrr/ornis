@@ -25,7 +25,8 @@ use glam::{Quat, Vec3};
 use ornis_assets::scene::MaterialDesc;
 use ornis_assets::scene::{MeshDesc, TransformDesc};
 use ornis_core::{
-    ComponentStore, Engine, Entity, FixedTime, Resources, SmartStore, System, SystemAccess,
+    ChildOf, ComponentStore, Engine, Entity, FixedTime, GlobalTransform, Resources, SmartStore,
+    System, SystemAccess, Transform, UnitQuat,
 };
 use ornis_editor::EditorOnly;
 use ornis_physics::soft_render::{MIN_TUBE_SIDES, tube_indices, tube_positions};
@@ -95,6 +96,7 @@ impl PhysicsRuntime {
     fn sync_in(
         &mut self,
         bodies: &ComponentStore<RigidBody>,
+        globals: Option<&ComponentStore<GlobalTransform>>,
         transforms: Option<&ComponentStore<TransformDesc>>,
         excluded: Option<&ComponentStore<EditorOnly>>,
     ) {
@@ -105,17 +107,13 @@ impl PhysicsRuntime {
                 continue;
             }
             if let Some(&handle) = self.bindings.get(&entity) {
-                self.sync_external_pose(
-                    handle,
-                    source,
-                    transforms.and_then(|lane| lane.get(entity)),
-                );
+                self.sync_external_pose(handle, source, world_pose(globals, transforms, entity));
                 continue;
             }
 
             let mut body = source.clone();
-            if let Some(transform) = transforms.and_then(|lane| lane.get(entity)) {
-                apply_transform_to_body(&mut body, transform);
+            if let Some((position, orientation)) = world_pose(globals, transforms, entity) {
+                apply_world_pose(&mut body, position, orientation);
             }
             let handle = self.solver.add_body(body);
             self.bindings.insert(entity, handle);
@@ -162,7 +160,7 @@ impl PhysicsRuntime {
         &mut self,
         handle: BodyHandle,
         source: &RigidBody,
-        transform: Option<&TransformDesc>,
+        pose: Option<(Vec3, Quat)>,
     ) {
         let Some(body) = self.solver.get_body_mut(handle) else {
             return;
@@ -177,9 +175,9 @@ impl PhysicsRuntime {
             body.angular_velocity = source.angular_velocity;
         }
         if matches!(body.body_type, BodyType::Static | BodyType::Kinematic)
-            && let Some(transform) = transform
+            && let Some((position, orientation)) = pose
         {
-            apply_transform_to_body(body, transform);
+            apply_world_pose(body, position, orientation);
         }
         // A newly edited body role/filter is reflected at the next sync
         // when the ECS source differs from the solver representation.
@@ -189,8 +187,8 @@ impl PhysicsRuntime {
             || body.is_trigger != source.is_trigger
         {
             *body = source.clone();
-            if let Some(transform) = transform {
-                apply_transform_to_body(body, transform);
+            if let Some((position, orientation)) = pose {
+                apply_world_pose(body, position, orientation);
             }
         }
     }
@@ -221,23 +219,91 @@ impl PhysicsRuntime {
         self.changed |= !self.soft_bindings.is_empty();
     }
 
-    fn sync_out(
-        &mut self,
-        bodies: &mut ComponentStore<RigidBody>,
-        transforms: &mut ComponentStore<TransformDesc>,
-    ) {
-        for (&entity, &handle) in &self.bindings {
-            let Some(body) = self.solver.get_body(handle) else {
-                continue;
-            };
-            if let Some(destination) = bodies.get_mut(entity) {
-                *destination = body.clone();
+    fn sync_out(&mut self, store: &SmartStore) {
+        let poses: Vec<(Entity, RigidBody)> = self
+            .bindings
+            .iter()
+            .filter_map(|(&entity, &handle)| {
+                self.solver
+                    .get_body(handle)
+                    .map(|body| (entity, body.clone()))
+            })
+            .collect();
+        let parents: Vec<(Entity, Entity)> = store
+            .read_lane::<ChildOf>()
+            .map(|lane| {
+                lane.entities
+                    .iter()
+                    .zip(lane.data.iter())
+                    .map(|(&child, link)| (child, link.parent()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let globals: Vec<(Entity, GlobalTransform)> = store
+            .read_lane::<GlobalTransform>()
+            .map(|lane| {
+                lane.entities
+                    .iter()
+                    .zip(lane.data.iter())
+                    .map(|(&entity, pose)| (entity, *pose))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let locals: Vec<(Entity, Transform)> = store
+            .read_lane::<Transform>()
+            .map(|lane| {
+                lane.entities
+                    .iter()
+                    .zip(lane.data.iter())
+                    .map(|(&entity, pose)| (entity, *pose))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(mut bodies) = store.write_lane::<RigidBody>() {
+            for (entity, body) in &poses {
+                if let Some(destination) = bodies.get_mut(*entity) {
+                    *destination = body.clone();
+                }
             }
-            if let Some(destination) = transforms.get_mut(entity) {
-                destination.translation = body.position;
-                // Degenerate solver orientation keeps the previous pose.
-                if let Some(rotation) = ornis_core::units::UnitQuat::normalize(body.orientation) {
-                    destination.rotation = rotation;
+        }
+        if let Some(mut transforms) = store.write_lane::<TransformDesc>() {
+            for (entity, body) in &poses {
+                if let Some(destination) = transforms.get_mut(*entity) {
+                    destination.translation = body.position;
+                    if let Some(rotation) = UnitQuat::normalize(body.orientation) {
+                        destination.rotation = rotation;
+                    }
+                }
+            }
+        }
+        if let Some(mut lane) = store.write_lane::<Transform>() {
+            for (entity, body) in &poses {
+                let Some(previous) = locals
+                    .iter()
+                    .find_map(|(candidate, pose)| (*candidate == *entity).then_some(*pose))
+                else {
+                    continue;
+                };
+                let world_rotation =
+                    UnitQuat::normalize(body.orientation).unwrap_or(previous.rotation);
+                let parent_global = parents
+                    .iter()
+                    .find_map(|(child, parent)| (*child == *entity).then_some(*parent))
+                    .and_then(|parent| {
+                        globals
+                            .iter()
+                            .find_map(|(candidate, pose)| (*candidate == parent).then_some(*pose))
+                    });
+                let local = match parent_global {
+                    Some(parent) => parent.to_local(body.position, world_rotation, previous),
+                    None => Transform {
+                        translation: body.position,
+                        rotation: world_rotation,
+                        scale: previous.scale,
+                    },
+                };
+                if let Some(destination) = lane.get_mut(*entity) {
+                    *destination = local;
                 }
             }
         }
@@ -311,7 +377,8 @@ impl PhysicsRuntime {
         meshes: &mut ComponentStore<MeshDesc>,
         transforms: &mut ComponentStore<TransformDesc>,
         ropes: Option<&ComponentStore<RopeMesh>>,
-    ) {
+    ) -> Vec<Entity> {
+        let mut pinned = Vec::new();
         for (&entity, &handle) in &self.soft_bindings {
             let Some(body) = self.solver.get_soft_body(handle) else {
                 continue;
@@ -344,6 +411,7 @@ impl PhysicsRuntime {
                     transform.rotation = ornis_core::units::UnitQuat::IDENTITY;
                     transform.scale = glam::Vec3::ONE;
                 }
+                pinned.push(entity);
                 continue;
             }
             let positions: Vec<[f32; VEC3_COMPONENTS]> = body
@@ -367,7 +435,9 @@ impl PhysicsRuntime {
                 transform.rotation = ornis_core::units::UnitQuat::IDENTITY;
                 transform.scale = glam::Vec3::ONE;
             }
+            pinned.push(entity);
         }
+        pinned
     }
 }
 
@@ -395,6 +465,8 @@ pub fn install_physics(engine: &mut Engine, gravity: Vec3) {
         .prepend_system(PhysicsStep)
         .prepend_system(SoftSyncIn)
         .prepend_system(PhysicsSyncIn);
+    // Last prepend runs first: world poses exist before sync-in reads them.
+    ornis_core::install_fixed_transform_propagation(engine);
 }
 
 /// ECS → physics synchronization system.
@@ -409,6 +481,7 @@ impl System for PhysicsSyncIn {
         SystemAccess::new()
             .reads::<SmartStore>()
             .reads_lane::<RigidBody>()
+            .reads_lane::<GlobalTransform>()
             .reads_lane::<TransformDesc>()
             .reads_lane::<EditorOnly>()
             .writes::<Mutex<PhysicsRuntime>>()
@@ -421,13 +494,19 @@ impl System for PhysicsSyncIn {
         let Some(body_lane) = store.read_lane::<RigidBody>() else {
             return;
         };
+        let globals = store.read_lane::<GlobalTransform>();
         let transforms = store.read_lane::<TransformDesc>();
         let excluded = store.read_lane::<EditorOnly>();
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
         let mut runtime = runtime_resource.lock().unwrap_or_else(|e| e.into_inner());
-        runtime.sync_in(&body_lane, transforms.as_deref(), excluded.as_deref());
+        runtime.sync_in(
+            &body_lane,
+            globals.as_deref(),
+            transforms.as_deref(),
+            excluded.as_deref(),
+        );
     }
 }
 
@@ -472,6 +551,10 @@ impl System for PhysicsSyncOut {
             .writes::<SmartStore>()
             .reads::<Mutex<PhysicsRuntime>>()
             .writes_lane::<RigidBody>()
+            .reads_lane::<ChildOf>()
+            .reads_lane::<GlobalTransform>()
+            .reads_lane::<Transform>()
+            .writes_lane::<Transform>()
             .writes_lane::<TransformDesc>()
     }
 
@@ -482,16 +565,10 @@ impl System for PhysicsSyncOut {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let Some(mut body_lane) = store.write_lane::<RigidBody>() else {
-            return;
-        };
-        let Some(mut transform_lane) = store.write_lane::<TransformDesc>() else {
-            return;
-        };
         runtime_resource
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .sync_out(&mut body_lane, &mut transform_lane);
+            .sync_out(store);
     }
 }
 
@@ -541,6 +618,8 @@ impl System for SoftSyncOut {
             .reads_lane::<RopeMesh>()
             .writes_lane::<MeshDesc>()
             .writes_lane::<TransformDesc>()
+            .writes_lane::<Transform>()
+            .writes_lane::<GlobalTransform>()
     }
 
     fn run(&self, resources: &Resources) {
@@ -550,24 +629,61 @@ impl System for SoftSyncOut {
         let Some(runtime_resource) = resources.get::<Mutex<PhysicsRuntime>>() else {
             return;
         };
-        let Some(mut mesh_lane) = store.write_lane::<MeshDesc>() else {
-            return;
+        let pinned = {
+            let Some(mut mesh_lane) = store.write_lane::<MeshDesc>() else {
+                return;
+            };
+            let Some(mut transform_lane) = store.write_lane::<TransformDesc>() else {
+                return;
+            };
+            let ropes = store.read_lane::<RopeMesh>();
+            runtime_resource
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .sync_soft_out(&mut mesh_lane, &mut transform_lane, ropes.as_deref())
         };
-        let Some(mut transform_lane) = store.write_lane::<TransformDesc>() else {
-            return;
-        };
-        let ropes = store.read_lane::<RopeMesh>();
-        runtime_resource
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .sync_soft_out(&mut mesh_lane, &mut transform_lane, ropes.as_deref());
+        for entity in pinned {
+            pin_hierarchy_identity(store, entity);
+        }
     }
 }
 
-/// Applies an ECS transform to a physics body's pose.
-pub(crate) fn apply_transform_to_body(body: &mut RigidBody, transform: &TransformDesc) {
-    body.position = transform.translation;
-    body.orientation = transform.rotation.get();
+/// World pose for physics sync-in.
+///
+/// [`GlobalTransform`] wins. Entities that have not been propagated yet
+/// fall back to [`TransformDesc`], which flat scenes store in world space.
+fn world_pose(
+    globals: Option<&ComponentStore<GlobalTransform>>,
+    transforms: Option<&ComponentStore<TransformDesc>>,
+    entity: Entity,
+) -> Option<(Vec3, Quat)> {
+    if let Some(global) = globals.and_then(|lane| lane.get(entity)) {
+        return Some((global.translation, global.rotation.get()));
+    }
+    transforms
+        .and_then(|lane| lane.get(entity))
+        .map(|transform| (transform.translation, transform.rotation.get()))
+}
+
+/// Applies a world pose to a physics body's position and orientation.
+fn apply_world_pose(body: &mut RigidBody, position: Vec3, orientation: Quat) {
+    body.position = position;
+    body.orientation = orientation;
+}
+
+/// Pins local and world TRS to identity so a world-space soft mesh is not
+/// transformed a second time. [`TransformDesc`] is pinned by the caller.
+fn pin_hierarchy_identity(store: &SmartStore, entity: Entity) {
+    if let Some(mut lane) = store.write_lane::<Transform>()
+        && let Some(transform) = lane.get_mut(entity)
+    {
+        *transform = Transform::IDENTITY;
+    }
+    if let Some(mut lane) = store.write_lane::<GlobalTransform>()
+        && let Some(transform) = lane.get_mut(entity)
+    {
+        *transform = GlobalTransform::IDENTITY;
+    }
 }
 
 #[cfg(test)]
@@ -686,6 +802,55 @@ mod tests {
                 .to_array(),
             [2.0, 3.0, 4.0]
         );
+    }
+
+    #[test]
+    fn physics_sync_reads_world_pose_and_writes_local() {
+        use ornis_core::{ChildOf, GlobalTransform, Transform};
+        let mut engine = Engine::new();
+        let store = engine.world_mut().store_mut().expect("store");
+        let parent = store.create_entity();
+        let child = store.create_entity();
+        store.insert(
+            parent,
+            Transform::from_translation(Vec3::new(8.0, 0.0, 0.0)),
+        );
+        store.insert(child, Transform::from_translation(Vec3::ZERO));
+        store.insert(child, TransformDesc::from_translation(Vec3::ZERO));
+        store.insert(child, ChildOf(parent));
+        store.insert(child, RigidBody::new_sphere(Vec3::ZERO, 0.5, 0.0));
+        install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
+
+        engine.run_frame(1.0 / 60.0);
+
+        let store = engine.world().store().expect("store");
+        let world = store
+            .read_lane::<TransformDesc>()
+            .expect("desc")
+            .get(child)
+            .expect("child desc")
+            .translation;
+        let local = store
+            .read_lane::<Transform>()
+            .expect("local")
+            .get(child)
+            .expect("child local")
+            .translation;
+        assert!(
+            (world.x - 8.0).abs() < 1e-3,
+            "sync-in must read the propagated world pose, got {world:?}"
+        );
+        assert!(
+            local.x.abs() < 1e-3,
+            "sync-out must keep the parent-relative local pose, got {local:?}"
+        );
+        let global = store
+            .read_lane::<GlobalTransform>()
+            .expect("global")
+            .get(child)
+            .expect("child global")
+            .translation;
+        assert!((global.x - 8.0).abs() < 1e-3);
     }
 
     #[test]

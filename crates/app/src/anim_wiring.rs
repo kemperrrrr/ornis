@@ -22,7 +22,7 @@ use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Entity, Seconds, SmartStore};
 use ornis_gltf::{
     LoadedAnimClip, LoadedInterpolation, LoadedJointTrack, LoadedKeyTrack, LoadedMesh,
-    LoadedSkelClip, LoadedSkin,
+    LoadedSkelClip, LoadedSkin, Model, NodeIdx,
 };
 
 use super::session::Name;
@@ -33,29 +33,42 @@ use super::session::Name;
 /// with interpolation preserved. Rotation arrays are `(x, y, z, w)` unit
 /// quaternions on the mirror side (normalized at import) and convert with
 /// [`Quat::from_xyzw`] exactly — no silent renormalization here.
-pub fn skel_clip_from_loaded(clip: &LoadedSkelClip) -> SkelClip {
+/// [`LoadedJointTrack::node`](ornis_gltf::LoadedJointTrack::node) resolves
+/// through `node_to_entity` onto [`JointTrack::node`](ornis_animation::JointTrack::node)
+/// so sampling can write that node's local transform. A missing entry
+/// leaves `node` empty; the joint index is unchanged.
+pub fn skel_clip_from_loaded(
+    clip: &LoadedSkelClip,
+    node_to_entity: &HashMap<NodeIdx, Entity>,
+) -> SkelClip {
     SkelClip {
         name: clip.name.clone(),
         duration: clip.duration,
-        tracks: clip.tracks.iter().map(joint_track_from_loaded).collect(),
+        tracks: clip
+            .tracks
+            .iter()
+            .map(|track| joint_track_from_loaded(track, node_to_entity))
+            .collect(),
     }
 }
 
-/// Converts an object mirror clip to a live [`AnimClip`], resolving loader-local
-/// node handles through `node_to_entity` to world entities.
+/// Converts an object mirror clip to a live [`AnimClip`], resolving
+/// [`NodeIdx`] through `node_to_entity` to world entities.
 ///
 /// Returns the clip plus the count of tracks dropped for lack of a mapping.
 /// The clip name comes from the caller (the mirror name is not consumed), and
-/// `duration`/`looping` copy the mirror verbatim.
+/// `duration`/`looping` copy the mirror verbatim. Mesh-less parents stay in
+/// the clip; this flat spawn drops a track only when `node_to_entity` has
+/// no entity for that node.
 pub fn anim_clip_from_loaded(
     name: String,
     clip: &LoadedAnimClip,
-    node_to_entity: &HashMap<Entity, Entity>,
+    node_to_entity: &HashMap<NodeIdx, Entity>,
 ) -> (AnimClip, usize) {
     let mut dropped = 0usize;
     let mut tracks = Vec::with_capacity(clip.tracks.len());
     for track in &clip.tracks {
-        let Some(&entity) = node_to_entity.get(&track.entity) else {
+        let Some(&entity) = node_to_entity.get(&track.node) else {
             dropped += 1;
             continue;
         };
@@ -118,10 +131,14 @@ pub fn skinned_mesh_from_loaded(skeleton: Entity, mesh: &LoadedMesh) -> Option<S
     ))
 }
 
-/// Maps one mirror joint track (joint index plus three channels).
-fn joint_track_from_loaded(track: &LoadedJointTrack) -> JointTrack {
+/// Maps one mirror joint track (joint index, hierarchy node, three channels).
+fn joint_track_from_loaded(
+    track: &LoadedJointTrack,
+    node_to_entity: &HashMap<NodeIdx, Entity>,
+) -> JointTrack {
     JointTrack {
         joint: JointId::from_raw(track.joint),
+        node: node_to_entity.get(&track.node).copied(),
         translation: vec3_track_from_loaded(&track.translation),
         rotation: quat_track_from_loaded(&track.rotation),
         scale: vec3_track_from_loaded(&track.scale),
@@ -183,21 +200,26 @@ fn with_interpolation<T, M: Copy>(
     }
 }
 
-/// World entities spawned from one [`LoadedScene`](ornis_gltf::LoadedScene):
-/// mesh entities in load order plus the loader-local node → world map
-/// animation wiring resolves through.
+/// World entities spawned from one [`Model`]: mesh entities in primitive
+/// order plus the node → world map animation wiring resolves through.
 pub struct GltfSpawn {
-    /// Mesh entities, 1:1 with the loaded entities, in load order.
+    /// Mesh entities, 1:1 with [`Model::primitives`], in primitive order.
     pub entities: Vec<Entity>,
-    /// Loader-local node handle (`Entity::new(node)`) → world entity.
-    /// First mesh entity wins per node.
-    pub node_to_entity: std::collections::HashMap<Entity, Entity>,
+    /// [`NodeIdx`] → world entity.
+    ///
+    /// [`spawn_gltf_world`] records the first primitive of a node and omits
+    /// mesh-less nodes, so object tracks on those nodes are dropped. The
+    /// hierarchical [`GameWorld::spawn`](crate::GameWorld::spawn) of a
+    /// [`Handle<Model>`](ornis_assets::Handle) fills this map from
+    /// [`ModelInstance`](crate::ModelInstance) (every node, parent before
+    /// child) so those tracks bind to the node entity.
+    pub node_to_entity: HashMap<NodeIdx, Entity>,
     /// Character root that receives [`Animator`].
     ///
     /// `None` (what [`spawn_gltf_world`] leaves) tells
     /// [`wire_loaded_animation`] to fall back to the first mesh entity.
     /// Set this before wiring when the real scene root is a different
-    /// entity — that is the hook for `GameWorld::spawn_scene` (Core track).
+    /// entity — that is the hook for hierarchical `Handle<Model>` spawn.
     /// The entity must already exist.
     pub scene_root: Option<Entity>,
 }
@@ -224,8 +246,8 @@ impl AnimationWiring {
 
     /// Inserts an [`Animator`] on `scene_root` for this wiring's skeletal clips.
     ///
-    /// Scene spawn (`GameWorld::spawn_scene`, Core track) should pass the
-    /// character root. Skeleton roots are not given a [`SkelPlayer`] until
+    /// Hierarchical model spawn passes the synthetic character root.
+    /// Skeleton roots are not given a [`SkelPlayer`] until
     /// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play). Calling
     /// this again on the same entity replaces the component; it does not
     /// clear an animator previously attached to a different entity.
@@ -248,27 +270,30 @@ pub fn attach_animator(
     store.insert(scene_root, Animator::new(clips, targets));
 }
 
-/// Spawns the mesh entities of a loaded glTF scene: `TransformDesc` +
-/// `MeshDesc::Custom` + `MaterialDesc` per primitive, no physics bodies
-/// (pure visual spawn — the solver never sees these entities).
+/// Spawns the mesh entities of a loaded glTF [`Model`]: `TransformDesc` +
+/// `MeshDesc::Custom` + `MaterialDesc` per primitive, at the node's world
+/// TRS, no physics bodies (pure visual spawn — the solver never sees these
+/// entities).
 ///
-/// Lanes are registered idempotently; entities follow load order so the
-/// caller can zip them back against the loaded entities.
-pub fn spawn_gltf_world(store: &mut SmartStore, loaded: &ornis_gltf::LoadedScene) -> GltfSpawn {
+/// This is the flat layout. One entity per node with local [`Transform`]
+/// and [`ornis_core::ChildOf`] is the Core track's spawn, not this function.
+///
+/// Lanes are registered idempotently; entities follow primitive order so
+/// the caller can zip them back against [`Model::primitives`].
+pub fn spawn_gltf_world(store: &mut SmartStore, model: &Model) -> GltfSpawn {
     store.register::<TransformDesc>();
     store.register::<MeshDesc>();
     store.register::<MaterialDesc>();
-    let scene = ornis_assets::import::scene_from_gltf(loaded);
+    let scene = ornis_assets::scene_from_model(model);
     let mut entities = Vec::with_capacity(scene.entities.len());
-    let mut node_to_entity = std::collections::HashMap::new();
-    for (desc, loaded_entity) in scene.entities.iter().zip(loaded.entities.iter()) {
+    let mut node_to_entity = HashMap::new();
+    for (desc, primitive) in scene.entities.iter().zip(model.primitives.iter()) {
         let entity = store.create_entity();
         store.insert(entity, desc.transform.clone());
+        crate::insert_flat_pose(store, entity, &desc.transform);
         store.insert(entity, desc.mesh.clone());
         store.insert(entity, desc.material.clone());
-        node_to_entity
-            .entry(Entity::new(loaded_entity.node))
-            .or_insert(entity);
+        node_to_entity.entry(primitive.node).or_insert(entity);
         entities.push(entity);
     }
     GltfSpawn {
@@ -328,15 +353,22 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
 /// are the target, not a guessed clip); hosts start them with
 /// [`set_playing`]. [`GltfSpawn::scene_root`], when set, receives the
 /// animator; otherwise the first mesh entity does, which is the stand-in
-/// until `GameWorld::spawn_scene` returns the character root.
+/// until hierarchical model spawn supplies the synthetic character root.
 ///
-/// `spawn.entities` must be the load-order mesh entities (see
-/// [`spawn_gltf_world`]); `spawn.node_to_entity` resolves loader-local
-/// node handles to them. Sources without skins or clips wire nothing.
+/// `spawn.entities` is one entity per primitive, in primitive order (the
+/// flat [`spawn_gltf_world`] list, or the primitive children of a
+/// hierarchical spawn). `spawn.node_to_entity` resolves [`NodeIdx`] to the
+/// entity object tracks write: a mesh entity for the flat spawn, the node
+/// entity from [`ModelInstance`](crate::ModelInstance) for the hierarchy.
+/// Joint clips still sample [`LoadedJointTrack::joint`](ornis_gltf::LoadedJointTrack::joint);
+/// [`LoadedJointTrack::node`](ornis_gltf::LoadedJointTrack::node) is the
+/// hierarchy address (mapped onto the live track, not a second joint index)
+/// so sampling writes that node's local transform. Sources without
+/// skins or clips wire nothing.
 /// Lanes are registered idempotently.
 pub fn wire_loaded_animation(
     store: &mut SmartStore,
-    loaded: &ornis_gltf::LoadedScene,
+    loaded: &Model,
     spawn: &GltfSpawn,
 ) -> AnimationWiring {
     use ornis_animation::{AnimClip, SkelClip};
@@ -376,7 +408,7 @@ pub fn wire_loaded_animation(
         } else {
             clip.name.clone()
         };
-        let live = skel_clip_from_loaded(clip);
+        let live = skel_clip_from_loaded(clip, &spawn.node_to_entity);
         let playlist = store.create_entity();
         store.insert(playlist, Name(name.clone()));
         store.insert_cold(playlist, live);
@@ -384,15 +416,20 @@ pub fn wire_loaded_animation(
         wiring.clips.entry(name).or_insert(ClipId(playlist));
     }
     // Skinned meshes: `SkinnedMesh.skeleton` points at the skin's root.
-    // `None` (unskinned primitive) keeps the regular `Custom` mesh.
-    for (desc, entity) in loaded.entities.iter().zip(spawn.entities.iter()) {
-        let Some(skin) = desc.skin else {
+    // The skin index lives on the node. `None` (unskinned primitive) keeps
+    // the regular `Custom` mesh.
+    for (primitive, entity) in loaded.primitives.iter().zip(spawn.entities.iter()) {
+        let Some(skin) = loaded
+            .nodes
+            .get(primitive.node.index())
+            .and_then(|node| node.skin)
+        else {
             continue;
         };
         let Some(&root) = wiring.roots.get(skin) else {
             continue;
         };
-        let Some(skinned) = skinned_mesh_from_loaded(root, &desc.mesh) else {
+        let Some(skinned) = skinned_mesh_from_loaded(root, &primitive.mesh) else {
             continue;
         };
         store.insert(*entity, skinned);
@@ -439,32 +476,35 @@ mod tests {
     use ornis_core::{Clamped01, Seconds};
     use ornis_gltf::{LoadedAnimTrack, LoadedKey, LoadedSkelClip, LoadedSkin};
 
-    /// Minimal unskinned entity mirror (node index drives the map).
-    fn entity_fixture(node: u32) -> ornis_gltf::LoadedEntity {
-        ornis_gltf::LoadedEntity {
-            name: format!("part_{node}"),
+    fn bare_mesh() -> ornis_gltf::LoadedMesh {
+        ornis_gltf::LoadedMesh {
+            positions: vec![[0.0, 0.0, 0.0]],
+            indices: vec![0],
+            normals: None,
+            uvs: None,
+            joints: None,
+            weights: None,
+        }
+    }
+
+    fn bare_material() -> ornis_gltf::LoadedMaterial {
+        ornis_gltf::LoadedMaterial {
+            base_color: [1.0, 1.0, 1.0],
+            metallic: 0.0,
+            roughness: 0.5,
+            emission: [0.0, 0.0, 0.0],
+            base_color_texture: None,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+        }
+    }
+
+    /// One primitive on `node`, identity local pose.
+    fn primitive_on(node: NodeIdx) -> ornis_gltf::ModelPrimitive {
+        ornis_gltf::ModelPrimitive {
             node,
-            translation: [0.0, 0.0, 0.0],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0, 1.0, 1.0],
-            mesh: ornis_gltf::LoadedMesh {
-                positions: vec![[0.0, 0.0, 0.0]],
-                indices: vec![0],
-                normals: None,
-                uvs: None,
-                joints: None,
-                weights: None,
-            },
-            skin: None,
-            material: ornis_gltf::LoadedMaterial {
-                base_color: [1.0, 1.0, 1.0],
-                metallic: 0.0,
-                roughness: 0.5,
-                emission: [0.0, 0.0, 0.0],
-                base_color_texture: None,
-                metallic_roughness_texture: None,
-                emissive_texture: None,
-            },
+            mesh: bare_mesh(),
+            material: bare_material(),
         }
     }
 
@@ -473,9 +513,26 @@ mod tests {
     #[test]
     fn spawn_maps_nodes_to_world_entities() {
         use ornis_assets::scene::TransformDesc;
-        let loaded = ornis_gltf::LoadedScene {
+        let loaded = ornis_gltf::Model {
             name: "two".to_string(),
-            entities: vec![entity_fixture(0), entity_fixture(7)],
+            nodes: vec![
+                ornis_gltf::ModelNode {
+                    name: Some("part_0".into()),
+                    parent: None,
+                    local: ornis_core::Transform::IDENTITY,
+                    primitives: vec![0],
+                    skin: None,
+                },
+                ornis_gltf::ModelNode {
+                    name: Some("part_1".into()),
+                    parent: None,
+                    local: ornis_core::Transform::IDENTITY,
+                    primitives: vec![1],
+                    skin: None,
+                },
+            ],
+            roots: vec![NodeIdx(0), NodeIdx(1)],
+            primitives: vec![primitive_on(NodeIdx(0)), primitive_on(NodeIdx(1))],
             skins: Vec::new(),
             skel_clips: Vec::new(),
             anim_clips: Vec::new(),
@@ -484,8 +541,8 @@ mod tests {
         let mut store = SmartStore::new();
         let spawn = spawn_gltf_world(&mut store, &loaded);
         assert_eq!(spawn.entities.len(), 2);
-        assert_eq!(spawn.node_to_entity[&Entity::new(0)], spawn.entities[0]);
-        assert_eq!(spawn.node_to_entity[&Entity::new(7)], spawn.entities[1]);
+        assert_eq!(spawn.node_to_entity[&NodeIdx(0)], spawn.entities[0]);
+        assert_eq!(spawn.node_to_entity[&NodeIdx(1)], spawn.entities[1]);
         for entity in &spawn.entities {
             let lane = store.read_lane::<TransformDesc>().unwrap();
             assert!(lane.get(*entity).is_some());
@@ -496,6 +553,7 @@ mod tests {
     fn joint_fixture() -> LoadedJointTrack {
         LoadedJointTrack {
             joint: 3,
+            node: NodeIdx(3),
             translation: LoadedKeyTrack::linear(vec![LoadedKey {
                 time: 0.5,
                 value: [1.0, 2.0, 3.0],
@@ -518,11 +576,12 @@ mod tests {
             duration: 2.5,
             tracks: vec![joint_fixture()],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         assert_eq!(live.duration, 2.5);
         assert_eq!(live.tracks.len(), 1);
         let track = &live.tracks[0];
         assert_eq!(track.joint, JointId::from_raw(3));
+        assert!(track.node.is_none(), "unmapped joint node stays unbound");
         assert_eq!(
             track.translation.keys,
             vec![Key {
@@ -536,12 +595,29 @@ mod tests {
     }
 
     #[test]
+    fn skel_clip_maps_joint_node_through_node_to_entity() {
+        let clip = LoadedSkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks: vec![joint_fixture()],
+        };
+        let store = SmartStore::new();
+        let entity = store.create_entity();
+        let mut map = HashMap::new();
+        map.insert(NodeIdx(3), entity);
+        let live = skel_clip_from_loaded(&clip, &map);
+        assert_eq!(live.tracks[0].node, Some(entity));
+        assert_eq!(live.tracks[0].joint, JointId::from_raw(3));
+    }
+
+    #[test]
     fn stepped_interpolation_survives_on_all_channels() {
         let clip = LoadedSkelClip {
             name: String::new(),
             duration: 1.0,
             tracks: vec![LoadedJointTrack {
                 joint: 0,
+                node: NodeIdx(0),
                 translation: LoadedKeyTrack::stepped(vec![LoadedKey {
                     time: 0.0,
                     value: [4.0, 5.0, 6.0],
@@ -556,7 +632,7 @@ mod tests {
                 }]),
             }],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         let track = &live.tracks[0];
         assert_eq!(track.translation.interpolation, Interpolation::Step);
         assert_eq!(track.rotation.interpolation, Interpolation::Step);
@@ -576,6 +652,7 @@ mod tests {
             duration: 2.0,
             tracks: vec![LoadedJointTrack {
                 joint: 0,
+                node: NodeIdx(0),
                 translation: MirrorTrack::cubic(
                     vec![
                         LoadedKey {
@@ -607,7 +684,7 @@ mod tests {
                 scale: MirrorTrack::cubic(Vec::new(), Vec::new(), Vec::new()),
             }],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         let track = &live.tracks[0];
         // Full round-trip: keys plus tangents convert value-for-value.
         assert_eq!(
@@ -653,14 +730,14 @@ mod tests {
     #[test]
     fn cubic_object_tracks_convert_through_node_mapping() {
         use ornis_gltf::LoadedKeyTrack as MirrorTrack;
-        let loader = Entity::new(0);
+        let loader = NodeIdx(0);
         let world = Entity::new(41);
         let clip = LoadedAnimClip {
             name: "cubic".to_string(),
             duration: 1.0,
             looping: true,
             tracks: vec![LoadedAnimTrack {
-                entity: loader,
+                node: loader,
                 translation: MirrorTrack::cubic(
                     vec![
                         LoadedKey {
@@ -701,6 +778,7 @@ mod tests {
             duration: 1.0,
             tracks: vec![LoadedJointTrack {
                 joint: 1,
+                node: NodeIdx(1),
                 translation: LoadedKeyTrack::linear(Vec::new()),
                 rotation: LoadedKeyTrack::linear(vec![LoadedKey {
                     time: 1.0,
@@ -709,7 +787,7 @@ mod tests {
                 scale: LoadedKeyTrack::linear(Vec::new()),
             }],
         };
-        let live = skel_clip_from_loaded(&clip);
+        let live = skel_clip_from_loaded(&clip, &HashMap::new());
         let got = live.tracks[0].rotation.keys[0].value;
         let want = Quat::from_xyzw(0.0, FRAC_1_SQRT_2, 0.0, FRAC_1_SQRT_2);
         assert_eq!(got, want);
@@ -717,8 +795,8 @@ mod tests {
 
     #[test]
     fn anim_clip_applies_node_mapping_and_counts_dropped() {
-        let loader_a = Entity::new(0);
-        let loader_b = Entity::new(1);
+        let loader_a = NodeIdx(0);
+        let loader_b = NodeIdx(1);
         let world_a = Entity::new(41);
         let clip = LoadedAnimClip {
             name: "mirror-name-ignored".to_string(),
@@ -743,7 +821,7 @@ mod tests {
             name: "x".to_string(),
             duration: 1.0,
             looping: false,
-            tracks: vec![object_track(Entity::new(7))],
+            tracks: vec![object_track(NodeIdx(7))],
         };
         let (live, dropped) = anim_clip_from_loaded("x".to_string(), &clip, &HashMap::new());
         assert!(live.tracks.is_empty());
@@ -836,7 +914,7 @@ mod tests {
             duration: 0.0,
             tracks: Vec::new(),
         };
-        let live_skel = skel_clip_from_loaded(&skel);
+        let live_skel = skel_clip_from_loaded(&skel, &HashMap::new());
         assert_eq!(live_skel.duration, 0.0);
         assert!(live_skel.tracks.is_empty());
 
@@ -853,9 +931,9 @@ mod tests {
         assert_eq!(live_anim.duration, 0.0);
     }
     /// One object track with a single translation key (`X` at `t = 0`).
-    fn object_track(entity: Entity) -> LoadedAnimTrack {
+    fn object_track(node: NodeIdx) -> LoadedAnimTrack {
         LoadedAnimTrack {
-            entity,
+            node,
             translation: LoadedKeyTrack::linear(vec![LoadedKey {
                 time: 0.0,
                 value: [1.0, 0.0, 0.0],
@@ -873,12 +951,21 @@ mod tests {
         }
     }
 
-    fn skinned_scene(clips: Vec<LoadedSkelClip>) -> ornis_gltf::LoadedScene {
-        let mut mesh = entity_fixture(0);
-        mesh.skin = Some(0);
-        ornis_gltf::LoadedScene {
+    fn skinned_scene(clips: Vec<LoadedSkelClip>) -> ornis_gltf::Model {
+        let mut primitive = primitive_on(NodeIdx(0));
+        primitive.mesh.joints = Some(vec![[0, 0, 0, 0]]);
+        primitive.mesh.weights = Some(vec![[1.0, 0.0, 0.0, 0.0]]);
+        ornis_gltf::Model {
             name: "character".into(),
-            entities: vec![mesh],
+            nodes: vec![ornis_gltf::ModelNode {
+                name: Some("part_0".into()),
+                parent: None,
+                local: ornis_core::Transform::IDENTITY,
+                primitives: vec![0],
+                skin: Some(0),
+            }],
+            roots: vec![NodeIdx(0)],
+            primitives: vec![primitive],
             skins: vec![LoadedSkin {
                 parents: vec![-1],
                 inverse_bind: vec![[

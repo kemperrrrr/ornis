@@ -20,6 +20,8 @@ mod engine;
 mod entity;
 /// Stable scalar wrappers for GPU-compatible buffer representations.
 pub mod gpu_types;
+/// Parent links, local [`Transform`], and world [`GlobalTransform`].
+pub mod hierarchy;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
 pub mod material;
@@ -50,6 +52,12 @@ pub use engine::{
 };
 pub use entity::{DenseIndex, Entity, EntityAllocator, EntityId, Generation};
 pub use gpu_types::GpuBool;
+pub use hierarchy::{
+    ChildOf, Children, GlobalTransform, HierarchyError, Name, PropagateTransforms, Transform,
+    clear_parent, despawn_recursive, install_fixed_transform_propagation,
+    install_transform_propagation, propagate_registered, propagate_transforms, reconcile_children,
+    set_parent,
+};
 pub use material::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Backend-neutral input (re-exported from `ornis-input` so downstream
 /// crates keep a single import path: adapters write raw codes, gameplay

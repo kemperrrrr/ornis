@@ -1,12 +1,14 @@
-//! glTF→[`Scene`](crate::scene::Scene) wiring.
+//! glTF [`Model`](ornis_gltf::Model) → editor [`Scene`](crate::scene::Scene)
+//! flattening.
 //!
-//! [`scene_from_gltf`] is the first real consumer of `ornis-gltf`: loaded
-//! geometry and scalar materials become scene descriptions; textured
-//! materials keep their scalar fallback until the GPU upload step learns
-//! images (see `ornis-gltf` docs). Cameras, lights and ambient come from
-//! host defaults — a glTF file carries no editor lighting rig.
+//! [`scene_from_model`] is the flat view the editor instantiates: every
+//! imported primitive becomes one entity at the node's world TRS. The
+//! [`Model`](ornis_gltf::Model) itself keeps the node tree. Cameras, lights
+//! and ambient come from host defaults — a glTF file carries no editor
+//! lighting rig. Textured materials keep their scalar fallback until the
+//! GPU upload step learns images (see `ornis-gltf` docs).
 
-use ornis_gltf::LoadedScene;
+use ornis_gltf::{Model, ModelPrimitive};
 
 use crate::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
 
@@ -37,39 +39,62 @@ fn default_camera() -> CameraDesc {
     }
 }
 
-/// Converts a loaded glTF scene into an editor [`Scene`].
+/// Flattens a glTF [`Model`] into an editor [`Scene`].
 ///
-/// Every mesh primitive becomes one entity with a `Custom` soup mesh;
-/// scalar PBR parameters become `Dielectric`/`Metal` by the loader's
-/// metallic threshold. Textured slots keep the scalar fallback (see the
-/// module docs). The result feeds the same replace path as `.ron` scenes.
-pub fn scene_from_gltf(loaded: &LoadedScene) -> Scene {
+/// Every mesh primitive becomes one entity whose transform is
+/// [`Model::world_transform`](ornis_gltf::Model::world_transform) of its
+/// node (the old baked world TRS). The entity name is the node name, or
+/// `mesh_{node}_{ordinal}` when the node is unnamed. Scalar PBR parameters
+/// become `Dielectric`/`Metal` by the loader's metallic threshold. The
+/// result feeds the same replace path as `.ron` scenes.
+pub fn scene_from_model(model: &Model) -> Scene {
     Scene {
-        name: loaded.name.clone(),
-        entities: loaded.entities.iter().map(entity_from_gltf).collect(),
+        name: model.name.clone(),
+        entities: model
+            .primitives
+            .iter()
+            .enumerate()
+            .map(|(index, primitive)| entity_from_primitive(model, index, primitive))
+            .collect(),
         lights: Vec::new(),
         camera: default_camera(),
         ambient: DEFAULT_AMBIENT_RGB,
     }
 }
 
-fn entity_from_gltf(entity: &ornis_gltf::LoadedEntity) -> EntityDesc {
-    // `into_custom` already round-trips the flat list through
-    // `Triangle::from_raw`/`as_u32`, so the soup stays triple-aligned by
-    // construction; the typed view below is the loud counterpart.
-    let (positions, indices) = entity.mesh.clone().into_custom();
+fn entity_from_primitive(model: &Model, index: usize, primitive: &ModelPrimitive) -> EntityDesc {
+    let (positions, indices) = primitive.mesh.clone().into_custom();
     let _typed: Vec<ornis_gltf::Triangle> = indices
         .chunks_exact(TRIANGLE_VERTS)
-        .map(|c| ornis_gltf::Triangle::from_raw([c[0], c[1], c[2]]))
+        .map(|corner| ornis_gltf::Triangle::from_raw([corner[0], corner[1], corner[2]]))
         .collect();
+    let world = model.world_transform(primitive.node);
     EntityDesc {
-        name: entity.name.clone(),
-        // Degenerate glTF rotations fall back to identity (normalized
-        // otherwise), see `TransformDesc::from_arrays`.
-        transform: TransformDesc::from_arrays(entity.translation, entity.rotation, entity.scale),
+        name: primitive_name(model, index, primitive),
+        transform: TransformDesc::from_arrays(
+            world.translation.to_array(),
+            world.rotation.get().to_array(),
+            world.scale.to_array(),
+        ),
         mesh: MeshDesc::Custom { positions, indices },
-        material: material_from_gltf(&entity.material),
+        material: material_from_gltf(&primitive.material),
     }
+}
+
+/// Node name, else `mesh_{node}_{ordinal}` among that node's primitives.
+fn primitive_name(model: &Model, index: usize, primitive: &ModelPrimitive) -> String {
+    if let Some(name) = model
+        .nodes
+        .get(primitive.node.index())
+        .and_then(|node| node.name.clone())
+    {
+        return name;
+    }
+    let ordinal = model.primitives[..index]
+        .iter()
+        .filter(|other| other.node == primitive.node)
+        .count();
+    format!("mesh_{}_{ordinal}", primitive.node.0)
 }
 
 fn material_from_gltf(material: &ornis_gltf::LoadedMaterial) -> MaterialDesc {
@@ -94,48 +119,118 @@ fn material_from_gltf(material: &ornis_gltf::LoadedMaterial) -> MaterialDesc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ornis_core::Transform;
+    use ornis_gltf::{ImportStats, LoadedMaterial, LoadedMesh, ModelNode, ModelPrimitive, NodeIdx};
+
+    fn mesh() -> LoadedMesh {
+        LoadedMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            normals: None,
+            uvs: None,
+            joints: None,
+            weights: None,
+        }
+    }
+
+    fn material() -> LoadedMaterial {
+        LoadedMaterial {
+            base_color: [0.9, 0.8, 0.2],
+            metallic: 1.0,
+            roughness: 0.2,
+            emission: [0.0, 0.0, 0.0],
+            base_color_texture: None,
+            metallic_roughness_texture: None,
+            emissive_texture: None,
+        }
+    }
 
     #[test]
     fn wiring_maps_geometry_and_scalar_materials() {
-        let scene = ornis_gltf::LoadedScene {
+        let model = Model {
             name: "wired".into(),
-            entities: vec![ornis_gltf::LoadedEntity {
-                name: "part".into(),
-                node: 0,
-                translation: [1.0, 2.0, 3.0],
-                rotation: [0.0, 0.0, 0.0, 1.0],
-                scale: [2.0, 2.0, 2.0],
-                mesh: ornis_gltf::LoadedMesh {
-                    positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                    indices: vec![0, 1, 2],
-                    normals: None,
-                    uvs: None,
-                    joints: None,
-                    weights: None,
+            nodes: vec![ModelNode {
+                name: Some("part".into()),
+                parent: None,
+                local: Transform {
+                    translation: glam::Vec3::new(1.0, 2.0, 3.0),
+                    rotation: ornis_core::UnitQuat::IDENTITY,
+                    scale: glam::Vec3::splat(2.0),
                 },
+                primitives: vec![0],
                 skin: None,
-                material: ornis_gltf::LoadedMaterial {
-                    base_color: [0.9, 0.8, 0.2],
-                    metallic: 1.0,
-                    roughness: 0.2,
-                    emission: [0.0, 0.0, 0.0],
-                    base_color_texture: None,
-                    metallic_roughness_texture: None,
-                    emissive_texture: None,
-                },
+            }],
+            roots: vec![NodeIdx(0)],
+            primitives: vec![ModelPrimitive {
+                node: NodeIdx(0),
+                mesh: mesh(),
+                material: material(),
             }],
             skins: Vec::new(),
             skel_clips: Vec::new(),
             anim_clips: Vec::new(),
-            stats: ornis_gltf::ImportStats::default(),
+            stats: ImportStats::default(),
         };
-        let scene = scene_from_gltf(&scene);
+        let scene = scene_from_model(&model);
         assert_eq!(scene.name, "wired");
         assert_eq!(scene.entities.len(), 1);
         let entity = &scene.entities[0];
+        assert_eq!(entity.name, "part");
         assert_eq!(entity.transform.translation.to_array(), [1.0, 2.0, 3.0]);
+        assert_eq!(entity.transform.scale.to_array(), [2.0, 2.0, 2.0]);
         assert!(matches!(entity.mesh, MeshDesc::Custom { .. }));
         assert!(matches!(entity.material, MaterialDesc::Metal { .. }));
         assert!(scene.lights.is_empty());
+    }
+
+    #[test]
+    fn flatten_composes_parent_and_names_unnamed_nodes() {
+        let model = Model {
+            name: "nested".into(),
+            nodes: vec![
+                ModelNode {
+                    name: None,
+                    parent: None,
+                    local: Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+                    primitives: vec![0],
+                    skin: None,
+                },
+                ModelNode {
+                    name: Some("child".into()),
+                    parent: Some(NodeIdx(0)),
+                    local: Transform::from_translation(glam::Vec3::new(0.0, 5.0, 0.0)),
+                    primitives: vec![1],
+                    skin: None,
+                },
+            ],
+            roots: vec![NodeIdx(0)],
+            primitives: vec![
+                ModelPrimitive {
+                    node: NodeIdx(0),
+                    mesh: mesh(),
+                    material: material(),
+                },
+                ModelPrimitive {
+                    node: NodeIdx(1),
+                    mesh: mesh(),
+                    material: material(),
+                },
+            ],
+            skins: Vec::new(),
+            skel_clips: Vec::new(),
+            anim_clips: Vec::new(),
+            stats: ImportStats::default(),
+        };
+        let scene = scene_from_model(&model);
+        assert_eq!(scene.entities[0].name, "mesh_0_0");
+        assert_eq!(
+            scene.entities[0].transform.translation.to_array(),
+            [10.0, 0.0, 0.0]
+        );
+        assert_eq!(scene.entities[1].name, "child");
+        assert_eq!(
+            scene.entities[1].transform.translation.to_array(),
+            [10.0, 5.0, 0.0]
+        );
     }
 }

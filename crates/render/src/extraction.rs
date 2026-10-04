@@ -29,6 +29,7 @@ use crate::mesh_upload::{SoupCache, UploadCache};
 use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
 use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
+use ornis_core::GlobalTransform;
 use ornis_core::units::{PositiveF32, UnitVec3};
 
 /// Indices per triangle (flat soup alignment).
@@ -483,6 +484,46 @@ pub struct ExtractionStats {
     pub custom_cache_misses: u32,
 }
 
+/// Pose-bearing entities in extraction order.
+///
+/// [`TransformDesc`] lane order comes first, so flat scenes stay stable.
+/// [`GlobalTransform`] entities with no [`TransformDesc`] follow: a spawned
+/// model subtree carries the world pose without a per-node desc.
+fn posed_entities(store: &SmartStore) -> Vec<Entity> {
+    let mut order = Vec::new();
+    if let Some(transforms) = store.read_lane::<TransformDesc>() {
+        order.extend(transforms.entities.iter().copied());
+    }
+    if let Some(globals) = store.read_lane::<GlobalTransform>() {
+        let transforms = store.read_lane::<TransformDesc>();
+        for &entity in &globals.entities {
+            if transforms
+                .as_ref()
+                .is_none_or(|lane| lane.get(entity).is_none())
+            {
+                order.push(entity);
+            }
+        }
+    }
+    order
+}
+
+/// World TRS for one renderable.
+///
+/// [`GlobalTransform`] is the hierarchy pose. Entities that have not been
+/// propagated still use [`TransformDesc`], which flat scenes store in world
+/// space. [`None`] when the entity has neither.
+fn world_trs(
+    global: Option<&GlobalTransform>,
+    desc: Option<&TransformDesc>,
+) -> Option<(Vec3, glam::Quat, Vec3)> {
+    if let Some(global) = global {
+        Some((global.translation, global.rotation.get(), global.scale))
+    } else {
+        desc.map(|desc| (desc.translation, desc.rotation.get(), desc.scale))
+    }
+}
+
 /// Extracts complete renderable entities from the ECS store.
 ///
 /// Thin wrapper over [`extract_render_data_with_stats`] discarding the
@@ -495,9 +536,12 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 /// Extracts complete renderable entities from the ECS store, counting
 /// every skip.
 ///
-/// Entities missing any of the three render components are skipped
-/// ([`ExtractionStats::skipped_incomplete`]). Dense lane order is used
-/// as the deterministic extraction order; identical [`MaterialDesc`]
+/// Entities missing mesh, material, or a pose are skipped
+/// ([`ExtractionStats::skipped_incomplete`]). A pose is
+/// [`GlobalTransform`] when that component is present, otherwise
+/// [`TransformDesc`]. Dense [`TransformDesc`] lane order is the
+/// deterministic extraction order; [`GlobalTransform`] entities with no
+/// desc follow it. Identical [`MaterialDesc`]
 /// values share one [`FrameUpload::materials`] entry (see
 /// [`deduped_material_index`]), so `materials.len()` is the number of
 /// *distinct* materials, not entities.
@@ -516,9 +560,12 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, ExtractionStats) {
     let mut extracted = FrameUpload::default();
     let mut stats = ExtractionStats::default();
-    let Some(transforms) = store.read_lane::<TransformDesc>() else {
+    let order = posed_entities(store);
+    if order.is_empty() {
         return (extracted, stats);
-    };
+    }
+    let transforms = store.read_lane::<TransformDesc>();
+    let globals = store.read_lane::<GlobalTransform>();
     let Some(meshes) = store.read_lane::<MeshDesc>() else {
         return (extracted, stats);
     };
@@ -539,12 +586,12 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
     const SOUP_CACHE_CAP: usize = 4096;
     /// Reserved custom-mesh upload slots per frame.
     const CUSTOM_MESH_RESERVE: usize = 256;
-    let lane_len = transforms.entities.len();
+    let lane_len = order.len();
     let mut soup_cache = SoupCache::with_capacity(lane_len.min(SOUP_CACHE_CAP));
     extracted
         .custom_meshes
         .reserve(lane_len.min(CUSTOM_MESH_RESERVE));
-    for (&entity, transform) in transforms.entities.iter().zip(&transforms.data) {
+    for entity in order {
         let Some(mesh) = meshes.get(entity) else {
             stats.skipped_incomplete += 1;
             continue;
@@ -602,6 +649,13 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             });
             continue;
         }
+        let Some((translation, rotation, scale)) = world_trs(
+            globals.as_ref().and_then(|lane| lane.get(entity)),
+            transforms.as_ref().and_then(|lane| lane.get(entity)),
+        ) else {
+            stats.skipped_incomplete += 1;
+            continue;
+        };
         // Per-entity Custom path: CPU-side vertices via the mesh_upload
         // bridge, deduplicated by soup hash within the frame (identical
         // soups convert once). An empty or invalid soup skips the entity —
@@ -628,11 +682,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                     stats.custom_cache_misses = stats.custom_cache_misses.saturating_add(1);
                 }
             }
-            let model = Mat4::from_scale_rotation_translation(
-                transform.scale,
-                transform.rotation.get(),
-                transform.translation,
-            );
+            let model = Mat4::from_scale_rotation_translation(scale, rotation, translation);
             let material_index =
                 deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
             let instance = InstanceData {
@@ -663,20 +713,16 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             } => {
                 extracted.mesh_params.0 = extracted.mesh_params.0.max(*segments);
                 extracted.mesh_params.1 = extracted.mesh_params.1.max(*rings);
-                transform.scale * radius.get()
+                scale * radius.get()
             }
-            MeshDesc::Box { size } => {
-                transform.scale * Vec3::from_array(size.map(PositiveF32::get))
+            MeshDesc::Box { size } => scale * Vec3::from_array(size.map(PositiveF32::get)),
+            MeshDesc::Plane { size } => {
+                Vec3::new(scale[0] * size[0].get(), scale[1], scale[2] * size[1].get())
             }
-            MeshDesc::Plane { size } => Vec3::new(
-                transform.scale[0] * size[0].get(),
-                transform.scale[1],
-                transform.scale[2] * size[1].get(),
-            ),
             MeshDesc::Cylinder { radius, height, .. } => Vec3::new(
-                transform.scale[0] * radius.get(),
-                transform.scale[1] * height.get(),
-                transform.scale[2] * radius.get(),
+                scale[0] * radius.get(),
+                scale[1] * height.get(),
+                scale[2] * radius.get(),
             ),
             // `as_custom` above handles every `Custom`; this arm is only
             // the match-exhaustiveness fallback (never a stub).
@@ -685,11 +731,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 continue;
             }
         };
-        let model = Mat4::from_scale_rotation_translation(
-            size_scale,
-            transform.rotation.get(),
-            transform.translation,
-        );
+        let model = Mat4::from_scale_rotation_translation(size_scale, rotation, translation);
         let material_index =
             deduped_material_index(&mut extracted, &mut seen, material, &mut stats);
         extracted.instances.push(InstanceData {
@@ -704,25 +746,25 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
 /// Maximum sphere tessellation over complete renderable entities — the
 /// GPU mesh re-create criterion (X2, Extract-free).
 ///
-/// The same canon as [`extract_render_data`]: entities missing any of
-/// the three render components are skipped (even for the maximum), and
-/// the result never falls below the `FrameUpload::default` floor
-/// (32, 24). Iterator form: the lane walk lives in closures (the
-/// sanctioned lenient form, `rustqual.toml`).
+/// The same canon as [`extract_render_data`]: entities missing mesh,
+/// material, or a pose ([`GlobalTransform`] or [`TransformDesc`]) are
+/// skipped (even for the maximum), and the result never falls below the
+/// `FrameUpload::default` floor (32, 24). Iterator form: the lane walk
+/// lives in closures (the sanctioned lenient form, `rustqual.toml`).
 pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
-    let Some(transforms) = store.read_lane::<TransformDesc>() else {
+    let order = posed_entities(store);
+    if order.is_empty() {
         return DEFAULT_MESH_PARAMS;
-    };
+    }
     let Some(meshes) = store.read_lane::<MeshDesc>() else {
         return DEFAULT_MESH_PARAMS;
     };
     let Some(materials) = store.read_lane::<MaterialDesc>() else {
         return DEFAULT_MESH_PARAMS;
     };
-    transforms
-        .entities
+    order
         .iter()
-        // Complete entities only: all three render components present.
+        // Complete entities only: pose plus mesh and material.
         .filter(|&&entity| meshes.get(entity).is_some() && materials.get(entity).is_some())
         .filter_map(|&entity| meshes.get(entity))
         .fold(DEFAULT_MESH_PARAMS, |params, mesh| match mesh {
@@ -1117,6 +1159,108 @@ fn skinned_tangent(normal: [f32; 3]) -> [f32; 3] {
 mod tests {
     use super::*;
     use ornis_core::units::{Clamped01, Ior};
+
+    #[test]
+    fn extraction_uses_global_transform_not_the_local_desc() {
+        use ornis_core::{SmartStore, Transform, propagate_transforms, set_parent};
+        let mut store = SmartStore::new();
+        let parent = store.create_entity();
+        let child = store.create_entity();
+        store.insert(
+            parent,
+            Transform::from_translation(glam::Vec3::new(10.0, 0.0, 0.0)),
+        );
+        store.insert(child, Transform::from_translation(glam::Vec3::X));
+        store.insert(child, TransformDesc::from_translation(glam::Vec3::X));
+        store.insert(
+            child,
+            MeshDesc::Sphere {
+                radius: PositiveF32::expect_valid(1.0),
+                segments: 8,
+                rings: 6,
+            },
+        );
+        store.insert(
+            child,
+            MaterialDesc::Dielectric {
+                base_color: [0.8, 0.2, 0.2],
+                roughness: Clamped01::new(0.4),
+                emission: [0.0, 0.0, 0.0],
+            },
+        );
+        set_parent(&mut store, child, parent).expect("parent");
+        propagate_transforms(&mut store);
+        let extracted = extract_render_data(&store);
+        assert_eq!(extracted.instances.len(), 1);
+        let translation = extracted.instances[0].model_matrix.w_axis.truncate();
+        assert!(
+            (translation - glam::Vec3::new(11.0, 0.0, 0.0)).length() < 1e-4,
+            "model matrix follows the world pose, got {translation:?}"
+        );
+    }
+
+    #[test]
+    fn extraction_draws_global_transform_without_transform_desc() {
+        use ornis_core::{GlobalTransform, SmartStore, Transform};
+        let mut store = SmartStore::new();
+        let flat = store.create_entity();
+        store.insert(
+            flat,
+            TransformDesc::from_translation(glam::Vec3::new(-2.0, 0.0, 0.0)),
+        );
+        store.insert(
+            flat,
+            MeshDesc::Sphere {
+                radius: PositiveF32::expect_valid(1.0),
+                segments: 8,
+                rings: 6,
+            },
+        );
+        store.insert(
+            flat,
+            MaterialDesc::Dielectric {
+                base_color: [0.2, 0.8, 0.2],
+                roughness: Clamped01::new(0.4),
+                emission: [0.0, 0.0, 0.0],
+            },
+        );
+        let posed = store.create_entity();
+        store.insert(
+            posed,
+            GlobalTransform::from_local(Transform::from_translation(glam::Vec3::new(
+                4.0, 0.0, 0.0,
+            ))),
+        );
+        store.insert(
+            posed,
+            MeshDesc::Sphere {
+                radius: PositiveF32::expect_valid(1.0),
+                segments: 40,
+                rings: 30,
+            },
+        );
+        store.insert(
+            posed,
+            MaterialDesc::Dielectric {
+                base_color: [0.8, 0.2, 0.2],
+                roughness: Clamped01::new(0.4),
+                emission: [0.0, 0.0, 0.0],
+            },
+        );
+        let extracted = extract_render_data(&store);
+        assert_eq!(extracted.instances.len(), 2);
+        let flat_translation = extracted.instances[0].model_matrix.w_axis.truncate();
+        let posed_translation = extracted.instances[1].model_matrix.w_axis.truncate();
+        assert!(
+            (flat_translation - glam::Vec3::new(-2.0, 0.0, 0.0)).length() < 1e-4,
+            "desc-only entity still draws, got {flat_translation:?}"
+        );
+        assert!(
+            (posed_translation - glam::Vec3::new(4.0, 0.0, 0.0)).length() < 1e-4,
+            "global-only entity draws, got {posed_translation:?}"
+        );
+        assert_eq!(max_mesh_params(&store), (40, 30));
+    }
 
     #[test]
     fn custom_quad_routes_per_entity_and_bad_soups_skip_without_stub() {

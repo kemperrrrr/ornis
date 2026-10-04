@@ -17,7 +17,7 @@ pub mod collider;
 pub mod error;
 /// Typed handles ([`Handle`]) and the [`Asset`] trait.
 pub mod handle;
-/// glTF→[`scene`] wiring (geometry + scalar materials; textures deferred).
+/// glTF [`Model`](ornis_gltf::Model) → flat [`scene`] wiring.
 #[cfg(feature = "gltf")]
 pub mod import;
 /// Format importers and the extension registry.
@@ -34,12 +34,14 @@ pub use collider::{ColliderDesc, collider_for};
 pub use error::AssetError;
 pub use handle::{Asset, Handle};
 #[cfg(feature = "gltf")]
-pub use import::scene_from_gltf;
+pub use import::scene_from_model;
 #[cfg(feature = "fbx")]
 pub use importer::FbxImporter;
 #[cfg(feature = "gltf")]
 pub use importer::GltfImporter;
 pub use importer::{ImportedAsset, Importer, ImporterRegistry, RonSceneImporter, SceneImport};
+#[cfg(feature = "gltf")]
+pub use ornis_gltf::{Model, ModelNode, ModelPrimitive, NodeIdx};
 pub use scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc, TriIndex,
     Triangle,

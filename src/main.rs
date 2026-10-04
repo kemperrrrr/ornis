@@ -27,8 +27,6 @@ use ornis_gameplay::install_gameplay;
 use ornis_physics::RigidBody;
 #[cfg(not(feature = "editor-only"))]
 use ornis_render::OrbitCamera;
-#[cfg(not(feature = "editor-only"))]
-use ornis_runner::{NativeOptions, run_native};
 
 #[cfg(feature = "editor-only")]
 use ornis_runner::EDITOR_HTTP_PORT;
@@ -83,7 +81,7 @@ fn main() {
 // Run with: cargo run
 // winit window, wgpu rendering, a 3D scene of spheres (OpenPBR).
 // Animation demo: `cargo run --example anim` (starter character via
-// the shared [`ornis_runner`] shell, not a binary flag).
+// [`ornis::run`], not a binary flag).
 // The browser editor server is opt-in here: `cargo run -- --remote-editor`
 // serves it on port 3420 (off by default — audit §6.2, backlog #16).
 // The native UI overlay was removed with the ornis-ui crate — the editor
@@ -91,15 +89,13 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Spheres showcase world: RON scene plus physics bodies, audio and
-/// object animation. The shell ([`ornis_runner::run_native`]) owns the
-/// window; content builders like this one stay here.
+/// object animation. `ornis::run` owns the window; content builders
+/// like this one stay here.
 #[cfg(not(feature = "editor-only"))]
-fn showcase_engine() -> (GameWorld, u32) {
+fn showcase_engine() -> GameWorld {
     let Ok(scene) = Scene::from_ron(include_str!("../assets/demo_scene.ron")) else {
-        let runtime = GameWorld::default();
-        return (runtime, 0);
+        return GameWorld::default();
     };
-    let entity_count = scene.entities.len() as u32;
     let mut runtime = GameWorld::from_scene(&scene);
     runtime.spawn(OrbitCamera::from_desc(&scene.camera));
     install_physics(runtime.engine_mut(), Vec3::new(0.0, DEFAULT_GRAVITY_Y, 0.0));
@@ -119,7 +115,7 @@ fn showcase_engine() -> (GameWorld, u32) {
     {
         let entities = runtime.entities().to_vec();
         let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
-            return (runtime, entity_count);
+            return runtime;
         };
         for (index, entity) in entities.into_iter().enumerate() {
             let description = &scene.entities[index];
@@ -143,7 +139,7 @@ fn showcase_engine() -> (GameWorld, u32) {
         eprintln!("showcase floor was not spawned: {error}");
     }
     runtime.frame(0.0);
-    (runtime, entity_count)
+    runtime
 }
 
 /// Centre of the hidden showcase static floor in world units.
@@ -195,5 +191,5 @@ fn spawn_showcase_floor(engine: &mut Engine) -> Result<Entity, ShowcaseFloorErro
 
 #[cfg(not(feature = "editor-only"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    run_native(showcase_engine, NativeOptions::from_env("Ornis Engine"))
+    ornis::run(showcase_engine())
 }
