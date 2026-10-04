@@ -74,18 +74,11 @@ impl GameWorld {
         world
     }
 
-    /// Spawns a scene loaded through [`AssetServer::load`]
-    /// (`ornis_assets`) and returns the one character root.
+    /// Spawns a RON [`Scene`] loaded through [`AssetServer::load`]
+    /// (`ornis_assets`) and returns one root entity.
     ///
-    /// glTF loads keep their [`LoadedScene`](ornis_gltf::LoadedScene) on
-    /// the server. This creates a root entity, spawns the mesh entities,
-    /// then sets [`GltfSpawn::scene_root`](crate::anim_wiring::GltfSpawn::scene_root)
-    /// before [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)
-    /// so the [`Animator`](ornis_animation::Animator) lands on that root
-    /// rather than the first mesh. Other scene formats spawn their
-    /// entities and return a root with no animator. Loading never starts
-    /// a clip — [`EntityMut::animator`](ornis_animation::AnimatorAccess::animator)
-    /// does.
+    /// Mesh entities are spawned flat (no animator). glTF models use
+    /// [`GameWorld::spawn_model`]. Loading never starts a clip.
     ///
     /// # Errors
     ///
@@ -98,9 +91,6 @@ impl GameWorld {
         assets: &ornis_assets::AssetServer,
         handle: &ornis_assets::Handle<Scene>,
     ) -> Result<Entity, ornis_assets::AssetError> {
-        if let Some(loaded) = assets.loaded_scene(handle.id()) {
-            return Ok(self.spawn_loaded(loaded));
-        }
         let Some(scene) = assets.get(handle) else {
             return Err(ornis_assets::AssetError::UnknownHandle {
                 index: handle.id().index(),
@@ -125,10 +115,37 @@ impl GameWorld {
         Ok(root)
     }
 
-    /// Mesh entities plus animation wiring for one retained glTF scene.
+    /// Flat-spawns a glTF [`Model`](ornis_assets::Model) and returns one root.
+    ///
+    /// Mesh primitives become entities at world TRS. The root receives the
+    /// [`Animator`](ornis_animation::Animator) when the model has skeletal
+    /// clips. This is the layout [`spawn_scene`](Self::spawn_scene) used
+    /// for glTF before models kept their node tree. Hierarchical spawn
+    /// (one entity per node, local [`ornis_core::Transform`], [`ornis_core::ChildOf`])
+    /// is a separate entry point. Loading never starts a clip —
+    /// [`EntityMut::animator`](ornis_animation::AnimatorAccess::animator) does.
+    ///
+    /// # Errors
+    ///
+    /// [`AssetError::UnknownHandle`](ornis_assets::AssetError::UnknownHandle)
+    /// when `handle` is not loaded. The world is untouched.
+    pub fn spawn_model(
+        &mut self,
+        assets: &ornis_assets::AssetServer,
+        handle: &ornis_assets::Handle<ornis_assets::Model>,
+    ) -> Result<Entity, ornis_assets::AssetError> {
+        let Some(model) = assets.get(handle) else {
+            return Err(ornis_assets::AssetError::UnknownHandle {
+                index: handle.id().index(),
+            });
+        };
+        Ok(self.spawn_loaded(model))
+    }
+
+    /// Mesh entities plus animation wiring for one loaded glTF model.
     ///
     /// The returned entity is the character root created before wiring.
-    fn spawn_loaded(&mut self, loaded: &ornis_gltf::LoadedScene) -> Entity {
+    fn spawn_loaded(&mut self, loaded: &ornis_assets::Model) -> Entity {
         let (spawn, root) = {
             let store = self
                 .engine_mut()
@@ -477,7 +494,7 @@ impl Spawn for OrbitCamera {
 ///
 /// [`AnimatorAccess`](ornis_animation::AnimatorAccess) resolves
 /// `world.entity_mut(hero).animator()?.play("Walk_Loop")?` against the
-/// character root [`GameWorld::spawn_scene`] returned.
+/// character root [`GameWorld::spawn_model`] returned.
 pub struct EntityMut<'a> {
     store: &'a mut ornis_core::SmartStore,
     entity: Entity,
@@ -1090,7 +1107,7 @@ mod tests {
 
     /// Scene-first facade: empty world, one character root, explicit light
     /// and camera. The world starts dark, and the animator sits on the
-    /// root `spawn_scene` returned.
+    /// root `spawn_model` returned.
     #[test]
     fn facade_spawns_asset_with_explicit_light_and_camera() {
         use ornis_animation::{Animator, AnimatorError, try_animator};
@@ -1107,9 +1124,10 @@ mod tests {
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
         let mut assets = ornis_assets::AssetServer::new();
-        let mannequin: ornis_assets::Handle<Scene> = assets.load(&starter).expect("starter loads");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            assets.load(&starter).expect("starter loads");
         let hero = world
-            .spawn_scene(&assets, &mannequin)
+            .spawn_model(&assets, &mannequin)
             .expect("starter spawns");
         let meshes = mesh_entities(&world);
         assert!(!meshes.is_empty());
@@ -1163,7 +1181,7 @@ mod tests {
             "orbit camera installed"
         );
 
-        let missing = assets.load::<Scene>(std::path::Path::new("nope.glb"));
+        let missing = assets.load::<ornis_assets::Model>(std::path::Path::new("nope.glb"));
         assert!(missing.is_err(), "missing file rejects");
     }
 
@@ -1175,11 +1193,12 @@ mod tests {
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
         let mut assets = ornis_assets::AssetServer::new();
-        let mannequin: ornis_assets::Handle<Scene> = assets.load(&starter).expect("starter loads");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            assets.load(&starter).expect("starter loads");
 
         let mut world = GameWorld::new();
         let hero = world
-            .spawn_scene(&assets, &mannequin)
+            .spawn_model(&assets, &mannequin)
             .expect("loaded handle spawns");
         let meshes = mesh_entities(&world);
         assert!(!meshes.is_empty());
@@ -1192,7 +1211,7 @@ mod tests {
 
         let mut other = GameWorld::new();
         let other_hero = other
-            .spawn_scene(&assets, &mannequin)
+            .spawn_model(&assets, &mannequin)
             .expect("same handle, other world");
         assert_eq!(mesh_entities(&other).len(), meshes.len());
         other
@@ -1203,7 +1222,7 @@ mod tests {
             .expect("Walk_Loop");
 
         let again = world
-            .spawn_scene(&assets, &mannequin)
+            .spawn_model(&assets, &mannequin)
             .expect("parse once, spawn many");
         assert_ne!(again, hero);
         assert_eq!(mesh_entities(&world).len(), meshes.len() * 2);
@@ -1260,9 +1279,10 @@ mod tests {
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
         let mut assets = ornis_assets::AssetServer::new();
-        let mannequin: ornis_assets::Handle<Scene> = assets.load(&starter).expect("starter loads");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            assets.load(&starter).expect("starter loads");
         let hero = world
-            .spawn_scene(&assets, &mannequin)
+            .spawn_model(&assets, &mannequin)
             .expect("starter spawns");
         let meshes = mesh_entities(&world);
         assert_ne!(hero, meshes[0]);

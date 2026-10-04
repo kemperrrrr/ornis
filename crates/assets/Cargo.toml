@@ -21,7 +21,7 @@ thiserror = "2.0"
 [features]
 default = ["gltf"]
 # `.gltf`/`.glb` importer (`GltfImporter`, `AssetServer::load_gltf*`,
-# `scene_from_gltf`, retained `LoadedScene` for animation wiring).
+# `scene_from_model`). glTF loads are [`Model`] assets, not scenes.
 gltf = ["dep:ornis-gltf"]
 # Placeholder: registers the `.fbx` extension with an importer that returns
 # `AssetError::UnsupportedFormat` (no parser, no new dependencies yet).

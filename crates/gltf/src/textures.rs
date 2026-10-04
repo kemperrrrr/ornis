@@ -241,7 +241,7 @@ mod tests {
         ));
         fixture.base_color_texture = Some(0);
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
-        let material = &scene.entities[0].material;
+        let material = &scene.primitives[0].material;
         let image = material
             .base_color_texture
             .as_ref()
@@ -277,7 +277,7 @@ mod tests {
         ));
         fixture.emissive_texture = Some(0);
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
-        let material = &scene.entities[0].material;
+        let material = &scene.primitives[0].material;
         let image = material.emissive_texture.as_ref().expect("emissive bound");
         assert_eq!((image.width, image.height), (3, 1));
         assert_eq!(image.pixels, rgba);
@@ -303,7 +303,7 @@ mod tests {
         ));
         fixture.metallic_roughness_texture = Some(0);
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
-        let material = &scene.entities[0].material;
+        let material = &scene.primitives[0].material;
         let image = material
             .metallic_roughness_texture
             .as_ref()
@@ -340,7 +340,7 @@ mod tests {
         fixture.base_color_texture = Some(0);
         fixture.emissive_texture = Some(0);
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
-        let material = &scene.entities[0].material;
+        let material = &scene.primitives[0].material;
         assert_eq!(
             material.base_color_texture.as_ref().map(|i| &i.pixels),
             Some(&rgba)
@@ -388,7 +388,7 @@ mod tests {
             std::fs::write(dir.join(name), bytes).expect("write sibling image");
         }
         let scene = load_path(&dir.join("tri.glb")).expect("external image loads");
-        let image = scene.entities[0]
+        let image = scene.primitives[0]
             .material
             .base_color_texture
             .as_ref()
@@ -420,7 +420,7 @@ mod tests {
     #[test]
     fn untextured_material_has_no_images() {
         let scene = load_triangle();
-        let material = &scene.entities[0].material;
+        let material = &scene.primitives[0].material;
         assert!(material.base_color_texture.is_none());
         assert!(material.metallic_roughness_texture.is_none());
         assert!(material.emissive_texture.is_none());

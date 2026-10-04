@@ -12,9 +12,11 @@ gltf = { version = "1", default-features = false, features = ["utils", "names"] 
 # exr, …) stays out of a geometry-first loader.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 thiserror = "2.0"
-# Animation-clip assembly (docs/animation-design.md §4): object tracks key
-# their entities with `ornis-core` handles; skeletal/value types stay plain
-# arrays (same seam as `LoadedSkin`, never a stub dependency).
+# Local TRS on imported nodes (`Vec3` / `Quat` behind `ornis_core::Transform`).
+glam = "0.33"
+# Animation-clip assembly (docs/animation-design.md §4): object tracks address
+# `NodeIdx`; skeletal joint indices stay plain `u32` (same seam as
+# `LoadedSkin`, never a stub dependency).
 ornis-core = { path = "../core" }
 
 [lints]

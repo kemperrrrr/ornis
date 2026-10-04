@@ -14,16 +14,16 @@
 //! no `glam` dependency — the same seam as [`LoadedSkin`](crate::LoadedSkin),
 //! whose wiring feeds the animation builders): joint indices map through
 //! `JointId::from_raw`, rotations are `(x, y, z, w)` unit quaternions,
-//! object entities arrive as [`Entity`] handles keyed by node index.
+//! object tracks address a [`NodeIdx`](crate::NodeIdx) into [`Model`](crate::Model).
 
 use std::collections::HashMap;
 
 use gltf::Document;
 use gltf::animation::Property;
 use gltf::animation::util::ReadOutputs;
-use ornis_core::Entity;
 
 use crate::ImportStats;
+use crate::model::NodeIdx;
 
 /// Squared length below which a quaternion is treated as degenerate.
 const DEGENERATE_LEN2: f32 = 1e-12;
@@ -113,14 +113,19 @@ impl<T> LoadedKeyTrack<T> {
 
 /// One joint channel of a [`LoadedSkelClip`]: sorted keys per transform lane.
 ///
-/// Mirrors `ornis-animation` `JointTrack` field-for-field: `joint` maps
-/// through `JointId::from_raw`, empty lanes read as identity (zero
-/// translation, unit rotation, unit scale) so untracked joints hold the
-/// bind offset instead of collapsing the chain.
+/// Mirrors `ornis-animation` `JointTrack` field-for-field on `joint`: that
+/// index maps through `JointId::from_raw` (skin order, same as
+/// [`LoadedSkin::parents`](crate::LoadedSkin::parents)). `node` is the same
+/// joint as a [`NodeIdx`] so spawn can bind the channel to the hierarchy.
+/// Empty lanes read as identity (zero translation, unit rotation, unit
+/// scale) so untracked joints hold the bind offset instead of collapsing
+/// the chain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedJointTrack {
     /// Animated joint index into the skin order (see [`node_to_joint_map`]).
     pub joint: u32,
+    /// Model node of this joint.
+    pub node: NodeIdx,
     /// Translation keys; empty means zero translation.
     pub translation: LoadedKeyTrack<[f32; 3]>,
     /// Rotation keys (`(x, y, z, w)` unit quaternions); empty means identity.
@@ -145,14 +150,14 @@ pub struct LoadedSkelClip {
 
 /// Object-space tracks for one animated node inside a [`LoadedAnimClip`].
 ///
-/// Mirrors `ornis-animation` `AnimTrack`: `entity` is the loader-local
-/// node handle ([`Entity::new`] keyed by node index — the node→entity
-/// mapping is consumed here and never leaks raw indices); empty lanes mean
-/// "leave untouched" (so entity size survives when no scale track exists).
+/// Mirrors `ornis-animation` `AnimTrack` except the target: `node` is a
+/// [`NodeIdx`] into [`Model::nodes`](crate::Model::nodes), including
+/// mesh-less parents. Empty lanes mean "leave untouched" (so a node's
+/// scale survives when no scale track exists).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedAnimTrack {
-    /// Animated node as a loader-local entity handle.
-    pub entity: Entity,
+    /// Animated model node.
+    pub node: NodeIdx,
     /// Translation keys; empty means "leave translation untouched".
     pub translation: LoadedKeyTrack<[f32; 3]>,
     /// Rotation keys; empty means "leave rotation untouched".
@@ -173,7 +178,8 @@ pub struct LoadedAnimClip {
     pub duration: f32,
     /// Whether playback wraps (`true`: the loader convention).
     pub looping: bool,
-    /// Per-node tracks in node-index order.
+    /// Per-node tracks in glTF document-node order. Each [`LoadedAnimTrack::node`]
+    /// is a [`NodeIdx`](crate::NodeIdx), including mesh-less parents.
     pub tracks: Vec<LoadedAnimTrack>,
 }
 
@@ -197,8 +203,9 @@ pub fn node_to_joint_map(document: &Document) -> HashMap<usize, usize> {
 ///
 /// `node_to_joint` comes from [`node_to_joint_map`]: channels targeting
 /// those nodes become [`LoadedJointTrack`]s, the rest become
-/// [`LoadedAnimTrack`]s — the node→entity/joint mapping is consumed here
-/// and never leaves the loader.
+/// [`LoadedAnimTrack`]s. `node_to_model` remaps the glTF document index to
+/// a [`NodeIdx`]; a channel whose node is outside the imported scene is
+/// skipped (it has no index to address).
 ///
 /// Each clip `duration` is the maximum input time over its assembled keys.
 /// A side with no tracks emits nothing; an animation with neither side
@@ -212,6 +219,7 @@ pub fn assemble_clips(
     document: &Document,
     buffers: &[Vec<u8>],
     node_to_joint: &HashMap<usize, usize>,
+    node_to_model: &HashMap<usize, NodeIdx>,
     stats: &mut ImportStats,
 ) -> (Vec<LoadedSkelClip>, Vec<LoadedAnimClip>) {
     let mut skel_clips = Vec::new();
@@ -232,7 +240,7 @@ pub fn assemble_clips(
             };
             assembly.push(node, keys, node_to_joint.contains_key(&node));
         }
-        let (joint_tracks, object_tracks) = assembly.into_tracks(node_to_joint);
+        let (joint_tracks, object_tracks) = assembly.into_tracks(node_to_joint, node_to_model);
         let duration = track_duration(&joint_tracks, &object_tracks);
         let mut emitted = false;
         if !joint_tracks.is_empty() {
@@ -356,16 +364,23 @@ impl ClipAssembly {
     }
 
     /// Splits staged parts into joint and object tracks (both in ascending
-    /// node order; joint indices resolve through `node_to_joint`).
+    /// document-node order; joint indices resolve through `node_to_joint`,
+    /// and both sides address [`NodeIdx`] through `node_to_model`).
+    ///
+    /// A staged node missing from `node_to_model` is outside the imported
+    /// scene and is dropped here — it has no [`NodeIdx`] to address.
     fn into_tracks(
         self,
         node_to_joint: &HashMap<usize, usize>,
+        node_to_model: &HashMap<usize, NodeIdx>,
     ) -> (Vec<LoadedJointTrack>, Vec<LoadedAnimTrack>) {
         let mut staged: Vec<(usize, JointPart)> = self.joints.into_iter().collect();
         staged.sort_by_key(|(node, _)| *node);
         let mut joints = Vec::with_capacity(staged.len());
         for (node, part) in staged {
-            let Some(&joint) = node_to_joint.get(&node) else {
+            let (Some(&joint), Some(&model_node)) =
+                (node_to_joint.get(&node), node_to_model.get(&node))
+            else {
                 continue;
             };
             joints.push(LoadedJointTrack {
@@ -374,6 +389,7 @@ impl ClipAssembly {
                 // reads them as zero translation / unit rotation / unit
                 // scale instead of collapsing the chain.
                 joint: joint as u32,
+                node: model_node,
                 translation: part
                     .translation
                     .unwrap_or_else(|| LoadedKeyTrack::linear(Vec::new())),
@@ -389,10 +405,13 @@ impl ClipAssembly {
         staged.sort_by_key(|(node, _)| *node);
         let mut entities = Vec::with_capacity(staged.len());
         for (node, part) in staged {
+            let Some(&model_node) = node_to_model.get(&node) else {
+                continue;
+            };
             // Empty object channel = "leave untouched" (design §1.1): absent
             // paths stay empty tracks via the constructors below.
             entities.push(LoadedAnimTrack {
-                entity: Entity::new(node as u32),
+                node: model_node,
                 translation: part
                     .translation
                     .unwrap_or_else(|| LoadedKeyTrack::linear(Vec::new())),

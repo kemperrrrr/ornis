@@ -2795,6 +2795,7 @@ dependencies = [
 name = "ornis-gltf"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "gltf",
  "image",
  "ornis-core",

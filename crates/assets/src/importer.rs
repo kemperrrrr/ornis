@@ -25,8 +25,11 @@ pub const FBX_FORMAT: &str = "fbx";
 /// Result of one importer run, ready to be stored by the server.
 #[non_exhaustive]
 pub enum ImportedAsset {
-    /// A scene ([`AssetKind::Scene`]).
+    /// A scene ([`AssetKind::Scene`]): `.ron`.
     Scene(SceneImport),
+    /// A glTF model ([`AssetKind::Model`]): `.gltf`/`.glb`.
+    #[cfg(feature = "gltf")]
+    Model(ornis_gltf::Model),
 }
 
 impl ImportedAsset {
@@ -34,6 +37,8 @@ impl ImportedAsset {
     pub fn kind(&self) -> AssetKind {
         match self {
             Self::Scene(_) => AssetKind::Scene,
+            #[cfg(feature = "gltf")]
+            Self::Model(_) => AssetKind::Model,
         }
     }
 }
@@ -44,10 +49,6 @@ pub struct SceneImport {
     pub scene: Scene,
     /// Original text for text formats (RON round-trip/hot-reload plan).
     pub source_text: Option<String>,
-    /// Retained glTF source: node indices and animation clips the
-    /// converted [`Scene`] drops (see `AssetServer::loaded_scene`).
-    #[cfg(feature = "gltf")]
-    pub gltf: Option<ornis_gltf::LoadedScene>,
 }
 
 impl SceneImport {
@@ -56,8 +57,6 @@ impl SceneImport {
         Self {
             scene,
             source_text: None,
-            #[cfg(feature = "gltf")]
-            gltf: None,
         }
     }
 }
@@ -214,14 +213,8 @@ impl GltfImporter {
     ///
     /// [`AssetError::Import`] tagged `"gltf"`.
     pub fn import_slice(&self, bytes: &[u8]) -> Result<ImportedAsset, AssetError> {
-        let loaded = ornis_gltf::load_slice(bytes)?;
-        Ok(Self::wrap(loaded))
-    }
-
-    fn wrap(loaded: ornis_gltf::LoadedScene) -> ImportedAsset {
-        let mut import = SceneImport::new(crate::import::scene_from_gltf(&loaded));
-        import.gltf = Some(loaded);
-        ImportedAsset::Scene(import)
+        let model = ornis_gltf::load_slice(bytes)?;
+        Ok(ImportedAsset::Model(model))
     }
 }
 
@@ -236,15 +229,15 @@ impl Importer for GltfImporter {
     }
 
     fn kind(&self) -> AssetKind {
-        AssetKind::Scene
+        AssetKind::Model
     }
 
     fn import_path(&self, path: &Path) -> Result<ImportedAsset, AssetError> {
-        let loaded = ornis_gltf::load_path(path).map_err(|error| match error {
+        let model = ornis_gltf::load_path(path).map_err(|error| match error {
             ornis_gltf::ImportError::Io(source) => AssetError::io(path, source),
             other => AssetError::from(other).with_path(path),
         })?;
-        Ok(Self::wrap(loaded))
+        Ok(ImportedAsset::Model(model))
     }
 }
 

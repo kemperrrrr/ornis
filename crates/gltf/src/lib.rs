@@ -15,10 +15,10 @@
 //!
 //! | glTF source | Output here | Later wiring (`crates/render/src/scene.rs`) |
 //! |---|---|---|
-//! | default scene, else first scene | [`LoadedScene::name`] | `Scene.name` |
-//! | node with a mesh | one [`LoadedEntity`] per mesh primitive | one `EntityDesc` per entity |
-//! | node TRS / matrix, world-composed | `translation`, `rotation` (`x,y,z,w`), `scale` | `TransformDesc` verbatim |
-//! | node name → mesh name → `mesh_{mi}_{pi}` | [`LoadedEntity::name`] | `EntityDesc.name` |
+//! | default scene, else first scene | [`Model::name`] | `Scene.name` |
+//! | every scene node, including mesh-less | one [`ModelNode`] (local TRS, parent) | one entity per node at spawn (Core track) |
+//! | node TRS / matrix, **local** | [`ModelNode::local`] ([`ornis_core::Transform`]) | world pose via [`Model::world_transform`] |
+//! | node name | [`ModelNode::name`] (`None` when omitted) | `EntityDesc.name` (unnamed → `mesh_{node}_{prim}`) |
 //! | primitive `POSITION` | [`LoadedMesh::positions`] (verbatim) | `MeshDesc::Custom.positions` |
 //! | primitive indices (`u8`/`u16`/`u32`) | [`LoadedMesh::indices`] as `u32` (verbatim; absent → sequential) | `MeshDesc::Custom.indices` |
 //! | primitive `NORMAL` | [`LoadedMesh::normals`] (`Some`, verbatim) | dropped: recomputed at upload |
@@ -27,8 +27,8 @@
 //! | absent `TEXCOORD_0` | [`LoadedMesh::uvs`] is `None`; [`LoadedMesh::resolved_uvs`] rebuilds with a box projection (as `custom_mesh_data`) | `mesh_upload::custom_mesh_data` |
 //! | primitive `JOINTS_0` (+`JOINTS_1..` when present) | [`LoadedMesh::joints`] (`Some`, top-4 by weight, `u16`) | `SkinnedMesh.joints` via `ornis-animation` builders |
 //! | primitive `WEIGHTS_0` (+`WEIGHTS_1..` when present) | [`LoadedMesh::weights`] (`Some`, normalized, `sum == 1`) | `SkinnedMesh.weights` via `ornis-animation` builders |
-//! | `skins[]` + node `skin` | [`LoadedSkin`] (`parents`/`inverse_bind`/`joint_names`) + [`LoadedEntity::skin`] link | `Skeleton` via `ornis-animation` builders |
-//! | `animations[]` sampler `input`/`output` per `channel.target.path` | [`LoadedScene::skel_clips`] ([`LoadedSkelClip`]) + [`LoadedScene::anim_clips`] ([`LoadedAnimClip`]) | `SkelClip`/`AnimClip` cold lanes via the animation builders |
+//! | `skins[]` + node `skin` | [`LoadedSkin`] (`parents`/`inverse_bind`/`joint_names`) + [`ModelNode::skin`] link | `Skeleton` via `ornis-animation` builders |
+//! | `animations[]` sampler `input`/`output` per `channel.target.path` | [`Model::skel_clips`] ([`LoadedSkelClip`]) + [`Model::anim_clips`] ([`LoadedAnimClip`]); tracks address [`NodeIdx`] | `SkelClip`/`AnimClip` cold lanes via the animation builders |
 //! | `baseColorFactor` / `metallicFactor` / `roughnessFactor` / `emissiveFactor` | [`LoadedMaterial`] scalars | `metallic >= 0.5` → `MaterialDesc::Metal`, else `Dielectric` |
 //! | `baseColorTexture` | [`LoadedMaterial::base_color_texture`] (RGBA8) | albedo bind at upload |
 //! | `metallicRoughnessTexture` | [`LoadedMaterial::metallic_roughness_texture`] (RGBA8; G = roughness, B = metallic) | roughness/metallic bind at upload |
@@ -48,7 +48,7 @@
 //! | index out of range, or unindexed count not a multiple of 3 | primitive skipped | [`ImportStats::skipped_bad_index`] |
 //! | morph targets, cameras, lights, extensions, samplers | ignored | — (documented here) |
 //! | animations, skeletons (beyond the topology above) | morph-target channels ignored (clip track lands later) | — (documented here) |
-//! | node without a mesh | traversed for children only | — |
+//! | node without a mesh | kept in [`Model::nodes`] with an empty primitive list | — |
 //! | external buffer URI under [`load_slice`] | `Err(ExternalBuffer)` — use [`load_path`] | — |
 //!
 //! # Next steps (explicitly NOT in this crate)
@@ -58,14 +58,15 @@
 //!    filtering, and `texCoord` sets live there, not here (samplers are
 //!    ignored on import).
 //! 2. `SkelClip`/`AnimClip` assembly from `animations[]` per `docs/animation-design.md`
-//!    §4 lands here ([`LoadedScene::skel_clips`], [`LoadedScene::anim_clips`];
+//!    §4 lands here ([`Model::skel_clips`], [`Model::anim_clips`];
 //!    `LINEAR`/`STEP`/`CUBICSPLINE` assemble, malformed `CUBICSPLINE`
 //!    channels skip with [`ImportStats::skipped_cubicspline`], morph targets
-//!    stay ignored).
-//! 3. Wiring: `LoadedScene` → `ornis-render` `Scene` (host keeps its own
-//!    camera/lights/ambient; [`LoadedMesh::into_custom`] feeds
+//!    stay ignored). Tracks address [`NodeIdx`], so a mesh-less parent keeps
+//!    its channel.
+//! 3. Wiring: [`Model`] → editor `Scene` via `scene_from_model` (host keeps
+//!    its own camera/lights/ambient; [`LoadedMesh::into_custom`] feeds
 //!    `MeshDesc::Custom`; [`LoadedMaterial::is_metallic`] picks the
-//!    `MaterialDesc` variant).
+//!    `MaterialDesc` variant). Hierarchical spawn is the Core track.
 
 #![warn(missing_docs)]
 
@@ -78,6 +79,7 @@ mod anim;
 mod base64;
 mod geom;
 mod import;
+mod model;
 mod textures;
 
 #[cfg(test)]
@@ -88,55 +90,7 @@ pub use anim::{
     LoadedKeyTrack, LoadedSkelClip, assemble_clips, node_to_joint_map,
 };
 pub use import::{load_path, load_slice};
-
-/// Geometry-only import result: flat entity list plus skip counters.
-///
-/// Mirrors `ornis-render` `Scene` without camera/lights/ambient — the host
-/// owns those and fills them in at wiring time.
-#[derive(Debug, Clone)]
-pub struct LoadedScene {
-    /// Scene label: glTF scene name, else `"scene"`.
-    pub name: String,
-    /// One entry per imported mesh primitive, hierarchy flattened.
-    pub entities: Vec<LoadedEntity>,
-    /// One entry per resolved `skins[]` element, in document order;
-    /// [`LoadedEntity::skin`] links into this table.
-    pub skins: Vec<LoadedSkin>,
-    /// Skeletal clips: one per glTF animation with joint tracks (skinned
-    /// nodes only); empty when no animation targets a joint.
-    pub skel_clips: Vec<LoadedSkelClip>,
-    /// Object clips: one per glTF animation with object tracks (unskinned
-    /// nodes only, entities keyed by node index); empty when every animated
-    /// node is skinned.
-    pub anim_clips: Vec<LoadedAnimClip>,
-    /// Primitive/skip counters; see the skip-rules table.
-    pub stats: ImportStats,
-}
-
-/// One imported mesh primitive with its world transform.
-///
-/// Field layouts match `ornis-render` `EntityDesc`/`TransformDesc` so the
-/// later wiring copies them verbatim.
-#[derive(Debug, Clone)]
-pub struct LoadedEntity {
-    /// Display name: node name → mesh name → `mesh_{mesh}_{primitive}`.
-    pub name: String,
-    /// Source glTF node index of the mesh instance (object-track mapping key).
-    pub node: u32,
-    /// World-space translation in glTF units.
-    pub translation: [f32; 3],
-    /// World-space orientation as `(x, y, z, w)`, unit length.
-    pub rotation: [f32; 4],
-    /// World-space scale per axis (may carry a mirror bake, see [`load_slice`]).
-    pub scale: [f32; 3],
-    /// Triangle soup plus optional source attributes.
-    pub mesh: LoadedMesh,
-    /// Skin link: index into [`LoadedScene::skins`] from the node's `skin`
-    /// field (`None` = unskinned node, or a skin with no joints).
-    pub skin: Option<usize>,
-    /// Scalar PBR factors plus decoded texture slots.
-    pub material: LoadedMaterial,
-}
+pub use model::{Model, ModelNode, ModelPrimitive, NodeIdx};
 
 /// Vertex index into a mesh vertex list.
 ///
