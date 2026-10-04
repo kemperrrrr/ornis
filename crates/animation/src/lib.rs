@@ -18,7 +18,8 @@
 //! the same file: [`Skeleton`]/[`JointPose`]/[`SkelPlayer`] hot lanes plus
 //! the cold [`SkelClip`] lane and [`SkinnedMesh`] bind data, sampled by
 //! `skel_sample` ([`SkelSampleSystem`]) and skinned on the CPU by
-//! `skel_skin_cpu` ([`SkelSkinSystem`]).
+//! `skel_skin_cpu` ([`SkelSkinSystem`]). [`Animator`] on the character root
+//! selects a skeletal clip by name; a player stays empty until that call.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -26,7 +27,8 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use ornis_core::{
-    ColdComponentStore, ComponentStore, Entity, Resources, SmartStore, System, SystemAccess, Time,
+    Clamped01, ColdComponentStore, ComponentStore, Entity, Resources, Seconds, SmartStore, System,
+    SystemAccess, Time,
 };
 use ornis_gameplay::Position;
 
@@ -45,6 +47,9 @@ const TRIANGLE_VERTS: usize = 3;
 /// Phase D GPU-skinning contract: [`SkinningMode`], [`JointCount`] /
 /// [`JointLimit`], [`SkinningResources`], [`SkinError`] and the shader-mirror
 /// reference blend.
+mod animator;
+pub use animator::{Animator, AnimatorAccess, AnimatorError, AnimatorMut, try_animator};
+
 pub mod skinning;
 
 pub use skinning::{
@@ -1139,13 +1144,15 @@ pub struct JointTrack {
 /// Shareable skeletal clip: cold data, sampled often, changed rarely.
 ///
 /// Lives in the cold lane on a playlist entity; [`SkelPlayer`]s reference
-/// it through [`ClipId`]. Time wraps past `duration` (clips loop); a
-/// non-positive `duration` holds the pose.
+/// it through [`ClipId`]. Whether time wraps past `duration` is the
+/// player's `looping` flag (a non-positive `duration` holds the pose
+/// either way). [`Self::name`] is the glTF animation name; the
+/// character-root [`Animator`] indexes these playlist entities by that name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkelClip {
     /// Clip name (glTF animation name; diagnostics and clip selection).
     pub name: String,
-    /// Clip length in seconds; player time wraps against it.
+    /// Clip length in seconds. Wrapping is the player's `looping` flag.
     pub duration: f32,
     /// Per-joint tracks; first track per joint wins on duplicates.
     pub tracks: Vec<JointTrack>,
@@ -1153,23 +1160,30 @@ pub struct SkelClip {
 
 /// Hot per-root playback cursor into a [`SkelClip`].
 ///
-/// Same shape as [`AnimPlayer`] (the playlist model is shared); `weight`
-/// is reserved for phase E blending and ignored here.
+/// Same playlist model as [`AnimPlayer`]. `weight` is reserved for phase E
+/// blending and ignored by the sampler. `time` and `speed` are [`Seconds`]
+/// so the hot lane does not carry a bare `f32`: `time` is the cursor in
+/// seconds, `speed` is the playback rate (`Seconds::new(1.0)` is real time;
+/// a negative raw value scrubs backwards). Wiring leaves this component
+/// absent until [`AnimatorMut::play`].
 ///
 /// `Clone + Send + Sync` per the hot-lane contract.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkelPlayer {
     /// Playlist entity holding the [`SkelClip`] in the cold lane.
     pub clip: ClipId,
-    /// Current clip time in seconds; advanced by `dt * speed` each PostFrame.
-    pub time: f32,
-    /// Playback rate multiplier (`1.0` = real time; negative scrubs backwards).
-    pub speed: f32,
-    /// Blend weight, reserved for phase E (crossfade/masks); ignored here.
-    pub weight: f32,
+    /// Current clip time; advanced by `dt * speed` each PostFrame.
+    pub time: Seconds,
+    /// Playback rate (`Seconds::new(1.0)` = real time; negative scrubs backwards).
+    pub speed: Seconds,
+    /// Blend weight in `[0, 1]`, reserved for phase E (crossfade/masks);
+    /// ignored by the sampler.
+    pub weight: Clamped01,
     /// Paused players hold their pose: time does not advance and the pose
     /// is not rewritten.
     pub playing: bool,
+    /// `true` wraps time past the clip duration; `false` clamps at the ends.
+    pub looping: bool,
 }
 
 /// One skinned mesh: bind geometry plus joint influences and the CPU
@@ -1477,7 +1491,7 @@ fn blend_normal(
 /// Skeleton pose sampler (system name `skel_sample`).
 ///
 /// PostFrame-only visual pose on variable [`Time`]: advances playing
-/// [`SkelPlayer`] cursors (clips wrap), samples their [`SkelClip`] tracks
+/// [`SkelPlayer`] cursors (wrap or clamp per `looping`), samples their [`SkelClip`] tracks
 /// to joint-local matrices and resolves them to model space along
 /// [`Skeleton::parents`], rooted at the entity's [`TransformDesc`]
 /// (identity when the lane is absent). Poses publish whole into
@@ -1570,7 +1584,13 @@ fn advance_skel_players(store: &SmartStore, dt: f32) {
         let Some(clip) = clips.get(player.clip.0) else {
             continue;
         };
-        player.time = advance_player_time(player.time, dt, player.speed, clip.duration, true);
+        player.time = Seconds::new(advance_player_time(
+            player.time.get(),
+            dt,
+            player.speed.get(),
+            clip.duration,
+            player.looping,
+        ));
     }
 }
 
@@ -1645,7 +1665,7 @@ fn sample_entity(
     if poses.is_none_or(|lane| lane.get(entity).is_none()) {
         return None;
     }
-    let locals = sample_locals(clip, skeleton.joint_count(), player.time);
+    let locals = sample_locals(clip, skeleton.joint_count(), player.time.get());
     compose_model_matrices(skeleton, &locals, &root_matrix(transforms, entity))
 }
 

@@ -21,7 +21,7 @@ use ornis_animation::{
     blend_vertex_reference, skeleton_from_import, skinned_mesh_from_import,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::units::Clamped01;
+use ornis_core::units::{Clamped01, Seconds};
 use ornis_core::{Engine, Entity, Stage};
 
 /// Registers the skeletal lanes (the engine runs both phase B systems on
@@ -125,10 +125,11 @@ fn spawn_skinned_pair(engine: &mut Engine) -> Entity {
         root,
         SkelPlayer {
             clip: ClipId(root),
-            time: 0.0,
-            speed: 1.0,
-            weight: 1.0,
+            time: Seconds::ZERO,
+            speed: Seconds::new(1.0),
+            weight: Clamped01::ONE,
             playing: true,
+            looping: true,
         },
     );
     let import = triangle_mesh_import();

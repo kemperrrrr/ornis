@@ -81,7 +81,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use ornis_animation::{AnimPlayer, ClipId, JointPose, SkelClip, SkelPlayer, Skeleton, SkinnedMesh};
+use ornis_animation::{Animator, JointPose, SkelClip, SkelPlayer, Skeleton, SkinnedMesh};
 use ornis_core::mutation::{Mutation, MutationBus, MutationPlugin, apply_mutations};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
@@ -689,8 +689,8 @@ impl EditorSession {
     /// Read `path` and replace the world with its scene. `.ron` files go
     /// through the asset server (retained as sources); `.glb`/`.gltf`
     /// files load geometry + scalar materials through the same replace
-    /// path, then wire skeletal/object animation clips (autoplaying, see
-    /// [`EditorSession::wire_gltf_animation`]).
+    /// path, then wire skeletal/object animation clips (named skeletal
+    /// playback, see [`EditorSession::wire_gltf_animation`]).
     /// Any error (missing file, invalid content) leaves the world untouched.
     ///
     /// # Errors
@@ -731,33 +731,18 @@ impl EditorSession {
             .map_err(|e| SceneFileError::Parse(e.to_string()))
     }
 
-    /// Wire glTF animation clips into the live world after a `.glb`/`.gltf`
-    /// replace (see [`EditorSession::load_scene_file`]).
+    /// Wires animation from a retained glTF scene into the live world
+    /// (thin wrapper over [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)).
     ///
-    /// Mesh entities are already spawned in `loaded` order (the converter
-    /// [`ornis_assets::import::scene_from_gltf`] preserves it 1:1 and
-    /// [`EditorSession::load_scene`] spawns in order), so `loaded.entities`
-    /// zips with the pre-wire [`EditorSession::alive`] prefix to rebuild
-    /// the node→world-entity map the converted [`Scene`] dropped. For every
-    /// skin a skeleton-root entity spawns ([`Skeleton`] plus
-    /// [`JointPose::identity`]); mesh entities with skin data gain a
-    /// [`SkinnedMesh`] lane pointing at their root. Every skeletal clip
-    /// becomes one cold-[`SkelClip`] playlist entity and every object clip
-    /// one cold-[`AnimClip`] playlist entity; roots play the first skeletal
-    /// clip and every mapped object-track entity plays its clip.
-    ///
-    /// Players spawn with `playing: true`: a DELIBERATE deviation from the
-    /// paused default of `docs/animation-design.md` §4.5 — loaded demo
-    /// content autoplays so the editor visibly runs; editor pause control
-    /// is a separate follow-up. Unmapped node tracks were already dropped
-    /// by the converter; the dropped count is covered by converter unit
-    /// tests and nothing is stored at runtime.
+    /// Mesh entities are already spawned in `loaded` order, so
+    /// `loaded.entities` zips with the pre-wire [`EditorSession::alive`]
+    /// prefix. Skeletal clips land on an [`Animator`] on the first mesh
+    /// entity (stand-in until a scene root is supplied). No skeletal
+    /// cursor exists until `Animator::play`. Object players are inserted
+    /// paused on the entities their tracks name. Created roots and
+    /// playlists join `alive`.
     ///
     /// Returns the number of spawned animation entities (roots + playlists).
-    /// Wires animation from a retained glTF scene into the live world
-    /// (thin wrapper over [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)):
-    /// node indices resolve against the pre-wire `alive` prefix (mesh
-    /// entities spawn in load order), created roots/playlists join `alive`.
     fn wire_gltf_animation(&mut self, loaded: &ornis_gltf::LoadedScene) -> usize {
         if loaded.skins.is_empty() && loaded.skel_clips.is_empty() && loaded.anim_clips.is_empty() {
             return 0;
@@ -776,14 +761,12 @@ impl EditorSession {
         let spawn = GltfSpawn {
             entities: mesh_entities,
             node_to_entity,
+            scene_root: None,
         };
         let Some(store) = self.store_mut() else {
             return 0;
         };
         let wiring = wire_loaded_animation(store, loaded, &spawn);
-        // Explicit start: wiring leaves players paused (the engine never
-        // autoplays); the editor host starts loaded content visibly.
-        crate::anim_wiring::set_playing_all(store, true);
         let added = wiring.added();
         for entity in wiring
             .roots
@@ -1447,16 +1430,18 @@ fn default_material() -> MaterialDesc {
 }
 
 /// Registers the skeletal animation lanes up front (hot
-/// [`Skeleton`]/[`JointPose`]/[`SkinnedMesh`]/[`SkelPlayer`], cold
-/// [`SkelClip`]): mirrors the [`install_object_animation`](crate::install_object_animation)
-/// pattern (`register` for hot lanes, `register_cold` for cold ones), so
-/// glTF wiring only inserts. `AnimPlayer`/`AnimClip` stay with
+/// [`Skeleton`]/[`JointPose`]/[`SkinnedMesh`]/[`SkelPlayer`]/[`Animator`],
+/// cold [`SkelClip`]): mirrors the
+/// [`install_object_animation`](crate::install_object_animation) pattern
+/// (`register` for hot lanes, `register_cold` for cold ones), so glTF
+/// wiring only inserts. `AnimPlayer`/`AnimClip` stay with
 /// `install_object_animation`.
 fn ensure_anim_lanes(store: &mut SmartStore) {
     store.register::<Skeleton>();
     store.register::<JointPose>();
     store.register::<SkinnedMesh>();
     store.register::<SkelPlayer>();
+    store.register::<Animator>();
     store.register_cold::<SkelClip>();
 }
 
@@ -3083,7 +3068,7 @@ mod tests {
     /// Cold object clips live here in tests (the lib import omits the name:
     /// only the cold lane — registered by `install_object_animation` — holds
     /// it at runtime).
-    use ornis_animation::AnimClip;
+    use ornis_animation::{AnimClip, AnimPlayer, try_animator};
 
     /// Render scene matching [`animated_loaded`] 1:1 (two mesh entities).
     fn animated_scene() -> Scene {
@@ -3216,12 +3201,12 @@ mod tests {
         }
     }
 
-    /// Skeletal + object wiring populates cold lanes and autoplay players:
-    /// one root (pose length == joint count), one skeletal playlist played
-    /// by the root, one object playlist played by the mapped entity (the
-    /// unmapped track drops), and a `SkinnedMesh` pointing at the root.
+    /// Skeletal wiring indexes the empty-name clip as `skel_clip_0` on the
+    /// first mesh and leaves the skeleton root without a cursor. Object
+    /// players are inserted paused on the mapped entity (the unmapped
+    /// track drops), and a `SkinnedMesh` points at the root.
     #[test]
-    fn gltf_animation_wiring_populates_cold_lanes_and_autoplays() {
+    fn gltf_animation_wiring_indexes_clips_without_a_skeletal_player() {
         let mut world = EditorSession::new();
         let loaded = animated_loaded();
         assert_eq!(world.load_scene(animated_scene()), 2);
@@ -3249,14 +3234,24 @@ mod tests {
         let anim_clips = store.read_cold_lane::<AnimClip>().expect("anim cold lane");
         assert_eq!(anim_clips.len(), 1);
 
-        let players = store.read_lane::<SkelPlayer>().expect("skel players");
-        let player = players.get(root).expect("root player");
-        assert!(player.playing, "loaded clips autoplay");
+        let hero = world.alive[0];
+        let playlist = store
+            .read_lane::<Animator>()
+            .expect("animator lane")
+            .get(hero)
+            .expect("animator on the first mesh")
+            .clip("skel_clip_0")
+            .expect("empty glTF name");
         assert!(
-            skel_clips.get(player.clip.0).is_some(),
-            "player points at the skeletal playlist"
+            skel_clips.get(playlist.0).is_some(),
+            "animator points at the skeletal playlist"
         );
-        drop(players);
+        assert!(
+            store
+                .read_lane::<SkelPlayer>()
+                .is_none_or(|lane| lane.get(root).is_none()),
+            "skeletal cursors stay empty until play"
+        );
 
         let skinned = store.read_lane::<SkinnedMesh>().expect("skinned lane");
         assert_eq!(
@@ -3269,7 +3264,7 @@ mod tests {
         let animated = world.alive[1];
         let object_players = store.read_lane::<AnimPlayer>().expect("anim players");
         let object = object_players.get(animated).expect("object player");
-        assert!(object.playing, "object clips autoplay");
+        assert!(!object.playing, "object players stay paused");
         let playlist = anim_clips.get(object.clip.0).expect("object playlist");
         assert_eq!(playlist.tracks.len(), 1, "unmapped track dropped");
         assert_eq!(playlist.tracks[0].entity, animated);
@@ -3320,8 +3315,8 @@ mod tests {
     }
 
     // Starter-content playback: the vendored no-root-motion UAL pack
-    // plays end to end (load → autoplay → joints move). Read-only over
-    // the committed fixture; nothing is written back.
+    // plays `Walk_Loop` by name (load → named play → joints move).
+    // Read-only over the committed fixture; nothing is written back.
     #[test]
     fn starter_pack_playback_moves_joints() {
         let mut session = EditorSession::new();
@@ -3331,15 +3326,34 @@ mod tests {
         let count = session.load_scene_file(&path).unwrap();
         assert!(count > 0, "nothing spawned");
 
+        let hero = session.alive[0];
+        {
+            let store = session.store_mut().expect("store");
+            try_animator(store, hero)
+                .expect("animator on the first mesh")
+                .play("Walk_Loop")
+                .expect("Walk_Loop");
+        }
+
         let store = session.world().store().unwrap();
         let players = store.read_lane::<SkelPlayer>().unwrap();
-        assert!(!players.entities.is_empty(), "no players");
+        assert!(!players.entities.is_empty(), "play inserts cursors");
         assert!(
             players
                 .entities
                 .iter()
                 .all(|e| players.get(*e).is_some_and(|p| p.playing)),
-            "players must autoplay"
+            "Walk_Loop is playing"
+        );
+        let clip = players.get(players.entities[0]).expect("cursor").clip;
+        assert_eq!(
+            store
+                .read_cold_lane::<SkelClip>()
+                .unwrap()
+                .get(clip.0)
+                .expect("playlist")
+                .name,
+            "Walk_Loop"
         );
         let before = store
             .read_lane::<JointPose>()

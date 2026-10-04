@@ -126,10 +126,11 @@ impl GameWorld {
     }
 
     /// Spawns a loaded asset into the world: mesh entities plus animation
-    /// wiring (skeleton roots, clip playlists, paused players) with the
-    /// needed sampler systems installed. Call
-    /// [`GameWorld::play_all_animations`] to start playback — loading
-    /// never autoplays.
+    /// wiring (skeleton roots, named clip playlists, a character-root
+    /// [`Animator`](ornis_animation::Animator)) with the needed sampler
+    /// systems installed. Loading never starts a skeletal clip — call
+    /// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play) with the
+    /// clip name.
     ///
     /// # Errors
     ///
@@ -193,6 +194,7 @@ impl GameWorld {
                 roots: Vec::new(),
                 skel_playlists: Vec::new(),
                 anim_playlists: Vec::new(),
+                clips: std::collections::HashMap::new(),
             },
         })
     }
@@ -257,32 +259,6 @@ impl GameWorld {
         crate::anim_wiring::set_playing(store, entity, false);
         crate::anim_wiring::rewind_player(store, entity)
     }
-
-    /// Starts every animation player in the world. Returns players touched.
-    pub fn play_all_animations(&mut self) -> usize {
-        let Some(store) = self.engine_mut().world_mut().store_mut() else {
-            return 0;
-        };
-        crate::anim_wiring::set_playing_all(store, true)
-    }
-
-    /// Pauses every animation player in the world. Returns players touched.
-    pub fn pause_all_animations(&mut self) -> usize {
-        let Some(store) = self.engine_mut().world_mut().store_mut() else {
-            return 0;
-        };
-        crate::anim_wiring::set_playing_all(store, false)
-    }
-
-    /// Stops every animation player in the world (pause + rewind).
-    /// Returns players touched.
-    pub fn stop_all_animations(&mut self) -> usize {
-        let Some(store) = self.engine_mut().world_mut().store_mut() else {
-            return 0;
-        };
-        crate::anim_wiring::set_playing_all(store, false);
-        crate::anim_wiring::rewind_all_players(store)
-    }
 }
 
 /// What [`GameWorld::spawn_gltf`] created: mesh entities plus the
@@ -290,7 +266,7 @@ impl GameWorld {
 pub struct SpawnedGltf {
     /// Mesh entities in load order.
     pub mesh_entities: Vec<Entity>,
-    /// Skeleton roots, clip playlists and players.
+    /// Skeleton roots, named clip playlists, and the character-root animator.
     pub wiring: crate::anim_wiring::AnimationWiring,
 }
 
@@ -1116,7 +1092,7 @@ mod tests {
 
     /// Scene-first facade: empty world, spawned asset, explicit light and
     /// camera — no engine, store, or installer calls. The world starts
-    /// dark (no silent rig) and the starter's moving clip autoplays.
+    /// dark (no silent rig) and skeletal playback waits for a named `play`.
     #[test]
     fn facade_spawns_asset_with_explicit_light_and_camera() {
         let mut world = GameWorld::new();
@@ -1193,7 +1169,11 @@ mod tests {
             legacy.wiring.skel_playlists.len()
         );
         assert!(!hero.wiring.roots.is_empty());
-        assert!(world.play_all_animations() > 0);
+        assert!(
+            hero.wiring.clips.contains_key("Walk_Loop"),
+            "spawn_scene indexes skeletal clips by name"
+        );
+        assert_eq!(hero.wiring.clips.len(), legacy.wiring.clips.len());
 
         let again = world
             .spawn_scene(&assets, &mannequin)
@@ -1222,17 +1202,39 @@ mod tests {
         ));
     }
 
-    /// Autoplay picks a *moving* clip (not the baked TPose first in most
-    /// packs) and joints visibly travel: pose snapshots over 90 frames
-    /// take more than one distinct value.
+    /// `Walk_Loop` is chosen by name (not the baked TPose, not the first
+    /// moving clip) and joints visibly travel: pose snapshots over 90
+    /// frames take more than one distinct value.
     #[test]
-    fn autoplay_moves_joints_over_time() {
-        use ornis_animation::{JointPose, SkelPlayer};
+    fn walk_loop_moves_joints_over_time() {
+        use ornis_animation::{JointPose, SkelPlayer, try_animator};
         let mut world = GameWorld::new();
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
         let spawned = world.spawn_gltf(&starter).expect("starter loads");
         assert!(spawned.wiring.skel_playlists.len() > 1);
+        let walk = spawned
+            .wiring
+            .clips
+            .get("Walk_Loop")
+            .copied()
+            .expect("Walk_Loop");
+        assert_ne!(walk.0, spawned.wiring.skel_playlists[0]);
+
+        let hero = spawned.mesh_entities[0];
+        {
+            let store = world.engine_mut().world_mut().store_mut().expect("store");
+            assert!(
+                store
+                    .read_lane::<SkelPlayer>()
+                    .is_none_or(|lane| lane.is_empty()),
+                "no skeletal cursor until play"
+            );
+            try_animator(store, hero)
+                .expect("animator")
+                .play("Walk_Loop")
+                .expect("Walk_Loop");
+        }
 
         let store = world.engine().world().store().expect("store");
         {
@@ -1243,17 +1245,11 @@ mod tests {
                 .map(|e| players.get(*e).unwrap().clip)
                 .collect();
             assert!(!played.is_empty());
-            // Not the first (static TPose) playlist.
             assert!(
-                played
-                    .iter()
-                    .all(|clip| clip.0 != spawned.wiring.skel_playlists[0]),
-                "autoplay must skip the static first clip"
+                played.iter().all(|clip| *clip == walk),
+                "play must select Walk_Loop, not the static first clip"
             );
         }
-
-        // Loading leaves players paused; explicit start moves joints.
-        assert!(world.play_all_animations() > 0);
 
         let mut seen = std::collections::HashSet::new();
         for _ in 0..90 {
@@ -1277,6 +1273,7 @@ mod tests {
     #[test]
     fn playback_controls_play_pause_stop() {
         use ornis_animation::{ClipId, SkelPlayer};
+        use ornis_core::{Clamped01, Seconds};
         let mut world = GameWorld::new();
         let store = world.engine_mut().world_mut().store_mut().expect("store");
         let entity = store.create_entity();
@@ -1284,10 +1281,11 @@ mod tests {
             entity,
             SkelPlayer {
                 clip: ClipId(entity),
-                time: 5.0,
-                speed: 1.0,
-                weight: 1.0,
+                time: Seconds::new(5.0),
+                speed: Seconds::new(1.0),
+                weight: Clamped01::ONE,
                 playing: false,
+                looping: true,
             },
         );
         assert!(world.play_animation(entity));
@@ -1303,9 +1301,6 @@ mod tests {
             .get(entity)
             .expect("player");
         assert!(!player.playing);
-        assert_eq!(player.time, 0.0);
-
-        assert_eq!(world.play_all_animations(), 1);
-        assert_eq!(world.stop_all_animations(), 1);
+        assert_eq!(player.time, Seconds::ZERO);
     }
 }
