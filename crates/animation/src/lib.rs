@@ -5,21 +5,27 @@
 //! The sampler is frame-only: it belongs in [`ornis_core::Stage::PostFrame`]
 //! on variable [`ornis_core::Time`], never in the fixed schedule, so the
 //! visual pose is not multiplied by the number of fixed substeps. Routing
-//! follows the design: renderable entities (those with a [`MeshDesc`] lane
-//! entry) are written into [`TransformDesc`], with the translation mirrored
-//! into the gameplay `Position` lane only when that lane already exists on the
-//! entity; entities without [`MeshDesc`] (pure gameplay markers) are written
-//! into [`Position`]. Lanes are never created for the sake of animation.
-//! Entities with a physics-authoritative lane are skipped (physics wins).
-//! Root motion is out of scope: gameplay-affecting motion travels the fixed
-//! `Velocity → RigidBody` path, never this sampler.
+//! follows the design: every playing track writes the target entity's local
+//! [`Transform`] when that component already exists, including mesh-less
+//! hierarchy nodes. Renderable entities (those with a [`MeshDesc`] lane
+//! entry) are also written into [`TransformDesc`], with the translation
+//! mirrored into the gameplay `Position` lane only when that lane already
+//! exists. Entities without [`MeshDesc`] and without [`Transform`] (pure
+//! gameplay markers) are written into [`Position`]. Lanes are never created
+//! for the sake of animation. A local write is then pushed through
+//! [`ornis_core::propagate_registered`] so children pick up the pose in the
+//! same frame. Entities with a physics-authoritative lane are skipped
+//! (physics wins). Root motion is out of scope: gameplay-affecting motion
+//! travels the fixed `Velocity → RigidBody` path, never this sampler.
 //!
 //! Phase B (`docs/animation-design.md` §2 and §5) adds the skeletal side in
 //! the same file: [`Skeleton`]/[`JointPose`]/[`SkelPlayer`] hot lanes plus
 //! the cold [`SkelClip`] lane and [`SkinnedMesh`] bind data, sampled by
 //! `skel_sample` ([`SkelSampleSystem`]) and skinned on the CPU by
-//! `skel_skin_cpu` ([`SkelSkinSystem`]). [`Animator`] on the character root
-//! selects a skeletal clip by name; a player stays empty until that call.
+//! `skel_skin_cpu` ([`SkelSkinSystem`]). Joint tracks that name a hierarchy
+//! node also write that node's local [`Transform`] (same propagation as
+//! object tracks). [`Animator`] on the character root selects a skeletal
+//! clip by name; a player stays empty until that call.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -27,8 +33,8 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 use ornis_core::{
-    Clamped01, ColdComponentStore, ComponentStore, Entity, Resources, Seconds, SmartStore, System,
-    SystemAccess, Time,
+    ChildOf, Children, Clamped01, ColdComponentStore, ComponentStore, Entity, GlobalTransform,
+    Resources, Seconds, SmartStore, System, SystemAccess, Time, Transform,
 };
 use ornis_gameplay::Position;
 
@@ -368,7 +374,9 @@ impl NoPhysics {
 /// Ordering: register after `body_to_transform` and pin
 /// `try_order_before("body_to_transform", "anim_sample")` — the WaW conflict
 /// on [`TransformDesc`] / [`Position`] already separates the levels, the edge
-/// makes the determinism explicit.
+/// makes the determinism explicit. A local [`Transform`] write also refreshes
+/// [`GlobalTransform`] in this system, so a mesh-less node's children move
+/// before later readers in the same frame.
 #[derive(Debug, Clone, Copy)]
 pub struct AnimSampleSystem<P = NoPhysics> {
     physics: PhantomData<P>,
@@ -404,15 +412,20 @@ impl<P: 'static + Send + Sync> System for AnimSampleSystem<P> {
         // is read for the renderable/marker routing. `AnimClip` is declared
         // although it travels the cold lane: the declaration only feeds level
         // planning (cold reads need no enforcement grant, schedule.rs:412-414).
+        // Hierarchy lanes are the propagation that follows a local write.
         SystemAccess::new()
             .reads::<Time>()
             .reads::<SmartStore>()
             .reads_lane::<AnimClip>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<P>()
+            .reads_lane::<ChildOf>()
             .writes_lane::<AnimPlayer>()
+            .writes_lane::<Transform>()
             .writes_lane::<TransformDesc>()
             .writes_lane::<Position>()
+            .writes_lane::<Children>()
+            .writes_lane::<GlobalTransform>()
     }
 
     fn run(&self, resources: &Resources) {
@@ -421,10 +434,35 @@ impl<P: 'static + Send + Sync> System for AnimSampleSystem<P> {
 }
 
 /// Sampled pose for one entity: one entry per channel, [`None`] = absent.
+#[derive(Clone, Copy)]
 struct SampledPose {
     translation: Option<Vec3>,
     rotation: Option<Quat>,
     scale: Option<Vec3>,
+}
+
+/// One entity whose existing local [`Transform`] receives [`SampledPose`].
+struct LocalWrite {
+    entity: Entity,
+    pose: SampledPose,
+}
+
+/// Model-space joint matrices plus the hierarchy nodes that clip writes.
+struct SampledClip {
+    matrices: Vec<Mat4>,
+    nodes: Vec<LocalWrite>,
+}
+
+/// Joint matrices and node writes collected before output lanes are locked.
+struct PoseBatch {
+    joints: Vec<JointMatrices>,
+    nodes: Vec<LocalWrite>,
+}
+
+/// Model matrices for one skeleton root.
+struct JointMatrices {
+    entity: Entity,
+    matrices: Vec<Mat4>,
 }
 
 /// Advances a playback cursor; pure function of `(clip, time)` for determinism.
@@ -530,25 +568,26 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
     if work.is_empty() {
         return;
     }
+    let locals: Vec<LocalWrite> = work
+        .iter()
+        .map(|item| LocalWrite {
+            entity: item.entity,
+            pose: item.pose,
+        })
+        .collect();
+    let wrote_local = publish_local_transforms(store, &locals);
     let mut descs = store.write_lane::<TransformDesc>();
     let mut positions = store.write_lane::<Position>();
-    if descs.is_none() && positions.is_none() {
-        return;
-    }
     for item in &work {
         if item.renderable
             && let Some(desc) = descs.as_mut().and_then(|lane| lane.get_mut(item.entity))
         {
-            if let Some(translation) = item.pose.translation {
-                desc.translation = translation;
-            }
-            // A degenerate sampled rotation keeps the previous orientation.
-            if let Some(rotation) = item.pose.rotation.and_then(UnitQuat::normalize) {
-                desc.rotation = rotation;
-            }
-            if let Some(scale) = item.pose.scale {
-                desc.scale = scale;
-            }
+            apply_channels(
+                &mut desc.translation,
+                &mut desc.rotation,
+                &mut desc.scale,
+                &item.pose,
+            );
         }
         // Translation mirror (renderables) or marker placement (no MeshDesc):
         // update only, never insert — animation must not grow the lane.
@@ -560,6 +599,62 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
             position.0 = translation;
         }
     }
+    drop(descs);
+    drop(positions);
+    if wrote_local {
+        ornis_core::propagate_registered(store);
+    }
+}
+
+/// Writes sampled channels onto an existing local [`Transform`].
+///
+/// Absent channels stay untouched. A degenerate rotation keeps the previous
+/// orientation. Returns whether any channel landed on a component that was
+/// already in the lane — the caller never inserts a pose for animation.
+fn publish_local_transforms(store: &SmartStore, poses: &[LocalWrite]) -> bool {
+    if poses.is_empty() {
+        return false;
+    }
+    let Some(mut locals) = store.write_lane::<Transform>() else {
+        return false;
+    };
+    let mut wrote = false;
+    for write in poses {
+        if let Some(local) = locals.get_mut(write.entity) {
+            wrote |= apply_channels(
+                &mut local.translation,
+                &mut local.rotation,
+                &mut local.scale,
+                &write.pose,
+            );
+        }
+    }
+    wrote
+}
+
+/// Applies present channels. A degenerate rotation keeps `rotation`.
+///
+/// Returns whether a channel was written.
+fn apply_channels(
+    translation: &mut Vec3,
+    rotation: &mut UnitQuat,
+    scale: &mut Vec3,
+    pose: &SampledPose,
+) -> bool {
+    let mut wrote = false;
+    if let Some(value) = pose.translation {
+        *translation = value;
+        wrote = true;
+    }
+    if let Some(value) = pose.rotation.and_then(UnitQuat::normalize) {
+        *rotation = value;
+        wrote = true;
+    }
+    if let Some(value) = pose.scale {
+        *scale = value;
+        wrote = true;
+    }
+    wrote
 }
 
 #[cfg(test)]
@@ -612,17 +707,27 @@ mod tests {
             TypeId::of::<AnimClip>(),
             TypeId::of::<MeshDesc>(),
             TypeId::of::<NoPhysics>(),
+            TypeId::of::<Transform>(),
             TypeId::of::<TransformDesc>(),
             TypeId::of::<Position>(),
+            TypeId::of::<ChildOf>(),
+            TypeId::of::<Children>(),
+            TypeId::of::<GlobalTransform>(),
         ] {
             let declared =
                 access.reads_lanes.contains(&lane) || access.writes_lanes.contains(&lane);
             assert!(declared, "lane {lane:?} must be declared");
         }
-        // Cursor advance writes the player lane; TransformDesc/Position are outputs.
+        // Cursor advance writes the player lane; poses and propagation are outputs.
         assert!(access.writes_lanes.contains(&TypeId::of::<AnimPlayer>()));
+        assert!(access.writes_lanes.contains(&TypeId::of::<Transform>()));
         assert!(access.writes_lanes.contains(&TypeId::of::<TransformDesc>()));
         assert!(access.writes_lanes.contains(&TypeId::of::<Position>()));
+        assert!(
+            access
+                .writes_lanes
+                .contains(&TypeId::of::<GlobalTransform>())
+        );
     }
 
     #[test]
@@ -1128,11 +1233,19 @@ impl JointPose {
 ///
 /// Field names follow the design (`t`/`r`/`s`); empty tracks mean
 /// "identity channel" (unlike object tracks, joints cannot leave a
-/// channel untouched or the chain would collapse).
+/// channel untouched or the chain would collapse). [`Self::node`], when
+/// spawn bound it, receives the sampled channels on its local
+/// [`Transform`] with object-track rules (absent channel left untouched)
+/// so the hierarchy can move; the skin chain still treats an empty
+/// channel as identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JointTrack {
     /// Animated joint index into [`Skeleton`]/[`JointPose`].
     pub joint: JointId,
+    /// Hierarchy node this joint writes, when spawn mapped the joint's node.
+    ///
+    /// `None` keeps the pose in [`JointPose`] only. This is not a joint index.
+    pub node: Option<Entity>,
     /// Translation keys; empty means zero translation.
     pub translation: KeyTrack<Vec3>,
     /// Rotation keys (unit quaternions); empty means identity.
@@ -1495,7 +1608,9 @@ fn blend_normal(
 /// to joint-local matrices and resolves them to model space along
 /// [`Skeleton::parents`], rooted at the entity's [`TransformDesc`]
 /// (identity when the lane is absent). Poses publish whole into
-/// [`JointPose`]; lanes are never created for animation.
+/// [`JointPose`]; lanes are never created for animation. A track whose
+/// [`JointTrack::node`] is bound also writes that node's local
+/// [`Transform`] and refreshes [`GlobalTransform`] in this system.
 ///
 /// Ordering: register after `anim_sample`, pin
 /// `try_order_before("anim_sample", "skel_sample")` and
@@ -1537,8 +1652,12 @@ impl System for SkelSampleSystem {
             .reads_lane::<SkelClip>()
             .reads_lane::<Skeleton>()
             .reads_lane::<TransformDesc>()
+            .reads_lane::<ChildOf>()
             .writes_lane::<SkelPlayer>()
             .writes_lane::<JointPose>()
+            .writes_lane::<Transform>()
+            .writes_lane::<Children>()
+            .writes_lane::<GlobalTransform>()
     }
 
     fn run(&self, resources: &Resources) {
@@ -1595,39 +1714,51 @@ fn advance_skel_players(store: &SmartStore, dt: f32) {
 }
 
 /// Samples playing cursors and publishes whole [`JointPose`] vectors.
+///
+/// Bound joint nodes also receive a local [`Transform`] write, then one
+/// propagation so their children move in this frame.
 fn publish_poses(store: &SmartStore) -> SkelSampleStats {
     let mut stats = SkelSampleStats::default();
-    let work = collect_pose_work(store, &mut stats);
-    if work.is_empty() {
-        return stats;
-    }
-    let Some(mut poses) = store.write_lane::<JointPose>() else {
-        return stats;
-    };
-    for (entity, matrices) in work {
-        if let Some(pose) = poses.get_mut(entity) {
-            pose.matrices = matrices;
-            stats.sampled += 1;
+    let batch = collect_pose_work(store, &mut stats);
+    if !batch.joints.is_empty() {
+        let Some(mut poses) = store.write_lane::<JointPose>() else {
+            return stats;
+        };
+        for item in batch.joints {
+            if let Some(pose) = poses.get_mut(item.entity) {
+                pose.matrices = item.matrices;
+                stats.sampled += 1;
+            }
         }
+    }
+    if publish_local_transforms(store, &batch.nodes) {
+        ornis_core::propagate_registered(store);
     }
     stats
 }
 
-/// Collects `(entity, model matrices)` without holding lane guards across
-/// the later write: every imperfect entity bumps `skipped_bad_skin`.
-fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> Vec<(Entity, Vec<Mat4>)> {
+/// Collects model matrices without holding lane guards across the later
+/// write: every imperfect entity bumps `skipped_bad_skin`.
+fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBatch {
+    let empty = || PoseBatch {
+        joints: Vec::new(),
+        nodes: Vec::new(),
+    };
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
-        return Vec::new();
+        return empty();
     };
     let Some(players) = store.read_lane::<SkelPlayer>() else {
-        return Vec::new();
+        return empty();
     };
     let Some(skeletons) = store.read_lane::<Skeleton>() else {
-        return Vec::new();
+        return empty();
     };
     let transforms = store.read_lane::<TransformDesc>();
     let poses = store.read_lane::<JointPose>();
-    let mut work = Vec::new();
+    let mut batch = PoseBatch {
+        joints: Vec::new(),
+        nodes: Vec::new(),
+    };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
             continue;
@@ -1640,11 +1771,17 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> Vec<(En
             transforms.as_deref(),
             poses.as_deref(),
         ) {
-            Some(matrices) => work.push((*entity, matrices)),
+            Some(sampled) => {
+                batch.nodes.extend(sampled.nodes);
+                batch.joints.push(JointMatrices {
+                    entity: *entity,
+                    matrices: sampled.matrices,
+                });
+            }
             None => stats.skipped_bad_skin += 1,
         }
     }
-    work
+    batch
 }
 
 /// Samples one playing cursor: tracks → locals → model matrices.
@@ -1659,14 +1796,53 @@ fn sample_entity(
     skeletons: &ComponentStore<Skeleton>,
     transforms: Option<&ComponentStore<TransformDesc>>,
     poses: Option<&ComponentStore<JointPose>>,
-) -> Option<Vec<Mat4>> {
+) -> Option<SampledClip> {
     let clip = clips.get(player.clip.0)?;
     let skeleton = skeletons.get(entity)?;
     if poses.is_none_or(|lane| lane.get(entity).is_none()) {
         return None;
     }
-    let locals = sample_locals(clip, skeleton.joint_count(), player.time.get());
-    compose_model_matrices(skeleton, &locals, &root_matrix(transforms, entity))
+    let time = player.time.get();
+    let locals = sample_locals(clip, skeleton.joint_count(), time);
+    let matrices = compose_model_matrices(skeleton, &locals, &root_matrix(transforms, entity))?;
+    Some(SampledClip {
+        matrices,
+        nodes: node_poses(clip, time),
+    })
+}
+
+/// Local channels for joint tracks bound to a hierarchy node.
+///
+/// First track per joint wins, matching [`sample_locals`]. An empty channel
+/// stays [`None`] so the node's bind pose survives; the skin chain still
+/// reads that empty channel as identity.
+fn node_poses(clip: &SkelClip, time: f32) -> Vec<LocalWrite> {
+    let mut out = Vec::new();
+    let mut painted_joints = Vec::new();
+    let mut painted_nodes = Vec::new();
+    for track in &clip.tracks {
+        let joint = track.joint.index();
+        if painted_joints.contains(&joint) {
+            continue;
+        }
+        painted_joints.push(joint);
+        let Some(entity) = track.node else {
+            continue;
+        };
+        if painted_nodes.contains(&entity) {
+            continue;
+        }
+        painted_nodes.push(entity);
+        out.push(LocalWrite {
+            entity,
+            pose: SampledPose {
+                translation: track.translation.sample(time),
+                rotation: track.rotation.sample(time),
+                scale: track.scale.sample(time),
+            },
+        });
+    }
+    out
 }
 
 /// Samples every [`JointTrack`] at `time`; untracked joints stay identity.

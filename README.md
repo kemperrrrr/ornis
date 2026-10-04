@@ -233,7 +233,10 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 `spawn(Handle<Model>)` строит иерархию узлов (локальный `Transform`,
 `ChildOf`, примитивы — дети узла), `spawn_scene` — корень RON-сцены.
 Клип запускается через `entity_mut(root).animator()?.play(name)`,
-окно открывает `ornis::run`. Иерархия живёт в
+окно открывает `ornis::run`. Сэмплинг пишет локальный `Transform`
+целевого узла (object-треки и суставы, отображённые через
+`node_to_entity`), поэтому дети двигаются распространением позы.
+Иерархия живёт в
 `ornis_core`: локальный `Transform`, мировой `GlobalTransform` (система
 `propagate_transforms` до извлечения кадра и до physics sync), связь
 `ChildOf` и кэш `Children`, имя `Name`. Скрытый пол витрины живёт

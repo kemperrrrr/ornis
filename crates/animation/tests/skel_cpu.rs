@@ -173,12 +173,14 @@ fn sample_resolves_parent_chain() {
         tracks: vec![
             JointTrack {
                 joint: JointId::from_raw(0),
+                node: None,
                 translation: no_translation(),
                 rotation: quat_keys(Quat::from_rotation_z(FRAC_PI_2)),
                 scale: no_scale(),
             },
             JointTrack {
                 joint: JointId::from_raw(1),
+                node: None,
                 translation: vec_keys(Vec3::new(1.0, 0.0, 0.0)),
                 rotation: no_rotation(),
                 scale: no_scale(),
@@ -216,6 +218,7 @@ fn skin_two_bone_chain_with_known_matrices() {
         duration: 1.0,
         tracks: vec![JointTrack {
             joint: JointId::from_raw(1),
+            node: None,
             translation: vec_keys(Vec3::new(1.0, 0.0, 0.0)),
             rotation: quat_keys(Quat::from_rotation_z(FRAC_PI_2)),
             scale: no_scale(),
@@ -493,6 +496,8 @@ fn systems_advertise_names_accesses_and_edge() {
         TypeId::of::<Skeleton>(),
         TypeId::of::<TransformDesc>(),
         TypeId::of::<JointPose>(),
+        TypeId::of::<ornis_core::Transform>(),
+        TypeId::of::<ornis_core::GlobalTransform>(),
     ] {
         let declared = sample.reads_lanes.contains(&lane) || sample.writes_lanes.contains(&lane);
         assert!(declared, "sample lane {lane:?} must be declared");

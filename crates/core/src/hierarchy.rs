@@ -428,6 +428,16 @@ pub fn register_hierarchy(store: &mut SmartStore) {
 /// remaining entities as roots so the walk finishes.
 pub fn propagate_transforms(store: &mut SmartStore) {
     register_hierarchy(store);
+    propagate_registered(store);
+}
+
+/// Walks a hierarchy whose lanes are already registered.
+///
+/// Same roots-first [`GlobalTransform`] write as [`propagate_transforms`],
+/// without creating lanes. A store that has never held a [`Transform`]
+/// returns immediately. Samplers call this after publishing a local pose
+/// so children observe it in the same frame.
+pub fn propagate_registered(store: &SmartStore) {
     propagate_in(store);
 }
 
