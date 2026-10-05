@@ -77,8 +77,11 @@ fn evaluate_base_layer(
     let alpha_u = alpha.x;
     let alpha_v = alpha.y;
     let d = ggx_ndf_aniso(noh, h, t, b, alpha_u, alpha_v);
+    // Smith returns V = G / (4 NoV NoL). The specular BRDF is D·F·V;
+    // dividing by 4·NoV·NoL again blows up at grazing angles (silhouette
+    // fireflies) because the light loop already multiplies by NoL.
     let g = smith_ggx_aniso(nov, nol, v, l, t, b, alpha_u, alpha_v);
-    let spec_brdf = d * g * f / max(4.0 * nov * nol, EPS);
+    let spec_brdf = d * g * f;
     let diffuse_color = base_color * (1.0 - metalness);
     let diff_roughness = max(diffuse_roughness, specular_roughness);
     let diff_alpha = diff_roughness * diff_roughness;
@@ -126,8 +129,9 @@ fn evaluate_coat_layer(
     let coat_alpha_u = coat_alpha.x;
     let coat_alpha_v = coat_alpha.y;
     let coat_d = ggx_ndf_aniso(noh, h, t, b, coat_alpha_u, coat_alpha_v);
+    // Same visibility contract as the base lobe: `coat_g` is already V.
     let coat_g = smith_ggx_aniso(nov, nol, v, l, t, b, coat_alpha_u, coat_alpha_v);
-    let coat_brdf = coat_d * coat_g * coat_f / max(4.0 * nov * nol, EPS);
+    let coat_brdf = coat_d * coat_g * coat_f;
     let mix_factor = coat_weight * coat_dark;
     let base_darkening = coat_base_darkening(
         coat_ior,
@@ -271,9 +275,10 @@ fn transmission_btdf(
     let f = fresnel_schlick(max(cos_theta_i, EPS), fresnel0_from_ior(ior_in));
     let t = 1.0 - f;
     let d = ggx_ndf(voh, alpha);
+    // `g` is V = G / (4 NoV NoL); the BTDF is D·T·V, not divided again.
     let g = smith_ggx_correlated(nov, nol, alpha);
     let extinction_factor = exp(-extinction * distance);
-    return Vec3::new(d * g * t / max(4.0 * nov * nol, EPS)) * extinction_factor;
+    return Vec3::new(d * g * t) * extinction_factor;
 }
 
 /// Octahedral normal decode (lighting-only g-buffer unpack).
@@ -360,6 +365,52 @@ mod tests {
         ] {
             assert!(!src.contains("Vec3"), "glam spelling leaked: {src}");
             assert!(!src.contains("glam"), "glam spelling leaked: {src}");
+        }
+    }
+
+    /// Smith visibility already includes `G / (4 NoV NoL)`. Dividing again
+    /// saturates ACES along a roughness-0.5 grazing rim (the anim mannequin).
+    #[test]
+    fn grazing_specular_stays_bounded_when_smith_visibility_is_applied_once() {
+        let nov = 1.0e-4;
+        let nol = 0.5;
+        let alpha = 0.25;
+        let visibility = crate::shaders::math::smith_ggx_correlated::eval(nov, nol, alpha);
+        let distribution = crate::shaders::math::ggx_ndf_aniso::eval(
+            1.0,
+            glam::Vec3::Z,
+            glam::Vec3::X,
+            glam::Vec3::Y,
+            alpha,
+            alpha,
+        );
+        let fresnel = 0.04;
+        let illuminance = 0.6;
+        let divided_again = distribution * visibility * fresnel * illuminance / (4.0 * nov);
+        let once = distribution * visibility * fresnel * illuminance * nol;
+        let white = crate::shaders::math::aces_tonemap::eval(glam::Vec3::splat(divided_again)).x;
+        let bounded = crate::shaders::math::aces_tonemap::eval(glam::Vec3::splat(once)).x;
+        assert!(
+            white > 0.95,
+            "double-divided grazing specular should tonemap to white, got {white} from {divided_again}"
+        );
+        assert!(
+            once < 1.0 && bounded < 0.5,
+            "single visibility application stays a modest highlight, got {once} -> {bounded}"
+        );
+    }
+
+    #[test]
+    fn specular_layers_do_not_divide_smith_visibility_again() {
+        for (name, src) in [
+            ("base", evaluate_base_layer::wgsl_source()),
+            ("coat", evaluate_coat_layer::wgsl_source()),
+            ("transmission", transmission_btdf::wgsl_source()),
+        ] {
+            assert!(
+                !src.contains("4.0") && !src.contains("4f"),
+                "{name} still divides by 4·NoV·NoL:\n{src}"
+            );
         }
     }
 
