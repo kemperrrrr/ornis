@@ -89,7 +89,8 @@ pub use typestate::{
 /// [`Seconds`] re-exported, so there is exactly one duration type.
 pub use units::{
     Clamped01, Clamped01Error, Color, Degrees, GearRatio, Hertz, HexColorError, Ior, IorError,
-    Kilograms, LinearRgb, LinearRgba, Lux, Meters, MetersPerSecond, PositiveF32, PositiveF32Error,
-    Radians, RadiansPerSecond, SecondsExt, UnitQuat, UnitQuatError, UnitVec3, UnitVec3Error,
+    Kilograms, LinearRgb, LinearRgba, Lux, Meters, MetersPerSecond, Position, PositiveF32,
+    PositiveF32Error, Radians, RadiansPerSecond, SecondsExt, UnitQuat, UnitQuatError, UnitVec3,
+    UnitVec3Error,
 };
 pub use world::World;

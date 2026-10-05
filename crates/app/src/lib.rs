@@ -28,7 +28,8 @@ pub mod session;
 pub mod sync_harness;
 
 pub use game_world::{
-    EntityMut, GameWorld, ModelInstance, PlaybackError, ReplicaGameWorld, Spawn, SpawnModelError,
+    EntityMut, GameWorld, ModelInstance, ModelSpawn, PlaybackError, ReplicaGameWorld, Spawn,
+    SpawnModelError,
 };
 pub use ornis_animation::{AnimatorAccess, try_animator};
 

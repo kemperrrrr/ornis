@@ -6,16 +6,20 @@
 //! frames).
 
 use glam::Vec3;
-use ornis_app::{AnimatorAccess, GameWorld};
+use ornis_app::{AnimatorAccess, GameWorld, ModelSpawn};
 use ornis_assets::Model;
-use ornis_core::{Color, Degrees, Lux, UnitVec3};
+use ornis_core::{Color, Degrees, Lux, Position, UnitVec3};
 use ornis_render::{DirectionalLight, OrbitCamera};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = GameWorld::new();
     world.set_title("Ornis — Animation Demo");
     let mannequin = world.load::<Model>("assets/starter/ual1_standard.glb")?;
-    let hero = world.spawn(mannequin)?;
+    let hero = world.spawn(ModelSpawn {
+        model: mannequin,
+        position: Position::new(0.0, 0.0, 0.0),
+        ..Default::default()
+    })?;
     // `direction` points toward the light. The key sits in the camera
     // octant so the front is lit; the fill and linear ambient keep the
     // far side readable. `#1A1A26` is sRGB, so it uploaded as ~0.01 linear.
