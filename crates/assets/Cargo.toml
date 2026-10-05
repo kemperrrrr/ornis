@@ -10,7 +10,7 @@ ornis-core = { path = "../core" }
 # glTF importer (feature `gltf`, default on): pulls the `gltf`/`image` tree.
 ornis-gltf = { path = "../gltf", optional = true }
 # `Vec3`/`Quat` behind the typed scene descriptors (same version as ornis-core).
-glam = "0.33"
+glam = "0.34"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Scene `.ron` is the canonical scene format: always available (no feature).

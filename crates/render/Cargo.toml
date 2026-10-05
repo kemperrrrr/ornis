@@ -9,7 +9,7 @@ license.workspace = true
 wgpu = "30"
 naga = { version = "30", features = ["wgsl-out"] }
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.33"
+glam = "0.34"
 ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 ornis-gameplay = { path = "../gameplay" }
@@ -31,7 +31,7 @@ pollster = "1.0"
 png = "0.18"
 proptest = "1"
 wgpu = "30"
-glam = "0.33"
+glam = "0.34"
 ornis-shader-lang = { path = "../shader-lang" }
 criterion = { version = "0.8", features = ["rayon"] }
 

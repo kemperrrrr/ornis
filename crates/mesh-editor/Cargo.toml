@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-glam = "0.33"
-manifold-rust = "0.15"
+glam = "0.34"
+manifold-rust = "0.16"
 # Typed validation errors (`thiserror::Error` on `BridgeError`/`MeshError`).
 thiserror = "2.0"
 

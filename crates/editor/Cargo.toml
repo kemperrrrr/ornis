@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-glam = "0.33"
+glam = "0.34"
 ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 serde = { version = "1", features = ["derive"] }
