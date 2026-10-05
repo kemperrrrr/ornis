@@ -53,6 +53,11 @@ impl AssetId {
     pub fn index(self) -> u64 {
         self.index
     }
+
+    /// Builds an id from its raw counter. Live ids start at 1.
+    pub(crate) const fn from_raw(index: u64) -> Self {
+        Self { index }
+    }
 }
 
 /// Asset kinds the server can load.

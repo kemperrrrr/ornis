@@ -210,7 +210,7 @@ pub struct GltfSpawn {
     /// [`spawn_gltf_world`] records the first primitive of a node and omits
     /// mesh-less nodes, so object tracks on those nodes are dropped. The
     /// hierarchical [`GameWorld::spawn`](crate::GameWorld::spawn) of a
-    /// [`Handle<Model>`](ornis_assets::Handle) fills this map from
+    /// [`ModelSpawn`](crate::ModelSpawn) fills this map from
     /// [`ModelInstance`](crate::ModelInstance) (every node, parent before
     /// child) so those tracks bind to the node entity.
     pub node_to_entity: HashMap<NodeIdx, Entity>,
@@ -219,7 +219,7 @@ pub struct GltfSpawn {
     /// `None` (what [`spawn_gltf_world`] leaves) tells
     /// [`wire_loaded_animation`] to fall back to the first mesh entity.
     /// Set this before wiring when the real scene root is a different
-    /// entity — that is the hook for hierarchical `Handle<Model>` spawn.
+    /// entity — that is the hook for hierarchical [`ModelSpawn`](crate::ModelSpawn) spawn.
     /// The entity must already exist.
     pub scene_root: Option<Entity>,
 }

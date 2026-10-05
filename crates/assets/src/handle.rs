@@ -79,6 +79,24 @@ impl<T: Asset> Handle<T> {
     pub fn id(self) -> AssetId {
         self.id
     }
+
+    /// A handle that addresses no loaded asset.
+    ///
+    /// The server issues ids from 1, so index 0 is never a live asset.
+    /// [`Default`] returns this handle. Looking it up yields `None`.
+    pub const fn dangling() -> Self {
+        Self {
+            id: AssetId::from_raw(0),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T: Asset> Default for Handle<T> {
+    /// [`Handle::dangling`]: index 0, which the server never issues.
+    fn default() -> Self {
+        Self::dangling()
+    }
 }
 
 impl<T: Asset> Clone for Handle<T> {
