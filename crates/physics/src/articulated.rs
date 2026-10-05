@@ -93,10 +93,21 @@ use crate::joint::{
 use crate::math::{Ray, RaycastHit};
 use crate::migration::{JointReference, validate_joint, validate_motor};
 
-/// Six-vector: indices `0..3` angular, `3..6` linear.
-type S6 = [f32; 6];
-/// Six-by-six matrix, row-major.
-type M6 = [[f32; 6]; 6];
+/// Spatial vector length: angular block then linear block.
+///
+/// Featherstone stores motion as `[omega; v]` and force as `[n; f]`
+/// (angular first). That is the opposite component order from AVBD's
+/// linear-first [`crate::avbd::SPATIAL_DOF`]; the count is the same six
+/// rigid-body degrees of freedom, kept local so this solver does not
+/// import the other.
+const SPATIAL_DOF: usize = 6;
+/// Columns of [`solve6`]'s augmented matrix: one spatial row plus the RHS.
+const AUGMENTED_COLS: usize = SPATIAL_DOF + 1;
+
+/// Spatial motion or force. Indices `0..3` are angular, `3..6` linear.
+type S6 = [f32; SPATIAL_DOF];
+/// Spatial inertia or Plücker matrix, row-major.
+type M6 = [[f32; SPATIAL_DOF]; SPATIAL_DOF];
 
 /// Plücker transform from frame A to frame B: `e` rotates A-coordinates
 /// into B-coordinates, `r` is the A-origin to B-origin vector in A
@@ -152,7 +163,7 @@ fn cross_force(v: &S6, f: &S6) -> S6 {
 /// Dot product of two six-vectors.
 fn dot6(a: &S6, b: &S6) -> f32 {
     let mut s = 0.0;
-    for k in 0..6 {
+    for k in 0..SPATIAL_DOF {
         s += a[k] * b[k];
     }
     s
@@ -160,10 +171,10 @@ fn dot6(a: &S6, b: &S6) -> f32 {
 
 /// Six-by-six matrix times six-vector.
 fn mat_vec(m: &M6, v: &S6) -> S6 {
-    let mut out = [0.0; 6];
-    for i in 0..6 {
+    let mut out = [0.0; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
         let mut s = 0.0;
-        for k in 0..6 {
+        for k in 0..SPATIAL_DOF {
             s += m[i][k] * v[k];
         }
         out[i] = s;
@@ -173,11 +184,11 @@ fn mat_vec(m: &M6, v: &S6) -> S6 {
 
 /// Six-by-six matrix product.
 fn mat_mul(a: &M6, b: &M6) -> M6 {
-    let mut out = [[0.0; 6]; 6];
-    for i in 0..6 {
-        for j in 0..6 {
+    let mut out = [[0.0; SPATIAL_DOF]; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
+        for j in 0..SPATIAL_DOF {
             let mut s = 0.0;
-            for k in 0..6 {
+            for k in 0..SPATIAL_DOF {
                 s += a[i][k] * b[k][j];
             }
             out[i][j] = s;
@@ -188,11 +199,11 @@ fn mat_mul(a: &M6, b: &M6) -> M6 {
 
 /// Six-by-six transpose product `A' * B`.
 fn mat_t_mul(a: &M6, b: &M6) -> M6 {
-    let mut out = [[0.0; 6]; 6];
-    for i in 0..6 {
-        for j in 0..6 {
+    let mut out = [[0.0; SPATIAL_DOF]; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
+        for j in 0..SPATIAL_DOF {
             let mut s = 0.0;
-            for k in 0..6 {
+            for k in 0..SPATIAL_DOF {
                 s += a[k][i] * b[k][j];
             }
             out[i][j] = s;
@@ -249,14 +260,14 @@ fn link_inertia(inertia_diag: Vec3, mass: f32) -> M6 {
 /// pivoting (fixed order, deterministic). Used only for the floating root;
 /// 1-DOF joints divide by the scalar `D`.
 fn solve6(a: &M6, b: &S6) -> S6 {
-    let mut m = [[0.0; 7]; 6];
-    for i in 0..6 {
-        for j in 0..6 {
+    let mut m = [[0.0; AUGMENTED_COLS]; SPATIAL_DOF];
+    for i in 0..SPATIAL_DOF {
+        for j in 0..SPATIAL_DOF {
             m[i][j] = a[i][j];
         }
-        m[i][6] = b[i];
+        m[i][SPATIAL_DOF] = b[i];
     }
-    for col in 0..6 {
+    for col in 0..SPATIAL_DOF {
         let mut piv = col;
         let mut best = m[col][col].abs();
         for (row, r) in m.iter().enumerate().skip(col + 1) {
@@ -270,7 +281,7 @@ fn solve6(a: &M6, b: &S6) -> S6 {
             m.swap(piv, col);
         }
         let d = m[col][col];
-        if d.abs() < 1e-30 {
+        if d.abs() < PIVOT_ABS_FLOOR {
             continue;
         }
         let pivot = m[col];
@@ -283,14 +294,18 @@ fn solve6(a: &M6, b: &S6) -> S6 {
             }
         }
     }
-    let mut x = [0.0; 6];
-    for i in (0..6).rev() {
-        let mut s = m[i][6];
-        for k in (i + 1)..6 {
+    let mut x = [0.0; SPATIAL_DOF];
+    for i in (0..SPATIAL_DOF).rev() {
+        let mut s = m[i][SPATIAL_DOF];
+        for k in (i + 1)..SPATIAL_DOF {
             s -= m[i][k] * x[k];
         }
         let d = m[i][i];
-        x[i] = if d.abs() < 1e-30 { 0.0 } else { s / d };
+        x[i] = if d.abs() < PIVOT_ABS_FLOOR {
+            0.0
+        } else {
+            s / d
+        };
     }
     x
 }
@@ -398,6 +413,14 @@ const FRICTION_SMOOTH: f32 = 0.02;
 /// Floor for the 1-DOF articulated denominator `D` (mass `> 0` keeps it
 /// positive; the floor guards degenerate zero-inertia bodies).
 const MIN_JOINT_INERTIA: f32 = 1e-12;
+/// Pivot magnitude below which [`solve6`] skips a singular elimination step.
+const PIVOT_ABS_FLOOR: f32 = 1e-30;
+/// Half-angle (rad) below which a quaternion attitude error is treated as zero.
+const SMALL_HALF_ANGLE: f32 = 1e-6;
+/// Floor under `sin(half)` when a quaternion delta becomes an axis-angle.
+const SIN_HALF_FLOOR: f32 = 1e-9;
+/// Angular speed (rad/s) below which [`integrate_quat`] leaves the quaternion.
+const ANGULAR_SPEED_FLOOR: f32 = 1e-12;
 
 /// Featherstone articulated-body engine: standalone
 /// [`PhysicsEngine`] implementation over reduced coordinates (see the
@@ -729,7 +752,7 @@ impl FeatherstoneEngine {
     fn joint_subspace(&self, i: usize) -> S6 {
         match self.links[i].joint {
             LinkJoint::Revolute { s_ang, s_lin, .. } => pack(s_ang, s_lin),
-            _ => [0.0; 6],
+            _ => [0.0; SPATIAL_DOF],
         }
     }
 
@@ -764,15 +787,15 @@ impl FeatherstoneEngine {
             r: Vec3::ZERO,
         };
         let mut xup = vec![identity_x; n];
-        let mut s_sub = vec![[0.0; 6]; n];
-        let mut vel = vec![[0.0; 6]; n];
-        let mut c_j = vec![[0.0; 6]; n];
-        let mut ia = vec![[[0.0; 6]; 6]; n];
-        let mut pa = vec![[0.0; 6]; n];
-        let mut u_mat = vec![[0.0; 6]; n];
+        let mut s_sub = vec![[0.0; SPATIAL_DOF]; n];
+        let mut vel = vec![[0.0; SPATIAL_DOF]; n];
+        let mut c_j = vec![[0.0; SPATIAL_DOF]; n];
+        let mut ia = vec![[[0.0; SPATIAL_DOF]; SPATIAL_DOF]; n];
+        let mut pa = vec![[0.0; SPATIAL_DOF]; n];
+        let mut u_mat = vec![[0.0; SPATIAL_DOF]; n];
         let mut den = vec![0.0; n];
         let mut uu = vec![0.0; n];
-        let zero = [0.0; 6];
+        let zero = [0.0; SPATIAL_DOF];
 
         // Pass 1 — outward kinematics + bias forces.
         for &i in &self.order {
@@ -793,8 +816,8 @@ impl FeatherstoneEngine {
                 ),
                 _ => {
                     let xp = apply_motion(&xup[i], &v_parent);
-                    let mut s = [0.0; 6];
-                    for k in 0..6 {
+                    let mut s = [0.0; SPATIAL_DOF];
+                    for k in 0..SPATIAL_DOF {
                         s[k] = xp[k] + s_sub[i][k] * link.qd;
                     }
                     s
@@ -802,9 +825,9 @@ impl FeatherstoneEngine {
             };
             vel[i] = v;
             // Joint velocity across the joint (zero for welds/roots).
-            let mut vj = [0.0; 6];
+            let mut vj = [0.0; SPATIAL_DOF];
             if matches!(link.joint, LinkJoint::Revolute { .. }) {
-                for k in 0..6 {
+                for k in 0..SPATIAL_DOF {
                     vj[k] = s_sub[i][k] * link.qd;
                 }
             }
@@ -817,7 +840,7 @@ impl FeatherstoneEngine {
                 rot.transpose() * link.body.torque,
                 rot.transpose() * (link.body.mass * self.gravity),
             );
-            for k in 0..6 {
+            for k in 0..SPATIAL_DOF {
                 p[k] -= f_ext[k];
             }
             ia[i] = inertia;
@@ -832,14 +855,14 @@ impl FeatherstoneEngine {
                 let tau = self.joint_torque(i, d, h);
                 let u = tau - dot6(&s_sub[i], &pa[i]);
                 // Articulated update: IA -= U U'/D.
-                for r in 0..6 {
-                    for c in 0..6 {
+                for r in 0..SPATIAL_DOF {
+                    for c in 0..SPATIAL_DOF {
                         ia[i][r][c] -= u_vec[r] * u_vec[c] / d;
                     }
                 }
                 // pA += IA_a c_J + U u/D.
                 let iac = mat_vec(&ia[i], &c_j[i]);
-                for k in 0..6 {
+                for k in 0..SPATIAL_DOF {
                     pa[i][k] += iac[k] + u_vec[k] * (u / d);
                 }
                 u_mat[i] = u_vec;
@@ -851,20 +874,20 @@ impl FeatherstoneEngine {
             };
             let x = mat_of_transform(&xup[i]);
             let acc = mat_t_mul(&x, &mat_mul(&ia[i], &x));
-            for r in 0..6 {
-                for c in 0..6 {
+            for r in 0..SPATIAL_DOF {
+                for c in 0..SPATIAL_DOF {
                     ia[p][r][c] += acc[r][c];
                 }
             }
             let pf = apply_force_t(&xup[i], &pa[i]);
-            for k in 0..6 {
+            for k in 0..SPATIAL_DOF {
                 pa[p][k] += pf[k];
             }
         }
 
         // Pass 3 — outward accelerations.
-        let mut acc = vec![[0.0; 6]; n];
-        let mut a_link = vec![[0.0; 6]; n];
+        let mut acc = vec![[0.0; SPATIAL_DOF]; n];
+        let mut a_link = vec![[0.0; SPATIAL_DOF]; n];
         for &i in &self.order {
             let a_in = match self.links[i].parent {
                 Some(p) => apply_motion(&xup[i], &a_link[p]),
@@ -872,14 +895,14 @@ impl FeatherstoneEngine {
             };
             match self.links[i].joint {
                 LinkJoint::Revolute { .. } => {
-                    let mut ac = [0.0; 6];
-                    for k in 0..6 {
+                    let mut ac = [0.0; SPATIAL_DOF];
+                    for k in 0..SPATIAL_DOF {
                         ac[k] = a_in[k] + c_j[i][k];
                     }
                     let qdd = (uu[i] - dot6(&u_mat[i], &ac)) / den[i];
                     acc[i][0] = qdd;
                     let mut a = ac;
-                    for k in 0..6 {
+                    for k in 0..SPATIAL_DOF {
                         a[k] += s_sub[i][k] * qdd;
                     }
                     a_link[i] = a;
@@ -890,14 +913,14 @@ impl FeatherstoneEngine {
                 LinkJoint::Floating => {
                     let tether = self.base_tether(i, &ia[i]);
                     let ia_in = mat_vec(&ia[i], &a_in);
-                    let mut u = [0.0; 6];
-                    for k in 0..6 {
+                    let mut u = [0.0; SPATIAL_DOF];
+                    for k in 0..SPATIAL_DOF {
                         u[k] = tether[k] - pa[i][k] - ia_in[k];
                     }
                     let qdd = solve6(&ia[i], &u);
                     acc[i] = qdd;
                     let mut a = a_in;
-                    for k in 0..6 {
+                    for k in 0..SPATIAL_DOF {
                         a[k] += qdd[k];
                     }
                     a_link[i] = a;
@@ -955,10 +978,10 @@ impl FeatherstoneEngine {
     fn base_tether(&self, i: usize, ia: &M6) -> S6 {
         let link = &self.links[i];
         let Some(m) = link.servo else {
-            return [0.0; 6];
+            return [0.0; SPATIAL_DOF];
         };
         if !matches!(m.kind, MotorKind::Position | MotorKind::Servo) {
-            return [0.0; 6];
+            return [0.0; SPATIAL_DOF];
         }
         let rot = Mat3::from_quat(link.body.orientation);
         let lin_err = link.tether_pos - link.body.position;
@@ -966,10 +989,10 @@ impl FeatherstoneEngine {
         let dq = link.tether_quat.conjugate() * link.body.orientation;
         let dq = if dq.w < 0.0 { -dq } else { dq };
         let half = dq.w.clamp(-1.0, 1.0).acos();
-        let local_err = if half < 1e-6 {
+        let local_err = if half < SMALL_HALF_ANGLE {
             Vec3::ZERO
         } else {
-            dq.xyz() * (2.0 * half / half.sin().max(1e-9))
+            dq.xyz() * (2.0 * half / half.sin().max(SIN_HALF_FLOOR))
         };
         // `dq` is in the reference frame; express the error in world.
         let ang_err = link.tether_quat * local_err;
@@ -1040,12 +1063,12 @@ impl FeatherstoneEngine {
             }
         }
         // Velocity propagation at the new state.
-        let mut vel = vec![[0.0; 6]; self.links.len()];
+        let mut vel = vec![[0.0; SPATIAL_DOF]; self.links.len()];
         for &i in &order {
             let x = self.xup(i);
             let v_parent = match self.links[i].parent {
                 Some(p) => vel[p],
-                None => [0.0; 6],
+                None => [0.0; SPATIAL_DOF],
             };
             let link = &self.links[i];
             let rot = Mat3::from_quat(link.body.orientation);
@@ -1059,8 +1082,8 @@ impl FeatherstoneEngine {
                 _ => {
                     let xp = apply_motion(&x, &v_parent);
                     let s = self.joint_subspace(i);
-                    let mut out = [0.0; 6];
-                    for k in 0..6 {
+                    let mut out = [0.0; SPATIAL_DOF];
+                    for k in 0..SPATIAL_DOF {
                         out[k] = xp[k] + s[k] * link.qd;
                     }
                     out
@@ -1190,7 +1213,7 @@ fn clamp_vec(v: Vec3, max: f32) -> Vec3 {
 /// velocity `w` over `h`.
 fn integrate_quat(q: Quat, w: Vec3, h: f32) -> Quat {
     let omega = w.length();
-    if omega < 1e-12 {
+    if omega < ANGULAR_SPEED_FLOOR {
         return q;
     }
     (Quat::from_axis_angle(w / omega, omega * h) * q).normalize()
@@ -1510,7 +1533,7 @@ mod tests {
         let m = mat_of_transform(&x);
         let direct = apply_motion(&x, &v);
         let matrix = mat_vec(&m, &v);
-        for k in 0..6 {
+        for k in 0..SPATIAL_DOF {
             assert!((direct[k] - matrix[k]).abs() < 1e-5, "6x6 mismatch at {k}");
         }
     }
@@ -1522,7 +1545,7 @@ mod tests {
         let b = [1.0, -1.0, 0.5, 2.0, 0.25, -0.75];
         let x = solve6(&a, &b);
         let back = mat_vec(&a, &x);
-        for k in 0..6 {
+        for k in 0..SPATIAL_DOF {
             assert!((back[k] - b[k]).abs() < 1e-5, "residual at {k}");
         }
     }

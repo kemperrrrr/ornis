@@ -33,6 +33,18 @@ fn write_lock<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_,
     lock.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// CPU-updated uniform buffer: the host writes it, the shader reads it.
+///
+/// `BitOr` on wgpu usages is not `const`, so this is `union` (which is).
+const CPU_UNIFORM_USAGE: wgpu::BufferUsages =
+    wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST);
+
+/// Color target rendered into by one pass and sampled by a later pass.
+///
+/// `BitOr` on wgpu usages is not `const`, so this is `union` (which is).
+const RENDER_TARGET_USAGE: wgpu::TextureUsages =
+    wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+
 /// Frame-global camera uniform (binding shared by every pass).
 ///
 /// The WGSL `Camera` declaration is generated from this layout
@@ -3596,7 +3608,7 @@ impl Renderer3D {
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("bloom params buffer"),
             contents: bytemuck::bytes_of(&BloomUniform::default()),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: CPU_UNIFORM_USAGE,
         });
 
         // Downsample: replace-blend, target is cleared first.
@@ -3787,7 +3799,7 @@ impl Renderer3D {
             sample_count: SINGLE_SAMPLE_COUNT,
             dimension: wgpu::TextureDimension::D2,
             format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: RENDER_TARGET_USAGE,
             view_formats: &[],
         });
         self.pbr_texture_view = self
