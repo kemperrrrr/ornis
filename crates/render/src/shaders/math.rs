@@ -41,6 +41,27 @@ fn fresnel0_from_ior(ior: f32) -> f32 {
     f * f
 }
 
+/// Split-sum image-based light: prefiltered specular times the BRDF LUT
+/// (scale/bias) plus irradiance times the diffuse color, gated by `weight`
+/// (0 leaves the direct-light result unchanged).
+#[kernel]
+fn evaluate_ibl(
+    prefiltered: glam::Vec3,
+    irradiance: glam::Vec3,
+    lut_scale: f32,
+    lut_bias: f32,
+    f0: glam::Vec3,
+    diffuse_color: glam::Vec3,
+    weight: f32,
+) -> glam::Vec3 {
+    let fresnel = f0 * lut_scale + glam::Vec3::splat(lut_bias);
+    let specular = prefiltered * fresnel;
+    let diffuse_weight =
+        (glam::Vec3::splat(1.0) - glam::Vec3::splat(lut_bias)).max(glam::Vec3::ZERO);
+    let diffuse = irradiance * diffuse_color * diffuse_weight;
+    (specular + diffuse) * weight
+}
+
 /// Scalar Schlick approximation of the Fresnel term (`cos_theta` = NoV or NoL).
 #[kernel]
 fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
@@ -594,8 +615,32 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_ibl_is_zero_when_weight_is_zero() {
+        let got = evaluate_ibl::eval(
+            glam::Vec3::ONE,
+            glam::Vec3::ONE,
+            1.0,
+            0.2,
+            glam::Vec3::splat(0.04),
+            glam::Vec3::ONE,
+            0.0,
+        );
+        assert!(got.length() < 1.0e-6, "{got}");
+        let lit = evaluate_ibl::eval(
+            glam::Vec3::ONE,
+            glam::Vec3::ONE,
+            1.0,
+            0.0,
+            glam::Vec3::splat(0.04),
+            glam::Vec3::ONE,
+            1.0,
+        );
+        assert!(lit.x > 0.5, "{lit}");
+    }
+
+    #[test]
     fn all_wgsl_sources_compile() {
-        let funcs: [&str; 23] = [
+        let funcs: [&str; 24] = [
             luminance::wgsl_source(),
             aces_tonemap::wgsl_source(),
             fresnel0_from_ior::wgsl_source(),
@@ -619,6 +664,7 @@ mod tests {
             coat_blend_darkened::wgsl_source(),
             thin_film_modulation::wgsl_source(),
             octahedral_encode::wgsl_source(),
+            evaluate_ibl::wgsl_source(),
         ];
         for src in funcs.iter() {
             assert!(src.starts_with("fn "), "bad source: {src}");

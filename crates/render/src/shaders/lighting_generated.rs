@@ -12,7 +12,7 @@ use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
     ComparisonSampler, DepthTexture, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME,
     Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d,
-    Texture2dUint, naga_ir, wgsl_decl,
+    Texture2dUint, TextureCube, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -52,7 +52,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 13] = [
+pub const LIGHTING_RESOURCES: [Resource; 17] = [
     Resource {
         group: 0,
         binding: 0,
@@ -157,6 +157,38 @@ pub const LIGHTING_RESOURCES: [Resource; 13] = [
         kind: ResourceKind::TextureDepthCubeArray,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 13,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "prefilter_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 14,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "irradiance_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 15,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "brdf_lut",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 16,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ibl_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
@@ -181,6 +213,7 @@ fn lighting_fragment_kernels() -> String {
         math::sheen_brdf::wgsl_source(),
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
+        math::evaluate_ibl::wgsl_source(),
     ];
     kernels.join("\n")
 }
@@ -216,6 +249,10 @@ pub(crate) struct LightingMaps {
     pub shadow_tex: DepthTextureArray,
     pub shadow_sampler: ComparisonSampler,
     pub shadow_cube_tex: DepthTextureCubeArray,
+    pub prefilter_cube: TextureCube,
+    pub irradiance_cube: TextureCube,
+    pub brdf_lut: Texture2d,
+    pub ibl_sampler: Sampler,
 }
 
 #[stage(fragment)]
@@ -502,7 +539,35 @@ fn fs_main(
         coat_color,
         nov,
     );
-    let color = ambient + lo + emission;
+    let f0_dielectric = fresnel0_from_ior(specular_ior);
+    let f0 = mix(
+        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
+        base_color * base_weight,
+        metalness,
+    );
+    let reflect_dir = n * (2.0 * dot(n, v)) - v;
+    let prefiltered = textureSampleLevel(
+        maps.prefilter_cube,
+        maps.ibl_sampler,
+        reflect_dir,
+        specular_roughness * ctx.lighting.ibl_max_mip,
+    );
+    let irradiance = textureSample(maps.irradiance_cube, maps.ibl_sampler, n);
+    let lut = textureSample(
+        maps.brdf_lut,
+        maps.ibl_sampler,
+        Vec2::new(nov, specular_roughness),
+    );
+    let ibl = evaluate_ibl(
+        prefiltered.rgb,
+        irradiance.rgb,
+        lut.r,
+        lut.g,
+        f0,
+        base_color * (1.0 - metalness),
+        ctx.lighting.ibl_weight,
+    );
+    let color = ambient + lo + emission + ibl;
     return glam::Vec4::new(color, opacity);
 }
 
@@ -598,7 +663,7 @@ mod tests {
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 13);
+        assert_eq!(LIGHTING_RESOURCES.len(), 17);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -632,7 +697,7 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 13);
+        assert_eq!(src.matches("@binding(").count(), 17);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer
@@ -655,6 +720,10 @@ mod tests {
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
         assert!(entry.contains("return vec4<f32>(color, opacity);"));
+        assert!(entry.contains("textureSampleLevel(prefilter_cube, ibl_sampler"));
+        assert!(entry.contains("textureSample(brdf_lut, ibl_sampler"));
+        assert!(entry.contains("textureSample(irradiance_cube, ibl_sampler"));
+        assert!(entry.contains("lighting.ibl_max_mip"));
         assert!(entry.contains("thin_film_weight_mix("));
         assert!(entry.contains("evaluate_coat_darkening("));
     }

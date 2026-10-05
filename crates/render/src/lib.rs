@@ -22,6 +22,8 @@ pub mod frame_passes;
 /// `RenderWorld` extraction + `ornis-wasm`, not through this module.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_resources;
+/// Split-sum image-based lighting (BRDF LUT, prefilter, irradiance).
+pub mod ibl;
 /// Typed directional light spawned into a world light rig.
 pub mod light;
 /// GPU mesh representation and primitive generation.
@@ -61,6 +63,10 @@ pub use flags::{
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use frame_passes::{
     FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor,
+};
+pub use ibl::{
+    BrdfLut, CubeFace, EnvironmentCube, SplitSum, bake_brdf_lut, convolve_irradiance,
+    convolve_specular, integrate_brdf,
 };
 pub use light::DirectionalLight;
 pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};

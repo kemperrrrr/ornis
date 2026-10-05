@@ -16,7 +16,8 @@
 use super::interface::GbufferFragmentInput as FragmentInput;
 use super::{
     ComparisonSampler, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME, Resource,
-    ResourceKind, ShaderModule, helpers, openpbr_material_decl, wgsl_decl,
+    ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
+    wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
@@ -59,13 +60,14 @@ pub fn wgsl_source() -> String {
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
         math::srgb_to_linear::wgsl_source(),
+        math::evaluate_ibl::wgsl_source(),
     ];
     let module = ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
-        .resources(&PBR_RESOURCES, &[0, 2, 3, 4, 5, 6])
+        .resources(&PBR_RESOURCES, &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .consts(helpers::wgsl_consts())
         .helper(helpers::wgsl_shared_helpers())
@@ -89,6 +91,10 @@ pub(crate) struct PbrContext {
     pub shadow_tex: DepthTextureArray,
     pub shadow_sampler: ComparisonSampler,
     pub shadow_cube_tex: DepthTextureCubeArray,
+    pub prefilter_cube: TextureCube,
+    pub irradiance_cube: TextureCube,
+    pub brdf_lut: Texture2d,
+    pub ibl_sampler: Sampler,
 }
 
 #[stage(fragment)]
@@ -356,7 +362,35 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         coat_color,
         nov,
     );
-    let color = ambient + lo + emission;
+    let f0_dielectric = fresnel0_from_ior(specular_ior);
+    let f0 = mix(
+        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
+        base_color * base_weight,
+        metalness,
+    );
+    let reflect_dir = n * (2.0 * dot(n, v)) - v;
+    let prefiltered = textureSampleLevel(
+        ctx.prefilter_cube,
+        ctx.ibl_sampler,
+        reflect_dir,
+        specular_roughness * ctx.lighting.ibl_max_mip,
+    );
+    let irradiance = textureSample(ctx.irradiance_cube, ctx.ibl_sampler, n);
+    let lut = textureSample(
+        ctx.brdf_lut,
+        ctx.ibl_sampler,
+        Vec2::new(nov, specular_roughness),
+    );
+    let ibl = evaluate_ibl(
+        prefiltered.rgb,
+        irradiance.rgb,
+        lut.r,
+        lut.g,
+        f0,
+        base_color * (1.0 - metalness),
+        ctx.lighting.ibl_weight,
+    );
+    let color = ambient + lo + emission + ibl;
     return glam::Vec4::new(color, opacity);
 }
 
@@ -368,7 +402,7 @@ pub fn wgsl_source_static() -> String {
 /// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
 /// Shared by `create_pbr_bind_group` and `create_forward_pass`, whose
 /// handwritten layouts were identical. Type names come from the Rust side.
-pub const PBR_RESOURCES: [Resource; 7] = [
+pub const PBR_RESOURCES: [Resource; 11] = [
     Resource {
         group: 0,
         binding: 0,
@@ -423,6 +457,38 @@ pub const PBR_RESOURCES: [Resource; 7] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "shadow_cube_tex",
         kind: ResourceKind::TextureDepthCubeArray,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 7,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "prefilter_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 8,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "irradiance_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 9,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "brdf_lut",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 10,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ibl_sampler",
+        kind: ResourceKind::Sampler,
         min_size: None,
     },
 ];
@@ -503,7 +569,7 @@ mod tests {
     fn pbr_resources_cover_stages_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         let src = wgsl_vertex_source() + &wgsl_source();
-        assert_eq!(PBR_RESOURCES.len(), 7);
+        assert_eq!(PBR_RESOURCES.len(), 11);
         for r in PBR_RESOURCES {
             assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
             let e = bgl_entry(&r, false);
