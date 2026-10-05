@@ -16,11 +16,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     world.set_title("Ornis — Animation Demo");
     let mannequin = world.load::<Model>("assets/starter/ual1_standard.glb")?;
     let hero = world.spawn(mannequin)?;
-    world.set_ambient(Color::hex("#1A1A26")?);
+    // `direction` points toward the light. The key sits in the camera
+    // octant so the front is lit; the fill and linear ambient keep the
+    // far side readable. `#1A1A26` is sRGB, so it uploaded as ~0.01 linear.
+    world.set_ambient(Color::linear_rgb(0.10, 0.10, 0.15));
     world.spawn(DirectionalLight {
-        direction: UnitVec3::new(Vec3::new(-1.0, -1.0, -1.0))?,
+        direction: UnitVec3::new(Vec3::new(1.0, 1.0, 1.0))?,
         illuminance: Lux(0.6),
         color: Color::WHITE,
+        ..Default::default()
+    });
+    world.spawn(DirectionalLight {
+        direction: UnitVec3::new(Vec3::new(-0.5, 0.5, -0.5))?,
+        illuminance: Lux(0.3),
+        color: Color::linear_rgb(0.8, 0.8, 1.0),
         ..Default::default()
     });
     world.spawn(OrbitCamera::looking_at(Vec3::new(2.5, 1.8, 3.5), Vec3::Y).with_fov(Degrees(45.0)));
