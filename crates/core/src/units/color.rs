@@ -28,10 +28,11 @@ const U8_SCALE: f32 = 255.0;
 
 /// Bit patterns of the IEC curve at `i / 255` for every byte `i`.
 ///
-/// `f32::powf` is not a const fn on the pinned toolchain, so [`Color::srgb_u8`]
-/// and [`Color::hex`] read this table. The unit test
-/// `srgb_u8_table_matches_the_runtime_curve` checks each entry against
-/// [`srgb_channel_to_linear`].
+/// These literals are the source of truth for [`Color::srgb_u8`] and
+/// [`Color::hex`]. They are not produced by `f32::powf`: that function is
+/// not const, and its result depends on the platform libm (a 1-ULP
+/// disagreement is enough for a bit-exact compare to fail). [`Color::srgb`]
+/// returns the same bits when a channel is exactly `n as f32 / 255.0`.
 #[rustfmt::skip]
 const SRGB_U8_TO_LINEAR_BITS: [u32; 256] = [
     0x0000_0000, 0x399F_22B4, 0x3A1F_22B4, 0x3A6E_B40E, 0x3A9F_22B4, 0x3AC6_EB61, 0x3AEE_B40E, 0x3B0B_3E5D,
@@ -102,6 +103,10 @@ impl Color {
 
     /// Decodes sRGB channels in `0..=1` (the IEC curve, extended outside
     /// that range) into opaque linear light.
+    ///
+    /// A channel that is exactly `n as f32 / 255.0` returns the same bits as
+    /// [`Self::srgb_u8`] for that byte. Other channels follow the IEC formula;
+    /// the power segment uses `f32::powf`, which is not bit-stable across libm.
     pub fn srgb(r: f32, g: f32, b: f32) -> Self {
         Self::from_linear(
             srgb_channel_to_linear(r),
@@ -113,8 +118,8 @@ impl Color {
 
     /// Decodes 8-bit sRGB channels into opaque linear light.
     ///
-    /// Const: the transfer is a 256-entry table because `f32::powf` is not
-    /// const on this toolchain. Alpha is `1`.
+    /// Const: the transfer is a 256-entry table of IEC results. Alpha is `1`.
+    /// The bits are identical on every platform.
     pub const fn srgb_u8(r: u8, g: u8, b: u8) -> Self {
         Self::from_linear(
             srgb_u8_channel(r),
@@ -359,11 +364,37 @@ fn required_channel<'de, A: SeqAccess<'de>>(seq: &mut A, read: usize) -> Result<
 }
 
 fn srgb_channel_to_linear(channel: f32) -> f32 {
+    if let Some(byte) = exact_srgb_byte(channel) {
+        return srgb_u8_channel(byte);
+    }
     if channel <= SRGB_LINEAR_THRESHOLD {
         channel / SRGB_LINEAR_SLOPE
     } else {
         ((channel + SRGB_POWER_OFFSET) / SRGB_POWER_SCALE).powf(SRGB_POWER_GAMMA)
     }
+}
+
+/// `Some(n)` when `channel` is the f32 value `n as f32 / 255.0`.
+///
+/// The candidate comes from a truncating scale. A multiply is at most half
+/// an ulp off, so the matching byte, if any, is the guess or a neighbor.
+/// The acceptance test is an integer compare of bits, not `powf`.
+fn exact_srgb_byte(channel: f32) -> Option<u8> {
+    if !(0.0..=1.0).contains(&channel) {
+        return None;
+    }
+    let guess = (channel * U8_SCALE) as i16;
+    for delta in -1..=1 {
+        let byte = guess + delta;
+        if !(0..=255).contains(&byte) {
+            continue;
+        }
+        let encoded = f32::from(byte as u8) / U8_SCALE;
+        if encoded.to_bits() == channel.to_bits() {
+            return Some(byte as u8);
+        }
+    }
+    None
 }
 
 fn linear_channel_to_srgb(channel: f32) -> f32 {
@@ -438,13 +469,37 @@ mod tests {
         assert!((encoded[2] - 0.6).abs() < 1e-5);
     }
 
+    /// Each byte encoding `n / 255` decodes to the table, not to `f32::powf`.
+    ///
+    /// `powf` is libm-specific: the same f32 base can differ by one ulp
+    /// between hosts, so a bit-exact compare against it fails on some
+    /// platforms. The linear piece of the IEC curve is only a divide, which
+    /// is IEEE-exact, and those bytes still match that divide.
     #[test]
     fn srgb_u8_table_matches_the_runtime_curve() {
+        let mut previous = f32::NEG_INFINITY;
         for byte in 0..=255 {
+            let encoded = f32::from(byte) / U8_SCALE;
             let from_table = srgb_u8_channel(byte);
-            let from_curve = srgb_channel_to_linear(f32::from(byte) / U8_SCALE);
-            assert_eq!(from_table.to_bits(), from_curve.to_bits());
+            let from_curve = srgb_channel_to_linear(encoded);
+            assert_eq!(
+                from_table.to_bits(),
+                from_curve.to_bits(),
+                "byte {byte} left the table"
+            );
+            assert!(from_table >= previous, "byte {byte} is not monotone");
+            previous = from_table;
+            if encoded <= SRGB_LINEAR_THRESHOLD {
+                let divided = encoded / SRGB_LINEAR_SLOPE;
+                assert_eq!(
+                    from_table.to_bits(),
+                    divided.to_bits(),
+                    "linear byte {byte}"
+                );
+            }
         }
+        assert_eq!(srgb_u8_channel(0).to_bits(), 0);
+        assert_eq!(srgb_u8_channel(255).to_bits(), 1.0f32.to_bits());
     }
 
     #[test]
