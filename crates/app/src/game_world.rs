@@ -14,8 +14,7 @@ use std::marker::PhantomData;
 
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
-    Authoritative, Color, Engine, Entity, LinearRgb, Replica, SceneEntities, SceneRole,
-    SceneVersion, Seconds,
+    Authoritative, Color, Engine, Entity, Replica, SceneEntities, SceneRole, SceneVersion, Seconds,
 };
 use ornis_render::extraction::{RenderLights, extract_render_data};
 use ornis_render::{DirectionalLight, FrameUpload, OrbitCamera, install_orbit_camera};
@@ -319,15 +318,16 @@ impl<Role: SceneRole> GameWorld<Role> {
         self.version.bump();
     }
 
-    /// Sets the linear ambient color.
+    /// Sets the ambient [`Color`].
     ///
-    /// Alpha is not part of the ambient channel. Creates an empty
-    /// [`RenderLights`] rig when the world has none, and leaves lights
-    /// already published by [`Self::spawn`] or [`Self::replace_scene`] in
-    /// place. [`Self::replace_scene`] replaces the whole rig, including
-    /// this ambient.
+    /// The resource stores `color` as given. The GPU upload reads linear
+    /// RGB and drops alpha. Creates an empty [`RenderLights`] rig when the
+    /// world has none, and leaves lights already published by
+    /// [`Self::spawn`] or [`Self::replace_scene`] in place.
+    /// [`Self::replace_scene`] replaces the whole rig, including this
+    /// ambient.
     pub fn set_ambient(&mut self, color: Color) {
-        self.ensure_render_lights().ambient = color.to_linear_rgb().as_array();
+        self.ensure_render_lights().ambient = color;
     }
 
     /// Places `value` into the world.
@@ -456,7 +456,7 @@ impl<Role: SceneRole> GameWorld<Role> {
             .is_none()
         {
             self.publish_render_lights(RenderLights {
-                ambient: LinearRgb::BLACK.as_array(),
+                ambient: Color::BLACK,
                 lights: Vec::new(),
                 ..RenderLights::default()
             });
@@ -886,7 +886,7 @@ mod tests {
 
         let rig = render_lights(&world);
         assert_eq!(rig.lights.len(), 1);
-        assert_eq!(rig.ambient, ambient.to_linear_rgb().as_array());
+        assert_eq!(rig.ambient, ambient);
         let camera = read_orbit_camera(world.engine()).expect("camera");
         assert_eq!(camera.view_parameters().3, 45.0);
 
@@ -918,7 +918,7 @@ mod tests {
         world.replace_scene(&scene());
         let rig = render_lights(&world);
         assert!(rig.lights.is_empty());
-        assert_eq!(rig.ambient, [0.1, 0.1, 0.1]);
+        assert_eq!(rig.ambient, Color::linear_rgb(0.1, 0.1, 0.1));
     }
 
     #[test]
@@ -932,7 +932,7 @@ mod tests {
         });
         let rig = render_lights(&world);
         assert_eq!(rig.lights.len(), 1);
-        assert_eq!(rig.ambient, [0.1, 0.1, 0.1]);
+        assert_eq!(rig.ambient, Color::linear_rgb(0.1, 0.1, 0.1));
     }
 
     #[test]
@@ -948,7 +948,7 @@ mod tests {
         world.set_ambient(Color::WHITE);
         let rig = render_lights(&world);
         assert_eq!(rig.lights.len(), 1);
-        assert_eq!(rig.ambient, [1.0, 1.0, 1.0]);
+        assert_eq!(rig.ambient, Color::WHITE);
     }
 
     #[test]
@@ -1280,7 +1280,7 @@ mod tests {
             .resources()
             .get::<RenderLights>()
             .expect("scene loader publishes RenderLights");
-        assert_eq!(lights.ambient, [0.2, 0.2, 0.2]);
+        assert_eq!(lights.ambient, Color::linear_rgb(0.2, 0.2, 0.2));
         assert_eq!(lights.lights.len(), 1);
         assert!(matches!(
             lights.set_lights_args().as_slice(),
@@ -1359,7 +1359,7 @@ mod tests {
             .resources()
             .get::<RenderLights>()
             .expect("explicit light");
-        assert_eq!(rig.ambient, [0.1, 0.1, 0.15]);
+        assert_eq!(rig.ambient, Color::linear_rgb(0.1, 0.1, 0.15));
         assert_eq!(rig.lights.len(), 1);
 
         world.spawn(

@@ -115,7 +115,7 @@ fn build_gpu_scene(
         mesh_params,
         extracted,
         lights: lights.set_lights_args(),
-        ambient: lights.ambient,
+        ambient: lights.ambient.to_linear_rgb().as_array(),
     }
 }
 
@@ -1191,7 +1191,10 @@ mod integration_tests {
 
         // Lighting, ambient and camera ride the same contract.
         let lights = RenderLights::from_scene(&live.scene);
-        assert_eq!(lights.ambient, [0.10, 0.10, 0.15]);
+        assert_eq!(
+            lights.ambient,
+            ornis_core::Color::linear_rgb(0.10, 0.10, 0.15)
+        );
         assert_eq!(lights.lights.len(), 1);
         assert!(matches!(
             &lights.lights[0],

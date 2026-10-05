@@ -341,8 +341,14 @@ impl System for RenderSubmit {
 
         fs.renderer
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
-        fs.renderer
-            .set_lights(&queue.0, lights.ambient, &lights.set_lights_args());
+        // Typed `Color` / `Lux` stay on the resource. Raw floats exist only
+        // in this upload: linear RGB here, renderer exposure inside
+        // `set_lights` (the resource multipliers default to the no-op).
+        fs.renderer.set_lights(
+            &queue.0,
+            lights.ambient.to_linear_rgb().as_array(),
+            &lights.set_lights_args(),
+        );
         fs.renderer
             .upload_materials(&device.0, &queue.0, &extracted.materials);
         // Custom geometry (loaded `.glb` / sculpted soups, incl. skinned):
@@ -619,7 +625,7 @@ mod tests {
         // (viewport lighting is the editor's job, not the engine's).
         let mut engine = Engine::new();
         let custom = RenderLights {
-            ambient: [0.5, 0.4, 0.3],
+            ambient: ornis_core::Color::linear_rgb(0.5, 0.4, 0.3),
             lights: vec![ornis_assets::scene::LightDesc::Directional {
                 direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.0, -1.0, 0.0))
                     .expect("non-zero direction"),
@@ -627,8 +633,8 @@ mod tests {
                 color: [1.0, 0.9, 0.8],
                 shadow: ShadowCast::Disabled,
             }],
-            ambient_intensity: 1.0,
-            exposure: 1.0,
+            ambient_intensity: ornis_core::Lux::new(1.0),
+            exposure: ornis_core::Lux::new(1.0),
         };
         let _ = engine.world_mut().insert(custom);
         install_frame_buffers(&mut engine);
@@ -637,7 +643,7 @@ mod tests {
             .resources()
             .get::<RenderLights>()
             .expect("lights resource");
-        assert_eq!(kept.ambient, [0.5, 0.4, 0.3]);
+        assert_eq!(kept.ambient, ornis_core::Color::linear_rgb(0.5, 0.4, 0.3));
         assert_eq!(kept.lights.len(), 1);
 
         let mut fresh = Engine::new();

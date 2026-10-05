@@ -30,7 +30,7 @@ use crate::renderer::{InstanceData, LightUploadStats, count_light_drops};
 use crate::skinning::{PaletteHandle, SkinBindError, SkinnedDraw};
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc};
 use ornis_core::GlobalTransform;
-use ornis_core::units::{PositiveF32, UnitVec3};
+use ornis_core::units::{Color, Lux, PositiveF32, UnitVec3};
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
@@ -240,38 +240,45 @@ impl Default for FrameUpload {
 /// uploads it via [`Self::set_lights_args`] instead of a hardcoded rig.
 ///
 /// The IBL-minimum multipliers ([`Self::ambient_intensity`],
-/// [`Self::exposure`]) default to `1.0` (exact no-op) and are accepted by
-/// old serialized payloads through `serde` defaults.
+/// [`Self::exposure`]) default to `Lux(1.0)` (exact no-op) and are
+/// accepted by old serialized payloads through `serde` defaults. GPU
+/// `[f32; …]` / raw `f32` values are produced only at the buffer upload
+/// (`Renderer3D::set_lights` / [`Self::set_lights_args`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderLights {
-    /// Ambient RGB contribution.
-    pub ambient: [f32; 3],
+    /// Ambient color. Linear RGB is taken at the GPU upload; alpha is not
+    /// part of the lighting uniform.
+    pub ambient: Color,
     /// Scene lights of any kind; the renderer uploads the first eight
     /// (see `renderer::MAX_LIGHTS`) and reports the rest via
     /// [`Self::light_upload_stats`].
+    ///
+    /// Directional entries stay [`LightDesc`] (direction is [`UnitVec3`]).
+    /// Asset payloads may still carry legacy color arrays; those arrays
+    /// become GPU floats inside `Renderer3D::set_lights`, not here.
     pub lights: Vec<LightDesc>,
     /// IBL-minimum ambient multiplier, baked into the ambient upload by
     /// `Renderer3D::set_lights_full`. Absent in older payloads — defaults
-    /// to `1.0` (no-op).
+    /// to `Lux(1.0)` (no-op). Not [`Lux::default`], which is zero.
     #[serde(default = "default_ibl_factor")]
-    pub ambient_intensity: f32,
+    pub ambient_intensity: Lux,
     /// IBL-minimum exposure multiplier applied to every light color, baked
     /// into the light upload by `Renderer3D::set_lights_full`. Absent in
-    /// older payloads — defaults to `1.0` (no-op).
+    /// older payloads — defaults to `Lux(1.0)` (no-op).
     #[serde(default = "default_ibl_factor")]
-    pub exposure: f32,
+    pub exposure: Lux,
 }
 
-/// Default IBL-minimum multiplier (`1.0`): the exact no-op for the ambient
-/// and exposure uploads, and the `serde` default for older payloads.
-fn default_ibl_factor() -> f32 {
-    1.0
+/// Default IBL-minimum multiplier (`Lux(1.0)`): the exact no-op for the
+/// ambient and exposure uploads, and the `serde` default for older payloads.
+fn default_ibl_factor() -> Lux {
+    Lux::new(1.0)
 }
 
 /// The lighting rig `RenderSubmit` hardcoded before X3 — the resource
 /// default, so a runtime that never loads a scene renders exactly as it
 /// did (gate: zero pixel differences).
-const LEGACY_AMBIENT: [f32; 3] = [0.10, 0.10, 0.15];
+const LEGACY_AMBIENT: Color = Color::linear_rgb(0.10, 0.10, 0.15);
 /// Legacy key light (`(1, 1, 1)` direction, stored normalized).
 fn legacy_key_light() -> LightDesc {
     LightDesc::Directional {
@@ -319,7 +326,7 @@ impl RenderLights {
             );
         }
         Self {
-            ambient: scene.ambient,
+            ambient: Color::from(scene.ambient_units()),
             lights: scene.lights.clone(),
             ambient_intensity: default_ibl_factor(),
             exposure: default_ibl_factor(),
@@ -1776,7 +1783,14 @@ mod tests {
         // resource default must be exactly the old hardcoded arguments
         // (gate: zero pixel differences).
         let rig = RenderLights::default();
-        assert_eq!(rig.ambient, [0.10, 0.10, 0.15]);
+        assert_eq!(rig.ambient, Color::linear_rgb(0.10, 0.10, 0.15));
+        assert_eq!(
+            rig.ambient.to_linear_rgb().as_array(),
+            [0.10, 0.10, 0.15],
+            "legacy ambient stays the same linear RGB at the upload"
+        );
+        assert_eq!(rig.ambient_intensity, Lux::new(1.0));
+        assert_eq!(rig.exposure, Lux::new(1.0));
         // Directions are stored normalized (`UnitVec3`); the evaluators
         // normalize anyway, so the lit result is unchanged.
         let key_dir = UnitVec3::normalize(Vec3::ONE).expect("non-zero");
@@ -1798,6 +1812,25 @@ mod tests {
                 },
             ] if *key == 0.6 && *fill == 0.3 && *key_d == key_dir && *fill_d == fill_dir
         ));
+    }
+
+    #[test]
+    fn old_render_lights_payload_defaults_ibl_multipliers() {
+        // Older resource payloads omit the IBL multipliers. `Lux::default`
+        // is zero, so the serde default must stay the no-op `Lux(1.0)`.
+        // Ambient keeps the linear RGB tuple scene files already use.
+        let parsed: RenderLights =
+            ron::de::from_str("(ambient: (0.10, 0.10, 0.15), lights: [])").expect("old payload");
+        assert_eq!(parsed.ambient, Color::linear_rgb(0.10, 0.10, 0.15));
+        assert_eq!(parsed.ambient_intensity, Lux::new(1.0));
+        assert_eq!(parsed.exposure, Lux::new(1.0));
+        assert!(parsed.lights.is_empty());
+
+        let round = ron::ser::to_string(&parsed).expect("serialize");
+        let again: RenderLights = ron::de::from_str(&round).expect("round trip");
+        assert_eq!(again.ambient, parsed.ambient);
+        assert_eq!(again.ambient_intensity, parsed.ambient_intensity);
+        assert_eq!(again.exposure, parsed.exposure);
     }
 
     #[test]

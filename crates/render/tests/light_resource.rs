@@ -106,9 +106,11 @@ fn world_lights_reproduce_legacy_rig_pixels() {
             .get::<RenderLights>()
             .expect("scene loader publishes RenderLights");
         let driven = common::render_frame_pixels(scene, |plan, context| {
-            scene
-                .renderer
-                .set_lights(context.queue, lights.ambient, &lights.set_lights_args());
+            scene.renderer.set_lights(
+                context.queue,
+                lights.ambient.to_linear_rgb().as_array(),
+                &lights.set_lights_args(),
+            );
             plan.render(context, &scene.renderer, &scene.mesh, 1);
         });
         assert_eq!(
