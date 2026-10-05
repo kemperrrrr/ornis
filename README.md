@@ -161,7 +161,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 
 | Фича | Статус | Комментарий |
 |---|---|---|
-| `Renderer3D` + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, ACES) | ✅ | `crates/render/src/` |
+| `Renderer3D` + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, ACES один раз в HDR-composite и в fog-present) | ✅ | `crates/render/src/` |
 | OpenPBR-материал (20 vec4 параметров, все BSDF) | ✅ | `crates/render/src/material.rs` |
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |

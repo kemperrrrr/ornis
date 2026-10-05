@@ -2,7 +2,7 @@
 //!
 //! Canonical source is the Rust code in this module: the full OpenPBR
 //! fragment skeleton (layer evaluators + `fs_main`) lives here as a Rust
-//! string, and the 19 BRDF math kernels are spliced in from
+//! string, and the BRDF math kernels are spliced in from
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
 //! The former handwritten `shaders/wgsl/pbr_*.wgsl` sources were deleted
 //! after the `#[stage]` translation of `fs_main`; the
@@ -34,12 +34,11 @@ pub fn wgsl_vertex_source() -> String {
 
 /// Forward-PBR fragment shader: full OpenPBR evaluation.
 ///
-/// Assembled as `{skeleton}\\n{kernel × 19}`, exactly like the legacy
+/// Assembled as `{skeleton}\\n{kernels}`, exactly like the legacy
 /// `shaders::pbr_fragment()`; entry point `fs_main` is kept.
 pub fn wgsl_source() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
         math::fresnel0_from_ior::wgsl_source(),
         math::fresnel_schlick::wgsl_source(),
         math::fresnel_schlick_vec::wgsl_source(),
@@ -50,6 +49,9 @@ pub fn wgsl_source() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
+        math::base_diffuse_energy::wgsl_source(),
+        math::thin_film_weight_mix::wgsl_source(),
+        math::coated_emission::wgsl_source(),
         math::coat_base_darkening::wgsl_source(),
         math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
@@ -137,7 +139,21 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    let thin_film_mod = thin_film_weight_mix(
+        thin_film_weight,
+        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
+    );
+    let coat_darken = evaluate_coat_darkening(
+        coat_weight,
+        coat_darkening,
+        coat_ior,
+        metalness,
+        base_color,
+        base_weight,
+        specular_weight,
+        subsurface_weight,
+        subsurface_color,
+    );
     for i in 0u..ctx.lighting.light_count {
         let light = ctx.lighting.lights[i];
         let kind = light.kind.x;
@@ -253,7 +269,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
             t,
             b,
             thin_film_mod,
-        );
+        ) * coat_darken;
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -341,8 +357,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         nov,
     );
     let color = ambient + lo + emission;
-    let tone_mapped = aces_tonemap(color);
-    return glam::Vec4::new(tone_mapped, opacity);
+    return glam::Vec4::new(color, opacity);
 }
 
 /// Static view for naga validation in tests.
@@ -443,7 +458,7 @@ mod tests {
         assert!(fs.contains("@group(0) @binding(3) var<uniform> lighting"));
         assert!(fs.contains("fn fs_main("));
         assert!(fs.contains("fn evaluate_base_layer"));
-        assert!(fs.contains("fn aces_tonemap"));
+        assert!(!fs.contains("aces_tonemap("));
     }
 
     /// The translated fragment entry must keep the legacy shape: same
@@ -462,7 +477,7 @@ mod tests {
         assert!(entry.contains(
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
-        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+        assert!(entry.contains("return vec4<f32>(color, opacity);"));
     }
 
     #[test]

@@ -162,7 +162,6 @@ pub const LIGHTING_RESOURCES: [Resource; 13] = [
 fn lighting_fragment_kernels() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
         math::fresnel0_from_ior::wgsl_source(),
         math::fresnel_schlick::wgsl_source(),
         math::fresnel_schlick_vec::wgsl_source(),
@@ -173,6 +172,9 @@ fn lighting_fragment_kernels() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
+        math::base_diffuse_energy::wgsl_source(),
+        math::thin_film_weight_mix::wgsl_source(),
+        math::coated_emission::wgsl_source(),
         math::coat_base_darkening::wgsl_source(),
         math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
@@ -286,7 +288,21 @@ fn fs_main(
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    let thin_film_mod = thin_film_weight_mix(
+        thin_film_weight,
+        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
+    );
+    let coat_darken = evaluate_coat_darkening(
+        coat_weight,
+        coat_darkening,
+        coat_ior,
+        metalness,
+        base_color,
+        base_weight,
+        specular_weight,
+        subsurface_weight,
+        subsurface_color,
+    );
     let t = normalize(cross(n, Vec3::new(0.0, 1.0, 0.0)) + Vec3::new(0.0, 0.0, EPS));
     let b = cross(n, t);
     for i in 0u..ctx.lighting.light_count {
@@ -399,7 +415,7 @@ fn fs_main(
             t,
             b,
             thin_film_mod,
-        );
+        ) * coat_darken;
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -487,8 +503,7 @@ fn fs_main(
         nov,
     );
     let color = ambient + lo + emission;
-    let tone_mapped = aces_tonemap(color);
-    return glam::Vec4::new(tone_mapped, opacity);
+    return glam::Vec4::new(color, opacity);
 }
 
 /// Full WGSL source for deferred lighting, assembled from Rust.
@@ -568,7 +583,10 @@ mod tests {
     #[test]
     fn lighting_generated_contains_expected_kernels() {
         let src = wgsl_source();
-        assert!(src.contains("fn aces_tonemap"));
+        assert!(
+            !src.contains("aces_tonemap("),
+            "lighting writes scene-linear HDR; ACES belongs to the composite"
+        );
         assert!(src.contains("fn fresnel_f82_tint"));
         assert!(src.contains("fn ggx_ndf_aniso"));
         assert!(src.contains("fn fs_main"));
@@ -636,7 +654,9 @@ mod tests {
         assert!(entry.contains(
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
-        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+        assert!(entry.contains("return vec4<f32>(color, opacity);"));
+        assert!(entry.contains("thin_film_weight_mix("));
+        assert!(entry.contains("evaluate_coat_darkening("));
     }
 
     /// The MSAA source validates with naga and spells multisampled depth +

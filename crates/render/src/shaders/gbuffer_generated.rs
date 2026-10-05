@@ -43,7 +43,10 @@ fn vs_main(
     let obj = ctx.per_objects[instance_index];
     let world_pos = obj.model * Vec4::new(input.position, 1.0);
     let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
-    let mut world_tangent = normalize((obj.normal_matrix * Vec4::new(input.tangent, 0.0)).xyz);
+    // Tangents are directions: the model matrix, not the inverse-transpose
+    // used for normals. Under non-uniform scale the inverse-transpose
+    // shears the tangent off the surface.
+    let mut world_tangent = normalize((obj.model * Vec4::new(input.tangent, 0.0)).xyz);
     let mut output: VertexOutput;
     output.clip_position = ctx.camera.view_proj * world_pos;
     output.world_position = world_pos.xyz;
@@ -201,6 +204,35 @@ mod tests {
     /// The translated vertex entry must keep the legacy shape: storage read,
     /// instance transform, var-out varying. (Byte-parity no longer applies —
     /// the generated entry is single-line.)
+    /// Severity: medium. Non-uniform scale must not shear tangents.
+    #[test]
+    fn tangent_uses_the_model_matrix_not_the_inverse_transpose() {
+        let entry = vs_main::wgsl_source();
+        assert!(
+            entry.contains("normalize((obj.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz)"),
+            "{entry}"
+        );
+        assert!(
+            entry.contains("normalize((obj.model * vec4<f32>(input.tangent, 0.0)).xyz)"),
+            "{entry}"
+        );
+        assert!(
+            !entry.contains("normal_matrix * vec4<f32>(input.tangent"),
+            "{entry}"
+        );
+        let tangent = glam::Vec3::new(1.0, 1.0, 0.0);
+        let model = glam::Mat4::from_scale(glam::Vec3::new(2.0, 1.0, 1.0));
+        let by_model = (model * tangent.extend(0.0)).truncate().normalize();
+        let by_inverse_transpose = (model.inverse().transpose() * tangent.extend(0.0))
+            .truncate()
+            .normalize();
+        assert!((by_model - glam::Vec3::new(2.0, 1.0, 0.0).normalize()).length() < 1e-5);
+        assert!(
+            by_model.dot(by_inverse_transpose) < 0.8,
+            "model {by_model} inverse-transpose {by_inverse_transpose}"
+        );
+    }
+
     #[test]
     fn gbuffer_vertex_entry_matches_legacy_shape() {
         let entry = vs_main::wgsl_source();

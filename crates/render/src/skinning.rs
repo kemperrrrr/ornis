@@ -163,7 +163,10 @@ fn vs_main_skinned(
     );
     let world_pos = obj.model * Vec4::new(skinned_pos, 1.0);
     let mut world_normal = normalize((obj.normal_matrix * Vec4::new(skinned_nrm, 0.0)).xyz);
-    let mut world_tangent = normalize((obj.normal_matrix * Vec4::new(skinned_tan, 0.0)).xyz);
+    // Instance tangent uses the model matrix (a direction). The normal
+    // keeps the inverse-transpose. Joint blending above stays the linear
+    // part: exact for rigid joints, approximate under non-uniform bone scale.
+    let mut world_tangent = normalize((obj.model * Vec4::new(skinned_tan, 0.0)).xyz);
     let mut output: VertexOutput;
     output.clip_position = ctx.camera.view_proj * world_pos;
     output.world_position = world_pos.xyz;

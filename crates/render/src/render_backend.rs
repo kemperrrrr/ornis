@@ -555,7 +555,8 @@ mod tests {
     /// via `RenderBackend` — pinning regressions of the real GPU pipeline.
     ///
     /// Compares the current frame pixel-by-pixel against the checked-in
-    /// `crates/render/tests/data/golden_probe_1280x720.png` (captured on Apple M1
+    /// `crates/render/tests/data/golden_probe_1280x720.png` (recaptured on
+    /// lavapipe after the single-ACES / thin-film / coat-darkening fixes,
     /// via `cargo run -p ornis-render --example render_probe`). Cross-driver
     /// noise is tolerated explicitly: per-channel drift ≤4 plus a ≤1px shift
     /// match against the golden neighborhood; more than 64 pixels outside

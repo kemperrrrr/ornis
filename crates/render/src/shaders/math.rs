@@ -162,6 +162,50 @@ fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     (A + B * cos_phi * alpha_max.sin() * tan_beta) * INV_PI
 }
 
+/// Diffuse energy left after the specular lobe.
+///
+/// The base albedo is already scaled by `(1 - metalness)` at the call
+/// site. Multiplying by metalness again darkened partial metals by
+/// `(1 - metalness)²` (a 0.5 metal kept a quarter of its diffuse).
+#[kernel]
+fn base_diffuse_energy(specular_luma: f32) -> f32 {
+    (1.0 - specular_luma).max(0.0)
+}
+
+/// Mix a thin-film modulation in by weight.
+///
+/// Weight 0 is the identity. The Airy kernel at thickness 0 is not 1
+/// (a zero-thickness film with the default water IOR still returns
+/// about 1.04), and the evaluators used to multiply that into every
+/// material because `thin_film_weight` was loaded and ignored.
+#[kernel]
+fn thin_film_weight_mix(weight: f32, modulation: glam::Vec3) -> glam::Vec3 {
+    glam::Vec3::splat(1.0).lerp(modulation, weight.clamp(0.0, 1.0))
+}
+
+/// Emitter radiance, with an optional coat transmittance tint.
+///
+/// `emission_luminance` is luminance in nits (cd/m²), the same quantity
+/// as outgoing radiance, so it is not divided by π (that factor converts
+/// Lambertian exitance and made every emitter π times too dark). A full
+/// coat transmits at normal incidence and blocks at grazing; the previous
+/// factor was the Fresnel term itself, so a coated emitter went black
+/// head-on and lit up on the silhouette.
+#[kernel]
+fn coated_emission(
+    emission_color: glam::Vec3,
+    emission_luminance: f32,
+    coat_weight: f32,
+    coat_color: glam::Vec3,
+    nov: f32,
+) -> glam::Vec3 {
+    let base_emission = emission_color * emission_luminance;
+    let coat_fresnel = (1.0 - nov).powf(5.0);
+    let transmit = (1.0 - coat_fresnel) * coat_weight + (1.0 - coat_weight);
+    let coat_emission = coat_color * base_emission * transmit;
+    base_emission.lerp(coat_emission, coat_weight)
+}
+
 /// Fabric sheen lobe (Charlie-style D with approximate visibility).
 #[kernel]
 fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
@@ -186,19 +230,29 @@ fn transmission_color_to_extinction(
     -c.ln() / transmission_depth
 }
 
-/// Single-lobe subsurface approximation: exponential profile scaled by a
-/// cosine phase term encoding anisotropy.
+/// Single-lobe subsurface approximation.
+///
+/// `distance` is the tangent-plane chord between the unit view and light
+/// (`|V - N·NoV - (L - N·NoL)|`, range 0..2), not a world-space path
+/// length. The dipole `1/r` pole is not defined on that chord: it
+/// evaluated to `1/EPS` whenever the light sat near the view (a white
+/// firefly on the subsurface preset). The phase uses the scattering
+/// cosine recovered from the same chord, not `cos(distance)`.
 #[kernel]
 fn subsurface_brdf(
-    _NoV: f32,
-    _NoL: f32,
+    NoV: f32,
+    NoL: f32,
     distance: f32,
     radius: glam::Vec3,
     anisotropy: f32,
 ) -> glam::Vec3 {
-    let sigma_tr = 3.0_f32.sqrt() / radius;
-    let profile = (-distance * sigma_tr).exp() / distance.max(EPS);
-    let phase = 1.0 + anisotropy * distance.cos();
+    let sigma_tr = 3.0_f32.sqrt() / radius.max(glam::Vec3::splat(EPS));
+    let profile = (-distance * sigma_tr).exp();
+    let v_len2 = (1.0 - NoV * NoV).max(0.0);
+    let l_len2 = (1.0 - NoL * NoL).max(0.0);
+    let tangent_dot = (v_len2 + l_len2 - distance * distance) * 0.5;
+    let cos_scatter = (NoV * NoL + tangent_dot).clamp(-1.0, 1.0);
+    let phase = (1.0 + anisotropy * cos_scatter).max(0.0);
     profile * phase * INV_PI
 }
 
@@ -252,10 +306,18 @@ fn coat_base_darkening(
     glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6))
 }
 
-/// Coat darkening, part 2: blend between clean and darkened albedo by the
-/// coat weight/darkening product.
+/// Coat darkening, part 2: identity when the coat is off, otherwise blend
+/// the darkened albedo by `coat_weight * coat_dark`.
+///
+/// The product used to be added onto the coat lobe (`darkening *
+/// coat_albedo`), which brightened the coat. Callers multiply the base
+/// lobe by this factor instead.
 #[kernel]
-fn coat_blend_darkened(base_darkening: glam::Vec3, mix_factor: f32) -> glam::Vec3 {
+fn coat_blend_darkened(base_darkening: glam::Vec3, coat_weight: f32, coat_dark: f32) -> glam::Vec3 {
+    if coat_weight <= 0.0 {
+        return glam::Vec3::splat(1.0);
+    }
+    let mix_factor = coat_weight * coat_dark;
     glam::Vec3::splat(1.0).lerp(base_darkening, mix_factor)
 }
 
@@ -433,9 +495,107 @@ mod tests {
         }
     }
 
+    /// Severity: medium. Partial metals must lose diffuse once.
+    #[test]
+    fn partial_metal_diffuse_energy_is_not_squared() {
+        let energy = base_diffuse_energy::eval(0.04);
+        assert!((energy - 0.96).abs() < 1e-5, "{energy}");
+        // The old weight was `energy * (1 - metalness)`. At metalness 0.5
+        // that kept 0.48 instead of 0.96.
+        assert!((energy * 0.5 - 0.48).abs() < 1e-5);
+    }
+
+    /// Severity: medium. A coat attenuates the base; weight 0 stays identity.
+    #[test]
+    fn coat_darkening_attenuates_and_is_identity_when_off() {
+        // A white base saturates the interreflection term back to 1.
+        // A mid-grey dielectric does not, so the coat factor is an
+        // attenuator rather than an extra light.
+        let grey = glam::Vec3::splat(0.2);
+        let darkened = coat_base_darkening::eval(1.5, 0.0, grey, 1.0, 1.0, 0.0, grey);
+        assert!(
+            darkened.x < 0.6,
+            "coat should darken a grey dielectric, got {darkened}"
+        );
+        let off = coat_blend_darkened::eval(darkened, 0.0, 1.0);
+        assert!(
+            (off - glam::Vec3::ONE).length() < 1e-5,
+            "weight 0 must be identity, got {off}"
+        );
+        let on = coat_blend_darkened::eval(darkened, 1.0, 1.0);
+        assert!((on - darkened).length() < 1e-5, "full coat, got {on}");
+    }
+
+    /// Severity: medium. Weight 0 must not inherit the zero-thickness Airy bias.
+    #[test]
+    fn thin_film_weight_zero_cancels_the_zero_thickness_bias() {
+        // Default material: weight 0, thickness 0, IOR 1.33 (water).
+        let raw = thin_film_modulation::eval(1.0, 1.33, 0.0, 1.0);
+        assert!(
+            (raw.x - 1.0401).abs() < 1e-3,
+            "zero-thickness Airy bias, got {raw}"
+        );
+        let off = thin_film_weight_mix::eval(0.0, raw);
+        assert!((off.x - 1.0).abs() < 1e-6 && (off - glam::Vec3::ONE).length() < 1e-5);
+        let on = thin_film_weight_mix::eval(1.0, raw);
+        assert!((on.x - raw.x).abs() < 1e-6);
+    }
+
+    /// Severity: medium. Nits are luminance; a coat must not black out the face.
+    #[test]
+    fn emission_is_luminance_and_coat_transmits_head_on() {
+        let white = glam::Vec3::ONE;
+        let bare = coated_emission::eval(white, 2.0, 0.0, white, 0.2);
+        assert!(
+            (bare.x - 2.0).abs() < 1e-5,
+            "bare emitter was divided by π, got {bare}"
+        );
+        let head_on = coated_emission::eval(white, 1.0, 1.0, white, 1.0);
+        assert!(
+            (head_on.x - 1.0).abs() < 1e-4,
+            "coated emitter at normal incidence was black, got {head_on}"
+        );
+        let grazing = coated_emission::eval(white, 1.0, 1.0, white, 0.0);
+        assert!(
+            grazing.x < 1e-4,
+            "grazing coat should block emission, got {grazing}"
+        );
+    }
+
+    /// Severity: critical. Aligned view/light must not hit the 1/r pole.
+    #[test]
+    fn subsurface_aligned_directions_stay_finite() {
+        let radius = glam::Vec3::splat(0.1);
+        let got = subsurface_brdf::eval(1.0, 1.0, 0.0, radius, 0.0);
+        let expected = INV_PI;
+        assert!(
+            (got.x - expected).abs() < 1e-4 && got.x < 1.0,
+            "aligned subsurface blew up, got {got} expected {expected}"
+        );
+        // Anisotropy uses the scattering cosine (1 when L aligns with V),
+        // not cos(distance). The old phase was `1 + g * cos(distance)`.
+        let phased = subsurface_brdf::eval(1.0, 1.0, 0.0, radius, 1.0);
+        assert!(
+            (phased.x - 2.0 * INV_PI).abs() < 1e-4,
+            "phase, got {phased}"
+        );
+        // A zero radius used to divide the dipole coefficient by 0.
+        let collapsed = subsurface_brdf::eval(1.0, 1.0, 0.0, glam::Vec3::ZERO, 0.0);
+        assert!(collapsed.x.is_finite() && collapsed.x < 1.0, "{collapsed}");
+    }
+
+    /// Severity: critical. A second ACES pass crushes an already-mapped midtone.
+    #[test]
+    fn second_aces_pass_crushes_midtones() {
+        let scene = glam::Vec3::splat(1.0);
+        let once = aces_tonemap::eval(scene);
+        let twice = aces_tonemap::eval(once);
+        assert!(twice.x < once.x - 0.05, "once={once} twice={twice}");
+    }
+
     #[test]
     fn all_wgsl_sources_compile() {
-        let funcs: [&str; 20] = [
+        let funcs: [&str; 23] = [
             luminance::wgsl_source(),
             aces_tonemap::wgsl_source(),
             fresnel0_from_ior::wgsl_source(),
@@ -448,6 +608,9 @@ mod tests {
             smith_ggx_correlated::wgsl_source(),
             smith_ggx_aniso::wgsl_source(),
             oren_nayar_brdf::wgsl_source(),
+            base_diffuse_energy::wgsl_source(),
+            thin_film_weight_mix::wgsl_source(),
+            coated_emission::wgsl_source(),
             sheen_brdf::wgsl_source(),
             transmission_color_to_extinction::wgsl_source(),
             subsurface_brdf::wgsl_source(),

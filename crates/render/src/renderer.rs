@@ -6248,8 +6248,8 @@ mod tests {
 
     /// GPU/CPU parity smoke for the enabled fog mix: a solid HDR layer over
     /// a cleared (far-plane) depth buffer, fogged on the GPU, must land
-    /// within tolerance of [`crate::frame_passes::apply_fog`] fed with the
-    /// same view-space distance the shader reconstructs.
+    /// within tolerance of ACES([`crate::frame_passes::apply_fog`]) fed with
+    /// the same view-space distance the shader reconstructs.
     ///
     /// The fresh `Renderer3D` camera is the identity (eye at the origin),
     /// so the reconstruction is exact on paper: NDC `(u*2-1, 1-v*2, 1)`
@@ -6449,7 +6449,15 @@ mod tests {
             crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, DENSITY)
                 .expect("positive density"),
         );
-        let expected = crate::frame_passes::apply_fog(INPUT, dist, fog);
+        let tonemap = |rgb: [f32; 3]| {
+            let mapped = crate::shaders::math::aces_tonemap::eval(glam::Vec3::from(rgb));
+            [mapped.x, mapped.y, mapped.z]
+        };
+        // The pass mixes in scene-linear space, then applies the same ACES
+        // the composite uses, because fog replaces that present.
+        let expected = tonemap(crate::frame_passes::apply_fog(INPUT, dist, fog));
+        let tonemapped_input = tonemap(INPUT);
+        let tonemapped_fog = tonemap(FOG_COLOR);
 
         let Some(px) = run_case(DENSITY) else {
             eprintln!("no GPU adapter; skipping");
@@ -6464,16 +6472,16 @@ mod tests {
         // High density visibly moved toward the fog color…
         for i in 0..3 {
             assert!(
-                (px[i] - FOG_COLOR[i]).abs() < (INPUT[i] - FOG_COLOR[i]).abs(),
+                (px[i] - tonemapped_fog[i]).abs() < (tonemapped_input[i] - tonemapped_fog[i]).abs(),
                 "no fog movement: {px:?}"
             );
         }
-        // …while a near-zero density keeps the input (disabled-adjacent).
+        // …while a near-zero density keeps the tonemapped input.
         let faint = crate::frame_passes::FogState::Enabled(
             crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, 1.0e-4)
                 .expect("positive density"),
         );
-        let faint_expected = crate::frame_passes::apply_fog(INPUT, dist, faint);
+        let faint_expected = tonemap(crate::frame_passes::apply_fog(INPUT, dist, faint));
         let Some(faint_px) = run_case(1.0e-4) else {
             eprintln!("no GPU adapter; skipping");
             return;
@@ -6484,7 +6492,7 @@ mod tests {
                 "faint channel {i}: gpu={faint_px:?} cpu={faint_expected:?}"
             );
             assert!(
-                (faint_px[i] - INPUT[i]).abs() < 0.02,
+                (faint_px[i] - tonemapped_input[i]).abs() < 0.02,
                 "near-zero density drifted: {faint_px:?}"
             );
         }
