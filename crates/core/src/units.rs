@@ -80,6 +80,40 @@ impl From<Meters> for f32 {
     }
 }
 
+/// A point in meters.
+///
+/// The translation stored on a local [`Transform`](crate::Transform). Not an
+/// ECS component: gameplay keeps its own `Position` lane.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Position(Vec3);
+
+impl Position {
+    /// The origin.
+    pub const ORIGIN: Self = Self(Vec3::ZERO);
+
+    /// Point at `(x, y, z)` meters.
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self(Vec3::new(x, y, z))
+    }
+
+    /// The raw vector, in meters.
+    pub const fn get(self) -> Vec3 {
+        self.0
+    }
+}
+
+impl From<Vec3> for Position {
+    fn from(value: Vec3) -> Self {
+        Self::new(value.x, value.y, value.z)
+    }
+}
+
+impl From<Position> for Vec3 {
+    fn from(value: Position) -> Self {
+        value.get()
+    }
+}
+
 /// Angle in radians (hinge twists, limits, angular velocity integration).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Radians(pub f32);
