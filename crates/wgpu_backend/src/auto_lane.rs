@@ -35,6 +35,13 @@ pub struct AutoLane<T: bytemuck::Pod> {
     queue: wgpu::Queue,
 }
 
+/// Storage buffer either residency verdict may copy out of or back into.
+///
+/// `BitOr` on wgpu usages is not `const`, so this is `union` (which is).
+const LANE_STORAGE_USAGE: wgpu::BufferUsages = wgpu::BufferUsages::STORAGE
+    .union(wgpu::BufferUsages::COPY_SRC)
+    .union(wgpu::BufferUsages::COPY_DST);
+
 impl<T: bytemuck::Pod> AutoLane<T> {
     /// Wrap CPU-side `data`, uploading it once to a storage buffer usable as
     /// both `COPY_SRC` and `COPY_DST` so either verdict can proceed.
@@ -45,14 +52,7 @@ impl<T: bytemuck::Pod> AutoLane<T> {
         config: DispatchConfig,
         label: &str,
     ) -> Self {
-        let buf = SmartBuffer::new(
-            data,
-            device,
-            wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            label,
-        );
+        let buf = SmartBuffer::new(data, device, LANE_STORAGE_USAGE, label);
         Self {
             buf,
             config,
