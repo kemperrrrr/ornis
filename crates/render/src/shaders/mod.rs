@@ -79,6 +79,24 @@ impl ResourceKind {
         }
     }
 
+    /// Full WGSL type spelling for a `var` declaration at a sample count:
+    /// the single-sample spelling, except depth and integer layers in MSAA
+    /// mode, which spell the multisampled texture types (see
+    /// [`resource_stays_multisampled`]) and load sample 0 with the unchanged
+    /// `textureLoad` call text.
+    pub fn wgsl_ty_for_samples(&self, sample_count: u32) -> String {
+        if sample_count > 1 && resource_stays_multisampled(self) {
+            match self {
+                Self::TextureFloat => "texture_multisampled_2d<f32>".to_string(),
+                Self::TextureUint => "texture_multisampled_2d<u32>".to_string(),
+                Self::TextureDepth => "texture_depth_multisampled_2d".to_string(),
+                _ => self.wgsl_ty_full(),
+            }
+        } else {
+            self.wgsl_ty_full()
+        }
+    }
+
     /// `var<…>` address-space prefix, or `var` for textures/samplers.
     fn wgsl_var(&self) -> &'static str {
         match self {
@@ -199,13 +217,34 @@ pub(crate) fn f32_lit(v: f32) -> String {
 }
 /// WGSL declaration line for one [`Resource`].
 pub fn resource_decl(r: &Resource) -> String {
+    resource_decl_for_samples(r, 1)
+}
+
+/// Whether a resource bound to an MSAA target keeps multisampled storage
+/// instead of resolving into a single-sample texture upstream.
+///
+/// Float color layers resolve (`resolve_target`) into single-sample textures,
+/// so they stay plain `texture_2d` in both WGSL and layout. Depth
+/// ([`ResourceKind::TextureDepth`]) and the integer material-id layer
+/// ([`ResourceKind::TextureUint`], loaded but never filtered) have no resolve
+/// target in `wgpu` render passes, so they stay multisampled and shaders load
+/// sample 0. Shadow-map arrays/cubes stay single-sample (the shadow pre-pass
+/// never runs MSAA).
+pub fn resource_stays_multisampled(kind: &ResourceKind) -> bool {
+    matches!(kind, ResourceKind::TextureDepth | ResourceKind::TextureUint)
+}
+
+/// WGSL declaration line for one [`Resource`] at a sample count: identical to
+/// [`resource_decl`] at 1x; in MSAA mode depth/integer layers spell the
+/// multisampled texture types (see [`resource_stays_multisampled`]).
+pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
     format!(
         "@group({}) @binding({}) {} {}: {};\n",
         r.group,
         r.binding,
         r.kind.wgsl_var(),
         r.name,
-        r.kind.wgsl_ty_full()
+        r.kind.wgsl_ty_for_samples(sample_count),
     )
 }
 
@@ -270,6 +309,26 @@ impl ShaderModule {
     /// the pass layout builds its BGL from).
     pub fn resources(mut self, table: &[Resource], bindings: &[u32]) -> Self {
         self.resources.push(resource_decls(table, bindings));
+        self
+    }
+
+    /// Resource declarations from a [`Resource`] table subset at a sample
+    /// count: MSAA-aware spellings (see [`resource_decl_for_samples`]).
+    /// Identical to [`resources`](Self::resources) at 1x.
+    pub fn resources_for_samples(
+        mut self,
+        table: &[Resource],
+        bindings: &[u32],
+        sample_count: u32,
+    ) -> Self {
+        let mut out = String::new();
+        for b in bindings {
+            let Some(r) = table.iter().find(|r| r.binding == *b) else {
+                continue;
+            };
+            out.push_str(&resource_decl_for_samples(r, sample_count));
+        }
+        self.resources.push(out);
         self
     }
 
@@ -364,6 +423,15 @@ pub fn bgl_entry(r: &Resource, multisampled: bool) -> wgpu::BindGroupLayoutEntry
         },
         count: None,
     }
+}
+
+/// `wgpu` bind-group-layout entry for one [`Resource`] at a sample count:
+/// identical to [`bgl_entry`] with `false` at 1x; in MSAA mode only the
+/// layers that stay multisampled bind multisampled (see
+/// [`resource_stays_multisampled`]) — resolved float layers bind the
+/// single-sample resolve textures.
+pub fn bgl_entry_for_samples(r: &Resource, sample_count: u32) -> wgpu::BindGroupLayoutEntry {
+    bgl_entry(r, sample_count > 1 && resource_stays_multisampled(&r.kind))
 }
 
 /// Fullscreen-quad corners shared by the bloom/hdr/lighting passes
@@ -1239,5 +1307,74 @@ mod tests {
         assert_eq!(std::mem::offset_of!(OpenPBRMaterial, geometry), 288);
         // Within-group slot order mirrors the WGSL field order.
         assert_eq!(openpbr_material_decl().matches("vec4<f32>").count(), 20);
+    }
+
+    /// MSAA declaration policy: at 1x every spelling is the legacy
+    /// single-sample one; at 4x only depth and integer layers go
+    /// multisampled (resolve has no depth/integer target), while float
+    /// colors, shadow arrays/cubes and samplers are untouched.
+    #[test]
+    fn msaa_decl_policy_touches_only_depth_and_uint() {
+        use super::ResourceKind::*;
+        // 1x is byte-identical to the legacy spelling.
+        for kind in [
+            TextureFloat,
+            TextureUint,
+            TextureDepth,
+            TextureDepthArray,
+            TextureDepthCubeArray,
+        ] {
+            assert_eq!(kind.wgsl_ty_for_samples(1), kind.wgsl_ty_full());
+        }
+        // 4x multisampled spellings for the staying layers only.
+        assert_eq!(
+            TextureUint.wgsl_ty_for_samples(4),
+            "texture_multisampled_2d<u32>"
+        );
+        assert_eq!(
+            TextureDepth.wgsl_ty_for_samples(4),
+            "texture_depth_multisampled_2d"
+        );
+        assert_eq!(TextureFloat.wgsl_ty_for_samples(4), "texture_2d<f32>");
+        assert_eq!(
+            TextureDepthArray.wgsl_ty_for_samples(4),
+            "texture_depth_2d_array"
+        );
+        assert_eq!(
+            TextureDepthCubeArray.wgsl_ty_for_samples(4),
+            "texture_depth_cube_array"
+        );
+        // The per-resource predicate matches the spelling table.
+        assert!(resource_stays_multisampled(&TextureDepth));
+        assert!(resource_stays_multisampled(&TextureUint));
+        assert!(!resource_stays_multisampled(&TextureFloat));
+        assert!(!resource_stays_multisampled(&TextureDepthArray));
+        assert!(!resource_stays_multisampled(&TextureDepthCubeArray));
+        assert!(!resource_stays_multisampled(&Sampler));
+    }
+
+    /// Layout entries follow the same policy: at 1x every entry equals the
+    /// legacy `bgl_entry(r, false)`; at 4x only depth/uint bindings flip to
+    /// multisampled.
+    #[test]
+    fn msaa_bgl_policy_matches_decl_policy() {
+        use crate::shaders::lighting_generated::LIGHTING_RESOURCES;
+        for r in LIGHTING_RESOURCES {
+            let legacy = bgl_entry(&r, false);
+            assert_eq!(
+                format!("{:?}", bgl_entry_for_samples(&r, 1).ty),
+                format!("{:?}", legacy.ty)
+            );
+            let msaa = bgl_entry_for_samples(&r, 4);
+            let expect_multi = resource_stays_multisampled(&r.kind);
+            let is_multi = matches!(
+                msaa.ty,
+                wgpu::BindingType::Texture {
+                    multisampled: true,
+                    ..
+                }
+            );
+            assert_eq!(is_multi, expect_multi, "binding {}", r.binding);
+        }
     }
 }

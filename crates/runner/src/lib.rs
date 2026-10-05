@@ -257,12 +257,19 @@ impl GameApp {
         // validation error instead of the Outdated/Lost recovery path.
         surface.configure(&device, &surface_config);
 
-        let renderer3d = ornis_render::Renderer3D::new(&device, &surface_config, 1);
-        let frame3d = ornis_render::RenderFrame3D::new_with(
+        // Negotiated MSAA: 4x when the adapter supports every multisampled
+        // format plus resolves (else the documented 1x fallback — never a
+        // panic). Plan and renderer share the count: the pool holds the
+        // multisampled targets, the renderer the single-sample resolves.
+        let sample_count =
+            ornis_render::negotiate_sample_count(&adapter, ornis_render::MSAA_SAMPLE_COUNT);
+        let renderer3d = ornis_render::Renderer3D::new(&device, &surface_config, sample_count);
+        let frame3d = ornis_render::RenderFrame3D::new_with_samples(
             surface_format,
             (surface_config.width, surface_config.height),
             ornis_render::Technique::Hybrid,
             ornis_render::Bloom::Off,
+            sample_count,
         );
         let sphere_mesh = ornis_render::create_sphere(
             &device,

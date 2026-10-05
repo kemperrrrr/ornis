@@ -85,6 +85,113 @@ pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 /// first eight entries of any kind. Excess lights are dropped and reported
 /// in [`LightUploadStats::dropped_lights`] (never silently).
 pub const MAX_LIGHTS: usize = 8;
+/// Native MSAA sample count: 4x multisampled color/depth with resolve into
+/// the presented/observed texture.
+///
+/// This is the count the native shell passes as `sample_count` (see
+/// [`Renderer3D::new`] and
+/// [`crate::render_backend::RenderBackendConfig::sample_count`) after gating
+/// it through [`negotiate_sample_count`]. Pass policy per target:
+///
+/// * geometry layers (g-buffer float colors, forward HDR color) render 4x
+///   multisampled and resolve into single-sample textures that downstream
+///   passes sample — shaders and layouts stay single-sample there;
+/// * g-buffer depth and the integer material-id layer have no resolve target
+///   in `wgpu`, so they stay multisampled and are loaded as sample 0 (see
+///   [`crate::shaders::resource_stays_multisampled`]);
+/// * fullscreen passes (lighting output, composite, bloom, fog target) and
+///   shadow maps stay single-sample, while the frame-plan pool follows this
+///   count for its geometry layers (sampling the single-sample resolves
+///   owned here — see [`Renderer3D::forward_resolve_view`]): every
+///   pipeline's `multisample.count` matches its attachments.
+pub const MSAA_SAMPLE_COUNT: u32 = 4;
+/// Single-sample count: the default everywhere (headless gates, plan pool,
+/// shadow maps, fullscreen passes) and the documented fallback when the
+/// adapter cannot do [`MSAA_SAMPLE_COUNT`] (see [`negotiate_sample_count`]).
+/// The 1x path never allocates resolve targets and records no resolves, so
+/// existing pixel-parity gates stay green by construction.
+pub const SINGLE_SAMPLE_COUNT: u32 = 1;
+/// Clamps a requested sample count to the supported set (`{1, 4}`):
+/// [`MSAA_SAMPLE_COUNT`] passes through, anything else (including 0, 2, 8)
+/// falls back to [`SINGLE_SAMPLE_COUNT`]. Pure, so unit tests pin it without
+/// a GPU. [`Renderer3D::new`] applies this; capability gating lives in
+/// [`negotiate_sample_count`].
+pub fn normalize_sample_count(requested: u32) -> u32 {
+    if requested == MSAA_SAMPLE_COUNT {
+        MSAA_SAMPLE_COUNT
+    } else {
+        SINGLE_SAMPLE_COUNT
+    }
+}
+
+/// Negotiates the MSAA sample count for `requested` against `adapter`:
+/// returns [`MSAA_SAMPLE_COUNT`] only when 4x multisampling is available
+/// for every texture the MSAA path creates multisampled (g-buffer colors,
+/// material id, depth, forward color) plus resolve support for every format
+/// it resolves into (the float colors); otherwise returns
+/// [`SINGLE_SAMPLE_COUNT`].
+///
+/// Two halves must both pass. First the WebGPU-guaranteed baseline (what the
+/// device enforces for the feature-less device requests used throughout this
+/// crate): adapter-specific flags are known to over-claim — native Metal
+/// reports `MULTISAMPLE_X4` for `R32Uint`, whose creation then fails, which
+/// is why the material-id layer uses `R16Uint` (spec-guaranteed multisample).
+/// Second the adapter's own flags, for adapters weaker than the spec
+/// (software rasterizers may miss a format). Either half failing falls back
+/// to single-sample rendering instead of a validation panic: the lavapipe/CI
+/// contract. The function itself never panics. Non-4 requests normalize to
+/// 1 without consulting any table.
+pub fn negotiate_sample_count(adapter: &wgpu::Adapter, requested: u32) -> u32 {
+    use wgpu::TextureFormatFeatureFlags as Flags;
+    if normalize_sample_count(requested) != MSAA_SAMPLE_COUNT {
+        return SINGLE_SAMPLE_COUNT;
+    }
+    /// Formats the MSAA path creates multisampled (geometry colors, the
+    /// integer material id, depth, forward color).
+    const MSAA_STORAGE: [wgpu::TextureFormat; 5] = [
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::R16Uint,
+        wgpu::TextureFormat::Rgba16Float,
+        wgpu::TextureFormat::Depth32Float,
+    ];
+    /// Formats the MSAA path resolves into (the filterable float colors;
+    /// depth and the integer id have no resolve target and stay multisampled).
+    const RESOLVE_TARGETS: [wgpu::TextureFormat; 3] = [
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::Rgba16Float,
+    ];
+    // Spec-guaranteed baseline for feature-less devices (see above).
+    let guaranteed_ok = MSAA_STORAGE.iter().all(|format| {
+        format
+            .guaranteed_format_features(wgpu::Features::empty())
+            .flags
+            .contains(Flags::MULTISAMPLE_X4)
+    }) && RESOLVE_TARGETS.iter().all(|format| {
+        format
+            .guaranteed_format_features(wgpu::Features::empty())
+            .flags
+            .contains(Flags::MULTISAMPLE_RESOLVE)
+    });
+    // The adapter must not be weaker than the spec baseline.
+    let adapter_ok = MSAA_STORAGE.iter().all(|format| {
+        adapter
+            .get_texture_format_features(*format)
+            .flags
+            .contains(Flags::MULTISAMPLE_X4)
+    }) && RESOLVE_TARGETS.iter().all(|format| {
+        adapter
+            .get_texture_format_features(*format)
+            .flags
+            .contains(Flags::MULTISAMPLE_RESOLVE)
+    });
+    if guaranteed_ok && adapter_ok {
+        MSAA_SAMPLE_COUNT
+    } else {
+        SINGLE_SAMPLE_COUNT
+    }
+}
 /// Components in an RGB / xyz triple.
 const VEC3_COMPONENTS: usize = 3;
 /// Midpoint / half-extent scale.
@@ -414,7 +521,12 @@ pub struct GBufferTextures {
     pub normal: wgpu::Texture,
     /// View of [`GBufferTextures::normal`].
     pub normal_view: wgpu::TextureView,
-    /// Material id target (R32Uint).
+    /// Material id target (`R16Uint`: the 16-bit integer format is the
+    /// widest integer format the WebGPU spec guarantees multisampling for —
+    /// `R32Uint` has no `MULTISAMPLE_X*` flag without adapter-specific
+    /// features, so 4x g-buffer creation would fail on native Metal. Ids
+    /// above `u16::MAX` truncate (loudly debug-asserted at upload; the
+    /// table holds dozens of entries in practice).
     pub material_id: wgpu::Texture,
     /// View of [`GBufferTextures::material_id`].
     pub material_id_view: wgpu::TextureView,
@@ -430,6 +542,33 @@ pub struct GBufferTextures {
     pub depth: wgpu::Texture,
     /// View of [`GBufferTextures::depth`].
     pub depth_view: wgpu::TextureView,
+    /// Single-sample resolve targets for the float color layers, `Some` only
+    /// in MSAA mode ([`MSAA_SAMPLE_COUNT`]): the g-buffer pass resolves into
+    /// them and downstream passes sample them. `None` at 1x (no extra
+    /// textures, no resolves — the 1x command stream is unchanged).
+    resolves: Option<GbufferResolves>,
+}
+
+/// Single-sample MSAA resolve targets for the g-buffer float color layers
+/// (see [`MSAA_SAMPLE_COUNT`]). Depth and the integer material-id layer have
+/// no resolve target in `wgpu` and stay multisampled (loaded as sample 0).
+struct GbufferResolves {
+    /// Resolve texture pairing [`GBufferTextures::albedo`].
+    _albedo_texture: wgpu::Texture,
+    /// View of the albedo resolve texture, sampled downstream.
+    albedo_view: wgpu::TextureView,
+    /// Resolve texture pairing [`GBufferTextures::normal`].
+    _normal_texture: wgpu::Texture,
+    /// View of the normal resolve texture, sampled downstream.
+    normal_view: wgpu::TextureView,
+    /// Resolve texture pairing [`GBufferTextures::world_position`].
+    _world_position_texture: wgpu::Texture,
+    /// View of the world-position resolve texture, sampled downstream.
+    world_position_view: wgpu::TextureView,
+    /// Resolve texture pairing [`GBufferTextures::material_params`].
+    _material_params_texture: wgpu::Texture,
+    /// View of the material-params resolve texture, sampled downstream.
+    material_params_view: wgpu::TextureView,
 }
 
 /// Full-screen deferred lighting pass: reads the five g-buffer targets +
@@ -605,6 +744,12 @@ pub struct ForwardPass {
     _color_texture: wgpu::Texture,
     /// View of `_color_texture`.
     color_view: wgpu::TextureView,
+    /// Owned single-sample resolve texture for the MSAA forward color
+    /// layer, `Some` only in MSAA mode (see [`MSAA_SAMPLE_COUNT`]).
+    _resolve_texture: Option<wgpu::Texture>,
+    /// View of `_resolve_texture`: what the composite pass samples in MSAA
+    /// mode. `None` at 1x (the composite samples `color_view` directly).
+    resolve_view: Option<wgpu::TextureView>,
 }
 
 /// Textured-forward pass: the legacy [`ForwardPass`] evaluation plus one
@@ -1226,6 +1371,21 @@ pub fn custom_draw_items(
         .collect()
 }
 
+/// Selector for one MSAA-resolvable g-buffer float color layer (see
+/// [`Renderer3D::gbuffer_resolve_target`]). Depth and material-id are not
+/// selectable: they have no resolve target in `wgpu`.
+#[derive(Debug, Clone, Copy)]
+enum GbufferResolveSlot {
+    /// Albedo/base color layer.
+    Albedo,
+    /// World-space normal layer.
+    Normal,
+    /// World-space position layer.
+    WorldPosition,
+    /// Material parameter layer.
+    MaterialParams,
+}
+
 /// Identity clip matrix for lights that cast no shadow.
 const NO_SHADOW_VP: [[f32; 4]; 4] = [
     [1.0, 0.0, 0.0, 0.0],
@@ -1472,6 +1632,15 @@ pub(crate) fn staging_capacity_for_instances(needed: usize) -> usize {
 impl Renderer3D {
     /// Build every pipeline/target for `surface_config`'s format and extent.
     ///
+    /// `sample_count` is [`normalize_sample_count`]ed to `{1, 4}` on entry:
+    /// pass [`MSAA_SAMPLE_COUNT`] for the native 4x path (after gating it
+    /// through [`negotiate_sample_count` against the adapter — `new` only
+    /// sees the device, so it cannot capability-gate itself), `1` (or
+    /// anything else) for single-sample. The fullscreen lighting output
+    /// stays single-sample in all modes (a fullscreen triangle has no edges
+    /// for MSAA to smooth; resolving it would be a 4x-cost no-op), while the
+    /// g-buffer/forward geometry layers go multisampled with resolve at 4x.
+    ///
     /// Capacity starts at 256 instances / 64 materials and grows on
     /// demand: [`upload_instances`](Self::upload_instances) and
     /// [`upload_materials`](Self::upload_materials) reallocate (and rebind)
@@ -1482,6 +1651,7 @@ impl Renderer3D {
         surface_config: &wgpu::SurfaceConfiguration,
         sample_count: u32,
     ) -> Self {
+        let sample_count = normalize_sample_count(sample_count);
         let max_objects = INITIAL_MAX_OBJECTS;
         let max_materials = INITIAL_MAX_MATERIALS;
         let format = surface_config.format;
@@ -1502,8 +1672,12 @@ impl Renderer3D {
         );
         let pipeline =
             Self::create_pbr_pipeline(device, surface_config, sample_count, &bind_group_layout);
+        // The deferred lighting output is a fullscreen triangle: MSAA would
+        // resolve four identical samples per pixel at 4x memory cost, so it
+        // stays single-sample in all modes (the lighting pipeline's
+        // `multisample.count` is 1 to match).
         let (pbr_texture, pbr_texture_view) =
-            Self::create_render_target(device, width, height, format, sample_count);
+            Self::create_render_target(device, width, height, format, SINGLE_SAMPLE_COUNT);
 
         let gbuffer = Self::create_gbuffer(device, width, height, sample_count);
         let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
@@ -1549,7 +1723,7 @@ impl Renderer3D {
         );
         let composite_pass = Self::create_composite_pass(device, format);
         let bloom_pass = Self::create_bloom_pass(device);
-        let fog = Self::create_fog_pass(device, format);
+        let fog = Self::create_fog_pass(device, format, sample_count);
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite sampler"),
             ..crate::flags::SamplerKind::LinearClamp.descriptor()
@@ -1650,9 +1824,19 @@ impl Renderer3D {
     }
 
     /// MSAA sample count this renderer was built with (see
-    /// [`crate::render_backend::RenderBackendConfig::sample_count`]).
+    /// [`crate::render_backend::RenderBackendConfig::sample_count`]):
+    /// [`SINGLE_SAMPLE_COUNT`] (1) or [`MSAA_SAMPLE_COUNT`] (4) — anything
+    /// else passed to [`new`](Self::new) normalizes to 1.
     pub fn sample_count(&self) -> u32 {
         self.sample_count
+    }
+
+    /// Single-sample view of the forward HDR resolve target, `Some` only in
+    /// MSAA mode (see [`MSAA_SAMPLE_COUNT`]): the frame-plan composite and
+    /// bloom bright-pass sample this at 4x, where the pooled forward layer
+    /// itself is multisampled. `None` at 1x (sample the pooled view there).
+    pub fn forward_resolve_view(&self) -> Option<&wgpu::TextureView> {
+        self.forward_pass.resolve_view.as_ref()
     }
 
     /// Exposure multiplier applied by [`set_lights`](Self::set_lights);
@@ -1950,7 +2134,9 @@ impl Renderer3D {
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
                     Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Uint,
+                        // `R16Uint`: the spec-guaranteed multisampleable
+                        // integer format (see the `material_id` field docs).
+                        format: wgpu::TextureFormat::R16Uint,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -2134,7 +2320,10 @@ impl Renderer3D {
             mip_level_count: 1,
             sample_count,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Uint,
+            // `R16Uint`, not `R32Uint`: the spec-guaranteed multisampleable
+            // integer format (see the `material_id` field docs). The WGSL
+            // type stays `u32`, so shaders and layouts are unchanged.
+            format: wgpu::TextureFormat::R16Uint,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -2190,6 +2379,51 @@ impl Renderer3D {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Single-sample resolve targets for the float color layers, MSAA
+        // mode only: the pass resolves into them, downstream passes sample
+        // them. Depth and the integer id stay multisampled (no resolve
+        // target exists for them; they load sample 0).
+        let resolves = (sample_count > 1).then(|| {
+            let (albedo_texture, albedo_view) = Self::create_resolve_target(
+                device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba8Unorm,
+                "gbuffer albedo resolve",
+            );
+            let (normal_texture, normal_view) = Self::create_resolve_target(
+                device,
+                width,
+                height,
+                wgpu::TextureFormat::Rg16Float,
+                "gbuffer normal resolve",
+            );
+            let (world_position_texture, world_position_view) = Self::create_resolve_target(
+                device,
+                width,
+                height,
+                wgpu::TextureFormat::Rg16Float,
+                "gbuffer world_position resolve",
+            );
+            let (material_params_texture, material_params_view) = Self::create_resolve_target(
+                device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba16Float,
+                "gbuffer material_params resolve",
+            );
+            GbufferResolves {
+                _albedo_texture: albedo_texture,
+                albedo_view,
+                _normal_texture: normal_texture,
+                normal_view,
+                _world_position_texture: world_position_texture,
+                world_position_view,
+                _material_params_texture: material_params_texture,
+                material_params_view,
+            }
+        });
+
         GBufferTextures {
             albedo,
             albedo_view,
@@ -2203,7 +2437,36 @@ impl Renderer3D {
             material_params_view,
             depth,
             depth_view,
+            resolves,
         }
+    }
+
+    /// Single-sample resolve texture pairing an MSAA color target: same
+    /// extent and format, `RENDER_ATTACHMENT` (resolve destination) plus
+    /// `TEXTURE_BINDING` (sampled downstream).
+    fn create_resolve_target(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        label: &str,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: SINGLE_SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
     }
 
     fn create_gbuffer_pipeline(
@@ -2280,7 +2543,9 @@ impl Renderer3D {
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
                     Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Uint,
+                        // `R16Uint`: the spec-guaranteed multisampleable
+                        // integer format (see the `material_id` field docs).
+                        format: wgpu::TextureFormat::R16Uint,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -2850,10 +3115,13 @@ impl Renderer3D {
     ) -> LightingPass {
         // Layout entries come from the pass resource table — the same table
         // that generates the WGSL declarations, so shader and layout agree.
+        // Only depth/integer layers bind multisampled in MSAA mode (they
+        // have no resolve target); the float layers bind the single-sample
+        // resolve textures (see `crate::shaders::resource_stays_multisampled`).
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> =
             shaders::lighting_generated::LIGHTING_RESOURCES
                 .iter()
-                .map(|r| shaders::bgl_entry(r, sample_count > 1))
+                .map(|r| shaders::bgl_entry_for_samples(r, sample_count))
                 .collect();
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lighting bind group layout"),
@@ -2874,9 +3142,9 @@ impl Renderer3D {
 
         let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lighting fragment (generated)"),
-            source: wgpu::ShaderSource::Wgsl(
-                Cow::Owned(shaders::lighting_generated::wgsl_source()),
-            ),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(
+                shaders::lighting_generated::wgsl_source_for_samples(sample_count),
+            )),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2914,8 +3182,10 @@ impl Renderer3D {
                 conservative: false,
             },
             depth_stencil: None,
+            // Fullscreen pass over resolved layers: single-sample in all
+            // modes (the output target is single-sample; see `new`).
             multisample: wgpu::MultisampleState {
-                count: sample_count,
+                count: SINGLE_SAMPLE_COUNT,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -2996,6 +3266,21 @@ impl Renderer3D {
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Single-sample resolve target for the forward HDR color, MSAA mode
+        // only: the pass resolves into it and the composite pass samples it.
+        let (resolve_texture, resolve_view) = if sample_count > 1 {
+            let (texture, view) = Self::create_resolve_target(
+                device,
+                width,
+                height,
+                wgpu::TextureFormat::Rgba16Float,
+                "forward color resolve",
+            );
+            (Some(texture), Some(view))
+        } else {
+            (None, None)
+        };
+
         let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("forward vertex"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::pbr_vertex())),
@@ -3062,6 +3347,8 @@ impl Renderer3D {
             bind_group,
             _color_texture: color_texture,
             color_view,
+            _resolve_texture: resolve_texture,
+            resolve_view,
         }
     }
 
@@ -3398,8 +3685,12 @@ impl Renderer3D {
     /// zero density is never drawn — [`render_fog`](Self::render_fog)
     /// returns early on non-positive densities, so the disabled pass is an
     /// exact no-op).
-    fn create_fog_pass(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> FogPipeline {
-        let fog_source = shaders::fog_generated::wgsl_source();
+    fn create_fog_pass(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> FogPipeline {
+        let fog_source = shaders::fog_generated::wgsl_source_for_samples(sample_count);
         let fog_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fog shader (generated)"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(fog_source)),
@@ -3412,7 +3703,7 @@ impl Renderer3D {
 
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> = shaders::fog_generated::FOG_RESOURCES
             .iter()
-            .map(|r| shaders::bgl_entry(r, false))
+            .map(|r| shaders::bgl_entry_for_samples(r, sample_count))
             .collect();
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fog bind group layout"),
@@ -3492,7 +3783,8 @@ impl Renderer3D {
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: self.sample_count,
+            // Fullscreen lighting output: single-sample in all modes (see `new`).
+            sample_count: SINGLE_SAMPLE_COUNT,
             dimension: wgpu::TextureDimension::D2,
             format: self.format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -3542,9 +3834,11 @@ impl Renderer3D {
         &self.pbr_texture_view
     }
 
-    /// Bytes allocated by the persistent textures of the legacy path
-    /// (5 g-buffer MRTs + g-buffer depth + lighting target + forward color
-    /// + shadow-map array + point-shadow cubes).
+    /// Bytes allocated by the persistent textures of the legacy path: the
+    /// five g-buffer MRTs plus g-buffer depth, lighting target, forward
+    /// color, shadow-map array, point-shadow cubes, and — when
+    /// [`MSAA_SAMPLE_COUNT`] is active — the single-sample MSAA resolve
+    /// targets.
     pub fn texture_budget(&self) -> u64 {
         let bpp = crate::transient_pool::format_bytes_per_pixel;
         let w = self.width as u64;
@@ -3552,15 +3846,31 @@ impl Renderer3D {
         let s = self.sample_count as u64;
         let gbuffer = (bpp(wgpu::TextureFormat::Rgba8Unorm)
             + bpp(wgpu::TextureFormat::Rg16Float)
-            + bpp(wgpu::TextureFormat::R32Uint)
+            + bpp(wgpu::TextureFormat::R16Uint)
             + bpp(wgpu::TextureFormat::Rg16Float)
             + bpp(wgpu::TextureFormat::Rgba16Float)
             + bpp(wgpu::TextureFormat::Depth32Float)) as u64
             * w
             * h
             * s;
-        let pbr = bpp(self.format) as u64 * w * h * s;
+        let pbr = bpp(self.format) as u64 * w * h;
         let forward = bpp(wgpu::TextureFormat::Rgba16Float) as u64 * w * h * s;
+        // Resolve targets are single-sample (`None` at 1x): four g-buffer
+        // float layers plus the forward HDR color, only when MSAA is active.
+        let resolves = if self.gbuffer.resolves.is_some() {
+            (bpp(wgpu::TextureFormat::Rgba8Unorm)
+                + bpp(wgpu::TextureFormat::Rg16Float)
+                + bpp(wgpu::TextureFormat::Rg16Float)
+                + bpp(wgpu::TextureFormat::Rgba16Float)) as u64
+                * w
+                * h
+        } else {
+            0
+        } + if self.forward_pass.resolve_view.is_some() {
+            bpp(wgpu::TextureFormat::Rgba16Float) as u64 * w * h
+        } else {
+            0
+        };
         let shadow_size = self.shadow_maps.size();
         let shadow = bpp(wgpu::TextureFormat::Depth32Float) as u64
             * shadow_size.width as u64
@@ -3571,7 +3881,7 @@ impl Renderer3D {
             * cube_size.width as u64
             * cube_size.height as u64
             * cube_size.depth_or_array_layers as u64;
-        gbuffer + pbr + forward + shadow + cubes
+        gbuffer + pbr + forward + resolves + shadow + cubes
     }
 
     /// Upload the camera uniform: view-projection, its inverse (computed here)
@@ -3888,12 +4198,21 @@ impl Renderer3D {
     /// Replace the GPU material table, growing the storage buffer (and
     /// the passes' bind groups) when `materials` exceeds current capacity;
     /// instances reference entries by index.
+    ///
+    /// The g-buffer material-id layer is `R16Uint` (the spec-guaranteed
+    /// multisampleable integer format — see [`MSAA_SAMPLE_COUNT`]), so ids
+    /// past `u16::MAX` would truncate: debug builds assert the table fits.
     pub fn upload_materials(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         materials: &[OpenPBRMaterial],
     ) {
+        debug_assert!(
+            materials.len() <= u16::MAX as usize,
+            "material table of {} exceeds the R16Uint id range",
+            materials.len()
+        );
         self.ensure_material_capacity(device, materials.len());
         let count = materials.len().min(
             self.max_materials
@@ -4171,7 +4490,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.albedo,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4185,7 +4504,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.normal,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4213,7 +4532,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.world_position,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4227,7 +4546,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.material_params,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4259,8 +4578,31 @@ impl Renderer3D {
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..1);
     }
 
+    /// Resolve target for one MSAA g-buffer float color layer: the stored
+    /// single-sample view in MSAA mode, `None` at 1x (no resolve recorded —
+    /// the 1x command stream is unchanged).
+    ///
+    /// In MSAA mode the `view` side must be a multisampled view of matching
+    /// extent and format: the renderer's own g-buffer views (as
+    /// [`render_scene`](Self::render_scene) passes) or same-extent custom 4x
+    /// views. Depth and material-id never resolve (see [`MSAA_SAMPLE_COUNT`]).
+    fn gbuffer_resolve_target(&self, slot: GbufferResolveSlot) -> Option<&wgpu::TextureView> {
+        let resolves = self.gbuffer.resolves.as_ref()?;
+        Some(match slot {
+            GbufferResolveSlot::Albedo => &resolves.albedo_view,
+            GbufferResolveSlot::Normal => &resolves.normal_view,
+            GbufferResolveSlot::WorldPosition => &resolves.world_position_view,
+            GbufferResolveSlot::MaterialParams => &resolves.material_params_view,
+        })
+    }
+
     /// Record the gbuffer pass: fills the five MRT targets + depth for
     /// `instance_count` uploaded instances of `mesh`.
+    ///
+    /// In MSAA mode the float layers resolve into the stored single-sample
+    /// views; `g` must then be the renderer's own multisampled views (as
+    /// [`render_scene`](Self::render_scene) passes). At 1x no resolve is
+    /// recorded.
     pub fn render_gbuffer(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -4274,7 +4616,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.albedo,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4288,7 +4630,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.normal,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4316,7 +4658,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.world_position,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4330,7 +4672,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.material_params,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4376,6 +4718,9 @@ impl Renderer3D {
     /// entry. With empty `customs` the command stream matches
     /// [`render_gbuffer`](Self::render_gbuffer) exactly (spheres-unchanged
     /// by construction).
+    ///
+    /// In MSAA mode `g` must be the renderer's own multisampled views (see
+    /// [`render_gbuffer`](Self::render_gbuffer)).
     pub fn render_gbuffer_with_custom(
         &self,
         device: &wgpu::Device,
@@ -4391,7 +4736,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.albedo,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4405,7 +4750,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.normal,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4433,7 +4778,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.world_position,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4447,7 +4792,7 @@ impl Renderer3D {
                 Some(wgpu::RenderPassColorAttachment {
                     view: g.material_params,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.0,
@@ -4550,6 +4895,13 @@ impl Renderer3D {
 
     /// Record the deferred lighting pass: reconstructs surface data from the
     /// g-buffer in `g`, evaluates the OpenPBR BRDF and writes HDR color into `output`.
+    ///
+    /// In MSAA mode the float layers are sampled from the renderer's stored
+    /// resolve textures (the pass resolved into them), while depth and
+    /// material-id bind the multisampled `g` views directly (loaded as sample
+    /// 0 — see [`MSAA_SAMPLE_COUNT`]); `g` must therefore be the renderer's
+    /// own MSAA views in that mode, as [`render_scene`](Self::render_scene)
+    /// passes. At 1x every binding is `g` itself.
     pub fn render_lighting(
         &self,
         device: &wgpu::Device,
@@ -4563,6 +4915,13 @@ impl Renderer3D {
         // Binding numbers come from the table; only the name → live
         // resource mapping is written out here.
         let material = read_lock(&self.material_buffer);
+        // Resolve views in MSAA mode, pass-through views at 1x (the helper
+        // returns `g`'s own view there, so the 1x bind group is unchanged).
+        let resolves = self.gbuffer.resolves.as_ref();
+        let albedo_view = resolves.map_or(g.albedo, |r| &r.albedo_view);
+        let normal_view = resolves.map_or(g.normal, |r| &r.normal_view);
+        let world_position_view = resolves.map_or(g.world_position, |r| &r.world_position_view);
+        let material_params_view = resolves.map_or(g.material_params, |r| &r.material_params_view);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lighting bind group (frame)"),
             layout: &self.lighting_pass.bind_group_layout,
@@ -4572,11 +4931,15 @@ impl Renderer3D {
                     "camera" => Some(self.camera_buffer.as_entire_binding()),
                     "lighting" => Some(self.lighting_buffer.as_entire_binding()),
                     "materials" => Some(material.as_entire_binding()),
-                    "albedo_tex" => Some(wgpu::BindingResource::TextureView(g.albedo)),
-                    "normal_tex" => Some(wgpu::BindingResource::TextureView(g.normal)),
+                    "albedo_tex" => Some(wgpu::BindingResource::TextureView(albedo_view)),
+                    "normal_tex" => Some(wgpu::BindingResource::TextureView(normal_view)),
                     "material_id_tex" => Some(wgpu::BindingResource::TextureView(g.material_id)),
-                    "world_pos_tex" => Some(wgpu::BindingResource::TextureView(g.world_position)),
-                    "mat_params_tex" => Some(wgpu::BindingResource::TextureView(g.material_params)),
+                    "world_pos_tex" => {
+                        Some(wgpu::BindingResource::TextureView(world_position_view))
+                    }
+                    "mat_params_tex" => {
+                        Some(wgpu::BindingResource::TextureView(material_params_view))
+                    }
                     "depth_tex" => Some(wgpu::BindingResource::TextureView(g.depth)),
                     "lighting_sampler" => {
                         Some(wgpu::BindingResource::Sampler(&self.lighting_pass.sampler))
@@ -4625,6 +4988,11 @@ impl Renderer3D {
     /// layer, depth-testing against (and optionally clearing) `depth`.
     /// `clear_depth = true` when the forward pass runs standalone; `false`
     /// when it follows the gbuffer pass and must share its depth.
+    ///
+    /// In MSAA mode `output` must be a multisampled view of matching extent
+    /// (the renderer's own forward color view, as
+    /// [`render_scene`](Self::render_scene) passes): the pass resolves into
+    /// the stored single-sample view. At 1x no resolve is recorded.
     pub fn render_forward(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -4647,7 +5015,7 @@ impl Renderer3D {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: output,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: self.forward_pass.resolve_view.as_ref(),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.0,
@@ -4688,6 +5056,9 @@ impl Renderer3D {
     /// skinned forward pipeline or routing transparent skinned materials
     /// through it. With empty `customs` the command stream matches
     /// [`render_forward`](Self::render_forward) exactly.
+    ///
+    /// In MSAA mode `output` must be a multisampled view of matching extent
+    /// (see [`render_forward`](Self::render_forward)).
     #[allow(clippy::too_many_arguments)]
     pub fn render_forward_with_custom(
         &self,
@@ -4712,7 +5083,7 @@ impl Renderer3D {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: output,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: self.forward_pass.resolve_view.as_ref(),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.0,
@@ -4765,6 +5136,9 @@ impl Renderer3D {
     /// the pass runs standalone; `false` when it follows the gbuffer pass
     /// and must share its depth. Mirrors [`render_forward`](Self::render_forward);
     /// the scalar `is_metallic` switch is untouched by bound textures.
+    ///
+    /// In MSAA mode `output` must be a multisampled view of matching extent
+    /// (see [`render_forward`](Self::render_forward)).
     ///
     /// # Panics
     ///
@@ -4853,7 +5227,7 @@ impl Renderer3D {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: output,
                 depth_slice: None,
-                resolve_target: None,
+                resolve_target: self.forward_pass.resolve_view.as_ref(),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.0,
@@ -5059,7 +5433,14 @@ impl Renderer3D {
             CompositeInputs {
                 target,
                 hdr: &self.pbr_texture_view,
-                hdr_fwd: &self.forward_pass.color_view,
+                // In MSAA mode the forward pass resolved into the stored
+                // single-sample view; at 1x that view does not exist and the
+                // color view is sampled directly (unchanged).
+                hdr_fwd: self
+                    .forward_pass
+                    .resolve_view
+                    .as_ref()
+                    .unwrap_or(&self.forward_pass.color_view),
                 bloom: &self.pbr_texture_view,
                 bloom_intensity: 0.0,
                 // Legacy path always runs the hybrid mix.
@@ -5813,6 +6194,23 @@ mod tests {
         let capacity = staging.capacity();
         staging.reserve(staging_capacity_for_instances(300).saturating_sub(staging.len()));
         assert_eq!(staging.capacity(), capacity, "same size: no realloc");
+    }
+
+    #[test]
+    fn msaa_sample_counts_normalize_to_one_or_four() {
+        // The native MSAA count and the single-sample default/fallback.
+        assert_eq!(MSAA_SAMPLE_COUNT, 4);
+        assert_eq!(SINGLE_SAMPLE_COUNT, 1);
+        // 4 passes through; everything else (including 0, 2, 8) falls back
+        // to single-sample — `new` can never build a 2x/8x renderer.
+        assert_eq!(normalize_sample_count(4), 4);
+        for requested in [0, 1, 2, 3, 5, 8, 16, u32::MAX] {
+            assert_eq!(
+                normalize_sample_count(requested),
+                1,
+                "requested {requested} must fall back to 1x"
+            );
+        }
     }
 
     /// Adapter handle, or `None` on headless CI without a GPU.

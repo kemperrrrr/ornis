@@ -75,6 +75,14 @@ pub trait FrameResource: 'static {
     /// Texture spec; `surface_format` feeds resources that mirror the
     /// surface format (e.g. the HDR layer).
     fn spec(surface_format: wgpu::TextureFormat) -> TextureSpec;
+    /// Whether the pooled texture follows the plan sample count
+    /// ([`SystemSet::sample_count`]): multisampled geometry layers (g-buffer
+    /// targets, depth, the forward HDR layer) return `true`, everything
+    /// else (fullscreen layers, bloom, external outputs) stays
+    /// single-sample. `false` by default so the 1x plan is unchanged.
+    fn multisampled() -> bool {
+        false
+    }
 }
 
 /// A clear value attached to a [`WriteClear`] access.
@@ -298,7 +306,11 @@ pub trait FramePass: Send + 'static {
     ///
     /// `where Self: Sized`: `SystemViews<'_, Self>` is a by-value
     /// parameter, and `Self` in a trait is not implicitly sized.
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>)
+    ///
+    /// Views and frame share one lifetime: both borrow from the same
+    /// dispatch, so resolve helpers can mix pooled views with
+    /// renderer-owned targets (MSAA resolves) in one return value.
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>)
     where
         Self: Sized;
 }
@@ -389,12 +401,20 @@ pub struct SystemSet {
     ordering: Vec<(PassId, PassId)>,
     /// S4 memory budget; unbounded by default.
     budget: Budget,
+    /// Negotiated MSAA sample count for multisampled resources (see
+    /// [`FrameResource::multisampled`]): `{1, 4}`, always normalized (see
+    /// [`sample_count`](Self::sample_count)). [`new`](Self::new) starts at 1.
+    sample_count: u32,
 }
 
 /// Type-erased system runner: resolves the typed views for the access
 /// sets and executes the pass body. `Send` — parallel recording (S5b)
 /// dispatches systems on rayon threads.
-type RunFn = Box<dyn FnMut(&Resolver<'_>, &mut Frame<'_>) + Send>;
+///
+/// Views and frame share one lifetime (see [`FramePass::run`]): both
+/// borrow from the same dispatch, so resolve helpers can mix pooled views
+/// with renderer-owned targets (MSAA resolves) in one return value.
+type RunFn = Box<dyn for<'a> FnMut(&Resolver<'a>, &mut Frame<'a>) + Send>;
 
 struct SystemEntry {
     #[allow(dead_code)] // printed in dispatch diagnostics
@@ -427,9 +447,14 @@ impl SystemSet {
     ///
     /// The surface size defaults to `(0, 0)`: call
     /// [`set_surface_size`](Self::set_surface_size) before compiling a
-    /// layout that resolves `SizePolicy::MatchSurface` resources.
+    /// layout that resolves `SizePolicy::MatchSurface` resources. The plan
+    /// sample count defaults to single-sample (see
+    /// [`set_sample_count`](Self::set_sample_count)).
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            sample_count: crate::renderer::SINGLE_SAMPLE_COUNT,
+            ..Self::default()
+        }
     }
 
     /// Bump the declaration generation and drop the memoized layout (the
@@ -460,6 +485,7 @@ impl SystemSet {
             spec,
             imported: false,
             external: false,
+            multisampled: false,
         });
         self.touch();
         id
@@ -478,6 +504,7 @@ impl SystemSet {
             spec,
             imported: true,
             external: false,
+            multisampled: false,
         });
         self.touch();
         id
@@ -493,6 +520,7 @@ impl SystemSet {
             spec: TextureSpec::external(),
             imported: false,
             external: true,
+            multisampled: false,
         });
         self.touch();
         id
@@ -529,6 +557,36 @@ impl SystemSet {
     /// Update the surface size (window resize).
     pub fn set_surface_size(&mut self, size: (u32, u32)) {
         self.surface_size = size;
+        self.touch();
+    }
+
+    /// Negotiated MSAA sample count applied to multisampled resources at
+    /// registration (see [`FrameResource::multisampled`]): normalized to
+    /// `{1, 4}` (see [`normalize_sample_count`](crate::renderer::normalize_sample_count)),
+    /// so out-of-range requests fall back to single-sample instead of
+    /// poisoning layouts. `Default`-constructed sets read back as 1 through
+    /// the same normalization.
+    pub fn sample_count(&self) -> u32 {
+        crate::renderer::normalize_sample_count(self.sample_count)
+    }
+
+    /// Sets the plan sample count for multisampled resources (the negotiated
+    /// renderer count — see [`RenderFrame3D::new_with_samples`](crate::frame_exec::RenderFrame3D::new_with_samples)).
+    /// Already-registered multisampled resources are upgraded in place;
+    /// imperative specs ([`create_resource`](Self::create_resource)) stay
+    /// caller-owned. Bumps the declaration generation only when the
+    /// normalized value actually changes.
+    pub fn set_sample_count(&mut self, sample_count: u32) {
+        let sample_count = crate::renderer::normalize_sample_count(sample_count);
+        if self.sample_count() == sample_count {
+            return;
+        }
+        self.sample_count = sample_count;
+        for node in &mut self.resources {
+            if node.multisampled && !node.external {
+                node.spec.samples = sample_count;
+            }
+        }
         self.touch();
     }
 
@@ -717,15 +775,27 @@ impl SystemSet {
     }
 
     /// Registers resource `R` and remembers its `ResourceId`.
+    ///
+    /// Multisampled resources (see [`FrameResource::multisampled`]) take
+    /// the plan sample count ([`sample_count`](Self::sample_count)) into
+    /// their spec; everything else registers its canonical 1x spec, so a
+    /// 1x plan lays out exactly like the imperative reference.
     pub fn register_resource<R: FrameResource>(
         &mut self,
         surface_format: wgpu::TextureFormat,
     ) -> ResourceId {
+        let mut spec = R::spec(surface_format);
+        if R::multisampled() {
+            spec.samples = self.sample_count();
+        }
         let id = match R::kind() {
-            ResourceKind::FrameOwned => self.create_resource(R::NAME, R::spec(surface_format)),
-            ResourceKind::Imported => self.import_resource(R::NAME, R::spec(surface_format)),
+            ResourceKind::FrameOwned => self.create_resource(R::NAME, spec),
+            ResourceKind::Imported => self.import_resource(R::NAME, spec),
             ResourceKind::ExternalOutput => self.external_output(R::NAME),
         };
+        if R::multisampled() {
+            self.resources[id.0 as usize].multisampled = true;
+        }
         self.ids.insert(TypeId::of::<R>(), id);
         id
     }
@@ -792,7 +862,14 @@ impl SystemSet {
 
     /// Runs the system registered for `pass_id`, if any. Returns `false`
     /// when the pass is not a typed system (imperative fallback).
-    pub fn run_pass(&self, pass_id: PassId, views: &PassViews<'_>, frame: &mut Frame<'_>) -> bool {
+    ///
+    /// Views and frame share one lifetime (see [`FramePass::run`]).
+    pub fn run_pass<'a>(
+        &'a self,
+        pass_id: PassId,
+        views: &'a PassViews<'a>,
+        frame: &mut Frame<'a>,
+    ) -> bool {
         let ids = &self.ids;
         let Some((_, entry)) = self.systems.iter().find(|(id, _)| *id == pass_id) else {
             return false;
@@ -939,6 +1016,93 @@ mod tests {
         );
     }
 
+    /// MSAA-eligible typed resource for the sample-count policy tests.
+    struct ResMsaa;
+    impl FrameResource for ResMsaa {
+        const NAME: &'static str = "msaa";
+        fn kind() -> ResourceKind {
+            ResourceKind::FrameOwned
+        }
+        fn spec(_: wgpu::TextureFormat) -> TextureSpec {
+            TextureSpec {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                samples: 1,
+                size: SizePolicy::MatchSurface,
+            }
+        }
+        fn multisampled() -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn sample_count_defaults_to_single_and_normalizes() {
+        assert_eq!(SystemSet::new().sample_count(), 1);
+        // `Default`-constructed sets read back through the same gate.
+        assert_eq!(SystemSet::default().sample_count(), 1);
+        // Anything outside `{1, 4}` falls back to single-sample, never a panic.
+        let mut set = SystemSet::new();
+        for rejected in [0, 2, 3, 5, 8, 16, u32::MAX] {
+            set.set_sample_count(rejected);
+            assert_eq!(set.sample_count(), 1, "request {rejected}");
+        }
+        set.set_sample_count(crate::renderer::MSAA_SAMPLE_COUNT);
+        assert_eq!(set.sample_count(), 4);
+    }
+
+    #[test]
+    fn sample_count_policy_applies_to_typed_resources() {
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        let mut systems = SystemSet::new();
+        systems.set_surface_size((64, 64));
+        systems.set_sample_count(4);
+        let msaa = systems.register_resource::<ResMsaa>(fmt);
+        let plain = systems.register_resource::<ResA>(fmt);
+        let layout = systems.build();
+        assert_eq!(
+            layout.resources[msaa.0 as usize].spec.samples, 4,
+            "multisampled resources follow the plan count"
+        );
+        assert_eq!(
+            layout.resources[plain.0 as usize].spec.samples, 1,
+            "other resources stay single-sample"
+        );
+    }
+
+    #[test]
+    fn set_sample_count_upgrades_registered_resources() {
+        let fmt = wgpu::TextureFormat::Rgba8Unorm;
+        let mut systems = SystemSet::new();
+        systems.set_surface_size((64, 64));
+        let msaa = systems.register_resource::<ResMsaa>(fmt);
+        // Imperative specs stay caller-owned, even multisample-shaped ones.
+        let manual = systems.create_resource(
+            "manual",
+            TextureSpec {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                samples: 4,
+                size: SizePolicy::MatchSurface,
+            },
+        );
+        assert_eq!(systems.build().resources[msaa.0 as usize].spec.samples, 1);
+        let computations = systems.layout_computations();
+        systems.set_sample_count(4);
+        assert_eq!(systems.build().resources[msaa.0 as usize].spec.samples, 4);
+        assert_eq!(
+            systems.build().resources[manual.0 as usize].spec.samples,
+            4,
+            "imperative spec untouched by the upgrade"
+        );
+        // Same value is a no-op: no spurious recompilation.
+        let after = systems.layout_computations();
+        assert!(after > computations);
+        systems.set_sample_count(4);
+        assert_eq!(systems.layout_computations(), after);
+        // Back down: the upgrade reverses.
+        systems.set_sample_count(1);
+        assert_eq!(systems.build().resources[msaa.0 as usize].spec.samples, 1);
+    }
+
     #[test]
     fn write_clear_carries_its_color() {
         let set = collect::<(WriteClear<ResB, ClearBlack>, Write<ResA>)>();
@@ -971,7 +1135,7 @@ mod tests {
             fn name(&self) -> &'static str {
                 "p0"
             }
-            fn run(&mut self, _views: SystemViews<'_, Self>, _frame: &mut Frame<'_>) {
+            fn run<'a>(&mut self, _views: SystemViews<'a, Self>, _frame: &mut Frame<'a>) {
                 unreachable!("layout parity test does not execute systems");
             }
         }
@@ -983,7 +1147,7 @@ mod tests {
             fn name(&self) -> &'static str {
                 "p1"
             }
-            fn run(&mut self, _views: SystemViews<'_, Self>, _frame: &mut Frame<'_>) {
+            fn run<'a>(&mut self, _views: SystemViews<'a, Self>, _frame: &mut Frame<'a>) {
                 unreachable!("layout parity test does not execute systems");
             }
         }
@@ -1047,7 +1211,7 @@ mod tests {
             fn name(&self) -> &'static str {
                 "p"
             }
-            fn run(&mut self, _views: SystemViews<'_, Self>, _frame: &mut Frame<'_>) {
+            fn run<'a>(&mut self, _views: SystemViews<'a, Self>, _frame: &mut Frame<'a>) {
                 unreachable!();
             }
         }

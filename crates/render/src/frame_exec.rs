@@ -40,6 +40,10 @@ struct PooledTexture {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     bytes: u64,
+    /// Spec the texture was created for: a layout with a different spec
+    /// (sample count, size, format) recreates the slot instead of reusing
+    /// a stale texture.
+    spec: crate::transient_pool::TextureSpec,
 }
 
 /// Executes a [`FrameLayout`] on wgpu: lazily creates one texture per pool
@@ -316,7 +320,8 @@ impl FrameExecutor {
         }
         self.pool.resize_with(layout.slots.len(), || None);
         for (i, slot) in layout.slots.iter().enumerate() {
-            if self.pool[i].is_none() {
+            let stale = self.pool[i].as_ref().is_some_and(|t| t.spec != slot.spec);
+            if self.pool[i].is_none() || stale {
                 self.pool[i] = Some(create_pooled_texture(device, slot, layout.surface_size, i));
             }
         }
@@ -353,6 +358,7 @@ fn create_pooled_texture(
         _texture: texture,
         view,
         bytes,
+        spec: slot.spec,
     }
 }
 
@@ -450,6 +456,11 @@ pub struct RenderFrame3D {
     systems: SystemSet,
     bloom: crate::flags::Bloom,
     technique: Technique,
+    /// Negotiated MSAA sample count of the pooled geometry targets
+    /// (`1` or `4`): must match the [`Renderer3D`] the plan renders
+    /// against, whose pipelines and resolve targets are built for the same
+    /// count. Single-sample resources stay 1x in all modes.
+    sample_count: u32,
 }
 
 /// Which lighting technique the plan wires up. The choice is expressed
@@ -557,13 +568,48 @@ impl RenderFrame3D {
     ///
     /// No fog node is registered (default): opt in with
     /// [`new_with_fog`](Self::new_with_fog).
+    ///
+    /// Single-sample plan: pooled geometry targets are 1x. Pair with a
+    /// 1x [`Renderer3D`]; for the negotiated 4x path use
+    /// [`new_with_samples`](Self::new_with_samples).
     pub fn new_with(
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
         technique: Technique,
         bloom: crate::flags::Bloom,
     ) -> Self {
-        Self::build(surface_format, surface_size, technique, bloom, None)
+        Self::build(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            None,
+            crate::renderer::SINGLE_SAMPLE_COUNT,
+        )
+    }
+
+    /// Like [`new_with`](Self::new_with), with the pooled geometry targets
+    /// at `sample_count` (normalized to `{1, 4}`): pass the negotiated
+    /// renderer count (see
+    /// [`negotiate_sample_count`](crate::renderer::negotiate_sample_count))
+    /// so plan and renderer agree — a 4x plan against a 4x [`Renderer3D`]
+    /// resolves through the renderer's single-sample targets, a 1x plan
+    /// lays out exactly like [`new_with`](Self::new_with).
+    pub fn new_with_samples(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        sample_count: u32,
+    ) -> Self {
+        Self::build(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            None,
+            sample_count,
+        )
     }
 
     /// Like [`new_with`](Self::new_with), plus an opt-in [`FogPass`] node
@@ -572,6 +618,9 @@ impl RenderFrame3D {
     /// node records no commands, so the frame stays pixel-identical to
     /// [`new_with`](Self::new_with); fog needs the deferred HDR layer
     /// (see [`FogPlacement`]).
+    ///
+    /// Single-sample plan; for the negotiated 4x path use
+    /// [`new_with_fog_samples`](Self::new_with_fog_samples).
     pub fn new_with_fog(
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
@@ -579,7 +628,35 @@ impl RenderFrame3D {
         bloom: crate::flags::Bloom,
         fog: FogWiring,
     ) -> Self {
-        Self::build(surface_format, surface_size, technique, bloom, Some(fog))
+        Self::build(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            Some(fog),
+            crate::renderer::SINGLE_SAMPLE_COUNT,
+        )
+    }
+
+    /// Like [`new_with_fog`](Self::new_with_fog), with the pooled geometry
+    /// targets at `sample_count` (see
+    /// [`new_with_samples`](Self::new_with_samples)).
+    pub fn new_with_fog_samples(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        fog: FogWiring,
+        sample_count: u32,
+    ) -> Self {
+        Self::build(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            Some(fog),
+            sample_count,
+        )
     }
 
     /// Shared plan builder: registers resources, technique nodes, the
@@ -591,10 +668,13 @@ impl RenderFrame3D {
         technique: Technique,
         bloom: crate::flags::Bloom,
         fog: Option<FogWiring>,
+        sample_count: u32,
     ) -> Self {
         // S2: resources are registered by type; specs/names (and the
         // ResourceId order) mirror the imperative wiring exactly.
         let mut systems = SystemSet::new();
+        systems.set_sample_count(sample_count);
+        let sample_count = systems.sample_count();
         systems.set_surface_size(surface_size);
         let ids = FrameIds {
             albedo: systems.register_resource::<Albedo>(surface_format),
@@ -683,12 +763,19 @@ impl RenderFrame3D {
             systems,
             bloom,
             technique,
+            sample_count,
         }
     }
 
     /// Resource handles of this plan.
     pub fn ids(&self) -> FrameIds {
         self.ids
+    }
+
+    /// Negotiated MSAA sample count of the pooled geometry targets (`1`
+    /// or `4`): matches the [`Renderer3D`] this plan renders against.
+    pub fn sample_count(&self) -> u32 {
+        self.sample_count
     }
 
     /// The technique this plan was wired for.
@@ -1504,7 +1591,7 @@ mod tests {
         FrameIds {
             albedo: plan.create_resource("albedo", spec(wgpu::TextureFormat::Rgba8Unorm)),
             normal: plan.create_resource("normal", spec(wgpu::TextureFormat::Rg16Float)),
-            material_id: plan.create_resource("material_id", spec(wgpu::TextureFormat::R32Uint)),
+            material_id: plan.create_resource("material_id", spec(wgpu::TextureFormat::R16Uint)),
             world_position: plan
                 .create_resource("world_position", spec(wgpu::TextureFormat::Rg16Float)),
             material_params: plan
@@ -1768,6 +1855,105 @@ mod tests {
         );
         let layout = g3.systems.layout();
         assert_eq!(layout.planned_pool_bytes(), 12 * 1280 * 720);
+    }
+
+    #[test]
+    fn plan_1x_stays_single_sample() {
+        // The default plan is all-1x: every pooled spec keeps samples 1,
+        // so the existing golden dumps stay byte-identical.
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            for bloom in [Bloom::Off, Bloom::On] {
+                let mut plan = RenderFrame3D::new_with(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    (64, 64),
+                    technique,
+                    bloom,
+                );
+                assert_eq!(plan.sample_count(), 1);
+                for resource in &plan.systems.build().resources {
+                    assert_eq!(
+                        resource.spec.samples, 1,
+                        "{technique:?}/{bloom:?} {}",
+                        resource.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plan_4x_specs_follow_negotiated_count() {
+        use crate::renderer::MSAA_SAMPLE_COUNT;
+        let mut plan = RenderFrame3D::new_with_samples(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (64, 64),
+            Technique::Hybrid,
+            Bloom::On,
+            MSAA_SAMPLE_COUNT,
+        );
+        assert_eq!(plan.sample_count(), MSAA_SAMPLE_COUNT);
+        let layout = plan.systems.build();
+        let samples_of = |name: &str| {
+            layout
+                .resources
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("resource '{name}' missing"))
+                .spec
+                .samples
+        };
+        for msaa in [
+            "albedo",
+            "normal",
+            "material_id",
+            "world_position",
+            "material_params",
+            "depth",
+            "hdr_fwd",
+        ] {
+            assert_eq!(samples_of(msaa), 4, "{msaa} must follow the plan count");
+        }
+        for single in ["hdr", "bloom0", "bloom1", "bloom2", "target"] {
+            assert_eq!(samples_of(single), 1, "{single} must stay single-sample");
+        }
+        // Out-of-range requests normalize to single-sample (never a panic).
+        let fallback = RenderFrame3D::new_with_samples(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (64, 64),
+            Technique::Hybrid,
+            Bloom::Off,
+            2,
+        );
+        assert_eq!(fallback.sample_count(), 1);
+    }
+
+    #[test]
+    fn msaa_plan_keeps_pool_shape() {
+        // Every sharing pair upgrades together (matparams/hdr_fwd are both
+        // multisampled), so 4x slot counts match the 1x goldens
+        // technique-for-technique — only the specs' sample counts differ.
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            for bloom in [Bloom::Off, Bloom::On] {
+                let mut one = RenderFrame3D::new_with(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    (1280, 720),
+                    technique,
+                    bloom,
+                );
+                let mut four = RenderFrame3D::new_with_samples(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    (1280, 720),
+                    technique,
+                    bloom,
+                    crate::renderer::MSAA_SAMPLE_COUNT,
+                );
+                assert_eq!(
+                    one.systems.layout().slots.len(),
+                    four.systems.layout().slots.len(),
+                    "slot shape must not change at 4x: {technique:?}/{bloom:?}"
+                );
+            }
+        }
     }
 
     #[test]

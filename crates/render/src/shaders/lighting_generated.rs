@@ -22,7 +22,13 @@ use ornis_macros::stage;
 /// WGSL boilerplate for deferred lighting: derived layouts plus resource
 /// bindings, assembled as naga IR and printed by naga itself (see
 /// [`naga_ir`](super::naga_ir)) — no WGSL text is authored here.
-fn lighting_wgsl_header() -> String {
+///
+/// At 1x every global declares the single-sample type; in MSAA mode the
+/// depth and material-id globals declare multisampled texture types (see
+/// [`super::resource_stays_multisampled`]) while the resolved float layers
+/// stay single-sample — the `textureLoad(…, 0)` call text in [`fs_main`]
+/// loads sample 0 unchanged for both spellings.
+fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
     let mut module = naga::Module::default();
     let cam = CameraUniform::naga_add_type(&mut module);
     // Inserted explicitly so declaration order stays Camera, Light,
@@ -37,7 +43,8 @@ fn lighting_wgsl_header() -> String {
             "materials" => mat,
             _ => cam,
         };
-        naga_ir::add_global(&mut module, ty, &r, false);
+        let multisampled = sample_count > 1 && super::resource_stays_multisampled(&r.kind);
+        naga_ir::add_global(&mut module, ty, &r, multisampled);
     }
     naga_ir::write_module(&module, &LIGHTING_RESOURCES)
 }
@@ -486,8 +493,16 @@ fn fs_main(
 
 /// Full WGSL source for deferred lighting, assembled from Rust.
 pub fn wgsl_source() -> String {
+    wgsl_source_for_samples(1)
+}
+
+/// Full WGSL source for deferred lighting at a sample count: at 1x
+/// byte-identical to [`wgsl_source`]; in MSAA mode depth and material-id
+/// declare multisampled types (their resolve-free bindings stay multisampled
+/// — see [`super::resource_stays_multisampled`]).
+pub fn wgsl_source_for_samples(sample_count: u32) -> String {
     ShaderModule::new()
-        .decl(lighting_wgsl_header())
+        .decl(lighting_wgsl_header_for_samples(sample_count))
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helpers([
             helpers::wgsl_consts(),
@@ -622,5 +637,24 @@ mod tests {
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
         assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+    }
+
+    /// The MSAA source validates with naga and spells multisampled depth +
+    /// material-id while the resolved float layers stay single-sample (their
+    /// `textureSampleLevel` fetches bind the resolve textures).
+    #[test]
+    fn msaa_source_validates_with_multisampled_depth_and_id() {
+        let src = wgsl_source_for_samples(4);
+        assert_valid_wgsl("lighting_generated_msaa", &src);
+        assert!(src.contains("texture_depth_multisampled_2d"), "{src}");
+        assert!(src.contains("texture_multisampled_2d<u32>"), "{src}");
+        // Resolved layers keep their single-sample declarations and fetches
+        // (bundle prefixes are stripped by the `stage` translation).
+        assert!(src.contains("textureSampleLevel"), "{src}");
+        assert!(src.contains("albedo_tex"), "{src}");
+        assert!(!src.contains("texture_multisampled_2d<f32>"), "{src}");
+        // The 1x source is untouched by the MSAA spelling.
+        let plain = wgsl_source();
+        assert!(!plain.contains("multisampled"), "{plain}");
     }
 }

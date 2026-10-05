@@ -18,6 +18,15 @@ pub struct RenderBackendConfig {
     /// target surface (or an offscreen texture in tests).
     pub surface_config: wgpu::SurfaceConfiguration,
     /// MSAA sample count for the gbuffer and lighting passes.
+    ///
+    /// `1` (the default) is single-sample; pass
+    /// [`crate::renderer::MSAA_SAMPLE_COUNT`] (4) for the native MSAA path
+    /// after gating it through
+    /// [`crate::renderer::negotiate_sample_count`] against the adapter
+    /// (software adapters fall back to 1 — never a panic). Fullscreen
+    /// passes and shadow maps stay single-sample in all modes; the
+    /// frame-plan pool follows this count for its geometry layers (see
+    /// [`crate::frame_exec::RenderFrame3D::new_with_samples`]).
     pub sample_count: u32,
     /// Exposure multiplier baked into every light color by
     /// `Renderer3D::set_lights_full` (via [`create_render_backend`]);

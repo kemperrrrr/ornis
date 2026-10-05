@@ -76,9 +76,10 @@ pub use render_backend::{
 };
 pub use renderer::{
     BlendMode, CameraUniform, CompositeInputs, CompositePass, CustomGbufferDraw, FogInputs,
-    ForwardPass, GBufferTextures, GbufferTargets, InstanceData, LightingPass, MaterialIdx,
-    PerObjectGpu, Renderer3D, StagedCustomMesh, TransparencyError, TransparencyOptions,
-    custom_draw_items, forward_blend_state, sort_by_depth, upload_vertex_rows,
+    ForwardPass, GBufferTextures, GbufferTargets, InstanceData, LightingPass, MSAA_SAMPLE_COUNT,
+    MaterialIdx, PerObjectGpu, Renderer3D, SINGLE_SAMPLE_COUNT, StagedCustomMesh,
+    TransparencyError, TransparencyOptions, custom_draw_items, forward_blend_state,
+    negotiate_sample_count, normalize_sample_count, sort_by_depth, upload_vertex_rows,
 };
 pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use skinning::{

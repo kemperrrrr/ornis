@@ -8,7 +8,7 @@
 //! stay identical. The conditional passes (forward, bloom_down0,
 //! composite) remain imperative until S2b.
 
-use crate::renderer::{CompositeInputs, GbufferTargets};
+use crate::renderer::{CompositeInputs, GbufferTargets, Renderer3D};
 use crate::system::{
     AccessSet, ClearBlack, ClearTransparent, ClearWhite, Frame, FramePass, FrameResource, Read,
     ResourceKind, SystemViews, ViewsFor, Write, WriteClear,
@@ -44,6 +44,24 @@ macro_rules! typed_resource {
             }
         }
     };
+    ($t:ident, $name:literal, owned_msaa, $format:expr) => {
+        impl FrameResource for $t {
+            const NAME: &'static str = $name;
+            fn kind() -> ResourceKind {
+                ResourceKind::FrameOwned
+            }
+            fn spec(_: wgpu::TextureFormat) -> TextureSpec {
+                TextureSpec {
+                    format: $format,
+                    samples: 1,
+                    size: SizePolicy::MatchSurface,
+                }
+            }
+            fn multisampled() -> bool {
+                true
+            }
+        }
+    };
     ($t:ident, $name:literal, owned_fraction, $format:expr, $divisor:expr) => {
         impl FrameResource for $t {
             const NAME: &'static str = $name;
@@ -61,29 +79,41 @@ macro_rules! typed_resource {
     };
 }
 
-/// G-buffer albedo layer.
+/// G-buffer albedo layer (multisampled geometry target at 4x; downstream
+/// passes sample the renderer's single-sample resolve).
 pub struct Albedo;
-typed_resource!(Albedo, "albedo", owned, F::Rgba8Unorm);
+typed_resource!(Albedo, "albedo", owned_msaa, F::Rgba8Unorm);
 
-/// G-buffer world-space normal layer.
+/// G-buffer world-space normal layer (multisampled geometry target at 4x).
 pub struct Normal;
-typed_resource!(Normal, "normal", owned, F::Rg16Float);
+typed_resource!(Normal, "normal", owned_msaa, F::Rg16Float);
 
-/// G-buffer material id layer.
+/// G-buffer material id layer (`R16Uint`: the spec-guaranteed
+/// multisampleable integer format — `R32Uint` has no multisample flag, so
+/// the legacy MSAA g-buffer could never create it; ids past `u16::MAX`
+/// truncate, see [`crate::renderer::MSAA_SAMPLE_COUNT`]).
+///
+/// Stays multisampled at 4x with no resolve target (loaded as sample 0).
 pub struct MaterialId;
-typed_resource!(MaterialId, "material_id", owned, F::R32Uint);
+typed_resource!(MaterialId, "material_id", owned_msaa, F::R16Uint);
 
-/// G-buffer world-space position layer.
+/// G-buffer world-space position layer (multisampled geometry target at 4x).
 pub struct WorldPosition;
-typed_resource!(WorldPosition, "world_position", owned, F::Rg16Float);
+typed_resource!(WorldPosition, "world_position", owned_msaa, F::Rg16Float);
 
-/// G-buffer material params layer.
+/// G-buffer material params layer (multisampled geometry target at 4x).
 pub struct MaterialParams;
-typed_resource!(MaterialParams, "material_params", owned, F::Rgba16Float);
+typed_resource!(
+    MaterialParams,
+    "material_params",
+    owned_msaa,
+    F::Rgba16Float
+);
 
-/// Depth buffer.
+/// Depth buffer (multisampled at 4x with no resolve target; shared with
+/// the forward pass in hybrid mode).
 pub struct Depth;
-typed_resource!(Depth, "depth", owned, F::Depth32Float);
+typed_resource!(Depth, "depth", owned_msaa, F::Depth32Float);
 
 /// HDR layer of the deferred path — mirrors the surface format.
 pub struct Hdr;
@@ -101,9 +131,11 @@ impl FrameResource for Hdr {
     }
 }
 
-/// HDR layer of the forward path.
+/// HDR layer of the forward path (the forward color target: multisampled
+/// at 4x, resolving into the renderer's single-sample view which the
+/// composite pass and the bloom bright-pass sample there).
 pub struct HdrFwd;
-typed_resource!(HdrFwd, "hdr_fwd", owned, F::Rgba16Float);
+typed_resource!(HdrFwd, "hdr_fwd", owned_msaa, F::Rgba16Float);
 
 /// Swapchain target (externally backed view, never pooled).
 pub struct Target;
@@ -153,7 +185,7 @@ impl FramePass for GbufferPass {
     fn name(&self) -> &'static str {
         "gbuffer"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let (
             Some(albedo),
             Some(normal),
@@ -199,7 +231,7 @@ impl FramePass for LightingPass {
     fn name(&self) -> &'static str {
         "lighting"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let (
             Some(albedo),
             Some(normal),
@@ -243,7 +275,7 @@ impl FramePass for BloomDown1Pass {
     fn name(&self) -> &'static str {
         "bloom_down1"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let (Some(input),) = views.reads else {
             return;
         };
@@ -269,7 +301,7 @@ impl FramePass for BloomDown2Pass {
     fn name(&self) -> &'static str {
         "bloom_down2"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let (Some(input),) = views.reads else {
             return;
         };
@@ -295,7 +327,7 @@ impl FramePass for BloomUp1Pass {
     fn name(&self) -> &'static str {
         "bloom_up1"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let (Some(input),) = views.reads else {
             return;
         };
@@ -316,7 +348,7 @@ impl FramePass for BloomUp0Pass {
     fn name(&self) -> &'static str {
         "bloom_up0"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let (Some(input),) = views.reads else {
             return;
         };
@@ -395,7 +427,7 @@ impl<M: ForwardMode> FramePass for Forward<M> {
     fn name(&self) -> &'static str {
         "forward"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         // Forward-only owns its shadow pre-pass too: no LightingPass
         // runs in that technique, so without this the shadow maps stay
         // at texture-init zero and every shadowed light goes fully dark.
@@ -429,25 +461,38 @@ impl<M: ForwardMode> FramePass for Forward<M> {
 pub trait BrightInput: Sized + 'static {
     /// The layer read by the bright pass in this mode.
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
-    /// Borrows the HDR view this technique's bright pass reads.
-    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> Option<&'a wgpu::TextureView>;
+    /// Borrows the HDR view this technique's bright pass reads: the pooled
+    /// view at 1x, the renderer's single-sample forward resolve at 4x when
+    /// this mode reads the multisampled forward layer.
+    fn input<'a>(
+        views: &SystemViews<'a, BloomBright<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<&'a wgpu::TextureView>;
 }
 
-/// Deferred/hybrid: `hdr`, filled by the lighting pass.
+/// Deferred/hybrid: `hdr` (single-sample lighting output in all modes).
 pub struct FromDeferred;
 impl BrightInput for FromDeferred {
     type Reads = (Read<Hdr>,);
-    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> Option<&'a wgpu::TextureView> {
+    fn input<'a>(
+        views: &SystemViews<'a, BloomBright<Self>>,
+        _renderer: &'a Renderer3D,
+    ) -> Option<&'a wgpu::TextureView> {
         views.get::<Hdr>()
     }
 }
 
-/// Forward-only: `hdr_fwd`, filled by the forward pass.
+/// Forward-only: `hdr_fwd` (multisampled at 4x — the resolve view then).
 pub struct FromForward;
 impl BrightInput for FromForward {
     type Reads = (Read<HdrFwd>,);
-    fn input<'a>(views: &SystemViews<'a, BloomBright<Self>>) -> Option<&'a wgpu::TextureView> {
-        views.get::<HdrFwd>()
+    fn input<'a>(
+        views: &SystemViews<'a, BloomBright<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<&'a wgpu::TextureView> {
+        renderer
+            .forward_resolve_view()
+            .or_else(|| views.get::<HdrFwd>())
     }
 }
 
@@ -471,8 +516,9 @@ impl<I: BrightInput> FramePass for BloomBright<I> {
     fn name(&self) -> &'static str {
         "bloom_down0"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let (Some(input), Some(output)) = (I::input(&views), views.get::<Bloom0>()) else {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (Some(input), Some(output)) = (I::input(&views, frame.renderer), views.get::<Bloom0>())
+        else {
             return;
         };
         frame.renderer.render_bloom_down(
@@ -499,7 +545,13 @@ pub trait CompositeMode: Sized + 'static {
     /// Binds the shader inputs from this mode's declared views. Dead
     /// layers (the ones this technique does not produce) are bound to a
     /// live view with zero effect — the shader picks by `TECHNIQUE`.
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>>;
+    /// Modes reading the forward layer sample the renderer's
+    /// single-sample resolve at 4x (the pooled forward layer is
+    /// multisampled there); at 1x every view is the pooled one.
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>>;
 }
 
 /// Deferred + bloom.
@@ -508,7 +560,10 @@ impl CompositeMode for CompositeDeferredBloom {
     type Reads = (Read<Hdr>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        _renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>> {
         let hdr = views.get::<Hdr>()?;
         Some(CompositeInputs {
             target: views.get::<Target>()?,
@@ -527,7 +582,10 @@ impl CompositeMode for CompositeDeferred {
     type Reads = (Read<Hdr>,);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        _renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>> {
         let hdr = views.get::<Hdr>()?;
         Some(CompositeInputs {
             target: views.get::<Target>()?,
@@ -546,11 +604,16 @@ impl CompositeMode for CompositeHybridBloom {
     type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>> {
         Some(CompositeInputs {
             target: views.get::<Target>()?,
             hdr: views.get::<Hdr>()?,
-            hdr_fwd: views.get::<HdrFwd>()?,
+            hdr_fwd: renderer
+                .forward_resolve_view()
+                .or_else(|| views.get::<HdrFwd>())?,
             bloom: views.get::<Bloom0>()?,
             bloom_intensity: Self::BLOOM.intensity(),
             mode: Self::TECHNIQUE.shader_mode(),
@@ -564,8 +627,13 @@ impl CompositeMode for CompositeHybrid {
     type Reads = (Read<Hdr>, Read<HdrFwd>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
-        let hdr_fwd = views.get::<HdrFwd>()?;
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>> {
+        let hdr_fwd = renderer
+            .forward_resolve_view()
+            .or_else(|| views.get::<HdrFwd>())?;
         Some(CompositeInputs {
             target: views.get::<Target>()?,
             hdr: views.get::<Hdr>()?,
@@ -583,8 +651,13 @@ impl CompositeMode for CompositeForwardBloom {
     type Reads = (Read<HdrFwd>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
-        let hdr_fwd = views.get::<HdrFwd>()?;
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>> {
+        let hdr_fwd = renderer
+            .forward_resolve_view()
+            .or_else(|| views.get::<HdrFwd>())?;
         Some(CompositeInputs {
             target: views.get::<Target>()?,
             hdr: hdr_fwd,
@@ -602,8 +675,13 @@ impl CompositeMode for CompositeForward {
     type Reads = (Read<HdrFwd>,);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(views: &SystemViews<'a, Composite<Self>>) -> Option<CompositeInputs<'a>> {
-        let hdr_fwd = views.get::<HdrFwd>()?;
+    fn inputs<'a>(
+        views: &SystemViews<'a, Composite<Self>>,
+        renderer: &'a Renderer3D,
+    ) -> Option<CompositeInputs<'a>> {
+        let hdr_fwd = renderer
+            .forward_resolve_view()
+            .or_else(|| views.get::<HdrFwd>())?;
         Some(CompositeInputs {
             target: views.get::<Target>()?,
             hdr: hdr_fwd,
@@ -867,7 +945,7 @@ impl FramePass for FogPass {
     fn name(&self) -> &'static str {
         "fog"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let Some(settings) = self.state.settings() else {
             // Disabled: keep the declared wiring honest in debug builds
             // without recording any commands (exact no-op).
@@ -918,8 +996,8 @@ impl<M: CompositeMode> FramePass for Composite<M> {
     fn name(&self) -> &'static str {
         "composite"
     }
-    fn run(&mut self, views: SystemViews<'_, Self>, frame: &mut Frame<'_>) {
-        let Some(inputs) = M::inputs(&views) else {
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let Some(inputs) = M::inputs(&views, frame.renderer) else {
             return;
         };
         frame
@@ -955,7 +1033,7 @@ mod tests {
         assert_eq!(Normal::NAME, "normal");
         owned_spec::<Normal>(F::Rg16Float, SizePolicy::MatchSurface);
         assert_eq!(MaterialId::NAME, "material_id");
-        owned_spec::<MaterialId>(F::R32Uint, SizePolicy::MatchSurface);
+        owned_spec::<MaterialId>(F::R16Uint, SizePolicy::MatchSurface);
         assert_eq!(WorldPosition::NAME, "world_position");
         owned_spec::<WorldPosition>(F::Rg16Float, SizePolicy::MatchSurface);
         assert_eq!(MaterialParams::NAME, "material_params");
@@ -979,6 +1057,34 @@ mod tests {
         assert_eq!(Hdr::spec(F::Rgba8UnormSrgb).format, F::Rgba8UnormSrgb);
         assert_eq!(Hdr::spec(F::Bgra8UnormSrgb).format, F::Bgra8UnormSrgb);
         assert_eq!(Hdr::spec(SURFACE).size, SizePolicy::MatchSurface);
+    }
+
+    #[test]
+    fn multisampled_policy_marks_geometry_layers() {
+        // Pool MSAA policy: geometry targets follow the plan sample count,
+        // fullscreen/external layers stay single-sample (see
+        // `FrameResource::multisampled`). The canonical `spec()` stays 1x —
+        // the count applies at registration (`SystemSet::register_resource`).
+        for msaa in [
+            Albedo::multisampled(),
+            Normal::multisampled(),
+            MaterialId::multisampled(),
+            WorldPosition::multisampled(),
+            MaterialParams::multisampled(),
+            Depth::multisampled(),
+            HdrFwd::multisampled(),
+        ] {
+            assert!(msaa, "geometry layer must follow the plan count");
+        }
+        for single in [
+            Hdr::multisampled(),
+            Bloom0::multisampled(),
+            Bloom1::multisampled(),
+            Bloom2::multisampled(),
+            Target::multisampled(),
+        ] {
+            assert!(!single, "fullscreen/external layer must stay 1x");
+        }
     }
 
     #[test]

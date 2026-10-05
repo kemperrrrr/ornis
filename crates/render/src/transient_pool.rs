@@ -26,6 +26,8 @@ use std::sync::Arc;
 
 use ornis_schedule::{MermaidDiagram, bitset_level_plan};
 
+/// Bytes per pixel for 16-bit formats (`R16Uint` material ids).
+const BYTES_PER_PIXEL_16: u32 = 2;
 /// Bytes per pixel for 32-bit formats (RGBA8 / R32 / Depth32 / …).
 const BYTES_PER_PIXEL_32: u32 = 4;
 /// Bytes per pixel for 64-bit formats (RGBA16F / RG32F).
@@ -36,6 +38,7 @@ const BYTES_PER_PIXEL_128: u32 = 16;
 /// Bytes per pixel for the texture formats used by the engine's renderer.
 pub fn format_bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
     match format {
+        wgpu::TextureFormat::R16Uint => BYTES_PER_PIXEL_16,
         wgpu::TextureFormat::Rgba8Unorm
         | wgpu::TextureFormat::Rgba8UnormSrgb
         | wgpu::TextureFormat::Bgra8UnormSrgb
@@ -84,7 +87,7 @@ pub(crate) fn budget_exceeded(budget: u64, required: u64, layout: &FrameLayout) 
 
 fn slot_bytes(slot: &PoolSlot, surface: (u32, u32)) -> u64 {
     let (w, h) = slot.spec.size.resolve(surface);
-    format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+    format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64 * slot.spec.samples as u64
 }
 
 /// Texture size policy.
@@ -311,13 +314,17 @@ pub struct FrameLayout {
 impl FrameLayout {
     /// Total bytes the pool will allocate at this layout's surface size —
     /// the device-free counterpart of `FrameExecutor::texture_budget`
-    /// (golden tests, S0 metrics, the S4 budget check).
+    /// (golden tests, S0 metrics, the S4 budget check). Scales with the
+    /// slot sample counts, like the pooled textures themselves.
     pub fn planned_pool_bytes(&self) -> u64 {
         self.slots
             .iter()
             .map(|slot| {
                 let (w, h) = slot.spec.size.resolve(self.surface_size);
-                format_bytes_per_pixel(slot.spec.format) as u64 * w as u64 * h as u64
+                format_bytes_per_pixel(slot.spec.format) as u64
+                    * w as u64
+                    * h as u64
+                    * slot.spec.samples as u64
             })
             .sum()
     }
@@ -528,6 +535,11 @@ pub(crate) struct ResourceNode {
     /// Resource backed by an externally provided view (e.g. the swapchain):
     /// never pooled, `slot` is always `None`.
     pub external: bool,
+    /// MSAA-eligible typed resource (see
+    /// [`crate::system::FrameResource::multisampled`]): [`SystemSet::set_sample_count`](crate::system::SystemSet::set_sample_count)
+    /// rewrites `spec.samples` in place for these. Imperative specs stay
+    /// caller-owned (`false`).
+    pub multisampled: bool,
 }
 
 impl ResourceNode {
@@ -865,6 +877,7 @@ mod tests {
             spec,
             imported: false,
             external: false,
+            multisampled: false,
         }
     }
 
@@ -874,6 +887,7 @@ mod tests {
             spec,
             imported: true,
             external: false,
+            multisampled: false,
         }
     }
 
@@ -1028,6 +1042,25 @@ mod tests {
         let layout = compile(resources, passes, (320, 240));
         assert_eq!(layout.slots.len(), 2);
         assert_ne!(layout.resources[0].slot, layout.resources[1].slot);
+    }
+
+    #[test]
+    fn planned_bytes_scale_with_samples() {
+        // Same single-resource layout at 1x vs 4x: the budget scales
+        // exactly by the sample count (the executor's pooled textures do
+        // the same — see `create_pooled_texture`).
+        let one = compile(
+            vec![res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 1))],
+            vec![pass("p0", &[], &[0])],
+            (64, 64),
+        );
+        let four = compile(
+            vec![res("a", spec(wgpu::TextureFormat::Rgba8Unorm, 4))],
+            vec![pass("p0", &[], &[0])],
+            (64, 64),
+        );
+        assert_eq!(one.planned_pool_bytes(), 4 * 64 * 64);
+        assert_eq!(four.planned_pool_bytes(), 4 * one.planned_pool_bytes());
     }
 
     // ── first-touch invariant: read-before-write on a frame-owned resource

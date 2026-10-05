@@ -131,10 +131,18 @@ pub const FOG_RESOURCES: [Resource; 5] = [
 
 /// Full WGSL source for the fog fragment stage, assembled from Rust.
 pub fn wgsl_source() -> String {
+    wgsl_source_for_samples(1)
+}
+
+/// Full WGSL source for the fog fragment stage at a sample count: at 1x
+/// byte-identical to [`wgsl_source`]; in MSAA mode the g-buffer depth
+/// declares the multisampled type (it has no resolve target — see
+/// [`super::resource_stays_multisampled`]) while HDR stays single-sample.
+pub fn wgsl_source_for_samples(sample_count: u32) -> String {
     ShaderModule::new()
         .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
         .decl(wgsl_decl(FogUniform::WGSL_SOURCE))
-        .resources(&FOG_RESOURCES, &[0, 1, 2, 3, 4])
+        .resources_for_samples(&FOG_RESOURCES, &[0, 1, 2, 3, 4], sample_count)
         .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helper(helpers::wgsl_lighting_decode())
@@ -225,5 +233,18 @@ mod tests {
             FOG_RESOURCES[4].min_size,
             Some(s) if s == std::mem::size_of::<FogUniform>() as u64
         ));
+    }
+
+    /// The MSAA source validates with naga: depth goes multisampled (loaded
+    /// sample 0, like lighting), HDR stays single-sample (it binds the
+    /// already-resolved layer).
+    #[test]
+    fn fog_msaa_source_validates_with_multisampled_depth() {
+        let src = wgsl_source_for_samples(4);
+        assert_valid_wgsl("fog_fragment_msaa", &src);
+        assert!(src.contains("texture_depth_multisampled_2d"), "{src}");
+        assert!(src.contains("textureSampleLevel"), "{src}");
+        let plain = wgsl_source();
+        assert!(!plain.contains("multisampled"), "{plain}");
     }
 }

@@ -613,11 +613,10 @@ mod tests {
     }
 
     #[test]
-    fn install_keeps_scene_published_lights() {
-        // `replace_scene` runs before `install_gpu_resources` in
-        // `GameApp::initialize`: a published scene rig must survive the
-        // GPU install, while a sceneless runtime still gets the legacy
-        // default (X3 zero-diff gate).
+    fn install_publish_no_silent_lights() {
+        // No silent default rig: a published scene rig must survive the
+        // GPU install untouched, and a sceneless runtime stays dark
+        // (viewport lighting is the editor's job, not the engine's).
         let mut engine = Engine::new();
         let custom = RenderLights {
             ambient: [0.5, 0.4, 0.3],
