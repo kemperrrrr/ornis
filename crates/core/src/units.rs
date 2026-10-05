@@ -104,7 +104,7 @@ impl Position {
 
 impl From<Vec3> for Position {
     fn from(value: Vec3) -> Self {
-        Self(value)
+        Self::new(value.x, value.y, value.z)
     }
 }
 
