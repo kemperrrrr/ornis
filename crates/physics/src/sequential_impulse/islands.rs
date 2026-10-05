@@ -391,11 +391,18 @@ impl SequentialImpulseEngine {
         );
         let warm_in = &self.warm_impulses;
         let base_iters = self.velocity_iterations;
-        // Contact hooks override friction/restitution/surface velocity in
-        // the scalar preamble only: while hooks are attached the SIMD-wide
-        // batches are off, so every override routes through the one solver
-        // that implements them. Without hooks the configured path stands.
-        let path = if self.contact_hooks.is_some() {
+        // Contact-hook overrides (friction, restitution, surface velocity)
+        // are applied in the scalar preamble only. A hook that actually
+        // changes a manifold forces the scalar path so every override
+        // routes through the solver that implements them. A no-op hook
+        // records only `None` entries and keeps the configured path —
+        // otherwise a default wide solve and a scalar no-op hook drift
+        // once a single-point impulse is applied (the wide factors are a
+        // distinct rounding of the same Gauss-Seidel step).
+        let hooks_override = islands
+            .iter()
+            .any(|isl| isl.hook.iter().any(Option::is_some));
+        let path = if hooks_override {
             SolvePath::Scalar
         } else {
             self.wide_solver

@@ -2233,3 +2233,37 @@ fn wheel_degenerate_axle_falls_back() {
         );
     }
 }
+
+/// Two equal-mass boxes, one sweeping into the other faster than the CCD
+/// travel gate. The linear response used to reflect only the mover
+/// (`v → 0` at e = 0) and leave the target at rest, dropping half the
+/// momentum. Both must leave near 15 m/s.
+#[test]
+fn linear_ccd_splits_momentum_across_two_dynamics() {
+    let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
+    physics.set_substeps(1);
+    let mut mover = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.2), 1.0);
+    mover.velocity = Vec3::new(30.0, 0.0, 0.0);
+    mover.restitution = 0.0;
+    mover.friction = 0.0;
+    mover.friction_transverse = 0.0;
+    mover.set_ccd_enabled(true);
+    let mut target = RigidBody::new_box(Vec3::new(0.55, 0.0, 0.0), Vec3::splat(0.2), 1.0);
+    target.restitution = 0.0;
+    target.friction = 0.0;
+    target.friction_transverse = 0.0;
+    let mover_h = physics.add_body(mover);
+    let target_h = physics.add_body(target);
+    physics.step(1.0 / 60.0);
+    let va = physics.get_body(mover_h).expect("mover").velocity;
+    let vb = physics.get_body(target_h).expect("target").velocity;
+    let momentum = va.x + vb.x;
+    assert!(
+        (momentum - 30.0).abs() < 0.05,
+        "momentum {momentum}, va={va:?} vb={vb:?}"
+    );
+    assert!(
+        (va.x - 15.0).abs() < 0.5 && (vb.x - 15.0).abs() < 0.5,
+        "equal masses must share the impact, va={va:?} vb={vb:?}"
+    );
+}

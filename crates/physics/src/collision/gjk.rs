@@ -32,6 +32,11 @@ const TET_VOLUME_EPS: f32 = 1e-9;
 const EPA_VISIBLE_EPS: f32 = 1e-9;
 /// Degenerate-growth cap for the EPA polytope (vertices): past this the expansion is zigzagging on curved features rather than converging, so the loop reports the best face so far instead of growing unbounded.
 const EPA_MAX_VERTS: usize = 128;
+/// Face cap for one EPA expansion. A non-disk visible set (degenerate
+/// cylinder/box overlap) makes every directed edge look horizon-bound, so
+/// the fan triples the face count each iteration and the twin search never
+/// returns. Past this the best face so far is the answer.
+const EPA_MAX_FACES: usize = 64;
 /// GJK/EPA simplex capacity (tetrahedron = 4 Minkowski vertices).
 const SIMPLEX_CAPACITY: usize = 4;
 /// Vertices per EPA/simplex face (triangle).
@@ -472,6 +477,9 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; SIMPLEX_CAPACITY]) -> (f32, Vec3
     }
     let mut best = (0.0f32, Vec3::X, a.pos, b.pos);
     for _ in 0..MAX_ITERS {
+        if faces.is_empty() || faces.len() > EPA_MAX_FACES {
+            break;
+        }
         // Closest face to the origin.
         let mut bi = 0usize;
         let mut bdist = f32::MAX;
@@ -534,6 +542,19 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; SIMPLEX_CAPACITY]) -> (f32, Vec3
                 horizon.push(e);
             }
         }
+        // Closest face so far, including the bailout below. The converged
+        // return above already handed back barycentric witnesses; this
+        // fallback keeps the plane the dispatcher re-seats under.
+        if bdist < f32::MAX {
+            best = (bdist.max(0.0), bnormal, a.pos, b.pos);
+        }
+        // A closed visible patch has a horizon no larger than its own
+        // boundary. More horizon edges than faces means twins were missed
+        // (degenerate overlap) and sealing them would triple the polytope
+        // every iteration. Keep the face found above.
+        if horizon.len() > faces.len() {
+            break;
+        }
         // Remove the visible set, add the vertex, reseal the fan.
         let mut kept: Vec<[usize; FACE_VERTS]> = Vec::with_capacity(faces.len() + horizon.len());
         for (i, f) in faces.drain(..).enumerate() {
@@ -556,7 +577,6 @@ fn epa(a: ShapeRef, b: ShapeRef, tet: [SVertex; SIMPLEX_CAPACITY]) -> (f32, Vec3
                 f.swap(1, 2);
             }
         }
-        best = (bdist.max(0.0), bnormal, a.pos, b.pos);
         if verts.len() > EPA_MAX_VERTS {
             break; // Degenerate growth guard: report the best face so far.
         }
@@ -762,6 +782,50 @@ mod tests {
         // 0.5 penetration along x.
         assert!(d.dist < 0.0, "must report overlap, got {}", d.dist);
         assert!((d.dist + 0.5).abs() < 1e-3, "depth, got {}", d.dist);
+    }
+
+    /// Cylinder resting through a box used to never return: a non-disk
+    /// visible set made every edge look horizon-bound, and the face fan
+    /// tripled until the twin scan did not finish. The query must come
+    /// back with a finite penetration.
+    #[test]
+    fn epa_cylinder_box_overlap_returns() {
+        let box_shape = Shape::Box {
+            half_extents: Vec3::splat(0.5),
+        };
+        let cylinder = Shape::Cylinder {
+            radius: 0.5,
+            half_height: 0.5,
+        };
+        let d = convex_distance(
+            ShapeRef {
+                shape: &box_shape,
+                pos: Vec3::new(-4.7e-5, 0.453, 2.6e-6),
+                rot: Quat::IDENTITY,
+            },
+            ShapeRef {
+                shape: &cylinder,
+                pos: Vec3::new(6.3e-7, 1.414, -1.2e-8),
+                rot: Quat::IDENTITY,
+            },
+        );
+        assert!(
+            d.dist.is_finite() && d.normal.is_finite(),
+            "non-finite dist {} n {}",
+            d.dist,
+            d.normal
+        );
+        assert!(
+            d.dist < 0.0,
+            "sinking cylinder/box must penetrate, dist {}",
+            d.dist
+        );
+        assert!(
+            d.normal.dot(Vec3::Y) > 0.99,
+            "upright overlap must push up, n={} dist={}",
+            d.normal,
+            d.dist
+        );
     }
 
     #[test]

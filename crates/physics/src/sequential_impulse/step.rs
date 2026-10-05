@@ -13,8 +13,8 @@ use crate::engine::Manifold;
 use super::SequentialImpulseEngine;
 use super::math::vec3_finite;
 use super::queries::{
-    ccd_impact_velocity, find_continuous_hit_with_budget, kinematic_cast, shape_min_dimension,
-    swept_orientation,
+    ccd_impact_velocity, find_continuous_hit_with_budget, kinematic_cast, linear_ccd_deltas,
+    shape_min_dimension, swept_orientation,
 };
 use super::*;
 
@@ -672,13 +672,24 @@ impl SequentialImpulseEngine {
                 b.velocity = v;
                 b.angular_velocity = w;
             } else {
-                let vn = b.velocity.dot(hit.normal);
-                if vn < 0.0 {
-                    // Inelastic below the shared restitution threshold; a
-                    // genuine impact bounces (one-shot, like the discrete
-                    // restitution stage).
-                    let bounce = if vn < -1.0 { 1.0 + e } else { 1.0 };
-                    b.velocity -= hit.normal * (bounce * vn);
+                // Two dynamics share the impact. A static or sleeping
+                // target stays on the historical mover-only update, which
+                // does not read the target velocity.
+                let target = hit.handle.index();
+                let target_dynamic = self.bodies[target].body_type == BodyType::Dynamic
+                    && self.bodies[target].inv_mass > 0.0;
+                let (dv_m, dv_t) = linear_ccd_deltas(
+                    self.bodies[h].velocity,
+                    self.bodies[target].velocity,
+                    self.bodies[h].inv_mass,
+                    self.bodies[target].inv_mass,
+                    hit.normal,
+                    e,
+                    target_dynamic,
+                );
+                self.bodies[h].velocity += dv_m;
+                if target_dynamic {
+                    self.bodies[target].velocity += dv_t;
                 }
             }
         }
