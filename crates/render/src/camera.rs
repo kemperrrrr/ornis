@@ -327,6 +327,26 @@ mod tests {
     }
 
     #[test]
+    fn from_desc_copies_typed_fov_clip_and_up() {
+        let desc = CameraDesc {
+            position: Vec3::new(2.5, 1.8, 3.5),
+            target: Vec3::Y,
+            up: UnitVec3::Z,
+            fov: Degrees::new(45.0),
+            near: Meters::new(0.25),
+            far: Meters::new(250.0),
+        };
+        let orbit = OrbitCamera::from_desc(&desc);
+        let (position, target, up, fov, near, far) = orbit.view_parameters();
+        assert!((position - desc.position).length() < 1e-4);
+        assert_eq!(target, desc.target);
+        assert_eq!(up, desc.up.get());
+        assert_eq!(fov, desc.fov.get());
+        assert_eq!(near, desc.near.get());
+        assert_eq!(far, desc.far.get());
+    }
+
+    #[test]
     fn looking_at_places_the_eye_and_names_the_defaults() {
         let eye = Vec3::new(2.5, 1.8, 3.5);
         let orbit = OrbitCamera::looking_at(eye, Vec3::Y).with_fov(Degrees(45.0));

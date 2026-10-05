@@ -1946,10 +1946,10 @@ mod tests {
             })
             .collect();
         let rig = crate::extraction::RenderLights {
-            ambient: [0.10, 0.10, 0.15],
+            ambient: ornis_core::Color::linear_rgb(0.10, 0.10, 0.15),
             lights,
-            ambient_intensity: 1.0,
-            exposure: 1.0,
+            ambient_intensity: ornis_core::Lux::new(1.0),
+            exposure: ornis_core::Lux::new(1.0),
         };
         let stats = rig.light_upload_stats();
         assert_eq!(stats.uploaded, 8, "{stats:?}");
@@ -1969,8 +1969,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("read {}: {e}", ron_path.display()));
         let scene = ornis_assets::scene::Scene::from_ron(&ron).expect("parse assets/scene.ron");
         let rig = crate::extraction::RenderLights::from_scene(&scene);
-        assert_eq!(rig.ambient_intensity, 1.0);
-        assert_eq!(rig.exposure, 1.0);
+        assert_eq!(rig.ambient_intensity, ornis_core::Lux::new(1.0));
+        assert_eq!(rig.exposure, ornis_core::Lux::new(1.0));
         // The demo scene fits the limits — the scene-load log stays quiet.
         let stats = rig.light_upload_stats();
         assert_eq!(stats.dropped_lights, 0, "{stats:?}");
