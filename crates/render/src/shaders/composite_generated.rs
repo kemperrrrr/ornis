@@ -91,6 +91,9 @@ pub const COMPOSITE_RESOURCES: [Resource; 4] = [
     },
 ];
 
+/// Group-0 `@binding` indices the UI composite fragment stage declares.
+const COMPOSITE_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3];
+
 /// WGSL bindings + quad constants + vertex/fragment entry points, assembled
 /// from Rust via the builder: constants and
 /// `srgb_to_linear::wgsl_source()` — the single `srgb_to_linear` in the
@@ -100,8 +103,9 @@ fn composite_wgsl_body() -> String {
     // entries. Entry points are `vs_main`/`fs_main` (unified ABI).
     ShaderModule::new()
         .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
-        .resources(&COMPOSITE_RESOURCES, &[0, 1, 2, 3])
+        .resources(&COMPOSITE_RESOURCES, COMPOSITE_FRAGMENT_BINDINGS)
         .consts(naga_ir::const_block(&COMPOSITE_QUAD, &COMPOSITE_UVS))
+        .consts(crate::shaders::math::wgsl_consts())
         .entry(vs_main::wgsl_source())
         // Kernel WGSL already contains `fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> { ... }`
         .helper(srgb_to_linear::wgsl_source())

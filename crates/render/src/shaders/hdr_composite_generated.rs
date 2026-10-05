@@ -49,6 +49,9 @@ pub fn wgsl_vertex_source() -> String {
         .emit()
 }
 
+/// Group-0 `@binding` indices the HDR composite fragment stage declares.
+const HDR_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4];
+
 /// HDR composite fragment shader: deferred/forward layer mix + bloom.
 ///
 /// Assembled from the derived `Camera`/`BloomParams` layouts, the shared
@@ -58,8 +61,9 @@ pub fn wgsl_source() -> String {
     ShaderModule::new()
         .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
         .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
-        .resources(&HDR_RESOURCES, &[0, 1, 2, 3, 4])
+        .resources(&HDR_RESOURCES, HDR_FRAGMENT_BINDINGS)
         .consts(vertex_quad())
+        .consts(crate::shaders::math::wgsl_consts())
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .entry(fs_main::wgsl_source())
         .helpers([aces_tonemap::wgsl_source(), luminance::wgsl_source()])

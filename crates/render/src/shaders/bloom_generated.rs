@@ -28,6 +28,18 @@ fn vs_main(
     };
 }
 
+/// Width of the bloom bright-pass soft knee, added above the luminance threshold.
+pub const BLOOM_SOFT_KNEE: f32 = 0.05;
+
+/// WGSL declaration of [`BLOOM_SOFT_KNEE`], bit-exact with the Rust constant.
+fn bloom_knee_const() -> String {
+    format!(
+        "const {}: f32 = {};\n",
+        stringify!(BLOOM_SOFT_KNEE),
+        super::f32_lit(BLOOM_SOFT_KNEE)
+    )
+}
+
 /// Bloom fragment entry, translated by [`stage`](ornis_macros::stage):
 /// bright-pass reselection. DSL-only — resource bundle
 /// (`ctx: BloomContext`).
@@ -48,7 +60,7 @@ fn fs_main(input: BloomVertexOutput, ctx: Context<BloomContext>) -> super::Locat
     let luma = luminance(color);
     let keep = smoothstep(
         ctx.bloom_params.threshold,
-        ctx.bloom_params.threshold + 0.05,
+        ctx.bloom_params.threshold + BLOOM_SOFT_KNEE,
         luma,
     );
     return glam::Vec4::new(color * keep, 1.0);
@@ -94,6 +106,8 @@ fn bloom_wgsl_body() -> String {
         .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
         .resources(&BLOOM_RESOURCES, &[0, 1, 2])
         .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
+        .consts(crate::shaders::math::wgsl_consts())
+        .consts(bloom_knee_const())
         .decl(wgsl_decl(BloomVertexOutput::WGSL_SOURCE))
         .entry(vs_main::wgsl_source())
         .helper(luminance::wgsl_source())

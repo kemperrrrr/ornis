@@ -17,21 +17,133 @@ pub const INV_PI: f32 = 1.0 / PI;
 /// Small epsilon guarding divisions and sqrt arguments in the kernels.
 pub const EPS: f32 = 1e-6;
 
+/// Rec.709 (ITU-R BT.709) luma weight for linear red.
+pub const REC709_LUMA_R: f32 = 0.2126;
+/// Rec.709 (ITU-R BT.709) luma weight for linear green.
+pub const REC709_LUMA_G: f32 = 0.7152;
+/// Rec.709 (ITU-R BT.709) luma weight for linear blue.
+pub const REC709_LUMA_B: f32 = 0.0722;
+
+/// Narkowicz ACES filmic-fit coefficient `a` (the quadratic numerator).
+pub const ACES_FIT_A: f32 = 2.51;
+/// Narkowicz ACES filmic-fit coefficient `b` (the linear numerator).
+pub const ACES_FIT_B: f32 = 0.03;
+/// Narkowicz ACES filmic-fit coefficient `c` (the quadratic denominator).
+pub const ACES_FIT_C: f32 = 2.43;
+/// Narkowicz ACES filmic-fit coefficient `d` (the linear denominator).
+pub const ACES_FIT_D: f32 = 0.59;
+/// Narkowicz ACES filmic-fit coefficient `e` (the constant denominator).
+pub const ACES_FIT_E: f32 = 0.14;
+
+/// Exponent of the Schlick Fresnel term, `(1 - cos θ)^5`.
+pub const SCHLICK_FRESNEL_POWER: f32 = 5.0;
+/// Cosine at which the F82-tint Fresnel correction is pinned (`1/7`, about 82°).
+pub const F82_PIVOT_COSINE: f32 = 1.0 / 7.0;
+/// Exponent of the F82 correction lobe, `cos θ · (1 - cos θ)^6`.
+pub const F82_CORRECTION_POWER: f32 = 6.0;
+
+/// Leading scale of the height-correlated Smith GGX visibility term.
+pub const SMITH_GGX_VISIBILITY_SCALE: f32 = 0.5;
+/// Numerator of the Oren–Nayar `A` roughness fit (`1 - 0.5 σ² / (σ² + 0.57)`).
+pub const OREN_NAYAR_A_NUMERATOR: f32 = 0.5;
+/// Offset inside the Oren–Nayar `A` roughness fit.
+pub const OREN_NAYAR_A_OFFSET: f32 = 0.57;
+/// Numerator of the Oren–Nayar `B` roughness fit.
+pub const OREN_NAYAR_B_NUMERATOR: f32 = 0.45;
+/// Offset inside the Oren–Nayar `B` roughness fit.
+pub const OREN_NAYAR_B_OFFSET: f32 = 0.09;
+
+/// Denominator scale of a microfacet specular lobe (`4 NoV NoL`).
+pub const MICROFACET_SPECULAR_SCALE: f32 = 4.0;
+/// Floor on a color channel before a logarithm or a reciprocal.
+pub const COLOR_CHANNEL_FLOOR: f32 = 1e-6;
+/// Factor under the square root of the subsurface diffusion profile (`√3 / radius`).
+pub const SUBSURFACE_DIFFUSION: f32 = 3.0;
+/// Half in the law of cosines that recovers the tangent-plane view·light dot
+/// from the chord `distance` (`(‖V‖² + ‖L‖² − d²) / 2`).
+pub const LAW_OF_COSINES_HALF: f32 = 0.5;
+
+/// IEC 61966-2-1 cutoff: sRGB channels at or below this decode linearly.
+pub const SRGB_LINEAR_CUTOFF: f32 = 0.04045;
+/// Slope of the linear segment of the sRGB inverse transfer (`c / 12.92`).
+pub const SRGB_LINEAR_SLOPE: f32 = 12.92;
+/// Offset inside the sRGB power segment (`(c + 0.055) / 1.055`).
+pub const SRGB_OFFSET: f32 = 0.055;
+/// Scale of the sRGB power segment.
+pub const SRGB_SCALE: f32 = 1.055;
+/// Exponent of the sRGB power segment.
+pub const SRGB_GAMMA: f32 = 2.4;
+
+/// Representative red wavelength (nanometers) of the thin-film modulation.
+pub const THIN_FILM_WAVELENGTH_R_NM: f32 = 650.0;
+/// Representative green wavelength (nanometers) of the thin-film modulation.
+pub const THIN_FILM_WAVELENGTH_G_NM: f32 = 550.0;
+/// Representative blue wavelength (nanometers) of the thin-film modulation.
+pub const THIN_FILM_WAVELENGTH_B_NM: f32 = 450.0;
+/// Optical-path cycles in the thin-film phase (`4 π n d cos / λ`).
+pub const THIN_FILM_PHASE_CYCLES: f32 = 4.0;
+
+/// WGSL `const` block for the kernel coefficients above.
+///
+/// Names travel via `stringify!` and values via [`f32_lit`](super::f32_lit),
+/// so a rename or a bit-exact tweak cannot drift from the Rust constants.
+/// Every shader that splices a kernel referencing these names must splice
+/// this block too (`PI` / `EPS` / `INV_PI` stay in [`super::helpers::wgsl_consts`]).
+pub fn wgsl_consts() -> String {
+    macro_rules! decl {
+        ($name:ident) => {
+            format!(
+                "const {}: f32 = {};\n",
+                stringify!($name),
+                super::f32_lit($name)
+            )
+        };
+    }
+    [
+        decl!(REC709_LUMA_R),
+        decl!(REC709_LUMA_G),
+        decl!(REC709_LUMA_B),
+        decl!(ACES_FIT_A),
+        decl!(ACES_FIT_B),
+        decl!(ACES_FIT_C),
+        decl!(ACES_FIT_D),
+        decl!(ACES_FIT_E),
+        decl!(SCHLICK_FRESNEL_POWER),
+        decl!(F82_PIVOT_COSINE),
+        decl!(F82_CORRECTION_POWER),
+        decl!(SMITH_GGX_VISIBILITY_SCALE),
+        decl!(OREN_NAYAR_A_NUMERATOR),
+        decl!(OREN_NAYAR_A_OFFSET),
+        decl!(OREN_NAYAR_B_NUMERATOR),
+        decl!(OREN_NAYAR_B_OFFSET),
+        decl!(MICROFACET_SPECULAR_SCALE),
+        decl!(COLOR_CHANNEL_FLOOR),
+        decl!(SUBSURFACE_DIFFUSION),
+        decl!(LAW_OF_COSINES_HALF),
+        decl!(SRGB_LINEAR_CUTOFF),
+        decl!(SRGB_LINEAR_SLOPE),
+        decl!(SRGB_OFFSET),
+        decl!(SRGB_SCALE),
+        decl!(SRGB_GAMMA),
+        decl!(THIN_FILM_WAVELENGTH_R_NM),
+        decl!(THIN_FILM_WAVELENGTH_G_NM),
+        decl!(THIN_FILM_WAVELENGTH_B_NM),
+        decl!(THIN_FILM_PHASE_CYCLES),
+    ]
+    .concat()
+}
+
 /// Rec.709 relative luminance of a linear RGB color.
 #[kernel]
 fn luminance(c: glam::Vec3) -> f32 {
-    c.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722))
+    c.dot(glam::Vec3::new(REC709_LUMA_R, REC709_LUMA_G, REC709_LUMA_B))
 }
 
 /// ACES filmic tone-mapping curve (Narkowicz approximation), HDR -> LDR.
 #[kernel]
 fn aces_tonemap(color: glam::Vec3) -> glam::Vec3 {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    color * (a * color + b) / (color * (c * color + d) + e)
+    color * (ACES_FIT_A * color + ACES_FIT_B)
+        / (color * (ACES_FIT_C * color + ACES_FIT_D) + ACES_FIT_E)
 }
 
 /// Normal-incidence Fresnel reflectance F0 from an index of refraction.
@@ -65,13 +177,13 @@ fn evaluate_ibl(
 /// Scalar Schlick approximation of the Fresnel term (`cos_theta` = NoV or NoL).
 #[kernel]
 fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
-    f0 + (1.0 - f0) * (1.0 - cos_theta).powf(5.0)
+    f0 + (1.0 - f0) * (1.0 - cos_theta).powf(SCHLICK_FRESNEL_POWER)
 }
 
 /// RGB Schlick Fresnel with spectral F0 (metals).
 #[kernel]
 fn fresnel_schlick_vec(cos_theta: f32, f0: glam::Vec3) -> glam::Vec3 {
-    f0 + (glam::Vec3::splat(1.0) - f0) * (1.0 - cos_theta).powf(5.0)
+    f0 + (glam::Vec3::splat(1.0) - f0) * (1.0 - cos_theta).powf(SCHLICK_FRESNEL_POWER)
 }
 
 /// Holzschuch--Pacanowsky "F82 tint" Fresnel: Schlick plus a correction
@@ -79,13 +191,15 @@ fn fresnel_schlick_vec(cos_theta: f32, f0: glam::Vec3) -> glam::Vec3 {
 /// metal data better than plain Schlick.
 #[kernel]
 fn fresnel_f82_tint(cos_theta: f32, f0: glam::Vec3, f82_tint: glam::Vec3) -> glam::Vec3 {
-    let mu_bar = 1.0 / 7.0;
-    let schlick_at_mu_bar = f0 + (glam::Vec3::splat(1.0) - f0) * (1.0_f32 - mu_bar).powf(5.0);
+    let mu_bar = F82_PIVOT_COSINE;
+    let schlick_at_mu_bar =
+        f0 + (glam::Vec3::splat(1.0) - f0) * (1.0_f32 - mu_bar).powf(SCHLICK_FRESNEL_POWER);
     let f82 = f82_tint * schlick_at_mu_bar;
-    let numerator = cos_theta * (1.0_f32 - cos_theta).powf(6.0);
-    let denominator = mu_bar * (1.0_f32 - mu_bar).powf(6.0);
+    let numerator = cos_theta * (1.0_f32 - cos_theta).powf(F82_CORRECTION_POWER);
+    let denominator = mu_bar * (1.0_f32 - mu_bar).powf(F82_CORRECTION_POWER);
     let scale = numerator / denominator;
-    let f_schlick = f0 + (glam::Vec3::splat(1.0) - f0) * (1.0 - cos_theta).powf(5.0);
+    let f_schlick =
+        f0 + (glam::Vec3::splat(1.0) - f0) * (1.0 - cos_theta).powf(SCHLICK_FRESNEL_POWER);
     let f82_correction = f_schlick - glam::Vec3::splat(scale) * (schlick_at_mu_bar - f82);
     f82_correction.max(glam::Vec3::splat(0.0))
 }
@@ -142,7 +256,7 @@ fn smith_ggx_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
     let a2 = alpha * alpha;
     let ggxv = NoV * (NoL * NoL * (1.0 - a2) + a2).max(EPS).sqrt();
     let ggxl = NoL * (NoV * NoV * (1.0 - a2) + a2).max(EPS).sqrt();
-    0.5 / (ggxv + ggxl).max(EPS)
+    SMITH_GGX_VISIBILITY_SCALE / (ggxv + ggxl).max(EPS)
 }
 
 /// Height-correlated Smith GGX visibility for anisotropic distributions.
@@ -165,7 +279,7 @@ fn smith_ggx_aniso(
     let a2v = alpha_v * alpha_v;
     let ggxv = NoV * (Lu * Lu * a2u + Lv * Lv * a2v + NoL * NoL).max(EPS).sqrt();
     let ggxl = NoL * (Vu * Vu * a2u + Vv * Vv * a2v + NoV * NoV).max(EPS).sqrt();
-    0.5 / (ggxv + ggxl).max(EPS)
+    SMITH_GGX_VISIBILITY_SCALE / (ggxv + ggxl).max(EPS)
 }
 
 /// Oren--Nayar diffuse BRDF (`alpha` = roughness sigma), normalized by 1/PI.
@@ -173,8 +287,8 @@ fn smith_ggx_aniso(
 fn oren_nayar_brdf(NoV: f32, NoL: f32, cos_phi: f32, alpha: f32) -> f32 {
     let sigma = alpha.max(EPS);
     let sigma2 = sigma * sigma;
-    let A = 1.0 - 0.5 * sigma2 / (sigma2 + 0.57);
-    let B = 0.45 * sigma2 / (sigma2 + 0.09);
+    let A = 1.0 - OREN_NAYAR_A_NUMERATOR * sigma2 / (sigma2 + OREN_NAYAR_A_OFFSET);
+    let B = OREN_NAYAR_B_NUMERATOR * sigma2 / (sigma2 + OREN_NAYAR_B_OFFSET);
     let theta_v = NoV.max(0.0).acos();
     let theta_l = NoL.max(0.0).acos();
     let alpha_max = theta_v.max(theta_l);
@@ -224,7 +338,7 @@ fn coated_emission(
         return glam::Vec3::ZERO;
     }
     let base_emission = emission_color * emission_luminance;
-    let coat_fresnel = (1.0 - nov).powf(5.0);
+    let coat_fresnel = (1.0 - nov).powf(SCHLICK_FRESNEL_POWER);
     let transmit = (1.0 - coat_fresnel) * coat_weight + (1.0 - coat_weight);
     let coat_emission = coat_color * base_emission * transmit;
     base_emission.lerp(coat_emission, coat_weight)
@@ -237,7 +351,7 @@ fn sheen_brdf(NoV: f32, NoL: f32, NoH: f32, VoH: f32, roughness: f32) -> f32 {
     let D = alpha / (PI * (NoH * NoH * (alpha - 1.0) + 1.0).powf(2.0));
     let G = 1.0 / (1.0 + alpha * (1.0 / NoV + 1.0 / NoL - 2.0));
     let F = VoH;
-    D * G * F / (4.0 * NoV * NoL).max(EPS)
+    D * G * F / (MICROFACET_SPECULAR_SCALE * NoV * NoL).max(EPS)
 }
 
 /// Convert transmission tint + thickness into a Beer--Lambert extinction
@@ -250,7 +364,7 @@ fn transmission_color_to_extinction(
     if transmission_depth <= 0.0 {
         return glam::Vec3::splat(0.0);
     }
-    let c = transmission_color.max(glam::Vec3::splat(1e-6));
+    let c = transmission_color.max(glam::Vec3::splat(COLOR_CHANNEL_FLOOR));
     -c.ln() / transmission_depth
 }
 
@@ -270,11 +384,11 @@ fn subsurface_brdf(
     radius: glam::Vec3,
     anisotropy: f32,
 ) -> glam::Vec3 {
-    let sigma_tr = 3.0_f32.sqrt() / radius.max(glam::Vec3::splat(EPS));
+    let sigma_tr = SUBSURFACE_DIFFUSION.sqrt() / radius.max(glam::Vec3::splat(EPS));
     let profile = (-distance * sigma_tr).exp();
     let v_len2 = (1.0 - NoV * NoV).max(0.0);
     let l_len2 = (1.0 - NoL * NoL).max(0.0);
-    let tangent_dot = (v_len2 + l_len2 - distance * distance) * 0.5;
+    let tangent_dot = (v_len2 + l_len2 - distance * distance) * LAW_OF_COSINES_HALF;
     let cos_scatter = (NoV * NoL + tangent_dot).clamp(-1.0, 1.0);
     let phase = (1.0 + anisotropy * cos_scatter).max(0.0);
     profile * phase * INV_PI
@@ -283,21 +397,21 @@ fn subsurface_brdf(
 /// Decode sRGB-encoded RGB to linear light (piecewise IEC 61966-2-1 OETF inverse).
 #[kernel]
 fn srgb_to_linear(c: glam::Vec3) -> glam::Vec3 {
-    let cutoff = 0.04045;
+    let cutoff = SRGB_LINEAR_CUTOFF;
     let r = if c.x <= cutoff {
-        c.x / 12.92
+        c.x / SRGB_LINEAR_SLOPE
     } else {
-        ((c.x + 0.055) / 1.055).powf(2.4)
+        ((c.x + SRGB_OFFSET) / SRGB_SCALE).powf(SRGB_GAMMA)
     };
     let g = if c.y <= cutoff {
-        c.y / 12.92
+        c.y / SRGB_LINEAR_SLOPE
     } else {
-        ((c.y + 0.055) / 1.055).powf(2.4)
+        ((c.y + SRGB_OFFSET) / SRGB_SCALE).powf(SRGB_GAMMA)
     };
     let b = if c.z <= cutoff {
-        c.z / 12.92
+        c.z / SRGB_LINEAR_SLOPE
     } else {
-        ((c.z + 0.055) / 1.055).powf(2.4)
+        ((c.z + SRGB_OFFSET) / SRGB_SCALE).powf(SRGB_GAMMA)
     };
     glam::Vec3::new(r, g, b)
 }
@@ -327,7 +441,8 @@ fn coat_base_darkening(
     let one_minus_Kcoat = 1.0 - Kcoat;
     let one_minus_Ebase_Kcoat = glam::Vec3::splat(1.0) - Ebase_Kcoat;
 
-    glam::Vec3::splat(one_minus_Kcoat) / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(1e-6))
+    glam::Vec3::splat(one_minus_Kcoat)
+        / one_minus_Ebase_Kcoat.max(glam::Vec3::splat(COLOR_CHANNEL_FLOOR))
 }
 
 /// Coat darkening, part 2: identity when the coat is off, otherwise blend
@@ -356,8 +471,12 @@ fn thin_film_modulation(
 ) -> glam::Vec3 {
     let sin_theta_film = ior_outside * (1.0 - cos_theta * cos_theta).max(0.0).sqrt() / film_ior;
     let cos_theta_film = (1.0 - sin_theta_film * sin_theta_film).max(0.0).sqrt();
-    let lambda = glam::Vec3::new(650.0, 550.0, 450.0);
-    let phase = 4.0 * PI * film_ior * thickness_nm * cos_theta_film / lambda;
+    let lambda = glam::Vec3::new(
+        THIN_FILM_WAVELENGTH_R_NM,
+        THIN_FILM_WAVELENGTH_G_NM,
+        THIN_FILM_WAVELENGTH_B_NM,
+    );
+    let phase = THIN_FILM_PHASE_CYCLES * PI * film_ior * thickness_nm * cos_theta_film / lambda;
     let r0 = ((film_ior - ior_outside) / (film_ior + ior_outside)).powf(2.0);
 
     glam::Vec3::splat(1.0)
@@ -673,5 +792,195 @@ mod tests {
             assert!(src.starts_with("fn "), "bad source: {src}");
             assert!(src.contains("->"), "missing return type: {src}");
         }
+    }
+
+    fn assert_valid_wgsl(name: &str, source: &str) {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{name} must parse: {e}"));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name} must validate: {e}"));
+    }
+
+    /// Named coefficients are the same f32 bits as the historical literals,
+    /// and the CPU kernels still evaluate those formulas bit-exactly.
+    #[test]
+    fn named_coefficients_match_historical_literals() {
+        assert_eq!(REC709_LUMA_R.to_bits(), 0.2126_f32.to_bits());
+        assert_eq!(REC709_LUMA_G.to_bits(), 0.7152_f32.to_bits());
+        assert_eq!(REC709_LUMA_B.to_bits(), 0.0722_f32.to_bits());
+        assert_eq!(ACES_FIT_A.to_bits(), 2.51_f32.to_bits());
+        assert_eq!(ACES_FIT_B.to_bits(), 0.03_f32.to_bits());
+        assert_eq!(ACES_FIT_C.to_bits(), 2.43_f32.to_bits());
+        assert_eq!(ACES_FIT_D.to_bits(), 0.59_f32.to_bits());
+        assert_eq!(ACES_FIT_E.to_bits(), 0.14_f32.to_bits());
+        assert_eq!(SRGB_LINEAR_CUTOFF.to_bits(), 0.04045_f32.to_bits());
+        assert_eq!(SRGB_LINEAR_SLOPE.to_bits(), 12.92_f32.to_bits());
+        assert_eq!(SRGB_OFFSET.to_bits(), 0.055_f32.to_bits());
+        assert_eq!(SRGB_SCALE.to_bits(), 1.055_f32.to_bits());
+        assert_eq!(SRGB_GAMMA.to_bits(), 2.4_f32.to_bits());
+        assert_eq!(F82_PIVOT_COSINE.to_bits(), (1.0_f32 / 7.0_f32).to_bits());
+        assert_eq!(COLOR_CHANNEL_FLOOR.to_bits(), 1e-6_f32.to_bits());
+        assert_eq!(THIN_FILM_WAVELENGTH_R_NM.to_bits(), 650.0_f32.to_bits());
+        assert_eq!(THIN_FILM_WAVELENGTH_G_NM.to_bits(), 550.0_f32.to_bits());
+        assert_eq!(THIN_FILM_WAVELENGTH_B_NM.to_bits(), 450.0_f32.to_bits());
+
+        let probes = [
+            glam::Vec3::ZERO,
+            glam::Vec3::ONE,
+            glam::Vec3::new(1.0, 0.0, 0.0),
+            glam::Vec3::new(0.2, 0.5, 0.8),
+            glam::Vec3::new(4.0, 0.25, 0.01),
+        ];
+        for c in probes {
+            let historical_luma = c.dot(glam::Vec3::new(0.2126, 0.7152, 0.0722));
+            assert_eq!(luminance::eval(c).to_bits(), historical_luma.to_bits());
+
+            let a = 2.51_f32;
+            let b = 0.03_f32;
+            let cc = 2.43_f32;
+            let d = 0.59_f32;
+            let e = 0.14_f32;
+            let historical_aces = c * (a * c + b) / (c * (cc * c + d) + e);
+            let aces = aces_tonemap::eval(c);
+            assert_eq!(aces.x.to_bits(), historical_aces.x.to_bits());
+            assert_eq!(aces.y.to_bits(), historical_aces.y.to_bits());
+            assert_eq!(aces.z.to_bits(), historical_aces.z.to_bits());
+
+            let historical_srgb =
+                glam::Vec3::new(srgb_channel(c.x), srgb_channel(c.y), srgb_channel(c.z));
+            assert_eq!(srgb_to_linear::eval(c), historical_srgb);
+        }
+    }
+
+    fn srgb_channel(channel: f32) -> f32 {
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Kernel WGSL names the coefficients, and the const block spells each
+    /// one with the bit-exact `f32_lit` decimal. Stitching that block in
+    /// front of every kernel (plus `PI`/`EPS`/`INV_PI`) still validates.
+    #[test]
+    fn kernel_wgsl_is_numerically_equivalent() {
+        let block = wgsl_consts();
+        for name in [
+            REC709_LUMA_R,
+            ACES_FIT_A,
+            SCHLICK_FRESNEL_POWER,
+            SMITH_GGX_VISIBILITY_SCALE,
+            SRGB_LINEAR_CUTOFF,
+            THIN_FILM_PHASE_CYCLES,
+            COLOR_CHANNEL_FLOOR,
+        ] {
+            let spelling = super::super::f32_lit(name);
+            assert!(
+                block.contains(&format!(" = {spelling};")),
+                "missing bit-exact spelling {spelling} in {block}"
+            );
+        }
+        let luma = luminance::wgsl_source();
+        assert!(luma.contains("REC709_LUMA_R"));
+        assert!(!luma.contains("0.2126"));
+        let aces = aces_tonemap::wgsl_source();
+        assert!(aces.contains("ACES_FIT_A"));
+        assert!(!aces.contains("2.51"));
+        let srgb = srgb_to_linear::wgsl_source();
+        assert!(srgb.contains("SRGB_LINEAR_CUTOFF"));
+        assert!(!srgb.contains("0.04045"));
+
+        let header = format!("{}\n{}", crate::shaders::helpers::wgsl_consts(), block);
+        let kernels = [
+            luminance::wgsl_source(),
+            aces_tonemap::wgsl_source(),
+            fresnel_schlick::wgsl_source(),
+            fresnel_f82_tint::wgsl_source(),
+            smith_ggx_correlated::wgsl_source(),
+            oren_nayar_brdf::wgsl_source(),
+            sheen_brdf::wgsl_source(),
+            transmission_color_to_extinction::wgsl_source(),
+            subsurface_brdf::wgsl_source(),
+            srgb_to_linear::wgsl_source(),
+            coat_base_darkening::wgsl_source(),
+            thin_film_modulation::wgsl_source(),
+            ggx_ndf::wgsl_source(),
+        ];
+        for src in kernels {
+            assert_valid_wgsl("kernel", &format!("{header}\n{src}"));
+        }
+    }
+
+    /// Passes that splice a kernel also splice the coefficient block, and
+    /// the assembled WGSL still validates.
+    #[test]
+    fn coefficient_block_is_spliced_into_shader_passes() {
+        let decl = format!(
+            "const REC709_LUMA_R: f32 = {};",
+            super::super::f32_lit(REC709_LUMA_R)
+        );
+        let srgb_decl = format!(
+            "const SRGB_LINEAR_CUTOFF: f32 = {};",
+            super::super::f32_lit(SRGB_LINEAR_CUTOFF)
+        );
+        let passes = [
+            (
+                "bloom",
+                crate::shaders::bloom_generated::wgsl_source(),
+                true,
+            ),
+            (
+                "hdr",
+                crate::shaders::hdr_composite_generated::wgsl_source(),
+                true,
+            ),
+            ("pbr", crate::shaders::pbr_generated::wgsl_source(), true),
+            (
+                "lighting",
+                crate::shaders::lighting_generated::wgsl_source(),
+                true,
+            ),
+            (
+                "textured",
+                crate::shaders::material_textures::wgsl_source_textured(),
+                true,
+            ),
+            (
+                "composite",
+                crate::shaders::composite_generated::wgsl_source(),
+                false,
+            ),
+        ];
+        for (name, src, wants_luma) in passes {
+            if wants_luma {
+                assert!(src.contains(&decl), "{name} missing {decl}");
+            } else {
+                assert!(src.contains(&srgb_decl), "{name} missing {srgb_decl}");
+            }
+            assert_valid_wgsl(name, &src);
+        }
+        let bloom = crate::shaders::bloom_generated::wgsl_source();
+        assert!(bloom.contains(&format!(
+            "const BLOOM_SOFT_KNEE: f32 = {};",
+            super::super::f32_lit(crate::shaders::bloom_generated::BLOOM_SOFT_KNEE)
+        )));
+        let pbr = crate::shaders::pbr_generated::wgsl_source();
+        assert!(pbr.contains("const POINT_OR_SPOT_KIND_EDGE: f32"));
+        assert!(pbr.contains("const SHADOW_CUBE_NEAR: f32"));
+        // Fog replaces the composite on the swapchain and runs the same
+        // ACES kernel, so it needs the coefficient block too.
+        let fog = crate::shaders::fog_generated::wgsl_source();
+        let aces_decl = format!(
+            "const ACES_FIT_A: f32 = {};",
+            super::super::f32_lit(ACES_FIT_A)
+        );
+        assert!(fog.contains(&aces_decl), "fog missing {aces_decl}");
+        assert_valid_wgsl("fog", &fog);
     }
 }
