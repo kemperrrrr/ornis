@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-glam = "0.33"
+glam = "0.34"
 ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 rayon = "1.12"
@@ -27,7 +27,7 @@ gpu = ["dep:bytemuck", "dep:naga"]
 # Shootout backend feature names kept for check-cfg + a later restore.
 # Optional `rapier3d` / `boxddd` deps are temporarily omitted: their lockfile
 # pull of nalgebra convert-glam030/031/032 makes `cargo outdated --workspace`
-# fail the hard gate (Project 0.30/0.31/0.32 while Latest is 0.33). Enabling
+# fail the hard gate (Project 0.30/0.31/0.32 while Latest is 0.34). Enabling
 # these features without re-adding the deps will not compile the backends.
 rapier = []
 box3d = []

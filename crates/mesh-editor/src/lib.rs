@@ -6,7 +6,7 @@
 //! the Manifold geometry library) — this crate only owns the Ornis side:
 //! canonical data, edit operations, the FFI-shape bridge and frame budgets.
 //!
-//! Provenance: `manifold-rust 0.15`, Apache-2.0, crates.io only
+//! Provenance: `manifold-rust 0.16`, Apache-2.0, crates.io only
 //! (workspace forbids git sources),
 //! upstream `https://github.com/larsbrubaker/manifold-rust`
 //! (port of `https://github.com/elalish/manifold`).

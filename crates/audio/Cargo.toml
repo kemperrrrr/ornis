@@ -11,7 +11,7 @@ ornis-gameplay = { path = "../gameplay" }
 cpal = "0.18"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "ogg", "mp3", "flac", "pcm"] }
 crossbeam-channel = "0.5"
-glam = "0.33"
+glam = "0.34"
 # Typed decoder errors (`thiserror::Error` on `DecodeError`).
 thiserror = "2.0"
 

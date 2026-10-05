@@ -9,7 +9,7 @@ license.workspace = true
 ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
 ornis-gameplay = { path = "../gameplay" }
-glam = "0.33"
+glam = "0.34"
 # Phase D: typed skinning errors (`SkinError` derives).
 thiserror = "2.0"
 

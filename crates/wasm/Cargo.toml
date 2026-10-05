@@ -36,7 +36,7 @@ web-sys = { version = "0.3", features = [
 ] }
 console_error_panic_hook = "0.1"
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.33"
+glam = "0.34"
 ornis-render = { path = "../render" }
 ornis-assets = { path = "../assets" }
 ornis-core = { path = "../core" }
