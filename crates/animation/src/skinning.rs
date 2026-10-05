@@ -10,10 +10,9 @@
 //! [`SkinError`] (the fallible build verdict).
 //!
 //! CPU-vs-GPU parity is approximate, never bit-identical: both sides use
-//! `f32` linear blend skinning over the same canonicalized weights, but the
-//! GPU normal path uses the joint linear part while the CPU path uses the
-//! inverse-transpose 3x3 (exact match for rigid/uniform-scale joints only),
-//! and driver FMA fusion may move the last ulp. Callers assert
+//! `f32` linear blend skinning over the same canonicalized weights and the
+//! same per-joint inverse-transpose for normals (identity when the joint is
+//! degenerate). Driver FMA fusion may still move the last ulp. Callers assert
 //! [`CPU_GPU_TOLERANCE`], not equality.
 
 use glam::{Mat4, Vec3};
@@ -94,7 +93,8 @@ impl From<JointCount> for usize {
 pub struct JointLimit(u32);
 
 impl JointLimit {
-    /// GPU palette capacity: 128 joints (64 bytes each, 8 KiB per palette).
+    /// GPU palette capacity: 128 joints. Each slot stores the skin matrix
+    /// and its inverse-transpose (see `ornis-render` `SkinJoint`).
     pub const GPU: Self = Self(128);
 
     /// Raw limit.
@@ -224,17 +224,25 @@ impl SkinningResources {
     }
 }
 
+/// Inverse-transpose of one joint, packed as a 4×4 direction matrix.
+///
+/// Degenerate (singular or non-finite) joints return identity — the same
+/// fallback as [`crate::skin_vertices`] — so a zero bone scale does not
+/// emit a NaN normal. The GPU palette stores this beside the skin matrix.
+pub fn joint_normal_matrix(joint: &Mat4) -> Mat4 {
+    Mat4::from_mat3(crate::normal_part(joint))
+}
+
 /// Reference blend of one vertex with the GPU-path formula: weighted
-/// `palette * vec4(position, 1)` for positions, weighted joint-linear-part
-/// transform for normals (renormalized unless the blend collapses).
+/// `palette * vec4(position, 1)` for positions, weighted inverse-transpose
+/// for normals (renormalized unless the blend collapses).
 ///
 /// This is the CPU mirror the vertex stage is pinned against: same weight
 /// canonicalization as [`crate::skin_vertices`] (finite positive sums
-/// normalize, otherwise full weight on joint 0) and out-of-range indices
-/// read as identity. It deliberately differs from [`crate::skin_vertices`]
-/// on normals (inverse-transpose there, linear part here): the two agree
-/// exactly for rigid/uniform-scale joints and drift within
-/// [`CPU_GPU_TOLERANCE`] otherwise — the documented parity допуск.
+/// normalize, otherwise full weight on joint 0), the same per-joint
+/// inverse-transpose, and out-of-range indices read as identity. The two
+/// agree within [`CPU_GPU_TOLERANCE`] for rigid, uniform, and non-uniform
+/// bone scale; a zero scale falls back to an unrotated normal on both sides.
 pub fn blend_vertex_reference(
     palette: &[Mat4],
     joints: [u16; 4],
@@ -253,7 +261,7 @@ pub fn blend_vertex_reference(
             .copied()
             .unwrap_or(Mat4::IDENTITY);
         blended_position += joint.transform_point3(vertex) * weights[slot];
-        blended_normal += joint.transform_vector3(direction) * weights[slot];
+        blended_normal += joint_normal_matrix(&joint).transform_vector3(direction) * weights[slot];
     }
     let position = blended_position.to_array();
     let normal = if blended_normal.length_squared() > DEGENERATE_LEN2 {
@@ -407,5 +415,73 @@ mod tests {
             [0.0, 1.0, 0.0],
         );
         assert!((Vec3::from_array(position) - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-6);
+    }
+
+    #[test]
+    fn non_uniform_bone_scale_uses_inverse_transpose() {
+        let scale = Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0));
+        let normal = Vec3::new(1.0, 1.0, 0.0).normalize().to_array();
+        let blended = blend_vertex_reference(
+            &[scale],
+            [0, 0, 0, 0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            normal,
+        );
+        let skinned = crate::skin_vertices(
+            &[scale],
+            &[[0, 0, 0, 0]],
+            &[[1.0, 0.0, 0.0, 0.0]],
+            &[[1.0, 0.0, 0.0]],
+            &[normal],
+        );
+        expect_non_uniform_normals(blended, skinned);
+        let uniform = blend_vertex_reference(
+            &[Mat4::from_scale(Vec3::splat(2.0))],
+            [0, 0, 0, 0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        );
+        expect_unit_axis(uniform.1, Vec3::Y);
+        let zero = blend_vertex_reference(
+            &[Mat4::from_scale(Vec3::ZERO)],
+            [0, 0, 0, 0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        );
+        expect_unit_axis(zero.1, Vec3::Z);
+    }
+
+    fn expect_non_uniform_normals(
+        blended: ([f32; 3], [f32; 3]),
+        skinned: (Vec<[f32; 3]>, Vec<[f32; 3]>),
+    ) {
+        let expected = Vec3::new(1.0, 2.0, 0.0).normalize();
+        let linear = Vec3::new(2.0, 1.0, 0.0).normalize();
+        let got = Vec3::from_array(blended.1);
+        assert!(
+            (got - expected).length() < CPU_GPU_TOLERANCE,
+            "inverse-transpose normal drifted"
+        );
+        assert!(
+            (got - linear).length() > CPU_GPU_TOLERANCE,
+            "linear-part normal must not pass"
+        );
+        assert!(
+            (Vec3::from_array(blended.0) - Vec3::new(2.0, 0.0, 0.0)).length() < CPU_GPU_TOLERANCE
+        );
+        assert!(
+            (Vec3::from_array(skinned.0[0]) - Vec3::from_array(blended.0)).length()
+                < CPU_GPU_TOLERANCE
+        );
+        assert!((Vec3::from_array(skinned.1[0]) - got).length() < CPU_GPU_TOLERANCE);
+    }
+
+    fn expect_unit_axis(normal: [f32; 3], axis: Vec3) {
+        let got = Vec3::from_array(normal);
+        assert!(got.is_finite());
+        assert!((got - axis).length() < CPU_GPU_TOLERANCE);
     }
 }

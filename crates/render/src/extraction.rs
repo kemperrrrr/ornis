@@ -2278,8 +2278,8 @@ mod tests {
         // Cpu-draw vs Gpu-draw parity at the entry level: the staged bind
         // data blended through the GPU reference formula lands within
         // `CPU_GPU_TOLERANCE` of the CPU skin output for a rigid palette
-        // (normals: linear part vs inverse-transpose coincide on rigid
-        // joints; positions differ only by FMA ordering).
+        // (both sides use the per-joint inverse-transpose; positions differ
+        // only by FMA ordering).
         use ornis_animation::{CPU_GPU_TOLERANCE, blend_vertex_reference, skin_vertices};
         let mut engine = Engine::new();
         push_rotated_two_joint_triangle(&mut engine);

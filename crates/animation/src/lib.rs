@@ -60,7 +60,7 @@ pub mod skinning;
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
-    blend_vertex_reference, canonical_staged_weights,
+    blend_vertex_reference, canonical_staged_weights, joint_normal_matrix,
 };
 
 /// One animation key: the channel value at `time` seconds from clip start.
@@ -1532,8 +1532,9 @@ pub fn skin_vertices(
 ///
 /// Degenerate (singular/non-finite) joints contribute [`Mat3::IDENTITY`]:
 /// positions still skin honestly, normals stay unrotated (documented
-/// fallback, not a silent entity-level stub).
-fn normal_part(joint: &Mat4) -> Mat3 {
+/// fallback, not a silent entity-level stub). Shared with
+/// [`joint_normal_matrix`] so the GPU palette packs the same fallback.
+pub(crate) fn normal_part(joint: &Mat4) -> Mat3 {
     let determinant = joint.determinant();
     if !determinant.is_finite() || determinant.abs() < DEGENERATE_LEN2 {
         return Mat3::IDENTITY;

@@ -153,7 +153,8 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   (`create_buffer_init` цена, ср. `mesh_upload.rs:90-99`).
 - **Фаза 2 — GPU-скининг:** `joint_matrix` публикуется как storage-буфер
   (один на скелет, `MAX_JOINTS` записей), вершинный шейдер делает
-  `Σ w·M[j]·v`. Residency-протокол (`command_sync.rs:13-88`):
+  `Σ w·M[j]·v` для позиций и тангентов; нормали — `Σ w·inverse_transpose(M[j])·n`
+  (тот же вырожденный fallback, что CPU). Residency-протокол (`command_sync.rs:13-88`):
   `skel_sample` → `mark_cpu::<JointPose>()`; render-submit при `needs_cpu_to_gpu`
   заливает буфер и `mark_both`; CPU-скининг при `Both` пропускается.
   Пока GPU-пути нет — весь `SkinnedMesh`-лейн `CpuOnly` по умолчанию
