@@ -1,14 +1,17 @@
 //! Map changed paths onto workspace packages.
 //!
+//! Package names and directories come from `cargo metadata --no-deps`.
 //! Member directories win over the root package, longest path first, so
 //! `crates/editor-backend` is not `crates/editor`. The root package owns
 //! `src/`, `tests/`, `examples/`, `benches/`, and a top-level `build.rs`.
 //! A root manifest, lockfile, `.cargo/` entry, or toolchain file cannot
 //! be pinned to one package and selects a workspace check instead.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::exit;
+use std::process::{exit, Command};
+
+use serde::Deserialize;
 
 pub(super) enum CheckPlan {
     Skip { reason: &'static str },
@@ -16,25 +19,77 @@ pub(super) enum CheckPlan {
     Workspace { reason: &'static str },
 }
 
+/// Workspace packages from `cargo metadata --no-deps`. The root package
+/// (manifest at the workspace root) is kept separate so its directory
+/// does not swallow every path.
 pub(super) fn load_package_index(root: &Path) -> PackageIndex {
-    let manifest_path = root.join("Cargo.toml");
-    let text = read_to_string(&manifest_path);
-    let mut members = Vec::new();
-    for rel in member_dirs(&text) {
-        let cargo_toml = root.join(&rel).join("Cargo.toml");
-        let name = package_name(&read_to_string(&cargo_toml)).unwrap_or_else(|| {
-            eprintln!("pre-push: no [package] name in {}", cargo_toml.display());
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|err| {
+            eprintln!("pre-push: failed to spawn cargo metadata: {err}");
             exit(1);
         });
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        eprintln!("pre-push: cargo metadata failed: {err}");
+        exit(output.status.code().unwrap_or(1));
+    }
+    let metadata: Metadata = serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        eprintln!("pre-push: cargo metadata JSON: {err}");
+        exit(1);
+    });
+    index_from_metadata(&metadata)
+}
+
+fn index_from_metadata(metadata: &Metadata) -> PackageIndex {
+    let member_ids: HashSet<&str> = metadata
+        .workspace_members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut root_name = None;
+    let mut members = Vec::new();
+    for pkg in &metadata.packages {
+        if !member_ids.contains(pkg.id.as_str()) {
+            continue;
+        }
+        let Some(dir) = pkg.manifest_path.parent() else {
+            continue;
+        };
+        if dir == metadata.workspace_root {
+            root_name = Some(pkg.name.clone());
+            continue;
+        }
+        let Ok(rel) = dir.strip_prefix(&metadata.workspace_root) else {
+            eprintln!(
+                "pre-push: package {} is outside the workspace ({})",
+                pkg.name,
+                pkg.manifest_path.display()
+            );
+            exit(1);
+        };
         members.push(MemberPkg {
-            name,
-            dir: PathBuf::from(rel),
+            name: pkg.name.clone(),
+            dir: rel.to_path_buf(),
         });
     }
-    PackageIndex {
-        root_name: package_name(&text),
-        members,
-    }
+    PackageIndex { root_name, members }
+}
+
+#[derive(Deserialize)]
+struct Metadata {
+    packages: Vec<MetadataPackage>,
+    workspace_members: Vec<String>,
+    workspace_root: PathBuf,
+}
+
+#[derive(Deserialize)]
+struct MetadataPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
 }
 
 pub(super) fn plan_for_paths(index: &PackageIndex, paths: &[PathBuf]) -> CheckPlan {
@@ -83,65 +138,6 @@ enum Class<'a> {
     Outside,
     Package(&'a str),
     Workspace,
-}
-
-fn read_to_string(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|err| {
-        eprintln!("pre-push: cannot read {}: {err}", path.display());
-        exit(1);
-    })
-}
-
-fn member_dirs(manifest: &str) -> Vec<String> {
-    let Some(members_at) = manifest.find("members") else {
-        return Vec::new();
-    };
-    let after_key = &manifest[members_at..];
-    let Some(open) = after_key.find('[') else {
-        return Vec::new();
-    };
-    let body = &after_key[open + 1..];
-    let Some(close) = body.find(']') else {
-        return Vec::new();
-    };
-    quoted_strings(&body[..close])
-}
-
-fn quoted_strings(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('"') {
-        rest = &rest[start + 1..];
-        let Some(end) = rest.find('"') else {
-            break;
-        };
-        out.push(rest[..end].to_string());
-        rest = &rest[end + 1..];
-    }
-    out
-}
-
-fn package_name(manifest: &str) -> Option<String> {
-    let pkg_at = manifest.find("[package]")?;
-    let after = &manifest[pkg_at + "[package]".len()..];
-    let section = match after.find("\n[") {
-        Some(end) => &after[..end],
-        None => after,
-    };
-    for line in section.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("name") else {
-            continue;
-        };
-        let Some(rest) = rest.trim_start().strip_prefix('=') else {
-            continue;
-        };
-        let name = rest.trim().trim_matches('"');
-        if !name.is_empty() {
-            return Some(name.to_string());
-        }
-    }
-    None
 }
 
 fn classify<'a>(index: &'a PackageIndex, path: &Path) -> Class<'a> {
@@ -325,26 +321,6 @@ mod tests {
             CheckPlan::Packages(pkgs) => assert_eq!(pkgs, vec!["ornis-physics".to_string()]),
             other => panic!("expected packages, got {}", plan_label(&other)),
         }
-    }
-
-    #[test]
-    fn manifest_parser_reads_members_and_package_names() {
-        let manifest = "\
-[workspace]\n\
-members = [\n    \"crates/core\",\n    \"xtask\",\n]\n\
-[package]\nname = \"ornis\"\n";
-        assert_eq!(
-            member_dirs(manifest),
-            vec!["crates/core".to_string(), "xtask".to_string()]
-        );
-        assert_eq!(package_name(manifest).as_deref(), Some("ornis"));
-        assert_eq!(
-            package_name(
-                "[workspace.package]\nversion = \"0.1.0\"\n\n[package]\nname = \"ornis-core\"\n"
-            )
-            .as_deref(),
-            Some("ornis-core")
-        );
     }
 
     #[test]
