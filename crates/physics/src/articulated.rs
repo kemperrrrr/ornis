@@ -259,8 +259,8 @@ fn solve6(a: &M6, b: &S6) -> S6 {
     for col in 0..6 {
         let mut piv = col;
         let mut best = m[col][col].abs();
-        for row in (col + 1)..6 {
-            let v = m[row][col].abs();
+        for (row, r) in m.iter().enumerate().skip(col + 1) {
+            let v = r[col].abs();
             if v > best {
                 best = v;
                 piv = row;
@@ -273,11 +273,12 @@ fn solve6(a: &M6, b: &S6) -> S6 {
         if d.abs() < 1e-30 {
             continue;
         }
-        for row in (col + 1)..6 {
-            let f = m[row][col] / d;
+        let pivot = m[col];
+        for r in m.iter_mut().skip(col + 1) {
+            let f = r[col] / d;
             if f != 0.0 {
-                for k in col..7 {
-                    m[row][k] -= f * m[col][k];
+                for (dst, p) in r[col..].iter_mut().zip(&pivot[col..]) {
+                    *dst -= f * p;
                 }
             }
         }

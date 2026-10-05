@@ -25,3 +25,5 @@ editor_test.html
 
 # CodeGraph local knowledge-graph index (12 MB SQLite, rebuilt by `codegraph init`)
 .codegraph/
+
+target-ci-run/
