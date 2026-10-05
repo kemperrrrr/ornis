@@ -39,10 +39,12 @@
 //! (canonical min/max keys); `filter_intersection_pair` runs sequentially
 //! in broadphase overlap order; `modify_contact` runs sequentially in
 //! active manifold order, once per substep, before island partitioning —
-//! never inside the parallel island solves. While hooks are attached the
-//! engine forces the scalar island path (flat-singleton and GPU
-//! single-point batching are skipped) so every hook effect routes through
-//! the one solver that implements overrides.
+//! never inside the parallel island solves. While hooks are attached,
+//! flat-singleton and GPU single-point batching are skipped (they do not
+//! implement overrides). The island velocity path stays on the configured
+//! solver until a hook actually changes a manifold; that override forces
+//! the scalar island path, the only one that applies it. A no-op hook
+//! records no override and stays on the configured path.
 //!
 //! # What a hook cannot do
 //!
@@ -544,12 +546,19 @@ impl SequentialImpulseEngine {
                     sub_dt,
                 },
             );
-            // Validate + write back the normal (re-normalized when finite
-            // and non-degenerate, original kept otherwise).
-            if view.normal.is_finite() && view.normal.length_squared() > 1e-12 {
-                manifolds[mi].normal = view.normal.normalize();
-            } else {
-                view.normal = orig_normal;
+            // Validate + write back a hook-supplied normal (re-normalized
+            // when finite and non-degenerate, original kept otherwise).
+            // An untouched normal stays bit-exact: `normalize` of an
+            // already-unit SAT normal is not an identity once the box
+            // tumbles, and a no-op hook must not move it.
+            if view.normal != orig_normal {
+                if view.normal.is_finite() && view.normal.length_squared() > 1e-12 {
+                    let n = view.normal.normalize();
+                    manifolds[mi].normal = n;
+                    view.normal = n;
+                } else {
+                    view.normal = orig_normal;
+                }
             }
             // Validate the scalars (invalid input falls back to legacy, so
             // a sloppy hook can never poison the solver with NaN).

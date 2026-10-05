@@ -398,26 +398,32 @@ fn rebound_fraction(e: f32) -> f32 {
     ball.restitution = e;
     let ball_h = physics.add_body(ball);
 
-    let mut touched = false;
+    // Rest center is 0.2. The first sample under 0.35 is still on the way
+    // down (~13 cm above the floor at dt = 1/60); counting it as the apex
+    // reports a rebound of 0.064 for a ball that never rises. The rebound
+    // is the highest point after the vertical velocity turns upward.
+    let mut armed = false;
+    let mut rising = false;
     let mut apex = 0.0f32;
+    let mut prev = f32::MAX;
     for _ in 0..400 {
         physics.step(DT);
         let y = physics.get_body(ball_h).expect("ball live").position.y;
-        if !touched && y < 0.35 {
-            touched = true;
+        if y < 0.35 {
+            armed = true;
         }
-        if touched && y > apex {
+        if armed && y > prev + 1e-4 {
+            rising = true;
+        }
+        if rising && y > apex {
             apex = y;
         }
+        prev = y;
     }
     (apex - 0.2) / 2.0
 }
 
 #[test]
-#[ignore = "найден лимит R1-L1 (чинить отдельно): импакт с пенетрацией ~0.1 м за шаг \
-    (> RESTITUTION_MAX_PEN 0.05) не получает restitution-импульс — мяч отскакивает \
-    всегда на 0.064 высоты (Baumgarte-pop) независимо от e; e=0 тоже «прыгает». \
-    Пробовали CCD на мяче — не помогает. Ожидание e^2 из Rapier issue 974 не выполняется."]
 fn restitution_rebound_follows_e_squared() {
     for e in [0.5f32, 0.8] {
         let measured = rebound_fraction(e);
@@ -432,9 +438,6 @@ fn restitution_rebound_follows_e_squared() {
 }
 
 #[test]
-#[ignore = "найден лимит R1-L1 (чинить отдельно): см. restitution_rebound_follows_e_squared — \
-    restitution-импульс не срабатывает, мяч всплывает на 0.064 от Baumgarte-поправки \
-    даже при e=0."]
 fn zero_restitution_does_not_bounce() {
     let measured = rebound_fraction(0.0);
     assert!(
@@ -622,12 +625,11 @@ fn sensor_reports_enter_exit_without_impulse() {
 // ground, the heavy one does not sink. (Adapted: heavy cylinder instead of a
 // second cube — deep stack of mixed geometry.)
 #[test]
-#[ignore = "найден лимит R1-L2 (чинить отдельно): 200 кг цилиндр на 1 кг коробке \
-    (соотношение 200:1 через контакты, цилиндр идёт GJK/EPA-веткой) — step() не \
-    возвращается (100% CPU; подтверждено сторожевым таймером 100 с и висящим 19+ ч \
-    прогоном того же сценария). Диагностика: тот же стек с тяжёлым БОКСом 200 кг \
-    завершается за 0.17 с, но давит лёгкую коробку сквозь пол (heavy y=0.50) — \
-    т.е. сломаны оба исхода 200:1, у цилиндра зависание, у бокса продавливание."]
+#[ignore = "R1-L2 зависание снято (EPA обрывается на взрыве граней), но стек 200:1 \
+    всё ещё не держится: за 300 шагов лёгкая коробка уезжает с платформы \
+    (y≈-4.85). Тот же вес боксом тоже не передаёт опору на пол. Поднятие \
+    бюджета итераций только для большого отношения масс — отдельный солвер, \
+    он сдвинет покой сцен вне этого теста."]
 fn heavy_cylinder_on_light_box_stack_holds() {
     let mut physics = engine();
     physics.add_body(RigidBody::new_box(

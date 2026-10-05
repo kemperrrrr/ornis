@@ -672,9 +672,13 @@ impl XpbdEngine {
         let n = self.bodies.len();
         let mut prev_pos = vec![Vec3::ZERO; n];
         let mut prev_rot = vec![Quat::IDENTITY; n];
+        // Integrated pose, before any constraint moves the body. Contact
+        // push-out past this travel must not become BDF1 velocity.
+        let mut predicted = vec![Vec3::ZERO; n];
         for (i, b) in self.bodies.iter_mut().enumerate() {
             prev_pos[i] = b.position;
             prev_rot[i] = b.orientation;
+            predicted[i] = b.position;
             if b.body_type != BodyType::Dynamic || b.inv_mass <= 0.0 {
                 continue;
             }
@@ -690,6 +694,7 @@ impl XpbdEngine {
             b.torque = Vec3::ZERO;
             b.position += h * b.velocity;
             b.orientation = integrate_orientation(b.orientation, b.angular_velocity, h);
+            predicted[i] = b.position;
         }
 
         let mut contacts = self.discover_contacts();
@@ -713,9 +718,10 @@ impl XpbdEngine {
         }
         let mut soft_contacts = self.discover_soft_contacts();
         self.wake_on_impact(&contacts, &soft_contacts);
+        let mut contact_shift = vec![Vec3::ZERO; n];
         for _ in 0..self.iterations {
             for i in 0..contacts.len() {
-                self.solve_contact(i, &mut contacts, alpha_c);
+                self.solve_contact(i, &mut contacts, alpha_c, &mut contact_shift);
             }
             for j in 0..self.joints.len() {
                 self.solve_joint(j, alpha_j, h);
@@ -729,7 +735,7 @@ impl XpbdEngine {
                 crate::soft_self::solve_self_collision(body, h);
             }
             for i in 0..soft_contacts.len() {
-                self.solve_soft_contact(i, &mut soft_contacts, alpha_c);
+                self.solve_soft_contact(i, &mut soft_contacts, alpha_c, &mut contact_shift);
             }
             // Write the normal impulses back to the warm-start cache while
             // the witnesses are still live.
@@ -755,7 +761,7 @@ impl XpbdEngine {
             if b.body_type != BodyType::Dynamic || b.inv_mass <= 0.0 {
                 continue;
             }
-            b.velocity = (b.position - prev_pos[i]) / h;
+            b.velocity = bdf1_velocity(b.position, prev_pos[i], predicted[i], contact_shift[i], h);
             b.angular_velocity = angular_velocity_from_delta(b.orientation, prev_rot[i], h);
         }
         for body in &mut self.soft_bodies {
@@ -908,7 +914,13 @@ impl XpbdEngine {
     /// sizes a positional correction is O(h²) against O(h) of sliding and
     /// cannot hold; it runs instead as a velocity pass over the BDF1
     /// velocities (see [`XpbdEngine::solve_soft_velocities`]).
-    fn solve_soft_contact(&mut self, i: usize, contacts: &mut [SoftContact], alpha_tilde: f32) {
+    fn solve_soft_contact(
+        &mut self,
+        i: usize,
+        contacts: &mut [SoftContact],
+        alpha_tilde: f32,
+        contact_shift: &mut [Vec3],
+    ) {
         let soft_awake = self
             .soft_sleep
             .get(contacts[i].soft)
@@ -920,7 +932,8 @@ impl XpbdEngine {
         let Some(particle) = soft.particles.get_mut(c.particle) else {
             return;
         };
-        let Some(body) = self.bodies.get_mut(c.body) else {
+        let body_idx = c.body;
+        let Some(body) = self.bodies.get_mut(body_idx) else {
             return;
         };
         let pb = body.position + body.orientation * c.lb;
@@ -948,7 +961,8 @@ impl XpbdEngine {
             if soft_awake {
                 particle.position += c.n * (applied * particle.inv_mass);
             }
-            apply_position_correction(body, -1.0, c.n, rb, applied);
+            let shift = apply_position_correction(body, -1.0, c.n, rb, applied);
+            contact_shift[body_idx] += shift;
         }
     }
 
@@ -1011,9 +1025,16 @@ impl XpbdEngine {
     }
 
     /// Position-level normal solve for one contact (inequality, `λ ≥ 0`).
-    fn solve_contact(&mut self, i: usize, contacts: &mut [Contact], alpha_tilde: f32) {
+    fn solve_contact(
+        &mut self,
+        i: usize,
+        contacts: &mut [Contact],
+        alpha_tilde: f32,
+        contact_shift: &mut [Vec3],
+    ) {
         let c = &mut contacts[i];
-        let (ba, bb) = pair_mut(&mut self.bodies, c.a, c.b);
+        let (a, b) = (c.a, c.b);
+        let (ba, bb) = pair_mut(&mut self.bodies, a, b);
         let pa = ba.position + ba.orientation * c.la;
         let pb = bb.position + bb.orientation * c.lb;
         // Signed gap: negative while penetrating, the XPBD `C(x) ≥ 0` form.
@@ -1032,8 +1053,10 @@ impl XpbdEngine {
         let applied = next - c.lambda;
         c.lambda = next;
         if applied != 0.0 {
-            apply_position_correction(ba, 1.0, c.n, ra, applied);
-            apply_position_correction(bb, -1.0, c.n, rb, applied);
+            let da = apply_position_correction(ba, 1.0, c.n, ra, applied);
+            let db = apply_position_correction(bb, -1.0, c.n, rb, applied);
+            contact_shift[a] += da;
+            contact_shift[b] += db;
         }
     }
 
@@ -2029,16 +2052,53 @@ fn angular_inverse_mass(a: &RigidBody, b: &RigidBody, n: Vec3) -> f32 {
 /// Apply `Δλ` of a positional constraint to one body: translate by
 /// `M⁻¹·∇Cᵀ·Δλ` and rotate by the resulting torque arm (the quaternion
 /// sum is the linearized exponential map; renormalized after the solve).
-fn apply_position_correction(body: &mut RigidBody, sign: f32, n: Vec3, r: Vec3, dlambda: f32) {
+/// Returns the translation actually applied (zero for a static or sleeping
+/// body) so a contact can keep that shift out of the BDF1 velocity.
+fn apply_position_correction(
+    body: &mut RigidBody,
+    sign: f32,
+    n: Vec3,
+    r: Vec3,
+    dlambda: f32,
+) -> Vec3 {
     if body.body_type != BodyType::Dynamic || body.inv_mass <= 0.0 {
-        return;
+        return Vec3::ZERO;
     }
     let impulse = n * (sign * dlambda);
-    body.position += impulse * body.inv_mass;
+    let delta = impulse * body.inv_mass;
+    body.position += delta;
     let dtheta = apply_inv_inertia(body.inertia, body.orientation, r.cross(impulse));
     let q = body.orientation;
     let dq = Quat::from_xyzw(dtheta.x * HALF, dtheta.y * HALF, dtheta.z * HALF, 0.0) * q;
     body.orientation = Quat::from_xyzw(q.x + dq.x, q.y + dq.y, q.z + dq.z, q.w + dq.w);
+    delta
+}
+
+/// BDF1 linear velocity from the solved pose.
+///
+/// Contact translation longer than this substep's integrated travel is
+/// clamped to that travel before it is divided by `h`. A sphere buried
+/// 1.5 m deep would otherwise leave the floor at `(1.5)/(1/1200) = 1800`
+/// m/s. Joint corrections stay inside `position` and keep the full
+/// difference. `h` is the caller's substep and is positive.
+fn bdf1_velocity(position: Vec3, prev: Vec3, predicted: Vec3, contact_shift: Vec3, h: f32) -> Vec3 {
+    let travel = (predicted - prev).length();
+    let limited = limit_length(contact_shift, travel);
+    (position - contact_shift + limited - prev) / h
+}
+
+/// Clamp `v` to length `max_len`. A non-finite input or a non-positive cap
+/// yields zero.
+fn limit_length(v: Vec3, max_len: f32) -> Vec3 {
+    let len2 = v.length_squared();
+    if !len2.is_finite() || max_len <= 0.0 {
+        return Vec3::ZERO;
+    }
+    if len2 <= max_len * max_len {
+        v
+    } else {
+        v * (max_len / len2.sqrt())
+    }
 }
 
 /// Apply `Δλ` of an angular constraint: pure rotation, no translation.
@@ -2146,6 +2206,50 @@ mod tests {
             b.velocity.length() < 0.25,
             "rest velocity {} too high",
             b.velocity.length()
+        );
+    }
+
+    /// A sphere whose center starts a metre inside a static floor must
+    /// climb to the surface. Inheriting the whole positional correction as
+    /// `(x_new − x_old) / h` turns a 1.5 m push over a 1/1200 s substep
+    /// into an 1800 m/s launch.
+    #[test]
+    fn buried_sphere_climbs_out_without_launching() {
+        let mut engine = XpbdEngine::new(Vec3::new(0.0, -9.81, 0.0));
+        engine.add_body(RigidBody::new_box(
+            Vec3::new(0.0, -5.0, 0.0),
+            Vec3::splat(5.0),
+            0.0,
+        ));
+        let mut ball = RigidBody::new_sphere(Vec3::new(0.0, -1.0, 0.0), 0.5, 1.0);
+        ball.restitution = 0.0;
+        ball.friction = 0.0;
+        let h = engine.add_body(ball);
+        let mut peak_speed = 0.0f32;
+        for _ in 0..30 {
+            engine.step(1.0 / 60.0);
+            let b = engine.get_body(h).expect("sphere");
+            assert!(
+                b.position.is_finite() && b.velocity.is_finite(),
+                "non-finite pose"
+            );
+            peak_speed = peak_speed.max(b.velocity.length());
+        }
+        let b = engine.get_body(h).expect("sphere");
+        // Rest center on the y = 0 floor is the radius, 0.5.
+        assert!(
+            b.position.y > 0.2,
+            "sphere still inside the floor, y={}",
+            b.position.y
+        );
+        assert!(
+            b.position.y < 1.5,
+            "sphere launched off the floor, y={}",
+            b.position.y
+        );
+        assert!(
+            peak_speed < 20.0,
+            "positional correction became a launch at {peak_speed} m/s"
         );
     }
 

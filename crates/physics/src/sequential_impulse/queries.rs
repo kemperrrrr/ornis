@@ -509,6 +509,46 @@ pub fn remove_angular_approach(
     cap_spin_correction(omega, inertia, orientation, im * (vn / denom))
 }
 
+/// Linear CCD velocity change for the mover and the target.
+///
+/// `mover` and `target` are `(velocity, inverse mass)`. `normal` points
+/// back toward the mover, so a closing pair has `vn < 0`. A static,
+/// kinematic, or sleeping target (`target_dynamic == false`) reproduces
+/// the mover-only response with the same operations as before:
+/// `Δv = -normal * bounce * (v_mover · normal)`, and the target delta is
+/// zero. Two awake dynamics share `J = -bounce * vn / (inv_m + inv_t)`
+/// with `vn = (v_mover - v_target) · normal`, so the pair's momentum is
+/// unchanged. Kinematic velocity is not folded into the static-path `vn`.
+pub(crate) fn linear_ccd_deltas(
+    mover: (Vec3, f32),
+    target: (Vec3, f32),
+    normal: Vec3,
+    restitution: f32,
+    target_dynamic: bool,
+) -> (Vec3, Vec3) {
+    let (v_mover, inv_mover) = mover;
+    let (v_target, inv_target) = target;
+    if !target_dynamic {
+        let vn = v_mover.dot(normal);
+        if vn >= 0.0 {
+            return (Vec3::ZERO, Vec3::ZERO);
+        }
+        let bounce = if vn < -1.0 { 1.0 + restitution } else { 1.0 };
+        return (-normal * (bounce * vn), Vec3::ZERO);
+    }
+    let vn = (v_mover - v_target).dot(normal);
+    if !vn.is_finite() || vn >= 0.0 {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
+    let bounce = if vn < -1.0 { 1.0 + restitution } else { 1.0 };
+    let denom = inv_mover + inv_target;
+    if !denom.is_finite() || denom <= 0.0 {
+        return (Vec3::ZERO, Vec3::ZERO);
+    }
+    let j = -bounce * vn / denom;
+    (normal * (j * inv_mover), -normal * (j * inv_target))
+}
+
 /// Unified one-shot impact for an angular CCD hit: the contact-point velocity
 /// `v_c = v + ω×r_c` (spin counts toward the approach, not just the center
 /// motion), a textbook rigid-body impulse `J = −(1+e)·vn_c/denom` with

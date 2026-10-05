@@ -154,8 +154,6 @@ pub struct WideBatch {
     inv_k_r1: Fx4,
     inv_k_r2: Fx4,
     inv_k_s: Fx4,
-    /// One-shot restitution bias per lane.
-    bias: Fx4,
 
     // --- Solver state (mutated per iteration) ---
     acc: Fx4,
@@ -247,7 +245,6 @@ impl WideBatch {
             inv_k_r1: Fx4::zero(),
             inv_k_r2: Fx4::zero(),
             inv_k_s: Fx4::zero(),
-            bias: Fx4::zero(),
             acc: Fx4::zero(),
             acc_f1: Fx4::zero(),
             acc_f2: Fx4::zero(),
@@ -301,7 +298,6 @@ impl WideBatch {
         self.target.set_lane(l, st.target[0]);
         self.mu.set_lane(l, st.mu);
         self.mu2.set_lane(l, st.mu2);
-        self.bias.set_lane(l, st.bias[0]);
         self.acc.set_lane(l, st.acc[0]);
 
         let (a, bb) = (&bodies[i], &bodies[j]);
@@ -585,7 +581,6 @@ impl WideBatch {
     /// couples about t1/t2 (rolling) and n (spin), capped by the lane
     /// coefficient × normal impulse. Zero inverse masses skip silently.
     fn solve_lane_rolling(&mut self, l: usize) {
-        let wrel = self.wb.lane(l) - self.wa.lane(l);
         let acc = self.acc.lane(l);
         // (axis, inv_k, accum, mu): 0/1 rolling, 2 spin.
         let axes = [
@@ -615,6 +610,10 @@ impl WideBatch {
             if inv_k == 0.0 {
                 continue;
             }
+            // Live spin: the t1 couple changes ω·t2 when the inertia axes
+            // are not the contact frame. A wrel captured above the loop
+            // would apply that leftover to the next axis.
+            let wrel = self.wb.lane(l) - self.wa.lane(l);
             let cap = mu_axis * acc;
             let new = (cur + (-wrel.dot(axis) * inv_k)).clamp(-cap, cap);
             let delta = new - cur;
@@ -628,38 +627,6 @@ impl WideBatch {
                     1 => self.acc_r2.set_lane(l, new),
                     _ => self.acc_s.set_lane(l, new),
                 }
-            }
-        }
-    }
-
-    /// One-shot restitution stage (mirrors the scalar post-iteration pass).
-    /// Applied after all iterations, against the final gathered velocities.
-    pub(crate) fn solve_restitution(&mut self) {
-        for l in 0..self.count {
-            let bias = self.bias.lane(l);
-            if bias <= 0.0 {
-                continue;
-            }
-            let n = self.n.lane(l);
-            let ra = self.ra.lane(l);
-            let rb = self.rb.lane(l);
-            let k_eff_inv = self.inv_k_n.lane(l);
-            if k_eff_inv == 0.0 {
-                continue;
-            }
-            let rel = point_velocity(self.vb.lane(l), self.wb.lane(l), rb)
-                - point_velocity(self.va.lane(l), self.wa.lane(l), ra);
-            let vn = rel.dot(n);
-            let lambda = (bias - vn) * k_eff_inv;
-            if lambda > 0.0 {
-                self.va
-                    .set_lane(l, self.va.lane(l) - self.apply_n_a.lane(l) * lambda);
-                self.vb
-                    .set_lane(l, self.vb.lane(l) + self.apply_n_b.lane(l) * lambda);
-                self.wa
-                    .set_lane(l, self.wa.lane(l) - self.apply_w_a.lane(l) * lambda);
-                self.wb
-                    .set_lane(l, self.wb.lane(l) + self.apply_w_b.lane(l) * lambda);
             }
         }
     }
@@ -1000,5 +967,58 @@ mod tests {
             }
             _ => panic!("both steps must be wide"),
         }
+    }
+
+    /// Rolling under inertia rotated 45° about Y: the wide lane must match
+    /// the scalar sweep, and the Z component the first tangent writes must
+    /// not survive the second axis.
+    #[test]
+    fn wide_rolling_matches_scalar_anisotropic_inertia() {
+        let mut floor = RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0);
+        floor.rolling_friction = 1.0;
+        floor.torsion_friction = 1.0;
+        let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
+        body.inertia = Vec3::new(1.0, 1.0, 0.01);
+        body.orientation = glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        body.angular_velocity = Vec3::X;
+        body.rolling_friction = 1.0;
+        body.torsion_friction = 1.0;
+        let bodies = vec![floor, body];
+        let n = Vec3::Y;
+        let manifolds = vec![manifold(0, 1, n, Vec3::ZERO)];
+        let mut st = single_state(0, 1, n, Vec3::ZERO, 0.0);
+        st.t1 = Vec3::X;
+        st.t2 = Vec3::Z;
+        st.mu = 0.0;
+        st.mu2 = 0.0;
+        st.mu_roll = 1.0;
+        st.mu_spin = 1.0;
+        st.acc[0] = 1.0e3;
+        let states = vec![st];
+
+        let mut scalar_bodies = bodies.clone();
+        let mut scalar_states = states.clone();
+        run_scalar(
+            &mut scalar_bodies,
+            &manifolds,
+            &mut scalar_states,
+            1,
+            crate::flags::RestitutionGate::Suppressed,
+        );
+
+        let items: Vec<(usize, &Manifold, &ManifoldState)> = vec![(0, &manifolds[0], &states[0])];
+        let mut batch = WideBatch::build(&items, &bodies);
+        let mut bodies2 = bodies.clone();
+        batch.gather(&bodies2);
+        batch.solve_iteration();
+        batch.scatter(&mut bodies2);
+
+        let dw = (bodies2[1].angular_velocity - scalar_bodies[1].angular_velocity).length();
+        assert!(dw < 1e-3, "wide/scalar rolling diverged by {dw}");
+        assert!(
+            bodies2[1].angular_velocity.z.abs() < 0.15,
+            "wide path left a coupled Z spin {:?}",
+            bodies2[1].angular_velocity
+        );
     }
 }

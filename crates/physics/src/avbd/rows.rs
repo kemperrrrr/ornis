@@ -291,6 +291,57 @@ fn bound_radius(shape: &Shape) -> f32 {
     }
 }
 
+/// Contact normal in the AVBD frame (points B → A; the primal push on B is `-n`).
+///
+/// Finite shapes take the witness axis, flip it under penetration, then
+/// lock to the stored pair frame or (for a new pair) the center delta.
+/// A half-space has no center — its position is a point on the plane — so
+/// that delta agrees with the crossed witnesses and drives a body whose
+/// center has already entered the solid deeper in. The frame is the
+/// outward plane normal instead: `-N` when the plane is body A (push B
+/// along `+N`), `+N` when the plane is body B (push A along `+N`).
+fn orient_contact_normal(
+    a: &RigidBody,
+    b: &RigidBody,
+    witnesses: (Vec3, Vec3),
+    dist: f32,
+    stored: Option<Vec3>,
+) -> Vec3 {
+    let (point_a, point_b) = witnesses;
+    if let Some(n) = halfspace_frame(a, b) {
+        return n;
+    }
+    let mut normal = point_a - point_b;
+    // Penetration witnesses point opposite the separating normal. This
+    // also resolves coincident-center containment without relying on
+    // the otherwise ambiguous center-to-center direction.
+    if dist < 0.0 {
+        normal = -normal;
+    }
+    if normal.length_squared() < AXIS_REST_LEN2 {
+        normal = a.position - b.position;
+    }
+    let mut normal = normal.normalize_or(Vec3::Y);
+    if let Some(old) = stored {
+        if normal.dot(old) < 0.0 {
+            normal = -normal;
+        }
+    } else if normal.dot(a.position - b.position) < 0.0 {
+        normal = -normal;
+    }
+    normal
+}
+
+/// Outward half-space axis in the AVBD B→A frame, or `None` when neither
+/// body is a plane.
+fn halfspace_frame(a: &RigidBody, b: &RigidBody) -> Option<Vec3> {
+    match (&a.shape, &b.shape) {
+        (Shape::HalfSpace { normal: plane }, _) => Some(-(a.orientation * plane.get())),
+        (_, Shape::HalfSpace { normal: plane }) => Some(b.orientation * plane.get()),
+        _ => None,
+    }
+}
+
 /// Local-space corners of a box (empty for every other shape).
 fn box_corners(shape: &Shape) -> Vec<Vec3> {
     /// Corners of an AABB/OBB.
@@ -470,17 +521,6 @@ impl AvbdEngine {
                 wake_vote: false,
             });
         }
-        let mut normal = d.point_a - d.point_b;
-        // Penetration witnesses point opposite the separating normal. This
-        // also resolves coincident-center containment without relying on
-        // the otherwise ambiguous center-to-center direction.
-        if d.dist < 0.0 {
-            normal = -normal;
-        }
-        if normal.length_squared() < AXIS_REST_LEN2 {
-            normal = a.position - b.position;
-        }
-        let mut normal = normal.normalize_or(Vec3::Y);
         // Persistent normal per pair: witness directions flip sign at
         // first touch (separated vs penetrating closest points), which
         // would turn a compressive lambda tensile and catapult the
@@ -489,20 +529,20 @@ impl AvbdEngine {
         // the contact frame must be stable, like collide() face
         // normals, not a live witness direction).
         //
-        // NOTE: no deep-penetration center fallback here. Buried
-        // witnesses can be orthogonal garbage (a hinge arm buried 0.2
-        // in its mount was born with a +X normal), but snapping them
+        // NOTE: no deep-penetration center fallback for finite shapes.
+        // Buried witnesses can be orthogonal garbage (a hinge arm buried
+        // 0.2 in its mount was born with a +X normal), but snapping them
         // to body centers was ablated: it breaks resting sphere
         // contacts. The garbage only ever mattered for jointed pairs,
-        // and those no longer collide (no-collide below), so the
-        // fallback's cure was worse than the disease.
-        if let Some(old) = self.pairs.iter().find(|p| p.a == ia && p.b == ib) {
-            if normal.dot(old.n) < 0.0 {
-                normal = -normal;
-            }
-        } else if normal.dot(a.position - b.position) < 0.0 {
-            normal = -normal;
-        }
+        // and those no longer collide (no-collide above). A half-space
+        // is the exception: it has no center, so the center rule itself
+        // is the bug once the other body has crossed the plane.
+        let stored = self
+            .pairs
+            .iter()
+            .find(|p| p.a == ia && p.b == ib)
+            .map(|p| p.n);
+        let normal = orient_contact_normal(a, b, (d.point_a, d.point_b), d.dist, stored);
         let exists = self.pairs.iter().any(|p| p.a == ia && p.b == ib);
         // Swept creation: a fast approach covers `approach*dt`
         // this step, so the pair must exist (as a damper shell)

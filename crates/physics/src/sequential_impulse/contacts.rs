@@ -20,7 +20,9 @@ use crate::flags::{Dispatch, RestitutionGate, RollAxis, SolvePath};
 /// and the GPU single-point path (identical preamble semantics).
 const MATCH_TOL_SQ: f32 = 0.05 * 0.05;
 const RESTITUTION_THRESHOLD: f32 = 1.0;
-const RESTITUTION_MAX_PEN: f32 = 0.05;
+/// Cached normal impulse above this means the point already carries load,
+/// so it must not bounce again. A speculative preview caches zero.
+const LOADED_IMPULSE: f32 = 1e-3;
 /// Min total manifolds before flat/island contact stages go parallel.
 const PARALLEL_MIN_MANIFOLDS: usize = 24;
 
@@ -63,9 +65,8 @@ fn match_warm_points(
     key: (usize, usize),
     warm_in: &WarmCache,
     count: usize,
-) -> ([f32; MAX_MANIFOLD_POINTS], [bool; MAX_MANIFOLD_POINTS]) {
+) -> [f32; MAX_MANIFOLD_POINTS] {
     let mut warm = [0.0f32; MAX_MANIFOLD_POINTS];
-    let mut matched = [false; MAX_MANIFOLD_POINTS];
     if let Some((cached_points, cached_count)) = warm_in.get(&key) {
         let mut used = [false; MAX_MANIFOLD_POINTS];
         for k in 0..count {
@@ -73,11 +74,10 @@ fn match_warm_points(
             {
                 used[c] = true;
                 warm[k] = cached_points[c].impulse;
-                matched[k] = true;
             }
         }
     }
-    (warm, matched)
+    warm
 }
 
 /// Speculative approach-speed target per point (G6): a separated point may
@@ -97,18 +97,26 @@ fn speculative_targets(
     target
 }
 
-/// Restitution bias from the pre-solve approach velocity — only on the first
-/// substep of a step and only for NEW (unmatched) points: one bounce per
-/// impact event. A persistent contact must never re-restitute — the NGS
-/// position pass would feed it fresh approach velocity every step and the
-/// bounce becomes an energy pump (Box3D applies restitution as a one-shot,
-/// never cached).
+/// Restitution bias from the pre-solve approach velocity: one bounce per
+/// impact. A pair that already carries any cached normal impulse must
+/// never re-restitute — the position pass would feed it fresh approach
+/// velocity and the bounce becomes an energy pump (Box3D applies
+/// restitution as a one-shot, never cached). Point identity is not the
+/// test: a tall stack shuffles manifold points every substep, and
+/// treating each shuffle as a new impact launches the tower.
+///
+/// A cache whose impulses are all ~0 is only a speculative preview of
+/// the same feature; the real landing still bounces. Approach slower
+/// than [`RESTITUTION_THRESHOLD`] never bounces, so a body spawned already
+/// buried (contact speed ~0) stays put even when the overlap is deep.
+/// Penetration depth is not a separate cap: a fast point can sink past
+/// 5 cm in one substep and must still rebound.
 #[allow(clippy::needless_range_loop)]
 #[allow(clippy::too_many_arguments)]
 fn compute_restitution_bias(
     bodies: &[RigidBody],
     m: &Manifold,
-    matched: &[bool; MAX_MANIFOLD_POINTS],
+    pair_loaded: bool,
     pen0: &[f32; MAX_MANIFOLD_POINTS],
     n: Vec3,
     e: f32,
@@ -116,14 +124,11 @@ fn compute_restitution_bias(
     sub_dt: f32,
 ) -> [f32; MAX_MANIFOLD_POINTS] {
     let mut bias = [0.0f32; MAX_MANIFOLD_POINTS];
-    if !gate.is_enabled() {
+    if !gate.is_enabled() || pair_loaded {
         return bias;
     }
     let (i, j) = (m.body_a.index(), m.body_b.index());
     for k in 0..m.point_count {
-        if matched[k] || pen0[k] > RESTITUTION_MAX_PEN {
-            continue;
-        }
         let p = m.points[k].world_point;
         let ra = p - bodies[i].position;
         let rb = p - bodies[j].position;
@@ -326,7 +331,14 @@ fn prepare_manifold_state(
         pen0[k] = m.points[k].penetration;
     }
 
-    let (warm, matched) = match_warm_points(&la, &lb, n, key, warm_in, count);
+    let warm = match_warm_points(&la, &lb, n, key, warm_in, count);
+    // Any cached normal impulse on the pair, matched or not. A speculative
+    // preview stores ~0 and must still bounce; a shuffled stack point must not.
+    let pair_loaded = warm_in.get(&key).is_some_and(|(pts, n_cached)| {
+        pts.iter()
+            .take(*n_cached)
+            .any(|p| p.impulse > LOADED_IMPULSE)
+    });
 
     let e = hook
         .and_then(|h| h.restitution)
@@ -342,7 +354,7 @@ fn prepare_manifold_state(
     let mu_roll = bodies[i].rolling_friction.max(bodies[j].rolling_friction);
     let mu_spin = bodies[i].torsion_friction.max(bodies[j].torsion_friction);
     let target = speculative_targets(&pen0, count, sub_dt);
-    let bias = compute_restitution_bias(bodies, m, &matched, &pen0, n, e, gate, sub_dt);
+    let bias = compute_restitution_bias(bodies, m, pair_loaded, &pen0, n, e, gate, sub_dt);
     let warm_applied = apply_warm_start(bodies, m, i, j, n, &warm, &target, full_support);
 
     Some(ManifoldState {
@@ -886,8 +898,9 @@ impl SequentialImpulseEngine {
         Self::solve_scalar_friction(bodies, i, j, st, m, total_inv);
     }
 
-    /// One-shot restitution step for a single manifold (the scalar half of
-    /// the post-iteration stage; the wide half lives in `WideBatch`).
+    /// One-shot restitution step for a single manifold. The wide velocity
+    /// iterations do not apply this impulse: both paths call this function
+    /// so a no-op hook and the default solver share one bounce.
     #[allow(clippy::needless_range_loop)]
     pub(super) fn solve_scalar_restitution_step(
         bodies: &mut [RigidBody],
@@ -1041,29 +1054,11 @@ impl SequentialImpulseEngine {
             // triple parity): pure couples opposing relative spin, capped
             // by mu × normal impulse. Zero coefficients skip everything.
             if st.mu_roll > 0.0 || st.mu_spin > 0.0 {
-                let wrel = bodies[j].angular_velocity - bodies[i].angular_velocity;
-                Self::solve_scalar_rolling(
-                    bodies,
-                    i,
-                    j,
-                    st,
-                    k,
-                    st.t1,
-                    wrel,
-                    st.mu_roll,
-                    RollAxis::RollU,
-                );
-                Self::solve_scalar_rolling(
-                    bodies,
-                    i,
-                    j,
-                    st,
-                    k,
-                    st.t2,
-                    wrel,
-                    st.mu_roll,
-                    RollAxis::RollV,
-                );
+                // Each axis re-reads ω. An impulse about t1 changes ω·t2
+                // when inertia is not aligned with the contact frame, so a
+                // wrel captured once couples the two tangents and the normal.
+                Self::solve_scalar_rolling(bodies, i, j, st, k, st.t1, st.mu_roll, RollAxis::RollU);
+                Self::solve_scalar_rolling(bodies, i, j, st, k, st.t2, st.mu_roll, RollAxis::RollV);
                 Self::solve_scalar_rolling(
                     bodies,
                     i,
@@ -1071,7 +1066,6 @@ impl SequentialImpulseEngine {
                     st,
                     k,
                     m.normal,
-                    wrel,
                     st.mu_spin,
                     RollAxis::Spin,
                 );
@@ -1084,8 +1078,10 @@ impl SequentialImpulseEngine {
     /// MuJoCo contact-frame torque model), accumulated per point and
     /// capped by `mu_axis × normal impulse`. `axis_kind` selects the
     /// accumulator: [`RollAxis::RollU`] / [`RollAxis::RollV`] / [`RollAxis::Spin`].
-    // Nine parameters mirror the neighboring friction helpers (bodies,
-    // pair, point, axis, spin, cap, slot); packing them would hide the
+    /// Relative spin is read from the live angular velocities so a previous
+    /// axis in the same sweep is visible.
+    // Eight parameters mirror the neighboring friction helpers (bodies,
+    // pair, point, axis, cap, slot); packing them would hide the
     // call-site symmetry of the three axes.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn solve_scalar_rolling(
@@ -1095,13 +1091,13 @@ impl SequentialImpulseEngine {
         st: &mut ManifoldState,
         k: usize,
         axis: Vec3,
-        wrel: Vec3,
         mu_axis: f32,
         axis_kind: RollAxis,
     ) {
         if mu_axis <= 0.0 {
             return;
         }
+        let wrel = bodies[j].angular_velocity - bodies[i].angular_velocity;
         let k_rot = axis.dot(mul_inv_inertia(
             bodies[i].inertia,
             bodies[i].orientation,
@@ -1265,35 +1261,18 @@ fn run_velocity_iterations(
     }
 }
 
-/// One-shot restitution stage across the island (wide + scalar halves).
+/// One-shot restitution stage. Always this scalar impulse, including after
+/// wide velocity iterations: the lane form multiplied by a precomputed
+/// inverse mass and did not match the division here.
 fn run_restitution_stage(
     bodies: &mut [RigidBody],
     manifolds: &[Manifold],
     states: &[ManifoldState],
-    steps: &mut [SolverStep],
-    path: SolvePath,
+    _steps: &mut [SolverStep],
+    _path: SolvePath,
 ) {
-    if path.use_wide() {
-        for step in steps.iter_mut() {
-            match step {
-                SolverStep::Wide(b) => {
-                    b.gather(bodies);
-                    b.solve_restitution();
-                    b.scatter(bodies);
-                }
-                SolverStep::Scalar(si) => {
-                    SequentialImpulseEngine::solve_scalar_restitution_step(
-                        bodies,
-                        manifolds,
-                        &states[*si],
-                    );
-                }
-            }
-        }
-    } else {
-        for st in states {
-            SequentialImpulseEngine::solve_scalar_restitution_step(bodies, manifolds, st);
-        }
+    for st in states {
+        SequentialImpulseEngine::solve_scalar_restitution_step(bodies, manifolds, st);
     }
 }
 
@@ -1578,5 +1557,71 @@ impl SequentialImpulseEngine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One Gauss-Seidel sweep, inertia rotated 45° about Y so an impulse
+    /// about the contact tangent X also changes ω·Z. Capturing `wrel` once
+    /// leaves |ω_z| ≈ 0.98; re-reading it after the first axis cancels Z
+    /// and puts the residual back on X.
+    #[test]
+    fn rolling_axes_reread_spin_under_anisotropic_inertia() {
+        let floor = RigidBody::new_box(Vec3::ZERO, Vec3::splat(1.0), 0.0);
+        let mut body = RigidBody::new_box(Vec3::ZERO, Vec3::splat(0.5), 1.0);
+        body.inertia = Vec3::new(1.0, 1.0, 0.01);
+        body.orientation = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        body.angular_velocity = Vec3::X;
+        let mut bodies = vec![floor, body];
+        let mut points = [ManifoldPoint {
+            world_point: Vec3::ZERO,
+            penetration: 0.0,
+        }; MAX_MANIFOLD_POINTS];
+        points[0].penetration = 0.01;
+        let manifold = Manifold::from_parts(
+            BodyHandle::from(0usize),
+            BodyHandle::from(1usize),
+            Vec3::Y,
+            points,
+            1,
+        )
+        .expect("one-point manifold");
+        let mut st = ManifoldState {
+            mi: 0,
+            i: 0,
+            j: 1,
+            count: 1,
+            acc: [1.0e3, 0.0, 0.0, 0.0],
+            acc_friction: [0.0; MAX_MANIFOLD_POINTS],
+            acc_friction2: [0.0; MAX_MANIFOLD_POINTS],
+            bias: [0.0; MAX_MANIFOLD_POINTS],
+            target: [0.0; MAX_MANIFOLD_POINTS],
+            mu: 0.0,
+            mu2: 0.0,
+            mu_roll: 1.0,
+            mu_spin: 1.0,
+            acc_roll: [0.0; MAX_MANIFOLD_POINTS],
+            acc_roll2: [0.0; MAX_MANIFOLD_POINTS],
+            acc_spin: [0.0; MAX_MANIFOLD_POINTS],
+            t1: Vec3::X,
+            t2: Vec3::Z,
+            surface_velocity: Vec3::ZERO,
+            la: [Vec3::ZERO; MAX_MANIFOLD_POINTS],
+            lb: [Vec3::ZERO; MAX_MANIFOLD_POINTS],
+            pen0: [0.01, 0.0, 0.0, 0.0],
+        };
+        SequentialImpulseEngine::solve_scalar_velocity_step(&mut bodies, &[manifold], &mut st);
+        let w = bodies[1].angular_velocity;
+        assert!(
+            w.z.abs() < 0.15,
+            "Z stayed coupled to the X couple, ω={w:?}"
+        );
+        assert!(
+            w.x.abs() > 0.5,
+            "second axis must put the residual back on X, ω={w:?}"
+        );
     }
 }
