@@ -471,10 +471,12 @@ mod tests {
 
     /// Each byte encoding `n / 255` decodes to the table, not to `f32::powf`.
     ///
-    /// `powf` is libm-specific: the same f32 base can differ by one ulp
+    /// `f32::powf` is libm-specific: the same f32 base can differ by one ulp
     /// between hosts, so a bit-exact compare against it fails on some
     /// platforms. The linear piece of the IEC curve is only a divide, which
-    /// is IEEE-exact, and those bytes still match that divide.
+    /// is IEEE-exact, and those bytes still match that divide. Bytes above
+    /// the threshold stay within a few ulps of an `f64` power rounded to
+    /// `f32` (see the bound in the test).
     #[test]
     fn srgb_u8_table_matches_the_runtime_curve() {
         let mut previous = f32::NEG_INFINITY;
@@ -496,6 +498,17 @@ mod tests {
                     divided.to_bits(),
                     "linear byte {byte}"
                 );
+            } else {
+                // `f64::powf` is libm too, but its error is far below one f32
+                // ulp on any libm, so this value rounded to f32 does not
+                // depend on the host. The literals were baked from glibc
+                // `f32::powf`, which is at most 4 ulp from `f64::powf` of the
+                // same already-rounded f32 base. This reference evaluates
+                // `n/255` in f64, and that extra input rounding widens the
+                // gap to 6 ulp (byte 134).
+                let reference = ((f64::from(byte) / 255.0 + 0.055) / 1.055).powf(2.4) as f32;
+                let ulps = from_table.to_bits().abs_diff(reference.to_bits());
+                assert!(ulps <= 6, "byte {byte} is {ulps} ulp from the f64 curve");
             }
         }
         assert_eq!(srgb_u8_channel(0).to_bits(), 0);
