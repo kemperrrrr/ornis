@@ -228,8 +228,12 @@ jobs and line-table debug info (debug assertions stay enabled).
 render loops уже используют общий `GameWorld`/`RenderExtract`/`RenderFrame3D`
 контракт после serialization boundary. Свет и клиентская камера ставятся через
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
-`OrbitCamera`). Ресурс `RenderLights` хранит ambient как `Color`, а
-множители `ambient_intensity` и `exposure` как `Lux` (старый payload без
+`StudioLights`, `OrbitCamera`). `set_ambient` меняет только ambient: если
+света ещё нет, публикуется риг с пустым списком направленных источников.
+`spawn(DirectionalLight)` добавляет ровно этот свет. Студийные key и fill —
+явный `spawn(StudioLights::default())`. Ресурс `RenderLights` хранит
+ambient как `Color`, а множители `ambient_intensity` и `exposure` как `Lux`
+(старый payload без
 этих полей получает `Lux(1.0)`, не ноль); в GPU-буфер цвет и множители
 попадают сырыми `f32` только в `Renderer3D::set_lights`. Орбитальная
 камера из `CameraDesc` строится через `OrbitCamera::from_desc`. Реестр

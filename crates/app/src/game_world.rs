@@ -18,7 +18,9 @@ use ornis_core::{
     SceneVersion, Seconds, UnitQuat,
 };
 use ornis_render::extraction::{RenderLights, extract_render_data};
-use ornis_render::{DirectionalLight, FrameUpload, OrbitCamera, install_orbit_camera};
+use ornis_render::{
+    DirectionalLight, FrameUpload, OrbitCamera, StudioLights, install_orbit_camera,
+};
 
 /// Single scene-backed game world: one [`Engine`] plus its scene entities.
 ///
@@ -321,19 +323,24 @@ impl<Role: SceneRole> GameWorld<Role> {
 
     /// Sets the ambient [`Color`].
     ///
+    /// Only the ambient color changes. Directional lights already published
+    /// by [`Self::spawn`] or [`Self::replace_scene`] stay. When the world
+    /// has no lighting yet, this publishes a rig whose light list is empty
+    /// — not the key and fill from [`RenderLights::default`]. Those two
+    /// arrive only from [`StudioLights`]. [`Self::replace_scene`] replaces
+    /// the whole rig, including this ambient.
+    ///
     /// The resource stores `color` as given. The GPU upload reads linear
-    /// RGB and drops alpha. Creates an empty [`RenderLights`] rig when the
-    /// world has none, and leaves lights already published by
-    /// [`Self::spawn`] or [`Self::replace_scene`] in place.
-    /// [`Self::replace_scene`] replaces the whole rig, including this
-    /// ambient.
+    /// RGB and drops alpha.
     pub fn set_ambient(&mut self, color: Color) {
         self.ensure_render_lights().ambient = color;
     }
 
     /// Places `value` into the world.
     ///
-    /// [`DirectionalLight`] is appended to the [`RenderLights`] rig.
+    /// [`DirectionalLight`] is appended as that one light. A world with no
+    /// lighting yet does not also receive the studio key and fill.
+    /// [`StudioLights`] appends that pair and leaves ambient unchanged.
     /// [`OrbitCamera`] replaces the client-side view and registers its
     /// input system once. Neither call returns a success flag: a light
     /// the renderer cannot upload is reported by that rig, and the camera
@@ -448,6 +455,13 @@ impl<Role: SceneRole> GameWorld<Role> {
         let _ = self.engine.world_mut().insert(lights);
     }
 
+    /// Returns the lighting resource, publishing an empty directional list
+    /// when the world has none.
+    ///
+    /// Ambient starts at [`Color::BLACK`] until [`Self::set_ambient`]. The
+    /// IBL multipliers stay the [`RenderLights::default`] no-op `Lux(1.0)`.
+    /// The key and fill are not copied in; [`StudioLights`] is the explicit
+    /// way to add that pair.
     fn ensure_render_lights(&mut self) -> &mut RenderLights {
         if self
             .engine
@@ -456,6 +470,9 @@ impl<Role: SceneRole> GameWorld<Role> {
             .get::<RenderLights>()
             .is_none()
         {
+            // Keep the IBL multipliers from `Default`. Directional lights stay
+            // empty: the studio key and fill are `StudioLights`, not a side
+            // effect of publishing ambient.
             self.publish_render_lights(RenderLights {
                 ambient: Color::BLACK,
                 lights: Vec::new(),
@@ -510,6 +527,17 @@ impl Spawn for DirectionalLight {
     fn spawn_into<Role: SceneRole>(self, world: &mut GameWorld<Role>) -> Self::Output {
         let desc = self.to_light_desc();
         world.ensure_render_lights().lights.push(desc);
+    }
+}
+
+impl Spawn for StudioLights {
+    type Output = ();
+
+    fn spawn_into<Role: SceneRole>(self, world: &mut GameWorld<Role>) -> Self::Output {
+        let rig = world.ensure_render_lights();
+        for light in self.lights() {
+            rig.lights.push(light.to_light_desc());
+        }
     }
 }
 
@@ -808,7 +836,7 @@ mod tests {
     use ornis_core::units::{Clamped01, PositiveF32};
     use ornis_core::{Color, Degrees, Lux, Stage as CoreStage, Time, UnitVec3};
     use ornis_physics::RigidBody;
-    use ornis_render::{DirectionalLight, OrbitCamera, read_orbit_camera};
+    use ornis_render::{DirectionalLight, OrbitCamera, StudioLights, read_orbit_camera};
 
     /// Minimal probe system for staged-plan lookups.
     struct StageProbe(&'static str);
@@ -959,6 +987,14 @@ mod tests {
             .clone()
     }
 
+    /// Field equality for lights. [`LightDesc`] has no `PartialEq`.
+    fn assert_same_lights(actual: &[LightDesc], expected: &[LightDesc]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        }
+    }
+
     #[test]
     fn typed_light_ambient_and_camera_publish_one_rig() {
         let mut world = GameWorld::new();
@@ -1039,6 +1075,76 @@ mod tests {
         let rig = render_lights(&world);
         assert_eq!(rig.lights.len(), 1);
         assert_eq!(rig.ambient, Color::WHITE);
+    }
+
+    #[test]
+    fn set_ambient_does_not_add_directional_lights() {
+        let mut world = GameWorld::new();
+        assert!(
+            world
+                .engine()
+                .world()
+                .resources()
+                .get::<RenderLights>()
+                .is_none(),
+            "a fresh world has no lighting"
+        );
+        let ambient = Color::linear_rgb(0.2, 0.25, 0.3);
+        world.set_ambient(ambient);
+        let rig = render_lights(&world);
+        let defaults = RenderLights::default();
+        assert_eq!(rig.ambient, ambient);
+        assert!(rig.lights.is_empty());
+        assert_eq!(rig.ambient_intensity, defaults.ambient_intensity);
+        assert_eq!(rig.exposure, defaults.exposure);
+    }
+
+    #[test]
+    fn spawn_directional_light_adds_exactly_one() {
+        let mut world = GameWorld::new();
+        let light = DirectionalLight {
+            direction: UnitVec3::Y,
+            illuminance: Lux(1.5),
+            color: Color::linear_rgb(0.2, 0.4, 0.8),
+            ..Default::default()
+        };
+        world.spawn(light);
+        let rig = render_lights(&world);
+        assert_eq!(rig.ambient, Color::BLACK);
+        assert_eq!(rig.lights.len(), 1);
+        assert_same_lights(&rig.lights, &[light.to_light_desc()]);
+
+        world.set_ambient(Color::WHITE);
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::new(Vec3::new(-1.0, 1.0, 0.0)).expect("direction"),
+            illuminance: Lux(0.4),
+            color: Color::WHITE,
+            ..Default::default()
+        });
+        let rig = render_lights(&world);
+        assert_eq!(rig.ambient, Color::WHITE);
+        assert_eq!(rig.lights.len(), 2);
+    }
+
+    #[test]
+    fn spawn_studio_lights_appends_key_and_fill_without_changing_ambient() {
+        let mut world = GameWorld::new();
+        let ambient = Color::linear_rgb(0.2, 0.3, 0.4);
+        world.set_ambient(ambient);
+        world.spawn(StudioLights::default());
+        let rig = render_lights(&world);
+        assert_eq!(rig.ambient, ambient);
+        assert_same_lights(&rig.lights, &RenderLights::default().lights);
+
+        world.spawn(DirectionalLight {
+            direction: UnitVec3::Y,
+            illuminance: Lux(1.0),
+            color: Color::WHITE,
+            ..Default::default()
+        });
+        let rig = render_lights(&world);
+        assert_eq!(rig.lights.len(), RenderLights::default().lights.len() + 1);
+        assert_eq!(rig.ambient, ambient);
     }
 
     #[test]
@@ -1394,8 +1500,9 @@ mod tests {
     }
 
     /// Scene-first facade: empty world, one character root, explicit light
-    /// and camera. The world starts dark, and the animator sits on the
-    /// root `spawn` returned.
+    /// and camera. The world starts dark. `set_ambient` does not add
+    /// directional lights; the spawned light is the only one. The animator
+    /// sits on the root `spawn` returned.
     #[test]
     fn facade_spawns_asset_with_explicit_light_and_camera() {
         use ornis_animation::{Animator, AnimatorError, try_animator};

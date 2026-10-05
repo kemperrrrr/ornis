@@ -70,7 +70,7 @@ pub use ibl::{
     BrdfLut, CubeFace, EnvironmentCube, SplitSum, bake_brdf_lut, convolve_irradiance,
     convolve_specular, integrate_brdf,
 };
-pub use light::DirectionalLight;
+pub use light::{DirectionalLight, StudioLights};
 pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};
 pub use mesh_upload::{
     ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,

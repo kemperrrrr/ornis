@@ -1,9 +1,11 @@
-//! Typed directional light placed into a [`RenderLights`](crate::extraction::RenderLights) rig.
+//! Typed directional light and the studio key/fill pair placed into a
+//! [`RenderLights`](crate::extraction::RenderLights) rig.
 //!
 //! The channels match a scene `Directional` light: [`UnitVec3`] points
 //! toward the light, [`Lux`] is the existing intensity `f32`, and [`Color`]
 //! is linear emission. [`DirectionalLight::to_light_desc`] is what the
-//! renderer uploads.
+//! renderer uploads. [`StudioLights`] is that pair on purpose; nothing else
+//! publishes it.
 
 use glam::Vec3;
 use ornis_assets::scene::{LightDesc, ShadowCast};
@@ -54,6 +56,47 @@ impl Default for DirectionalLight {
     }
 }
 
+/// Studio key and fill.
+///
+/// [`Default`] is the directional pair inside
+/// [`RenderLights::default`](crate::extraction::RenderLights::default):
+/// a white key toward `(1, 1, 1)` and a cooler fill toward `(-0.5, 0.5, -0.5)`.
+/// Spawning appends both lights. Ambient and lights already in the world stay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StudioLights {
+    /// Brighter light of the pair.
+    pub key: DirectionalLight,
+    /// Dimmer light from the opposite octant.
+    pub fill: DirectionalLight,
+}
+
+impl StudioLights {
+    /// Fill strength (`0.3`) of [`Default`].
+    pub const DEFAULT_FILL_ILLUMINANCE: Lux = Lux(0.3);
+
+    /// Key then fill, in the order
+    /// [`RenderLights::default`](crate::extraction::RenderLights::default) stores them.
+    pub fn lights(self) -> [DirectionalLight; 2] {
+        [self.key, self.fill]
+    }
+}
+
+impl Default for StudioLights {
+    /// Key at [`DirectionalLight::DEFAULT_ILLUMINANCE`], fill at
+    /// [`Self::DEFAULT_FILL_ILLUMINANCE`].
+    fn default() -> Self {
+        Self {
+            key: DirectionalLight::default(),
+            fill: DirectionalLight {
+                direction: UnitVec3::normalize(Vec3::new(-0.5, 0.5, -0.5)).unwrap_or(UnitVec3::Y),
+                illuminance: Self::DEFAULT_FILL_ILLUMINANCE,
+                color: Color::linear_rgb(0.8, 0.8, 1.0),
+                shadow: ShadowCast::Disabled,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,5 +121,22 @@ mod tests {
             }
             other => panic!("directional light became {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_studio_lights_match_the_legacy_key_and_fill() {
+        let pair = StudioLights::default();
+        assert_eq!(pair.key, DirectionalLight::default());
+        let [key, fill] = pair.lights();
+        let expected = crate::extraction::RenderLights::default().lights;
+        assert_eq!(
+            format!("{:?}", key.to_light_desc()),
+            format!("{:?}", expected[0])
+        );
+        assert_eq!(
+            format!("{:?}", fill.to_light_desc()),
+            format!("{:?}", expected[1])
+        );
+        assert_eq!(fill.illuminance, StudioLights::DEFAULT_FILL_ILLUMINANCE);
     }
 }
