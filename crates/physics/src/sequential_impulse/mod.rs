@@ -1269,6 +1269,13 @@ impl SequentialImpulseEngine {
 
 impl PhysicsEngine for SequentialImpulseEngine {
     fn step(&mut self, dt: f32) {
+        // Same contract as the other engines and the orchestrator: a
+        // non-finite or non-positive host delta is a no-op. Integrating it
+        // poisons every awake velocity (`gravity * dt` is NaN) once the
+        // debug assertions in the integrate path are compiled out.
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
         // Driver snapshot FIRST (even on the fast path below): the kinematic
         // step displacement must span exactly one step, and a zero-velocity
         // teleport still counts as driven motion for the wake check.

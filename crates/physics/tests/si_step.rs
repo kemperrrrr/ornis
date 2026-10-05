@@ -27,6 +27,38 @@ fn dense_shedding_scene() -> SequentialImpulseEngine {
     physics
 }
 
+/// Sibling engines (`AvbdEngine`, `XpbdEngine`, `FeatherstoneEngine`, the
+/// orchestrator) treat a non-finite or non-positive `dt` as a no-op. The
+/// SI step must do the same: a NaN/Inf host delta would otherwise poison
+/// every awake velocity through `gravity * dt`.
+#[test]
+fn non_finite_or_non_positive_dt_does_not_move_bodies() {
+    let mut physics = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut ball = RigidBody::new_sphere(Vec3::new(0.0, 2.0, 0.0), 0.5, 1.0);
+    ball.velocity = Vec3::X;
+    let h = physics.add_body(ball);
+    for dt in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 0.0] {
+        physics.step(dt);
+        let b = physics.get_body(h).expect("ball");
+        assert_eq!(
+            b.position,
+            Vec3::new(0.0, 2.0, 0.0),
+            "dt={dt} moved position to {:?}",
+            b.position
+        );
+        assert_eq!(
+            b.velocity,
+            Vec3::X,
+            "dt={dt} changed velocity to {:?}",
+            b.velocity
+        );
+        assert!(
+            b.angular_velocity == Vec3::ZERO && b.orientation.is_finite(),
+            "dt={dt} poisoned orientation or spin"
+        );
+    }
+}
+
 fn angular_momentum(body: &RigidBody) -> Vec3 {
     let w_body = body.orientation.conjugate() * body.angular_velocity;
     body.orientation * (body.inertia * w_body)
