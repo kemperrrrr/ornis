@@ -100,7 +100,8 @@ impl From<bool> for CachePolicy {
 /// Whether the first-substep restitution bias may fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RestitutionGate {
-    /// Restitution bias enabled (first substep, new points only).
+    /// Restitution bias enabled for this substep. A point that already
+    /// carries a cached normal impulse does not bounce again.
     Enabled,
     /// Restitution suppressed.
     Suppressed,

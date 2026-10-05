@@ -37,6 +37,9 @@ fn fast_box_drop_does_not_tunnel() {
     ));
     let mut ball = RigidBody::new_box(Vec3::new(0.0, 8.0, 0.0), Vec3::splat(0.4), 1.0);
     ball.velocity = Vec3::new(0.0, -40.0, 0.0);
+    // Inelastic: the pin is "no tunnel, then rest", not the bounce.
+    // Default e = 0.3 still leaves this drop in the air after 120 steps.
+    ball.restitution = 0.0;
     let h = physics.add_body(ball);
     for _ in 0..120 {
         physics.step(1.0 / 60.0);
@@ -991,10 +994,12 @@ fn hull_tetrahedron_rests_on_face() {
     // the apex v0): lay it flat down. Rest height = face distance
     // 0.408 below the center.
     let n = Vec3::new(-2.828427, 0.0, 2.0).normalize();
-    let body = physics.add_body(
-        RigidBody::new_convex_hull(Vec3::new(0.0, 1.2, 0.0), tetra_vertices(), 1.0)
-            .with_orientation(Quat::from_rotation_arc(n, Vec3::NEG_Y)),
-    );
+    let mut hull = RigidBody::new_convex_hull(Vec3::new(0.0, 1.2, 0.0), tetra_vertices(), 1.0)
+        .with_orientation(Quat::from_rotation_arc(n, Vec3::NEG_Y));
+    // Face rest is the rolling/torsion pin. Default e = 0.3 keeps the
+    // drop bouncing past the rest height for the whole run.
+    hull.restitution = 0.0;
+    let body = physics.add_body(hull);
     for _ in 0..900 {
         physics.step(1.0 / 60.0);
     }

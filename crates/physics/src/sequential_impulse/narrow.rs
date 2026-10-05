@@ -583,7 +583,7 @@ fn distance_contact(
         return None;
     }
     let axis = d.point_b - d.point_a;
-    let mut normal = if axis.length_squared() > DEGENERATE_LEN2 {
+    let witness = if axis.length_squared() > DEGENERATE_LEN2 {
         axis.normalize()
     } else {
         (b.position - a.position).normalize_or(Vec3::Y)
@@ -592,10 +592,21 @@ fn distance_contact(
     // point ends up above the A-side point), flipping the axis against the
     // separating direction — the solver would then push the bodies through
     // each other. Enforce consistency with the center delta (same class of
-    // fix as in `box_vs_capsule` below).
-    if normal.dot(b.position - a.position) < 0.0 {
-        normal = -normal;
-    }
+    // fix as [`box_vs_capsule`]).
+    //
+    // A half-space has no center. Its position is an arbitrary point on the
+    // plane and the solid is the infinite half along `-n`, so the center
+    // delta agrees with those crossed witnesses and drives a body whose
+    // center has already crossed the plane deeper into the solid. The
+    // outward plane normal is the contact frame: `+n` when the plane is
+    // body A (push B into free space), `-n` when the plane is body B (the
+    // reaction on A is `+n`).
+    let normal = match (&a.shape, &b.shape) {
+        (Shape::HalfSpace { normal: plane }, _) => a.orientation * plane.get(),
+        (_, Shape::HalfSpace { normal: plane }) => -(b.orientation * plane.get()),
+        _ if witness.dot(b.position - a.position) < 0.0 => -witness,
+        _ => witness,
+    };
     let penetration = -d.dist;
     Some(Manifold::single(
         crate::body::BodyHandle::from(i),

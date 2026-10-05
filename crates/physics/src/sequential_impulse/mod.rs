@@ -1269,6 +1269,13 @@ impl SequentialImpulseEngine {
 
 impl PhysicsEngine for SequentialImpulseEngine {
     fn step(&mut self, dt: f32) {
+        // Same contract as the other engines and the orchestrator: a
+        // non-finite or non-positive host delta is a no-op. Integrating it
+        // poisons every awake velocity (`gravity * dt` is NaN) once the
+        // debug assertions in the integrate path are compiled out.
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
         // Driver snapshot FIRST (even on the fast path below): the kinematic
         // step displacement must span exactly one step, and a zero-velocity
         // teleport still counts as driven motion for the wake check.
@@ -1540,9 +1547,13 @@ impl PhysicsEngine for SequentialImpulseEngine {
                 );
             }
             timing.narrow_phase_ms += t0.elapsed().as_secs_f64() * MS_PER_SEC;
-            // Restitution is one-shot per step, evaluated on the first substep.
+            // Restitution stays one bounce per impact. The gate is open on
+            // every substep so a landing that is not substep 0 still
+            // bounces; a pair that already carries a cached normal impulse
+            // does not (see `compute_restitution_bias`). A substep-0-only
+            // gate misses that landing after a zero-impulse preview.
             let t0 = Instant::now();
-            let gate = crate::flags::RestitutionGate::from(s == 0);
+            let gate = crate::flags::RestitutionGate::Enabled;
             let mut islands: Vec<IslandWork> = Vec::new();
             if use_flat {
                 self.solve_flat_velocity(&manifolds_buf, gate, sub_dt, dt, &mut flat_shards);

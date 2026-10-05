@@ -36,6 +36,24 @@ fn run(engine: &mut SequentialImpulseEngine, n: u32) -> Vec<ContactForceEvent> {
     out
 }
 
+/// Like [`run`], and each step's drain must already be sorted by pair.
+fn run_asserting_sorted(engine: &mut SequentialImpulseEngine, n: u32) -> Vec<ContactForceEvent> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        engine.step(1.0 / 60.0);
+        let batch = engine.drain_contact_force_events();
+        let mut sorted = batch.clone();
+        sorted.sort_by_key(|e| (e.a, e.b));
+        assert_eq!(
+            batch.iter().map(|e| (e.a, e.b)).collect::<Vec<_>>(),
+            sorted.iter().map(|e| (e.a, e.b)).collect::<Vec<_>>(),
+            "drain order must be canonical"
+        );
+        out.extend(batch);
+    }
+    out
+}
+
 /// A 1 m drop stays under a 5 kN threshold (quiet); a 10 m drop reports
 /// with a force in the impact ballpark.
 #[test]
@@ -101,7 +119,9 @@ fn force_opt_out_default_reports_nothing() {
     assert!(events.is_empty(), "opt-out default must report nothing");
 }
 
-/// Drain order is canonical (sorted by pair) and reruns are identical.
+/// Each step's drain is canonical (sorted by pair) and reruns are identical.
+/// The history is the concatenation of those drains: a later impact of a
+/// lower pair index is not re-sorted into an earlier step.
 #[test]
 fn force_drain_order_is_deterministic() {
     let mut engine = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
@@ -117,15 +137,8 @@ fn force_drain_order_is_deterministic() {
                 .with_contact_force_threshold(1000.0),
         );
     }
-    let first = run(&mut engine, 120);
+    let first = run_asserting_sorted(&mut engine, 120);
     assert!(!first.is_empty(), "staggered drops must report");
-    let mut sorted = first.clone();
-    sorted.sort_by_key(|e| (e.a, e.b));
-    assert_eq!(
-        first.iter().map(|e| (e.a, e.b)).collect::<Vec<_>>(),
-        sorted.iter().map(|e| (e.a, e.b)).collect::<Vec<_>>(),
-        "drain order must be canonical"
-    );
 
     // Rebuild identically and rerun: the event stream must match exactly.
     let mut engine2 = SequentialImpulseEngine::new(Vec3::new(0.0, -9.81, 0.0));
