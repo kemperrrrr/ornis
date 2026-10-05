@@ -53,7 +53,7 @@ cargo xtask quality --everything  # всё сразу: --ci + --full + --bench +
 cargo xtask quality --ci --only fmt,test  # подмножество стадий для CI-шардов (идники: --list-stages)
 cargo xtask fuzz <target>     # фаззинг парсеров: scene_ron, materialx_parse (через +nightly)
 cargo xtask mutants           # мутационное тестирование ornis-core (cargo-mutants, долго)
-cargo xtask install-hooks     # pre-push hook: fmt + workspace check (ORNIS_HOOK_FULL=1: +clippy, wasm32)
+cargo xtask install-hooks     # pre-push: fmt + check затронутых крейтов в target/hook (ORNIS_PREPUSH_FULL=1: весь workspace; ORNIS_HOOK_FULL=1: +clippy, wasm32). `git push --no-verify` пропускает хук; CI остаётся полным гейтом
 
 # обновление structural baseline (ratchet):
 rustqual --save-baseline baseline.json   # локально после осознанного роста сложности

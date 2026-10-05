@@ -6,6 +6,8 @@
 //!   cargo xtask quality [--ci] [--full] [--bench] [--everything] [--only <ids>] [--list-stages]
 //!   cargo xtask fuzz <target> [-- <libfuzzer args>]
 //!   cargo xtask mutants [-- <cargo-mutants args>]
+//!   cargo xtask install-hooks
+//!   cargo xtask pre-push [<remote-name> <url>]   (git hook; reads stdin)
 //!   cargo editor   [--skip-wasm] [--editor-dir <path>]   (alias)
 //!
 //! `editor` builds the WASM viewport (wasm-pack) and runs the engine with the
@@ -13,6 +15,7 @@
 //! std::process::Command without a shell.
 
 mod e2e;
+mod prepush;
 mod quality;
 
 use std::path::{Path, PathBuf};
@@ -30,6 +33,7 @@ fn main() {
         "fuzz" => quality::fuzz(&args[1..]),
         "mutants" => quality::mutants(&args[1..]),
         "install-hooks" => install_hooks(),
+        "pre-push" => prepush::pre_push(&args[1..]),
         "-h" | "--help" | "help" => usage(0),
         other => {
             eprintln!("xtask: unknown task '{other}'");
@@ -62,16 +66,22 @@ fn usage(code: i32) -> ! {
          Run a cargo-fuzz target (scene_ron, materialx_parse, editor_command) via +nightly\n  \
           mutants [-- <args>]\n      \
           Run cargo-mutants against ornis-core\n  \
+          pre-push [<remote-name> <url>]\n      \
+          Hook entry: check packages touched by the pre-push ref list\n      \
+          on stdin (ORNIS_PREPUSH_FULL=1 checks the whole workspace;\n      \
+          ORNIS_HOOK_FULL=1 adds clippy + wasm32)\n  \
           install-hooks\n      \
-          Install .githooks/pre-push into .git/hooks (fmt + workspace\n      \
-          check on push; ORNIS_HOOK_FULL=1 adds clippy + wasm32 check)"
+          Install .githooks/pre-push into .git/hooks (fmt + check of\n      \
+          crates touched by the push; ORNIS_PREPUSH_FULL=1 for a full\n      \
+          workspace check; ORNIS_HOOK_FULL=1 adds clippy + wasm32)"
      );
     exit(code);
 }
 
 /// Copy the committed `.githooks/` scripts into `.git/hooks/` (git does
 /// not execute hooks from the worktree). Opt-in per clone; rerun after
-/// pulling hook updates.
+/// pulling hook updates. The installed hook formats the tree and checks
+/// only crates touched by the push.
 fn install_hooks() {
     let root = workspace_root();
     let src = root.join(".githooks/pre-push");
@@ -96,10 +106,13 @@ fn install_hooks() {
             },
         );
     }
-    eprintln!("xtask: installed pre-push hook (ORNIS_HOOK_FULL=1 for clippy + wasm32)");
+    eprintln!(
+        "xtask: installed pre-push hook (scoped crate check in target/hook; \
+         ORNIS_PREPUSH_FULL=1 for a workspace check; ORNIS_HOOK_FULL=1 for clippy + wasm32)"
+    );
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     // xtask/Cargo.toml lives one level below the workspace root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -107,7 +120,7 @@ fn workspace_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn run(cmd: &mut Command, what: &str) {
+pub(crate) fn run(cmd: &mut Command, what: &str) {
     let status = match cmd.status() {
         Ok(status) => status,
         Err(e) => {
