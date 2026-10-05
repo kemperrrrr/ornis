@@ -170,15 +170,67 @@ fn parse_name_status_z(data: &[u8]) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
-    fn rev(spec: &str) -> String {
+    /// Throwaway repo so the diff tests do not need this checkout's history
+    /// (CI fetches a shallow clone).
+    struct TempRepo {
+        path: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new(label: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "ornis-prepush-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path)
+                .unwrap_or_else(|err| panic!("mkdir {}: {err}", path.display()));
+            git(&path, &["init", "-b", "master"]);
+            Self { path }
+        }
+
+        fn write(&self, rel: &str, body: &str) {
+            let path = self.path.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|err| panic!("mkdir {}: {err}", parent.display()));
+            }
+            std::fs::write(&path, body)
+                .unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
+        }
+
+        fn commit(&self, message: &str) -> String {
+            git(&self.path, &["add", "."]);
+            git(
+                &self.path,
+                &["-c", "commit.gpgsign=false", "commit", "-m", message],
+            );
+            git(&self.path, &["rev-parse", "HEAD"])
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
-            .args(["rev-parse", spec])
-            .current_dir(crate::workspace_root())
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "prepush")
+            .env("GIT_AUTHOR_EMAIL", "prepush@example.com")
+            .env("GIT_COMMITTER_NAME", "prepush")
+            .env("GIT_COMMITTER_EMAIL", "prepush@example.com")
             .output()
-            .unwrap_or_else(|err| panic!("git rev-parse {spec}: {err}"));
+            .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
         assert!(
             output.status.success(),
-            "git rev-parse {spec}: {}",
+            "git {args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
@@ -217,27 +269,46 @@ mod tests {
     fn deleting_a_ref_changes_nothing() {
         let update = RefUpdate {
             local_sha: "0".repeat(40),
-            remote_sha: rev("HEAD"),
+            remote_sha: "abc".to_string(),
         };
-        assert!(changed_paths(&crate::workspace_root(), "origin", &update).is_empty());
+        assert!(changed_paths(Path::new("."), "origin", &update).is_empty());
     }
 
     #[test]
     fn one_crate_commit_lists_only_that_file() {
-        let update = RefUpdate {
-            local_sha: rev("d02278c"),
-            remote_sha: rev("d02278c^"),
-        };
-        let paths = changed_paths(&crate::workspace_root(), "origin", &update);
-        assert_eq!(paths, vec![PathBuf::from("crates/core/src/units/color.rs")]);
+        let repo = TempRepo::new("one-crate");
+        repo.write("crates/foo/src/lib.rs", "fn before() {}\n");
+        let parent = repo.commit("init");
+        repo.write("crates/foo/src/lib.rs", "fn after() {}\n");
+        let local = repo.commit("edit foo");
+        let paths = changed_paths(
+            &repo.path,
+            "origin",
+            &RefUpdate {
+                local_sha: local,
+                remote_sha: parent,
+            },
+        );
+        assert_eq!(paths, vec![PathBuf::from("crates/foo/src/lib.rs")]);
     }
 
     #[test]
     fn new_branch_already_on_origin_master_has_no_diff() {
-        let update = RefUpdate {
-            local_sha: rev("d02278c"),
-            remote_sha: "0".repeat(40),
-        };
-        assert!(changed_paths(&crate::workspace_root(), "origin", &update).is_empty());
+        let repo = TempRepo::new("on-master");
+        repo.write("crates/foo/src/lib.rs", "fn same() {}\n");
+        let local = repo.commit("init");
+        git(
+            &repo.path,
+            &["update-ref", "refs/remotes/origin/master", "HEAD"],
+        );
+        let paths = changed_paths(
+            &repo.path,
+            "origin",
+            &RefUpdate {
+                local_sha: local,
+                remote_sha: "0".repeat(40),
+            },
+        );
+        assert!(paths.is_empty());
     }
 }
