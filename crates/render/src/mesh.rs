@@ -443,6 +443,50 @@ pub fn create_box(device: &wgpu::Device, size: [f32; 3]) -> Mesh {
     )
 }
 
+/// Camera-facing quad in the local XY plane (`z = 0`) with a caller-supplied
+/// shading normal. `size` is `(width, height)`; the quad is centered on the
+/// origin. The normal is stored as given (callers pass a unit vector).
+#[cfg(test)]
+pub(crate) fn create_facing_quad(device: &wgpu::Device, size: [f32; 2], normal: [f32; 3]) -> Mesh {
+    let hx = size[0] * HALF;
+    let hy = size[1] * HALF;
+    let tangent = [0.0, 1.0, 0.0];
+    let vertices = [
+        Vertex {
+            position: [-hx, -hy, 0.0],
+            normal,
+            uv: [0.0, 1.0],
+            tangent,
+        },
+        Vertex {
+            position: [hx, -hy, 0.0],
+            normal,
+            uv: [1.0, 1.0],
+            tangent,
+        },
+        Vertex {
+            position: [hx, hy, 0.0],
+            normal,
+            uv: [1.0, 0.0],
+            tangent,
+        },
+        Vertex {
+            position: [-hx, hy, 0.0],
+            normal,
+            uv: [0.0, 0.0],
+            tangent,
+        },
+    ];
+    let indices = [0, 1, 2, 0, 2, 3];
+    upload_vertices(
+        device,
+        "facing quad vertex buffer",
+        "facing quad index buffer",
+        &vertices,
+        &indices,
+    )
+}
+
 /// Generate a flat quad in the local XZ plane (see [`plane_data`]),
 /// uploading it to `device`.
 pub fn create_plane(device: &wgpu::Device, size: [f32; 2]) -> Mesh {

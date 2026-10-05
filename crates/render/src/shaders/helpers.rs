@@ -27,6 +27,17 @@ pub const EPS: f32 = 1e-6;
 pub const SHADOW_REF_BIAS: f32 = 0.001;
 /// Single-precision 1/π, matching the former `0.31830988618` bit-wise.
 pub const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
+/// Cleared g-buffer depth (far plane). A sample at this depth is background:
+/// its octahedral clear `(0, 0)` decodes to +Z and must not be shaded.
+pub const CLEAR_DEPTH: f32 = 1.0;
+/// Dot product above which two sample normals are the same surface.
+pub const NORMAL_AGREE: f32 = 0.999;
+/// NDC depth gap that splits two samples onto different surfaces.
+pub const DEPTH_EDGE: f32 = 0.002;
+/// Alpha below which a deferred pixel is absent (former `0.001` discard).
+pub const ALPHA_CUTOFF: f32 = 0.001;
+/// `MSAA_SAMPLE_COUNT` as `f32`, for coverage comparisons in WGSL.
+pub const MSAA_SAMPLES_F: f32 = 4.0;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
@@ -41,7 +52,27 @@ pub fn wgsl_consts() -> String {
             )
         };
     }
-    [decl!(PI), decl!(EPS), decl!(INV_PI), decl!(SHADOW_REF_BIAS)].concat()
+    let floats = [
+        decl!(PI),
+        decl!(EPS),
+        decl!(INV_PI),
+        decl!(SHADOW_REF_BIAS),
+        decl!(CLEAR_DEPTH),
+        decl!(NORMAL_AGREE),
+        decl!(DEPTH_EDGE),
+        decl!(ALPHA_CUTOFF),
+        decl!(MSAA_SAMPLES_F),
+    ]
+    .concat();
+    format!("{floats}{}", msaa_samples_wgsl())
+}
+
+/// `u32` sample count shared with [`crate::renderer::MSAA_SAMPLE_COUNT`].
+fn msaa_samples_wgsl() -> String {
+    format!(
+        "const MSAA_SAMPLES: u32 = {}u;\n",
+        crate::renderer::MSAA_SAMPLE_COUNT
+    )
 }
 
 /// Base layer: dielectric/metallic mix with anisotropic GGX + Oren-Nayar.
@@ -270,9 +301,6 @@ fn evaluate_emission(
     coat_color: glam::Vec3,
     nov: f32,
 ) -> glam::Vec3 {
-    if emission_luminance <= 0.0 {
-        return Vec3::new(0.0);
-    }
     return coated_emission(
         emission_color,
         emission_luminance,

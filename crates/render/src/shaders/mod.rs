@@ -137,7 +137,11 @@ impl ResourceKind {
                 min_binding_size: None,
             },
             Self::TextureFloat => wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                // Multisampled floats are not filterable (wgpu): the MSAA
+                // normal is `textureLoad`ed per sample, never sampled.
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: !multisampled,
+                },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled,
             },

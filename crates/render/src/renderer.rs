@@ -3202,13 +3202,21 @@ impl Renderer3D {
     ) -> LightingPass {
         // Layout entries come from the pass resource table — the same table
         // that generates the WGSL declarations, so shader and layout agree.
-        // Only depth/integer layers bind multisampled in MSAA mode (they
-        // have no resolve target); the float layers bind the single-sample
-        // resolve textures (see `crate::shaders::resource_stays_multisampled`).
+        // Depth, material-id and the normal stay multisampled at 4x (the
+        // normal must not box-filter the octahedral clear into +Z). Other
+        // float layers bind the single-sample resolve.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> =
             shaders::lighting_generated::LIGHTING_RESOURCES
                 .iter()
-                .map(|r| shaders::bgl_entry_for_samples(r, sample_count))
+                .map(|r| {
+                    shaders::bgl_entry(
+                        r,
+                        shaders::lighting_generated::per_sample_flag(
+                            sample_count,
+                            shaders::lighting_generated::keeps_per_sample(r.name, &r.kind),
+                        ),
+                    )
+                })
                 .collect();
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lighting bind group layout"),
@@ -5098,12 +5106,14 @@ impl Renderer3D {
     /// Record the deferred lighting pass: reconstructs surface data from the
     /// g-buffer in `g`, evaluates the OpenPBR BRDF and writes HDR color into `output`.
     ///
-    /// In MSAA mode the float layers are sampled from the renderer's stored
-    /// resolve textures (the pass resolved into them), while depth and
-    /// material-id bind the multisampled `g` views directly (loaded as sample
-    /// 0 — see [`MSAA_SAMPLE_COUNT`]); `g` must therefore be the renderer's
-    /// own MSAA views in that mode, as [`render_scene`](Self::render_scene)
-    /// passes. At 1x every binding is `g` itself.
+    /// In MSAA mode albedo, world position and material params are sampled
+    /// from the renderer's stored resolve textures. Depth, material-id and
+    /// the normal bind the multisampled `g` views: interior pixels shade
+    /// sample 0, and edge pixels average only covered samples so a cleared
+    /// octahedral `(0, 0)` (which decodes to +Z) cannot fringe the
+    /// silhouette. `g` must be the renderer's own MSAA views in that mode,
+    /// as [`render_scene`](Self::render_scene) passes. At 1x every binding
+    /// is `g` itself.
     pub fn render_lighting(
         &self,
         device: &wgpu::Device,
@@ -5119,9 +5129,11 @@ impl Renderer3D {
         let material = read_lock(&self.material_buffer);
         // Resolve views in MSAA mode, pass-through views at 1x (the helper
         // returns `g`'s own view there, so the 1x bind group is unchanged).
+        // The normal stays on the multisampled view: lighting loads each
+        // sample instead of the hardware box filter.
         let resolves = self.gbuffer.resolves.as_ref();
         let albedo_view = resolves.map_or(g.albedo, |r| &r.albedo_view);
-        let normal_view = resolves.map_or(g.normal, |r| &r.normal_view);
+        let normal_view = g.normal;
         let world_position_view = resolves.map_or(g.world_position, |r| &r.world_position_view);
         let material_params_view = resolves.map_or(g.material_params, |r| &r.material_params_view);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -5603,6 +5615,42 @@ impl Renderer3D {
         rpass.set_pipeline(&self.fog.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
         rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
+    }
+
+    /// Deferred g-buffer plus lighting into `target`, without the forward
+    /// pass. Test-only: the edge probe needs the deferred term alone.
+    #[cfg(test)]
+    fn render_deferred_frame(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        mesh: &Mesh,
+    ) {
+        let g = GbufferTargets {
+            albedo: &self.gbuffer.albedo_view,
+            normal: &self.gbuffer.normal_view,
+            material_id: &self.gbuffer.material_id_view,
+            world_position: &self.gbuffer.world_position_view,
+            material_params: &self.gbuffer.material_params_view,
+            depth: &self.gbuffer.depth_view,
+        };
+        self.render_gbuffer(encoder, &g, mesh, 1);
+        self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
+        self.render_composite(
+            device,
+            queue,
+            encoder,
+            CompositeInputs {
+                target,
+                hdr: &self.pbr_texture_view,
+                hdr_fwd: &self.pbr_texture_view,
+                bloom: &self.pbr_texture_view,
+                bloom_intensity: 0.0,
+                mode: 0,
+            },
+        );
     }
 
     /// All-in-one legacy frame on the renderer's persistent targets:
@@ -6704,3 +6752,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "msaa_edge_gpu.rs"]
+mod msaa_edge_gpu;

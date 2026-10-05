@@ -30,6 +30,8 @@ pub mod light;
 pub mod mesh;
 /// Upload of `ornis-mesh-editor` mesh data to the GPU.
 pub mod mesh_upload;
+/// Deferred MSAA edge mask (covered samples only; clear normal is not +Z-shaded).
+pub mod msaa_edge;
 /// Backend-neutral rendering trait plus its factory.
 pub mod render_backend;
 /// The deferred [`renderer::Renderer3D`] and its passes.
@@ -73,6 +75,7 @@ pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};
 pub use mesh_upload::{
     ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,
 };
+pub use msaa_edge::{DeferredSample, SampleCoverage, shade_mask};
 pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBRMaterial};
 /// Unified explicit-ordering edge error (Phase A, audit §4.2); the same type
 /// `ornis_core` re-exports for systems.

@@ -220,6 +220,9 @@ fn coated_emission(
     coat_color: glam::Vec3,
     nov: f32,
 ) -> glam::Vec3 {
+    if emission_luminance <= 0.0 {
+        return glam::Vec3::ZERO;
+    }
     let base_emission = emission_color * emission_luminance;
     let coat_fresnel = (1.0 - nov).powf(5.0);
     let transmit = (1.0 - coat_fresnel) * coat_weight + (1.0 - coat_weight);
