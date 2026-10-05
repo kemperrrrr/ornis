@@ -303,11 +303,11 @@ fn bound_radius(shape: &Shape) -> f32 {
 fn orient_contact_normal(
     a: &RigidBody,
     b: &RigidBody,
-    point_a: Vec3,
-    point_b: Vec3,
+    witnesses: (Vec3, Vec3),
     dist: f32,
     stored: Option<Vec3>,
 ) -> Vec3 {
+    let (point_a, point_b) = witnesses;
     if let Some(n) = halfspace_frame(a, b) {
         return n;
     }
@@ -542,7 +542,7 @@ impl AvbdEngine {
             .iter()
             .find(|p| p.a == ia && p.b == ib)
             .map(|p| p.n);
-        let normal = orient_contact_normal(a, b, d.point_a, d.point_b, d.dist, stored);
+        let normal = orient_contact_normal(a, b, (d.point_a, d.point_b), d.dist, stored);
         let exists = self.pairs.iter().any(|p| p.a == ia && p.b == ib);
         // Swept creation: a fast approach covers `approach*dt`
         // this step, so the pair must exist (as a damper shell)

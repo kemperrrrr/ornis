@@ -5,8 +5,20 @@
 use glam::{Quat, Vec3};
 use ornis_physics::engine::{Manifold, NarrowShardPool, SatCache, detect_collisions_into};
 use ornis_physics::{
-    AvbdEngine, PhysicsEngine, Pose, RigidBody, SequentialImpulseEngine, Shape, XpbdEngine,
+    AvbdEngine, BodyHandle, PhysicsEngine, Pose, RigidBody, SequentialImpulseEngine, Shape,
+    XpbdEngine,
 };
+
+/// Thirty steps from a buried pose. Shared so the two half-space climbs
+/// are not a duplicated three-statement block.
+fn climb_after_thirty(engine: &mut impl PhysicsEngine, h: BodyHandle) -> (f32, f32) {
+    let y0 = engine.get_body(h).expect("ball").position.y;
+    for _ in 0..30 {
+        engine.step(1.0 / 60.0);
+    }
+    let y = engine.get_body(h).expect("ball").position.y;
+    (y0, y)
+}
 
 /// Unit cube as two half-boxes (the compound narrowphase must agree with
 /// the plain box on this split).
@@ -159,11 +171,7 @@ fn halfspace_buried_body_is_pushed_out_of_the_solid() {
     ball.restitution = 0.0;
     ball.friction = 0.0;
     let h = physics.add_body(ball);
-    let y0 = physics.get_body(h).expect("ball").position.y;
-    for _ in 0..30 {
-        physics.step(1.0 / 60.0);
-    }
-    let y = physics.get_body(h).expect("ball").position.y;
+    let (y0, y) = climb_after_thirty(&mut physics, h);
     assert!(
         y.is_finite() && y > y0,
         "buried sphere must leave the solid: y0={y0} y={y}"
@@ -188,11 +196,7 @@ fn halfspace_buried_body_climbs_out_on_xpbd_and_avbd() {
             engine.add_body(plane);
             h
         };
-        let y0 = engine.get_body(h).expect("ball").position.y;
-        for _ in 0..30 {
-            engine.step(1.0 / 60.0);
-        }
-        let y = engine.get_body(h).expect("ball").position.y;
+        let (y0, y) = climb_after_thirty(&mut engine, h);
         assert!(
             y.is_finite() && y > y0,
             "buried sphere sank (plane_first={plane_first}): y0={y0} y={y}"

@@ -511,22 +511,23 @@ pub fn remove_angular_approach(
 
 /// Linear CCD velocity change for the mover and the target.
 ///
-/// `normal` points back toward the mover, so a closing pair has `vn < 0`.
-/// A static, kinematic, or sleeping target (`target_dynamic == false`)
-/// reproduces the mover-only response with the same operations as before:
+/// `mover` and `target` are `(velocity, inverse mass)`. `normal` points
+/// back toward the mover, so a closing pair has `vn < 0`. A static,
+/// kinematic, or sleeping target (`target_dynamic == false`) reproduces
+/// the mover-only response with the same operations as before:
 /// `Δv = -normal * bounce * (v_mover · normal)`, and the target delta is
 /// zero. Two awake dynamics share `J = -bounce * vn / (inv_m + inv_t)`
 /// with `vn = (v_mover - v_target) · normal`, so the pair's momentum is
 /// unchanged. Kinematic velocity is not folded into the static-path `vn`.
 pub(crate) fn linear_ccd_deltas(
-    v_mover: Vec3,
-    v_target: Vec3,
-    inv_mover: f32,
-    inv_target: f32,
+    mover: (Vec3, f32),
+    target: (Vec3, f32),
     normal: Vec3,
     restitution: f32,
     target_dynamic: bool,
 ) -> (Vec3, Vec3) {
+    let (v_mover, inv_mover) = mover;
+    let (v_target, inv_target) = target;
     if !target_dynamic {
         let vn = v_mover.dot(normal);
         if vn >= 0.0 {

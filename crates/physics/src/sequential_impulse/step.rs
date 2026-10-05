@@ -679,10 +679,8 @@ impl SequentialImpulseEngine {
                 let target_dynamic = self.bodies[target].body_type == BodyType::Dynamic
                     && self.bodies[target].inv_mass > 0.0;
                 let (dv_m, dv_t) = linear_ccd_deltas(
-                    self.bodies[h].velocity,
-                    self.bodies[target].velocity,
-                    self.bodies[h].inv_mass,
-                    self.bodies[target].inv_mass,
+                    (self.bodies[h].velocity, self.bodies[h].inv_mass),
+                    (self.bodies[target].velocity, self.bodies[target].inv_mass),
                     hit.normal,
                     e,
                     target_dynamic,

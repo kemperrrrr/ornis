@@ -391,22 +391,8 @@ impl SequentialImpulseEngine {
         );
         let warm_in = &self.warm_impulses;
         let base_iters = self.velocity_iterations;
-        // Contact-hook overrides (friction, restitution, surface velocity)
-        // are applied in the scalar preamble only. A hook that actually
-        // changes a manifold forces the scalar path so every override
-        // routes through the solver that implements them. A no-op hook
-        // records only `None` entries and keeps the configured path —
-        // otherwise a default wide solve and a scalar no-op hook drift
-        // once a single-point impulse is applied (the wide factors are a
-        // distinct rounding of the same Gauss-Seidel step).
-        let hooks_override = islands
-            .iter()
-            .any(|isl| isl.hook.iter().any(Option::is_some));
-        let path = if hooks_override {
-            SolvePath::Scalar
-        } else {
-            self.wide_solver
-        };
+        // Overrides force the scalar solver; a no-op hook keeps `wide_solver`.
+        let path = velocity_solve_path(self.wide_solver, islands);
         // per-island adaptive iters: precompute outside the dispatched closure
         // so we don't borrow `self` inside it (borrow checker). Tall-stack
         // islands never scale below the full base budget (the resting
@@ -464,6 +450,21 @@ impl SequentialImpulseEngine {
             next.extend(isl.warm.iter().map(|(k, v)| (*k, *v)));
         }
         self.warm_impulses = next;
+    }
+}
+
+/// Scalar path when any manifold on these islands carries a hook override.
+/// A no-op hook stores only `None` and stays on `configured`, so it matches
+/// a run with no hooks. Wide and scalar single-point impulses are not the
+/// same bits once a real impulse is applied.
+fn velocity_solve_path(configured: SolvePath, islands: &[IslandWork]) -> SolvePath {
+    let hooks_override = islands
+        .iter()
+        .any(|isl| isl.hook.iter().any(Option::is_some));
+    if hooks_override {
+        SolvePath::Scalar
+    } else {
+        configured
     }
 }
 
