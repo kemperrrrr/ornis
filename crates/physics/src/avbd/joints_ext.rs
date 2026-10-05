@@ -236,6 +236,12 @@ impl AvbdEngine {
     /// spring about the assembly reference.
     pub(super) fn motor_impulse(&mut self) {
         for ji in 0..self.joints.len() {
+            // Free motors carry their drive inline in the spec (no
+            // servo/mot slots): branch before the override gate below.
+            if self.joints[ji].kind == AvbdJointKind::Motor {
+                self.free_motor_impulse(ji);
+                continue;
+            }
             let (kind, eff) = {
                 let j = &self.joints[ji];
                 let eff = j.servo.or_else(|| {
@@ -365,6 +371,50 @@ impl AvbdEngine {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Free-motor deadbeat drive for one [`AvbdJointKind::Motor`] joint:
+    /// the exact budget-clamped velocity step per world axis through the
+    /// pair effective mass (centers of mass — no anchors, no levers),
+    /// applied to the velocity fields BEFORE warmstart like the other
+    /// motors. No iteration, no dual state, no position rows (the SI-only
+    /// `correction` pull has no penalty counterpart here).
+    fn free_motor_impulse(&mut self, ji: usize) {
+        const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+        let Some(drive) = self.joints[ji].spec.motor_drive() else {
+            return;
+        };
+        let (a, b) = {
+            let j = &self.joints[ji];
+            (j.a, j.b)
+        };
+        for axis in AXES {
+            let v = (self.bodies[b].velocity - self.bodies[a].velocity).dot(axis);
+            let (ka_lin, kb_lin) = (eff_inv_mass(&self.bodies[a]), eff_inv_mass(&self.bodies[b]));
+            let dj =
+                drive.linear_impulse(drive.linear_target.dot(axis) - v, ka_lin + kb_lin, DT_STEP);
+            if dj != 0.0 {
+                if self.solvable(a) {
+                    self.bodies[a].velocity += -dj * ka_lin * axis;
+                }
+                if self.solvable(b) {
+                    self.bodies[b].velocity += dj * kb_lin * axis;
+                }
+            }
+            let w = (self.bodies[b].angular_velocity - self.bodies[a].angular_velocity).dot(axis);
+            let ia = self.ang_inv_wa(a, axis);
+            let ib = self.ang_inv_wa(b, axis);
+            let ka = ia.dot(axis) + ib.dot(axis);
+            let dw = drive.angular_impulse(drive.angular_target.dot(axis) - w, ka, DT_STEP);
+            if dw != 0.0 {
+                if self.solvable(a) {
+                    self.bodies[a].angular_velocity += -dw * ia;
+                }
+                if self.solvable(b) {
+                    self.bodies[b].angular_velocity += dw * ib;
+                }
             }
         }
     }
@@ -712,6 +762,10 @@ impl AvbdEngine {
                             j.pen_l[2] = (j.pen_l[2] + BETA * c.abs()).min(LIM_PEN_MAX);
                         }
                     }
+                }
+                AvbdJointKind::Motor => {
+                    // Motors carry no dual state (fresh deadbeat solve
+                    // every primal, like the hinge/slide motors).
                 }
             }
             // Angular equality rows.

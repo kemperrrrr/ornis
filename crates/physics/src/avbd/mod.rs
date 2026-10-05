@@ -51,7 +51,10 @@
 //!   coordinates, closer to Box2D than the builtin velocity-only pass)
 //!   and [`crate::joint::JointKind::SixDof`] (per-axis free/locked/limited
 //!   rows in body A's live assembly frame, mirroring the builtin position
-//!   pass; limited forces in dual-owned per-axis slots).
+//!   pass; limited forces in dual-owned per-axis slots) and
+//!   [`crate::joint::JointKind::Motor`] (free 6-DOF velocity drive as a
+//!   deadbeat impulse, like the hinge/slide motors — no position rows,
+//!   the SI-only `correction` pull has no penalty counterpart here).
 //!   Sleep (M2, closed): quiet dynamics freeze per body (builtin 0.15 m/s
 //!   + 0.5 s parity) and wake on fresh pairs/joint edits/velocity kicks;
 //!   wake propagates through live pairs (1 cm backstop), so no per-engine
@@ -293,6 +296,10 @@ enum AvbdJointKind {
     Wheel,
     Gear,
     SixDof,
+    /// Free 6-DOF velocity drive (no position rows — the drive acts as a
+    /// deadbeat impulse in `motor_impulse`, like the hinge/slide motors;
+    /// the SI-only `correction` pull has no penalty counterpart here).
+    Motor,
 }
 
 /// One gear side: referenced bodies, world axis, anchor levers and the
@@ -1504,6 +1511,15 @@ impl PhysicsEngine for AvbdEngine {
                 joint.kind = AvbdJointKind::SixDof;
                 joint.six_lin = linear;
                 joint.six_ang = angular;
+                joint.q_ref = r.ref_quat;
+                joint.dref = r.ref_anchor_delta;
+            }
+            JointKind::Motor { .. } => {
+                // Free drive: no anchors/axes to normalize (the resolve
+                // already captured the assembly pose into `q_ref`/`dref`
+                // for snapshots and the rest residual); targets and
+                // budgets ride live in the spec.
+                joint.kind = AvbdJointKind::Motor;
                 joint.q_ref = r.ref_quat;
                 joint.dref = r.ref_anchor_delta;
             }

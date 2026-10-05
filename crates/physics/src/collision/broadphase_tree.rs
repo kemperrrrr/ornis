@@ -307,12 +307,30 @@ impl Tree {
 }
 
 /// Persistent dynamic AABB tree broadphase.
+///
+/// Query acceleration (R5): the same live trees also serve read-only scene
+/// queries (ray / AABB / shape casts) through the `query_*` methods below,
+/// in the spirit of Box3D `b3DynamicTree_RayCast` / `b3DynamicTree_BoxCast`
+/// (segment-AABB prefilter plus slab pruning, closest-first traversal) but
+/// implemented independently over this module's node layout. The query pass
+/// never inserts, removes or rebalances: it holds only `&self`, so the
+/// borrow checker pins the no-mutation invariant for the whole traversal.
+/// Consistency for the pass is fixed by [`DynamicAabbTree::generation`]
+/// (recorded at bind time) plus [`DynamicAabbTree::is_fresh_for`] (every
+/// current base AABB still sits inside its proxy fat); anything stale takes
+/// the explicit brute-force fallback in the query pipeline, never a silent
+/// miss.
 pub(crate) struct DynamicAabbTree {
     proxies: Vec<Option<Proxy>>,
     static_tree: Tree,
     dynamic_tree: Tree,
     active: Vec<(usize, usize)>,
     stats: BroadPhaseStats,
+    /// Monotonic update counter: recorded by a query view at bind time so a
+    /// pass can name the tree state it runs against. The counter alone does
+    /// not prove freshness (bodies may move without an update); the
+    /// fat-containment probe in [`DynamicAabbTree::is_fresh_for`] does.
+    generation: u64,
     /// Reused query output buffer: one allocation total instead of one per
     /// dynamic body per update.
     scratch: Vec<usize>,
@@ -344,6 +362,7 @@ impl DynamicAabbTree {
             active_set: FxHashSet::default(),
             prev_swept: Vec::new(),
             prev_filter: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -384,6 +403,7 @@ impl BroadPhase for DynamicAabbTree {
             body_count: bodies.len(),
             ..BroadPhaseStats::default()
         };
+        self.generation = self.generation.wrapping_add(1);
         let swept = crate::broadphase::swept_aabbs(bodies, sub_dt, prev);
         // Any count change can remap body indices (`swap_remove`), which
         // would alias buffered pair identities: drop the buffer and re-query
@@ -420,6 +440,274 @@ impl BroadPhase for DynamicAabbTree {
     fn stats(&self) -> BroadPhaseStats {
         self.stats
     }
+}
+
+/// Read-only query acceleration over the live trees (R5).
+///
+/// All traversals below hold only `&self`: no inserts, removals or
+/// rebalances happen during a query pass. Pruning is conservative on two
+/// levels, mirroring the Box3D `b3DynamicTree` query family without copying
+/// it: node tests run against the *fat* AABBs (which contain the swept
+/// boxes, which contain the base boxes), and any degenerate test (NaN
+/// bounds) fails open — the node is visited instead of pruned, so a bad
+/// bound can only cost time, never a hit. Exact per-shape kernels run after
+/// the traversal in ascending handle order with the same strict-minimum /
+/// stable-sort tie rules as the brute-force pipeline, so tree results are
+/// identical and only the visit order differs.
+impl DynamicAabbTree {
+    /// Monotonic update counter recorded by a query view at bind time.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Bodies tracked by the proxy table (must equal the scene length for
+    /// a query view to bind; anything else is the explicit stale-topology
+    /// fallback).
+    pub(crate) fn topology_len(&self) -> usize {
+        self.proxies.len()
+    }
+
+    /// Whether `aabb` is usable as a query region or a prunable bound:
+    /// no NaN components and `min <= max` per axis. Infinities (half-space
+    /// planes) are queryable — plain comparisons handle them.
+    pub(crate) fn aabb_is_queryable(aabb: &AABB) -> bool {
+        !aabb.min.x.is_nan()
+            && !aabb.min.y.is_nan()
+            && !aabb.min.z.is_nan()
+            && !aabb.max.x.is_nan()
+            && !aabb.max.y.is_nan()
+            && !aabb.max.z.is_nan()
+            && aabb.min.x <= aabb.max.x
+            && aabb.min.y <= aabb.max.y
+            && aabb.min.z <= aabb.max.z
+    }
+
+    /// Freshness probe for a query pass: true when every current base AABB
+    /// still sits inside its proxy fat and proxy kinds still match body
+    /// types. This is an O(n) AABB check per query — cheap next to the
+    /// narrowphase kernels it saves — and it is exact: a body that moved
+    /// past its fat (or was added/removed/flipped without an update)
+    /// reports stale, and the caller falls back to brute force explicitly.
+    pub(crate) fn is_fresh_for(&self, bodies: &[RigidBody]) -> bool {
+        if self.proxies.len() != bodies.len() {
+            return false;
+        }
+        for (index, body) in bodies.iter().enumerate() {
+            let Some(proxy) = self.proxies[index].as_ref() else {
+                return false;
+            };
+            let want_static = body.body_type == BodyType::Static;
+            if (proxy.kind == TreeKind::Static) != want_static {
+                return false;
+            }
+            let base = body.shape.aabb(body.position, body.orientation);
+            if !Self::aabb_is_queryable(&base) || !Self::aabb_is_queryable(&proxy.fat) {
+                return false;
+            }
+            if !proxy.fat.contains_aabb(&base) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Collect every body whose fat AABB overlaps `target`, over both
+    /// trees. Fat overlap is a superset of base overlap, so no true hit is
+    /// ever pruned; the caller re-tests candidates exactly.
+    pub(crate) fn query_aabb_into(&self, target: &AABB, out: &mut Vec<usize>) {
+        self.static_tree.query(target, out);
+        self.dynamic_tree.query(target, out);
+    }
+
+    /// Candidate collection for a ray cast, in the spirit of Box3D
+    /// `b3DynamicTree_RayCast`: each node must overlap the ray segment box
+    /// *and* pass the slab test against its fat AABB, otherwise the whole
+    /// subtree is skipped. Leaves are collected unsorted; the caller
+    /// sorts by handle and runs the exact kernels, so visit order never
+    /// affects results. Shrinking `max_dist` on a hit (Box3D's callback
+    /// feedback) is deliberately skipped here — the superset is pruned
+    /// exactly afterwards, which keeps the pass deterministic by
+    /// construction.
+    pub(crate) fn query_ray_into(
+        &self,
+        origin: Vec3,
+        direction: Vec3,
+        max_dist: f32,
+        out: &mut Vec<usize>,
+    ) {
+        let end = origin + direction * max_dist;
+        let segment = AABB::new(origin.min(end), origin.max(end));
+        Self::ray_in_tree(
+            &self.static_tree,
+            origin,
+            direction,
+            max_dist,
+            &segment,
+            out,
+        );
+        Self::ray_in_tree(
+            &self.dynamic_tree,
+            origin,
+            direction,
+            max_dist,
+            &segment,
+            out,
+        );
+    }
+
+    fn ray_in_tree(
+        tree: &Tree,
+        origin: Vec3,
+        direction: Vec3,
+        max_dist: f32,
+        segment: &AABB,
+        out: &mut Vec<usize>,
+    ) {
+        let Some(root) = tree.root else {
+            return;
+        };
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            let aabb = &tree.nodes[node].aabb;
+            if !aabb.overlaps(segment) {
+                continue;
+            }
+            if !ray_hits_aabb(origin, direction, aabb.min, aabb.max, max_dist) {
+                continue;
+            }
+            match (tree.nodes[node].child1, tree.nodes[node].child2) {
+                (Some(c1), Some(c2)) => {
+                    // Closer-center child pops first: deterministic visit
+                    // order (results do not depend on it — the caller sorts).
+                    let d1 = (tree.nodes[c1].aabb.center() - origin).length_squared();
+                    let d2 = (tree.nodes[c2].aabb.center() - origin).length_squared();
+                    if d1 <= d2 {
+                        stack.push(c2);
+                        stack.push(c1);
+                    } else {
+                        stack.push(c1);
+                        stack.push(c2);
+                    }
+                }
+                _ => {
+                    if let Some(body) = tree.nodes[node].body {
+                        out.push(body);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Closest-point traversal in the spirit of Box3D
+    /// `b3DynamicTree_QueryClosest`: nodes are visited closest-first and a
+    /// subtree is skipped once its fat-box distance exceeds the best
+    /// distance so far (strict `>`: ties are kept so the caller's handle
+    /// tie-break stays exact). `exact` maps a body index plus the current
+    /// best to the new best; the traversal only prunes, all hit decisions
+    /// stay with the caller.
+    pub(crate) fn query_closest(
+        &self,
+        point: Vec3,
+        best: &mut f32,
+        mut exact: impl FnMut(usize, f32) -> f32,
+    ) {
+        Self::closest_in_tree(&self.static_tree, point, best, &mut exact);
+        Self::closest_in_tree(&self.dynamic_tree, point, best, &mut exact);
+    }
+
+    fn closest_in_tree(
+        tree: &Tree,
+        point: Vec3,
+        best: &mut f32,
+        exact: &mut impl FnMut(usize, f32) -> f32,
+    ) {
+        let Some(root) = tree.root else {
+            return;
+        };
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            if point_aabb_dist2(point, &tree.nodes[node].aabb) > *best {
+                continue;
+            }
+            match (tree.nodes[node].child1, tree.nodes[node].child2) {
+                (Some(c1), Some(c2)) => {
+                    let d1 = point_aabb_dist2(point, &tree.nodes[c1].aabb);
+                    let d2 = point_aabb_dist2(point, &tree.nodes[c2].aabb);
+                    // Push farther first (pops closest-first); prune only
+                    // strictly worse than best so distance ties survive for
+                    // the caller's handle tie-break.
+                    if d1 <= d2 {
+                        if d2 <= *best {
+                            stack.push(c2);
+                        }
+                        if d1 <= *best {
+                            stack.push(c1);
+                        }
+                    } else {
+                        if d1 <= *best {
+                            stack.push(c1);
+                        }
+                        if d2 <= *best {
+                            stack.push(c2);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(body) = tree.nodes[node].body {
+                        let current = *best;
+                        *best = exact(body, current);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Slab test of a ray against one AABB for `t` in `[0, max_dist]`
+/// (boundary-inclusive). A NaN bound fails open (`true`): pruning must
+/// never drop a hit on degenerate input, only waste time on it.
+fn ray_hits_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3, max_dist: f32) -> bool {
+    /// Parallel-axis tolerance, same band as the exact ray kernels.
+    const PARALLEL_EPS: f32 = 1e-12;
+    let mut near = 0.0f32;
+    let mut far = max_dist;
+    for (o, d, mn, mx) in [
+        (origin.x, direction.x, min.x, max.x),
+        (origin.y, direction.y, min.y, max.y),
+        (origin.z, direction.z, min.z, max.z),
+    ] {
+        if d.abs() <= PARALLEL_EPS {
+            if o < mn || o > mx {
+                return false;
+            }
+            continue;
+        }
+        let (t0, t1) = if d > 0.0 {
+            ((mn - o) / d, (mx - o) / d)
+        } else {
+            ((mx - o) / d, (mn - o) / d)
+        };
+        if t0.is_nan() || t1.is_nan() {
+            // NaN bound: fail open, visit instead of prune.
+            return true;
+        }
+        near = near.max(t0);
+        far = far.min(t1);
+        if near > far {
+            return false;
+        }
+    }
+    far >= 0.0 && near <= max_dist
+}
+
+/// Squared distance from a point to an AABB (0 inside). NaN bounds read as
+/// infinity (fail open: the node is visited, never pruned).
+fn point_aabb_dist2(point: Vec3, aabb: &AABB) -> f32 {
+    let dx = (aabb.min.x - point.x).max(0.0).max(point.x - aabb.max.x);
+    let dy = (aabb.min.y - point.y).max(0.0).max(point.y - aabb.max.y);
+    let dz = (aabb.min.z - point.z).max(0.0).max(point.z - aabb.max.z);
+    let d2 = dx * dx + dy * dy + dz * dz;
+    if d2.is_nan() { f32::INFINITY } else { d2 }
 }
 
 impl DynamicAabbTree {

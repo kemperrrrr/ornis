@@ -129,6 +129,7 @@ fn joint_kind_name(kind: &JointKind) -> &'static str {
         JointKind::Wheel { .. } => "wheel",
         JointKind::Gear { .. } => "gear",
         JointKind::SixDof { .. } => "six-dof",
+        JointKind::Motor { .. } => "motor",
     }
 }
 
@@ -1196,7 +1197,7 @@ impl SplitState {
 
     /// Cross-solver coupling pass (v1): every registry joint whose dynamic
     /// ends are owned by different solvers and whose kind carries a
-    /// structural row ([`CrossRowKind`]: ball, distance) is solved here —
+    /// structural row ([`CrossRowKind`]: ball, distance, rope) is solved here —
     /// one PBD-style positional projection plus one velocity impulse row —
     /// directly between the two live engine mirrors.
     ///
@@ -1368,7 +1369,7 @@ impl SplitState {
                 Some(row) => Some(CrossJointStatus::Coupled(row)),
                 None => Some(CrossJointStatus::Unsupported {
                     detail: format!(
-                        "{name} joint across {oa:?}/{ob:?} solvers has no cross-solver row (ball/distance only)"
+                        "{name} joint across {oa:?}/{ob:?} solvers has no cross-solver row (ball/distance/rope only; the motor is a velocity drive with no positional row to couple — pin both ends to one solver)"
                     ),
                 }),
             };

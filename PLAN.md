@@ -1457,6 +1457,57 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   AVBD/XPBD/Islands — явный `Unsupported`); новых зависимостей нет
   (`serde`/`ron` уже были), `deny` чист, overhead ниже шума.
   ✅ Программа parity с Rapier закрыта целиком (P1/P2/P4/P5/P6/P8).
+- **Добор из Box3D-аудита (программа 2026-10-01, решение владельца):**
+  character controller — не физика, скип; recording/replay — не
+  физика, скип; остальное берём: R1 rapier-сценарии как oracle-тесты,
+  R2 movers, R3 motor joint 6-DOF, R4 hull-инструментарий, R5
+  tree-ускоренные запросы, R6 Featherstone multibody (полноценный
+  reduced-coordinate articulated-body солвер — строить обязательно,
+  вердикт P6 «не строить» отменён владельцем как ошибочный), R7 sub-step
+  count параметром шага.
+  Волна 1: R1+R4 параллельно; дальше последовательно.
+  ✅ Волна 1 закрыта 2026-10-01 (верифицировано: 511 тестов): R1 —
+  `tests/rapier_scenarios.rs` (13 сценариев black-box, 10 green +
+  3 ignore; найдены лимиты R1-L1 restitution при глубокой пенетрации
+  и R1-L2 зависание на тяжёлом цилиндре 200:1 — чинить отдельно);
+  R4 — `collision/hull_tool.rs` (cylinder/cone/rock/from_points,
+  clone_and_transform с зеркалами, MAX_VERTICES=256, детерминированный
+  LCG-рок, явные `MeshError`).
+  ✅ R2+R7 закрыты 2026-10-01 (верифицировано: 526 тестов):
+  `KinematicMover` (привязка к kinematic-телу, plane-solver carry
+  пассажиров со slop, CCD-travel штатно, wake через существующие гейты,
+  муверы — transient driver-state) + `step_with_substeps(dt, 1..=64)`
+  (вне — явный `StepError`, `step(dt)` бит-идентичен дефолту 12).
+  ✅ R3 закрыт 2026-10-01 (верифицировано: 540 тестов):
+  `JointKind::Motor` (свободный 6-DOF drive, бюджеты клампят накопление,
+  `correction=0.3` — паритет Box2D, поза — дело servo) во всех трёх
+  солверах; кросс — явный `Unsupported`; миграция/снапшот lossless.
+  ✅ R5 закрыт 2026-10-01 (верифицировано: 547 тестов): запросы через
+  живое broadphase-дерево (read-only view, freshness-проба, явный
+  fallback в брутфорс); лучи ~1.0x (честно без выигрыша), shape-касты
+  ~16x; паритет brute-vs-tree побитово.
+  🟡 R6 реализован в v1, верификация 2026-10-04 (физика-трек):
+  `articulated.rs` — `FeatherstoneEngine` (ABA, O(n), reduced
+  coordinates, детерминизм — rerun бит-в-бит), отдельный opt-in движок
+  рядом с SI/AVBD/XPBD; вердикт P6 в `joint.rs` переписан. При
+  проверке найдены и исправлены два бага floating-root: мировые
+  скорости корня шли в пропагацию детям без поворота в link-frame
+  (повёрнутый корень «вращал» свою скорость каждый шаг и не падал), и
+  tether масштабировался композитной инерцией поддерева вместо
+  артикулированной (явная неустойчивость на офсетных цепях) + двойной
+  поворот angular_velocity в tether; тест fixed-vs-floating сравнивал
+  двойной маятник с удерживаемой базой (физически разные механизмы) —
+  переписан на weld, допуск ужесточён до 1e-3; добавлен регресс
+  `rotated_floating_chain_free_falls_rigidly`; убраны отладочные
+  `ORNIS_ABA_DEBUG`-хуки. 16 unit-тестов зелёные. Лимиты v1 (честно,
+  не закрыто): только revolute/fixed/floating-base (прочие
+  `JointKind` — явный `Unsupported`); нет контактов/коллизий
+  (`shapecast` всегда «нет попадания», raycast работает); оркестратор
+  `crate::Engine` о движке не знает (нет кросс-роутинга с SI-миром);
+  лимиты revolute — жёсткий clamp, не силовые строки; нет сна; один
+  ABA-солв на `step` без сабстепов (жёсткие серво — малый dt);
+  joint-фреймы только трансляционные. Закрыть R6 полностью =
+  контакты + интеграция в `Engine`.
 
 ---
 ## Приложение C — Unified Scheduler (IDEAS №28): план реализации

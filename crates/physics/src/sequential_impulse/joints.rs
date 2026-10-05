@@ -973,6 +973,140 @@ fn joint_spring_velocity_iteration(
     apply_impulse(bodies, a, b, n * dl, ra, rb);
 }
 
+/// Free-motor velocity rows (Box3D `b3MotorJoint` spirit): 3 linear +
+/// 3 angular COM-level rows driving the B-minus-A relative velocity toward
+/// the spec targets. Limit-row discipline, not deadbeat: each axis
+/// accumulates into the shared warm-start totals (`acc_lin`/`acc_ang`)
+/// clamped to `±budget·sub_dt`, so a weak motor ramps gradually and
+/// under-delivers against overload instead of snapping to the target.
+/// Warm-started like the equality rows (the clamp self-corrects stale
+/// accumulation in one step — at the target the residual correction
+/// unwinds the holding impulse to exactly the load).
+fn joint_motor_velocity_iteration(
+    bodies: &mut [RigidBody],
+    joint: &mut Joint,
+    a: usize,
+    b: usize,
+    sub_dt: f32,
+) {
+    const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+    let Some(drive) = joint.kind.motor_drive() else {
+        return;
+    };
+    if sub_dt <= 0.0 {
+        return;
+    }
+    for (k, dir) in AXES.iter().enumerate() {
+        if drive.max_force > 0.0 {
+            let k_eff = effective_mass(bodies, a, b, *dir, Vec3::ZERO, Vec3::ZERO);
+            if k_eff >= MIN_EFFECTIVE_MASS {
+                let vrel = (bodies[b].velocity - bodies[a].velocity).dot(*dir);
+                let dl = -(vrel - drive.linear_target.dot(*dir)) / k_eff;
+                let cap = drive.max_force * sub_dt;
+                let next = (joint.acc_lin[k] + dl).clamp(-cap, cap);
+                apply_impulse(
+                    bodies,
+                    a,
+                    b,
+                    dir * (next - joint.acc_lin[k]),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                );
+                joint.acc_lin[k] = next;
+            }
+        }
+        if drive.max_torque > 0.0 {
+            let (ba, bb) = (&bodies[a], &bodies[b]);
+            let k_eff = mul_inv_inertia(ba.inertia, ba.orientation, *dir).dot(*dir)
+                + mul_inv_inertia(bb.inertia, bb.orientation, *dir).dot(*dir);
+            if k_eff >= MIN_EFFECTIVE_MASS {
+                let wrel = (bb.angular_velocity - ba.angular_velocity).dot(*dir);
+                let dl = -(wrel - drive.angular_target.dot(*dir)) / k_eff;
+                let cap = drive.max_torque * sub_dt;
+                let next = (joint.acc_ang[k] + dl).clamp(-cap, cap);
+                apply_angular_impulse(bodies, a, b, dir * (next - joint.acc_ang[k]));
+                joint.acc_ang[k] = next;
+            }
+        }
+    }
+}
+
+/// Free-motor position pull (the `correction` share of the spec): a weak
+/// PBD-style projection toward the assembly relative pose — inverse-mass
+/// split translation plus inertia-weighted split rotation, scaled by
+/// `correction` (clamped drift control, not a lock). Runs ONCE per
+/// substep, not per position iteration: compounding it over the iteration
+/// count would stiffen the pull into a pose hold. `correction == 0` is a
+/// pure velocity drive and skips entirely (no pose memory). A static side
+/// takes none of the correction; an all-infinite-mass pair skips (never
+/// divides by dust).
+fn joint_motor_position_correction(bodies: &mut [RigidBody], joint: &Joint, a: usize, b: usize) {
+    const MAX_LIN_CORRECTION: f32 = 0.25;
+    const MAX_ANG_CORRECTION: f32 = 0.5;
+    let Some(drive) = joint.kind.motor_drive() else {
+        return;
+    };
+    let c = drive.correction.clamp(0.0, 1.0);
+    if c <= 0.0 {
+        return;
+    }
+    // Linear: assembly separation error in the world frame.
+    let e = (bodies[b].position - bodies[a].position)
+        - bodies[a].orientation * joint.reference_anchor_delta;
+    let pull = e * c;
+    if pull.length_squared() >= POS_CORRECTION_EPS * POS_CORRECTION_EPS {
+        let pull = if pull.length() > MAX_LIN_CORRECTION {
+            pull / pull.length() * MAX_LIN_CORRECTION
+        } else {
+            pull
+        };
+        let (ima, imb) = (bodies[a].inv_mass.max(0.0), bodies[b].inv_mass.max(0.0));
+        let sum = ima + imb;
+        if sum > 0.0 {
+            // Reborrow mutably after the shared reads above.
+            let (lo, hi, swapped) = if a < b { (a, b, false) } else { (b, a, true) };
+            let (head, tail) = bodies.split_at_mut(hi);
+            let (ma, mb) = if swapped {
+                (&mut tail[0], &mut head[lo])
+            } else {
+                (&mut head[lo], &mut tail[0])
+            };
+            ma.position += pull * (ima / sum);
+            mb.position -= pull * (imb / sum);
+        }
+    }
+    // Angular: assembly orientation error as a world rotation vector.
+    let (qa, qb) = (bodies[a].orientation, bodies[b].orientation);
+    let mut q_err = (qa.conjugate() * qb) * joint.reference_quat.conjugate();
+    if q_err.w < 0.0 {
+        q_err = -q_err;
+    }
+    let angle = 2.0 * q_err.xyz().length().atan2(q_err.w);
+    if angle >= POS_CORRECTION_EPS {
+        let e = (qa * q_err.xyz()).normalize_or(Vec3::X) * angle * c;
+        let e = if e.length() > MAX_ANG_CORRECTION {
+            e / e.length() * MAX_ANG_CORRECTION
+        } else {
+            e
+        };
+        let (ba, bb) = (&bodies[a], &bodies[b]);
+        let da = mul_inv_inertia(ba.inertia, ba.orientation, -e);
+        let db = mul_inv_inertia(bb.inertia, bb.orientation, e);
+        if da.length_squared() > 0.0 || db.length_squared() > 0.0 {
+            // Reborrow mutably after the shared reads above.
+            let (lo, hi, swapped) = if a < b { (a, b, false) } else { (b, a, true) };
+            let (head, tail) = bodies.split_at_mut(hi);
+            let (ma, mb) = if swapped {
+                (&mut tail[0], &mut head[lo])
+            } else {
+                (&mut head[lo], &mut tail[0])
+            };
+            apply_positional_rotation(ma, da);
+            apply_positional_rotation(mb, db);
+        }
+    }
+}
+
 /// Wheel suspension spring (semi-implicit Euler in generalized
 /// coordinates — a deliberate deviation from the Box2D gamma/bias
 /// formulation, which goes unstable when the substep is small: its
@@ -1194,6 +1328,25 @@ fn solve_new_joint_velocity(
             let rb = bodies[b].orientation * lb;
             // Stateless spring (no accumulator): one drive per substep.
             joint_spring_velocity_iteration(bodies, a, b, ra, rb, motor, integration, sub_dt);
+        }
+        JointKind::Motor { .. } => {
+            // Free 6-DOF drive at the centers of mass (no anchors, no
+            // levers): warm-start the accumulated budget-clamped impulse,
+            // then iterate the 6 rows.
+            const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+            for (k, dir) in AXES.iter().enumerate() {
+                let l = joint.acc_lin[k];
+                if l.abs() > DEGENERATE_EPS {
+                    apply_impulse(bodies, a, b, dir * l, Vec3::ZERO, Vec3::ZERO);
+                }
+                let t = joint.acc_ang[k];
+                if t.abs() > DEGENERATE_EPS {
+                    apply_angular_impulse(bodies, a, b, dir * t);
+                }
+            }
+            for _ in 0..iterations {
+                joint_motor_velocity_iteration(bodies, joint, a, b, sub_dt);
+            }
         }
         JointKind::Wheel { .. } => {
             let Some((susp_a, axle_a, suspension, motor)) = joint.wheel_drive() else {
@@ -1435,6 +1588,11 @@ fn solve_new_joint_position(
         // row either). Legacy kinds and gears never reach here (dispatched
         // by the caller).
         JointKind::Spring { .. } => {}
+        JointKind::Motor { .. } => {
+            // Weak assembly-pose pull, once per substep (see
+            // `joint_motor_position_correction` — never per iteration).
+            joint_motor_position_correction(bodies, joint, a, b);
+        }
         JointKind::Ball { .. }
         | JointKind::Revolute { .. }
         | JointKind::Prismatic { .. }

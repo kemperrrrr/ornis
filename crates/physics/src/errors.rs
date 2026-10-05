@@ -70,6 +70,28 @@ pub enum MeshError {
         /// Offending length.
         len: usize,
     },
+    /// Hull input exceeds the vertex budget (`count > max`): the GJK path
+    /// scans vertices linearly, so tooling refuses oversized input instead
+    /// of silently truncating it.
+    #[error("hull has {count} vertices, over the {max} limit")]
+    TooManyVertices {
+        /// Provided vertex count.
+        count: usize,
+        /// Enforced budget.
+        max: usize,
+    },
+    /// Hull input is degenerate: fewer than 4 unique points after welding,
+    /// or zero enclosed volume (collinear/coplanar input).
+    #[error("degenerate hull: need 4 non-coplanar points with non-zero volume")]
+    DegenerateHull,
+    /// Hull builder parameter out of range (non-positive height/radius,
+    /// side/slice count outside its documented range, or a non-finite or
+    /// collapsing clone transform).
+    #[error("invalid hull parameter: {detail}")]
+    BadHullParams {
+        /// What was wrong (static description, no allocation).
+        detail: &'static str,
+    },
 }
 
 /// Compound/rounded/half-space construction failure (P5 shapes).
@@ -185,6 +207,66 @@ pub enum JointError {
     #[error("unsupported joint: {detail}")]
     Unsupported {
         /// What is unsupported.
+        detail: String,
+    },
+}
+
+/// Kinematic-mover admission failure: unknown handles, non-kinematic
+/// bodies and invalid displacements (R2).
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum MoverError {
+    /// No mover under this handle (removed or never added).
+    #[error("unknown mover {handle}")]
+    UnknownMover {
+        /// Offending mover handle.
+        handle: usize,
+    },
+    /// Mover target body is not kinematic (movers drive kinematic
+    /// platforms only — dynamics are simulated, statics never move).
+    #[error("mover body {handle} is not kinematic")]
+    NotKinematic {
+        /// Offending body handle.
+        handle: usize,
+    },
+    /// Mover target body handle is out of range.
+    #[error("mover body {handle} is out of range")]
+    InvalidBody {
+        /// Offending body handle.
+        handle: usize,
+    },
+    /// Per-step displacement is non-finite (would poison the carry solve).
+    #[error("mover displacement must be finite")]
+    BadDisplacement,
+    /// Movers live on the sequential-impulse engine under
+    /// [`RoutingKind::Single`](crate::RoutingKind): solver switches and
+    /// Islands routing rebuild engines without them (re-attach after).
+    #[error("movers unsupported here: {detail}")]
+    Unsupported {
+        /// What was requested and why it is refused.
+        detail: String,
+    },
+}
+
+/// Explicit substep-count step failure (R7, Box3D
+/// `b3World_Step(dt, subStepCount)` parity).
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum StepError {
+    /// Requested count is outside the `1..=64` admission range (never
+    /// clamped silently — fix the caller).
+    #[error("substep count {got} outside {min}..={max}")]
+    BadSubstepCount {
+        /// Requested count.
+        got: u32,
+        /// Minimum accepted count.
+        min: u32,
+        /// Maximum accepted count.
+        max: u32,
+    },
+    /// Per-call substep override on an engine/routing that does not host
+    /// the sequential-impulse substep loop.
+    #[error("step_with_substeps unsupported here: {detail}")]
+    Unsupported {
+        /// What was requested and why it is refused.
         detail: String,
     },
 }

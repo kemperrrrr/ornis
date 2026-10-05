@@ -33,6 +33,7 @@
 use glam::{Quat, Vec2, Vec3};
 
 use crate::body::{BodyHandle, BodyType, RigidBody};
+use crate::broadphase_tree::DynamicAabbTree;
 use crate::constants::{NEAR_ZERO, SHAPE_TOUCH};
 use crate::distance::{ShapeRef, cast_shape as swept_cast, shape_distance};
 use crate::errors::{QueryError, check_ray_input};
@@ -836,9 +837,397 @@ fn trimesh_feature(mesh: &TriMesh, local_p: Vec3) -> u32 {
     feature
 }
 
+/// Read-only query view over the live broadphase tree (R5).
+///
+/// Binds the *same* [`DynamicAabbTree`](crate::broadphase_tree) the pair
+/// pipeline maintains — no second tree is built. Traversal mirrors the
+/// Box3D `b3DynamicTree_RayCast` / `b3DynamicTree_BoxCast` / `QueryClosest`
+/// family (segment-box prefilter, slab pruning on fat boxes, closest-first
+/// walk) but is implemented independently over this engine's node layout;
+/// the tree only *prunes*, every hit decision runs the exact per-shape
+/// kernels shared with [`QueryPipeline`] over candidates in ascending
+/// handle order with the same strict-minimum / handle tie-break rules, so
+/// tree results are identical and only the visit order differs.
+///
+/// Read-only invariant: the view holds `tree: &DynamicAabbTree` (shared
+/// borrow — no insert, remove or rebalance can run during a pass) and
+/// records [`DynamicAabbTree::generation`] at bind time to name the tree
+/// state. Freshness beyond the counter comes from
+/// [`DynamicAabbTree::is_fresh_for`]: every current base AABB must still sit
+/// inside its proxy fat. [`QueryTreeView::try_bind`] returns `None` on any
+/// staleness (bodies added/removed/moved/flipped without a broadphase
+/// update, degenerate NaN bounds), and each method falls back to the
+/// [`QueryPipeline`] brute-force kernel when its own query region is
+/// degenerate — both fallbacks are explicit branches, never silent skips.
+#[derive(Clone, Copy)]
+pub(crate) struct QueryTreeView<'a> {
+    bodies: &'a [RigidBody],
+    tree: &'a DynamicAabbTree,
+    /// Tree generation seen at bind time (names the tree state for the pass;
+    /// the borrow plus the fat-containment probe carry the actual guarantee).
+    generation: u64,
+}
+
+impl<'a> QueryTreeView<'a> {
+    /// Bind a view over `bodies` and the live `tree`. Returns `None` — the
+    /// explicit brute-force fallback — when the topology changed since the
+    /// last broadphase update or any current base AABB escaped its proxy
+    /// fat (see [`DynamicAabbTree::is_fresh_for`]).
+    pub(crate) fn try_bind(bodies: &'a [RigidBody], tree: &'a DynamicAabbTree) -> Option<Self> {
+        if tree.topology_len() != bodies.len() {
+            return None;
+        }
+        if !tree.is_fresh_for(bodies) {
+            return None;
+        }
+        Some(Self {
+            bodies,
+            tree,
+            generation: tree.generation(),
+        })
+    }
+
+    /// Pins the no-mutation invariant for a pass: the shared borrow already
+    /// forbids any insert/rebalance during traversal, so the generation
+    /// recorded at bind time must still hold here (debug builds fail loudly
+    /// instead of querying a half-mutated tree).
+    fn check_generation(&self) {
+        debug_assert_eq!(
+            self.tree.generation(),
+            self.generation,
+            "live broadphase tree mutated during a query pass"
+        );
+    }
+
+    /// Closest ray hit (same contract as [`QueryPipeline::cast_ray`]).
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::InvalidInput`] for a non-finite/zero direction or a
+    /// bad `max_dist`.
+    pub(crate) fn cast_ray(
+        &self,
+        ray: &Ray,
+        max_dist: f32,
+        filter: &QueryFilter,
+    ) -> Result<Option<RaycastHit>, QueryError> {
+        check_ray_input(ray.origin, ray.direction, max_dist)?;
+        self.check_generation();
+        let mut ids = Vec::new();
+        self.tree
+            .query_ray_into(ray.origin, ray.direction, max_dist, &mut ids);
+        sort_dedup(&mut ids);
+        let mut best: Option<RaycastHit> = None;
+        // Shrinking the exact-test limit to the best hit so far is sound:
+        // farther hits would lose the strict minimum anyway, and a hit at
+        // exactly the limit still reports (inclusive far plane) but keeps
+        // the earlier — smaller — handle via the strict comparison.
+        let mut limit = max_dist;
+        for index in ids {
+            let Some(body) = self.bodies.get(index) else {
+                continue;
+            };
+            let handle = BodyHandle::from(index);
+            if !filter.matches(handle, body) {
+                continue;
+            }
+            if let Some(hit) = raycast_body_hit(body, handle, ray, limit)
+                && best.is_none_or(|known| hit.distance < known.distance)
+            {
+                limit = hit.distance;
+                best = Some(hit);
+            }
+        }
+        Ok(best)
+    }
+
+    /// Every ray hit, stable-sorted by distance (same contract as
+    /// [`QueryPipeline::intersect_ray`]).
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::InvalidInput`] for a non-finite/zero direction or a
+    /// bad `max_dist`.
+    pub(crate) fn intersect_ray(
+        &self,
+        ray: &Ray,
+        max_dist: f32,
+        filter: &QueryFilter,
+    ) -> Result<Vec<RaycastHit>, QueryError> {
+        check_ray_input(ray.origin, ray.direction, max_dist)?;
+        self.check_generation();
+        let mut ids = Vec::new();
+        self.tree
+            .query_ray_into(ray.origin, ray.direction, max_dist, &mut ids);
+        sort_dedup(&mut ids);
+        let mut hits = Vec::new();
+        for index in ids {
+            let Some(body) = self.bodies.get(index) else {
+                continue;
+            };
+            let handle = BodyHandle::from(index);
+            if !filter.matches(handle, body) {
+                continue;
+            }
+            if let Some(hit) = raycast_body_hit(body, handle, ray, max_dist) {
+                hits.push(hit);
+            }
+        }
+        // Brute force stable-sorts by distance over handle-order hits; the
+        // explicit handle tie-break below is that order, stated plainly.
+        hits.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.handle.index().cmp(&b.handle.index()))
+        });
+        Ok(hits)
+    }
+
+    /// Bodies containing `point` (same contract as
+    /// [`QueryPipeline::intersect_point`]).
+    pub(crate) fn intersect_point(&self, point: Vec3, filter: &QueryFilter) -> Vec<BodyHandle> {
+        if !point.is_finite() {
+            return Vec::new();
+        }
+        self.check_generation();
+        let target = AABB::from_point(point);
+        if !DynamicAabbTree::aabb_is_queryable(&target) {
+            return QueryPipeline::new().intersect_point(self.bodies, point, filter);
+        }
+        let mut ids = Vec::new();
+        self.tree.query_aabb_into(&target, &mut ids);
+        sort_dedup(&mut ids);
+        ids.into_iter()
+            .filter(|index| {
+                self.bodies.get(*index).is_some_and(|body| {
+                    let handle = BodyHandle::from(*index);
+                    filter.matches(handle, body)
+                        && shape_contains(&body.shape, body.position, body.orientation, point)
+                })
+            })
+            .map(BodyHandle::from)
+            .collect()
+    }
+
+    /// Bodies whose AABB overlaps `query` (same contract as
+    /// [`QueryPipeline::intersect_aabb`]).
+    pub(crate) fn intersect_aabb(&self, query: &AABB, filter: &QueryFilter) -> Vec<BodyHandle> {
+        self.check_generation();
+        if !DynamicAabbTree::aabb_is_queryable(query) {
+            return QueryPipeline::new().intersect_aabb(self.bodies, query, filter);
+        }
+        let mut ids = Vec::new();
+        self.tree.query_aabb_into(query, &mut ids);
+        sort_dedup(&mut ids);
+        ids.into_iter()
+            .filter(|index| {
+                self.bodies.get(*index).is_some_and(|body| {
+                    let handle = BodyHandle::from(*index);
+                    filter.matches(handle, body)
+                        && body
+                            .shape
+                            .aabb(body.position, body.orientation)
+                            .overlaps(query)
+                })
+            })
+            .map(BodyHandle::from)
+            .collect()
+    }
+
+    /// Closest surface projection (same contract as
+    /// [`QueryPipeline::project_point`]).
+    pub(crate) fn project_point(
+        &self,
+        point: Vec3,
+        filter: &QueryFilter,
+    ) -> Option<PointProjection> {
+        if !point.is_finite() {
+            return None;
+        }
+        self.check_generation();
+        let mut best: Option<(f32, PointProjection)> = None;
+        let mut best_handle = usize::MAX;
+        let mut best_d2 = f32::INFINITY;
+        self.tree
+            .query_closest(point, &mut best_d2, |index, current| {
+                let Some(body) = self.bodies.get(index) else {
+                    return current;
+                };
+                let handle = BodyHandle::from(index);
+                if !filter.matches(handle, body) {
+                    return current;
+                }
+                let (closest, is_inside, feature_id) =
+                    project_shape(&body.shape, body.position, body.orientation, point);
+                if !closest.is_finite() {
+                    return current;
+                }
+                let dist2 = (point - closest).length_squared();
+                if !dist2.is_finite() {
+                    return current;
+                }
+                // Strict minimum in traversal order plus an explicit
+                // smaller-handle tie-break: the brute-force first-minimum over
+                // handle order, regardless of visit order.
+                if dist2 < current || (dist2 == current && index < best_handle) {
+                    best = Some((
+                        dist2,
+                        PointProjection {
+                            handle,
+                            point: closest,
+                            is_inside,
+                            feature_id,
+                        },
+                    ));
+                    best_handle = index;
+                    dist2
+                } else {
+                    current
+                }
+            });
+        best.map(|(_, projection)| projection)
+    }
+
+    /// Linear shape sweep (same contract as [`QueryPipeline::cast_shape`]).
+    pub(crate) fn cast_shape(
+        &self,
+        shape: &Shape,
+        position: Vec3,
+        orientation: Quat,
+        displacement: Vec3,
+        filter: &QueryFilter,
+    ) -> Option<RaycastHit> {
+        if !position.is_finite() || !orientation.is_finite() || !displacement.is_finite() {
+            return None;
+        }
+        self.check_generation();
+        let brute = || {
+            QueryPipeline::new().cast_shape(
+                self.bodies,
+                shape,
+                position,
+                orientation,
+                displacement,
+                filter,
+            )
+        };
+        let start = shape.aabb(position, orientation);
+        let end = shape.aabb(position + displacement, orientation);
+        if !DynamicAabbTree::aabb_is_queryable(&start) || !DynamicAabbTree::aabb_is_queryable(&end)
+        {
+            return brute();
+        }
+        // Touch-band expansion: overlap means `dist <= SHAPE_TOUCH`, so
+        // bodies resting just under the band would not overlap the raw
+        // swept box. The pad keeps the candidate set a superset.
+        let pad = Vec3::splat(SHAPE_TOUCH);
+        let swept = AABB::new(start.min.min(end.min) - pad, start.max.max(end.max) + pad);
+        let mut ids = Vec::new();
+        self.tree.query_aabb_into(&swept, &mut ids);
+        sort_dedup(&mut ids);
+        let mover = ShapeRef {
+            shape,
+            pos: position,
+            rot: orientation,
+        };
+        let targets = ids.into_iter().filter_map(|index| {
+            let body = self.bodies.get(index)?;
+            let handle = BodyHandle::from(index);
+            filter.matches(handle, body).then_some((
+                handle,
+                ShapeRef {
+                    shape: &body.shape,
+                    pos: body.position,
+                    rot: body.orientation,
+                },
+            ))
+        });
+        swept_cast(mover, displacement, targets).map(|hit| RaycastHit {
+            handle: hit.handle,
+            point: hit.point,
+            normal: hit.normal,
+            distance: hit.t,
+        })
+    }
+
+    /// Bodies overlapping `shape` at the pose (same contract as
+    /// [`QueryPipeline::intersect_shape`]).
+    pub(crate) fn intersect_shape(
+        &self,
+        shape: &Shape,
+        position: Vec3,
+        orientation: Quat,
+        filter: &QueryFilter,
+    ) -> Vec<BodyHandle> {
+        if !position.is_finite() || !orientation.is_finite() {
+            return Vec::new();
+        }
+        self.check_generation();
+        let base = shape.aabb(position, orientation);
+        if !DynamicAabbTree::aabb_is_queryable(&base) {
+            return QueryPipeline::new().intersect_shape(
+                self.bodies,
+                shape,
+                position,
+                orientation,
+                filter,
+            );
+        }
+        let pad = Vec3::splat(SHAPE_TOUCH);
+        let query = AABB::new(base.min - pad, base.max + pad);
+        let mut ids = Vec::new();
+        self.tree.query_aabb_into(&query, &mut ids);
+        sort_dedup(&mut ids);
+        let mover = ShapeRef {
+            shape,
+            pos: position,
+            rot: orientation,
+        };
+        ids.into_iter()
+            .filter(|index| {
+                self.bodies.get(*index).is_some_and(|body| {
+                    let handle = BodyHandle::from(*index);
+                    filter.matches(handle, body)
+                        && shape_distance(
+                            mover,
+                            ShapeRef {
+                                shape: &body.shape,
+                                pos: body.position,
+                                rot: body.orientation,
+                            },
+                        )
+                        .dist
+                            <= SHAPE_TOUCH
+                })
+            })
+            .map(BodyHandle::from)
+            .collect()
+    }
+}
+
+/// Ascending-handle candidate order with duplicates removed (a body owns
+/// exactly one leaf, so duplicates only arise defensively).
+fn sort_dedup(ids: &mut Vec<usize>) {
+    ids.sort_unstable();
+    ids.dedup();
+}
+
 impl SequentialImpulseEngine {
+    /// Live-tree query view when the broadphase is tree-backed and fresh;
+    /// `None` is the explicit brute-force path (non-tree backend, stale
+    /// tree, topology change).
+    fn query_tree_view(&self) -> Option<QueryTreeView<'_>> {
+        let tree = self.broadphase_tree_for_query()?;
+        QueryTreeView::try_bind(&self.bodies, tree)
+    }
+
     /// Closest ray hit with the surface normal (see [`RaycastHit`]);
     /// read-only: poses, sleep state and caches are untouched, nothing wakes.
+    ///
+    /// Served by the live broadphase tree when it is tree-backed and
+    /// fresh, otherwise by the brute-force [`QueryPipeline`] — identical
+    /// results either way (the tree only prunes).
     ///
     /// # Errors
     ///
@@ -850,11 +1239,15 @@ impl SequentialImpulseEngine {
         max_dist: f32,
         filter: &QueryFilter,
     ) -> Result<Option<RaycastHit>, QueryError> {
+        if let Some(view) = self.query_tree_view() {
+            return view.cast_ray(ray, max_dist, filter);
+        }
         QueryPipeline::new().cast_ray(&self.bodies, ray, max_dist, filter)
     }
 
     /// Every ray hit, stable-sorted by distance; read-only (see
-    /// [`QueryPipeline::intersect_ray`]).
+    /// [`QueryPipeline::intersect_ray`]). Tree-accelerated when the live
+    /// broadphase is tree-backed and fresh, brute-force otherwise.
     ///
     /// # Errors
     ///
@@ -866,33 +1259,49 @@ impl SequentialImpulseEngine {
         max_dist: f32,
         filter: &QueryFilter,
     ) -> Result<Vec<RaycastHit>, QueryError> {
+        if let Some(view) = self.query_tree_view() {
+            return view.intersect_ray(ray, max_dist, filter);
+        }
         QueryPipeline::new().intersect_ray(&self.bodies, ray, max_dist, filter)
     }
 
     /// Handles of every body containing `point`; read-only (see
-    /// [`QueryPipeline::intersect_point`]).
+    /// [`QueryPipeline::intersect_point`]). Tree-accelerated when the live
+    /// broadphase is tree-backed and fresh, brute-force otherwise.
     pub fn query_intersect_point(&self, point: Vec3, filter: &QueryFilter) -> Vec<BodyHandle> {
+        if let Some(view) = self.query_tree_view() {
+            return view.intersect_point(point, filter);
+        }
         QueryPipeline::new().intersect_point(&self.bodies, point, filter)
     }
 
     /// Handles of every body whose AABB overlaps `query`; read-only (see
-    /// [`QueryPipeline::intersect_aabb`]).
+    /// [`QueryPipeline::intersect_aabb`]). Tree-accelerated when the live
+    /// broadphase is tree-backed and fresh, brute-force otherwise.
     pub fn query_intersect_aabb(&self, query: &AABB, filter: &QueryFilter) -> Vec<BodyHandle> {
+        if let Some(view) = self.query_tree_view() {
+            return view.intersect_aabb(query, filter);
+        }
         QueryPipeline::new().intersect_aabb(&self.bodies, query, filter)
     }
 
     /// Closest surface projection of `point`; read-only (see
-    /// [`QueryPipeline::project_point`]).
+    /// [`QueryPipeline::project_point`]). Tree-accelerated when the live
+    /// broadphase is tree-backed and fresh, brute-force otherwise.
     pub fn query_project_point(
         &self,
         point: Vec3,
         filter: &QueryFilter,
     ) -> Option<PointProjection> {
+        if let Some(view) = self.query_tree_view() {
+            return view.project_point(point, filter);
+        }
         QueryPipeline::new().project_point(&self.bodies, point, filter)
     }
 
     /// Linear shape sweep along `displacement`; read-only (see
-    /// [`QueryPipeline::cast_shape`]).
+    /// [`QueryPipeline::cast_shape`]). Tree-accelerated when the live
+    /// broadphase is tree-backed and fresh, brute-force otherwise.
     pub fn query_cast_shape(
         &self,
         shape: &Shape,
@@ -901,6 +1310,9 @@ impl SequentialImpulseEngine {
         displacement: Vec3,
         filter: &QueryFilter,
     ) -> Option<RaycastHit> {
+        if let Some(view) = self.query_tree_view() {
+            return view.cast_shape(shape, position, orientation, displacement, filter);
+        }
         QueryPipeline::new().cast_shape(
             &self.bodies,
             shape,
@@ -913,6 +1325,8 @@ impl SequentialImpulseEngine {
 
     /// Handles of every body overlapping `shape` at the given pose;
     /// read-only (see [`QueryPipeline::intersect_shape`]).
+    /// Tree-accelerated when the live broadphase is tree-backed and fresh,
+    /// brute-force otherwise.
     pub fn query_intersect_shape(
         &self,
         shape: &Shape,
@@ -920,6 +1334,9 @@ impl SequentialImpulseEngine {
         orientation: Quat,
         filter: &QueryFilter,
     ) -> Vec<BodyHandle> {
+        if let Some(view) = self.query_tree_view() {
+            return view.intersect_shape(shape, position, orientation, filter);
+        }
         QueryPipeline::new().intersect_shape(&self.bodies, shape, position, orientation, filter)
     }
 }

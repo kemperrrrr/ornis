@@ -56,6 +56,9 @@ mod split;
 #[cfg(test)]
 mod engine_policy_tests;
 
+/// Featherstone articulated-body engine: reduced-coordinate ABA forward
+/// dynamics for jointed mechanisms (R6, opt-in; overturns the P6 verdict).
+pub mod articulated;
 /// AVBD rigid-body engine: second [`engine::PhysicsEngine`] implementation
 /// (M1, Genesis-style engine-level modularity).
 pub mod avbd;
@@ -104,11 +107,18 @@ use split::{SplitBody, SplitJoint, SplitOwner, SplitState};
 // `broadphase_tree` were (and stay) crate-private, reachable as before.
 pub(crate) use collision::{broadphase, broadphase_tree};
 
+pub use articulated::{BaseJoint, FeatherstoneEngine};
 pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, LocalAvbdBody, LocalSiBody, RigidBody};
 pub use collision::broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
-pub use engine::{PhysicsEngine, SequentialImpulseEngine};
-pub use errors::{ColliderError, JointError, MeshError, QueryError, ShapeError, SnapshotError};
+pub use engine::{
+    KinematicMover, MAX_SUBSTEP_COUNT, MIN_SUBSTEP_COUNT, MoverHandle, PhysicsEngine,
+    SequentialImpulseEngine,
+};
+pub use errors::{
+    ColliderError, JointError, MeshError, MoverError, QueryError, ShapeError, SnapshotError,
+    StepError,
+};
 pub use flags::{
     AxisStatus, BodyRole, CachePolicy, CoordKind, Dispatch, HitKind, LimitSide, Order,
     RestitutionGate, RollAxis, RoutePhase, SolvePath, SolverSide, StructuralState,
@@ -118,9 +128,10 @@ pub use invariants::{
     NonEmpty4, PositiveF32, Radians, UnitVec3, validate_heightfield,
 };
 pub use joint::{
-    AxisConfig, CrossRowKind, JointHandle, JointKind, JointMotor, LocalAvbdJoint, LocalSiJoint,
-    MotorKind, MotorModel, PrismaticLimit, PrismaticMotor, ResolvedJoint, RevoluteLimit,
-    RevoluteMotor, SpringIntegration, WheelSuspension, cross_row_kind, resolve_joint,
+    AxisConfig, CrossRowKind, DEFAULT_MOTOR_CORRECTION, JointHandle, JointKind, JointMotor,
+    LocalAvbdJoint, LocalSiJoint, MotorDrive, MotorKind, MotorModel, PrismaticLimit,
+    PrismaticMotor, ResolvedJoint, RevoluteLimit, RevoluteMotor, SpringIntegration,
+    WheelSuspension, cross_row_kind, resolve_joint,
 };
 pub use math::{AABB, Ray, RaycastHit};
 pub use query_pipeline::{PointProjection, QueryFilter, QueryPipeline, QueryPredicate};
@@ -248,8 +259,8 @@ pub struct SplitMetrics {
 /// only through [`Engine::pin_body_solver`]: a pinned body keeps its owner
 /// across routing ticks, so a joint between differently-pinned bodies stays
 /// cross-solver until the host unpins. Each tick, after every engine steps
-/// and before the registry sync, the coupling pass solves each cross ball
-/// or distance joint as one positional projection plus one velocity row
+/// and before the registry sync, the coupling pass solves each cross ball,
+/// distance or rope joint as one positional projection plus one velocity row
 /// directly between the live mirrors, in canonical global-joint order,
 /// with mass-restore on both sides (sleep must not read as infinite mass).
 /// Every other cross kind is never half-solved: it stays unmirrored and
@@ -593,14 +604,138 @@ impl Engine {
 
     /// How one registry joint is solved: [`CrossJointStatus::Native`] when
     /// both ends share a solver (always, under [`RoutingKind::Single`]),
-    /// [`CrossJointStatus::Coupled`] for a cross-solver ball/distance row,
-    /// [`CrossJointStatus::Unsupported`] with a named cause otherwise.
+    /// [`CrossJointStatus::Coupled`] for a cross-solver ball/distance/rope
+    /// row, [`CrossJointStatus::Unsupported`] with a named cause otherwise
+    /// (revolute, prismatic, fixed, spring, wheel, gear, six-DOF and motor
+    /// joints never half-solve across solvers).
     /// `None` for an invalid joint handle.
     pub fn cross_joint_status(&self, handle: JointHandle) -> Option<CrossJointStatus> {
         if let Some(s) = &self.split {
             return s.cross_status(handle);
         }
         (handle.index() < self.joint_count()).then_some(CrossJointStatus::Native)
+    }
+
+    /// Mover-owning engine behind the seam, if this orchestrator currently
+    /// hosts movers: [`RoutingKind::Single`] on
+    /// [`SolverKind::SequentialImpulse`]. Any other solver or routing
+    /// rebuilds engines without mover state — mover calls refuse with
+    /// [`MoverError::Unsupported`] instead of losing the driver silently.
+    fn mover_engine(&mut self) -> Result<&mut SequentialImpulseEngine, MoverError> {
+        if self.routing != RoutingKind::Single {
+            return Err(MoverError::Unsupported {
+                detail: "movers need RoutingKind::Single (Islands routing rebuilds engines)"
+                    .to_string(),
+            });
+        }
+        match &mut self.inner {
+            EngineInner::SequentialImpulse(e) => Ok(e),
+            EngineInner::Avbd(_) | EngineInner::Xpbd(_) => Err(MoverError::Unsupported {
+                detail: "movers need SolverKind::SequentialImpulse".to_string(),
+            }),
+        }
+    }
+
+    /// Attach a kinematic platform mover (see
+    /// [`SequentialImpulseEngine::add_mover`]).
+    ///
+    /// # Errors
+    ///
+    /// [`MoverError`] from the inner engine, or [`MoverError::Unsupported`]
+    /// outside [`RoutingKind::Single`] on
+    /// [`SolverKind::SequentialImpulse`].
+    pub fn add_mover(&mut self, body: BodyHandle) -> Result<MoverHandle, MoverError> {
+        self.mover_engine()?.add_mover(body)
+    }
+
+    /// Detach a mover; no-op for an invalid handle and outside the
+    /// mover-hosting mode (same no-op convention as
+    /// [`PhysicsEngine::remove_body`]).
+    pub fn remove_mover(&mut self, handle: MoverHandle) {
+        if let Ok(e) = self.mover_engine() {
+            e.remove_mover(handle);
+        }
+    }
+
+    /// Set the mover's per-step displacement (see
+    /// [`SequentialImpulseEngine::set_mover_displacement`]).
+    ///
+    /// # Errors
+    ///
+    /// [`MoverError`] from the inner engine, or [`MoverError::Unsupported`]
+    /// outside [`RoutingKind::Single`] on
+    /// [`SolverKind::SequentialImpulse`].
+    pub fn set_mover_displacement(
+        &mut self,
+        handle: MoverHandle,
+        displacement: glam::Vec3,
+    ) -> Result<(), MoverError> {
+        self.mover_engine()?
+            .set_mover_displacement(handle, displacement)
+    }
+
+    /// Activate or park the mover (see
+    /// [`SequentialImpulseEngine::set_mover_active`]).
+    ///
+    /// # Errors
+    ///
+    /// [`MoverError`] from the inner engine, or [`MoverError::Unsupported`]
+    /// outside [`RoutingKind::Single`] on
+    /// [`SolverKind::SequentialImpulse`].
+    pub fn set_mover_active(
+        &mut self,
+        handle: MoverHandle,
+        active: bool,
+    ) -> Result<(), MoverError> {
+        self.mover_engine()?.set_mover_active(handle, active)
+    }
+
+    /// Read-only access to a mover, or `None` for an invalid handle (and
+    /// outside the mover-hosting mode).
+    pub fn mover(&self, handle: MoverHandle) -> Option<&KinematicMover> {
+        if self.routing != RoutingKind::Single {
+            return None;
+        }
+        match &self.inner {
+            EngineInner::SequentialImpulse(e) => e.mover(handle),
+            EngineInner::Avbd(_) | EngineInner::Xpbd(_) => None,
+        }
+    }
+
+    /// How many movers are currently attached (0 outside the
+    /// mover-hosting mode).
+    pub fn mover_count(&self) -> usize {
+        if self.routing != RoutingKind::Single {
+            return 0;
+        }
+        match &self.inner {
+            EngineInner::SequentialImpulse(e) => e.mover_count(),
+            EngineInner::Avbd(_) | EngineInner::Xpbd(_) => 0,
+        }
+    }
+
+    /// Box3D `b3World_Step(dt, subStepCount)` parity (R7): advance by `dt`
+    /// with exactly `n` substeps as the cap (see
+    /// [`SequentialImpulseEngine::step_with_substeps`]).
+    ///
+    /// # Errors
+    ///
+    /// [`StepError::BadSubstepCount`] unless `n` is in `1..=64`,
+    /// [`StepError::Unsupported`] outside [`RoutingKind::Single`] on
+    /// [`SolverKind::SequentialImpulse`].
+    pub fn step_with_substeps(&mut self, dt: f32, substeps: u32) -> Result<(), errors::StepError> {
+        crate::sequential_impulse::check_substep_count(substeps)?;
+        if self.routing != RoutingKind::Single {
+            return Err(errors::StepError::Unsupported {
+                detail: "step_with_substeps needs RoutingKind::Single".to_string(),
+            });
+        }
+        match &mut self.inner {
+            EngineInner::SequentialImpulse(e) => e.step_with_substeps(dt, substeps),
+            EngineInner::Avbd(_) | EngineInner::Xpbd(_) => Err(errors::StepError::Unsupported {
+                detail: "step_with_substeps needs SolverKind::SequentialImpulse".to_string(),
+            }),
+        }
     }
 
     fn snapshot(&self) -> SceneSnapshot {

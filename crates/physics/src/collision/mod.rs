@@ -14,5 +14,8 @@ pub mod broadphase_tree;
 pub mod distance;
 /// GJK/EPA fallback narrow phase for cylinder, cone and convex hull pairs.
 pub(crate) mod gjk;
+/// Procedural convex-hull builders (R4): cylinder/cone/rock tooling plus the
+/// strict `from_points` wrapper and `clone_and_transform` over `shape`.
+pub mod hull_tool;
 /// Collision shapes with AABB projection and inertia tensors.
 pub mod shape;

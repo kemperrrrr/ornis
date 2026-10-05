@@ -474,6 +474,19 @@ pub enum JointKindSnapshot {
         /// Angular-axis configurations.
         angular: [AxisConfigSnapshot; 3],
     },
+    /// Free 6-DOF velocity drive (no anchors — COM-level rows).
+    Motor {
+        /// Desired relative linear velocity (m/s, B-minus-A, world frame).
+        linear_target: [f32; 3],
+        /// Desired relative angular velocity (rad/s, B-minus-A, world frame).
+        angular_target: [f32; 3],
+        /// Linear force budget (N).
+        max_force: f32,
+        /// Angular torque budget (N·m).
+        max_torque: f32,
+        /// Assembly-pose pull per position pass (`0..=1`, SI only).
+        correction: f32,
+    },
 }
 
 /// Per-axis six-DOF configuration mirror.
@@ -1365,6 +1378,19 @@ impl JointKindSnapshot {
                 linear: linear.map(AxisConfigSnapshot::from_config),
                 angular: angular.map(AxisConfigSnapshot::from_config),
             },
+            JointKind::Motor {
+                linear_target,
+                angular_target,
+                max_force,
+                max_torque,
+                correction,
+            } => Self::Motor {
+                linear_target: v3(linear_target),
+                angular_target: v3(angular_target),
+                max_force,
+                max_torque,
+                correction,
+            },
         }
     }
 
@@ -1503,6 +1529,19 @@ impl JointKindSnapshot {
                 local_anchor_b: vec3(local_anchor_b),
                 linear: linear.map(AxisConfigSnapshot::to_config),
                 angular: angular.map(AxisConfigSnapshot::to_config),
+            },
+            Self::Motor {
+                linear_target,
+                angular_target,
+                max_force,
+                max_torque,
+                correction,
+            } => JointKind::Motor {
+                linear_target: vec3(linear_target),
+                angular_target: vec3(angular_target),
+                max_force,
+                max_torque,
+                correction,
             },
         }
     }

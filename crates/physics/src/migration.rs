@@ -245,6 +245,9 @@ pub(crate) fn validate_joint(kind: &JointKind) -> Result<(), crate::errors::Join
             axis(local_anchor_b, "local_anchor_b")?;
             Ok(())
         }
+        // Free motor: no anchors (COM-level drive) — nothing to check here;
+        // targets and budgets validate in the arm below.
+        JointKind::Motor { .. } => Ok(()),
     };
     anchors?;
     match *kind {
@@ -329,6 +332,33 @@ pub(crate) fn validate_joint(kind: &JointKind) -> Result<(), crate::errors::Join
             }
         }
         JointKind::Spring { motor, .. } => validate_motor(&motor),
+        JointKind::Motor {
+            linear_target,
+            angular_target,
+            max_force,
+            max_torque,
+            correction,
+        } => {
+            if !linear_target.is_finite() || !angular_target.is_finite() {
+                return Err(JointError::NonFinite {
+                    field: "motor target".to_string(),
+                });
+            }
+            if !max_force.is_finite() || max_force < 0.0 {
+                return Err(JointError::NonFinite {
+                    field: "motor max_force".to_string(),
+                });
+            }
+            if !max_torque.is_finite() || max_torque < 0.0 {
+                return Err(JointError::NonFinite {
+                    field: "motor max_torque".to_string(),
+                });
+            }
+            if !correction.is_finite() || !(0.0..=1.0).contains(&correction) {
+                return Err(JointError::BadBounds { min: 0.0, max: 1.0 });
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

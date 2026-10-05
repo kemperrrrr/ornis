@@ -579,6 +579,12 @@ impl AvbdEngine {
                         }
                     }
                 }
+                AvbdJointKind::Motor => {
+                    // No primal position rows: the free drive acts as a
+                    // deadbeat velocity impulse (see `free_motor_impulse`),
+                    // not as a penalty servo. A fixed-gain position servo
+                    // is bang-bang at single-step dt without substeps.
+                }
             }
             // Geometric stiffness (official): the lever rotates with the
             // body, and the truncated Hessian must know. Without this the

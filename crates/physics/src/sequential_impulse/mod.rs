@@ -11,6 +11,7 @@ pub mod hooks;
 mod islands;
 pub mod joints;
 mod math;
+mod mover;
 mod narrow;
 mod queries;
 mod sleep;
@@ -27,6 +28,7 @@ pub use math::{
     apply_impulse, effective_mass, inv_inertia_axis, mul_inv_inertia, point_velocity,
     solve_normal_block, solve_small,
 };
+pub use mover::{KinematicMover, MoverHandle};
 pub use narrow::{box_manifold, detect_collisions_into, obb_sat};
 pub(crate) use queries::DEFAULT_MAX_CCD_SUBSTEPS;
 pub use queries::{
@@ -61,7 +63,7 @@ use crate::broadphase::{
     StepTiming,
 };
 use crate::distance;
-use crate::errors::{QueryError, SnapshotError};
+use crate::errors::{QueryError, SnapshotError, StepError};
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuSequentialImpulse;
 use crate::joint::{Joint, JointHandle, JointKind};
@@ -79,6 +81,30 @@ use crate::wide::{SolverStep, build_solver_steps};
 /// are sized by this. Box2D-class 4-point cap: one face contact (2) plus
 /// margin for speculative/rolling rows sharing the same lanes.
 pub(crate) const MAX_MANIFOLD_POINTS: usize = 4;
+
+/// Minimum substep count accepted by
+/// [`step_with_substeps`](SequentialImpulseEngine::step_with_substeps)
+/// (R7, Box3D `b3World_Step(dt, subStepCount)` parity).
+pub const MIN_SUBSTEP_COUNT: u32 = 1;
+/// Maximum substep count accepted by
+/// [`step_with_substeps`](SequentialImpulseEngine::step_with_substeps)
+/// (R7, Box3D `b3World_Step(dt, subStepCount)` parity).
+pub const MAX_SUBSTEP_COUNT: u32 = 64;
+
+/// Admission check for an explicit per-call substep count (R7): `1..=64`
+/// passes, anything else is a typed refusal — never a silent clamp (a
+/// clamped count would change solver quality behind the caller's back).
+pub(crate) fn check_substep_count(n: u32) -> Result<(), StepError> {
+    if (MIN_SUBSTEP_COUNT..=MAX_SUBSTEP_COUNT).contains(&n) {
+        Ok(())
+    } else {
+        Err(StepError::BadSubstepCount {
+            got: n,
+            min: MIN_SUBSTEP_COUNT,
+            max: MAX_SUBSTEP_COUNT,
+        })
+    }
+}
 
 /// The CPU reference physics engine: sequential-impulse solver with a
 /// selectable broadphase, manifold generation, island-coherent sleeping,
@@ -141,6 +167,12 @@ pub struct SequentialImpulseEngine {
     /// entries for touched bodies are pushed; empty in steady state when
     /// nobody teleports.
     saved_driver_vel: Vec<(usize, Vec3, Vec3)>,
+    /// Attached kinematic platform movers (R2, dense handle order — see
+    /// [`MoverHandle`]): transient driver state, not simulation state.
+    /// Snapshots, restores and solver migrations do not carry them;
+    /// re-attach after a restore. Invalidated by `remove_body` (dropped
+    /// with the platform, remapped with the swapped tail).
+    movers: Vec<KinematicMover>,
     /// Persistent joint constraints with warm-start state (G5). Joints also
     /// feed the island union-find: jointed bodies sleep and wake together.
     joints: Vec<Joint>,
@@ -923,6 +955,7 @@ impl SequentialImpulseEngine {
             asleep: Vec::new(),
             prev_pose: Vec::new(),
             saved_driver_vel: Vec::new(),
+            movers: Vec::new(),
             joints: Vec::new(),
             joint_pairs: FxHashSet::default(),
             debug_pairs: Vec::new(),
@@ -986,6 +1019,18 @@ impl SequentialImpulseEngine {
         self.broadphase.auto_active_kind()
     }
 
+    /// Live dynamic AABB tree for read-only query acceleration (R5):
+    /// `Some` only while the broadphase is tree-backed (explicit
+    /// [`BroadPhaseKind::DynamicAabbTree`] or [`BroadPhaseKind::Auto`]
+    /// currently routed there). The reference borrows the trees the pair
+    /// pipeline maintains — no copy, no rebuild — and query passes hold it
+    /// shared, so no insert/rebalance can interleave with a traversal.
+    pub(crate) fn broadphase_tree_for_query(
+        &self,
+    ) -> Option<&crate::broadphase_tree::DynamicAabbTree> {
+        self.broadphase.as_query_tree()
+    }
+
     /// Selects the uniform-grid backend and configures its cell size.
     ///
     /// Smaller cells reduce false candidate pairs at the cost of more cell
@@ -1043,6 +1088,34 @@ impl SequentialImpulseEngine {
     /// (default 12). More substeps = more stable stacks, linearly more cost.
     pub fn set_substeps(&mut self, n: u32) {
         self.substeps = n;
+    }
+
+    /// Current substep cap (default 12): what `step(dt)` splits the step
+    /// into before the adaptive pass and the step budget trim it down.
+    pub fn substeps(&self) -> u32 {
+        self.substeps
+    }
+
+    /// Box3D `b3World_Step(dt, subStepCount)` parity (R7): advance by `dt`
+    /// with exactly `n` substeps as the cap. The override is temporary —
+    /// restored before return, never stored or snapshotted — so `step(dt)`
+    /// keeps the configured default bit-identically afterwards. The
+    /// per-body adaptive pass and the step budget trim work on top of `n`
+    /// exactly as they work on top of
+    /// [`set_substeps`](Self::set_substeps).
+    ///
+    /// # Errors
+    ///
+    /// [`StepError::BadSubstepCount`] unless `n` is in `1..=64`
+    /// ([`MIN_SUBSTEP_COUNT`]..=[`MAX_SUBSTEP_COUNT`]): out-of-range
+    /// counts are refused explicitly, never clamped silently.
+    pub fn step_with_substeps(&mut self, dt: f32, substeps: u32) -> Result<(), StepError> {
+        check_substep_count(substeps)?;
+        let saved = self.substeps;
+        self.substeps = substeps;
+        PhysicsEngine::step(self, dt);
+        self.substeps = saved;
+        Ok(())
     }
 
     /// Worst-case step budget (default: on, see [`StepBudget::default`]).
@@ -1200,6 +1273,11 @@ impl PhysicsEngine for SequentialImpulseEngine {
         // step displacement must span exactly one step, and a zero-velocity
         // teleport still counts as driven motion for the wake check.
         let teleported_kinematic = self.snapshot_driver_motion();
+        // R2 movers before the fast-path check: engine-driven platforms
+        // displace here (carrying and waking passengers through the mover
+        // pass), so a displacing mover keeps the world awake exactly like
+        // a driver teleport — and a parked one costs nothing.
+        let mover_motion = self.apply_movers();
         // G7: a fully sleeping world with no trigger state cannot change —
         // skip the whole substep loop (broadphase re-sort included) instead
         // of paying to rediscover that nothing moves. Trigger-only worlds
@@ -1224,6 +1302,7 @@ impl PhysicsEngine for SequentialImpulseEngine {
         if !has_awake_dynamic
             && !has_driven_kinematic
             && !teleported_kinematic
+            && !mover_motion
             && !has_trigger
             && self.trigger_pairs.is_empty()
         {
@@ -1674,6 +1753,21 @@ impl PhysicsEngine for SequentialImpulseEngine {
             self.asleep.swap_remove(handle.index());
             self.body_moved.swap_remove(handle.index());
             self.prev_pose.swap_remove(handle.index());
+            // Mover handles are body indices: drop movers driving the
+            // removed body, remap the swapped-in tail onto the freed slot
+            // (mover handles past a dropped mover shift — same convention
+            // as bodies).
+            let mut mi = 0;
+            while mi < self.movers.len() {
+                if self.movers[mi].body == handle {
+                    self.movers.swap_remove(mi);
+                } else {
+                    if self.movers[mi].body == last {
+                        self.movers[mi].body = handle;
+                    }
+                    mi += 1;
+                }
+            }
             // Drop joints touching the removed body (gears die with their
             // referenced joints inside the rebuild — dangling joint indices
             // are never kept); remap the swapped-in body's index in the

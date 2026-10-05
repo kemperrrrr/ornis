@@ -385,12 +385,14 @@ impl AvbdEngine {
         }
         // No-collide for pin-jointed bodies (builtin `joint_pairs`
         // parity, narrowed: Ball/Revolute/Prismatic/Distance/Rope/Spring/
-        // Wheel — a hinge pin passes through its mount, so contact
+        // Wheel/Motor — a hinge pin passes through its mount, so contact
         // friction there is a phantom brake on the joint. Measured: a
         // motor-driven hinge buried 0.2 in its mount never turned — the
         // mount's spin friction saturated the motor. Rope/Spring tethers
         // join the list (Distance parity — Rapier disables contacts
-        // between joined bodies by default too). Triggers still report
+        // between joined bodies by default too), and so does the free
+        // motor (its velocity drive would fight partner friction the
+        // same way). Triggers still report
         // overlap below; gears carry no entry, so geared bodies keep
         // colliding like in the builtin.
         //
@@ -413,6 +415,7 @@ impl AvbdEngine {
                         | AvbdJointKind::Rope
                         | AvbdJointKind::Spring
                         | AvbdJointKind::Wheel
+                        | AvbdJointKind::Motor
                 ) && ((j.a == ia && j.b == ib) || (j.a == ib && j.b == ia))
             })
         {

@@ -10,21 +10,17 @@
 //! spring interpretation, shared by every engine through one drive equation
 //! (see [`JointMotor::servo_impulse`]) instead of per-joint duplicates.
 //!
-//! # Multibody verdict (P6): maximal coordinates stand, no Featherstone solver
+//! # Multibody: maximal coordinates by default, Featherstone opt-in (R6)
 //!
-//! A reduced-coordinate (Featherstone-style) articulated-body solver was
-//! evaluated against the maximal-coordinate joint solvers in this crate (SI
-//! substep-interleaved equalities, AVBD penalty rows, XPBD compliant rows).
-//! Verdict: chains assembled from the existing joints already cover the
-//! articulated case — ball-joint chains hang, hinge chains swing about one
-//! axis, gears couple coordinates — all held by the current solvers. A
-//! dedicated reduced-coordinate pass would buy O(n) exact tree dynamics and
-//! zero joint drift for long chains, but it cannot reuse the contact, island
-//! and sleep machinery (contacts couple the tree to the world outside it),
-//! so it would be a second dynamics core with its own integration, sleeping
-//! and SIMD/GPU story — out of scope, and unnecessary at our chain lengths
-//! (drift stays inside the position-pass tolerance). No new solver is built;
-//! articulated assemblies keep composing [`JointKind`]s directly.
+//! The P6 verdict ("no reduced-coordinate solver; chains from the existing
+//! joints suffice") was overturned by the owner as wrong (Box3D-audit
+//! program, R6). Chains composed from [`JointKind`]s in the SI/AVBD/XPBD
+//! engines remain the default and the only path that couples articulated
+//! bodies with contacts, islands and sleep. For drift-free, exact tree
+//! dynamics of free/loaded mechanisms there is now the opt-in
+//! reduced-coordinate engine [`crate::articulated::FeatherstoneEngine`]
+//! (ABA, revolute/fixed/floating-base joints, no contacts in v1 — see its
+//! module docs for the full scope).
 
 use glam::{Quat, Vec3};
 
@@ -370,6 +366,135 @@ pub enum JointKind {
         /// Per-axis angular configuration in body A's assembly frame.
         angular: [AxisConfig; 3],
     },
+    /// Free motor (Box3D `b3MotorJoint` spirit): drives body B toward the
+    /// target linear + angular velocity RELATIVE to body A, with no locked
+    /// axes and no anchors. A static body A is the world frame (the
+    /// Box3D "motor vs ground" setup); two dynamics drive their relative
+    /// motion (chaser/drone disciplines).
+    ///
+    /// Targets are world-frame vectors (m/s and rad/s of B-minus-A). The
+    /// budgets clamp the ACCUMULATED impulse (`±max_force·dt`,
+    /// `±max_torque·dt`, limit-row discipline): a weak motor ramps up
+    /// gradually and under-delivers against overload instead of snapping
+    /// to the target — never a hard velocity clamp.
+    ///
+    /// `correction` is the Baumgarte share of the assembly-pose error
+    /// removed per position pass (`0..=1`, default
+    /// [`DEFAULT_MOTOR_CORRECTION`], Box2D `b2MotorJointDef`
+    /// `correctionFactor` parity): `0` is a pure velocity drive with no
+    /// pose memory, `> 0` weakly pulls the assembly transform back (drift
+    /// control, not a pose hold — under a sustained velocity drive the
+    /// pose trails by ~`v·h/correction` per substep, millimetric at
+    /// default). Pose holding is the separate [`JointMotor::servo`] drive
+    /// (fixed setpoint + stiffness); the motor tracks a VELOCITY, the
+    /// servo a POSE — do not mix them.
+    ///
+    /// Solver coverage: SI runs 6 accumulated velocity rows plus the weak
+    /// position pull; AVBD/XPBD run the velocity drive only (no positional
+    /// rows — correction is SI-only there). Cross-solver has no structural
+    /// row, so a cross motor is explicitly `Unsupported` (pin both ends to
+    /// one solver). Boundary with [`KinematicMover`](crate::KinematicMover):
+    /// the motor drives DYNAMIC bodies through impulses, the mover carries
+    /// KINEMATIC bodies through displacement — different bodies, no overlap.
+    Motor {
+        /// Desired relative linear velocity (m/s, B-minus-A, world frame).
+        linear_target: Vec3,
+        /// Desired relative angular velocity (rad/s, B-minus-A, world frame).
+        angular_target: Vec3,
+        /// Linear force budget (N): clamps the accumulated linear impulse.
+        max_force: f32,
+        /// Angular torque budget (N·m): clamps the accumulated angular impulse.
+        max_torque: f32,
+        /// Assembly-pose pull per position pass (`0..=1`, SI only).
+        correction: f32,
+    },
+}
+
+/// Default motor position-correction share (Box2D `b2MotorJointDef`
+/// `correctionFactor` parity: `0.3`).
+pub const DEFAULT_MOTOR_CORRECTION: f32 = 0.3;
+
+/// Drive parameters of a [`JointKind::Motor`] joint, by value for the
+/// solver rows and sleep votes (the spec variant stays the canonical
+/// store; see [`JointKind::motor_drive`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotorDrive {
+    /// Desired relative linear velocity (m/s, B-minus-A, world frame).
+    pub linear_target: Vec3,
+    /// Desired relative angular velocity (rad/s, B-minus-A, world frame).
+    pub angular_target: Vec3,
+    /// Linear force budget (N): clamps the accumulated linear impulse.
+    pub max_force: f32,
+    /// Angular torque budget (N·m): clamps the accumulated angular impulse.
+    pub max_torque: f32,
+    /// Assembly-pose pull per position pass (`0..=1`, SI only).
+    pub correction: f32,
+}
+
+impl MotorDrive {
+    /// Checked constructor: `None` unless both targets are finite, both
+    /// budgets are finite and `>= 0`, and `correction` is finite in
+    /// `0..=1` (a pull share outside the unit range would over/anti-correct).
+    pub fn try_new(
+        linear_target: Vec3,
+        angular_target: Vec3,
+        max_force: f32,
+        max_torque: f32,
+        correction: f32,
+    ) -> Option<Self> {
+        let m = Self {
+            linear_target,
+            angular_target,
+            max_force,
+            max_torque,
+            correction,
+        };
+        m.check().then_some(m)
+    }
+
+    /// Validity predicate behind [`MotorDrive::try_new`].
+    pub fn check(&self) -> bool {
+        self.linear_target.is_finite()
+            && self.angular_target.is_finite()
+            && self.max_force.is_finite()
+            && self.max_force >= 0.0
+            && self.max_torque.is_finite()
+            && self.max_torque >= 0.0
+            && self.correction.is_finite()
+            && (0.0..=1.0).contains(&self.correction)
+    }
+
+    /// Whether this drive disturbs sleep (a live velocity vote for the
+    /// engine sleep heuristics): any budgeted nonzero target. A pure
+    /// correction pull (`correction > 0`, zero targets) is NOT a vote —
+    /// the assembly-residual check covers the unsettled case and a settled
+    /// motor must sleep (same split as the spring rest residual).
+    pub fn keeps_awake(&self) -> bool {
+        (self.max_force > 0.0 && self.linear_target != Vec3::ZERO)
+            || (self.max_torque > 0.0 && self.angular_target != Vec3::ZERO)
+    }
+
+    /// Budget-clamped deadbeat linear impulse for one drive axis: the
+    /// exact impulse driving the axis rate to the target
+    /// (`rate_error / inv_eff_mass`, clamped to `±max_force·dt`). The
+    /// single-shot twin of the SI accumulated rows, shared by the
+    /// AVBD/XPBD velocity passes; non-positive `dt`, budget or mass
+    /// yields zero (never NaN).
+    pub fn linear_impulse(&self, rate_error: f32, inv_eff_mass: f32, dt: f32) -> f32 {
+        if dt <= 0.0 || self.max_force <= 0.0 || inv_eff_mass <= 0.0 {
+            return 0.0;
+        }
+        (rate_error / inv_eff_mass).clamp(-self.max_force * dt, self.max_force * dt)
+    }
+
+    /// Budget-clamped deadbeat angular impulse for one drive axis (same
+    /// equation against `max_torque`).
+    pub fn angular_impulse(&self, rate_error: f32, inv_eff_mass: f32, dt: f32) -> f32 {
+        if dt <= 0.0 || self.max_torque <= 0.0 || inv_eff_mass <= 0.0 {
+            return 0.0;
+        }
+        (rate_error / inv_eff_mass).clamp(-self.max_torque * dt, self.max_torque * dt)
+    }
 }
 
 impl JointKind {
@@ -458,6 +583,59 @@ impl JointKind {
     pub fn spring_motor(&self) -> Option<JointMotor> {
         match self {
             Self::Spring { motor, .. } => Some(*motor),
+            _ => None,
+        }
+    }
+
+    /// Checked motor: `None` unless the drive validates (see
+    /// [`MotorDrive::check`]).
+    pub fn motor_checked(
+        linear_target: Vec3,
+        angular_target: Vec3,
+        max_force: f32,
+        max_torque: f32,
+        correction: f32,
+    ) -> Option<Self> {
+        MotorDrive::try_new(
+            linear_target,
+            angular_target,
+            max_force,
+            max_torque,
+            correction,
+        )
+        .map(
+            |MotorDrive {
+                 linear_target,
+                 angular_target,
+                 max_force,
+                 max_torque,
+                 correction,
+             }| Self::Motor {
+                linear_target,
+                angular_target,
+                max_force,
+                max_torque,
+                correction,
+            },
+        )
+    }
+
+    /// Drive parameters of a [`JointKind::Motor`], or `None` for other joints.
+    pub fn motor_drive(&self) -> Option<MotorDrive> {
+        match *self {
+            Self::Motor {
+                linear_target,
+                angular_target,
+                max_force,
+                max_torque,
+                correction,
+            } => Some(MotorDrive {
+                linear_target,
+                angular_target,
+                max_force,
+                max_torque,
+                correction,
+            }),
             _ => None,
         }
     }
@@ -1193,6 +1371,13 @@ pub fn resolve_joint(
             let rb = qb * r.lb;
             r.ref_anchor_delta = qa.conjugate() * ((pb + rb) - (pa + ra));
         }
+        JointKind::Motor { .. } => {
+            // Free drive: no anchors (COM-level rows), but the assembly
+            // relative pose is still captured for the weak SI position
+            // pull (`correction > 0`) and the AVBD rest residual.
+            r.ref_quat = qa.conjugate() * qb;
+            r.ref_anchor_delta = qa.conjugate() * (pb - pa);
+        }
         JointKind::Gear { .. } => return None,
     }
     Some(r)
@@ -1220,9 +1405,10 @@ pub enum CrossRowKind {
 /// Cross-solver row of a joint spec, or `None` when the kind has no
 /// structural point row. Ball, distance and rope couple across solvers
 /// (rope one-sided: the coupling pass only pulls a stretched rope);
-/// revolute, prismatic, fixed, spring, wheel, gear and six-DOF return
-/// `None` explicitly — a cross joint of those kinds is never half-solved
-/// (springs have no compliant cross row in v1 — see `split.rs`).
+/// revolute, prismatic, fixed, spring, wheel, gear, six-DOF and motor
+/// return `None` explicitly — a cross joint of those kinds is never
+/// half-solved (springs have no compliant cross row in v1; the motor is a
+/// velocity drive with no positional row to couple — see `split.rs`).
 pub fn cross_row_kind(kind: &JointKind) -> Option<CrossRowKind> {
     match kind {
         JointKind::Ball { .. } => Some(CrossRowKind::Ball),
@@ -1234,7 +1420,8 @@ pub fn cross_row_kind(kind: &JointKind) -> Option<CrossRowKind> {
         | JointKind::Spring { .. }
         | JointKind::Wheel { .. }
         | JointKind::Gear { .. }
-        | JointKind::SixDof { .. } => None,
+        | JointKind::SixDof { .. }
+        | JointKind::Motor { .. } => None,
     }
 }
 
@@ -1334,7 +1521,8 @@ impl Joint {
             | JointKind::Spring { .. }
             | JointKind::Wheel { .. }
             | JointKind::Gear { .. }
-            | JointKind::SixDof { .. } => (None, None),
+            | JointKind::SixDof { .. }
+            | JointKind::Motor { .. } => (None, None),
         }
     }
 
@@ -1350,7 +1538,8 @@ impl Joint {
             | JointKind::Spring { .. }
             | JointKind::Wheel { .. }
             | JointKind::Gear { .. }
-            | JointKind::SixDof { .. } => (None, None),
+            | JointKind::SixDof { .. }
+            | JointKind::Motor { .. } => (None, None),
         }
     }
 
@@ -1370,7 +1559,8 @@ impl Joint {
             | JointKind::Spring { .. }
             | JointKind::Wheel { .. }
             | JointKind::Gear { .. }
-            | JointKind::SixDof { .. } => None,
+            | JointKind::SixDof { .. }
+            | JointKind::Motor { .. } => None,
         }
     }
 
@@ -1401,8 +1591,9 @@ impl Joint {
         }
     }
 
-    /// Local anchor on each body. Gear joints hold no anchors — returns
-    /// zeros (they coordinate other joints instead of constraining bodies).
+    /// Local anchor on each body. Gear and motor joints hold no anchors —
+    /// returns zeros (gears coordinate other joints instead of constraining
+    /// bodies; motors drive center-of-mass velocities directly).
     pub fn local_anchors(&self) -> (Vec3, Vec3) {
         match &self.kind {
             JointKind::Ball {
@@ -1447,7 +1638,7 @@ impl Joint {
                 local_anchor_b,
                 ..
             } => (*local_anchor_a, *local_anchor_b),
-            JointKind::Gear { .. } => (Vec3::ZERO, Vec3::ZERO),
+            JointKind::Gear { .. } | JointKind::Motor { .. } => (Vec3::ZERO, Vec3::ZERO),
         }
     }
 }
@@ -1656,6 +1847,98 @@ mod tests {
             body_a: BodyHandle::from_raw(0),
             body_b: BodyHandle::from_raw(1),
             kind: rope,
+            acc_lin: [0.0; 3],
+            acc_ang: [0.0; 3],
+            reference_angle: 0.0,
+            reference_length: 0.0,
+            reference_distance: 0.0,
+            reference_quat: Quat::IDENTITY,
+            reference_anchor_delta: Vec3::ZERO,
+            acc_limit: 0.0,
+            acc_dist: 0.0,
+            acc_rope: 0.0,
+            servo: None,
+            acc_gear: 0.0,
+            gear_mem: None,
+            acc_6dof: [0.0; 6],
+        }
+        .local_anchors();
+        assert_eq!((la, lb), (Vec3::ZERO, Vec3::ZERO));
+    }
+
+    #[test]
+    fn motor_checked_gates_targets_budgets_and_correction() {
+        let good = JointKind::motor_checked(Vec3::X, Vec3::Z, 50.0, 10.0, 0.3);
+        assert!(good.is_some());
+        let drive = good
+            .expect("valid motor")
+            .motor_drive()
+            .expect("drive reads back");
+        assert_eq!(drive.linear_target, Vec3::X);
+        assert_eq!(drive.angular_target, Vec3::Z);
+        assert_eq!(drive.max_force, 50.0);
+        assert_eq!(drive.max_torque, 10.0);
+        assert_eq!(drive.correction, 0.3);
+        // Non-finite targets, negative budgets and out-of-range correction refuse.
+        assert!(JointKind::motor_checked(Vec3::NAN, Vec3::Z, 50.0, 10.0, 0.3).is_none());
+        assert!(JointKind::motor_checked(Vec3::X, Vec3::Z, -1.0, 10.0, 0.3).is_none());
+        assert!(JointKind::motor_checked(Vec3::X, Vec3::Z, 50.0, f32::INFINITY, 0.3).is_none());
+        assert!(JointKind::motor_checked(Vec3::X, Vec3::Z, 50.0, 10.0, 1.5).is_none());
+        assert!(JointKind::motor_checked(Vec3::X, Vec3::Z, 50.0, 10.0, f32::NAN).is_none());
+        // Non-motor kinds expose no drive.
+        assert!(
+            JointKind::Ball {
+                local_anchor_a: Vec3::ZERO,
+                local_anchor_b: Vec3::ZERO,
+            }
+            .motor_drive()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn motor_drive_sleep_vote_needs_a_budgeted_target() {
+        let coasting =
+            MotorDrive::try_new(Vec3::ZERO, Vec3::ZERO, 50.0, 10.0, 0.3).expect("valid drive");
+        assert!(!coasting.keeps_awake());
+        let pushing =
+            MotorDrive::try_new(Vec3::X, Vec3::ZERO, 50.0, 10.0, 0.0).expect("valid drive");
+        assert!(pushing.keeps_awake());
+        let spinning =
+            MotorDrive::try_new(Vec3::ZERO, Vec3::Z, 50.0, 10.0, 0.0).expect("valid drive");
+        assert!(spinning.keeps_awake());
+        // A budgeted target with a zeroed budget on its own axis is no vote.
+        let unbudgeted = MotorDrive {
+            max_force: 0.0,
+            ..pushing
+        };
+        assert!(!unbudgeted.keeps_awake());
+    }
+
+    #[test]
+    fn resolve_motor_captures_assembly_pose_without_anchors() {
+        let motor =
+            JointKind::motor_checked(Vec3::X, Vec3::ZERO, 50.0, 10.0, DEFAULT_MOTOR_CORRECTION)
+                .expect("valid motor");
+        let r = resolve_joint(
+            &motor,
+            Vec3::new(1.0, 0.0, 0.0),
+            ID,
+            Vec3::new(4.0, 0.0, 0.0),
+            ID,
+        )
+        .expect("motor resolves");
+        assert!(!r.degenerate);
+        assert_eq!((r.la, r.lb), (Vec3::ZERO, Vec3::ZERO));
+        // COM separation in A's frame survives for the weak position pull.
+        assert!((r.ref_anchor_delta - Vec3::new(3.0, 0.0, 0.0)).length() < 1e-6);
+        assert_eq!(r.ref_quat, Quat::IDENTITY);
+        // A velocity drive has no positional row to couple across solvers.
+        assert_eq!(cross_row_kind(&motor), None);
+        let (la, lb) = Joint {
+            body_a: BodyHandle::from_raw(0),
+            body_b: BodyHandle::from_raw(1),
+            kind: motor,
             acc_lin: [0.0; 3],
             acc_ang: [0.0; 3],
             reference_angle: 0.0,

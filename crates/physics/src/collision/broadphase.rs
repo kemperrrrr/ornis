@@ -238,6 +238,17 @@ impl BroadPhaseBackend {
         }
     }
 
+    /// Returns the live dynamic tree for read-only query acceleration, or
+    /// `None` when the active backend is not tree-backed. The reference
+    /// borrows the live trees (no copy, no rebuild): query passes traverse
+    /// the same nodes the pair pipeline maintains.
+    pub(crate) fn as_query_tree(&self) -> Option<&DynamicAabbTree> {
+        match self {
+            Self::DynamicAabbTree(tree) => Some(tree),
+            Self::Auto(adaptive) => adaptive.query_tree(),
+            Self::SweepAndPrune(_) | Self::UniformGrid(_) => None,
+        }
+    }
     /// Returns the backend that served the latest update when `Auto` is
     /// selected, or `None` for explicit backend selections.
     pub(crate) fn auto_active_kind(&self) -> Option<BroadPhaseKind> {
@@ -971,6 +982,13 @@ impl AdaptiveBroadphase {
     /// never `Auto` itself).
     fn active_kind(&self) -> BroadPhaseKind {
         self.active
+    }
+
+    /// Live dynamic tree for read-only query acceleration: `Some` only
+    /// while the tree is the active backend, otherwise the query pipeline
+    /// takes the explicit brute-force path.
+    fn query_tree(&self) -> Option<&DynamicAabbTree> {
+        (self.active == BroadPhaseKind::DynamicAabbTree).then_some(&self.tree)
     }
 
     /// Grid cell size currently backing the adaptive grid.

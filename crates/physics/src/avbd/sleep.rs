@@ -19,6 +19,7 @@ impl AvbdEngine {
         j.mot.is_some_and(|[speed, cap]| speed != 0.0 && cap > 0.0)
             || j.servo.is_some_and(|m| m.keeps_awake())
             || j.spec.spring_motor().is_some_and(|m| m.keeps_awake())
+            || j.spec.motor_drive().is_some_and(|m| m.keeps_awake())
             || self.joint_members(j).into_iter().any(|h| {
                 let b = &self.bodies[h];
                 b.body_type != BodyType::Dynamic
@@ -72,6 +73,13 @@ impl AvbdEngine {
                 .map(|(a, b)| (a.coord + j.gratio * b.coord - j.ref_val).abs())
                 .unwrap_or(0.0),
             AvbdJointKind::SixDof => self.sixdof_rest_error(j, delta),
+            // Free motor: no positional rows, but the assembly deviation
+            // is still the unsettled signal (the SI-only correction pull
+            // converges it there; a pure velocity drive at rest reports
+            // zero here and sleeps through the `keeps_awake` vote above).
+            AvbdJointKind::Motor => (delta - a.orientation * j.dref)
+                .length()
+                .max(quat_diff_vec(a.orientation.conjugate() * b.orientation, j.q_ref).length()),
         }
     }
 

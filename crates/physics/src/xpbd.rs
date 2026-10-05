@@ -41,10 +41,13 @@
 //!   rebuilding it from zero, which is what keeps it still.
 //! - Joints supported structurally: ball, distance, rope (one-sided),
 //!   spring (compliant row plus the velocity damping pass), fixed,
-//!   revolute and prismatic. Limits and motors are NOT driven (accepted
-//!   joints constrain the free axes and ignore the drive — a stored servo
-//!   override migrates losslessly but never fires here). Wheel, gear and
-//!   six-DOF joints are rejected (`add_joint` returns `None`).
+//!   revolute, prismatic and the free motor (budget-clamped velocity
+//!   pass, no position rows — the SI-only `correction` pull has no
+//!   counterpart here). Limits and hinge/slide spec motors are NOT driven
+//!   (accepted joints constrain the free axes and ignore the drive — a
+//!   stored servo override migrates losslessly but never fires here).
+//!   Wheel, gear and six-DOF joints are rejected (`add_joint` returns
+//!   `None`).
 //! - No islands, single-threaded: bodies sleep individually (never as one
 //!   coherent island), so a jointed assembly has no group freeze — an awake
 //!   neighbour re-wakes a sleeper on impact instead. Soft↔rigid begin/end
@@ -105,6 +108,10 @@ enum XpbdJointKind {
     /// Compliant distance row about the spec rest length (stiffness via
     /// per-joint compliance, damping via the velocity pass below).
     Spring,
+    /// Free 6-DOF velocity drive (no position rows — the drive runs as a
+    /// budget-clamped velocity pass, like the spring damping pass; the
+    /// SI-only `correction` pull has no position-level counterpart here).
+    Motor,
 }
 
 /// Persistent joint state: structural kind plus assembly-time frames.
@@ -757,6 +764,7 @@ impl XpbdEngine {
         self.solve_velocities(&contacts, h);
         self.solve_soft_velocities(&soft_contacts, h);
         self.solve_spring_damping(h);
+        self.solve_motor_velocity(h);
     }
 
     /// Discrete contact discovery at the current poses: AABB prefilter plus
@@ -1156,6 +1164,13 @@ impl XpbdEngine {
                 }
                 self.solve_axis_alignment(&joint, alpha_tilde);
             }
+            XpbdJointKind::Motor => {
+                // No position rows: the free drive runs as a
+                // budget-clamped velocity pass (see
+                // `solve_motor_velocity`), not as a position constraint.
+                // A position-level pull would tether the driven body to
+                // the assembly pose and fight the velocity target.
+            }
         }
     }
 
@@ -1238,6 +1253,55 @@ impl XpbdEngine {
                 let (ba, bb) = pair_mut(&mut self.bodies, joint.a, joint.b);
                 apply_velocity_impulse(ba, 1.0, n, ra, jt);
                 apply_velocity_impulse(bb, -1.0, n, rb, jt);
+            }
+        }
+    }
+
+    /// Velocity-level free-motor drive over the substep's motor joints
+    /// (mirrors the spring-damping velocity pass): per world axis, a
+    /// budget-clamped deadbeat impulse toward the relative target
+    /// (`drive.linear_impulse` / `drive.angular_impulse`), applied at the
+    /// centers of mass — no anchors, no levers, no position rows (a
+    /// position-level pull would tether the driven body to the assembly
+    /// pose and fight the velocity target; the SI-only `correction` pull
+    /// has no counterpart here). Explicit Euler over substeps: a weak
+    /// budget ramps gradually and under-delivers against overload, like
+    /// the SI accumulated rows.
+    fn solve_motor_velocity(&mut self, h: f32) {
+        if h <= 0.0 {
+            return;
+        }
+        const AXES: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
+        for j in 0..self.joints.len() {
+            let joint = self.joints[j];
+            if joint.kind != XpbdJointKind::Motor {
+                continue;
+            }
+            if self.rigid_asleep[joint.a] && self.rigid_asleep[joint.b] {
+                continue;
+            }
+            let Some(drive) = joint.spec.motor_drive() else {
+                continue;
+            };
+            for axis in AXES {
+                let (ba, bb) = (&self.bodies[joint.a], &self.bodies[joint.b]);
+                let v = (bb.velocity - ba.velocity).dot(axis);
+                let k = ba.inv_mass.max(0.0) + bb.inv_mass.max(0.0);
+                let jt = drive.linear_impulse(drive.linear_target.dot(axis) - v, k, h);
+                if jt != 0.0 {
+                    let (ba, bb) = pair_mut(&mut self.bodies, joint.a, joint.b);
+                    apply_velocity_impulse(ba, -1.0, axis, Vec3::ZERO, jt);
+                    apply_velocity_impulse(bb, 1.0, axis, Vec3::ZERO, jt);
+                }
+                let (ba, bb) = (&self.bodies[joint.a], &self.bodies[joint.b]);
+                let w = (bb.angular_velocity - ba.angular_velocity).dot(axis);
+                let ka = angular_inverse_mass(ba, bb, axis);
+                let dw = drive.angular_impulse(drive.angular_target.dot(axis) - w, ka, h);
+                if dw != 0.0 {
+                    let (ba, bb) = pair_mut(&mut self.bodies, joint.a, joint.b);
+                    apply_angular_velocity_impulse(ba, -1.0, axis, dw);
+                    apply_angular_velocity_impulse(bb, 1.0, axis, dw);
+                }
             }
         }
     }
@@ -1771,13 +1835,15 @@ impl PhysicsEngine for XpbdEngine {
             JointKind::Distance { .. } => XpbdJointKind::Distance,
             JointKind::Rope { .. } => XpbdJointKind::Rope,
             JointKind::Spring { .. } => XpbdJointKind::Spring,
+            JointKind::Motor { .. } => XpbdJointKind::Motor,
             // Wheel needs a suspension spring with axle lock, gear couples
             // other joints and six-DOF needs per-axis configs: all rejected
             // rather than silently mis-solved.
             JointKind::Wheel { .. } | JointKind::Gear { .. } | JointKind::SixDof { .. } => {
                 return Err(JointError::Unsupported {
-                    detail: "xpbd supports ball/revolute/prismatic/fixed/distance/rope/spring only"
-                        .to_string(),
+                    detail:
+                        "xpbd supports ball/revolute/prismatic/fixed/distance/rope/spring/motor only"
+                            .to_string(),
                 });
             }
         };
@@ -1873,12 +1939,12 @@ impl PhysicsEngine for XpbdEngine {
 }
 
 /// Whether the [`crate::Engine`] orchestrator can migrate this joint onto
-/// the XPBD path: ball, revolute, prismatic, fixed, distance, rope and
-/// spring solve structurally here (see [`XpbdEngine::add_joint`]). Wheel
-/// needs a suspension spring with axle lock, gear couples other joints and
-/// six-DOF needs per-axis configs — all rejected rather than silently
-/// mis-solved, so the orchestrator parks them outside the migration
-/// instead of panicking.
+/// the XPBD path: ball, revolute, prismatic, fixed, distance, rope,
+/// spring and motor solve here (see [`XpbdEngine::add_joint`]; the motor
+/// drives velocity only, without position rows). Wheel needs a suspension
+/// spring with axle lock, gear couples other joints and six-DOF needs
+/// per-axis configs — all rejected rather than silently mis-solved, so
+/// the orchestrator parks them outside the migration instead of panicking.
 pub(crate) fn xpbd_supports_joint(kind: &JointKind) -> bool {
     matches!(
         kind,
@@ -1889,6 +1955,7 @@ pub(crate) fn xpbd_supports_joint(kind: &JointKind) -> bool {
             | JointKind::Distance { .. }
             | JointKind::Rope { .. }
             | JointKind::Spring { .. }
+            | JointKind::Motor { .. }
     )
 }
 
@@ -1993,6 +2060,15 @@ fn apply_velocity_impulse(body: &mut RigidBody, sign: f32, n: Vec3, r: Vec3, j: 
     let impulse = n * (sign * j);
     body.velocity += impulse * body.inv_mass;
     body.angular_velocity += apply_inv_inertia(body.inertia, body.orientation, r.cross(impulse));
+}
+
+/// Pure-angular velocity update for one body (the motor drive's torque
+/// half — no lever, no translation).
+fn apply_angular_velocity_impulse(body: &mut RigidBody, sign: f32, axis: Vec3, j: f32) {
+    if body.body_type != BodyType::Dynamic || body.inv_mass <= 0.0 {
+        return;
+    }
+    body.angular_velocity += apply_inv_inertia(body.inertia, body.orientation, axis * (sign * j));
 }
 
 /// Point velocity `v + ω×r` at the world lever `r`.
