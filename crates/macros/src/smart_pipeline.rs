@@ -24,6 +24,15 @@
 //!   iterator shapes) are left as ordinary sequential `for` loops and get a
 //!   compile-time warning (via the `deprecated`-note trick, which surfaces in
 //!   the IDE and the terminal).
+//! - R6: every bound lane type is statically asserted `Send + Sync` at the
+//!   top of the function, so the diagnostic points at the annotated system
+//!   rather than deep generic internals.
+//! - R3: the access set derived from the lane bindings is exported as a
+//!   module-scope `const __SMART_PIPELINE_ACCESS_<fn>: &[(&str, bool)]`
+//!   (sorted `(type, is_write)` pairs; a write covers a read of the same
+//!   lane; the const carries `allow(dead_code, non_upper_case_globals)`).
+//!   Wiring the comparison against `System::access()` at registration
+//!   is a follow-up; the extraction lives here.
 //!
 //! Known limitations (the analysis is syntactic, not type-directed):
 //! - At most two lanes per `zip` are parallelized; longer `zip` chains stay
@@ -51,6 +60,9 @@ use syn::{
 struct LaneBinding {
     var_name: Ident,
     is_mutable: bool,
+    /// The `T` in `store.read_lane::<T>()` / `store.write_lane::<T>()`,
+    /// kept for the R6 `Send + Sync` assertion and the R3 access-set export.
+    lane_ty: Type,
 }
 
 /// Extracts the single turbofish type argument of `read_lane::<T>()` /
@@ -163,10 +175,11 @@ impl LaneCollector {
     }
 
     /// If `expr` is `store.read_lane::<T>()` / `store.write_lane::<T>()`
-    /// (possibly wrapped in `.unwrap()` / `.expect(..)`), returns whether the
-    /// lane is mutable. Malformed turbofish is reported separately by
-    /// `visit_expr_method_call`, so here it simply yields `None`.
-    fn lane_binding_mutability(&self, expr: &Expr) -> Option<bool> {
+    /// (possibly wrapped in `.unwrap()` / `.expect(..)`), returns the lane
+    /// mutability plus the bound lane type `T`. Malformed turbofish is
+    /// reported separately by `visit_expr_method_call`, so here it simply
+    /// yields `None`.
+    fn lane_binding(&self, expr: &Expr) -> Option<(bool, Type)> {
         let mut current = expr;
         loop {
             match current {
@@ -174,7 +187,9 @@ impl LaneCollector {
                     if (mc.method == "read_lane" || mc.method == "write_lane")
                         && self.is_store_receiver(&mc.receiver)
                     {
-                        return turbofish_type(mc).ok().map(|_| mc.method == "write_lane");
+                        return turbofish_type(mc)
+                            .ok()
+                            .map(|ty| (mc.method == "write_lane", ty));
                     }
                     current = &mc.receiver;
                 }
@@ -206,11 +221,12 @@ impl Visit<'_> for LaneCollector {
     fn visit_local(&mut self, node: &Local) {
         if let Some(init) = &node.init
             && let Pat::Ident(PatIdent { ident, .. }) = &node.pat
-            && let Some(is_mutable) = self.lane_binding_mutability(&init.expr)
+            && let Some((is_mutable, lane_ty)) = self.lane_binding(&init.expr)
         {
             self.lanes.push(LaneBinding {
                 var_name: ident.clone(),
                 is_mutable,
+                lane_ty,
             });
         }
         visit::visit_local(self, node);
@@ -596,10 +612,57 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &input.sig;
     let stmts = &input.block.stmts;
 
+    // R6: every lane type must be `Send + Sync` (parallel iteration moves
+    // lane data across Rayon threads). The store API already requires the
+    // same bounds; asserting here points the diagnostic at the annotated
+    // system instead of deep generic internals.
+    let lane_tys: Vec<&Type> = collector.lanes.iter().map(|lane| &lane.lane_ty).collect();
+    let send_sync_assert = if lane_tys.is_empty() {
+        TokenStream2::new()
+    } else {
+        quote! {
+            {
+                fn __ornis_lane_must_be_send_sync<T: Send + Sync>() {}
+                #(__ornis_lane_must_be_send_sync::<#lane_tys>();)*
+            }
+        }
+    };
+
+    // R3: export the access set derived from the lane bindings as a
+    // module-scope constant next to the function: sorted `(type, is_write)`
+    // pairs, so the expansion is deterministic and machine-checkable. A
+    // write covers a read of the same lane (matches the scheduler's
+    // "own write covers read" rule), hence one entry per lane type with
+    // OR-ed mutability. Wiring the comparison against `System::access()`
+    // at registration is a follow-up; the extraction (the hard,
+    // desync-prone half) is done here.
+    let access_const_name = format_ident!("__SMART_PIPELINE_ACCESS_{}", input.sig.ident);
+    let mut access_entries: Vec<(String, bool)> = Vec::new();
+    for lane in &collector.lanes {
+        let ty_name = lane.lane_ty.to_token_stream().to_string();
+        match access_entries.iter_mut().find(|(name, _)| *name == ty_name) {
+            Some(entry) => entry.1 |= lane.is_mutable,
+            None => access_entries.push((ty_name, lane.is_mutable)),
+        }
+    }
+    access_entries.sort();
+    let access_tys: Vec<&str> = access_entries
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let access_writes: Vec<bool> = access_entries.iter().map(|(_, w)| *w).collect();
+    let access_const = quote! {
+        #[allow(dead_code, non_upper_case_globals)]
+        const #access_const_name: &[(&str, bool)] = &[
+            #((#access_tys, #access_writes)),*
+        ];
+    };
+
     let expanded = quote! {
         #(#attrs)*
         #vis #sig {
             ornis_core::pipeline_enter();
+            #send_sync_assert
             #(#warning_tokens)*
             // The body runs inside a block so the hook below also fires for
             // functions with a tail expression; `return` still exits early
@@ -609,6 +672,7 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
             ornis_core::pipeline_exit();
             smart_pipeline_result
         }
+        #access_const
     };
 
     expanded.into()

@@ -198,3 +198,41 @@ fn smart_pipeline_entry_compiles_and_runs() {
         assert_eq!(pos.x, 1.0);
     }
 }
+
+/// R3: the macro exports the access set derived from the lane bindings as a
+/// sorted `(type, is_write)` constant next to the function.
+#[test]
+fn smart_pipeline_access_const_matches_lane_bindings() {
+    // Sorted by type name; a write covers a read of the same lane.
+    assert_eq!(
+        __SMART_PIPELINE_ACCESS_entry_integrate,
+        &[("EntryPos", true), ("EntryVel", false)]
+    );
+}
+
+#[smart_pipeline]
+fn entry_readonly(store: &SmartStore) -> usize {
+    let velocities = store.read_lane::<EntryVel>().expect("vel lane");
+    velocities.len()
+}
+
+/// R3: a read-only single lane exports one read entry.
+#[test]
+fn smart_pipeline_access_const_single_read_lane() {
+    assert_eq!(
+        __SMART_PIPELINE_ACCESS_entry_readonly,
+        &[("EntryVel", false)]
+    );
+}
+
+#[smart_pipeline]
+fn entry_no_lanes(dt: f32) -> f32 {
+    dt * 2.0
+}
+
+/// R3: no lane bindings export an empty access set (still deterministic).
+#[test]
+fn smart_pipeline_access_const_empty_without_lanes() {
+    assert!(__SMART_PIPELINE_ACCESS_entry_no_lanes.is_empty());
+    assert_eq!(entry_no_lanes(21.0), 42.0);
+}
