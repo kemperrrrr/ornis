@@ -1473,6 +1473,23 @@ CPU/GPU-код невозможен, authoritative — CPU Strong-Confluence); �
   R4 — `collision/hull_tool.rs` (cylinder/cone/rock/from_points,
   clone_and_transform с зеркалами, MAX_VERTICES=256, детерминированный
   LCG-рок, явные `MeshError`).
+  Статус лимитов R1 (2026-10-05, PR #31). R1-L1 ✅ снят: порог
+  глубины 5 см для реституции убран; отскок разрешён, пока у пары
+  нет кэшированного нормального импульса (`compute_restitution_bias`).
+  Тесты `restitution_rebound_follows_e_squared` и
+  `zero_restitution_does_not_bounce` сняты с `#[ignore]`. R1-L2 🟡
+  частично: зависание `step()` снято (EPA в `gjk.rs` обрывается на
+  64 гранях или когда горизонт длиннее числа граней; тест
+  `epa_cylinder_box_overlap_returns`). Стек 200:1 всё ещё не
+  держится: лёгкая коробка съезжает, цилиндр проваливается.
+  `heavy_cylinder_on_light_box_stack_holds` остаётся `#[ignore]`.
+  Нужен другой бюджет итераций или солвер; глобальный подъём бюджета
+  сдвинет покоящиеся сцены.
+  Открыто. Вращение при плоском ударе гранью: SI-солвер даёт |ω|≈10.9
+  рад/с боксу, упавшему плашмя без начальной ω (determinism-сцена,
+  e=0.3, удар −32 м/с) — артефакт порядка sequential impulses по 4
+  точкам манифолда; лечить block solver на 2–4 точки для этого пути
+  или симметричным накоплением. Отдельная ветка.
   ✅ R2+R7 закрыты 2026-10-01 (верифицировано: 526 тестов):
   `KinematicMover` (привязка к kinematic-телу, plane-solver carry
   пассажиров со slop, CCD-travel штатно, wake через существующие гейты,
