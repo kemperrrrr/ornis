@@ -1528,6 +1528,7 @@ struct BuiltLighting {
 /// [`SHADOW_ORTHO_HALF`] box when `fit` is `None` and the fitted box
 /// otherwise. Shadow layer VPs are collected in assignment order (layer
 /// `i` ↔ entry `i`).
+#[allow(clippy::too_many_arguments)]
 fn build_lighting_uniform(
     ambient: [f32; 3],
     ambient_intensity: f32,
