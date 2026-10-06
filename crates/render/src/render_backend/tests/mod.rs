@@ -6,7 +6,8 @@ mod custom_mesh;
 mod golden;
 mod lights;
 mod shadows_dir;
-mod shadows_point_spot;
+mod shadows_point;
+mod shadows_spot;
 
 /// None when no adapter is available (CI without GPU and without
 /// lavapipe); the tests below skip in that case.
