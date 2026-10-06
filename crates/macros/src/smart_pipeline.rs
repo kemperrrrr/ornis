@@ -26,7 +26,9 @@
 //!   the IDE and the terminal).
 //! - R6: every bound lane type is statically asserted `Send + Sync` at the
 //!   top of the function, so the diagnostic points at the annotated system
-//!   rather than deep generic internals.
+//!   rather than deep generic internals. The rewritten loop is type-checked
+//!   inside that same bound, so a rejected lane does not also fail in
+//!   `par_iter` / `for_each`.
 //! - R3: the access set derived from the lane bindings is exported as a
 //!   module-scope `const __SMART_PIPELINE_ACCESS_<fn>: &[(&str, bool)]`
 //!   (sorted `(type, is_write)` pairs; a write covers a read of the same
@@ -496,48 +498,119 @@ impl LoopRewriter<'_> {
             _ => return Err(issues),
         };
 
-        let pat = &node.pat;
-        let body = &node.body;
-        let expr: Expr = match iters.as_slice() {
-            [single] => {
-                let var = &single.var_name;
-                let method = par_iter_method(single.mutable);
-                // Audit §3.3, backlog #7: capture TLS access frame before
-                // entering the parallel section and install it in each task
-                // — enforcement applies on rayon threads as well. Empty
-                // snapshot (outside Schedule::run) is a no-op, zero cost.
-                syn::parse_quote! {{
-                    use ornis_core::rayon::prelude::*;
-                    let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
-                    #var.#method().for_each(|#pat| {
-                        let _ornis_frame_guard = __ornis_access_frame.install();
-                        #body
-                    });
-                }}
-            }
-            [first, second] => {
-                let var0 = &first.var_name;
-                let var1 = &second.var_name;
-                let method0 = par_iter_method(first.mutable);
-                let method1 = par_iter_method(second.mutable);
-                // See single-lane branch: capture/install frame (#7).
-                syn::parse_quote! {{
-                    use ornis_core::rayon::prelude::*;
-                    let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
-                    #var0.#method0().zip(#var1.#method1()).for_each(|#pat| {
-                        let _ornis_frame_guard = __ornis_access_frame.install();
-                        #body
-                    });
-                }}
-            }
-            _ => {
-                return Err(vec![
-                    "#[smart_pipeline]: more than two zip lanes is unsupported".to_string(),
-                ]);
-            }
-        };
-        Ok(expr)
+        // The loop runs inside `__ornis_lane_must_be_send_sync`, whose
+        // `T: Send + Sync` bound is assumed while `par_iter` is checked.
+        // A lane that fails the bound errors at this call only.
+        parallel_loop_expr(&iters, &node.pat, &node.body)
     }
+}
+
+/// Borrow of the lane guard passed into the parallel helper.
+fn lane_ref(iter: &LaneIter) -> TokenStream2 {
+    let var = &iter.var_name;
+    if iter.mutable {
+        quote!(&mut #var)
+    } else {
+        quote!(&#var)
+    }
+}
+
+/// Store reference the helper takes. `param` is the lane's type parameter.
+fn store_ref(mutable: bool, param: &Ident) -> TokenStream2 {
+    if mutable {
+        quote!(&mut ornis_core::ComponentStore<#param>)
+    } else {
+        quote!(&ornis_core::ComponentStore<#param>)
+    }
+}
+
+/// Item type `par_iter` / `par_iter_mut` yields for `param`.
+fn item_ty(mutable: bool, param: &Ident) -> TokenStream2 {
+    if mutable {
+        quote!(&mut #param)
+    } else {
+        quote!(&#param)
+    }
+}
+
+/// Parallel replacement for one or two lane iterators.
+///
+/// `par_iter` is type-checked only inside `__ornis_lane_must_be_send_sync`,
+/// where `Send + Sync` already holds. The call site is what fails when a
+/// lane type does not.
+fn parallel_loop_expr(
+    iters: &[LaneIter],
+    pat: &Pat,
+    body: &syn::Block,
+) -> Result<Expr, Vec<String>> {
+    match iters {
+        [single] => Ok(single_lane_loop(single, pat, body)),
+        [first, second] => Ok(zip_lane_loop(first, second, pat, body)),
+        _ => Err(vec![
+            "#[smart_pipeline]: more than two zip lanes is unsupported".to_string(),
+        ]),
+    }
+}
+
+/// Audit §3.3, backlog #7: capture the TLS access frame before the parallel
+/// section and install it in each task. An empty snapshot (outside
+/// `Schedule::run`) is a no-op.
+fn single_lane_loop(iter: &LaneIter, pat: &Pat, body: &syn::Block) -> Expr {
+    let lane = lane_ref(iter);
+    let method = par_iter_method(iter.mutable);
+    let param = format_ident!("T");
+    let store = store_ref(iter.mutable, &param);
+    let item = item_ty(iter.mutable, &param);
+    syn::parse_quote! {{
+        fn __ornis_lane_must_be_send_sync<T, F>(__ornis_lane: #store, __ornis_body: F)
+        where
+            T: Send + Sync,
+            F: Fn(#item) + Send + Sync,
+        {
+            use ornis_core::rayon::prelude::*;
+            let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
+            __ornis_lane.#method().for_each(|__ornis_item| {
+                let _ornis_frame_guard = __ornis_access_frame.install();
+                __ornis_body(__ornis_item);
+            });
+        }
+        __ornis_lane_must_be_send_sync(#lane, |#pat| #body);
+    }}
+}
+
+/// Two-lane `zip`, same frame capture as [`single_lane_loop`].
+fn zip_lane_loop(first: &LaneIter, second: &LaneIter, pat: &Pat, body: &syn::Block) -> Expr {
+    let lane0 = lane_ref(first);
+    let lane1 = lane_ref(second);
+    let method0 = par_iter_method(first.mutable);
+    let method1 = par_iter_method(second.mutable);
+    let a = format_ident!("A");
+    let b = format_ident!("B");
+    let store0 = store_ref(first.mutable, &a);
+    let store1 = store_ref(second.mutable, &b);
+    let item0 = item_ty(first.mutable, &a);
+    let item1 = item_ty(second.mutable, &b);
+    syn::parse_quote! {{
+        fn __ornis_lane_must_be_send_sync<A, B, F>(
+            __ornis_lane0: #store0,
+            __ornis_lane1: #store1,
+            __ornis_body: F,
+        ) where
+            A: Send + Sync,
+            B: Send + Sync,
+            F: Fn((#item0, #item1)) + Send + Sync,
+        {
+            use ornis_core::rayon::prelude::*;
+            let __ornis_access_frame = ornis_core::schedule::capture_access_frame();
+            __ornis_lane0.#method0().zip(__ornis_lane1.#method1()).for_each(
+                |__ornis_item| {
+                    let _ornis_frame_guard = __ornis_access_frame.install();
+                    __ornis_body(__ornis_item);
+                },
+            );
+        }
+        __ornis_lane_must_be_send_sync(#lane0, #lane1, |#pat| #body);
+    }}
 }
 
 fn par_iter_method(mutable: bool) -> Ident {
