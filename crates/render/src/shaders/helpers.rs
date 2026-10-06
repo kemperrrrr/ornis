@@ -53,6 +53,16 @@ pub const NDC_TO_UV_HALF: f32 = 0.5;
 pub const SHADOW_CUBE_NEAR: f32 = 0.1;
 /// Split on a 0/1 light selector: at or below this, the light is not a point light.
 pub const LIGHT_SELECTOR_SPLIT: f32 = 0.5;
+/// Screen-space normal variance scale for geometric specular AA (Filament `SIGMA2`).
+pub const SPECULAR_AA_VARIANCE: f32 = 0.15;
+/// Scale from normal variance to the GGX kernel (`2 * variance` in Filament).
+pub const SPECULAR_AA_KERNEL_SCALE: f32 = 2.0;
+/// Cap on the extra GGX kernel geometric specular AA may add (Filament `KAPPA`).
+pub const SPECULAR_AA_KERNEL_CAP: f32 = 0.2;
+/// Bias in the Karis firefly weight `1 / (bias + luma)` used on MSAA edges.
+pub const KARIS_LUMA_BIAS: f32 = 1.0;
+/// Magnitude past which an HDR channel is treated as non-finite and zeroed.
+pub const HDR_FINITE_LIMIT: f32 = 1.0e20;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
@@ -83,6 +93,11 @@ pub fn wgsl_consts() -> String {
         decl!(NDC_TO_UV_HALF),
         decl!(SHADOW_CUBE_NEAR),
         decl!(LIGHT_SELECTOR_SPLIT),
+        decl!(SPECULAR_AA_VARIANCE),
+        decl!(SPECULAR_AA_KERNEL_SCALE),
+        decl!(SPECULAR_AA_KERNEL_CAP),
+        decl!(KARIS_LUMA_BIAS),
+        decl!(HDR_FINITE_LIMIT),
     ]
     .concat();
     format!("{floats}{}", msaa_samples_wgsl())
@@ -94,6 +109,44 @@ fn msaa_samples_wgsl() -> String {
         "const MSAA_SAMPLES: u32 = {}u;\n",
         crate::renderer::MSAA_SAMPLE_COUNT
     )
+}
+
+/// Geometric specular AA (Kaplanyan / Filament): widen perceptual roughness
+/// by the screen-space variance of `n`, then return a perceptual roughness
+/// the rest of the BRDF squares again. Derivatives must run in uniform
+/// control flow, so callers invoke this before any `discard`.
+#[ornis_macros::wgsl_fn]
+fn specular_aa_roughness(roughness: f32, n: glam::Vec3) -> f32 {
+    let du = dpdx(n);
+    let dv = dpdy(n);
+    let variance = SPECULAR_AA_VARIANCE * (dot(du, du) + dot(dv, dv));
+    let kernel = min(SPECULAR_AA_KERNEL_SCALE * variance, SPECULAR_AA_KERNEL_CAP);
+    let alpha = roughness * roughness;
+    let square = saturate(alpha * alpha + kernel);
+    return sqrt(sqrt(max(square, 0.0)));
+}
+
+/// Zero a non-finite HDR color. Finite highlights stay untouched so ACES
+/// in the composite can compress them; NaN/Inf would otherwise resolve to
+/// white.
+#[ornis_macros::wgsl_fn]
+fn sanitize_hdr(color: glam::Vec3) -> glam::Vec3 {
+    let x_ok = select(
+        0.0,
+        1.0,
+        color.x == color.x && abs(color.x) < HDR_FINITE_LIMIT,
+    );
+    let y_ok = select(
+        0.0,
+        1.0,
+        color.y == color.y && abs(color.y) < HDR_FINITE_LIMIT,
+    );
+    let z_ok = select(
+        0.0,
+        1.0,
+        color.z == color.z && abs(color.z) < HDR_FINITE_LIMIT,
+    );
+    return color * (x_ok * y_ok * z_ok);
 }
 
 /// Base layer: dielectric/metallic mix with anisotropic GGX + Oren-Nayar.
@@ -398,6 +451,8 @@ fn reconstruct_world_pos(uv: glam::Vec2, depth: f32, camera: Camera) -> glam::Ve
 /// All shared evaluator sources concatenated (consts excluded).
 pub fn wgsl_shared_helpers() -> String {
     [
+        specular_aa_roughness::wgsl_source(),
+        sanitize_hdr::wgsl_source(),
         evaluate_base_layer::wgsl_source(),
         evaluate_coat_layer::wgsl_source(),
         evaluate_coat_darkening::wgsl_source(),
@@ -422,6 +477,22 @@ pub fn wgsl_lighting_decode() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn specular_aa_uses_screen_space_normal_derivatives() {
+        let src = specular_aa_roughness::wgsl_source();
+        assert!(src.contains("dpdx("), "{src}");
+        assert!(src.contains("dpdy("), "{src}");
+        assert!(src.contains("SPECULAR_AA_VARIANCE"), "{src}");
+        assert!(src.contains("SPECULAR_AA_KERNEL_CAP"), "{src}");
+    }
+
+    #[test]
+    fn sanitize_hdr_drops_non_finite_colors() {
+        let src = sanitize_hdr::wgsl_source();
+        assert!(src.contains("HDR_FINITE_LIMIT"), "{src}");
+        assert!(src.contains("color.x == color.x"), "{src}");
+    }
 
     #[test]
     fn helper_sources_keep_legacy_signatures() {

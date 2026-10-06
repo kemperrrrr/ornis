@@ -115,16 +115,21 @@ typed_resource!(
 pub struct Depth;
 typed_resource!(Depth, "depth", owned_msaa, F::Depth32Float);
 
-/// HDR layer of the deferred path — mirrors the surface format.
+/// HDR layer of the deferred path.
+///
+/// Scene-linear [`crate::renderer::DEFERRED_HDR_FORMAT`], independent of
+/// the surface: the lighting pass writes pre-tonemap color and the
+/// composite applies ACES once. Matching the surface (8-bit sRGB) clamped
+/// highlights and quantized the walking mannequin.
 pub struct Hdr;
 impl FrameResource for Hdr {
     const NAME: &'static str = "hdr";
     fn kind() -> ResourceKind {
         ResourceKind::FrameOwned
     }
-    fn spec(surface_format: wgpu::TextureFormat) -> TextureSpec {
+    fn spec(_surface_format: wgpu::TextureFormat) -> TextureSpec {
         TextureSpec {
-            format: surface_format,
+            format: crate::renderer::DEFERRED_HDR_FORMAT,
             samples: 1,
             size: SizePolicy::MatchSurface,
         }
@@ -1051,12 +1056,13 @@ mod tests {
     }
 
     #[test]
-    fn hdr_mirrors_the_surface_format() {
+    fn hdr_is_scene_linear_half_float() {
         assert_eq!(Hdr::NAME, "hdr");
         assert_eq!(Hdr::kind(), ResourceKind::FrameOwned);
-        assert_eq!(Hdr::spec(F::Rgba8UnormSrgb).format, F::Rgba8UnormSrgb);
-        assert_eq!(Hdr::spec(F::Bgra8UnormSrgb).format, F::Bgra8UnormSrgb);
+        assert_eq!(Hdr::spec(F::Rgba8UnormSrgb).format, F::Rgba16Float);
+        assert_eq!(Hdr::spec(F::Bgra8UnormSrgb).format, F::Rgba16Float);
         assert_eq!(Hdr::spec(SURFACE).size, SizePolicy::MatchSurface);
+        assert_eq!(Hdr::spec(SURFACE).samples, 1);
     }
 
     #[test]

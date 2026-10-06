@@ -292,7 +292,7 @@ fn fs_main_textured(
     let metalness = mr_factors.y;
     let diffuse_roughness = mat.base_params.y;
     let specular_weight = mat.specular_params.x;
-    let specular_roughness = mr_factors.x;
+    let specular_roughness = specular_aa_roughness(mr_factors.x, n);
     let specular_ior = mat.specular_params.z;
     let specular_anisotropy = mat.specular_params.w;
     let specular_edge_tint = mat.specular_color.rgb;
@@ -577,7 +577,7 @@ fn fs_main_textured(
         base_color * (1.0 - metalness),
         ctx.lighting.ibl_weight,
     );
-    let color = ambient + lo + emission + ibl;
+    let color = sanitize_hdr(ambient + lo + emission + ibl);
     return glam::Vec4::new(color, opacity);
 }
 

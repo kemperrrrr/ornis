@@ -123,6 +123,14 @@ pub const MSAA_SAMPLE_COUNT: u32 = 4;
 /// The 1x path never allocates resolve targets and records no resolves, so
 /// existing pixel-parity gates stay green by construction.
 pub const SINGLE_SAMPLE_COUNT: u32 = 1;
+/// Scene-linear color of the deferred lighting pass.
+///
+/// Half-float, not the surface format: an 8-bit sRGB target clamps every
+/// channel to 1 before the composite's single ACES, so a grazing highlight
+/// becomes a hard white pixel and a walking normal quantizes into a
+/// whole-body flicker. The composite still tonemaps once into the
+/// swapchain.
+pub const DEFERRED_HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Clamps a requested sample count to the supported set (`{1, 4}`):
 /// [`MSAA_SAMPLE_COUNT`] passes through, anything else (including 0, 2, 8)
 /// falls back to [`SINGLE_SAMPLE_COUNT`]. Pure, so unit tests pin it without
@@ -1750,8 +1758,13 @@ impl Renderer3D {
         // resolve four identical samples per pixel at 4x memory cost, so it
         // stays single-sample in all modes (the lighting pipeline's
         // `multisample.count` is 1 to match).
-        let (pbr_texture, pbr_texture_view) =
-            Self::create_render_target(device, width, height, format, SINGLE_SAMPLE_COUNT);
+        let (pbr_texture, pbr_texture_view) = Self::create_render_target(
+            device,
+            width,
+            height,
+            DEFERRED_HDR_FORMAT,
+            SINGLE_SAMPLE_COUNT,
+        );
 
         let gbuffer = Self::create_gbuffer(device, width, height, sample_count);
         let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
@@ -3885,7 +3898,7 @@ impl Renderer3D {
             // Fullscreen lighting output: single-sample in all modes (see `new`).
             sample_count: SINGLE_SAMPLE_COUNT,
             dimension: wgpu::TextureDimension::D2,
-            format: self.format,
+            format: DEFERRED_HDR_FORMAT,
             usage: RENDER_TARGET_USAGE,
             view_formats: &[],
         });
@@ -3953,7 +3966,7 @@ impl Renderer3D {
             * w
             * h
             * s;
-        let pbr = bpp(self.format) as u64 * w * h;
+        let pbr = bpp(DEFERRED_HDR_FORMAT) as u64 * w * h;
         let forward = bpp(wgpu::TextureFormat::Rgba16Float) as u64 * w * h * s;
         // Resolve targets are single-sample (`None` at 1x): four g-buffer
         // float layers plus the forward HDR color, only when MSAA is active.

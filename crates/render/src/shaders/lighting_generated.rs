@@ -334,6 +334,8 @@ fn shade_lit(
     albedo_a: f32,
     mat: OpenPBRMaterial,
 ) -> glam::Vec4 {
+    // Derivatives before `discard`: a non-uniform discard makes `dpdx` invalid.
+    let specular_roughness = specular_aa_roughness(mat.specular_params.y, n);
     if albedo_a < ALPHA_CUTOFF {
         discard;
     }
@@ -343,7 +345,6 @@ fn shade_lit(
     let metalness = mat.base_params.z;
     let diffuse_roughness = mat.base_params.y;
     let specular_weight = mat.specular_params.x;
-    let specular_roughness = mat.specular_params.y;
     let specular_ior = mat.specular_params.z;
     let specular_anisotropy = mat.specular_params.w;
     let specular_edge_tint = mat.specular_color.rgb;
@@ -620,16 +621,17 @@ fn shade_lit(
         base_color * (1.0 - metalness),
         lighting.ibl_weight,
     );
-    let color = ambient + lo + emission + ibl;
+    let color = sanitize_hdr(ambient + lo + emission + ibl);
     return glam::Vec4::new(color, opacity);
 }
 
 /// Deferred lighting at 4x. Every sample is lit (the fetches stay in
 /// uniform control flow), then an edge mask picks the result: interior
 /// pixels keep sample 0, and silhouette or disagreement pixels average
-/// only the covered samples. Cleared samples (depth [`CLEAR_DEPTH`](super::helpers::CLEAR_DEPTH),
-/// octahedral `(0, 0)` → +Z) contribute nothing, so the box-filtered
-/// resolve cannot fringe the edge.
+/// only the covered samples with a Karis weight `1 / (1 + luma)`, so one
+/// grazing firefly cannot paint the whole pixel white. Alpha stays
+/// coverage-weighted. Cleared samples (depth [`CLEAR_DEPTH`](super::helpers::CLEAR_DEPTH),
+/// octahedral `(0, 0)` → +Z) contribute nothing.
 #[stage(fragment, entry = "fs_main")]
 fn fs_main_msaa(
     input: QuadVertexOutput,
@@ -673,9 +675,11 @@ fn fs_main_msaa(
         let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
         let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
         let lit = shade_lit(n, world_pos, v, 1.0, ctx.materials[id]);
-        acc = acc + lit.xyz * covered;
+        let luma = max(luminance(lit.xyz), 0.0);
+        let karis = covered / (KARIS_LUMA_BIAS + luma);
+        acc = acc + lit.xyz * karis;
         alpha = alpha + lit.w * covered;
-        weight = weight + covered;
+        weight = weight + karis;
         let is_zero = select(0.0, 1.0, s == 0u);
         single = mix(single, lit, is_zero);
     }
@@ -847,6 +851,8 @@ mod tests {
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
         assert!(src.contains("return vec4<f32>(color, opacity);"));
+        assert!(src.contains("specular_aa_roughness("));
+        assert!(src.contains("sanitize_hdr("));
         assert!(src.contains("textureSampleLevel(prefilter_cube, ibl_sampler"));
         assert!(src.contains("textureSample(brdf_lut, ibl_sampler"));
         assert!(src.contains("textureSample(irradiance_cube, ibl_sampler"));
@@ -871,6 +877,10 @@ mod tests {
             "{src}"
         );
         assert!(src.contains("CLEAR_DEPTH"), "{src}");
+        assert!(
+            src.contains("KARIS_LUMA_BIAS"),
+            "edge resolve must Karis-weight fireflies, {src}"
+        );
         assert!(src.contains("textureSampleLevel"), "{src}");
         assert!(src.contains("albedo_tex"), "{src}");
         assert!(
