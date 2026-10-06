@@ -1429,6 +1429,7 @@ fn default_material() -> MaterialDesc {
         base_color: [HALF, HALF, HALF],
         roughness: Clamped01::new(HALF),
         emission: [0.0, 0.0, 0.0],
+        metallic: ornis_core::Metallic::new(0.0),
     }
 }
 
@@ -2703,6 +2704,7 @@ mod tests {
                 base_color: [1.0, 0.0, 0.0],
                 roughness: Clamped01::new(0.3),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(1.0),
             },
         );
 

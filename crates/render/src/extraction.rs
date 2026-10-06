@@ -946,7 +946,7 @@ fn insert_scene_entities(
 /// entry bumps [`ExtractionStats::materials_deduped`].
 ///
 /// `surface` is applied after [`material_to_gpu`], so a glTF metalness
-/// value (once the assets track writes it as a number) is the input and
+/// value (the assets track writes it as a number) is the input and
 /// the override replaces only the three surface slots.
 fn deduped_material_index(
     extracted: &mut FrameUpload,
@@ -991,25 +991,25 @@ fn apply_surface_override(material: &mut OpenPBRMaterial, surface: &ornis_core::
 
 fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
     match material {
+        // `dielectric()` and `metal()` differ only in metalness once color
+        // and roughness are overwritten. Both presets start from the
+        // dielectric recipe and write the continuous factor.
         MaterialDesc::Dielectric {
             base_color,
             roughness,
             emission,
+            ..
+        }
+        | MaterialDesc::Metal {
+            base_color,
+            roughness,
+            emission,
+            ..
         } => {
             let mut output = OpenPBRMaterial::dielectric();
             output.base.color_rgb(*base_color);
             output.specular.roughness(roughness.get());
-            apply_emission(&mut output, *emission);
-            output
-        }
-        MaterialDesc::Metal {
-            base_color,
-            roughness,
-            emission,
-        } => {
-            let mut output = OpenPBRMaterial::metal();
-            output.base.color_rgb(*base_color);
-            output.specular.roughness(roughness.get());
+            output.base.metalness(material.metallic_units().get());
             apply_emission(&mut output, *emission);
             output
         }
@@ -1018,21 +1018,25 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
             coat_weight,
             coat_roughness,
             emission,
+            ..
         } => {
             let mut output = OpenPBRMaterial::coat();
             output.base.color_rgb(*base_color);
             output.coat.weight(coat_weight.get());
             output.coat.roughness(coat_roughness.get());
+            output.base.metalness(material.metallic_units().get());
             apply_emission(&mut output, *emission);
             output
         }
         MaterialDesc::Matte {
             base_color,
             roughness,
+            ..
         } => {
             let mut output = OpenPBRMaterial::dielectric();
             output.base.color_rgb(*base_color);
             output.base.diffuse_roughness(roughness.get());
+            output.base.metalness(material.metallic_units().get());
             // Matte is diffuse-only: no specular lobe.
             output.specular.weight(0.0);
             output
@@ -1041,11 +1045,13 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
             base_color,
             roughness,
             ior,
+            ..
         } => {
             let mut output = OpenPBRMaterial::glass();
             output.transmission.color_rgb(*base_color);
             output.specular.roughness(roughness.get());
             output.specular.ior(ior.get());
+            output.base.metalness(material.metallic_units().get());
             output
         }
     }
@@ -1233,6 +1239,7 @@ mod tests {
             base_color: [0.2, 0.4, 0.6],
             roughness: Clamped01::new(0.7),
             emission: [0.3, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(0.0),
         };
         let surface = Surface {
             roughness: Roughness::new(0.15),
@@ -1339,6 +1346,7 @@ mod tests {
                 base_color: [0.8, 0.2, 0.2],
                 roughness: Clamped01::new(0.4),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         set_parent(&mut store, child, parent).expect("parent");
@@ -1375,6 +1383,7 @@ mod tests {
                 base_color: [0.2, 0.8, 0.2],
                 roughness: Clamped01::new(0.4),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         let posed = store.create_entity();
@@ -1398,6 +1407,7 @@ mod tests {
                 base_color: [0.8, 0.2, 0.2],
                 roughness: Clamped01::new(0.4),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         let extracted = extract_render_data(&store);
@@ -1434,6 +1444,7 @@ mod tests {
                     base_color: [0.8, 0.2, 0.2],
                     roughness: Clamped01::new(0.4),
                     emission: [0.0, 0.0, 0.0],
+                    metallic: ornis_core::Metallic::new(0.0),
                 },
             );
         };
@@ -1490,10 +1501,12 @@ mod tests {
             base_color: [0.9, 0.7, 0.1],
             roughness: Clamped01::new(0.2),
             emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(1.0),
         };
         let other = MaterialDesc::Matte {
             base_color: [0.2, 0.2, 0.2],
             roughness: Clamped01::new(0.8),
+            metallic: ornis_core::Metallic::new(0.0),
         };
         let mut engine = Engine::new();
         for (i, material) in [shared.clone(), shared.clone(), shared.clone(), other]
@@ -1537,12 +1550,76 @@ mod tests {
     }
 
     #[test]
+    fn partial_metallic_reaches_gpu_metalness_and_edges_match_presets() {
+        // 0.3 is written as metalness, with albedo, roughness and emission
+        // still applied. Extraction uses the same conversion, so a stored
+        // description reaches the frame upload unchanged when no
+        // `Surface` override is present.
+        let partial = MaterialDesc::Dielectric {
+            base_color: [0.2, 0.4, 0.6],
+            roughness: Clamped01::new(0.4),
+            emission: [0.2, 0.0, 0.1],
+            metallic: Metallic::new(0.3),
+        };
+        let gpu = material_to_gpu(&partial);
+        assert!((gpu.base.params[BASE_METALNESS_SLOT] - 0.3).abs() < 1e-6);
+        assert_eq!(&gpu.base.color[..3], &[0.2, 0.4, 0.6]);
+        assert!((gpu.specular.params[SPECULAR_ROUGHNESS_SLOT] - 0.4).abs() < 1e-6);
+        assert_eq!(gpu.emission.params[0], 0.2);
+
+        let mut store = ornis_core::SmartStore::new();
+        let entity = store.create_entity();
+        store.insert(entity, TransformDesc::from_translation(glam::Vec3::ZERO));
+        store.insert(
+            entity,
+            MeshDesc::Sphere {
+                radius: PositiveF32::expect_valid(1.0),
+                segments: 8,
+                rings: 6,
+            },
+        );
+        store.insert(entity, partial);
+        let upload = extract_render_data(&store);
+        let extracted = upload.materials[upload.instances[0].material_index.index()];
+        assert!((extracted.base.params[BASE_METALNESS_SLOT] - 0.3).abs() < 1e-6);
+
+        let dielectric = material_to_gpu(&MaterialDesc::Dielectric {
+            base_color: [0.2, 0.4, 0.6],
+            roughness: Clamped01::new(0.4),
+            emission: [0.0, 0.0, 0.0],
+            metallic: Metallic::new(0.0),
+        });
+        let mut expected = OpenPBRMaterial::dielectric();
+        expected.base.color_rgb([0.2, 0.4, 0.6]);
+        expected.specular.roughness(0.4);
+        assert_eq!(
+            bytemuck::bytes_of(&dielectric),
+            bytemuck::bytes_of(&expected)
+        );
+
+        let metal = material_to_gpu(&MaterialDesc::Metal {
+            base_color: [0.9, 0.7, 0.1],
+            roughness: Clamped01::new(0.2),
+            emission: [0.0, 0.0, 0.0],
+            metallic: Metallic::new(1.0),
+        });
+        let mut expected_metal = OpenPBRMaterial::metal();
+        expected_metal.base.color_rgb([0.9, 0.7, 0.1]);
+        expected_metal.specular.roughness(0.2);
+        assert_eq!(
+            bytemuck::bytes_of(&metal),
+            bytemuck::bytes_of(&expected_metal)
+        );
+    }
+
+    #[test]
     fn material_to_gpu_maps_emission_and_matte() {
         // Emission `[2, 1, 0.5]`: peak 2 nits, normalized chromaticity.
         let gpu = material_to_gpu(&MaterialDesc::Dielectric {
             base_color: [0.5, 0.5, 0.5],
             roughness: Clamped01::new(0.9),
             emission: [2.0, 1.0, 0.5],
+            metallic: ornis_core::Metallic::new(0.0),
         });
         assert_eq!(gpu.emission.params[0], 2.0);
         assert_eq!(gpu.emission.color[0], 1.0);
@@ -1553,12 +1630,14 @@ mod tests {
             base_color: [0.9, 0.7, 0.1],
             roughness: Clamped01::new(0.2),
             emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(1.0),
         });
         assert_eq!(off.emission.params[0], 0.0);
         // Matte: diffuse albedo + roughness, no specular lobe.
         let matte = material_to_gpu(&MaterialDesc::Matte {
             base_color: [0.2, 0.4, 0.6],
             roughness: Clamped01::new(0.7),
+            metallic: ornis_core::Metallic::new(0.0),
         });
         assert_eq!(matte.base.color[0], 0.2);
         assert_eq!(matte.base.color[1], 0.4);
@@ -1576,6 +1655,7 @@ mod tests {
             base_color: [0.9, 0.95, 1.0],
             roughness: Clamped01::new(0.05),
             ior: Ior::new(1.33),
+            metallic: ornis_core::Metallic::new(0.0),
         });
         assert_eq!(gpu.transmission.color[0], 0.9);
         assert_eq!(gpu.transmission.color[1], 0.95);
@@ -1593,6 +1673,7 @@ mod tests {
             base_color: [0.9, 0.95, 1.0],
             roughness: Clamped01::new(0.05),
             ior: Ior::new(1.5),
+            metallic: ornis_core::Metallic::new(0.0),
         };
         let mut engine = Engine::new();
         for i in 0..3 {
@@ -1635,6 +1716,7 @@ mod tests {
             base_color: [0.8, 0.2, 0.2],
             roughness: Clamped01::new(0.4),
             emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(0.0),
         };
         let mut engine = Engine::new();
         let mut add = |mesh: MeshDesc| {
@@ -1763,6 +1845,7 @@ mod tests {
             base_color: [0.8, 0.2, 0.2],
             roughness: Clamped01::new(0.4),
             emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(0.0),
         }
     }
 
@@ -1892,6 +1975,7 @@ mod tests {
         let other = MaterialDesc::Matte {
             base_color: [0.2, 0.2, 0.2],
             roughness: Clamped01::new(0.8),
+            metallic: ornis_core::Metallic::new(0.0),
         };
         for material in [test_material(), test_material(), test_material(), other] {
             push_test_entity(&mut engine, Some(test_sphere()), Some(material));

@@ -559,6 +559,7 @@ mod tests {
                 base_color: [0.9, 0.7, 0.1],
                 roughness: ornis_core::units::Clamped01::new(0.2),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(1.0),
             },
         }
     }

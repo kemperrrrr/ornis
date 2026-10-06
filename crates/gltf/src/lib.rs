@@ -29,7 +29,7 @@
 //! | primitive `WEIGHTS_0` (+`WEIGHTS_1..` when present) | [`LoadedMesh::weights`] (`Some`, normalized, `sum == 1`) | `SkinnedMesh.weights` via `ornis-animation` builders |
 //! | `skins[]` + node `skin` | [`LoadedSkin`] (`parents`/`inverse_bind`/`joint_names`) + [`ModelNode::skin`] link | `Skeleton` via `ornis-animation` builders |
 //! | `animations[]` sampler `input`/`output` per `channel.target.path` | [`Model::skel_clips`] ([`LoadedSkelClip`]) + [`Model::anim_clips`] ([`LoadedAnimClip`]); tracks address [`NodeIdx`] | `SkelClip`/`AnimClip` cold lanes via the animation builders |
-//! | `baseColorFactor` / `metallicFactor` / `roughnessFactor` / `emissiveFactor` | [`LoadedMaterial`] scalars | `metallic >= 0.5` → `MaterialDesc::Metal`, else `Dielectric` |
+//! | `baseColorFactor` / `metallicFactor` / `roughnessFactor` / `emissiveFactor` | [`LoadedMaterial`] scalars | factor kept as [`ornis_core::Metallic`]; `1` → `MaterialDesc::Metal`, else `Dielectric` |
 //! | `baseColorTexture` | [`LoadedMaterial::base_color_texture`] (RGBA8) | albedo bind at upload |
 //! | `metallicRoughnessTexture` | [`LoadedMaterial::metallic_roughness_texture`] (RGBA8; G = roughness, B = metallic) | roughness/metallic bind at upload |
 //! | `emissiveTexture` | [`LoadedMaterial::emissive_texture`] (RGBA8) | emission bind at upload |
@@ -65,14 +65,16 @@
 //!    its channel.
 //! 3. Wiring: [`Model`] → editor `Scene` via `scene_from_model` (host keeps
 //!    its own camera/lights/ambient; [`LoadedMesh::into_custom`] feeds
-//!    `MeshDesc::Custom`; [`LoadedMaterial::is_metallic`] picks the
-//!    `MaterialDesc` variant). Hierarchical spawn is the Core track.
+//!    `MeshDesc::Custom`; `metallicFactor` is stored as
+//!    [`ornis_core::Metallic`] — a clamped `1` selects `MaterialDesc::Metal`,
+//!    every other factor selects `Dielectric` and keeps the number).
+//!    Hierarchical spawn is the Core track.
 
 #![warn(missing_docs)]
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
-/// Metallic-factor threshold for `Metal` vs `Dielectric` wiring.
+/// Legacy `>=` cut used only by [`LoadedMaterial::is_metallic`].
 const METALNESS_THRESHOLD: f32 = 0.5;
 
 mod anim;
@@ -276,11 +278,13 @@ impl LoadedMesh {
 
 /// Scalar PBR factors of one primitive plus its decoded texture slots.
 ///
-/// Wiring rule: [`LoadedMaterial::is_metallic`] picks `MaterialDesc::Metal`,
-/// otherwise `MaterialDesc::Dielectric`; `base_color` feeds `base_color`,
-/// `roughness` feeds `roughness`, `emission` feeds `emission`. Each `Some`
-/// texture feeds the matching upload bind; `None` means the slot is unbound
-/// and the scalar factor stands alone.
+/// `base_color`, `roughness`, `emission` and `metallic` are the glTF
+/// factors. Assets wiring stores `metallic` as [`ornis_core::Metallic`]:
+/// a clamped `1` selects the `Metal` preset and every other value selects
+/// `Dielectric` while keeping the number. [`LoadedMaterial::is_metallic`]
+/// is the old `>= 0.5` classification and does not move that number. Each
+/// `Some` texture feeds the matching upload bind; `None` means the slot is
+/// unbound and the scalar factor stands alone.
 #[derive(Debug, Clone)]
 pub struct LoadedMaterial {
     /// `baseColorFactor` RGB in linear space (default white).
@@ -301,11 +305,12 @@ pub struct LoadedMaterial {
 }
 
 impl LoadedMaterial {
-    /// Whether the wiring should pick `Metal` over `Dielectric`.
+    /// Whether `metallicFactor` is at least `0.5`.
     ///
-    /// Threshold `>= 0.5` on the scalar factor; a bound
-    /// metallic-roughness texture does not move the switch — the upload
-    /// shader samples it at runtime instead.
+    /// Legacy classification. Assets wiring no longer uses it to choose
+    /// a preset or to snap the factor. A bound metallic-roughness texture
+    /// does not move the result — the upload shader samples that image
+    /// at runtime instead.
     pub fn is_metallic(&self) -> bool {
         self.metallic >= METALNESS_THRESHOLD
     }

@@ -876,6 +876,7 @@ mod tests {
                 base_color: [0.8, 0.2, 0.2],
                 roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         };
         Scene {
@@ -909,6 +910,7 @@ mod tests {
                     base_color: [0.9, 0.8, 0.2],
                     roughness: Clamped01::new(0.2),
                     emission: [0.0, 0.0, 0.0],
+                    metallic: ornis_core::Metallic::new(1.0),
                 },
             }],
             lights: Vec::new(),
@@ -1312,6 +1314,7 @@ mod tests {
                         base_color: [0.8, 0.2, 0.2],
                         roughness: Clamped01::new(0.4),
                         emission: [0.0, 0.0, 0.0],
+                        metallic: ornis_core::Metallic::new(0.0),
                     },
                 },
                 EntityDesc {
@@ -1330,6 +1333,7 @@ mod tests {
                         base_color: [0.9, 0.8, 0.2],
                         roughness: Clamped01::new(0.2),
                         emission: [0.0, 0.0, 0.0],
+                        metallic: ornis_core::Metallic::new(1.0),
                     },
                 },
                 EntityDesc {
@@ -1349,6 +1353,7 @@ mod tests {
                         coat_weight: Clamped01::new(0.7),
                         coat_roughness: Clamped01::new(0.1),
                         emission: [0.0, 0.0, 0.0],
+                        metallic: ornis_core::Metallic::new(0.0),
                     },
                 },
             ],
@@ -1408,6 +1413,7 @@ mod tests {
                         base_color: [0.9, 0.8, 0.2],
                         roughness: Clamped01::new(0.2),
                         emission: [0.0, 0.0, 0.0],
+                        metallic: ornis_core::Metallic::new(1.0),
                     },
                 },
                 EntityDesc {
@@ -1422,6 +1428,7 @@ mod tests {
                         base_color: [0.2, 0.8, 0.2],
                         roughness: Clamped01::new(0.5),
                         emission: [0.0, 0.0, 0.0],
+                        metallic: ornis_core::Metallic::new(0.0),
                     },
                 },
             ],
@@ -1456,6 +1463,7 @@ mod tests {
                 coat_weight: Clamped01::new(0.7),
                 coat_roughness: Clamped01::new(0.1),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         world.frame(0.0);
@@ -2169,9 +2177,9 @@ mod tests {
         );
     }
 
-    /// `None` keeps the glTF dielectric/metal choice. `Some(Surface)` rewrites
-    /// roughness, metalness, and specular weight on every primitive and
-    /// leaves color, IOR, and emission alone.
+    /// `None` keeps each primitive's glTF metalness number. `Some(Surface)`
+    /// rewrites roughness, metalness, and specular weight on every primitive
+    /// and leaves color, IOR, and emission alone.
     #[test]
     fn model_spawn_surface_overrides_every_primitive() {
         use ornis_core::{Metallic, Roughness, Specular};
@@ -2189,7 +2197,7 @@ mod tests {
         const METAL_ROUGHNESS: f32 = 0.2;
         /// Override roughness, distinct from both glTF values.
         const OVERRIDE_ROUGHNESS: f32 = 0.15;
-        /// Override metalness, strictly between the binary presets.
+        /// Override metalness, distinct from both glTF factors.
         const OVERRIDE_METALNESS: f32 = 0.3;
         /// Override specular weight (presets write `1`).
         const OVERRIDE_SPECULAR: f32 = 0.4;
@@ -2204,7 +2212,7 @@ mod tests {
             baseline[0].specular.params[SPECULAR_ROUGHNESS],
             DIELECTRIC_ROUGHNESS
         );
-        assert_eq!(baseline[0].base.params[BASE_METALNESS], 0.0);
+        assert_eq!(baseline[0].base.params[BASE_METALNESS], 0.1);
         assert_eq!(baseline[0].specular.params[SPECULAR_WEIGHT], 1.0);
         assert_eq!(baseline[0].base.color[0], 0.2);
         assert_eq!(baseline[0].base.color[1], 0.4);
@@ -2214,7 +2222,7 @@ mod tests {
             baseline[1].specular.params[SPECULAR_ROUGHNESS],
             METAL_ROUGHNESS
         );
-        assert_eq!(baseline[1].base.params[BASE_METALNESS], 1.0);
+        assert_eq!(baseline[1].base.params[BASE_METALNESS], 0.9);
         assert_eq!(baseline[1].specular.params[SPECULAR_WEIGHT], 1.0);
         assert_eq!(baseline[1].base.color[0], 0.8);
         assert_eq!(baseline[1].emission.params[0], 0.4);
@@ -2268,7 +2276,7 @@ mod tests {
             .collect()
     }
 
-    /// Two-primitive glTF: dielectric (metallic 0.1) then metal (metallic 0.9).
+    /// Two-primitive glTF: metallicFactor 0.1 then 0.9.
     fn two_material_glb() -> Vec<u8> {
         let mut bin = Vec::new();
         for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {

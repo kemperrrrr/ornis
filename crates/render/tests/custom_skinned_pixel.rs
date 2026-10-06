@@ -23,6 +23,7 @@ fn orange_dielectric() -> MaterialDesc {
         base_color: [1.0, 0.45, 0.1],
         roughness: Clamped01::new(0.5),
         emission: [0.0, 0.0, 0.0],
+        metallic: ornis_core::Metallic::new(0.0),
     }
 }
 
