@@ -27,6 +27,17 @@ pub const EPS: f32 = 1e-6;
 pub const SHADOW_REF_BIAS: f32 = 0.001;
 /// Single-precision 1/π, matching the former `0.31830988618` bit-wise.
 pub const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
+/// Cleared g-buffer depth (far plane). A sample at this depth is background:
+/// its octahedral clear `(0, 0)` decodes to +Z and must not be shaded.
+pub const CLEAR_DEPTH: f32 = 1.0;
+/// Dot product above which two sample normals are the same surface.
+pub const NORMAL_AGREE: f32 = 0.999;
+/// NDC depth gap that splits two samples onto different surfaces.
+pub const DEPTH_EDGE: f32 = 0.002;
+/// Alpha below which a deferred pixel is absent (former `0.001` discard).
+pub const ALPHA_CUTOFF: f32 = 0.001;
+/// `MSAA_SAMPLE_COUNT` as `f32`, for coverage comparisons in WGSL.
+pub const MSAA_SAMPLES_F: f32 = 4.0;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
@@ -41,7 +52,27 @@ pub fn wgsl_consts() -> String {
             )
         };
     }
-    [decl!(PI), decl!(EPS), decl!(INV_PI), decl!(SHADOW_REF_BIAS)].concat()
+    let floats = [
+        decl!(PI),
+        decl!(EPS),
+        decl!(INV_PI),
+        decl!(SHADOW_REF_BIAS),
+        decl!(CLEAR_DEPTH),
+        decl!(NORMAL_AGREE),
+        decl!(DEPTH_EDGE),
+        decl!(ALPHA_CUTOFF),
+        decl!(MSAA_SAMPLES_F),
+    ]
+    .concat();
+    format!("{floats}{}", msaa_samples_wgsl())
+}
+
+/// `u32` sample count shared with [`crate::renderer::MSAA_SAMPLE_COUNT`].
+fn msaa_samples_wgsl() -> String {
+    format!(
+        "const MSAA_SAMPLES: u32 = {}u;\n",
+        crate::renderer::MSAA_SAMPLE_COUNT
+    )
 }
 
 /// Base layer: dielectric/metallic mix with anisotropic GGX + Oren-Nayar.
@@ -88,12 +119,14 @@ fn evaluate_base_layer(
     let cos_phi = max(dot(normalize(v - n * nov), normalize(l - n * nol)), 0.0);
     let diff_brdf = oren_nayar_brdf(nov, nol, cos_phi, diff_alpha);
     let ks = f * specular_weight;
-    let kd = (Vec3::new(1.0) - luminance(ks)) * (1.0 - metalness);
+    let kd = Vec3::new(base_diffuse_energy(luminance(ks)));
     let base_bsdf = kd * diff_brdf * diffuse_color + ks * spec_brdf;
     return base_bsdf * base_weight * thin_film_mod;
 }
 
-/// Coat layer with base darkening under the coat.
+/// Coat specular lobe. Base darkening is [`evaluate_coat_darkening`],
+/// applied to the base lobe by the caller — adding it here used to
+/// brighten the coat instead of attenuating the base.
 #[ornis_macros::wgsl_fn]
 fn evaluate_coat_layer(
     n: glam::Vec3,
@@ -132,19 +165,39 @@ fn evaluate_coat_layer(
     // Same visibility contract as the base lobe: `coat_g` is already V.
     let coat_g = smith_ggx_aniso(nov, nol, v, l, t, b, coat_alpha_u, coat_alpha_v);
     let coat_brdf = coat_d * coat_g * coat_f;
-    let mix_factor = coat_weight * coat_dark;
-    let base_darkening = coat_base_darkening(
-        coat_ior,
-        base_metalness,
-        base_color,
-        base_weight,
-        specular_weight,
-        subsurface_weight,
-        subsurface_color,
+    return coat_color * coat_brdf * coat_weight;
+}
+
+/// Multiplier applied to the base lobe under a coat.
+///
+/// This is the coat-darkening factor (1 when the coat is off). It used
+/// to be added as `darkening * coat_albedo`, which brightened the coat
+/// instead of attenuating the base underneath it.
+#[ornis_macros::wgsl_fn]
+fn evaluate_coat_darkening(
+    coat_weight: f32,
+    coat_dark: f32,
+    coat_ior: f32,
+    base_metalness: f32,
+    base_color: glam::Vec3,
+    base_weight: f32,
+    specular_weight: f32,
+    subsurface_weight: f32,
+    subsurface_color: glam::Vec3,
+) -> glam::Vec3 {
+    return coat_blend_darkened(
+        coat_base_darkening(
+            coat_ior,
+            base_metalness,
+            base_color,
+            base_weight,
+            specular_weight,
+            subsurface_weight,
+            subsurface_color,
+        ),
+        coat_weight,
+        coat_dark,
     );
-    let darkening = coat_blend_darkened(base_darkening, mix_factor);
-    let coat_albedo_approx = coat_color * coat_weight * luminance(coat_f0);
-    return coat_color * coat_brdf * coat_weight + darkening * coat_albedo_approx;
 }
 
 /// Fuzz (sheen) layer.
@@ -203,7 +256,7 @@ fn evaluate_transmission_layer(
     let extinction = transmission_color_to_extinction(transmission_color, transmission_depth);
     let distance = transmission_depth;
     let btdf = transmission_btdf(
-        nov, nol, voh, ior_in, ior_out, alpha.x, extinction, distance,
+        nov, nol, noh, voh, ior_in, ior_out, alpha.x, extinction, distance,
     );
     return transmission_color * btdf * transmission_weight;
 }
@@ -248,13 +301,13 @@ fn evaluate_emission(
     coat_color: glam::Vec3,
     nov: f32,
 ) -> glam::Vec3 {
-    if emission_luminance <= 0.0 {
-        return Vec3::new(0.0);
-    }
-    let base_emission = emission_color * emission_luminance * INV_PI;
-    let coat_emission =
-        coat_color * base_emission * (pow(1.0 - nov, 5.0) * coat_weight + (1.0 - coat_weight));
-    return mix(base_emission, coat_emission, coat_weight);
+    return coated_emission(
+        emission_color,
+        emission_luminance,
+        coat_weight,
+        coat_color,
+        nov,
+    );
 }
 
 /// Microfacet transmission BTDF with extinction.
@@ -262,6 +315,7 @@ fn evaluate_emission(
 fn transmission_btdf(
     nov: f32,
     nol: f32,
+    noh: f32,
     voh: f32,
     ior_in: f32,
     ior_out: f32,
@@ -274,8 +328,10 @@ fn transmission_btdf(
     let cos_theta_i = nov;
     let f = fresnel_schlick(max(cos_theta_i, EPS), fresnel0_from_ior(ior_in));
     let t = 1.0 - f;
-    let d = ggx_ndf(voh, alpha);
-    // `g` is V = G / (4 NoV NoL); the BTDF is D·T·V, not divided again.
+    // The NDF argument is the facet normal `N·H`, not `V·H` (those agree
+    // only when the half-vector sits on the normal). `g` is already
+    // V = G / (4 NoV NoL); the BTDF is D·T·V, not divided again.
+    let d = ggx_ndf(noh, alpha);
     let g = smith_ggx_correlated(nov, nol, alpha);
     let extinction_factor = exp(-extinction * distance);
     return Vec3::new(d * g * t) * extinction_factor;
@@ -323,6 +379,7 @@ pub fn wgsl_shared_helpers() -> String {
     [
         evaluate_base_layer::wgsl_source(),
         evaluate_coat_layer::wgsl_source(),
+        evaluate_coat_darkening::wgsl_source(),
         evaluate_fuzz_layer::wgsl_source(),
         evaluate_transmission_layer::wgsl_source(),
         evaluate_subsurface_layer::wgsl_source(),
@@ -412,6 +469,34 @@ mod tests {
                 "{name} still divides by 4·NoV·NoL:\n{src}"
             );
         }
+    }
+
+    /// Severity: medium. The transmission NDF must see `N·H`, not `V·H`.
+    #[test]
+    fn transmission_ndf_uses_facet_normal() {
+        let alpha = 0.05;
+        let at_noh = crate::shaders::math::ggx_ndf::eval(0.25, alpha);
+        let at_voh = crate::shaders::math::ggx_ndf::eval(1.0, alpha);
+        assert!(
+            at_voh > at_noh * 5.0,
+            "the two cosines disagree: noh={at_noh} voh={at_voh}"
+        );
+        let src = transmission_btdf::wgsl_source();
+        assert!(src.contains("ggx_ndf(noh,"), "{src}");
+        assert!(!src.contains("ggx_ndf(voh,"), "{src}");
+    }
+
+    /// Severity: medium. Coat darkening is a base multiplier, not extra light.
+    #[test]
+    fn coat_layer_does_not_add_the_darkening_term() {
+        let lobe = evaluate_coat_layer::wgsl_source();
+        assert!(
+            !lobe.contains("coat_albedo_approx") && !lobe.contains("darkening *"),
+            "{lobe}"
+        );
+        let factor = evaluate_coat_darkening::wgsl_source();
+        assert!(factor.contains("coat_blend_darkened("), "{factor}");
+        assert!(!factor.contains("if ("), "{factor}");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Canonical source is the Rust code in this module: the full OpenPBR
 //! fragment skeleton (layer evaluators + `fs_main`) lives here as a Rust
-//! string, and the 19 BRDF math kernels are spliced in from
+//! string, and the BRDF math kernels are spliced in from
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
 //! The former handwritten `shaders/wgsl/pbr_*.wgsl` sources were deleted
 //! after the `#[stage]` translation of `fs_main`; the
@@ -16,7 +16,8 @@
 use super::interface::GbufferFragmentInput as FragmentInput;
 use super::{
     ComparisonSampler, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME, Resource,
-    ResourceKind, ShaderModule, helpers, openpbr_material_decl, wgsl_decl,
+    ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
+    wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
@@ -34,12 +35,11 @@ pub fn wgsl_vertex_source() -> String {
 
 /// Forward-PBR fragment shader: full OpenPBR evaluation.
 ///
-/// Assembled as `{skeleton}\\n{kernel × 19}`, exactly like the legacy
+/// Assembled as `{skeleton}\\n{kernels}`, exactly like the legacy
 /// `shaders::pbr_fragment()`; entry point `fs_main` is kept.
 pub fn wgsl_source() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
         math::fresnel0_from_ior::wgsl_source(),
         math::fresnel_schlick::wgsl_source(),
         math::fresnel_schlick_vec::wgsl_source(),
@@ -50,6 +50,9 @@ pub fn wgsl_source() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
+        math::base_diffuse_energy::wgsl_source(),
+        math::thin_film_weight_mix::wgsl_source(),
+        math::coated_emission::wgsl_source(),
         math::coat_base_darkening::wgsl_source(),
         math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
@@ -57,13 +60,14 @@ pub fn wgsl_source() -> String {
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
         math::srgb_to_linear::wgsl_source(),
+        math::evaluate_ibl::wgsl_source(),
     ];
     let module = ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
-        .resources(&PBR_RESOURCES, &[0, 2, 3, 4, 5, 6])
+        .resources(&PBR_RESOURCES, &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .consts(helpers::wgsl_consts())
         .helper(helpers::wgsl_shared_helpers())
@@ -87,6 +91,10 @@ pub(crate) struct PbrContext {
     pub shadow_tex: DepthTextureArray,
     pub shadow_sampler: ComparisonSampler,
     pub shadow_cube_tex: DepthTextureCubeArray,
+    pub prefilter_cube: TextureCube,
+    pub irradiance_cube: TextureCube,
+    pub brdf_lut: Texture2d,
+    pub ibl_sampler: Sampler,
 }
 
 #[stage(fragment)]
@@ -137,7 +145,21 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    let thin_film_mod = thin_film_weight_mix(
+        thin_film_weight,
+        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
+    );
+    let coat_darken = evaluate_coat_darkening(
+        coat_weight,
+        coat_darkening,
+        coat_ior,
+        metalness,
+        base_color,
+        base_weight,
+        specular_weight,
+        subsurface_weight,
+        subsurface_color,
+    );
     for i in 0u..ctx.lighting.light_count {
         let light = ctx.lighting.lights[i];
         let kind = light.kind.x;
@@ -253,7 +275,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
             t,
             b,
             thin_film_mod,
-        );
+        ) * coat_darken;
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -340,9 +362,36 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         coat_color,
         nov,
     );
-    let color = ambient + lo + emission;
-    let tone_mapped = aces_tonemap(color);
-    return glam::Vec4::new(tone_mapped, opacity);
+    let f0_dielectric = fresnel0_from_ior(specular_ior);
+    let f0 = mix(
+        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
+        base_color * base_weight,
+        metalness,
+    );
+    let reflect_dir = n * (2.0 * dot(n, v)) - v;
+    let prefiltered = textureSampleLevel(
+        ctx.prefilter_cube,
+        ctx.ibl_sampler,
+        reflect_dir,
+        specular_roughness * ctx.lighting.ibl_max_mip,
+    );
+    let irradiance = textureSample(ctx.irradiance_cube, ctx.ibl_sampler, n);
+    let lut = textureSample(
+        ctx.brdf_lut,
+        ctx.ibl_sampler,
+        Vec2::new(nov, specular_roughness),
+    );
+    let ibl = evaluate_ibl(
+        prefiltered.rgb,
+        irradiance.rgb,
+        lut.r,
+        lut.g,
+        f0,
+        base_color * (1.0 - metalness),
+        ctx.lighting.ibl_weight,
+    );
+    let color = ambient + lo + emission + ibl;
+    return glam::Vec4::new(color, opacity);
 }
 
 /// Static view for naga validation in tests.
@@ -353,7 +402,7 @@ pub fn wgsl_source_static() -> String {
 /// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
 /// Shared by `create_pbr_bind_group` and `create_forward_pass`, whose
 /// handwritten layouts were identical. Type names come from the Rust side.
-pub const PBR_RESOURCES: [Resource; 7] = [
+pub const PBR_RESOURCES: [Resource; 11] = [
     Resource {
         group: 0,
         binding: 0,
@@ -410,6 +459,38 @@ pub const PBR_RESOURCES: [Resource; 7] = [
         kind: ResourceKind::TextureDepthCubeArray,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 7,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "prefilter_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 8,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "irradiance_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 9,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "brdf_lut",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 10,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ibl_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
 ];
 
 #[cfg(test)]
@@ -443,7 +524,7 @@ mod tests {
         assert!(fs.contains("@group(0) @binding(3) var<uniform> lighting"));
         assert!(fs.contains("fn fs_main("));
         assert!(fs.contains("fn evaluate_base_layer"));
-        assert!(fs.contains("fn aces_tonemap"));
+        assert!(!fs.contains("aces_tonemap("));
     }
 
     /// The translated fragment entry must keep the legacy shape: same
@@ -462,7 +543,7 @@ mod tests {
         assert!(entry.contains(
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
-        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+        assert!(entry.contains("return vec4<f32>(color, opacity);"));
     }
 
     #[test]
@@ -488,7 +569,7 @@ mod tests {
     fn pbr_resources_cover_stages_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         let src = wgsl_vertex_source() + &wgsl_source();
-        assert_eq!(PBR_RESOURCES.len(), 7);
+        assert_eq!(PBR_RESOURCES.len(), 11);
         for r in PBR_RESOURCES {
             assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
             let e = bgl_entry(&r, false);

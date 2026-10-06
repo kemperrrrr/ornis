@@ -29,7 +29,8 @@
 use super::interface::GbufferFragmentInput as FragmentInput;
 use super::{
     ComparisonSampler, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME, Resource,
-    ResourceKind, Sampler, ShaderModule, Texture2d, helpers, openpbr_material_decl, wgsl_decl,
+    ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
+    wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::math;
@@ -135,12 +136,16 @@ pub(crate) struct PbrTexturedContext {
     pub metallic_roughness_tex: Texture2d,
     pub emissive_tex: Texture2d,
     pub material_sampler: Sampler,
+    pub prefilter_cube: TextureCube,
+    pub irradiance_cube: TextureCube,
+    pub brdf_lut: Texture2d,
+    pub ibl_sampler: Sampler,
 }
 
 /// Resource layout of the textured-forward pass: the legacy seven rows
 /// verbatim plus one texture row per role and the shared sampler.
 /// Type names come from the Rust side.
-pub const TEXTURED_PBR_RESOURCES: [Resource; 11] = [
+pub const TEXTURED_PBR_RESOURCES: [Resource; 15] = [
     Resource {
         group: 0,
         binding: 0,
@@ -229,6 +234,38 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 11] = [
         kind: ResourceKind::Sampler,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 11,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "prefilter_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 12,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "irradiance_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 13,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "brdf_lut",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 14,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ibl_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
 ];
 
 /// Textured forward-PBR fragment entry, translated by
@@ -291,7 +328,21 @@ fn fs_main_textured(
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    let thin_film_mod = thin_film_weight_mix(
+        thin_film_weight,
+        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
+    );
+    let coat_darken = evaluate_coat_darkening(
+        coat_weight,
+        coat_darkening,
+        coat_ior,
+        metalness,
+        base_color,
+        base_weight,
+        specular_weight,
+        subsurface_weight,
+        subsurface_color,
+    );
     for i in 0u..ctx.lighting.light_count {
         let light = ctx.lighting.lights[i];
         let kind = light.kind.x;
@@ -407,7 +458,7 @@ fn fs_main_textured(
             t,
             b,
             thin_film_mod,
-        );
+        ) * coat_darken;
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -494,20 +545,46 @@ fn fs_main_textured(
         coat_color,
         nov,
     );
-    let color = ambient + lo + emission;
-    let tone_mapped = aces_tonemap(color);
-    return glam::Vec4::new(tone_mapped, opacity);
+    let f0_dielectric = fresnel0_from_ior(specular_ior);
+    let f0 = mix(
+        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
+        base_color * base_weight,
+        metalness,
+    );
+    let reflect_dir = n * (2.0 * dot(n, v)) - v;
+    let prefiltered = textureSampleLevel(
+        ctx.prefilter_cube,
+        ctx.ibl_sampler,
+        reflect_dir,
+        specular_roughness * ctx.lighting.ibl_max_mip,
+    );
+    let irradiance = textureSample(ctx.irradiance_cube, ctx.ibl_sampler, n);
+    let lut = textureSample(
+        ctx.brdf_lut,
+        ctx.ibl_sampler,
+        Vec2::new(nov, specular_roughness),
+    );
+    let ibl = evaluate_ibl(
+        prefiltered.rgb,
+        irradiance.rgb,
+        lut.r,
+        lut.g,
+        f0,
+        base_color * (1.0 - metalness),
+        ctx.lighting.ibl_weight,
+    );
+    let color = ambient + lo + emission + ibl;
+    return glam::Vec4::new(color, opacity);
 }
 
 /// Textured forward-PBR fragment shader: the legacy evaluation plus the
 /// three role samples, assembled exactly like
-/// [`crate::shaders::pbr_generated::wgsl_source`] (same 19 kernels).
+/// [`crate::shaders::pbr_generated::wgsl_source`] (same kernel set).
 /// Entry point `fs_main_textured` is kept distinct from the legacy
 /// `fs_main` so both pipelines can coexist.
 pub fn wgsl_source_textured() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
         math::fresnel0_from_ior::wgsl_source(),
         math::fresnel_schlick::wgsl_source(),
         math::fresnel_schlick_vec::wgsl_source(),
@@ -518,6 +595,9 @@ pub fn wgsl_source_textured() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
+        math::base_diffuse_energy::wgsl_source(),
+        math::thin_film_weight_mix::wgsl_source(),
+        math::coated_emission::wgsl_source(),
         math::coat_base_darkening::wgsl_source(),
         math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
@@ -525,13 +605,17 @@ pub fn wgsl_source_textured() -> String {
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
         math::srgb_to_linear::wgsl_source(),
+        math::evaluate_ibl::wgsl_source(),
     ];
     let module = ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
-        .resources(&TEXTURED_PBR_RESOURCES, &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        .resources(
+            &TEXTURED_PBR_RESOURCES,
+            &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        )
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .consts(helpers::wgsl_consts())
         .helper(helpers::wgsl_shared_helpers())
@@ -616,7 +700,7 @@ mod tests {
         assert!(entry.contains(
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
-        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+        assert!(entry.contains("return vec4<f32>(color, opacity);"));
     }
 
     /// Every table row's declaration appears in the assembled fragment, and
@@ -629,12 +713,15 @@ mod tests {
         // Vertex-only rows (per_objects) live in the shared vertex stage,
         // like the legacy table — cover both assemblies together.
         let src = wgsl_vertex_source() + &wgsl_source_textured();
-        assert_eq!(TEXTURED_PBR_RESOURCES.len(), 11);
+        assert_eq!(TEXTURED_PBR_RESOURCES.len(), 15);
         for (i, r) in TEXTURED_PBR_RESOURCES.iter().enumerate() {
             assert!(src.contains(&resource_decl(r)), "missing {}", r.name);
             let e = bgl_entry(r, false);
             assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
-            if i < PBR_RESOURCES.len() {
+            // The original seven rows stay aligned with the untextured
+            // table. IBL is appended after the material textures, so it
+            // does not share those binding numbers.
+            if i < 7 {
                 assert_eq!(
                     (r.binding, r.name),
                     (PBR_RESOURCES[i].binding, PBR_RESOURCES[i].name),

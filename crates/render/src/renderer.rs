@@ -426,9 +426,48 @@ pub(crate) struct LightingUniform {
     #[wgsl(to = "Light")]
     lights: [GpuLight; 8],
     light_count: u32,
+    /// Split-sum IBL weight. `0` (default) keeps the direct-light result.
+    ibl_weight: f32,
+    /// Highest mip of the prefiltered specular cube (`0` when IBL is off).
+    ibl_max_mip: f32,
     /// Trailing pad to a 16-multiple size (padding: not shader-visible).
     #[wgsl(skip)]
-    _pad: [u32; 3],
+    _pad: u32,
+}
+
+/// The two shader-visible IBL scalars, packed for an offset write that
+/// does not touch the light array.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct IblTail {
+    weight: f32,
+    max_mip: f32,
+}
+
+/// Bind-group entries shared by the forward and legacy PBR layouts.
+#[allow(clippy::too_many_arguments)]
+fn forward_ibl_entries<'a>(
+    camera: &'a wgpu::Buffer,
+    per_object: &'a wgpu::Buffer,
+    material: &'a wgpu::Buffer,
+    lighting: &'a wgpu::Buffer,
+    shadow_array_view: &'a wgpu::TextureView,
+    shadow_sampler: &'a wgpu::Sampler,
+    shadow_cube_array_view: &'a wgpu::TextureView,
+    ibl: &'a crate::ibl::IblTargets,
+) -> Vec<wgpu::BindGroupEntry<'a>> {
+    shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| match r.name {
+        "camera" => Some(camera.as_entire_binding()),
+        "per_objects" => Some(per_object.as_entire_binding()),
+        "materials" => Some(material.as_entire_binding()),
+        "lighting" => Some(lighting.as_entire_binding()),
+        "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+        "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
+        "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(shadow_cube_array_view)),
+        "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => ibl.binding(r.name),
+        _ => None,
+    })
+    .unwrap_or_default()
 }
 
 /// Index into the deduplicated material table ([`FrameUpload::materials`]).
@@ -1043,6 +1082,18 @@ pub struct Renderer3D {
     /// mirror NDC y — see [`point_cube_face_vp`] — so winding flips).
     shadow_cube_pipeline: wgpu::RenderPipeline,
     point_shadow_count: std::sync::atomic::AtomicU32,
+    /// Split-sum IBL textures. Default is 1×1 black with weight 0.
+    ibl: crate::ibl::IblTargets,
+    /// LUT + black-face bytes copied into [`Self::ibl`] on the first pass
+    /// that samples it (`new` has no queue).
+    ibl_staging: wgpu::Buffer,
+    /// Set once the IBL textures hold finite texels.
+    ibl_uploaded: std::sync::atomic::AtomicBool,
+    /// `f32` bits of the IBL weight, so [`set_lights`](Self::set_lights)
+    /// (`&self`) can rewrite the uniform without clearing IBL.
+    ibl_weight_bits: std::sync::atomic::AtomicU32,
+    /// `f32` bits of the prefilter's highest mip.
+    ibl_max_mip_bits: std::sync::atomic::AtomicU32,
 }
 
 /// Pick an up vector non-parallel to the given shadow axis.
@@ -1443,6 +1494,8 @@ fn build_lighting_uniform(
     exposure: f32,
     lights: &[LightDesc],
     fit: Option<([f32; 3], f32)>,
+    ibl_weight: f32,
+    ibl_max_mip: f32,
 ) -> BuiltLighting {
     /// Normalize a direction, falling back to +Z on degenerate input.
     fn norm_dir(d: [f32; VEC3_COMPONENTS]) -> [f32; VEC4_COMPONENTS] {
@@ -1612,7 +1665,9 @@ fn build_lighting_uniform(
             ],
             lights: gpu_lights,
             light_count: count as u32,
-            _pad: [0; VEC3_COMPONENTS],
+            ibl_weight,
+            ibl_max_mip,
+            _pad: 0,
         },
         stats: LightUploadStats {
             uploaded: count as u32,
@@ -1629,7 +1684,7 @@ fn build_lighting_uniform(
 /// free layer/cube slot. No GPU access — safe to call per frame; log on
 /// scene change, not per frame.
 pub fn count_light_drops(lights: &[LightDesc]) -> LightUploadStats {
-    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None).stats
+    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None, 0.0, 0.0).stats
 }
 
 /// Exact CPU staging capacity for one [`Renderer3D::upload_instances`]
@@ -1675,12 +1730,19 @@ impl Renderer3D {
             Self::create_shadow_targets(device);
         let (shadow_cube_maps, shadow_cube_views, shadow_cube_array_view, shadow_cube_vp_buffers) =
             Self::create_shadow_cube_targets(device);
+        let ibl = crate::ibl::black_targets(device);
+        let ibl_staging = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ibl staging"),
+            contents: &crate::ibl::initial_staging_bytes(),
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
         let (bind_group_layout, bind_group) = Self::create_pbr_bind_group(
             device,
             &buffers,
             &shadow_array_view,
             &shadow_sampler,
             &shadow_cube_array_view,
+            &ibl,
         );
         let pipeline =
             Self::create_pbr_pipeline(device, surface_config, sample_count, &bind_group_layout);
@@ -1728,6 +1790,7 @@ impl Renderer3D {
             &shadow_array_view,
             &shadow_sampler,
             &shadow_cube_array_view,
+            &ibl,
             width,
             height,
             sample_count,
@@ -1796,6 +1859,11 @@ impl Renderer3D {
             shadow_cube_vp_buffers,
             shadow_cube_pipeline,
             point_shadow_count: std::sync::atomic::AtomicU32::new(0),
+            ibl,
+            ibl_staging,
+            ibl_uploaded: std::sync::atomic::AtomicBool::new(false),
+            ibl_weight_bits: std::sync::atomic::AtomicU32::new(0),
+            ibl_max_mip_bits: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -1826,6 +1894,7 @@ impl Renderer3D {
                 &this.shadow_array_view,
                 &this.shadow_sampler,
                 &this.shadow_cube_array_view,
+                &this.ibl,
                 this.width,
                 this.height,
                 this.sample_count,
@@ -1930,7 +1999,9 @@ impl Renderer3D {
                 ],
             }; MAX_LIGHTS],
             light_count: 0,
-            _pad: [0; VEC3_COMPONENTS],
+            ibl_weight: 0.0,
+            ibl_max_mip: 0.0,
+            _pad: 0,
         };
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting buffer"),
@@ -1952,6 +2023,7 @@ impl Renderer3D {
         shadow_array_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_cube_array_view: &wgpu::TextureView,
+        ibl: &crate::ibl::IblTargets,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
         // Layout entries come from the pass resource table.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> = shaders::pbr_generated::PBR_RESOURCES
@@ -1978,6 +2050,9 @@ impl Renderer3D {
                     "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
                     "shadow_cube_tex" => {
                         Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
+                    }
+                    "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
+                        ibl.binding(r.name)
                     }
                     _ => None,
                 }
@@ -3127,13 +3202,21 @@ impl Renderer3D {
     ) -> LightingPass {
         // Layout entries come from the pass resource table — the same table
         // that generates the WGSL declarations, so shader and layout agree.
-        // Only depth/integer layers bind multisampled in MSAA mode (they
-        // have no resolve target); the float layers bind the single-sample
-        // resolve textures (see `crate::shaders::resource_stays_multisampled`).
+        // Depth, material-id and the normal stay multisampled at 4x (the
+        // normal must not box-filter the octahedral clear into +Z). Other
+        // float layers bind the single-sample resolve.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> =
             shaders::lighting_generated::LIGHTING_RESOURCES
                 .iter()
-                .map(|r| shaders::bgl_entry_for_samples(r, sample_count))
+                .map(|r| {
+                    shaders::bgl_entry(
+                        r,
+                        shaders::lighting_generated::per_sample_flag(
+                            sample_count,
+                            shaders::lighting_generated::keeps_per_sample(r.name, &r.kind),
+                        ),
+                    )
+                })
                 .collect();
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lighting bind group layout"),
@@ -3224,6 +3307,7 @@ impl Renderer3D {
         shadow_array_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_cube_array_view: &wgpu::TextureView,
+        ibl: &crate::ibl::IblTargets,
         width: u32,
         height: u32,
         sample_count: u32,
@@ -3254,6 +3338,9 @@ impl Renderer3D {
                         "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
                         "shadow_cube_tex" => {
                             Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
+                        }
+                        "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
+                            ibl.binding(r.name)
                         }
                         _ => None,
                     },
@@ -3832,6 +3919,7 @@ impl Renderer3D {
             &self.shadow_array_view,
             &self.shadow_sampler,
             &self.shadow_cube_array_view,
+            &self.ibl,
             width,
             height,
             self.sample_count,
@@ -3978,6 +4066,97 @@ impl Renderer3D {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    /// Bind a split-sum environment, or clear it (`None` restores the
+    /// 1×1 black cubes and a weight of 0 — the direct-light result).
+    ///
+    /// Forward bind groups are rebuilt so they sample the new views.
+    /// Deferred lighting rebuilds its group every frame.
+    pub fn set_image_based_light(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        env: Option<&crate::ibl::EnvironmentCube>,
+    ) {
+        self.ibl = crate::ibl::upload_targets(device, queue, env);
+        self.ibl_uploaded
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.store_ibl_params(queue);
+        self.rebind_ibl_groups(device);
+    }
+
+    fn store_ibl_params(&self, queue: &wgpu::Queue) {
+        self.ibl_weight_bits.store(
+            self.ibl.weight.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.ibl_max_mip_bits.store(
+            self.ibl.max_mip.to_bits(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        queue.write_buffer(
+            &self.lighting_buffer,
+            std::mem::offset_of!(LightingUniform, ibl_weight) as u64,
+            bytemuck::bytes_of(&IblTail {
+                weight: self.ibl.weight,
+                max_mip: self.ibl.max_mip,
+            }),
+        );
+    }
+
+    fn encode_ibl_if_needed(&self, encoder: &mut wgpu::CommandEncoder) {
+        match self
+            .ibl_uploaded
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            true => {}
+            false => crate::ibl::encode_initial_upload(encoder, &self.ibl_staging, &self.ibl),
+        }
+    }
+
+    fn rebind_ibl_groups(&mut self, device: &wgpu::Device) {
+        self.rebind_forward_ibl(device);
+        self.rebind_legacy_pbr_ibl(device);
+    }
+
+    fn rebind_forward_ibl(&mut self, device: &wgpu::Device) {
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        *write_lock(&self.forward_pass.bind_group) =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("forward bind group (ibl)"),
+                layout: &self.forward_pass.bind_group_layout,
+                entries: &forward_ibl_entries(
+                    &self.camera_buffer,
+                    &per_object,
+                    &material,
+                    &self.lighting_buffer,
+                    &self.shadow_array_view,
+                    &self.shadow_sampler,
+                    &self.shadow_cube_array_view,
+                    &self.ibl,
+                ),
+            });
+    }
+
+    fn rebind_legacy_pbr_ibl(&mut self, device: &wgpu::Device) {
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        self._bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pbr bind group (ibl)"),
+            layout: &self._bind_group_layout,
+            entries: &forward_ibl_entries(
+                &self.camera_buffer,
+                &per_object,
+                &material,
+                &self.lighting_buffer,
+                &self.shadow_array_view,
+                &self.shadow_sampler,
+                &self.shadow_cube_array_view,
+                &self.ibl,
+            ),
+        });
+    }
+
     /// Upload ambient RGB plus up to eight scene lights of any kind
     /// ([`MAX_LIGHTS`]); excess lights are dropped and the drop is
     /// published via [`light_upload_stats`](Self::light_upload_stats),
@@ -4014,7 +4193,23 @@ impl Renderer3D {
         lights: &[LightDesc],
     ) -> LightUploadStats {
         let fit = *read_lock(&self.shadow_fit);
-        let built = build_lighting_uniform(ambient, ambient_intensity, exposure, lights, fit);
+        let ibl_weight = f32::from_bits(
+            self.ibl_weight_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let ibl_max_mip = f32::from_bits(
+            self.ibl_max_mip_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let built = build_lighting_uniform(
+            ambient,
+            ambient_intensity,
+            exposure,
+            lights,
+            fit,
+            ibl_weight,
+            ibl_max_mip,
+        );
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
         // Publish the light-space VPs for the depth pre-pass (as camera
         // uniforms: the shadow pipeline reuses the gbuffer vertex shader,
@@ -4159,6 +4354,9 @@ impl Renderer3D {
                         "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
                             &self.shadow_cube_array_view,
                         )),
+                        "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
+                            self.ibl.binding(r.name)
+                        }
                         _ => None,
                     },
                 )
@@ -4908,12 +5106,14 @@ impl Renderer3D {
     /// Record the deferred lighting pass: reconstructs surface data from the
     /// g-buffer in `g`, evaluates the OpenPBR BRDF and writes HDR color into `output`.
     ///
-    /// In MSAA mode the float layers are sampled from the renderer's stored
-    /// resolve textures (the pass resolved into them), while depth and
-    /// material-id bind the multisampled `g` views directly (loaded as sample
-    /// 0 — see [`MSAA_SAMPLE_COUNT`]); `g` must therefore be the renderer's
-    /// own MSAA views in that mode, as [`render_scene`](Self::render_scene)
-    /// passes. At 1x every binding is `g` itself.
+    /// In MSAA mode albedo, world position and material params are sampled
+    /// from the renderer's stored resolve textures. Depth, material-id and
+    /// the normal bind the multisampled `g` views: interior pixels shade
+    /// sample 0, and edge pixels average only covered samples so a cleared
+    /// octahedral `(0, 0)` (which decodes to +Z) cannot fringe the
+    /// silhouette. `g` must be the renderer's own MSAA views in that mode,
+    /// as [`render_scene`](Self::render_scene) passes. At 1x every binding
+    /// is `g` itself.
     pub fn render_lighting(
         &self,
         device: &wgpu::Device,
@@ -4929,9 +5129,11 @@ impl Renderer3D {
         let material = read_lock(&self.material_buffer);
         // Resolve views in MSAA mode, pass-through views at 1x (the helper
         // returns `g`'s own view there, so the 1x bind group is unchanged).
+        // The normal stays on the multisampled view: lighting loads each
+        // sample instead of the hardware box filter.
         let resolves = self.gbuffer.resolves.as_ref();
         let albedo_view = resolves.map_or(g.albedo, |r| &r.albedo_view);
-        let normal_view = resolves.map_or(g.normal, |r| &r.normal_view);
+        let normal_view = g.normal;
         let world_position_view = resolves.map_or(g.world_position, |r| &r.world_position_view);
         let material_params_view = resolves.map_or(g.material_params, |r| &r.material_params_view);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4963,12 +5165,16 @@ impl Renderer3D {
                     "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
                         &self.shadow_cube_array_view,
                     )),
+                    "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
+                        self.ibl.binding(r.name)
+                    }
                     _ => None,
                 },
             )
             .unwrap_or_default(),
         });
 
+        self.encode_ibl_if_needed(encoder);
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -5014,6 +5220,7 @@ impl Renderer3D {
         instance_count: u32,
         clear_depth: bool,
     ) {
+        self.encode_ibl_if_needed(encoder);
         let depth_ops = wgpu::Operations {
             load: if clear_depth {
                 wgpu::LoadOp::Clear(1.0)
@@ -5082,6 +5289,7 @@ impl Renderer3D {
         clear_depth: bool,
         customs: &[CustomGbufferDraw<'_>],
     ) {
+        self.encode_ibl_if_needed(encoder);
         let depth_ops = wgpu::Operations {
             load: if clear_depth {
                 wgpu::LoadOp::Clear(1.0)
@@ -5173,6 +5381,7 @@ impl Renderer3D {
         let Some(pass) = self.textured_forward.as_ref() else {
             return;
         };
+        self.encode_ibl_if_needed(encoder);
         // The bind group is rebuilt per frame: the material buffer may have
         // grown and the bound set may have changed. Binding numbers come
         // from the table; only the name → live resource mapping is here.
@@ -5216,6 +5425,9 @@ impl Renderer3D {
                     "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
                         &self.shadow_cube_array_view,
                     )),
+                    "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
+                        self.ibl.binding(r.name)
+                    }
                     "base_color_tex" => Some(wgpu::BindingResource::TextureView(base_color_view)),
                     "metallic_roughness_tex" => Some(wgpu::BindingResource::TextureView(data_view)),
                     "emissive_tex" => Some(wgpu::BindingResource::TextureView(emissive_view)),
@@ -5403,6 +5615,42 @@ impl Renderer3D {
         rpass.set_pipeline(&self.fog.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
         rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
+    }
+
+    /// Deferred g-buffer plus lighting into `target`, without the forward
+    /// pass. Test-only: the edge probe needs the deferred term alone.
+    #[cfg(test)]
+    fn render_deferred_frame(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        mesh: &Mesh,
+    ) {
+        let g = GbufferTargets {
+            albedo: &self.gbuffer.albedo_view,
+            normal: &self.gbuffer.normal_view,
+            material_id: &self.gbuffer.material_id_view,
+            world_position: &self.gbuffer.world_position_view,
+            material_params: &self.gbuffer.material_params_view,
+            depth: &self.gbuffer.depth_view,
+        };
+        self.render_gbuffer(encoder, &g, mesh, 1);
+        self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
+        self.render_composite(
+            device,
+            queue,
+            encoder,
+            CompositeInputs {
+                target,
+                hdr: &self.pbr_texture_view,
+                hdr_fwd: &self.pbr_texture_view,
+                bloom: &self.pbr_texture_view,
+                bloom_intensity: 0.0,
+                mode: 0,
+            },
+        );
     }
 
     /// All-in-one legacy frame on the renderer's persistent targets:
@@ -5996,7 +6244,13 @@ mod tests {
         );
         assert_eq!(
             LightingUniform::FIELD_NAMES,
-            &["ambient_color", "lights", "light_count"]
+            &[
+                "ambient_color",
+                "lights",
+                "light_count",
+                "ibl_weight",
+                "ibl_max_mip"
+            ]
         );
     }
 
@@ -6005,7 +6259,7 @@ mod tests {
         let lights: Vec<LightDesc> = (0..10)
             .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
             .collect();
-        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None);
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, 0.0, 0.0);
         assert_eq!(
             built.stats,
             LightUploadStats {
@@ -6063,7 +6317,7 @@ mod tests {
         // `fit: None` must reproduce the legacy matrix bit-for-bit:
         // directional-only scenes stay pixel-identical.
         let light = dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Enabled);
-        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None);
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None, 0.0, 0.0);
         let v = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
         assert_eq!(built.uniform.lights[0].shadow_vp, dir_shadow_vp(v));
         assert_eq!(built.uniform.lights[0].params[3], 0.0);
@@ -6187,10 +6441,10 @@ mod tests {
             color: [HALF, 0.25, 0.125],
             shadow: ShadowCast::Disabled,
         }];
-        let base = build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None);
+        let base = build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None, 0.0, 0.0);
         assert_eq!(base.uniform.ambient_color, [HALF, 0.25, 0.125, 1.0]);
         assert_eq!(base.uniform.lights[0].color, [HALF, 0.25, 0.125, 2.0]);
-        let scaled = build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None);
+        let scaled = build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None, 0.0, 0.0);
         assert_eq!(scaled.uniform.ambient_color, [1.0, HALF, 0.25, 1.0]);
         assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, HALF, 2.0]);
     }
@@ -6248,8 +6502,8 @@ mod tests {
 
     /// GPU/CPU parity smoke for the enabled fog mix: a solid HDR layer over
     /// a cleared (far-plane) depth buffer, fogged on the GPU, must land
-    /// within tolerance of [`crate::frame_passes::apply_fog`] fed with the
-    /// same view-space distance the shader reconstructs.
+    /// within tolerance of ACES([`crate::frame_passes::apply_fog`]) fed with
+    /// the same view-space distance the shader reconstructs.
     ///
     /// The fresh `Renderer3D` camera is the identity (eye at the origin),
     /// so the reconstruction is exact on paper: NDC `(u*2-1, 1-v*2, 1)`
@@ -6449,7 +6703,15 @@ mod tests {
             crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, DENSITY)
                 .expect("positive density"),
         );
-        let expected = crate::frame_passes::apply_fog(INPUT, dist, fog);
+        let tonemap = |rgb: [f32; 3]| {
+            let mapped = crate::shaders::math::aces_tonemap::eval(glam::Vec3::from(rgb));
+            [mapped.x, mapped.y, mapped.z]
+        };
+        // The pass mixes in scene-linear space, then applies the same ACES
+        // the composite uses, because fog replaces that present.
+        let expected = tonemap(crate::frame_passes::apply_fog(INPUT, dist, fog));
+        let tonemapped_input = tonemap(INPUT);
+        let tonemapped_fog = tonemap(FOG_COLOR);
 
         let Some(px) = run_case(DENSITY) else {
             eprintln!("no GPU adapter; skipping");
@@ -6464,16 +6726,16 @@ mod tests {
         // High density visibly moved toward the fog color…
         for i in 0..3 {
             assert!(
-                (px[i] - FOG_COLOR[i]).abs() < (INPUT[i] - FOG_COLOR[i]).abs(),
+                (px[i] - tonemapped_fog[i]).abs() < (tonemapped_input[i] - tonemapped_fog[i]).abs(),
                 "no fog movement: {px:?}"
             );
         }
-        // …while a near-zero density keeps the input (disabled-adjacent).
+        // …while a near-zero density keeps the tonemapped input.
         let faint = crate::frame_passes::FogState::Enabled(
             crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, 1.0e-4)
                 .expect("positive density"),
         );
-        let faint_expected = crate::frame_passes::apply_fog(INPUT, dist, faint);
+        let faint_expected = tonemap(crate::frame_passes::apply_fog(INPUT, dist, faint));
         let Some(faint_px) = run_case(1.0e-4) else {
             eprintln!("no GPU adapter; skipping");
             return;
@@ -6484,9 +6746,13 @@ mod tests {
                 "faint channel {i}: gpu={faint_px:?} cpu={faint_expected:?}"
             );
             assert!(
-                (faint_px[i] - INPUT[i]).abs() < 0.02,
+                (faint_px[i] - tonemapped_input[i]).abs() < 0.02,
                 "near-zero density drifted: {faint_px:?}"
             );
         }
     }
 }
+
+#[cfg(test)]
+#[path = "msaa_edge_gpu.rs"]
+mod msaa_edge_gpu;

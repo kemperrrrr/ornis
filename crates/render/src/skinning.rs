@@ -10,12 +10,11 @@
 //! [`GbufferVertexOutput`](crate::shaders::interface::GbufferVertexOutput),
 //! so the fragment stage is untouched.
 //!
-//! CPU-vs-GPU parity is approximate, never bit-identical: the shader uses
-//! the joint linear part for normals while the CPU path uses the
-//! inverse-transpose 3x3 (see
-//! [`blend_vertex_reference`](ornis_animation::blend_vertex_reference)),
-//! exact for rigid/uniform-scale joints only, and driver FMA fusion may
-//! move the last ulp on either side. Callers assert
+//! CPU-vs-GPU parity is approximate, never bit-identical: both paths blend
+//! normals with the per-joint inverse-transpose (identity when the joint is
+//! degenerate; see
+//! [`blend_vertex_reference`](ornis_animation::blend_vertex_reference)).
+//! Driver FMA fusion may still move the last ulp. Callers assert
 //! [`ornis_animation::CPU_GPU_TOLERANCE`], not equality.
 //!
 //! Draw-path contract: the renderer owns one skinned g-buffer pipeline
@@ -51,17 +50,28 @@ const GPU_PALETTE_SLOTS: usize = 128;
 pub struct SkinJoint {
     /// Final joint matrix (`model * inverse_bind`), column-major.
     pub matrix: [[f32; 4]; 4],
+    /// Inverse-transpose of [`Self::matrix`] for normals. Identity when the
+    /// joint is degenerate (zero scale), matching the CPU skin path.
+    pub normal_matrix: [[f32; 4]; 4],
 }
 
 impl SkinJoint {
-    /// Wraps one final joint matrix for upload.
-    pub const fn from_matrix(matrix: [[f32; 4]; 4]) -> Self {
-        Self { matrix }
+    /// Wraps one final joint matrix and packs its inverse-transpose.
+    ///
+    /// Degenerate joints store an identity [`Self::normal_matrix`], the same
+    /// fallback as [`ornis_animation::skin_vertices`].
+    pub fn from_matrix(matrix: [[f32; 4]; 4]) -> Self {
+        let joint = Mat4::from_cols_array_2d(&matrix);
+        let normal = ornis_animation::joint_normal_matrix(&joint);
+        Self {
+            matrix,
+            normal_matrix: normal.to_cols_array_2d(),
+        }
     }
 }
 
 /// Whole joint palette: one [`SkinJoint`] per joint, zero-padded to the
-/// [`JointLimit::GPU`] capacity (8 KiB).
+/// [`JointLimit::GPU`] capacity (16 KiB).
 ///
 /// The WGSL `JointPalette` declaration is generated from this layout
 /// ([`JointPalette::WGSL_SOURCE`]). The vertex stage binds it as
@@ -76,8 +86,8 @@ pub struct JointPalette {
     pub joints: [SkinJoint; 128],
 }
 
-/// Byte size of one staged [`JointPalette`] (128 joints × 64 bytes).
-pub const PALETTE_BYTE_SIZE: usize = 8 * 1024;
+/// Byte size of one staged [`JointPalette`] (128 joints × 128 bytes).
+pub const PALETTE_BYTE_SIZE: usize = 16 * 1024;
 
 /// Skinned vertex input: bind-pose attributes plus joint influences.
 ///
@@ -127,9 +137,9 @@ pub(crate) struct SkinnedGbufferContext {
 /// transform and the shared world-space varying. DSL-only — `per_objects` /
 /// `camera` / `palette` globals declared via the context bundle.
 ///
-/// Normals (and tangents) blend through the joint linear part, not the
-/// inverse-transpose the CPU path uses: exact for rigid/uniform-scale
-/// joints, approximate otherwise (the documented parity допуск).
+/// Normals blend through each joint's inverse-transpose (`normal_matrix`).
+/// Positions and tangents blend through the joint matrix. A degenerate
+/// joint uploads an identity normal matrix, matching the CPU path.
 #[stage(vertex)]
 fn vs_main_skinned(
     input: SkinnedVertexInput,
@@ -150,10 +160,10 @@ fn vs_main_skinned(
         + (joint2.matrix * Vec4::new(input.position, 1.0)).xyz * weight2
         + (joint3.matrix * Vec4::new(input.position, 1.0)).xyz * weight3;
     let skinned_nrm = normalize(
-        (joint0.matrix * Vec4::new(input.normal, 0.0)).xyz * weight0
-            + (joint1.matrix * Vec4::new(input.normal, 0.0)).xyz * weight1
-            + (joint2.matrix * Vec4::new(input.normal, 0.0)).xyz * weight2
-            + (joint3.matrix * Vec4::new(input.normal, 0.0)).xyz * weight3,
+        (joint0.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight0
+            + (joint1.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight1
+            + (joint2.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight2
+            + (joint3.normal_matrix * Vec4::new(input.normal, 0.0)).xyz * weight3,
     );
     let skinned_tan = normalize(
         (joint0.matrix * Vec4::new(input.tangent, 0.0)).xyz * weight0
@@ -163,7 +173,10 @@ fn vs_main_skinned(
     );
     let world_pos = obj.model * Vec4::new(skinned_pos, 1.0);
     let mut world_normal = normalize((obj.normal_matrix * Vec4::new(skinned_nrm, 0.0)).xyz);
-    let mut world_tangent = normalize((obj.normal_matrix * Vec4::new(skinned_tan, 0.0)).xyz);
+    // Instance tangent uses the model matrix (a direction). The normal
+    // keeps the instance inverse-transpose. Joint normals already used
+    // each joint's inverse-transpose (`normal_matrix`).
+    let mut world_tangent = normalize((obj.model * Vec4::new(skinned_tan, 0.0)).xyz);
     let mut output: VertexOutput;
     output.clip_position = ctx.camera.view_proj * world_pos;
     output.world_position = world_pos.xyz;
@@ -255,7 +268,7 @@ pub fn joint_palette_bytes(palette: &[Mat4]) -> Result<Vec<u8>, SkinError> {
     let mut joints: [SkinJoint; GPU_PALETTE_SLOTS] =
         [bytemuck::Zeroable::zeroed(); GPU_PALETTE_SLOTS];
     for (slot, matrix) in joints.iter_mut().zip(palette.iter()) {
-        slot.matrix = matrix.to_cols_array_2d();
+        *slot = SkinJoint::from_matrix(matrix.to_cols_array_2d());
     }
     Ok(bytemuck::cast_slice(&joints).to_vec())
 }
@@ -405,11 +418,12 @@ pub enum SkinBindError {
     ShadowWithoutPalette,
 }
 
-/// Stages one entry's joint matrices as [`PALETTE_BYTE_SIZE`] upload bytes:
-/// `joints` (column-major) followed by zero padding to the full slot.
+/// Stages one entry's joint matrices as [`PALETTE_BYTE_SIZE`] upload bytes.
 ///
-/// Same layout as [`joint_palette_bytes`] for entries that already staged
-/// matrices (see
+/// Each used slot is a [`SkinJoint`]: the column-major skin matrix plus the
+/// inverse-transpose packed by [`SkinJoint::from_matrix`]. Unused slots stay
+/// zero. Same layout as [`joint_palette_bytes`] for entries that already
+/// staged matrices (see
 /// [`CustomMeshEntry::joint_palette`](crate::extraction::CustomMeshEntry::joint_palette)):
 /// the upload path packs one slot per entry, so every handle spans full
 /// slots.
@@ -426,10 +440,12 @@ pub fn palette_upload_bytes(joints: &[[[f32; 4]; 4]]) -> Result<Vec<u8>, SkinBin
             limit: limit.get(),
         });
     }
-    let mut bytes = vec![0u8; PALETTE_BYTE_SIZE];
-    let staged: &[u8] = bytemuck::cast_slice(joints);
-    bytes[..staged.len()].copy_from_slice(staged);
-    Ok(bytes)
+    let mut slots: [SkinJoint; GPU_PALETTE_SLOTS] =
+        [bytemuck::Zeroable::zeroed(); GPU_PALETTE_SLOTS];
+    for (slot, matrix) in slots.iter_mut().zip(joints.iter()) {
+        *slot = SkinJoint::from_matrix(*matrix);
+    }
+    Ok(bytemuck::cast_slice(&slots).to_vec())
 }
 
 /// Entry-point name of the skinned vertex stage: the renderer's skinned
@@ -460,14 +476,16 @@ mod tests {
 
     #[test]
     fn palette_layout_matches_wgsl() {
-        // 128 joints × 64 bytes, first slot at zero; the derive gates the
-        // offsets/sizes at compile time, this pins the totals for upload.
-        assert_eq!(std::mem::size_of::<SkinJoint>(), 64);
+        // 128 joints × 128 bytes (matrix + inverse-transpose), first slot
+        // at zero; the derive gates the offsets, this pins the totals.
+        assert_eq!(std::mem::size_of::<SkinJoint>(), 128);
         assert_eq!(std::mem::offset_of!(SkinJoint, matrix), 0);
+        assert_eq!(std::mem::offset_of!(SkinJoint, normal_matrix), 64);
         assert_eq!(std::mem::size_of::<JointPalette>(), PALETTE_BYTE_SIZE);
-        assert_eq!(PALETTE_BYTE_SIZE, 8 * 1024);
+        assert_eq!(PALETTE_BYTE_SIZE, 16 * 1024);
         assert_eq!(std::mem::offset_of!(JointPalette, joints), 0);
         assert!(SkinJoint::WGSL_SOURCE.contains("matrix: mat4x4<f32>"));
+        assert!(SkinJoint::WGSL_SOURCE.contains("normal_matrix: mat4x4<f32>"));
         assert!(JointPalette::WGSL_SOURCE.contains("array<SkinJoint, 128>"));
     }
 
@@ -511,6 +529,7 @@ mod tests {
         assert!(entry.contains("let joint0 = palette[input.joints.x];"));
         assert!(entry.contains("let joint3 = palette[input.joints.w];"));
         assert!(entry.contains("joint0.matrix * "));
+        assert!(entry.contains("joint0.normal_matrix * "));
         assert!(entry.contains("input.weights.x"));
         assert!(entry.contains("output.clip_position = camera.view_proj * world_pos;"));
         assert!(entry.contains("output.material_index = obj.material_index;"));
@@ -536,7 +555,8 @@ mod tests {
 
     #[test]
     fn palette_bytes_stage_and_gate() {
-        // Two rigid joints stage into an 8 KiB zero-padded upload.
+        // Two rigid joints stage into a 16 KiB zero-padded upload. The
+        // normal matrix keeps the rotation and drops the translation.
         let palette = [
             Mat4::IDENTITY,
             Mat4::from_rotation_translation(
@@ -546,9 +566,30 @@ mod tests {
         ];
         let bytes = joint_palette_bytes(&palette).expect("fits");
         assert_eq!(bytes.len(), PALETTE_BYTE_SIZE);
-        let first: [[f32; 4]; 4] = bytemuck::cast_slice::<u8, [[f32; 4]; 4]>(&bytes[..64])[0];
-        assert_eq!(first, Mat4::IDENTITY.to_cols_array_2d());
-        assert!(bytes[128..].iter().all(|byte| *byte == 0));
+        let stride = std::mem::size_of::<SkinJoint>();
+        let first: SkinJoint = bytemuck::cast_slice(&bytes[..stride])[0];
+        assert_eq!(first.matrix, Mat4::IDENTITY.to_cols_array_2d());
+        assert_eq!(first.normal_matrix, Mat4::IDENTITY.to_cols_array_2d());
+        let second: SkinJoint = bytemuck::cast_slice(&bytes[stride..stride * 2])[0];
+        assert_eq!(second.matrix, palette[1].to_cols_array_2d());
+        // Rigid inverse-transpose keeps the rotation and drops translation.
+        assert_eq!(
+            second.normal_matrix,
+            ornis_animation::joint_normal_matrix(&palette[1]).to_cols_array_2d()
+        );
+        assert_eq!(second.normal_matrix[3], [0.0, 0.0, 0.0, 1.0]);
+        assert_ne!(second.matrix[3], second.normal_matrix[3]);
+        assert!(bytes[stride * 2..].iter().all(|byte| *byte == 0));
+        // Non-uniform scale must not store the linear part: inverse-transpose
+        // of diag(2, 1, 1) is diag(0.5, 1, 1), not the skin matrix.
+        let scale = Mat4::from_scale(glam::Vec3::new(2.0, 1.0, 1.0));
+        let scaled = joint_palette_bytes(&[scale]).expect("scale fits");
+        let scaled_joint: SkinJoint = bytemuck::cast_slice(&scaled[..stride])[0];
+        assert_eq!(
+            scaled_joint.normal_matrix,
+            ornis_animation::joint_normal_matrix(&scale).to_cols_array_2d()
+        );
+        assert_ne!(scaled_joint.normal_matrix, scaled_joint.matrix);
         // Empty and over-limit never stage (typed errors, not strings).
         assert_eq!(joint_palette_bytes(&[]), Err(SkinError::EmptyPalette));
         assert!(matches!(
@@ -559,7 +600,7 @@ mod tests {
 
     #[test]
     fn palette_handle_indexes_full_slots() {
-        // Slot math is the bind contract: slot `i` spans full 8 KiB
+        // Slot math is the bind contract: slot `i` spans full 16 KiB
         // slots, and `bound` gates handles against the staged count.
         let handle = PaletteHandle::from_raw(3);
         assert_eq!(handle.get(), 3);
@@ -595,17 +636,18 @@ mod tests {
 
     #[test]
     fn entry_upload_bytes_pad_to_full_slots() {
-        // One identity joint stages into a full 8 KiB slot: staged bytes
-        // first, zeros after — the same layout `joint_palette_bytes`
-        // produces for the same matrix.
+        // One identity joint stages into a full 16 KiB slot: the skin
+        // matrix and its inverse-transpose first, zeros after — the same
+        // layout `joint_palette_bytes` produces for the same matrix.
         let joints = [Mat4::IDENTITY.to_cols_array_2d()];
         let bytes = palette_upload_bytes(&joints).expect("fits");
         assert_eq!(bytes.len(), PALETTE_BYTE_SIZE);
+        let stride = std::mem::size_of::<SkinJoint>();
         assert_eq!(
-            bytes[..64],
-            joint_palette_bytes(&[Mat4::IDENTITY]).expect("fits")[..64]
+            bytes[..stride],
+            joint_palette_bytes(&[Mat4::IDENTITY]).expect("fits")[..stride]
         );
-        assert!(bytes[64..].iter().all(|byte| *byte == 0));
+        assert!(bytes[stride..].iter().all(|byte| *byte == 0));
         // Over-limit staging fails typed, never truncated.
         let over = vec![Mat4::IDENTITY.to_cols_array_2d(); 129];
         assert_eq!(

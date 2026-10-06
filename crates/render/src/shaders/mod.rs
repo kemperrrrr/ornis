@@ -55,6 +55,8 @@ pub enum ResourceKind {
     TextureDepthArray,
     /// `var name: texture_depth_cube_array` (point-light shadow cubes).
     TextureDepthCubeArray,
+    /// `var name: texture_cube<f32>` (prefiltered specular / irradiance).
+    TextureCube,
     /// `var name: sampler`.
     Sampler,
     /// `var name: sampler_comparison` (shadow PCF).
@@ -74,6 +76,7 @@ impl ResourceKind {
             Self::TextureDepth => "texture_depth_2d".to_string(),
             Self::TextureDepthArray => "texture_depth_2d_array".to_string(),
             Self::TextureDepthCubeArray => "texture_depth_cube_array".to_string(),
+            Self::TextureCube => "texture_cube<f32>".to_string(),
             Self::Sampler => "sampler".to_string(),
             Self::SamplerComparison => "sampler_comparison".to_string(),
         }
@@ -108,6 +111,7 @@ impl ResourceKind {
             | Self::TextureDepth
             | Self::TextureDepthArray
             | Self::TextureDepthCubeArray
+            | Self::TextureCube
             | Self::Sampler
             | Self::SamplerComparison => "var",
         }
@@ -133,7 +137,11 @@ impl ResourceKind {
                 min_binding_size: None,
             },
             Self::TextureFloat => wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                // Multisampled floats are not filterable (wgpu): the MSAA
+                // normal is `textureLoad`ed per sample, never sampled.
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: !multisampled,
+                },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled,
             },
@@ -155,6 +163,11 @@ impl ResourceKind {
             Self::TextureDepthCubeArray => wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Depth,
                 view_dimension: wgpu::TextureViewDimension::CubeArray,
+                multisampled,
+            },
+            Self::TextureCube => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
                 multisampled,
             },
             Self::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
@@ -461,6 +474,8 @@ pub struct DepthTexture;
 pub struct DepthTextureArray;
 /// Depth-cube-array handle marker (point-light shadow cubes); see [`Texture2d`].
 pub struct DepthTextureCubeArray;
+/// Color cube-texture handle marker (IBL prefilter / irradiance); see [`Texture2d`].
+pub struct TextureCube;
 /// Sampler handle marker; see [`Texture2d`].
 pub struct Sampler;
 /// Comparison-sampler handle marker (shadow PCF); see [`Texture2d`].
@@ -1323,6 +1338,7 @@ mod tests {
             TextureDepth,
             TextureDepthArray,
             TextureDepthCubeArray,
+            TextureCube,
         ] {
             assert_eq!(kind.wgsl_ty_for_samples(1), kind.wgsl_ty_full());
         }
@@ -1344,12 +1360,14 @@ mod tests {
             TextureDepthCubeArray.wgsl_ty_for_samples(4),
             "texture_depth_cube_array"
         );
+        assert_eq!(TextureCube.wgsl_ty_for_samples(4), "texture_cube<f32>");
         // The per-resource predicate matches the spelling table.
         assert!(resource_stays_multisampled(&TextureDepth));
         assert!(resource_stays_multisampled(&TextureUint));
         assert!(!resource_stays_multisampled(&TextureFloat));
         assert!(!resource_stays_multisampled(&TextureDepthArray));
         assert!(!resource_stays_multisampled(&TextureDepthCubeArray));
+        assert!(!resource_stays_multisampled(&TextureCube));
         assert!(!resource_stays_multisampled(&Sampler));
     }
 

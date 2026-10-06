@@ -68,7 +68,9 @@ fn image_class(kind: &ResourceKind, multisampled: bool) -> Option<naga::ImageCla
         }),
         // Depth arrays/cubes need `image_class_arrayed` — callers must not
         // route them through this helper.
-        ResourceKind::TextureDepthArray | ResourceKind::TextureDepthCubeArray => None,
+        ResourceKind::TextureDepthArray
+        | ResourceKind::TextureDepthCubeArray
+        | ResourceKind::TextureCube => None,
         _ => None,
     }
 }
@@ -149,6 +151,23 @@ pub fn add_global(
                         arrayed: true,
                         class: naga::ImageClass::Depth {
                             multi: multisampled,
+                        },
+                    },
+                },
+                naga::Span::default(),
+            );
+            (naga::AddressSpace::Handle, image)
+        }
+        ResourceKind::TextureCube => {
+            let image = module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Image {
+                        dim: naga::ImageDimension::Cube,
+                        arrayed: false,
+                        class: naga::ImageClass::Sampled {
+                            kind: naga::ScalarKind::Float,
+                            multi: false,
                         },
                     },
                 },

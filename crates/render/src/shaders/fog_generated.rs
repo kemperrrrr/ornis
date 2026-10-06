@@ -10,7 +10,9 @@
 //! non-linear). It is linearized through `Camera::inv_view_proj` and the
 //! Euclidean distance to `Camera::camera_pos` feeds the exponential mix
 //! `color + (fog.color - color) * (1 - exp(-density * depth))` — the same
-//! math as [`crate::frame_passes::apply_fog`]. The `world_position` layer
+//! math as [`crate::frame_passes::apply_fog`] — and the result is passed
+//! through the composite's ACES curve because this pass replaces that
+//! present. The `world_position` layer
 //! is NOT the source: it only stores xy (`Rg16Float`, z comes from depth
 //! anyway), so sampling depth directly is authoritative.
 //!
@@ -25,6 +27,7 @@ use super::{
     Texture2d, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, FogUniform};
+use crate::shaders::math::aces_tonemap;
 use ornis_macros::stage;
 
 /// Fog fragment uniforms as a context bundle (`ctx.camera`, `ctx.fog_params`).
@@ -81,7 +84,11 @@ fn fs_main(
     let dist = length(ctx.camera.camera_pos.xyz - world_pos);
     let factor = 1.0 - exp(0.0 - ctx.fog_params.density * dist);
     let mixed = hdr + (ctx.fog_params.color - hdr) * factor;
-    return glam::Vec4::new(mixed, 1.0);
+    // This pass replaces the composite on the swapchain, so it applies
+    // the same single ACES the composite does. The mix itself stays
+    // scene-linear (`apply_fog`).
+    let tone_mapped = aces_tonemap(mixed);
+    return glam::Vec4::new(tone_mapped, 1.0);
 }
 
 /// Resource layout of the fog pass (what `Renderer3D::create_fog_pass`
@@ -146,6 +153,7 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
         .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helper(helpers::wgsl_lighting_decode())
+        .helper(aces_tonemap::wgsl_source())
         .entry(fs_main::wgsl_source())
         .emit()
 }
@@ -214,7 +222,8 @@ mod tests {
         assert!(entry.contains("exp("));
         assert!(entry.contains("fog_params.density"));
         assert!(entry.contains("fog_params.color"));
-        assert!(entry.contains("return vec4<f32>(mixed, 1.0);"));
+        assert!(entry.contains("let tone_mapped = aces_tonemap(mixed);"));
+        assert!(entry.contains("return vec4<f32>(tone_mapped, 1.0);"));
     }
 
     /// Every table row's declaration appears in the assembled shader, and

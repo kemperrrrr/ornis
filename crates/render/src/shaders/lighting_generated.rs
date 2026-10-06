@@ -12,7 +12,7 @@ use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
     ComparisonSampler, DepthTexture, DepthTextureArray, DepthTextureCubeArray, OPENPBR_WGSL_NAME,
     Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d,
-    Texture2dUint, naga_ir, wgsl_decl,
+    Texture2dUint, TextureCube, naga_ir, wgsl_decl,
 };
 use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
 use crate::shaders::math;
@@ -23,11 +23,57 @@ use ornis_macros::stage;
 /// bindings, assembled as naga IR and printed by naga itself (see
 /// [`naga_ir`](super::naga_ir)) — no WGSL text is authored here.
 ///
-/// At 1x every global declares the single-sample type; in MSAA mode the
-/// depth and material-id globals declare multisampled texture types (see
-/// [`super::resource_stays_multisampled`]) while the resolved float layers
-/// stay single-sample — the `textureLoad(…, 0)` call text in [`fs_main`]
-/// loads sample 0 unchanged for both spellings.
+/// At 1x every global declares the single-sample type. In MSAA mode depth,
+/// the material id, and the octahedral normal stay multisampled
+/// ([`keeps_per_sample`]) so lighting can load each sample. Other float
+/// layers still resolve.
+fn lighting_header_type(
+    name: &str,
+    camera: naga::Handle<naga::Type>,
+    lighting: naga::Handle<naga::Type>,
+    material: naga::Handle<naga::Type>,
+) -> naga::Handle<naga::Type> {
+    match name {
+        "camera" => camera,
+        "lighting" => lighting,
+        "materials" => material,
+        _ => camera,
+    }
+}
+
+/// Depth, material id, and the normal layer stay per-sample at 4x.
+///
+/// The normal must not go through the hardware box filter: a cleared texel
+/// is `(0, 0)`, and the octahedral decode of that is +Z, which fringes
+/// every silhouette.
+pub(crate) fn keeps_per_sample(name: &str, kind: &ResourceKind) -> bool {
+    name == "normal_tex" || matches!(kind, ResourceKind::TextureDepth | ResourceKind::TextureUint)
+}
+
+/// Whether an MSAA lighting binding keeps per-sample storage.
+pub(crate) fn per_sample_flag(sample_count: u32, keeps: bool) -> bool {
+    sample_count > 1 && keeps
+}
+
+fn add_lighting_global(
+    module: &mut naga::Module,
+    sample_count: u32,
+    resource: &Resource,
+    camera: naga::Handle<naga::Type>,
+    lighting: naga::Handle<naga::Type>,
+    material: naga::Handle<naga::Type>,
+) {
+    naga_ir::add_global(
+        module,
+        lighting_header_type(resource.name, camera, lighting, material),
+        resource,
+        per_sample_flag(
+            sample_count,
+            keeps_per_sample(resource.name, &resource.kind),
+        ),
+    );
+}
+
 fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
     let mut module = naga::Module::default();
     let cam = CameraUniform::naga_add_type(&mut module);
@@ -37,14 +83,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
     let lighting = LightingUniform::naga_add_type(&mut module);
     let mat = naga_ir::openpbr_type(&mut module);
     for r in LIGHTING_RESOURCES {
-        let ty = match r.name {
-            "camera" => cam,
-            "lighting" => lighting,
-            "materials" => mat,
-            _ => cam,
-        };
-        let multisampled = sample_count > 1 && super::resource_stays_multisampled(&r.kind);
-        naga_ir::add_global(&mut module, ty, &r, multisampled);
+        add_lighting_global(&mut module, sample_count, &r, cam, lighting, mat);
     }
     naga_ir::write_module(&module, &LIGHTING_RESOURCES)
 }
@@ -52,7 +91,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 13] = [
+pub const LIGHTING_RESOURCES: [Resource; 17] = [
     Resource {
         group: 0,
         binding: 0,
@@ -157,12 +196,43 @@ pub const LIGHTING_RESOURCES: [Resource; 13] = [
         kind: ResourceKind::TextureDepthCubeArray,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 13,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "prefilter_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 14,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "irradiance_cube",
+        kind: ResourceKind::TextureCube,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 15,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "brdf_lut",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 16,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ibl_sampler",
+        kind: ResourceKind::Sampler,
+        min_size: None,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
     let kernels = [
         math::luminance::wgsl_source(),
-        math::aces_tonemap::wgsl_source(),
         math::fresnel0_from_ior::wgsl_source(),
         math::fresnel_schlick::wgsl_source(),
         math::fresnel_schlick_vec::wgsl_source(),
@@ -173,12 +243,16 @@ fn lighting_fragment_kernels() -> String {
         math::smith_ggx_correlated::wgsl_source(),
         math::smith_ggx_aniso::wgsl_source(),
         math::oren_nayar_brdf::wgsl_source(),
+        math::base_diffuse_energy::wgsl_source(),
+        math::thin_film_weight_mix::wgsl_source(),
+        math::coated_emission::wgsl_source(),
         math::coat_base_darkening::wgsl_source(),
         math::coat_blend_darkened::wgsl_source(),
         math::thin_film_modulation::wgsl_source(),
         math::sheen_brdf::wgsl_source(),
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
+        math::evaluate_ibl::wgsl_source(),
     ];
     kernels.join("\n")
 }
@@ -214,6 +288,10 @@ pub(crate) struct LightingMaps {
     pub shadow_tex: DepthTextureArray,
     pub shadow_sampler: ComparisonSampler,
     pub shadow_cube_tex: DepthTextureCubeArray,
+    pub prefilter_cube: TextureCube,
+    pub irradiance_cube: TextureCube,
+    pub brdf_lut: Texture2d,
+    pub ibl_sampler: Sampler,
 }
 
 #[stage(fragment)]
@@ -239,12 +317,26 @@ fn fs_main(
         textureSampleLevel(maps.world_pos_tex, maps.lighting_sampler, input.uv, 0.0);
     let mat_params = textureSampleLevel(maps.mat_params_tex, maps.lighting_sampler, input.uv, 0.0);
     let mat = ctx.materials[material_id];
-    if albedo.a < 0.001 {
-        discard;
-    }
     let n = octahedral_decode(normal_enc.rg);
     let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
     let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
+    return shade_lit(n, world_pos, v, albedo.a, mat);
+}
+
+/// OpenPBR lighting for one decoded sample. `albedo_a` below
+/// [`ALPHA_CUTOFF`](super::helpers::ALPHA_CUTOFF) discards the fragment.
+/// Globals (`lighting`, shadow maps, IBL) are the lighting bind group.
+#[ornis_macros::wgsl_fn]
+fn shade_lit(
+    n: glam::Vec3,
+    world_pos: glam::Vec3,
+    v: glam::Vec3,
+    albedo_a: f32,
+    mat: OpenPBRMaterial,
+) -> glam::Vec4 {
+    if albedo_a < ALPHA_CUTOFF {
+        discard;
+    }
     let nov = max(dot(n, v), EPS);
     let base_weight = mat.base_params.x;
     let base_color = mat.base_color.rgb;
@@ -286,11 +378,25 @@ fn fs_main(
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
-    let thin_film_mod = thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0);
+    let thin_film_mod = thin_film_weight_mix(
+        thin_film_weight,
+        thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
+    );
+    let coat_darken = evaluate_coat_darkening(
+        coat_weight,
+        coat_darkening,
+        coat_ior,
+        metalness,
+        base_color,
+        base_weight,
+        specular_weight,
+        subsurface_weight,
+        subsurface_color,
+    );
     let t = normalize(cross(n, Vec3::new(0.0, 1.0, 0.0)) + Vec3::new(0.0, 0.0, EPS));
     let b = cross(n, t);
-    for i in 0u..ctx.lighting.light_count {
-        let light = ctx.lighting.lights[i];
+    for i in 0u..lighting.light_count {
+        let light = lighting.lights[i];
         let kind = light.kind.x;
         // Point/spot: vector from the surface to the light + range cutoff.
         // Directionals keep the legacy infinite-light path (pixel-identical).
@@ -343,8 +449,8 @@ fn fs_main(
                 let shadow_uv = Vec2::new(shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5);
                 radiance = radiance
                     * textureSampleCompare(
-                        maps.shadow_tex,
-                        maps.shadow_sampler,
+                        shadow_tex,
+                        shadow_sampler,
                         shadow_uv,
                         i32(light.params.w),
                         shadow_ndc.z - SHADOW_REF_BIAS,
@@ -363,8 +469,8 @@ fn fs_main(
                 let cube_ref = (far / denom) - (0.1 * far) / (denom * major) - SHADOW_REF_BIAS;
                 radiance = radiance
                     * textureSampleCompare(
-                        maps.shadow_cube_tex,
-                        maps.shadow_sampler,
+                        shadow_cube_tex,
+                        shadow_sampler,
                         to_frag,
                         i32(light.params.w),
                         cube_ref,
@@ -399,7 +505,7 @@ fn fs_main(
             t,
             b,
             thin_film_mod,
-        );
+        ) * coat_darken;
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -478,7 +584,7 @@ fn fs_main(
         lo = lo + layer_bsdf * radiance * nol;
     }
     let ambient =
-        ctx.lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
+        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
     let emission = evaluate_emission(
         emission_luminance,
         emission_color,
@@ -486,9 +592,96 @@ fn fs_main(
         coat_color,
         nov,
     );
-    let color = ambient + lo + emission;
-    let tone_mapped = aces_tonemap(color);
-    return glam::Vec4::new(tone_mapped, opacity);
+    let f0_dielectric = fresnel0_from_ior(specular_ior);
+    let f0 = mix(
+        Vec3::new(f0_dielectric, f0_dielectric, f0_dielectric),
+        base_color * base_weight,
+        metalness,
+    );
+    let reflect_dir = n * (2.0 * dot(n, v)) - v;
+    let prefiltered = textureSampleLevel(
+        prefilter_cube,
+        ibl_sampler,
+        reflect_dir,
+        specular_roughness * lighting.ibl_max_mip,
+    );
+    let irradiance = textureSample(irradiance_cube, ibl_sampler, n);
+    let lut = textureSample(brdf_lut, ibl_sampler, Vec2::new(nov, specular_roughness));
+    let ibl = evaluate_ibl(
+        prefiltered.rgb,
+        irradiance.rgb,
+        lut.r,
+        lut.g,
+        f0,
+        base_color * (1.0 - metalness),
+        lighting.ibl_weight,
+    );
+    let color = ambient + lo + emission + ibl;
+    return glam::Vec4::new(color, opacity);
+}
+
+/// Deferred lighting at 4x. Every sample is lit (the fetches stay in
+/// uniform control flow), then an edge mask picks the result: interior
+/// pixels keep sample 0, and silhouette or disagreement pixels average
+/// only the covered samples. Cleared samples (depth [`CLEAR_DEPTH`](super::helpers::CLEAR_DEPTH),
+/// octahedral `(0, 0)` → +Z) contribute nothing, so the box-filtered
+/// resolve cannot fringe the edge.
+#[stage(fragment, entry = "fs_main")]
+fn fs_main_msaa(
+    input: QuadVertexOutput,
+    ctx: Context<LightingContext>,
+    maps: Context<LightingMaps>,
+) -> super::Location<0, glam::Vec4> {
+    let albedo = textureSampleLevel(maps.albedo_tex, maps.lighting_sampler, input.uv, 0.0);
+    let world_pos_enc =
+        textureSampleLevel(maps.world_pos_tex, maps.lighting_sampler, input.uv, 0.0);
+    let mat_params = textureSampleLevel(maps.mat_params_tex, maps.lighting_sampler, input.uv, 0.0);
+    if albedo.a < ALPHA_CUTOFF {
+        discard;
+    }
+    let coord = UVec2::new(input.uv * Vec2::new(textureDimensions(maps.depth_tex)));
+    let mut acc = Vec3::new(0.0, 0.0, 0.0);
+    let mut alpha = 0.0;
+    let mut weight = 0.0;
+    let mut single = Vec4::new(0.0, 0.0, 0.0, 0.0);
+    let mut covered_count = 0.0;
+    let mut have_ref = 0.0;
+    let mut disagree = 0.0;
+    let mut ref_d = CLEAR_DEPTH;
+    let mut ref_id = MSAA_SAMPLES - MSAA_SAMPLES;
+    let mut ref_n = Vec3::new(0.0, 0.0, 1.0);
+    for s in 0u..MSAA_SAMPLES {
+        let depth = textureLoad(maps.depth_tex, coord, s);
+        let id = textureLoad(maps.material_id_tex, coord, s).r;
+        let n = octahedral_decode(textureLoad(maps.normal_tex, coord, s).rg);
+        let covered = select(0.0, 1.0, depth < CLEAR_DEPTH);
+        let is_ref = select(0.0, 1.0, have_ref == 0.0 && covered == 1.0);
+        let depth_far = select(0.0, 1.0, abs(depth - ref_d) > DEPTH_EDGE);
+        let normal_far = select(0.0, 1.0, dot(n, ref_n) < NORMAL_AGREE);
+        let id_far = select(0.0, 1.0, id != ref_id);
+        let split = max(depth_far, max(normal_far, id_far));
+        disagree = max(disagree, split * covered * have_ref);
+        ref_n = mix(ref_n, n, is_ref);
+        ref_d = mix(ref_d, depth, is_ref);
+        ref_id = select(ref_id, id, is_ref == 1.0);
+        have_ref = max(have_ref, covered);
+        covered_count = covered_count + covered;
+        let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
+        let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
+        let lit = shade_lit(n, world_pos, v, 1.0, ctx.materials[id]);
+        acc = acc + lit.xyz * covered;
+        alpha = alpha + lit.w * covered;
+        weight = weight + covered;
+        let is_zero = select(0.0, 1.0, s == 0u);
+        single = mix(single, lit, is_zero);
+    }
+    let all_clear = select(0.0, 1.0, covered_count == 0.0);
+    let all_hit = select(0.0, 1.0, covered_count == MSAA_SAMPLES_F);
+    let calm = select(0.0, 1.0, disagree == 0.0);
+    let interior = max(all_clear, all_hit * calm);
+    let edge = 1.0 - interior;
+    let averaged = Vec4::new(acc / max(weight, EPS), alpha / max(weight, EPS));
+    return mix(single, averaged, edge);
 }
 
 /// Full WGSL source for deferred lighting, assembled from Rust.
@@ -496,10 +689,17 @@ pub fn wgsl_source() -> String {
     wgsl_source_for_samples(1)
 }
 
+fn lighting_entry(msaa: bool) -> &'static str {
+    match msaa {
+        true => fs_main_msaa::wgsl_source(),
+        false => fs_main::wgsl_source(),
+    }
+}
+
 /// Full WGSL source for deferred lighting at a sample count: at 1x
-/// byte-identical to [`wgsl_source`]; in MSAA mode depth and material-id
-/// declare multisampled types (their resolve-free bindings stay multisampled
-/// — see [`super::resource_stays_multisampled`]).
+/// byte-identical to [`wgsl_source`]; in MSAA mode depth, material-id and
+/// the normal declare multisampled types and [`fs_main_msaa`] shades
+/// covered samples on edges.
 pub fn wgsl_source_for_samples(sample_count: u32) -> String {
     ShaderModule::new()
         .decl(lighting_wgsl_header_for_samples(sample_count))
@@ -509,7 +709,8 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
             helpers::wgsl_lighting_decode(),
             helpers::wgsl_shared_helpers(),
         ])
-        .entry(fs_main::wgsl_source())
+        .helper(shade_lit::wgsl_source())
+        .entry(lighting_entry(per_sample_flag(sample_count, true)))
         .helper(lighting_fragment_kernels())
         .emit()
 }
@@ -568,7 +769,10 @@ mod tests {
     #[test]
     fn lighting_generated_contains_expected_kernels() {
         let src = wgsl_source();
-        assert!(src.contains("fn aces_tonemap"));
+        assert!(
+            !src.contains("aces_tonemap("),
+            "lighting writes scene-linear HDR; ACES belongs to the composite"
+        );
         assert!(src.contains("fn fresnel_f82_tint"));
         assert!(src.contains("fn ggx_ndf_aniso"));
         assert!(src.contains("fn fs_main"));
@@ -580,7 +784,7 @@ mod tests {
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 13);
+        assert_eq!(LIGHTING_RESOURCES.len(), 17);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -614,13 +818,12 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 13);
+        assert_eq!(src.matches("@binding(").count(), 17);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer
-    /// decode with `textureLoad` coords, alpha `discard`, the light loop
-    /// with the early-out, and the summed layer BSDF. (Byte-parity no
-    /// longer applies — the generated entry is single-line.)
+    /// decode with `textureLoad` coords, then [`shade_lit`] (alpha
+    /// `discard`, the light loop, the summed layer BSDF).
     #[test]
     fn fs_main_matches_legacy_shape() {
         let entry = fs_main::wgsl_source();
@@ -629,32 +832,51 @@ mod tests {
         assert!(entry.contains(
             "textureLoad(depth_tex, vec2<u32>(input.uv * vec2<f32>(textureDimensions(depth_tex))), 0)"
         ));
-        assert!(entry.contains("discard;"));
-        assert!(entry.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));
-        assert!(entry.contains("continue;"));
-        assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
-        assert!(entry.contains(
+        assert!(entry.contains("shade_lit("));
+        let src = wgsl_source();
+        assert!(src.contains("discard;"));
+        assert!(src.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));
+        assert!(src.contains("continue;"));
+        assert!(src.contains("let base_bsdf = evaluate_base_layer("));
+        assert!(src.contains(
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
-        assert!(entry.contains("return vec4<f32>(tone_mapped, opacity);"));
+        assert!(src.contains("return vec4<f32>(color, opacity);"));
+        assert!(src.contains("textureSampleLevel(prefilter_cube, ibl_sampler"));
+        assert!(src.contains("textureSample(brdf_lut, ibl_sampler"));
+        assert!(src.contains("textureSample(irradiance_cube, ibl_sampler"));
+        assert!(src.contains("lighting.ibl_max_mip"));
+        assert!(src.contains("thin_film_weight_mix("));
+        assert!(src.contains("evaluate_coat_darkening("));
     }
 
-    /// The MSAA source validates with naga and spells multisampled depth +
-    /// material-id while the resolved float layers stay single-sample (their
-    /// `textureSampleLevel` fetches bind the resolve textures).
+    /// The MSAA source validates with naga. Depth, material-id and the
+    /// normal are multisampled; the entry loads every sample and masks
+    /// cleared ones. Albedo stays a resolved `texture_2d`.
     #[test]
     fn msaa_source_validates_with_multisampled_depth_and_id() {
         let src = wgsl_source_for_samples(4);
         assert_valid_wgsl("lighting_generated_msaa", &src);
         assert!(src.contains("texture_depth_multisampled_2d"), "{src}");
         assert!(src.contains("texture_multisampled_2d<u32>"), "{src}");
-        // Resolved layers keep their single-sample declarations and fetches
-        // (bundle prefixes are stripped by the `stage` translation).
+        assert!(src.contains("texture_multisampled_2d<f32>"), "{src}");
+        assert!(src.contains("textureLoad(normal_tex"), "{src}");
+        assert!(
+            src.contains("for (var s: u32 = 0; s < MSAA_SAMPLES; s = s + 1)"),
+            "{src}"
+        );
+        assert!(src.contains("CLEAR_DEPTH"), "{src}");
         assert!(src.contains("textureSampleLevel"), "{src}");
         assert!(src.contains("albedo_tex"), "{src}");
-        assert!(!src.contains("texture_multisampled_2d<f32>"), "{src}");
-        // The 1x source is untouched by the MSAA spelling.
+        assert!(
+            src.contains("var albedo_tex: texture_2d<f32>"),
+            "albedo stays resolved, {src}"
+        );
         let plain = wgsl_source();
         assert!(!plain.contains("multisampled"), "{plain}");
+        assert!(
+            !plain.contains("for (var s: u32 = 0; s < MSAA_SAMPLES; s = s + 1)"),
+            "1x lighting does not walk samples"
+        );
     }
 }
