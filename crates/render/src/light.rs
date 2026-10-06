@@ -1,9 +1,11 @@
-//! Typed directional light placed into a [`RenderLights`](crate::extraction::RenderLights) rig.
+//! Typed directional light and the studio key/fill pair placed into a
+//! [`RenderLights`](crate::extraction::RenderLights) rig.
 //!
 //! The channels match a scene `Directional` light: [`UnitVec3`] points
 //! toward the light, [`Lux`] is the existing intensity `f32`, and [`Color`]
 //! is linear emission. [`DirectionalLight::to_light_desc`] is what the
-//! renderer uploads.
+//! renderer uploads. [`StudioLights`] is that pair on purpose; nothing else
+//! publishes it.
 
 use glam::Vec3;
 use ornis_assets::scene::{LightDesc, ShadowCast};
@@ -30,6 +32,25 @@ impl DirectionalLight {
     /// Legacy key-light strength (`0.6`) from the pre-X3 rig.
     pub const DEFAULT_ILLUMINANCE: Lux = Lux(0.6);
 
+    /// Directional scene light, or [`None`] for a point or spot.
+    fn from_light_desc(desc: &LightDesc) -> Option<Self> {
+        let LightDesc::Directional {
+            direction,
+            intensity,
+            color,
+            shadow,
+        } = desc
+        else {
+            return None;
+        };
+        Some(Self {
+            direction: *direction,
+            illuminance: Lux::new(*intensity),
+            color: Color::linear_rgb(color[0], color[1], color[2]),
+            shadow: *shadow,
+        })
+    }
+
     /// Scene light the renderer already knows how to upload.
     pub fn to_light_desc(self) -> LightDesc {
         LightDesc::Directional {
@@ -50,6 +71,52 @@ impl Default for DirectionalLight {
             illuminance: Self::DEFAULT_ILLUMINANCE,
             color: Color::WHITE,
             shadow: ShadowCast::Disabled,
+        }
+    }
+}
+
+/// Studio key and fill.
+///
+/// [`Default`] is the directional pair inside
+/// [`RenderLights::default`](crate::extraction::RenderLights::default):
+/// a white key toward `(1, 1, 1)` and a cooler fill toward `(-0.5, 0.5, -0.5)`.
+/// Spawning appends both lights. Ambient and lights already in the world stay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StudioLights {
+    /// Brighter light of the pair.
+    pub key: DirectionalLight,
+    /// Dimmer light from the opposite octant.
+    pub fill: DirectionalLight,
+}
+
+impl StudioLights {
+    /// Fill strength (`0.3`) of [`Default`].
+    pub const DEFAULT_FILL_ILLUMINANCE: Lux = Lux(0.3);
+
+    /// Key then fill, in the order
+    /// [`RenderLights::default`](crate::extraction::RenderLights::default) stores them.
+    pub fn lights(self) -> [DirectionalLight; 2] {
+        [self.key, self.fill]
+    }
+}
+
+impl Default for StudioLights {
+    /// Key and fill copied from
+    /// [`RenderLights::default`](crate::extraction::RenderLights::default).
+    ///
+    /// The pair is not rebuilt from literals here: those numbers already live
+    /// on the legacy rig. A missing entry falls back to [`DirectionalLight::default`].
+    fn default() -> Self {
+        let lights = crate::extraction::RenderLights::default().lights;
+        Self {
+            key: lights
+                .first()
+                .and_then(DirectionalLight::from_light_desc)
+                .unwrap_or_default(),
+            fill: lights
+                .get(1)
+                .and_then(DirectionalLight::from_light_desc)
+                .unwrap_or_default(),
         }
     }
 }
@@ -78,5 +145,22 @@ mod tests {
             }
             other => panic!("directional light became {other:?}"),
         }
+    }
+
+    #[test]
+    fn default_studio_lights_match_the_legacy_key_and_fill() {
+        let pair = StudioLights::default();
+        assert_eq!(pair.key, DirectionalLight::default());
+        let [key, fill] = pair.lights();
+        let expected = crate::extraction::RenderLights::default().lights;
+        assert_eq!(
+            format!("{:?}", key.to_light_desc()),
+            format!("{:?}", expected[0])
+        );
+        assert_eq!(
+            format!("{:?}", fill.to_light_desc()),
+            format!("{:?}", expected[1])
+        );
+        assert_eq!(fill.illuminance, StudioLights::DEFAULT_FILL_ILLUMINANCE);
     }
 }
