@@ -9,6 +9,9 @@
 //! ([`PositiveF32`], [`Clamped01`], [`UnitVec3`], [`UnitQuat`]) turn the
 //! old comment-invariants ("must be > 0", "must be normalized") into
 //! checked constructors instead of silent defaults.
+//! [`Roughness`], [`Metallic`], [`Specular`] and [`EnvironmentWeight`]
+//! are infallible `[0, 1]` weights (NaN becomes `0`) with the same bare
+//! `f32` wire form as [`Clamped01`].
 //!
 //! [`Color`] stores [`LinearRgba`] and serializes as the scene file's linear
 //! RGB array. [`Lux`] is the light-intensity `f32` under a newtype.
@@ -618,6 +621,164 @@ impl TryFrom<f32> for Clamped01 {
     }
 }
 
+/// Maps `value` into `[0, 1]`.
+///
+/// `f32::clamp` leaves NaN unchanged. A missing weight is `0`.
+fn clamp_unit_interval(value: f32) -> f32 {
+    if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    }
+}
+
+/// Specular roughness in `[0, 1]` (`0` mirror-smooth, `1` fully rough).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Roughness(f32);
+
+impl Roughness {
+    /// Infallible constructor: clamps into `[0, 1]` (NaN maps to `0`).
+    pub fn new(value: f32) -> Self {
+        Self(clamp_unit_interval(value))
+    }
+
+    /// Raw value in `[0, 1]`.
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<Roughness> for f32 {
+    fn from(value: Roughness) -> Self {
+        value.get()
+    }
+}
+
+impl Serialize for Roughness {
+    /// Wire form is the raw `f32` (same as [`Clamped01`]).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Roughness {
+    /// Reads the raw `f32` and clamps it ([`Roughness::new`]; NaN → `0`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(f32::deserialize(deserializer)?))
+    }
+}
+
+/// Base metalness in `[0, 1]` (`0` dielectric, `1` metal).
+///
+/// The GPU mixes the two continuously: `base.params[2]` is this value,
+/// not a binary preset switch.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Metallic(f32);
+
+impl Metallic {
+    /// Infallible constructor: clamps into `[0, 1]` (NaN maps to `0`).
+    pub fn new(value: f32) -> Self {
+        Self(clamp_unit_interval(value))
+    }
+
+    /// Raw value in `[0, 1]`.
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<Metallic> for f32 {
+    fn from(value: Metallic) -> Self {
+        value.get()
+    }
+}
+
+impl Serialize for Metallic {
+    /// Wire form is the raw `f32` (same as [`Clamped01`]).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Metallic {
+    /// Reads the raw `f32` and clamps it ([`Metallic::new`]; NaN → `0`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(f32::deserialize(deserializer)?))
+    }
+}
+
+/// Specular lobe weight in `[0, 1]` (`0` off, `1` full).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Specular(f32);
+
+impl Specular {
+    /// Infallible constructor: clamps into `[0, 1]` (NaN maps to `0`).
+    pub fn new(value: f32) -> Self {
+        Self(clamp_unit_interval(value))
+    }
+
+    /// Raw value in `[0, 1]`.
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<Specular> for f32 {
+    fn from(value: Specular) -> Self {
+        value.get()
+    }
+}
+
+impl Serialize for Specular {
+    /// Wire form is the raw `f32` (same as [`Clamped01`]).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Specular {
+    /// Reads the raw `f32` and clamps it ([`Specular::new`]; NaN → `0`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(f32::deserialize(deserializer)?))
+    }
+}
+
+/// Image-based light mix in `[0, 1]` (`0` direct light only, `1` full IBL).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct EnvironmentWeight(f32);
+
+impl EnvironmentWeight {
+    /// Infallible constructor: clamps into `[0, 1]` (NaN maps to `0`).
+    pub fn new(value: f32) -> Self {
+        Self(clamp_unit_interval(value))
+    }
+
+    /// Raw value in `[0, 1]`.
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl From<EnvironmentWeight> for f32 {
+    fn from(value: EnvironmentWeight) -> Self {
+        value.get()
+    }
+}
+
+impl Serialize for EnvironmentWeight {
+    /// Wire form is the raw `f32` (same as [`Clamped01`]).
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvironmentWeight {
+    /// Reads the raw `f32` and clamps it ([`EnvironmentWeight::new`]; NaN → `0`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(f32::deserialize(deserializer)?))
+    }
+}
+
 /// Linear-space RGB color (albedo, tint, emission; values may exceed `1`).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct LinearRgb(pub [f32; 3]);
@@ -933,6 +1094,40 @@ mod tests {
         assert!(Clamped01::try_new(1.5).is_none());
         let as_f32: f32 = Clamped01::new(0.25).into();
         assert_eq!(as_f32, 0.25);
+    }
+
+    #[test]
+    fn surface_unit_interval_clamps_and_maps_nan_to_zero() {
+        fn check(new: fn(f32) -> f32) {
+            assert_eq!(new(0.25), 0.25);
+            assert_eq!(new(0.0), 0.0);
+            assert_eq!(new(1.0), 1.0);
+            assert_eq!(new(1.5), 1.0);
+            assert_eq!(new(-0.5), 0.0);
+            assert_eq!(new(f32::NAN), 0.0);
+            assert_eq!(new(f32::INFINITY), 1.0);
+            assert_eq!(new(f32::NEG_INFINITY), 0.0);
+        }
+        check(|v| Roughness::new(v).get());
+        check(|v| Metallic::new(v).get());
+        check(|v| Specular::new(v).get());
+        check(|v| EnvironmentWeight::new(v).get());
+    }
+
+    #[test]
+    fn metallic_ron_roundtrip_is_a_bare_f32() {
+        let value = Metallic::new(0.35);
+        let text = ron::ser::to_string(&value).expect("serialize");
+        assert_eq!(text, ron::ser::to_string(&0.35_f32).expect("f32"));
+        let back: Metallic = ron::de::from_str(&text).expect("roundtrip");
+        assert_eq!(back, value);
+        assert_eq!(back.get(), 0.35);
+        let high: Metallic = ron::de::from_str("1.7").expect("over");
+        assert_eq!(high.get(), 1.0);
+        let low: Metallic = ron::de::from_str("-0.2").expect("under");
+        assert_eq!(low.get(), 0.0);
+        let nan: Metallic = ron::de::from_str("NaN").expect("nan");
+        assert_eq!(nan.get(), 0.0);
     }
 
     #[test]
