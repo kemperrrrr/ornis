@@ -32,6 +32,25 @@ impl DirectionalLight {
     /// Legacy key-light strength (`0.6`) from the pre-X3 rig.
     pub const DEFAULT_ILLUMINANCE: Lux = Lux(0.6);
 
+    /// Directional scene light, or [`None`] for a point or spot.
+    fn from_light_desc(desc: &LightDesc) -> Option<Self> {
+        let LightDesc::Directional {
+            direction,
+            intensity,
+            color,
+            shadow,
+        } = desc
+        else {
+            return None;
+        };
+        Some(Self {
+            direction: *direction,
+            illuminance: Lux::new(*intensity),
+            color: Color::linear_rgb(color[0], color[1], color[2]),
+            shadow: *shadow,
+        })
+    }
+
     /// Scene light the renderer already knows how to upload.
     pub fn to_light_desc(self) -> LightDesc {
         LightDesc::Directional {
@@ -82,17 +101,22 @@ impl StudioLights {
 }
 
 impl Default for StudioLights {
-    /// Key at [`DirectionalLight::DEFAULT_ILLUMINANCE`], fill at
-    /// [`Self::DEFAULT_FILL_ILLUMINANCE`].
+    /// Key and fill copied from
+    /// [`RenderLights::default`](crate::extraction::RenderLights::default).
+    ///
+    /// The pair is not rebuilt from literals here: those numbers already live
+    /// on the legacy rig. A missing entry falls back to [`DirectionalLight::default`].
     fn default() -> Self {
+        let lights = crate::extraction::RenderLights::default().lights;
         Self {
-            key: DirectionalLight::default(),
-            fill: DirectionalLight {
-                direction: UnitVec3::normalize(Vec3::new(-0.5, 0.5, -0.5)).unwrap_or(UnitVec3::Y),
-                illuminance: Self::DEFAULT_FILL_ILLUMINANCE,
-                color: Color::linear_rgb(0.8, 0.8, 1.0),
-                shadow: ShadowCast::Disabled,
-            },
+            key: lights
+                .first()
+                .and_then(DirectionalLight::from_light_desc)
+                .unwrap_or_default(),
+            fill: lights
+                .get(1)
+                .and_then(DirectionalLight::from_light_desc)
+                .unwrap_or_default(),
         }
     }
 }
