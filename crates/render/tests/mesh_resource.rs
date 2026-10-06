@@ -36,6 +36,7 @@ fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
                     base_color: [0.8, 0.2, 0.2],
                     roughness: Clamped01::new(0.4),
                     emission: [0.0, 0.0, 0.0],
+                    metallic: ornis_core::Metallic::new(0.0),
                 },
             })
             .collect(),

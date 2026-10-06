@@ -1531,6 +1531,40 @@ mod tests {
     }
 
     #[test]
+    fn metallic_factor_point_three_is_preserved_with_its_texture() {
+        // The factor is a number on the loaded material. The
+        // metallic-roughness image (B = metallic) stays bound beside it.
+        let mut fixture = triangle();
+        fixture.material = Some(FixtureMaterial {
+            base_color: [0.2, 0.4, 0.6, 1.0],
+            metallic: 0.3,
+            roughness: 0.55,
+            emission: [0.2, 0.0, 0.1],
+        });
+        fixture.metallic_roughness_texture = Some(0);
+        fixture.images = vec![crate::fixtures::FixtureImage {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 128, 64, 255],
+            encoding: crate::fixtures::FixtureEncoding::Png,
+            storage: crate::fixtures::FixtureImageStorage::BufferView,
+            mime_override: None,
+        }];
+        let scene = load_slice(&build_glb(&fixture)).expect("partial metal parses");
+        let material = &scene.primitives[0].material;
+        assert!((material.metallic - 0.3).abs() < f32::EPSILON);
+        assert_eq!(material.base_color, [0.2, 0.4, 0.6]);
+        assert!((material.roughness - 0.55).abs() < f32::EPSILON);
+        assert_eq!(material.emission, [0.2, 0.0, 0.1]);
+        assert!(!material.is_metallic(), "0.3 is under the legacy cut");
+        let image = material
+            .metallic_roughness_texture
+            .as_ref()
+            .expect("metallic-roughness still bound");
+        assert_eq!(image.pixels, vec![0, 128, 64, 255]);
+    }
+
+    #[test]
     fn into_custom_drops_attributes() {
         let scene = load_triangle();
         let (positions, indices) = scene.primitives[0].mesh.clone().into_custom();

@@ -43,6 +43,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
             base_color,
             roughness,
             emission,
+            ..
         } => {
             let mut mat = OpenPBRMaterial::dielectric();
             mat.base.color_rgb(*base_color);
@@ -54,6 +55,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
             base_color,
             roughness,
             emission,
+            ..
         } => {
             let mut mat = OpenPBRMaterial::metal();
             mat.base.color_rgb(*base_color);
@@ -66,6 +68,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
             coat_weight,
             coat_roughness,
             emission,
+            ..
         } => {
             let mut mat = OpenPBRMaterial::coat();
             mat.base.color_rgb(*base_color);
@@ -77,6 +80,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
         MaterialDesc::Matte {
             base_color,
             roughness,
+            ..
         } => {
             let mut mat = OpenPBRMaterial::dielectric();
             mat.base.color_rgb(*base_color);
@@ -89,6 +93,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
             base_color,
             roughness,
             ior,
+            ..
         } => {
             let mut mat = OpenPBRMaterial::glass();
             mat.transmission.color_rgb(*base_color);

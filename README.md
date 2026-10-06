@@ -247,7 +247,11 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 `world.load::<Model>(path)` грузит модель, `spawn(ModelSpawn { model, position, .. })`
 возвращает корень иерархии узлов (локальный `Transform` корня — position/rotation/scale,
 `ChildOf`, примитивы — дети узла) или `SpawnModelError`, если хендл не загружен
-или родитель мёртв (мир не меняется).
+или родитель мёртв (мир не меняется). `ModelSpawn.material: None` оставляет
+материал glTF: `metallicFactor` пишется как непрерывный `Metallic` (кламп к `1` — пресет `Metal`, иначе `Dielectric` с этим числом). `Some(Surface)` после конвертации переписывает на каждом
+примитиве только roughness, metalness и specular weight. `set_environment_light`
+пишет явный вес IBL в `RenderLights` (куб не создаёт); пока его не звали, вес
+по-прежнему 0 без куба и 1 с кубом.
 `spawn_scene` — корень RON-сцены. Клип запускается через
 `entity_mut(root).animator()?.play(name)`, окно открывает `ornis::run`
 с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет

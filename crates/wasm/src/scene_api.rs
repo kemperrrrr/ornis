@@ -327,6 +327,10 @@ mod tests {
                 ..
             }
         ));
+        // Old payloads omit `metallic`: Dielectric/Coat stay 0, Metal is 1.
+        assert_eq!(live.scene.entities[0].material.metallic_units().get(), 0.0);
+        assert_eq!(live.scene.entities[1].material.metallic_units().get(), 1.0);
+        assert_eq!(live.scene.entities[2].material.metallic_units().get(), 0.0);
         assert!(matches!(
             live.scene.entities[1].mesh,
             MeshDesc::Plane { size } if size.map(PositiveF32::get) == [3.0, 5.0]
@@ -373,6 +377,7 @@ mod tests {
             base_color: [0.8, 0.2, 0.2],
             roughness: Clamped01::new(0.4),
             emission: [2.0, 1.0, 0.5],
+            metallic: ornis_core::Metallic::new(0.0),
         })
         .expect("material serializes");
         let payload = format!(
@@ -395,6 +400,21 @@ mod tests {
             );
         };
         assert_eq!(*emission, [2.0, 1.0, 0.5]);
+        assert_eq!(live.scene.entities[0].material.metallic_units().get(), 0.0);
+    }
+
+    #[test]
+    fn metallic_factor_survives_json_transport() {
+        let material = MaterialDesc::Dielectric {
+            base_color: [0.2, 0.4, 0.6],
+            roughness: Clamped01::new(0.4),
+            emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(0.3),
+        };
+        let json = serde_json::to_string(&material).expect("serialize");
+        let back: MaterialDesc = serde_json::from_str(&json).expect("parse");
+        assert!((back.metallic_units().get() - 0.3).abs() < f32::EPSILON);
+        assert_eq!(json, serde_json::to_string(&back).expect("again"));
     }
 
     #[test]

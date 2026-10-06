@@ -107,6 +107,7 @@ fn spawn_sphere(engine: &mut Engine) -> Entity {
             base_color: [0.5, 0.5, 0.5],
             roughness: Clamped01::new(0.9),
             emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(0.0),
         },
     );
     store.insert_cold(entity, ride_clip(entity));
