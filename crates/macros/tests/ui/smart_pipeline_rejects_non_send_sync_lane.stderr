@@ -10,7 +10,7 @@ note: required because it appears within the type `NotSendSync`
    |
  7 | struct NotSendSync {
    |        ^^^^^^^^^^^
-note: required by a bound in `__ornis_lane_must_be_send_sync`
+note: required by a bound in `integrate_not_send::__ornis_lane_must_be_send_sync`
   --> tests/ui/smart_pipeline_rejects_non_send_sync_lane.rs:11:1
    |
 11 | #[smart_pipeline]
@@ -29,7 +29,7 @@ note: required because it appears within the type `NotSendSync`
    |
  7 | struct NotSendSync {
    |        ^^^^^^^^^^^
-note: required by a bound in `__ornis_lane_must_be_send_sync`
+note: required by a bound in `integrate_not_send::__ornis_lane_must_be_send_sync`
   --> tests/ui/smart_pipeline_rejects_non_send_sync_lane.rs:11:1
    |
 11 | #[smart_pipeline]
@@ -48,38 +48,28 @@ note: required because it appears within the type `NotSendSync`
    |
  7 | struct NotSendSync {
    |        ^^^^^^^^^^^
-note: required by a bound in `ComponentStore::<T>::par_iter_mut`
-  --> $WORKSPACE/crates/core/src/component_store.rs
-   |
-   |     pub fn par_iter_mut(&mut self) -> rayon::slice::IterMut<'_, T>
-   |            ------------ required by a bound in this associated function
-   |     where
-   |         T: Send,
-   |            ^^^^ required by this bound in `ComponentStore::<T>::par_iter_mut`
-   = note: this error originates in the attribute macro `smart_pipeline` (in Nightly builds, run with -Z macro-backtrace for more info)
-
-error[E0599]: the method `for_each` exists for struct `ornis_core::rayon::slice::IterMut<'_, NotSendSync>`, but its trait bounds were not satisfied
+note: required by a bound in `integrate_not_send::__ornis_lane_must_be_send_sync`
   --> tests/ui/smart_pipeline_rejects_non_send_sync_lane.rs:11:1
    |
- 7 | struct NotSendSync {
-   | ------------------ doesn't satisfy `NotSendSync: Send`
-...
 11 | #[smart_pipeline]
-   | ^^^^^^^^^^^^^^^^^ method cannot be called on `ornis_core::rayon::slice::IterMut<'_, NotSendSync>` due to unsatisfied trait bounds
+   | ^^^^^^^^^^^^^^^^^ required by this bound in `__ornis_lane_must_be_send_sync`
+   = note: this error originates in the attribute macro `smart_pipeline` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `*mut u8` cannot be shared between threads safely
+  --> tests/ui/smart_pipeline_rejects_non_send_sync_lane.rs:11:1
    |
-  ::: $CARGO/rayon-$VERSION/src/slice/mod.rs
+11 | #[smart_pipeline]
+   | ^^^^^^^^^^^^^^^^^ `*mut u8` cannot be shared between threads safely
    |
-   | pub struct IterMut<'data, T> {
-   | ---------------------------- doesn't satisfy `_: Iterator` or `_: ParallelIterator`
+   = help: within `NotSendSync`, the trait `Sync` is not implemented for `*mut u8`
+note: required because it appears within the type `NotSendSync`
+  --> tests/ui/smart_pipeline_rejects_non_send_sync_lane.rs:7:8
    |
-   = note: the following trait bounds were not satisfied:
-           `NotSendSync: Send`
-           which is required by `ornis_core::rayon::slice::IterMut<'_, NotSendSync>: ornis_core::rayon::iter::ParallelIterator`
-           `ornis_core::rayon::slice::IterMut<'_, NotSendSync>: Iterator`
-           which is required by `&mut ornis_core::rayon::slice::IterMut<'_, NotSendSync>: Iterator`
-note: the trait `Send` must be implemented
-  --> $RUST/core/src/marker.rs
+ 7 | struct NotSendSync {
+   |        ^^^^^^^^^^^
+note: required by a bound in `integrate_not_send::__ornis_lane_must_be_send_sync`
+  --> tests/ui/smart_pipeline_rejects_non_send_sync_lane.rs:11:1
    |
-   | pub unsafe auto trait Send {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+11 | #[smart_pipeline]
+   | ^^^^^^^^^^^^^^^^^ required by this bound in `__ornis_lane_must_be_send_sync`
    = note: this error originates in the attribute macro `smart_pipeline` (in Nightly builds, run with -Z macro-backtrace for more info)
