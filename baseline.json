@@ -1,22 +1,22 @@
 {
   "version": 2,
-  "quality_score": 0.5172576751424167,
-  "iosp_score": 0.9107991849671723,
+  "quality_score": 0.5202927439123044,
+  "iosp_score": 0.9114805661649068,
   "violations": 394,
-  "total": 6929,
+  "total": 6976,
   "complexity_warnings": 73,
   "magic_number_warnings": 129,
   "nesting_depth_warnings": 19,
   "function_length_warnings": 126,
   "unsafe_warnings": 11,
   "error_handling_warnings": 21,
-  "duplicate_groups": 88,
-  "dead_code_warnings": 421,
+  "duplicate_groups": 87,
+  "dead_code_warnings": 420,
   "dead_type_warnings": 4,
   "fragment_groups": 652,
-  "boilerplate_warnings": 317,
+  "boilerplate_warnings": 324,
   "srp_struct_warnings": 23,
-  "srp_module_warnings": 95,
+  "srp_module_warnings": 94,
   "wildcard_import_warnings": 27,
   "sdp_violations": 0,
   "coupling_warnings": 0,
@@ -28,37 +28,57 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 24,
-  "total_findings": 2802,
+  "total_findings": 2805,
   "violation_details": [
     {
-      "name": "showcase_engine",
-      "file": "src/main.rs",
-      "line": 95
+      "name": "EventLog::push",
+      "file": "crates/editor-backend/src/remote.rs",
+      "line": 253
     },
     {
-      "name": "GpuLanes::execute",
-      "file": "crates/wgpu_backend/src/gpu_lanes.rs",
-      "line": 68
+      "name": "EventLog::after",
+      "file": "crates/editor-backend/src/remote.rs",
+      "line": 262
     },
     {
-      "name": "AutoProfiler::load_or_calibrate",
-      "file": "crates/wgpu_backend/src/profiler.rs",
-      "line": 59
+      "name": "serve",
+      "file": "crates/editor-backend/src/remote.rs",
+      "line": 288
     },
     {
-      "name": "set_rigid_field",
-      "file": "crates/app/src/sync_harness.rs",
-      "line": 152
+      "name": "serve_events_stream",
+      "file": "crates/editor-backend/src/remote.rs",
+      "line": 639
+    },
+    {
+      "name": "push_pending",
+      "file": "crates/editor-backend/src/remote.rs",
+      "line": 759
+    },
+    {
+      "name": "route_request",
+      "file": "crates/editor-backend/src/remote.rs",
+      "line": 1256
+    },
+    {
+      "name": "setup",
+      "file": "crates/core/benches/store_bench.rs",
+      "line": 8
+    },
+    {
+      "name": "GlobalTransform::to_local",
+      "file": "crates/core/src/hierarchy.rs",
+      "line": 188
+    },
+    {
+      "name": "Color::hex",
+      "file": "crates/core/src/units/color.rs",
+      "line": 140
     },
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
       "line": 313
-    },
-    {
-      "name": "install_object_animation",
-      "file": "crates/app/src/lib.rs",
-      "line": 104
     },
     {
       "name": "PhysicsRuntime::sync_out",
@@ -71,74 +91,44 @@
       "line": 322
     },
     {
-      "name": "print_expr",
-      "file": "crates/shader-lang/src/writer.rs",
-      "line": 133
+      "name": "install_object_animation",
+      "file": "crates/app/src/lib.rs",
+      "line": 104
     },
     {
-      "name": "print_stmt",
-      "file": "crates/shader-lang/src/writer.rs",
-      "line": 194
+      "name": "set_rigid_field",
+      "file": "crates/app/src/sync_harness.rs",
+      "line": 152
     },
     {
-      "name": "print_if",
-      "file": "crates/shader-lang/src/writer.rs",
-      "line": 274
+      "name": "EditableMesh::poll_exact",
+      "file": "crates/mesh-editor/src/editable.rs",
+      "line": 291
     },
     {
-      "name": "assemble_clips",
-      "file": "crates/gltf/src/anim.rs",
-      "line": 218
+      "name": "RefitBudget::decide",
+      "file": "crates/mesh-editor/src/refit.rs",
+      "line": 82
     },
     {
-      "name": "read_channel",
-      "file": "crates/gltf/src/anim.rs",
-      "line": 462
+      "name": "ExactWorker::try_recv",
+      "file": "crates/mesh-editor/src/exact.rs",
+      "line": 329
     },
     {
-      "name": "make_vec_track",
-      "file": "crates/gltf/src/anim.rs",
-      "line": 668
+      "name": "pool_loop",
+      "file": "crates/mesh-editor/src/exact.rs",
+      "line": 354
     },
     {
-      "name": "make_quat_track",
-      "file": "crates/gltf/src/anim.rs",
-      "line": 677
+      "name": "run_job",
+      "file": "crates/mesh-editor/src/exact.rs",
+      "line": 395
     },
     {
-      "name": "import_gltf",
-      "file": "crates/gltf/src/import.rs",
-      "line": 191
-    },
-    {
-      "name": "pick_closest_with_epsilon",
-      "file": "crates/editor/src/picking.rs",
-      "line": 536
-    },
-    {
-      "name": "intersect_entity",
-      "file": "crates/editor/src/picking.rs",
-      "line": 575
-    },
-    {
-      "name": "cylinder_triangles",
-      "file": "crates/editor/src/picking.rs",
-      "line": 739
-    },
-    {
-      "name": "setup",
-      "file": "crates/core/benches/store_bench.rs",
-      "line": 8
-    },
-    {
-      "name": "Color::hex",
-      "file": "crates/core/src/units/color.rs",
-      "line": 140
-    },
-    {
-      "name": "GlobalTransform::to_local",
-      "file": "crates/core/src/hierarchy.rs",
-      "line": 188
+      "name": "bevel_all",
+      "file": "crates/mesh-editor/src/exact.rs",
+      "line": 422
     },
     {
       "name": "main",
@@ -146,29 +136,19 @@
       "line": 81
     },
     {
-      "name": "AssetServer::load",
-      "file": "crates/assets/src/server.rs",
-      "line": 244
+      "name": "GameApp::process_remote_commands",
+      "file": "crates/runner/src/lib.rs",
+      "line": 356
     },
     {
-      "name": "AssetError::from",
-      "file": "crates/assets/src/error.rs",
-      "line": 228
+      "name": "GameApp::window_event",
+      "file": "crates/runner/src/lib.rs",
+      "line": 521
     },
     {
-      "name": "LightDesc::point_units",
-      "file": "crates/assets/src/scene.rs",
-      "line": 620
-    },
-    {
-      "name": "LightDesc::spot_units",
-      "file": "crates/assets/src/scene.rs",
-      "line": 647
-    },
-    {
-      "name": "CameraDesc::try_new_units",
-      "file": "crates/assets/src/scene.rs",
-      "line": 749
+      "name": "GameApp::about_to_wait",
+      "file": "crates/runner/src/lib.rs",
+      "line": 651
     },
     {
       "name": "bench_recording",
@@ -176,29 +156,64 @@
       "line": 79
     },
     {
-      "name": "extract_render_data_with_stats",
-      "file": "crates/render/src/extraction.rs",
-      "line": 567
+      "name": "RenderSubmit::run",
+      "file": "crates/render/src/gpu_resources.rs",
+      "line": 309
     },
     {
-      "name": "skinned_tangent",
-      "file": "crates/render/src/extraction.rs",
-      "line": 1157
+      "name": "build_lighting_uniform",
+      "file": "crates/render/src/renderer.rs",
+      "line": 1535
     },
     {
-      "name": "OrbitCamera::position",
-      "file": "crates/render/src/camera.rs",
-      "line": 101
+      "name": "Renderer3D::create_forward_pass",
+      "file": "crates/render/src/renderer.rs",
+      "line": 3361
+    },
+    {
+      "name": "Renderer3D::set_lights_full",
+      "file": "crates/render/src/renderer.rs",
+      "line": 4298
+    },
+    {
+      "name": "Renderer3D::ensure_instance_capacity",
+      "file": "crates/render/src/renderer.rs",
+      "line": 4485
+    },
+    {
+      "name": "Renderer3D::ensure_material_capacity",
+      "file": "crates/render/src/renderer.rs",
+      "line": 4505
+    },
+    {
+      "name": "Renderer3D::ensure_palette_capacity",
+      "file": "crates/render/src/renderer.rs",
+      "line": 4595
+    },
+    {
+      "name": "Renderer3D::stage_custom_meshes",
+      "file": "crates/render/src/renderer.rs",
+      "line": 4643
+    },
+    {
+      "name": "Renderer3D::upload_skin_palettes",
+      "file": "crates/render/src/renderer.rs",
+      "line": 4714
+    },
+    {
+      "name": "Renderer3D::render_forward_textured",
+      "file": "crates/render/src/renderer.rs",
+      "line": 5484
+    },
+    {
+      "name": "RenderFrame3D::build",
+      "file": "crates/render/src/frame_exec.rs",
+      "line": 665
     },
     {
       "name": "fs_main",
       "file": "crates/render/src/shaders/pbr_generated.rs",
       "line": 108
-    },
-    {
-      "name": "fs_main_textured",
-      "file": "crates/render/src/shaders/material_textures.rs",
-      "line": 276
     },
     {
       "name": "fs_main",
@@ -271,59 +286,274 @@
       "line": 72
     },
     {
-      "name": "RenderSubmit::run",
-      "file": "crates/render/src/gpu_resources.rs",
+      "name": "fs_main_textured",
+      "file": "crates/render/src/shaders/material_textures.rs",
+      "line": 276
+    },
+    {
+      "name": "skinned_tangent",
+      "file": "crates/render/src/extraction/skinning.rs",
+      "line": 327
+    },
+    {
+      "name": "extract_render_data_with_stats",
+      "file": "crates/render/src/extraction/mod.rs",
       "line": 308
     },
     {
-      "name": "build_lighting_uniform",
-      "file": "crates/render/src/renderer.rs",
-      "line": 1532
+      "name": "OrbitCamera::position",
+      "file": "crates/render/src/camera.rs",
+      "line": 101
     },
     {
-      "name": "Renderer3D::create_forward_pass",
-      "file": "crates/render/src/renderer.rs",
-      "line": 3357
+      "name": "blend_vertex_reference",
+      "file": "crates/animation/src/skinning.rs",
+      "line": 246
     },
     {
-      "name": "Renderer3D::set_lights_full",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4243
+      "name": "KeyTrack<Quat>::sample",
+      "file": "crates/animation/src/lib.rs",
+      "line": 198
     },
     {
-      "name": "Renderer3D::ensure_instance_capacity",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4430
+      "name": "hermite_quat",
+      "file": "crates/animation/src/lib.rs",
+      "line": 252
     },
     {
-      "name": "Renderer3D::ensure_material_capacity",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4450
+      "name": "blend_position",
+      "file": "crates/animation/src/lib.rs",
+      "line": 1563
     },
     {
-      "name": "Renderer3D::ensure_palette_capacity",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4540
+      "name": "blend_normal",
+      "file": "crates/animation/src/lib.rs",
+      "line": 1583
     },
     {
-      "name": "Renderer3D::stage_custom_meshes",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4588
+      "name": "bake_bind_transform",
+      "file": "crates/animation/src/lib.rs",
+      "line": 2266
     },
     {
-      "name": "Renderer3D::upload_skin_palettes",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4659
+      "name": "assemble_clips",
+      "file": "crates/gltf/src/anim.rs",
+      "line": 218
     },
     {
-      "name": "Renderer3D::render_forward_textured",
-      "file": "crates/render/src/renderer.rs",
-      "line": 5429
+      "name": "read_channel",
+      "file": "crates/gltf/src/anim.rs",
+      "line": 462
     },
     {
-      "name": "RenderFrame3D::build",
-      "file": "crates/render/src/frame_exec.rs",
-      "line": 665
+      "name": "make_vec_track",
+      "file": "crates/gltf/src/anim.rs",
+      "line": 668
+    },
+    {
+      "name": "make_quat_track",
+      "file": "crates/gltf/src/anim.rs",
+      "line": 677
+    },
+    {
+      "name": "import_gltf",
+      "file": "crates/gltf/src/import.rs",
+      "line": 191
+    },
+    {
+      "name": "lower_expr",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 21
+    },
+    {
+      "name": "lower_stmt",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 103
+    },
+    {
+      "name": "lower_call",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 227
+    },
+    {
+      "name": "lower_method_call",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 258
+    },
+    {
+      "name": "array_ir_ty",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 390
+    },
+    {
+      "name": "infer_lit_ty",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 426
+    },
+    {
+      "name": "lower_array_repeat",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 454
+    },
+    {
+      "name": "lower_local",
+      "file": "crates/macros/src/wgsl_lower.rs",
+      "line": 565
+    },
+    {
+      "name": "collect_pat_idents",
+      "file": "crates/macros/src/smart_pipeline.rs",
+      "line": 249
+    },
+    {
+      "name": "LoopRewriter<'_>::plan",
+      "file": "crates/macros/src/smart_pipeline.rs",
+      "line": 462
+    },
+    {
+      "name": "parse_binding_base_ty",
+      "file": "crates/macros/src/gpu_pipeline.rs",
+      "line": 109
+    },
+    {
+      "name": "parse_binding_group",
+      "file": "crates/macros/src/gpu_pipeline.rs",
+      "line": 184
+    },
+    {
+      "name": "TypeAnalyzer::visit_type",
+      "file": "crates/macros/src/pipeline_config.rs",
+      "line": 127
+    },
+    {
+      "name": "TypeAnalyzer::type_to_string",
+      "file": "crates/macros/src/pipeline_config.rs",
+      "line": 168
+    },
+    {
+      "name": "TypeAnalyzer::analyze_type",
+      "file": "crates/macros/src/pipeline_config.rs",
+      "line": 289
+    },
+    {
+      "name": "TypeAnalyzer::visit_data_struct",
+      "file": "crates/macros/src/pipeline_config.rs",
+      "line": 330
+    },
+    {
+      "name": "derive",
+      "file": "crates/macros/src/pipeline_config.rs",
+      "line": 707
+    },
+    {
+      "name": "GpuLanes::execute",
+      "file": "crates/wgpu_backend/src/gpu_lanes.rs",
+      "line": 68
+    },
+    {
+      "name": "AutoProfiler::load_or_calibrate",
+      "file": "crates/wgpu_backend/src/profiler.rs",
+      "line": 59
+    },
+    {
+      "name": "player_input",
+      "file": "crates/gameplay/src/lib.rs",
+      "line": 266
+    },
+    {
+      "name": "print_expr",
+      "file": "crates/shader-lang/src/writer.rs",
+      "line": 133
+    },
+    {
+      "name": "print_stmt",
+      "file": "crates/shader-lang/src/writer.rs",
+      "line": 194
+    },
+    {
+      "name": "print_if",
+      "file": "crates/shader-lang/src/writer.rs",
+      "line": 274
+    },
+    {
+      "name": "avbd_step",
+      "file": "crates/physics/examples/avbd_spike.rs",
+      "line": 284
+    },
+    {
+      "name": "build_avbd_scene",
+      "file": "crates/physics/examples/avbd_spike.rs",
+      "line": 510
+    },
+    {
+      "name": "build_si_scene",
+      "file": "crates/physics/examples/avbd_spike.rs",
+      "line": 538
+    },
+    {
+      "name": "main",
+      "file": "crates/physics/examples/avbd_spike.rs",
+      "line": 556
+    },
+    {
+      "name": "setup_body_grid",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 65
+    },
+    {
+      "name": "setup_giant_floor",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 98
+    },
+    {
+      "name": "setup_sparse",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 122
+    },
+    {
+      "name": "setup_islands",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 142
+    },
+    {
+      "name": "setup_heterogeneous",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 167
+    },
+    {
+      "name": "run_probe",
+      "file": "crates/physics/examples/probe_100k.rs",
+      "line": 220
+    },
+    {
+      "name": "setup_islands_grid",
+      "file": "crates/physics/examples/perf_probe.rs",
+      "line": 82
+    },
+    {
+      "name": "setup_big_stack",
+      "file": "crates/physics/examples/perf_probe.rs",
+      "line": 107
+    },
+    {
+      "name": "setup_many_islands",
+      "file": "crates/physics/examples/perf_probe.rs",
+      "line": 124
+    },
+    {
+      "name": "setup_contact_cluster",
+      "file": "crates/physics/examples/perf_probe.rs",
+      "line": 143
+    },
+    {
+      "name": "setup_tall_stack",
+      "file": "crates/physics/examples/perf_probe.rs",
+      "line": 163
+    },
+    {
+      "name": "main",
+      "file": "crates/physics/examples/perf_probe.rs",
+      "line": 375
     },
     {
       "name": "setup_islands_grid",
@@ -351,6 +581,16 @@
       "line": 197
     },
     {
+      "name": "setup_grid",
+      "file": "crates/physics/benches/query_bench.rs",
+      "line": 34
+    },
+    {
+      "name": "setup_mesh_grid",
+      "file": "crates/physics/benches/query_bench.rs",
+      "line": 68
+    },
+    {
       "name": "build_grid",
       "file": "crates/physics/benches/engine_shootout.rs",
       "line": 128
@@ -376,16 +616,6 @@
       "line": 545
     },
     {
-      "name": "setup_grid",
-      "file": "crates/physics/benches/query_bench.rs",
-      "line": 34
-    },
-    {
-      "name": "setup_mesh_grid",
-      "file": "crates/physics/benches/query_bench.rs",
-      "line": 68
-    },
-    {
       "name": "body_for",
       "file": "crates/physics/src/colliders.rs",
       "line": 34
@@ -396,259 +626,44 @@
       "line": 101
     },
     {
-      "name": "QueryPipeline::cast_ray",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 203
+      "name": "avbd_hessian_ang",
+      "file": "crates/physics/src/gpu/avbd.rs",
+      "line": 252
     },
     {
-      "name": "QueryPipeline::intersect_ray",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 234
+      "name": "avbd_diag_solve",
+      "file": "crates/physics/src/gpu/avbd.rs",
+      "line": 271
     },
     {
-      "name": "QueryPipeline::project_point",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 310
+      "name": "avbd_stub_kernel",
+      "file": "crates/physics/src/gpu/avbd.rs",
+      "line": 313
     },
     {
-      "name": "shape_contains",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 437
+      "name": "avbd_row_kernel",
+      "file": "crates/physics/src/gpu/avbd.rs",
+      "line": 581
     },
     {
-      "name": "hull_contains",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 501
-    },
-    {
-      "name": "project_shape",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 622
-    },
-    {
-      "name": "shape_feature",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 631
-    },
-    {
-      "name": "cylinder_feature",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 692
-    },
-    {
-      "name": "cone_feature",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 729
-    },
-    {
-      "name": "compound_feature",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 798
-    },
-    {
-      "name": "QueryTreeView<'a>::try_bind",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 876
-    },
-    {
-      "name": "QueryTreeView<'a>::cast_ray",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 908
-    },
-    {
-      "name": "QueryTreeView<'a>::intersect_ray",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 951
-    },
-    {
-      "name": "QueryTreeView<'a>::cast_shape",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 1093
-    },
-    {
-      "name": "QueryTreeView<'a>::intersect_shape",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 1156
-    },
-    {
-      "name": "SequentialImpulseEngine::query_cast_ray",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 1236
-    },
-    {
-      "name": "SequentialImpulseEngine::query_intersect_ray",
-      "file": "crates/physics/src/query_pipeline.rs",
-      "line": 1256
-    },
-    {
-      "name": "WideBatch::world_inertia",
-      "file": "crates/physics/src/wide.rs",
-      "line": 176
-    },
-    {
-      "name": "WideBatch::build",
-      "file": "crates/physics/src/wide.rs",
-      "line": 214
-    },
-    {
-      "name": "WideBatch::fill_lane",
-      "file": "crates/physics/src/wide.rs",
-      "line": 277
-    },
-    {
-      "name": "WideBatch::solve_iteration",
-      "file": "crates/physics/src/wide.rs",
-      "line": 440
-    },
-    {
-      "name": "WideBatch::solve_lane_rolling",
-      "file": "crates/physics/src/wide.rs",
-      "line": 583
-    },
-    {
-      "name": "AvbdEngine::step_inner",
-      "file": "crates/physics/src/avbd/mod.rs",
-      "line": 846
-    },
-    {
-      "name": "AvbdEngine::step",
-      "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1212
-    },
-    {
-      "name": "AvbdEngine::add_joint",
-      "file": "crates/physics/src/avbd/mod.rs",
-      "line": 1310
-    },
-    {
-      "name": "quat_integrate",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 110
-    },
-    {
-      "name": "quat_diff_vec",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 128
-    },
-    {
-      "name": "inverse_symmetric",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 211
-    },
-    {
-      "name": "mat3_vec",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 243
-    },
-    {
-      "name": "box_corners",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 346
-    },
-    {
-      "name": "shape_min_dimension",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 373
-    },
-    {
-      "name": "AvbdEngine::discover_pair",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 432
-    },
-    {
-      "name": "AvbdEngine::generate_pairs",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 767
-    },
-    {
-      "name": "AvbdEngine::friction_levers",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 987
-    },
-    {
-      "name": "AvbdEngine::row_c_levers",
-      "file": "crates/physics/src/avbd/rows.rs",
-      "line": 1006
-    },
-    {
-      "name": "AvbdEngine::update_gear_mem",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
-      "line": 56
-    },
-    {
-      "name": "AvbdEngine::gear_sides",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
-      "line": 120
-    },
-    {
-      "name": "AvbdEngine::rope_impulse",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "name": "GpuBatch::fill_lane",
+      "file": "crates/physics/src/gpu/si_batches.rs",
       "line": 173
     },
     {
-      "name": "AvbdEngine::motor_impulse",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
-      "line": 237
+      "name": "world_inertia_matrix",
+      "file": "crates/physics/src/gpu/si_batches.rs",
+      "line": 335
     },
     {
-      "name": "AvbdEngine::free_motor_impulse",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
-      "line": 384
+      "name": "pack_single_point_batches",
+      "file": "crates/physics/src/gpu/si_batches.rs",
+      "line": 528
     },
     {
-      "name": "AvbdEngine::ang_inv_wa",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
-      "line": 423
-    },
-    {
-      "name": "AvbdEngine::dual_update",
-      "file": "crates/physics/src/avbd/joints_ext.rs",
-      "line": 464
-    },
-    {
-      "name": "AvbdEngine::solve_body",
-      "file": "crates/physics/src/avbd/assembly.rs",
-      "line": 73
-    },
-    {
-      "name": "cross_inv_inertia",
-      "file": "crates/physics/src/split.rs",
-      "line": 139
-    },
-    {
-      "name": "cross_apply_impulse",
-      "file": "crates/physics/src/split.rs",
-      "line": 227
-    },
-    {
-      "name": "cross_effective_mass",
-      "file": "crates/physics/src/split.rs",
-      "line": 236
-    },
-    {
-      "name": "solve_cross_velocity",
-      "file": "crates/physics/src/split.rs",
-      "line": 248
-    },
-    {
-      "name": "swept_bounds",
-      "file": "crates/physics/src/split.rs",
-      "line": 418
-    },
-    {
-      "name": "SplitState::step",
-      "file": "crates/physics/src/split.rs",
-      "line": 1049
-    },
-    {
-      "name": "SplitState::couple_cross_joints",
-      "file": "crates/physics/src/split.rs",
-      "line": 1215
-    },
-    {
-      "name": "SplitState::couple_velocity",
-      "file": "crates/physics/src/split.rs",
-      "line": 1347
+      "name": "GpuSequentialImpulse::solve",
+      "file": "crates/physics/src/gpu/mod.rs",
+      "line": 583
     },
     {
       "name": "SoftBody::chain",
@@ -679,6 +694,21 @@
       "name": "SoftBody::try_soft_cube_units",
       "file": "crates/physics/src/soft.rs",
       "line": 690
+    },
+    {
+      "name": "RigidBody::try_sphere_units",
+      "file": "crates/physics/src/body.rs",
+      "line": 484
+    },
+    {
+      "name": "RigidBody::try_capsule_units",
+      "file": "crates/physics/src/body.rs",
+      "line": 497
+    },
+    {
+      "name": "RigidBody::try_new_halfspace",
+      "file": "crates/physics/src/body.rs",
+      "line": 873
     },
     {
       "name": "XpbdEngine::substep",
@@ -831,61 +861,6 @@
       "line": 2149
     },
     {
-      "name": "RigidBody::try_sphere_units",
-      "file": "crates/physics/src/body.rs",
-      "line": 484
-    },
-    {
-      "name": "RigidBody::try_capsule_units",
-      "file": "crates/physics/src/body.rs",
-      "line": 497
-    },
-    {
-      "name": "RigidBody::try_new_halfspace",
-      "file": "crates/physics/src/body.rs",
-      "line": 873
-    },
-    {
-      "name": "Capped4<T>::try_from_slice",
-      "file": "crates/physics/src/invariants.rs",
-      "line": 295
-    },
-    {
-      "name": "NonEmpty4<T>::try_from_slice",
-      "file": "crates/physics/src/invariants.rs",
-      "line": 347
-    },
-    {
-      "name": "FeatherstoneEngine::fk_pose",
-      "file": "crates/physics/src/articulated.rs",
-      "line": 693
-    },
-    {
-      "name": "FeatherstoneEngine::xup",
-      "file": "crates/physics/src/articulated.rs",
-      "line": 723
-    },
-    {
-      "name": "FeatherstoneEngine::aba",
-      "file": "crates/physics/src/articulated.rs",
-      "line": 783
-    },
-    {
-      "name": "FeatherstoneEngine::integrate",
-      "file": "crates/physics/src/articulated.rs",
-      "line": 1019
-    },
-    {
-      "name": "integrate_quat",
-      "file": "crates/physics/src/articulated.rs",
-      "line": 1214
-    },
-    {
-      "name": "FeatherstoneEngine::step",
-      "file": "crates/physics/src/articulated.rs",
-      "line": 1240
-    },
-    {
       "name": "Engine::set_solver_kind",
       "file": "crates/physics/src/lib.rs",
       "line": 424
@@ -946,59 +921,44 @@
       "line": 1534
     },
     {
-      "name": "GpuSequentialImpulse::solve",
-      "file": "crates/physics/src/gpu/mod.rs",
-      "line": 583
+      "name": "FeatherstoneEngine::fk_pose",
+      "file": "crates/physics/src/articulated.rs",
+      "line": 693
     },
     {
-      "name": "GpuBatch::fill_lane",
-      "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 173
+      "name": "FeatherstoneEngine::xup",
+      "file": "crates/physics/src/articulated.rs",
+      "line": 723
     },
     {
-      "name": "world_inertia_matrix",
-      "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 335
+      "name": "FeatherstoneEngine::aba",
+      "file": "crates/physics/src/articulated.rs",
+      "line": 783
     },
     {
-      "name": "pack_single_point_batches",
-      "file": "crates/physics/src/gpu/si_batches.rs",
-      "line": 528
+      "name": "FeatherstoneEngine::integrate",
+      "file": "crates/physics/src/articulated.rs",
+      "line": 1019
     },
     {
-      "name": "avbd_hessian_ang",
-      "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 252
+      "name": "integrate_quat",
+      "file": "crates/physics/src/articulated.rs",
+      "line": 1214
     },
     {
-      "name": "avbd_diag_solve",
-      "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 271
+      "name": "FeatherstoneEngine::step",
+      "file": "crates/physics/src/articulated.rs",
+      "line": 1240
     },
     {
-      "name": "avbd_stub_kernel",
-      "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 313
+      "name": "Capped4<T>::try_from_slice",
+      "file": "crates/physics/src/invariants.rs",
+      "line": 295
     },
     {
-      "name": "avbd_row_kernel",
-      "file": "crates/physics/src/gpu/avbd.rs",
-      "line": 581
-    },
-    {
-      "name": "MotorModel::combine_coefficients",
-      "file": "crates/physics/src/joint.rs",
-      "line": 907
-    },
-    {
-      "name": "JointMotor::position",
-      "file": "crates/physics/src/joint.rs",
-      "line": 1024
-    },
-    {
-      "name": "JointMotor::servo",
-      "file": "crates/physics/src/joint.rs",
-      "line": 1047
+      "name": "NonEmpty4<T>::try_from_slice",
+      "file": "crates/physics/src/invariants.rs",
+      "line": 347
     },
     {
       "name": "WorldSnapshot::instantiate_si",
@@ -1016,304 +976,234 @@
       "line": 980
     },
     {
-      "name": "ConvexHull::from_points",
-      "file": "crates/physics/src/collision/hull_tool.rs",
-      "line": 157
+      "name": "MotorModel::combine_coefficients",
+      "file": "crates/physics/src/joint.rs",
+      "line": 907
     },
     {
-      "name": "ConvexHull::cylinder",
-      "file": "crates/physics/src/collision/hull_tool.rs",
-      "line": 199
+      "name": "JointMotor::position",
+      "file": "crates/physics/src/joint.rs",
+      "line": 1024
     },
     {
-      "name": "ConvexHull::cone",
-      "file": "crates/physics/src/collision/hull_tool.rs",
-      "line": 269
+      "name": "JointMotor::servo",
+      "file": "crates/physics/src/joint.rs",
+      "line": 1047
     },
     {
-      "name": "ConvexHull::rock",
-      "file": "crates/physics/src/collision/hull_tool.rs",
-      "line": 325
+      "name": "AvbdEngine::update_gear_mem",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "line": 56
     },
     {
-      "name": "shape_max_extent",
-      "file": "crates/physics/src/collision/broadphase.rs",
-      "line": 895
+      "name": "AvbdEngine::gear_sides",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "line": 120
     },
     {
-      "name": "AdaptiveBroadphase::vote",
-      "file": "crates/physics/src/collision/broadphase.rs",
-      "line": 957
+      "name": "AvbdEngine::rope_impulse",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "line": 173
     },
     {
-      "name": "AdaptiveBroadphase::desired_cell_size",
-      "file": "crates/physics/src/collision/broadphase.rs",
-      "line": 1003
+      "name": "AvbdEngine::motor_impulse",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "line": 237
     },
     {
-      "name": "AdaptiveBroadphase::density_raw",
-      "file": "crates/physics/src/collision/broadphase.rs",
-      "line": 1015
+      "name": "AvbdEngine::free_motor_impulse",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "line": 384
     },
     {
-      "name": "AdaptiveBroadphase::update",
-      "file": "crates/physics/src/collision/broadphase.rs",
-      "line": 1037
-    },
-    {
-      "name": "heightfield_convex",
-      "file": "crates/physics/src/collision/distance.rs",
-      "line": 253
-    },
-    {
-      "name": "refine_witnesses",
-      "file": "crates/physics/src/collision/distance.rs",
-      "line": 364
-    },
-    {
-      "name": "trimesh_convex",
-      "file": "crates/physics/src/collision/distance.rs",
+      "name": "AvbdEngine::ang_inv_wa",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
       "line": 423
     },
     {
-      "name": "compound_distance",
-      "file": "crates/physics/src/collision/distance.rs",
-      "line": 567
+      "name": "AvbdEngine::dual_update",
+      "file": "crates/physics/src/avbd/joints_ext.rs",
+      "line": 464
     },
     {
-      "name": "shape_distance",
-      "file": "crates/physics/src/collision/distance.rs",
-      "line": 654
+      "name": "AvbdEngine::step_inner",
+      "file": "crates/physics/src/avbd/mod.rs",
+      "line": 846
     },
     {
-      "name": "cast_shape",
-      "file": "crates/physics/src/collision/distance.rs",
-      "line": 841
+      "name": "AvbdEngine::step",
+      "file": "crates/physics/src/avbd/mod.rs",
+      "line": 1212
     },
     {
-      "name": "Tree::insert_leaf",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 114
+      "name": "AvbdEngine::add_joint",
+      "file": "crates/physics/src/avbd/mod.rs",
+      "line": 1310
     },
     {
-      "name": "Tree::remove_leaf",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 165
+      "name": "quat_integrate",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 110
     },
     {
-      "name": "Tree::rotate",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 242
+      "name": "quat_diff_vec",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 128
     },
     {
-      "name": "Tree::query",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 288
+      "name": "inverse_symmetric",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 211
     },
     {
-      "name": "Tree::query_recursive",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 294
+      "name": "mat3_vec",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 243
     },
     {
-      "name": "DynamicAabbTree::fat_aabb",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 369
+      "name": "box_corners",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 346
     },
     {
-      "name": "DynamicAabbTree::update",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 393
+      "name": "shape_min_dimension",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 373
     },
     {
-      "name": "DynamicAabbTree::is_fresh_for",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 491
+      "name": "AvbdEngine::discover_pair",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 432
     },
     {
-      "name": "DynamicAabbTree::query_ray_into",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 531
+      "name": "AvbdEngine::generate_pairs",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 767
     },
     {
-      "name": "DynamicAabbTree::sync_proxies",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 716
+      "name": "AvbdEngine::friction_levers",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 987
     },
     {
-      "name": "DynamicAabbTree::refresh_proxies",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 741
+      "name": "AvbdEngine::row_c_levers",
+      "file": "crates/physics/src/avbd/rows.rs",
+      "line": 1006
     },
     {
-      "name": "DynamicAabbTree::insert_new",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 832
+      "name": "AvbdEngine::solve_body",
+      "file": "crates/physics/src/avbd/assembly.rs",
+      "line": 73
     },
     {
-      "name": "DynamicAabbTree::query_dynamic",
-      "file": "crates/physics/src/collision/broadphase_tree.rs",
-      "line": 861
+      "name": "apply_warm_start",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 208
     },
     {
-      "name": "Shape::aabb",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 619
+      "name": "prepare_manifold_state",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 301
     },
     {
-      "name": "Shape::try_inertia",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 713
+      "name": "SequentialImpulseEngine::solve_contacts_velocity_gpu",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 417
     },
     {
-      "name": "Shape::convex_try_inertia",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 752
+      "name": "SequentialImpulseEngine::solve_contacts_velocity",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 521
     },
     {
-      "name": "Shape::inertia",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 840
+      "name": "SequentialImpulseEngine::solve_contacts_position",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 597
     },
     {
-      "name": "Shape::has_gjk_support",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 890
+      "name": "SequentialImpulseEngine::solve_island_velocity",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 791
     },
     {
-      "name": "Shape::closest_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 955
+      "name": "SequentialImpulseEngine::solve_scalar_velocity_step",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 852
     },
     {
-      "name": "halfspace_aabb",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1017
+      "name": "SequentialImpulseEngine::solve_scalar_restitution_step",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 905
     },
     {
-      "name": "compound_try_inertia",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1039
+      "name": "SequentialImpulseEngine::solve_scalar_friction",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 951
     },
     {
-      "name": "closest_compound_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1071
+      "name": "SequentialImpulseEngine::solve_scalar_rolling",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1087
     },
     {
-      "name": "closest_round_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1090
+      "name": "SequentialImpulseEngine::solve_island_position",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1138
     },
     {
-      "name": "closest_box_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1098
+      "name": "prepare_island_states",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1193
     },
     {
-      "name": "closest_cylinder_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1118
+      "name": "run_velocity_iterations",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1230
     },
     {
-      "name": "closest_cone_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1155
+      "name": "tangent_effective_mass",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1311
     },
     {
-      "name": "closest_heightfield_point",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1221
+      "name": "SequentialImpulseEngine::solve_flat_velocity",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1354
     },
     {
-      "name": "ConvexHull::from_vertices",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1304
+      "name": "SequentialImpulseEngine::solve_one_flat_shard",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1400
     },
     {
-      "name": "ConvexHull::aabb",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1380
+      "name": "SequentialImpulseEngine::solve_flat_position",
+      "file": "crates/physics/src/sequential_impulse/contacts.rs",
+      "line": 1509
     },
     {
-      "name": "ConvexHull::try_inertia",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1417
+      "name": "SequentialImpulseEngine::update_sleep",
+      "file": "crates/physics/src/sequential_impulse/islands.rs",
+      "line": 80
     },
     {
-      "name": "ConvexHull::min_extent",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1468
+      "name": "SequentialImpulseEngine::collect_sleep_flags",
+      "file": "crates/physics/src/sequential_impulse/islands.rs",
+      "line": 202
     },
     {
-      "name": "Heightfield::local_extents",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1587
+      "name": "SequentialImpulseEngine::dispatch_islands_velocity",
+      "file": "crates/physics/src/sequential_impulse/islands.rs",
+      "line": 376
     },
     {
-      "name": "Heightfield::local_center",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1597
+      "name": "SequentialImpulseEngine::restore_world",
+      "file": "crates/physics/src/sequential_impulse/mod.rs",
+      "line": 523
     },
     {
-      "name": "Heightfield::aabb",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1620
-    },
-    {
-      "name": "TriMesh::from_triangles",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1646
-    },
-    {
-      "name": "TriMesh::from_indexed",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1737
-    },
-    {
-      "name": "TriMesh::build_bvh",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1793
-    },
-    {
-      "name": "TriMesh::split",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1830
-    },
-    {
-      "name": "TriMesh::aabb",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1891
-    },
-    {
-      "name": "TriMesh::try_inertia",
-      "file": "crates/physics/src/collision/shape.rs",
-      "line": 1941
-    },
-    {
-      "name": "support",
-      "file": "crates/physics/src/collision/gjk.rs",
-      "line": 68
-    },
-    {
-      "name": "minkowski",
-      "file": "crates/physics/src/collision/gjk.rs",
-      "line": 200
-    },
-    {
-      "name": "gjk_separated",
-      "file": "crates/physics/src/collision/gjk.rs",
-      "line": 267
-    },
-    {
-      "name": "epa",
-      "file": "crates/physics/src/collision/gjk.rs",
-      "line": 460
-    },
-    {
-      "name": "convex_distance",
-      "file": "crates/physics/src/collision/gjk.rs",
-      "line": 589
+      "name": "SequentialImpulseEngine::step",
+      "file": "crates/physics/src/sequential_impulse/mod.rs",
+      "line": 1271
     },
     {
       "name": "mul_inv_inertia",
@@ -1359,16 +1249,6 @@
       "name": "commit_active_set",
       "file": "crates/physics/src/sequential_impulse/math.rs",
       "line": 502
-    },
-    {
-      "name": "SequentialImpulseEngine::restore_world",
-      "file": "crates/physics/src/sequential_impulse/mod.rs",
-      "line": 523
-    },
-    {
-      "name": "SequentialImpulseEngine::step",
-      "file": "crates/physics/src/sequential_impulse/mod.rs",
-      "line": 1271
     },
     {
       "name": "shape_min_dimension",
@@ -1454,21 +1334,6 @@
       "name": "raycast_body_hit",
       "file": "crates/physics/src/sequential_impulse/queries.rs",
       "line": 1556
-    },
-    {
-      "name": "SequentialImpulseEngine::update_sleep",
-      "file": "crates/physics/src/sequential_impulse/islands.rs",
-      "line": 80
-    },
-    {
-      "name": "SequentialImpulseEngine::collect_sleep_flags",
-      "file": "crates/physics/src/sequential_impulse/islands.rs",
-      "line": 202
-    },
-    {
-      "name": "SequentialImpulseEngine::dispatch_islands_velocity",
-      "file": "crates/physics/src/sequential_impulse/islands.rs",
-      "line": 376
     },
     {
       "name": "SequentialImpulseEngine::apply_step_budget",
@@ -1636,369 +1501,504 @@
       "line": 1466
     },
     {
-      "name": "apply_warm_start",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 208
+      "name": "WideBatch::world_inertia",
+      "file": "crates/physics/src/wide.rs",
+      "line": 176
     },
     {
-      "name": "prepare_manifold_state",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 301
+      "name": "WideBatch::build",
+      "file": "crates/physics/src/wide.rs",
+      "line": 214
     },
     {
-      "name": "SequentialImpulseEngine::solve_contacts_velocity_gpu",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 417
+      "name": "WideBatch::fill_lane",
+      "file": "crates/physics/src/wide.rs",
+      "line": 277
     },
     {
-      "name": "SequentialImpulseEngine::solve_contacts_velocity",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 521
+      "name": "WideBatch::solve_iteration",
+      "file": "crates/physics/src/wide.rs",
+      "line": 440
     },
     {
-      "name": "SequentialImpulseEngine::solve_contacts_position",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 597
+      "name": "WideBatch::solve_lane_rolling",
+      "file": "crates/physics/src/wide.rs",
+      "line": 583
     },
     {
-      "name": "SequentialImpulseEngine::solve_island_velocity",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 791
+      "name": "cross_inv_inertia",
+      "file": "crates/physics/src/split.rs",
+      "line": 139
     },
     {
-      "name": "SequentialImpulseEngine::solve_scalar_velocity_step",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 852
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_scalar_restitution_step",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 905
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_scalar_friction",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 951
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_scalar_rolling",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1087
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_island_position",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1138
-    },
-    {
-      "name": "prepare_island_states",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1193
-    },
-    {
-      "name": "run_velocity_iterations",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1230
-    },
-    {
-      "name": "tangent_effective_mass",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1311
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_flat_velocity",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1354
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_one_flat_shard",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1400
-    },
-    {
-      "name": "SequentialImpulseEngine::solve_flat_position",
-      "file": "crates/physics/src/sequential_impulse/contacts.rs",
-      "line": 1509
-    },
-    {
-      "name": "avbd_step",
-      "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 284
-    },
-    {
-      "name": "build_avbd_scene",
-      "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 510
-    },
-    {
-      "name": "build_si_scene",
-      "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 538
-    },
-    {
-      "name": "main",
-      "file": "crates/physics/examples/avbd_spike.rs",
-      "line": 556
-    },
-    {
-      "name": "setup_islands_grid",
-      "file": "crates/physics/examples/perf_probe.rs",
-      "line": 82
-    },
-    {
-      "name": "setup_big_stack",
-      "file": "crates/physics/examples/perf_probe.rs",
-      "line": 107
-    },
-    {
-      "name": "setup_many_islands",
-      "file": "crates/physics/examples/perf_probe.rs",
-      "line": 124
-    },
-    {
-      "name": "setup_contact_cluster",
-      "file": "crates/physics/examples/perf_probe.rs",
-      "line": 143
-    },
-    {
-      "name": "setup_tall_stack",
-      "file": "crates/physics/examples/perf_probe.rs",
-      "line": 163
-    },
-    {
-      "name": "main",
-      "file": "crates/physics/examples/perf_probe.rs",
-      "line": 375
-    },
-    {
-      "name": "setup_body_grid",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 65
-    },
-    {
-      "name": "setup_giant_floor",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 98
-    },
-    {
-      "name": "setup_sparse",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 122
-    },
-    {
-      "name": "setup_islands",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 142
-    },
-    {
-      "name": "setup_heterogeneous",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 167
-    },
-    {
-      "name": "run_probe",
-      "file": "crates/physics/examples/probe_100k.rs",
-      "line": 220
-    },
-    {
-      "name": "ExactWorker::try_recv",
-      "file": "crates/mesh-editor/src/exact.rs",
-      "line": 329
-    },
-    {
-      "name": "pool_loop",
-      "file": "crates/mesh-editor/src/exact.rs",
-      "line": 354
-    },
-    {
-      "name": "run_job",
-      "file": "crates/mesh-editor/src/exact.rs",
-      "line": 395
-    },
-    {
-      "name": "bevel_all",
-      "file": "crates/mesh-editor/src/exact.rs",
-      "line": 422
-    },
-    {
-      "name": "EditableMesh::poll_exact",
-      "file": "crates/mesh-editor/src/editable.rs",
-      "line": 291
-    },
-    {
-      "name": "RefitBudget::decide",
-      "file": "crates/mesh-editor/src/refit.rs",
-      "line": 82
-    },
-    {
-      "name": "GameApp::process_remote_commands",
-      "file": "crates/runner/src/lib.rs",
-      "line": 356
-    },
-    {
-      "name": "GameApp::window_event",
-      "file": "crates/runner/src/lib.rs",
-      "line": 521
-    },
-    {
-      "name": "GameApp::about_to_wait",
-      "file": "crates/runner/src/lib.rs",
-      "line": 651
-    },
-    {
-      "name": "lower_expr",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 21
-    },
-    {
-      "name": "lower_stmt",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 103
-    },
-    {
-      "name": "lower_call",
-      "file": "crates/macros/src/wgsl_lower.rs",
+      "name": "cross_apply_impulse",
+      "file": "crates/physics/src/split.rs",
       "line": 227
     },
     {
-      "name": "lower_method_call",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 258
+      "name": "cross_effective_mass",
+      "file": "crates/physics/src/split.rs",
+      "line": 236
     },
     {
-      "name": "array_ir_ty",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 390
+      "name": "solve_cross_velocity",
+      "file": "crates/physics/src/split.rs",
+      "line": 248
     },
     {
-      "name": "infer_lit_ty",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 426
+      "name": "swept_bounds",
+      "file": "crates/physics/src/split.rs",
+      "line": 418
     },
     {
-      "name": "lower_array_repeat",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 454
+      "name": "SplitState::step",
+      "file": "crates/physics/src/split.rs",
+      "line": 1049
     },
     {
-      "name": "lower_local",
-      "file": "crates/macros/src/wgsl_lower.rs",
-      "line": 565
+      "name": "SplitState::couple_cross_joints",
+      "file": "crates/physics/src/split.rs",
+      "line": 1215
     },
     {
-      "name": "parse_binding_base_ty",
-      "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 109
+      "name": "SplitState::couple_velocity",
+      "file": "crates/physics/src/split.rs",
+      "line": 1347
     },
     {
-      "name": "parse_binding_group",
-      "file": "crates/macros/src/gpu_pipeline.rs",
-      "line": 184
-    },
-    {
-      "name": "collect_pat_idents",
-      "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 249
-    },
-    {
-      "name": "LoopRewriter<'_>::plan",
-      "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 462
-    },
-    {
-      "name": "TypeAnalyzer::visit_type",
-      "file": "crates/macros/src/pipeline_config.rs",
-      "line": 127
-    },
-    {
-      "name": "TypeAnalyzer::type_to_string",
-      "file": "crates/macros/src/pipeline_config.rs",
-      "line": 168
-    },
-    {
-      "name": "TypeAnalyzer::analyze_type",
-      "file": "crates/macros/src/pipeline_config.rs",
-      "line": 289
-    },
-    {
-      "name": "TypeAnalyzer::visit_data_struct",
-      "file": "crates/macros/src/pipeline_config.rs",
-      "line": 330
-    },
-    {
-      "name": "derive",
-      "file": "crates/macros/src/pipeline_config.rs",
-      "line": 707
-    },
-    {
-      "name": "player_input",
-      "file": "crates/gameplay/src/lib.rs",
-      "line": 266
-    },
-    {
-      "name": "KeyTrack<Quat>::sample",
-      "file": "crates/animation/src/lib.rs",
-      "line": 198
-    },
-    {
-      "name": "hermite_quat",
-      "file": "crates/animation/src/lib.rs",
-      "line": 252
-    },
-    {
-      "name": "blend_position",
-      "file": "crates/animation/src/lib.rs",
-      "line": 1563
-    },
-    {
-      "name": "blend_normal",
-      "file": "crates/animation/src/lib.rs",
-      "line": 1583
-    },
-    {
-      "name": "bake_bind_transform",
-      "file": "crates/animation/src/lib.rs",
-      "line": 2266
-    },
-    {
-      "name": "blend_vertex_reference",
-      "file": "crates/animation/src/skinning.rs",
-      "line": 246
-    },
-    {
-      "name": "EventLog::push",
-      "file": "crates/editor-backend/src/remote.rs",
+      "name": "heightfield_convex",
+      "file": "crates/physics/src/collision/distance.rs",
       "line": 253
     },
     {
-      "name": "EventLog::after",
-      "file": "crates/editor-backend/src/remote.rs",
-      "line": 262
+      "name": "refine_witnesses",
+      "file": "crates/physics/src/collision/distance.rs",
+      "line": 364
     },
     {
-      "name": "serve",
-      "file": "crates/editor-backend/src/remote.rs",
+      "name": "trimesh_convex",
+      "file": "crates/physics/src/collision/distance.rs",
+      "line": 423
+    },
+    {
+      "name": "compound_distance",
+      "file": "crates/physics/src/collision/distance.rs",
+      "line": 567
+    },
+    {
+      "name": "shape_distance",
+      "file": "crates/physics/src/collision/distance.rs",
+      "line": 654
+    },
+    {
+      "name": "cast_shape",
+      "file": "crates/physics/src/collision/distance.rs",
+      "line": 841
+    },
+    {
+      "name": "shape_max_extent",
+      "file": "crates/physics/src/collision/broadphase.rs",
+      "line": 895
+    },
+    {
+      "name": "AdaptiveBroadphase::vote",
+      "file": "crates/physics/src/collision/broadphase.rs",
+      "line": 957
+    },
+    {
+      "name": "AdaptiveBroadphase::desired_cell_size",
+      "file": "crates/physics/src/collision/broadphase.rs",
+      "line": 1003
+    },
+    {
+      "name": "AdaptiveBroadphase::density_raw",
+      "file": "crates/physics/src/collision/broadphase.rs",
+      "line": 1015
+    },
+    {
+      "name": "AdaptiveBroadphase::update",
+      "file": "crates/physics/src/collision/broadphase.rs",
+      "line": 1037
+    },
+    {
+      "name": "support",
+      "file": "crates/physics/src/collision/gjk.rs",
+      "line": 68
+    },
+    {
+      "name": "minkowski",
+      "file": "crates/physics/src/collision/gjk.rs",
+      "line": 200
+    },
+    {
+      "name": "gjk_separated",
+      "file": "crates/physics/src/collision/gjk.rs",
+      "line": 267
+    },
+    {
+      "name": "epa",
+      "file": "crates/physics/src/collision/gjk.rs",
+      "line": 460
+    },
+    {
+      "name": "convex_distance",
+      "file": "crates/physics/src/collision/gjk.rs",
+      "line": 589
+    },
+    {
+      "name": "Shape::aabb",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 619
+    },
+    {
+      "name": "Shape::try_inertia",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 713
+    },
+    {
+      "name": "Shape::convex_try_inertia",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 752
+    },
+    {
+      "name": "Shape::inertia",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 840
+    },
+    {
+      "name": "Shape::has_gjk_support",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 890
+    },
+    {
+      "name": "Shape::closest_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 955
+    },
+    {
+      "name": "halfspace_aabb",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1017
+    },
+    {
+      "name": "compound_try_inertia",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1039
+    },
+    {
+      "name": "closest_compound_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1071
+    },
+    {
+      "name": "closest_round_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1090
+    },
+    {
+      "name": "closest_box_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1098
+    },
+    {
+      "name": "closest_cylinder_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1118
+    },
+    {
+      "name": "closest_cone_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1155
+    },
+    {
+      "name": "closest_heightfield_point",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1221
+    },
+    {
+      "name": "ConvexHull::from_vertices",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1304
+    },
+    {
+      "name": "ConvexHull::aabb",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1380
+    },
+    {
+      "name": "ConvexHull::try_inertia",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1417
+    },
+    {
+      "name": "ConvexHull::min_extent",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1468
+    },
+    {
+      "name": "Heightfield::local_extents",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1587
+    },
+    {
+      "name": "Heightfield::local_center",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1597
+    },
+    {
+      "name": "Heightfield::aabb",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1620
+    },
+    {
+      "name": "TriMesh::from_triangles",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1646
+    },
+    {
+      "name": "TriMesh::from_indexed",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1737
+    },
+    {
+      "name": "TriMesh::build_bvh",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1793
+    },
+    {
+      "name": "TriMesh::split",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1830
+    },
+    {
+      "name": "TriMesh::aabb",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1891
+    },
+    {
+      "name": "TriMesh::try_inertia",
+      "file": "crates/physics/src/collision/shape.rs",
+      "line": 1941
+    },
+    {
+      "name": "Tree::insert_leaf",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 114
+    },
+    {
+      "name": "Tree::remove_leaf",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 165
+    },
+    {
+      "name": "Tree::rotate",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 242
+    },
+    {
+      "name": "Tree::query",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
       "line": 288
     },
     {
-      "name": "serve_events_stream",
-      "file": "crates/editor-backend/src/remote.rs",
-      "line": 639
+      "name": "Tree::query_recursive",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 294
     },
     {
-      "name": "push_pending",
-      "file": "crates/editor-backend/src/remote.rs",
-      "line": 759
+      "name": "DynamicAabbTree::fat_aabb",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 369
     },
     {
-      "name": "route_request",
-      "file": "crates/editor-backend/src/remote.rs",
+      "name": "DynamicAabbTree::update",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 393
+    },
+    {
+      "name": "DynamicAabbTree::is_fresh_for",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 491
+    },
+    {
+      "name": "DynamicAabbTree::query_ray_into",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 531
+    },
+    {
+      "name": "DynamicAabbTree::sync_proxies",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 716
+    },
+    {
+      "name": "DynamicAabbTree::refresh_proxies",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 741
+    },
+    {
+      "name": "DynamicAabbTree::insert_new",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 832
+    },
+    {
+      "name": "DynamicAabbTree::query_dynamic",
+      "file": "crates/physics/src/collision/broadphase_tree.rs",
+      "line": 861
+    },
+    {
+      "name": "ConvexHull::from_points",
+      "file": "crates/physics/src/collision/hull_tool.rs",
+      "line": 157
+    },
+    {
+      "name": "ConvexHull::cylinder",
+      "file": "crates/physics/src/collision/hull_tool.rs",
+      "line": 199
+    },
+    {
+      "name": "ConvexHull::cone",
+      "file": "crates/physics/src/collision/hull_tool.rs",
+      "line": 269
+    },
+    {
+      "name": "ConvexHull::rock",
+      "file": "crates/physics/src/collision/hull_tool.rs",
+      "line": 325
+    },
+    {
+      "name": "QueryPipeline::cast_ray",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 203
+    },
+    {
+      "name": "QueryPipeline::intersect_ray",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 234
+    },
+    {
+      "name": "QueryPipeline::project_point",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 310
+    },
+    {
+      "name": "shape_contains",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 437
+    },
+    {
+      "name": "hull_contains",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 501
+    },
+    {
+      "name": "project_shape",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 622
+    },
+    {
+      "name": "shape_feature",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 631
+    },
+    {
+      "name": "cylinder_feature",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 692
+    },
+    {
+      "name": "cone_feature",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 729
+    },
+    {
+      "name": "compound_feature",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 798
+    },
+    {
+      "name": "QueryTreeView<'a>::try_bind",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 876
+    },
+    {
+      "name": "QueryTreeView<'a>::cast_ray",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 908
+    },
+    {
+      "name": "QueryTreeView<'a>::intersect_ray",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 951
+    },
+    {
+      "name": "QueryTreeView<'a>::cast_shape",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 1093
+    },
+    {
+      "name": "QueryTreeView<'a>::intersect_shape",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 1156
+    },
+    {
+      "name": "SequentialImpulseEngine::query_cast_ray",
+      "file": "crates/physics/src/query_pipeline.rs",
+      "line": 1236
+    },
+    {
+      "name": "SequentialImpulseEngine::query_intersect_ray",
+      "file": "crates/physics/src/query_pipeline.rs",
       "line": 1256
+    },
+    {
+      "name": "LightDesc::point_units",
+      "file": "crates/assets/src/scene.rs",
+      "line": 667
+    },
+    {
+      "name": "LightDesc::spot_units",
+      "file": "crates/assets/src/scene.rs",
+      "line": 694
+    },
+    {
+      "name": "CameraDesc::try_new_units",
+      "file": "crates/assets/src/scene.rs",
+      "line": 796
+    },
+    {
+      "name": "AssetError::from",
+      "file": "crates/assets/src/error.rs",
+      "line": 228
+    },
+    {
+      "name": "AssetServer::load",
+      "file": "crates/assets/src/server.rs",
+      "line": 244
+    },
+    {
+      "name": "pick_closest_with_epsilon",
+      "file": "crates/editor/src/picking.rs",
+      "line": 536
+    },
+    {
+      "name": "intersect_entity",
+      "file": "crates/editor/src/picking.rs",
+      "line": 575
+    },
+    {
+      "name": "cylinder_triangles",
+      "file": "crates/editor/src/picking.rs",
+      "line": 739
     },
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
       "line": 773
+    },
+    {
+      "name": "showcase_engine",
+      "file": "src/main.rs",
+      "line": 95
     }
   ]
 }
