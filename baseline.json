@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.5165709200055839,
-  "iosp_score": 0.9106170598911071,
+  "quality_score": 0.5172576751424167,
+  "iosp_score": 0.9107991849671723,
   "violations": 394,
-  "total": 6916,
+  "total": 6929,
   "complexity_warnings": 73,
   "magic_number_warnings": 129,
   "nesting_depth_warnings": 19,
@@ -22,13 +22,13 @@
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
-  "tq_no_sut_warnings": 6,
+  "tq_no_sut_warnings": 8,
   "tq_untested_warnings": 155,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 24,
-  "total_findings": 2800,
+  "total_findings": 2802,
   "violation_details": [
     {
       "name": "showcase_engine",
@@ -1898,12 +1898,12 @@
     {
       "name": "collect_pat_idents",
       "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 231
+      "line": 249
     },
     {
       "name": "LoopRewriter<'_>::plan",
       "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 444
+      "line": 462
     },
     {
       "name": "TypeAnalyzer::visit_type",
