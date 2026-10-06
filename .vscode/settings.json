@@ -1,0 +1,22 @@
+{
+  // rust-analyzer: отдельный target + суженный скоуп для большого workspace
+  // (22 крейта, 550 deps, wgpu/naga). Убирает "Blocking waiting for file lock"
+  // и вечный спиннер от `cargo check --workspace --all-targets` на каждый сейв.
+  "rust-analyzer.cargo.targetDir": "target/rust-analyzer",
+  "rust-analyzer.cargo.allTargets": false,
+  "rust-analyzer.check.allTargets": false,
+  "rust-analyzer.check.workspace": false,
+  "rust-analyzer.cachePriming.enable": false,
+  "rust-analyzer.files.exclude": [
+    "target",
+    "mutants.out",
+    "mutants.out.old",
+    ".codegraph"
+  ],
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/mutants.out/**": true,
+    "**/mutants.out.old/**": true,
+    "**/.codegraph/**": true
+  }
+}
