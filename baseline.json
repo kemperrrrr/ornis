@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.5153102617487473,
-  "iosp_score": 0.9107264859940788,
+  "quality_score": 0.5160128371614972,
+  "iosp_score": 0.9108888383723573,
   "violations": 392,
-  "total": 6896,
+  "total": 6905,
   "complexity_warnings": 73,
   "magic_number_warnings": 129,
   "nesting_depth_warnings": 19,
@@ -263,7 +263,7 @@
     {
       "name": "RenderSubmit::run",
       "file": "crates/render/src/gpu_resources.rs",
-      "line": 305
+      "line": 308
     },
     {
       "name": "build_lighting_uniform",
