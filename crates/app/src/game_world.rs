@@ -343,6 +343,7 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// after [`Renderer3D::set_image_based_light`](ornis_render::Renderer3D::set_image_based_light).
     /// A stored weight is written into `LightingUniform.ibl_weight` on
     /// submit and is not replaced when a cube is bound or cleared.
+    // qual:api — public entry; in-tree callers are tests until a sample uses it.
     pub fn set_environment_light(&mut self, weight: EnvironmentWeight) {
         self.ensure_render_lights().environment_weight = Some(weight);
     }
@@ -579,14 +580,7 @@ impl Spawn for ModelSpawn {
                 return Err(SpawnModelError::InvalidParent { parent });
             }
         }
-        Ok(spawn_model_hierarchy(
-            world,
-            self.model,
-            &model,
-            self.root_transform(),
-            self.parent,
-            self.material,
-        ))
+        Ok(spawn_model_hierarchy(world, &model, self))
     }
 }
 
@@ -689,11 +683,8 @@ pub struct ModelInstance {
 
 fn spawn_model_hierarchy<Role: SceneRole>(
     world: &mut GameWorld<Role>,
-    handle: ornis_assets::Handle<ornis_assets::Model>,
     model: &ornis_assets::Model,
-    local: ornis_core::Transform,
-    parent: Option<Entity>,
-    surface: Option<Surface>,
+    spawn: ModelSpawn,
 ) -> Entity {
     let (root, skeletal, object) = {
         let store = world
@@ -701,17 +692,17 @@ fn spawn_model_hierarchy<Role: SceneRole>(
             .world_mut()
             .store_mut()
             .expect("engine always carries a store");
-        let root = insert_model_root(store, model, local);
-        if let Some(parent) = parent {
+        let root = insert_model_root(store, model, spawn.root_transform());
+        if let Some(parent) = spawn.parent {
             ornis_core::set_parent(store, root, parent)
                 .expect("parent was alive before the model was spawned");
         }
         let nodes = insert_model_nodes(store, root, model);
-        let primitives = insert_model_primitives(store, &nodes, model, surface);
+        let primitives = insert_model_primitives(store, &nodes, model, spawn.material);
         store.insert(
             root,
             ModelInstance {
-                model: handle,
+                model: spawn.model,
                 nodes: nodes.clone(),
             },
         );

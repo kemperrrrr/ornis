@@ -4093,18 +4093,8 @@ impl Renderer3D {
     /// No explicit weight: `0` with the black placeholder, `1` after a
     /// cube upload. An explicit weight stays across both binds and is
     /// what [`Self::set_lights`] copies into `LightingUniform.ibl_weight`.
-    fn effective_ibl_weight(&self) -> f32 {
-        if self
-            .ibl_weight_explicit
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            f32::from_bits(
-                self.ibl_weight_bits
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            )
-        } else {
-            self.ibl.weight
-        }
+    fn resolve_ibl_weight(explicit: bool, explicit_weight: f32, automatic: f32) -> f32 {
+        if explicit { explicit_weight } else { automatic }
     }
 
     /// Writes `weight` into `LightingUniform.ibl_weight` only.
@@ -4143,7 +4133,15 @@ impl Renderer3D {
     }
 
     fn store_ibl_params(&self, queue: &wgpu::Queue) {
-        let weight = self.effective_ibl_weight();
+        let weight = Self::resolve_ibl_weight(
+            self.ibl_weight_explicit
+                .load(std::sync::atomic::Ordering::Relaxed),
+            f32::from_bits(
+                self.ibl_weight_bits
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            self.ibl.weight,
+        );
         self.ibl_weight_bits
             .store(weight.to_bits(), std::sync::atomic::Ordering::Relaxed);
         self.ibl_max_mip_bits.store(
