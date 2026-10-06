@@ -35,6 +35,7 @@ fn legacy_scene() -> Scene {
                 base_color: [0.9, 0.8, 0.2],
                 roughness: Clamped01::new(0.2),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(1.0),
             },
         }],
         lights: vec![

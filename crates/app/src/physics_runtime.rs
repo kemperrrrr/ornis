@@ -978,6 +978,7 @@ mod tests {
                 base_color: [0.9, 0.8, 0.2],
                 roughness: Clamped01::new(0.2),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(1.0),
             },
         );
 
@@ -1030,6 +1031,7 @@ mod tests {
                 base_color: [0.5, 0.5, 0.5],
                 roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
@@ -1152,6 +1154,7 @@ mod tests {
                 base_color: [0.5, 0.5, 0.5],
                 roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));
@@ -1246,6 +1249,7 @@ mod tests {
                 base_color: [0.5, 0.5, 0.5],
                 roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         install_physics(&mut engine, Vec3::new(0.0, -9.81, 0.0));

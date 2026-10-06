@@ -16,7 +16,7 @@ use glam::{Quat, Vec3};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use ornis_core::units::{
-    Clamped01, Degrees, Ior, LinearRgb, Meters, PositiveF32, UnitQuat, UnitVec3,
+    Clamped01, Degrees, Ior, LinearRgb, Metallic, Meters, PositiveF32, UnitQuat, UnitVec3,
 };
 
 #[cfg(not(feature = "gltf"))]
@@ -309,6 +309,11 @@ impl MeshDesc {
 }
 
 /// Material preset mapped onto the engine's OpenPBR surface model.
+///
+/// Every preset carries a continuous [`Metallic`]. Older files omit the
+/// field: [`MaterialDesc::Metal`] defaults to `1`, every other preset to
+/// `0`. The GPU blends that number; the variant name is the authored
+/// recipe, not a threshold on the factor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MaterialDesc {
     /// Non-metal with specular reflection.
@@ -321,6 +326,10 @@ pub enum MaterialDesc {
         /// Absent in older files — defaults to off.
         #[serde(default)]
         emission: [f32; 3],
+        /// Base metalness in [0, 1]. Absent in older files — this preset
+        /// defaults to `0`.
+        #[serde(default)]
+        metallic: Metallic,
     },
     /// Conductor with tinted specular reflection.
     Metal {
@@ -332,6 +341,10 @@ pub enum MaterialDesc {
         /// Absent in older files — defaults to off.
         #[serde(default)]
         emission: [f32; 3],
+        /// Base metalness in [0, 1]. Absent in older files — this preset
+        /// defaults to `1`.
+        #[serde(default = "default_metal_metallic")]
+        metallic: Metallic,
     },
     /// Base layer with a clearcoat on top.
     Coat {
@@ -345,6 +358,10 @@ pub enum MaterialDesc {
         /// Absent in older files — defaults to off.
         #[serde(default)]
         emission: [f32; 3],
+        /// Base metalness in [0, 1]. Absent in older files — this preset
+        /// defaults to `0`.
+        #[serde(default)]
+        metallic: Metallic,
     },
     /// Rough diffuse-only surface (no specular lobe).
     Matte {
@@ -352,6 +369,10 @@ pub enum MaterialDesc {
         base_color: [f32; 3],
         /// Diffuse roughness in [0, 1].
         roughness: Clamped01,
+        /// Base metalness in [0, 1]. Absent in older files — this preset
+        /// defaults to `0`.
+        #[serde(default)]
+        metallic: Metallic,
     },
     /// Transparent refractive surface (thin-walled glass).
     Glass {
@@ -363,7 +384,16 @@ pub enum MaterialDesc {
         /// defaults to 1.5.
         #[serde(default = "default_glass_ior")]
         ior: Ior,
+        /// Base metalness in [0, 1]. Absent in older files — this preset
+        /// defaults to `0`.
+        #[serde(default)]
+        metallic: Metallic,
     },
+}
+
+/// Metalness of [`MaterialDesc::Metal`] when a file omits `metallic`.
+fn default_metal_metallic() -> Metallic {
+    Metallic::new(1.0)
 }
 
 /// Default [`MaterialDesc::Glass`] index of refraction (crown glass).
@@ -378,6 +408,7 @@ impl MaterialDesc {
             base_color: base_color.as_array(),
             roughness,
             emission: [0.0, 0.0, 0.0],
+            metallic: Metallic::new(0.0),
         }
     }
 
@@ -387,6 +418,7 @@ impl MaterialDesc {
             base_color: base_color.as_array(),
             roughness,
             emission: [0.0, 0.0, 0.0],
+            metallic: default_metal_metallic(),
         }
     }
 
@@ -395,6 +427,7 @@ impl MaterialDesc {
         Self::Matte {
             base_color: base_color.as_array(),
             roughness,
+            metallic: Metallic::new(0.0),
         }
     }
 
@@ -409,6 +442,7 @@ impl MaterialDesc {
             coat_weight,
             coat_roughness,
             emission: [0.0, 0.0, 0.0],
+            metallic: Metallic::new(0.0),
         }
     }
 
@@ -419,6 +453,7 @@ impl MaterialDesc {
             base_color: base_color.as_array(),
             roughness,
             ior,
+            metallic: Metallic::new(0.0),
         }
     }
 
@@ -442,6 +477,18 @@ impl MaterialDesc {
             | Self::Matte { roughness, .. }
             | Self::Glass { roughness, .. } => *roughness,
             Self::Coat { coat_roughness, .. } => *coat_roughness,
+        }
+    }
+
+    /// Base metalness. Files that omit the field load as `1` for
+    /// [`MaterialDesc::Metal`] and `0` for every other preset.
+    pub fn metallic_units(&self) -> Metallic {
+        match self {
+            Self::Dielectric { metallic, .. }
+            | Self::Metal { metallic, .. }
+            | Self::Coat { metallic, .. }
+            | Self::Matte { metallic, .. }
+            | Self::Glass { metallic, .. } => *metallic,
         }
     }
 
@@ -897,6 +944,7 @@ Scene(
                 base_color,
                 roughness,
                 emission,
+                ..
             } => {
                 assert_eq!(*base_color, [0.5, 0.5, 0.5]);
                 assert_eq!(roughness.get(), 0.9);
@@ -993,6 +1041,55 @@ Scene(
     }
 
     #[test]
+    fn metallic_defaults_from_the_preset_and_round_trips() {
+        // `FULL_SCENE_RON` predates `metallic`. The preset supplies it:
+        // Metal → 1, every other variant → 0.
+        let scene = Scene::from_ron(FULL_SCENE_RON).expect("old ron");
+        assert_eq!(default_metal_metallic().get(), 1.0);
+        assert_eq!(scene.entities[0].material.metallic_units().get(), 0.0);
+        assert_eq!(
+            scene.entities[1].material.metallic_units().get(),
+            default_metal_metallic().get()
+        );
+        assert_eq!(scene.entities[2].material.metallic_units().get(), 0.0);
+
+        let explicit = FULL_SCENE_RON.replace(
+            "Dielectric(base_color: (0.5, 0.5, 0.5), roughness: 0.9)",
+            "Dielectric(base_color: (0.5, 0.5, 0.5), roughness: 0.9, metallic: 0.3)",
+        );
+        let parsed = Scene::from_ron(&explicit).expect("partial metal");
+        assert!((parsed.entities[0].material.metallic_units().get() - 0.3).abs() < f32::EPSILON);
+        let serialized = parsed.to_ron().expect("serialize");
+        let again = Scene::from_ron(&serialized).expect("re-parse");
+        assert_eq!(parsed.entities[0].material, again.entities[0].material);
+        assert_eq!(serialized, again.to_ron().expect("re-serialize"));
+
+        // An explicit factor on Metal overrides the preset default of 1.
+        let metal = FULL_SCENE_RON.replace(
+            "Metal(base_color: (0.9, 0.7, 0.1), roughness: 0.2)",
+            "Metal(base_color: (0.9, 0.7, 0.1), roughness: 0.2, metallic: 0.3)",
+        );
+        let metal_scene = Scene::from_ron(&metal).expect("metal factor");
+        assert!(
+            (metal_scene.entities[1].material.metallic_units().get() - 0.3).abs() < f32::EPSILON
+        );
+
+        let matte = Scene::from_ron(&FULL_SCENE_RON.replace(
+            "Dielectric(base_color: (0.5, 0.5, 0.5), roughness: 0.9)",
+            "Matte(base_color: (0.2, 0.4, 0.6), roughness: 0.7)",
+        ))
+        .expect("old matte");
+        assert_eq!(matte.entities[0].material.metallic_units().get(), 0.0);
+
+        let glass = Scene::from_ron(&FULL_SCENE_RON.replace(
+            "Dielectric(base_color: (0.5, 0.5, 0.5), roughness: 0.9)",
+            "Glass(base_color: (0.9, 0.95, 1.0), roughness: 0.05)",
+        ))
+        .expect("old glass");
+        assert_eq!(glass.entities[0].material.metallic_units().get(), 0.0);
+    }
+
+    #[test]
     fn emission_defaults_to_off_for_old_ron() {
         // `FULL_SCENE_RON` predates `emission`: all three variants must
         // deserialize with zero emission (additive schema change).
@@ -1031,12 +1128,13 @@ Scene(
         );
         let matte = Scene::from_ron(&matte_ron).expect("matte parses");
         assert!(matches!(
-            matte.entities[0].material,
-            MaterialDesc::Matte {
-                base_color: [0.2, 0.4, 0.6],
-                roughness,
-            } if (roughness.get() - 0.7).abs() < f32::EPSILON
-        ));
+                    matte.entities[0].material,
+                    MaterialDesc::Matte {
+                        base_color: [0.2, 0.4, 0.6],
+                        roughness,
+                        ..
+        } if (roughness.get() - 0.7).abs() < f32::EPSILON
+                ));
         let reserialized = matte.to_ron().expect("serialize");
         let reparsed = Scene::from_ron(&reserialized).expect("re-parse");
         assert_eq!(reserialized, reparsed.to_ron().expect("re-serialize"));
@@ -1051,14 +1149,15 @@ Scene(
         );
         let scene = Scene::from_ron(&without_ior).expect("glass parses");
         assert!(matches!(
-            scene.entities[0].material,
-            MaterialDesc::Glass {
-                base_color: [0.9, 0.95, 1.0],
-                roughness,
-                ior,
-            } if (roughness.get() - 0.05).abs() < f32::EPSILON
-                && (ior.get() - 1.5).abs() < f32::EPSILON
-        ));
+                    scene.entities[0].material,
+                    MaterialDesc::Glass {
+                        base_color: [0.9, 0.95, 1.0],
+                        roughness,
+                        ior,
+                        ..
+        } if (roughness.get() - 0.05).abs() < f32::EPSILON
+                        && (ior.get() - 1.5).abs() < f32::EPSILON
+                ));
 
         let with_ior = FULL_SCENE_RON.replace(
             "Dielectric(base_color: (0.5, 0.5, 0.5), roughness: 0.9)",

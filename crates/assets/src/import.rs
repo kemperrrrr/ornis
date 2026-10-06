@@ -44,9 +44,10 @@ fn default_camera() -> CameraDesc {
 /// Every mesh primitive becomes one entity whose transform is
 /// [`Model::world_transform`](ornis_gltf::Model::world_transform) of its
 /// node (the old baked world TRS). The entity name is the node name, or
-/// `mesh_{node}_{ordinal}` when the node is unnamed. Scalar PBR parameters
-/// become `Dielectric`/`Metal` by the loader's metallic threshold. The
-/// result feeds the same replace path as `.ron` scenes.
+/// `mesh_{node}_{ordinal}` when the node is unnamed. Scalar metalness is
+/// the glTF factor: a clamped `1` keeps [`MaterialDesc::Metal`], every
+/// other value is [`MaterialDesc::Dielectric`] carrying that number.
+/// The result feeds the same replace path as `.ron` scenes.
 pub fn scene_from_model(model: &Model) -> Scene {
     Scene {
         name: model.name.clone(),
@@ -99,19 +100,27 @@ fn primitive_name(model: &Model, index: usize, primitive: &ModelPrimitive) -> St
 
 fn material_from_gltf(material: &ornis_gltf::LoadedMaterial) -> MaterialDesc {
     // glTF roughness is already in [0, 1]; the clamp keeps malformed
-    // payloads loadable (same leniency as the `serde` impl).
+    // payloads loadable (same leniency as the `serde` impl). Metalness
+    // uses the same clamp (`Metallic::new`: NaN → 0, outside [0, 1] folds
+    // in). A full metal keeps the authored `Metal` preset — that is the
+    // old edge and glTF's default factor of 1. Every other factor,
+    // including values the old `>= 0.5` switch called metal, stays on
+    // `Dielectric` and keeps the number.
     let roughness = ornis_core::units::Clamped01::new(material.roughness);
-    if material.is_metallic() {
+    let metallic = ornis_core::Metallic::new(material.metallic);
+    if metallic.get() == 1.0 {
         MaterialDesc::Metal {
             base_color: material.base_color,
             roughness,
             emission: material.emission,
+            metallic,
         }
     } else {
         MaterialDesc::Dielectric {
             base_color: material.base_color,
             roughness,
             emission: material.emission,
+            metallic,
         }
     }
 }
@@ -180,7 +189,50 @@ mod tests {
         assert_eq!(entity.transform.scale.to_array(), [2.0, 2.0, 2.0]);
         assert!(matches!(entity.mesh, MeshDesc::Custom { .. }));
         assert!(matches!(entity.material, MaterialDesc::Metal { .. }));
+        assert_eq!(entity.material.metallic_units().get(), 1.0);
         assert!(scene.lights.is_empty());
+    }
+
+    #[test]
+    fn partial_metallic_factor_is_not_snapped() {
+        // 0.3 used to fall under the 0.5 threshold and render as a pure
+        // dielectric. The factor, albedo, roughness and emission all stay.
+        let mut source = material();
+        source.base_color = [0.1, 0.2, 0.3];
+        source.metallic = 0.3;
+        source.roughness = 0.55;
+        source.emission = [0.2, 0.0, 0.1];
+        let desc = material_from_gltf(&source);
+        assert!(matches!(
+            desc,
+            MaterialDesc::Dielectric {
+                emission: [0.2, 0.0, 0.1],
+                ..
+            }
+        ));
+        assert!((desc.metallic_units().get() - 0.3).abs() < f32::EPSILON);
+        assert_eq!(desc.base_color_units().as_array(), [0.1, 0.2, 0.3]);
+        assert!((desc.roughness_units().get() - 0.55).abs() < f32::EPSILON);
+
+        // Above the old threshold, still the factor — not a full metal.
+        source.metallic = 0.9;
+        let above = material_from_gltf(&source);
+        assert!(matches!(above, MaterialDesc::Dielectric { .. }));
+        assert!((above.metallic_units().get() - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn metallic_edges_keep_the_old_presets() {
+        let mut source = material();
+        source.metallic = 0.0;
+        let dielectric = material_from_gltf(&source);
+        assert!(matches!(dielectric, MaterialDesc::Dielectric { .. }));
+        assert_eq!(dielectric.metallic_units().get(), 0.0);
+
+        source.metallic = 1.0;
+        let metal = material_from_gltf(&source);
+        assert!(matches!(metal, MaterialDesc::Metal { .. }));
+        assert_eq!(metal.metallic_units().get(), 1.0);
     }
 
     #[test]

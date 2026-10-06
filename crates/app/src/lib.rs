@@ -362,6 +362,7 @@ mod tests {
                 base_color: [1.0, 0.0, 0.0],
                 roughness: Clamped01::new(0.5),
                 emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(0.0),
             },
         );
         let view = UnifiedView::new(engine.world());

@@ -695,6 +695,7 @@ mod tests {
                 ornis_assets::scene::MaterialDesc::Matte {
                     base_color,
                     roughness,
+                    ..
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::dielectric();
                     m.base.color_rgb(*base_color);
@@ -706,6 +707,7 @@ mod tests {
                     base_color,
                     roughness,
                     ior,
+                    ..
                 } => {
                     let mut m = ornis_core::OpenPBRMaterial::glass();
                     m.transmission.color_rgb(*base_color);
