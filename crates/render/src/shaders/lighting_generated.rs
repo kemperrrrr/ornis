@@ -253,6 +253,8 @@ fn lighting_fragment_kernels() -> String {
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
         math::evaluate_ibl::wgsl_source(),
+        math::evaluate_ibl_specular::wgsl_source(),
+        math::evaluate_ibl_diffuse::wgsl_source(),
     ];
     kernels.join("\n")
 }
@@ -379,6 +381,9 @@ fn shade_lit(
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
+    let mut spec_acc = Vec3::new(0.0, 0.0, 0.0);
+    let mut diff_acc = Vec3::new(0.0, 0.0, 0.0);
+    let mut shadow_vis = 1.0;
     let thin_film_mod = thin_film_weight_mix(
         thin_film_weight,
         thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
@@ -451,14 +456,15 @@ fn shade_lit(
                     shadow_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
                     NDC_TO_UV_HALF - shadow_ndc.y * NDC_TO_UV_HALF,
                 );
-                radiance = radiance
-                    * textureSampleCompare(
-                        shadow_tex,
-                        shadow_sampler,
-                        shadow_uv,
-                        i32(light.params.w),
-                        shadow_ndc.z - SHADOW_REF_BIAS,
-                    );
+                let vis = textureSampleCompare(
+                    shadow_tex,
+                    shadow_sampler,
+                    shadow_uv,
+                    i32(light.params.w),
+                    shadow_ndc.z - SHADOW_REF_BIAS,
+                );
+                radiance = radiance * vis;
+                shadow_vis = min(shadow_vis, vis);
             }
             if is_point > LIGHT_SELECTOR_SPLIT {
                 // Cube sample: the hardware picks the face from the
@@ -472,14 +478,15 @@ fn shade_lit(
                 let denom = far - SHADOW_CUBE_NEAR;
                 let cube_ref =
                     (far / denom) - (SHADOW_CUBE_NEAR * far) / (denom * major) - SHADOW_REF_BIAS;
-                radiance = radiance
-                    * textureSampleCompare(
-                        shadow_cube_tex,
-                        shadow_sampler,
-                        to_frag,
-                        i32(light.params.w),
-                        cube_ref,
-                    );
+                let vis = textureSampleCompare(
+                    shadow_cube_tex,
+                    shadow_sampler,
+                    to_frag,
+                    i32(light.params.w),
+                    cube_ref,
+                );
+                radiance = radiance * vis;
+                shadow_vis = min(shadow_vis, vis);
             }
         }
         let nol = max(dot(n, l), EPS);
@@ -511,6 +518,30 @@ fn shade_lit(
             b,
             thin_film_mod,
         ) * coat_darken;
+        if lighting.debug_view != SHADING_DEBUG_BEAUTY {
+            let spec_lobe = evaluate_base_specular(
+                v,
+                l,
+                h,
+                nov,
+                nol,
+                noh,
+                voh,
+                base_weight,
+                base_color,
+                metalness,
+                specular_weight,
+                specular_roughness,
+                specular_ior,
+                specular_anisotropy,
+                specular_edge_tint,
+                t,
+                b,
+                thin_film_mod,
+            ) * coat_darken;
+            spec_acc = spec_acc + spec_lobe * radiance * nol;
+            diff_acc = diff_acc + (base_bsdf - spec_lobe) * radiance * nol;
+        }
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -621,7 +652,26 @@ fn shade_lit(
         base_color * (1.0 - metalness),
         lighting.ibl_weight,
     );
-    let color = sanitize_hdr(ambient + lo + emission + ibl);
+    let raw = ambient + lo + emission + ibl;
+    let beauty = sanitize_hdr(raw);
+    let mut ibl_spec = Vec3::new(0.0, 0.0, 0.0);
+    if lighting.debug_view == SHADING_DEBUG_IBL_SPECULAR
+        || lighting.debug_view == SHADING_DEBUG_DIFFUSE
+    {
+        ibl_spec = evaluate_ibl_specular(prefiltered.rgb, lut.r, lut.g, f0, lighting.ibl_weight);
+    }
+    let diffuse = diff_acc + ambient + (ibl - ibl_spec);
+    let color = select_shading_debug(
+        lighting.debug_view,
+        beauty,
+        spec_acc,
+        ibl_spec,
+        diffuse,
+        specular_roughness,
+        metalness,
+        shadow_vis,
+        raw,
+    );
     return glam::Vec4::new(color, opacity);
 }
 
