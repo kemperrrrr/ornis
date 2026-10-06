@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "quality_score": 0.5202927439123044,
+  "quality_score": 0.5166000833618463,
   "iosp_score": 0.9114805661649068,
   "violations": 394,
   "total": 6976,
@@ -11,13 +11,13 @@
   "unsafe_warnings": 11,
   "error_handling_warnings": 21,
   "duplicate_groups": 87,
-  "dead_code_warnings": 420,
-  "dead_type_warnings": 4,
+  "dead_code_warnings": 419,
+  "dead_type_warnings": 3,
   "fragment_groups": 652,
   "boilerplate_warnings": 324,
   "srp_struct_warnings": 23,
-  "srp_module_warnings": 94,
-  "wildcard_import_warnings": 27,
+  "srp_module_warnings": 100,
+  "wildcard_import_warnings": 49,
   "sdp_violations": 0,
   "coupling_warnings": 0,
   "coupling_cycles": 0,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 24,
-  "total_findings": 2805,
+  "total_findings": 2831,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -161,49 +161,49 @@
       "line": 309
     },
     {
-      "name": "build_lighting_uniform",
-      "file": "crates/render/src/renderer.rs",
-      "line": 1535
-    },
-    {
-      "name": "Renderer3D::create_forward_pass",
-      "file": "crates/render/src/renderer.rs",
-      "line": 3361
-    },
-    {
-      "name": "Renderer3D::set_lights_full",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4298
+      "name": "Renderer3D::stage_custom_meshes",
+      "file": "crates/render/src/renderer/meshes.rs",
+      "line": 497
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4485
+      "file": "crates/render/src/renderer/buffers.rs",
+      "line": 191
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4505
+      "file": "crates/render/src/renderer/buffers.rs",
+      "line": 211
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4595
-    },
-    {
-      "name": "Renderer3D::stage_custom_meshes",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4643
+      "file": "crates/render/src/renderer/buffers.rs",
+      "line": 301
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
-      "file": "crates/render/src/renderer.rs",
-      "line": 4714
+      "file": "crates/render/src/renderer/buffers.rs",
+      "line": 328
+    },
+    {
+      "name": "build_lighting_uniform",
+      "file": "crates/render/src/renderer/lights.rs",
+      "line": 249
+    },
+    {
+      "name": "Renderer3D::set_lights_full",
+      "file": "crates/render/src/renderer/lights.rs",
+      "line": 477
+    },
+    {
+      "name": "Renderer3D::create_forward_pass",
+      "file": "crates/render/src/renderer/forward.rs",
+      "line": 233
     },
     {
       "name": "Renderer3D::render_forward_textured",
-      "file": "crates/render/src/renderer.rs",
-      "line": 5484
+      "file": "crates/render/src/renderer/forward.rs",
+      "line": 685
     },
     {
       "name": "RenderFrame3D::build",
