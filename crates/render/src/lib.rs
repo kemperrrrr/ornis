@@ -86,7 +86,7 @@ pub use render_backend::{
 pub use renderer::{
     BlendMode, CameraUniform, CompositeInputs, CompositePass, CustomGbufferDraw, FogInputs,
     ForwardPass, GBufferTextures, GbufferTargets, InstanceData, LightingPass, MSAA_SAMPLE_COUNT,
-    MaterialIdx, PerObjectGpu, Renderer3D, SINGLE_SAMPLE_COUNT, StagedCustomMesh,
+    MaterialIdx, PerObjectGpu, Renderer3D, SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh,
     TransparencyError, TransparencyOptions, custom_draw_items, forward_blend_state,
     negotiate_sample_count, normalize_sample_count, sort_by_depth, upload_vertex_rows,
 };

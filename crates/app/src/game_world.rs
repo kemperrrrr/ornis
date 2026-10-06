@@ -1145,10 +1145,16 @@ mod tests {
         let mut world = GameWorld::new();
         let ambient = Color::linear_rgb(0.2, 0.3, 0.4);
         world.set_ambient(ambient);
-        world.spawn(StudioLights::default());
+        let studio = StudioLights::default();
+        world.spawn(studio);
         let rig = render_lights(&world);
         assert_eq!(rig.ambient, ambient);
-        assert_same_lights(&rig.lights, &RenderLights::default().lights);
+        assert_same_lights(
+            &rig.lights,
+            &studio.lights().map(DirectionalLight::to_light_desc),
+        );
+        assert_eq!(studio.key.shadow, ShadowCast::Enabled);
+        assert_eq!(studio.fill.shadow, ShadowCast::Disabled);
 
         world.spawn(DirectionalLight {
             direction: UnitVec3::Y,

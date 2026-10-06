@@ -1577,7 +1577,10 @@ mod tests {
 
     /// Verbatim pre-S2 resource registration — the reference the typed
     /// registration (`register_resource`) has to match bit-for-bit.
-    fn imperative_resources(plan: &mut SystemSet, surface_format: wgpu::TextureFormat) -> FrameIds {
+    fn imperative_resources(
+        plan: &mut SystemSet,
+        _surface_format: wgpu::TextureFormat,
+    ) -> FrameIds {
         let spec = |format| TextureSpec {
             format,
             samples: 1,
@@ -1597,7 +1600,7 @@ mod tests {
             material_params: plan
                 .create_resource("material_params", spec(wgpu::TextureFormat::Rgba16Float)),
             depth: plan.create_resource("depth", spec(wgpu::TextureFormat::Depth32Float)),
-            hdr: plan.create_resource("hdr", spec(surface_format)),
+            hdr: plan.create_resource("hdr", spec(crate::renderer::DEFERRED_HDR_FORMAT)),
             hdr_fwd: plan.create_resource("hdr_fwd", spec(wgpu::TextureFormat::Rgba16Float)),
             target: plan.external_output("target"),
             bloom0: plan.create_resource("bloom0", frac(wgpu::TextureFormat::Rgba16Float, 2)),
@@ -1713,10 +1716,12 @@ mod tests {
 
     #[test]
     fn golden_pool_slots_per_technique() {
-        // Pinned against B1-R7 measurements (surface format Rgba8Unorm so
-        // `hdr` shares the albedo spec group): 9 resources → 7 slots on the
-        // deferred/hybrid path; the bloom cascade adds exactly its three
-        // fraction levels (bloom0/1/2 have distinct TextureSpec keys).
+        // `hdr` is Rgba16Float. Its lifetime overlaps `material_params`
+        // (same spec), so it still takes its own slot: 9 resources → 7
+        // slots on the deferred/hybrid path, same count as when `hdr`
+        // mirrored an `Rgba8Unorm` surface and overlapped albedo. The bloom
+        // cascade adds exactly its three fraction levels. Forward leaves
+        // `hdr` dead.
         assert_eq!(slots_for(Technique::Forward, Bloom::Off), 2);
         assert_eq!(slots_for(Technique::Forward, Bloom::On), 5);
         assert_eq!(slots_for(Technique::Deferred, Bloom::Off), 7);

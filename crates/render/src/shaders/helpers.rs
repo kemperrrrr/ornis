@@ -53,6 +53,34 @@ pub const NDC_TO_UV_HALF: f32 = 0.5;
 pub const SHADOW_CUBE_NEAR: f32 = 0.1;
 /// Split on a 0/1 light selector: at or below this, the light is not a point light.
 pub const LIGHT_SELECTOR_SPLIT: f32 = 0.5;
+/// Screen-space normal variance scale for geometric specular AA (Filament `SIGMA2`).
+pub const SPECULAR_AA_VARIANCE: f32 = 0.15;
+/// Scale from normal variance to the GGX kernel (`2 * variance` in Filament).
+pub const SPECULAR_AA_KERNEL_SCALE: f32 = 2.0;
+/// Cap on the extra GGX kernel geometric specular AA may add (Filament `KAPPA`).
+pub const SPECULAR_AA_KERNEL_CAP: f32 = 0.2;
+/// Bias in the Karis firefly weight `1 / (bias + luma)` used on MSAA edges.
+pub const KARIS_LUMA_BIAS: f32 = 1.0;
+/// Magnitude past which an HDR channel is treated as non-finite and zeroed.
+pub const HDR_FINITE_LIMIT: f32 = 1.0e20;
+/// [`crate::renderer::ShadingDebug::Beauty`].
+pub const SHADING_DEBUG_BEAUTY: u32 = 0;
+/// [`crate::renderer::ShadingDebug::DirectSpecular`].
+pub const SHADING_DEBUG_DIRECT_SPECULAR: u32 = 1;
+/// [`crate::renderer::ShadingDebug::IblSpecular`].
+pub const SHADING_DEBUG_IBL_SPECULAR: u32 = 2;
+/// [`crate::renderer::ShadingDebug::Diffuse`].
+pub const SHADING_DEBUG_DIFFUSE: u32 = 3;
+/// [`crate::renderer::ShadingDebug::Roughness`].
+pub const SHADING_DEBUG_ROUGHNESS: u32 = 4;
+/// [`crate::renderer::ShadingDebug::Metallic`].
+pub const SHADING_DEBUG_METALLIC: u32 = 5;
+/// [`crate::renderer::ShadingDebug::Shadow`].
+pub const SHADING_DEBUG_SHADOW: u32 = 6;
+/// [`crate::renderer::ShadingDebug::Heat`].
+pub const SHADING_DEBUG_HEAT: u32 = 7;
+/// Pre-tonemap luma above which the heat view paints the pixel red.
+pub const SHADING_DEBUG_HOT_LUMA: f32 = 1.0;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
@@ -83,9 +111,31 @@ pub fn wgsl_consts() -> String {
         decl!(NDC_TO_UV_HALF),
         decl!(SHADOW_CUBE_NEAR),
         decl!(LIGHT_SELECTOR_SPLIT),
+        decl!(SPECULAR_AA_VARIANCE),
+        decl!(SPECULAR_AA_KERNEL_SCALE),
+        decl!(SPECULAR_AA_KERNEL_CAP),
+        decl!(KARIS_LUMA_BIAS),
+        decl!(HDR_FINITE_LIMIT),
+        decl!(SHADING_DEBUG_HOT_LUMA),
     ]
     .concat();
-    format!("{floats}{}", msaa_samples_wgsl())
+    macro_rules! decl_u32 {
+        ($name:ident) => {
+            format!("const {}: u32 = {}u;\n", stringify!($name), $name)
+        };
+    }
+    let ints = [
+        decl_u32!(SHADING_DEBUG_BEAUTY),
+        decl_u32!(SHADING_DEBUG_DIRECT_SPECULAR),
+        decl_u32!(SHADING_DEBUG_IBL_SPECULAR),
+        decl_u32!(SHADING_DEBUG_DIFFUSE),
+        decl_u32!(SHADING_DEBUG_ROUGHNESS),
+        decl_u32!(SHADING_DEBUG_METALLIC),
+        decl_u32!(SHADING_DEBUG_SHADOW),
+        decl_u32!(SHADING_DEBUG_HEAT),
+    ]
+    .concat();
+    format!("{floats}{ints}{}", msaa_samples_wgsl())
 }
 
 /// `u32` sample count shared with [`crate::renderer::MSAA_SAMPLE_COUNT`].
@@ -94,6 +144,124 @@ fn msaa_samples_wgsl() -> String {
         "const MSAA_SAMPLES: u32 = {}u;\n",
         crate::renderer::MSAA_SAMPLE_COUNT
     )
+}
+
+/// Geometric specular AA (Kaplanyan / Filament): widen perceptual roughness
+/// by the screen-space variance of `n`, then return a perceptual roughness
+/// the rest of the BRDF squares again. Derivatives must run in uniform
+/// control flow, so callers invoke this before any `discard`.
+#[ornis_macros::wgsl_fn]
+fn specular_aa_roughness(roughness: f32, n: glam::Vec3) -> f32 {
+    let du = dpdx(n);
+    let dv = dpdy(n);
+    let variance = SPECULAR_AA_VARIANCE * (dot(du, du) + dot(dv, dv));
+    let kernel = min(SPECULAR_AA_KERNEL_SCALE * variance, SPECULAR_AA_KERNEL_CAP);
+    let alpha = roughness * roughness;
+    let square = saturate(alpha * alpha + kernel);
+    return sqrt(sqrt(max(square, 0.0)));
+}
+
+/// Zero a non-finite HDR color. Finite highlights stay untouched so ACES
+/// in the composite can compress them; NaN/Inf would otherwise resolve to
+/// white.
+#[ornis_macros::wgsl_fn]
+fn sanitize_hdr(color: glam::Vec3) -> glam::Vec3 {
+    let x_ok = select(
+        0.0,
+        1.0,
+        color.x == color.x && abs(color.x) < HDR_FINITE_LIMIT,
+    );
+    let y_ok = select(
+        0.0,
+        1.0,
+        color.y == color.y && abs(color.y) < HDR_FINITE_LIMIT,
+    );
+    let z_ok = select(
+        0.0,
+        1.0,
+        color.z == color.z && abs(color.z) < HDR_FINITE_LIMIT,
+    );
+    return color * (x_ok * y_ok * z_ok);
+}
+
+/// Base specular lobe `F · D · V`, with Smith `V` already including
+/// `1 / (4 NoV NoL)`. Fresnel is applied once here; the diffuse energy
+/// term uses the same `F`.
+#[ornis_macros::wgsl_fn]
+fn evaluate_base_specular(
+    v: glam::Vec3,
+    l: glam::Vec3,
+    h: glam::Vec3,
+    nov: f32,
+    nol: f32,
+    noh: f32,
+    voh: f32,
+    base_weight: f32,
+    base_color: glam::Vec3,
+    metalness: f32,
+    specular_weight: f32,
+    specular_roughness: f32,
+    specular_ior: f32,
+    specular_anisotropy: f32,
+    specular_edge_tint: glam::Vec3,
+    t: glam::Vec3,
+    b: glam::Vec3,
+    thin_film_mod: glam::Vec3,
+) -> glam::Vec3 {
+    let f0_dielectric = Vec3::new(fresnel0_from_ior(specular_ior));
+    let f0_metal = base_color * base_weight;
+    let f0 = mix(f0_dielectric, f0_metal, metalness);
+    let f = fresnel_f82_tint(voh, f0, specular_edge_tint);
+    let alpha = openpbr_anisotropy(specular_roughness, specular_anisotropy);
+    let d = ggx_ndf_aniso(noh, h, t, b, alpha.x, alpha.y);
+    // Smith returns V = G / (4 NoV NoL). Do not divide by 4·NoV·NoL again:
+    // the light loop already multiplies by NoL, and a second divide blows
+    // up at grazing angles.
+    let g = smith_ggx_aniso(nov, nol, v, l, t, b, alpha.x, alpha.y);
+    let ks = f * specular_weight;
+    return ks * d * g * base_weight * thin_film_mod;
+}
+
+/// Pick a deferred debug term. `view == 0` returns `beauty` unchanged.
+/// `raw` is the pre-sanitize color used by the heat view.
+#[ornis_macros::wgsl_fn]
+fn select_shading_debug(
+    view: u32,
+    beauty: glam::Vec3,
+    direct_spec: glam::Vec3,
+    ibl_spec: glam::Vec3,
+    diffuse: glam::Vec3,
+    roughness: f32,
+    metalness: f32,
+    shadow: f32,
+    raw: glam::Vec3,
+) -> glam::Vec3 {
+    let is_beauty = select(0.0, 1.0, view == SHADING_DEBUG_BEAUTY);
+    let is_direct = select(0.0, 1.0, view == SHADING_DEBUG_DIRECT_SPECULAR);
+    let is_ibl = select(0.0, 1.0, view == SHADING_DEBUG_IBL_SPECULAR);
+    let is_diffuse = select(0.0, 1.0, view == SHADING_DEBUG_DIFFUSE);
+    let is_rough = select(0.0, 1.0, view == SHADING_DEBUG_ROUGHNESS);
+    let is_metal = select(0.0, 1.0, view == SHADING_DEBUG_METALLIC);
+    let is_shadow = select(0.0, 1.0, view == SHADING_DEBUG_SHADOW);
+    let is_heat = select(0.0, 1.0, view == SHADING_DEBUG_HEAT);
+    let x_bad = select(0.0, 1.0, raw.x != raw.x || abs(raw.x) >= HDR_FINITE_LIMIT);
+    let y_bad = select(0.0, 1.0, raw.y != raw.y || abs(raw.y) >= HDR_FINITE_LIMIT);
+    let z_bad = select(0.0, 1.0, raw.z != raw.z || abs(raw.z) >= HDR_FINITE_LIMIT);
+    let bad = max(x_bad, max(y_bad, z_bad));
+    let hot = select(0.0, 1.0, luminance(beauty) > SHADING_DEBUG_HOT_LUMA);
+    let heat = mix(
+        mix(beauty, Vec3::new(SHADING_DEBUG_HOT_LUMA, 0.0, 0.0), hot),
+        Vec3::new(SHADING_DEBUG_HOT_LUMA, 0.0, SHADING_DEBUG_HOT_LUMA),
+        bad,
+    );
+    return beauty * is_beauty
+        + direct_spec * is_direct
+        + ibl_spec * is_ibl
+        + diffuse * is_diffuse
+        + Vec3::new(roughness, roughness, roughness) * is_rough
+        + Vec3::new(metalness, metalness, metalness) * is_metal
+        + Vec3::new(shadow, shadow, shadow) * is_shadow
+        + heat * is_heat;
 }
 
 /// Base layer: dielectric/metallic mix with anisotropic GGX + Oren-Nayar.
@@ -125,15 +293,30 @@ fn evaluate_base_layer(
     let f0_metal = base_color * base_weight;
     let f0 = mix(f0_dielectric, f0_metal, metalness);
     let f = fresnel_f82_tint(voh, f0, specular_edge_tint);
-    let alpha = openpbr_anisotropy(specular_roughness, specular_anisotropy);
-    let alpha_u = alpha.x;
-    let alpha_v = alpha.y;
-    let d = ggx_ndf_aniso(noh, h, t, b, alpha_u, alpha_v);
-    // Smith returns V = G / (4 NoV NoL). The specular BRDF is D·F·V;
-    // dividing by 4·NoV·NoL again blows up at grazing angles (silhouette
-    // fireflies) because the light loop already multiplies by NoL.
-    let g = smith_ggx_aniso(nov, nol, v, l, t, b, alpha_u, alpha_v);
-    let spec_brdf = d * g * f;
+    // Specular lobe applies this Fresnel once (`ks` inside
+    // [`evaluate_base_specular`]). Multiplying `F` again here squared a
+    // dielectric F0 of ~0.04 down to ~0.0016, so the body looked like
+    // albedo while the grazing rim (F → 1) stayed hot.
+    let spec = evaluate_base_specular(
+        v,
+        l,
+        h,
+        nov,
+        nol,
+        noh,
+        voh,
+        base_weight,
+        base_color,
+        metalness,
+        specular_weight,
+        specular_roughness,
+        specular_ior,
+        specular_anisotropy,
+        specular_edge_tint,
+        t,
+        b,
+        thin_film_mod,
+    );
     let diffuse_color = base_color * (1.0 - metalness);
     let diff_roughness = max(diffuse_roughness, specular_roughness);
     let diff_alpha = diff_roughness * diff_roughness;
@@ -141,8 +324,8 @@ fn evaluate_base_layer(
     let diff_brdf = oren_nayar_brdf(nov, nol, cos_phi, diff_alpha);
     let ks = f * specular_weight;
     let kd = Vec3::new(base_diffuse_energy(luminance(ks)));
-    let base_bsdf = kd * diff_brdf * diffuse_color + ks * spec_brdf;
-    return base_bsdf * base_weight * thin_film_mod;
+    let diff = kd * diff_brdf * diffuse_color * base_weight * thin_film_mod;
+    return spec + diff;
 }
 
 /// Coat specular lobe. Base darkening is [`evaluate_coat_darkening`],
@@ -398,6 +581,10 @@ fn reconstruct_world_pos(uv: glam::Vec2, depth: f32, camera: Camera) -> glam::Ve
 /// All shared evaluator sources concatenated (consts excluded).
 pub fn wgsl_shared_helpers() -> String {
     [
+        specular_aa_roughness::wgsl_source(),
+        sanitize_hdr::wgsl_source(),
+        evaluate_base_specular::wgsl_source(),
+        select_shading_debug::wgsl_source(),
         evaluate_base_layer::wgsl_source(),
         evaluate_coat_layer::wgsl_source(),
         evaluate_coat_darkening::wgsl_source(),
@@ -424,6 +611,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn specular_aa_uses_screen_space_normal_derivatives() {
+        let src = specular_aa_roughness::wgsl_source();
+        assert!(src.contains("dpdx("), "{src}");
+        assert!(src.contains("dpdy("), "{src}");
+        assert!(src.contains("SPECULAR_AA_VARIANCE"), "{src}");
+        assert!(src.contains("SPECULAR_AA_KERNEL_CAP"), "{src}");
+    }
+
+    #[test]
+    fn sanitize_hdr_drops_non_finite_colors() {
+        let src = sanitize_hdr::wgsl_source();
+        assert!(src.contains("HDR_FINITE_LIMIT"), "{src}");
+        assert!(src.contains("color.x == color.x"), "{src}");
+    }
+
+    #[test]
     fn helper_sources_keep_legacy_signatures() {
         assert!(
             evaluate_base_layer::wgsl_source()
@@ -444,6 +647,28 @@ mod tests {
             assert!(!src.contains("Vec3"), "glam spelling leaked: {src}");
             assert!(!src.contains("glam"), "glam spelling leaked: {src}");
         }
+    }
+
+    /// Head-on dielectric Fresnel is F0 (~0.04), not F0² (~0.0016). The
+    /// base lobe multiplies `F` once inside `evaluate_base_specular`.
+    #[test]
+    fn base_specular_applies_fresnel_once() {
+        let f0 = crate::shaders::math::fresnel0_from_ior::eval(1.5);
+        assert!(
+            (0.03..0.05).contains(&f0),
+            "IOR 1.5 dielectric F0 should be ~0.04, got {f0}"
+        );
+        let squared = f0 * f0;
+        assert!(
+            squared < 0.002 && f0 / squared > 20.0,
+            "F0² hides the highlight: f0={f0} f0²={squared}"
+        );
+        let lobe = evaluate_base_specular::wgsl_source();
+        assert!(lobe.contains("ks * d * g"), "{lobe}");
+        assert!(!lobe.contains("d * g * f"), "{lobe}");
+        let layer = evaluate_base_layer::wgsl_source();
+        assert!(layer.contains("evaluate_base_specular("), "{layer}");
+        assert!(!layer.contains("spec_brdf"), "{layer}");
     }
 
     /// Smith visibility already includes `G / (4 NoV NoL)`. Dividing again

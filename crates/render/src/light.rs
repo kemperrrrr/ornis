@@ -13,9 +13,11 @@ use ornis_core::{Color, Lux, UnitVec3};
 
 /// One infinitely distant light.
 ///
-/// `..Default::default()` fills [`Self::shadow`] (off) and, when a field is
-/// omitted, the legacy key direction, [`Self::DEFAULT_ILLUMINANCE`], and
-/// [`Color::WHITE`].
+/// `..Default::default()` fills [`Self::shadow`] ([`ShadowCast::Enabled`])
+/// and, when a field is omitted, the legacy key direction,
+/// [`Self::DEFAULT_ILLUMINANCE`], and [`Color::WHITE`]. Scene files stay
+/// unshadowed unless they set `shadow`: [`ShadowCast`]'s serde default is
+/// still off.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DirectionalLight {
     /// Direction toward the light, from the scene.
@@ -24,7 +26,9 @@ pub struct DirectionalLight {
     pub illuminance: Lux,
     /// Linear emission color.
     pub color: Color,
-    /// Shadow-map request ([`ShadowCast`]). Default is off, matching older scene files.
+    /// Shadow-map request ([`ShadowCast`]). [`Default`] casts a shadow.
+    /// Older scene files stay off: [`ShadowCast`]'s serde default is
+    /// [`ShadowCast::Disabled`].
     pub shadow: ShadowCast,
 }
 
@@ -64,23 +68,24 @@ impl DirectionalLight {
 
 impl Default for DirectionalLight {
     /// Legacy key light: direction `(1, 1, 1)` normalized, illuminance
-    /// [`Self::DEFAULT_ILLUMINANCE`], white, shadows off.
+    /// [`Self::DEFAULT_ILLUMINANCE`], white, shadow map on.
     fn default() -> Self {
         Self {
             direction: UnitVec3::normalize(Vec3::new(1.0, 1.0, 1.0)).unwrap_or(UnitVec3::Y),
             illuminance: Self::DEFAULT_ILLUMINANCE,
             color: Color::WHITE,
-            shadow: ShadowCast::Disabled,
+            shadow: ShadowCast::Enabled,
         }
     }
 }
 
 /// Studio key and fill.
 ///
-/// [`Default`] is the directional pair inside
+/// [`Default`] keeps the directions, colors, and strengths of
 /// [`RenderLights::default`](crate::extraction::RenderLights::default):
 /// a white key toward `(1, 1, 1)` and a cooler fill toward `(-0.5, 0.5, -0.5)`.
-/// Spawning appends both lights. Ambient and lights already in the world stay.
+/// The key casts a shadow; the fill does not. Spawning appends both lights.
+/// Ambient and lights already in the world stay.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StudioLights {
     /// Brighter light of the pair.
@@ -102,22 +107,28 @@ impl StudioLights {
 
 impl Default for StudioLights {
     /// Key and fill copied from
-    /// [`RenderLights::default`](crate::extraction::RenderLights::default).
+    /// [`RenderLights::default`](crate::extraction::RenderLights::default),
+    /// then the key shadow is turned on and the fill shadow is turned off.
     ///
-    /// The pair is not rebuilt from literals here: those numbers already live
-    /// on the legacy rig. A missing entry falls back to [`DirectionalLight::default`].
+    /// Directions, colors, and strengths stay on the legacy rig. A missing
+    /// entry falls back to [`DirectionalLight::default`] (key) or that same
+    /// light with the shadow cleared (fill).
     fn default() -> Self {
         let lights = crate::extraction::RenderLights::default().lights;
-        Self {
-            key: lights
-                .first()
-                .and_then(DirectionalLight::from_light_desc)
-                .unwrap_or_default(),
-            fill: lights
-                .get(1)
-                .and_then(DirectionalLight::from_light_desc)
-                .unwrap_or_default(),
-        }
+        let mut key = lights
+            .first()
+            .and_then(DirectionalLight::from_light_desc)
+            .unwrap_or_default();
+        let mut fill = lights
+            .get(1)
+            .and_then(DirectionalLight::from_light_desc)
+            .unwrap_or(DirectionalLight {
+                shadow: ShadowCast::Disabled,
+                ..DirectionalLight::default()
+            });
+        key.shadow = ShadowCast::Enabled;
+        fill.shadow = ShadowCast::Disabled;
+        Self { key, fill }
     }
 }
 
@@ -141,7 +152,7 @@ mod tests {
                 assert!(xyz.x > 0.0 && xyz.y > 0.0 && xyz.z > 0.0);
                 assert_eq!(intensity, DirectionalLight::DEFAULT_ILLUMINANCE.get());
                 assert_eq!(color, [1.0, 1.0, 1.0]);
-                assert_eq!(shadow, ShadowCast::Disabled);
+                assert_eq!(shadow, ShadowCast::Enabled);
             }
             other => panic!("directional light became {other:?}"),
         }
@@ -151,12 +162,24 @@ mod tests {
     fn default_studio_lights_match_the_legacy_key_and_fill() {
         let pair = StudioLights::default();
         assert_eq!(pair.key, DirectionalLight::default());
+        assert_eq!(pair.key.shadow, ShadowCast::Enabled);
+        assert_eq!(pair.fill.shadow, ShadowCast::Disabled);
         let [key, fill] = pair.lights();
         let expected = crate::extraction::RenderLights::default().lights;
-        assert_eq!(
-            format!("{:?}", key.to_light_desc()),
-            format!("{:?}", expected[0])
-        );
+        // The resource default stays unshadowed. The studio key is that
+        // light with the shadow map turned on; the fill matches it.
+        let LightDesc::Directional {
+            direction: key_dir,
+            intensity: key_intensity,
+            color: key_color,
+            shadow: ShadowCast::Disabled,
+        } = &expected[0]
+        else {
+            panic!("legacy key");
+        };
+        assert_eq!(key.direction, *key_dir);
+        assert_eq!(key.illuminance.get(), *key_intensity);
+        assert_eq!(key.color.to_linear_rgb().as_array(), *key_color);
         assert_eq!(
             format!("{:?}", fill.to_light_desc()),
             format!("{:?}", expected[1])

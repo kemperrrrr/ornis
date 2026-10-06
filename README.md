@@ -161,7 +161,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 
 | Фича | Статус | Комментарий |
 |---|---|---|
-| `Renderer3D` + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, split-sum IBL, ACES один раз в HDR-composite и в fog-present) | ✅ | `crates/render/src/` |
+| `Renderer3D` + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, split-sum IBL, ACES один раз в HDR-composite и в fog-present; deferred HDR — `Rgba16Float`, geometric specular AA, Karis-resolve только на MSAA-рёбрах, Fresnel базового слоя один раз, `ShadingDebug`) | ✅ | `crates/render/src/` |
 | OpenPBR-материал (20 vec4 параметров, все BSDF) | ✅ | `crates/render/src/material.rs` |
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |
@@ -230,7 +230,13 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
 `StudioLights`, `OrbitCamera`). `set_ambient` меняет только ambient: если
 света ещё нет, публикуется риг с пустым списком направленных источников.
-`spawn(DirectionalLight)` добавляет ровно этот свет. Студийные key и fill —
+`spawn(DirectionalLight)` добавляет ровно этот свет.
+`DirectionalLight::default()` запрашивает карту теней (`ShadowCast::Enabled`);
+`..Default::default()` на примере вроде `anim` включает её у каждого такого
+света (лимит — 4 слоя 1024² и 2 куба). `StudioLights::default()` оставляет
+тень только у key, fill — `ShadowCast::Disabled`. Ресурс
+`RenderLights::default` и RON без поля `shadow` по-прежнему без карт
+(serde-дефолт `ShadowCast::Disabled`). Студийные key и fill —
 явный `spawn(StudioLights::default())`. Ресурс `RenderLights` хранит
 ambient как `Color`, а множители `ambient_intensity` и `exposure` как `Lux`
 (старый payload без

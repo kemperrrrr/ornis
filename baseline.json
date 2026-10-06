@@ -1,19 +1,19 @@
 {
   "version": 2,
-  "quality_score": 0.5160128371614972,
-  "iosp_score": 0.9108888383723573,
-  "violations": 392,
-  "total": 6905,
+  "quality_score": 0.5172576751424167,
+  "iosp_score": 0.9107991849671723,
+  "violations": 394,
+  "total": 6929,
   "complexity_warnings": 73,
   "magic_number_warnings": 129,
   "nesting_depth_warnings": 19,
   "function_length_warnings": 126,
   "unsafe_warnings": 11,
   "error_handling_warnings": 21,
-  "duplicate_groups": 90,
-  "dead_code_warnings": 419,
+  "duplicate_groups": 88,
+  "dead_code_warnings": 421,
   "dead_type_warnings": 4,
-  "fragment_groups": 658,
+  "fragment_groups": 652,
   "boilerplate_warnings": 317,
   "srp_struct_warnings": 23,
   "srp_module_warnings": 95,
@@ -22,7 +22,7 @@
   "coupling_warnings": 0,
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
-  "tq_no_sut_warnings": 6,
+  "tq_no_sut_warnings": 8,
   "tq_untested_warnings": 155,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
@@ -203,57 +203,67 @@
     {
       "name": "fs_main",
       "file": "crates/render/src/shaders/lighting_generated.rs",
-      "line": 298
+      "line": 300
     },
     {
       "name": "shade_lit",
       "file": "crates/render/src/shaders/lighting_generated.rs",
-      "line": 330
+      "line": 332
     },
     {
       "name": "fs_main_msaa",
       "file": "crates/render/src/shaders/lighting_generated.rs",
-      "line": 634
+      "line": 686
+    },
+    {
+      "name": "evaluate_base_specular",
+      "file": "crates/render/src/shaders/helpers.rs",
+      "line": 191
+    },
+    {
+      "name": "select_shading_debug",
+      "file": "crates/render/src/shaders/helpers.rs",
+      "line": 228
     },
     {
       "name": "evaluate_base_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 101
+      "line": 269
     },
     {
       "name": "evaluate_coat_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 152
+      "line": 335
     },
     {
       "name": "evaluate_fuzz_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 226
+      "line": 409
     },
     {
       "name": "evaluate_transmission_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 248
+      "line": 431
     },
     {
       "name": "evaluate_subsurface_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 287
+      "line": 470
     },
     {
       "name": "transmission_btdf",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 336
+      "line": 519
     },
     {
       "name": "octahedral_decode",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 363
+      "line": 546
     },
     {
       "name": "reconstruct_world_pos",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 391
+      "line": 574
     },
     {
       "name": "fs_main",
@@ -268,47 +278,47 @@
     {
       "name": "build_lighting_uniform",
       "file": "crates/render/src/renderer.rs",
-      "line": 1491
+      "line": 1532
     },
     {
       "name": "Renderer3D::create_forward_pass",
       "file": "crates/render/src/renderer.rs",
-      "line": 3301
+      "line": 3357
     },
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer.rs",
-      "line": 4187
+      "line": 4243
     },
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 4370
+      "line": 4430
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 4390
+      "line": 4450
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer.rs",
-      "line": 4480
+      "line": 4540
     },
     {
       "name": "Renderer3D::stage_custom_meshes",
       "file": "crates/render/src/renderer.rs",
-      "line": 4528
+      "line": 4588
     },
     {
       "name": "Renderer3D::upload_skin_palettes",
       "file": "crates/render/src/renderer.rs",
-      "line": 4599
+      "line": 4659
     },
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer.rs",
-      "line": 5369
+      "line": 5429
     },
     {
       "name": "RenderFrame3D::build",
@@ -1888,12 +1898,12 @@
     {
       "name": "collect_pat_idents",
       "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 231
+      "line": 249
     },
     {
       "name": "LoopRewriter<'_>::plan",
       "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 444
+      "line": 462
     },
     {
       "name": "TypeAnalyzer::visit_type",

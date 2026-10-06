@@ -174,6 +174,32 @@ fn evaluate_ibl(
     (specular + diffuse) * weight
 }
 
+/// Specular half of [`evaluate_ibl`]: prefiltered radiance times the LUT Fresnel.
+#[kernel]
+fn evaluate_ibl_specular(
+    prefiltered: glam::Vec3,
+    lut_scale: f32,
+    lut_bias: f32,
+    f0: glam::Vec3,
+    weight: f32,
+) -> glam::Vec3 {
+    let fresnel = f0 * lut_scale + glam::Vec3::splat(lut_bias);
+    prefiltered * fresnel * weight
+}
+
+/// Diffuse half of [`evaluate_ibl`]: irradiance times the diffuse color.
+#[kernel]
+fn evaluate_ibl_diffuse(
+    irradiance: glam::Vec3,
+    lut_bias: f32,
+    diffuse_color: glam::Vec3,
+    weight: f32,
+) -> glam::Vec3 {
+    let diffuse_weight =
+        (glam::Vec3::splat(1.0) - glam::Vec3::splat(lut_bias)).max(glam::Vec3::ZERO);
+    irradiance * diffuse_color * diffuse_weight * weight
+}
+
 /// Scalar Schlick approximation of the Fresnel term (`cos_theta` = NoV or NoL).
 #[kernel]
 fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
@@ -801,8 +827,23 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_ibl_is_the_sum_of_its_lobes() {
+        let prefiltered = glam::Vec3::new(0.4, 0.2, 0.1);
+        let irradiance = glam::Vec3::new(0.3, 0.3, 0.3);
+        let f0 = glam::Vec3::splat(0.04);
+        let diffuse = glam::Vec3::new(0.8, 0.2, 0.05);
+        let both = evaluate_ibl::eval(prefiltered, irradiance, 0.5, 0.1, f0, diffuse, 1.0);
+        let spec = evaluate_ibl_specular::eval(prefiltered, 0.5, 0.1, f0, 1.0);
+        let diff = evaluate_ibl_diffuse::eval(irradiance, 0.1, diffuse, 1.0);
+        assert!(
+            (both - spec - diff).length() < 1.0e-5,
+            "ibl {both} != spec {spec} + diff {diff}"
+        );
+    }
+
+    #[test]
     fn all_wgsl_sources_compile() {
-        let funcs: [&str; 24] = [
+        let funcs: [&str; 26] = [
             luminance::wgsl_source(),
             aces_tonemap::wgsl_source(),
             fresnel0_from_ior::wgsl_source(),
@@ -827,6 +868,8 @@ mod tests {
             thin_film_modulation::wgsl_source(),
             octahedral_encode::wgsl_source(),
             evaluate_ibl::wgsl_source(),
+            evaluate_ibl_specular::wgsl_source(),
+            evaluate_ibl_diffuse::wgsl_source(),
         ];
         for src in funcs.iter() {
             assert!(src.starts_with("fn "), "bad source: {src}");

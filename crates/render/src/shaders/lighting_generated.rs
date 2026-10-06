@@ -253,6 +253,8 @@ fn lighting_fragment_kernels() -> String {
         math::transmission_color_to_extinction::wgsl_source(),
         math::subsurface_brdf::wgsl_source(),
         math::evaluate_ibl::wgsl_source(),
+        math::evaluate_ibl_specular::wgsl_source(),
+        math::evaluate_ibl_diffuse::wgsl_source(),
     ];
     kernels.join("\n")
 }
@@ -334,6 +336,8 @@ fn shade_lit(
     albedo_a: f32,
     mat: OpenPBRMaterial,
 ) -> glam::Vec4 {
+    // Derivatives before `discard`: a non-uniform discard makes `dpdx` invalid.
+    let specular_roughness = specular_aa_roughness(mat.specular_params.y, n);
     if albedo_a < ALPHA_CUTOFF {
         discard;
     }
@@ -343,7 +347,6 @@ fn shade_lit(
     let metalness = mat.base_params.z;
     let diffuse_roughness = mat.base_params.y;
     let specular_weight = mat.specular_params.x;
-    let specular_roughness = mat.specular_params.y;
     let specular_ior = mat.specular_params.z;
     let specular_anisotropy = mat.specular_params.w;
     let specular_edge_tint = mat.specular_color.rgb;
@@ -378,6 +381,9 @@ fn shade_lit(
     let opacity = mat.geometry_params.x;
     let thin_walled = mat.geometry_params.y;
     let mut lo = Vec3::new(0.0, 0.0, 0.0);
+    let mut spec_acc = Vec3::new(0.0, 0.0, 0.0);
+    let mut diff_acc = Vec3::new(0.0, 0.0, 0.0);
+    let mut shadow_vis = 1.0;
     let thin_film_mod = thin_film_weight_mix(
         thin_film_weight,
         thin_film_modulation(nov, thin_film_ior, thin_film_thickness_um, 1.0),
@@ -450,14 +456,15 @@ fn shade_lit(
                     shadow_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
                     NDC_TO_UV_HALF - shadow_ndc.y * NDC_TO_UV_HALF,
                 );
-                radiance = radiance
-                    * textureSampleCompare(
-                        shadow_tex,
-                        shadow_sampler,
-                        shadow_uv,
-                        i32(light.params.w),
-                        shadow_ndc.z - SHADOW_REF_BIAS,
-                    );
+                let vis = textureSampleCompare(
+                    shadow_tex,
+                    shadow_sampler,
+                    shadow_uv,
+                    i32(light.params.w),
+                    shadow_ndc.z - SHADOW_REF_BIAS,
+                );
+                radiance = radiance * vis;
+                shadow_vis = min(shadow_vis, vis);
             }
             if is_point > LIGHT_SELECTOR_SPLIT {
                 // Cube sample: the hardware picks the face from the
@@ -471,14 +478,15 @@ fn shade_lit(
                 let denom = far - SHADOW_CUBE_NEAR;
                 let cube_ref =
                     (far / denom) - (SHADOW_CUBE_NEAR * far) / (denom * major) - SHADOW_REF_BIAS;
-                radiance = radiance
-                    * textureSampleCompare(
-                        shadow_cube_tex,
-                        shadow_sampler,
-                        to_frag,
-                        i32(light.params.w),
-                        cube_ref,
-                    );
+                let vis = textureSampleCompare(
+                    shadow_cube_tex,
+                    shadow_sampler,
+                    to_frag,
+                    i32(light.params.w),
+                    cube_ref,
+                );
+                radiance = radiance * vis;
+                shadow_vis = min(shadow_vis, vis);
             }
         }
         let nol = max(dot(n, l), EPS);
@@ -510,6 +518,30 @@ fn shade_lit(
             b,
             thin_film_mod,
         ) * coat_darken;
+        if lighting.debug_view != SHADING_DEBUG_BEAUTY {
+            let spec_lobe = evaluate_base_specular(
+                v,
+                l,
+                h,
+                nov,
+                nol,
+                noh,
+                voh,
+                base_weight,
+                base_color,
+                metalness,
+                specular_weight,
+                specular_roughness,
+                specular_ior,
+                specular_anisotropy,
+                specular_edge_tint,
+                t,
+                b,
+                thin_film_mod,
+            ) * coat_darken;
+            spec_acc = spec_acc + spec_lobe * radiance * nol;
+            diff_acc = diff_acc + (base_bsdf - spec_lobe) * radiance * nol;
+        }
         let coat_bsdf = evaluate_coat_layer(
             n,
             v,
@@ -620,16 +652,36 @@ fn shade_lit(
         base_color * (1.0 - metalness),
         lighting.ibl_weight,
     );
-    let color = ambient + lo + emission + ibl;
+    let raw = ambient + lo + emission + ibl;
+    let beauty = sanitize_hdr(raw);
+    let mut ibl_spec = Vec3::new(0.0, 0.0, 0.0);
+    if lighting.debug_view == SHADING_DEBUG_IBL_SPECULAR
+        || lighting.debug_view == SHADING_DEBUG_DIFFUSE
+    {
+        ibl_spec = evaluate_ibl_specular(prefiltered.rgb, lut.r, lut.g, f0, lighting.ibl_weight);
+    }
+    let diffuse = diff_acc + ambient + (ibl - ibl_spec);
+    let color = select_shading_debug(
+        lighting.debug_view,
+        beauty,
+        spec_acc,
+        ibl_spec,
+        diffuse,
+        specular_roughness,
+        metalness,
+        shadow_vis,
+        raw,
+    );
     return glam::Vec4::new(color, opacity);
 }
 
 /// Deferred lighting at 4x. Every sample is lit (the fetches stay in
 /// uniform control flow), then an edge mask picks the result: interior
 /// pixels keep sample 0, and silhouette or disagreement pixels average
-/// only the covered samples. Cleared samples (depth [`CLEAR_DEPTH`](super::helpers::CLEAR_DEPTH),
-/// octahedral `(0, 0)` → +Z) contribute nothing, so the box-filtered
-/// resolve cannot fringe the edge.
+/// only the covered samples with a Karis weight `1 / (1 + luma)`, so one
+/// grazing firefly cannot paint the whole pixel white. Alpha stays
+/// coverage-weighted. Cleared samples (depth [`CLEAR_DEPTH`](super::helpers::CLEAR_DEPTH),
+/// octahedral `(0, 0)` → +Z) contribute nothing.
 #[stage(fragment, entry = "fs_main")]
 fn fs_main_msaa(
     input: QuadVertexOutput,
@@ -673,9 +725,11 @@ fn fs_main_msaa(
         let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
         let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
         let lit = shade_lit(n, world_pos, v, 1.0, ctx.materials[id]);
-        acc = acc + lit.xyz * covered;
+        let luma = max(luminance(lit.xyz), 0.0);
+        let karis = covered / (KARIS_LUMA_BIAS + luma);
+        acc = acc + lit.xyz * karis;
         alpha = alpha + lit.w * covered;
-        weight = weight + covered;
+        weight = weight + karis;
         let is_zero = select(0.0, 1.0, s == 0u);
         single = mix(single, lit, is_zero);
     }
@@ -847,6 +901,8 @@ mod tests {
             "let layer_bsdf = base_bsdf + coat_bsdf + fuzz_bsdf + trans_bsdf + ss_bsdf;"
         ));
         assert!(src.contains("return vec4<f32>(color, opacity);"));
+        assert!(src.contains("specular_aa_roughness("));
+        assert!(src.contains("sanitize_hdr("));
         assert!(src.contains("textureSampleLevel(prefilter_cube, ibl_sampler"));
         assert!(src.contains("textureSample(brdf_lut, ibl_sampler"));
         assert!(src.contains("textureSample(irradiance_cube, ibl_sampler"));
@@ -871,6 +927,10 @@ mod tests {
             "{src}"
         );
         assert!(src.contains("CLEAR_DEPTH"), "{src}");
+        assert!(
+            src.contains("KARIS_LUMA_BIAS"),
+            "edge resolve must Karis-weight fireflies, {src}"
+        );
         assert!(src.contains("textureSampleLevel"), "{src}");
         assert!(src.contains("albedo_tex"), "{src}");
         assert!(

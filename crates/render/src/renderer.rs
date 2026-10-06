@@ -123,6 +123,14 @@ pub const MSAA_SAMPLE_COUNT: u32 = 4;
 /// The 1x path never allocates resolve targets and records no resolves, so
 /// existing pixel-parity gates stay green by construction.
 pub const SINGLE_SAMPLE_COUNT: u32 = 1;
+/// Scene-linear color of the deferred lighting pass.
+///
+/// Half-float, not the surface format: an 8-bit sRGB target clamps every
+/// channel to 1 before the composite's single ACES, so a grazing highlight
+/// becomes a hard white pixel and a walking normal quantizes into a
+/// whole-body flicker. The composite still tonemaps once into the
+/// swapchain.
+pub const DEFERRED_HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Clamps a requested sample count to the supported set (`{1, 4}`):
 /// [`MSAA_SAMPLE_COUNT`] passes through, anything else (including 0, 2, 8)
 /// falls back to [`SINGLE_SAMPLE_COUNT`]. Pure, so unit tests pin it without
@@ -409,6 +417,36 @@ impl GpuLight {
     }
 }
 
+/// Which term the deferred lighting pass writes.
+///
+/// [`ShadingDebug::Beauty`] is the default and leaves the image unchanged.
+/// Other variants replace the lit color so a capture can show one lobe.
+/// Forward draws ignore the selector. The id is the `debug_view` field of
+/// the lighting uniform; [`Renderer3D::set_shading_debug`] stores it across
+/// [`Renderer3D::set_lights`] calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum ShadingDebug {
+    /// Full lighting: ambient, direct, emission, IBL.
+    #[default]
+    Beauty = 0,
+    /// Direct base specular lobe only (no diffuse, no IBL, no ambient).
+    DirectSpecular = 1,
+    /// Split-sum IBL specular only. Black when the IBL weight is 0.
+    IblSpecular = 2,
+    /// Direct diffuse plus ambient plus IBL diffuse.
+    Diffuse = 3,
+    /// Perceptual specular roughness in every channel (after geometric AA).
+    Roughness = 4,
+    /// Metalness in every channel.
+    Metallic = 5,
+    /// Shadow visibility in every channel. `1` when no light casts a map.
+    Shadow = 6,
+    /// Pre-tonemap heat: magenta if non-finite, red if luma exceeds 1,
+    /// otherwise the beauty color.
+    Heat = 7,
+}
+
 /// Lighting uniform block: ambient + fixed light array + count.
 ///
 /// The WGSL `Lighting` declaration is generated from this layout
@@ -430,9 +468,8 @@ pub(crate) struct LightingUniform {
     ibl_weight: f32,
     /// Highest mip of the prefiltered specular cube (`0` when IBL is off).
     ibl_max_mip: f32,
-    /// Trailing pad to a 16-multiple size (padding: not shader-visible).
-    #[wgsl(skip)]
-    _pad: u32,
+    /// [`ShadingDebug`] discriminant. `0` is beauty.
+    debug_view: u32,
 }
 
 /// The two shader-visible IBL scalars, packed for an offset write that
@@ -1097,6 +1134,9 @@ pub struct Renderer3D {
     ibl_weight_explicit: std::sync::atomic::AtomicBool,
     /// `f32` bits of the prefilter's highest mip.
     ibl_max_mip_bits: std::sync::atomic::AtomicU32,
+    /// [`ShadingDebug`] discriminant, so [`set_lights`](Self::set_lights)
+    /// (`&self`) can rewrite the uniform without clearing the debug view.
+    shading_debug: std::sync::atomic::AtomicU32,
 }
 
 /// Pick an up vector non-parallel to the given shadow axis.
@@ -1491,6 +1531,7 @@ struct BuiltLighting {
 /// [`SHADOW_ORTHO_HALF`] box when `fit` is `None` and the fitted box
 /// otherwise. Shadow layer VPs are collected in assignment order (layer
 /// `i` ↔ entry `i`).
+#[allow(clippy::too_many_arguments)]
 fn build_lighting_uniform(
     ambient: [f32; 3],
     ambient_intensity: f32,
@@ -1499,6 +1540,7 @@ fn build_lighting_uniform(
     fit: Option<([f32; 3], f32)>,
     ibl_weight: f32,
     ibl_max_mip: f32,
+    debug_view: u32,
 ) -> BuiltLighting {
     /// Normalize a direction, falling back to +Z on degenerate input.
     fn norm_dir(d: [f32; VEC3_COMPONENTS]) -> [f32; VEC4_COMPONENTS] {
@@ -1670,7 +1712,7 @@ fn build_lighting_uniform(
             light_count: count as u32,
             ibl_weight,
             ibl_max_mip,
-            _pad: 0,
+            debug_view,
         },
         stats: LightUploadStats {
             uploaded: count as u32,
@@ -1687,7 +1729,7 @@ fn build_lighting_uniform(
 /// free layer/cube slot. No GPU access — safe to call per frame; log on
 /// scene change, not per frame.
 pub fn count_light_drops(lights: &[LightDesc]) -> LightUploadStats {
-    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None, 0.0, 0.0).stats
+    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None, 0.0, 0.0, 0).stats
 }
 
 /// Exact CPU staging capacity for one [`Renderer3D::upload_instances`]
@@ -1753,8 +1795,13 @@ impl Renderer3D {
         // resolve four identical samples per pixel at 4x memory cost, so it
         // stays single-sample in all modes (the lighting pipeline's
         // `multisample.count` is 1 to match).
-        let (pbr_texture, pbr_texture_view) =
-            Self::create_render_target(device, width, height, format, SINGLE_SAMPLE_COUNT);
+        let (pbr_texture, pbr_texture_view) = Self::create_render_target(
+            device,
+            width,
+            height,
+            DEFERRED_HDR_FORMAT,
+            SINGLE_SAMPLE_COUNT,
+        );
 
         let gbuffer = Self::create_gbuffer(device, width, height, sample_count);
         let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
@@ -1868,6 +1915,7 @@ impl Renderer3D {
             ibl_weight_bits: std::sync::atomic::AtomicU32::new(0),
             ibl_weight_explicit: std::sync::atomic::AtomicBool::new(false),
             ibl_max_mip_bits: std::sync::atomic::AtomicU32::new(0),
+            shading_debug: std::sync::atomic::AtomicU32::new(ShadingDebug::Beauty as u32),
         }
     }
 
@@ -1935,6 +1983,14 @@ impl Renderer3D {
     /// [`set_lights`](Self::set_lights) calls (default `1.0`).
     pub fn set_exposure(&mut self, exposure: f32) {
         self.exposure = exposure;
+    }
+
+    /// Deferred lighting debug term. Stored across [`set_lights`](Self::set_lights);
+    /// the next light upload writes it into `debug_view`. [`ShadingDebug::Beauty`]
+    /// keeps the frame unchanged. Forward draws ignore the selector.
+    pub fn set_shading_debug(&self, view: ShadingDebug) {
+        self.shading_debug
+            .store(view as u32, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Transparency mode of the forward pipeline (see
@@ -2005,7 +2061,7 @@ impl Renderer3D {
             light_count: 0,
             ibl_weight: 0.0,
             ibl_max_mip: 0.0,
-            _pad: 0,
+            debug_view: 0,
         };
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting buffer"),
@@ -3889,7 +3945,7 @@ impl Renderer3D {
             // Fullscreen lighting output: single-sample in all modes (see `new`).
             sample_count: SINGLE_SAMPLE_COUNT,
             dimension: wgpu::TextureDimension::D2,
-            format: self.format,
+            format: DEFERRED_HDR_FORMAT,
             usage: RENDER_TARGET_USAGE,
             view_formats: &[],
         });
@@ -3957,7 +4013,7 @@ impl Renderer3D {
             * w
             * h
             * s;
-        let pbr = bpp(self.format) as u64 * w * h;
+        let pbr = bpp(DEFERRED_HDR_FORMAT) as u64 * w * h;
         let forward = bpp(wgpu::TextureFormat::Rgba16Float) as u64 * w * h * s;
         // Resolve targets are single-sample (`None` at 1x): four g-buffer
         // float layers plus the forward HDR color, only when MSAA is active.
@@ -4256,6 +4312,9 @@ impl Renderer3D {
             self.ibl_max_mip_bits
                 .load(std::sync::atomic::Ordering::Relaxed),
         );
+        let debug_view = self
+            .shading_debug
+            .load(std::sync::atomic::Ordering::Relaxed);
         let built = build_lighting_uniform(
             ambient,
             ambient_intensity,
@@ -4264,6 +4323,7 @@ impl Renderer3D {
             fit,
             ibl_weight,
             ibl_max_mip,
+            debug_view,
         );
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
         // Publish the light-space VPs for the depth pre-pass (as camera
@@ -6289,14 +6349,14 @@ mod tests {
 
     #[test]
     fn lighting_uniform_spells_eight_lights() {
-        // The WGSL block must spell the widened array; the member list
-        // itself is unchanged (multipliers stay CPU-baked, no new
-        // shader-visible field).
+        // Multipliers stay CPU-baked. `debug_view` is the only added
+        // shader-visible field; it occupies the former trailing pad.
         assert!(
             LightingUniform::WGSL_SOURCE.contains("array<Light, 8>"),
             "{}",
             LightingUniform::WGSL_SOURCE
         );
+        assert!(LightingUniform::WGSL_SOURCE.contains("debug_view: u32"));
         assert_eq!(
             LightingUniform::FIELD_NAMES,
             &[
@@ -6304,9 +6364,27 @@ mod tests {
                 "lights",
                 "light_count",
                 "ibl_weight",
-                "ibl_max_mip"
+                "ibl_max_mip",
+                "debug_view"
             ]
         );
+        assert_eq!(
+            std::mem::offset_of!(LightingUniform, debug_view)
+                - std::mem::offset_of!(LightingUniform, ibl_max_mip),
+            4
+        );
+        let built = build_lighting_uniform(
+            [0.0; VEC3_COMPONENTS],
+            1.0,
+            1.0,
+            &[],
+            None,
+            0.0,
+            0.0,
+            ShadingDebug::Shadow as u32,
+        );
+        assert_eq!(built.uniform.debug_view, ShadingDebug::Shadow as u32);
+        assert_eq!(ShadingDebug::Beauty as u32, 0);
     }
 
     #[test]
@@ -6314,7 +6392,7 @@ mod tests {
         let lights: Vec<LightDesc> = (0..10)
             .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
             .collect();
-        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, 0.0, 0.0);
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, 0.0, 0.0, 0);
         assert_eq!(
             built.stats,
             LightUploadStats {
@@ -6372,7 +6450,7 @@ mod tests {
         // `fit: None` must reproduce the legacy matrix bit-for-bit:
         // directional-only scenes stay pixel-identical.
         let light = dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Enabled);
-        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None, 0.0, 0.0);
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None, 0.0, 0.0, 0);
         let v = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
         assert_eq!(built.uniform.lights[0].shadow_vp, dir_shadow_vp(v));
         assert_eq!(built.uniform.lights[0].params[3], 0.0);
@@ -6496,10 +6574,12 @@ mod tests {
             color: [HALF, 0.25, 0.125],
             shadow: ShadowCast::Disabled,
         }];
-        let base = build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None, 0.0, 0.0);
+        let base =
+            build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None, 0.0, 0.0, 0);
         assert_eq!(base.uniform.ambient_color, [HALF, 0.25, 0.125, 1.0]);
         assert_eq!(base.uniform.lights[0].color, [HALF, 0.25, 0.125, 2.0]);
-        let scaled = build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None, 0.0, 0.0);
+        let scaled =
+            build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None, 0.0, 0.0, 0);
         assert_eq!(scaled.uniform.ambient_color, [1.0, HALF, 0.25, 1.0]);
         assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, HALF, 2.0]);
     }

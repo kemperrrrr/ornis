@@ -8,6 +8,7 @@
 use glam::Vec3;
 use ornis_app::{AnimatorAccess, GameWorld, ModelSpawn};
 use ornis_assets::Model;
+use ornis_assets::scene::ShadowCast;
 use ornis_core::{Color, Degrees, Lux, Position, UnitVec3};
 use ornis_render::{DirectionalLight, OrbitCamera};
 
@@ -34,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direction: UnitVec3::new(Vec3::new(-0.5, 0.5, -0.5))?,
         illuminance: Lux(0.3),
         color: Color::linear_rgb(0.8, 0.8, 1.0),
-        ..Default::default()
+        shadow: ShadowCast::Disabled,
     });
     world.spawn(OrbitCamera::looking_at(Vec3::new(2.5, 1.8, 3.5), Vec3::Y).with_fov(Degrees(45.0)));
     world.entity_mut(hero).animator()?.play("Walk_Loop")?;

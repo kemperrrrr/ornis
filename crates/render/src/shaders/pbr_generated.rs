@@ -117,7 +117,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
     let metalness = mat.base_params.z;
     let diffuse_roughness = mat.base_params.y;
     let specular_weight = mat.specular_params.x;
-    let specular_roughness = mat.specular_params.y;
+    let specular_roughness = specular_aa_roughness(mat.specular_params.y, n);
     let specular_ior = mat.specular_params.z;
     let specular_anisotropy = mat.specular_params.w;
     let specular_edge_tint = mat.specular_color.rgb;
@@ -401,7 +401,7 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         base_color * (1.0 - metalness),
         ctx.lighting.ibl_weight,
     );
-    let color = ambient + lo + emission + ibl;
+    let color = sanitize_hdr(ambient + lo + emission + ibl);
     return glam::Vec4::new(color, opacity);
 }
 
