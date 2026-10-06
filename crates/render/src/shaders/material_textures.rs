@@ -351,11 +351,11 @@ fn fs_main_textured(
         let to_light = light.position.xyz - input.world_position;
         let dist = length(to_light);
         let l_point = to_light / max(dist, EPS);
-        let use_point = step(0.5, kind);
+        let use_point = step(POINT_OR_SPOT_KIND_EDGE, kind);
         let l_dir = normalize(mix(normalize(light.direction.xyz), l_point, use_point));
         // smoothstep(edge0 == edge1) is undefined in WGSL — widen the
         // cutoff edge by 1%: coshaped but defined on every driver.
-        let edge0 = light.params.x * 0.99;
+        let edge0 = light.params.x * RANGE_CUTOFF_INNER_FRACTION;
         let range_cut = mix(
             1.0,
             1.0 - smoothstep(edge0, light.params.x, dist),
@@ -373,20 +373,20 @@ fn fs_main_textured(
         let cone = mix(
             1.0,
             smoothstep(light.params.z, light.params.y, cos_theta),
-            step(1.5, kind),
+            step(SPOT_KIND_EDGE, kind),
         );
         let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
         let mut radiance = light_color * intensity * attenuation * range_cut * cone;
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
-        let is_point = step(0.5, kind) * (1.0 - step(1.5, kind));
+        let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
         // the lookup; single-mip depth needs no LOD, so the branch is
         // safe in non-uniform control flow.
         if light.params.w >= 0.0 {
-            if is_point <= 0.5 {
+            if is_point <= LIGHT_SELECTOR_SPLIT {
                 let shadow_clip = light.shadow_vp
                     * Vec4::new(
                         input.world_position.x,
@@ -399,7 +399,10 @@ fn fs_main_textured(
                 // row 0 while `shadow_uv` v=0 reads from the top, so an
                 // unmirrored lookup samples the mirrored texel (shadows
                 // land overturned — darkness tests are blind to it).
-                let shadow_uv = Vec2::new(shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5);
+                let shadow_uv = Vec2::new(
+                    shadow_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                    NDC_TO_UV_HALF - shadow_ndc.y * NDC_TO_UV_HALF,
+                );
                 radiance = radiance
                     * textureSampleCompare(
                         ctx.shadow_tex,
@@ -409,7 +412,7 @@ fn fs_main_textured(
                         shadow_ndc.z - SHADOW_REF_BIAS,
                     );
             }
-            if is_point > 0.5 {
+            if is_point > LIGHT_SELECTOR_SPLIT {
                 // Cube sample: the hardware picks the face from the
                 // fragment→light vector's major axis; the reference is
                 // the 90°-perspective depth for that axis
@@ -418,8 +421,9 @@ fn fs_main_textured(
                 let to_frag = input.world_position - light.position.xyz;
                 let major = max(max(abs(to_frag.x), abs(to_frag.y)), abs(to_frag.z));
                 let far = max(light.params.x, 1.0);
-                let denom = far - 0.1;
-                let cube_ref = (far / denom) - (0.1 * far) / (denom * major) - SHADOW_REF_BIAS;
+                let denom = far - SHADOW_CUBE_NEAR;
+                let cube_ref =
+                    (far / denom) - (SHADOW_CUBE_NEAR * far) / (denom * major) - SHADOW_REF_BIAS;
                 radiance = radiance
                     * textureSampleCompare(
                         ctx.shadow_cube_tex,
@@ -577,6 +581,12 @@ fn fs_main_textured(
     return glam::Vec4::new(color, opacity);
 }
 
+/// Group-0 `@binding` indices the textured forward-PBR fragment stage declares.
+///
+/// Bindings 11–14 are the split-sum IBL set on top of the untextured
+/// forward-PBR indices.
+const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+
 /// Textured forward-PBR fragment shader: the legacy evaluation plus the
 /// three role samples, assembled exactly like
 /// [`crate::shaders::pbr_generated::wgsl_source`] (same kernel set).
@@ -612,12 +622,10 @@ pub fn wgsl_source_textured() -> String {
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
-        .resources(
-            &TEXTURED_PBR_RESOURCES,
-            &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-        )
+        .resources(&TEXTURED_PBR_RESOURCES, TEXTURED_PBR_FRAGMENT_BINDINGS)
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .consts(helpers::wgsl_consts())
+        .consts(math::wgsl_consts())
         .helper(helpers::wgsl_shared_helpers())
         .helper(wgsl_material_texture_helpers())
         .entry(fs_main_textured::wgsl_source())

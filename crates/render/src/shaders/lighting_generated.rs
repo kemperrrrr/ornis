@@ -403,11 +403,11 @@ fn shade_lit(
         let to_light = light.position.xyz - world_pos;
         let dist = length(to_light);
         let l_point = to_light / max(dist, EPS);
-        let use_point = step(0.5, kind);
+        let use_point = step(POINT_OR_SPOT_KIND_EDGE, kind);
         let l_dir = normalize(mix(normalize(light.direction.xyz), l_point, use_point));
         // smoothstep(edge0 == edge1) is undefined in WGSL — widen the
         // cutoff edge by 1%: coshaped but defined on every driver.
-        let edge0 = light.params.x * 0.99;
+        let edge0 = light.params.x * RANGE_CUTOFF_INNER_FRACTION;
         let range_cut = mix(
             1.0,
             1.0 - smoothstep(edge0, light.params.x, dist),
@@ -425,20 +425,20 @@ fn shade_lit(
         let cone = mix(
             1.0,
             smoothstep(light.params.z, light.params.y, cos_theta),
-            step(1.5, kind),
+            step(SPOT_KIND_EDGE, kind),
         );
         let attenuation = mix(1.0, 1.0 / max(dist * dist, EPS), use_point);
         let mut radiance = light_color * intensity * attenuation * range_cut * cone;
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
-        let is_point = step(0.5, kind) * (1.0 - step(1.5, kind));
+        let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
         // the lookup; single-mip depth needs no LOD, so the branch is
         // safe in non-uniform control flow.
         if light.params.w >= 0.0 {
-            if is_point <= 0.5 {
+            if is_point <= LIGHT_SELECTOR_SPLIT {
                 let shadow_clip =
                     light.shadow_vp * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
                 let shadow_ndc = shadow_clip.xyz / shadow_clip.w;
@@ -446,7 +446,10 @@ fn shade_lit(
                 // row 0 while `shadow_uv` v=0 reads from the top, so an
                 // unmirrored lookup samples the mirrored texel (shadows
                 // land overturned — darkness tests are blind to it).
-                let shadow_uv = Vec2::new(shadow_ndc.x * 0.5 + 0.5, 0.5 - shadow_ndc.y * 0.5);
+                let shadow_uv = Vec2::new(
+                    shadow_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                    NDC_TO_UV_HALF - shadow_ndc.y * NDC_TO_UV_HALF,
+                );
                 radiance = radiance
                     * textureSampleCompare(
                         shadow_tex,
@@ -456,7 +459,7 @@ fn shade_lit(
                         shadow_ndc.z - SHADOW_REF_BIAS,
                     );
             }
-            if is_point > 0.5 {
+            if is_point > LIGHT_SELECTOR_SPLIT {
                 // Cube sample: the hardware picks the face from the
                 // fragment→light vector's major axis; the reference is
                 // the 90°-perspective depth for that axis
@@ -465,8 +468,9 @@ fn shade_lit(
                 let to_frag = world_pos - light.position.xyz;
                 let major = max(max(abs(to_frag.x), abs(to_frag.y)), abs(to_frag.z));
                 let far = max(light.params.x, 1.0);
-                let denom = far - 0.1;
-                let cube_ref = (far / denom) - (0.1 * far) / (denom * major) - SHADOW_REF_BIAS;
+                let denom = far - SHADOW_CUBE_NEAR;
+                let cube_ref =
+                    (far / denom) - (SHADOW_CUBE_NEAR * far) / (denom * major) - SHADOW_REF_BIAS;
                 radiance = radiance
                     * textureSampleCompare(
                         shadow_cube_tex,
@@ -704,6 +708,7 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
     ShaderModule::new()
         .decl(lighting_wgsl_header_for_samples(sample_count))
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
+        .consts(math::wgsl_consts())
         .helpers([
             helpers::wgsl_consts(),
             helpers::wgsl_lighting_decode(),

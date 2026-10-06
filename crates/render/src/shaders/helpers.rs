@@ -38,6 +38,21 @@ pub const DEPTH_EDGE: f32 = 0.002;
 pub const ALPHA_CUTOFF: f32 = 0.001;
 /// `MSAA_SAMPLE_COUNT` as `f32`, for coverage comparisons in WGSL.
 pub const MSAA_SAMPLES_F: f32 = 4.0;
+/// `step` edge between a directional light (kind 0) and a point or spot (kind ≥ 1).
+pub const POINT_OR_SPOT_KIND_EDGE: f32 = 0.5;
+/// `step` edge between a point light (kind 1) and a spot (kind 2).
+pub const SPOT_KIND_EDGE: f32 = 1.5;
+/// Inner fraction of a finite light's range where attenuation starts to fall.
+///
+/// `smoothstep` with equal edges is undefined in WGSL, so the cutoff begins
+/// this far inside the light range.
+pub const RANGE_CUTOFF_INNER_FRACTION: f32 = 0.99;
+/// Half-extent that maps NDC `[-1, 1]` onto a texture UV `[0, 1]`.
+pub const NDC_TO_UV_HALF: f32 = 0.5;
+/// Near plane of a point-light cube-shadow face. The far plane is the light range.
+pub const SHADOW_CUBE_NEAR: f32 = 0.1;
+/// Split on a 0/1 light selector: at or below this, the light is not a point light.
+pub const LIGHT_SELECTOR_SPLIT: f32 = 0.5;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
@@ -62,6 +77,12 @@ pub fn wgsl_consts() -> String {
         decl!(DEPTH_EDGE),
         decl!(ALPHA_CUTOFF),
         decl!(MSAA_SAMPLES_F),
+        decl!(POINT_OR_SPOT_KIND_EDGE),
+        decl!(SPOT_KIND_EDGE),
+        decl!(RANGE_CUTOFF_INNER_FRACTION),
+        decl!(NDC_TO_UV_HALF),
+        decl!(SHADOW_CUBE_NEAR),
+        decl!(LIGHT_SELECTOR_SPLIT),
     ]
     .concat();
     format!("{floats}{}", msaa_samples_wgsl())

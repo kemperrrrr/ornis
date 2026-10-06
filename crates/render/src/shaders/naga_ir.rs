@@ -12,6 +12,12 @@ use super::{OPENPBR_SLOTS, OPENPBR_WGSL_NAME, Resource, ResourceKind};
 
 /// Byte stride of a `vec4<f32>` (and the StorageReadArray fallback).
 const VEC4_STRIDE: u32 = 16;
+/// Byte stride of a `vec2<f32>`.
+const VEC2_STRIDE: u32 = 8;
+/// Byte width of an `f32` scalar in the naga type IR.
+const F32_SCALAR_WIDTH: u8 = 4;
+/// Component count of a `vec4`.
+const VEC4_COMPONENTS: usize = 4;
 
 /// Insert the shared `OpenPBRMaterial` layout into the module, built from
 /// the [`OPENPBR_SLOTS`] name list (20 `vec4` slots, 16 bytes each).
@@ -23,7 +29,7 @@ pub fn openpbr_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
                 size: naga::VectorSize::Quad,
                 scalar: naga::Scalar {
                     kind: naga::ScalarKind::Float,
-                    width: 4,
+                    width: F32_SCALAR_WIDTH,
                 },
             },
         },
@@ -36,7 +42,7 @@ pub fn openpbr_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
             name: Some(slot.to_string()),
             ty: vec4f,
             binding: None,
-            offset: (i * 16) as u32,
+            offset: (i as u32) * VEC4_STRIDE,
         })
         .collect();
     module.types.insert(
@@ -44,7 +50,7 @@ pub fn openpbr_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
             name: Some(OPENPBR_WGSL_NAME.to_string()),
             inner: naga::TypeInner::Struct {
                 members,
-                span: (OPENPBR_SLOTS.len() * 16) as u32,
+                span: (OPENPBR_SLOTS.len() as u32) * VEC4_STRIDE,
             },
         },
         naga::Span::default(),
@@ -277,7 +283,7 @@ fn compose_vec(
     parts: Vec<naga::Handle<naga::Expression>>,
 ) -> (naga::Handle<naga::Type>, naga::Handle<naga::Expression>) {
     let size = match width {
-        4 => naga::VectorSize::Quad,
+        VEC4_COMPONENTS => naga::VectorSize::Quad,
         _ => naga::VectorSize::Bi,
     };
     let ty = module.types.insert(
@@ -287,7 +293,7 @@ fn compose_vec(
                 size,
                 scalar: naga::Scalar {
                     kind: naga::ScalarKind::Float,
-                    width: 4,
+                    width: F32_SCALAR_WIDTH,
                 },
             },
         },
@@ -327,7 +333,7 @@ fn add_const_vec_array(module: &mut naga::Module, name: &str, vals: &[Vec<f32>])
         naga::Expression::Compose { ty, .. } => ty,
         _ => return,
     };
-    let stride = if width == 2 { 8 } else { 16 };
+    let stride = if width == 2 { VEC2_STRIDE } else { VEC4_STRIDE };
     let Some(len) = std::num::NonZeroU32::new(parts.len() as u32) else {
         return;
     };

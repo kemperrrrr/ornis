@@ -1,16 +1,16 @@
 {
   "version": 2,
-  "quality_score": 0.4946741690923484,
-  "iosp_score": 0.9106858054226475,
+  "quality_score": 0.5153102617487473,
+  "iosp_score": 0.9107264859940788,
   "violations": 392,
-  "total": 6889,
+  "total": 6896,
   "complexity_warnings": 73,
-  "magic_number_warnings": 241,
+  "magic_number_warnings": 129,
   "nesting_depth_warnings": 19,
   "function_length_warnings": 126,
   "unsafe_warnings": 11,
   "error_handling_warnings": 21,
-  "duplicate_groups": 88,
+  "duplicate_groups": 90,
   "dead_code_warnings": 419,
   "dead_type_warnings": 4,
   "fragment_groups": 658,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 24,
-  "total_findings": 2912,
+  "total_findings": 2802,
   "violation_details": [
     {
       "name": "showcase_engine",
@@ -193,7 +193,7 @@
     {
       "name": "fs_main",
       "file": "crates/render/src/shaders/pbr_generated.rs",
-      "line": 101
+      "line": 108
     },
     {
       "name": "fs_main_textured",
@@ -213,47 +213,47 @@
     {
       "name": "fs_main_msaa",
       "file": "crates/render/src/shaders/lighting_generated.rs",
-      "line": 630
+      "line": 634
     },
     {
       "name": "evaluate_base_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 80
+      "line": 101
     },
     {
       "name": "evaluate_coat_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 131
+      "line": 152
     },
     {
       "name": "evaluate_fuzz_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 205
+      "line": 226
     },
     {
       "name": "evaluate_transmission_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 227
+      "line": 248
     },
     {
       "name": "evaluate_subsurface_layer",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 266
+      "line": 287
     },
     {
       "name": "transmission_btdf",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 315
+      "line": 336
     },
     {
       "name": "octahedral_decode",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 342
+      "line": 363
     },
     {
       "name": "reconstruct_world_pos",
       "file": "crates/render/src/shaders/helpers.rs",
-      "line": 370
+      "line": 391
     },
     {
       "name": "fs_main",

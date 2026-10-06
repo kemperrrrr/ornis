@@ -136,6 +136,9 @@ pub const FOG_RESOURCES: [Resource; 5] = [
     },
 ];
 
+/// Group-0 `@binding` indices the fog fragment stage declares.
+const FOG_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4];
+
 /// Full WGSL source for the fog fragment stage, assembled from Rust.
 pub fn wgsl_source() -> String {
     wgsl_source_for_samples(1)
@@ -149,8 +152,9 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
     ShaderModule::new()
         .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
         .decl(wgsl_decl(FogUniform::WGSL_SOURCE))
-        .resources_for_samples(&FOG_RESOURCES, &[0, 1, 2, 3, 4], sample_count)
+        .resources_for_samples(&FOG_RESOURCES, FOG_FRAGMENT_BINDINGS, sample_count)
         .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
+        .consts(crate::shaders::math::wgsl_consts())
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helper(helpers::wgsl_lighting_decode())
         .helper(aces_tonemap::wgsl_source())
