@@ -1951,6 +1951,7 @@ mod tests {
             lights,
             ambient_intensity: ornis_core::Lux::new(1.0),
             exposure: ornis_core::Lux::new(1.0),
+            environment_weight: None,
         };
         let stats = rig.light_upload_stats();
         assert_eq!(stats.uploaded, 8, "{stats:?}");

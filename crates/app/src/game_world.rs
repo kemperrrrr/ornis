@@ -14,8 +14,8 @@ use std::marker::PhantomData;
 
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
-    Authoritative, Color, Engine, Entity, Position, Replica, SceneEntities, SceneRole,
-    SceneVersion, Seconds, UnitQuat,
+    Authoritative, Color, Engine, Entity, EnvironmentWeight, Position, Replica, SceneEntities,
+    SceneRole, SceneVersion, Seconds, Surface, UnitQuat,
 };
 use ornis_render::extraction::{RenderLights, extract_render_data};
 use ornis_render::{
@@ -336,6 +336,18 @@ impl<Role: SceneRole> GameWorld<Role> {
         self.ensure_render_lights().ambient = color;
     }
 
+    /// Sets the image-based light weight on the lighting resource.
+    ///
+    /// Does not upload an environment cube. Until this is called the
+    /// renderer keeps the automatic weight: `0` with no cube and `1`
+    /// after [`Renderer3D::set_image_based_light`](ornis_render::Renderer3D::set_image_based_light).
+    /// A stored weight is written into `LightingUniform.ibl_weight` on
+    /// submit and is not replaced when a cube is bound or cleared.
+    // qual:api — public entry; in-tree callers are tests until a sample uses it.
+    pub fn set_environment_light(&mut self, weight: EnvironmentWeight) {
+        self.ensure_render_lights().environment_weight = Some(weight);
+    }
+
     /// Places `value` into the world.
     ///
     /// [`DirectionalLight`] is appended as that one light. A world with no
@@ -568,13 +580,7 @@ impl Spawn for ModelSpawn {
                 return Err(SpawnModelError::InvalidParent { parent });
             }
         }
-        Ok(spawn_model_hierarchy(
-            world,
-            self.model,
-            &model,
-            self.root_transform(),
-            self.parent,
-        ))
+        Ok(spawn_model_hierarchy(world, &model, self))
     }
 }
 
@@ -609,8 +615,8 @@ pub enum SpawnModelError {
 /// [`set_parent`](ornis_core::set_parent). The live node map is a separate
 /// [`ModelInstance`] component on the root.
 ///
-/// [`Default`] is the origin, identity rotation, unit scale, no parent, and
-/// a dangling model handle. Spawning it returns
+/// [`Default`] is the origin, identity rotation, unit scale, no parent,
+/// no surface override, and a dangling model handle. Spawning it returns
 /// [`SpawnModelError::UnknownHandle`] and creates no entities.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelSpawn {
@@ -624,6 +630,8 @@ pub struct ModelSpawn {
     pub scale: glam::Vec3,
     /// Parent of the synthetic root. Default is none.
     pub parent: Option<Entity>,
+    /// Surface stamped on every primitive. `None` keeps the glTF material.
+    pub material: Option<Surface>,
 }
 
 impl ModelSpawn {
@@ -645,7 +653,8 @@ impl ModelSpawn {
 }
 
 impl Default for ModelSpawn {
-    /// Origin, identity rotation, unit scale, no parent, dangling model handle.
+    /// Origin, identity rotation, unit scale, no parent, no surface override,
+    /// dangling model handle.
     fn default() -> Self {
         Self {
             model: ornis_assets::Handle::dangling(),
@@ -653,6 +662,7 @@ impl Default for ModelSpawn {
             rotation: UnitQuat::IDENTITY,
             scale: glam::Vec3::ONE,
             parent: None,
+            material: None,
         }
     }
 }
@@ -673,10 +683,8 @@ pub struct ModelInstance {
 
 fn spawn_model_hierarchy<Role: SceneRole>(
     world: &mut GameWorld<Role>,
-    handle: ornis_assets::Handle<ornis_assets::Model>,
     model: &ornis_assets::Model,
-    local: ornis_core::Transform,
-    parent: Option<Entity>,
+    spawn: ModelSpawn,
 ) -> Entity {
     let (root, skeletal, object) = {
         let store = world
@@ -684,17 +692,17 @@ fn spawn_model_hierarchy<Role: SceneRole>(
             .world_mut()
             .store_mut()
             .expect("engine always carries a store");
-        let root = insert_model_root(store, model, local);
-        if let Some(parent) = parent {
+        let root = insert_model_root(store, model, spawn.root_transform());
+        if let Some(parent) = spawn.parent {
             ornis_core::set_parent(store, root, parent)
                 .expect("parent was alive before the model was spawned");
         }
         let nodes = insert_model_nodes(store, root, model);
-        let primitives = insert_model_primitives(store, &nodes, model);
+        let primitives = insert_model_primitives(store, &nodes, model, spawn.material);
         store.insert(
             root,
             ModelInstance {
-                model: handle,
+                model: spawn.model,
                 nodes: nodes.clone(),
             },
         );
@@ -769,6 +777,7 @@ fn insert_model_primitives(
     store: &mut ornis_core::SmartStore,
     nodes: &[Entity],
     model: &ornis_assets::Model,
+    surface: Option<Surface>,
 ) -> Vec<Entity> {
     let flat = ornis_assets::scene_from_model(model);
     let mut primitives = Vec::with_capacity(model.primitives.len());
@@ -778,6 +787,9 @@ fn insert_model_primitives(
         store.insert(entity, ornis_core::GlobalTransform::IDENTITY);
         store.insert(entity, desc.mesh.clone());
         store.insert(entity, desc.material.clone());
+        if let Some(surface) = surface {
+            store.insert(entity, surface);
+        }
         let parent = nodes[primitive.node.index()];
         ornis_core::set_parent(store, entity, parent).expect("primitive parent");
         primitives.push(entity);
@@ -2053,6 +2065,7 @@ mod tests {
                 rotation,
                 scale,
                 parent: Some(parent),
+                material: None,
             })
             .expect("placed");
         {
@@ -2124,5 +2137,211 @@ mod tests {
         assert_eq!(world.title(), "Ornis — Animation Demo");
         let replica = ReplicaGameWorld::new_replica();
         assert_eq!(replica.title(), "Ornis Engine");
+    }
+
+    /// `set_environment_light` stores a clamped weight and does not invent
+    /// directional lights or a cube.
+    #[test]
+    fn set_environment_light_stores_the_weight() {
+        let mut world = GameWorld::new();
+        world.set_environment_light(EnvironmentWeight::new(f32::NAN));
+        let lights = world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("lights");
+        assert_eq!(
+            lights.environment_weight.map(EnvironmentWeight::get),
+            Some(0.0)
+        );
+        assert!(lights.lights.is_empty());
+        world.set_environment_light(EnvironmentWeight::new(1.7));
+        let lights = world
+            .engine()
+            .world()
+            .resources()
+            .get::<RenderLights>()
+            .expect("lights");
+        assert_eq!(
+            lights.environment_weight.map(EnvironmentWeight::get),
+            Some(1.0)
+        );
+    }
+
+    /// `None` keeps the glTF dielectric/metal choice. `Some(Surface)` rewrites
+    /// roughness, metalness, and specular weight on every primitive and
+    /// leaves color, IOR, and emission alone.
+    #[test]
+    fn model_spawn_surface_overrides_every_primitive() {
+        use ornis_core::{Metallic, Roughness, Specular};
+        /// Specular weight slot (`specular.params[0]`).
+        const SPECULAR_WEIGHT: usize = 0;
+        /// Specular roughness slot (`specular.params[1]`).
+        const SPECULAR_ROUGHNESS: usize = 1;
+        /// Specular IOR slot (`specular.params[2]`).
+        const SPECULAR_IOR: usize = 2;
+        /// Base metalness slot (`base.params[2]`).
+        const BASE_METALNESS: usize = 2;
+        /// Dielectric glTF roughness.
+        const DIELECTRIC_ROUGHNESS: f32 = 0.7;
+        /// Metal glTF roughness.
+        const METAL_ROUGHNESS: f32 = 0.2;
+        /// Override roughness, distinct from both glTF values.
+        const OVERRIDE_ROUGHNESS: f32 = 0.15;
+        /// Override metalness, strictly between the binary presets.
+        const OVERRIDE_METALNESS: f32 = 0.3;
+        /// Override specular weight (presets write `1`).
+        const OVERRIDE_SPECULAR: f32 = 0.4;
+
+        let path =
+            std::env::temp_dir().join(format!("ornis-surface-override-{}.glb", std::process::id()));
+        std::fs::write(&path, two_material_glb()).expect("write glb");
+
+        let baseline = spawned_materials(&path, None);
+        assert_eq!(baseline.len(), 2);
+        assert_eq!(
+            baseline[0].specular.params[SPECULAR_ROUGHNESS],
+            DIELECTRIC_ROUGHNESS
+        );
+        assert_eq!(baseline[0].base.params[BASE_METALNESS], 0.0);
+        assert_eq!(baseline[0].specular.params[SPECULAR_WEIGHT], 1.0);
+        assert_eq!(baseline[0].base.color[0], 0.2);
+        assert_eq!(baseline[0].base.color[1], 0.4);
+        assert_eq!(baseline[0].base.color[2], 0.6);
+        assert_eq!(baseline[0].emission.params[0], 0.3);
+        assert_eq!(
+            baseline[1].specular.params[SPECULAR_ROUGHNESS],
+            METAL_ROUGHNESS
+        );
+        assert_eq!(baseline[1].base.params[BASE_METALNESS], 1.0);
+        assert_eq!(baseline[1].specular.params[SPECULAR_WEIGHT], 1.0);
+        assert_eq!(baseline[1].base.color[0], 0.8);
+        assert_eq!(baseline[1].emission.params[0], 0.4);
+
+        let surface = Surface {
+            roughness: Roughness::new(OVERRIDE_ROUGHNESS),
+            metallic: Metallic::new(OVERRIDE_METALNESS),
+            specular: Specular::new(OVERRIDE_SPECULAR),
+        };
+        let overridden = spawned_materials(&path, Some(surface));
+        assert_eq!(overridden.len(), baseline.len());
+        for (index, (over, base)) in overridden.iter().zip(baseline.iter()).enumerate() {
+            assert_eq!(over.specular.params[SPECULAR_ROUGHNESS], OVERRIDE_ROUGHNESS);
+            assert_eq!(over.base.params[BASE_METALNESS], OVERRIDE_METALNESS);
+            assert_eq!(over.specular.params[SPECULAR_WEIGHT], OVERRIDE_SPECULAR);
+            assert_eq!(over.base.color, base.base.color, "color {index}");
+            assert_eq!(
+                over.specular.params[SPECULAR_IOR], base.specular.params[SPECULAR_IOR],
+                "ior {index}"
+            );
+            assert_eq!(
+                over.emission.params, base.emission.params,
+                "emission {index}"
+            );
+            assert_eq!(
+                over.emission.color, base.emission.color,
+                "emission color {index}"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn spawned_materials(
+        path: &std::path::Path,
+        material: Option<Surface>,
+    ) -> Vec<ornis_render::OpenPBRMaterial> {
+        let mut world = GameWorld::new();
+        let model = world.load::<ornis_assets::Model>(path).expect("glb loads");
+        world
+            .spawn(ModelSpawn {
+                model,
+                material,
+                ..ModelSpawn::default()
+            })
+            .expect("spawn");
+        let upload = extract_render_data(world.engine().world().store().expect("store"));
+        upload
+            .custom_meshes
+            .iter()
+            .map(|entry| upload.materials[entry.instance.material_index.index()])
+            .collect()
+    }
+
+    /// Two-primitive glTF: dielectric (metallic 0.1) then metal (metallic 0.9).
+    fn two_material_glb() -> Vec<u8> {
+        let mut bin = Vec::new();
+        for position in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for component in position {
+                bin.extend_from_slice(&component.to_le_bytes());
+            }
+        }
+        let index_offset = bin.len();
+        for index in [0_u16, 1, 2] {
+            bin.extend_from_slice(&index.to_le_bytes());
+        }
+        let json = format!(
+            r#"{{
+                "asset": {{"version": "2.0"}},
+                "scene": 0,
+                "scenes": [{{"nodes": [0]}}],
+                "nodes": [{{"mesh": 0}}],
+                "meshes": [{{"primitives": [
+                    {{"attributes": {{"POSITION": 0}}, "indices": 1, "material": 0}},
+                    {{"attributes": {{"POSITION": 0}}, "indices": 1, "material": 1}}
+                ]}}],
+                "materials": [
+                    {{
+                        "pbrMetallicRoughness": {{
+                            "baseColorFactor": [0.2, 0.4, 0.6, 1.0],
+                            "metallicFactor": 0.1,
+                            "roughnessFactor": 0.7
+                        }},
+                        "emissiveFactor": [0.3, 0.0, 0.0]
+                    }},
+                    {{
+                        "pbrMetallicRoughness": {{
+                            "baseColorFactor": [0.8, 0.1, 0.05, 1.0],
+                            "metallicFactor": 0.9,
+                            "roughnessFactor": 0.2
+                        }},
+                        "emissiveFactor": [0.0, 0.4, 0.0]
+                    }}
+                ],
+                "accessors": [
+                    {{
+                        "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                        "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]
+                    }},
+                    {{"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}}
+                ],
+                "bufferViews": [
+                    {{"buffer": 0, "byteOffset": 0, "byteLength": {index_offset}}},
+                    {{"buffer": 0, "byteOffset": {index_offset}, "byteLength": 6}}
+                ],
+                "buffers": [{{"byteLength": {}}}]
+            }}"#,
+            bin.len()
+        );
+        assemble_glb(&json, &bin)
+    }
+
+    fn assemble_glb(json: &str, bin: &[u8]) -> Vec<u8> {
+        let json_pad = json.len().next_multiple_of(4) - json.len();
+        let bin_pad = bin.len().next_multiple_of(4) - bin.len();
+        let total = 12 + 8 + json.len() + json_pad + 8 + bin.len() + bin_pad;
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&0x4654_6C67_u32.to_le_bytes());
+        out.extend_from_slice(&2_u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&((json.len() + json_pad) as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(json.as_bytes());
+        out.extend(std::iter::repeat_n(b' ', json_pad));
+        out.extend_from_slice(&((bin.len() + bin_pad) as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(bin);
+        out.extend(std::iter::repeat_n(0_u8, bin_pad));
+        out
     }
 }

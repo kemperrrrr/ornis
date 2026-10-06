@@ -638,6 +638,46 @@ mod tests {
         }
     }
 
+    /// Metalness mixes dielectric and metal continuously. `0.3` sits
+    /// strictly between the dielectric (`0`) and metal (`1`) endpoints
+    /// of F0 and of the diffuse albedo. Mirrors `evaluate_base_layer`:
+    /// `F0 = mix(fresnel0(ior), base_color, m)` and `diffuse * (1 - m)`.
+    #[test]
+    fn partial_metalness_is_between_dielectric_and_metal() {
+        /// Partial metal used as the intermediate sample.
+        const PARTIAL_METALNESS: f32 = 0.3;
+        /// Dielectric IOR shared by both presets.
+        const DIELECTRIC_IOR: f32 = 1.5;
+        let base = glam::Vec3::new(0.8, 0.2, 0.1);
+        let f0_dielectric = glam::Vec3::splat(fresnel0_from_ior::eval(DIELECTRIC_IOR));
+        let f0 = |metalness: f32| f0_dielectric.lerp(base, metalness);
+        let diffuse = |metalness: f32| base * (1.0 - metalness);
+        let f0_dielectric_end = f0(0.0);
+        let f0_metal_end = f0(1.0);
+        let f0_partial = f0(PARTIAL_METALNESS);
+        let diffuse_dielectric = diffuse(0.0);
+        let diffuse_metal = diffuse(1.0);
+        let diffuse_partial = diffuse(PARTIAL_METALNESS);
+        assert!((f0_dielectric_end - f0_dielectric).length() < 1e-6);
+        assert!((f0_metal_end - base).length() < 1e-6);
+        assert!((diffuse_dielectric - base).length() < 1e-6);
+        assert!(diffuse_metal.length() < 1e-6);
+        for axis in 0..3 {
+            let f0_lo = f0_dielectric_end[axis].min(f0_metal_end[axis]);
+            let f0_hi = f0_dielectric_end[axis].max(f0_metal_end[axis]);
+            assert!(
+                f0_partial[axis] > f0_lo && f0_partial[axis] < f0_hi,
+                "F0 axis {axis} {f0_partial} not between {f0_dielectric_end} and {f0_metal_end}"
+            );
+            let diffuse_lo = diffuse_dielectric[axis].min(diffuse_metal[axis]);
+            let diffuse_hi = diffuse_dielectric[axis].max(diffuse_metal[axis]);
+            assert!(
+                diffuse_partial[axis] > diffuse_lo && diffuse_partial[axis] < diffuse_hi,
+                "diffuse axis {axis} {diffuse_partial} not between endpoints"
+            );
+        }
+    }
+
     /// Severity: medium. Partial metals must lose diffuse once.
     #[test]
     fn partial_metal_diffuse_energy_is_not_squared() {
