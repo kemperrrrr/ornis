@@ -351,3 +351,64 @@ impl Renderer3D {
         (0..count as u32).map(PaletteHandle::from_raw).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    #[test]
+    fn per_object_material_index_substitutes_to_u32() {
+        use crate::shaders::interface::{GbufferFragmentInput, GbufferVertexOutput};
+        // The DSL substitutes the transparent `MaterialIdx` newtype to WGSL
+        // `u32`: the declaration texts are unchanged from the raw-`u32` era.
+        assert!(
+            PerObjectGpu::WGSL_SOURCE.contains("material_index: u32"),
+            "{}",
+            PerObjectGpu::WGSL_SOURCE
+        );
+        assert_eq!(
+            PerObjectGpu::FIELD_NAMES,
+            &["model", "normal_matrix", "material_index"]
+        );
+        assert!(
+            GbufferVertexOutput::WGSL_SOURCE.contains("material_index: u32"),
+            "{}",
+            GbufferVertexOutput::WGSL_SOURCE
+        );
+        assert!(
+            GbufferFragmentInput::WGSL_SOURCE.contains("material_index: u32"),
+            "{}",
+            GbufferFragmentInput::WGSL_SOURCE
+        );
+        // CPU layout is unchanged: transparent wrapper, same offsets/size.
+        assert_eq!(std::mem::size_of::<MaterialIdx>(), 4);
+        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 144);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 128);
+        // The derived declaration validates with naga.
+        let mut module = naga::Module::default();
+        let handle = PerObjectGpu::naga_add_type(&mut module);
+        let naga::TypeInner::Struct { members, span } = &module.types[handle].inner else {
+            panic!("PerObjectGpu must lower to a naga struct");
+        };
+        assert_eq!(*span, 144);
+        assert_eq!(members[2].offset, 128);
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("PerObjectGpu declaration must validate");
+    }
+
+    #[test]
+    fn staging_reserve_is_exact_and_stable_at_same_size() {
+        // The upload path reserves once up front: exact fit for the
+        // frame, and re-reserving the same size never reallocates.
+        assert_eq!(staging_capacity_for_instances(300), 300);
+        let mut staging: Vec<PerObjectGpu> =
+            Vec::with_capacity(staging_capacity_for_instances(300));
+        assert!(staging.capacity() >= 300);
+        let capacity = staging.capacity();
+        staging.reserve(staging_capacity_for_instances(300).saturating_sub(staging.len()));
+        assert_eq!(staging.capacity(), capacity, "same size: no realloc");
+    }
+}

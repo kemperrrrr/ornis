@@ -1,5 +1,6 @@
 //! Custom and skinned mesh upload, staging, and draw recording (color and shadow entries) for `Renderer3D`.
 use super::gbuffer::GbufferResolveSlot;
+use super::shadows::CUBE_FACE_COUNT;
 use super::*;
 /// Upload one inline `MeshDesc::Custom` soup as its own [`Mesh`].
 ///
@@ -336,6 +337,132 @@ impl Renderer3D {
         (pipeline, bind_group_layout)
     }
 
+    /// Render skinned depth pre-passes for one skinned entry: the same
+    /// layers and cube faces [`render_shadows`](Self::render_shadows)
+    /// covers, drawn with the skinned depth pipelines and the entry's
+    /// palette slot — skinned depth, never bind-pose depth.
+    ///
+    /// The entry instance must already sit in per-object slot 0 (via
+    /// [`upload_instances`](Self::upload_instances) or
+    /// [`render_skinned_entry`](Self::render_skinned_entry)); a stale
+    /// handle records no commands. A no-op without shadowed lights.
+    pub fn render_skinned_shadows(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mesh: &Mesh,
+        handle: PaletteHandle,
+    ) {
+        if handle.index()
+            >= self
+                .palette_count
+                .load(std::sync::atomic::Ordering::Relaxed) as usize
+        {
+            return;
+        }
+        let count = self
+            .shadow_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(SHADOW_LAYERS as u32);
+        let cubes = self
+            .point_shadow_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(POINT_SHADOW_CUBES as u32);
+        if count == 0 && cubes == 0 {
+            return;
+        }
+        let per_object = read_lock(&self.per_object_buffer);
+        let material = read_lock(&self.material_buffer);
+        let palette = read_lock(&self.palette_buffer);
+        for layer in 0..count as usize {
+            self.render_skinned_shadow_layer(
+                device,
+                encoder,
+                mesh,
+                handle,
+                &self.skinned_shadow_pipeline,
+                &self.shadow_vp_buffers[layer],
+                &self.shadow_views[layer],
+                &per_object,
+                &material,
+                &palette,
+            );
+        }
+        for cube in 0..cubes as usize {
+            for face in 0..CUBE_FACE_COUNT {
+                let idx = cube * CUBE_FACE_COUNT + face;
+                self.render_skinned_shadow_layer(
+                    device,
+                    encoder,
+                    mesh,
+                    handle,
+                    &self.skinned_shadow_cube_pipeline,
+                    &self.shadow_cube_vp_buffers[idx],
+                    &self.shadow_cube_views[idx],
+                    &per_object,
+                    &material,
+                    &palette,
+                );
+            }
+        }
+    }
+
+    /// One skinned depth-only draw into a shadow view: the light-space VP
+    /// goes into the `camera` slot and the entry palette into binding 3.
+    /// Shared by 2D layers and cube faces (same layout, mirrored pipeline
+    /// for faces).
+    #[allow(clippy::too_many_arguments)]
+    fn render_skinned_shadow_layer(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mesh: &Mesh,
+        handle: PaletteHandle,
+        pipeline: &wgpu::RenderPipeline,
+        vp_buffer: &wgpu::Buffer,
+        view: &wgpu::TextureView,
+        per_object: &wgpu::Buffer,
+        material: &wgpu::Buffer,
+        palette: &wgpu::Buffer,
+    ) {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skinned shadow bind group"),
+            layout: &self.skinned_bind_group_layout,
+            entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
+                "camera" => Some(vp_buffer.as_entire_binding()),
+                "per_objects" => Some(per_object.as_entire_binding()),
+                "materials" => Some(material.as_entire_binding()),
+                "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: palette,
+                    offset: handle.byte_offset(),
+                    size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                })),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("skinned shadow pass"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+    }
+
     /// Stage one frame's custom entries into per-entity GPU meshes.
     ///
     /// Production upload for
@@ -592,5 +719,214 @@ impl Renderer3D {
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_util::*;
+    use super::super::*;
+    use super::*;
+    use ornis_assets::scene::ShadowCast;
+    #[test]
+    fn skinned_pipeline_sources_validate_with_naga() {
+        // The skinned pipelines assemble the skinned vertex stage with the
+        // classic fragment stage: both modules the renderer compiles must
+        // validate (the shadow variants reuse the same vertex module).
+        assert_valid_wgsl(
+            "skinned_vertex",
+            &crate::skinning::wgsl_vertex_source_skinned(),
+        );
+        assert_valid_wgsl("skinned_fragment", &crate::shaders::gbuffer_fragment());
+        assert_eq!(crate::skinning::skinned_entry_point(), "vs_main_skinned");
+    }
+
+    #[test]
+    fn skinned_upload_rejects_empty_and_bad_indices() {
+        // Validation needs a device: skipped headless, like every probe.
+        let Some((device, _)) = try_device() else {
+            eprintln!("no GPU adapter; skipping skinned upload probe");
+            return;
+        };
+        use crate::mesh_upload::UploadError;
+        let vertex = SkinnedVertex {
+            position: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            joints: [0, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        assert!(matches!(
+            upload_skinned_mesh(&device, &[], &[0, 1, 2]),
+            Err(UploadError::EmptyMesh)
+        ));
+        assert!(matches!(
+            upload_skinned_mesh(&device, &[vertex], &[]),
+            Err(UploadError::EmptyMesh)
+        ));
+        assert!(matches!(
+            upload_skinned_mesh(&device, &[vertex], &[0, 1]),
+            Err(UploadError::InvalidMesh(_))
+        ));
+        assert!(matches!(
+            upload_skinned_mesh(&device, &[vertex], &[0, 1, 7]),
+            Err(UploadError::InvalidMesh(_))
+        ));
+        assert!(upload_skinned_mesh(&device, &[vertex; 3], &[0, 1, 2]).is_ok());
+    }
+
+    /// Skinned color + shadow draws bind the palette and record without
+    /// panicking; a stale handle is an exact no-op. Skipped when no
+    /// adapter is available.
+    #[test]
+    fn skinned_entry_renders_and_shadows_without_panic() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("no GPU adapter; skipping skinned draw probe");
+            return;
+        };
+        const W: u32 = 64;
+        const H: u32 = 64;
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width: W,
+            height: H,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let renderer = Renderer3D::new(&device, &surface_config, 1);
+        // Bind-group assembly pins the layout contract: four rows off the
+        // skinned resource table, palette at binding 3, vertex-only.
+        assert_eq!(GBUFFER_SKINNED_RESOURCES.len(), 4);
+        let palette_row = GBUFFER_SKINNED_RESOURCES
+            .iter()
+            .find(|r| r.binding == 3)
+            .expect("palette at binding 3");
+        assert_eq!(palette_row.name, "palette");
+        assert_eq!(
+            palette_row.visibility,
+            wgpu::ShaderStages::VERTEX,
+            "palette is vertex-only"
+        );
+        {
+            let per_object = read_lock(&renderer.per_object_buffer);
+            let material = read_lock(&renderer.material_buffer);
+            let palette = read_lock(&renderer.palette_buffer);
+            let entries =
+                crate::shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
+                    "camera" => Some(renderer.camera_buffer.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    "palette" => Some(palette.as_entire_binding()),
+                    _ => None,
+                })
+                .expect("skinned resources resolve");
+            assert_eq!(entries.len(), 4);
+            assert_eq!(
+                entries.iter().map(|e| e.binding).collect::<Vec<_>>(),
+                vec![0, 1, 2, 3]
+            );
+        }
+
+        let mut red = ornis_core::OpenPBRMaterial::dielectric();
+        red.base.color_rgb([0.8, 0.2, 0.2]);
+        red.specular.roughness(HALF);
+        renderer.upload_materials(&device, &queue, &[red]);
+        // Identity palette over one triangle: the vertex stage passes the
+        // bind pose through (model is identity, like the extraction's
+        // skinned entries).
+        let row = |position: [f32; 3]| SkinnedVertex {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+            joints: [0, 0, 0, 0],
+            weights: [1.0, 0.0, 0.0, 0.0],
+        };
+        let mesh = upload_skinned_mesh(
+            &device,
+            &[
+                row([-HALF, -HALF, 0.0]),
+                row([HALF, -HALF, 0.0]),
+                row([0.0, HALF, 0.0]),
+            ],
+            &[0, 1, 2],
+        )
+        .expect("triangle valid");
+        let palette_bytes =
+            crate::skinning::joint_palette_bytes(&[glam::Mat4::IDENTITY]).expect("fits");
+        assert_eq!(palette_bytes.len(), PALETTE_BYTE_SIZE);
+        let handles = renderer.upload_skin_palettes(&device, &queue, &[palette_bytes]);
+        assert_eq!(handles, vec![PaletteHandle::from_raw(0)]);
+        // Identity view-projection: clip = world, depth 0 < clear 1.
+        renderer.set_camera(
+            &queue,
+            &[
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            [0.0, 0.0, 0.0],
+        );
+        // One shadowed light so the skinned depth pre-pass draws.
+        renderer.set_lights_full(
+            &queue,
+            [0.1, 0.1, 0.15],
+            1.0,
+            1.0,
+            &[ornis_assets::scene::LightDesc::Directional {
+                direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(0.2, 1.0, 0.3))
+                    .expect("non-zero direction"),
+                intensity: 1.2,
+                color: [1.0, 1.0, 1.0],
+                shadow: ShadowCast::Enabled,
+            }],
+        );
+        let g = GbufferTargets {
+            albedo: &renderer.gbuffer.albedo_view,
+            normal: &renderer.gbuffer.normal_view,
+            material_id: &renderer.gbuffer.material_id_view,
+            world_position: &renderer.gbuffer.world_position_view,
+            material_params: &renderer.gbuffer.material_params_view,
+            depth: &renderer.gbuffer.depth_view,
+        };
+        let instance = InstanceData {
+            model_matrix: glam::Mat4::IDENTITY,
+            normal_matrix: glam::Mat4::IDENTITY,
+            material_index: MaterialIdx::from_raw(0),
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("skinned probe encoder"),
+        });
+        renderer.render_skinned_entry(
+            &device,
+            &queue,
+            &mut encoder,
+            &g,
+            &mesh,
+            &instance,
+            handles[0],
+        );
+        renderer.render_skinned_shadows(&device, &mut encoder, &mesh, handles[0]);
+        // Stale handle: exact no-op, never an out-of-bounds bind.
+        renderer.render_skinned_entry(
+            &device,
+            &queue,
+            &mut encoder,
+            &g,
+            &mesh,
+            &instance,
+            PaletteHandle::from_raw(99),
+        );
+        renderer.render_skinned_shadows(&device, &mut encoder, &mesh, PaletteHandle::from_raw(99));
+        queue.submit(std::iter::once(encoder.finish()));
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
     }
 }

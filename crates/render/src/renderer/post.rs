@@ -662,3 +662,288 @@ impl Renderer3D {
         rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_util::*;
+    use super::super::*;
+    use super::*;
+    #[test]
+    fn fog_uniform_layout_matches_wgsl() {
+        // Layout gates (precedent: Camera/Lighting via `WgslStruct`):
+        // `color: vec3<f32>` at 0, `density: f32` at 12, 16 bytes total.
+        assert_eq!(std::mem::size_of::<FogUniform>(), 16);
+        assert_eq!(std::mem::offset_of!(FogUniform, color), 0);
+        assert_eq!(std::mem::offset_of!(FogUniform, density), 12);
+        assert_eq!(FogUniform::FIELD_NAMES, &["color", "density"]);
+        assert!(
+            FogUniform::WGSL_SOURCE.contains("color: vec3<f32>"),
+            "{}",
+            FogUniform::WGSL_SOURCE
+        );
+        assert!(
+            FogUniform::WGSL_SOURCE.contains("density: f32"),
+            "{}",
+            FogUniform::WGSL_SOURCE
+        );
+        let packed = FogUniform::pack([HALF, 0.6, 0.7], 0.1);
+        let bytes = bytemuck::bytes_of(&packed);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(
+            &bytes[0..12],
+            bytemuck::cast_slice::<f32, u8>(&[HALF, 0.6, 0.7])
+        );
+    }
+
+    /// GPU/CPU parity smoke for the enabled fog mix: a solid HDR layer over
+    /// a cleared (far-plane) depth buffer, fogged on the GPU, must land
+    /// within tolerance of ACES([`crate::frame_passes::apply_fog`]) fed with
+    /// the same view-space distance the shader reconstructs.
+    ///
+    /// The fresh `Renderer3D` camera is the identity (eye at the origin),
+    /// so the reconstruction is exact on paper: NDC `(u*2-1, 1-v*2, 1)`
+    /// maps to itself and the distance is its length. Skipped when no
+    /// adapter is available.
+    #[test]
+    fn fog_enabled_gpu_matches_cpu_apply_fog() {
+        const W: u32 = 32;
+        const H: u32 = 2;
+        const BPP: u32 = 4;
+        const ROW: u32 = W * BPP; // 128 — under the 256 copy alignment…
+        // …so pad rows to 256 bytes for the readback copy.
+        const PADDED_ROW: u32 = 256;
+        const FMT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+        const INPUT: [f32; 3] = [0.2, 0.4, 0.6];
+        const FOG_COLOR: [f32; 3] = [0.9, 0.1, 0.1];
+        const DENSITY: f32 = 3.0;
+        // Tolerance covers u8 quantization (1/255) plus f32 exp/MAD
+        // ordering between CPU and GPU.
+        const TOL: f32 = 0.03;
+
+        fn run_case(density: f32) -> Option<[f32; 3]> {
+            let (device, queue) = try_device()?;
+            let surface_config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: FMT,
+                width: W,
+                height: H,
+                present_mode: wgpu::PresentMode::AutoNoVsync,
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
+            };
+            let renderer = Renderer3D::new(&device, &surface_config, 1);
+
+            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let input_byte = [byte(INPUT[0]), byte(INPUT[1]), byte(INPUT[2]), 255];
+            let extent = wgpu::Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            };
+            let hdr_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("fog parity hdr"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FMT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let mut hdr_data = vec![0u8; (ROW * H) as usize];
+            for px in hdr_data.chunks_exact_mut(4) {
+                px.copy_from_slice(&input_byte);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &hdr_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &hdr_data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(ROW),
+                    rows_per_image: Some(H),
+                },
+                extent,
+            );
+            // Far-plane depth: clear-only pass over a depth texture.
+            let depth_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("fog parity depth"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let target_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("fog parity target"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FMT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let target = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
+            let hdr = hdr_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fog parity encoder"),
+            });
+            // Initialize both attachments first (`render_fog` loads the
+            // target instead of clearing it).
+            {
+                let clear_depth = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fog parity init"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &clear_depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            renderer.render_fog(
+                &device,
+                &queue,
+                &mut encoder,
+                FogInputs {
+                    hdr: &hdr,
+                    depth: &depth_view,
+                    target: &target,
+                    color: FOG_COLOR,
+                    density,
+                },
+            );
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fog parity readback"),
+                size: (PADDED_ROW * H) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &target_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(PADDED_ROW),
+                        rows_per_image: Some(H),
+                    },
+                },
+                extent,
+            );
+            queue.submit([encoder.finish()]);
+
+            let slice = buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .ok();
+            rx.recv().ok()?.ok()?;
+            let view = slice.get_mapped_range().unwrap();
+            // Center-ish texel (x=16, y=1): deterministic uv, same math
+            // the CPU reference uses below.
+            let px = (PADDED_ROW + 16 * BPP) as usize;
+            let pixel = [
+                view[px] as f32 / 255.0,
+                view[px + 1] as f32 / 255.0,
+                view[px + 2] as f32 / 255.0,
+            ];
+            Some(pixel)
+        }
+
+        // Reconstructed distance for texel (16, 1) under the identity
+        // camera: uv = ((16+0.5)/32, (1+0.5)/2), NDC z = 1 (cleared far).
+        let u = (16.0 + HALF) / W as f32;
+        let v = (1.0 + HALF) / H as f32;
+        let dist = ((2.0 * u - 1.0).powi(2) + (1.0 - 2.0 * v).powi(2) + 1.0).sqrt();
+        let fog = crate::frame_passes::FogState::Enabled(
+            crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, DENSITY)
+                .expect("positive density"),
+        );
+        let tonemap = |rgb: [f32; 3]| {
+            let mapped = crate::shaders::math::aces_tonemap::eval(glam::Vec3::from(rgb));
+            [mapped.x, mapped.y, mapped.z]
+        };
+        // The pass mixes in scene-linear space, then applies the same ACES
+        // the composite uses, because fog replaces that present.
+        let expected = tonemap(crate::frame_passes::apply_fog(INPUT, dist, fog));
+        let tonemapped_input = tonemap(INPUT);
+        let tonemapped_fog = tonemap(FOG_COLOR);
+
+        let Some(px) = run_case(DENSITY) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        for i in 0..3 {
+            assert!(
+                (px[i] - expected[i]).abs() <= TOL,
+                "channel {i}: gpu={px:?} cpu={expected:?} (dist={dist})"
+            );
+        }
+        // High density visibly moved toward the fog color…
+        for i in 0..3 {
+            assert!(
+                (px[i] - tonemapped_fog[i]).abs() < (tonemapped_input[i] - tonemapped_fog[i]).abs(),
+                "no fog movement: {px:?}"
+            );
+        }
+        // …while a near-zero density keeps the tonemapped input.
+        let faint = crate::frame_passes::FogState::Enabled(
+            crate::frame_passes::FogSettings::try_from_raw(FOG_COLOR, 1.0e-4)
+                .expect("positive density"),
+        );
+        let faint_expected = tonemap(crate::frame_passes::apply_fog(INPUT, dist, faint));
+        let Some(faint_px) = run_case(1.0e-4) else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        for i in 0..3 {
+            assert!(
+                (faint_px[i] - faint_expected[i]).abs() <= TOL,
+                "faint channel {i}: gpu={faint_px:?} cpu={faint_expected:?}"
+            );
+            assert!(
+                (faint_px[i] - tonemapped_input[i]).abs() < 0.02,
+                "near-zero density drifted: {faint_px:?}"
+            );
+        }
+    }
+}

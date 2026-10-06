@@ -144,3 +144,78 @@ impl Renderer3D {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::lights::build_lighting_uniform;
+    use super::super::test_util::*;
+    use super::super::*;
+    use ornis_assets::scene::ShadowCast;
+    #[test]
+    fn ibl_multipliers_scale_upload_and_default_is_noop() {
+        let lights = vec![LightDesc::Directional {
+            direction: ornis_core::units::UnitVec3::normalize(glam::Vec3::new(1.0, 1.0, 1.0))
+                .expect("non-zero direction"),
+            intensity: 2.0,
+            color: [HALF, 0.25, 0.125],
+            shadow: ShadowCast::Disabled,
+        }];
+        let base =
+            build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None, 0.0, 0.0, 0);
+        assert_eq!(base.uniform.ambient_color, [HALF, 0.25, 0.125, 1.0]);
+        assert_eq!(base.uniform.lights[0].color, [HALF, 0.25, 0.125, 2.0]);
+        let scaled =
+            build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None, 0.0, 0.0, 0);
+        assert_eq!(scaled.uniform.ambient_color, [1.0, HALF, 0.25, 1.0]);
+        assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, HALF, 2.0]);
+    }
+
+    /// Explicit IBL weight reaches the lighting uniform and survives a
+    /// cube bind. Without the setter, no cube stays at 0 and a cube
+    /// becomes 1. Skipped when no adapter is available.
+    #[test]
+    fn explicit_environment_weight_survives_cube_bind() {
+        /// Side of the headless surface used only to construct the renderer.
+        const SIDE: u32 = 4;
+        /// Explicit weight, distinct from both automatic endpoints.
+        const EXPLICIT_WEIGHT: f32 = 0.35;
+        let Some((device, queue)) = try_device() else {
+            return;
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: SIDE,
+            height: SIDE,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let cube = crate::ibl::EnvironmentCube::solid(ornis_core::units::Color::WHITE, SIDE);
+        let mut automatic = Renderer3D::new(&device, &config, 1);
+        assert_eq!(automatic.ibl_weight_for_tests(), 0.0);
+        automatic.set_image_based_light(&device, &queue, None);
+        assert_eq!(automatic.ibl_weight_for_tests(), 0.0);
+        automatic.set_image_based_light(&device, &queue, Some(&cube));
+        assert_eq!(automatic.ibl_weight_for_tests(), 1.0);
+        let mip = automatic.ibl_max_mip_for_tests();
+        assert!(mip > 0.0, "a bound cube publishes a prefilter mip");
+        automatic.set_lights(&queue, [0.1, 0.1, 0.1], &[]);
+        assert_eq!(automatic.ibl_weight_for_tests(), 1.0);
+        assert_eq!(automatic.ibl_max_mip_for_tests(), mip);
+
+        let mut explicit = Renderer3D::new(&device, &config, 1);
+        explicit.set_explicit_environment_weight(&queue, EXPLICIT_WEIGHT);
+        assert_eq!(explicit.ibl_weight_for_tests(), EXPLICIT_WEIGHT);
+        explicit.set_image_based_light(&device, &queue, Some(&cube));
+        assert_eq!(explicit.ibl_weight_for_tests(), EXPLICIT_WEIGHT);
+        assert!(explicit.ibl_max_mip_for_tests() > 0.0);
+        explicit.set_lights(&queue, [0.1, 0.1, 0.1], &[]);
+        assert_eq!(explicit.ibl_weight_for_tests(), EXPLICIT_WEIGHT);
+        let kept_mip = explicit.ibl_max_mip_for_tests();
+        explicit.set_explicit_environment_weight(&queue, EXPLICIT_WEIGHT);
+        assert_eq!(explicit.ibl_max_mip_for_tests(), kept_mip);
+    }
+}

@@ -555,3 +555,68 @@ impl Renderer3D {
         *read_lock(&self.last_light_stats)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_util::*;
+    use super::super::*;
+    use super::*;
+    #[test]
+    fn lighting_uniform_spells_eight_lights() {
+        // Multipliers stay CPU-baked. `debug_view` is the only added
+        // shader-visible field; it occupies the former trailing pad.
+        assert!(
+            LightingUniform::WGSL_SOURCE.contains("array<Light, 8>"),
+            "{}",
+            LightingUniform::WGSL_SOURCE
+        );
+        assert!(LightingUniform::WGSL_SOURCE.contains("debug_view: u32"));
+        assert_eq!(
+            LightingUniform::FIELD_NAMES,
+            &[
+                "ambient_color",
+                "lights",
+                "light_count",
+                "ibl_weight",
+                "ibl_max_mip",
+                "debug_view"
+            ]
+        );
+        assert_eq!(
+            std::mem::offset_of!(LightingUniform, debug_view)
+                - std::mem::offset_of!(LightingUniform, ibl_max_mip),
+            4
+        );
+        let built = build_lighting_uniform(
+            [0.0; VEC3_COMPONENTS],
+            1.0,
+            1.0,
+            &[],
+            None,
+            0.0,
+            0.0,
+            ShadingDebug::Shadow as u32,
+        );
+        assert_eq!(built.uniform.debug_view, ShadingDebug::Shadow as u32);
+        assert_eq!(ShadingDebug::Beauty as u32, 0);
+    }
+
+    #[test]
+    fn ten_lights_upload_eight_and_drop_two() {
+        let lights: Vec<LightDesc> = (0..10)
+            .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
+            .collect();
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, 0.0, 0.0, 0);
+        assert_eq!(
+            built.stats,
+            LightUploadStats {
+                uploaded: 8,
+                dropped_lights: 2,
+                dropped_shadows: 0,
+            }
+        );
+        assert_eq!(built.uniform.light_count, 8);
+        // The public preview agrees with the upload path (single logic).
+        assert_eq!(count_light_drops(&lights), built.stats);
+    }
+}

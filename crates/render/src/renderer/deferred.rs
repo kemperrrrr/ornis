@@ -214,7 +214,7 @@ impl Renderer3D {
     /// Deferred g-buffer plus lighting into `target`, without the forward
     /// pass. Test-only: the edge probe needs the deferred term alone.
     #[cfg(test)]
-    fn render_deferred_frame(
+    pub(super) fn render_deferred_frame(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,

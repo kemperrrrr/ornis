@@ -795,3 +795,57 @@ impl Renderer3D {
         rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::*;
+    use super::*;
+    #[test]
+    fn transparency_defaults_to_replace_and_sorts_far_first() {
+        // Default mode is opaque: the forward pipeline blends with REPLACE
+        // (golden-pinned); opt-in selects ALPHA_BLENDING.
+        assert_eq!(TransparencyOptions::default().mode, BlendMode::Opaque);
+        assert!(!TransparencyOptions::default().sorted_alpha());
+        assert!(!BlendMode::Opaque.is_transparent());
+        assert!(BlendMode::Transparent.is_transparent());
+        assert_eq!(
+            forward_blend_state(TransparencyOptions::default()),
+            wgpu::BlendState::REPLACE
+        );
+        assert_eq!(
+            forward_blend_state(TransparencyOptions::new(BlendMode::Transparent)),
+            wgpu::BlendState::ALPHA_BLENDING
+        );
+        assert_eq!(BlendMode::Opaque.blend_state(), wgpu::BlendState::REPLACE);
+        assert_eq!(
+            BlendMode::Transparent.blend_state(),
+            wgpu::BlendState::ALPHA_BLENDING
+        );
+        // Legacy bool polarity is preserved.
+        assert_eq!(BlendMode::from(false), BlendMode::Opaque);
+        assert_eq!(BlendMode::from(true), BlendMode::Transparent);
+        assert_eq!(TransparencyOptions::from(false).mode, BlendMode::Opaque);
+        // Opacity classification: 1.0+ is opaque, below is transparent,
+        // non-finite is rejected.
+        assert_eq!(BlendMode::from_opacity(1.0), Ok(BlendMode::Opaque));
+        assert_eq!(BlendMode::from_opacity(2.0), Ok(BlendMode::Opaque));
+        assert_eq!(BlendMode::from_opacity(HALF), Ok(BlendMode::Transparent));
+        assert_eq!(BlendMode::from_opacity(0.0), Ok(BlendMode::Transparent));
+        assert!(matches!(
+            BlendMode::from_opacity(f32::NAN),
+            Err(TransparencyError::NonFiniteOpacity(_))
+        ));
+        assert!(matches!(
+            BlendMode::from_opacity(f32::INFINITY),
+            Err(TransparencyError::NonFiniteOpacity(_))
+        ));
+        // Depth sort: far first, stable on ties, empty stays empty.
+        // Transparent mode requires this order before uploading (see
+        // `TransparencyOptions`; the whole-frame twin is
+        // `crate::extraction::sort_by_depth`).
+        assert_eq!(sort_by_depth(&[]), Vec::<u32>::new());
+        assert_eq!(sort_by_depth(&[2.0]), vec![0]);
+        assert_eq!(sort_by_depth(&[1.0, 5.0, 3.0]), vec![1, 2, 0]);
+        assert_eq!(sort_by_depth(&[2.0, 2.0, 1.0]), vec![0, 1, 2]);
+    }
+}

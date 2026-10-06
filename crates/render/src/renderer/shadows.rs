@@ -662,132 +662,6 @@ impl Renderer3D {
         }
     }
 
-    /// Render skinned depth pre-passes for one skinned entry: the same
-    /// layers and cube faces [`render_shadows`](Self::render_shadows)
-    /// covers, drawn with the skinned depth pipelines and the entry's
-    /// palette slot — skinned depth, never bind-pose depth.
-    ///
-    /// The entry instance must already sit in per-object slot 0 (via
-    /// [`upload_instances`](Self::upload_instances) or
-    /// [`render_skinned_entry`](Self::render_skinned_entry)); a stale
-    /// handle records no commands. A no-op without shadowed lights.
-    pub fn render_skinned_shadows(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        mesh: &Mesh,
-        handle: PaletteHandle,
-    ) {
-        if handle.index()
-            >= self
-                .palette_count
-                .load(std::sync::atomic::Ordering::Relaxed) as usize
-        {
-            return;
-        }
-        let count = self
-            .shadow_count
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .min(SHADOW_LAYERS as u32);
-        let cubes = self
-            .point_shadow_count
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .min(POINT_SHADOW_CUBES as u32);
-        if count == 0 && cubes == 0 {
-            return;
-        }
-        let per_object = read_lock(&self.per_object_buffer);
-        let material = read_lock(&self.material_buffer);
-        let palette = read_lock(&self.palette_buffer);
-        for layer in 0..count as usize {
-            self.render_skinned_shadow_layer(
-                device,
-                encoder,
-                mesh,
-                handle,
-                &self.skinned_shadow_pipeline,
-                &self.shadow_vp_buffers[layer],
-                &self.shadow_views[layer],
-                &per_object,
-                &material,
-                &palette,
-            );
-        }
-        for cube in 0..cubes as usize {
-            for face in 0..CUBE_FACE_COUNT {
-                let idx = cube * CUBE_FACE_COUNT + face;
-                self.render_skinned_shadow_layer(
-                    device,
-                    encoder,
-                    mesh,
-                    handle,
-                    &self.skinned_shadow_cube_pipeline,
-                    &self.shadow_cube_vp_buffers[idx],
-                    &self.shadow_cube_views[idx],
-                    &per_object,
-                    &material,
-                    &palette,
-                );
-            }
-        }
-    }
-
-    /// One skinned depth-only draw into a shadow view: the light-space VP
-    /// goes into the `camera` slot and the entry palette into binding 3.
-    /// Shared by 2D layers and cube faces (same layout, mirrored pipeline
-    /// for faces).
-    #[allow(clippy::too_many_arguments)]
-    fn render_skinned_shadow_layer(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        mesh: &Mesh,
-        handle: PaletteHandle,
-        pipeline: &wgpu::RenderPipeline,
-        vp_buffer: &wgpu::Buffer,
-        view: &wgpu::TextureView,
-        per_object: &wgpu::Buffer,
-        material: &wgpu::Buffer,
-        palette: &wgpu::Buffer,
-    ) {
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("skinned shadow bind group"),
-            layout: &self.skinned_bind_group_layout,
-            entries: &shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
-                "camera" => Some(vp_buffer.as_entire_binding()),
-                "per_objects" => Some(per_object.as_entire_binding()),
-                "materials" => Some(material.as_entire_binding()),
-                "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: palette,
-                    offset: handle.byte_offset(),
-                    size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
-                })),
-                _ => None,
-            })
-            .unwrap_or_default(),
-        });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("skinned shadow pass"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
-    }
-
     /// Upload the camera uniform: view-projection, its inverse (computed here)
     /// and eye position. Call once per frame before rendering.
     /// Test-only readback of one 2D shadow layer as row-major depths
@@ -877,5 +751,231 @@ impl Renderer3D {
     /// ±[`SHADOW_ORTHO_HALF`] default.
     pub fn shadow_half_extent(&self) -> f32 {
         read_lock(&self.shadow_fit).map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::lights::build_lighting_uniform;
+    use super::super::test_util::*;
+    use super::super::*;
+    use super::*;
+    use ornis_assets::scene::ShadowCast;
+    #[test]
+    fn dir_shadow_vp_centers_origin_with_light_depth_order() {
+        // Light above: to-light = +Y, eye at +Y·30 looking at origin.
+        let vp = dir_shadow_vp(glam::Vec3::Y);
+        let center = ndc_of(vp, [0.0, 0.0, 0.0]);
+        assert!(center[0].abs() < 1e-5 && center[1].abs() < 1e-5);
+        assert!((0.0..=1.0).contains(&center[2]));
+        // Nearer the light (higher Y) = smaller depth.
+        let hi = ndc_of(vp, [0.0, 5.0, 0.0])[2];
+        let lo = ndc_of(vp, [0.0, -5.0, 0.0])[2];
+        assert!(hi < center[2] && center[2] < lo, "{hi} {center:?} {lo}");
+        // Box rim stays inside the frustum.
+        for p in [
+            [12.0, 0.0, 0.0],
+            [-12.0, 0.0, 0.0],
+            [0.0, 0.0, 12.0],
+            [0.0, 0.0, -12.0],
+        ] {
+            let n = ndc_of(vp, p);
+            assert!(
+                n[0].abs() <= 1.0 + 1e-4 && n[1].abs() <= 1.0 + 1e-4,
+                "{p:?} -> {n:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn spot_shadow_vp_points_down_its_axis() {
+        let vp = spot_shadow_vp([0.0, 6.0, 0.0], glam::Vec3::NEG_Y, 35.0, 40.0);
+        let hit = ndc_of(vp, [0.0, 0.0, 0.0]);
+        assert!(hit[0].abs() < 1e-4 && hit[1].abs() < 1e-4);
+        assert!((0.0..=1.0).contains(&hit[2]));
+        // Behind the light has negative clip w (mirrored projection).
+        assert!(clip_of(vp, [0.0, 8.0, 0.0]).w < 0.0);
+        // Off-axis outside the 35° cone (half-width ≈ 4.2 at depth 6;
+        // the shadow frame maps world X onto NDC Y here).
+        let side = ndc_of(vp, [5.0, 0.0, 0.0]);
+        assert!(side[0].abs().max(side[1].abs()) > 1.0, "{side:?}");
+    }
+
+    #[test]
+    fn point_cube_face_vp_centers_its_axis() {
+        // Light at origin-ish, range 20: each face centers its axis
+        // with directx depth order (nearer = smaller).
+        let pos = [2.0, 3.0, 4.0];
+        let axes = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for (face, axis) in axes.iter().enumerate() {
+            let vp = point_cube_face_vp(pos, 20.0, face);
+            let target = [
+                pos[0] + axis[0] * 5.0,
+                pos[1] + axis[1] * 5.0,
+                pos[2] + axis[2] * 5.0,
+            ];
+            let hit = ndc_of(vp, target);
+            assert!(
+                hit[0].abs() < 1e-4 && hit[1].abs() < 1e-4,
+                "face {face}: {hit:?}"
+            );
+            assert!((0.0..=1.0).contains(&hit[2]), "face {face}: {hit:?}");
+            // Nearer along the axis = smaller depth (matches the
+            // analytic sampling formula's monotonicity).
+            let near = ndc_of(
+                vp,
+                [
+                    pos[0] + axis[0] * 2.0,
+                    pos[1] + axis[1] * 2.0,
+                    pos[2] + axis[2] * 2.0,
+                ],
+            )[2];
+            let far = ndc_of(
+                vp,
+                [
+                    pos[0] + axis[0] * 10.0,
+                    pos[1] + axis[1] * 10.0,
+                    pos[2] + axis[2] * 10.0,
+                ],
+            )[2];
+            assert!(
+                near < hit[2] && hit[2] < far,
+                "face {face}: {near} {hit:?} {far}"
+            );
+        }
+    }
+
+    #[test]
+    fn point_cube_face_vp_matches_sampler_frame() {
+        // Texel placement must match the hardware cube-sampling frame
+        // (GL convention: +X: (−z,−y), −X: (+z,−y), +Y: (+x,+z),
+        // −Y: (+x,−z), +Z: (+x,−y), −Z: (−x,−y)). Rasterization maps
+        // NDC y+1 onto texture row 0 while the sampler reads v=0 from
+        // the top, so a +u-source offset lands at positive NDC x and a
+        // +v-source offset at NEGATIVE NDC y (the V-mirror in
+        // `point_cube_face_vp`). Regression pin: without the mirror
+        // the sampler reads mirrored texels (all-lit point shadows).
+        let pos = [2.0, 3.0, 4.0];
+        let axes: [[[f32; 3]; 2]; 6] = [
+            [[0.0, 0.0, -1.0], [0.0, -1.0, 0.0]],
+            [[0.0, 0.0, 1.0], [0.0, -1.0, 0.0]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, -1.0]],
+            [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+            [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+        ];
+        let face_axis = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ];
+        for (face, ([u, v], axis)) in axes.iter().zip(face_axis.iter()).enumerate() {
+            let vp = point_cube_face_vp(pos, 20.0, face);
+            let base = [
+                pos[0] + axis[0] * 5.0,
+                pos[1] + axis[1] * 5.0,
+                pos[2] + axis[2] * 5.0,
+            ];
+            let pu = [base[0] + u[0], base[1] + u[1], base[2] + u[2]];
+            let pv = [base[0] + v[0], base[1] + v[1], base[2] + v[2]];
+            let nu = ndc_of(vp, pu);
+            let nv = ndc_of(vp, pv);
+            assert!(nu[0] > 0.05, "face {face}: +u offset -> {nu:?}");
+            assert!(nv[1] < -0.05, "face {face}: +v offset -> {nv:?}");
+        }
+    }
+
+    #[test]
+    fn shadow_overflow_counts_dropped_shadows() {
+        // Five shadowed directionals over four 2D layers.
+        let dirs: Vec<LightDesc> = (0..5)
+            .map(|_| dir_probe([0.0, 1.0, 0.0], ornis_assets::scene::ShadowCast::Enabled))
+            .collect();
+        let stats = count_light_drops(&dirs);
+        assert_eq!(stats.uploaded, 5);
+        assert_eq!(stats.dropped_lights, 0);
+        assert_eq!(stats.dropped_shadows, 1, "{stats:?}");
+        // Three shadowed points over two cubes.
+        let points: Vec<LightDesc> = (0..3)
+            .map(|i| LightDesc::Point {
+                position: glam::Vec3::new(i as f32, 4.0, 6.0),
+                intensity: 100.0,
+                color: [1.0, 1.0, 1.0],
+                range: ornis_core::units::Meters::new(30.0),
+                shadow: ShadowCast::Enabled,
+            })
+            .collect();
+        let stats = count_light_drops(&points);
+        assert_eq!(stats.dropped_shadows, 1, "{stats:?}");
+        // A shadow request on a dropped excess light counts too.
+        let mut lights: Vec<LightDesc> = (0..8)
+            .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
+            .collect();
+        lights.push(dir_probe(
+            [0.0, 1.0, 0.0],
+            ornis_assets::scene::ShadowCast::Enabled,
+        ));
+        lights.push(dir_probe(
+            [0.0, 1.0, 0.0],
+            ornis_assets::scene::ShadowCast::Enabled,
+        ));
+        let stats = count_light_drops(&lights);
+        assert_eq!(stats.dropped_lights, 2, "{stats:?}");
+        assert_eq!(stats.dropped_shadows, 2, "{stats:?}");
+    }
+
+    #[test]
+    fn legacy_shadow_path_matches_dir_shadow_vp() {
+        // `fit: None` must reproduce the legacy matrix bit-for-bit:
+
+        // directional-only scenes stay pixel-identical.
+        let light = dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Enabled);
+        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None, 0.0, 0.0, 0);
+        let v = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
+        assert_eq!(built.uniform.lights[0].shadow_vp, dir_shadow_vp(v));
+        assert_eq!(built.uniform.lights[0].params[3], 0.0);
+    }
+
+    #[test]
+    fn fitted_shadow_covers_radius_50_scene() {
+        let (center, half) = shadow_fit_for_bounds([-50.0; 3], [50.0; 3]);
+        assert_eq!(center, [0.0, 0.0, 0.0]);
+        assert!((half - 50.0).abs() < 1e-6, "{half}");
+        let vp = dir_shadow_vp_fitted(glam::Vec3::Y, center, half);
+        for x in [-50.0, 50.0] {
+            for y in [-50.0, 50.0] {
+                for z in [-50.0, 50.0] {
+                    let n = ndc_of(vp, [x, y, z]);
+                    assert!(
+                        n[0].abs() <= 1.0 + 1e-3 && n[1].abs() <= 1.0 + 1e-3,
+                        "{x},{y},{z} -> {n:?}"
+                    );
+                    assert!((0.0..=1.0).contains(&n[2]), "{x},{y},{z} -> {n:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_fit_keeps_legacy_box() {
+        assert_eq!(
+            shadow_fit_for_bounds([-1.0; 3], [1.0; 3]),
+            ([0.0; 3], SHADOW_ORTHO_HALF)
+        );
+        assert_eq!(SHADOW_ORTHO_HALF, 12.0);
+        assert_eq!(
+            shadow_fit_for_bounds([f32::NAN; 3], [0.0; 3]),
+            ([0.0; 3], SHADOW_ORTHO_HALF)
+        );
     }
 }
