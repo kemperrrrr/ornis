@@ -1007,6 +1007,24 @@ mod tests {
     }
 
     #[test]
+    fn dielectric_and_metal_presets_share_inactive_lobes() {
+        let dielectric = OpenPBRMaterial::dielectric();
+        let metal = OpenPBRMaterial::metal();
+        assert_eq!(dielectric.base.params[2], 0.0);
+        assert_eq!(metal.base.params[2], 1.0);
+        assert_eq!(dielectric.specular.params[0], metal.specular.params[0]);
+        assert_eq!(dielectric.specular.params[2], metal.specular.params[2]);
+        assert_eq!(dielectric.transmission.params, metal.transmission.params);
+        assert_eq!(dielectric.transmission.color, metal.transmission.color);
+        assert_eq!(dielectric.subsurface.params, metal.subsurface.params);
+        assert_eq!(dielectric.fuzz.params, metal.fuzz.params);
+        assert_eq!(dielectric.coat.params, metal.coat.params);
+        assert_eq!(dielectric.thin_film.params, metal.thin_film.params);
+        assert_eq!(dielectric.emission.params, metal.emission.params);
+        assert_eq!(dielectric.geometry.params, metal.geometry.params);
+    }
+
+    #[test]
     fn dielectric_preset_writes_expected_fields() {
         // `dielectric()` is a convenience preset; a mutant that collapses
         // it to Default::default() must be caught by checking the fields

@@ -11,7 +11,8 @@
 //! checked constructors instead of silent defaults.
 //! [`Roughness`], [`Metallic`], [`Specular`] and [`EnvironmentWeight`]
 //! are infallible `[0, 1]` weights (NaN becomes `0`) with the same bare
-//! `f32` wire form as [`Clamped01`].
+//! `f32` wire form as [`Clamped01`]. [`Surface`] bundles the three
+//! material weights an authored spawn can stamp onto every primitive.
 //!
 //! [`Color`] stores [`LinearRgba`] and serializes as the scene file's linear
 //! RGB array. [`Lux`] is the light-intensity `f32` under a newtype.
@@ -777,6 +778,21 @@ impl<'de> Deserialize<'de> for EnvironmentWeight {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Ok(Self::new(f32::deserialize(deserializer)?))
     }
+}
+
+/// Authored override of roughness, metalness, and specular weight.
+///
+/// Lives in `ornis-core` so `ornis-app` can stamp it onto primitives and
+/// `ornis-render` can read the same lane. Color, IOR, and emission are
+/// not fields: those stay on the source material.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Surface {
+    /// Specular roughness written to `specular.params[1]`.
+    pub roughness: Roughness,
+    /// Metalness written to `base.params[2]`.
+    pub metallic: Metallic,
+    /// Specular lobe weight written to `specular.params[0]`.
+    pub specular: Specular,
 }
 
 /// Linear-space RGB color (albedo, tint, emission; values may exceed `1`).

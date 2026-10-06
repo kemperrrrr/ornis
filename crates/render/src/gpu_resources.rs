@@ -293,6 +293,7 @@ impl System for RenderSubmit {
             .reads_lane::<ornis_core::GlobalTransform>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<MaterialDesc>()
+            .reads_lane::<ornis_core::Surface>()
             .reads_lane::<SkinnedMesh>()
             .reads_lane::<Skeleton>()
             .reads_lane::<JointPose>()
@@ -352,6 +353,13 @@ impl System for RenderSubmit {
             lights.ambient.to_linear_rgb().as_array(),
             &lights.set_lights_args(),
         );
+        // Explicit weight overwrites only `ibl_weight`. `None` leaves the
+        // automatic 0/1 that `set_image_based_light` stored. The cube
+        // textures and `ibl_max_mip` stay.
+        if let Some(weight) = lights.environment_weight {
+            fs.renderer
+                .set_explicit_environment_weight(&queue.0, weight.get());
+        }
         fs.renderer
             .upload_materials(&device.0, &queue.0, &extracted.materials);
         // Custom geometry (loaded `.glb` / sculpted soups, incl. skinned):
@@ -406,6 +414,7 @@ impl System for RenderPresent {
             .reads_lane::<ornis_core::GlobalTransform>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<MaterialDesc>()
+            .reads_lane::<ornis_core::Surface>()
             .reads_lane::<SkinnedMesh>()
             .reads_lane::<Skeleton>()
             .reads_lane::<JointPose>()
@@ -638,6 +647,7 @@ mod tests {
             }],
             ambient_intensity: ornis_core::Lux::new(1.0),
             exposure: ornis_core::Lux::new(1.0),
+            environment_weight: None,
         };
         let _ = engine.world_mut().insert(custom);
         install_frame_buffers(&mut engine);

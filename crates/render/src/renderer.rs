@@ -1092,6 +1092,9 @@ pub struct Renderer3D {
     /// `f32` bits of the IBL weight, so [`set_lights`](Self::set_lights)
     /// (`&self`) can rewrite the uniform without clearing IBL.
     ibl_weight_bits: std::sync::atomic::AtomicU32,
+    /// Set once [`Self::set_explicit_environment_weight`] runs. While set,
+    /// cube binds keep this weight instead of the automatic 0/1.
+    ibl_weight_explicit: std::sync::atomic::AtomicBool,
     /// `f32` bits of the prefilter's highest mip.
     ibl_max_mip_bits: std::sync::atomic::AtomicU32,
 }
@@ -1863,6 +1866,7 @@ impl Renderer3D {
             ibl_staging,
             ibl_uploaded: std::sync::atomic::AtomicBool::new(false),
             ibl_weight_bits: std::sync::atomic::AtomicU32::new(0),
+            ibl_weight_explicit: std::sync::atomic::AtomicBool::new(false),
             ibl_max_mip_bits: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -4084,11 +4088,64 @@ impl Renderer3D {
         self.rebind_ibl_groups(device);
     }
 
-    fn store_ibl_params(&self, queue: &wgpu::Queue) {
-        self.ibl_weight_bits.store(
-            self.ibl.weight.to_bits(),
-            std::sync::atomic::Ordering::Relaxed,
+    /// Automatic cube weight, unless an explicit weight was stored.
+    ///
+    /// No explicit weight: `0` with the black placeholder, `1` after a
+    /// cube upload. An explicit weight stays across both binds and is
+    /// what [`Self::set_lights`] copies into `LightingUniform.ibl_weight`.
+    fn effective_ibl_weight(&self) -> f32 {
+        if self
+            .ibl_weight_explicit
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            f32::from_bits(
+                self.ibl_weight_bits
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        } else {
+            self.ibl.weight
+        }
+    }
+
+    /// Writes `weight` into `LightingUniform.ibl_weight` only.
+    ///
+    /// Does not upload or clear the environment cube, and does not change
+    /// `ibl_max_mip`. Later [`Self::set_image_based_light`] and
+    /// [`Self::set_lights`] keep this value.
+    pub(crate) fn set_explicit_environment_weight(&self, queue: &wgpu::Queue, weight: f32) {
+        self.ibl_weight_explicit
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.ibl_weight_bits
+            .store(weight.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        queue.write_buffer(
+            &self.lighting_buffer,
+            std::mem::offset_of!(LightingUniform, ibl_weight) as u64,
+            bytemuck::bytes_of(&weight),
         );
+    }
+
+    /// `LightingUniform.ibl_weight` last stored in the CPU mirror.
+    #[cfg(test)]
+    pub(crate) fn ibl_weight_for_tests(&self) -> f32 {
+        f32::from_bits(
+            self.ibl_weight_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// `LightingUniform.ibl_max_mip` last stored in the CPU mirror.
+    #[cfg(test)]
+    pub(crate) fn ibl_max_mip_for_tests(&self) -> f32 {
+        f32::from_bits(
+            self.ibl_max_mip_bits
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn store_ibl_params(&self, queue: &wgpu::Queue) {
+        let weight = self.effective_ibl_weight();
+        self.ibl_weight_bits
+            .store(weight.to_bits(), std::sync::atomic::Ordering::Relaxed);
         self.ibl_max_mip_bits.store(
             self.ibl.max_mip.to_bits(),
             std::sync::atomic::Ordering::Relaxed,
@@ -4097,7 +4154,7 @@ impl Renderer3D {
             &self.lighting_buffer,
             std::mem::offset_of!(LightingUniform, ibl_weight) as u64,
             bytemuck::bytes_of(&IblTail {
-                weight: self.ibl.weight,
+                weight,
                 max_mip: self.ibl.max_mip,
             }),
         );
@@ -6498,6 +6555,55 @@ mod tests {
                 .await
                 .ok()
         })
+    }
+
+    /// Explicit IBL weight reaches the lighting uniform and survives a
+    /// cube bind. Without the setter, no cube stays at 0 and a cube
+    /// becomes 1. Skipped when no adapter is available.
+    #[test]
+    fn explicit_environment_weight_survives_cube_bind() {
+        /// Side of the headless surface used only to construct the renderer.
+        const SIDE: u32 = 4;
+        /// Explicit weight, distinct from both automatic endpoints.
+        const EXPLICIT_WEIGHT: f32 = 0.35;
+        let Some((device, queue)) = try_device() else {
+            return;
+        };
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: SIDE,
+            height: SIDE,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let cube = crate::ibl::EnvironmentCube::solid(ornis_core::units::Color::WHITE, SIDE);
+        let mut automatic = Renderer3D::new(&device, &config, 1);
+        assert_eq!(automatic.ibl_weight_for_tests(), 0.0);
+        automatic.set_image_based_light(&device, &queue, None);
+        assert_eq!(automatic.ibl_weight_for_tests(), 0.0);
+        automatic.set_image_based_light(&device, &queue, Some(&cube));
+        assert_eq!(automatic.ibl_weight_for_tests(), 1.0);
+        let mip = automatic.ibl_max_mip_for_tests();
+        assert!(mip > 0.0, "a bound cube publishes a prefilter mip");
+        automatic.set_lights(&queue, [0.1, 0.1, 0.1], &[]);
+        assert_eq!(automatic.ibl_weight_for_tests(), 1.0);
+        assert_eq!(automatic.ibl_max_mip_for_tests(), mip);
+
+        let mut explicit = Renderer3D::new(&device, &config, 1);
+        explicit.set_explicit_environment_weight(&queue, EXPLICIT_WEIGHT);
+        assert_eq!(explicit.ibl_weight_for_tests(), EXPLICIT_WEIGHT);
+        explicit.set_image_based_light(&device, &queue, Some(&cube));
+        assert_eq!(explicit.ibl_weight_for_tests(), EXPLICIT_WEIGHT);
+        assert!(explicit.ibl_max_mip_for_tests() > 0.0);
+        explicit.set_lights(&queue, [0.1, 0.1, 0.1], &[]);
+        assert_eq!(explicit.ibl_weight_for_tests(), EXPLICIT_WEIGHT);
+        let kept_mip = explicit.ibl_max_mip_for_tests();
+        explicit.set_explicit_environment_weight(&queue, EXPLICIT_WEIGHT);
+        assert_eq!(explicit.ibl_max_mip_for_tests(), kept_mip);
     }
 
     /// GPU/CPU parity smoke for the enabled fog mix: a solid HDR layer over

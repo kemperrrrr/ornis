@@ -91,6 +91,6 @@ pub use units::{
     Clamped01, Clamped01Error, Color, Degrees, EnvironmentWeight, GearRatio, Hertz, HexColorError,
     Ior, IorError, Kilograms, LinearRgb, LinearRgba, Lux, Metallic, Meters, MetersPerSecond,
     Position, PositiveF32, PositiveF32Error, Radians, RadiansPerSecond, Roughness, SecondsExt,
-    Specular, UnitQuat, UnitQuatError, UnitVec3, UnitVec3Error,
+    Specular, Surface, UnitQuat, UnitQuatError, UnitVec3, UnitVec3Error,
 };
 pub use world::World;
