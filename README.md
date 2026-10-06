@@ -230,7 +230,13 @@ render loops уже используют общий `GameWorld`/`RenderExtract`/
 `GameWorld::set_ambient(Color)` и `GameWorld::spawn` (`DirectionalLight`,
 `StudioLights`, `OrbitCamera`). `set_ambient` меняет только ambient: если
 света ещё нет, публикуется риг с пустым списком направленных источников.
-`spawn(DirectionalLight)` добавляет ровно этот свет. Студийные key и fill —
+`spawn(DirectionalLight)` добавляет ровно этот свет.
+`DirectionalLight::default()` запрашивает карту теней (`ShadowCast::Enabled`);
+`..Default::default()` на примере вроде `anim` включает её у каждого такого
+света (лимит — 4 слоя 1024² и 2 куба). `StudioLights::default()` оставляет
+тень только у key, fill — `ShadowCast::Disabled`. Ресурс
+`RenderLights::default` и RON без поля `shadow` по-прежнему без карт
+(serde-дефолт `ShadowCast::Disabled`). Студийные key и fill —
 явный `spawn(StudioLights::default())`. Ресурс `RenderLights` хранит
 ambient как `Color`, а множители `ambient_intensity` и `exposure` как `Lux`
 (старый payload без
