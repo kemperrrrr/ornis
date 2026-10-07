@@ -86,7 +86,8 @@ cargo xtask quality            # регресс-гейт: падает толь�
   xtask — единственный источник правды о составе гейта: локально
   `cargo xtask quality --ci` гоняет те же 13 стадий, что все шарды вместе.
 - **Determinism nightly** (`.github/workflows/determinism-nightly.yml`) —
-  `#[ignore]`-гейты детерминизма (`--ignored --skip regenerate`) раз в сутки
+  `#[ignore]`-гейты детерминизма (`--ignored --skip regenerate --skip known_limit_`,
+  известные лимиты `known_limit_*` не гоняются) раз в сутки
   + вручную через `workflow_dispatch`; в per-push гейт не входит (долгие),
   канонические снапшоты при этом обязаны оставаться нетронутыми.
 
