@@ -1,0 +1,5 @@
+error: #[smart_system]: `resources.get()` needs a turbofish type so the access set can be derived — write `resources.get::<T>()`
+  --> tests/ui/smart_system_rejects_inferred_get.rs:12:21
+   |
+12 |     let cfg: &Cfg = resources.get().expect("cfg");
+   |                     ^^^^^^^^^^^^^^^

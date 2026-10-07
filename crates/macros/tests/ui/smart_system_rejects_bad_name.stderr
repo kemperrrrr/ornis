@@ -1,0 +1,5 @@
+error: #[smart_system]: expected `name = "..."`
+ --> tests/ui/smart_system_rejects_bad_name.rs:5:23
+  |
+5 | #[smart_system(name = 1)]
+  |                       ^

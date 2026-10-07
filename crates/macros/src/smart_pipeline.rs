@@ -33,8 +33,8 @@
 //!   module-scope `const __SMART_PIPELINE_ACCESS_<fn>: &[(&str, bool)]`
 //!   (sorted `(type, is_write)` pairs; a write covers a read of the same
 //!   lane; the const carries `allow(dead_code, non_upper_case_globals)`).
-//!   Wiring the comparison against `System::access()` at registration
-//!   is a follow-up; the extraction lives here.
+//!   `smart_system` consumes the same extraction to generate `System::access`
+//!   directly, so declaration and body cannot desync.
 //!
 //! Known limitations (the analysis is syntactic, not type-directed):
 //! - At most two lanes per `zip` are parallelized; longer `zip` chains stay
@@ -46,6 +46,12 @@
 //! - The lane variable must be bound by a plain `let` directly from
 //!   `store.read_lane::<T>()` / `store.write_lane::<T>()` (`.unwrap()` /
 //!   `.expect(..)` wrappers around the call are allowed).
+//! - Conscious extension (PLAN m, R3): the `store` receiver may also be an
+//!   alias bound from `resources.get::<SmartStore>()` (same wrappers), so
+//!   `#[smart_pipeline]` works over `&Resources`-fed functions too. Lane
+//!   patterns include `let Type ident` and let-else `Some(ident)` /
+//!   `Ok(ident)`; lane calls in any expression position count toward the
+//!   access set, but only plain bindings drive loop rewriting.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -58,24 +64,26 @@ use syn::{
     visit_mut::{self, VisitMut},
 };
 
-/// A `let` binding of a `SmartStore` lane guard.
-struct LaneBinding {
-    var_name: Ident,
-    is_mutable: bool,
-    /// The `T` in `store.read_lane::<T>()` / `store.write_lane::<T>()`,
-    /// kept for the R6 `Send + Sync` assertion and the R3 access-set export.
-    lane_ty: Type,
+/// A `let` binding of a `SmartStore` lane guard, usable for loop rewriting.
+/// Lane types for assertions and the access set come from `lane_accesses`
+/// (every call site, any context), not from bindings.
+pub(crate) struct LaneBinding {
+    pub(crate) var_name: Ident,
+    pub(crate) is_mutable: bool,
 }
 
 /// Extracts the single turbofish type argument of `read_lane::<T>()` /
-/// `write_lane::<T>()`. The turbofish lives in [`ExprMethodCall::turbofish`],
-/// not in `args`.
-fn turbofish_type(node: &ExprMethodCall) -> Result<Type, syn::Error> {
+/// `write_lane::<T>()` (and `get::<T>()` / `contains::<T>()`). The turbofish
+/// lives in [`ExprMethodCall::turbofish`], not in `args`.
+pub(crate) fn turbofish_type(
+    node: &ExprMethodCall,
+    macro_name: &'static str,
+) -> Result<Type, syn::Error> {
     let error = || {
         syn::Error::new_spanned(
             node,
             format!(
-                "#[smart_pipeline]: `{}` requires exactly one turbofish type argument, \
+                "{macro_name}: `{}` requires exactly one turbofish type argument, \
                  e.g. `store.{}::<Position>()`",
                 node.method, node.method
             ),
@@ -107,21 +115,21 @@ mod turbofish_tests {
     #[test]
     fn turbofish_extracts_type() {
         let mc = method_call("store.read_lane::<Position>()");
-        let ty = turbofish_type(&mc).expect("turbofish present");
+        let ty = turbofish_type(&mc, "#[smart_pipeline]").expect("turbofish present");
         assert_eq!(ty.to_token_stream().to_string(), "Position");
     }
 
     #[test]
     fn turbofish_write_lane_works() {
         let mc = method_call("store.write_lane::<Vec3>()");
-        let ty = turbofish_type(&mc).expect("ok");
+        let ty = turbofish_type(&mc, "#[smart_pipeline]").expect("ok");
         assert_eq!(ty.to_token_stream().to_string(), "Vec3");
     }
 
     #[test]
     fn turbofish_missing_is_error() {
         let mc = method_call("store.read_lane()");
-        match turbofish_type(&mc) {
+        match turbofish_type(&mc, "#[smart_pipeline]") {
             Err(err) => assert!(err.to_string().contains("turbofish"), "got: {err}"),
             Ok(_) => panic!("expected error for missing turbofish"),
         }
@@ -140,7 +148,7 @@ mod turbofish_tests {
         let src = "store.read_lane::<'a>()";
         let expr: syn::Expr = syn::parse_str(src).expect("parses");
         if let syn::Expr::MethodCall(mc) = expr {
-            assert!(turbofish_type(&mc).is_err());
+            assert!(turbofish_type(&mc, "#[smart_pipeline]").is_err());
         } else {
             panic!("expected method call");
         }
@@ -151,7 +159,7 @@ mod turbofish_tests {
         let src = "store.read_lane::<A, B>()";
         let expr: syn::Expr = syn::parse_str(src).expect("parses");
         if let syn::Expr::MethodCall(mc) = expr {
-            assert!(turbofish_type(&mc).is_err());
+            assert!(turbofish_type(&mc, "#[smart_pipeline]").is_err());
         } else {
             panic!("expected method call");
         }
@@ -161,43 +169,217 @@ mod turbofish_tests {
 /// Collects the `SmartStore` parameter name and all lane guard bindings of
 /// the function. Also validates the turbofish of every `read_lane` /
 /// `write_lane` call on the store, accumulating errors instead of panicking.
+///
+/// Shared with `smart_system`: besides lane bindings it also tracks the
+/// `&Resources` parameter (by type) and `SmartStore` aliases bound from
+/// `resources.get::<SmartStore>()`, plus `resources.get::<T>()` reads for
+/// the access-set export.
 #[derive(Default)]
-struct LaneCollector {
-    store_param: Option<Ident>,
-    lanes: Vec<LaneBinding>,
-    errors: Vec<syn::Error>,
+pub(crate) struct LaneCollector {
+    pub(crate) macro_name: &'static str,
+    pub(crate) store_param: Option<Ident>,
+    /// `&Resources` parameter ident (by type, any name).
+    pub(crate) resources_param: Option<Ident>,
+    /// Locals bound from `resources.get::<SmartStore>()` (through
+    /// `.expect()`/`.unwrap()`): additional store receivers.
+    pub(crate) store_aliases: Vec<Ident>,
+    /// Bindings usable for loop rewriting: `let ident` / `let Type ident` /
+    /// `let Some(ident)` / `let Ok(ident)` from a lane call. See `lane_accesses`
+    /// for the full access set (any context).
+    pub(crate) lanes: Vec<LaneBinding>,
+    /// Every `read_lane::<T>()` / `write_lane::<T>()` call on a store
+    /// receiver, in any context: `(type, is_write)`. Drives `Send + Sync`
+    /// assertions and the access-set export.
+    pub(crate) lane_accesses: Vec<(Type, bool)>,
+    /// `T` in `resources.get::<T>()` / `resources.contains::<T>()`
+    /// (resource reads for the access set).
+    pub(crate) resource_reads: Vec<Type>,
+    pub(crate) errors: Vec<syn::Error>,
 }
 
 impl LaneCollector {
+    pub(crate) fn new(macro_name: &'static str) -> Self {
+        Self {
+            macro_name,
+            ..Self::default()
+        }
+    }
+
     fn is_store_receiver(&self, receiver: &Expr) -> bool {
-        match (&self.store_param, receiver) {
-            (Some(store), Expr::Path(p)) => p.path.is_ident(store),
+        match receiver {
+            Expr::Path(p) => {
+                if let Some(store) = &self.store_param
+                    && p.path.is_ident(store)
+                {
+                    return true;
+                }
+                self.store_aliases
+                    .iter()
+                    .any(|alias| p.path.is_ident(alias))
+            }
             _ => false,
         }
     }
 
-    /// If `expr` is `store.read_lane::<T>()` / `store.write_lane::<T>()`
-    /// (possibly wrapped in `.unwrap()` / `.expect(..)`), returns the lane
-    /// mutability plus the bound lane type `T`. Malformed turbofish is
-    /// reported separately by `visit_expr_method_call`, so here it simply
-    /// yields `None`.
-    fn lane_binding(&self, expr: &Expr) -> Option<(bool, Type)> {
-        let mut current = expr;
+    /// The `T` of `node` itself if it is a `resources.get::<T>()` /
+    /// `resources.contains::<T>()` call. Only the node itself is checked (no
+    /// chain walk, no clone): the visitor descends into receivers on its own,
+    /// so wrappers are visited as inner nodes.
+    fn resources_read_here(&self, node: &ExprMethodCall) -> Option<Type> {
+        self.resources_call_type(node)
+    }
+
+    /// Last path segment of a type, for `SmartStore` / `Resources` matching.
+    pub(crate) fn last_segment(ty: &Type) -> Option<String> {
+        if let Type::Path(TypePath { path, .. }) = ty {
+            return path.segments.last().map(|s| s.ident.to_string());
+        }
+        None
+    }
+
+    /// Strips `.unwrap()` / `.expect(..)` wrappers, returning the wrapped
+    /// expression. Traversal is deliberately limited to these two methods:
+    /// anything else (`.len()`, `.map()`, …) ends the chain, so derived
+    /// values are never mistaken for lane guards or store aliases.
+    fn strip_wrappers(mut expr: &Expr) -> &Expr {
         loop {
-            match current {
-                Expr::MethodCall(mc) => {
-                    if (mc.method == "read_lane" || mc.method == "write_lane")
-                        && self.is_store_receiver(&mc.receiver)
-                    {
-                        return turbofish_type(mc)
-                            .ok()
-                            .map(|ty| (mc.method == "write_lane", ty));
-                    }
-                    current = &mc.receiver;
+            match expr {
+                Expr::MethodCall(mc) if mc.method == "unwrap" || mc.method == "expect" => {
+                    expr = &mc.receiver;
                 }
-                _ => return None,
+                _ => return expr,
             }
         }
+    }
+
+    /// Branchless by design (IOSP contract): matching lives in `Option`
+    /// combinators, doing in `Vec::push` — the `if` version reads nicer but
+    /// mixes deciding with doing in one function body.
+    fn lane_binding(&self, expr: &Expr) -> Option<(bool, Type)> {
+        as_method_call(Self::strip_wrappers(expr)).and_then(|mc| {
+            lane_call_write(mc).and_then(|write| {
+                self.is_store_receiver(&mc.receiver)
+                    .then(|| {
+                        turbofish_type(mc, self.macro_name)
+                            .ok()
+                            .map(|ty| (write, ty))
+                    })
+                    .flatten()
+            })
+        })
+    }
+
+    /// If the wrapper-stripped `expr` is `resources.get::<SmartStore>()`,
+    /// the bound local is a store alias for lane bindings below.
+    /// Branchless like `lane_binding` (see above).
+    fn store_alias_source(&self, expr: &Expr) -> bool {
+        as_method_call(Self::strip_wrappers(expr))
+            .and_then(|mc| self.resources_call_type(mc))
+            .is_some_and(|ty| Self::last_segment(&ty).as_deref() == Some("SmartStore"))
+    }
+
+    /// The `T` of a `resources.get::<T>()` / `resources.contains::<T>()`
+    /// call, or `None` (malformed turbofish is reported by the method-call
+    /// visitor, so it stays silent here).
+    fn resources_call_type(&self, mc: &ExprMethodCall) -> Option<Type> {
+        if (mc.method != "get" && mc.method != "contains")
+            || !matches!(&*mc.receiver, Expr::Path(path) if self
+                .resources_param
+                .as_ref()
+                .is_some_and(|r| path.path.is_ident(r)))
+        {
+            return None;
+        }
+        turbofish_type(mc, self.macro_name).ok()
+    }
+}
+
+/// Pure classification of a function parameter for the collector: a
+/// `&SmartStore` lane source, the `&Resources` context, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParamKind {
+    SmartStore,
+    Resources,
+    Other,
+}
+
+/// Classifies `ty` without touching visitor state.
+pub(crate) fn classify_param(ty: &Type) -> ParamKind {
+    if let Type::Reference(TypeReference { elem, .. }) = ty {
+        match LaneCollector::last_segment(elem).as_deref() {
+            Some("SmartStore") => ParamKind::SmartStore,
+            Some("Resources") => ParamKind::Resources,
+            _ => ParamKind::Other,
+        }
+    } else {
+        ParamKind::Other
+    }
+}
+
+/// Extracts the bound ident from `let` patterns the collector understands:
+/// `ident`, `Type ident`, and single-element `Some(ident)` / `Ok(ident)`
+/// (let-else). Anything else yields `None`.
+pub(crate) fn binding_ident(pat: &Pat) -> Option<Ident> {
+    match pat {
+        Pat::Ident(pat_ident) => Some(pat_ident.ident.clone()),
+        Pat::Type(pat_type) => binding_ident(&pat_type.pat),
+        Pat::TupleStruct(tuple) => tuple_struct_binding(tuple),
+        _ => None,
+    }
+}
+
+/// Single-element `Some(ident)` / `Ok(ident)` (let-else) unwrap.
+fn tuple_struct_binding(tuple: &syn::PatTupleStruct) -> Option<Ident> {
+    if tuple.elems.len() != 1 {
+        return None;
+    }
+    let name = tuple.path.segments.last()?.ident.to_string();
+    if name != "Some" && name != "Ok" {
+        return None;
+    }
+    if let Pat::Ident(pat_ident) = &tuple.elems[0] {
+        Some(pat_ident.ident.clone())
+    } else {
+        None
+    }
+}
+
+/// The node if it is a plain method call. Pure shape test, no calls.
+fn as_method_call(expr: &Expr) -> Option<&ExprMethodCall> {
+    if let Expr::MethodCall(mc) = expr {
+        Some(mc)
+    } else {
+        None
+    }
+}
+
+/// Lane-access mutability of a bare method call name, if it is one.
+fn lane_call_write(mc: &ExprMethodCall) -> Option<bool> {
+    if mc.method == "read_lane" {
+        Some(false)
+    } else if mc.method == "write_lane" {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+impl LaneCollector {
+    /// Registers one `let`: a store alias and/or a rewritable lane binding.
+    /// Resource reads themselves are recorded by `visit_expr_method_call`.
+    /// Branchless like `lane_binding`: conditional pushes are `bool::then` /
+    /// `Option::map` chains, so deciding and doing stay in separate steps.
+    fn handle_local(&mut self, ident: &Ident, init: &Expr) {
+        // `let store = resources.get::<SmartStore>().expect(..)`.
+        let _ = self
+            .store_alias_source(init)
+            .then(|| self.store_aliases.push(ident.clone()));
+        let _ = self.lane_binding(init).map(|(is_mutable, _)| {
+            self.lanes.push(LaneBinding {
+                var_name: ident.clone(),
+                is_mutable,
+            })
+        });
     }
 }
 
@@ -206,40 +388,44 @@ impl Visit<'_> for LaneCollector {
         for arg in &node.sig.inputs {
             if let FnArg::Typed(PatType { pat, ty, .. }) = arg
                 && let Pat::Ident(PatIdent { ident, .. }) = &**pat
-                && let Type::Reference(TypeReference { elem, .. }) = &**ty
-                && let Type::Path(TypePath { path, .. }) = &**elem
-                && path
-                    .segments
-                    .last()
-                    .map(|s| s.ident == "SmartStore")
-                    .unwrap_or(false)
             {
-                self.store_param = Some(ident.clone());
+                match classify_param(ty) {
+                    ParamKind::SmartStore => {
+                        self.store_param = Some(ident.clone());
+                    }
+                    ParamKind::Resources => {
+                        self.resources_param = Some(ident.clone());
+                    }
+                    ParamKind::Other => {}
+                }
             }
         }
         self.visit_block(&node.block);
     }
 
     fn visit_local(&mut self, node: &Local) {
-        if let Some(init) = &node.init
-            && let Pat::Ident(PatIdent { ident, .. }) = &node.pat
-            && let Some((is_mutable, lane_ty)) = self.lane_binding(&init.expr)
-        {
-            self.lanes.push(LaneBinding {
-                var_name: ident.clone(),
-                is_mutable,
-                lane_ty,
-            });
-        }
+        let _ = node
+            .init
+            .as_ref()
+            .zip(binding_ident(&node.pat))
+            .map(|(init, ident)| self.handle_local(&ident, &init.expr));
         visit::visit_local(self, node);
     }
 
     fn visit_expr_method_call(&mut self, node: &ExprMethodCall) {
         if (node.method == "read_lane" || node.method == "write_lane")
             && self.is_store_receiver(&node.receiver)
-            && let Err(error) = turbofish_type(node)
         {
-            self.errors.push(error);
+            if let Err(error) = turbofish_type(node, self.macro_name) {
+                self.errors.push(error);
+            } else if let Ok(ty) = turbofish_type(node, self.macro_name) {
+                self.lane_accesses.push((ty, node.method == "write_lane"));
+            }
+        }
+        // Every `resources.get::<T>()` reads a resource, in any context
+        // (dedup happens at emission by type string).
+        if let Some(ty) = self.resources_read_here(node) {
+            self.resource_reads.push(ty);
         }
         visit::visit_expr_method_call(self, node);
     }
@@ -263,6 +449,7 @@ fn collect_pat_idents(pat: &Pat, out: &mut Vec<Ident>) {
 /// cannot be executed in parallel. Conservative by design — a false positive
 /// only means the loop stays sequential.
 struct LoopBodyAnalyzer {
+    macro_name: &'static str,
     /// Idents that may legally be assigned inside the body: loop pattern
     /// variables, body-local `let` bindings, closure params, nested loop vars.
     assignable: Vec<Ident>,
@@ -274,8 +461,9 @@ struct LoopBodyAnalyzer {
 }
 
 impl LoopBodyAnalyzer {
-    fn new(loop_vars: Vec<Ident>) -> Self {
+    fn new(macro_name: &'static str, loop_vars: Vec<Ident>) -> Self {
         Self {
+            macro_name,
             assignable: loop_vars.clone(),
             loop_vars,
             closure_depth: 0,
@@ -290,8 +478,9 @@ impl LoopBodyAnalyzer {
             && !self.assignable.contains(ident)
         {
             self.issues.push(format!(
-                "#[smart_pipeline]: variable `{ident}` is assigned inside the loop but declared \
-                 outside it - shared mutable state prevents parallelization; loop left sequential"
+                "{}: variable `{ident}` is assigned inside the loop but declared \
+                 outside it - shared mutable state prevents parallelization; loop left sequential",
+                self.macro_name
             ));
         }
     }
@@ -358,8 +547,9 @@ impl Visit<'_> for LoopBodyAnalyzer {
             && matches!(binary.op, BinOp::Add(_) | BinOp::Sub(_))
         {
             self.issues.push(format!(
-                "#[smart_pipeline]: cross-iteration dependency `{ident}[{}]` prevents \
+                "{}: cross-iteration dependency `{ident}[{}]` prevents \
                  parallelization; loop left sequential",
+                self.macro_name,
                 binary.to_token_stream()
             ));
         }
@@ -371,33 +561,33 @@ impl Visit<'_> for LoopBodyAnalyzer {
         // control flow targeting the analyzed loop itself (or a label)
         // blocks the rewrite.
         if node.label.is_some() || (self.closure_depth == 0 && self.loop_depth == 0) {
-            self.issues.push(
-                "#[smart_pipeline]: `break` in the loop body prevents parallelization; loop \
-                 left sequential"
-                    .to_string(),
-            );
+            self.issues.push(format!(
+                "{}: `break` in the loop body prevents parallelization; loop \
+                 left sequential",
+                self.macro_name
+            ));
         }
         visit::visit_expr_break(self, node);
     }
 
     fn visit_expr_continue(&mut self, node: &syn::ExprContinue) {
         if node.label.is_some() || (self.closure_depth == 0 && self.loop_depth == 0) {
-            self.issues.push(
-                "#[smart_pipeline]: `continue` in the loop body prevents parallelization; loop \
-                 left sequential"
-                    .to_string(),
-            );
+            self.issues.push(format!(
+                "{}: `continue` in the loop body prevents parallelization; loop \
+                 left sequential",
+                self.macro_name
+            ));
         }
         visit::visit_expr_continue(self, node);
     }
 
     fn visit_expr_return(&mut self, node: &syn::ExprReturn) {
         if self.closure_depth == 0 {
-            self.issues.push(
-                "#[smart_pipeline]: `return` in the loop body prevents parallelization; loop \
-                 left sequential"
-                    .to_string(),
-            );
+            self.issues.push(format!(
+                "{}: `return` in the loop body prevents parallelization; loop \
+                 left sequential",
+                self.macro_name
+            ));
         }
         visit::visit_expr_return(self, node);
     }
@@ -411,9 +601,10 @@ struct LaneIter {
 
 /// Rewrites parallel-safe `for` loops over lane iterators in place, leaving
 /// everything else untouched.
-struct LoopRewriter<'a> {
-    lanes: &'a [LaneBinding],
-    warnings: Vec<String>,
+pub(crate) struct LoopRewriter<'a> {
+    pub(crate) macro_name: &'static str,
+    pub(crate) lanes: &'a [LaneBinding],
+    pub(crate) warnings: Vec<String>,
 }
 
 impl LoopRewriter<'_> {
@@ -463,33 +654,34 @@ impl LoopRewriter<'_> {
         let mut issues = Vec::new();
 
         if node.label.is_some() {
-            issues.push(
-                "#[smart_pipeline]: labeled loop left sequential (labels cannot be rewritten \
-                 into a Rayon closure)"
-                    .to_string(),
-            );
+            issues.push(format!(
+                "{}: labeled loop left sequential (labels cannot be rewritten \
+                 into a Rayon closure)",
+                self.macro_name
+            ));
         }
 
         let mut loop_vars = Vec::new();
         collect_pat_idents(&node.pat, &mut loop_vars);
         if loop_vars.is_empty() {
-            issues.push(
-                "#[smart_pipeline]: loop pattern binds no variables; loop left sequential"
-                    .to_string(),
-            );
+            issues.push(format!(
+                "{}: loop pattern binds no variables; loop left sequential",
+                self.macro_name
+            ));
         }
 
         let iters = self.extract_lane_iters(&node.expr);
         if iters.is_none() {
             issues.push(format!(
-                "#[smart_pipeline]: cannot parallelize loop over `{}` - expected \
+                "{}: cannot parallelize loop over `{}` - expected \
                  `lane.iter()`/`lane.iter_mut()`, optionally two lanes combined with \
                  `.zip(..)`; loop left sequential",
+                self.macro_name,
                 node.expr.to_token_stream()
             ));
         }
 
-        let mut analyzer = LoopBodyAnalyzer::new(loop_vars);
+        let mut analyzer = LoopBodyAnalyzer::new(self.macro_name, loop_vars);
         analyzer.visit_block(&node.body);
         issues.extend(analyzer.issues);
 
@@ -643,33 +835,27 @@ impl VisitMut for LoopRewriter<'_> {
     }
 }
 
-pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut input = parse_macro_input!(item as ItemFn);
-
-    let mut collector = LaneCollector::default();
-    collector.visit_item_fn(&input);
-
-    if !collector.errors.is_empty() {
-        let mut errors = collector.errors.into_iter();
-        let Some(mut combined) = errors.next() else {
-            return TokenStream::new();
-        };
-        for error in errors {
-            combined.combine(error);
-        }
-        return combined.to_compile_error().into();
-    }
-
-    let mut rewriter = LoopRewriter {
-        lanes: &collector.lanes,
-        warnings: Vec::new(),
+/// Shared emission helpers: error accumulation, sequential-loop warnings,
+/// and the `pipeline_enter` / `pipeline_exit` body wrapper.
+/// Merge errors into one diagnostic (bridge-free core, unit-testable).
+pub(crate) fn combine_errors2(errors: Vec<syn::Error>) -> TokenStream2 {
+    let mut errors = errors.into_iter();
+    let Some(mut combined) = errors.next() else {
+        return TokenStream2::new();
     };
-    rewriter.visit_block_mut(&mut input.block);
+    for error in errors {
+        combined.combine(error);
+    }
+    combined.to_compile_error()
+}
 
-    // Compile-time warnings via the deprecated-note trick: using a deprecated
-    // item emits a warning with the note, visible in the IDE and terminal.
-    let warning_tokens: Vec<TokenStream2> = rewriter
-        .warnings
+pub(crate) fn combine_errors(errors: Vec<syn::Error>) -> TokenStream {
+    combine_errors2(errors).into()
+}
+
+/// Emits the deprecated-note warning blocks for loops left sequential.
+pub(crate) fn warning_tokens(warnings: &[String]) -> Vec<TokenStream2> {
+    warnings
         .iter()
         .map(|w| {
             quote! {{
@@ -678,19 +864,33 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let _ = SmartPipelineSequentialLoop;
             }}
         })
-        .collect();
+        .collect()
+}
 
-    let attrs = &input.attrs;
-    let vis = &input.vis;
-    let sig = &input.sig;
-    let stmts = &input.block.stmts;
+/// Wraps rewritten statements with the profiling enter/exit hooks.
+pub(crate) fn wrap_body(stmts: &[syn::Stmt]) -> TokenStream2 {
+    quote! {
+        // The body runs inside a block so the hook below also fires for
+        // functions with a tail expression; `return` still exits early
+        // (the exit hook is a no-op profiling marker).
+        #[allow(clippy::let_unit_value)]
+        let smart_pipeline_result = { #(#stmts)* };
+    }
+}
 
-    // R6: every lane type must be `Send + Sync` (parallel iteration moves
-    // lane data across Rayon threads). The store API already requires the
-    // same bounds; asserting here points the diagnostic at the annotated
-    // system instead of deep generic internals.
-    let lane_tys: Vec<&Type> = collector.lanes.iter().map(|lane| &lane.lane_ty).collect();
-    let send_sync_assert = if lane_tys.is_empty() {
+/// R6: static `Send + Sync` assertion over lane access types (shared with
+/// `smart_system`). Empty when no lanes are touched.
+pub(crate) fn send_sync_assert_tokens(lane_accesses: &[(Type, bool)]) -> TokenStream2 {
+    let mut seen: Vec<String> = Vec::new();
+    let mut lane_tys: Vec<&Type> = Vec::new();
+    for (ty, _) in lane_accesses {
+        let name = ty.to_token_stream().to_string();
+        if !seen.contains(&name) {
+            seen.push(name);
+            lane_tys.push(ty);
+        }
+    }
+    if lane_tys.is_empty() {
         TokenStream2::new()
     } else {
         quote! {
@@ -699,31 +899,84 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 #(__ornis_lane_must_be_send_sync::<#lane_tys>();)*
             }
         }
+    }
+}
+
+/// R3: sorted, deduplicated `(type, is_write)` access entries over lane
+/// accesses (shared with `smart_system`). A write covers a read of the same
+/// lane, matching the scheduler's "own write covers read" rule. The
+/// dedup/sort key is the rendered type string, so the expansion is
+/// deterministic.
+pub(crate) fn access_entries(accesses: &[(Type, bool)]) -> Vec<(Type, bool)> {
+    let mut entries: Vec<(Type, bool)> = Vec::new();
+    for (ty, write) in accesses {
+        let ty_name = ty.to_token_stream().to_string();
+        match entries
+            .iter_mut()
+            .find(|(kept, _)| kept.to_token_stream().to_string() == ty_name)
+        {
+            Some(entry) => entry.1 |= write,
+            None => entries.push((ty.clone(), *write)),
+        }
+    }
+    entries.sort_by(|a, b| {
+        a.0.to_token_stream()
+            .to_string()
+            .cmp(&b.0.to_token_stream().to_string())
+    });
+    entries
+}
+
+pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut input = parse_macro_input!(item as ItemFn);
+
+    let mut collector = LaneCollector::new("#[smart_pipeline]");
+    collector.visit_item_fn(&input);
+
+    if !collector.errors.is_empty() {
+        return combine_errors(collector.errors);
+    }
+
+    let mut rewriter = LoopRewriter {
+        macro_name: "#[smart_pipeline]",
+        lanes: &collector.lanes,
+        warnings: Vec::new(),
     };
+    rewriter.visit_block_mut(&mut input.block);
+
+    // Compile-time warnings via the deprecated-note trick: using a deprecated
+    // item emits a warning with the note, visible in the IDE and terminal.
+    let warning_tokens = warning_tokens(&rewriter.warnings);
+
+    let attrs = &input.attrs;
+    let vis = &input.vis;
+    let sig = &input.sig;
+    let body = wrap_body(&input.block.stmts);
+
+    // R6: every lane type must be `Send + Sync` (parallel iteration moves
+    // lane data across Rayon threads). The store API already requires the
+    // same bounds; asserting here points the diagnostic at the annotated
+    // system instead of deep generic internals.
+    let send_sync_assert = send_sync_assert_tokens(&collector.lane_accesses);
 
     // R3: export the access set derived from the lane bindings as a
     // module-scope constant next to the function: sorted `(type, is_write)`
-    // pairs, so the expansion is deterministic and machine-checkable. A
-    // write covers a read of the same lane (matches the scheduler's
-    // "own write covers read" rule), hence one entry per lane type with
-    // OR-ed mutability. Wiring the comparison against `System::access()`
-    // at registration is a follow-up; the extraction (the hard,
-    // desync-prone half) is done here.
+    // pairs, so the expansion is deterministic and machine-checkable.
+    // Wiring the comparison against `System::access()` at registration is
+    // done by `smart_system`; the extraction (the hard, desync-prone half)
+    // lives here.
     let access_const_name = format_ident!("__SMART_PIPELINE_ACCESS_{}", input.sig.ident);
-    let mut access_entries: Vec<(String, bool)> = Vec::new();
-    for lane in &collector.lanes {
-        let ty_name = lane.lane_ty.to_token_stream().to_string();
-        match access_entries.iter_mut().find(|(name, _)| *name == ty_name) {
-            Some(entry) => entry.1 |= lane.is_mutable,
-            None => access_entries.push((ty_name, lane.is_mutable)),
-        }
-    }
-    access_entries.sort();
-    let access_tys: Vec<&str> = access_entries
+    let entries = access_entries(&collector.lane_accesses);
+    let access_tys: Vec<syn::LitStr> = entries
         .iter()
-        .map(|(name, _)| name.as_str())
+        .map(|(ty, _)| {
+            syn::LitStr::new(
+                &ty.to_token_stream().to_string(),
+                proc_macro2::Span::call_site(),
+            )
+        })
         .collect();
-    let access_writes: Vec<bool> = access_entries.iter().map(|(_, w)| *w).collect();
+    let access_writes: Vec<bool> = entries.iter().map(|(_, w)| *w).collect();
     let access_const = quote! {
         #[allow(dead_code, non_upper_case_globals)]
         const #access_const_name: &[(&str, bool)] = &[
@@ -737,11 +990,7 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
             ornis_core::pipeline_enter();
             #send_sync_assert
             #(#warning_tokens)*
-            // The body runs inside a block so the hook below also fires for
-            // functions with a tail expression; `return` still exits early
-            // (the exit hook is a no-op profiling marker).
-            #[allow(clippy::let_unit_value)]
-            let smart_pipeline_result = { #(#stmts)* };
+            #body
             ornis_core::pipeline_exit();
             smart_pipeline_result
         }
@@ -749,4 +998,268 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     expanded.into()
+}
+
+#[cfg(test)]
+mod collector_tests {
+    use super::*;
+    use quote::ToTokens;
+
+    fn parse_ty(src: &str) -> Type {
+        syn::parse_str(src).expect("type parses")
+    }
+
+    fn parse_pat(src: &str) -> Pat {
+        // Wrap in a `let` so any pattern form parses (`Local` itself is
+        // not `Parse`; go through `Stmt`).
+        let stmt: syn::Stmt = syn::parse_str(&format!("let {src} = x;")).expect("let parses");
+        match stmt {
+            syn::Stmt::Local(local) => local.pat.clone(),
+            _ => panic!("expected a `let` statement"),
+        }
+    }
+
+    #[test]
+    fn classify_param_sorts_references() {
+        assert_eq!(
+            classify_param(&parse_ty("&SmartStore")),
+            ParamKind::SmartStore
+        );
+        assert_eq!(
+            classify_param(&parse_ty("&Resources")),
+            ParamKind::Resources
+        );
+        assert_eq!(classify_param(&parse_ty("&Velocity")), ParamKind::Other);
+        assert_eq!(classify_param(&parse_ty("Velocity")), ParamKind::Other);
+        assert_eq!(
+            classify_param(&parse_ty("&mut SmartStore")),
+            ParamKind::SmartStore
+        );
+    }
+
+    #[test]
+    fn binding_ident_accepts_documented_forms() {
+        assert_eq!(binding_ident(&parse_pat("pos")).unwrap().to_string(), "pos");
+        // A type ascription is Pat::Type and unwraps to the inner ident.
+        assert_eq!(
+            binding_ident(&parse_pat("vel: u32")).unwrap().to_string(),
+            "vel"
+        );
+        assert_eq!(
+            binding_ident(&parse_pat("Some(pos)")).unwrap().to_string(),
+            "pos"
+        );
+        assert_eq!(binding_ident(&parse_pat("Ok(v)")).unwrap().to_string(), "v");
+        assert!(binding_ident(&parse_pat("(a, b)")).is_none());
+    }
+
+    #[test]
+    fn access_entries_dedups_sorts_and_folds_writes() {
+        let read_v: Type = parse_ty("V");
+        let write_p: Type = parse_ty("P");
+        let entries = access_entries(&[
+            (write_p.clone(), true),
+            (read_v.clone(), false),
+            (parse_ty("P"), false),
+            (parse_ty("A"), false),
+        ]);
+        let rendered: Vec<(String, bool)> = entries
+            .iter()
+            .map(|(ty, w)| (ty.to_token_stream().to_string(), *w))
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                ("A".to_string(), false),
+                ("P".to_string(), true),
+                ("V".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn let_else_binding_parallelizes_without_warnings() {
+        let mut item: ItemFn = syn::parse_str(
+            "fn f(store: &SmartStore) { let Some(mut xs) = store.write_lane::<P>() else { return; }; for x in xs.iter_mut() { x.x += 1.0; } }",
+        )
+        .expect("fn parses");
+        let mut collector = LaneCollector::new("#[smart_pipeline]");
+        collector.visit_item_fn(&item);
+        assert!(collector.errors.is_empty());
+        assert_eq!(collector.lanes.len(), 1);
+        let mut rewriter = LoopRewriter {
+            macro_name: "#[smart_pipeline]",
+            lanes: &collector.lanes,
+            warnings: Vec::new(),
+        };
+        rewriter.visit_block_mut(&mut item.block);
+        assert!(rewriter.warnings.is_empty(), "{:?}", rewriter.warnings);
+        let rendered = item.block.to_token_stream().to_string();
+        assert!(rendered.contains("for_each"), "{rendered}");
+    }
+
+    #[test]
+    fn rewriter_warning_uses_macro_name() {
+        let mut item: ItemFn = syn::parse_str(
+            "fn f(store: &SmartStore) { let mut xs = store.write_lane::<P>().unwrap(); for x in xs.iter_mut() { if x.x > 0.0 { break; } } }",
+        )
+        .expect("fn parses");
+        let mut collector = LaneCollector::new("#[smart_system]");
+        collector.visit_item_fn(&item);
+        assert!(collector.errors.is_empty());
+        let mut rewriter = LoopRewriter {
+            macro_name: "#[smart_system]",
+            lanes: &collector.lanes,
+            warnings: Vec::new(),
+        };
+        rewriter.visit_block_mut(&mut item.block);
+        assert_eq!(rewriter.warnings.len(), 1);
+        assert!(
+            rewriter.warnings[0].starts_with("#[smart_system]:"),
+            "got: {}",
+            rewriter.warnings[0]
+        );
+    }
+}
+
+#[cfg(test)]
+mod collector_unit_tests {
+    use super::*;
+
+    fn parse_expr(src: &str) -> Expr {
+        syn::parse_str(src).expect("expr parses")
+    }
+
+    fn collector_with_store() -> LaneCollector {
+        let mut collector = LaneCollector::new("#[smart_pipeline]");
+        collector.store_param = Some(syn::parse_str("store").expect("ident"));
+        collector.resources_param = Some(syn::parse_str("resources").expect("ident"));
+        collector
+    }
+
+    #[test]
+    fn strip_wrappers_peels_only_unwrap_expect() {
+        let chained = parse_expr("store.read_lane::<P>().expect(\"p\").len()");
+        assert!(matches!(
+            LaneCollector::strip_wrappers(&chained),
+            Expr::MethodCall(mc) if mc.method == "len"
+        ));
+        let wrapped = parse_expr("store.read_lane::<P>().expect(\"p\")");
+        assert!(matches!(
+            LaneCollector::strip_wrappers(&wrapped),
+            Expr::MethodCall(mc) if mc.method == "read_lane"
+        ));
+        assert!(matches!(
+            LaneCollector::strip_wrappers(&parse_expr("x")),
+            Expr::Path(_)
+        ));
+    }
+
+    #[test]
+    fn as_method_call_matches_only_calls() {
+        assert!(as_method_call(&parse_expr("a.b()")).is_some());
+        assert!(as_method_call(&parse_expr("x")).is_none());
+    }
+
+    #[test]
+    fn lane_binding_reads_and_writes() {
+        let collector = collector_with_store();
+        let (write, ty) = collector
+            .lane_binding(&parse_expr("store.write_lane::<P>().expect(\"p\")"))
+            .expect("write lane");
+        assert!(write);
+        assert_eq!(ty.to_token_stream().to_string(), "P");
+        let (write, _) = collector
+            .lane_binding(&parse_expr("store.read_lane::<V>()"))
+            .expect("read lane");
+        assert!(!write);
+        assert!(
+            collector
+                .lane_binding(&parse_expr("other.read_lane::<V>()"))
+                .is_none()
+        );
+        assert!(collector.lane_binding(&parse_expr("store.len()")).is_none());
+    }
+
+    #[test]
+    fn store_alias_source_needs_smart_store_get() {
+        let collector = collector_with_store();
+        assert!(
+            collector
+                .store_alias_source(&parse_expr("resources.get::<SmartStore>().expect(\"s\")"))
+        );
+        assert!(!collector.store_alias_source(&parse_expr("resources.get::<Cfg>()")));
+        assert!(!collector.store_alias_source(&parse_expr("store.read_lane::<P>()")));
+    }
+
+    #[test]
+    fn is_store_receiver_covers_param_and_aliases() {
+        let mut collector = collector_with_store();
+        collector
+            .store_aliases
+            .push(syn::parse_str("cache").expect("ident"));
+        let check = |collector: &LaneCollector, src: &str| {
+            let Expr::MethodCall(mc) = parse_expr(src) else {
+                panic!("expected call");
+            };
+            collector.is_store_receiver(&mc.receiver)
+        };
+        assert!(check(&collector, "store.read_lane::<P>()"));
+        assert!(!check(&collector, "other.read_lane::<P>()"));
+        assert!(check(&collector, "cache.read_lane::<P>()"));
+    }
+
+    #[test]
+    fn resources_read_here_needs_turbofish_get() {
+        let collector = collector_with_store();
+        let read = |src: &str| {
+            let Expr::MethodCall(mc) = parse_expr(src) else {
+                panic!("expected call");
+            };
+            collector.resources_read_here(&mc)
+        };
+        assert!(read("resources.get::<Cfg>()").is_some());
+        assert!(read("resources.contains::<Cfg>()").is_some());
+        assert!(read("resources.get()").is_none());
+        assert!(read("resources.len()").is_none());
+    }
+
+    #[test]
+    fn combine_errors_merges_and_empties() {
+        let empty = combine_errors2(Vec::new());
+        assert!(empty.to_string().is_empty());
+        let err = combine_errors2(vec![
+            syn::Error::new_spanned(syn::parse_str::<Ident>("x").expect("ident"), "first"),
+            syn::Error::new_spanned(syn::parse_str::<Ident>("y").expect("ident"), "second"),
+        ]);
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("first") && rendered.contains("second"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn warning_tokens_wrap_each_message() {
+        assert!(warning_tokens(&[]).is_empty());
+        let tokens = warning_tokens(&["left sequential".to_string()]);
+        let rendered: TokenStream2 = tokens.into_iter().collect::<TokenStream2>();
+        assert!(rendered.to_string().contains("left sequential"));
+    }
+
+    #[test]
+    fn wrap_body_preserves_tail_value() {
+        let stmts: Vec<syn::Stmt> = vec![syn::parse_str("let x = 1;").expect("stmt")];
+        let rendered = wrap_body(&stmts).to_string();
+        assert!(rendered.contains("smart_pipeline_result"));
+    }
+
+    #[test]
+    fn send_sync_assert_covers_each_lane_once() {
+        assert!(send_sync_assert_tokens(&[]).to_string().is_empty());
+        let pos: Type = syn::parse_str("Pos").expect("type");
+        let tokens = send_sync_assert_tokens(&[(pos, true)]).to_string();
+        assert!(tokens.contains("__ornis_lane_must_be_send_sync"));
+        assert!(tokens.contains("Pos"));
+    }
 }

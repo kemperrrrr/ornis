@@ -15,9 +15,10 @@
 //! - `#[kernel]` — translate a small Rust function AST into WGSL compute
 //!   code (used e.g. for BRDF math in `render/shaders/math.rs`).
 //! - `#[gpu_pipeline]`, `#[derive(PipelineConfig)]`,
-//!   `#[smart_pipeline]` — declare pipelines with static bind-group /
-//!   layout metadata, letting the engine build them without hand-written
-//!   boilerplate; `for_each_entity!` stamps per-component dispatch glue.
+//!   `#[smart_pipeline]`, `#[smart_system]` — declare pipelines with static
+//!   bind-group / layout metadata, letting the engine build them without
+//!   hand-written boilerplate; `for_each_entity!` stamps per-component
+//!   dispatch glue.
 #![warn(missing_docs)]
 
 mod auto_pipeline;
@@ -28,6 +29,7 @@ mod pack;
 mod pipeline_config;
 mod register_component;
 mod smart_pipeline;
+mod smart_system;
 mod stages;
 mod static_profile;
 mod wgsl;
@@ -96,6 +98,20 @@ pub fn for_each_entity(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn smart_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
     smart_pipeline::attribute(attr, item)
+}
+
+/// Generate a full `ornis_core::System` implementation from an ordinary
+/// function taking `&Resources` plus plain parameters (PLAN m, path 3):
+/// one struct field per non-`Resources` parameter, `name()` from
+/// `name = "..."` (default: the function name), `access()` derived from the
+/// body (`resources.get::<T>()` → `reads`, lane bindings →
+/// `reads_lane`/`writes_lane`), and `run()` forwarding to the function.
+/// Loop bodies get the same parallel rewriting as `#[smart_pipeline]`.
+// qual:api (proc-macro entry point: invoked by the compiler, invisible to the
+// call graph by design).
+#[proc_macro_attribute]
+pub fn smart_system(attr: TokenStream, item: TokenStream) -> TokenStream {
+    smart_system::attribute(attr, item)
 }
 
 /// Derive static pipeline configuration from `#[gpu]` / `#[cpu]` / `#[auto]`

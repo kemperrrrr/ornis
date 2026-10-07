@@ -1,0 +1,5 @@
+error: #[smart_system]: system functions must return `()`
+ --> tests/ui/smart_system_rejects_non_unit_return.rs:7:4
+  |
+7 | fn returns_value(resources: &ornis_core::Resources) -> usize {
+  |    ^^^^^^^^^^^^^

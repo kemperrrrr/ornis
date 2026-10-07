@@ -1,0 +1,5 @@
+error: #[smart_system]: `&str` parameters cannot be stored in the system struct; use an owned `String`
+ --> tests/ui/smart_system_rejects_ref_param.rs:7:53
+  |
+7 | fn by_ref(resources: &ornis_core::Resources, name: &str) {
+  |                                                     ^^^

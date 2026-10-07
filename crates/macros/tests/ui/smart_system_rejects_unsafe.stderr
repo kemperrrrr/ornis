@@ -1,0 +1,5 @@
+error: #[smart_system]: unsafe system functions are not supported
+ --> tests/ui/smart_system_rejects_unsafe.rs:6:11
+  |
+6 | unsafe fn unsafe_system(resources: &ornis_core::Resources) {
+  |           ^^^^^^^^^^^^^
