@@ -182,6 +182,40 @@ fn entry_integrate(store: &SmartStore, dt: f32) -> usize {
     positions.len()
 }
 
+/// PLAN m, R3 (variant a): `#[smart_pipeline]` also understands a store
+/// alias bound from `resources.get::<SmartStore>()`.
+#[smart_pipeline]
+fn entry_over_resources(resources: &ornis_core::Resources) -> usize {
+    let store = resources.get::<SmartStore>().expect("store");
+    let mut positions = store.write_lane::<EntryPos>().expect("pos");
+    for pos in positions.iter_mut() {
+        pos.x += 1.0;
+    }
+    positions.len()
+}
+
+#[test]
+fn smart_pipeline_over_resources_alias() {
+    let mut store = SmartStore::new();
+    store.register::<EntryPos>();
+    for _ in 0..4 {
+        let e = store.create_entity();
+        store.insert(e, EntryPos { x: 0.0 });
+    }
+    let mut resources = ornis_core::Resources::new();
+    resources.insert(store);
+    assert_eq!(entry_over_resources(&resources), 4);
+    assert_eq!(
+        __SMART_PIPELINE_ACCESS_entry_over_resources,
+        &[("EntryPos", true)]
+    );
+    let store = resources.get::<SmartStore>().expect("store");
+    let lane = store.read_lane::<EntryPos>().expect("pos");
+    for pos in lane.iter() {
+        assert_eq!(pos.x, 1.0);
+    }
+}
+
 #[test]
 fn smart_pipeline_entry_compiles_and_runs() {
     let mut store = SmartStore::new();

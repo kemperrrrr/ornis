@@ -1,0 +1,5 @@
+error: #[smart_system]: generic system functions are not supported
+ --> tests/ui/smart_system_rejects_generic.rs:7:4
+  |
+7 | fn generic_system<T>(resources: &ornis_core::Resources, value: T) {
+  |    ^^^^^^^^^^^^^^

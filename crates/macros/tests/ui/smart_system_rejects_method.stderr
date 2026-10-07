@@ -1,0 +1,5 @@
+error: #[smart_system]: system functions must be free functions
+ --> tests/ui/smart_system_rejects_method.rs:9:15
+  |
+9 |     fn method(&self, resources: &ornis_core::Resources) {
+  |               ^^^^^

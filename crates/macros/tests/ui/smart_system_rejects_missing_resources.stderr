@@ -1,0 +1,5 @@
+error: #[smart_system]: expected exactly one `&Resources` parameter
+ --> tests/ui/smart_system_rejects_missing_resources.rs:7:4
+  |
+7 | fn no_resources(speed: f32) {
+  |    ^^^^^^^^^^^^

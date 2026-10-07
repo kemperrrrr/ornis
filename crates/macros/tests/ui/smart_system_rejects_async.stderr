@@ -1,0 +1,5 @@
+error: #[smart_system]: async system functions are not supported
+ --> tests/ui/smart_system_rejects_async.rs:6:10
+  |
+6 | async fn async_system(resources: &ornis_core::Resources) {
+  |          ^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: #[smart_system]: `&mut Resources` is not supported — `run` receives `&Resources`
+ --> tests/ui/smart_system_rejects_mut_resources.rs:7:29
+  |
+7 | fn mut_resources(resources: &mut ornis_core::Resources) {
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: #[smart_system]: expected exactly one `&Resources` parameter
+ --> tests/ui/smart_system_rejects_two_resources.rs:6:35
+  |
+6 | fn two(a: &ornis_core::Resources, b: &ornis_core::Resources) {
+  |                                   ^
