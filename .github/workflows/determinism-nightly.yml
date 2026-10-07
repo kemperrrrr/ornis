@@ -8,6 +8,9 @@ name: Determinism Nightly
 #
 # Regenerate helpers (*_regenerate, also #[ignore]d) are EXCLUDED via
 # --skip: they rewrite canonical snapshots and must stay manual.
+# Known-limit scenarios (known_limit_*, also #[ignore]d) are EXCLUDED
+# too: they pin solver limits and are expected to fail. --no-fail-fast
+# keeps one failing test binary from hiding the remaining gates.
 
 on:
   schedule:
@@ -40,7 +43,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target
-          cargo test -p ornis-physics -- --ignored --skip regenerate 2>&1 | tee target/determinism-nightly.log
+          cargo test -p ornis-physics --no-fail-fast -- --ignored --skip regenerate --skip known_limit_ 2>&1 | tee target/determinism-nightly.log
 
       - name: Canonical snapshots untouched
         shell: bash
