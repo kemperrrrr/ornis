@@ -10,7 +10,9 @@
 
 use ornis_gltf::{Model, ModelPrimitive};
 
-use crate::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+use crate::scene::{
+    CameraDesc, CameraProjection, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
+};
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
@@ -36,6 +38,7 @@ fn default_camera() -> CameraDesc {
         fov: ornis_core::units::Degrees::new(DEFAULT_CAMERA_FOV_DEG),
         near: ornis_core::units::Meters::new(DEFAULT_CAMERA_NEAR),
         far: ornis_core::units::Meters::new(DEFAULT_CAMERA_FAR),
+        projection: CameraProjection::Perspective,
     }
 }
 

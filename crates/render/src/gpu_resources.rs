@@ -341,7 +341,7 @@ impl System for RenderSubmit {
         // S7: the camera math lives in `camera_view_projection` — `run`
         // stays pure orchestration (IOSP).
         let (view_proj, cam_pos) =
-            camera_view_projection(orbit.view_parameters(), surface_state.size);
+            camera_view_projection(&orbit.view_parameters(), surface_state.size);
 
         fs.renderer
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());

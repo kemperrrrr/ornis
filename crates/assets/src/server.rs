@@ -535,7 +535,9 @@ fn insert_asset_entity(store: &mut SmartStore, desc: &EntityDesc) -> Entity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, TransformDesc};
+    use crate::scene::{
+        CameraDesc, CameraProjection, EntityDesc, MaterialDesc, MeshDesc, TransformDesc,
+    };
     use ornis_core::Engine;
 
     /// Shipped demo scene: five spheres over two directional lights.
@@ -576,6 +578,7 @@ mod tests {
                 fov: ornis_core::units::Degrees::new(60.0),
                 near: ornis_core::units::Meters::new(0.1),
                 far: ornis_core::units::Meters::new(100.0),
+                projection: CameraProjection::Perspective,
             },
             ambient: [0.1, 0.1, 0.1],
         }
