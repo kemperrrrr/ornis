@@ -936,12 +936,48 @@ fn level1(stages: &mut StageList<'_>) {
     // dependency no Rust target uses. False positives are allow-listed in
     // the owning crate via `[package.metadata.cargo-machete] ignored`,
     // never by deleting the stage.
-    machete_stage(stages);
+    if stages.enabled("machete") {
+        if binary_exists("cargo-machete") {
+            // Direct binary, never `cargo machete`: cargo's
+            // external-subcommand forwarding behaves differently for a
+            // `cargo` nested under `cargo run` (the gate's own
+            // `cargo xtask` invocation), and the bare binary is immune.
+            stages.run(
+                "machete",
+                "machete",
+                "cargo-machete",
+                cmd(stages.root, "cargo-machete", &[]),
+                false,
+            );
+        } else {
+            stages.skip(
+                "machete",
+                "machete",
+                &format!("cargo-machete not installed — Install:  cargo install cargo-machete --version {CARGO_MACHETE_VERSION} --locked"),
+            );
+        }
+    }
 
     // Spell-check gate (typos, pinned 1.51.1, config `_typos.toml`):
     // domain terms live in `[default.extend-words]`, vendored code and
     // canonical snapshots in `[files] extend-exclude`.
-    typos_stage(stages);
+    if stages.enabled("typos") {
+        if binary_exists("typos") {
+            stages.run(
+                "typos",
+                "typos",
+                "typos",
+                cmd(stages.root, "typos", &[]),
+                false,
+            );
+        } else {
+            stages.skip(
+                "typos",
+                "typos",
+                &format!("typos not installed — Install:  cargo install typos-cli --version {TYPOS_VERSION} --locked"),
+            );
+        }
+    }
 }
 
 fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
@@ -1103,91 +1139,6 @@ const CARGO_HACK_VERSION: &str = "0.6.45";
 const CARGO_MACHETE_VERSION: &str = "0.9.2";
 const TYPOS_VERSION: &str = "1.51.1";
 
-/// Unused-dependency gate: `cargo machete` FAILs on any unused dependency.
-///
-/// Invoked as the `cargo-machete` binary directly, never as
-/// `cargo machete`: cargo's external-subcommand forwarding behaves
-/// differently for a `cargo` nested under `cargo run` (the gate's own
-/// `cargo xtask` invocation), and the bare binary is immune to that.
-fn machete_stage(stages: &mut StageList<'_>) {
-    if !stages.enabled("machete") {
-        return;
-    }
-    if !binary_exists("cargo-machete") {
-        stages.skip(
-            "machete",
-            "machete",
-            &format!("cargo-machete not installed — Install:  cargo install cargo-machete --version {CARGO_MACHETE_VERSION} --locked"),
-        );
-        return;
-    }
-    stages.run(
-        "machete",
-        "machete",
-        "cargo-machete",
-        cmd(stages.root, "cargo-machete", &[]),
-        false,
-    );
-}
-
-/// Spell-check gate: `typos` with the repo `_typos.toml` config.
-fn typos_stage(stages: &mut StageList<'_>) {
-    if !stages.enabled("typos") {
-        return;
-    }
-    if !binary_exists("typos") {
-        stages.skip(
-            "typos",
-            "typos",
-            &format!("typos not installed — Install:  cargo install typos-cli --version {TYPOS_VERSION} --locked"),
-        );
-        return;
-    }
-    stages.run(
-        "typos",
-        "typos",
-        "typos",
-        cmd(stages.root, "typos", &[]),
-        false,
-    );
-}
-
-/// Feature-matrix gate: `cargo hack check --workspace --each-feature
-/// --no-dev-deps`. Slow — one `cargo check` per feature.
-///
-/// Same direct-binary rule as [`machete_stage`]: `cargo-hack` is invoked
-/// without the `cargo` dispatcher.
-fn hack_check_stage(stages: &mut StageList<'_>) {
-    if !stages.enabled("hack-check") {
-        return;
-    }
-    if !binary_exists("cargo-hack") {
-        stages.skip(
-            "hack-check",
-            "hack (feature matrix)",
-            &format!("cargo-hack not installed — Install:  cargo install cargo-hack --version {CARGO_HACK_VERSION} --locked"),
-        );
-        return;
-    }
-    stages.run(
-        "hack-check",
-        "hack (feature matrix)",
-        "cargo hack check --workspace --each-feature --no-dev-deps",
-        cmd(
-            stages.root,
-            "cargo-hack",
-            &[
-                "hack",
-                "check",
-                "--workspace",
-                "--each-feature",
-                "--no-dev-deps",
-            ],
-        ),
-        false,
-    );
-}
-
 /// ── Level 2 (--full): coverage + bench compile check ──────
 fn full_stages(stages: &mut StageList<'_>) {
     stages.run(
@@ -1216,7 +1167,35 @@ fn full_stages(stages: &mut StageList<'_>) {
     // every workspace crate must check without dev-deps (catches
     // `#[cfg(feature)]` code that only compiles under default features).
     // Slow (one `cargo check` per feature) — `--full` / nightly only.
-    hack_check_stage(stages);
+    // Direct `cargo-hack` binary (same nested-dispatch reason as above;
+    // the binary takes the `hack` subcommand explicitly).
+    if stages.enabled("hack-check") {
+        if binary_exists("cargo-hack") {
+            stages.run(
+                "hack-check",
+                "hack (feature matrix)",
+                "cargo hack check --workspace --each-feature --no-dev-deps",
+                cmd(
+                    stages.root,
+                    "cargo-hack",
+                    &[
+                        "hack",
+                        "check",
+                        "--workspace",
+                        "--each-feature",
+                        "--no-dev-deps",
+                    ],
+                ),
+                false,
+            );
+        } else {
+            stages.skip(
+                "hack-check",
+                "hack (feature matrix)",
+                &format!("cargo-hack not installed — Install:  cargo install cargo-hack --version {CARGO_HACK_VERSION} --locked"),
+            );
+        }
+    }
 }
 
 fn bench_stage(stages: &mut StageList<'_>) {
