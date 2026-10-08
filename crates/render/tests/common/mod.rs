@@ -10,6 +10,9 @@
 //! the gate stays green on machines without GPU drivers (CI provides
 //! lavapipe).
 
+/// Sized (non-square) render/readback helpers for the 320×180 gates.
+pub mod sized;
+
 use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::ShadowCast;
 use ornis_render::render_backend::RenderContext;
@@ -35,7 +38,10 @@ pub struct HeadlessScene {
     pub mesh: ornis_render::Mesh,
 }
 
-async fn request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+/// Adapter triple for gates that build their own targets (MSAA/ortho):
+/// same acquisition as [`HeadlessScene`], with the adapter kept for
+/// sample-count negotiation.
+pub async fn request_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),
@@ -47,10 +53,11 @@ async fn request_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         .request_adapter(&wgpu::RequestAdapterOptions::default())
         .await
         .ok()?;
-    adapter
+    let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await
-        .ok()
+        .ok()?;
+    Some((adapter, device, queue))
 }
 
 fn surface_config() -> wgpu::SurfaceConfiguration {
@@ -70,7 +77,7 @@ fn surface_config() -> wgpu::SurfaceConfiguration {
 impl HeadlessScene {
     /// Creates the scene, or `None` when no adapter exists (skip).
     pub fn new() -> Option<Self> {
-        let (device, queue) = pollster::block_on(request_device())?;
+        let (_, device, queue) = pollster::block_on(request_device())?;
         let renderer = Renderer3D::new(&device, &surface_config(), 1);
         let mesh = ornis_render::create_sphere(&device, 1.0, 16, 12);
 

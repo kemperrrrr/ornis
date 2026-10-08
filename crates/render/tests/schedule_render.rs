@@ -6,6 +6,9 @@
 //! found. The scene and harness live in `common` (shared with the S5b
 //! parallel gate).
 
+// The harness is shared across the gate binaries; this gate uses only
+// the square-scene part of it.
+#[allow(dead_code)]
 mod common;
 
 use ornis_render::frame_exec::BufferRenderContext;

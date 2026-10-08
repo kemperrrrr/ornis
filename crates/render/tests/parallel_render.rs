@@ -4,6 +4,9 @@
 //! The scene and harness live in `common` (shared with the E1 schedule
 //! gate).
 
+// The harness is shared across the gate binaries; this gate uses only
+// the square-scene part of it.
+#[allow(dead_code)]
 mod common;
 
 #[test]
