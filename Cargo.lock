@@ -1018,7 +1018,6 @@ name = "editor-backend"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
- "glam",
  "ornis-input",
  "serde",
  "serde_json",
@@ -2673,16 +2672,9 @@ dependencies = [
  "ornis-audio",
  "ornis-core",
  "ornis-gameplay",
- "ornis-gltf",
  "ornis-physics",
  "ornis-render",
  "ornis-runner",
- "pollster",
- "serde",
- "serde_json",
- "tiny_http",
- "wgpu",
- "winit",
 ]
 
 [[package]]
@@ -2713,7 +2705,6 @@ dependencies = [
  "ornis-gltf",
  "ornis-physics",
  "ornis-render",
- "serde",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -2753,7 +2744,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "criterion",
- "crossbeam-channel",
  "crossbeam-epoch",
  "fixedbitset",
  "glam",
@@ -2825,9 +2815,7 @@ dependencies = [
 name = "ornis-materialx"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "criterion",
- "glam",
  "ornis-core",
  "ornis-render",
  "quick-xml 0.42.0",
@@ -2878,7 +2866,6 @@ dependencies = [
  "ornis-animation",
  "ornis-assets",
  "ornis-core",
- "ornis-gameplay",
  "ornis-macros",
  "ornis-mesh-editor",
  "ornis-schedule",
@@ -2930,7 +2917,6 @@ dependencies = [
  "crossbeam-channel",
  "editor-backend",
  "ornis-app",
- "serde",
  "serde_json",
  "thiserror 2.0.21",
  "winit",
@@ -2941,16 +2927,13 @@ dependencies = [
 name = "ornis-wasm"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "console_error_panic_hook",
  "glam",
- "js-sys",
  "ornis-app",
  "ornis-assets",
  "ornis-core",
  "ornis-render",
  "raw-window-handle",
- "ron",
  "serde",
  "serde_json",
  "wasm-bindgen",

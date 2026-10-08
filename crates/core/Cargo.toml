@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 rayon = "1.12"
 fixedbitset = "0.5"
-crossbeam-channel = "0.5"
 crossbeam-epoch = "0.9"
 glam = "0.34"
 bytemuck = { version = "1", features = ["derive"] }
