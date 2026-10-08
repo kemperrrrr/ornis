@@ -20,7 +20,7 @@ on:
         type: number
         default: 3
       target_ref:
-        description: 'Source branch to benchmark (empty → use dispatcher ref)'
+        description: 'PR head SHA to benchmark (empty → use dispatcher ref)'
         type: string
         default: ''
 
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           ref: ${{ inputs.target_ref || github.ref }}
@@ -60,11 +60,11 @@ jobs:
           sudo apt-get install -y -o Acquire::ForceIPv4=true \
             libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # Run 100k body probe with step-by-step timing
       - name: Run 100k probe
@@ -166,7 +166,7 @@ jobs:
       # Upload probe log for reference
       - name: Upload probe log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: probe-100k-log
           path: target/probe_100k.log

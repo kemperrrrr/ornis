@@ -34,6 +34,10 @@ const MIN_SPHERE_RINGS: u32 = 2;
 const DEGENERATE_LEN2: f32 = 1e-12;
 /// Open upper bound for camera FOV (degrees).
 const FOV_OPEN_MAX_DEG: f32 = 180.0;
+/// Stored vertical field of view for orthographic cameras (degrees).
+/// Ignored while the projection is orthographic; kept valid so a mode
+/// switch back to perspective needs no repair.
+const ORTHO_PLACEHOLDER_FOV_DEG: f32 = 60.0;
 /// Absolute view·up cosine above which the camera basis is parallel.
 const CAMERA_UP_PARALLEL_DOT: f32 = 0.999;
 
@@ -147,6 +151,14 @@ pub enum MeshDesc {
         /// Full extents in world units: `[width_x, depth_z]` (both positive).
         size: [PositiveF32; 2],
     },
+    /// Flat sprite quad in the local XY plane (`+Z` face normal), centered
+    /// at the transform origin. Unlike [`MeshDesc::Plane`] (XZ, `+Y`) it
+    /// faces an orthographic camera looking down `-Z` without rotation.
+    /// UV `(0, 0)` is the top-left corner, `(1, 1)` the bottom-right.
+    Quad {
+        /// Full extents in world units: `[width_x, height_y]` (both positive).
+        size: [PositiveF32; 2],
+    },
     /// Right circular cylinder around local `+Y`, centered at the
     /// transform origin.
     Cylinder {
@@ -173,7 +185,7 @@ impl MeshDesc {
     /// Borrows the inline soup of a [`MeshDesc::Custom`].
     ///
     /// Returns `None` for procedural variants (`Sphere`, `Box`, `Plane`,
-    /// `Cylinder`). The render extraction routes `Some` into the per-entity
+    /// `Quad`, `Cylinder`). The render extraction routes `Some` into the per-entity
     /// upload path (`mesh_upload::custom_vertices`); the transport itself
     /// never validates shapes — see `MeshData::validate` in the mesh editor.
     /// The flat list stays triple-aligned by construction (see
@@ -181,9 +193,11 @@ impl MeshDesc {
     pub fn as_custom(&self) -> Option<(&[[f32; 3]], &[u32])> {
         match self {
             Self::Custom { positions, indices } => Some((positions, indices)),
-            Self::Sphere { .. } | Self::Box { .. } | Self::Plane { .. } | Self::Cylinder { .. } => {
-                None
-            }
+            Self::Sphere { .. }
+            | Self::Box { .. }
+            | Self::Plane { .. }
+            | Self::Quad { .. }
+            | Self::Cylinder { .. } => None,
         }
     }
 
@@ -268,6 +282,16 @@ impl MeshDesc {
             PositiveF32::try_new(size[1].get())?,
         ];
         Some(Self::Plane { size })
+    }
+
+    /// Checked sprite quad: `None` unless both extents are finite and
+    /// `> 0`. Canonical constructor for the typed `Quad` fields.
+    pub fn try_quad_units(size: [Meters; 2]) -> Option<Self> {
+        let size = [
+            PositiveF32::try_new(size[0].get())?,
+            PositiveF32::try_new(size[1].get())?,
+        ];
+        Some(Self::Quad { size })
     }
 
     /// Checked cylinder: `None` unless radius/height are finite and `> 0`
@@ -389,6 +413,13 @@ pub enum MaterialDesc {
         #[serde(default)]
         metallic: Metallic,
     },
+    /// Unlit sprite color: radiance = `color`, with no BRDF, light,
+    /// shadow or IBL contribution. Tonemap and exposure apply exactly
+    /// as for emission.
+    Unlit {
+        /// Sprite color in linear space.
+        color: [f32; 3],
+    },
 }
 
 /// Metalness of [`MaterialDesc::Metal`] when a file omits `metallic`.
@@ -457,7 +488,15 @@ impl MaterialDesc {
         }
     }
 
-    /// Albedo/base color as [`LinearRgb`] (all variants).
+    /// Typed unlit sprite: color as [`LinearRgb`].
+    pub fn unlit_units(color: LinearRgb) -> Self {
+        Self::Unlit {
+            color: color.as_array(),
+        }
+    }
+
+    /// Albedo/base color as [`LinearRgb`] (all variants; for
+    /// [`MaterialDesc::Unlit`] this is the sprite color).
     pub fn base_color_units(&self) -> LinearRgb {
         LinearRgb::new(match self {
             Self::Dielectric { base_color, .. }
@@ -465,11 +504,13 @@ impl MaterialDesc {
             | Self::Coat { base_color, .. }
             | Self::Matte { base_color, .. }
             | Self::Glass { base_color, .. } => *base_color,
+            Self::Unlit { color } => *color,
         })
     }
 
     /// Roughness as [`Clamped01`] (stored typed; legacy out-of-range
     /// values were clamped on load through the `serde` impl).
+    /// [`MaterialDesc::Unlit`] has no roughness lobe and reports `0`.
     pub fn roughness_units(&self) -> Clamped01 {
         match self {
             Self::Dielectric { roughness, .. }
@@ -477,11 +518,13 @@ impl MaterialDesc {
             | Self::Matte { roughness, .. }
             | Self::Glass { roughness, .. } => *roughness,
             Self::Coat { coat_roughness, .. } => *coat_roughness,
+            Self::Unlit { .. } => Clamped01::new(0.0),
         }
     }
 
     /// Base metalness. Files that omit the field load as `1` for
-    /// [`MaterialDesc::Metal`] and `0` for every other preset.
+    /// [`MaterialDesc::Metal`] and `0` for every other preset;
+    /// [`MaterialDesc::Unlit`] has no metalness and reports `0`.
     pub fn metallic_units(&self) -> Metallic {
         match self {
             Self::Dielectric { metallic, .. }
@@ -489,6 +532,7 @@ impl MaterialDesc {
             | Self::Coat { metallic, .. }
             | Self::Matte { metallic, .. }
             | Self::Glass { metallic, .. } => *metallic,
+            Self::Unlit { .. } => Metallic::new(0.0),
         }
     }
 
@@ -762,6 +806,24 @@ impl LightDesc {
     }
 }
 
+/// Camera projection: perspective foreshortening or an orthographic
+/// box (K0: 2D as degenerate 3D). The wire form is the variant name;
+/// [`CameraProjection::Orthographic`] carries its half-height as a plain
+/// `f32` in meters. Absent in older files — defaults to perspective.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum CameraProjection {
+    /// Perspective foreshortening (`fov` applies).
+    #[default]
+    Perspective,
+    /// Orthographic box: vertical half-extent in world units (`fov`
+    /// is stored but ignored).
+    Orthographic {
+        /// Vertical half-extent of the view box in meters.
+        #[serde(with = "crate::wire::meters")]
+        half_height: Meters,
+    },
+}
+
 /// Viewing camera described look-at style.
 ///
 /// Wire form unchanged: vectors as `[f32; 3]`, `fov`/`near`/`far` as `f32`.
@@ -786,27 +848,31 @@ pub struct CameraDesc {
     /// Far clip distance.
     #[serde(with = "crate::wire::meters")]
     pub far: Meters,
+    /// Projection: perspective foreshortening or an orthographic box.
+    /// Absent in older files — defaults to [`CameraProjection::Perspective`].
+    /// In [`CameraProjection::Orthographic`] mode `fov` is ignored.
+    #[serde(default)]
+    pub projection: CameraProjection,
 }
 
 impl CameraDesc {
-    /// Checked camera: `None` unless the fov is strictly inside
-    /// `(0, 180)` degrees, `near` is finite and `> 0`, `far > near`, all
-    /// positions are finite, and `up` is finite, non-zero and not parallel
-    /// to the view direction.
-    pub fn try_new_units(
+    /// Shared look-at framing validation of [`Self::try_new_units`] and
+    /// [`Self::try_orthographic_units`]: finite eye/target, a non-degenerate
+    /// view offset, a finite non-zero `up` not parallel to the view, and
+    /// `0 < near < far`. Pure computation over external types (the unit
+    /// constructors normalize through their own crates, like
+    /// [`MeshDesc::try_sphere_units`]), so the checked constructors stay
+    /// pure orchestration (IOSP). Returns the eye, target and normalized up.
+    fn validated_framing(
         position: [Meters; 3],
         target: [Meters; 3],
         up: [f32; 3],
-        fov: Degrees,
         near: Meters,
         far: Meters,
-    ) -> Option<Self> {
+    ) -> Option<(Vec3, Vec3, UnitVec3)> {
         let position = [position[0].get(), position[1].get(), position[2].get()];
         let target = [target[0].get(), target[1].get(), target[2].get()];
         if !position.iter().chain(target.iter()).all(|v| v.is_finite()) {
-            return None;
-        }
-        if !fov.is_finite() || fov.get() <= 0.0 || fov.get() >= FOV_OPEN_MAX_DEG {
             return None;
         }
         if !near.is_finite() || near.get() <= 0.0 || !far.is_finite() || far.get() <= near.get() {
@@ -834,13 +900,79 @@ impl CameraDesc {
         if !dot.is_finite() || dot > CAMERA_UP_PARALLEL_DOT {
             return None;
         }
+        Some((
+            Vec3::from_array(position),
+            Vec3::from_array(target),
+            UnitVec3::normalize(Vec3::from_array(up))?,
+        ))
+    }
+
+    /// Validated vertical field of view: strictly inside `(0, 180)` degrees.
+    fn validated_fov(fov: Degrees) -> Option<Degrees> {
+        if !fov.is_finite() || fov.get() <= 0.0 || fov.get() >= FOV_OPEN_MAX_DEG {
+            None
+        } else {
+            Some(fov)
+        }
+    }
+
+    /// Validated orthographic half-height: finite and `> 0`.
+    fn validated_half_height(half_height: Meters) -> Option<Meters> {
+        if !half_height.is_finite() || half_height.get() <= 0.0 {
+            None
+        } else {
+            Some(half_height)
+        }
+    }
+
+    /// Checked camera: `None` unless the fov is strictly inside
+    /// `(0, 180)` degrees, `near` is finite and `> 0`, `far > near`, all
+    /// positions are finite, and `up` is finite, non-zero and not parallel
+    /// to the view direction.
+    pub fn try_new_units(
+        position: [Meters; 3],
+        target: [Meters; 3],
+        up: [f32; 3],
+        fov: Degrees,
+        near: Meters,
+        far: Meters,
+    ) -> Option<Self> {
+        let (position, target, up) = Self::validated_framing(position, target, up, near, far)?;
+        let fov = Self::validated_fov(fov)?;
         Some(Self {
-            position: Vec3::from_array(position),
-            target: Vec3::from_array(target),
-            up: crate::wire::stable_unit_vec3(Vec3::from_array(up))?,
+            position,
+            target,
+            up,
             fov,
             near,
             far,
+            projection: CameraProjection::Perspective,
+        })
+    }
+
+    /// Checked orthographic camera: `None` unless `half_height` is finite
+    /// and `> 0`, plus all [`Self::try_new_units`] framing checks (finite
+    /// eye/target, non-parallel `up`, `0 < near < far`). The stored `fov`
+    /// is a valid placeholder and is ignored while the projection is
+    /// orthographic.
+    pub fn try_orthographic_units(
+        position: [Meters; 3],
+        target: [Meters; 3],
+        up: [f32; 3],
+        half_height: Meters,
+        near: Meters,
+        far: Meters,
+    ) -> Option<Self> {
+        let (position, target, up) = Self::validated_framing(position, target, up, near, far)?;
+        let half_height = Self::validated_half_height(half_height)?;
+        Some(Self {
+            position,
+            target,
+            up,
+            fov: Degrees::new(ORTHO_PLACEHOLDER_FOV_DEG),
+            near,
+            far,
+            projection: CameraProjection::Orthographic { half_height },
         })
     }
 
@@ -1023,6 +1155,43 @@ Scene(
     }
 
     #[test]
+    fn quad_and_unlit_round_trip() {
+        // Typed constructors, explicit parameters, no builders.
+        let mesh = MeshDesc::try_quad_units([Meters::new(2.0), Meters::new(1.0)])
+            .expect("positive quad size");
+        let material = MaterialDesc::unlit_units(LinearRgb::new([0.2, 0.4, 0.8]));
+        match &mesh {
+            MeshDesc::Quad { size } => {
+                assert_eq!(size.map(PositiveF32::get), [2.0, 1.0]);
+            }
+            other => panic!("expected Quad, got {other:?}"),
+        }
+        match &material {
+            MaterialDesc::Unlit { color } => assert_eq!(*color, [0.2, 0.4, 0.8]),
+            other => panic!("expected Unlit, got {other:?}"),
+        }
+        assert_eq!(material.base_color_units().as_array(), [0.2, 0.4, 0.8]);
+        assert_eq!(material.metallic_units().get(), 0.0);
+        assert_eq!(material.roughness_units().get(), 0.0);
+        assert_eq!(material.ior_units(), None);
+        let mesh_ron = ron::ser::to_string(&mesh).expect("serialize quad");
+        let material_ron = ron::ser::to_string(&material).expect("serialize unlit");
+        let mesh_back: MeshDesc = ron::de::from_str(&mesh_ron).expect("re-parse quad");
+        let material_back: MaterialDesc = ron::de::from_str(&material_ron).expect("re-parse unlit");
+        match mesh_back {
+            MeshDesc::Quad { size } => assert_eq!(size.map(PositiveF32::get), [2.0, 1.0]),
+            other => panic!("quad round-trip broke the variant: {other:?}"),
+        }
+        assert_eq!(material_back, material);
+        // Degenerate sizes are rejected, like the plane constructor.
+        assert!(MeshDesc::try_quad_units([Meters::new(0.0), Meters::new(1.0)]).is_none());
+        assert!(MeshDesc::try_quad_units([Meters::new(1.0), Meters::new(-2.0)]).is_none());
+        // Old scenes without the new variants load exactly as before.
+        let old = Scene::from_ron(FULL_SCENE_RON).expect("old scene");
+        assert_eq!(old.entities.len(), 3);
+    }
+
+    #[test]
     fn rejects_malformed_ron() {
         assert!(Scene::from_ron("Scene(name: 42)").is_err());
         assert!(Scene::from_ron("not a scene at all").is_err());
@@ -1099,6 +1268,7 @@ Scene(
                 MaterialDesc::Dielectric { emission, .. }
                 | MaterialDesc::Metal { emission, .. }
                 | MaterialDesc::Coat { emission, .. } => *emission,
+                MaterialDesc::Unlit { color } => *color,
                 MaterialDesc::Matte { .. } | MaterialDesc::Glass { .. } => [0.0, 0.0, 0.0],
             };
             assert_eq!(emission, [0.0, 0.0, 0.0]);
@@ -1257,6 +1427,34 @@ Scene(
         Vec3::from_array(v).normalize().to_array()
     }
 
+    /// The additive `projection` field rides alongside the legacy camera
+    /// shape: a `Perspective` camera serializes with the field, and old
+    /// payloads without it load as `Perspective`.
+    fn assert_perspective_camera_wire_shape(camera: &CameraDesc, legacy_camera: &legacy::Camera) {
+        let camera_json = serde_json::to_string(camera).expect("json");
+        assert!(
+            camera_json.ends_with(",\"projection\":\"Perspective\"}"),
+            "unexpected camera wire form: {camera_json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<CameraDesc>(
+                &serde_json::to_string(legacy_camera).expect("json")
+            )
+            .expect("legacy JSON parses"),
+            *camera
+        );
+        let camera_ron = ron::ser::to_string(camera).expect("ron");
+        assert!(
+            camera_ron.contains("projection:Perspective"),
+            "unexpected camera wire form: {camera_ron}"
+        );
+        assert_eq!(
+            ron::de::from_str::<CameraDesc>(&ron::ser::to_string(legacy_camera).expect("ron"))
+                .expect("legacy RON parses"),
+            *camera
+        );
+    }
+
     #[test]
     fn shipped_ron_round_trips_equivalently_and_stably() {
         for (name, text) in SHIPPED_RON {
@@ -1338,6 +1536,7 @@ Scene(
             fov: Degrees::new(60.0),
             near: Meters::new(0.1),
             far: Meters::new(100.0),
+            projection: CameraProjection::Perspective,
         };
         let legacy_camera = legacy::Camera {
             position: [0.0, 2.5, 9.0],
@@ -1347,14 +1546,7 @@ Scene(
             near: 0.1,
             far: 100.0,
         };
-        assert_eq!(
-            serde_json::to_string(&camera).expect("json"),
-            serde_json::to_string(&legacy_camera).expect("json")
-        );
-        assert_eq!(
-            ron::ser::to_string(&camera).expect("ron"),
-            ron::ser::to_string(&legacy_camera).expect("ron")
-        );
+        assert_perspective_camera_wire_shape(&camera, &legacy_camera);
 
         let spot = LightDesc::spot_units(
             [Meters::new(1.0), Meters::new(4.0), Meters::new(0.0)],
@@ -1584,5 +1776,118 @@ Scene(
     #[test]
     fn glass_ior_defaults_to_crown() {
         assert_eq!(default_glass_ior().get(), 1.5);
+    }
+
+    #[test]
+    fn camera_without_projection_loads_as_perspective() {
+        // `FULL_SCENE_RON` and the shipped scenes predate `projection`.
+        let scene = Scene::from_ron(FULL_SCENE_RON).expect("old ron");
+        assert_eq!(scene.camera.projection, CameraProjection::Perspective);
+        let json = r#"{"position":[0,2.5,9],"target":[0,0,0],"up":[0,1,0],
+            "fov":60.0,"near":0.1,"far":100.0}"#;
+        let camera: CameraDesc = serde_json::from_str(json).expect("old json");
+        assert_eq!(camera.projection, CameraProjection::Perspective);
+    }
+
+    #[test]
+    fn orthographic_camera_round_trips_in_ron_and_json() {
+        let camera = CameraDesc::try_orthographic_units(
+            [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+            [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+            [0.0, 1.0, 0.0],
+            Meters::new(2.0),
+            Meters::new(0.1),
+            Meters::new(100.0),
+        )
+        .expect("valid ortho camera");
+        assert!(matches!(
+            camera.projection,
+            CameraProjection::Orthographic { half_height }
+                if half_height == Meters::new(2.0)
+        ));
+        for text in [
+            ron::ser::to_string(&camera).expect("ron"),
+            serde_json::to_string(&camera).expect("json"),
+        ] {
+            let back: CameraDesc = if text.starts_with('{') {
+                serde_json::from_str(&text).expect("json round-trip")
+            } else {
+                ron::de::from_str(&text).expect("ron round-trip")
+            };
+            assert_eq!(back, camera);
+        }
+        // The half-height travels as a plain `f32` in meters.
+        let json = serde_json::to_string(&camera).expect("json");
+        assert!(
+            json.contains("\"half_height\":2.0"),
+            "unexpected ortho wire form: {json}"
+        );
+    }
+
+    #[test]
+    fn try_orthographic_units_rejects_degenerate_input() {
+        fn ortho(half_height: Meters) -> Option<CameraDesc> {
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, 1.0, 0.0],
+                half_height,
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+        }
+        assert!(ortho(Meters::new(2.0)).is_some());
+        assert!(ortho(Meters::new(0.0)).is_none());
+        assert!(ortho(Meters::new(-1.0)).is_none());
+        assert!(ortho(Meters::new(f32::NAN)).is_none());
+        assert!(ortho(Meters::new(f32::INFINITY)).is_none());
+        // Shared framing checks still apply: coincident eye/target,
+        // parallel up and inverted clip planes reject.
+        let eye = [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)];
+        assert!(
+            CameraDesc::try_orthographic_units(
+                eye,
+                eye,
+                [0.0, 1.0, 0.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none()
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, 0.0, 0.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none()
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, 1.0, 0.0],
+                Meters::new(2.0),
+                Meters::new(100.0),
+                Meters::new(0.1),
+            )
+            .is_none()
+        );
+        // The perspective constructor keeps rejecting a degenerate fov.
+        assert!(
+            CameraDesc::try_new_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, 1.0, 0.0],
+                Degrees::new(0.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none()
+        );
     }
 }

@@ -11,9 +11,20 @@
 //! do 4x, [`negotiate_sample_count`](ornis_render::negotiate_sample_count)
 //! falls back to 1x and the gate pins that fallback (negotiated output is
 //! then byte-identical to the 1x frame) instead of failing.
+//!
+//! Adapter acquisition and the render-and-read-back flow live in the shared
+//! `common` harness (no per-gate copies — the rustqual ratchet flags exact
+//! `DUPLICATE` pairs).
 
+// The harness is shared across the gate binaries; this gate uses the
+// sized (non-square) half of it.
+#[allow(dead_code)]
+mod common;
+
+use common::sized::{FrameSpec, render_and_readback};
+use ornis_render::render_backend::RenderContext;
 use ornis_render::{
-    InstanceData, MaterialIdx, OpenPBRMaterial, Renderer3D, negotiate_sample_count,
+    InstanceData, MaterialIdx, OpenPBRMaterial, RenderFrame3D, Renderer3D, negotiate_sample_count,
 };
 
 /// Offscreen frame extent (shadow-probe precedent: fast, large enough for
@@ -37,38 +48,11 @@ const MAX_DIFF_FRACTION: f64 = 0.05;
 /// not a clear color.
 const MIN_LIT_FRACTION: f64 = 0.05;
 
-fn try_adapter() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
-    pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        });
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .ok()?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()?;
-        Some((adapter, device, queue))
-    })
-}
-
-fn surface_config() -> wgpu::SurfaceConfiguration {
-    wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+/// Offscreen frame spec (shared harness builds targets from it).
+fn frame_spec() -> FrameSpec {
+    FrameSpec {
+        size: (W, H),
         format: FORMAT,
-        width: W,
-        height: H,
-        present_mode: wgpu::PresentMode::AutoNoVsync,
-        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-        color_space: wgpu::SurfaceColorSpace::Auto,
     }
 }
 
@@ -80,7 +64,7 @@ fn build_scene(
     queue: &wgpu::Queue,
     sample_count: u32,
 ) -> (Renderer3D, ornis_render::Mesh) {
-    let renderer = Renderer3D::new(device, &surface_config(), sample_count);
+    let renderer = Renderer3D::new(device, &frame_spec().surface_config(), sample_count);
     let mesh = ornis_render::create_sphere(device, 1.0, 24, 16);
     let mut material = OpenPBRMaterial::dielectric();
     material.base.color_rgb([0.8, 0.8, 0.8]);
@@ -129,27 +113,9 @@ fn render_pixels(
     renderer: &Renderer3D,
     mesh: &ornis_render::Mesh,
 ) -> Vec<u8> {
-    let target_tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("msaa probe target"),
-        size: wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let target_view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("msaa probe encoder"),
-    });
-    renderer.render_scene(device, queue, &mut encoder, &target_view, mesh, 1);
-    queue.submit([encoder.finish()]);
-    readback_pixels(device, queue, &target_tex)
+    render_and_readback(device, queue, &frame_spec(), |encoder, view| {
+        renderer.render_scene(device, queue, encoder, view, mesh, 1);
+    })
 }
 
 /// Renders one plan-path frame (the native shell combo: Hybrid plan +
@@ -163,22 +129,7 @@ fn render_plan_pixels(
     mesh: &ornis_render::Mesh,
     sample_count: u32,
 ) -> Vec<u8> {
-    let target_tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("msaa plan probe target"),
-        size: wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let target_view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut plan = ornis_render::RenderFrame3D::new_with_samples(
+    let mut plan = RenderFrame3D::new_with_samples(
         FORMAT,
         (W, H),
         ornis_render::Technique::Hybrid,
@@ -186,84 +137,24 @@ fn render_plan_pixels(
         sample_count,
     );
     assert_eq!(plan.sample_count(), sample_count);
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("msaa plan probe encoder"),
-    });
-    plan.render(
-        ornis_render::render_backend::RenderContext {
-            device,
-            queue,
-            encoder: &mut encoder,
-            target: &target_view,
-        },
-        renderer,
-        mesh,
-        1,
-    );
-    queue.submit([encoder.finish()]);
-    readback_pixels(device, queue, &target_tex)
-}
-
-/// Copies a `COPY_SRC` target back to CPU bytes (blocking), stripping the
-/// 256-byte row padding.
-fn readback_pixels(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    target_tex: &wgpu::Texture,
-) -> Vec<u8> {
-    const BPP: u32 = 4;
-    let unpadded = W * BPP;
-    let padded = unpadded.div_ceil(256) * 256;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("msaa probe readback"),
-        size: (padded * H) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("msaa probe readback encoder"),
-    });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: target_tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(H),
+    render_and_readback(device, queue, &frame_spec(), |encoder, view| {
+        plan.render(
+            RenderContext {
+                device,
+                queue,
+                encoder,
+                target: view,
             },
-        },
-        wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([encoder.finish()]);
-    let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll readback");
-    let data = slice.get_mapped_range().unwrap();
-    let mut pixels = vec![0u8; (unpadded * H) as usize];
-    for y in 0..H as usize {
-        pixels[y * unpadded as usize..][..unpadded as usize]
-            .copy_from_slice(&data[y * padded as usize..][..unpadded as usize]);
-    }
-    drop(data);
-    readback.unmap();
-    pixels
+            renderer,
+            mesh,
+            1,
+        );
+    })
 }
 
 #[test]
 fn msaa_4x_resolve_is_deterministic_and_close_to_1x() {
-    let Some((adapter, device, queue)) = try_adapter() else {
+    let Some((adapter, device, queue)) = pollster::block_on(common::request_device()) else {
         eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
         return;
     };
@@ -365,7 +256,7 @@ fn msaa_plan_renders_nonblack_at_negotiated_count() {
     // at the same negotiated count) must render the sphere, not a clear
     // color. On the documented 1x fallback this exercises the 1x plan
     // path; on true 4x it proves the pool MSAA + renderer-resolve wiring.
-    let Some((adapter, device, queue)) = try_adapter() else {
+    let Some((adapter, device, queue)) = pollster::block_on(common::request_device()) else {
         eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
         return;
     };

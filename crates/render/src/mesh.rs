@@ -353,6 +353,44 @@ pub fn plane_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
     (vertices, vec![0, 2, 1, 0, 3, 2])
 }
 
+/// CPU-side geometry of a flat sprite quad in the local XY plane (`+Z`
+/// face normal), centered at the origin: 4 vertices and 6 indices, UV
+/// `(0, 0)` at the top-left corner and `(1, 1)` at the bottom-right,
+/// with the `+X` tangent (unit, orthogonal to the normal — same contract
+/// as [`plane_data`]). Unlike [`plane_data`] (XZ, `+Y`) it faces a
+/// camera looking down `-Z` without rotation.
+pub fn quad_data(size: [f32; 2]) -> (Vec<Vertex>, Vec<u32>) {
+    let (hx, hy) = (size[0] * HALF, size[1] * HALF);
+    let vertices = vec![
+        Vertex {
+            position: [-hx, hy, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [hx, hy, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [hx, -hy, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [1.0, 1.0],
+            tangent: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [-hx, -hy, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            uv: [0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0],
+        },
+    ];
+    // CCW seen from +Z (verified by the winding test below).
+    (vertices, vec![0, 3, 2, 0, 2, 1])
+}
+
 /// CPU-side geometry of a right circular cylinder around `+Y`:
 /// `radial_segments` is clamped to at least 3. Layout is side quads
 /// (`2 * (n + 1)` vertices, analytic radial normals and tangents) plus
@@ -500,6 +538,19 @@ pub fn create_plane(device: &wgpu::Device, size: [f32; 2]) -> Mesh {
     )
 }
 
+/// Generate a flat sprite quad in the local XY plane (see [`quad_data`]),
+/// uploading it to `device`.
+pub fn create_quad(device: &wgpu::Device, size: [f32; 2]) -> Mesh {
+    let (vertices, indices) = quad_data(size);
+    upload_vertices(
+        device,
+        "quad vertex buffer",
+        "quad index buffer",
+        &vertices,
+        &indices,
+    )
+}
+
 /// Generate a right circular cylinder around `+Y` (see [`cylinder_data`]),
 /// uploading it to `device`. `radial_segments` is clamped to at least 3.
 pub fn create_cylinder(
@@ -631,6 +682,45 @@ mod tests {
             assert!(
                 (n - glam::Vec3::Y).length() < 1e-6,
                 "plane winding faces +Y: {tri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quad_has_4_vertices_and_faces_plus_z() {
+        let (vertices, indices) = quad_data([3.0, 5.0]);
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(indices, vec![0, 3, 2, 0, 2, 1]);
+        assert_orthogonal_unit_tangents(&vertices);
+        for vertex in &vertices {
+            assert_eq!(vertex.normal, [0.0, 0.0, 1.0]);
+            assert_eq!(vertex.tangent, [1.0, 0.0, 0.0]);
+            assert_eq!(vertex.position[2], 0.0, "quad lies in z = 0");
+        }
+        // Corners: (−hx, +hy) → (+hx, −hy), UV (0, 0) top-left.
+        assert_eq!(
+            vertices
+                .iter()
+                .map(|v| (v.position, v.uv))
+                .collect::<Vec<_>>(),
+            vec![
+                ([-1.5, 2.5, 0.0], [0.0, 0.0]),
+                ([1.5, 2.5, 0.0], [1.0, 0.0]),
+                ([1.5, -2.5, 0.0], [1.0, 1.0]),
+                ([-1.5, -2.5, 0.0], [0.0, 1.0]),
+            ]
+        );
+        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
+        for tri in indices.chunks_exact(3) {
+            let n = face_normal(
+                positions[tri[0] as usize],
+                positions[tri[1] as usize],
+                positions[tri[2] as usize],
+            )
+            .normalize();
+            assert!(
+                (n - glam::Vec3::Z).length() < 1e-6,
+                "quad winding faces +Z: {tri:?}"
             );
         }
     }

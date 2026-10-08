@@ -6,16 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-editor-backend = { path = "../editor-backend" }
-ornis-animation = { path = "../animation" }
-ornis-assets = { path = "../assets" }
-ornis-audio = { path = "../audio" }
-ornis-core = { path = "../core" }
-ornis-editor = { path = "../editor" }
-ornis-gameplay = { path = "../gameplay" }
-ornis-gltf = { path = "../gltf" }
-ornis-physics = { path = "../physics" }
-ornis-render = { path = "../render" }
+editor-backend = { path = "../editor-backend", version = "0.1.0" }
+ornis-animation = { path = "../animation", version = "0.1.0" }
+ornis-assets = { path = "../assets", version = "0.1.0" }
+ornis-audio = { path = "../audio", version = "0.1.0" }
+ornis-core = { path = "../core", version = "0.1.0" }
+ornis-editor = { path = "../editor", version = "0.1.0" }
+ornis-gameplay = { path = "../gameplay", version = "0.1.0" }
+ornis-gltf = { path = "../gltf", version = "0.1.0" }
+ornis-physics = { path = "../physics", version = "0.1.0" }
+ornis-render = { path = "../render", version = "0.1.0" }
 crossbeam-channel = "0.5"
 glam = "0.34"
 serde = { version = "1", features = ["derive"] }

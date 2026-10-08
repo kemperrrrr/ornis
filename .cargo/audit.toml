@@ -1,9 +1,8 @@
 # cargo-audit configuration
-# Rationale for ignores — see deny.toml [advisories].
-# quick-xml 0.39.4 ← wayland-scanner (build-time proc-macro, Linux only,
-# trusted Wayland protocol XML); 0.41 unavailable until winit 0.30 upgrade.
+# Single source of truth for advisory ignores is deny.toml [advisories];
+# this file intentionally carries no ignores. RUSTSEC-2026-0194/0195
+# (quick-xml DoS, patched in >= 0.41.0) are already closed by Cargo.lock
+# (quick-xml 0.41.0 via wayland-scanner 0.31.11), so the stale entries
+# were removed 2026-10-07.
 [advisories]
-ignore = [
-    "RUSTSEC-2026-0194",
-    "RUSTSEC-2026-0195",
-]
+ignore = []

@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.5166000833618463,
-  "iosp_score": 0.9114805661649068,
+  "quality_score": 0.5138985383653337,
+  "iosp_score": 0.911797627042758,
   "violations": 394,
-  "total": 6976,
-  "complexity_warnings": 73,
-  "magic_number_warnings": 129,
+  "total": 7005,
+  "complexity_warnings": 74,
+  "magic_number_warnings": 131,
   "nesting_depth_warnings": 19,
-  "function_length_warnings": 126,
+  "function_length_warnings": 127,
   "unsafe_warnings": 11,
   "error_handling_warnings": 21,
-  "duplicate_groups": 87,
-  "dead_code_warnings": 419,
+  "duplicate_groups": 91,
+  "dead_code_warnings": 421,
   "dead_type_warnings": 3,
-  "fragment_groups": 652,
-  "boilerplate_warnings": 324,
+  "fragment_groups": 676,
+  "boilerplate_warnings": 325,
   "srp_struct_warnings": 23,
   "srp_module_warnings": 100,
   "wildcard_import_warnings": 49,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 8,
-  "tq_untested_warnings": 155,
+  "tq_untested_warnings": 154,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 24,
-  "total_findings": 2831,
+  "total_findings": 2865,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -228,7 +228,7 @@
     {
       "name": "fs_main_msaa",
       "file": "crates/render/src/shaders/lighting_generated.rs",
-      "line": 686
+      "line": 690
     },
     {
       "name": "evaluate_base_specular",
@@ -1953,17 +1953,17 @@
     {
       "name": "LightDesc::point_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 667
+      "line": 707
     },
     {
       "name": "LightDesc::spot_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 694
+      "line": 734
     },
     {
       "name": "CameraDesc::try_new_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 796
+      "line": 836
     },
     {
       "name": "AssetError::from",
@@ -1978,17 +1978,17 @@
     {
       "name": "pick_closest_with_epsilon",
       "file": "crates/editor/src/picking.rs",
-      "line": 536
+      "line": 546
     },
     {
       "name": "intersect_entity",
       "file": "crates/editor/src/picking.rs",
-      "line": 575
+      "line": 585
     },
     {
       "name": "cylinder_triangles",
       "file": "crates/editor/src/picking.rs",
-      "line": 739
+      "line": 766
     },
     {
       "name": "quality",

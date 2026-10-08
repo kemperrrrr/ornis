@@ -52,7 +52,9 @@ pub mod textures;
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
-pub use camera::{OrbitCamera, install_orbit_camera, read_orbit_camera};
+pub use camera::{
+    CameraView, OrbitCamera, camera_view_projection, install_orbit_camera, read_orbit_camera,
+};
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{
     ExtractionStats, FrameUpload, MeshPose, RenderLights, RenderWorld, SkinInfluences,
