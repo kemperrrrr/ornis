@@ -87,8 +87,8 @@ pub struct CompoundChild {
 
 /// Exact auto recipe for `mesh`, or `None` when no exact recipe exists.
 ///
-/// Sphere/Box/Cylinder meshes map to their analytic collider; Plane and
-/// Custom meshes map to `None` — a transport mesh is not a collision
+/// Sphere/Box/Cylinder meshes map to their analytic collider; Plane, Quad
+/// and Custom meshes map to `None` — a transport mesh is not a collision
 /// promise. Pair with an explicit [`ColliderDesc`] lane entry for those
 /// (`TriMesh` validates the `Custom` soup through [`MeshDesc::as_triangles`]
 /// at the physics projection).
@@ -108,7 +108,7 @@ pub fn collider_for(mesh: &MeshDesc) -> Option<ColliderDesc> {
             radius: radius.get(),
             height: height.get(),
         }),
-        MeshDesc::Plane { .. } | MeshDesc::Custom { .. } => None,
+        MeshDesc::Plane { .. } | MeshDesc::Quad { .. } | MeshDesc::Custom { .. } => None,
     }
 }
 
@@ -156,6 +156,15 @@ mod tests {
     fn plane_and_custom_have_no_auto_recipe() {
         assert_eq!(
             collider_for(&MeshDesc::Plane {
+                size: [
+                    PositiveF32::expect_valid(3.0),
+                    PositiveF32::expect_valid(5.0),
+                ]
+            }),
+            None
+        );
+        assert_eq!(
+            collider_for(&MeshDesc::Quad {
                 size: [
                     PositiveF32::expect_valid(3.0),
                     PositiveF32::expect_valid(5.0),

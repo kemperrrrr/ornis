@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ornis-core = { path = "../core" }
-ornis-gameplay = { path = "../gameplay" }
+ornis-core = { path = "../core", version = "0.1.0" }
+ornis-gameplay = { path = "../gameplay", version = "0.1.0" }
 cpal = "0.18"
 symphonia = { version = "0.6", default-features = false, features = ["wav", "ogg", "mp3", "flac", "pcm"] }
 crossbeam-channel = "0.5"

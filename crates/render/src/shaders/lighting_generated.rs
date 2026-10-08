@@ -652,7 +652,11 @@ fn shade_lit(
         base_color * (1.0 - metalness),
         lighting.ibl_weight,
     );
-    let raw = ambient + lo + emission + ibl;
+    // Unlit sprites (geometry `params[2]`, see `ShadingMode`): radiance is
+    // the emission alone — no BRDF, light, shadow or IBL term. `select`
+    // keeps the lit sum bit-identical when the flag is off.
+    let full = ambient + lo + emission + ibl;
+    let raw = select(full, emission, mat.geometry_params.z >= 0.5);
     let beauty = sanitize_hdr(raw);
     let mut ibl_spec = Vec3::new(0.0, 0.0, 0.0);
     if lighting.debug_view == SHADING_DEBUG_IBL_SPECULAR

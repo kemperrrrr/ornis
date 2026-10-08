@@ -9,7 +9,7 @@ license.workspace = true
 proc-macro = true
 
 [dependencies]
-ornis-shader-lang = { path = "../shader-lang" }
+ornis-shader-lang = { path = "../shader-lang", version = "0.1.0" }
 syn = { version = "3", features = ["full", "visit", "visit-mut"] }
 quote = "1"
 proc-macro2 = "1"
@@ -17,7 +17,7 @@ glam = { version = "0.34", optional = true }
 
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "wgsl-out"] }
-ornis-core = { path = "../core" }
+ornis-core = { path = "../core", version = "0.1.0" }
 glam = "0.34"
 trybuild = "1"
 wgpu = "30"

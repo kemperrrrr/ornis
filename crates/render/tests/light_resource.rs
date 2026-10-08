@@ -13,7 +13,8 @@
 mod common;
 
 use ornis_assets::scene::{
-    CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast, TransformDesc,
+    CameraDesc, CameraProjection, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, ShadowCast,
+    TransformDesc,
 };
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_render::RenderLights;
@@ -61,6 +62,7 @@ fn legacy_scene() -> Scene {
             fov: ornis_core::units::Degrees::new(60.0),
             near: ornis_core::units::Meters::new(0.1),
             far: ornis_core::units::Meters::new(100.0),
+            projection: CameraProjection::Perspective,
         },
         ambient: [0.10, 0.10, 0.15],
     }

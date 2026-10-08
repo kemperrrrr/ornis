@@ -3,24 +3,41 @@ name: Performance Benchmarks
 on:
   # Manual trigger for on-demand performance runs
   workflow_dispatch:
+    inputs:
+      target_ref:
+        description: 'PR head SHA to benchmark (empty → use dispatcher ref)'
+        type: string
+        default: ''
   # Optional: run on schedule (e.g. weekly) to track performance trends
   # schedule:
   #   - cron: '0 0 * * 0'  # Every Sunday at midnight UTC
 
 env:
   CARGO_TERM_COLOR: always
+  # Regression thresholds (RAT-11): CI runners are noisy, so the gate is a
+  # loose percentage plus one automatic re-run of a breached group before
+  # failing (see the comparison step below). Tighten only with data from
+  # repeated master runs, never from a single local measurement.
+  PERF_STEP_MAX_PCT: 15
+  PERF_BODIES_MAX_PCT: 25
 
+# actions: read — the comparison step downloads the last `criterion-results`
+# artifact from a master run as the baseline (first-ever run has no
+# baseline and reports INFO instead of gating; seed it by running this
+# workflow once on master).
 permissions:
   contents: read
+  actions: read
 
 jobs:
   performance:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.target_ref || github.ref }}
 
       # System dependencies (same as quality.yml)
       - name: Install system dependencies
@@ -35,11 +52,11 @@ jobs:
           sudo apt-get install -y -o Acquire::ForceIPv4=true \
             libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # Cheap baseline (reuses existing examples, <2 min on ubuntu):
       # grid 1k + islands many_islands catch solver/broadphase regress.
@@ -61,6 +78,157 @@ jobs:
           set -o pipefail
           mkdir -p target
           cargo bench -p ornis-physics --bench solver_bench -- --verbose 2>&1 | tee target/bench.log
+
+      # Baseline for regression comparison: the `criterion-results` artifact
+      # from the latest successful master run of this workflow. Best-effort
+      # (gh CLI only, no third-party action): a missing baseline (never run
+      # on master yet, expired artifact) downgrades the gate below to INFO
+      # instead of failing the run.
+      - name: Download master baseline criterion results
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/performance.yml/runs?branch=master&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')"
+          if [ -z "$run_id" ]; then
+            echo "no successful master run of performance.yml yet — comparison will INFO-skip"
+            exit 0
+          fi
+          echo "baseline run: $run_id"
+          gh run download "$run_id" --repo "${GITHUB_REPOSITORY}" \
+            --name criterion-results --dir baseline-criterion
+
+      - name: Install critcmp
+        shell: bash
+        run: |
+          if ! command -v critcmp >/dev/null 2>&1; then
+            cargo install critcmp --locked
+          fi
+          critcmp --version
+
+      # Regression gate (RAT-11): critcmp renders the human-readable
+      # before/after table; the pass/fail decision is computed from
+      # criterion's `estimates.json` means (point estimates, ns) against
+      # the PERF_*_MAX_PCT thresholds above. A breached group is
+      # re-benched once to rule out CI noise — only a persistent breach
+      # fails the workflow.
+      - name: Compare against baseline (regression gate)
+        id: perf-gate
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target
+          if [ ! -d baseline-criterion/physics_step ] && [ ! -d baseline-criterion/physics_bodies ]; then
+            {
+              echo "## 📊 Performance regression gate: no baseline"
+              echo
+              echo "No master \`criterion-results\` artifact found — comparison skipped (INFO)."
+              echo "Seed the baseline by running this workflow once on \`master\`;"
+              echo "later runs gate \`solver_bench\` at +${PERF_STEP_MAX_PCT}% (physics_step) /"
+              echo "+${PERF_BODIES_MAX_PCT}% (physics_bodies) with one automatic re-run on breach."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "baseline=missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "baseline=present" >> "$GITHUB_OUTPUT"
+          # critcmp is the human-readable report only — the python gate below
+          # is authoritative, so a critcmp layout error must not fail the step.
+          critcmp baseline-criterion target/criterion 2>&1 | tee target/critcmp.txt || \
+            echo "(critcmp report failed — the estimates.json gate below still applies)" | tee target/critcmp.txt
+          python3 - <<'PY' 2>&1 | tee target/perf-gate.log
+          import json, os, subprocess, sys
+
+          cur_root, base_root = "target/criterion", "baseline-criterion"
+          step_max = float(os.environ.get("PERF_STEP_MAX_PCT", "15"))
+          bodies_max = float(os.environ.get("PERF_BODIES_MAX_PCT", "25"))
+          thresholds = {"physics_step": step_max, "physics_bodies": bodies_max}
+
+          def means(root):
+              # Recursive walk: BenchmarkId::new(backend, n) nests results as
+              # <group>/<backend>/<n>/new/estimates.json, while plain
+              # bench_function lands at <group>/<name>/new/estimates.json.
+              out = {}
+              for group in ("physics_step", "physics_bodies"):
+                  gdir = os.path.join(root, group)
+                  if not os.path.isdir(gdir):
+                      continue
+                  for dirpath, _dirnames, filenames in os.walk(gdir):
+                      if (os.path.basename(dirpath) != "new"
+                              or "estimates.json" not in filenames):
+                          continue
+                      rel = os.path.relpath(os.path.dirname(dirpath), gdir)
+                      with open(os.path.join(dirpath, "estimates.json")) as f:
+                          data = json.load(f)
+                      out[f"{group}/{rel}"] = data["mean"]["point_estimate"]
+              return out
+
+          def breached(cur, base):
+              bad = []
+              for bid, now in sorted(cur.items()):
+                  group = bid.split("/", 1)[0]
+                  old = base.get(bid)
+                  if old is None or old <= 0:
+                      continue
+                  pct = (now - old) / old * 100.0
+                  limit = thresholds.get(group, step_max)
+                  if pct > limit:
+                      bad.append((bid, old, now, pct, limit))
+              return bad
+
+          cur, base = means(cur_root), means(base_root)
+          print(f"compared {len(cur)} current vs {len(base)} baseline benchmarks")
+          if not base:
+              # Downloaded artifact has no recognizable criterion layout.
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write("## 📊 Performance regression gate: unusable baseline\n\n"
+                          "Baseline artifact contains no `estimates.json` "
+                          f"(found {len(cur)} current benchmarks) — comparison skipped (INFO).\n")
+              sys.exit(0)
+          bad = breached(cur, base)
+          if bad:
+              # Noise guard: re-bench each breached group once, then re-compare
+              # only the previously breached benchmarks.
+              groups = sorted({b[0].split("/", 1)[0] for b in bad})
+              print(f"breach on first pass: {[b[0] for b in bad]} — re-running groups {groups} once")
+              for g in groups:
+                  subprocess.run(
+                      ["cargo", "bench", "-p", "ornis-physics",
+                       "--bench", "solver_bench", "--", g],
+                      check=False,
+                  )
+              cur = means(cur_root)
+              bad = [row for row in breached(cur, base) if row[0] in {b[0] for b in bad}]
+          summary = ["## 📊 Performance regression gate", ""]
+          if not bad:
+              summary.append(
+                  f"✅ No persistent regression vs master baseline "
+                  f"(limits +{step_max:g}% physics_step / +{bodies_max:g}% physics_bodies, "
+                  f"one re-run on first-pass breach).")
+          else:
+              summary.append(
+                  f"❌ Persistent regression vs master baseline "
+                  f"(limits +{step_max:g}% physics_step / +{bodies_max:g}% physics_bodies, "
+                  f"confirmed by re-run):")
+              summary += ["", "| benchmark | baseline | current | change | limit |",
+                          "|---|---|---|---|---|"]
+              for bid, old, now, pct, limit in bad:
+                  summary.append(
+                      f"| `{bid}` | {old/1e6:.3f} ms | {now/1e6:.3f} ms | +{pct:.1f}% | +{limit:g}% |")
+                  print(f"::error title=perf-regression::{bid} regressed +{pct:.1f}% (limit +{limit:g}%)")
+          summary += ["", "<details><summary>critcmp report</summary>", "",
+                      "```text"]
+          try:
+              with open("target/critcmp.txt") as f:
+                  summary.append(f.read().strip() or "(empty critcmp output)")
+          except OSError:
+              summary.append("(critcmp output missing)")
+          summary += ["```", "</details>"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(summary) + "\n")
+          sys.exit(1 if bad else 0)
+          PY
 
       # Extract and publish summary to job summary
       - name: Publish benchmark summary
@@ -100,7 +268,7 @@ jobs:
       # Upload probe logs
       - name: Upload probe logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: probe-logs
           path: |
@@ -112,7 +280,7 @@ jobs:
       # Upload criterion results as artifact for trend analysis
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: criterion-results
           path: target/criterion/
@@ -122,7 +290,7 @@ jobs:
       # Upload raw benchmark log
       - name: Upload benchmark log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: benchmark-log
           path: target/bench.log

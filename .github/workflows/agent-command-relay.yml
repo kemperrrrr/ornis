@@ -34,12 +34,21 @@ jobs:
           test "$(jq -r '.state' <<<"${pr_json}")" = "open"
           test "$(jq -r '.head.repo.full_name' <<<"${pr_json}")" = "${REPOSITORY}"
 
-          pr_ref="$(jq -r '.head.ref' <<<"${pr_json}")"
+          # Pin the exact head SHA: dispatching by branch name (head.ref)
+          # leaves a TOCTOU window where the branch can be replaced between
+          # this check and the dispatched run. The target workflow checks
+          # out this SHA verbatim.
+          pr_sha="$(jq -r '.head.sha' <<<"${pr_json}")"
+          test -n "${pr_sha}"
+          [[ "${pr_sha}" =~ ^[0-9a-f]{40}$ ]]
 
-          # Dispatch the performance workflow on the PR head ref
+          # Dispatch the performance workflow pinned to the PR head SHA
+          # (--ref master selects the trusted workflow definition; the
+          # benchmarked code comes from target_ref).
           gh workflow run performance.yml \
             --repo "${REPOSITORY}" \
-            --ref "${pr_ref}"
+            --ref master \
+            -f target_ref="${pr_sha}"
 
   dispatch-probe:
     if: >-
@@ -66,7 +75,11 @@ jobs:
           test "$(jq -r '.state' <<<"${pr_json}")" = "open"
           test "$(jq -r '.head.repo.full_name' <<<"${pr_json}")" = "${REPOSITORY}"
 
-          pr_ref="$(jq -r '.head.ref' <<<"${pr_json}")"
+          # Pin the exact head SHA (see dispatch-performance for why the
+          # branch name must not be used here).
+          pr_sha="$(jq -r '.head.sha' <<<"${pr_json}")"
+          test -n "${pr_sha}"
+          [[ "${pr_sha}" =~ ^[0-9a-f]{40}$ ]]
 
           # Dispatch the probe workflow with grid backend
           # (100k bodies, grid cell size 8, 3 steps)
@@ -76,7 +89,7 @@ jobs:
             -f backend=grid \
             -f cell_size=8 \
             -f steps=3 \
-            -f target_ref="${pr_ref}"
+            -f target_ref="${pr_sha}"
 
   dispatch-probe-sap:
     if: >-
@@ -103,7 +116,11 @@ jobs:
           test "$(jq -r '.state' <<<"${pr_json}")" = "open"
           test "$(jq -r '.head.repo.full_name' <<<"${pr_json}")" = "${REPOSITORY}"
 
-          pr_ref="$(jq -r '.head.ref' <<<"${pr_json}")"
+          # Pin the exact head SHA (see dispatch-performance for why the
+          # branch name must not be used here).
+          pr_sha="$(jq -r '.head.sha' <<<"${pr_json}")"
+          test -n "${pr_sha}"
+          [[ "${pr_sha}" =~ ^[0-9a-f]{40}$ ]]
 
           # Dispatch the probe workflow with sweep-and-prune backend
           # (100k bodies, 3 steps, SAP to compare with grid)
@@ -112,5 +129,5 @@ jobs:
             --ref master \
             -f backend=sweep \
             -f steps=3 \
-            -f target_ref="${pr_ref}"
+            -f target_ref="${pr_sha}"
 

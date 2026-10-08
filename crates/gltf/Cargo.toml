@@ -17,7 +17,7 @@ glam = "0.34"
 # Animation-clip assembly (docs/animation-design.md §4): object tracks address
 # `NodeIdx`; skeletal joint indices stay plain `u32` (same seam as
 # `LoadedSkin`, never a stub dependency).
-ornis-core = { path = "../core" }
+ornis-core = { path = "../core", version = "0.1.0" }
 
 [lints]
 workspace = true

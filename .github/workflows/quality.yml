@@ -24,13 +24,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Explicit token scopes. The report job needs `pull-requests: write` for
-# the failure-digest comments; shard jobs only read the repo and write
-# their own log artifacts (actions: read is implicit for the runner, but
-# listing it future-proofs against org-level Workflow permission changes).
+# Explicit token scopes. Only the `report` job needs `pull-requests: write`
+# (failure-digest comments); every other job runs with the workflow-default
+# `contents: read`. Shard jobs only read the repo and write their own log
+# artifacts (actions: read is implicit for the runner, but listing it
+# future-proofs against org-level Workflow permission changes).
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   # Sharding: `cargo xtask quality` is still the single source of truth for
@@ -42,7 +42,9 @@ jobs:
   #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual (no compilation)
   #   clippy — clippy-physics, clippy
   #   test   — test (workspace)
-  #   gpu    — test-physics, smoke (both need lavapipe)
+  #   gpu    — test-physics, determinism-fast, smoke (all need lavapipe;
+  #            determinism-fast is the fast PR subset of Determinism Nightly,
+  #            ~+30 s test runtime, no rebuild beyond test-physics)
   #   docs   — doc, wasm-check
   fast:
     runs-on: ubuntu-latest
@@ -50,11 +52,11 @@ jobs:
     steps:
       # Full history: rustqual's failure diagnostics run `git archive
       # origin/<base>` for the reference measurement.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
@@ -63,9 +65,11 @@ jobs:
       # rustqual comes from the vendored Ornis fork (third_party/rustqual),
       # not crates.io — the fork carries workspace-aware layer resolution
       # the upstream 1.8.2 lacks.
-      - uses: taiki-e/install-action@v2
+      # Tool versions are pinned explicitly so CI stays reproducible
+      # (install-action would otherwise float to latest on every run).
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
-          tool: cargo-deny,cargo-audit,cargo-outdated
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-outdated@0.19.0
 
       - name: Build vendored rustqual
         run: |
@@ -75,7 +79,7 @@ jobs:
       - name: Verify rustqual version (vendored fork)
         run: ./third_party/rustqual/target/release/rustqual --version
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: quality
 
@@ -88,7 +92,7 @@ jobs:
 
       - name: Upload shard log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: quality-log-fast
           path: target/quality-fast.log
@@ -104,7 +108,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
 
@@ -121,13 +125,13 @@ jobs:
             libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: quality
 
@@ -142,7 +146,7 @@ jobs:
 
       - name: Upload shard log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: quality-log-clippy
           path: target/quality-clippy.log
@@ -158,7 +162,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
 
@@ -183,13 +187,13 @@ jobs:
             libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: quality
 
@@ -207,7 +211,7 @@ jobs:
 
       - name: Upload shard log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: quality-log-test
           path: target/quality-test.log
@@ -223,7 +227,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
 
@@ -249,13 +253,13 @@ jobs:
             libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: quality
 
@@ -268,11 +272,11 @@ jobs:
           RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only test-physics,smoke 2>&1 | tee target/quality-gpu.log
+          cargo xtask quality --ci --only test-physics,determinism-fast,smoke 2>&1 | tee target/quality-gpu.log
 
       - name: Upload shard log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: quality-log-gpu
           path: target/quality-gpu.log
@@ -288,7 +292,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
 
@@ -305,7 +309,7 @@ jobs:
             libasound2-dev libudev-dev pkg-config mold \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
           components: rustfmt, clippy
 
@@ -315,9 +319,9 @@ jobs:
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: quality
 
@@ -332,7 +336,7 @@ jobs:
 
       - name: Upload shard log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: quality-log-docs
           path: target/quality-docs.log
@@ -346,12 +350,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [fast, clippy, test, gpu, docs]
+    # Posts failure-digest PR comments — the only job that needs
+    # `pull-requests: write` (workflow default is `contents: read`).
+    permissions:
+      pull-requests: write
     # `always()` so failure digests are posted even when a shard fails;
     # the steps below no-op on full success (except the merged-log artifact).
     if: always()
     steps:
       - name: Download shard logs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: quality-log-*
           path: target/shard-logs
@@ -373,7 +381,7 @@ jobs:
 
       - name: Upload merged log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: quality-log
           path: target/quality.log
@@ -425,7 +433,7 @@ jobs:
 
       - name: Post failure digest to PR
         if: failure() && github.event_name == 'pull_request'
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
           body-path: target/comment-body.md

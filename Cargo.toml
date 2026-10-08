@@ -50,16 +50,16 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ornis-assets = { path = "crates/assets" }
-ornis-core = { path = "crates/core" }
-ornis-gameplay = { path = "crates/gameplay" }
-ornis-physics = { path = "crates/physics" }
-ornis-render = { path = "crates/render" }
-ornis-app = { path = "crates/app" }
-ornis-audio = { path = "crates/audio" }
-ornis-gltf = { path = "crates/gltf" }
-ornis-runner = { path = "crates/runner" }
-editor-backend = { path = "crates/editor-backend" }
+ornis-assets = { path = "crates/assets", version = "0.1.0" }
+ornis-core = { path = "crates/core", version = "0.1.0" }
+ornis-gameplay = { path = "crates/gameplay", version = "0.1.0" }
+ornis-physics = { path = "crates/physics", version = "0.1.0" }
+ornis-render = { path = "crates/render", version = "0.1.0" }
+ornis-app = { path = "crates/app", version = "0.1.0" }
+ornis-audio = { path = "crates/audio", version = "0.1.0" }
+ornis-gltf = { path = "crates/gltf", version = "0.1.0" }
+ornis-runner = { path = "crates/runner", version = "0.1.0" }
+editor-backend = { path = "crates/editor-backend", version = "0.1.0" }
 wgpu = "30"
 winit = "0.30"
 pollster = "1.0"

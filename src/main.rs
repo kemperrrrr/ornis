@@ -121,10 +121,11 @@ fn showcase_engine() -> GameWorld {
             let description = &scene.entities[index];
             let radius = match &description.mesh {
                 ornis_assets::scene::MeshDesc::Sphere { radius, .. } => radius.get(),
-                // Custom/Box/Plane/Cylinder need an explicit validated collider recipe.
+                // Custom/Box/Plane/Quad/Cylinder need an explicit validated collider recipe.
                 ornis_assets::scene::MeshDesc::Custom { .. }
                 | ornis_assets::scene::MeshDesc::Box { .. }
                 | ornis_assets::scene::MeshDesc::Plane { .. }
+                | ornis_assets::scene::MeshDesc::Quad { .. }
                 | ornis_assets::scene::MeshDesc::Cylinder { .. } => continue,
             };
             let mass = if index == 0 { 1.0 } else { 0.0 };
