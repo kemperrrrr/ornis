@@ -22,7 +22,7 @@ use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_render::{
     FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
-    read_orbit_camera,
+    camera_view_projection, read_orbit_camera,
 };
 
 mod scene_api;
@@ -689,17 +689,15 @@ impl<'a> FrameState<'a> {
         self.input.borrow_mut().clear_frame_transients();
     }
 
-    /// Upload the orbit-derived camera for the current aspect ratio.
+    /// Upload the orbit-derived camera for the current surface size.
     fn update_camera(&mut self) {
-        let aspect = self.config.width as f32 / self.config.height as f32;
         let Some(orbit) = read_orbit_camera(self.render_world.engine()) else {
             return;
         };
-        let (cam_pos, cam_target, cam_up, fov, near, far) = orbit.view_parameters();
-        let view = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
-        let proj =
-            glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
-        let view_proj = proj * view;
+        let (view_proj, cam_pos) = camera_view_projection(
+            &orbit.view_parameters(),
+            (self.config.width, self.config.height),
+        );
         self.renderer.set_camera(
             &self.queue,
             &view_proj.to_cols_array_2d(),

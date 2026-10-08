@@ -8,6 +8,9 @@
 //! mirroring the extraction `custom_quad_*` / `push_skinned_triangle`
 //! fixtures.
 
+// The harness is shared across the gate binaries; this gate uses only
+// the square-scene part of it.
+#[allow(dead_code)]
 mod common;
 
 use glam::Mat4;

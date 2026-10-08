@@ -129,6 +129,20 @@ mod tests {
     use ornis_assets::scene::TransformDesc;
     use ornis_core::Engine;
 
+    /// Perspective look-at frame matching the camera tests (typed
+    /// `Degrees`/`Meters`, never bare `f32`).
+    fn perspective_view() -> crate::camera::CameraView {
+        crate::camera::CameraView {
+            eye: Vec3::new(0.0, 2.5, 9.0),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            projection: ornis_assets::scene::CameraProjection::Perspective,
+            fov: ornis_core::units::Degrees::new(60.0),
+            near: ornis_core::units::Meters::new(0.1),
+            far: ornis_core::units::Meters::new(100.0),
+        }
+    }
+
     #[test]
     fn cull_frame_upload_drops_offscreen_spheres() {
         // 100 spheres: 50 near the origin (visible), 50 at x = 100 (far
@@ -149,15 +163,8 @@ mod tests {
         let mut extracted = extract_render_data(engine.world().store().expect("store"));
         assert_eq!(extracted.instances.len(), 100, "extraction never culls");
 
-        let view = (
-            Vec3::new(0.0, 2.5, 9.0),
-            Vec3::ZERO,
-            Vec3::Y,
-            60.0,
-            0.1,
-            100.0,
-        );
-        let (view_proj, _) = crate::camera::camera_view_projection(view, (160, 90));
+        let view = perspective_view();
+        let (view_proj, _) = crate::camera::camera_view_projection(&view, (160, 90));
         let stats = cull_frame_upload(&mut extracted, &view_proj);
         assert!(stats.culled > 0, "offscreen half culled: {stats:?}");
         assert_eq!(stats.culled, 50, "{stats:?}");
@@ -189,15 +196,8 @@ mod tests {
                 pose: MeshPose::Skinned,
             });
         }
-        let view = (
-            Vec3::new(0.0, 2.5, 9.0),
-            Vec3::ZERO,
-            Vec3::Y,
-            60.0,
-            0.1,
-            100.0,
-        );
-        let (view_proj, _) = crate::camera::camera_view_projection(view, (160, 90));
+        let view = perspective_view();
+        let (view_proj, _) = crate::camera::camera_view_projection(&view, (160, 90));
         let stats = cull_frame_upload(&mut upload, &view_proj);
         assert_eq!(stats.kept, 1, "{stats:?}");
         assert_eq!(stats.culled, 1, "{stats:?}");
@@ -218,15 +218,8 @@ mod tests {
             store.insert(handle, test_sphere());
             store.insert(handle, test_material());
         }
-        let view = (
-            Vec3::new(0.0, 2.5, 9.0),
-            Vec3::ZERO,
-            Vec3::Y,
-            60.0,
-            0.1,
-            100.0,
-        );
-        let (view_proj, _) = crate::camera::camera_view_projection(view, (160, 90));
+        let view = perspective_view();
+        let (view_proj, _) = crate::camera::camera_view_projection(&view, (160, 90));
         let mut timed = extract_render_data(engine.world().store().expect("store"));
         let mut plain = timed.clone();
         let (stats, elapsed) = cull_frame_upload_timed(&mut timed, &view_proj);

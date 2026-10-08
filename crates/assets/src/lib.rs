@@ -43,7 +43,7 @@ pub use importer::{ImportedAsset, Importer, ImporterRegistry, RonSceneImporter, 
 #[cfg(feature = "gltf")]
 pub use ornis_gltf::{Model, ModelNode, ModelPrimitive, NodeIdx};
 pub use scene::{
-    CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc, TriIndex,
-    Triangle,
+    CameraDesc, CameraProjection, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene,
+    TransformDesc, TriIndex, Triangle,
 };
 pub use server::{AssetEvent, AssetId, AssetKind, AssetServer, SceneLoadError, parse_scene_ron};

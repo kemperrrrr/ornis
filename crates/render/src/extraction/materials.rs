@@ -4,6 +4,7 @@ use super::ExtractionStats;
 use super::FrameUpload;
 use ornis_assets::scene::MaterialDesc;
 use ornis_core::OpenPBRMaterial;
+use ornis_core::material::ShadingMode;
 
 /// Returns the [`FrameUpload::materials`] index for `material`,
 /// pushing its GPU conversion only on first sight (exact `PartialEq`
@@ -115,6 +116,21 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
             output.specular.roughness(roughness.get());
             output.specular.ior(ior.get());
             output.base.metalness(material.metallic_units().get());
+            output
+        }
+        MaterialDesc::Unlit { color } => {
+            // Unlit sprite: no BRDF lobe (zero weights, black base), the
+            // sprite color travels as emission, and the shading-mode flag
+            // tells both evaluators (forward + deferred) to output the
+            // emission alone — no light, shadow or IBL term. Tonemap
+            // applies downstream exactly as for emission.
+            let mut output = OpenPBRMaterial::dielectric();
+            output.base.color_rgb([0.0, 0.0, 0.0]);
+            output.base.weight(0.0);
+            output.specular.weight(0.0);
+            output.base.metalness(0.0);
+            apply_emission(&mut output, *color);
+            output.geometry.set_shading(ShadingMode::Unlit);
             output
         }
     }
@@ -415,6 +431,41 @@ mod tests {
         assert_eq!(gpu.transmission.params[0], 1.0, "full transmission");
         assert!((gpu.specular.params[1] - 0.05).abs() < f32::EPSILON);
         assert!((gpu.specular.params[2] - 1.33).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn material_to_gpu_maps_unlit_to_emission_with_flag() {
+        // Unlit sprite: black base with no BRDF lobe, the sprite color as
+        // emission (peak-luminance mapping, like the other presets), and
+        // the unlit shading-mode flag so both evaluators output the
+        // emission alone.
+        use ornis_core::material::ShadingMode;
+        use ornis_core::units::LinearRgb;
+
+        let gpu = material_to_gpu(&MaterialDesc::unlit_units(LinearRgb::new([0.2, 0.4, 0.8])));
+        assert_eq!(&gpu.base.color[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(gpu.base.color[3], 1.0, "opaque alpha survives");
+        assert_eq!(gpu.base.params[0], 0.0, "no diffuse lobe");
+        assert_eq!(gpu.specular.params[0], 0.0, "no specular lobe");
+        assert_eq!(gpu.base.params[2], 0.0, "no metalness");
+        assert_eq!(gpu.emission.params[0], 0.8, "peak channel is the luminance");
+        assert_eq!(gpu.emission.color[0], 0.25);
+        assert_eq!(gpu.emission.color[1], 0.5);
+        assert_eq!(gpu.emission.color[2], 1.0);
+        assert_eq!(gpu.geometry.shading(), ShadingMode::Unlit);
+        assert_eq!(gpu.geometry.params[2], 1.0);
+        // Black unlit stays black (emission off) but keeps the flag.
+        let black = material_to_gpu(&MaterialDesc::unlit_units(LinearRgb::new([0.0, 0.0, 0.0])));
+        assert_eq!(black.emission.params[0], 0.0);
+        assert_eq!(black.geometry.shading(), ShadingMode::Unlit);
+        // Lit presets never set the flag (golden frames stay bit-identical).
+        let lit = material_to_gpu(&MaterialDesc::Dielectric {
+            base_color: [0.5, 0.5, 0.5],
+            roughness: Clamped01::new(0.9),
+            emission: [0.0, 0.0, 0.0],
+            metallic: ornis_core::Metallic::new(0.0),
+        });
+        assert_eq!(lit.geometry.shading(), ShadingMode::Lit);
     }
 
     #[test]

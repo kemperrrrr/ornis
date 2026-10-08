@@ -130,7 +130,9 @@ pub struct EmissionGroup {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 /// Geometry (opacity/thin-walled) parameters — GPU slot 8.
 pub struct GeometryGroup {
-    /// First param vec4: `[opacity, thin_walled_flag, reserved]`.
+    /// First param vec4: `[opacity, thin_walled_flag, shading_mode, reserved]`
+    /// (`shading_mode`: `1.0` = [`ShadingMode::Unlit`], see
+    /// [`GeometryGroup::set_shading`]).
     pub params: [f32; 4],
     /// Second reserved param vec4 kept for 16-byte alignment.
     pub params2: [f32; 4],
@@ -522,6 +524,59 @@ impl GeometryGroup {
     /// Current geometry transparency mode.
     pub fn transparency(&self) -> Transparency {
         Transparency::from(self.params[1] >= THIN_WALLED_THRESHOLD)
+    }
+    /// Sets the shading mode via [`ShadingMode`] (GPU slot `params[2]`:
+    /// `1.0` = unlit emission-only output, `0.0` = lit OpenPBR).
+    pub fn set_shading(&mut self, mode: ShadingMode) -> &mut Self {
+        self.params[2] = f32::from(mode);
+        self
+    }
+    /// Current shading mode.
+    pub fn shading(&self) -> ShadingMode {
+        ShadingMode::from(self.params[2] >= UNLIT_THRESHOLD)
+    }
+}
+
+/// GPU encoding threshold for [`ShadingMode::Unlit`] (`params[2] >= 0.5`).
+const UNLIT_THRESHOLD: f32 = 0.5;
+
+/// Material shading mode (typed replacement for a raw unlit flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ShadingMode {
+    /// Standard lit OpenPBR evaluation (default).
+    #[default]
+    Lit,
+    /// Unlit sprite output: radiance = emission, with no BRDF, light,
+    /// shadow or IBL contribution. Tonemap applies exactly as for
+    /// emission.
+    Unlit,
+}
+
+impl ShadingMode {
+    /// `true` for [`ShadingMode::Unlit`].
+    pub fn is_unlit(self) -> bool {
+        matches!(self, Self::Unlit)
+    }
+}
+
+impl From<f32> for ShadingMode {
+    /// GPU slot decoding (`params[2] >= 0.5` = unlit).
+    fn from(v: f32) -> Self {
+        Self::from(v >= UNLIT_THRESHOLD)
+    }
+}
+
+impl From<bool> for ShadingMode {
+    /// Flag polarity (`true` = unlit).
+    fn from(unlit: bool) -> Self {
+        if unlit { Self::Unlit } else { Self::Lit }
+    }
+}
+
+impl From<ShadingMode> for f32 {
+    /// GPU slot encoding (`params[2]`: `1.0` = unlit).
+    fn from(mode: ShadingMode) -> f32 {
+        if mode.is_unlit() { 1.0 } else { 0.0 }
     }
 }
 
