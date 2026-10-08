@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use glam::{Mat4, Vec3, Vec4};
 use ornis_core::{Degrees, Engine, InputState, Meters, Resources, System, SystemAccess};
 
-use ornis_assets::scene::CameraDesc;
+use ornis_assets::scene::{CameraDesc, CameraProjection};
 
 /// Client-side orbit camera: azimuth/elevation around a target plus a zoom
 /// radius. It is view state, not part of the server-authoritative scene.
@@ -24,11 +24,43 @@ pub struct OrbitCamera {
     fov: f32,
     near: f32,
     far: f32,
+    projection: CameraProjection,
+}
+
+/// Named orbit-camera view parameters for one frame (K0).
+///
+/// Replaces the `(eye, target, up, fov, near, far)` tuple: the projection
+/// travels alongside the look-at frame so [`camera_view_projection`]
+/// renders the authored perspective/orthographic mode without a second
+/// argument. Field of view and clip planes stay typed
+/// ([`Degrees`]/[`Meters`], never bare `f32`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraView {
+    /// Eye position in world units.
+    pub eye: Vec3,
+    /// Look-at target in world units.
+    pub target: Vec3,
+    /// Up direction (non-parallel to the view direction).
+    pub up: Vec3,
+    /// Projection: perspective foreshortening or an orthographic box.
+    pub projection: CameraProjection,
+    /// Vertical field of view in degrees (ignored in orthographic mode).
+    pub fov: Degrees,
+    /// Near clip distance in meters.
+    pub near: Meters,
+    /// Far clip distance in meters.
+    pub far: Meters,
 }
 
 impl OrbitCamera {
     const MIN_RADIUS: f32 = 0.5;
     const MAX_RADIUS: f32 = 1000.0;
+    /// Orthographic zoom bounds: the wheel moves `half_height` inside
+    /// `[0.01, 1000]` m (same exponential speed as the radius zoom).
+    const MIN_HALF_HEIGHT: f32 = 0.01;
+    /// Orthographic zoom bounds: the wheel moves `half_height` inside
+    /// `[0.01, 1000]` m (same exponential speed as the radius zoom).
+    const MAX_HALF_HEIGHT: f32 = 1000.0;
     /// Keep elevation off the poles so `look_at` never degenerates.
     const ELEVATION_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const ROTATE_SPEED: f32 = 0.005;
@@ -44,19 +76,23 @@ impl OrbitCamera {
 
     /// Creates an orbit camera from a serialized look-at camera description.
     ///
-    /// Eye, target, up, field of view and clip planes come from `cam`.
-    /// [`Self::looking_at`] only supplies the orbit basis.
+    /// Eye, target, up, projection, field of view and clip planes come from
+    /// `cam`. [`Self::looking_at`] only supplies the orbit basis.
     pub fn from_desc(cam: &CameraDesc) -> Self {
-        Self::looking_at(cam.position, cam.target)
-            .with_up(cam.up.get())
-            .with_fov(cam.fov)
-            .with_clip(cam.near, cam.far)
+        Self {
+            projection: cam.projection,
+            ..Self::looking_at(cam.position, cam.target)
+                .with_up(cam.up.get())
+                .with_fov(cam.fov)
+                .with_clip(cam.near, cam.far)
+        }
     }
 
     /// Orbit camera aimed from `eye` at `target`.
     ///
     /// Field of view and clip planes start at [`Self::DEFAULT_FOV`],
-    /// [`Self::DEFAULT_NEAR`] and [`Self::DEFAULT_FAR`]. Up is [`Vec3::Y`],
+    /// [`Self::DEFAULT_NEAR`] and [`Self::DEFAULT_FAR`], the projection at
+    /// [`CameraProjection::Perspective`]. Up is [`Vec3::Y`],
     /// or [`Vec3::Z`] when the view is parallel to Y so the basis does not
     /// collapse. A zero offset uses the minimum orbit radius along +X.
     pub fn looking_at(eye: Vec3, target: Vec3) -> Self {
@@ -74,6 +110,7 @@ impl OrbitCamera {
             fov: Self::DEFAULT_FOV.get(),
             near: Self::DEFAULT_NEAR.get(),
             far: Self::DEFAULT_FAR.get(),
+            projection: CameraProjection::Perspective,
         }
     }
 
@@ -104,16 +141,18 @@ impl OrbitCamera {
         self.target + self.radius * Vec3::new(ce * ca, se, ce * sa)
     }
 
-    /// Returns the look-at target, up vector, field of view, and clip planes.
-    pub fn view_parameters(&self) -> (Vec3, Vec3, Vec3, f32, f32, f32) {
-        (
-            self.position(),
-            self.target,
-            self.up,
-            self.fov,
-            self.near,
-            self.far,
-        )
+    /// Returns the look-at frame, projection, field of view and clip planes
+    /// for one frame.
+    pub fn view_parameters(&self) -> CameraView {
+        CameraView {
+            eye: self.position(),
+            target: self.target,
+            up: self.up,
+            projection: self.projection,
+            fov: Degrees::new(self.fov),
+            near: Meters::new(self.near),
+            far: Meters::new(self.far),
+        }
     }
 
     /// Applies the shared input contract: left-button drag rotates and wheel
@@ -134,9 +173,21 @@ impl OrbitCamera {
     }
 
     /// `delta_y` from a wheel event: positive scrolls down/away (zoom out).
+    /// In orthographic mode the wheel moves `half_height` (same exponential
+    /// speed, clamped to `[0.01, 1000]` m) and the orbit radius stays put;
+    /// rotation is unchanged in both modes.
     fn zoom(&mut self, delta_y: f32) {
-        self.radius = (self.radius * (delta_y * Self::ZOOM_SPEED).exp())
-            .clamp(Self::MIN_RADIUS, Self::MAX_RADIUS);
+        match &mut self.projection {
+            CameraProjection::Perspective => {
+                self.radius = (self.radius * (delta_y * Self::ZOOM_SPEED).exp())
+                    .clamp(Self::MIN_RADIUS, Self::MAX_RADIUS);
+            }
+            CameraProjection::Orthographic { half_height } => {
+                let zoomed = half_height.get() * (delta_y * Self::ZOOM_SPEED).exp();
+                *half_height =
+                    Meters::new(zoomed.clamp(Self::MIN_HALF_HEIGHT, Self::MAX_HALF_HEIGHT));
+            }
+        }
     }
 }
 
@@ -209,21 +260,36 @@ impl System for OrbitCameraSystem {
 
 /// Frame view-projection from orbit view parameters and a surface size
 /// (S7): the aspect falls back to 1.0 for a zero dimension, the
-/// perspective is the DirectX-style projection of the legacy renderer.
+/// perspective is the DirectX-style projection of the legacy renderer,
+/// and the orthographic branch is the same DirectX `0..1` box the shadow
+/// maps use (`±half_height` vertically, aspect-scaled horizontally).
 ///
 /// Kept as a free function so `RenderSubmit::run` stays pure
 /// orchestration (IOSP): guards, one lane read, one projection, uploads.
-pub fn camera_view_projection(
-    view: (Vec3, Vec3, Vec3, f32, f32, f32),
-    surface_size: (u32, u32),
-) -> (Mat4, Vec3) {
-    let (cam_pos, cam_target, cam_up, fov, near, far) = view;
+pub fn camera_view_projection(view: &CameraView, surface_size: (u32, u32)) -> (Mat4, Vec3) {
     let (w, h) = (surface_size.0 as f64, surface_size.1 as f64);
     let aspect = if h > 0.0 { w as f32 / h as f32 } else { 1.0 };
-    let view_matrix = glam::camera::rh::view::look_at_mat4(cam_pos, cam_target, cam_up);
-    let projection =
-        glam::camera::rh::proj::directx::perspective(fov.to_radians(), aspect, near, far);
-    (projection * view_matrix, cam_pos)
+    let view_matrix = glam::camera::rh::view::look_at_mat4(view.eye, view.target, view.up);
+    let projection = match view.projection {
+        CameraProjection::Perspective => glam::camera::rh::proj::directx::perspective(
+            view.fov.get().to_radians(),
+            aspect,
+            view.near.get(),
+            view.far.get(),
+        ),
+        CameraProjection::Orthographic { half_height } => {
+            let half = half_height.get();
+            glam::camera::rh::proj::directx::orthographic(
+                -half * aspect,
+                half * aspect,
+                -half,
+                half,
+                view.near.get(),
+                view.far.get(),
+            )
+        }
+    };
+    (projection * view_matrix, view.eye)
 }
 
 /// Six normalized world-space frustum planes for CPU-side sphere culling.
@@ -307,6 +373,33 @@ mod tests {
             fov: Degrees::new(60.0),
             near: Meters::new(0.1),
             far: Meters::new(100.0),
+            projection: CameraProjection::Perspective,
+        }
+    }
+
+    fn ortho_camera(half_height: Meters) -> CameraDesc {
+        CameraDesc::try_orthographic_units(
+            [Meters::new(0.0), Meters::new(0.0), Meters::new(9.0)],
+            [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+            [0.0, 1.0, 0.0],
+            half_height,
+            Meters::new(0.1),
+            Meters::new(100.0),
+        )
+        .expect("valid orthographic test camera")
+    }
+
+    /// NDC of a world point through a view-projection matrix.
+    fn ndc_of(view_proj: &Mat4, point: Vec3) -> Vec3 {
+        let clip = *view_proj * point.extend(1.0);
+        (clip / clip.w).truncate()
+    }
+
+    /// Orthographic half-height of a [`CameraView`] built by the tests.
+    fn ortho_half_height(view: &CameraView) -> Meters {
+        match view.projection {
+            CameraProjection::Orthographic { half_height } => half_height,
+            CameraProjection::Perspective => panic!("expected an orthographic test view"),
         }
     }
 
@@ -323,7 +416,10 @@ mod tests {
 
         assert_ne!(orbit.position(), initial);
         assert!(orbit.position().length() > 0.5);
-        assert_eq!(orbit.view_parameters().3, OrbitCamera::DEFAULT_FOV.get());
+        assert_eq!(
+            orbit.view_parameters().fov.get(),
+            OrbitCamera::DEFAULT_FOV.get()
+        );
     }
 
     #[test]
@@ -335,30 +431,39 @@ mod tests {
             fov: Degrees::new(45.0),
             near: Meters::new(0.25),
             far: Meters::new(250.0),
+            projection: CameraProjection::Perspective,
         };
         let orbit = OrbitCamera::from_desc(&desc);
-        let (position, target, up, fov, near, far) = orbit.view_parameters();
-        assert!((position - desc.position).length() < 1e-4);
-        assert_eq!(target, desc.target);
-        assert_eq!(up, desc.up.get());
-        assert_eq!(fov, desc.fov.get());
-        assert_eq!(near, desc.near.get());
-        assert_eq!(far, desc.far.get());
+        let view = orbit.view_parameters();
+        assert!((view.eye - desc.position).length() < 1e-4);
+        assert_eq!(view.target, desc.target);
+        assert_eq!(view.up, desc.up.get());
+        assert_eq!(view.fov, desc.fov);
+        assert_eq!(view.near, desc.near);
+        assert_eq!(view.far, desc.far);
+        assert_eq!(view.projection, desc.projection);
+
+        let ortho = ortho_camera(Meters::new(2.0));
+        let orbit = OrbitCamera::from_desc(&ortho);
+        let view = orbit.view_parameters();
+        assert!((view.eye - ortho.position).length() < 1e-4);
+        assert_eq!(view.projection, ortho.projection);
     }
 
     #[test]
     fn looking_at_places_the_eye_and_names_the_defaults() {
         let eye = Vec3::new(2.5, 1.8, 3.5);
         let orbit = OrbitCamera::looking_at(eye, Vec3::Y).with_fov(Degrees(45.0));
-        let (position, target, up, fov, near, far) = orbit.view_parameters();
-        assert!((position - eye).length() < 1e-4);
-        assert_eq!(target, Vec3::Y);
-        assert_eq!(up, Vec3::Y);
-        assert_eq!(fov, 45.0);
-        assert_eq!(near, OrbitCamera::DEFAULT_NEAR.get());
-        assert_eq!(far, OrbitCamera::DEFAULT_FAR.get());
+        let view = orbit.view_parameters();
+        assert!((view.eye - eye).length() < 1e-4);
+        assert_eq!(view.target, Vec3::Y);
+        assert_eq!(view.up, Vec3::Y);
+        assert_eq!(view.fov.get(), 45.0);
+        assert_eq!(view.projection, CameraProjection::Perspective);
+        assert_eq!(view.near, OrbitCamera::DEFAULT_NEAR);
+        assert_eq!(view.far, OrbitCamera::DEFAULT_FAR);
         let overhead = OrbitCamera::looking_at(Vec3::new(0.0, 5.0, 0.0), Vec3::ZERO);
-        assert_eq!(overhead.view_parameters().2, Vec3::Z);
+        assert_eq!(overhead.view_parameters().up, Vec3::Z);
     }
 
     #[test]
@@ -423,13 +528,139 @@ mod tests {
     fn view_projection_aspect_fallback_and_finite_matrices() {
         let orbit = OrbitCamera::from_desc(&camera());
         let view = orbit.view_parameters();
-        let (view_proj, cam_pos) = camera_view_projection(view, (1920, 1080));
-        assert_eq!(cam_pos, view.0);
+        let (view_proj, cam_pos) = camera_view_projection(&view, (1920, 1080));
+        assert_eq!(cam_pos, view.eye);
         assert!(view_proj.to_cols_array().iter().all(|c| c.is_finite()));
         // A zero dimension falls back to square aspect — no NaN, and the
         // projection differs from the wide-surface one.
-        let (square, _) = camera_view_projection(view, (0, 0));
+        let (square, _) = camera_view_projection(&view, (0, 0));
         assert!(square.to_cols_array().iter().all(|c| c.is_finite()));
         assert_ne!(square, view_proj);
+        // The fallback is exactly aspect 1: a square surface agrees.
+        let (unit, _) = camera_view_projection(&view, (10, 10));
+        assert_eq!(square, unit);
+    }
+
+    #[test]
+    fn orthographic_matrix_maps_view_box_edges_to_ndc_unit() {
+        // `half_height = 2` on a 320×180 frame: the box rim at the target
+        // depth lands on NDC ±1.
+        let half = 2.0_f32;
+        let orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(half)));
+        let view = orbit.view_parameters();
+        let (view_proj, _) = camera_view_projection(&view, (320, 180));
+        let aspect = 320.0 / 180.0;
+        for (point, expected) in [
+            (Vec3::new(half * aspect, 0.0, 0.0), [1.0, 0.0]),
+            (Vec3::new(-half * aspect, 0.0, 0.0), [-1.0, 0.0]),
+            (Vec3::new(0.0, half, 0.0), [0.0, 1.0]),
+            (Vec3::new(0.0, -half, 0.0), [0.0, -1.0]),
+        ] {
+            let ndc = ndc_of(&view_proj, point);
+            assert!(
+                (ndc.x - expected[0]).abs() < 1e-4
+                    && (ndc.y - expected[1]).abs() < 1e-4
+                    && (0.0..=1.0).contains(&ndc.z),
+                "{point:?} -> {ndc:?}, expected rim {expected:?} inside the depth range"
+            );
+        }
+    }
+
+    #[test]
+    fn orthographic_screen_size_is_distance_independent() {
+        // The same world offset maps to the same NDC from two eye
+        // distances; the perspective camera shrinks with distance.
+        let half = Meters::new(2.0);
+        let orbit = |eye_z: f32| {
+            OrbitCamera::from_desc(
+                &CameraDesc::try_orthographic_units(
+                    [Meters::new(0.0), Meters::new(0.0), Meters::new(eye_z)],
+                    [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                    [0.0, 1.0, 0.0],
+                    half,
+                    Meters::new(0.1),
+                    Meters::new(100.0),
+                )
+                .expect("valid ortho camera"),
+            )
+        };
+        let (near_vp, _) = camera_view_projection(&orbit(9.0).view_parameters(), (320, 180));
+        let (far_vp, _) = camera_view_projection(&orbit(20.0).view_parameters(), (320, 180));
+        let point = Vec3::new(2.0, 1.5, 0.0);
+        let (near_ndc, far_ndc) = (ndc_of(&near_vp, point), ndc_of(&far_vp, point));
+        // Screen position (x/y) is identical; only the depth differs.
+        assert!(
+            (near_ndc.truncate() - far_ndc.truncate()).length() < 1e-6,
+            "{near_ndc:?} vs {far_ndc:?}"
+        );
+
+        let persp = |eye_z: f32| {
+            OrbitCamera::looking_at(Vec3::new(0.0, 0.0, eye_z), Vec3::ZERO)
+                .with_fov(Degrees::new(60.0))
+        };
+        let (near_vp, _) = camera_view_projection(&persp(9.0).view_parameters(), (320, 180));
+        let (far_vp, _) = camera_view_projection(&persp(20.0).view_parameters(), (320, 180));
+        assert!(
+            (ndc_of(&near_vp, point) - ndc_of(&far_vp, point)).length() > 0.1,
+            "perspective must shrink with distance"
+        );
+    }
+
+    #[test]
+    fn orthographic_zero_surface_size_falls_back_to_unit_aspect() {
+        let orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
+        let view = orbit.view_parameters();
+        let (zero, _) = camera_view_projection(&view, (0, 0));
+        assert!(zero.to_cols_array().iter().all(|c| c.is_finite()));
+        let (unit, _) = camera_view_projection(&view, (10, 10));
+        assert_eq!(zero, unit);
+    }
+
+    #[test]
+    fn orthographic_frustum_keeps_visible_and_culls_offscreen() {
+        // `half_height = 2` on 320×180: half-width ≈ 3.56 at any depth.
+        let orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
+        let (view_proj, _) = camera_view_projection(&orbit.view_parameters(), (320, 180));
+        let frustum = Frustum::from_view_proj(&view_proj);
+        assert!(frustum.sphere_visible(Vec3::ZERO, 0.5));
+        assert!(frustum.sphere_visible(Vec3::new(0.0, 0.0, -50.0), 0.5));
+        assert!(!frustum.sphere_visible(Vec3::new(10.0, 0.0, 0.0), 0.5));
+        assert!(!frustum.sphere_visible(Vec3::new(0.0, -10.0, 0.0), 0.5));
+    }
+
+    #[test]
+    fn orthographic_wheel_zooms_half_height_not_radius() {
+        let mut orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
+        let before = orbit.view_parameters();
+        let eye_before = before.eye;
+        let mut input = InputState::new();
+        input.add_wheel_delta(100.0);
+        orbit.apply_input(&input);
+        let after = orbit.view_parameters();
+        // The orbit radius (hence the eye) stays put in ortho mode.
+        assert_eq!(after.eye, eye_before);
+        let half_before = ortho_half_height(&before);
+        let half_after = ortho_half_height(&after);
+        assert!(
+            half_after.get() > half_before.get(),
+            "{} vs {}",
+            half_after.get(),
+            half_before.get()
+        );
+        // The zoom clamps instead of running away.
+        for _ in 0..100 {
+            let mut input = InputState::new();
+            input.add_wheel_delta(100.0);
+            orbit.apply_input(&input);
+        }
+        let clamped = ortho_half_height(&orbit.view_parameters());
+        assert_eq!(clamped.get(), 1000.0);
+        // Rotation still works in ortho mode.
+        let mut orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
+        let mut input = InputState::new();
+        input.set_mouse_button(0, true);
+        input.set_pointer_position([10.0, 4.0]);
+        orbit.apply_input(&input);
+        assert_ne!(orbit.position(), eye_before);
     }
 }

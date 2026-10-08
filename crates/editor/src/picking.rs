@@ -31,6 +31,8 @@ const HALF_EXTENT: f32 = 0.5;
 const UNIT_BOX_BOUND: f32 = 0.866_025_4;
 /// Bounding radius of the unit-plane proxy (half-diagonal `√2/2`).
 const UNIT_PLANE_BOUND: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// Bounding radius of the unit-quad proxy (same `1×1` half-diagonal).
+const UNIT_QUAD_BOUND: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// Bounding radius of the unit-cylinder proxy (`r = 1`, `h = 1`: `√(1+1/4)`).
 const UNIT_CYLINDER_BOUND: f32 = 1.118_034;
 /// Side/cap fan segments of the interim unit-cylinder proxy.
@@ -64,6 +66,14 @@ const PLANE_CORNERS: [[f32; 3]; 4] = [
     [HALF_EXTENT, 0.0, -HALF_EXTENT],
     [HALF_EXTENT, 0.0, HALF_EXTENT],
     [-HALF_EXTENT, 0.0, HALF_EXTENT],
+];
+
+/// Corners of the unit-quad proxy (`1×1` in XY, matches the renderer).
+const QUAD_CORNERS: [[f32; 3]; 4] = [
+    [-HALF_EXTENT, HALF_EXTENT, 0.0],
+    [HALF_EXTENT, HALF_EXTENT, 0.0],
+    [HALF_EXTENT, -HALF_EXTENT, 0.0],
+    [-HALF_EXTENT, -HALF_EXTENT, 0.0],
 ];
 
 /// Tolerances for ray intersection (Möller–Trumbore core + sphere path).
@@ -125,12 +135,11 @@ impl Default for PickEpsilon {
 /// camera-agnostic, while each viewport side (native window, WASM replica)
 /// holds its own camera and converts clicks locally. Build from an orbit
 /// camera via [`ViewportCamera::from_view_parameters`], which takes the
-/// exact tuple [`OrbitCamera::view_parameters`][1] returns — no render
-/// dependency needed.
+/// look-at frame as an explicit `(position, target, up, fov, near, far)`
+/// tuple — the same components the render orbit camera publishes, without
+/// a render dependency here by design.
 ///
 /// Pointer convention: pixels, origin top-left, `y` down (browser canvas).
-///
-/// [1]: ornis_render ribbon (no dependency here by design)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewportCamera {
     position: Vec3,
@@ -202,9 +211,10 @@ impl ViewportCamera {
     /// Builds a picking camera from orbit view parameters and a viewport
     /// size in pixels.
     ///
-    /// `view` is the exact `(position, target, up, fov, near, far)` tuple
-    /// the orbit camera publishes, so viewport sides convert without
-    /// depending on the render crate. Same validation as [`Self::new`].
+    /// `view` is the `(position, target, up, fov, near, far)` look-at frame
+    /// the orbit camera publishes (as fields, not as this tuple), so
+    /// viewport sides convert without depending on the render crate.
+    /// Same validation as [`Self::new`].
     #[must_use]
     pub fn from_view_parameters(
         view: (Vec3, Vec3, Vec3, f32, f32, f32),
@@ -607,6 +617,14 @@ fn intersect_entity(
             let model = model_matrix(transform, size_scale)?;
             proxy_hit(ray, &model, &plane_triangles(), UNIT_PLANE_BOUND, eps)
         }
+        MeshDesc::Quad { size } => {
+            let size_scale = scaled_size(
+                transform.scale,
+                Vec3::new(size[0].get(), size[1].get(), 1.0),
+            )?;
+            let model = model_matrix(transform, size_scale)?;
+            proxy_hit(ray, &model, &quad_triangles(), UNIT_QUAD_BOUND, eps)
+        }
         MeshDesc::Cylinder { radius, height, .. } => {
             let size_scale = scaled_size(
                 transform.scale,
@@ -727,6 +745,15 @@ fn box_triangles() -> Vec<[Vec3; 3]> {
 /// Two triangles of the unit plane (`1×1` in XZ, double-sided).
 fn plane_triangles() -> Vec<[Vec3; 3]> {
     let corners = PLANE_CORNERS.map(Vec3::from_array);
+    vec![
+        [corners[0], corners[1], corners[2]],
+        [corners[0], corners[2], corners[3]],
+    ]
+}
+
+/// Two triangles of the unit sprite quad (`1×1` in XY, double-sided).
+fn quad_triangles() -> Vec<[Vec3; 3]> {
+    let corners = QUAD_CORNERS.map(Vec3::from_array);
     vec![
         [corners[0], corners[1], corners[2]],
         [corners[0], corners[2], corners[3]],

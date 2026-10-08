@@ -401,7 +401,11 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         base_color * (1.0 - metalness),
         ctx.lighting.ibl_weight,
     );
-    let color = sanitize_hdr(ambient + lo + emission + ibl);
+    // Unlit sprites (geometry `params[2]`, see `ShadingMode`): radiance is
+    // the emission alone — no BRDF, light, shadow or IBL term. `select`
+    // keeps the lit sum bit-identical when the flag is off.
+    let full = ambient + lo + emission + ibl;
+    let color = sanitize_hdr(select(full, emission, mat.geometry_params.z >= 0.5));
     return glam::Vec4::new(color, opacity);
 }
 
