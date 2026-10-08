@@ -1,0 +1,7 @@
+{
+  "generated_by": "cargo xtask quality --full (cargo-llvm-cov --workspace)",
+  "line_rate": 0.8631775343252165,
+  "lines_covered": 72172,
+  "lines_total": 83612,
+  "version": 1
+}

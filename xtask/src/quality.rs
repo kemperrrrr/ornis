@@ -1347,20 +1347,78 @@ const CARGO_MACHETE_VERSION: &str = "0.9.2";
 const TYPOS_VERSION: &str = "1.51.1";
 
 /// ── Level 2 (--full): coverage + bench compile check ──────
+/// Coverage is a ratchet gate (same idea as rustqual): the workspace line
+/// rate in `coverage-baseline.json` is the floor — equal or better is PASS,
+/// only a true regression FAILs. On improvement the baseline file is updated
+/// automatically (commit it). First run without a baseline saves the current
+/// rate and PASSes. Without cargo-llvm-cov the stage SKIPs (same as before).
+/// The JSON summary stays at `target/llvm-cov/coverage-summary.json`, the
+/// HTML report at `target/llvm-cov/html` — per-crate detail lives there and
+/// in the nightly artifacts, not in the gate output.
 fn full_stages(stages: &mut StageList<'_>) {
-    stages.run(
-        "coverage",
-        "coverage (llvm-cov)",
-        "cargo llvm-cov --workspace --html --output-dir target/llvm-cov",
-        stages.cargo(&[
-            "llvm-cov",
-            "--workspace",
-            "--html",
-            "--output-dir",
-            "target/llvm-cov",
-        ]),
-        false,
-    );
+    if stages.enabled("coverage") && !cargo_subcommand_exists("llvm-cov") {
+        stages.skip(
+            "coverage",
+            "coverage (llvm-cov)",
+            "cargo-llvm-cov not installed (cargo install cargo-llvm-cov --locked; rustup component add llvm-tools-preview)",
+        );
+    } else if stages.enabled("coverage") {
+        stages.n += 1;
+        let started = Instant::now();
+        let (idx, total) = (stages.n, stages.total);
+        let name = "coverage (llvm-cov)";
+        eprintln!();
+        eprintln!("═══ [{idx}/{total}] {name}: cargo llvm-cov --workspace (ratchet vs {COVERAGE_BASELINE}) ═══");
+        let summary_path = stages.root.join(COVERAGE_SUMMARY);
+        if let Some(parent) = summary_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // One test run, machine-readable summary. The HTML report renders
+        // afterwards from the same data (no test re-run).
+        let tested = Command::new("cargo")
+            .args([
+                "llvm-cov",
+                "--workspace",
+                "--summary-only",
+                "--json",
+                "--output-path",
+                &summary_path.to_string_lossy(),
+            ])
+            .current_dir(stages.root)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let (status, note) = if !tested {
+            (
+                Status::Fail,
+                "cargo llvm-cov --workspace did not finish (tests or collection broke)".to_string(),
+            )
+        } else if let Ok(text) = std::fs::read_to_string(&summary_path) {
+            let (rate, covered, count) = coverage_rate(&text);
+            let _ = Command::new("cargo")
+                .args([
+                    "llvm-cov",
+                    "report",
+                    "--html",
+                    "--output-dir",
+                    COVERAGE_HTML,
+                ])
+                .current_dir(stages.root)
+                .status();
+            eprintln!(
+                "workspace lines: {covered}/{count} = {:.2}%",
+                rate * COVERAGE_PERCENT
+            );
+            coverage_verdict(&stages.root.join(COVERAGE_BASELINE), rate, covered, count)
+        } else {
+            (
+                Status::Fail,
+                "coverage summary unreadable (report step broke)".to_string(),
+            )
+        };
+        eprintln!("── {name}: {} ({note}) ──", status.label());
+        stages.push("coverage", name, status, note, started);
+    }
 
     stages.run(
         "bench-compile",
@@ -1402,6 +1460,103 @@ fn full_stages(stages: &mut StageList<'_>) {
                 &format!("cargo-hack not installed — Install:  cargo install cargo-hack --version {CARGO_HACK_VERSION} --locked"),
             );
         }
+    }
+}
+
+/// Workspace line-coverage floor file (ratchet baseline, same role as
+/// rustqual's `baseline.json`): FAIL only on true regression.
+const COVERAGE_BASELINE: &str = "coverage-baseline.json";
+/// Machine-readable llvm-cov summary produced by the gate run.
+const COVERAGE_SUMMARY: &str = "target/llvm-cov/coverage-summary.json";
+/// Human-readable report rendered from the same data (no test re-run).
+const COVERAGE_HTML: &str = "target/llvm-cov/html";
+/// Float epsilon for the ratchet comparison (equal = PASS, like rustqual).
+const COVERAGE_EPS: f64 = 1e-9;
+/// Factor for human-readable percent printing.
+const COVERAGE_PERCENT: f64 = 100.0;
+
+/// Workspace `(line_rate, covered, total)` from an llvm-cov
+/// `--summary-only --json` report (`data[0].totals.lines`).
+fn coverage_rate(summary: &str) -> (f64, u64, u64) {
+    let report: serde_json::Value =
+        serde_json::from_str(summary).unwrap_or(serde_json::Value::Null);
+    let lines = report
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|d| d.get("totals"))
+        .and_then(|t| t.get("lines"));
+    let covered = lines
+        .and_then(|l| l.get("covered"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let count = lines
+        .and_then(|l| l.get("count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let rate = if count > 0 {
+        covered as f64 / count as f64
+    } else {
+        0.0
+    };
+    (rate, covered, count)
+}
+
+/// Floor stored in the baseline file, if present and parseable.
+fn load_coverage_floor(path: &Path) -> Option<f64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("line_rate").and_then(|x| x.as_f64()))
+}
+
+/// Overwrites the baseline file with the current measurement.
+fn save_coverage_floor(path: &Path, rate: f64, covered: u64, count: u64) -> std::io::Result<()> {
+    let doc = serde_json::json!({
+        "version": 1,
+        "line_rate": rate,
+        "lines_covered": covered,
+        "lines_total": count,
+        "generated_by": "cargo xtask quality --full (cargo-llvm-cov --workspace)",
+    });
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n",
+    )
+}
+
+/// Ratchet verdict against the stored floor: regression FAILs, first run
+/// and growth rewrite the file (commit it), equality PASSes silently.
+fn coverage_verdict(baseline: &Path, rate: f64, covered: u64, count: u64) -> (Status, String) {
+    let prior = load_coverage_floor(baseline);
+    if prior.is_some_and(|b| rate + COVERAGE_EPS < b) {
+        (
+            Status::Fail,
+            format!(
+                "workspace lines {:.2}% below baseline {:.2}%",
+                rate * COVERAGE_PERCENT,
+                prior.unwrap_or(0.0) * COVERAGE_PERCENT
+            ),
+        )
+    } else if prior.is_none_or(|b| rate > b + COVERAGE_EPS) {
+        match save_coverage_floor(baseline, rate, covered, count) {
+            Ok(()) if prior.is_none() => (
+                Status::Pass,
+                format!("baseline set at {:.2}%", rate * COVERAGE_PERCENT),
+            ),
+            Ok(()) => (
+                Status::Pass,
+                format!(
+                    "baseline lifted to {:.2}% — commit {COVERAGE_BASELINE}",
+                    rate * COVERAGE_PERCENT
+                ),
+            ),
+            Err(e) => (
+                Status::Fail,
+                format!("cannot write {COVERAGE_BASELINE}: {e}"),
+            ),
+        }
+    } else {
+        (Status::Pass, String::new())
     }
 }
 
@@ -1621,17 +1776,13 @@ fn quality_usage(code: i32) -> ! {
          USAGE:\n  \
           cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
-         cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html), bench compile-check and the cargo-hack feature matrix\n  \
+         cargo xtask quality --full    + coverage ratchet (llvm-cov --workspace vs coverage-baseline.json), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n  \
          cargo xtask quality --ci --only fmt,audit  (CI sharding: run a subset)\n  \
          cargo xtask quality --ci --allow-skip wasm-check  (excuse a SKIP in strict CI mode)\n  \
          cargo xtask quality --list-stages  (print canonical stage ids)\n\
-          \n\
-          In strict mode (--ci or GITHUB_ACTIONS) a SKIP fails the gate unless\n  \
-          excused via --allow-skip. Locally skips only print a trailing warning.\n\
-          \n\
           External tools (audit, deny, outdated, upgrade-check, llvm-cov, rustqual, hack, machete, typos) are optional:\n  \
           missing → SKIP with install hint. rustqual is MIT.\n  \
           rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
@@ -1640,6 +1791,10 @@ fn quality_usage(code: i32) -> ! {
           (equal = PASS, only a true regression FAILs). The committed baseline\n  \
           must not exceed the base branch version (origin/master locally) —\n  \
           growth needs the `baseline-bump-approved` PR label.\n  \
+          Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
+          (equal = PASS, only a true regression FAILs; growth rewrites the file — commit it).\n  \
+          Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
+          a full instrumented workspace run takes tens of minutes.\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
@@ -2666,5 +2821,42 @@ mod tests {
         // parallel runs cannot observe each other (RAT-24 review).
         let raw = std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok();
         assert_eq!(baseline_bump_allowed(), parse_bump_allowed(raw.as_deref()));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{coverage_rate, coverage_verdict, load_coverage_floor, Status, COVERAGE_EPS};
+
+    /// Minimal llvm-cov summary shape: totals resolve to rate/covered/total.
+    #[test]
+    fn parses_summary_totals() {
+        let (rate, covered, count) =
+            coverage_rate(r#"{"data": [{"totals": {"lines": {"covered": 3, "count": 4}}}]}"#);
+        assert_eq!((covered, count), (3, 4));
+        assert!((rate - covered as f64 / count as f64).abs() < COVERAGE_EPS);
+    }
+
+    /// Garbage in — zeroed measurement out, never a panic.
+    #[test]
+    fn rejects_broken_summary() {
+        assert_eq!(coverage_rate("not json"), (0.0, 0, 0));
+        assert_eq!(coverage_rate("{}"), (0.0, 0, 0));
+    }
+
+    /// Scratch baseline: first save, silent equality, lift, regression FAIL.
+    #[test]
+    fn ratchets_against_scratch_floor() {
+        let path = std::env::temp_dir().join("ornis-coverage-verdict-probe.json");
+        let _ = std::fs::remove_file(&path);
+        assert!(load_coverage_floor(&path).is_none());
+        let (status, _) = coverage_verdict(&path, 0.0, 0, 2);
+        assert_eq!(status, Status::Pass);
+        let (status, _) = coverage_verdict(&path, 1.0, 2, 2);
+        assert_eq!(status, Status::Pass);
+        assert!((load_coverage_floor(&path).unwrap_or(0.0) - 1.0).abs() < COVERAGE_EPS);
+        let (status, _) = coverage_verdict(&path, 0.0, 0, 2);
+        assert_eq!(status, Status::Fail);
+        let _ = std::fs::remove_file(&path);
     }
 }
