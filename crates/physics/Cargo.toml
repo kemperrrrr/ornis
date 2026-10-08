@@ -7,12 +7,12 @@ license.workspace = true
 
 [dependencies]
 glam = "0.34"
-ornis-assets = { path = "../assets" }
-ornis-core = { path = "../core" }
+ornis-assets = { path = "../assets", version = "0.1.0" }
+ornis-core = { path = "../core", version = "0.1.0" }
 rayon = "1.12"
 dashmap = "6"
-ornis-macros = { path = "../macros" }
-ornis-schedule = { path = "../schedule" }
+ornis-macros = { path = "../macros", version = "0.1.0" }
+ornis-schedule = { path = "../schedule", version = "0.1.0" }
 thiserror = "2.0"
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"

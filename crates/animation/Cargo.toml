@@ -6,15 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ornis-assets = { path = "../assets" }
-ornis-core = { path = "../core" }
-ornis-gameplay = { path = "../gameplay" }
+ornis-assets = { path = "../assets", version = "0.1.0" }
+ornis-core = { path = "../core", version = "0.1.0" }
+ornis-gameplay = { path = "../gameplay", version = "0.1.0" }
 glam = "0.34"
 # Phase D: typed skinning errors (`SkinError` derives).
 thiserror = "2.0"
 
 [dev-dependencies]
-ornis-render = { path = "../render" }
+ornis-render = { path = "../render", version = "0.1.0" }
 
 [lints]
 workspace = true

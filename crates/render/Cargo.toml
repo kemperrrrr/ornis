@@ -10,17 +10,17 @@ wgpu = "30"
 naga = { version = "30", features = ["wgsl-out"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.34"
-ornis-assets = { path = "../assets" }
-ornis-core = { path = "../core" }
-ornis-gameplay = { path = "../gameplay" }
+ornis-assets = { path = "../assets", version = "0.1.0" }
+ornis-core = { path = "../core", version = "0.1.0" }
+ornis-gameplay = { path = "../gameplay", version = "0.1.0" }
 # Phase C (animation-design §2.3): extraction reads the `SkinnedMesh` lane to
 # publish pre-skinned world vertices (`CustomMeshEntry.skinned`). One-way
 # edge — `ornis-animation` never depends on `ornis-render`.
-ornis-animation = { path = "../animation" }
-ornis-mesh-editor = { path = "../mesh-editor" }
-ornis-macros = { path = "../macros" }
+ornis-animation = { path = "../animation", version = "0.1.0" }
+ornis-mesh-editor = { path = "../mesh-editor", version = "0.1.0" }
+ornis-macros = { path = "../macros", version = "0.1.0" }
 # Phase A (audit §7): shared engine for levels/edges/OrderError.
-ornis-schedule = { path = "../schedule" }
+ornis-schedule = { path = "../schedule", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
 # Typed projection/upload errors (`thiserror::Error` derives).
@@ -32,7 +32,7 @@ png = "0.18"
 proptest = "1"
 wgpu = "30"
 glam = "0.34"
-ornis-shader-lang = { path = "../shader-lang" }
+ornis-shader-lang = { path = "../shader-lang", version = "0.1.0" }
 criterion = { version = "0.8", features = ["rayon"] }
 
 [[bench]]

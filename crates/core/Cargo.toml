@@ -23,9 +23,9 @@ serde_json = "1"
 # Typed errors (`thiserror::Error` derives on registry/mutation/schedule errors).
 thiserror = "2.0"
 # Phase A (audit §7): scheduler level/edge/cache mechanics.
-ornis-schedule = { path = "../schedule" }
+ornis-schedule = { path = "../schedule", version = "0.1.0" }
 # Backend-neutral input state, named keys and action mapping.
-ornis-input = { path = "../input" }
+ornis-input = { path = "../input", version = "0.1.0" }
 
 [features]
 default = []
@@ -37,7 +37,7 @@ serde = { version = "1.0", features = ["derive"] }
 ron = "0.12"
 criterion = { version = "0.8", features = ["rayon"] }
 bytemuck = { version = "1.25", features = ["derive"] }
-ornis-macros = { path = "../macros" }
+ornis-macros = { path = "../macros", version = "0.1.0" }
 proptest = "1"
 
 [[bench]]

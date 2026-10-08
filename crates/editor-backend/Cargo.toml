@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"
 glam = "0.34"
-ornis-input = { path = "../input" }
+ornis-input = { path = "../input", version = "0.1.0" }
 # Typed command errors (`thiserror::Error` on `SetComponentError`).
 thiserror = "2.0"
 

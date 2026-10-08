@@ -6,11 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ornis-app = { path = "../app" }
-ornis-core = { path = "../core" }
-ornis-render = { path = "../render" }
+ornis-app = { path = "../app", version = "0.1.0" }
+ornis-core = { path = "../core", version = "0.1.0" }
+ornis-render = { path = "../render", version = "0.1.0" }
 crossbeam-channel = "0.5"
-editor-backend = { path = "../editor-backend" }
+editor-backend = { path = "../editor-backend", version = "0.1.0" }
 pollster = "1.0"
 wgpu = "30"
 winit = "0.30"
