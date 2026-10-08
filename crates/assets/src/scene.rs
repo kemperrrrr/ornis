@@ -151,6 +151,14 @@ pub enum MeshDesc {
         /// Full extents in world units: `[width_x, depth_z]` (both positive).
         size: [PositiveF32; 2],
     },
+    /// Flat sprite quad in the local XY plane (`+Z` face normal), centered
+    /// at the transform origin. Unlike [`MeshDesc::Plane`] (XZ, `+Y`) it
+    /// faces an orthographic camera looking down `-Z` without rotation.
+    /// UV `(0, 0)` is the top-left corner, `(1, 1)` the bottom-right.
+    Quad {
+        /// Full extents in world units: `[width_x, height_y]` (both positive).
+        size: [PositiveF32; 2],
+    },
     /// Right circular cylinder around local `+Y`, centered at the
     /// transform origin.
     Cylinder {
@@ -177,7 +185,7 @@ impl MeshDesc {
     /// Borrows the inline soup of a [`MeshDesc::Custom`].
     ///
     /// Returns `None` for procedural variants (`Sphere`, `Box`, `Plane`,
-    /// `Cylinder`). The render extraction routes `Some` into the per-entity
+    /// `Quad`, `Cylinder`). The render extraction routes `Some` into the per-entity
     /// upload path (`mesh_upload::custom_vertices`); the transport itself
     /// never validates shapes — see `MeshData::validate` in the mesh editor.
     /// The flat list stays triple-aligned by construction (see
@@ -185,9 +193,11 @@ impl MeshDesc {
     pub fn as_custom(&self) -> Option<(&[[f32; 3]], &[u32])> {
         match self {
             Self::Custom { positions, indices } => Some((positions, indices)),
-            Self::Sphere { .. } | Self::Box { .. } | Self::Plane { .. } | Self::Cylinder { .. } => {
-                None
-            }
+            Self::Sphere { .. }
+            | Self::Box { .. }
+            | Self::Plane { .. }
+            | Self::Quad { .. }
+            | Self::Cylinder { .. } => None,
         }
     }
 
@@ -272,6 +282,16 @@ impl MeshDesc {
             PositiveF32::try_new(size[1].get())?,
         ];
         Some(Self::Plane { size })
+    }
+
+    /// Checked sprite quad: `None` unless both extents are finite and
+    /// `> 0`. Canonical constructor for the typed `Quad` fields.
+    pub fn try_quad_units(size: [Meters; 2]) -> Option<Self> {
+        let size = [
+            PositiveF32::try_new(size[0].get())?,
+            PositiveF32::try_new(size[1].get())?,
+        ];
+        Some(Self::Quad { size })
     }
 
     /// Checked cylinder: `None` unless radius/height are finite and `> 0`
@@ -393,6 +413,13 @@ pub enum MaterialDesc {
         #[serde(default)]
         metallic: Metallic,
     },
+    /// Unlit sprite color: radiance = `color`, with no BRDF, light,
+    /// shadow or IBL contribution. Tonemap and exposure apply exactly
+    /// as for emission.
+    Unlit {
+        /// Sprite color in linear space.
+        color: [f32; 3],
+    },
 }
 
 /// Metalness of [`MaterialDesc::Metal`] when a file omits `metallic`.
@@ -461,7 +488,15 @@ impl MaterialDesc {
         }
     }
 
-    /// Albedo/base color as [`LinearRgb`] (all variants).
+    /// Typed unlit sprite: color as [`LinearRgb`].
+    pub fn unlit_units(color: LinearRgb) -> Self {
+        Self::Unlit {
+            color: color.as_array(),
+        }
+    }
+
+    /// Albedo/base color as [`LinearRgb`] (all variants; for
+    /// [`MaterialDesc::Unlit`] this is the sprite color).
     pub fn base_color_units(&self) -> LinearRgb {
         LinearRgb::new(match self {
             Self::Dielectric { base_color, .. }
@@ -469,11 +504,13 @@ impl MaterialDesc {
             | Self::Coat { base_color, .. }
             | Self::Matte { base_color, .. }
             | Self::Glass { base_color, .. } => *base_color,
+            Self::Unlit { color } => *color,
         })
     }
 
     /// Roughness as [`Clamped01`] (stored typed; legacy out-of-range
     /// values were clamped on load through the `serde` impl).
+    /// [`MaterialDesc::Unlit`] has no roughness lobe and reports `0`.
     pub fn roughness_units(&self) -> Clamped01 {
         match self {
             Self::Dielectric { roughness, .. }
@@ -481,11 +518,13 @@ impl MaterialDesc {
             | Self::Matte { roughness, .. }
             | Self::Glass { roughness, .. } => *roughness,
             Self::Coat { coat_roughness, .. } => *coat_roughness,
+            Self::Unlit { .. } => Clamped01::new(0.0),
         }
     }
 
     /// Base metalness. Files that omit the field load as `1` for
-    /// [`MaterialDesc::Metal`] and `0` for every other preset.
+    /// [`MaterialDesc::Metal`] and `0` for every other preset;
+    /// [`MaterialDesc::Unlit`] has no metalness and reports `0`.
     pub fn metallic_units(&self) -> Metallic {
         match self {
             Self::Dielectric { metallic, .. }
@@ -493,6 +532,7 @@ impl MaterialDesc {
             | Self::Coat { metallic, .. }
             | Self::Matte { metallic, .. }
             | Self::Glass { metallic, .. } => *metallic,
+            Self::Unlit { .. } => Metallic::new(0.0),
         }
     }
 
@@ -1115,6 +1155,43 @@ Scene(
     }
 
     #[test]
+    fn quad_and_unlit_round_trip() {
+        // Typed constructors, explicit parameters, no builders.
+        let mesh = MeshDesc::try_quad_units([Meters::new(2.0), Meters::new(1.0)])
+            .expect("positive quad size");
+        let material = MaterialDesc::unlit_units(LinearRgb::new([0.2, 0.4, 0.8]));
+        match &mesh {
+            MeshDesc::Quad { size } => {
+                assert_eq!(size.map(PositiveF32::get), [2.0, 1.0]);
+            }
+            other => panic!("expected Quad, got {other:?}"),
+        }
+        match &material {
+            MaterialDesc::Unlit { color } => assert_eq!(*color, [0.2, 0.4, 0.8]),
+            other => panic!("expected Unlit, got {other:?}"),
+        }
+        assert_eq!(material.base_color_units().as_array(), [0.2, 0.4, 0.8]);
+        assert_eq!(material.metallic_units().get(), 0.0);
+        assert_eq!(material.roughness_units().get(), 0.0);
+        assert_eq!(material.ior_units(), None);
+        let mesh_ron = ron::ser::to_string(&mesh).expect("serialize quad");
+        let material_ron = ron::ser::to_string(&material).expect("serialize unlit");
+        let mesh_back: MeshDesc = ron::de::from_str(&mesh_ron).expect("re-parse quad");
+        let material_back: MaterialDesc = ron::de::from_str(&material_ron).expect("re-parse unlit");
+        match mesh_back {
+            MeshDesc::Quad { size } => assert_eq!(size.map(PositiveF32::get), [2.0, 1.0]),
+            other => panic!("quad round-trip broke the variant: {other:?}"),
+        }
+        assert_eq!(material_back, material);
+        // Degenerate sizes are rejected, like the plane constructor.
+        assert!(MeshDesc::try_quad_units([Meters::new(0.0), Meters::new(1.0)]).is_none());
+        assert!(MeshDesc::try_quad_units([Meters::new(1.0), Meters::new(-2.0)]).is_none());
+        // Old scenes without the new variants load exactly as before.
+        let old = Scene::from_ron(FULL_SCENE_RON).expect("old scene");
+        assert_eq!(old.entities.len(), 3);
+    }
+
+    #[test]
     fn rejects_malformed_ron() {
         assert!(Scene::from_ron("Scene(name: 42)").is_err());
         assert!(Scene::from_ron("not a scene at all").is_err());
@@ -1191,6 +1268,7 @@ Scene(
                 MaterialDesc::Dielectric { emission, .. }
                 | MaterialDesc::Metal { emission, .. }
                 | MaterialDesc::Coat { emission, .. } => *emission,
+                MaterialDesc::Unlit { color } => *color,
                 MaterialDesc::Matte { .. } | MaterialDesc::Glass { .. } => [0.0, 0.0, 0.0],
             };
             assert_eq!(emission, [0.0, 0.0, 0.0]);

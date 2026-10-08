@@ -478,6 +478,9 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             MeshDesc::Plane { size } => {
                 Vec3::new(scale[0] * size[0].get(), scale[1], scale[2] * size[1].get())
             }
+            MeshDesc::Quad { size } => {
+                Vec3::new(scale[0] * size[0].get(), scale[1] * size[1].get(), scale[2])
+            }
             MeshDesc::Cylinder { radius, height, .. } => Vec3::new(
                 scale[0] * radius.get(),
                 scale[1] * height.get(),
@@ -537,7 +540,10 @@ pub fn max_mesh_params(store: &SmartStore) -> (u32, u32) {
             // Custom soups don't feed the shared sphere tessellation.
             MeshDesc::Custom { .. } => params,
             // Other procedural variants don't feed it either.
-            MeshDesc::Box { .. } | MeshDesc::Plane { .. } | MeshDesc::Cylinder { .. } => params,
+            MeshDesc::Box { .. }
+            | MeshDesc::Plane { .. }
+            | MeshDesc::Quad { .. }
+            | MeshDesc::Cylinder { .. } => params,
         })
 }
 fn insert_scene_entities(
@@ -939,6 +945,12 @@ mod tests {
                     PositiveF32::expect_valid(5.0),
                 ],
             },
+            MeshDesc::Quad {
+                size: [
+                    PositiveF32::expect_valid(3.0),
+                    PositiveF32::expect_valid(5.0),
+                ],
+            },
             MeshDesc::Cylinder {
                 radius: PositiveF32::expect_valid(2.0),
                 height: PositiveF32::expect_valid(7.0),
@@ -951,7 +963,7 @@ mod tests {
 
         let (extracted, stats) =
             extract_render_data_with_stats(engine.world().store().expect("store"));
-        assert_eq!(extracted.instances.len(), 4);
+        assert_eq!(extracted.instances.len(), 5);
         assert_eq!(extracted.custom_meshes.len(), 1);
         assert_eq!(stats.skipped_unknown_mesh, 0);
         assert_eq!(stats.skipped_incomplete, 0);
@@ -978,6 +990,31 @@ mod tests {
         assert_eq!(extracted.materials.len(), 2);
         assert_eq!(stats.materials_deduped, 2);
         assert_eq!(stats.skipped_incomplete, 0);
+    }
+
+    #[test]
+    fn quad_size_scales_the_model_in_xy() {
+        // `Quad [3, 5]` bakes width into X and height into Y (like `Plane`
+        // bakes into X/Z), leaving the Z axis untouched.
+        let mut engine = Engine::new();
+        push_test_entity(
+            &mut engine,
+            Some(MeshDesc::Quad {
+                size: [
+                    PositiveF32::expect_valid(3.0),
+                    PositiveF32::expect_valid(5.0),
+                ],
+            }),
+            Some(test_material()),
+        );
+
+        let extracted = extract_render_data(engine.world().store().expect("store"));
+        assert_eq!(extracted.instances.len(), 1);
+        let model = extracted.instances[0].model_matrix;
+        assert_eq!(model.x_axis.length(), 3.0);
+        assert_eq!(model.y_axis.length(), 5.0);
+        assert_eq!(model.z_axis.length(), 1.0);
+        assert_eq!(model.w_axis.truncate(), glam::Vec3::ZERO);
     }
 
     #[test]

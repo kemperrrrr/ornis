@@ -404,6 +404,40 @@ mod tests {
     }
 
     #[test]
+    fn quad_and_unlit_survive_json_transport() {
+        // Wire parity for the K0b variants: the JSON transport preserves
+        // sprite-quad geometry and the unlit color bit-exactly.
+        let mesh_json = serde_json::to_string(&MeshDesc::Quad {
+            size: [
+                PositiveF32::expect_valid(2.0),
+                PositiveF32::expect_valid(1.0),
+            ],
+        })
+        .expect("mesh serializes");
+        let material_json = serde_json::to_string(&MaterialDesc::Unlit {
+            color: [0.2, 0.4, 0.8],
+        })
+        .expect("material serializes");
+        let payload = format!(
+            r#"{{"version": 1, "entities": [{{"components": {{
+                "Transform": {{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]}},
+                "Mesh": {mesh_json},
+                "Material": {material_json}
+            }} }}], "lights": [],
+            "camera": {{"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}} }}"#
+        );
+        let live = parse_scene_json(&payload).expect("round-tripped payload must parse");
+        assert!(matches!(
+            live.scene.entities[0].mesh,
+            MeshDesc::Quad { size } if size.map(PositiveF32::get) == [2.0, 1.0]
+        ));
+        let MaterialDesc::Unlit { color } = &live.scene.entities[0].material else {
+            panic!("expected Unlit, got {:?}", live.scene.entities[0].material);
+        };
+        assert_eq!(*color, [0.2, 0.4, 0.8]);
+    }
+
+    #[test]
     fn metallic_factor_survives_json_transport() {
         let material = MaterialDesc::Dielectric {
             base_color: [0.2, 0.4, 0.6],
