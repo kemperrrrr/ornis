@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-ornis-core = { path = "../core" }
+ornis-core = { path = "../core", version = "0.1.0" }
 # glTF importer (feature `gltf`, default on): pulls the `gltf`/`image` tree.
-ornis-gltf = { path = "../gltf", optional = true }
+ornis-gltf = { path = "../gltf", version = "0.1.0", optional = true }
 # `Vec3`/`Quat` behind the typed scene descriptors (same version as ornis-core).
 glam = "0.34"
 serde = { version = "1", features = ["derive"] }
