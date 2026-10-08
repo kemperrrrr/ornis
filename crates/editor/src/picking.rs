@@ -135,12 +135,11 @@ impl Default for PickEpsilon {
 /// camera-agnostic, while each viewport side (native window, WASM replica)
 /// holds its own camera and converts clicks locally. Build from an orbit
 /// camera via [`ViewportCamera::from_view_parameters`], which takes the
-/// exact tuple [`OrbitCamera::view_parameters`][1] returns — no render
-/// dependency needed.
+/// look-at frame as an explicit `(position, target, up, fov, near, far)`
+/// tuple — the same components the render orbit camera publishes, without
+/// a render dependency here by design.
 ///
 /// Pointer convention: pixels, origin top-left, `y` down (browser canvas).
-///
-/// [1]: ornis_render ribbon (no dependency here by design)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewportCamera {
     position: Vec3,
@@ -212,9 +211,10 @@ impl ViewportCamera {
     /// Builds a picking camera from orbit view parameters and a viewport
     /// size in pixels.
     ///
-    /// `view` is the exact `(position, target, up, fov, near, far)` tuple
-    /// the orbit camera publishes, so viewport sides convert without
-    /// depending on the render crate. Same validation as [`Self::new`].
+    /// `view` is the `(position, target, up, fov, near, far)` look-at frame
+    /// the orbit camera publishes (as fields, not as this tuple), so
+    /// viewport sides convert without depending on the render crate.
+    /// Same validation as [`Self::new`].
     #[must_use]
     pub fn from_view_parameters(
         view: (Vec3, Vec3, Vec3, f32, f32, f32),

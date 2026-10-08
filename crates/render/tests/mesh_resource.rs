@@ -12,7 +12,9 @@ mod common;
 
 use std::sync::Mutex;
 
-use ornis_assets::scene::{CameraDesc, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc};
+use ornis_assets::scene::{
+    CameraDesc, CameraProjection, EntityDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
+};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_render::RenderWorld;
 use ornis_render::gpu_resources::{GpuDevice, GpuMesh, install_render_mesh};
@@ -48,6 +50,7 @@ fn probe_scene(tessellations: &[(u32, u32)]) -> Scene {
             fov: ornis_core::units::Degrees::new(60.0),
             near: ornis_core::units::Meters::new(0.1),
             far: ornis_core::units::Meters::new(100.0),
+            projection: CameraProjection::Perspective,
         },
         ambient: [0.1, 0.1, 0.1],
     }

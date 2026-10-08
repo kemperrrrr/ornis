@@ -843,7 +843,7 @@ mod tests {
     use super::*;
     use glam::Vec3;
     use ornis_assets::scene::{
-        CameraDesc, LightDesc, MaterialDesc, MeshDesc, ShadowCast, TransformDesc,
+        CameraDesc, CameraProjection, LightDesc, MaterialDesc, MeshDesc, ShadowCast, TransformDesc,
     };
     use ornis_core::units::{Clamped01, PositiveF32};
     use ornis_core::{Color, Degrees, Lux, Stage as CoreStage, Time, UnitVec3};
@@ -890,6 +890,7 @@ mod tests {
                 fov: ornis_core::units::Degrees::new(60.0),
                 near: ornis_core::units::Meters::new(0.1),
                 far: ornis_core::units::Meters::new(100.0),
+                projection: CameraProjection::Perspective,
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -921,6 +922,7 @@ mod tests {
                 fov: ornis_core::units::Degrees::new(60.0),
                 near: ornis_core::units::Meters::new(0.1),
                 far: ornis_core::units::Meters::new(100.0),
+                projection: CameraProjection::Perspective,
             },
             ambient: [0.1, 0.1, 0.1],
         }
@@ -1028,7 +1030,7 @@ mod tests {
         assert_eq!(rig.lights.len(), 1);
         assert_eq!(rig.ambient, ambient);
         let camera = read_orbit_camera(world.engine()).expect("camera");
-        assert_eq!(camera.view_parameters().3, 45.0);
+        assert_eq!(camera.view_parameters().fov.get(), 45.0);
 
         world.spawn(OrbitCamera::looking_at(
             Vec3::new(1.0, 1.0, 1.0),
@@ -1371,6 +1373,7 @@ mod tests {
                 fov: ornis_core::units::Degrees::new(60.0),
                 near: ornis_core::units::Meters::new(0.1),
                 far: ornis_core::units::Meters::new(100.0),
+                projection: CameraProjection::Perspective,
             },
             ambient: [0.1, 0.1, 0.1],
         };
@@ -1446,6 +1449,7 @@ mod tests {
                 fov: ornis_core::units::Degrees::new(60.0),
                 near: ornis_core::units::Meters::new(0.1),
                 far: ornis_core::units::Meters::new(100.0),
+                projection: CameraProjection::Perspective,
             },
             ambient: [0.1, 0.1, 0.1],
         };
