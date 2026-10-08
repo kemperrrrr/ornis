@@ -60,8 +60,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Same toolset the single-job gate installed: no cargo-edit on
-      # purpose, so `upgrade-check` keeps its SKIP-with-hint behavior.
+      # `upgrade-check` no longer needs cargo-edit: it parses
+      # `cargo outdated --workspace --format json` (cargo-outdated is
+      # installed below), so it really runs here instead of SKIPping.
       # rustqual comes from the vendored Ornis fork (third_party/rustqual),
       # not crates.io — the fork carries workspace-aware layer resolution
       # the upstream 1.8.2 lacks.
@@ -71,6 +72,17 @@ jobs:
         with:
           tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-outdated@0.19.0
 
+      # rust-cache BEFORE the fork build: otherwise the two rustqual
+      # compile steps below run uncached on every fast-shard run.
+      # The fork is excluded from the workspace (own target dir), so it
+      # needs an explicit workspaces entry to be cached at all.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: quality
+          workspaces: |
+            . -> target
+            third_party/rustqual -> target
+
       - name: Build vendored rustqual
         run: |
           cargo build --release --manifest-path third_party/rustqual/Cargo.toml
@@ -78,10 +90,6 @@ jobs:
 
       - name: Verify rustqual version (vendored fork)
         run: ./third_party/rustqual/target/release/rustqual --version
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: quality
 
       - name: Quality gate (fast shard)
         id: gate
