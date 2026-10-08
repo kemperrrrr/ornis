@@ -94,6 +94,9 @@ fn golden_full_scene_probe_matches_snapshot() {
         ornis_assets::scene::MeshDesc::Plane { size } => {
             crate::mesh::create_plane(&device, size.map(ornis_core::units::PositiveF32::get))
         }
+        ornis_assets::scene::MeshDesc::Quad { size } => {
+            crate::mesh::create_quad(&device, size.map(ornis_core::units::PositiveF32::get))
+        }
         ornis_assets::scene::MeshDesc::Cylinder {
             radius,
             height,
@@ -162,6 +165,24 @@ fn golden_full_scene_probe_matches_snapshot() {
                 m.transmission.color_rgb(*base_color);
                 m.specular.roughness(roughness.get());
                 m.specular.ior(ior.get());
+                m
+            }
+            ornis_assets::scene::MaterialDesc::Unlit { color } => {
+                // Mirrors the extraction mapping (the golden scene has no
+                // unlit entities; this arm is exhaustiveness only).
+                let mut m = ornis_core::OpenPBRMaterial::dielectric();
+                m.base.color_rgb([0.0, 0.0, 0.0]);
+                m.base.weight(0.0);
+                m.specular.weight(0.0);
+                m.base.metalness(0.0);
+                let peak = color[0].max(color[1]).max(color[2]).max(0.0);
+                if peak > 0.0 {
+                    m.emission.luminance(peak);
+                    m.emission
+                        .color_rgb([color[0] / peak, color[1] / peak, color[2] / peak]);
+                }
+                m.geometry
+                    .set_shading(ornis_core::material::ShadingMode::Unlit);
                 m
             }
         };
