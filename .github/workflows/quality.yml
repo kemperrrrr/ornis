@@ -42,7 +42,9 @@ jobs:
   #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual (no compilation)
   #   clippy — clippy-physics, clippy
   #   test   — test (workspace)
-  #   gpu    — test-physics, smoke (both need lavapipe)
+  #   gpu    — test-physics, determinism-fast, smoke (all need lavapipe;
+  #            determinism-fast is the fast PR subset of Determinism Nightly,
+  #            ~+30 s test runtime, no rebuild beyond test-physics)
   #   docs   — doc, wasm-check
   fast:
     runs-on: ubuntu-latest
@@ -268,7 +270,7 @@ jobs:
           RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only test-physics,smoke 2>&1 | tee target/quality-gpu.log
+          cargo xtask quality --ci --only test-physics,determinism-fast,smoke 2>&1 | tee target/quality-gpu.log
 
       - name: Upload shard log
         if: always()
