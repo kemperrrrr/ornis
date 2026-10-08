@@ -83,6 +83,8 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
 
     fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
         let shared = self.store.load(Ordering::Acquire, guard);
+        // SAFETY: `shared` was loaded under `guard`, which the caller holds
+        // for `'g`; the epoch reclaimer cannot free the snapshot while pinned.
         unsafe { shared.deref() }
     }
 
@@ -121,7 +123,6 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
                 }
             }
         }
-    }
 }
 
 impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
@@ -566,6 +567,11 @@ mod tests {
         assert_eq!(val, Some(2.0));
     }
 
+    // Miri serializes OS threads and interprets every epoch-pinned load:
+    // 8 threads x 1000 reads is sound but far too slow under Miri. The
+    // single-threaded lock-free tests above still run under Miri; data-race
+    // coverage for this path comes from the nightly ThreadSanitizer job.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn lock_free_concurrent_read() {
         use std::sync::Arc;

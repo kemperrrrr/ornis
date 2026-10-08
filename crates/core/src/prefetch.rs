@@ -15,6 +15,9 @@
 /// `LOCALITY` mirrors `_mm_prefetch`'s compile-time hint (3 = keep in all
 /// cache levels). Pure performance hint with no observable semantics.
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
+    // SAFETY: x86 PREFETCH is a non-faulting cache hint — it never reads
+    // memory observably and is safe for any address; callers additionally
+    // pass pointers derived from live allocations (see `prefetch_iter`).
     unsafe { std::arch::x86_64::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }
 
@@ -22,6 +25,7 @@ pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
 #[mutants::skip]
 /// 32-bit x86 variant of the prefetch hint; see the x86_64 version.
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
+    // SAFETY: same non-faulting-hint argument as the x86_64 variant above.
     unsafe { std::arch::x86::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }
 

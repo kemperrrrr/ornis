@@ -61,6 +61,8 @@ impl raw_window_handle::HasWindowHandle for CanvasWindow {
         let obj = NonNull::from(js_value).cast();
         let web_handle = WebCanvasWindowHandle::new(obj);
         let raw = RawWindowHandle::WebCanvas(web_handle);
+        // SAFETY: `obj` points at the live canvas `JsValue` borrowed from
+        // `self`; the borrowed handle never outlives that borrow.
         Ok(unsafe { WindowHandle::borrow_raw(raw) })
     }
 }

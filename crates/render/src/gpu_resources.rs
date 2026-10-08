@@ -524,6 +524,10 @@ impl System for RenderPresent {
             // a single MutexGuard (safe: different fields).
             let renderer = &fs.renderer as *const Renderer3D;
             let frame3d = &mut fs.frame3d as *mut RenderFrame3D;
+            // SAFETY: both pointers derive from `fs`, whose MutexGuard is
+            // held for the whole block; they target disjoint fields
+            // (`renderer` is only read, `frame3d` only written), so no
+            // aliasing `&mut` exists, and neither pointer escapes the block.
             unsafe {
                 // E2: encoder context as frame data — per-pass encoders
                 // land in FrameCommandBuffers; submit + present live in

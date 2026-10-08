@@ -1004,6 +1004,9 @@ mod tests {
     fn test_pod_zeroable() {
         let _mat = OpenPBRMaterial::default();
         let _zeroed = OpenPBRMaterial::zeroed();
+        // SAFETY: test-only; `OpenPBRMaterial` is `bytemuck::Pod` (all-zero
+        // is a valid value — every field is float/reserved bits), and the
+        // byte array length matches `OPENPBR_MATERIAL_SIZE` by construction.
         let _pod = unsafe {
             std::mem::transmute::<[u8; OPENPBR_MATERIAL_SIZE], OpenPBRMaterial>(
                 [0u8; OPENPBR_MATERIAL_SIZE],

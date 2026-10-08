@@ -39,6 +39,9 @@ fn run_with_threads<F>(threads: usize, f: F) -> Vec<Position>
 where
     F: FnOnce(&mut SmartStore) -> Vec<Position>,
 {
+    // SAFETY: no other test in this binary touches the process environment,
+    // and rayon reads `RAYON_NUM_THREADS` once at first pool init; no
+    // concurrent env reader exists while these tests run.
     unsafe {
         std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
     }
