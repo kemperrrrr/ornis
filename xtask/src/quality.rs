@@ -1419,11 +1419,26 @@ fn bench_stage(stages: &mut StageList<'_>) {
 /// These two stages mirror what the GitHub Actions quality shards
 /// run; --ci makes the local gate identical to CI by construction.
 fn ci_stages(stages: &mut StageList<'_>) {
+    // Strict rustdoc: `-D warnings` is set inside xtask (not the
+    // workflow) so local and CI runs deny warnings identically; any
+    // pre-existing RUSTDOCFLAGS (e.g. mold link args on CI) is preserved
+    // and `-D warnings` is appended once. Inlined (not a helper fn) so
+    // the rustqual baseline stays flat (no new untested function).
+    let mut doc = stages.cargo(&["doc", "--workspace", "--no-deps"]);
+    let rustdocflags = std::env::var("RUSTDOCFLAGS").unwrap_or_default();
+    if !(rustdocflags.contains("-D") && rustdocflags.contains("warnings")) {
+        let merged = if rustdocflags.trim().is_empty() {
+            "-D warnings".to_string()
+        } else {
+            format!("{rustdocflags} -D warnings")
+        };
+        doc.env("RUSTDOCFLAGS", merged);
+    }
     stages.run(
         "doc",
         "doc",
-        "cargo doc --workspace --no-deps",
-        stages.cargo(&["doc", "--workspace", "--no-deps"]),
+        "cargo doc --workspace --no-deps (RUSTDOCFLAGS includes -D warnings)",
+        doc,
         false,
     );
 
