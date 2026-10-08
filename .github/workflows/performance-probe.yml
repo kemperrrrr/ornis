@@ -26,6 +26,13 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Smoke-level ceiling (RAT-11), not a precision gate: 100k tiled Grid 8.0
+  # steady is ~8 s/step on M1 (docs/quality/perf-baseline-2026-09-02.md),
+  # so 30 s median leaves ~3× headroom for CI noise while still catching
+  # backend blowups (SAP-scale ~80 s) and hangs. No automatic re-run — a
+  # 100k re-probe costs tens of minutes; re-dispatch manually instead.
+
+  PERF_PROBE_MAX_MEDIAN_STEP_S: 30
 
 permissions:
   contents: read
@@ -76,6 +83,48 @@ jobs:
           cargo run -p ornis-physics --release --example probe_100k -- \
             ${BACKEND_FLAG} --bodies 100000 --steps ${{ inputs.steps }} \
             2>&1 | tee target/probe_100k.log
+
+      # Threshold gate (RAT-11): median of measured steps (step 0 is
+      # broadphase warm-up and is excluded) must stay under
+      # PERF_PROBE_MAX_MEDIAN_STEP_S. Fails loudly on breach; no re-run
+      # (see env comment above).
+      - name: Check probe threshold
+        id: probe-gate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, statistics, sys
+
+          limit = float(os.environ.get("PERF_PROBE_MAX_MEDIAN_STEP_S", "30"))
+          units = {"ns": 1e-9, "us": 1e-6, "µs": 1e-6, "μs": 1e-6,
+                   "ms": 1e-3, "s": 1.0, "m": 60.0}
+          steps = {}
+          with open("target/probe_100k.log", encoding="utf-8", errors="replace") as f:
+              for line in f:
+                  m = re.match(r"^step (\d+): ([\d.]+)\s*(ns|µs|μs|us|ms|s|m)\s*$",
+                               line.strip())
+                  if m:
+                      steps[int(m.group(1))] = float(m.group(2)) * units[m.group(3)]
+          measured = [t for i, t in sorted(steps.items()) if i > 0]
+          lines = ["## 📊 Probe threshold gate", ""]
+          if not measured:
+              lines.append("No measured `step N:` lines found — gate skipped (INFO).")
+              print("\n".join(lines))
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write("\n".join(lines) + "\n")
+              sys.exit(0)
+          median = statistics.median(measured)
+          status = "✅" if median <= limit else "❌"
+          lines.append(f"{status} median step {median:.2f} s over {len(measured)} "
+                       f"measured steps (limit {limit:g} s).")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines) + "\n")
+          if median > limit:
+              print(f"::error title=probe-threshold::median step {median:.2f}s "
+                    f"exceeds {limit:g}s")
+              sys.exit(1)
+          PY
 
       # Extract results and publish to job summary
       - name: Publish probe results
