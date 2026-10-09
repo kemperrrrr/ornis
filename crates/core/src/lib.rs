@@ -34,6 +34,7 @@ mod prefetch;
 mod registry;
 pub mod schedule;
 mod smart_store;
+mod system_param;
 /// Phantom build/run phases and scalar newtypes for the frame boundary.
 pub mod typestate;
 /// Physical and rendering unit newtypes over raw `f32` soup.
@@ -80,6 +81,10 @@ pub use schedule::{
     OrderError, Resources, Schedule, System, SystemAccess, SystemName, compute_levels,
 };
 pub use smart_store::{Pack, SmartStore};
+pub use system_param::{
+    EventStore, Events, NoRawStore, PlainResource, Res, ResMut, SystemParam, canonical_lane_order,
+    register_events,
+};
 pub use typestate::{
     Authoritative, Building, FixedSteps, Frame, Phase, Replica, Running, SceneEntities, SceneRole,
     SceneVersion, Seconds, Tick,

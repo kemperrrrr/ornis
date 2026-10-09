@@ -399,6 +399,24 @@ pub trait Pack: Clone + Send + Sync + 'static {
     /// Returns a mutable view of the bundle for `entity` allowing in-place
     /// edits of the underlying component data.
     fn pack_get_mut<'a>(store: &'a mut SmartStore, entity: Entity) -> Option<Self::PackMut<'a>>;
+
+    /// Writes the bundle back into its lanes through shared (`&`)
+    /// access — the scatter half of the `#[smart_system]` per-object
+    /// loop (gather with [`pack_get`](Pack::pack_get), run the body,
+    /// scatter with this). Lanes are locked one at a time, never nested,
+    /// so no lock ordering is required.
+    fn pack_put(&self, store: &SmartStore, entity: Entity);
+
+    /// Entities owning the bundle (membership of the first lane).
+    /// The `#[smart_system]` loop iterates this set; entities missing
+    /// other lanes are skipped by [`pack_get`](Pack::pack_get).
+    fn pack_entities(store: &SmartStore) -> Vec<Entity>;
+
+    /// `TypeId`s of every lane this bundle owns (one per field).
+    /// The `#[smart_system]` macro declares them as the system's lane
+    /// access (reads for `&T`, writes for `&mut T`) without naming the
+    /// generated wrapper types.
+    fn pack_lane_ids() -> Vec<TypeId>;
 }
 
 #[cfg(test)]
