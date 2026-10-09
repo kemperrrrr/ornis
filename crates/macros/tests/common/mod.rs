@@ -1,9 +1,9 @@
-//! Shared probe harness for `#[smart_system]` access-set tests (see
-//! `REVIEW-smart_system.md`): one world shape plus `run_enforced`, which runs
-//! a system under forced access checking and reports the declaration panic
-//! (if any) instead of unwinding the test.
+//! Shared probe harness for `#[smart_system]` access-set tests: one world
+//! shape plus `run_enforced`, which runs a system under forced access
+//! checking and reports the declaration panic (if any) instead of unwinding
+//! the test.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ornis_core::{Resources, Schedule, SmartStore, System};
 
@@ -35,7 +35,8 @@ pub struct Cfg {
     pub k: f32,
 }
 
-/// Builds the shared probe world: one entity with `P`/`V`, a `Mutex<Counter>`
+/// Builds the shared probe world: one entity with `P`/`V`, a
+/// `Mutex<Counter>`, an `Arc<Mutex<Counter>>` (wrapped interior mutability)
 /// and a `Cfg` resource.
 pub fn world() -> Resources {
     let mut resources = Resources::new();
@@ -47,12 +48,11 @@ pub fn world() -> Resources {
     store.insert(e, V { x: 1.0 });
     resources.insert(store);
     resources.insert(Mutex::new(Counter::default()));
+    resources.insert(Arc::new(Mutex::new(Counter::default())));
     resources.insert(Cfg { k: 2.0 });
     resources
 }
 
-/// Ok(()) — the system ran under forced access checking; Err(msg) — the
-/// declaration panic (`undeclared ...`).
 /// Runs one system under forced access checking, reporting the declaration
 /// panic (if any) instead of unwinding the test.
 pub fn run_enforced<S: System + 'static>(system: S) -> Result<(), String> {

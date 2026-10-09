@@ -51,7 +51,10 @@
 //!   `#[smart_pipeline]` works over `&Resources`-fed functions too. Lane
 //!   patterns include `let Type ident` and let-else `Some(ident)` /
 //!   `Ok(ident)`; lane calls in any expression position count toward the
-//!   access set, but only plain bindings drive loop rewriting.
+//!   access set, but only plain bindings drive loop rewriting. A lane call
+//!   chained directly off `resources.get::<SmartStore>()` counts as well,
+//!   as do calls inside known std macros (`assert!`, `println!`, …); unknown
+//!   macro invocations stay opaque.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -207,17 +210,20 @@ impl LaneCollector {
 
     fn is_store_receiver(&self, receiver: &Expr) -> bool {
         match receiver {
-            Expr::Path(p) => {
-                if let Some(store) = &self.store_param
-                    && p.path.is_ident(store)
-                {
-                    return true;
-                }
-                self.store_aliases
-                    .iter()
-                    .any(|alias| p.path.is_ident(alias))
+            Expr::Path(p) => p
+                .path
+                .get_ident()
+                .is_some_and(|ident| self.is_store_ident(ident)),
+            // `resources.get::<SmartStore>().expect(..).read_lane::<T>()`:
+            // the chain itself is a store receiver (N3). Anything else
+            // (`.len()`, `.map()`, …) ends the chain on purpose.
+            other => {
+                let stripped = Self::strip_wrappers(other);
+                as_method_call(stripped).is_some_and(|mc| {
+                    self.resources_call_type(mc)
+                        .is_some_and(|ty| Self::last_segment(&ty).as_deref() == Some("SmartStore"))
+                })
             }
-            _ => false,
         }
     }
 
@@ -367,8 +373,13 @@ fn lane_call_write(mc: &ExprMethodCall) -> Option<bool> {
 impl LaneCollector {
     /// Registers one `let`: a store alias and/or a rewritable lane binding.
     /// Resource reads themselves are recorded by `visit_expr_method_call`.
-    /// Branchless like `lane_binding`: conditional pushes are `bool::then` /
-    /// `Option::map` chains, so deciding and doing stay in separate steps.
+    /// A plain re-alias (`let s2 = store;`, `&store`, `store.clone()`) also
+    /// registers `s2` as a store alias (N6); anything else using a store
+    /// ident is an escape, reported by `smart_system`, not here.
+    ///
+    /// Stays combinator-shaped on purpose: the IOSP gate flags branching
+    /// statements mixed with calls in one function, so the classifiers below
+    /// stay pure and this one only orchestrates.
     fn handle_local(&mut self, ident: &Ident, init: &Expr) {
         // `let store = resources.get::<SmartStore>().expect(..)`.
         let _ = self
@@ -380,7 +391,102 @@ impl LaneCollector {
                 is_mutable,
             })
         });
+        let _ = self
+            .store_realias_source(init)
+            .map(|_| self.store_aliases.push(ident.clone()));
     }
+
+    /// Whether `ident` is the store parameter or a known store alias.
+    fn is_store_ident(&self, ident: &Ident) -> bool {
+        self.store_param.as_ref() == Some(ident)
+            || self.store_aliases.iter().any(|alias| alias == ident)
+    }
+
+    /// A plain re-alias of a known store ident: `store`, `&store`,
+    /// `&mut store`, `store.clone()`. Returns the aliased store ident.
+    /// Integration: no branching, only the pure shape test plus the
+    /// membership check below.
+    fn store_realias_source(&self, expr: &Expr) -> Option<Ident> {
+        realias_candidate(Self::strip_wrappers(expr))
+            .filter(|ident| self.is_store_ident(ident))
+            .cloned()
+    }
+}
+
+/// Pure shape of a store re-alias target: a bare ident, `&ident`, or
+/// `ident.clone()`. Operation: match and comparisons only, no project calls
+/// (the wrapper stripping and membership check stay with the caller above).
+fn realias_candidate(expr: &Expr) -> Option<&Ident> {
+    match expr {
+        Expr::Path(path) => path.path.get_ident(),
+        Expr::Reference(reference) => match &*reference.expr {
+            Expr::Path(path) => path.path.get_ident(),
+            _ => None,
+        },
+        Expr::MethodCall(mc) if mc.method == "clone" && mc.args.is_empty() => match &*mc.receiver {
+            Expr::Path(path) => path.path.get_ident(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Std macros whose arguments are plain comma-separated expressions, so the
+/// collector can derive accesses from inside them (N1): `assert!`,
+/// `debug_assert*!`, `println!`/`eprintln!`/`format!`/`write!`/`writeln!`,
+/// `panic!`, `dbg!`. Any other macro invocation hides its contents: passing
+/// `resources` or a store ident into one is a compile error in
+/// `smart_system` (newtypes/aliases around `Mutex` are likewise invisible —
+/// declare them explicitly).
+pub(crate) const DERIVABLE_MACROS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "println",
+    "eprintln",
+    "format",
+    "write",
+    "writeln",
+    "panic",
+    "dbg",
+    "unreachable",
+    "unimplemented",
+    "todo",
+];
+
+/// Last segment of a macro path (`assert`, `std::assert` → `assert`).
+pub(crate) fn macro_name(mac: &syn::Macro) -> Option<String> {
+    mac.path.segments.last().map(|s| s.ident.to_string())
+}
+
+/// Parses a macro invocation as comma-separated expressions, if possible.
+pub(crate) fn macro_exprs(
+    mac: &syn::Macro,
+) -> Option<syn::punctuated::Punctuated<Expr, syn::Token![,]>> {
+    mac.parse_body_with(punctuated_exprs).ok()
+}
+
+/// `parse_body_with` needs a higher-ranked function; a closure infers a
+/// concrete lifetime and is rejected, so this stays a free function.
+fn punctuated_exprs(
+    input: syn::parse::ParseStream,
+) -> syn::Result<syn::punctuated::Punctuated<Expr, syn::Token![,]>> {
+    syn::punctuated::Punctuated::parse_terminated(input)
+}
+
+/// Whether the macro tokens mention any of the idents (used to reject
+/// accesses hidden inside opaque macros).
+pub(crate) fn macro_mentions_ident(mac: &syn::Macro, idents: &[&Ident]) -> bool {
+    let tokens = mac.tokens.to_string();
+    idents.iter().any(|ident| {
+        let name = ident.to_string();
+        tokens
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|tok| tok == name)
+    })
 }
 
 impl Visit<'_> for LaneCollector {
@@ -404,6 +510,10 @@ impl Visit<'_> for LaneCollector {
     }
 
     fn visit_local(&mut self, node: &Local) {
+        // Combinator-shaped on purpose (IOSP gate): `binding_ident` covers
+        // `ident`, `Type ident`, `Some(ident)` / `Ok(ident)`; anything else
+        // cannot drive loop rewriting (its lane accesses still count via
+        // `visit_expr_method_call`).
         let _ = node
             .init
             .as_ref()
@@ -416,10 +526,9 @@ impl Visit<'_> for LaneCollector {
         if (node.method == "read_lane" || node.method == "write_lane")
             && self.is_store_receiver(&node.receiver)
         {
-            if let Err(error) = turbofish_type(node, self.macro_name) {
-                self.errors.push(error);
-            } else if let Ok(ty) = turbofish_type(node, self.macro_name) {
-                self.lane_accesses.push((ty, node.method == "write_lane"));
+            match turbofish_type(node, self.macro_name) {
+                Err(error) => self.errors.push(error),
+                Ok(ty) => self.lane_accesses.push((ty, node.method == "write_lane")),
             }
         }
         // Every `resources.get::<T>()` reads a resource, in any context
@@ -428,6 +537,35 @@ impl Visit<'_> for LaneCollector {
             self.resource_reads.push(ty);
         }
         visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &syn::Macro) {
+        // Known std macros hold plain expressions: derive accesses from
+        // inside them (N1) via a sub-collector seeded with the current
+        // store context (parsed expressions are temporaries, so they cannot
+        // be visited with `self` directly). Unknown macros stay opaque;
+        // `smart_system` rejects `resources`/store idents hidden in them,
+        // `smart_pipeline` keeps ignoring them.
+        let known = macro_name(node).is_some_and(|name| DERIVABLE_MACROS.contains(&name.as_str()));
+        if known && let Some(exprs) = macro_exprs(node) {
+            let mut sub = LaneCollector {
+                macro_name: self.macro_name,
+                store_param: self.store_param.clone(),
+                resources_param: self.resources_param.clone(),
+                store_aliases: self.store_aliases.clone(),
+                ..LaneCollector::default()
+            };
+            for expr in &exprs {
+                sub.visit_expr(expr);
+            }
+            // Expression position holds no `let` bindings, so no new lanes
+            // or aliases can appear; only accesses and errors merge back.
+            self.lane_accesses.extend(sub.lane_accesses);
+            self.resource_reads.extend(sub.resource_reads);
+            self.errors.extend(sub.errors);
+            return;
+        }
+        visit::visit_macro(self, node);
     }
 }
 
@@ -838,7 +976,7 @@ impl VisitMut for LoopRewriter<'_> {
 /// Shared emission helpers: error accumulation, sequential-loop warnings,
 /// and the `pipeline_enter` / `pipeline_exit` body wrapper.
 /// Merge errors into one diagnostic (bridge-free core, unit-testable).
-pub(crate) fn combine_errors2(errors: Vec<syn::Error>) -> TokenStream2 {
+pub(crate) fn combine_errors_tokens(errors: Vec<syn::Error>) -> TokenStream2 {
     let mut errors = errors.into_iter();
     let Some(mut combined) = errors.next() else {
         return TokenStream2::new();
@@ -849,19 +987,22 @@ pub(crate) fn combine_errors2(errors: Vec<syn::Error>) -> TokenStream2 {
     combined.to_compile_error()
 }
 
-pub(crate) fn combine_errors(errors: Vec<syn::Error>) -> TokenStream {
-    combine_errors2(errors).into()
-}
-
-/// Emits the deprecated-note warning blocks for loops left sequential.
-pub(crate) fn warning_tokens(warnings: &[String]) -> Vec<TokenStream2> {
+/// Emits the deprecated-note warning blocks for loops left sequential. The
+/// marker struct is named after the macro so the warning points back at the
+/// right attribute (`SmartSystemSequentialLoop` for `smart_system`).
+pub(crate) fn warning_tokens(warnings: &[String], macro_name: &'static str) -> Vec<TokenStream2> {
+    let marker = if macro_name == "#[smart_system]" {
+        format_ident!("SmartSystemSequentialLoop")
+    } else {
+        format_ident!("SmartPipelineSequentialLoop")
+    };
     warnings
         .iter()
         .map(|w| {
             quote! {{
                 #[deprecated(note = #w)]
-                struct SmartPipelineSequentialLoop;
-                let _ = SmartPipelineSequentialLoop;
+                struct #marker;
+                let _ = #marker;
             }}
         })
         .collect()
@@ -934,7 +1075,7 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
     collector.visit_item_fn(&input);
 
     if !collector.errors.is_empty() {
-        return combine_errors(collector.errors);
+        return combine_errors_tokens(collector.errors).into();
     }
 
     let mut rewriter = LoopRewriter {
@@ -946,7 +1087,7 @@ pub fn attribute(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Compile-time warnings via the deprecated-note trick: using a deprecated
     // item emits a warning with the note, visible in the IDE and terminal.
-    let warning_tokens = warning_tokens(&rewriter.warnings);
+    let warning_tokens = warning_tokens(&rewriter.warnings, "#[smart_pipeline]");
 
     let attrs = &input.attrs;
     let vis = &input.vis;
@@ -1225,10 +1366,70 @@ mod collector_unit_tests {
     }
 
     #[test]
+    fn macro_helpers_classify_invocations() {
+        fn invocation(src: &str) -> syn::Macro {
+            match syn::parse_str::<syn::Stmt>(src).expect("stmt parses") {
+                syn::Stmt::Macro(stmt) => stmt.mac,
+                _ => panic!("expected a macro statement"),
+            }
+        }
+        let known = invocation("assert!(resources.get::<Cfg>().is_some());");
+        assert_eq!(macro_name(&known).as_deref(), Some("assert"));
+        let exprs = macro_exprs(&known).expect("known macros parse as exprs");
+        assert_eq!(exprs.len(), 1);
+        let resources: Ident = syn::parse_str("resources").expect("ident");
+        let other: Ident = syn::parse_str("other").expect("ident");
+        assert!(macro_mentions_ident(&known, &[&resources]));
+        assert!(!macro_mentions_ident(&known, &[&other]));
+
+        let unknown = invocation("my_macro!(resources);");
+        assert_eq!(macro_name(&unknown).as_deref(), Some("my_macro"));
+        assert!(macro_mentions_ident(&unknown, &[&resources]));
+        assert!(!macro_mentions_ident(&unknown, &[&other]));
+    }
+
+    #[test]
+    fn realias_candidate_shapes() {
+        assert_eq!(
+            realias_candidate(&parse_expr("store")).unwrap().to_string(),
+            "store"
+        );
+        assert_eq!(
+            realias_candidate(&parse_expr("&store"))
+                .unwrap()
+                .to_string(),
+            "store"
+        );
+        assert_eq!(
+            realias_candidate(&parse_expr("store.clone()"))
+                .unwrap()
+                .to_string(),
+            "store"
+        );
+        assert!(realias_candidate(&parse_expr("store.len()")).is_none());
+        assert!(realias_candidate(&parse_expr("other")).is_some());
+    }
+
+    #[test]
+    fn len_chain_gives_access_but_no_binding() {
+        // `let n = store.read_lane::<V>().unwrap().len()` is a derived value,
+        // not a lane guard: no `LaneBinding` (nothing to rewrite), but the
+        // lane access still counts.
+        let item: ItemFn =
+            syn::parse_str("fn f(store: &SmartStore) { let n = store.read_lane::<V>().unwrap().len(); let _ = n; }")
+                .expect("fn parses");
+        let mut collector = LaneCollector::new("#[smart_pipeline]");
+        collector.visit_item_fn(&item);
+        assert!(collector.errors.is_empty());
+        assert!(collector.lanes.is_empty());
+        assert_eq!(collector.lane_accesses.len(), 1);
+    }
+
+    #[test]
     fn combine_errors_merges_and_empties() {
-        let empty = combine_errors2(Vec::new());
+        let empty = combine_errors_tokens(Vec::new());
         assert!(empty.to_string().is_empty());
-        let err = combine_errors2(vec![
+        let err = combine_errors_tokens(vec![
             syn::Error::new_spanned(syn::parse_str::<Ident>("x").expect("ident"), "first"),
             syn::Error::new_spanned(syn::parse_str::<Ident>("y").expect("ident"), "second"),
         ]);
@@ -1241,10 +1442,12 @@ mod collector_unit_tests {
 
     #[test]
     fn warning_tokens_wrap_each_message() {
-        assert!(warning_tokens(&[]).is_empty());
-        let tokens = warning_tokens(&["left sequential".to_string()]);
+        assert!(warning_tokens(&[], "#[smart_pipeline]").is_empty());
+        let tokens = warning_tokens(&["left sequential".to_string()], "#[smart_system]");
         let rendered: TokenStream2 = tokens.into_iter().collect::<TokenStream2>();
-        assert!(rendered.to_string().contains("left sequential"));
+        let rendered = rendered.to_string();
+        assert!(rendered.contains("left sequential"));
+        assert!(rendered.contains("SmartSystemSequentialLoop"));
     }
 
     #[test]

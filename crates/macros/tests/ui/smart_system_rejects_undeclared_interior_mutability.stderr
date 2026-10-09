@@ -1,4 +1,4 @@
-error: #[smart_system]: resource `std :: sync :: Mutex < Counter >` has interior mutability — declare it with `writes(...)` or `reads(...)`
+error: #[smart_system]: resource `std::sync::Mutex<Counter>` has interior mutability — declare it with `writes(...)` or `reads(...)`
   --> tests/ui/smart_system_rejects_undeclared_interior_mutability.rs:11:16
    |
 11 |         .get::<std::sync::Mutex<Counter>>()

@@ -216,6 +216,35 @@ fn smart_pipeline_over_resources_alias() {
     }
 }
 
+/// A lane off a `resources.get::<SmartStore>()` chain (no alias) counts
+/// toward the access set too.
+#[smart_pipeline]
+fn entry_chain_lane(resources: &ornis_core::Resources) -> usize {
+    resources
+        .get::<SmartStore>()
+        .expect("store")
+        .read_lane::<EntryVel>()
+        .expect("vel")
+        .len()
+}
+
+#[test]
+fn smart_pipeline_chain_lane_in_access_const() {
+    let mut store = SmartStore::new();
+    store.register::<EntryVel>();
+    for _ in 0..3 {
+        let e = store.create_entity();
+        store.insert(e, EntryVel { x: 0.0 });
+    }
+    let mut resources = ornis_core::Resources::new();
+    resources.insert(store);
+    assert_eq!(entry_chain_lane(&resources), 3);
+    assert_eq!(
+        __SMART_PIPELINE_ACCESS_entry_chain_lane,
+        &[("EntryVel", false)]
+    );
+}
+
 #[test]
 fn smart_pipeline_entry_compiles_and_runs() {
     let mut store = SmartStore::new();

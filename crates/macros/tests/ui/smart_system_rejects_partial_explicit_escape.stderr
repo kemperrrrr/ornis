@@ -1,0 +1,5 @@
+error: #[smart_system]: `resources` escapes here; access cannot be derived — declare it with `reads(...)`/`writes(...)`
+  --> tests/ui/smart_system_rejects_partial_explicit_escape.rs:25:24
+   |
+25 |     let _ = cfg_helper(resources);
+   |                        ^^^^^^^^^

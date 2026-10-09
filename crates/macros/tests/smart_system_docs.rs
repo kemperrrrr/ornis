@@ -1,5 +1,5 @@
-//! Docs probe (REVIEW-smart_system.md item 7): generated `pub` items carry
-//! documentation, so `#[smart_system]` is usable under `#![deny(missing_docs)]`.
+//! Docs probe: generated `pub` items carry documentation, so
+//! `#[smart_system]` is usable under `#![deny(missing_docs)]`.
 
 #![deny(missing_docs)]
 
