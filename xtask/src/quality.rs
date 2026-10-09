@@ -243,6 +243,346 @@ impl<'a> StageList<'a> {
     }
 }
 
+/// Strict rustqual ratchet comparator (RAT-5).
+///
+/// The gate compares `baseline.json` against the fresh
+/// `rustqual --save-baseline` output and FAILs on ANY regression:
+/// lower `quality_score`/`iosp_score`, a higher count in ANY category
+/// from [`COUNT_CATEGORIES`], or newly added findings by identity
+/// (`file` + `name` from `violation_details`, line ignored as noise).
+/// Totals alone are not enough: fixing 5 findings while adding 5 new
+/// ones keeps `total_findings` flat but still FAILs via the identity set.
+///
+/// A missing key or an unparsable report is a hard FAIL (never 0-vs-0
+/// PASS): [`compare_rustqual_reports`] returns `Err` with a message
+/// naming the offending key/side.
+///
+/// Improvement (strictly better with no regression) is PASS, but the
+/// outcome sets `baseline_stale = true`: the baseline must then be
+/// refreshed (`rustqual --save-baseline baseline.json`) and may only
+/// move down — any committed baseline bump re-FAILs against the old
+/// one through this same comparator, which is what makes it a ratchet.
+const RATCHET_EPS: f64 = 1e-9;
+
+/// Cap on stored identity-diff samples per side (the reason line shows fewer).
+const IDENTITY_DIFF_CAP: usize = 11;
+/// Findings shown inline in a regression reason.
+const REASON_SAMPLE_LEN: usize = 3;
+/// New findings printed in the stage log on FAIL.
+const LOGGED_NEW_FINDINGS: usize = 5;
+
+/// Count categories under ratchet. Every key must exist in BOTH reports;
+/// absence is `Err`, not zero. `total`/`version` are excluded (inventory,
+/// not findings); scores are handled as floats separately.
+const COUNT_CATEGORIES: &[&str] = &[
+    "violations",
+    "total_findings",
+    "complexity_warnings",
+    "magic_number_warnings",
+    "nesting_depth_warnings",
+    "function_length_warnings",
+    "unsafe_warnings",
+    "error_handling_warnings",
+    "duplicate_groups",
+    "dead_code_warnings",
+    "dead_type_warnings",
+    "fragment_groups",
+    "boilerplate_warnings",
+    "srp_struct_warnings",
+    "srp_module_warnings",
+    "wildcard_import_warnings",
+    "sdp_violations",
+    "coupling_warnings",
+    "coupling_cycles",
+    "tq_no_assertion_warnings",
+    "tq_no_sut_warnings",
+    "tq_untested_warnings",
+    "tq_uncovered_warnings",
+    "tq_untested_logic_warnings",
+    "structural_srp_warnings",
+    "structural_coupling_warnings",
+];
+
+/// Outcome of [`compare_rustqual_reports`] on successfully parsed inputs.
+#[derive(Debug)]
+struct RatchetOutcome {
+    /// Non-empty when the gate must FAIL.
+    regressed_reasons: Vec<String>,
+    /// True when at least one metric strictly improved and nothing regressed.
+    baseline_stale: bool,
+    /// Human-readable improvement lines (for the "update baseline" hint).
+    improvement_notes: Vec<String>,
+    /// Findings identity diff (file, name); empty when details absent.
+    added_findings: Vec<FindingId>,
+    removed_findings: Vec<FindingId>,
+    base_quality: f64,
+    cur_quality: f64,
+    base_iosp: f64,
+    cur_iosp: f64,
+}
+
+/// Parse one rustqual report; invalid JSON is an error naming the side.
+fn parse_rustqual_report(side: &str, text: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(text).map_err(|e| format!("{side} rustqual report is not valid JSON: {e}"))
+}
+
+/// Require a float key; missing/wrong-typed keys are errors, never zero.
+fn require_f64(report: &serde_json::Value, side: &str, key: &str) -> Result<f64, String> {
+    report
+        .get(key)
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| format!("{side} rustqual report: missing or non-numeric key `{key}`"))
+}
+
+/// Require a count key; missing/wrong-typed keys are errors, never zero.
+fn require_u64(report: &serde_json::Value, side: &str, key: &str) -> Result<u64, String> {
+    report
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| format!("{side} rustqual report: missing or non-integer key `{key}`"))
+}
+
+/// Identity set of findings as (file, name) pairs; `None` when the
+/// report carries no `violation_details` array (identity check skipped).
+fn finding_identity_set(
+    report: &serde_json::Value,
+) -> Option<std::collections::BTreeSet<(String, String)>> {
+    let details = report.get("violation_details")?.as_array()?;
+    let mut set = std::collections::BTreeSet::new();
+    for item in details {
+        let file = item.get("file")?.as_str()?.to_string();
+        let name = item.get("name")?.as_str()?.to_string();
+        set.insert((file, name));
+    }
+    Some(set)
+}
+
+/// Compare one score (higher is better): regression or improvement notes.
+fn compare_score(
+    base: f64,
+    cur: f64,
+    name: &str,
+    regressed: &mut Vec<String>,
+    improved: &mut Vec<String>,
+) {
+    if cur + RATCHET_EPS < base {
+        regressed.push(format!("{name} {base:.4}→{cur:.4}"));
+    } else if cur > base + RATCHET_EPS {
+        improved.push(format!("{name} {base:.4}→{cur:.4}"));
+    }
+}
+
+/// Compare every count category; any increase is a regression.
+fn compare_counts(
+    base: &serde_json::Value,
+    cur: &serde_json::Value,
+    regressed: &mut Vec<String>,
+    improved: &mut Vec<String>,
+) -> Result<(), String> {
+    for key in COUNT_CATEGORIES {
+        let b = require_u64(base, "baseline", key)?;
+        let c = require_u64(cur, "current", key)?;
+        if c > b {
+            regressed.push(format!("{key} {b}→{c}"));
+        } else if c < b {
+            improved.push(format!("{key} {b}→{c}"));
+        }
+    }
+    Ok(())
+}
+
+/// One finding identity: (file, rule name). Line numbers are ignored.
+type FindingId = (String, String);
+
+/// Diff findings by identity; any addition is a regression even when
+/// totals are flat. Returns (added, removed) samples.
+fn diff_findings(
+    base: &serde_json::Value,
+    cur: &serde_json::Value,
+    regressed: &mut Vec<String>,
+) -> (Vec<FindingId>, Vec<FindingId>) {
+    let (mut added, mut removed) = (Vec::new(), Vec::new());
+    let Some(b) = finding_identity_set(base) else {
+        return (added, removed);
+    };
+    let Some(c) = finding_identity_set(cur) else {
+        return (added, removed);
+    };
+    for f in c.difference(&b).take(IDENTITY_DIFF_CAP) {
+        added.push(f.clone());
+    }
+    for f in b.difference(&c).take(IDENTITY_DIFF_CAP) {
+        removed.push(f.clone());
+    }
+    let added_total = c.difference(&b).count();
+    if added_total > 0 {
+        let mut sample = added
+            .iter()
+            .take(REASON_SAMPLE_LEN)
+            .map(|(f, n)| format!("{f}::{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if added_total > added.len() {
+            sample.push_str(", …");
+        }
+        regressed.push(format!("new findings +{added_total} ({sample})"));
+    }
+    (added, removed)
+}
+
+/// Compare two raw rustqual JSON reports.
+///
+/// # Errors
+/// Returns `Err` when either side is not valid JSON or lacks a required
+/// key — the caller must treat that as gate FAIL with the message.
+fn compare_rustqual_reports(base_s: &str, cur_s: &str) -> Result<RatchetOutcome, String> {
+    let base = parse_rustqual_report("baseline", base_s)?;
+    let cur = parse_rustqual_report("current", cur_s)?;
+
+    let base_q = require_f64(&base, "baseline", "quality_score")?;
+    let cur_q = require_f64(&cur, "current", "quality_score")?;
+    let base_iosp = require_f64(&base, "baseline", "iosp_score")?;
+    let cur_iosp = require_f64(&cur, "current", "iosp_score")?;
+
+    let mut regressed_reasons = Vec::new();
+    let mut improvement_notes = Vec::new();
+
+    compare_score(
+        base_q,
+        cur_q,
+        "quality_score",
+        &mut regressed_reasons,
+        &mut improvement_notes,
+    );
+    compare_score(
+        base_iosp,
+        cur_iosp,
+        "iosp_score",
+        &mut regressed_reasons,
+        &mut improvement_notes,
+    );
+    compare_counts(&base, &cur, &mut regressed_reasons, &mut improvement_notes)?;
+
+    // Findings identity: catches the "fix 5, add 5" swap that keeps
+    // totals flat. Line numbers are ignored (shifts are noise).
+    let (added_findings, removed_findings) = diff_findings(&base, &cur, &mut regressed_reasons);
+
+    let baseline_stale = regressed_reasons.is_empty() && !improvement_notes.is_empty();
+    Ok(RatchetOutcome {
+        regressed_reasons,
+        baseline_stale,
+        improvement_notes,
+        added_findings,
+        removed_findings,
+        base_quality: base_q,
+        cur_quality: cur_q,
+        base_iosp,
+        cur_iosp,
+    })
+}
+
+/// One stage-table row.
+fn stage_result(name: &str, status: Status, note: String) -> StageResult {
+    StageResult {
+        name: name.into(),
+        status,
+        note,
+    }
+}
+
+/// Print the comparison table for a parsed ratchet outcome.
+fn print_ratchet_comparison(o: &RatchetOutcome) {
+    eprintln!();
+    eprintln!("═══ Baseline Comparison (xtask ratchet) ═══");
+    let q_mark = if o.cur_quality + RATCHET_EPS < o.base_quality {
+        format!("(↓ {:.1}%)", (o.base_quality - o.cur_quality) * 100.0)
+    } else if o.cur_quality > o.base_quality + RATCHET_EPS {
+        format!("(↑ {:.1}%)", (o.cur_quality - o.base_quality) * 100.0)
+    } else {
+        "(unchanged)".to_string()
+    };
+    eprintln!(
+        "  Quality: {:.1}% → {:.1}% {}",
+        o.base_quality * 100.0,
+        o.cur_quality * 100.0,
+        q_mark
+    );
+    let iosp_mark = if o
+        .regressed_reasons
+        .iter()
+        .any(|r| r.starts_with("iosp_score"))
+    {
+        "↓"
+    } else {
+        ""
+    };
+    eprintln!(
+        "  IOSP: {:.1}% → {:.1}% {}",
+        o.base_iosp * 100.0,
+        o.cur_iosp * 100.0,
+        iosp_mark
+    );
+    for r in &o.regressed_reasons {
+        eprintln!("  regressed: {r}");
+    }
+    for (f, n) in o.added_findings.iter().take(LOGGED_NEW_FINDINGS) {
+        eprintln!("  new finding: {f}::{n}");
+    }
+}
+
+/// Record PASS/FAIL for a parsed ratchet outcome.
+fn record_ratchet_verdict(stages: &mut StageList<'_>, name: &str, cur_s: &str, o: RatchetOutcome) {
+    if !o.regressed_reasons.is_empty() {
+        if ci_annotations() {
+            diagnostics::baseline(cur_s);
+            diagnostics::reference_rustqual(stages.root);
+        }
+        let note = o.regressed_reasons.join(", ");
+        eprintln!("── {name}: FAIL (ratchet regression: {note}) ──");
+        if ci_annotations() {
+            annotate(
+                format!("quality-{name}"),
+                &format!("ratchet regression: {note}"),
+            );
+        }
+        stages.results.push(stage_result(name, Status::Fail, note));
+        return;
+    }
+    if o.baseline_stale {
+        eprintln!(
+            "  improved: {} — refresh baseline (`rustqual --save-baseline baseline.json`; values may only decrease)",
+            o.improvement_notes.join(", ")
+        );
+    }
+    if !o.removed_findings.is_empty() {
+        eprintln!("  resolved findings: −{}", o.removed_findings.len());
+    }
+    eprintln!("── {name}: PASS (ratchet: equal or improved) ──");
+    stages
+        .results
+        .push(stage_result(name, Status::Pass, String::new()));
+}
+
+/// Record the ratchet verdict for the rustqual stage: FAIL with reasons
+/// on any regression (or on an unreadable/corrupt report), PASS with a
+/// baseline-refresh hint when strictly improved.
+fn finish_rustqual_stage(stages: &mut StageList<'_>, name: &str, base_s: &str, cur_s: &str) {
+    match compare_rustqual_reports(base_s, cur_s) {
+        Ok(o) => {
+            print_ratchet_comparison(&o);
+            record_ratchet_verdict(stages, name, cur_s, o);
+        }
+        Err(msg) => {
+            // Corrupt report or missing key: hard FAIL, never 0-vs-0 PASS.
+            eprintln!("── {name}: FAIL ({msg}) ──");
+            if ci_annotations() {
+                annotate(format!("quality-{name}"), &msg);
+            }
+            stages.results.push(stage_result(name, Status::Fail, msg));
+        }
+    }
+}
+
 fn rustqual_stage(stages: &mut StageList<'_>) {
     if !stages.enabled("rustqual") {
         return;
@@ -306,114 +646,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
             let cur_str = std::fs::read_to_string(&tmp_path);
             let base_str = std::fs::read_to_string(&baseline_path);
             match (cur_str, base_str) {
-                (Ok(cur_s), Ok(base_s)) => {
-                    let cur_v: serde_json::Value =
-                        serde_json::from_str(&cur_s).unwrap_or(serde_json::Value::Null);
-                    let base_v: serde_json::Value =
-                        serde_json::from_str(&base_s).unwrap_or(serde_json::Value::Null);
-                    let cur_q = cur_v
-                        .get("quality_score")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    let base_q = base_v
-                        .get("quality_score")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    let cur_f = cur_v
-                        .get("total_findings")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let base_f = base_v
-                        .get("total_findings")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cur_vio = cur_v
-                        .get("violations")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let base_vio = base_v
-                        .get("violations")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let cur_iosp = cur_v
-                        .get("iosp_score")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    let base_iosp = base_v
-                        .get("iosp_score")
-                        .and_then(|v| v.as_f64())
-                        .unwrap_or(0.0);
-                    const EPS: f64 = 1e-9;
-                    let quality_regressed = cur_q + EPS < base_q;
-                    let findings_regressed = cur_f > base_f;
-                    let violations_regressed = cur_vio > base_vio;
-                    let iosp_regressed = cur_iosp + EPS < base_iosp;
-                    eprintln!();
-                    eprintln!("═══ Baseline Comparison (xtask ratchet) ═══");
-                    eprintln!(
-                        "  Quality: {:.1}% → {:.1}% {}",
-                        base_q * 100.0,
-                        cur_q * 100.0,
-                        if quality_regressed {
-                            format!("(↓ {:.1}%)", (base_q - cur_q) * 100.0)
-                        } else if cur_q > base_q + EPS {
-                            format!("(↑ {:.1}%)", (cur_q - base_q) * 100.0)
-                        } else {
-                            "(unchanged)".to_string()
-                        }
-                    );
-                    eprintln!(
-                        "  Findings:   {base_f} → {cur_f} ({:+})",
-                        cur_f as i64 - base_f as i64
-                    );
-                    eprintln!(
-                        "  Violations: {base_vio} → {cur_vio} ({:+})",
-                        cur_vio as i64 - base_vio as i64
-                    );
-                    eprintln!(
-                        "  IOSP: {:.1}% → {:.1}% {}",
-                        base_iosp * 100.0,
-                        cur_iosp * 100.0,
-                        if iosp_regressed { "↓" } else { "" }
-                    );
-                    let regressed = quality_regressed || findings_regressed || violations_regressed;
-                    if regressed {
-                        if ci_annotations() {
-                            diagnostics::baseline(&cur_v.to_string());
-                            diagnostics::reference_rustqual(stages.root);
-                        }
-                        let mut reasons = Vec::new();
-                        if quality_regressed {
-                            reasons.push(format!("quality {base_q:.4}→{cur_q:.4}"));
-                        }
-                        if violations_regressed {
-                            reasons.push(format!("violations {base_vio}→{cur_vio}"));
-                        }
-                        if findings_regressed {
-                            reasons.push(format!("findings {base_f}→{cur_f}"));
-                        }
-                        let note = reasons.join(", ");
-                        eprintln!("── {name}: FAIL (ratchet regression: {note}) ──");
-                        if ci_annotations() {
-                            annotate(
-                                format!("quality-{name}"),
-                                &format!("ratchet regression: {note}"),
-                            );
-                        }
-                        stages.results.push(StageResult {
-                            name: name.into(),
-                            status: Status::Fail,
-                            note,
-                        });
-                    } else {
-                        eprintln!("── {name}: PASS (ratchet: equal or improved) ──");
-                        stages.results.push(StageResult {
-                            name: name.into(),
-                            status: Status::Pass,
-                            note: String::new(),
-                        });
-                    }
-                }
+                (Ok(cur_s), Ok(base_s)) => finish_rustqual_stage(stages, name, &base_s, &cur_s),
                 (Err(e), _) | (_, Err(e)) => {
                     let note = format!("read baseline/cur json: {e}");
                     eprintln!("── {name}: FAIL ({note}) ──");
@@ -1353,4 +1586,196 @@ fn nightly_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod ratchet_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn report_with(overrides: serde_json::Value) -> String {
+        let mut base = json!({
+            "quality_score": 0.8,
+            "iosp_score": 0.9,
+            "violations": 10,
+            "total_findings": 100,
+            "complexity_warnings": 5,
+            "magic_number_warnings": 5,
+            "nesting_depth_warnings": 1,
+            "function_length_warnings": 5,
+            "unsafe_warnings": 2,
+            "error_handling_warnings": 2,
+            "duplicate_groups": 3,
+            "dead_code_warnings": 10,
+            "dead_type_warnings": 1,
+            "fragment_groups": 4,
+            "boilerplate_warnings": 6,
+            "srp_struct_warnings": 2,
+            "srp_module_warnings": 3,
+            "wildcard_import_warnings": 1,
+            "sdp_violations": 0,
+            "coupling_warnings": 0,
+            "coupling_cycles": 0,
+            "tq_no_assertion_warnings": 0,
+            "tq_no_sut_warnings": 1,
+            "tq_untested_warnings": 5,
+            "tq_uncovered_warnings": 0,
+            "tq_untested_logic_warnings": 0,
+            "structural_srp_warnings": 2,
+            "structural_coupling_warnings": 1,
+            "violation_details": [
+                {"name": "foo", "file": "a.rs", "line": 1},
+                {"name": "bar", "file": "b.rs", "line": 2}
+            ]
+        });
+        if let (Some(map), Some(ov)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in ov {
+                map.insert(k.clone(), v.clone());
+            }
+        }
+        base.to_string()
+    }
+
+    fn base_report() -> String {
+        report_with(json!({}))
+    }
+
+    #[test]
+    fn equal_is_pass_and_not_stale() {
+        let b = base_report();
+        let o = compare_rustqual_reports(&b, &b).expect("equal must parse");
+        assert!(o.regressed_reasons.is_empty());
+        assert!(!o.baseline_stale);
+    }
+
+    #[test]
+    fn iosp_drop_is_regression() {
+        let b = base_report();
+        let c = report_with(json!({"iosp_score": 0.5}));
+        let o = compare_rustqual_reports(&b, &c).expect("must parse");
+        assert!(o.regressed_reasons.iter().any(|r| r.contains("iosp_score")));
+    }
+
+    #[test]
+    fn quality_drop_is_regression() {
+        let b = base_report();
+        let c = report_with(json!({"quality_score": 0.1}));
+        let o = compare_rustqual_reports(&b, &c).expect("must parse");
+        assert!(o
+            .regressed_reasons
+            .iter()
+            .any(|r| r.contains("quality_score")));
+    }
+
+    #[test]
+    fn category_bump_is_regression_even_when_total_flat() {
+        // unsafe +1, dead_code -1: total_findings overridden flat, but the
+        // per-category ratchet must still catch the unsafe increase.
+        let b = base_report();
+        let c = report_with(json!({
+            "unsafe_warnings": 3,
+            "dead_code_warnings": 9,
+            "total_findings": 100,
+            "violation_details": [
+                {"name": "foo", "file": "a.rs", "line": 1},
+                {"name": "bar", "file": "b.rs", "line": 2}
+            ]
+        }));
+        let o = compare_rustqual_reports(&b, &c).expect("must parse");
+        assert!(o
+            .regressed_reasons
+            .iter()
+            .any(|r| r.contains("unsafe_warnings")));
+    }
+
+    #[test]
+    fn swapped_findings_with_flat_totals_is_regression() {
+        // Same totals, one finding replaced: identity set catches the swap.
+        let b = base_report();
+        let c = report_with(json!({
+            "violation_details": [
+                {"name": "foo", "file": "a.rs", "line": 1},
+                {"name": "NEW", "file": "c.rs", "line": 9}
+            ]
+        }));
+        let o = compare_rustqual_reports(&b, &c).expect("must parse");
+        assert!(o
+            .regressed_reasons
+            .iter()
+            .any(|r| r.contains("new findings")));
+        assert_eq!(
+            o.added_findings,
+            vec![("c.rs".to_string(), "NEW".to_string())]
+        );
+    }
+
+    #[test]
+    fn missing_key_is_fail_not_zero() {
+        let mut v: serde_json::Value = serde_json::from_str(&base_report()).unwrap();
+        v.as_object_mut().unwrap().remove("unsafe_warnings");
+        let err = compare_rustqual_reports(&base_report(), &v.to_string()).unwrap_err();
+        assert!(err.contains("unsafe_warnings"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn invalid_json_is_fail() {
+        let err = compare_rustqual_reports("{not json", &base_report()).unwrap_err();
+        assert!(err.contains("not valid JSON"), "unexpected: {err}");
+        let err2 = compare_rustqual_reports(&base_report(), "null").unwrap_err();
+        assert!(err2.contains("missing"), "unexpected: {err2}");
+    }
+
+    #[test]
+    fn improvement_marks_baseline_stale() {
+        let b = base_report();
+        let c = report_with(json!({
+            "dead_code_warnings": 9,
+            "total_findings": 99,
+            "violation_details": [{"name": "foo", "file": "a.rs", "line": 1}]
+        }));
+        let o = compare_rustqual_reports(&b, &c).expect("must parse");
+        assert!(o.regressed_reasons.is_empty());
+        assert!(o.baseline_stale);
+        assert!(!o.improvement_notes.is_empty());
+    }
+
+    #[test]
+    fn epsilon_equal_scores_pass() {
+        let b = base_report();
+        let c = report_with(json!({"quality_score": 0.8 + 5e-10, "iosp_score": 0.9 - 5e-10}));
+        let o = compare_rustqual_reports(&b, &c).expect("must parse");
+        assert!(o.regressed_reasons.is_empty());
+    }
+
+    fn test_stages() -> StageList<'static> {
+        StageList::new(std::path::Path::new("."), 1, None)
+    }
+
+    #[test]
+    fn stage_records_pass_on_equal() {
+        let b = base_report();
+        let mut stages = test_stages();
+        finish_rustqual_stage(&mut stages, "rustqual", &b, &b);
+        assert_eq!(stages.results.len(), 1);
+        assert_eq!(stages.results[0].status, Status::Pass);
+    }
+
+    #[test]
+    fn stage_records_fail_on_regression() {
+        let b = base_report();
+        let c = report_with(json!({"iosp_score": 0.1}));
+        let mut stages = test_stages();
+        finish_rustqual_stage(&mut stages, "rustqual", &b, &c);
+        assert_eq!(stages.results.len(), 1);
+        assert_eq!(stages.results[0].status, Status::Fail);
+        assert!(stages.results[0].note.contains("iosp_score"));
+    }
+
+    #[test]
+    fn stage_records_fail_on_corrupt_report() {
+        let mut stages = test_stages();
+        finish_rustqual_stage(&mut stages, "rustqual", "{broken", &base_report());
+        assert_eq!(stages.results[0].status, Status::Fail);
+        assert!(stages.results[0].note.contains("not valid JSON"));
+    }
 }
