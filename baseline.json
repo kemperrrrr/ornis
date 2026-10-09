@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.5138985383653337,
-  "iosp_score": 0.911797627042758,
+  "quality_score": 0.5192441812025383,
+  "iosp_score": 0.9126192060323797,
   "violations": 394,
-  "total": 7005,
-  "complexity_warnings": 74,
+  "total": 7054,
+  "complexity_warnings": 73,
   "magic_number_warnings": 131,
   "nesting_depth_warnings": 19,
   "function_length_warnings": 127,
   "unsafe_warnings": 11,
   "error_handling_warnings": 21,
-  "duplicate_groups": 91,
-  "dead_code_warnings": 421,
+  "duplicate_groups": 89,
+  "dead_code_warnings": 422,
   "dead_type_warnings": 3,
-  "fragment_groups": 676,
-  "boilerplate_warnings": 325,
+  "fragment_groups": 666,
+  "boilerplate_warnings": 326,
   "srp_struct_warnings": 23,
   "srp_module_warnings": 100,
   "wildcard_import_warnings": 49,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 8,
-  "tq_untested_warnings": 154,
+  "tq_untested_warnings": 151,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 24,
-  "total_findings": 2865,
+  "total_findings": 2852,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -78,7 +78,7 @@
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
-      "line": 313
+      "line": 315
     },
     {
       "name": "PhysicsRuntime::sync_out",
@@ -303,7 +303,7 @@
     {
       "name": "OrbitCamera::position",
       "file": "crates/render/src/camera.rs",
-      "line": 101
+      "line": 138
     },
     {
       "name": "blend_vertex_reference",
@@ -1953,17 +1953,17 @@
     {
       "name": "LightDesc::point_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 707
+      "line": 711
     },
     {
       "name": "LightDesc::spot_units",
       "file": "crates/assets/src/scene.rs",
-      "line": 734
+      "line": 738
     },
     {
-      "name": "CameraDesc::try_new_units",
+      "name": "CameraDesc::validated_framing",
       "file": "crates/assets/src/scene.rs",
-      "line": 836
+      "line": 866
     },
     {
       "name": "AssetError::from",
@@ -1993,7 +1993,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 773
+      "line": 1038
     },
     {
       "name": "showcase_engine",
