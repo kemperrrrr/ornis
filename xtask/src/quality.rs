@@ -52,7 +52,7 @@ struct StageResult {
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
 /// sharding; the default (no `--only`) runs everything implied by the
 /// level flags, exactly as before.
-const LEVEL1_IDS: [&str; 12] = [
+const LEVEL1_IDS: [&str; 14] = [
     "fmt",
     "clippy-physics",
     "test-physics",
@@ -65,9 +65,11 @@ const LEVEL1_IDS: [&str; 12] = [
     "deny",
     "outdated",
     "upgrade-check",
+    "machete",
+    "typos",
 ];
 const CI_IDS: [&str; 2] = ["doc", "wasm-check"];
-const FULL_IDS: [&str; 2] = ["coverage", "bench-compile"];
+const FULL_IDS: [&str; 3] = ["coverage", "bench-compile", "hack-check"];
 const BENCH_IDS: [&str; 1] = ["criterion"];
 const DEEP_IDS: [&str; 3] = ["mutants", "fuzz-scene", "fuzz-editor"];
 
@@ -929,6 +931,53 @@ fn level1(stages: &mut StageList<'_>) {
     // dependencies_upgrade_stage); lagging majors are fixed with
     // `cargo upgrade --incompatible allow`.
     dependencies_upgrade_stage(stages);
+
+    // Unused-dependency gate (cargo-machete, pinned 0.9.2): FAILs on any
+    // dependency no Rust target uses. False positives are allow-listed in
+    // the owning crate via `[package.metadata.cargo-machete] ignored`,
+    // never by deleting the stage.
+    if stages.enabled("machete") {
+        if binary_exists("cargo-machete") {
+            // Direct binary, never `cargo machete`: cargo's
+            // external-subcommand forwarding behaves differently for a
+            // `cargo` nested under `cargo run` (the gate's own
+            // `cargo xtask` invocation), and the bare binary is immune.
+            stages.run(
+                "machete",
+                "machete",
+                "cargo-machete",
+                cmd(stages.root, "cargo-machete", &[]),
+                false,
+            );
+        } else {
+            stages.skip(
+                "machete",
+                "machete",
+                &format!("cargo-machete not installed — Install:  cargo install cargo-machete --version {CARGO_MACHETE_VERSION} --locked"),
+            );
+        }
+    }
+
+    // Spell-check gate (typos, pinned 1.51.1, config `_typos.toml`):
+    // domain terms live in `[default.extend-words]`, vendored code and
+    // canonical snapshots in `[files] extend-exclude`.
+    if stages.enabled("typos") {
+        if binary_exists("typos") {
+            stages.run(
+                "typos",
+                "typos",
+                "typos",
+                cmd(stages.root, "typos", &[]),
+                false,
+            );
+        } else {
+            stages.skip(
+                "typos",
+                "typos",
+                &format!("typos not installed — Install:  cargo install typos-cli --version {TYPOS_VERSION} --locked"),
+            );
+        }
+    }
 }
 
 fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
@@ -1084,6 +1133,11 @@ fn is_version_string(s: &str) -> bool {
         _ => false,
     }
 }
+/// Pinned third-party gate tools (single source of truth for the version
+/// strings; CI mirrors them via `taiki-e/install-action` `@version` pins).
+const CARGO_HACK_VERSION: &str = "0.6.45";
+const CARGO_MACHETE_VERSION: &str = "0.9.2";
+const TYPOS_VERSION: &str = "1.51.1";
 
 /// ── Level 2 (--full): coverage + bench compile check ──────
 fn full_stages(stages: &mut StageList<'_>) {
@@ -1108,6 +1162,40 @@ fn full_stages(stages: &mut StageList<'_>) {
         stages.cargo(&["bench", "--workspace", "--no-run"]),
         false,
     );
+
+    // Feature-matrix gate (cargo-hack, pinned 0.6.45): every feature of
+    // every workspace crate must check without dev-deps (catches
+    // `#[cfg(feature)]` code that only compiles under default features).
+    // Slow (one `cargo check` per feature) — `--full` / nightly only.
+    // Direct `cargo-hack` binary (same nested-dispatch reason as above;
+    // the binary takes the `hack` subcommand explicitly).
+    if stages.enabled("hack-check") {
+        if binary_exists("cargo-hack") {
+            stages.run(
+                "hack-check",
+                "hack (feature matrix)",
+                "cargo hack check --workspace --each-feature --no-dev-deps",
+                cmd(
+                    stages.root,
+                    "cargo-hack",
+                    &[
+                        "hack",
+                        "check",
+                        "--workspace",
+                        "--each-feature",
+                        "--no-dev-deps",
+                    ],
+                ),
+                false,
+            );
+        } else {
+            stages.skip(
+                "hack-check",
+                "hack (feature matrix)",
+                &format!("cargo-hack not installed — Install:  cargo install cargo-hack --version {CARGO_HACK_VERSION} --locked"),
+            );
+        }
+    }
 }
 
 fn bench_stage(stages: &mut StageList<'_>) {
@@ -1309,9 +1397,9 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, determinism-fast, clippy, rustqual, smoke, test, audit, deny, outdated, upgrade-check\n  \
+         cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, determinism-fast, clippy, rustqual, smoke, test, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
-         cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html) and bench compile-check\n  \
+         cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n  \
@@ -1322,7 +1410,7 @@ fn quality_usage(code: i32) -> ! {
           In strict mode (--ci or GITHUB_ACTIONS) a SKIP fails the gate unless\n  \
           excused via --allow-skip. Locally skips only print a trailing warning.\n\
           \n\
-          External tools (audit, deny, outdated, llvm-cov, rustqual) are optional:\n  \
+          External tools (audit, deny, outdated, upgrade-check, llvm-cov, rustqual, hack, machete, typos) are optional:\n  \
           missing → SKIP with install hint. rustqual is MIT.\n  \
           rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
           Baseline: rustqual --save-baseline baseline.json; the gate re-runs rustqual\n  \
@@ -1754,6 +1842,12 @@ fn install_hint(sub: &str) -> String {
         "deny" => "Install:  cargo install cargo-deny --locked".to_string(),
         "outdated" => "Install:  cargo install cargo-outdated --locked".to_string(),
         "upgrade" => "Install:  cargo install cargo-edit --locked".to_string(),
+        "hack" => {
+            format!("Install:  cargo install cargo-hack --version {CARGO_HACK_VERSION} --locked")
+        }
+        "machete" => format!(
+            "Install:  cargo install cargo-machete --version {CARGO_MACHETE_VERSION} --locked"
+        ),
         "llvm-cov" => "Install:  cargo install cargo-llvm-cov --locked\n\
              and the component:  rustup component add llvm-tools-preview"
             .to_string(),

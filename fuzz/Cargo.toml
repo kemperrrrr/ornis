@@ -15,7 +15,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 editor-backend = { path = "../crates/editor-backend" }
-ornis-render = { path = "../crates/render" }
+# scene_ron target parses `ornis_assets::scene::Scene::from_ron` (RON only,
+# so default features stay off — keeps the nightly fuzz build light).
+ornis-assets = { path = "../crates/assets", default-features = false }
 ornis-materialx = { path = "../crates/materialx" }
 
 # Prevents "multiple workspace roots" from the root workspace.

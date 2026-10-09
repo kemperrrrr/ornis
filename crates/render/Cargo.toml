@@ -12,7 +12,6 @@ bytemuck = { version = "1", features = ["derive"] }
 glam = "0.34"
 ornis-assets = { path = "../assets", version = "0.1.0" }
 ornis-core = { path = "../core", version = "0.1.0" }
-ornis-gameplay = { path = "../gameplay", version = "0.1.0" }
 # Phase C (animation-design §2.3): extraction reads the `SkinnedMesh` lane to
 # publish pre-skinned world vertices (`CustomMeshEntry.skinned`). One-way
 # edge — `ornis-animation` never depends on `ornis-render`.

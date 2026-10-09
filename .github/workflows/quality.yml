@@ -39,7 +39,7 @@ jobs:
   # is the slowest shard, not the sum of all 13 stages.
   #
   # Shard map (stage ids):
-  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual (no compilation)
+  #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos (no compilation)
   #   clippy — clippy-physics, clippy
   #   test   — test (workspace)
   #   gpu    — test-physics, determinism-fast, smoke (all need lavapipe;
@@ -68,9 +68,11 @@ jobs:
       # the upstream 1.8.2 lacks.
       # Tool versions are pinned explicitly so CI stays reproducible
       # (install-action would otherwise float to latest on every run).
+      # cargo-machete (unused deps) and typos (spell-check, `_typos.toml`)
+      # are the RAT-9 gate tools.
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
-          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-outdated@0.19.0
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2,cargo-outdated@0.19.0,cargo-machete@0.9.2,typos@1.51.1
 
       # rust-cache BEFORE the fork build: otherwise the two rustqual
       # compile steps below run uncached on every fast-shard run.
@@ -96,7 +98,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual 2>&1 | tee target/quality-fast.log
+          cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos 2>&1 | tee target/quality-fast.log
 
       - name: Upload shard log
         if: always()

@@ -57,15 +57,8 @@ ornis-physics = { path = "crates/physics", version = "0.1.0" }
 ornis-render = { path = "crates/render", version = "0.1.0" }
 ornis-app = { path = "crates/app", version = "0.1.0" }
 ornis-audio = { path = "crates/audio", version = "0.1.0" }
-ornis-gltf = { path = "crates/gltf", version = "0.1.0" }
 ornis-runner = { path = "crates/runner", version = "0.1.0" }
 editor-backend = { path = "crates/editor-backend", version = "0.1.0" }
-wgpu = "30"
-winit = "0.30"
-pollster = "1.0"
-tiny_http = "0.12"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 crossbeam-channel = "0.5"
 glam = "0.34"
 
