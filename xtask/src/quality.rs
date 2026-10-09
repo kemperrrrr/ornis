@@ -3,7 +3,9 @@
 //!
 //! Stage architecture: each stage prints a header and PASS/FAIL/SKIP/INFO;
 //! the run continues after a failed stage and prints a summary table at
-//! the end; the exit code is 1 if any stage FAILs.
+//! the end; the exit code is 1 if any stage FAILs, or — in strict mode
+//! (`--ci` or `GITHUB_ACTIONS`) — if any stage is SKIPped without an
+//! explicit `--allow-skip` exception.
 
 #[path = "quality_diagnostics.rs"]
 mod diagnostics;
@@ -12,12 +14,15 @@ mod smoke;
 
 use std::path::Path;
 use std::process::{exit, Command};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Pass,
     Fail,
-    /// The tool is missing — the stage is skipped (not counted as a failure).
+    /// The tool is missing — the stage is skipped. Locally this is a
+    /// warning; in strict mode (`--ci` / `GITHUB_ACTIONS`) an unexcused
+    /// SKIP fails the gate (see `--allow-skip`).
     Skip,
     /// Informational stages do not affect the exit code (kept for optional tools).
     Info,
@@ -35,9 +40,13 @@ impl Status {
 }
 
 struct StageResult {
+    /// Canonical stage id (`--list-stages`, `--only`, `--allow-skip`).
+    id: String,
     name: String,
     status: Status,
     note: String,
+    /// Wall-clock time spent in the stage (zero for instant skips).
+    elapsed: Duration,
 }
 
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
@@ -71,6 +80,9 @@ struct QualityFlags {
     everything: bool,
     /// `--only id[,id...]` — run only these stage ids (CI sharding).
     only: Option<Vec<String>>,
+    /// `--allow-skip id[,id...]` — stage ids whose SKIP does not fail
+    /// strict mode (`--ci` / `GITHUB_ACTIONS`). Every other SKIP fails.
+    allow_skip: Vec<String>,
 }
 
 impl QualityFlags {
@@ -78,31 +90,7 @@ impl QualityFlags {
         let mut f = Self::default();
         let mut i = 0;
         while i < args.len() {
-            let a = args[i].as_str();
-            if let Some(list) = a.strip_prefix("--only=") {
-                push_only(&mut f, list);
-            } else if a == "--only" {
-                i += 1;
-                let Some(list) = args.get(i) else {
-                    eprintln!("xtask quality: --only requires a comma-separated stage list");
-                    quality_usage(2);
-                };
-                push_only(&mut f, list);
-            } else {
-                match a {
-                    "--full" => f.full = true,
-                    "--bench" => f.bench = true,
-                    "--ci" => f.ci = true,
-                    "--everything" => f.everything = true,
-                    "--list-stages" => print_stages(0),
-                    "-h" | "--help" => quality_usage(0),
-                    _ => {
-                        eprintln!("xtask quality: unknown flag '{a}'");
-                        quality_usage(2);
-                    }
-                }
-            }
-            i += 1;
+            i = parse_arg(&mut f, args, i);
         }
         // --everything implies all levels: level 2 (coverage + bench
         // compile-check), criterion, the CI set (doc + wasm check) and
@@ -113,6 +101,7 @@ impl QualityFlags {
             f.ci = true;
         }
         validate_only(&f);
+        validate_allow_skip(&f);
         f
     }
 
@@ -151,6 +140,18 @@ impl QualityFlags {
         }
     }
 
+    /// Strict mode: an unexcused SKIP fails the gate. Enabled by `--ci`
+    /// or by running under GitHub Actions, so CI shards cannot silently
+    /// go green on a skipped stage.
+    fn strict(&self) -> bool {
+        self.ci || std::env::var_os("GITHUB_ACTIONS").is_some()
+    }
+
+    /// Whether a SKIP of this stage id is explicitly excused.
+    fn skip_allowed(&self, id: &str) -> bool {
+        self.allow_skip.iter().any(|s| s == id)
+    }
+
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
     /// With `--only` the total is the filtered count.
@@ -181,6 +182,73 @@ fn push_only(f: &mut QualityFlags, list: &str) {
         let id = part.trim();
         if !id.is_empty() && !v.iter().any(|s| s == id) {
             v.push(id.to_string());
+        }
+    }
+}
+
+/// Parses one flag at `args[i]`; returns the next unconsumed index.
+fn parse_arg(f: &mut QualityFlags, args: &[String], i: usize) -> usize {
+    let a = args[i].as_str();
+    if let Some(list) = a.strip_prefix("--only=") {
+        push_only(f, list);
+        return i + 1;
+    }
+    if let Some(list) = a.strip_prefix("--allow-skip=") {
+        push_allow_skip(f, list);
+        return i + 1;
+    }
+    if a == "--only" || a == "--allow-skip" {
+        let value = require_value(args, i, a);
+        if a == "--only" {
+            push_only(f, &value);
+        } else {
+            push_allow_skip(f, &value);
+        }
+        return i + 2;
+    }
+    match a {
+        "--full" => f.full = true,
+        "--bench" => f.bench = true,
+        "--ci" => f.ci = true,
+        "--everything" => f.everything = true,
+        "--list-stages" => print_stages(0),
+        "-h" | "--help" => quality_usage(0),
+        _ => {
+            eprintln!("xtask quality: unknown flag '{a}'");
+            quality_usage(2);
+        }
+    }
+    i + 1
+}
+
+/// Value of a space-separated `--flag value` pair; exits on a missing value.
+fn require_value(args: &[String], i: usize, flag: &str) -> String {
+    match args.get(i + 1) {
+        Some(value) => value.clone(),
+        None => {
+            eprintln!("xtask quality: {flag} requires a comma-separated stage list");
+            quality_usage(2);
+        }
+    }
+}
+
+/// A typo in `--allow-skip` must fail loudly, never silently excuse
+/// nothing (or the wrong stage) and stay green.
+fn validate_allow_skip(f: &QualityFlags) {
+    let all = QualityFlags::all_known_ids();
+    for id in &f.allow_skip {
+        if !all.contains(&id.as_str()) {
+            eprintln!("xtask quality: unknown stage id '{id}' in --allow-skip (see --list-stages)");
+            quality_usage(2);
+        }
+    }
+}
+
+fn push_allow_skip(f: &mut QualityFlags, list: &str) {
+    for part in list.split([',', ' ']) {
+        let id = part.trim();
+        if !id.is_empty() && !f.allow_skip.iter().any(|s| s == id) {
+            f.allow_skip.push(id.to_string());
         }
     }
 }
@@ -225,7 +293,7 @@ impl<'a> StageList<'a> {
             return;
         }
         self.n += 1;
-        let result = run_stage(self.n, self.total, name, desc, command, informational);
+        let result = run_stage(self.n, self.total, id, name, desc, command, informational);
         self.results.push(result);
     }
 
@@ -234,8 +302,26 @@ impl<'a> StageList<'a> {
             return;
         }
         self.n += 1;
-        let result = skip_stage(self.n, self.total, name, note);
+        let result = skip_stage(self.n, self.total, id, name, note);
         self.results.push(result);
+    }
+
+    /// Records a custom-stage outcome with its wall-clock time.
+    fn push(
+        &mut self,
+        id: &'static str,
+        name: &str,
+        status: Status,
+        note: String,
+        started: Instant,
+    ) {
+        self.results.push(StageResult {
+            id: id.into(),
+            name: name.into(),
+            status,
+            note,
+            elapsed: started.elapsed(),
+        });
     }
 
     fn cargo(&self, args: &[&str]) -> Command {
@@ -482,11 +568,13 @@ fn compare_rustqual_reports(base_s: &str, cur_s: &str) -> Result<RatchetOutcome,
 }
 
 /// One stage-table row.
-fn stage_result(name: &str, status: Status, note: String) -> StageResult {
+fn stage_result(name: &str, status: Status, note: String, elapsed: Duration) -> StageResult {
     StageResult {
+        id: name.into(),
         name: name.into(),
         status,
         note,
+        elapsed,
     }
 }
 
@@ -531,7 +619,13 @@ fn print_ratchet_comparison(o: &RatchetOutcome) {
 }
 
 /// Record PASS/FAIL for a parsed ratchet outcome.
-fn record_ratchet_verdict(stages: &mut StageList<'_>, name: &str, cur_s: &str, o: RatchetOutcome) {
+fn record_ratchet_verdict(
+    stages: &mut StageList<'_>,
+    name: &str,
+    cur_s: &str,
+    o: RatchetOutcome,
+    elapsed: Duration,
+) {
     if !o.regressed_reasons.is_empty() {
         if ci_annotations() {
             diagnostics::baseline(cur_s);
@@ -545,7 +639,9 @@ fn record_ratchet_verdict(stages: &mut StageList<'_>, name: &str, cur_s: &str, o
                 &format!("ratchet regression: {note}"),
             );
         }
-        stages.results.push(stage_result(name, Status::Fail, note));
+        stages
+            .results
+            .push(stage_result(name, Status::Fail, note, elapsed));
         return;
     }
     if o.baseline_stale {
@@ -560,17 +656,23 @@ fn record_ratchet_verdict(stages: &mut StageList<'_>, name: &str, cur_s: &str, o
     eprintln!("── {name}: PASS (ratchet: equal or improved) ──");
     stages
         .results
-        .push(stage_result(name, Status::Pass, String::new()));
+        .push(stage_result(name, Status::Pass, String::new(), elapsed));
 }
 
 /// Record the ratchet verdict for the rustqual stage: FAIL with reasons
 /// on any regression (or on an unreadable/corrupt report), PASS with a
 /// baseline-refresh hint when strictly improved.
-fn finish_rustqual_stage(stages: &mut StageList<'_>, name: &str, base_s: &str, cur_s: &str) {
+fn finish_rustqual_stage(
+    stages: &mut StageList<'_>,
+    name: &str,
+    base_s: &str,
+    cur_s: &str,
+    elapsed: Duration,
+) {
     match compare_rustqual_reports(base_s, cur_s) {
         Ok(o) => {
             print_ratchet_comparison(&o);
-            record_ratchet_verdict(stages, name, cur_s, o);
+            record_ratchet_verdict(stages, name, cur_s, o, elapsed);
         }
         Err(msg) => {
             // Corrupt report or missing key: hard FAIL, never 0-vs-0 PASS.
@@ -578,7 +680,9 @@ fn finish_rustqual_stage(stages: &mut StageList<'_>, name: &str, base_s: &str, c
             if ci_annotations() {
                 annotate(format!("quality-{name}"), &msg);
             }
-            stages.results.push(stage_result(name, Status::Fail, msg));
+            stages
+                .results
+                .push(stage_result(name, Status::Fail, msg, elapsed));
         }
     }
 }
@@ -623,6 +727,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
     let desc = "rustqual (ratchet: baseline.json — own comparator, equal=PASS)";
     eprintln!();
     eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
+    let started = Instant::now();
     let tmp_path = stages.root.join("target/rustqual_cur.json");
     if let Some(parent) = tmp_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -646,14 +751,18 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
             let cur_str = std::fs::read_to_string(&tmp_path);
             let base_str = std::fs::read_to_string(&baseline_path);
             match (cur_str, base_str) {
-                (Ok(cur_s), Ok(base_s)) => finish_rustqual_stage(stages, name, &base_s, &cur_s),
+                (Ok(cur_s), Ok(base_s)) => {
+                    finish_rustqual_stage(stages, name, &base_s, &cur_s, started.elapsed())
+                }
                 (Err(e), _) | (_, Err(e)) => {
                     let note = format!("read baseline/cur json: {e}");
                     eprintln!("── {name}: FAIL ({note}) ──");
                     stages.results.push(StageResult {
+                        id: "rustqual".into(),
                         name: name.into(),
                         status: Status::Fail,
                         note,
+                        elapsed: started.elapsed(),
                     });
                 }
             }
@@ -662,9 +771,11 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
             let note = format!("spawn: {e}");
             eprintln!("── {name}: FAIL ({note}) ──");
             stages.results.push(StageResult {
+                id: "rustqual".into(),
                 name: name.into(),
                 status: Status::Fail,
                 note,
+                elapsed: started.elapsed(),
             });
         }
     }
@@ -813,92 +924,164 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
-    // Hard gate: majors must be latest — cargo upgrade (cargo-edit) dry-run.
-    // `cargo upgrade` is the same tool the project uses for `cargo upgrade --incompatible allow`;
-    // dry-run prints `old req / latest` table if any crate lags behind latest.
+    // Hard gate: majors must be latest — parsed from
+    // `cargo outdated --workspace --format json` (see
+    // dependencies_upgrade_stage); lagging majors are fixed with
+    // `cargo upgrade --incompatible allow`.
     dependencies_upgrade_stage(stages);
 }
 
 fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {
-    // cargo-edit's `cargo upgrade --dry-run --incompatible allow` prints a table
-    // with `old req` rows when a dependency lags behind latest. Exit code is 0
-    // even when outdated, so we inspect stdout/stderr instead of relying on exit.
+    // Hard gate: majors must be latest. Implemented on top of
+    // `cargo outdated --workspace --format json` (same tool the `outdated`
+    // stage already requires — no cargo-edit needed): each JSON line is one
+    // workspace member (`{crate_name, dependencies: [{name, project,
+    // compat, latest, ...}]}`), listing only deps that lag behind. A dep
+    // counts as major-lag when `latest` is newer than the semver-compatible
+    // version — i.e. `cargo update` alone cannot reach it and `cargo
+    // upgrade` would have to bump the requirement. Minor-only lag
+    // (`latest == compat`) is the `outdated` stage's job and passes here.
     if !stages.enabled("upgrade-check") {
         return;
     }
     stages.n += 1;
     let (idx, total) = (stages.n, stages.total);
     let name = "upgrade-check";
-    let desc = "cargo upgrade --dry-run --incompatible allow (must be clean)";
+    let desc = "cargo outdated --workspace --format json (majors must be latest)";
     eprintln!();
     eprintln!("═══ [{idx}/{total}] {name}: {desc} ═══");
-    if !cargo_subcommand_exists("upgrade") {
-        // cargo-edit not installed — skip with hint instead of failing the gate.
-        let hint = "Install:  cargo install cargo-edit --locked";
-        eprintln!("── {name}: SKIP (cargo-upgrade not installed — {hint}) ──");
-        stages.results.push(StageResult {
-            name: name.into(),
-            status: Status::Skip,
-            note: "cargo-upgrade not installed".into(),
-        });
+    let started = Instant::now();
+    if !cargo_subcommand_exists("outdated") {
+        let hint = install_hint("outdated");
+        eprintln!("── {name}: SKIP (cargo-outdated not installed — {hint}) ──");
+        stages.push(
+            "upgrade-check",
+            name,
+            Status::Skip,
+            "cargo-outdated not installed".into(),
+            started,
+        );
         return;
     }
     let output = Command::new("cargo")
-        .args(["upgrade", "--dry-run", "--incompatible", "allow"])
+        .args(["outdated", "--workspace", "--format", "json"])
         .current_dir(stages.root)
         .output();
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let combined = format!("{stdout}\n{stderr}");
-            // `cargo upgrade` prints a table header `old req` when outdated.
-            // When up-to-date it prints only `note: Re-run...` or nothing.
-            let has_outdated = combined
-                .lines()
-                .any(|l| l.trim_start().starts_with("old req") || l.contains("old req"));
-            // Fallback: also treat any `Updating` line with `->` as outdated (covers alternative output).
-            let has_update_table = combined.contains("Updating") && combined.contains("->");
-            if has_outdated || has_update_table || combined.contains("outdated") {
-                // Check if the table actually contains data rows (not just header).
-                // Heuristic: if output contains a version number like `0.` after header, it's real.
-                let outdated = combined
-                    .lines()
-                    .any(|l| l.contains("0.") && l.contains("->"))
-                    || has_outdated;
-                if outdated {
-                    eprintln!("{combined}");
-                    eprintln!("── {name}: FAIL (dependencies not latest — run `cargo upgrade --incompatible allow`) ──");
-                    if ci_annotations() {
-                        annotate(
-                            format!("quality-{name}"),
-                            "dependencies not latest — run `cargo upgrade --incompatible allow`",
-                        );
-                    }
-                    stages.results.push(StageResult {
-                        name: name.into(),
-                        status: Status::Fail,
-                        note: "outdated".into(),
-                    });
-                    return;
+            let lagging = parse_outdated_major_lag(&stdout);
+            if !lagging.is_empty() {
+                // Cap the printed list; the count stays exact.
+                const SHOWN: usize = 10;
+                for entry in lagging.iter().take(SHOWN) {
+                    eprintln!("  {entry}");
                 }
+                if lagging.len() > SHOWN {
+                    eprintln!("  … +{} more", lagging.len() - SHOWN);
+                }
+                let note = format!("{} deps not latest", lagging.len());
+                eprintln!("── {name}: FAIL ({note} — run `cargo upgrade --incompatible allow`) ──");
+                if ci_annotations() {
+                    annotate(
+                        stage_title(name),
+                        &format!("{note} — run `cargo upgrade --incompatible allow`"),
+                    );
+                }
+                stages.push("upgrade-check", name, Status::Fail, note, started);
+                return;
             }
-            // No table rows → clean.
+            if !out.status.success() {
+                // No parseable major lag but cargo-outdated itself errored
+                // (network, lockfile): fail loudly, never silently green.
+                let tail = stderr
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("cargo outdated failed");
+                let note = format!("cargo outdated failed: {tail}");
+                eprintln!("── {name}: FAIL ({note}) ──");
+                if ci_annotations() {
+                    annotate(stage_title(name), &note);
+                }
+                stages.push("upgrade-check", name, Status::Fail, note, started);
+                return;
+            }
+            // No lagging deps → clean.
             eprintln!("── {name}: PASS ──");
-            stages.results.push(StageResult {
-                name: name.into(),
-                status: Status::Pass,
-                note: String::new(),
-            });
+            stages.push("upgrade-check", name, Status::Pass, String::new(), started);
         }
         Err(e) => {
             eprintln!("── {name}: FAIL (spawn error: {e}) ──");
-            stages.results.push(StageResult {
-                name: name.into(),
-                status: Status::Fail,
-                note: format!("spawn: {e}"),
-            });
+            stages.push(
+                "upgrade-check",
+                name,
+                Status::Fail,
+                format!("spawn: {e}"),
+                started,
+            );
         }
+    }
+}
+
+/// Parses `cargo outdated --format json` output (one JSON object per line,
+/// one per workspace member) into `name project->latest` entries for every
+/// dependency with major lag: `latest` names a version newer than both the
+/// locked `project` one and the semver-compatible one, i.e. `cargo update`
+/// alone cannot reach it and `cargo upgrade` would have to bump the
+/// requirement. Minor-only lag (`latest == compat`) belongs to the
+/// `outdated` stage and passes here. Unchanged deps print as `"---"` and
+/// removed ones as `"Removed"`; a `"Removed"` marker is reported as lag so
+/// a vanished upstream version fails loudly instead of silently passing.
+fn parse_outdated_major_lag(stdout: &str) -> Vec<String> {
+    let mut lagging = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let empty = Vec::new();
+        let deps = v
+            .get("dependencies")
+            .and_then(|d| d.as_array())
+            .unwrap_or(&empty);
+        for dep in deps {
+            let name = dep.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+            let project = dep.get("project").and_then(|p| p.as_str()).unwrap_or("");
+            let compat = dep.get("compat").and_then(|c| c.as_str()).unwrap_or("");
+            let latest = dep.get("latest").and_then(|l| l.as_str()).unwrap_or("");
+            if latest == "Removed" || compat == "Removed" {
+                lagging.push(format!("{name} {project}->Removed"));
+            } else if is_version_string(latest) && latest != compat {
+                lagging.push(format!("{name} {project}->{latest}"));
+            }
+        }
+    }
+    lagging.sort();
+    lagging.dedup();
+    lagging
+}
+
+/// Structural version check (`1.2.3`, `0.31`, `2.0.0-alpha.1`): at least
+/// one dot-separated numeric component. Rejects the `"---"` (unchanged)
+/// and `"Removed"` markers cargo-outdated prints for clean deps.
+fn is_version_string(s: &str) -> bool {
+    let core = s.split('-').next().unwrap_or("");
+    let mut parts = core.split('.');
+    match (parts.next(), parts.next()) {
+        (Some(major), Some(_minor)) => {
+            !major.is_empty()
+                && major.chars().all(|c| c.is_ascii_digit())
+                && core.split('.').all(|p| {
+                    let p = p.trim();
+                    !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())
+                })
+        }
+        _ => false,
     }
 }
 
@@ -1071,9 +1254,54 @@ pub fn quality(args: &[String]) {
     }
 
     print_summary(&stages.results);
-    if stages.results.iter().any(|r| r.status == Status::Fail) {
+    let failed = stages.results.iter().any(|r| r.status == Status::Fail);
+    if skip_exit_code(&stages.results, &flags) != 0 || failed {
         exit(1);
     }
+}
+
+/// Enforces the skip policy; returns 1 when the gate must fail on skips.
+/// A SKIP is a silent green locally (trailing warning only); in strict
+/// mode (`--ci` or `GITHUB_ACTIONS`) an unexcused SKIP fails the gate —
+/// only `--allow-skip id,...` excuses it.
+fn skip_exit_code(results: &[StageResult], flags: &QualityFlags) -> i32 {
+    if flags.strict() {
+        let unexcused: Vec<&StageResult> = results
+            .iter()
+            .filter(|r| r.status == Status::Skip && !flags.skip_allowed(&r.id))
+            .collect();
+        if unexcused.is_empty() {
+            return 0;
+        }
+        let names: Vec<&str> = unexcused.iter().map(|r| r.name.as_str()).collect();
+        eprintln!(
+            "xtask quality: {} stage(s) skipped without --allow-skip: {}",
+            names.len(),
+            names.join(", ")
+        );
+        if ci_annotations() {
+            for r in &unexcused {
+                annotate(
+                    stage_title(&r.name),
+                    &format!("stage SKIPped in CI without --allow-skip ({})", r.note),
+                );
+            }
+        }
+        return 1;
+    }
+    let skipped: Vec<&str> = results
+        .iter()
+        .filter(|r| r.status == Status::Skip)
+        .map(|r| r.name.as_str())
+        .collect();
+    if !skipped.is_empty() {
+        eprintln!(
+            "xtask quality: warning: {} stage(s) skipped: {}",
+            skipped.len(),
+            skipped.join(", ")
+        );
+    }
+    0
 }
 
 fn quality_usage(code: i32) -> ! {
@@ -1088,12 +1316,18 @@ fn quality_usage(code: i32) -> ! {
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n  \
          cargo xtask quality --ci --only fmt,audit  (CI sharding: run a subset)\n  \
+         cargo xtask quality --ci --allow-skip wasm-check  (excuse a SKIP in strict CI mode)\n  \
          cargo xtask quality --list-stages  (print canonical stage ids)\n\
-         \n\
-         External tools (audit, deny, outdated, upgrade, llvm-cov, rustqual) are optional:\n  \
-         missing → SKIP with install hint. rustqual is MIT.\n  \
-         rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
-         Baseline: rustqual --save-baseline baseline.json; CI: rustqual --compare baseline.json --fail-on-regression --no-fail\n  \
+          \n\
+          In strict mode (--ci or GITHUB_ACTIONS) a SKIP fails the gate unless\n  \
+          excused via --allow-skip. Locally skips only print a trailing warning.\n\
+          \n\
+          External tools (audit, deny, outdated, llvm-cov, rustqual) are optional:\n  \
+          missing → SKIP with install hint. rustqual is MIT.\n  \
+          rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
+          Baseline: rustqual --save-baseline baseline.json; the gate re-runs rustqual\n  \
+          into target/rustqual_cur.json and compares with its own ratchet\n  \
+          (equal = PASS, only a true regression FAILs).\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
@@ -1111,6 +1345,7 @@ fn cmd(root: &Path, program: &str, args: &[&str]) -> Command {
 fn run_stage(
     index: usize,
     total: usize,
+    id: &str,
     name: &str,
     display_cmd: &str,
     mut command: Command,
@@ -1118,6 +1353,7 @@ fn run_stage(
 ) -> StageResult {
     eprintln!();
     eprintln!("═══ [{index}/{total}] {name}: {display_cmd} ═══");
+    let started = Instant::now();
 
     // Check for an external cargo tool, with an install hint.
     // Only third-party subcommands are checked: built-in ones (test, bench, …)
@@ -1134,9 +1370,11 @@ fn run_stage(
                 let hint = install_hint(&sub);
                 eprintln!("xtask quality: SKIP — tool 'cargo {sub}' not found.\n{hint}");
                 return StageResult {
+                    id: id.to_string(),
                     name: name.to_string(),
                     status: Status::Skip,
                     note: format!("cargo-{sub} not installed"),
+                    elapsed: started.elapsed(),
                 };
             }
         }
@@ -1160,6 +1398,7 @@ fn run_stage(
                 if informational { "INFO" } else { "PASS" }
             );
             StageResult {
+                id: id.to_string(),
                 name: name.to_string(),
                 status: if informational {
                     Status::Info
@@ -1167,32 +1406,39 @@ fn run_stage(
                     Status::Pass
                 },
                 note: String::new(),
+                elapsed: started.elapsed(),
             }
         }
         Ok((status, log)) => {
             if informational {
                 eprintln!("── {name}: INFO (exit {status} — outdated dependencies) ──");
                 StageResult {
+                    id: id.to_string(),
                     name: name.to_string(),
                     status: Status::Info,
                     note: format!("{status}"),
+                    elapsed: started.elapsed(),
                 }
             } else {
                 eprintln!("── {name}: FAIL (exit {status}) ──");
                 annotate_stage_failure(name, &log);
                 StageResult {
+                    id: id.to_string(),
                     name: name.to_string(),
                     status: Status::Fail,
                     note: format!("{status}"),
+                    elapsed: started.elapsed(),
                 }
             }
         }
         Err(e) => {
             eprintln!("── {name}: FAIL (spawn error: {e}) ──");
             StageResult {
+                id: id.to_string(),
                 name: name.to_string(),
                 status: Status::Fail,
                 note: format!("spawn: {e}"),
+                elapsed: started.elapsed(),
             }
         }
     }
@@ -1259,7 +1505,7 @@ fn annotate_stage_failure(name: &str, log: &str) {
     // rustfmt diffs: one annotation per hunk — bodies never fit the cap.
     if name == "fmt" {
         for hunk in fmt_hunks(&clean) {
-            annotate(format!("quality-{name}"), &hunk);
+            annotate(stage_title(name), &hunk);
         }
         return;
     }
@@ -1276,12 +1522,12 @@ fn annotate_stage_failure(name: &str, log: &str) {
     let picked = &interesting[start..];
     if picked.is_empty() {
         annotate(
-            format!("quality-{}", name.replace(' ', "-")),
+            stage_title(name),
             "stage failed with no recognized error lines — see the raw log",
         );
     }
     for l in picked {
-        annotate(format!("quality-{}", name.replace(' ', "-")), l.trim());
+        annotate(stage_title(name), l.trim());
     }
 }
 
@@ -1334,6 +1580,12 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+/// `::error` annotation title for a stage (`quality-<id>`); display
+/// names are dash-normalized so titles never contain spaces.
+fn stage_title(name: &str) -> String {
+    format!("quality-{}", name.replace(' ', "-"))
+}
+
 /// One `::error::` workflow command (GitHub Actions annotations).
 fn annotate(title: String, message: &str) {
     let esc = |s: &str| -> String {
@@ -1356,14 +1608,22 @@ fn annotate(title: String, message: &str) {
 fn print_summary(results: &[StageResult]) {
     eprintln!();
     eprintln!("╔════════════ QUALITY SUMMARY ════════════╗");
+    let total: Duration = results.iter().map(|r| r.elapsed).sum();
     for r in results {
         let note = if r.note.is_empty() {
             String::new()
         } else {
             format!(" ({})", r.note)
         };
-        eprintln!("  {:<22} {:<4}{}", r.name, r.status.label(), note);
+        eprintln!(
+            "  {:<22} {:<4} {:>8}{}",
+            r.name,
+            r.status.label(),
+            format_duration(r.elapsed),
+            note
+        );
     }
+    eprintln!("  {:<22}      {:>8}", "total", format_duration(total));
     eprintln!("╚═════════════════════════════════════════╝");
     if ci_annotations() {
         for r in results.iter().filter(|r| r.status == Status::Fail) {
@@ -1377,6 +1637,20 @@ fn print_summary(results: &[StageResult]) {
                 &format!("stage FAIL ({note})"),
             );
         }
+    }
+}
+
+/// Short wall-clock rendering for the SUMMARY table: `0.4s`, `12s`, `3m04s`.
+fn format_duration(d: Duration) -> String {
+    const SECS_PER_MINUTE: u64 = 60;
+    const DOUBLE_DIGIT_SECS: u64 = 10;
+    let secs = d.as_secs();
+    if secs >= SECS_PER_MINUTE {
+        format!("{}m{:02}s", secs / SECS_PER_MINUTE, secs % SECS_PER_MINUTE)
+    } else if secs >= DOUBLE_DIGIT_SECS {
+        format!("{secs}s")
+    } else {
+        format!("{:.1}s", d.as_secs_f64())
     }
 }
 
@@ -1414,14 +1688,16 @@ fn rustqual_binary(root: &std::path::Path) -> String {
 }
 
 /// Records a SKIP without spawning a command (no progress output).
-fn skip_stage(index: usize, total: usize, name: &str, note: &str) -> StageResult {
+fn skip_stage(index: usize, total: usize, id: &str, name: &str, note: &str) -> StageResult {
     eprintln!();
     eprintln!("═══ [{index}/{total}] {name} ═══");
     eprintln!("── {name}: SKIP ({note}) ──");
     StageResult {
+        id: id.to_string(),
         name: name.to_string(),
         status: Status::Skip,
         note: note.to_string(),
+        elapsed: Duration::ZERO,
     }
 }
 
@@ -1436,6 +1712,7 @@ fn smoke_stage(stages: &mut StageList<'_>) {
         "═══ [{}/{}] smoke (editor-only): build + 90s readiness ═══",
         stages.n, stages.total
     );
+    let started = Instant::now();
     let (status, note) = match smoke::check(stages.root) {
         Ok(()) => (Status::Pass, String::new()),
         Err(log) => {
@@ -1449,9 +1726,11 @@ fn smoke_stage(stages: &mut StageList<'_>) {
     };
     eprintln!("── smoke (editor-only): {} ──", status.label());
     stages.results.push(StageResult {
+        id: "smoke".into(),
         name: "smoke (editor-only)".into(),
         status,
         note,
+        elapsed: started.elapsed(),
     });
 }
 
@@ -1755,7 +2034,7 @@ mod ratchet_tests {
     fn stage_records_pass_on_equal() {
         let b = base_report();
         let mut stages = test_stages();
-        finish_rustqual_stage(&mut stages, "rustqual", &b, &b);
+        finish_rustqual_stage(&mut stages, "rustqual", &b, &b, Duration::ZERO);
         assert_eq!(stages.results.len(), 1);
         assert_eq!(stages.results[0].status, Status::Pass);
     }
@@ -1765,7 +2044,7 @@ mod ratchet_tests {
         let b = base_report();
         let c = report_with(json!({"iosp_score": 0.1}));
         let mut stages = test_stages();
-        finish_rustqual_stage(&mut stages, "rustqual", &b, &c);
+        finish_rustqual_stage(&mut stages, "rustqual", &b, &c, Duration::ZERO);
         assert_eq!(stages.results.len(), 1);
         assert_eq!(stages.results[0].status, Status::Fail);
         assert!(stages.results[0].note.contains("iosp_score"));
@@ -1774,8 +2053,127 @@ mod ratchet_tests {
     #[test]
     fn stage_records_fail_on_corrupt_report() {
         let mut stages = test_stages();
-        finish_rustqual_stage(&mut stages, "rustqual", "{broken", &base_report());
+        finish_rustqual_stage(
+            &mut stages,
+            "rustqual",
+            "{broken",
+            &base_report(),
+            Duration::ZERO,
+        );
         assert_eq!(stages.results[0].status, Status::Fail);
         assert!(stages.results[0].note.contains("not valid JSON"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_strings_recognize_semver_and_reject_markers() {
+        assert!(is_version_string("1.2.3"));
+        assert!(is_version_string("0.31"));
+        assert!(is_version_string("2.0.0-alpha.1"));
+        assert!(!is_version_string("---"));
+        assert!(!is_version_string("Removed"));
+        assert!(!is_version_string(""));
+        assert!(!is_version_string("1"));
+    }
+
+    #[test]
+    fn major_lag_parser_lists_only_newer_latest() {
+        let stdout = concat!(
+            "{\"crate_name\":\"ornis\",\"dependencies\":[",
+            "{\"name\":\"serde\",\"project\":\"1.0.200\",\"compat\":\"1.0.228\",\"latest\":\"1.0.228\",\"kind\":\"Normal\",\"platform\":null},",
+            "{\"name\":\"tokio\",\"project\":\"1.40.0\",\"compat\":\"1.40.0\",\"latest\":\"1.48.0\",\"kind\":\"Normal\",\"platform\":null},",
+            "{\"name\":\"gone\",\"project\":\"0.5.0\",\"compat\":\"Removed\",\"latest\":\"Removed\",\"kind\":\"Normal\",\"platform\":null},",
+            "{\"name\":\"stable\",\"project\":\"2.0.0\",\"compat\":\"---\",\"latest\":\"---\",\"kind\":\"Normal\",\"platform\":null}",
+            "]}\n",
+            "{\"crate_name\":\"xtask\",\"dependencies\":[]}\n",
+        );
+        // serde is minor-only lag (latest == compat) → the outdated stage's
+        // job, not upgrade-check's. tokio is major lag; gone vanished.
+        assert_eq!(
+            parse_outdated_major_lag(stdout),
+            ["gone 0.5.0->Removed", "tokio 1.40.0->1.48.0"]
+        );
+        assert!(parse_outdated_major_lag("").is_empty());
+        assert!(parse_outdated_major_lag("not json\n").is_empty());
+    }
+
+    #[test]
+    fn durations_render_compactly() {
+        assert_eq!(format_duration(Duration::from_millis(400)), "0.4s");
+        assert_eq!(format_duration(Duration::from_secs(12)), "12s");
+        assert_eq!(format_duration(Duration::from_secs(184)), "3m04s");
+    }
+
+    #[test]
+    fn strict_mode_follows_ci_flag() {
+        let strict = QualityFlags {
+            ci: true,
+            ..QualityFlags::default()
+        };
+        assert!(strict.strict());
+    }
+
+    #[test]
+    fn allow_skip_matches_exact_ids() {
+        let mut f = QualityFlags::default();
+        assert!(!f.skip_allowed("deny"));
+        push_allow_skip(&mut f, "deny, wasm-check");
+        push_allow_skip(&mut f, "deny");
+        assert!(f.skip_allowed("deny"));
+        assert!(f.skip_allowed("wasm-check"));
+        assert!(!f.skip_allowed("fmt"));
+        // Valid ids validate silently (typos exit the process).
+        validate_allow_skip(&f);
+    }
+
+    #[test]
+    fn parse_accepts_both_list_forms() {
+        let args = [
+            "--ci",
+            "--allow-skip",
+            "deny",
+            "--allow-skip=wasm-check",
+            "--only=fmt",
+        ];
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let f = QualityFlags::parse(&owned);
+        assert!(f.ci);
+        assert!(f.skip_allowed("deny"));
+        assert!(f.skip_allowed("wasm-check"));
+        assert!(f.enabled("fmt"));
+        assert!(!f.enabled("deny"));
+    }
+
+    fn skipped_result(id: &str) -> StageResult {
+        StageResult {
+            id: id.into(),
+            name: id.into(),
+            status: Status::Skip,
+            note: "missing tool".into(),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn skip_policy_fails_only_unexcused_strict_skips() {
+        let strict = QualityFlags {
+            ci: true,
+            ..QualityFlags::default()
+        };
+        let results = vec![skipped_result("deny")];
+        assert_eq!(skip_exit_code(&results, &strict), 1);
+        let excused = QualityFlags {
+            ci: true,
+            allow_skip: vec!["deny".to_string()],
+            ..QualityFlags::default()
+        };
+        assert_eq!(skip_exit_code(&results, &excused), 0);
+        // No skips at all → 0 in any mode (strict here in case the
+        // tests themselves run under GITHUB_ACTIONS).
+        assert_eq!(skip_exit_code(&[], &strict), 0);
     }
 }
