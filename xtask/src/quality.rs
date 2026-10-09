@@ -52,11 +52,10 @@ struct StageResult {
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
 /// sharding; the default (no `--only`) runs everything implied by the
 /// level flags, exactly as before.
-const LEVEL1_IDS: [&str; 15] = [
+const LEVEL1_IDS: [&str; 14] = [
     "fmt",
     "clippy-physics",
     "test-physics",
-    "determinism-fast",
     "clippy",
     "rustqual",
     "smoke",
@@ -839,37 +838,14 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
-    // Fast determinism subset of Determinism Nightly (RAT-11): the small-N
-    // bit-identity gates run in the PR gpu shard so solver/parallelism
-    // regressions are caught before merge. Default-suite determinism
-    // filters only (~30 s debug, measured 2026-10-08): the canonical
-    // snapshot, cross-thread and cross-run bit-identity, plus the AVBD
-    // run-to-run gate. The ignored nightly gates are deliberately NOT
-    // here: `avbd_confluence_one_vs_many_threads` alone takes ~7 min in
-    // a debug build (CI `cargo test` is debug; 10× the ~37 s release
-    // figure in its comment), so no ignored gate fits a PR shard.
-    // No rebuild: the filters reuse the test-physics binaries, so the
-    // added CI cost is test runtime only.
-    stages.run(
-        "determinism-fast",
-        "determinism-fast (PR subset of Determinism Nightly)",
-        "cargo test -p ornis-physics --features gpu --no-fail-fast -- --test-threads=1 solver_is_deterministic determinism_snapshot avbd_determinism",
-        stages.cargo(&[
-            "test",
-            "-p",
-            "ornis-physics",
-            "--features",
-            "gpu",
-            "--no-fail-fast",
-            "--",
-            "--test-threads=1",
-            "solver_is_deterministic",
-            "determinism_snapshot",
-            "avbd_determinism",
-        ]),
-        false,
-    );
-
+    // No `determinism-fast` stage (removed, RAT-26): it re-ran the
+    // default-suite determinism filters (`solver_is_deterministic`,
+    // `determinism_snapshot`, `avbd_determinism`) that `test-physics`
+    // above already runs with identical flags — pure duplication, second
+    // binary run for zero new coverage. Making it "real" via `--ignored`
+    // does not fit a PR shard either: the ignored nightly gates need
+    // ~7 min each in a debug build (see determinism-nightly.yml), so they
+    // stay in the Determinism Nightly workflow.
     stages.run(
         "clippy",
         "clippy",
@@ -1417,7 +1393,7 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, determinism-fast, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
+          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
