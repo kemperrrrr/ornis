@@ -21,10 +21,15 @@ env:
   PERF_STEP_MAX_PCT: 15
   PERF_BODIES_MAX_PCT: 25
 
-# actions: read — the comparison step downloads the last `criterion-results`
-# artifact from a master run as the baseline (first-ever run has no
+# actions: read — the comparison step downloads the `criterion-baseline-master`
+# artifact from a true master run as the baseline (first-ever run has no
 # baseline and reports INFO instead of gating; seed it by running this
-# workflow once on master).
+# workflow once on master with an empty target_ref). The baseline lives in
+# its own artifact — NOT `criterion-results` — because the relay
+# (agent-command-relay.yml) dispatches PR benchmarks with `--ref master`
+# plus `-f target_ref=<PR SHA>`, and those runs also list as branch=master:
+# taking "latest successful master run" would crown a foreign PR's numbers
+# as everyone's baseline (RAT-26).
 permissions:
   contents: read
   actions: read
@@ -79,11 +84,14 @@ jobs:
           mkdir -p target
           cargo bench -p ornis-physics --bench solver_bench -- --verbose 2>&1 | tee target/bench.log
 
-      # Baseline for regression comparison: the `criterion-results` artifact
-      # from the latest successful master run of this workflow. Best-effort
-      # (gh CLI only, no third-party action): a missing baseline (never run
+      # Baseline for regression comparison: the `criterion-baseline-master`
+      # artifact from the latest TRUE master run of this workflow (empty
+      # `inputs.target_ref`). PR-dispatched runs share branch=master but
+      # never upload that artifact (see the upload step below), so the
+      # download loop below skips them — a missing baseline (never seeded
       # on master yet, expired artifact) downgrades the gate below to INFO
-      # instead of failing the run.
+      # instead of failing the run. Best-effort (gh CLI only, no
+      # third-party action).
       - name: Download master baseline criterion results
         continue-on-error: true
         env:
@@ -91,20 +99,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          run_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/performance.yml/runs?branch=master&status=success&per_page=1" --jq '.workflow_runs[0].id // empty')"
-          if [ -z "$run_id" ]; then
-            echo "no successful master run of performance.yml yet — comparison will INFO-skip"
+          rm -rf baseline-criterion
+          baseline_run=""
+          for run_id in $(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/performance.yml/runs?branch=master&status=success&per_page=10" --jq '.workflow_runs[].id'); do
+            if gh run download "$run_id" --repo "${GITHUB_REPOSITORY}" \
+              --name criterion-baseline-master --dir baseline-criterion 2>/dev/null; then
+              baseline_run="$run_id"
+              break
+            fi
+          done
+          if [ -z "$baseline_run" ]; then
+            echo "no true-master run with a criterion-baseline-master artifact yet — comparison will INFO-skip"
             exit 0
           fi
-          echo "baseline run: $run_id"
-          gh run download "$run_id" --repo "${GITHUB_REPOSITORY}" \
-            --name criterion-results --dir baseline-criterion
+          echo "baseline run: $baseline_run"
+
+      # critcmp 0.1.8 (latest, 2023-07-12 — upstream is stable since):
+      # version-pinned so CI stays reproducible; the binary itself is
+      # cached across runs (fresh compile only on cache miss).
+      - name: Cache critcmp binary
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/critcmp
+          key: critcmp-0.1.8-${{ runner.os }}-${{ runner.arch }}
 
       - name: Install critcmp
         shell: bash
         run: |
           if ! command -v critcmp >/dev/null 2>&1; then
-            cargo install critcmp --locked
+            cargo install critcmp --version 0.1.8 --locked
           fi
           critcmp --version
 
@@ -124,8 +147,8 @@ jobs:
             {
               echo "## 📊 Performance regression gate: no baseline"
               echo
-              echo "No master \`criterion-results\` artifact found — comparison skipped (INFO)."
-              echo "Seed the baseline by running this workflow once on \`master\`;"
+              echo "No master \`criterion-baseline-master\` artifact found — comparison skipped (INFO)."
+              echo "Seed the baseline by running this workflow once on \`master\` with an empty \`target_ref\`;"
               echo "later runs gate \`solver_bench\` at +${PERF_STEP_MAX_PCT}% (physics_step) /"
               echo "+${PERF_BODIES_MAX_PCT}% (physics_bodies) with one automatic re-run on breach."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -285,6 +308,20 @@ jobs:
           name: criterion-results
           path: target/criterion/
           retention-days: 30
+          if-no-files-found: warn
+
+      # Master-only baseline seed (RAT-26): uploaded ONLY when this run
+      # benchmarks master itself (empty `inputs.target_ref`). Runs
+      # dispatched for a PR (`--ref master -f target_ref=<SHA>`) check out
+      # foreign code and must never become anyone's baseline — the download
+      # step above reads back only this artifact name.
+      - name: Upload master baseline criterion results
+        if: ${{ inputs.target_ref == '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: criterion-baseline-master
+          path: target/criterion/
+          retention-days: 90
           if-no-files-found: warn
 
       # Upload raw benchmark log
