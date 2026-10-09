@@ -1,0 +1,152 @@
+error[E0277]: `std::sync::Mutex<u32>` cannot be shared as `Res`: it may hold interior mutability; use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:14:10
+   |
+14 | #[derive(ornis_macros::PlainResource)]
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PlainResource` is not implemented for `std::sync::Mutex<u32>`
+   |
+   = help: the following other types implement trait `PlainResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Box<T>
+             Duration
+             FixedSteps
+             FixedTime
+           and $N others
+   = note: this error originates in the derive macro `ornis_macros::PlainResource` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `std::sync::Mutex<u32>` cannot be shared as `Res`: it may hold interior mutability; use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:20:30
+   |
+20 | fn sys(u: &mut Unit, holder: Res<Holder>) {
+   |                              ^^^^^^^^^^^ the trait `PlainResource` is not implemented for `std::sync::Mutex<u32>`
+   |
+   = help: the following other types implement trait `PlainResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Box<T>
+             Duration
+             FixedSteps
+             FixedTime
+           and $N others
+note: required for `Holder` to implement `PlainResource`
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:15:8
+   |
+14 | #[derive(ornis_macros::PlainResource)]
+   |          --------------------------- type parameter would need to implement `PlainResource`
+15 | struct Holder {
+   |        ^^^^^^
+   = help: consider manually implementing `PlainResource` to avoid undesired bounds
+note: required by a bound in `Res`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct Res<'a, T: PlainResource> {
+   |                       ^^^^^^^^^^^^^ required by this bound in `Res`
+
+error[E0277]: `std::sync::Mutex<u32>` cannot be shared as `Res`: it may hold interior mutability; use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:19:1
+   |
+19 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ the trait `PlainResource` is not implemented for `std::sync::Mutex<u32>`
+   |
+   = help: the following other types implement trait `PlainResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Box<T>
+             Duration
+             FixedSteps
+             FixedTime
+           and $N others
+note: required for `Holder` to implement `PlainResource`
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:15:8
+   |
+14 | #[derive(ornis_macros::PlainResource)]
+   |          --------------------------- type parameter would need to implement `PlainResource`
+15 | struct Holder {
+   |        ^^^^^^
+   = help: consider manually implementing `PlainResource` to avoid undesired bounds
+note: required by a bound in `Res`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct Res<'a, T: PlainResource> {
+   |                       ^^^^^^^^^^^^^ required by this bound in `Res`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the associated function or constant `access` exists for struct `Res<'_, Holder>`, but its trait bounds were not satisfied
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:19:1
+   |
+15 | struct Holder {
+   | ------------- doesn't satisfy `Holder: PlainResource`
+...
+19 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ associated function or constant cannot be called on `Res<'_, Holder>` due to unsatisfied trait bounds
+   |
+  ::: $RUST/std/src/sync/poison/mutex.rs
+   |
+   | pub struct Mutex<T: ?Sized> {
+   | --------------------------- doesn't satisfy `std::sync::Mutex<u32>: PlainResource`
+   |
+note: trait bound `std::sync::Mutex<u32>: PlainResource` was not satisfied
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:14:10
+   |
+14 | #[derive(ornis_macros::PlainResource)]
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ type parameter would need to implement `PlainResource`
+   = help: consider manually implementing the trait to avoid undesired bounds
+   = note: this error originates in the attribute macro `smart_system` which comes from the expansion of the derive macro `ornis_macros::PlainResource` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the associated function or constant `fetch` exists for struct `Res<'_, Holder>`, but its trait bounds were not satisfied
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:19:1
+   |
+15 | struct Holder {
+   | ------------- doesn't satisfy `Holder: PlainResource`
+...
+19 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ associated function or constant cannot be called on `Res<'_, Holder>` due to unsatisfied trait bounds
+   |
+  ::: $RUST/std/src/sync/poison/mutex.rs
+   |
+   | pub struct Mutex<T: ?Sized> {
+   | --------------------------- doesn't satisfy `std::sync::Mutex<u32>: PlainResource`
+   |
+note: trait bound `std::sync::Mutex<u32>: PlainResource` was not satisfied
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:14:10
+   |
+14 | #[derive(ornis_macros::PlainResource)]
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^ type parameter would need to implement `PlainResource`
+   = help: consider manually implementing the trait to avoid undesired bounds
+   = note: this error originates in the attribute macro `smart_system` which comes from the expansion of the derive macro `ornis_macros::PlainResource` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `std::sync::Mutex<u32>` cannot be shared as `Res`: it may hold interior mutability; use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:20:22
+   |
+20 | fn sys(u: &mut Unit, holder: Res<Holder>) {
+   |                      ^^^^^^ the trait `PlainResource` is not implemented for `std::sync::Mutex<u32>`
+   |
+   = help: the following other types implement trait `PlainResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Box<T>
+             Duration
+             FixedSteps
+             FixedTime
+           and $N others
+note: required for `Holder` to implement `PlainResource`
+  --> tests/ui/smart_system_rejects_mutex_newtype.rs:15:8
+   |
+14 | #[derive(ornis_macros::PlainResource)]
+   |          --------------------------- type parameter would need to implement `PlainResource`
+15 | struct Holder {
+   |        ^^^^^^
+   = help: consider manually implementing `PlainResource` to avoid undesired bounds
+note: required by a bound in `Res`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct Res<'a, T: PlainResource> {
+   |                       ^^^^^^^^^^^^^ required by this bound in `Res`
