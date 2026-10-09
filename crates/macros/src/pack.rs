@@ -157,6 +157,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
         &pack_mut_name,
         &info.lanes,
     );
+    let pack_put = generate_pack_put(&info.fields);
+    let pack_entities = generate_pack_entities(&info.lanes);
+    let pack_lane_ids = generate_pack_lane_ids(&info.lanes);
 
     let expanded = quote! {
         #wrapper_defs
@@ -184,6 +187,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
             fn pack_get_mut<'a>(store: &'a mut ornis_core::SmartStore, entity: ornis_core::Entity) -> Option<Self::PackMut<'a>> {
                 #pack_get_mut
+            }
+
+            fn pack_put(&self, store: &ornis_core::SmartStore, entity: ornis_core::Entity) {
+                #pack_put
+            }
+
+            fn pack_entities(store: &ornis_core::SmartStore) -> Vec<ornis_core::Entity> {
+                #pack_entities
+            }
+
+            fn pack_lane_ids() -> Vec<std::any::TypeId> {
+                #pack_lane_ids
             }
         }
 
@@ -279,6 +294,42 @@ fn generate_pack_get_mut(
     }
 }
 
+fn generate_pack_put(fields: &[FieldInfo]) -> TokenStream2 {
+    // Scatter one field at a time: each `write_lane` guard is dropped
+    // before the next is taken, so lanes are never locked nested and no
+    // canonical capture order is needed (system_param::canonical_lane_order
+    // applies once multi-lane batch locking lands).
+    let puts = fields.iter().map(|f| {
+        let name = &f.name;
+        let wrapper_name = &f.wrapper_name;
+        quote! {
+            if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
+                __lane.insert(entity, #wrapper_name(self.#name.clone()));
+            }
+        }
+    });
+
+    quote! { #(#puts)* }
+}
+
+fn generate_pack_entities(lanes: &[LaneInfo]) -> TokenStream2 {
+    let first_wrapper = &lanes[0].wrapper_ty;
+    quote! {
+        match store.read_lane::<#first_wrapper>() {
+            Some(__lane) => __lane.iter_entities().collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+fn generate_pack_lane_ids(lanes: &[LaneInfo]) -> TokenStream2 {
+    let ids = lanes.iter().map(|lane| {
+        let wrapper = &lane.wrapper_ty;
+        quote! { std::any::TypeId::of::<#wrapper>() }
+    });
+    quote! { vec![#(#ids),*] }
+}
+
 fn generate_for_each_packed(
     struct_name: &Ident,
     ty_generics: &syn::TypeGenerics,
@@ -307,7 +358,9 @@ fn generate_for_each_packed(
                     None => return,
                 };
                 for __entity in entities {
-                    if let Some(mut __pm) = Self::pack_get_mut(store, __entity) {
+                    if let Some(mut __pm) =
+                        <Self as ornis_core::Pack>::pack_get_mut(store, __entity)
+                    {
                         f(&mut __pm);
                     }
                 }
