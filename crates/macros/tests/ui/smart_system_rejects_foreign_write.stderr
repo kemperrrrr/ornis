@@ -1,0 +1,5 @@
+error: smart_system: cannot write another entity's component — `t.field` is read-only (gather); send an event via `Events<E>` instead
+  --> tests/ui/smart_system_rejects_foreign_write.rs:15:9
+   |
+15 |         t.hp -= 1.0;
+   |         ^^^^^^^^^^^
