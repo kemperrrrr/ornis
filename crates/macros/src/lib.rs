@@ -30,6 +30,8 @@ mod pipeline_config;
 mod register_component;
 mod smart_pipeline;
 mod smart_system;
+mod smart_system_checks;
+mod smart_system_emit;
 mod stages;
 mod static_profile;
 mod wgsl;
@@ -107,6 +109,10 @@ pub fn smart_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// body (`resources.get::<T>()` → `reads`, lane bindings →
 /// `reads_lane`/`writes_lane`), and `run()` forwarding to the function.
 /// Loop bodies get the same parallel rewriting as `#[smart_pipeline]`.
+/// What cannot be derived (typeless `get()`, escaping `resources`/store
+/// idents, undeclared interior mutability, accesses inside unknown macros)
+/// is a compile error unless `opaque` is set with every touched resource
+/// and lane listed in `reads`/`writes`/`reads_lane`/`writes_lane`.
 // qual:api (proc-macro entry point: invoked by the compiler, invisible to the
 // call graph by design).
 #[proc_macro_attribute]

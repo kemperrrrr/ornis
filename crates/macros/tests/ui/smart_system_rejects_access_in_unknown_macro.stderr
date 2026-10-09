@@ -1,0 +1,5 @@
+error: #[smart_system]: `resources`/`store` used inside a macro invocation; accesses cannot be derived — hoist the call into a `let` or declare it explicitly
+  --> tests/ui/smart_system_rejects_access_in_unknown_macro.rs:15:28
+   |
+15 |     let _ = check_present!(resources);
+   |                            ^^^^^^^^^

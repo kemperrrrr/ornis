@@ -1,0 +1,5 @@
+error: #[smart_system]: resource `std::sync::Arc<std::sync::Mutex<Counter>>` has interior mutability — declare it with `writes(...)` or `reads(...)`
+  --> tests/ui/smart_system_rejects_wrapped_interior_mutability.rs:12:16
+   |
+12 |         .get::<std::sync::Arc<std::sync::Mutex<Counter>>>()
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

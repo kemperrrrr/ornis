@@ -1,4 +1,4 @@
-error: #[smart_system]: expected `name = "..."`, `reads(A, ...)` or `writes(B, ...)`
+error: #[smart_system]: expected `name = "..."`, `reads(A, ...)`, `writes(B, ...)`, `reads_lane(P, ...)`, `writes_lane(Q, ...)` or `opaque`
  --> tests/ui/smart_system_rejects_bare_name.rs:5:16
   |
 5 | #[smart_system(name)]

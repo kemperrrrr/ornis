@@ -1,18 +1,17 @@
-//! Probe tests for `REVIEW-smart_system.md` items 1, 2, 5, 12 and 13:
-//! interior mutability, non-plain lane bindings, parameter order, `&T`
-//! parameters, same-lane read+write, parallel levels, and parity with a
-//! hand-written system.
+//! Probe tests for `#[smart_system]` access inference: interior mutability,
+//! non-plain lane bindings, parameter order, `&T` parameters, same-lane
+//! read+write, parallel levels, store-alias forms, macro invocations, and
+//! parity with a hand-written system.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ornis_core::{Resources, Schedule, SmartStore, System};
 
 use ornis_macros::smart_system;
 
-#[path = "smart_system_access.rs"]
-mod access;
+mod common;
 
-use access::{Cfg, Counter, P, V, run_enforced, world};
+use common::{Cfg, Counter, P, V, run_enforced, world};
 
 // ---- п.1: interior mutability must be declared as a write ----
 
@@ -234,7 +233,7 @@ fn cfg_helper(resources: &Resources) -> f32 {
     resources.get::<Cfg>().map(|c| c.k).unwrap_or(0.0)
 }
 
-#[smart_system(reads(Cfg))]
+#[smart_system(opaque, reads(Cfg))]
 fn via_helper_allowed(resources: &Resources) {
     let store = resources.get::<SmartStore>().expect("store");
     let mut pos = store.write_lane::<P>().expect("pos");
@@ -262,7 +261,7 @@ fn raw_ident_system_compiles_with_unrawed_name() {
     assert_eq!(run_enforced(LoopSystem::new()), Ok(()));
 }
 
-// ---- п.13: parity with a hand-written system ----// ---- п.13: parity with a hand-written system ----
+// ---- parity with a hand-written system ----
 
 /// Hand-written twin of `machine_integrate` below: same per-element
 /// arithmetic in the same order (bitwise parity), deliberately different
@@ -359,24 +358,175 @@ fn confluence_world(n: usize) -> Resources {
 fn collect_bits(resources: &Resources) -> Vec<u32> {
     let store = resources.get::<SmartStore>().expect("store");
     let lane = store.read_lane::<P>().expect("pos");
-    let mut bits: Vec<u32> = lane.iter().map(|p| p.x.to_bits()).collect();
-    bits.sort_unstable();
-    bits
+    // Entity insertion order, no sorting: a permutation would hide here.
+    lane.iter().map(|p| p.x.to_bits()).collect()
 }
 
 #[test]
 fn smart_system_confluence_1_vs_32() {
     let run = |threads: usize| {
-        unsafe {
-            std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
-        }
-        let resources = confluence_world(512);
-        let mut schedule = Schedule::new();
-        schedule.add_system(WideMapSystem::new());
-        schedule.run(&resources);
-        collect_bits(&resources)
+        ornis_core::rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("thread pool")
+            .install(|| {
+                assert_eq!(
+                    ornis_core::rayon::current_num_threads(),
+                    threads,
+                    "pool really runs on {threads} threads"
+                );
+                let resources = confluence_world(512);
+                let mut schedule = Schedule::new();
+                schedule.add_system(WideMapSystem::new());
+                schedule.run(&resources);
+                collect_bits(&resources)
+            })
     };
-    // Same scheduling caveat as `ornis-core` confluence tests: the global
-    // pool initializes once, so this mirrors the established gate.
     assert_eq!(run(1), run(32));
+}
+
+// ---- N5: wrapped interior mutability is declared as a write ----
+
+#[smart_system(writes(Arc<Mutex<Counter>>))]
+fn arc_mutex(resources: &Resources) {
+    resources
+        .get::<Arc<Mutex<Counter>>>()
+        .expect("counter")
+        .lock()
+        .expect("lock")
+        .0 += 1;
+}
+
+#[test]
+fn n5_arc_mutex_write_is_declared_as_write() {
+    let entry = ArcMutexSystem::new().access();
+    assert!(
+        entry
+            .writes
+            .iter()
+            .any(|id| *id == std::any::TypeId::of::<Arc<Mutex<Counter>>>())
+    );
+    assert!(
+        !entry
+            .reads
+            .iter()
+            .any(|id| *id == std::any::TypeId::of::<Arc<Mutex<Counter>>>())
+    );
+    assert_eq!(run_enforced(ArcMutexSystem::new()), Ok(()));
+}
+
+// ---- N2: a store passed to a helper is rejected; `reads_lane` declares it ----
+
+fn lane_helper(store: &SmartStore) -> usize {
+    store.read_lane::<V>().map(|lane| lane.len()).unwrap_or(0)
+}
+
+#[smart_system(reads_lane(V))]
+fn store_declared(resources: &Resources) {
+    let store = resources.get::<SmartStore>().expect("store");
+    let _ = lane_helper(store);
+}
+
+#[test]
+fn n2_store_escape_with_lane_declared() {
+    let entry = StoreDeclaredSystem::new().access();
+    assert!(entry.reads_lanes.contains(&std::any::TypeId::of::<V>()));
+    assert_eq!(run_enforced(StoreDeclaredSystem::new()), Ok(()));
+}
+
+// ---- N6: a re-aliased store is still tracked ----
+
+#[smart_system]
+fn realias(resources: &Resources) {
+    let store = resources.get::<SmartStore>().expect("store");
+    let s2 = store;
+    let _ = s2.read_lane::<V>().expect("vel").len();
+}
+
+#[test]
+fn n6_realiased_store_lane_declared() {
+    assert_eq!(run_enforced(RealiasSystem::new()), Ok(()));
+    assert!(
+        RealiasSystem::new()
+            .access()
+            .reads_lanes
+            .contains(&std::any::TypeId::of::<V>())
+    );
+}
+
+// ---- N3: a lane off a `resources.get::<SmartStore>()` chain counts ----
+
+#[smart_system]
+fn chain_lane(resources: &Resources) {
+    let n = resources
+        .get::<SmartStore>()
+        .expect("store")
+        .read_lane::<V>()
+        .expect("vel")
+        .len();
+    let _ = n;
+}
+
+#[test]
+fn n3_chain_lane_declared() {
+    assert_eq!(run_enforced(ChainLaneSystem::new()), Ok(()));
+    assert!(
+        ChainLaneSystem::new()
+            .access()
+            .reads_lanes
+            .contains(&std::any::TypeId::of::<V>())
+    );
+}
+
+// ---- N1: accesses inside known std macros are derived ----
+
+#[smart_system]
+fn in_macro(resources: &Resources) {
+    assert!(resources.get::<Cfg>().is_some());
+}
+
+#[test]
+fn n1_resource_in_assert_declared() {
+    assert_eq!(run_enforced(InMacroSystem::new()), Ok(()));
+    assert!(
+        InMacroSystem::new()
+            .access()
+            .reads
+            .contains(&std::any::TypeId::of::<Cfg>())
+    );
+}
+
+#[smart_system]
+fn lane_in_macro(resources: &Resources) {
+    let store = resources.get::<SmartStore>().expect("store");
+    println!("{}", store.read_lane::<V>().expect("vel").len());
+}
+
+#[test]
+fn n1_lane_in_println_declared() {
+    assert_eq!(run_enforced(LaneInMacroSystem::new()), Ok(()));
+    assert!(
+        LaneInMacroSystem::new()
+            .access()
+            .reads_lanes
+            .contains(&std::any::TypeId::of::<V>())
+    );
+}
+
+// ---- N4: explicit `writes` never blanket-approves an escape; `opaque` does ----
+
+#[smart_system(opaque, reads(Cfg), writes(Mutex<Counter>))]
+fn partial_explicit_allowed(resources: &Resources) {
+    resources
+        .get::<Mutex<Counter>>()
+        .expect("counter")
+        .lock()
+        .expect("lock")
+        .0 += 1;
+    let _ = cfg_helper(resources);
+}
+
+#[test]
+fn n4_opaque_with_full_declaration_passes() {
+    assert_eq!(run_enforced(PartialExplicitAllowedSystem::new()), Ok(()));
 }

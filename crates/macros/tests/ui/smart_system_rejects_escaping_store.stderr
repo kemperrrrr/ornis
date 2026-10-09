@@ -1,0 +1,5 @@
+error: #[smart_system]: `store` escapes here; lane accesses cannot be derived — declare them with `reads_lane(...)`/`writes_lane(...)`
+  --> tests/ui/smart_system_rejects_escaping_store.rs:17:25
+   |
+17 |     let _ = lane_helper(store);
+   |                         ^^^^^
