@@ -12,9 +12,10 @@ name: Determinism Nightly
 # too: they pin solver limits and are expected to fail. --no-fail-fast
 # keeps one failing test binary from hiding the remaining gates.
 #
-# Fast PR subset (RAT-11): the small-N default-suite determinism gates
-# run in every PR via the `determinism-fast` xtask stage (Quality `gpu`
-# shard, ~+30 s, no rebuild). The ignored gates stay here: measured
+# Fast PR coverage (RAT-26): the small-N default-suite determinism gates
+# run in every PR inside the `test-physics` xtask stage (Quality `gpu`
+# shard) with identical flags — a separate `determinism-fast` filter stage
+# was removed as pure duplication. The ignored gates stay here: measured
 # 2026-10-08, `avbd_confluence_one_vs_many_threads` alone takes ~7 min
 # in a debug build (CI `cargo test` is debug), so no ignored gate fits
 # a PR shard.
