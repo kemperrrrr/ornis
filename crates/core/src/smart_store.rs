@@ -73,13 +73,41 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
         unsafe { shared.deref() }
     }
 
-    fn write(&self, f: impl FnOnce(&mut ComponentStore<T>)) {
-        let guard = epoch_pin();
-        let shared = self.store.load(Ordering::Acquire, &guard);
-        let mut new_store = unsafe { (*shared.deref()).clone() };
-        f(&mut new_store);
-        self.store.store(Owned::new(new_store), Ordering::Release);
-        unsafe { guard.defer_destroy(shared) };
+    fn write(&self, mut f: impl FnMut(&mut ComponentStore<T>)) {
+        // CAS publish loop: `load -> clone -> store` without a CAS lets two
+        // writers read the same snapshot and both `defer_destroy` it (double
+        // free, UB). Only the thread whose `compare_exchange` succeeds owns
+        // the replaced snapshot and may retire it; losers drop their private
+        // clone inline and retry on the fresh snapshot. Success ordering is
+        // AcqRel (acquire the latest snapshot, release the publish);
+        // failure ordering is Acquire (reload the current pointer).
+        loop {
+            let guard = epoch_pin();
+            let shared = self.store.load(Ordering::Acquire, &guard);
+            // Safety: `shared` is pinned by `guard` for this iteration.
+            let mut new_store = unsafe { (*shared.deref()).clone() };
+            f(&mut new_store);
+            match self.store.compare_exchange(
+                shared,
+                Owned::new(new_store),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                &guard,
+            ) {
+                Ok(_) => {
+                    // Safety: this thread replaced `shared`; no other thread
+                    // can retire it because its CAS on the same `shared`
+                    // pointer now fails. Epoch reclamation frees it once
+                    // readers drain.
+                    unsafe { guard.defer_destroy(shared) };
+                    break;
+                }
+                Err(_) => {
+                    // CAS lost: our `Owned` clone is dropped with the error;
+                    // the loop retries against the winning snapshot.
+                }
+            }
+        }
     }
 }
 
@@ -298,7 +326,9 @@ impl SmartStore {
         if let Some(rwlock) = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>() {
             write_lock(rwlock).insert(entity, component);
         } else if let Some(lf) = lane.as_any().downcast_ref::<LockFreeLaneInner<T>>() {
-            lf.write(|store| store.insert(entity, component));
+            // `component` is cloned per CAS attempt: the write loop may
+            // re-apply the closure after contention, so it must be `FnMut`.
+            lf.write(|store| store.insert(entity, component.clone()));
         }
     }
 
@@ -353,11 +383,16 @@ impl SmartStore {
 
     /// Applies a mutation to the lock-free lane of `T`: clones the current
     /// snapshot, runs the mutator on the clone, then atomically publishes
-    /// it. Old snapshots are reclaimed by the epoch garbage collector once
-    /// readers drain. No-op if `T` has no lock-free lane.
+    /// it via `compare_exchange` (retrying on contention). Old snapshots
+    /// are reclaimed by the epoch garbage collector once readers drain.
+    /// No-op if `T` has no lock-free lane.
+    ///
+    /// Takes `FnMut` (not `FnOnce`) because a contended CAS retry must
+    /// re-apply the mutation to the fresh snapshot; one-shot move-out
+    /// closures cannot be retried safely.
     pub fn write_lock_free_lane<T: 'static + Clone + Send + Sync>(
         &self,
-        f: impl FnOnce(&mut ComponentStore<T>),
+        f: impl FnMut(&mut ComponentStore<T>),
     ) {
         let tid = TypeId::of::<T>();
         let Some(lane) = self.lanes.get(&tid) else {
@@ -606,5 +641,62 @@ mod tests {
         assert_eq!(lane.len(), 0);
         drop(lane);
         assert!(store.write_cold_lane::<f32>().is_some());
+    }
+
+    /// Stress through the public lock-free API: concurrent
+    /// `write_lock_free_lane` inserts plus `destroy_entity` create/destroy
+    /// pairs racing on one lane. The CAS loop must preserve every insert
+    /// while retiring each replaced snapshot exactly once (the old
+    /// `load -> clone -> store` code lost updates and double-freed).
+    #[test]
+    fn lock_free_concurrent_write_and_destroy_consistent() {
+        use std::sync::Arc;
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 100;
+
+        let mut store = SmartStore::new();
+        store.register_lock_free::<u64>();
+        let store = Arc::new(store);
+
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let s = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let e = s.create_entity();
+                    let v = (t * PER_THREAD + i) as u64;
+                    s.write_lock_free_lane::<u64>(|lane| {
+                        lane.insert(e, v);
+                    });
+                }
+                // Interleaved create/destroy pairs contend with the
+                // inserts above on the same snapshots; net lane effect is
+                // zero, so the final length proves no insert was lost.
+                for _ in 0..PER_THREAD {
+                    let e = s.create_entity();
+                    s.destroy_entity(e);
+                }
+            }));
+        }
+        // A concurrent reader pins old snapshots while writers retire them,
+        // exercising epoch reclamation under contention.
+        let s = Arc::clone(&store);
+        let reader = thread::spawn(move || {
+            for _ in 0..2000 {
+                let _ = s.with_lock_free_lane::<u64, _>(|lane| lane.len());
+            }
+        });
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        reader.join().unwrap();
+
+        let len = store
+            .with_lock_free_lane::<u64, _>(|lane| lane.len())
+            .unwrap();
+        assert_eq!(len, THREADS * PER_THREAD);
     }
 }
