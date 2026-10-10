@@ -123,6 +123,16 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
     }
 }
 
+impl<T: Clone + Send + Sync> Drop for LockFreeLaneInner<T> {
+    fn drop(&mut self) {
+        // SAFETY: `&mut self` proves exclusive access: lock-free reads go
+        // through `with_lock_free_lane(&self, ..)`, whose snapshot cannot
+        // outlive the store, so no live reader of this snapshot exists;
+        // retired snapshots already went to `defer_destroy`.
+        crate::component_store::free_live_snapshot(&mut self.store);
+    }
+}
+
 // Reserved: RAII read guard for lock-free lanes (experimental
 // "lock-free" feature). Holds an epoch guard alive while exposing the
 // snapshot of the store captured at read time.
@@ -483,6 +493,18 @@ mod tests {
             .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
             .unwrap();
         assert_eq!(val, Some(3.5));
+    }
+
+    #[test]
+    fn drop_frees_live_snapshot() {
+        let marker = std::sync::Arc::new(());
+        {
+            let mut store = SmartStore::new();
+            store.register_lock_free::<std::sync::Arc<()>>();
+            let e = store.create_entity();
+            store.insert(e, std::sync::Arc::clone(&marker));
+        } // drop: живой снапшот с клоном Arc должен освободиться сразу
+        assert_eq!(std::sync::Arc::strong_count(&marker), 1);
     }
 
     #[test]
