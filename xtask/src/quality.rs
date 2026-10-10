@@ -730,8 +730,13 @@ fn finish_rustqual_stage(
 /// baseline, its absence in the tree fails closed in strict mode and
 /// warns locally. Returns true when the stage result was recorded and
 /// the caller must return.
-fn reject_deleted_baseline(stages: &mut StageList<'_>) -> bool {
-    if read_base_baseline(stages.root).is_none() {
+///
+/// Takes `guard_ref` explicitly so tests stay hermetic: the only env
+/// read ([`baseline_guard_ref`]) happens once at stage entry, never
+/// inside the checked functions (RAT-24 review: env reads inside shared
+/// helpers flake under parallel `cargo test`).
+fn reject_deleted_baseline(stages: &mut StageList<'_>, guard_ref: &str) -> bool {
+    if read_base_baseline(stages.root, guard_ref).is_none() {
         return false;
     }
     let note = "baseline.json deleted while the base branch has one";
@@ -755,8 +760,22 @@ fn reject_deleted_baseline(stages: &mut StageList<'_>) -> bool {
 
 /// Bump guard verdict (RAT-24): flip the rustqual stage row to FAIL
 /// when the committed baseline grew vs the base branch version.
-fn apply_bump_guard(stages: &mut StageList<'_>, name: &str, committed_s: &str) {
-    if let Some(reason) = check_baseline_bump(stages.root, committed_s, stages.strict) {
+/// `bump_allowed`/`guard_ref` come from the stage entry point, which is
+/// the only place that reads the env (see [`baseline_bump_allowed`]).
+fn apply_bump_guard(
+    stages: &mut StageList<'_>,
+    name: &str,
+    committed_s: &str,
+    bump_allowed: bool,
+    guard_ref: &str,
+) {
+    if let Some(reason) = check_baseline_bump(
+        stages.root,
+        committed_s,
+        stages.strict,
+        bump_allowed,
+        guard_ref,
+    ) {
         eprintln!("── {name}: FAIL ({reason}) ──");
         if ci_annotations() {
             annotate(stage_title(name), &reason);
@@ -787,9 +806,14 @@ fn baseline_bump_allowed() -> bool {
 /// Base ref whose `baseline.json` the committed one must not exceed:
 /// `origin/<base>` on pull_request CI runs, `origin/master` otherwise
 /// (local runs and push events).
-fn baseline_guard_ref() -> String {
-    if std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("pull_request") {
-        if let Ok(base) = std::env::var("GITHUB_BASE_REF") {
+///
+/// Pure mapping over the already-read env values so tests can cover
+/// every branch without touching process env (RAT-24 review of PR #75:
+/// env-reading helpers flake under parallel `cargo test`). The two
+/// `std::env::var` reads live inline at the `rustqual_stage` entry.
+fn baseline_guard_ref_for(event_name: Option<&str>, base_ref: Option<&str>) -> String {
+    if event_name == Some("pull_request") {
+        if let Some(base) = base_ref {
             if !base.is_empty() {
                 return format!("origin/{base}");
             }
@@ -798,10 +822,10 @@ fn baseline_guard_ref() -> String {
     "origin/master".to_string()
 }
 
-/// Read the base branch `baseline.json`; `None` when the ref or the
-/// file is unavailable (shallow checkout, never fetched, first baseline).
-fn read_base_baseline(root: &Path) -> Option<String> {
-    let guard_ref = baseline_guard_ref();
+/// Read the base branch `baseline.json` at `guard_ref`; `None` when
+/// the ref or the file is unavailable (shallow checkout, never fetched,
+/// first baseline).
+fn read_base_baseline(root: &Path, guard_ref: &str) -> Option<String> {
     let out = Command::new("git")
         .args([
             "-C",
@@ -820,12 +844,22 @@ fn read_base_baseline(root: &Path) -> Option<String> {
 /// RAT-24 bump guard: compare the committed `baseline.json` against the
 /// base branch version with the same strict comparator, so a bump can
 /// no longer sneak through the same-PR comparison. Any growth (or an
-/// unreadable side) is a FAIL unless the bump is owner-approved (see
+/// unreadable side) is a FAIL unless the bump is owner-approved (`true`
+/// only when the workflow saw the `baseline-bump-approved` label — see
 /// [`baseline_bump_allowed`]). A missing base baseline fails closed in
 /// strict mode and warns locally. Equal-or-lower is `None` (holds).
-fn check_baseline_bump(root: &Path, committed_s: &str, strict: bool) -> Option<String> {
-    let guard_ref = baseline_guard_ref();
-    let Some(base_s) = read_base_baseline(root) else {
+///
+/// Both `bump_allowed` and `guard_ref` are parameters, not env reads, so
+/// parallel tests cannot race each other through process env (RAT-24
+/// review of PR #75).
+fn check_baseline_bump(
+    root: &Path,
+    committed_s: &str,
+    strict: bool,
+    bump_allowed: bool,
+    guard_ref: &str,
+) -> Option<String> {
+    let Some(base_s) = read_base_baseline(root, guard_ref) else {
         let note = format!("baseline guard: cannot read {guard_ref}:baseline.json");
         if strict {
             return Some(note);
@@ -837,7 +871,7 @@ fn check_baseline_bump(root: &Path, committed_s: &str, strict: bool) -> Option<S
         Err(msg) => Some(format!("baseline guard: {msg}")),
         Ok(o) if !o.regressed_reasons.is_empty() => {
             let reasons = o.regressed_reasons.join(", ");
-            if baseline_bump_allowed() {
+            if bump_allowed {
                 eprintln!("baseline guard: bump allowed by owner label ({reasons})");
                 return None;
             }
@@ -867,8 +901,15 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
         return;
     }
     let baseline_path = stages.root.join("baseline.json");
+    // The only env reads for the bump guard live here, at stage entry:
+    // helpers below take both values as parameters so parallel tests
+    // cannot race through process env (RAT-24 review of PR #75).
+    let gh_event = std::env::var("GITHUB_EVENT_NAME").ok();
+    let gh_base = std::env::var("GITHUB_BASE_REF").ok();
+    let guard_ref = baseline_guard_ref_for(gh_event.as_deref(), gh_base.as_deref());
+    let bump_allowed = baseline_bump_allowed();
     if !baseline_path.exists() {
-        if reject_deleted_baseline(stages) {
+        if reject_deleted_baseline(stages, &guard_ref) {
             return;
         }
         // No baseline — run plain rustqual (findings are informational until baseline is created).
@@ -918,7 +959,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
             match (cur_str, base_str) {
                 (Ok(cur_s), Ok(base_s)) => {
                     finish_rustqual_stage(stages, name, &base_s, &cur_s, started.elapsed());
-                    apply_bump_guard(stages, name, &base_s);
+                    apply_bump_guard(stages, name, &base_s, bump_allowed, &guard_ref);
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     let note = format!("read baseline/cur json: {e}");
@@ -2299,9 +2340,12 @@ mod ratchet_tests {
         assert!(err2.contains("`file`"), "unexpected: {err2}");
     }
 
-    /// Scratch git repo with `baseline.json` committed and visible as
-    /// `origin/master` (what CI's full-history checkout provides).
-    fn init_guard_repo(name: &str, base_json: &str) -> std::path::PathBuf {
+    /// Scratch git repo with `baseline.json` committed and visible at
+    /// `remote_ref` (what CI's full-history checkout provides). The ref
+    /// is a parameter — deliberately not `origin/master` — so the guard
+    /// tests prove they follow the passed ref instead of the ambient
+    /// `GITHUB_*` env (RAT-24 review of PR #75).
+    fn init_guard_repo(name: &str, base_json: &str, remote_ref: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("xtask-guard-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2325,21 +2369,24 @@ mod ratchet_tests {
             "-qm",
             "base",
         ]);
-        git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        git(&["update-ref", &format!("refs/remotes/{remote_ref}"), "HEAD"]);
         dir
     }
 
     #[test]
     fn bump_guard_fails_growth_and_passes_equal() {
-        let dir = init_guard_repo("bump", &base_report());
-        assert_eq!(baseline_guard_ref(), "origin/master");
-        let base = read_base_baseline(&dir).expect("base baseline readable");
+        // Non-master ref: the guard must follow the parameter, not the
+        // ambient base ref env.
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("bump", &base_report(), guard_ref);
+        let base = read_base_baseline(&dir, guard_ref).expect("base baseline readable");
         assert!(base.contains("quality_score"));
         // Committed == base: the ratchet holds.
-        assert!(check_baseline_bump(&dir, &base_report(), true).is_none());
+        assert!(check_baseline_bump(&dir, &base_report(), true, false, guard_ref).is_none());
         // Committed above base: FAIL naming the count and the label.
         let bumped = report_with(json!({"dead_code_warnings": 11}));
-        let reason = check_baseline_bump(&dir, &bumped, true).expect("bump must fail");
+        let reason =
+            check_baseline_bump(&dir, &bumped, true, false, guard_ref).expect("bump must fail");
         assert!(
             reason.contains("dead_code_warnings"),
             "unexpected: {reason}"
@@ -2348,18 +2395,21 @@ mod ratchet_tests {
             reason.contains("baseline-bump-approved"),
             "unexpected: {reason}"
         );
+        // Owner-approved bump: the same growth holds.
+        assert!(check_baseline_bump(&dir, &bumped, true, true, guard_ref).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn deleted_baseline_guard_fails_closed_in_strict() {
-        let dir = init_guard_repo("deleted", &base_report());
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("deleted", &base_report(), guard_ref);
         let mut stages = StageList::new(&dir, 1, None, true);
-        assert!(reject_deleted_baseline(&mut stages));
+        assert!(reject_deleted_baseline(&mut stages, guard_ref));
         assert_eq!(stages.results.len(), 1);
         assert_eq!(stages.results[0].status, Status::Fail);
         let mut lax = StageList::new(&dir, 1, None, false);
-        assert!(!reject_deleted_baseline(&mut lax));
+        assert!(!reject_deleted_baseline(&mut lax, guard_ref));
         assert!(lax.results.is_empty());
         // apply_bump_guard flips a Pass row to Fail on growth.
         let mut stages2 = StageList::new(&dir, 1, None, true);
@@ -2370,7 +2420,7 @@ mod ratchet_tests {
             Duration::ZERO,
         ));
         let bumped = report_with(json!({"dead_code_warnings": 11}));
-        apply_bump_guard(&mut stages2, "rustqual", &bumped);
+        apply_bump_guard(&mut stages2, "rustqual", &bumped, false, guard_ref);
         assert_eq!(stages2.results[0].status, Status::Fail);
         assert!(stages2.results[0].note.contains("dead_code_warnings"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2558,9 +2608,35 @@ mod tests {
     }
 
     #[test]
+    fn guard_ref_mapping_is_env_free() {
+        assert_eq!(baseline_guard_ref_for(None, None), "origin/master");
+        assert_eq!(
+            baseline_guard_ref_for(Some("push"), Some("master")),
+            "origin/master"
+        );
+        assert_eq!(
+            baseline_guard_ref_for(Some("pull_request"), Some("master")),
+            "origin/master"
+        );
+        assert_eq!(
+            baseline_guard_ref_for(Some("pull_request"), Some("release")),
+            "origin/release"
+        );
+        assert_eq!(
+            baseline_guard_ref_for(Some("pull_request"), None),
+            "origin/master"
+        );
+        assert_eq!(
+            baseline_guard_ref_for(Some("pull_request"), Some("")),
+            "origin/master"
+        );
+    }
+
+    #[test]
     fn bump_allowlist_follows_env() {
-        // Nothing else in this binary reads this var, so serializing
-        // here is unnecessary; restore the prior value afterwards.
+        // This is the only test that touches this var, and no helper
+        // reads env anymore (both take parameters), so parallel tests
+        // cannot observe it; restore the prior value afterwards.
         let prev = std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok();
         std::env::remove_var("ORNIS_BASELINE_BUMP_ALLOWED");
         assert!(!baseline_bump_allowed());
