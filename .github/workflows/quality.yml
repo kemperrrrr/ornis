@@ -41,7 +41,7 @@ jobs:
   # Shard map (stage ids):
   #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos (no compilation)
   #   clippy — clippy-physics, clippy
-  #   test   — test (workspace)
+   #   test   — test, test-lockfree (workspace + ornis-core lock-free lanes)
   #   gpu    — test-physics, determinism-fast, smoke (all need lavapipe;
   #            determinism-fast is the fast PR subset of Determinism Nightly,
   #            ~+30 s test runtime, no rebuild beyond test-physics)
@@ -217,7 +217,7 @@ jobs:
           RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only test 2>&1 | tee target/quality-test.log
+          cargo xtask quality --ci --only test,test-lockfree 2>&1 | tee target/quality-test.log
 
       - name: Upload shard log
         if: always()
