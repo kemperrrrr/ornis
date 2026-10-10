@@ -37,6 +37,8 @@ type TargetLane = Body__target__PackLane__3;
 
 const DT: f32 = 1.0 / 60.0;
 const GRAVITY: f32 = -9.81;
+/// Pull toward the link target per step (scenario c).
+const LINK_PULL: f32 = 0.1;
 
 // ---------------------------------------------------------------------------
 // (a) linear integration
@@ -132,7 +134,7 @@ impl System for FilterManual {
 #[ornis_macros::smart_system]
 fn link_body(b: &mut Body) {
     let goal = b.target.map(|t| t.position).unwrap_or(0.0);
-    b.position += (goal - b.position) * 0.1;
+    b.position += (goal - b.position) * LINK_PULL;
 }
 
 struct LinkManual;
@@ -166,7 +168,7 @@ impl System for LinkManual {
             };
             let mut positions = store.write_lane::<PosLane>().expect("position lane");
             if let Some(position) = positions.get_mut(entity) {
-                position.0 += (goal - position.0) * 0.1;
+                position.0 += (goal - position.0) * LINK_PULL;
             }
         }
     }
@@ -206,7 +208,7 @@ fn aos_link(bodies: &mut [AosBody]) {
         let goal = bodies[index]
             .target
             .map_or(0.0, |target| bodies[target].position);
-        bodies[index].position += (goal - bodies[index].position) * 0.1;
+        bodies[index].position += (goal - bodies[index].position) * LINK_PULL;
     }
 }
 
@@ -217,11 +219,18 @@ fn aos_link(bodies: &mut [AosBody]) {
 /// Deterministic xorshift for scattered targets (fixed seed, no extra deps).
 struct XorShift(u64);
 
+/// Xorshift64 step constants (Marsaglia).
+const XOR_A: u32 = 13;
+const XOR_B: u32 = 7;
+const XOR_C: u32 = 17;
+/// Fixed seed: layouts must be identical across variants.
+const XOR_SEED: u64 = 0x9E3779B97F4A7C15;
+
 impl XorShift {
     fn next(&mut self, bound: usize) -> usize {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
+        self.0 ^= self.0 << XOR_A;
+        self.0 ^= self.0 >> XOR_B;
+        self.0 ^= self.0 << XOR_C;
         (self.0 as usize) % bound
     }
 }
@@ -281,7 +290,7 @@ fn build_world(
             },
         ));
     }
-    let mut rng = XorShift(0x9E3779B97F4A7C15);
+    let mut rng = XorShift(XOR_SEED);
     let entities: Vec<Entity> = bodies.iter().map(|(entity, _)| *entity).collect();
     for (index, (entity, body)) in bodies.iter_mut().enumerate() {
         let target = match layout {
@@ -297,7 +306,7 @@ fn build_world(
 }
 
 fn build_aos(count: usize, density: &FilterDensity, layout: &LinkLayout) -> Vec<AosBody> {
-    let mut rng = XorShift(0x9E3779B97F4A7C15);
+    let mut rng = XorShift(XOR_SEED);
     (0..count)
         .map(|index| {
             let target = match layout {
