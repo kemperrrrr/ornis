@@ -838,7 +838,8 @@ pub struct CameraDesc {
     #[serde(with = "crate::wire::vec3")]
     pub target: Vec3,
     /// Up direction, unit length (should not be parallel to the view
-    /// direction; normalized on load).
+    /// direction; deserialization only re-normalizes without rejecting
+    /// a parallel up).
     #[serde(with = "crate::wire::unit_vec3")]
     pub up: UnitVec3,
     /// Vertical field of view.
@@ -864,7 +865,7 @@ impl CameraDesc {
     /// [`Self::try_orthographic_units`]: finite eye/target, a non-degenerate
     /// view offset, a finite non-zero `up` not parallel to the view, and
     /// `0 < near < far`. Pure validation over plain arrays (the up
-    /// normalization lives in [`Self::checked_up` lining up with
+    /// normalization lives in [`Self::checked_up`] lining up with
     /// [`LightDesc::checked_dir`]), so the checked constructors stay pure
     /// orchestration (IOSP). Returns the eye, target and validated raw up.
     fn validated_framing(
@@ -1900,7 +1901,8 @@ Scene(
         assert!(ortho(Meters::new(f32::NAN)).is_none());
         assert!(ortho(Meters::new(f32::INFINITY)).is_none());
         // Shared framing checks still apply: coincident eye/target,
-        // parallel up and inverted clip planes reject.
+        // zero up, (anti-)parallel up, non-finite up and inverted clip
+        // planes reject.
         let eye = [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)];
         assert!(
             CameraDesc::try_orthographic_units(
@@ -1923,6 +1925,42 @@ Scene(
                 Meters::new(100.0),
             )
             .is_none()
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, -2.5, -9.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none(),
+            "up parallel to the view direction must reject"
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, 2.5, 9.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none(),
+            "up antiparallel to the view direction must reject"
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, f32::NAN, 0.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none(),
+            "non-finite up must reject"
         );
         assert!(
             CameraDesc::try_orthographic_units(
