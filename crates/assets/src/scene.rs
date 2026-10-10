@@ -826,7 +826,9 @@ pub enum CameraProjection {
 
 /// Viewing camera described look-at style.
 ///
-/// Wire form unchanged: vectors as `[f32; 3]`, `fov`/`near`/`far` as `f32`.
+/// Vectors travel as `[f32; 3]`, `fov`/`near`/`far` as `f32`; the additive
+/// `projection` field rides alongside (absent in older payloads, which load
+/// as [`CameraProjection::Perspective`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraDesc {
     /// Eye position in world units.
@@ -836,7 +838,8 @@ pub struct CameraDesc {
     #[serde(with = "crate::wire::vec3")]
     pub target: Vec3,
     /// Up direction, unit length (should not be parallel to the view
-    /// direction; normalized on load).
+    /// direction; deserialization only re-normalizes without rejecting
+    /// a parallel up).
     #[serde(with = "crate::wire::unit_vec3")]
     pub up: UnitVec3,
     /// Vertical field of view.
@@ -851,6 +854,8 @@ pub struct CameraDesc {
     /// Projection: perspective foreshortening or an orthographic box.
     /// Absent in older files — defaults to [`CameraProjection::Perspective`].
     /// In [`CameraProjection::Orthographic`] mode `fov` is ignored.
+    /// Always serialized (even for `Perspective`), so the wire form grew by
+    /// this field compared to pre-`projection` payloads.
     #[serde(default)]
     pub projection: CameraProjection,
 }
@@ -859,17 +864,17 @@ impl CameraDesc {
     /// Shared look-at framing validation of [`Self::try_new_units`] and
     /// [`Self::try_orthographic_units`]: finite eye/target, a non-degenerate
     /// view offset, a finite non-zero `up` not parallel to the view, and
-    /// `0 < near < far`. Pure computation over external types (the unit
-    /// constructors normalize through their own crates, like
-    /// [`MeshDesc::try_sphere_units`]), so the checked constructors stay
-    /// pure orchestration (IOSP). Returns the eye, target and normalized up.
+    /// `0 < near < far`. Pure validation over plain arrays (the up
+    /// normalization lives in [`Self::checked_up`] lining up with
+    /// [`LightDesc::checked_dir`]), so the checked constructors stay pure
+    /// orchestration (IOSP). Returns the eye, target and validated raw up.
     fn validated_framing(
         position: [Meters; 3],
         target: [Meters; 3],
         up: [f32; 3],
         near: Meters,
         far: Meters,
-    ) -> Option<(Vec3, Vec3, UnitVec3)> {
+    ) -> Option<(Vec3, Vec3, [f32; 3])> {
         let position = [position[0].get(), position[1].get(), position[2].get()];
         let target = [target[0].get(), target[1].get(), target[2].get()];
         if !position.iter().chain(target.iter()).all(|v| v.is_finite()) {
@@ -900,11 +905,16 @@ impl CameraDesc {
         if !dot.is_finite() || dot > CAMERA_UP_PARALLEL_DOT {
             return None;
         }
-        Some((
-            Vec3::from_array(position),
-            Vec3::from_array(target),
-            UnitVec3::normalize(Vec3::from_array(up))?,
-        ))
+        Some((Vec3::from_array(position), Vec3::from_array(target), up))
+    }
+
+    /// Stable up normalization: the canonical re-normalization-cycle member,
+    /// so `parse(serialize(camera)) == camera` for every constructed value
+    /// (a single `v / |v|` can move an already-unit value by an ULP; see
+    /// [`crate::wire::stable_unit_vec3`]). `None` for zero/non-finite input
+    /// (already rejected by [`Self::validated_framing`] in practice).
+    fn checked_up(up: [f32; 3]) -> Option<UnitVec3> {
+        crate::wire::stable_unit_vec3(Vec3::from_array(up))
     }
 
     /// Validated vertical field of view: strictly inside `(0, 180)` degrees.
@@ -938,6 +948,7 @@ impl CameraDesc {
         far: Meters,
     ) -> Option<Self> {
         let (position, target, up) = Self::validated_framing(position, target, up, near, far)?;
+        let up = Self::checked_up(up)?;
         let fov = Self::validated_fov(fov)?;
         Some(Self {
             position,
@@ -964,6 +975,7 @@ impl CameraDesc {
         far: Meters,
     ) -> Option<Self> {
         let (position, target, up) = Self::validated_framing(position, target, up, near, far)?;
+        let up = Self::checked_up(up)?;
         let half_height = Self::validated_half_height(half_height)?;
         Some(Self {
             position,
@@ -1428,13 +1440,18 @@ Scene(
     }
 
     /// The additive `projection` field rides alongside the legacy camera
-    /// shape: a `Perspective` camera serializes with the field, and old
-    /// payloads without it load as `Perspective`.
+    /// shape: a `Perspective` camera carries the field on the wire, and old
+    /// payloads without it load as `Perspective`. The full strings below pin
+    /// the shape: any wire change must update this test deliberately
+    /// (a plain `skip_serializing_if` for `Perspective` is not currently
+    /// possible: rustqual counts the predicate as dead code — it cannot see
+    /// the serde string reference — and the strict ratchet gate fails on any
+    /// new finding without a `baseline.json` bump, which is out of scope
+    /// for this slice).
     fn assert_perspective_camera_wire_shape(camera: &CameraDesc, legacy_camera: &legacy::Camera) {
-        let camera_json = serde_json::to_string(camera).expect("json");
-        assert!(
-            camera_json.ends_with(",\"projection\":\"Perspective\"}"),
-            "unexpected camera wire form: {camera_json}"
+        assert_eq!(
+            serde_json::to_string(camera).expect("json"),
+            r#"{"position":[0.0,2.5,9.0],"target":[0.0,0.0,0.0],"up":[0.0,1.0,0.0],"fov":60.0,"near":0.1,"far":100.0,"projection":"Perspective"}"#
         );
         assert_eq!(
             serde_json::from_str::<CameraDesc>(
@@ -1443,10 +1460,9 @@ Scene(
             .expect("legacy JSON parses"),
             *camera
         );
-        let camera_ron = ron::ser::to_string(camera).expect("ron");
-        assert!(
-            camera_ron.contains("projection:Perspective"),
-            "unexpected camera wire form: {camera_ron}"
+        assert_eq!(
+            ron::ser::to_string(camera).expect("ron"),
+            "(position:(0.0,2.5,9.0),target:(0.0,0.0,0.0),up:(0.0,1.0,0.0),fov:60.0,near:0.1,far:100.0,projection:Perspective)"
         );
         assert_eq!(
             ron::de::from_str::<CameraDesc>(&ron::ser::to_string(legacy_camera).expect("ron"))
@@ -1779,6 +1795,49 @@ Scene(
     }
 
     #[test]
+    fn camera_unnormalized_up_round_trips_in_json_and_ron() {
+        // Regression test: the constructors must store the stable normal
+        // (see `checked_up`), so a serialize/parse cycle is bit-exact. A
+        // plain `v / |v|` differs in the last bit for these inputs, which
+        // made every load/save cycle rewrite the camera.
+        for up in [[0.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.1, 1.0, 0.0]] {
+            let eye = [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)];
+            let at = [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)];
+            let perspective = CameraDesc::try_new_units(
+                eye,
+                at,
+                up,
+                Degrees::new(60.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .expect("valid perspective camera");
+            let ortho = CameraDesc::try_orthographic_units(
+                eye,
+                at,
+                up,
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .expect("valid orthographic camera");
+            for camera in [&perspective, &ortho] {
+                for text in [
+                    serde_json::to_string(camera).expect("json"),
+                    ron::ser::to_string(camera).expect("ron"),
+                ] {
+                    let back: CameraDesc = if text.starts_with('{') {
+                        serde_json::from_str(&text).expect("json round-trip")
+                    } else {
+                        ron::de::from_str(&text).expect("ron round-trip")
+                    };
+                    assert_eq!(back, *camera, "round-trip for up {up:?}: {text}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn camera_without_projection_loads_as_perspective() {
         // `FULL_SCENE_RON` and the shipped scenes predate `projection`.
         let scene = Scene::from_ron(FULL_SCENE_RON).expect("old ron");
@@ -1842,7 +1901,8 @@ Scene(
         assert!(ortho(Meters::new(f32::NAN)).is_none());
         assert!(ortho(Meters::new(f32::INFINITY)).is_none());
         // Shared framing checks still apply: coincident eye/target,
-        // parallel up and inverted clip planes reject.
+        // zero up, (anti-)parallel up, non-finite up and inverted clip
+        // planes reject.
         let eye = [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)];
         assert!(
             CameraDesc::try_orthographic_units(
@@ -1865,6 +1925,42 @@ Scene(
                 Meters::new(100.0),
             )
             .is_none()
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, -2.5, -9.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none(),
+            "up parallel to the view direction must reject"
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, 2.5, 9.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none(),
+            "up antiparallel to the view direction must reject"
+        );
+        assert!(
+            CameraDesc::try_orthographic_units(
+                [Meters::new(0.0), Meters::new(2.5), Meters::new(9.0)],
+                [Meters::new(0.0), Meters::new(0.0), Meters::new(0.0)],
+                [0.0, f32::NAN, 0.0],
+                Meters::new(2.0),
+                Meters::new(0.1),
+                Meters::new(100.0),
+            )
+            .is_none(),
+            "non-finite up must reject"
         );
         assert!(
             CameraDesc::try_orthographic_units(
