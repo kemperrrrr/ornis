@@ -718,8 +718,11 @@ fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
                     .get::<ornis_core::SmartStore>()
                     .expect(concat!("smart_system `", #fn_name_str, "`: missing SmartStore resource"));
                 #(#config_bindings)*
+                // Parameter fetches are entity-independent: hoist them out
+                // of the per-entity loop (they are pure borrows, so this is
+                // semantics-preserving and saves a map lookup per entity).
+                #(#fetch_stmts)*
                 for __entity in <#pack_ty as ornis_core::Pack>::pack_entities(#store_ident) {
-                    #(#fetch_stmts)*
                     let Some(#u_binding) =
                         <#pack_ty as ornis_core::Pack>::pack_get(#store_ident, __entity)
                     else {

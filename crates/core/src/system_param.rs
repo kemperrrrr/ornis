@@ -86,9 +86,22 @@ impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> {}
 /// `T` must be [`PlainResource`] (no interior mutability), so sharing it
 /// across a parallel level is deterministic. For interior-mutable state
 /// use [`ResMut`].
+///
+/// `Copy` (a shared borrow only): the generated per-entity loop passes
+/// parameters by value, so they must survive more than one iteration.
+/// Manual impls: a derive would add a `T: Copy` bound the resource types
+/// do not satisfy.
 pub struct Res<'a, T: PlainResource> {
     value: &'a T,
 }
+
+impl<T: PlainResource> Clone for Res<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: PlainResource> Copy for Res<'_, T> {}
 
 impl<'a, T: PlainResource> Res<'a, T> {
     /// Fetches the singleton; panics with the type name when absent
@@ -125,9 +138,20 @@ impl<T: PlainResource> Deref for Res<'_, T> {
 /// declaration keeps conflicting systems on separate levels in
 /// registration order, so the mutation order stays deterministic.
 /// Unlike [`Res`], `T` is *not* required to be [`PlainResource`].
+///
+/// `Copy` (a shared borrow only): see [`Res`]. Manual impls for the
+/// same derive-bound reason.
 pub struct ResMut<'a, T: Send + Sync + 'static> {
     value: &'a T,
 }
+
+impl<T: Send + Sync + 'static> Clone for ResMut<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Send + Sync + 'static> Copy for ResMut<'_, T> {}
 
 impl<'a, T: Send + Sync + 'static> ResMut<'a, T> {
     /// Fetches the singleton; panics with the type name when absent.
@@ -249,10 +273,21 @@ pub fn register_events<E: Send + Sync + 'static>(resources: &mut Resources) {
 /// for enforcement), so producers and consumers never share a level.
 /// Draining is sorted by entity id — deterministic across parallel and
 /// sequential runs.
+///
+/// `Copy` (a shared borrow only): see [`Res`]. Manual impls for the
+/// same derive-bound reason.
 pub struct Events<'a, E: Send + Sync + 'static> {
     store: &'a EventStore<E>,
     _marker: PhantomData<&'a ()>,
 }
+
+impl<E: Send + Sync + 'static> Clone for Events<'_, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E: Send + Sync + 'static> Copy for Events<'_, E> {}
 
 impl<'a, E: Send + Sync + 'static> Events<'a, E> {
     /// Fetches the queue singleton; panics when [`register_events`] was
