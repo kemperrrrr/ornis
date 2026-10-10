@@ -1,9 +1,12 @@
 //! Implementation of `#[derive(Pack)]`: struct → per-field component lanes.
 //!
-//! Each named field gets a unique wrapper type acting as its lane marker,
-//! and `Option<T>` fields are unwrapped to the inner lane type. The derive
-//! emits the registration/insertion code that splits the struct across the
-//! store's lanes. Only structs with named fields are supported.
+//! Each named field gets a unique wrapper type acting as its lane marker.
+//! `Option<T>` fields are sparse: the lane stores `T` and only entities
+//! with `Some` own a lane entry (`pack_get` maps a missing entry back to
+//! `None`, so entity links like `target: Option<Entity>` naturally skip
+//! unlinked entities). The derive emits the registration/insertion code
+//! that splits the struct across the store's lanes. Only structs with
+//! named fields are supported.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -19,6 +22,8 @@ struct FieldInfo {
     lane_ty: Type,
     // Unique wrapper type for this field's lane
     wrapper_name: Ident,
+    // `Option<T>` fields are sparse lanes of `T` (missing entry ⇔ `None`).
+    optional: bool,
 }
 
 #[derive(Clone)]
@@ -42,19 +47,22 @@ fn extract_field_info(struct_name: &Ident, fields: &FieldsNamed) -> Vec<FieldInf
         .filter_map(|(idx, f)| {
             let name = f.ident.as_ref()?.clone();
             let ty = f.ty.clone();
-            let lane_ty = extract_lane_type(&ty);
+            let (lane_ty, optional) = unpack_option(ty.clone());
             let wrapper_name = format_ident!("{}__{}__PackLane__{}", struct_name, name, idx);
             Some(FieldInfo {
                 name,
                 lane_ty,
                 wrapper_name,
+                optional,
             })
         })
         .collect()
 }
 
-fn extract_lane_type(ty: &Type) -> Type {
-    match ty {
+/// Splits `Option<T>` into `(T, true)`; any other type maps to itself
+/// with `false` (dense lane, every bundled entity owns an entry).
+fn unpack_option(ty: Type) -> (Type, bool) {
+    match &ty {
         Type::Path(TypePath { path, .. }) => {
             let mut path = path.clone();
             if let Some(last) = path.segments.last_mut()
@@ -62,11 +70,11 @@ fn extract_lane_type(ty: &Type) -> Type {
                 && let syn::PathArguments::AngleBracketed(args) = &last.arguments
                 && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
             {
-                return inner.clone();
+                return (inner.clone(), true);
             }
-            ty.clone()
+            (ty, false)
         }
-        _ => ty.clone(),
+        _ => (ty, false),
     }
 }
 
@@ -236,8 +244,16 @@ fn generate_pack_insert(fields: &[FieldInfo]) -> TokenStream2 {
     let inserts = fields.iter().map(|f| {
         let name = &f.name;
         let wrapper_name = &f.wrapper_name;
-        quote! {
-            store.insert(entity, #wrapper_name(self.#name.clone()));
+        if f.optional {
+            quote! {
+                if let Some(__inner) = self.#name.clone() {
+                    store.insert(entity, #wrapper_name(__inner));
+                }
+            }
+        } else {
+            quote! {
+                store.insert(entity, #wrapper_name(self.#name.clone()));
+            }
         }
     });
 
@@ -252,8 +268,16 @@ fn generate_pack_get(
     let field_reads = fields.iter().map(|f| {
         let name = &f.name;
         let wrapper_name = &f.wrapper_name;
-        quote! {
-            let #name = store.read_lane::<#wrapper_name>()?.get(entity)?.0.clone();
+        if f.optional {
+            quote! {
+                let #name = store.read_lane::<#wrapper_name>()?
+                    .get(entity)
+                    .map(|__w| __w.0.clone());
+            }
+        } else {
+            quote! {
+                let #name = store.read_lane::<#wrapper_name>()?.get(entity)?.0.clone();
+            }
         }
     });
 
@@ -302,9 +326,19 @@ fn generate_pack_put(fields: &[FieldInfo]) -> TokenStream2 {
     let puts = fields.iter().map(|f| {
         let name = &f.name;
         let wrapper_name = &f.wrapper_name;
-        quote! {
-            if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
-                __lane.insert(entity, #wrapper_name(self.#name.clone()));
+        if f.optional {
+            quote! {
+                if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
+                    if let Some(__inner) = self.#name.clone() {
+                        __lane.insert(entity, #wrapper_name(__inner));
+                    }
+                }
+            }
+        } else {
+            quote! {
+                if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
+                    __lane.insert(entity, #wrapper_name(self.#name.clone()));
+                }
             }
         }
     });
@@ -387,9 +421,17 @@ fn generate_pack_mut_struct(
         let name = &f.name;
         let inner_ty = &f.lane_ty;
         let guard_name = format_ident!("_guard_{}", name);
-        quote! {
-            pub fn #name(&mut self) -> &mut #inner_ty {
-                &mut self.#guard_name.get_mut(self._entity).unwrap().0
+        if f.optional {
+            quote! {
+                pub fn #name(&mut self) -> Option<&mut #inner_ty> {
+                    self.#guard_name.get_mut(self._entity).map(|__w| &mut __w.0)
+                }
+            }
+        } else {
+            quote! {
+                pub fn #name(&mut self) -> &mut #inner_ty {
+                    &mut self.#guard_name.get_mut(self._entity).unwrap().0
+                }
             }
         }
     });
