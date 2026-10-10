@@ -47,5 +47,9 @@ harness = false
 name = "comparison_bench"
 harness = false
 
+[[bench]]
+name = "smart_system_bench"
+harness = false
+
 [lints]
 workspace = true
