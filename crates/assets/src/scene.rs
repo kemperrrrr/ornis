@@ -824,6 +824,17 @@ pub enum CameraProjection {
     },
 }
 
+impl CameraProjection {
+    /// Wire predicate for `skip_serializing_if`: perspective is the default
+    /// and stays absent on the wire, so perspective cameras serialize exactly
+    /// like pre-`projection` payloads. Referenced by name from the serde
+    /// attribute below, which static analysis cannot see as a call.
+    #[allow(dead_code)]
+    pub const fn is_perspective(&self) -> bool {
+        matches!(self, Self::Perspective)
+    }
+}
+
 /// Viewing camera described look-at style.
 ///
 /// Vectors travel as `[f32; 3]`, `fov`/`near`/`far` as `f32`; the additive
@@ -854,9 +865,9 @@ pub struct CameraDesc {
     /// Projection: perspective foreshortening or an orthographic box.
     /// Absent in older files — defaults to [`CameraProjection::Perspective`].
     /// In [`CameraProjection::Orthographic`] mode `fov` is ignored.
-    /// Always serialized (even for `Perspective`), so the wire form grew by
-    /// this field compared to pre-`projection` payloads.
-    #[serde(default)]
+    /// `Perspective` stays absent on the wire, so perspective cameras
+    /// serialize exactly like pre-`projection` payloads.
+    #[serde(default, skip_serializing_if = "CameraProjection::is_perspective")]
     pub projection: CameraProjection,
 }
 
@@ -1439,38 +1450,6 @@ Scene(
         Vec3::from_array(v).normalize().to_array()
     }
 
-    /// The additive `projection` field rides alongside the legacy camera
-    /// shape: a `Perspective` camera carries the field on the wire, and old
-    /// payloads without it load as `Perspective`. The full strings below pin
-    /// the shape: any wire change must update this test deliberately
-    /// (a plain `skip_serializing_if` for `Perspective` is not currently
-    /// possible: rustqual counts the predicate as dead code — it cannot see
-    /// the serde string reference — and the strict ratchet gate fails on any
-    /// new finding without a `baseline.json` bump, which is out of scope
-    /// for this slice).
-    fn assert_perspective_camera_wire_shape(camera: &CameraDesc, legacy_camera: &legacy::Camera) {
-        assert_eq!(
-            serde_json::to_string(camera).expect("json"),
-            r#"{"position":[0.0,2.5,9.0],"target":[0.0,0.0,0.0],"up":[0.0,1.0,0.0],"fov":60.0,"near":0.1,"far":100.0,"projection":"Perspective"}"#
-        );
-        assert_eq!(
-            serde_json::from_str::<CameraDesc>(
-                &serde_json::to_string(legacy_camera).expect("json")
-            )
-            .expect("legacy JSON parses"),
-            *camera
-        );
-        assert_eq!(
-            ron::ser::to_string(camera).expect("ron"),
-            "(position:(0.0,2.5,9.0),target:(0.0,0.0,0.0),up:(0.0,1.0,0.0),fov:60.0,near:0.1,far:100.0,projection:Perspective)"
-        );
-        assert_eq!(
-            ron::de::from_str::<CameraDesc>(&ron::ser::to_string(legacy_camera).expect("ron"))
-                .expect("legacy RON parses"),
-            *camera
-        );
-    }
-
     #[test]
     fn shipped_ron_round_trips_equivalently_and_stably() {
         for (name, text) in SHIPPED_RON {
@@ -1562,7 +1541,14 @@ Scene(
             near: 0.1,
             far: 100.0,
         };
-        assert_perspective_camera_wire_shape(&camera, &legacy_camera);
+        assert_eq!(
+            serde_json::to_string(&camera).expect("json"),
+            serde_json::to_string(&legacy_camera).expect("json")
+        );
+        assert_eq!(
+            ron::ser::to_string(&camera).expect("ron"),
+            ron::ser::to_string(&legacy_camera).expect("ron")
+        );
 
         let spot = LightDesc::spot_units(
             [Meters::new(1.0), Meters::new(4.0), Meters::new(0.0)],
@@ -1846,6 +1832,15 @@ Scene(
             "fov":60.0,"near":0.1,"far":100.0}"#;
         let camera: CameraDesc = serde_json::from_str(json).expect("old json");
         assert_eq!(camera.projection, CameraProjection::Perspective);
+        // The wire predicate backs `skip_serializing_if`: only perspective
+        // stays absent on the wire.
+        assert!(CameraProjection::Perspective.is_perspective());
+        assert!(
+            !CameraProjection::Orthographic {
+                half_height: Meters::new(2.0)
+            }
+            .is_perspective()
+        );
     }
 
     #[test]
