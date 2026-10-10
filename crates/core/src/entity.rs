@@ -223,10 +223,14 @@ impl EntityAllocator {
     /// Bumps the id's generation, invalidating every outstanding handle
     /// to it. Deallocating an unknown or already-dead id is a no-op.
     pub fn deallocate(&mut self, entity: Entity) {
-        let idx = entity.id.index();
-        if idx >= self.generations.len() {
+        // Idempotent: concurrent `destroy_entity` calls for the same handle
+        // must not push one id onto the free list twice — duplicates would
+        // hand the same id out twice on the next allocates. (`is_alive`
+        // bounds-checks the index, so the explicit length check is covered.)
+        if !self.is_alive(entity) {
             return;
         }
+        let idx = entity.id.index();
         self.generations[idx] = entity.generation.as_u32().wrapping_add(1);
         self.free_list.push(entity.id.as_u32());
     }

@@ -103,9 +103,8 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
                     break;
                 }
                 Err(_) => {
-                    // CAS lost: our `Owned` clone is dropped with the error
-                    // and we retry against the winning snapshot.
-                    continue;
+                    // CAS lost: our `Owned` clone is dropped with the error;
+                    // the loop retries against the winning snapshot.
                 }
             }
         }

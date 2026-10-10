@@ -72,9 +72,8 @@ impl<T: 'static + Clone + Send + Sync> LaneInner<T> {
                     break;
                 }
                 Err(_) => {
-                    // CAS lost: our `Owned` clone is dropped with the error
-                    // and we retry against the winning snapshot.
-                    continue;
+                    // CAS lost: our `Owned` clone is dropped with the error;
+                    // the loop retries against the winning snapshot.
                 }
             }
         }
@@ -368,5 +367,24 @@ mod tests {
 
         let guard = store.read_lane::<u64>().unwrap();
         assert_eq!(guard.len(), 0);
+        drop(guard);
+
+        // Allocator integrity: every entity was destroyed by 4 threads at
+        // once, so without idempotent `deallocate` one id would land on the
+        // free list 4 times and come back out duplicated. Reallocate 4x the
+        // set (exactly draining a quad-pushed free list) and require unique
+        // ids: old code yields 256 distinct ids here, fixed code 1024.
+        for &e in &entities {
+            assert!(!store.is_alive(e), "entity still alive after destroy");
+        }
+        let total = entities.len() * 4;
+        let mut fresh_ids: Vec<u32> = (0..total).map(|_| store.create_entity().id()).collect();
+        fresh_ids.sort_unstable();
+        fresh_ids.dedup();
+        assert_eq!(
+            fresh_ids.len(),
+            total,
+            "recycled entity id handed out twice"
+        );
     }
 }
