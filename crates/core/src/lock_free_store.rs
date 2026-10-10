@@ -263,16 +263,21 @@ mod tests {
     /// or retire one snapshot twice. Under the old `load -> clone -> store`
     /// code two writers could publish over each other (lost inserts) and
     /// both `defer_destroy` the same snapshot (double free, UB).
+    ///
+    /// Miri runs the same test with small N (`cfg!(miri)` sizes below):
+    /// interpretation is 10-100x slower, so the native sizes would time
+    /// out the nightly job while checking the same interleavings.
     #[test]
     fn concurrent_writes_no_lost_updates_or_double_free() {
         use std::sync::Arc;
         use std::thread;
 
-        const THREADS: usize = 8;
-        const PER_THREAD: usize = 250;
+        const THREADS: usize = if cfg!(miri) { 2 } else { 8 };
+        const PER_THREAD: usize = if cfg!(miri) { 8 } else { 250 };
         // Ids below this are hammered by removals; only higher ids are
         // asserted so the test is deterministic under any interleaving.
-        const SHARED_REMOVE_IDS: u32 = 16;
+        const SHARED_REMOVE_IDS: u32 = if cfg!(miri) { 4 } else { 16 };
+        const READER_ITERS: usize = if cfg!(miri) { 16 } else { 2000 };
 
         let lane = Arc::new(LaneInner::<u64>::new());
         let mut handles = Vec::new();
@@ -299,7 +304,7 @@ mod tests {
         // exercising epoch reclamation under contention.
         let reader_lane = Arc::clone(&lane);
         let reader = thread::spawn(move || {
-            for _ in 0..2000 {
+            for _ in 0..READER_ITERS {
                 let guard = crossbeam_epoch::pin();
                 let _ = reader_lane.read(&guard).len();
             }
@@ -328,21 +333,26 @@ mod tests {
 
     /// Stress through the public API: overlapping `destroy_entity` calls
     /// from several threads retire snapshots concurrently; readers observe
-    /// a consistent (eventually empty) lane.
+    /// a consistent (eventually empty) lane. Small N under Miri, same
+    /// reason as above.
     #[test]
     fn concurrent_destroy_no_double_free() {
         use std::sync::Arc;
         use std::thread;
 
+        const THREADS: usize = if cfg!(miri) { 2 } else { 4 };
+        const ENTITIES: usize = if cfg!(miri) { 16 } else { 256 };
+        const READER_ITERS: usize = if cfg!(miri) { 16 } else { 1000 };
+
         let mut store = LockFreeStore::new();
-        let entities: Vec<Entity> = (0..256).map(|_| store.create_entity()).collect();
+        let entities: Vec<Entity> = (0..ENTITIES).map(|_| store.create_entity()).collect();
         for &e in &entities {
             store.insert::<u64>(e, 1);
         }
         let store = Arc::new(store);
 
         let mut handles = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..THREADS {
             let s = Arc::clone(&store);
             let all = entities.clone();
             handles.push(thread::spawn(move || {
@@ -355,7 +365,7 @@ mod tests {
         }
         let s = Arc::clone(&store);
         let reader = thread::spawn(move || {
-            for _ in 0..1000 {
+            for _ in 0..READER_ITERS {
                 let _ = s.read_lane::<u64>().map(|g| g.len());
             }
         });
@@ -369,15 +379,15 @@ mod tests {
         assert_eq!(guard.len(), 0);
         drop(guard);
 
-        // Allocator integrity: every entity was destroyed by 4 threads at
-        // once, so without idempotent `deallocate` one id would land on the
-        // free list 4 times and come back out duplicated. Reallocate 4x the
-        // set (exactly draining a quad-pushed free list) and require unique
-        // ids: old code yields 256 distinct ids here, fixed code 1024.
+        // Allocator integrity: every entity was destroyed by THREADS threads
+        // at once, so without idempotent `deallocate` one id would land on
+        // the free list THREADS times and come back out duplicated.
+        // Reallocate THREADS x the set (exactly draining such a free list)
+        // and require unique ids.
         for &e in &entities {
             assert!(!store.is_alive(e), "entity still alive after destroy");
         }
-        let total = entities.len() * 4;
+        let total = entities.len() * THREADS;
         let mut fresh_ids: Vec<u32> = (0..total).map(|_| store.create_entity().id()).collect();
         fresh_ids.sort_unstable();
         fresh_ids.dedup();

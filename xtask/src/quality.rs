@@ -52,7 +52,7 @@ struct StageResult {
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
 /// sharding; the default (no `--only`) runs everything implied by the
 /// level flags, exactly as before.
-const LEVEL1_IDS: [&str; 14] = [
+const LEVEL1_IDS: [&str; 15] = [
     "fmt",
     "clippy-physics",
     "test-physics",
@@ -61,6 +61,7 @@ const LEVEL1_IDS: [&str; 14] = [
     "rustqual",
     "smoke",
     "test",
+    "test-lockfree",
     "audit",
     "deny",
     "outdated",
@@ -902,6 +903,25 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // Lock-free lanes (`lock_free_store`, behind the `lock-free` feature)
+    // are not compiled by the plain workspace test run above: without this
+    // stage a CAS/double-free regression would stay green in CI (RAT-37).
+    // Scoped to ornis-core so the extra cost is one more lib build.
+    stages.run(
+        "test-lockfree",
+        "test (lock-free)",
+        "cargo test -p ornis-core --features lock-free --no-fail-fast",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-core",
+            "--features",
+            "lock-free",
+            "--no-fail-fast",
+        ]),
+        false,
+    );
+
     stages.run(
         "audit",
         "audit",
@@ -1397,7 +1417,7 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-         cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, determinism-fast, clippy, rustqual, smoke, test, audit, deny, outdated, upgrade-check, machete, typos\n  \
+          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, determinism-fast, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \

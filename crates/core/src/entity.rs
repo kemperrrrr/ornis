@@ -265,4 +265,37 @@ mod tests {
         assert_ne!(c.generation, a.generation);
         assert!(alloc.is_alive(c));
     }
+
+    /// Double and stale `deallocate` must be no-ops: the id lands on the
+    /// free list exactly once (never handed out twice) and the stored
+    /// generation only moves forward.
+    #[test]
+    fn deallocate_twice_and_stale_is_noop() {
+        let mut alloc = EntityAllocator::new();
+        let a = alloc.allocate();
+        alloc.deallocate(a);
+        // Same handle again: the generation already bumped, so `is_alive`
+        // fails and the call must not queue the id a second time.
+        alloc.deallocate(a);
+        let c = alloc.allocate();
+        assert_eq!(c.id(), a.id());
+        assert_eq!(c.generation(), a.generation() + 1);
+        // The id was queued exactly once: the next allocate hands out a
+        // fresh id instead of the same one a second time.
+        let d = alloc.allocate();
+        assert_ne!(d.id(), a.id());
+        // A stale handle (pre-recycle generation) must neither roll the
+        // generation back nor re-queue the id while `c` is live.
+        alloc.deallocate(a);
+        assert!(alloc.is_alive(c));
+        assert_eq!(c.generation(), a.generation() + 1);
+        // Retiring the live handle once kills it; retiring it twice still
+        // queues the id only once.
+        alloc.deallocate(c);
+        assert!(!alloc.is_alive(c));
+        alloc.deallocate(c);
+        let e = alloc.allocate();
+        assert_eq!(e.id(), a.id());
+        assert_eq!(e.generation(), a.generation() + 2);
+    }
 }
