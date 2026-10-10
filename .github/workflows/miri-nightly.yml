@@ -19,16 +19,17 @@ name: Miri Nightly
 # - `MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-ignore-leaks`: crossbeam-epoch
 #   0.9 trips Miri's default Stacked Borrows in its thread-local registry
 #   (`internal.rs` `Local::element_of` retag — a known upstream pattern,
-#   not an Ornis bug); it is clean under Tree Borrows. Leak checking is
-#   off because epoch retirement is lazy by design: deferred snapshots
-#   plus crossbeam's thread-local/global collector internals are still
-#   queued at process exit. The one REAL leak Miri found locally (dropped
-#   lock-free stores leak their live snapshot — `Atomic` frees nothing on
-#   drop) is NOT fixed here: the fix adds rustqual findings, so it ships
-#   as a separate PR with a baseline update — the leak is tracked as
-#   RAT-19. macOS note: local Miri runs abort on glam's NEON
-#   `faddv` (unsupported aarch64 intrinsic, e.g. via `UnitQuat::normalize`
-#   in hierarchy tests); the Linux job uses x86 SSE instead.
+#   not an Ornis bug); it is clean under Tree Borrows. Leak checking stays
+#   off even though the RAT-19 live-snapshot leak is fixed (each lock-free
+#   lane reclaims its live snapshot in `Drop`, covered by the
+#   `drop_frees_live_snapshot` tests): the 7 leaks Miri still reports with
+#   `--features lock-free` all come from crossbeam itself — retired
+#   snapshots still queued as uncollected deferred garbage plus the
+#   thread-local/global collector internals (`Local`, `SealedBag` queue
+#   nodes) that live until process exit. macOS note: local Miri runs abort
+#   on glam's NEON `faddv` (unsupported aarch64 intrinsic, e.g. via
+#   `UnitQuat::normalize` in hierarchy tests); the Linux job uses x86 SSE
+#   instead.
 # - The concurrent stress tests (both stores) scale down to small N
 #   under `cfg!(miri)` (2 threads, tens of entities/iterations): same
 #   interleavings, bounded interpret time. `benchmark_speed` (a
