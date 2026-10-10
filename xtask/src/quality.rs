@@ -796,11 +796,17 @@ fn apply_bump_guard(
 /// `baseline-bump-approved` label (see quality.yml — the label comes
 /// from the event payload, so no extra token scope is needed). Local
 /// runs never set it: the baseline may only move down.
+///
+/// The parse is a pure function of the already-read value so tests cover
+/// it without touching process env (RAT-24 review of PR #75); the single
+/// `std::env::var` read lives in the wrapper below, called once at the
+/// `rustqual_stage` entry.
+fn parse_bump_allowed(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1") | Some("true"))
+}
+
 fn baseline_bump_allowed() -> bool {
-    matches!(
-        std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").as_deref(),
-        Ok("1") | Ok("true")
-    )
+    parse_bump_allowed(std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok().as_deref())
 }
 
 /// Base ref whose `baseline.json` the committed one must not exceed:
@@ -2630,6 +2636,16 @@ mod tests {
             baseline_guard_ref_for(Some("pull_request"), Some("")),
             "origin/master"
         );
+    }
+
+    #[test]
+    fn bump_allowlist_parses_without_env() {
+        assert!(parse_bump_allowed(Some("1")));
+        assert!(parse_bump_allowed(Some("true")));
+        assert!(!parse_bump_allowed(None));
+        assert!(!parse_bump_allowed(Some("")));
+        assert!(!parse_bump_allowed(Some("0")));
+        assert!(!parse_bump_allowed(Some("yes")));
     }
 
     #[test]
