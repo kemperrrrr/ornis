@@ -82,7 +82,18 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target
-          cargo bench -p ornis-physics --bench solver_bench -- --verbose 2>&1 | tee target/bench.log
+          # Named criterion baseline for critcmp: `--save-baseline` stores
+          # results under `target/criterion/<group>/<name>/` so `critcmp
+          # --export <name>` can serialize them. critcmp takes baseline
+          # names or `--export` JSON — never raw directories (RAT-26).
+          # `new/` (what the python gate reads) is written either way.
+          if [ -z "${{ inputs.target_ref }}" ]; then
+            saved_baseline="master"
+          else
+            saved_baseline="pr"
+          fi
+          echo "saved_baseline=$saved_baseline" >> "$GITHUB_OUTPUT"
+          cargo bench -p ornis-physics --bench solver_bench -- --verbose --save-baseline "$saved_baseline" 2>&1 | tee target/bench.log
 
       # Baseline for regression comparison: the `criterion-baseline-master`
       # artifact from the latest TRUE master run of this workflow (empty
@@ -91,7 +102,9 @@ jobs:
       # download loop below skips them — a missing baseline (never seeded
       # on master yet, expired artifact) downgrades the gate below to INFO
       # instead of failing the run. Best-effort (gh CLI only, no
-      # third-party action).
+      # third-party action). The gate reads `master-baseline.json` (critcmp
+      # `--export` output, seeded by the master run itself); the raw
+      # criterion dirs travel along only for the estimates.json python gate.
       - name: Download master baseline criterion results
         continue-on-error: true
         env:
@@ -131,6 +144,18 @@ jobs:
           fi
           critcmp --version
 
+      # Master-only baseline seed, part 1 (RAT-26): serialize this run's
+      # named `master` baseline to JSON inside `target/criterion/`, so the
+      # `criterion-baseline-master` upload below carries it. PR runs skip
+      # this step: their `criterion-results` artifact stays JSON-free and
+      # can never seed anyone's baseline.
+      - name: Export master baseline JSON (true-master runs only)
+        if: ${{ inputs.target_ref == '' }}
+        shell: bash
+        run: |
+          critcmp --export "${{ steps.bench.outputs.saved_baseline }}" > target/criterion/master-baseline.json
+          critcmp --baselines
+
       # Regression gate (RAT-11): critcmp renders the human-readable
       # before/after table; the pass/fail decision is computed from
       # criterion's `estimates.json` means (point estimates, ns) against
@@ -143,11 +168,11 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target
-          if [ ! -d baseline-criterion/physics_step ] && [ ! -d baseline-criterion/physics_bodies ]; then
+          if [ ! -f baseline-criterion/master-baseline.json ]; then
             {
               echo "## 📊 Performance regression gate: no baseline"
               echo
-              echo "No master \`criterion-baseline-master\` artifact found — comparison skipped (INFO)."
+              echo "No master \`criterion-baseline-master\` artifact with \`master-baseline.json\` found — comparison skipped (INFO)."
               echo "Seed the baseline by running this workflow once on \`master\` with an empty \`target_ref\`;"
               echo "later runs gate \`solver_bench\` at +${PERF_STEP_MAX_PCT}% (physics_step) /"
               echo "+${PERF_BODIES_MAX_PCT}% (physics_bodies) with one automatic re-run on breach."
@@ -158,7 +183,12 @@ jobs:
           echo "baseline=present" >> "$GITHUB_OUTPUT"
           # critcmp is the human-readable report only — the python gate below
           # is authoritative, so a critcmp layout error must not fail the step.
-          critcmp baseline-criterion target/criterion 2>&1 | tee target/critcmp.txt || \
+          # JSON-vs-JSON: critcmp takes baseline names or `--export` JSON,
+          # never raw directories (passing directories silently prints
+          # "no benchmark comparisons to show", review #53/RAT-26).
+          critcmp --export "${{ steps.bench.outputs.saved_baseline }}" > target/current.json 2>target/critcmp-export.err || \
+            echo "::warning::critcmp --export failed — report falls back to the estimates.json gate below"
+          critcmp baseline-criterion/master-baseline.json target/current.json 2>&1 | tee target/critcmp.txt || \
             echo "(critcmp report failed — the estimates.json gate below still applies)" | tee target/critcmp.txt
           python3 - <<'PY' 2>&1 | tee target/perf-gate.log
           import json, os, subprocess, sys
