@@ -17,12 +17,18 @@
 
 #![warn(missing_docs)]
 
+use std::any::TypeId;
+use std::sync::RwLockWriteGuard;
+
 use glam::Vec3;
 
 use ornis_core::units::MetersPerSecond;
-use ornis_core::{Engine, FixedTime, Resources, SmartStore, System, SystemAccess, Time};
+use ornis_core::{
+    ComponentStore, Engine, Entity, FixedTime, Pack, Res, Resources, SmartStore, System,
+    SystemAccess, Time,
+};
 use ornis_input::{InputMap, InputState};
-use ornis_macros::RegisterComponent;
+use ornis_macros::{RegisterComponent, smart_system};
 
 /// Squared-length / dt floor for near-zero gameplay intent.
 const NEAR_ZERO: f32 = 1e-6;
@@ -174,7 +180,8 @@ impl Default for Position {
 ///
 /// The schedule declarations ensure deterministic levels:
 /// `player_input` writes `Velocity`/`Position` and reads `InputState`,
-/// `physics_push` reads `Velocity`/`FixedTime` and writes `Position`,
+/// `physics_push` (a `#[smart_system]` v2 system over [`PushBundle`])
+/// writes `Velocity`/`Position` and reads `FixedTime`,
 /// `transform_update` reads `Velocity`/`Time` and writes `Position`.
 /// No separate `RenderWorld` copy is required — the same world that
 /// gameplay mutates is the source for view extraction.
@@ -246,7 +253,9 @@ impl GameplayPlugin {
         engine.schedule_mut().add_system(PlayerInputSystem {
             speed: self.player_speed,
         });
-        engine.fixed_schedule_mut().add_system(PhysicsPushSystem);
+        engine
+            .fixed_schedule_mut()
+            .add_system(PhysicsPushSystem::new());
         engine.schedule_mut().add_system(TransformUpdateSystem);
         // Ensure deterministic ordering: input before physics-derived motion
         // within the frame, even when lanes are disjoint.
@@ -327,38 +336,20 @@ pub fn player_input(resources: &Resources, speed: f32) {
 
 /// Applies gameplay velocity to world placement at fixed rate.
 ///
+/// `#[smart_system]` v2 migration demo (RAT-31, IDEAS §32): access follows
+/// from the parameter types (`&mut PushBundle` → writes both lanes,
+/// `Res<FixedTime>` → shared read) instead of a hand-written
+/// [`SystemAccess`]. Runs in the fixed schedule under the same
+/// `"physics_push"` name, so staged plans are unaffected.
+///
 /// This is the fixed-step counterpart of [`player_input`]: it integrates
 /// horizontal intent under the authoritative `FixedTime::delta_seconds()`
 /// so that catch-up frames do not double-apply transient input. The system
 /// also preserves vertical velocity for gravity/physics consumers.
-pub fn physics_push(resources: &Resources) {
-    let Some(fixed) = resources.get::<FixedTime>() else {
-        return;
-    };
+#[smart_system]
+fn physics_push(bundle: &mut PushBundle, fixed: Res<FixedTime>) {
     let dt = fixed.delta();
-    let Some(store) = resources.get::<SmartStore>() else {
-        return;
-    };
-    let Some(vel_lane) = store.read_lane::<Velocity>() else {
-        return;
-    };
-    let entities: Vec<(ornis_core::Entity, Vec3)> = vel_lane
-        .entities
-        .iter()
-        .zip(&vel_lane.data)
-        .map(|(&e, v)| (e, v.0))
-        .collect();
-    drop(vel_lane);
-    let Some(mut pos_lane) = store.write_lane::<Position>() else {
-        return;
-    };
-    for (entity, vel) in entities {
-        if let Some(pos) = pos_lane.get_mut(entity) {
-            *pos = pos.advanced_by_secs(Velocity::from_mps(vel), dt);
-        } else {
-            pos_lane.insert(entity, Position::from_meters(vel * dt.get()));
-        }
-    }
+    bundle.position = bundle.position.advanced_by_secs(bundle.velocity, dt);
 }
 
 /// Integrates remaining velocity into world placement at variable rate.
@@ -439,23 +430,75 @@ impl System for PlayerInputSystem {
     }
 }
 
-struct PhysicsPushSystem;
+/// Per-object bundle for the migrated [`physics_push`] system (RAT-31 demo).
+///
+/// Manual [`Pack`] over the existing [`Velocity`]/[`Position`] lanes — no
+/// lane fork: the v2 system reads and writes the same components the rest
+/// of the engine (physics sync, render sync) already uses. Entities missing
+/// either lane are skipped (no insert-if-missing, unlike the old manual
+/// system); tests always insert complete lane sets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PushBundle {
+    /// Gameplay intent consumed for this step.
+    pub velocity: Velocity,
+    /// World-space placement advanced by the step.
+    pub position: Position,
+}
 
-impl System for PhysicsPushSystem {
-    fn name(&self) -> &'static str {
-        "physics_push"
+/// Mutable per-entity view over the [`PushBundle`] lanes.
+pub struct PushBundleMut<'a> {
+    _guard_velocity: RwLockWriteGuard<'a, ComponentStore<Velocity>>,
+    _guard_position: RwLockWriteGuard<'a, ComponentStore<Position>>,
+    _entity: Entity,
+}
+
+impl Pack for PushBundle {
+    type PackMut<'a> = PushBundleMut<'a>;
+
+    fn pack_register(store: &mut SmartStore) {
+        store.register::<Velocity>();
+        store.register::<Position>();
     }
 
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<FixedTime>()
-            .reads::<SmartStore>()
-            .reads_lane::<Velocity>()
-            .writes_lane::<Position>()
+    fn pack_insert(&self, store: &mut SmartStore, entity: Entity) {
+        store.insert(entity, self.velocity);
+        store.insert(entity, self.position);
     }
 
-    fn run(&self, resources: &Resources) {
-        physics_push(resources);
+    fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self> {
+        let velocity = *store.read_lane::<Velocity>()?.get(entity)?;
+        let position = *store.read_lane::<Position>()?.get(entity)?;
+        Some(PushBundle { velocity, position })
+    }
+
+    fn pack_get_mut<'a>(store: &'a mut SmartStore, entity: Entity) -> Option<Self::PackMut<'a>> {
+        let _guard_velocity = store.write_lane::<Velocity>()?;
+        let _guard_position = store.write_lane::<Position>()?;
+        Some(PushBundleMut {
+            _guard_velocity,
+            _guard_position,
+            _entity: entity,
+        })
+    }
+
+    fn pack_put(&self, store: &SmartStore, entity: Entity) {
+        if let Some(mut lane) = store.write_lane::<Velocity>() {
+            lane.insert(entity, self.velocity);
+        }
+        if let Some(mut lane) = store.write_lane::<Position>() {
+            lane.insert(entity, self.position);
+        }
+    }
+
+    fn pack_entities(store: &SmartStore) -> Vec<Entity> {
+        match store.read_lane::<Velocity>() {
+            Some(lane) => lane.iter_entities().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn pack_lane_ids() -> Vec<TypeId> {
+        vec![TypeId::of::<Velocity>(), TypeId::of::<Position>()]
     }
 }
 
