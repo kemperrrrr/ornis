@@ -10,6 +10,8 @@
 use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
 
+use crossbeam_epoch::Atomic;
+
 use crate::entity::{DenseIndex, Entity};
 use crate::page_table::PageTable;
 use crate::prefetch::{PREFETCH_STRIDE, prefetch_iter};
@@ -61,6 +63,31 @@ impl<T: Clone> Clone for ComponentStore<T> {
             entities: self.entities.clone(),
             sparse: self.sparse.clone(),
             bitset: self.bitset.clone(),
+        }
+    }
+}
+
+/// Reclaim the live snapshot held in `store`.
+///
+/// `crossbeam_epoch::Atomic` frees nothing on drop, so lock-free lanes must
+/// call this from their `Drop` impls — otherwise every dropped store leaks
+/// one snapshot per lane (RAT-19).
+///
+/// The `&mut` borrow is the whole contract: it proves exclusive access, so
+/// no reader can still hold the snapshot (read guards borrow `&self`) and
+/// no concurrent `write` can publish over it. Snapshots already retired via
+/// `defer_destroy` are no longer in `store` and are left untouched here.
+pub(crate) fn free_live_snapshot<T>(store: &mut Atomic<ComponentStore<T>>) {
+    // SAFETY: `store` is exclusively borrowed, so no live epoch guard can
+    // pin the pointer loaded below; `unprotected` only mints a token to
+    // satisfy the API. `into_owned` rebuilds the single `Owned` value the
+    // `Atomic` was created from, and dropping it frees exactly the live
+    // snapshot — never a retired one, which is no longer stored here.
+    unsafe {
+        let guard = crossbeam_epoch::unprotected();
+        let shared = store.load(std::sync::atomic::Ordering::Relaxed, guard);
+        if !shared.is_null() {
+            drop(shared.into_owned());
         }
     }
 }
