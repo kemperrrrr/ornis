@@ -2646,23 +2646,10 @@ mod tests {
         assert!(!parse_bump_allowed(Some("")));
         assert!(!parse_bump_allowed(Some("0")));
         assert!(!parse_bump_allowed(Some("yes")));
-    }
-
-    #[test]
-    fn bump_allowlist_follows_env() {
-        // This is the only test that touches this var, and no helper
-        // reads env anymore (both take parameters), so parallel tests
-        // cannot observe it; restore the prior value afterwards.
-        let prev = std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok();
-        std::env::remove_var("ORNIS_BASELINE_BUMP_ALLOWED");
-        assert!(!baseline_bump_allowed());
-        std::env::set_var("ORNIS_BASELINE_BUMP_ALLOWED", "1");
-        assert!(baseline_bump_allowed());
-        std::env::set_var("ORNIS_BASELINE_BUMP_ALLOWED", "yes");
-        assert!(!baseline_bump_allowed());
-        match prev {
-            Some(v) => std::env::set_var("ORNIS_BASELINE_BUMP_ALLOWED", v),
-            None => std::env::remove_var("ORNIS_BASELINE_BUMP_ALLOWED"),
-        }
+        // The thin env wrapper must agree with the pure parse on the
+        // ambient value. Read-only: no other test mutates this var, so
+        // parallel runs cannot observe each other (RAT-24 review).
+        let raw = std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok();
+        assert_eq!(baseline_bump_allowed(), parse_bump_allowed(raw.as_deref()));
     }
 }

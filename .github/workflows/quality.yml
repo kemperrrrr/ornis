@@ -25,8 +25,15 @@ env:
 
 # Cancel superseded PR runs: a new push makes the previous 20-minute gate
 # result irrelevant. Master pushes are never cancelled.
+# RAT-24: label events for any *other* label get their own throwaway group
+# (unique per run, so they cancel nothing). Without this a stray label
+# would enter the real group, cancel the running gate, and leave only
+# skipped jobs behind — which branch protection counts as passed.
+# `labeled`/`unlabeled` for `baseline-bump-approved` stays in the real
+# group: removing/adding the approval must cancel the stale verdict and
+# re-run every shard.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'baseline-bump-approved') && format('-noop-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Explicit token scopes. Only the `report` job needs `pull-requests: write`
