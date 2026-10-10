@@ -96,6 +96,13 @@ jobs:
       - name: Quality gate (fast shard)
         id: gate
         shell: bash
+        env:
+          # RAT-24: the rustqual bump guard inside xtask compares the
+          # committed baseline.json against origin/<base>. Growth FAILs
+          # unless the owner set the `baseline-bump-approved` label — the
+          # label comes from the event payload, so this needs no extra
+          # token scope. On push events there is no PR: always false.
+          ORNIS_BASELINE_BUMP_ALLOWED: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-bump-approved') }}
         run: |
           mkdir -p target
           cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos 2>&1 | tee target/quality-fast.log

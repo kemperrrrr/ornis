@@ -270,16 +270,25 @@ struct StageList<'a> {
     n: usize,
     results: Vec<StageResult>,
     only: Option<Vec<String>>,
+    /// Strict mode (`--ci` or `GITHUB_ACTIONS`): guards fail closed
+    /// instead of warning when their reference data is unavailable.
+    strict: bool,
 }
 
 impl<'a> StageList<'a> {
-    fn new(root: &'a std::path::Path, total: usize, only: Option<Vec<String>>) -> Self {
+    fn new(
+        root: &'a std::path::Path,
+        total: usize,
+        only: Option<Vec<String>>,
+        strict: bool,
+    ) -> Self {
         Self {
             root,
             total,
             n: 0,
             results: Vec::new(),
             only,
+            strict,
         }
     }
 
@@ -348,8 +357,15 @@ impl<'a> StageList<'a> {
 /// Improvement (strictly better with no regression) is PASS, but the
 /// outcome sets `baseline_stale = true`: the baseline must then be
 /// refreshed (`rustqual --save-baseline baseline.json`) and may only
-/// move down — any committed baseline bump re-FAILs against the old
-/// one through this same comparator, which is what makes it a ratchet.
+/// move down.
+///
+/// A committed baseline bump cannot sneak through the same-PR
+/// comparison above: [`check_baseline_bump`] additionally compares the
+/// committed `baseline.json` against the base branch version
+/// (`origin/<base>` on pull_request CI, `origin/master` locally) with
+/// this same comparator. Any growth FAILs unless the PR carries the
+/// owner-set `baseline-bump-approved` label (plumbed as
+/// `ORNIS_BASELINE_BUMP_ALLOWED=1` by the workflow).
 const RATCHET_EPS: f64 = 1e-9;
 
 /// Cap on stored identity-diff samples per side (the reason line shows fewer).
@@ -430,19 +446,40 @@ fn require_u64(report: &serde_json::Value, side: &str, key: &str) -> Result<u64,
         .ok_or_else(|| format!("{side} rustqual report: missing or non-integer key `{key}`"))
 }
 
-/// Identity set of findings as (file, name) pairs; `None` when the
-/// report carries no `violation_details` array (identity check skipped).
+/// Identity set of findings as (file, name) pairs.
+///
+/// Only `Classification::Violation` functions (IOSP violations) carry
+/// per-finding identity in the rustqual report — every other category
+/// exists as an aggregate count only (see `create_baseline` in the
+/// vendored fork: `violation_details` is built from violations alone).
+/// The identity check therefore covers IOSP findings; all other
+/// categories are ratcheted through their counts.
+///
+/// # Errors
+/// A missing/non-array `violation_details`, or an entry without string
+/// `file`/`name`, is a hard FAIL — silently skipping would blind the
+/// "fix 5, add 5" swap detector.
 fn finding_identity_set(
     report: &serde_json::Value,
-) -> Option<std::collections::BTreeSet<(String, String)>> {
-    let details = report.get("violation_details")?.as_array()?;
+    side: &str,
+) -> Result<std::collections::BTreeSet<(String, String)>, String> {
+    let details = report.get("violation_details").ok_or_else(|| {
+        format!("{side} rustqual report: missing `violation_details` (identity check needs it)")
+    })?;
+    let arr = details
+        .as_array()
+        .ok_or_else(|| format!("{side} rustqual report: `violation_details` is not an array"))?;
     let mut set = std::collections::BTreeSet::new();
-    for item in details {
-        let file = item.get("file")?.as_str()?.to_string();
-        let name = item.get("name")?.as_str()?.to_string();
-        set.insert((file, name));
+    for (i, item) in arr.iter().enumerate() {
+        let file = item.get("file").and_then(|v| v.as_str()).ok_or_else(|| {
+            format!("{side} rustqual report: violation_details[{i}] has no string `file`")
+        })?;
+        let name = item.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+            format!("{side} rustqual report: violation_details[{i}] has no string `name`")
+        })?;
+        set.insert((file.to_string(), name.to_string()));
     }
-    Some(set)
+    Ok(set)
 }
 
 /// Compare one score (higher is better): regression or improvement notes.
@@ -484,18 +521,18 @@ type FindingId = (String, String);
 
 /// Diff findings by identity; any addition is a regression even when
 /// totals are flat. Returns (added, removed) samples.
+///
+/// # Errors
+/// Propagates the hard FAIL from [`finding_identity_set`] when either
+/// side lacks usable per-finding identity.
 fn diff_findings(
     base: &serde_json::Value,
     cur: &serde_json::Value,
     regressed: &mut Vec<String>,
-) -> (Vec<FindingId>, Vec<FindingId>) {
+) -> Result<(Vec<FindingId>, Vec<FindingId>), String> {
+    let b = finding_identity_set(base, "baseline")?;
+    let c = finding_identity_set(cur, "current")?;
     let (mut added, mut removed) = (Vec::new(), Vec::new());
-    let Some(b) = finding_identity_set(base) else {
-        return (added, removed);
-    };
-    let Some(c) = finding_identity_set(cur) else {
-        return (added, removed);
-    };
     for f in c.difference(&b).take(IDENTITY_DIFF_CAP) {
         added.push(f.clone());
     }
@@ -515,7 +552,7 @@ fn diff_findings(
         }
         regressed.push(format!("new findings +{added_total} ({sample})"));
     }
-    (added, removed)
+    Ok((added, removed))
 }
 
 /// Compare two raw rustqual JSON reports.
@@ -553,7 +590,7 @@ fn compare_rustqual_reports(base_s: &str, cur_s: &str) -> Result<RatchetOutcome,
 
     // Findings identity: catches the "fix 5, add 5" swap that keeps
     // totals flat. Line numbers are ignored (shifts are noise).
-    let (added_findings, removed_findings) = diff_findings(&base, &cur, &mut regressed_reasons);
+    let (added_findings, removed_findings) = diff_findings(&base, &cur, &mut regressed_reasons)?;
 
     let baseline_stale = regressed_reasons.is_empty() && !improvement_notes.is_empty();
     Ok(RatchetOutcome {
@@ -689,6 +726,129 @@ fn finish_rustqual_stage(
     }
 }
 
+/// Deleted-baseline dodge guard (RAT-24): when the base branch has a
+/// baseline, its absence in the tree fails closed in strict mode and
+/// warns locally. Returns true when the stage result was recorded and
+/// the caller must return.
+fn reject_deleted_baseline(stages: &mut StageList<'_>) -> bool {
+    if read_base_baseline(stages.root).is_none() {
+        return false;
+    }
+    let note = "baseline.json deleted while the base branch has one";
+    if !stages.strict {
+        eprintln!("xtask quality: warning: {note} — plain run, ratchet skipped");
+        return false;
+    }
+    stages.n += 1;
+    let (idx, total) = (stages.n, stages.total);
+    eprintln!();
+    eprintln!("═══ [{idx}/{total}] rustqual: baseline guard ═══");
+    eprintln!("── rustqual: FAIL ({note}) ──");
+    stages.results.push(stage_result(
+        "rustqual",
+        Status::Fail,
+        note.into(),
+        Duration::ZERO,
+    ));
+    true
+}
+
+/// Bump guard verdict (RAT-24): flip the rustqual stage row to FAIL
+/// when the committed baseline grew vs the base branch version.
+fn apply_bump_guard(stages: &mut StageList<'_>, name: &str, committed_s: &str) {
+    if let Some(reason) = check_baseline_bump(stages.root, committed_s, stages.strict) {
+        eprintln!("── {name}: FAIL ({reason}) ──");
+        if ci_annotations() {
+            annotate(stage_title(name), &reason);
+        }
+        if let Some(last) = stages.results.last_mut() {
+            last.status = Status::Fail;
+            if last.note.is_empty() {
+                last.note = reason;
+            } else {
+                last.note = format!("{}; {reason}", last.note);
+            }
+        }
+    }
+}
+
+/// Owner-approved baseline bump plumbing: CI sets
+/// `ORNIS_BASELINE_BUMP_ALLOWED=1` only when the PR carries the
+/// `baseline-bump-approved` label (see quality.yml — the label comes
+/// from the event payload, so no extra token scope is needed). Local
+/// runs never set it: the baseline may only move down.
+fn baseline_bump_allowed() -> bool {
+    matches!(
+        std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Base ref whose `baseline.json` the committed one must not exceed:
+/// `origin/<base>` on pull_request CI runs, `origin/master` otherwise
+/// (local runs and push events).
+fn baseline_guard_ref() -> String {
+    if std::env::var("GITHUB_EVENT_NAME").as_deref() == Ok("pull_request") {
+        if let Ok(base) = std::env::var("GITHUB_BASE_REF") {
+            if !base.is_empty() {
+                return format!("origin/{base}");
+            }
+        }
+    }
+    "origin/master".to_string()
+}
+
+/// Read the base branch `baseline.json`; `None` when the ref or the
+/// file is unavailable (shallow checkout, never fetched, first baseline).
+fn read_base_baseline(root: &Path) -> Option<String> {
+    let guard_ref = baseline_guard_ref();
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &root.to_string_lossy(),
+            "show",
+            &format!("{guard_ref}:baseline.json"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// RAT-24 bump guard: compare the committed `baseline.json` against the
+/// base branch version with the same strict comparator, so a bump can
+/// no longer sneak through the same-PR comparison. Any growth (or an
+/// unreadable side) is a FAIL unless the bump is owner-approved (see
+/// [`baseline_bump_allowed`]). A missing base baseline fails closed in
+/// strict mode and warns locally. Equal-or-lower is `None` (holds).
+fn check_baseline_bump(root: &Path, committed_s: &str, strict: bool) -> Option<String> {
+    let guard_ref = baseline_guard_ref();
+    let Some(base_s) = read_base_baseline(root) else {
+        let note = format!("baseline guard: cannot read {guard_ref}:baseline.json");
+        if strict {
+            return Some(note);
+        }
+        eprintln!("xtask quality: {note} — bump guard skipped (fetch origin/master to enable)");
+        return None;
+    };
+    match compare_rustqual_reports(&base_s, committed_s) {
+        Err(msg) => Some(format!("baseline guard: {msg}")),
+        Ok(o) if !o.regressed_reasons.is_empty() => {
+            let reasons = o.regressed_reasons.join(", ");
+            if baseline_bump_allowed() {
+                eprintln!("baseline guard: bump allowed by owner label ({reasons})");
+                return None;
+            }
+            Some(format!(
+                "baseline.json grew vs {guard_ref} ({reasons}) — needs `baseline-bump-approved` label"
+            ))
+        }
+        Ok(_) => None,
+    }
+}
+
 fn rustqual_stage(stages: &mut StageList<'_>) {
     if !stages.enabled("rustqual") {
         return;
@@ -708,6 +868,9 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
     }
     let baseline_path = stages.root.join("baseline.json");
     if !baseline_path.exists() {
+        if reject_deleted_baseline(stages) {
+            return;
+        }
         // No baseline — run plain rustqual (findings are informational until baseline is created).
         let mut c = Command::new(&rq);
         c.current_dir(stages.root);
@@ -754,7 +917,8 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
             let base_str = std::fs::read_to_string(&baseline_path);
             match (cur_str, base_str) {
                 (Ok(cur_s), Ok(base_s)) => {
-                    finish_rustqual_stage(stages, name, &base_s, &cur_s, started.elapsed())
+                    finish_rustqual_stage(stages, name, &base_s, &cur_s, started.elapsed());
+                    apply_bump_guard(stages, name, &base_s);
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     let note = format!("read baseline/cur json: {e}");
@@ -1313,7 +1477,7 @@ pub fn quality(args: &[String]) {
              (level-gated ids like doc/coverage need --ci/--full; see --list-stages)"
         );
     }
-    let mut stages = StageList::new(&root, total, flags.only.clone());
+    let mut stages = StageList::new(&root, total, flags.only.clone(), flags.strict());
 
     // ── Level 1 (mandatory set) ───────────────────────────────
     level1(&mut stages);
@@ -1411,7 +1575,9 @@ fn quality_usage(code: i32) -> ! {
           rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
           Baseline: rustqual --save-baseline baseline.json; the gate re-runs rustqual\n  \
           into target/rustqual_cur.json and compares with its own ratchet\n  \
-          (equal = PASS, only a true regression FAILs).\n  \
+          (equal = PASS, only a true regression FAILs). The committed baseline\n  \
+          must not exceed the base branch version (origin/master locally) —\n  \
+          growth needs the `baseline-bump-approved` PR label.\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
@@ -2087,6 +2253,130 @@ mod ratchet_tests {
     }
 
     #[test]
+    fn baseline_bump_fails_while_drop_passes() {
+        // The bump guard reuses this same comparator (base baseline vs
+        // committed baseline): a bumped count fails, a lowered one
+        // passes as stale.
+        let base = base_report();
+        let bumped = report_with(json!({"dead_code_warnings": 11}));
+        let o = compare_rustqual_reports(&base, &bumped).expect("must parse");
+        assert!(
+            o.regressed_reasons
+                .iter()
+                .any(|r| r.contains("dead_code_warnings")),
+            "unexpected: {o:?}"
+        );
+        let lowered = report_with(json!({
+            "dead_code_warnings": 9,
+            "total_findings": 99,
+            "violation_details": [{"name": "foo", "file": "a.rs", "line": 1}]
+        }));
+        let o2 = compare_rustqual_reports(&base, &lowered).expect("must parse");
+        assert!(o2.regressed_reasons.is_empty());
+        assert!(o2.baseline_stale);
+    }
+
+    #[test]
+    fn missing_details_is_fail() {
+        let mut v: serde_json::Value = serde_json::from_str(&base_report()).unwrap();
+        v.as_object_mut().unwrap().remove("violation_details");
+        let err = compare_rustqual_reports(&base_report(), &v.to_string()).unwrap_err();
+        assert!(err.contains("violation_details"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn detail_entry_without_identity_is_fail() {
+        let mut v: serde_json::Value = serde_json::from_str(&base_report()).unwrap();
+        v["violation_details"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("file");
+        let err = compare_rustqual_reports(&base_report(), &v.to_string()).unwrap_err();
+        assert!(err.contains("`file`"), "unexpected: {err}");
+        let mut w: serde_json::Value = serde_json::from_str(&base_report()).unwrap();
+        w["violation_details"][1] = json!({"name": "x", "file": 42, "line": 1});
+        let err2 = compare_rustqual_reports(&base_report(), &w.to_string()).unwrap_err();
+        assert!(err2.contains("`file`"), "unexpected: {err2}");
+    }
+
+    /// Scratch git repo with `baseline.json` committed and visible as
+    /// `origin/master` (what CI's full-history checkout provides).
+    fn init_guard_repo(name: &str, base_json: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("xtask-guard-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("baseline.json"), base_json).unwrap();
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "baseline.json"]);
+        git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        dir
+    }
+
+    #[test]
+    fn bump_guard_fails_growth_and_passes_equal() {
+        let dir = init_guard_repo("bump", &base_report());
+        assert_eq!(baseline_guard_ref(), "origin/master");
+        let base = read_base_baseline(&dir).expect("base baseline readable");
+        assert!(base.contains("quality_score"));
+        // Committed == base: the ratchet holds.
+        assert!(check_baseline_bump(&dir, &base_report(), true).is_none());
+        // Committed above base: FAIL naming the count and the label.
+        let bumped = report_with(json!({"dead_code_warnings": 11}));
+        let reason = check_baseline_bump(&dir, &bumped, true).expect("bump must fail");
+        assert!(
+            reason.contains("dead_code_warnings"),
+            "unexpected: {reason}"
+        );
+        assert!(
+            reason.contains("baseline-bump-approved"),
+            "unexpected: {reason}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleted_baseline_guard_fails_closed_in_strict() {
+        let dir = init_guard_repo("deleted", &base_report());
+        let mut stages = StageList::new(&dir, 1, None, true);
+        assert!(reject_deleted_baseline(&mut stages));
+        assert_eq!(stages.results.len(), 1);
+        assert_eq!(stages.results[0].status, Status::Fail);
+        let mut lax = StageList::new(&dir, 1, None, false);
+        assert!(!reject_deleted_baseline(&mut lax));
+        assert!(lax.results.is_empty());
+        // apply_bump_guard flips a Pass row to Fail on growth.
+        let mut stages2 = StageList::new(&dir, 1, None, true);
+        stages2.results.push(stage_result(
+            "rustqual",
+            Status::Pass,
+            String::new(),
+            Duration::ZERO,
+        ));
+        let bumped = report_with(json!({"dead_code_warnings": 11}));
+        apply_bump_guard(&mut stages2, "rustqual", &bumped);
+        assert_eq!(stages2.results[0].status, Status::Fail);
+        assert!(stages2.results[0].note.contains("dead_code_warnings"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn invalid_json_is_fail() {
         let err = compare_rustqual_reports("{not json", &base_report()).unwrap_err();
         assert!(err.contains("not valid JSON"), "unexpected: {err}");
@@ -2117,7 +2407,7 @@ mod ratchet_tests {
     }
 
     fn test_stages() -> StageList<'static> {
-        StageList::new(std::path::Path::new("."), 1, None)
+        StageList::new(std::path::Path::new("."), 1, None, false)
     }
 
     #[test]
@@ -2265,5 +2555,22 @@ mod tests {
         // No skips at all → 0 in any mode (strict here in case the
         // tests themselves run under GITHUB_ACTIONS).
         assert_eq!(skip_exit_code(&[], &strict), 0);
+    }
+
+    #[test]
+    fn bump_allowlist_follows_env() {
+        // Nothing else in this binary reads this var, so serializing
+        // here is unnecessary; restore the prior value afterwards.
+        let prev = std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok();
+        std::env::remove_var("ORNIS_BASELINE_BUMP_ALLOWED");
+        assert!(!baseline_bump_allowed());
+        std::env::set_var("ORNIS_BASELINE_BUMP_ALLOWED", "1");
+        assert!(baseline_bump_allowed());
+        std::env::set_var("ORNIS_BASELINE_BUMP_ALLOWED", "yes");
+        assert!(!baseline_bump_allowed());
+        match prev {
+            Some(v) => std::env::set_var("ORNIS_BASELINE_BUMP_ALLOWED", v),
+            None => std::env::remove_var("ORNIS_BASELINE_BUMP_ALLOWED"),
+        }
     }
 }
