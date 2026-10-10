@@ -38,6 +38,13 @@ struct Ping {
     amount: f32,
 }
 
+/// Bundle with an entity link (`Option<Entity>` sparse lane).
+#[derive(Clone, Debug, PartialEq, ornis_macros::Pack)]
+struct Chaser {
+    position: f32,
+    target: Option<Entity>,
+}
+
 #[smart_system]
 fn drift(m: &mut Mote, wind: Res<Wind>) {
     if m.velocity == 0.0 {
@@ -84,6 +91,13 @@ fn pong(m: &mut Mote, #[entity] e: Entity, pings: Events<Ping>) {
         if to == e {
             m.velocity += ping.amount;
         }
+    }
+}
+
+#[smart_system]
+fn chase(c: &mut Chaser) {
+    if let Some(t) = c.target {
+        c.position += t.position * 0.5;
     }
 }
 
@@ -221,6 +235,46 @@ fn events_send_and_apply_in_entity_id_order() {
 #[test]
 fn system_name_is_function_name() {
     assert_eq!(DriftSystem::new().name(), "drift");
+}
+
+/// Entity links: `t.position` gathers the target's bundle; unlinked
+/// entities (`None`) pass through untouched.
+#[test]
+fn link_read_gathers_target_bundle() {
+    let mut resources = Resources::new();
+    let mut store = SmartStore::new();
+    Chaser::pack_register(&mut store);
+    let target = store.create_entity();
+    Chaser {
+        position: 10.0,
+        target: None,
+    }
+    .pack_insert(&mut store, target);
+    let hunter = store.create_entity();
+    Chaser {
+        position: 0.0,
+        target: Some(target),
+    }
+    .pack_insert(&mut store, hunter);
+    let loner = store.create_entity();
+    Chaser {
+        position: 1.0,
+        target: None,
+    }
+    .pack_insert(&mut store, loner);
+    resources.insert(store);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(ChaseSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let hunter_body = Chaser::pack_get(store, hunter).expect("hunter bundle");
+    assert_eq!(hunter_body.position, 0.0 + 10.0 * 0.5);
+    let target_body = Chaser::pack_get(store, target).expect("target bundle");
+    assert_eq!(target_body.position, 10.0);
+    let loner_body = Chaser::pack_get(store, loner).expect("loner bundle");
+    assert_eq!(loner_body.position, 1.0);
 }
 
 /// `Res` requires `PlainResource`: covered at compile time by trybuild

@@ -533,7 +533,9 @@ fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
         foreign.visit_stmt_mut(stmt);
     }
 
-    // Body function: same params with elided lifetimes on wrappers.
+    // Body function: same params with elided lifetimes on wrappers, plus
+    // the store handle so rewritten foreign reads (`t.field` gathers)
+    // resolve — the body runs once per entity outside `run`'s scope.
     let body_fn_name = format_ident!("__smart_system_body_{}", func.sig.ident);
     let mut body_inputs = Vec::new();
     body_inputs.push({
@@ -544,6 +546,7 @@ fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
             quote! { #u: &#pack_ty }
         }
     });
+    body_inputs.push(quote! { #store_ident: &ornis_core::SmartStore });
     for param in &params {
         let name = &param.name;
         match &param.kind {
@@ -722,7 +725,7 @@ fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
                     else {
                         continue;
                     };
-                    #body_fn_name(#u_ref, #(#call_args),*);
+                    #body_fn_name(#u_ref, #store_ident, #(#call_args),*);
                     #scatter
                 }
             }
