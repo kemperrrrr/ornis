@@ -508,6 +508,11 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
+        // Small sizes under Miri: interpretation is 10-100x slower, the
+        // same read/write interleavings are covered with fewer iterations.
+        const THREADS: usize = if cfg!(miri) { 2 } else { 8 };
+        const ITERS: usize = if cfg!(miri) { 16 } else { 1000 };
+
         let mut store = SmartStore::new();
         store.register_lock_free::<f32>();
 
@@ -517,10 +522,10 @@ mod tests {
         let store = Arc::new(store);
         let mut handles = vec![];
 
-        for _ in 0..8 {
+        for _ in 0..THREADS {
             let s = Arc::clone(&store);
             handles.push(thread::spawn(move || {
-                for _ in 0..1000 {
+                for _ in 0..ITERS {
                     let val = s
                         .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
                         .unwrap();
@@ -534,7 +539,11 @@ mod tests {
         }
     }
 
+    // Wall-clock throughput gate: meaningless under Miri (interpreted
+    // speed is 10-100x native), so it is ignored there. Native coverage
+    // comes from the `test-lockfree` quality stage.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn benchmark_speed() {
         let mut store = SmartStore::new();
         let start = std::time::Instant::now();
@@ -648,13 +657,15 @@ mod tests {
     /// pairs racing on one lane. The CAS loop must preserve every insert
     /// while retiring each replaced snapshot exactly once (the old
     /// `load -> clone -> store` code lost updates and double-freed).
+    /// Small N under Miri, same reason as `lock_free_concurrent_read`.
     #[test]
     fn lock_free_concurrent_write_and_destroy_consistent() {
         use std::sync::Arc;
         use std::thread;
 
-        const THREADS: usize = 8;
-        const PER_THREAD: usize = 100;
+        const THREADS: usize = if cfg!(miri) { 2 } else { 8 };
+        const PER_THREAD: usize = if cfg!(miri) { 8 } else { 100 };
+        const READER_ITERS: usize = if cfg!(miri) { 16 } else { 2000 };
 
         let mut store = SmartStore::new();
         store.register_lock_free::<u64>();
@@ -684,7 +695,7 @@ mod tests {
         // exercising epoch reclamation under contention.
         let s = Arc::clone(&store);
         let reader = thread::spawn(move || {
-            for _ in 0..2000 {
+            for _ in 0..READER_ITERS {
                 let _ = s.with_lock_free_lane::<u64, _>(|lane| lane.len());
             }
         });

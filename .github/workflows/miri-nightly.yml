@@ -25,16 +25,20 @@ name: Miri Nightly
 #   queued at process exit. The one REAL leak Miri found locally (dropped
 #   lock-free stores leak their live snapshot — `Atomic` frees nothing on
 #   drop) is NOT fixed here: the fix adds rustqual findings, so it ships
-#   as a separate PR with a baseline update — see the RAT-8 report for
-#   the ready patch. macOS note: local Miri runs abort on glam's NEON
+#   as a separate PR with a baseline update — the leak is tracked as
+#   RAT-19. macOS note: local Miri runs abort on glam's NEON
 #   `faddv` (unsupported aarch64 intrinsic, e.g. via `UnitQuat::normalize`
 #   in hierarchy tests); the Linux job uses x86 SSE instead.
-# - The concurrent stress tests (`concurrent_writes_no_lost_updates_or_
-#   double_free`, `concurrent_destroy_no_double_free`) scale down to
-#   small N under `cfg!(miri)` (2 threads, tens of entities/iterations):
-#   same interleavings, bounded interpret time. Race coverage at full
-#   scale comes from the TSan job below and the native `test-lockfree`
-#   quality stage.
+# - The concurrent stress tests (both stores) scale down to small N
+#   under `cfg!(miri)` (2 threads, tens of entities/iterations): same
+#   interleavings, bounded interpret time. `benchmark_speed` (a
+#   wall-clock throughput gate, meaningless under interpretation) carries
+#   `#[cfg_attr(miri, ignore)]`. Race coverage at full scale comes from
+#   the TSan job below and the native `test-lockfree` quality stage.
+# - `-Zmiri-permissive-provenance`: crossbeam-epoch exposes pointers as
+#   integers internally, which is noisy `integer-to-pointer cast`
+#   warnings under strict provenance; permissive mode keeps the log
+#   readable without hiding real UB.
 
 on:
   schedule:
@@ -56,9 +60,14 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Pinned by date: a floating `nightly` would break (or silently
+      # change meaning of) this job on a toolchain regression with no code
+      # change, and the result would not be reproducible. Verified locally
+      # as `nightly-2026-10-09` (track «Ядро и платформа»); bump
+      # deliberately, re-verifying the Miri run.
       - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # nightly action pin
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-10-09
           components: miri, rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -68,7 +77,7 @@ jobs:
       - name: Miri test (ornis-core lib, lock-free)
         shell: bash
         env:
-          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-ignore-leaks
+          MIRIFLAGS: -Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-permissive-provenance
         run: |
           set -o pipefail
           mkdir -p target
@@ -93,7 +102,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # nightly action pin
         with:
-          toolchain: nightly
+          toolchain: nightly-2026-10-09
           components: rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
