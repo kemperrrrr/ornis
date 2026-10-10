@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+    # RAT-24: labeled/unlabeled so the gate re-runs when the owner
+    # (un)sets `baseline-bump-approved` (the bump guard reads the label
+    # from the event payload). Shard jobs ignore any other label event
+    # (see the shared `if:` guard below) so stray labels cost nothing.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,8 +25,15 @@ env:
 
 # Cancel superseded PR runs: a new push makes the previous 20-minute gate
 # result irrelevant. Master pushes are never cancelled.
+# RAT-24: label events for any *other* label get their own throwaway group
+# (unique per run, so they cancel nothing). Without this a stray label
+# would enter the real group, cancel the running gate, and leave only
+# skipped jobs behind — which branch protection counts as passed.
+# `labeled`/`unlabeled` for `baseline-bump-approved` stays in the real
+# group: removing/adding the approval must cancel the stale verdict and
+# re-run every shard.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ ((github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'baseline-bump-approved') && format('-noop-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Explicit token scopes. Only the `report` job needs `pull-requests: write`
@@ -47,6 +59,10 @@ jobs:
   #            the ignored ones stay in Determinism Nightly)
   #   docs   — doc, wasm-check
   fast:
+    # RAT-24: run on every trigger except label events for other labels —
+    # only `baseline-bump-approved` changes the guard verdict, so only it
+    # may re-run the gate (see `on.pull_request.types` above).
+    if: (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'baseline-bump-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -96,6 +112,15 @@ jobs:
       - name: Quality gate (fast shard)
         id: gate
         shell: bash
+        env:
+          # RAT-24: the rustqual bump guard inside xtask compares the
+          # committed baseline.json against origin/<base>. Growth FAILs
+          # unless the owner set the `baseline-bump-approved` label — the
+          # label comes from the event payload, so this needs no extra
+          # token scope. The workflow fires on labeled/unlabeled (see
+          # `on:`), so (un)setting the label re-runs the gate by itself.
+          # On push events there is no PR: always false.
+          ORNIS_BASELINE_BUMP_ALLOWED: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-bump-approved') }}
         run: |
           mkdir -p target
           cargo xtask quality --ci --only fmt,audit,deny,outdated,upgrade-check,rustqual,machete,typos 2>&1 | tee target/quality-fast.log
@@ -110,6 +135,8 @@ jobs:
           if-no-files-found: warn
 
   clippy:
+    # RAT-24: see `fast` — ignore label events for other labels.
+    if: (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'baseline-bump-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -164,6 +191,8 @@ jobs:
           if-no-files-found: warn
 
   test:
+    # RAT-24: see `fast` — ignore label events for other labels.
+    if: (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'baseline-bump-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -229,6 +258,8 @@ jobs:
           if-no-files-found: warn
 
   gpu:
+    # RAT-24: see `fast` — ignore label events for other labels.
+    if: (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'baseline-bump-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -294,6 +325,8 @@ jobs:
           if-no-files-found: warn
 
   docs:
+    # RAT-24: see `fast` — ignore label events for other labels.
+    if: (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'baseline-bump-approved'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -366,7 +399,9 @@ jobs:
       pull-requests: write
     # `always()` so failure digests are posted even when a shard fails;
     # the steps below no-op on full success (except the merged-log artifact).
-    if: always()
+    # RAT-24: still skip on label events for other labels (all shards skip
+    # there, so there is nothing to report).
+    if: ${{ always() && ((github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'baseline-bump-approved') }}
     steps:
       - name: Download shard logs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
