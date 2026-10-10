@@ -1,0 +1,5 @@
+error: smart_system: `Res<SmartStore>` is forbidden — reach components through the first `&T`/`&mut T` (`T: Pack`) parameter
+  --> tests/ui/smart_system_rejects_store_resource.rs:12:33
+   |
+12 | fn sys(u: &mut Unit, store: Res<SmartStore>) {
+   |                                 ^^^^^^^^^^

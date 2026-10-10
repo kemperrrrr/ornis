@@ -717,6 +717,18 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   write покрывает read); гейты — 3 теста в `entry_points.rs`. Остаток R3 —
   проводка сверки с `System::access()` на регистрации (follow-up, см.
   ниже; mismatch = compile error — целевой вид полного R3).
+  > **Пересмотр 2026-10-09 (RAT-31, IDEAS §32): вывод из тела функции
+  > отклонён.** Синтаксический анализ тела всегда догоняет новые формы
+  > кода (helper, `if let`, `match`, `.map`, alias): доступ следует из
+  > **типов параметров**, как `SystemParam` в Bevy. Новый `#[smart_system]`
+  > (v2): функция для одного объекта (`u: &mut T`/`&T`, `T: Pack`;
+  > `Res<T: PlainResource>` → read, `ResMut<T>` → write,
+  > `Events<E>` → write при `send`/`clear`, иначе read;
+  > `&Resources` и `Res<SmartStore>` — compile error). В v2 доступ по
+  > лейнам — целым бандлом (`Pack::pack_lane_ids`); поточечный вывод из
+  > обращений `u.field` — v2b. Гейты v2: `crates/core/tests/smart_system.rs`
+  > (цикл, фильтр, уровни, детерминированные события) + 6 trybuild-кейсов
+  > `smart_system_rejects_*`.
 - **R4 — структурные опсы** (`add`/`remove`/`spawn`) → auto-defer / ошибка
   в параллельном контексте.
 - **R5 — захваченное изменяемое состояние** → `atomic`/`reduce`-трансформация

@@ -1,0 +1,5 @@
+error: smart_system: `Res<Mutex<…>>` holds interior mutability and is not `PlainResource` — use `ResMut` (declares a write) instead
+  --> tests/ui/smart_system_rejects_interior_resource.rs:13:35
+   |
+13 | fn sys(u: &mut Unit, counter: Res<std::sync::Mutex<u32>>) {
+   |                                   ^^^^^^^^^^^^^^^^^^^^^

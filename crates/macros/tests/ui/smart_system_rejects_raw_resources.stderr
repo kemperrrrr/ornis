@@ -1,0 +1,5 @@
+error: smart_system: raw `&Resources` is forbidden — declare typed parameters (`Res<T>`, `ResMut<T>`, `Events<E>`) so access follows from types
+  --> tests/ui/smart_system_rejects_raw_resources.rs:12:33
+   |
+12 | fn sys(u: &mut Unit, resources: &Resources) {
+   |                                 ^^^^^^^^^^

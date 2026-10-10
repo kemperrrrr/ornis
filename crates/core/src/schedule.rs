@@ -278,6 +278,16 @@ impl SystemAccess {
         self
     }
 
+    /// Merges another access set into this one (used by generated
+    /// `#[smart_system]` code to union per-parameter contributions).
+    pub fn combine(mut self, other: Self) -> Self {
+        self.reads.extend(other.reads);
+        self.writes.extend(other.writes);
+        self.reads_lanes.extend(other.reads_lanes);
+        self.writes_lanes.extend(other.writes_lanes);
+        self
+    }
+
     /// Whether a write conflicts with (read ∪ write) of another access.
     #[cfg(test)]
     fn writes_touch(&self, other: &SystemAccess) -> bool {
