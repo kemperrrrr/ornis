@@ -5,19 +5,18 @@
 //! never from syntactic body analysis: [`Res`] declares a shared read,
 //! [`ResMut`] an exclusive-scheduler write (mutation itself goes through
 //! the resource's interior mutability), and [`EventWriter`]/[`EventReader`]
-//! declare event-queue access by role. [`PlainResource`] keeps interior
-//! mutability out of [`Res`]:
+//! declare event-queue access by role ([`events`] owns the queue itself).
+//! [`PlainResource`] keeps interior mutability out of [`Res`]:
 //! a `Mutex`/`RwLock`/`Atomic*` behind a shared read would be
 //! memory-safe but non-deterministic (see the commutativity contract in
 //! [`crate::schedule`]), so it must be declared as [`ResMut`] instead.
 //!
-//! [`SmartStore`] is deliberately *not* a parameter: systems generated
+//! [`crate::SmartStore`] is deliberately *not* a parameter: systems generated
 //! by `#[smart_system]` reach the store through the first (`Pack`)
 //! parameter. Raw `&Resources`, `Res<SmartStore>`, and `ResMut` handles for
 //! `SmartStore`/`Resources` would bypass declared accesses, so they are
 //! rejected by the macro or the `ResMutResource` bound.
 
-use std::any::TypeId;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::atomic::{
@@ -28,7 +27,11 @@ use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use crate::schedule::{Resources, SystemAccess};
-use crate::{Entity, FixedTime, SmartStore, Time};
+use crate::{FixedTime, Time};
+
+mod events;
+
+pub use events::{EventReader, EventStore, EventWriter, register_events};
 
 /// Marker for types that may be accessed through [`ResMut`].
 ///
@@ -71,6 +74,11 @@ pub unsafe trait ResMutResource: Send + Sync + 'static {}
 )]
 pub unsafe trait PlainResource: ResMutResource {}
 
+// SAFETY (both traits): every `plain_impl!` type is owned, `'static` plain
+// data — `&T` reaches no interior mutability, so sharing it across a level
+// through `Res` is deterministic, and `ResMut`'s `writes::<T>()` key covers
+// all mutation (the type is only mutable through `&mut`, which the scheduler
+// serializes).
 macro_rules! plain_impl {
     ($($ty:ty),*) => {
         $(
@@ -94,6 +102,9 @@ plain_impl!(
     crate::Meters
 );
 
+// SAFETY (container/tuple impls): purely structural forwarding — a container
+// is an approved resource only when the bound holds for everything reachable
+// from it, so no new state and no hidden interior mutability is introduced.
 unsafe impl<T: ResMutResource> ResMutResource for Option<T> {}
 unsafe impl<T: PlainResource> PlainResource for Option<T> {}
 unsafe impl<T: ResMutResource> ResMutResource for Vec<T> {}
@@ -129,6 +140,12 @@ unsafe impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> 
 // Synchronization primitives are valid mutable resources only when the
 // protected value is itself an approved resource type. In particular this
 // excludes `Mutex<SmartStore>` and `Mutex<Resources>` by default.
+//
+// SAFETY: these types are interior-mutable, so they implement only
+// `ResMutResource` and are reachable exclusively through `ResMut` (a
+// declared `writes` access) — never through `Res`/`PlainResource`. The
+// `T: ResMutResource` bound keeps scheduler handles (`Mutex<SmartStore>`)
+// out, and atomics carry their own state with no reachable aliases.
 unsafe impl<T: ResMutResource> ResMutResource for Mutex<T> {}
 unsafe impl<T: ResMutResource> ResMutResource for RwLock<T> {}
 unsafe impl<T: ResMutResource> ResMutResource for std::sync::OnceLock<T> {}
@@ -245,191 +262,6 @@ impl<T: ResMutResource> Deref for ResMut<'_, T> {
     }
 }
 
-/// Deterministic event queue resource: `(entity, event)` pairs sent by
-/// one system and applied by another.
-///
-/// Sends from any thread/level append in arrival order; draining sorts by
-/// entity id, so application order is deterministic regardless of which
-/// parallel level produced the events (Strong Confluence, IDEAS §24.1).
-/// Writers and readers both declare a write through [`EventWriter`] and
-/// [`EventReader`]; readers may drain the queue.
-pub struct EventStore<E: Send + 'static> {
-    queue: Mutex<Vec<(Entity, E)>>,
-}
-
-impl<E: Send + 'static> Default for EventStore<E> {
-    fn default() -> Self {
-        Self {
-            queue: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl<E: Send + 'static> EventStore<E> {
-    /// Appends `(to, event)`; callable from any thread.
-    pub fn send(&self, to: Entity, event: E) {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((to, event));
-    }
-
-    /// Takes all queued events sorted by entity id (stable for equal ids,
-    /// so same-entity sends keep arrival order).
-    pub fn drain_sorted(&self) -> Vec<(Entity, E)> {
-        let mut taken = self
-            .queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .split_off(0);
-        taken.sort_by_key(|(entity, _)| entity.id());
-        taken
-    }
-
-    /// Peeks all queued events sorted by entity id without consuming
-    /// them (per-entity consumers over a shared snapshot; the queue is
-    /// cleared explicitly with [`clear`](Self::clear)).
-    pub fn read_sorted(&self) -> Vec<(Entity, E)>
-    where
-        E: Clone,
-    {
-        let mut snapshot = self
-            .queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        snapshot.sort_by_key(|(entity, _)| entity.id());
-        snapshot
-    }
-
-    /// Drops all queued events (explicit end-of-frame lifecycle; automatic
-    /// consume-once application is a `#[smart_system]` v2b follow-up).
-    pub fn clear(&self) {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-    }
-
-    /// Number of queued events.
-    pub fn len(&self) -> usize {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
-    }
-
-    /// Whether the queue is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-/// Registers the [`EventStore`] singleton for `E` (systems fetch it
-/// through [`EventWriter`] or [`EventReader`]; the store must exist before
-/// the schedule runs).
-pub fn register_events<E: Send + Sync + 'static>(resources: &mut Resources) {
-    if resources.get::<EventStore<E>>().is_none() {
-        resources.insert(EventStore::<E>::default());
-    }
-}
-
-/// Event producer parameter. Its type always declares a write to the queue,
-/// independent of which helpers are called in the function body.
-pub struct EventWriter<'a, E: Send + Sync + 'static> {
-    store: &'a EventStore<E>,
-}
-
-impl<E: Send + Sync + 'static> Clone for EventWriter<'_, E> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<E: Send + Sync + 'static> Copy for EventWriter<'_, E> {}
-
-impl<'a, E: Send + Sync + 'static> EventWriter<'a, E> {
-    /// Fetches the queue singleton; panics when [`register_events`] was
-    /// not called (same missing-resource contract as [`Res`]).
-    // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — register_events must run before the schedule; same rationale as Res::fetch above"
-    pub fn fetch(resources: &'a Resources) -> Self {
-        let store = resources.get::<EventStore<E>>().unwrap_or_else(|| {
-            panic!(
-                "smart_system: missing EventStore<'{}'> — call register_events() before running the schedule",
-                std::any::type_name::<E>()
-            )
-        });
-        Self { store }
-    }
-
-    /// Queues `event` for `to` (arrival order; application order is fixed
-    /// later by [`EventReader::drain_sorted`]).
-    pub fn send(&self, to: Entity, event: E) {
-        self.store.send(to, event);
-    }
-
-    /// Declares exclusive access to the event queue.
-    pub fn access() -> SystemAccess {
-        SystemAccess::new().writes::<EventStore<E>>()
-    }
-}
-
-/// Event consumer parameter.
-///
-/// It declares a write because [`drain_sorted`](Self::drain_sorted) consumes
-/// queue contents. This is conservative even for a body that only calls
-/// [`read_sorted`](Self::read_sorted), ensuring consumers never share a
-/// scheduler level with producers or other consumers.
-pub struct EventReader<'a, E: Send + Sync + 'static> {
-    store: &'a EventStore<E>,
-}
-
-impl<E: Send + Sync + 'static> Clone for EventReader<'_, E> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<E: Send + Sync + 'static> Copy for EventReader<'_, E> {}
-
-impl<'a, E: Send + Sync + 'static> EventReader<'a, E> {
-    /// Fetches the queue singleton; panics when [`register_events`] was
-    /// not called (same missing-resource contract as [`Res`]).
-    // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — register_events must run before the schedule; same rationale as Res::fetch above"
-    pub fn fetch(resources: &'a Resources) -> Self {
-        let store = resources.get::<EventStore<E>>().unwrap_or_else(|| {
-            panic!(
-                "smart_system: missing EventStore<'{}'> — call register_events() before running the schedule",
-                std::any::type_name::<E>()
-            )
-        });
-        Self { store }
-    }
-
-    /// Takes all queued events sorted by entity id.
-    pub fn drain_sorted(&self) -> Vec<(Entity, E)> {
-        self.store.drain_sorted()
-    }
-
-    /// Peeks all queued events sorted by entity id without consuming.
-    pub fn read_sorted(&self) -> Vec<(Entity, E)>
-    where
-        E: Clone,
-    {
-        self.store.read_sorted()
-    }
-
-    /// Drops all queued events.
-    pub fn clear(&self) {
-        self.store.clear();
-    }
-
-    /// Declares exclusive access because this reader can drain the queue.
-    pub fn access() -> SystemAccess {
-        SystemAccess::new().writes::<EventStore<E>>()
-    }
-}
-
 /// Uniform fetch + access contract for typed system parameters.
 ///
 /// `#[smart_system]` emits the same wrapper access/fetch operations into its
@@ -496,25 +328,10 @@ impl<E: Send + Sync + 'static> SystemParam for EventReader<'_, E> {
     }
 }
 
-/// Canonical lane-capture order: [`TypeId`]s sorted ascending.
-///
-/// Lanes are `RwLock`s; acquiring several in one system in different
-/// orders across systems deadlocks. Generated `#[smart_system]` code
-/// (and hand-written multi-lane systems) sort lane ids through this
-/// helper before locking, so every system captures in the same order.
-pub fn canonical_lane_order(ids: &mut [TypeId]) {
-    ids.sort();
-}
-
-/// Legacy type alias naming the store handle forbidden as a system resource.
-/// Systems reach components through the first (`Pack`) parameter; a raw
-/// store handle would bypass the derived lane access set. The macro rejects
-/// direct `Res<SmartStore>` and `ResMutResource` is deliberately not
-/// implemented for `SmartStore` or [`Resources`].
-pub type NoRawStore = SmartStore;
-
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     #[derive(Debug, PartialEq)]
@@ -544,34 +361,5 @@ mod tests {
             *ResMut::<Mutex<u32>>::fetch(&resources).lock().unwrap(),
             1
         );
-    }
-
-    #[test]
-    fn events_drain_in_entity_id_order() {
-        let store = EventStore::<&'static str>::default();
-        store.send(Entity::new(9), "nine");
-        store.send(Entity::new(2), "two");
-        store.send(Entity::new(5), "five");
-        let drained = store.drain_sorted();
-        let ids: Vec<u32> = drained.iter().map(|(e, _)| e.id()).collect();
-        assert_eq!(ids, vec![2, 5, 9]);
-        assert!(store.is_empty());
-    }
-
-    #[test]
-    fn event_writer_and_reader_both_declare_exclusive_access() {
-        let write = SystemAccess::new().writes::<EventStore<u32>>();
-        assert_eq!(EventWriter::<u32>::access(), write);
-        // Readers may drain, so their parameter type is conservatively a write.
-        assert_eq!(EventReader::<u32>::access(), write);
-    }
-
-    #[test]
-    fn canonical_lane_order_sorts_type_ids() {
-        let mut ids = vec![TypeId::of::<u32>(), TypeId::of::<u8>()];
-        canonical_lane_order(&mut ids);
-        let mut expected = vec![TypeId::of::<u8>(), TypeId::of::<u32>()];
-        expected.sort();
-        assert_eq!(ids, expected);
     }
 }
