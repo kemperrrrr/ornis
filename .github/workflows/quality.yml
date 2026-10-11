@@ -32,14 +32,70 @@ concurrency:
 # Explicit token scopes. Only the `report` job needs `pull-requests: write`
 # (failure-digest comments); only the `fast` job needs `pull-requests:
 # read` (it reads the live `baseline-bump-approved` label via the PR API
-# — RAT-24). Every other job runs with the workflow-default `contents:
-# read`. Shard jobs only read the repo and write their own log artifacts
-# (actions: read is implicit for the runner, but listing it future-proofs
-# against org-level Workflow permission changes).
+# — RAT-24); only `reset-approval` needs `pull-requests: write` (it
+# removes that label on a new head, and checks out nothing). Every other
+# job runs with the workflow-default `contents: read`. Shard jobs only
+# read the repo and write their own log artifacts (actions: read is
+# implicit for the runner, but listing it future-proofs against org-level
+# Workflow permission changes).
 permissions:
   contents: read
 
 jobs:
+  # Approval is per-head: the owner's `baseline-bump-approved` label must
+  # not carry over to a later push (or a reopen after pushes to a closed
+  # PR, which fire no `synchronize`) that grows the baseline further.
+  # Threat model:
+  # - Runs on the `pull_request` event: the token never gets secrets and,
+  #   for fork PRs, is read-only. NOT `pull_request_target` — that would
+  #   run with a write token in the context of untrusted PR content. This
+  #   job additionally checks out nothing and runs no PR code: it only
+  #   calls the REST API through `gh`, and its only inputs (PR number,
+  #   repository) are passed via `env`, never interpolated into the script.
+  # - Permissions are scoped to this job: `pull-requests: write` is the
+  #   minimum that lets `DELETE .../labels/<name>` work; `contents` and
+  #   everything else is `none` (a job-level `permissions` block replaces
+  #   the workflow default). Fork PR + label present => the DELETE is
+  #   forbidden => the job fails red and `fast` below fails with it
+  #   (fail closed), instead of silently honouring a stale label.
+  # - No race with the guard: `fast` runs only after this job, so it can
+  #   never read the previous head's label. `run_attempt == 1` keeps the
+  #   owner flow working: «set the label, then Re-run jobs» reruns with
+  #   attempt >= 2 and must NOT strip the label just set.
+  # - Out of scope: a PR that edits this job (or `fast`) to dodge the
+  #   reset. The `pull_request` event runs the PR's own workflow files, so
+  #   such a change is visible only in the diff under `.github/` — catching
+  #   it is the owner's review (no CODEOWNERS: single-owner repo).
+  reset-approval:
+    if: github.event_name == 'pull_request' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Drop stale baseline-bump-approved label
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          labels="$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')" || {
+            echo "::error::gh pr view failed for PR #$PR_NUMBER — cannot check baseline-bump-approved"
+            exit 1
+          }
+          if ! printf '%s\n' "$labels" | grep -qx 'baseline-bump-approved'; then
+            echo "baseline-bump-approved not set — nothing to reset"
+            exit 0
+          fi
+          gh api --method DELETE \
+            "repos/$GH_REPO/issues/$PR_NUMBER/labels/baseline-bump-approved" >/dev/null || {
+            echo "::error::could not remove baseline-bump-approved from PR #$PR_NUMBER (read-only token on a fork PR?)"
+            exit 1
+          }
+          echo "::notice::baseline-bump-approved removed: PR head changed, approval does not carry over (owner: re-label, then re-run jobs)"
+
   # Sharding: `cargo xtask quality` is still the single source of truth for
   # gate composition — each shard runs the same xtask binary with
   # `--ci --only <ids>` (see `cargo xtask quality --list-stages`). Wall time
@@ -56,13 +112,26 @@ jobs:
   fast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # RAT-24: this is the only job that talks to the PR API (live
+    needs: [reset-approval]
+    # `reset-approval` is skipped on push and on re-runs (attempt >= 2);
+    # `!cancelled()` keeps `fast` running then. A FAILED reset must keep
+    # the guard red (a skipped `fast` would count as passed), hence the
+    # explicit first step instead of an `if` on the job.
+    if: ${{ !cancelled() }}
+    # RAT-24: this is the only gate job that talks to the PR API (live
     # `baseline-bump-approved` label, see below) — scope the grant here,
-    # not workflow-wide. Merges with the workflow-default `contents: read`
-    # (same mechanism as the `report` job's `pull-requests: write`).
+    # not workflow-wide. Explicit `contents: read` because a job-level
+    # block replaces the workflow default (checkout needs it).
     permissions:
+      contents: read
       pull-requests: read
     steps:
+      - name: Require approval reset
+        if: needs.reset-approval.result == 'failure'
+        run: |
+          echo "::error::reset-approval failed — a stale baseline-bump-approved label cannot be ruled out"
+          exit 1
+
       # Full history: rustqual's failure diagnostics run `git archive
       # origin/<base>` for the reference measurement.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -110,7 +179,9 @@ jobs:
       # of the event payload, so labeling needs no workflow trigger (and
       # stray labels create no runs or skipped checks at all). Owner flow:
       # set `baseline-bump-approved`, then "Re-run failed jobs" — the
-      # re-run sees the current labels. On push events there is no PR:
+      # re-run sees the current labels. A new head resets the label first
+      # (`reset-approval` job; it does not run on re-runs, so the label
+      # set by the owner survives them). On push events there is no PR:
       # always false. The API call is hoisted out of any condition and a
       # failed lookup fails this job red via ::error:: — a silent
       # `false` (which would pass the gate as "not approved") must be
@@ -408,9 +479,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: [fast, clippy, test, gpu, docs]
-    # Posts failure-digest PR comments — the only job that needs
-    # `pull-requests: write` (workflow default is `contents: read`).
+    # Posts failure-digest PR comments — the only gate job that needs
+    # `pull-requests: write`. Explicit `contents: read` because a
+    # job-level block replaces the workflow default.
     permissions:
+      contents: read
       pull-requests: write
     # `always()` so failure digests are posted even when a shard fails;
     # the steps below no-op on full success (except the merged-log artifact).
