@@ -106,3 +106,26 @@ fn test_own_method_not_universal() {
     let scope = build_scope("struct A; impl A { fn record_logic(&mut self) {} }");
     assert!(scope.is_own_method("record_logic"));
 }
+
+#[test]
+fn test_blanket_impl_over_std_type_claims_nothing() {
+    // `impl<T> Marker for Vec<T>` must not make `Vec` a project type:
+    // otherwise `Vec::new` resolves as an own call tree-wide (false IOSP).
+    let scope = build_scope(
+        "trait Marker {} impl<T> Marker for Vec<T> {} struct Mine; impl Mine { fn build(&self) {} }",
+    );
+    assert!(!scope.types.contains("Vec"));
+    assert!(!scope.is_own_function("Vec::new"));
+    assert!(scope.types.contains("Mine"));
+    assert!(scope.is_own_function("Mine::build"));
+}
+
+#[test]
+fn test_generic_impl_over_defined_type_still_claims() {
+    // A blanket impl over a *defined* generic keeps resolving.
+    let scope = build_scope(
+        "struct Wrapper<T>(T); trait Marker {} impl<T> Marker for Wrapper<T> {}",
+    );
+    assert!(scope.types.contains("Wrapper"));
+    assert!(scope.is_own_function("Wrapper::new"));
+}

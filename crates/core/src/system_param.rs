@@ -106,6 +106,7 @@ impl<T: PlainResource> Copy for Res<'_, T> {}
 impl<'a, T: PlainResource> Res<'a, T> {
     /// Fetches the singleton; panics with the type name when absent
     /// (same contract as Bevy's `Res`: a declared resource must exist).
+    // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — a declared resource must exist; mirrors Bevy's Res fetch panic with the type name attached"
     pub fn fetch(resources: &'a Resources) -> Self {
         let value = resources.get::<T>().unwrap_or_else(|| {
             panic!(
@@ -155,6 +156,7 @@ impl<T: Send + Sync + 'static> Copy for ResMut<'_, T> {}
 
 impl<'a, T: Send + Sync + 'static> ResMut<'a, T> {
     /// Fetches the singleton; panics with the type name when absent.
+    // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — a declared resource must exist; mirrors Bevy's Res fetch panic with the type name attached"
     pub fn fetch(resources: &'a Resources) -> Self {
         let value = resources.get::<T>().unwrap_or_else(|| {
             panic!(
@@ -292,6 +294,7 @@ impl<E: Send + Sync + 'static> Copy for Events<'_, E> {}
 impl<'a, E: Send + Sync + 'static> Events<'a, E> {
     /// Fetches the queue singleton; panics when [`register_events`] was
     /// not called (same missing-resource contract as [`Res`]).
+    // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — register_events must run before the schedule; same rationale as Res::fetch above"
     pub fn fetch(resources: &'a Resources) -> Self {
         let store = resources.get::<EventStore<E>>().unwrap_or_else(|| {
             panic!(

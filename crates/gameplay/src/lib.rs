@@ -99,16 +99,19 @@ impl<'de> serde::Deserialize<'de> for Velocity {
 
 impl Velocity {
     /// Wraps a raw m/s vector.
+    #[allow(dead_code)] // unit-vocabulary constructor (mirrors Position::from_meters; reserved for physics-sync callers)
     pub fn from_mps(velocity: Vec3) -> Self {
         Self(velocity)
     }
 
     /// Raw m/s vector.
+    #[allow(dead_code)] // unit-vocabulary accessor (mirrors Position::as_meters; reserved for physics-sync callers)
     pub fn as_mps(self) -> Vec3 {
         self.0
     }
 
     /// Speed (magnitude) in m/s.
+    #[allow(dead_code)] // unit-vocabulary accessor (reserved for HUD/physics-sync callers)
     pub fn speed_units(self) -> MetersPerSecond {
         MetersPerSecond::new(self.0.length())
     }
@@ -144,11 +147,13 @@ impl<'de> serde::Deserialize<'de> for Position {
 
 impl Position {
     /// Wraps a raw world-space position (meters).
+    #[allow(dead_code)] // unit-vocabulary constructor (reserved for spawn paths that build from raw vectors)
     pub fn from_meters(position: Vec3) -> Self {
         Self(position)
     }
 
     /// Raw position in meters.
+    #[allow(dead_code)] // unit-vocabulary accessor (reserved for render-sync callers)
     pub fn as_meters(self) -> Vec3 {
         self.0
     }
@@ -226,6 +231,7 @@ impl GameplayPlugin {
 
     /// Current speed in m/s (non-finite or negative raw values saturate to
     /// zero so a corrupt field never reverses movement).
+    #[allow(dead_code)] // plugin accessor (reserved for engine wiring that clamps configured speeds)
     pub fn speed_units(&self) -> MetersPerSecond {
         let v = self.player_speed;
         if v.is_finite() {
@@ -346,6 +352,8 @@ pub fn player_input(resources: &Resources, speed: f32) {
 /// horizontal intent under the authoritative `FixedTime::delta_seconds()`
 /// so that catch-up frames do not double-apply transient input. The system
 /// also preserves vertical velocity for gravity/physics consumers.
+#[allow(dead_code)]
+// consumed by #[smart_system]: the original fn is replaced by generated glue, invisible to the call graph
 #[smart_system]
 fn physics_push(bundle: &mut PushBundle, fixed: Res<FixedTime>) {
     let dt = fixed.delta();
@@ -657,5 +665,25 @@ mod tests {
         let mermaid = engine.schedule().mermaid();
         assert!(mermaid.contains("player_input"));
         assert!(mermaid.contains("transform_update"));
+    }
+
+    #[test]
+    fn component_units_round_trip() {
+        // Pins the meters/second vocabulary (also keeps the conversion
+        // helpers referenced outside doc examples).
+        let vel = Velocity::from_mps(Vec3::new(3.0, 4.0, 0.0));
+        assert_eq!(vel.as_mps(), Vec3::new(3.0, 4.0, 0.0));
+        assert!((vel.speed_units().get() - 5.0).abs() < 1e-6);
+        let pos = Position::from_meters(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(pos.as_meters(), Vec3::new(1.0, 2.0, 3.0));
+        let dt = ornis_core::units::Seconds::new(2.0);
+        assert_eq!(
+            pos.advanced_by_secs(vel, dt).as_meters(),
+            Vec3::new(7.0, 10.0, 3.0)
+        );
+        assert_eq!(
+            pos.advanced_by(vel, 2.0).as_meters(),
+            Vec3::new(7.0, 10.0, 3.0)
+        );
     }
 }
