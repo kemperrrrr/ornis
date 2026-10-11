@@ -1,0 +1,4 @@
+Temporary: while this file exists, the CI quality run (agent debug branch only)
+publishes the rustfmt patch and the regenerated crates/macros/tests/ui/*.stderr
+snapshots as check-run annotations (see xtask/src/agent_dump.rs). Both the file
+and the module are removed before the final hand-off.

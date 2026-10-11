@@ -974,6 +974,17 @@ fn level1(stages: &mut StageList<'_>) {
             );
         }
     }
+
+    // TEMPORARY agent plumbing (`xtask/AGENT-DUMP-TEMPORARY.flag`): publish
+    // the rustfmt patch and the regenerated trybuild snapshots as
+    // annotations so the remote agent can apply them locally. Placed after
+    // every stage on purpose: the rustqual numbers stay pre-format.
+    if stages.enabled("fmt") {
+        crate::agent_dump::fmt_patch(stages.root);
+    }
+    if stages.enabled("test") {
+        crate::agent_dump::ui_snapshots(stages.root);
+    }
 }
 
 fn dependencies_upgrade_stage(stages: &mut StageList<'_>) {

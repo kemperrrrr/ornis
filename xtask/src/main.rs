@@ -14,6 +14,7 @@
 //! remote editor server. Cross-platform: everything goes through
 //! std::process::Command without a shell.
 
+mod agent_dump;
 mod e2e;
 mod prepush;
 mod quality;
