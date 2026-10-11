@@ -148,7 +148,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | Backend-neutral `InputState` resource | ✅ | `crates/input` (`ornis-input`: `InputState` + `KeyCode`/`MouseButton` + `InputMap` action mapping, реэкспорт через `ornis_core`); `Engine` + `InputState::apply_snapshot` — единый источник; native winit, WASM orbit + browser `BrowserInput`→`UiCommand::Input`→WS/`POST /api/input`→`apply_snapshot` (remote.rs, server_session.rs, main.rs); проводной формат `pressed_keys` (u32) не менялся, маппинг на краю чтения (`player_input` — через `InputMap::default_gameplay`) |
 | Entity Recycling + генерационные индексы | ✅ | `crates/core/src/entity.rs` |
 | Bitset-пересечения, страничные sparse-массивы, cache-line alignment | ✅ | в `ComponentStore` |
-| Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs` |
+| Lock-free store, hot/cold split, temporal sort (`defrag`) | ✅ | `lock_free_store.rs`, `cold_store.rs`; lock-free лейны доступны только через `with_lock_free_lane`/`write_lock_free_lane` — `read_lane`/`write_lane` на них **паникуют** (с #79; `None` — только «лейна нет») |
 | ZST-диспетчеризация (`GpuLane`/`CpuLane`/`HybridLane`, `LaneTarget`) | ✅ | `crates/core/src/pipeline.rs` |
 | Макросы (`smart_pipeline`, `for_each_entity`, `kernel`, `gpu_pipeline`, `WgslStruct`, `Pack`, `PipelineConfig`, `AutoPipeline`) | ✅ | `crates/macros/src/` |
 | Runtime-диспетчер CPU/GPU (`Dispatcher`, `SmartDispatcher`, `decide(element_count)`) | ✅ | `crates/core/src/dispatcher.rs`; `Dispatcher::decide` — чистое решение по порогу, `SmartDispatcher` — CPU-only; core `GpuExecutor`-STUB удалён решением владельца (исполнение требует Device/Queue — слой `ornis-wgpu-backend`: `AutoLane`/`GpuLanes`/`CommandSync`) |
