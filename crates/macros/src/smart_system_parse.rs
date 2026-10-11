@@ -2,8 +2,8 @@
 //!
 //! Turns the function signature into typed parameters ([`TypedParam`]):
 //! the first `u: &T` / `u: &mut T` (`T: Pack`) selects the entity set,
-//! the rest are `Res`/`ResMut`/`Events`/`#[config]`/`#[entity]`. Raw
-//! `&Resources`, `SmartStore`, and interior-mutable `Res<Mutex<…>>` are
+//! the rest are `Res`/`ResMut`/`EventWriter`/`EventReader`/`#[config]`/
+//! `#[entity]`. Raw `&Resources`, `SmartStore`, and interior-mutable `Res<Mutex<…>>` are
 //! compile errors with dedicated diagnostics.
 
 use proc_macro2::TokenStream as TokenStream2;
@@ -70,7 +70,7 @@ pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
             return Err(syn::Error::new_spanned(
                 r,
                 "smart_system: unexpected `self` — only the first parameter is the entity, \
-                 the rest are `Res<T>` / `ResMut<T>` / `Events<E>` / `#[config]`",
+                 the rest are `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` / `#[config]`",
             ));
         }
         FnArg::Typed(t) => t,
@@ -109,17 +109,17 @@ pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
         Type::Reference(_) => Err(syn::Error::new_spanned(
             &typed.ty,
             "smart_system: raw `&Resources` is forbidden — declare typed parameters \
-             (`Res<T>`, `ResMut<T>`, `Events<E>`) so access follows from types",
+             (`Res<T>`, `ResMut<T>`, `EventWriter<E>` / `EventReader<E>`) so access follows from types",
         )),
         Type::Path(tp) => parse_wrapper_param(name, &typed.ty, tp),
         _ => Err(syn::Error::new_spanned(
             &typed.ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `Events<E>` \
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
              (or `#[config] name: T`)",
         )),
     }
 }
-/// Validates one `Res<T>` / `ResMut<T>` / `Events<E>` wrapper parameter.
+/// Validates one `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` wrapper parameter.
 fn parse_wrapper_param(
     name: Ident,
     ty: &Type,
@@ -128,7 +128,7 @@ fn parse_wrapper_param(
     let Some(seg) = tp.path.segments.last() else {
         return Err(syn::Error::new_spanned(
             ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `Events<E>` \
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
              (or `#[config] name: T`)",
         ));
     };
@@ -142,7 +142,7 @@ fn parse_wrapper_param(
         }
         return Err(syn::Error::new_spanned(
             ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `Events<E>` \
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
              (or `#[config] name: T`)",
         ));
     };
@@ -164,11 +164,20 @@ fn parse_wrapper_param(
             "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
         ));
     };
-    if is_smart_store_ty(inner) {
+    if matches!(kind, ParamKind::Res) && is_smart_store_ty(inner) {
         return Err(syn::Error::new_spanned(
             inner,
             "smart_system: `Res<SmartStore>` is forbidden — reach components through \
              the first `&T`/`&mut T` (`T: Pack`) parameter",
+        ));
+    }
+    if matches!(kind, ParamKind::ResMut)
+        && matches!(path_last_ident(inner).as_deref(), Some("SmartStore" | "Resources"))
+    {
+        return Err(syn::Error::new_spanned(
+            inner,
+            "smart_system: `ResMut<SmartStore>` and `ResMut<Resources>` are forbidden — \
+             use `Pack`/typed parameters so scheduler access stays explicit",
         ));
     }
     if matches!(kind, ParamKind::Res) {

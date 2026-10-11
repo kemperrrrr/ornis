@@ -23,9 +23,18 @@ pub(crate) fn generate_pack_get_mut(
         let name = &field.name;
         let wrapper_name = &field.wrapper_name;
         let guard_name = format_ident!("_guard_{}", name);
-        lane_guards.push(quote! {
-            let #guard_name = store.write_lane::<#wrapper_name>()?;
-        });
+        if field.optional {
+            lane_guards.push(quote! {
+                let #guard_name = store.write_lane::<#wrapper_name>()?;
+            });
+        } else {
+            lane_guards.push(quote! {
+                let #guard_name = store.write_lane::<#wrapper_name>()?;
+                if #guard_name.get(entity).is_none() {
+                    return None;
+                }
+            });
+        }
         guard_fields_init.push(quote! {
             #guard_name,
         });

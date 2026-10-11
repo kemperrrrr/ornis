@@ -2,14 +2,14 @@
 //! kernels with access derived from parameter types.
 //!
 //! Covers the scalar loop (gather/body/scatter), `if`/`return` filters,
-//! `Res`/`ResMut`/`Events` parameters, `#[config]` and `#[entity]`
+//! `Res`/`ResMut`/event-role parameters, `#[config]` and `#[entity]`
 //! parameters, deterministic event application order, and the scheduler
 //! level splits (same-lane writers serialize, readers share a level,
 //! resource read/write splits across disjoint lane sets).
 
 use ornis_core::{
-    Entity, Events, Pack, PlainResource, Res, ResMut, Resources, Schedule, SmartStore, System,
-    SystemAccess, register_events,
+    Entity, EventReader, EventWriter, Pack, PlainResource, Res, ResMut, Resources, Schedule,
+    SmartStore, System, SystemAccess, register_events,
 };
 use ornis_macros::smart_system;
 
@@ -79,19 +79,24 @@ fn gust(m: &mut Mote, #[config] speed: f32) {
 }
 
 #[smart_system]
-fn ping(m: &Mote, #[entity] e: Entity, pings: Events<Ping>) {
+fn ping(m: &Mote, #[entity] e: Entity, pings: EventWriter<Ping>) {
     if m.position > 0.0 {
         pings.send(e, Ping { amount: 1.0 });
     }
 }
 
 #[smart_system]
-fn pong(m: &mut Mote, #[entity] e: Entity, pings: Events<Ping>) {
+fn pong(m: &mut Mote, #[entity] e: Entity, pings: EventReader<Ping>) {
     for (to, ping) in pings.read_sorted() {
         if to == e {
             m.velocity += ping.amount;
         }
     }
+}
+
+#[smart_system]
+fn drain_pings(m: &Mote, pings: EventReader<Ping>) {
+    let _ = (m.position, pings.drain_sorted());
 }
 
 #[smart_system]
@@ -192,14 +197,17 @@ fn access_sets_follow_parameter_types() {
     let write = DriftSystem::new().access();
     assert!(!write.writes_lanes.is_empty());
 
+    let event_store = std::any::TypeId::of::<ornis_core::EventStore<Ping>>();
     let events_write = PingSystem::new().access();
-    assert!(!events_write.writes.is_empty());
+    assert!(events_write.writes.contains(&event_store));
     let events_read = PongSystem::new().access();
-    assert!(events_read.writes.is_empty() && !events_read.reads.is_empty());
+    assert!(events_read.writes.contains(&event_store));
+    let events_drain = DrainPingsSystem::new().access();
+    assert!(events_drain.writes.contains(&event_store));
 }
 
-/// Events: `send` in one system, deterministic application in another
-/// (sorted by entity id, independent of send order).
+/// Event queue: a writer produces entries and a reader consumes the ordered
+/// snapshot (sorted by entity id, independent of send order).
 #[test]
 fn events_send_and_apply_in_entity_id_order() {
     // Entities created in reverse position order so arrival order differs
@@ -283,7 +291,8 @@ fn link_read_gathers_target_bundle() {
 fn plain_resource_bound_is_structural() {
     // Direct impl for coverage of the manual path.
     struct Manual;
-    impl PlainResource for Manual {}
+    unsafe impl ornis_core::ResMutResource for Manual {}
+    unsafe impl PlainResource for Manual {}
     let access = SystemAccess::new().reads::<Manual>();
     assert_eq!(access.reads.len(), 1);
 }
