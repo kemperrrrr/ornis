@@ -354,18 +354,8 @@ impl SmartStore {
         &self,
     ) -> Option<std::sync::RwLockReadGuard<'_, ComponentStore<T>>> {
         crate::schedule::assert_lane_access_declared::<T>(false);
-        let tid = TypeId::of::<T>();
-        let lane = self.lanes.get(&tid)?;
-        let Some(store) = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>() else {
-            if lane.is_lock_free() {
-                panic!(
-                    "SmartStore::read_lane::<{}>() cannot access a lock-free lane; use with_lock_free_lane()",
-                    std::any::type_name::<T>()
-                );
-            }
-            return None;
-        };
-        Some(read_lock(store))
+        self.rwlock_lane::<T>("read_lane", "with_lock_free_lane")
+            .map(read_lock)
     }
 
     /// Writes to the hot lane of component `T` behind an exclusive guard.
@@ -381,18 +371,28 @@ impl SmartStore {
         &self,
     ) -> Option<std::sync::RwLockWriteGuard<'_, ComponentStore<T>>> {
         crate::schedule::assert_lane_access_declared::<T>(true);
-        let tid = TypeId::of::<T>();
-        let lane = self.lanes.get(&tid)?;
-        let Some(store) = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>() else {
-            if lane.is_lock_free() {
-                panic!(
-                    "SmartStore::write_lane::<{}>() cannot access a lock-free lane; use write_lock_free_lane()",
-                    std::any::type_name::<T>()
-                );
-            }
-            return None;
-        };
-        Some(write_lock(store))
+        self.rwlock_lane::<T>("write_lane", "write_lock_free_lane")
+            .map(write_lock)
+    }
+
+    /// Looks up the `RwLock` hot lane of `T` for [`read_lane`](Self::read_lane) /
+    /// [`write_lane`](Self::write_lane). `None` if the lane is absent;
+    /// panics (naming `caller` and the `alternative` accessor) if it was
+    /// registered as lock-free.
+    fn rwlock_lane<T: 'static + Send + Sync>(
+        &self,
+        caller: &str,
+        alternative: &str,
+    ) -> Option<&RwLock<ComponentStore<T>>> {
+        let lane = self.lanes.get(&TypeId::of::<T>())?;
+        let store = lane.as_any().downcast_ref::<RwLock<ComponentStore<T>>>();
+        if store.is_none() && lane.is_lock_free() {
+            panic!(
+                "SmartStore::{caller}::<{}>() cannot access a lock-free lane; use {alternative}()",
+                std::any::type_name::<T>()
+            );
+        }
+        store
     }
 
     /// Runs `f` against an epoch-pinned snapshot of the lock-free lane of
