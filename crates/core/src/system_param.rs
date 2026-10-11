@@ -129,10 +129,7 @@ unsafe impl<A: ResMutResource> ResMutResource for (A,) {}
 unsafe impl<A: PlainResource> PlainResource for (A,) {}
 unsafe impl<A: ResMutResource, B: ResMutResource> ResMutResource for (A, B) {}
 unsafe impl<A: PlainResource, B: PlainResource> PlainResource for (A, B) {}
-unsafe impl<A: ResMutResource, B: ResMutResource, C: ResMutResource>
-    ResMutResource for (A, B, C)
-{
-}
+unsafe impl<A: ResMutResource, B: ResMutResource, C: ResMutResource> ResMutResource for (A, B, C) {}
 unsafe impl<A: PlainResource, B: PlainResource, C: PlainResource> PlainResource for (A, B, C) {}
 unsafe impl<K: ResMutResource, V: ResMutResource> ResMutResource for HashMap<K, V> {}
 unsafe impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> {}
@@ -357,9 +354,6 @@ mod tests {
         resources.insert(Mutex::new(1u32));
         let access = ResMut::<Mutex<u32>>::access();
         assert_eq!(access, SystemAccess::new().writes::<Mutex<u32>>());
-        assert_eq!(
-            *ResMut::<Mutex<u32>>::fetch(&resources).lock().unwrap(),
-            1
-        );
+        assert_eq!(*ResMut::<Mutex<u32>>::fetch(&resources).lock().unwrap(), 1);
     }
 }

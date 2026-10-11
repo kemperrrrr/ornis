@@ -159,7 +159,6 @@ impl<'ast> Visit<'ast> for BodyInfo {
         }
         syn::visit::visit_expr(self, node);
     }
-
 }
 
 impl BodyInfo {

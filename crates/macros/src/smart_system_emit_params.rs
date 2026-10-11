@@ -170,4 +170,3 @@ pub(crate) fn build_fetch_stmts(
     }
     (fetch_stmts, call_args, config_bindings)
 }
-

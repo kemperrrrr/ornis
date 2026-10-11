@@ -153,7 +153,10 @@ pub(crate) fn parse_wrapper_param(
         ));
     }
     if matches!(kind, ParamKind::ResMut)
-        && matches!(path_last_ident(inner).as_deref(), Some("SmartStore" | "Resources"))
+        && matches!(
+            path_last_ident(inner).as_deref(),
+            Some("SmartStore" | "Resources")
+        )
     {
         return Err(syn::Error::new_spanned(
             inner,
