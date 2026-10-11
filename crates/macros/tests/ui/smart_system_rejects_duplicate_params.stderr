@@ -1,13 +1,5 @@
 error: smart_system: `write` declares `u32` a second time — declare each resource/queue through one parameter (`Res` reads, `ResMut` writes, `EventWriter`/`EventReader` events)
-  --> tests/ui/smart_system_rejects_duplicate_params.rs:12:38
+  --> tests/ui/smart_system_rejects_duplicate_params.rs:11:38
    |
-12 | fn sys(u: &mut Unit, read: Res<u32>, write: ResMut<u32>) {
+11 | fn sys(u: &mut Unit, read: Res<u32>, write: ResMut<u32>) {
    |                                      ^^^^^
-
-warning: unused imports: `ResMut` and `Res`
- --> tests/ui/smart_system_rejects_duplicate_params.rs:3:18
-  |
-3 | use ornis_core::{Res, ResMut};
-  |                  ^^^  ^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

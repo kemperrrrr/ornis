@@ -164,6 +164,16 @@ pub(crate) fn parse_wrapper_param(
              use `Pack`/typed parameters so scheduler access stays explicit",
         ));
     }
+    if matches!(kind, ParamKind::Res | ParamKind::ResMut)
+        && path_last_ident(inner).as_deref() == Some("EventStore")
+    {
+        return Err(syn::Error::new_spanned(
+            inner,
+            "smart_system: `Res<EventStore<_>>` / `ResMut<EventStore<_>>` are forbidden — \
+             declare queue access with `EventWriter<E>` / `EventReader<E>` so duplicate \
+             and conflicting declarations stay detectable",
+        ));
+    }
     if matches!(kind, ParamKind::Res) {
         check_plain_shape(inner)?;
     }

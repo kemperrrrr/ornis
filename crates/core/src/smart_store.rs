@@ -7,6 +7,16 @@
 //! accessed) lanes are kept in a separate map so hot data stays compact.
 //! The [`Pack`] trait extends the store with multi-component packed
 //! access used by GPU upload paths.
+//!
+//! # Lock-free lanes and `read_lane`/`write_lane`
+//!
+//! API change (smart_system v2, #79): [`SmartStore::read_lane`] and
+//! [`SmartStore::write_lane`] return `RwLock` guards, so they **panic** on a
+//! lane registered through [`SmartStore::register_lock_free`] instead of
+//! reporting it as absent (`None` still means "no such lane"). Reach
+//! lock-free lanes only through [`SmartStore::with_lock_free_lane`] /
+//! [`SmartStore::write_lock_free_lane`]; `Pack` views and `#[smart_system]`
+//! need `RwLock` lanes.
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{RwLock, atomic::Ordering};

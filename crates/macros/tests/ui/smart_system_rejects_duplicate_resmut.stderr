@@ -1,0 +1,5 @@
+error: smart_system: `second` declares `u32` a second time — declare each resource/queue through one parameter (`Res` reads, `ResMut` writes, `EventWriter`/`EventReader` events)
+  --> tests/ui/smart_system_rejects_duplicate_resmut.rs:11:42
+   |
+11 | fn sys(u: &mut Unit, first: ResMut<u32>, second: ResMut<u32>) {
+   |                                          ^^^^^^
