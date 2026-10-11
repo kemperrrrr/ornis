@@ -605,6 +605,41 @@ mod tests {
     }
 
     #[test]
+    fn physics_push_declares_velocity_read_and_position_write() {
+        let access = PhysicsPushSystem.access();
+        let velocity = std::any::TypeId::of::<Velocity>();
+        let position = std::any::TypeId::of::<Position>();
+        assert!(access.reads_lanes.contains(&velocity));
+        assert!(!access.writes_lanes.contains(&velocity));
+        assert!(access.writes_lanes.contains(&position));
+    }
+
+    #[test]
+    fn physics_push_inserts_position_for_velocity_only_entities() {
+        let mut engine = Engine::new();
+        install_gameplay(&mut engine);
+        let entity = engine.world().store().unwrap().create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(entity, Velocity(Vec3::new(6.0, 0.0, 0.0)));
+
+        engine.run_frame(1.0 / 60.0);
+
+        let pos = engine
+            .world()
+            .store()
+            .unwrap()
+            .read_lane::<Position>()
+            .unwrap()
+            .get(entity)
+            .copied()
+            .expect("physics_push preserves insert-if-missing behavior");
+        assert!((pos.0.x - 6.0 / 60.0).abs() < 1e-4, "pos {pos:?}");
+    }
+
+    #[test]
     fn unified_schedule_levels_are_deterministic() {
         let mut engine = Engine::new();
         install_gameplay(&mut engine);
@@ -614,5 +649,25 @@ mod tests {
         let mermaid = engine.schedule().mermaid();
         assert!(mermaid.contains("player_input"));
         assert!(mermaid.contains("transform_update"));
+    }
+
+    #[test]
+    fn component_units_round_trip() {
+        // Pins the meters/second vocabulary (also keeps the conversion
+        // helpers referenced outside doc examples).
+        let vel = Velocity::from_mps(Vec3::new(3.0, 4.0, 0.0));
+        assert_eq!(vel.as_mps(), Vec3::new(3.0, 4.0, 0.0));
+        assert!((vel.speed_units().get() - 5.0).abs() < 1e-6);
+        let pos = Position::from_meters(Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(pos.as_meters(), Vec3::new(1.0, 2.0, 3.0));
+        let dt = ornis_core::units::Seconds::new(2.0);
+        assert_eq!(
+            pos.advanced_by_secs(vel, dt).as_meters(),
+            Vec3::new(7.0, 10.0, 3.0)
+        );
+        assert_eq!(
+            pos.advanced_by(vel, 2.0).as_meters(),
+            Vec3::new(7.0, 10.0, 3.0)
+        );
     }
 }

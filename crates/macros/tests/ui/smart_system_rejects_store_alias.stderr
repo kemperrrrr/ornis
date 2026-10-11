@@ -1,0 +1,96 @@
+error[E0277]: the trait bound `SmartStore: ResMutResource` is not satisfied
+  --> tests/ui/smart_system_rejects_store_alias.rs:14:25
+   |
+14 | fn sys(u: &Unit, store: ResMut<StoreAlias>) {
+   |                         ^^^^^^^^^^^^^^^^^^ the trait `ResMutResource` is not implemented for `SmartStore`
+   |
+   = help: the following other types implement trait `ResMutResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Atomic<bool>
+             Atomic<i16>
+             Atomic<i32>
+             Atomic<i64>
+           and $N others
+note: required by a bound in `ResMut`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct ResMut<'a, T: ResMutResource> {
+   |                          ^^^^^^^^^^^^^^ required by this bound in `ResMut`
+
+error[E0277]: the trait bound `SmartStore: ResMutResource` is not satisfied
+  --> tests/ui/smart_system_rejects_store_alias.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ the trait `ResMutResource` is not implemented for `SmartStore`
+   |
+   = help: the following other types implement trait `ResMutResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Atomic<bool>
+             Atomic<i16>
+             Atomic<i32>
+             Atomic<i64>
+           and $N others
+note: required by a bound in `ResMut`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct ResMut<'a, T: ResMutResource> {
+   |                          ^^^^^^^^^^^^^^ required by this bound in `ResMut`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the associated function or constant `access` exists for struct `ResMut<'_, SmartStore>`, but its trait bounds were not satisfied
+  --> tests/ui/smart_system_rejects_store_alias.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ associated function or constant cannot be called on `ResMut<'_, SmartStore>` due to unsatisfied trait bounds
+   |
+  ::: $WORKSPACE/crates/core/src/smart_store.rs
+   |
+   | pub struct SmartStore {
+   | --------------------- doesn't satisfy `SmartStore: ResMutResource`
+   |
+   = note: the following trait bounds were not satisfied:
+           `SmartStore: ResMutResource`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the associated function or constant `fetch` exists for struct `ResMut<'_, SmartStore>`, but its trait bounds were not satisfied
+  --> tests/ui/smart_system_rejects_store_alias.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ associated function or constant cannot be called on `ResMut<'_, SmartStore>` due to unsatisfied trait bounds
+   |
+  ::: $WORKSPACE/crates/core/src/smart_store.rs
+   |
+   | pub struct SmartStore {
+   | --------------------- doesn't satisfy `SmartStore: ResMutResource`
+   |
+   = note: the following trait bounds were not satisfied:
+           `SmartStore: ResMutResource`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `SmartStore: ResMutResource` is not satisfied
+  --> tests/ui/smart_system_rejects_store_alias.rs:14:18
+   |
+14 | fn sys(u: &Unit, store: ResMut<StoreAlias>) {
+   |                  ^^^^^ the trait `ResMutResource` is not implemented for `SmartStore`
+   |
+   = help: the following other types implement trait `ResMutResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Atomic<bool>
+             Atomic<i16>
+             Atomic<i32>
+             Atomic<i64>
+           and $N others
+note: required by a bound in `ResMut`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct ResMut<'a, T: ResMutResource> {
+   |                          ^^^^^^^^^^^^^^ required by this bound in `ResMut`

@@ -1,0 +1,48 @@
+error[E0277]: `std::sync::Mutex<u32>` cannot be shared as `Res`: it may hold interior mutability; use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct
+ --> tests/ui/plain_resource_rejects_mutex_field.rs:7:10
+  |
+7 | #[derive(PlainResource)]
+  |          ^^^^^^^^^^^^^ the trait `PlainResource` is not implemented for `std::sync::Mutex<u32>`
+  |
+  = help: the following other types implement trait `PlainResource`:
+            ()
+            (A, B)
+            (A, B, C)
+            (A,)
+            Box<T>
+            Duration
+            FixedSteps
+            FixedTime
+          and $N others
+  = note: this error originates in the derive macro `PlainResource` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `std::sync::Mutex<u32>` cannot be shared as `Res`: it may hold interior mutability; use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct
+  --> tests/ui/plain_resource_rejects_mutex_field.rs:13:13
+   |
+13 | fn takes(_: ornis_core::Res<'_, Holder>) {}
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `PlainResource` is not implemented for `std::sync::Mutex<u32>`
+   |
+   = help: the following other types implement trait `PlainResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Box<T>
+             Duration
+             FixedSteps
+             FixedTime
+           and $N others
+note: required for `Holder` to implement `PlainResource`
+  --> tests/ui/plain_resource_rejects_mutex_field.rs:9:8
+   |
+ 7 | #[derive(PlainResource)]
+   |          ------------- type parameter would need to implement `PlainResource`
+ 8 | #[allow(dead_code)]
+ 9 | struct Holder {
+   |        ^^^^^^
+   = help: consider manually implementing `PlainResource` to avoid undesired bounds
+note: required by a bound in `Res`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct Res<'a, T: PlainResource> {
+   |                       ^^^^^^^^^^^^^ required by this bound in `Res`

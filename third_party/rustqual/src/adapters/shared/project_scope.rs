@@ -27,6 +27,11 @@ pub struct ProjectScope {
 impl ProjectScope {
     /// Build a ProjectScope from a set of already-parsed files.
     pub fn from_files(files: &[(&str, &File)]) -> Self {
+        // Pass 0: type definitions (struct/enum/union/trait idents). Impl
+        // self-types are only claimed as project types when defined here:
+        // a blanket `impl<T> Foo for Vec<T>` must not make `Vec::new`
+        // resolve as an own call tree-wide (false IOSP violations).
+        let defined_types = collect_defined_types(files);
         let mut collector = ScopeCollector {
             functions: HashSet::new(),
             methods: HashSet::new(),
@@ -36,6 +41,7 @@ impl ProjectScope {
             trait_method_names: HashSet::new(),
             concrete_method_names: HashSet::new(),
             methods_by_type: HashMap::new(),
+            defined_types,
         };
         files
             .iter()
@@ -192,8 +198,45 @@ struct ScopeCollector {
     trait_method_names: HashSet<String>,
     /// Methods from inherent (non-trait) impl blocks only.
     concrete_method_names: HashSet<String>,
-    /// Methods grouped by parent type.
+    /// Methods grouped by parent type name: `"Config" → {"load", "save"}`.
     methods_by_type: HashMap<String, HashSet<String>>,
+    /// Type names with an item definition in the project (pre-pass).
+    /// Guards `types` against blanket impls over external generics.
+    defined_types: HashSet<String>,
+}
+
+/// Pre-pass visitor: only type definitions, no impls or functions.
+struct DefinitionsCollector {
+    defined: HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for DefinitionsCollector {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        self.defined.insert(node.ident.to_string());
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        self.defined.insert(node.ident.to_string());
+    }
+
+    fn visit_item_union(&mut self, node: &'ast syn::ItemUnion) {
+        self.defined.insert(node.ident.to_string());
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.defined.insert(node.ident.to_string());
+    }
+}
+
+/// Collect item-defined type names across all files (pre-pass for [`ProjectScope::from_files`]).
+fn collect_defined_types(files: &[(&str, &File)]) -> HashSet<String> {
+    let mut collector = DefinitionsCollector {
+        defined: HashSet::new(),
+    };
+    files
+        .iter()
+        .for_each(|(_, file)| collector.visit_file(file));
+    collector.defined
 }
 
 impl<'ast> Visit<'ast> for ScopeCollector {
@@ -204,9 +247,17 @@ impl<'ast> Visit<'ast> for ScopeCollector {
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
         let type_name = if let syn::Type::Path(tp) = &*node.self_ty {
-            tp.path.segments.last().map(|seg| {
-                self.types.insert(seg.ident.to_string());
-                seg.ident.to_string()
+            tp.path.segments.last().and_then(|seg| {
+                let name = seg.ident.to_string();
+                // Claim the self-type only when the project defines it.
+                // A blanket `impl<T> Marker for Vec<T>` leaves `Vec` out,
+                // so `Vec::new` keeps resolving as external (stdlib).
+                if self.defined_types.contains(&name) {
+                    self.types.insert(name.clone());
+                    Some(name)
+                } else {
+                    None
+                }
             })
         } else {
             None

@@ -1,0 +1,5 @@
+error: smart_system: passing whole `u` to a function hides field accesses — pass `u.field` values instead
+  --> tests/ui/smart_system_rejects_whole_unit_arg.rs:15:12
+   |
+15 |     helper(&u);
+   |            ^^
