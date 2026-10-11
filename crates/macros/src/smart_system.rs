@@ -19,9 +19,11 @@
 //! whole-bundle lanes for `u`). Raw `&Resources`, `Res<SmartStore>`, and
 //! `ResMut` aliases of `SmartStore`/`Resources` are compile errors, as are
 //! writes to another entity (`t.hp -= …` — use
-//! [`ornis_core::EventWriter`] instead) and passing whole `u` to a free
-//! function. Field-level lane inference (only touched `u.field` lanes)
-//! is a follow-up (v2b); v2 declares the whole bundle.
+//! [`ornis_core::EventWriter`] instead), passing whole `u` to a free
+//! function, and declaring one resource twice when either declaration
+//! writes (`Res<C>` + `ResMut<C>`). Field-level lane inference (only
+//! touched `u.field` lanes) is a follow-up (v2b); v2 declares the whole
+//! bundle.
 //!
 //! [System]: https://docs.rs/ornis-core/latest/ornis_core/schedule/trait.System.html
 
@@ -44,6 +46,29 @@ pub(crate) enum ParamKind {
     ResMut,
     EventWriter,
     EventReader,
+}
+
+impl ParamKind {
+    /// Resource family of this role — the namespace its inner type keys:
+    /// `Res`/`ResMut` address the resource itself, `EventWriter`/
+    /// `EventReader` address the `EventStore<E>` singleton. Configs and
+    /// entity handles are not resources.
+    pub(crate) fn resource_family(&self) -> Option<&'static str> {
+        match self {
+            ParamKind::Res | ParamKind::ResMut => Some("resource"),
+            ParamKind::EventWriter | ParamKind::EventReader => Some("event"),
+            ParamKind::Config | ParamKind::EntityHandle => None,
+        }
+    }
+
+    /// Whether the role declares a scheduler write: `ResMut`, and both
+    /// event roles (a reader may drain the queue).
+    pub(crate) fn declares_write(&self) -> bool {
+        matches!(
+            self,
+            ParamKind::ResMut | ParamKind::EventWriter | ParamKind::EventReader
+        )
+    }
 }
 
 pub(crate) struct TypedParam {

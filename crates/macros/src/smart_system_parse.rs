@@ -1,18 +1,20 @@
-//! Signature parsing for `#[smart_system]` (IDEAS §32).
+//! Signature validation and parameter collection for `#[smart_system]`
+//! (IDEAS §32).
 //!
-//! Turns the function signature into typed parameters ([`TypedParam`]):
-//! the first `u: &T` / `u: &mut T` (`T: Pack`) selects the entity set,
-//! the rest are `Res`/`ResMut`/`EventWriter`/`EventReader`/`#[config]`/
-//! `#[entity]`. Raw `&Resources`, `SmartStore`, and interior-mutable `Res<Mutex<…>>` are
-//! compile errors with dedicated diagnostics.
+//! [`check_signature`] pins the function shape (sync, safe, non-generic,
+//! unit return, at least one input); [`collect_params`] splits the inputs
+//! into the entity parameter plus typed parameters — parsed in
+//! [`crate::smart_system_parse_params`] — and rejects reserved `__smart_*`
+//! names and conflicting duplicate declarations. [`config_struct_parts`]
+//! and [`combine_errors`] feed the emitter with the `#[config]` fields and
+//! the aggregated diagnostics.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{FnArg, GenericArgument, Ident, ItemFn, Pat, PathArguments, Type};
+use syn::{FnArg, Ident, ItemFn, Type};
 
-use crate::smart_system::{
-    ParamKind, RESERVED_PREFIX, TypedParam, is_param_wrapper, is_smart_store_ty, path_last_ident,
-};
+use crate::smart_system::{ParamKind, RESERVED_PREFIX, TypedParam};
+use crate::smart_system_parse_params::{parse_first_param, parse_param};
 
 pub(crate) fn config_struct_parts(
     params: &[TypedParam],
@@ -32,199 +34,6 @@ pub(crate) fn config_struct_parts(
     (fields, ctor_params, ctor_inits)
 }
 
-pub(crate) fn parse_first_param(arg: &FnArg) -> Result<(Ident, Type, bool), syn::Error> {
-    let typed = match arg {
-        FnArg::Receiver(r) => {
-            return Err(syn::Error::new_spanned(
-                r,
-                "smart_system: systems are free functions — the first parameter must be \
-                 `u: &T` / `u: &mut T` with `T: Pack`",
-            ));
-        }
-        FnArg::Typed(t) => t,
-    };
-    let name = match typed.pat.as_ref() {
-        Pat::Ident(id) => id.ident.clone(),
-        _ => {
-            return Err(syn::Error::new_spanned(
-                &typed.pat,
-                "smart_system: the first parameter must be a plain binding `u: &T` / `u: &mut T`",
-            ));
-        }
-    };
-    match typed.ty.as_ref() {
-        Type::Reference(r) => {
-            let is_mut = r.mutability.is_some();
-            Ok((name, (*r.elem).clone(), is_mut))
-        }
-        _ => Err(syn::Error::new_spanned(
-            &typed.ty,
-            "smart_system: the first parameter must be `u: &T` / `u: &mut T` with `T: Pack` \
-             — owned values and other shapes are not supported",
-        )),
-    }
-}
-pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
-    let typed = match arg {
-        FnArg::Receiver(r) => {
-            return Err(syn::Error::new_spanned(
-                r,
-                "smart_system: unexpected `self` — only the first parameter is the entity, \
-                 the rest are `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` / `#[config]`",
-            ));
-        }
-        FnArg::Typed(t) => t,
-    };
-    let name = match typed.pat.as_ref() {
-        Pat::Ident(id) => id.ident.clone(),
-        _ => {
-            return Err(syn::Error::new_spanned(
-                &typed.pat,
-                "smart_system: parameters must be plain bindings (`time: Res<FixedTime>`)",
-            ));
-        }
-    };
-    let is_config = typed.attrs.iter().any(|a| a.path().is_ident("config"));
-    if is_config {
-        let ty = (*typed.ty).clone();
-        return Ok(TypedParam::new(name, ParamKind::Config, ty.clone(), ty));
-    }
-    let is_entity = typed.attrs.iter().any(|a| a.path().is_ident("entity"));
-    if is_entity {
-        if path_last_ident(&typed.ty).as_deref() != Some("Entity") {
-            return Err(syn::Error::new_spanned(
-                &typed.ty,
-                "smart_system: `#[entity]` parameters must have type `Entity`",
-            ));
-        }
-        let ty = (*typed.ty).clone();
-        return Ok(TypedParam::new(
-            name,
-            ParamKind::EntityHandle,
-            ty.clone(),
-            ty,
-        ));
-    }
-    match typed.ty.as_ref() {
-        Type::Reference(_) => Err(syn::Error::new_spanned(
-            &typed.ty,
-            "smart_system: raw `&Resources` is forbidden — declare typed parameters \
-             (`Res<T>`, `ResMut<T>`, `EventWriter<E>` / `EventReader<E>`) so access follows from types",
-        )),
-        Type::Path(tp) => parse_wrapper_param(name, &typed.ty, tp),
-        _ => Err(syn::Error::new_spanned(
-            &typed.ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
-        )),
-    }
-}
-/// Validates one `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` wrapper parameter.
-fn parse_wrapper_param(
-    name: Ident,
-    ty: &Type,
-    tp: &syn::TypePath,
-) -> Result<TypedParam, syn::Error> {
-    let Some(seg) = tp.path.segments.last() else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
-        ));
-    };
-    let Some(kind) = is_param_wrapper(seg) else {
-        if seg.ident == "SmartStore" {
-            return Err(syn::Error::new_spanned(
-                ty,
-                "smart_system: raw `SmartStore` is forbidden — the first `&T`/`&mut T` \
-                 (`T: Pack`) parameter already selects the entity set",
-            ));
-        }
-        return Err(syn::Error::new_spanned(
-            ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
-        ));
-    };
-    let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "smart_system: wrapper needs its inner type (`Res<FixedTime>`)",
-        ));
-    };
-    if args.args.len() != 1 {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
-        ));
-    }
-    let GenericArgument::Type(inner) = &args.args[0] else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
-        ));
-    };
-    if matches!(kind, ParamKind::Res) && is_smart_store_ty(inner) {
-        return Err(syn::Error::new_spanned(
-            inner,
-            "smart_system: `Res<SmartStore>` is forbidden — reach components through \
-             the first `&T`/`&mut T` (`T: Pack`) parameter",
-        ));
-    }
-    if matches!(kind, ParamKind::ResMut)
-        && matches!(path_last_ident(inner).as_deref(), Some("SmartStore" | "Resources"))
-    {
-        return Err(syn::Error::new_spanned(
-            inner,
-            "smart_system: `ResMut<SmartStore>` and `ResMut<Resources>` are forbidden — \
-             use `Pack`/typed parameters so scheduler access stays explicit",
-        ));
-    }
-    if matches!(kind, ParamKind::Res) {
-        check_plain_shape(inner)?;
-    }
-    Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
-}
-
-/// Early syntactic backstop for the `PlainResource` bound: well-known
-/// interior-mutability types are rejected with one clean diagnostic
-/// instead of a cascade of unsatisfied-bound errors (custom interior
-/// types are still caught by the `Res<T: PlainResource>` bound itself).
-pub(crate) fn check_plain_shape(inner: &Type) -> Result<(), syn::Error> {
-    // Interior-mutability names rejected with one clean diagnostic
-    // (one line per family; keep alphabetical).
-    const DENIED: &[&str] = &[
-        "Mutex",
-        "RwLock",
-        "Cell",
-        "RefCell",
-        "UnsafeCell",
-        "OnceCell",
-        "AtomicBool",
-        "AtomicI8",
-        "AtomicI16",
-        "AtomicI32",
-        "AtomicI64",
-        "AtomicIsize",
-        "AtomicU8",
-        "AtomicU16",
-        "AtomicU32",
-        "AtomicU64",
-        "AtomicUsize",
-    ];
-    if let Some(name) = path_last_ident(inner)
-        && DENIED.contains(&name.as_str())
-    {
-        return Err(syn::Error::new_spanned(
-            inner,
-            format!(
-                "smart_system: `Res<{name}<…>>` holds interior mutability and is not \
-                 `PlainResource` — use `ResMut` (declares a write) instead"
-            ),
-        ));
-    }
-    Ok(())
-}
 pub(crate) fn combine_errors(errors: Vec<syn::Error>) -> syn::Error {
     let mut iter = errors.into_iter();
     match iter.next() {
@@ -309,6 +118,8 @@ where
         params.push(parse_param(arg)?);
     }
 
+    reject_conflicting_params(&params)?;
+
     for param in &params {
         if param.name.to_string().starts_with(RESERVED_PREFIX) {
             return Err(syn::Error::new_spanned(
@@ -318,4 +129,45 @@ where
         }
     }
     Ok((u_ident, pack_ty, is_mut, params))
+}
+
+/// Rejects two parameters that address the same resource when at least one
+/// of them declares a write: `Res<C>` + `ResMut<C>`, two `ResMut<C>`,
+/// `EventWriter<E>` + `EventReader<E>`. Two read-only `Res<C>` stay legal —
+/// the scheduler needs no ordering between them. Keys are compared as
+/// written, so differently spelled aliases are not detected here (the
+/// `ResMutResource`/`PlainResource` bounds still gate what they can name).
+fn reject_conflicting_params(params: &[TypedParam]) -> Result<(), syn::Error> {
+    for (index, later) in params.iter().enumerate() {
+        let Some(family) = later.kind.resource_family() else {
+            continue;
+        };
+        let later_key = resource_key(later);
+        for earlier in &params[..index] {
+            if earlier.kind.resource_family() != Some(family)
+                || resource_key(earlier) != later_key
+                || !(earlier.kind.declares_write() || later.kind.declares_write())
+            {
+                continue;
+            }
+            return Err(syn::Error::new_spanned(
+                &later.name,
+                format!(
+                    "smart_system: `{}` declares `{}` a second time — declare each \
+                     resource/queue through one parameter (`Res` reads, `ResMut` writes, \
+                     `EventWriter`/`EventReader` events)",
+                    later.name, later_key
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Written spelling of a parameter's resource key: the inner type for
+/// `Res`/`ResMut` (the resource) and for the event roles (the payload of
+/// the `EventStore<E>` singleton).
+fn resource_key(param: &TypedParam) -> String {
+    let inner = &param.inner;
+    quote!(#inner).to_string()
 }
