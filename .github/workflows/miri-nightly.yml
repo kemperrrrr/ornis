@@ -47,6 +47,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Single source of truth for the nightly: installed by the action and
+  # selected explicitly via `cargo +$NIGHTLY_TOOLCHAIN` below.
+  NIGHTLY_TOOLCHAIN: nightly-2026-10-09
 
 permissions:
   contents: read
@@ -65,9 +68,19 @@ jobs:
       # change, and the result would not be reproducible. Verified locally
       # as `nightly-2026-10-09` (track «Ядро и платформа»); bump
       # deliberately, re-verifying the Miri run.
-      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # nightly action pin
+      #
+      # The action SHA must come from dtolnay's `master`: the per-version
+      # branches (`1.97`, `1.97.1`, ...) hard-code their toolchain and have
+      # no `toolchain` input — a SHA from one of them silently installs
+      # stable and ignores `toolchain:` below (only a «Unexpected input(s)»
+      # warning). That is what broke the 2026-10-11 run: stable 1.97.1 has
+      # no `miri` component (Miri job), and `rust-src` landed in stable
+      # while `cargo +nightly` resolved to a different, bare toolchain
+      # (TSan job). Commands below name the pinned toolchain explicitly for
+      # the same reason: `+nightly` is the floating channel, not it.
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (honours the `toolchain` input)
         with:
-          toolchain: nightly-2026-10-09
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: miri, rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -81,7 +94,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target
-          cargo +nightly miri test -p ornis-core --features lock-free --lib --no-fail-fast 2>&1 | tee target/miri-nightly.log
+          cargo +"$NIGHTLY_TOOLCHAIN" miri test -p ornis-core --features lock-free --lib --no-fail-fast 2>&1 | tee target/miri-nightly.log
 
       - name: Upload Miri log
         if: always()
@@ -100,9 +113,9 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # nightly action pin
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (honours the `toolchain` input)
         with:
-          toolchain: nightly-2026-10-09
+          toolchain: ${{ env.NIGHTLY_TOOLCHAIN }}
           components: rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -119,7 +132,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target
-          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu \
+          cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target x86_64-unknown-linux-gnu \
             -p ornis-core --features lock-free --lib -- lock_free 2>&1 | tee target/tsan-nightly.log
 
       - name: Upload TSan log
