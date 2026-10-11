@@ -793,9 +793,9 @@ fn apply_bump_guard(
 
 /// Owner-approved baseline bump plumbing: CI sets
 /// `ORNIS_BASELINE_BUMP_ALLOWED=1` only when the PR carries the
-/// `baseline-bump-approved` label (see quality.yml — the label comes
-/// from the event payload, so no extra token scope is needed). Local
-/// runs never set it: the baseline may only move down.
+/// `baseline-bump-approved` label (see quality.yml — the `fast` job reads
+/// the label live from the PR API, so labeling needs no workflow
+/// trigger). Local runs never set it: the baseline may only move down.
 ///
 /// The parse is a pure function of the already-read value so tests cover
 /// it without touching process env (RAT-24 review of PR #75); the single
