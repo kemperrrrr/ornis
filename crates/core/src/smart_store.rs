@@ -21,7 +21,7 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{RwLock, atomic::Ordering};
 
-use crossbeam_epoch::{Atomic, Guard, Owned, pin as epoch_pin};
+use crossbeam_epoch::{Atomic, Guard, Owned, Shared, pin as epoch_pin};
 
 use crate::cold_store::ColdComponentStore;
 use crate::component_store::ComponentStore;
@@ -72,6 +72,38 @@ impl<T: 'static + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
 
 struct LockFreeLaneInner<T: Clone + Send + Sync> {
     store: Atomic<ComponentStore<T>>,
+}
+
+/// Reclaim the live snapshot held in `store`, leaving null behind.
+///
+/// `crossbeam_epoch::Atomic` frees nothing on drop, so lock-free lanes must
+/// call this from their `Drop` impls — otherwise every dropped store leaks
+/// one snapshot per lane (RAT-19).
+///
+/// The swap makes the call idempotent: a second call observes null and frees
+/// nothing, so a repeated call can never double-free. Call only from `Drop`:
+/// `read` dereferences the pointer unconditionally and does not expect null,
+/// so freeing anywhere else would open a use-after-free for later readers.
+/// The `&mut` borrow additionally proves exclusive access at the call site —
+/// no concurrent `write` can publish over the pointer being reclaimed.
+/// Snapshots already retired via `defer_destroy` are no longer in `store`
+/// and are left untouched here.
+pub(crate) fn free_live_snapshot<T>(store: &mut Atomic<ComponentStore<T>>) {
+    // SAFETY: `store` is exclusively borrowed, so no other thread can touch
+    // the pointer; `unprotected` only mints a token to satisfy the API.
+    // `swap` atomically replaces the live pointer with null and returns the
+    // previous value; `into_owned` rebuilds the single `Owned` allocation
+    // that `Atomic` was created or last published from (`Atomic::new` /
+    // `Owned::new` in `write`), and dropping it frees exactly that snapshot.
+    // A null result means an earlier call already reclaimed it — nothing to
+    // do, and crucially no second free.
+    unsafe {
+        let guard = crossbeam_epoch::unprotected();
+        let old = store.swap(Shared::null(), Ordering::Relaxed, guard);
+        if !old.is_null() {
+            drop(old.into_owned());
+        }
+    }
 }
 
 impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
@@ -139,6 +171,16 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
 
     fn is_lock_free(&self) -> bool {
         true
+    }
+}
+
+impl<T: Clone + Send + Sync> Drop for LockFreeLaneInner<T> {
+    fn drop(&mut self) {
+        // SAFETY: `&mut self` proves exclusive access, and lock-free reads
+        // go through `with_lock_free_lane(&self, ..)`, whose snapshot cannot
+        // outlive the store — so no live reader of this snapshot exists and
+        // none can appear afterwards. See `free_live_snapshot` docs.
+        free_live_snapshot(&mut self.store);
     }
 }
 
@@ -548,6 +590,18 @@ mod tests {
             .with_lock_free_lane::<f32, _>(|store| store.get(e).copied())
             .unwrap();
         assert_eq!(val, Some(3.5));
+    }
+
+    #[test]
+    fn drop_frees_live_snapshot() {
+        let marker = std::sync::Arc::new(());
+        {
+            let mut store = SmartStore::new();
+            store.register_lock_free::<std::sync::Arc<()>>();
+            let e = store.create_entity();
+            store.insert(e, std::sync::Arc::clone(&marker));
+        } // drop: the live snapshot holding the Arc clone must be freed immediately
+        assert_eq!(std::sync::Arc::strong_count(&marker), 1);
     }
 
     #[test]
