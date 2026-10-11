@@ -4,29 +4,49 @@
 //! Access follows from **parameter types** (Bevy-style `SystemParam`),
 //! never from syntactic body analysis: [`Res`] declares a shared read,
 //! [`ResMut`] an exclusive-scheduler write (mutation itself goes through
-//! the resource's interior mutability), [`Events`] declares event-queue
-//! access. [`PlainResource`] keeps interior mutability out of [`Res`]:
+//! the resource's interior mutability), and [`EventWriter`]/[`EventReader`]
+//! declare event-queue access by role. [`PlainResource`] keeps interior
+//! mutability out of [`Res`]:
 //! a `Mutex`/`RwLock`/`Atomic*` behind a shared read would be
 //! memory-safe but non-deterministic (see the commutativity contract in
 //! [`crate::schedule`]), so it must be declared as [`ResMut`] instead.
 //!
 //! [`SmartStore`] is deliberately *not* a parameter: systems generated
 //! by `#[smart_system]` reach the store through the first (`Pack`)
-//! parameter, and a raw `&Resources` parameter would bypass declared
-//! accesses entirely — both are compile errors in the macro.
+//! parameter. Raw `&Resources`, `Res<SmartStore>`, and `ResMut` handles for
+//! `SmartStore`/`Resources` would bypass declared accesses, so they are
+//! rejected by the macro or the `ResMutResource` bound.
 
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::Mutex;
+use std::sync::atomic::{
+    AtomicBool, AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU16,
+    AtomicU32, AtomicU64, AtomicUsize,
+};
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use crate::schedule::{Resources, SystemAccess};
 use crate::{Entity, FixedTime, SmartStore, Time};
 
-/// Marker for resources without interior mutability.
+/// Marker for types that may be accessed through [`ResMut`].
 ///
+/// This bound is deliberately opt-in: `SmartStore` and [`Resources`] do not
+/// implement it, so aliases cannot smuggle either scheduler handle into a
+/// `#[smart_system]` body. Ordinary resources can implement it when their
+/// state is covered by the access key for the concrete type.
+///
+/// # Safety
+/// Implementors must not expose scheduler internals such as `SmartStore` or
+/// `Resources` through this resource. Mutable state must remain encapsulated
+/// by the resource so `ResMut<T>`'s `writes::<T>()` declaration is complete;
+/// in particular, state must not be aliased through a different resource type
+/// with an independent access key. Shared-pointer wrappers such as `Arc<T>`
+/// therefore need an explicit, audited newtype opt-in rather than a blanket
+/// implementation.
+pub unsafe trait ResMutResource: Send + Sync + 'static {}
+
 /// A `PlainResource` can be shared between systems on the same parallel
 /// level through [`Res`]: every byte reachable from it is either
 /// immutable or mutated only between scheduler runs. Types with interior
@@ -40,15 +60,23 @@ use crate::{Entity, FixedTime, SmartStore, Time};
 /// fails with the missing-bound error below instead of silently sharing
 /// mutable state. Primitives, plain std containers of plain data, and
 /// `glam` vectors implement it out of the box.
+///
+/// # Safety
+/// Every value reachable from an implementation must be immutable through
+/// shared references, or changed only between scheduler runs. Use
+/// [`ResMutResource`] for interior-mutable state.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be shared as `Res`: it may hold interior mutability; \
                use `ResMut` (declares a write) or `#[derive(PlainResource)]` on a plain-data struct"
 )]
-pub trait PlainResource: Send + Sync + 'static {}
+pub unsafe trait PlainResource: ResMutResource {}
 
 macro_rules! plain_impl {
     ($($ty:ty),*) => {
-        $(impl PlainResource for $ty {})*
+        $(
+            unsafe impl ResMutResource for $ty {}
+            unsafe impl PlainResource for $ty {}
+        )*
     };
 }
 
@@ -66,20 +94,55 @@ plain_impl!(
     crate::Meters
 );
 
-impl<T: PlainResource> PlainResource for Option<T> {}
-impl<T: PlainResource> PlainResource for Vec<T> {}
-impl<T: PlainResource> PlainResource for Box<T> {}
-impl<T: PlainResource, E: PlainResource> PlainResource for Result<T, E> {}
-impl<T: PlainResource> PlainResource for [T; 0] {}
-impl<T: PlainResource> PlainResource for [T; 1] {}
-impl<T: PlainResource> PlainResource for [T; 2] {}
-impl<T: PlainResource> PlainResource for [T; 3] {}
-impl<T: PlainResource> PlainResource for [T; 4] {}
-impl PlainResource for () {}
-impl<A: PlainResource> PlainResource for (A,) {}
-impl<A: PlainResource, B: PlainResource> PlainResource for (A, B) {}
-impl<A: PlainResource, B: PlainResource, C: PlainResource> PlainResource for (A, B, C) {}
-impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> {}
+unsafe impl<T: ResMutResource> ResMutResource for Option<T> {}
+unsafe impl<T: PlainResource> PlainResource for Option<T> {}
+unsafe impl<T: ResMutResource> ResMutResource for Vec<T> {}
+unsafe impl<T: PlainResource> PlainResource for Vec<T> {}
+unsafe impl<T: ResMutResource> ResMutResource for Box<T> {}
+unsafe impl<T: PlainResource> PlainResource for Box<T> {}
+unsafe impl<T: ResMutResource, E: ResMutResource> ResMutResource for Result<T, E> {}
+unsafe impl<T: PlainResource, E: PlainResource> PlainResource for Result<T, E> {}
+unsafe impl<T: ResMutResource> ResMutResource for [T; 0] {}
+unsafe impl<T: PlainResource> PlainResource for [T; 0] {}
+unsafe impl<T: ResMutResource> ResMutResource for [T; 1] {}
+unsafe impl<T: PlainResource> PlainResource for [T; 1] {}
+unsafe impl<T: ResMutResource> ResMutResource for [T; 2] {}
+unsafe impl<T: PlainResource> PlainResource for [T; 2] {}
+unsafe impl<T: ResMutResource> ResMutResource for [T; 3] {}
+unsafe impl<T: PlainResource> PlainResource for [T; 3] {}
+unsafe impl<T: ResMutResource> ResMutResource for [T; 4] {}
+unsafe impl<T: PlainResource> PlainResource for [T; 4] {}
+unsafe impl ResMutResource for () {}
+unsafe impl PlainResource for () {}
+unsafe impl<A: ResMutResource> ResMutResource for (A,) {}
+unsafe impl<A: PlainResource> PlainResource for (A,) {}
+unsafe impl<A: ResMutResource, B: ResMutResource> ResMutResource for (A, B) {}
+unsafe impl<A: PlainResource, B: PlainResource> PlainResource for (A, B) {}
+unsafe impl<A: ResMutResource, B: ResMutResource, C: ResMutResource>
+    ResMutResource for (A, B, C)
+{
+}
+unsafe impl<A: PlainResource, B: PlainResource, C: PlainResource> PlainResource for (A, B, C) {}
+unsafe impl<K: ResMutResource, V: ResMutResource> ResMutResource for HashMap<K, V> {}
+unsafe impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> {}
+
+// Synchronization primitives are valid mutable resources only when the
+// protected value is itself an approved resource type. In particular this
+// excludes `Mutex<SmartStore>` and `Mutex<Resources>` by default.
+unsafe impl<T: ResMutResource> ResMutResource for Mutex<T> {}
+unsafe impl<T: ResMutResource> ResMutResource for RwLock<T> {}
+unsafe impl<T: ResMutResource> ResMutResource for std::sync::OnceLock<T> {}
+unsafe impl ResMutResource for AtomicBool {}
+unsafe impl ResMutResource for AtomicI8 {}
+unsafe impl ResMutResource for AtomicI16 {}
+unsafe impl ResMutResource for AtomicI32 {}
+unsafe impl ResMutResource for AtomicI64 {}
+unsafe impl ResMutResource for AtomicIsize {}
+unsafe impl ResMutResource for AtomicU8 {}
+unsafe impl ResMutResource for AtomicU16 {}
+unsafe impl ResMutResource for AtomicU32 {}
+unsafe impl ResMutResource for AtomicU64 {}
+unsafe impl ResMutResource for AtomicUsize {}
 
 /// Shared resource parameter: declares `reads::<T>`.
 ///
@@ -138,23 +201,24 @@ impl<T: PlainResource> Deref for Res<'_, T> {
 /// (`Mutex`, atomics — the `PhysicsRuntime` pattern); the write
 /// declaration keeps conflicting systems on separate levels in
 /// registration order, so the mutation order stays deterministic.
-/// Unlike [`Res`], `T` is *not* required to be [`PlainResource`].
+/// Unlike [`Res`], `T` may contain interior mutability, but it must opt in
+/// to [`ResMutResource`] so its resource access remains scheduler-visible.
 ///
 /// `Copy` (a shared borrow only): see [`Res`]. Manual impls for the
 /// same derive-bound reason.
-pub struct ResMut<'a, T: Send + Sync + 'static> {
+pub struct ResMut<'a, T: ResMutResource> {
     value: &'a T,
 }
 
-impl<T: Send + Sync + 'static> Clone for ResMut<'_, T> {
+impl<T: ResMutResource> Clone for ResMut<'_, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: Send + Sync + 'static> Copy for ResMut<'_, T> {}
+impl<T: ResMutResource> Copy for ResMut<'_, T> {}
 
-impl<'a, T: Send + Sync + 'static> ResMut<'a, T> {
+impl<'a, T: ResMutResource> ResMut<'a, T> {
     /// Fetches the singleton; panics with the type name when absent.
     // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — a declared resource must exist; mirrors Bevy's Res fetch panic with the type name attached"
     pub fn fetch(resources: &'a Resources) -> Self {
@@ -173,7 +237,7 @@ impl<'a, T: Send + Sync + 'static> ResMut<'a, T> {
     }
 }
 
-impl<T: Send + Sync + 'static> Deref for ResMut<'_, T> {
+impl<T: ResMutResource> Deref for ResMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -187,7 +251,8 @@ impl<T: Send + Sync + 'static> Deref for ResMut<'_, T> {
 /// Sends from any thread/level append in arrival order; draining sorts by
 /// entity id, so application order is deterministic regardless of which
 /// parallel level produced the events (Strong Confluence, IDEAS §24.1).
-/// A system that only sends still declares a write (see [`Events`]).
+/// Writers and readers both declare a write through [`EventWriter`] and
+/// [`EventReader`]; readers may drain the queue.
 pub struct EventStore<E: Send + 'static> {
     queue: Mutex<Vec<(Entity, E)>>,
 }
@@ -261,37 +326,29 @@ impl<E: Send + 'static> EventStore<E> {
 }
 
 /// Registers the [`EventStore`] singleton for `E` (systems fetch it
-/// through [`Events`]; the store must exist before the schedule runs).
+/// through [`EventWriter`] or [`EventReader`]; the store must exist before
+/// the schedule runs).
 pub fn register_events<E: Send + Sync + 'static>(resources: &mut Resources) {
     if resources.get::<EventStore<E>>().is_none() {
         resources.insert(EventStore::<E>::default());
     }
 }
 
-/// Event parameter: `send` in one system, drain in another.
-///
-/// Declares `writes::<EventStore<E>>` when the body sends, otherwise
-/// `reads::<EventStore<E>>` (a write declaration also covers the read
-/// for enforcement), so producers and consumers never share a level.
-/// Draining is sorted by entity id — deterministic across parallel and
-/// sequential runs.
-///
-/// `Copy` (a shared borrow only): see [`Res`]. Manual impls for the
-/// same derive-bound reason.
-pub struct Events<'a, E: Send + Sync + 'static> {
+/// Event producer parameter. Its type always declares a write to the queue,
+/// independent of which helpers are called in the function body.
+pub struct EventWriter<'a, E: Send + Sync + 'static> {
     store: &'a EventStore<E>,
-    _marker: PhantomData<&'a ()>,
 }
 
-impl<E: Send + Sync + 'static> Clone for Events<'_, E> {
+impl<E: Send + Sync + 'static> Clone for EventWriter<'_, E> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<E: Send + Sync + 'static> Copy for Events<'_, E> {}
+impl<E: Send + Sync + 'static> Copy for EventWriter<'_, E> {}
 
-impl<'a, E: Send + Sync + 'static> Events<'a, E> {
+impl<'a, E: Send + Sync + 'static> EventWriter<'a, E> {
     /// Fetches the queue singleton; panics when [`register_events`] was
     /// not called (same missing-resource contract as [`Res`]).
     // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — register_events must run before the schedule; same rationale as Res::fetch above"
@@ -302,16 +359,51 @@ impl<'a, E: Send + Sync + 'static> Events<'a, E> {
                 std::any::type_name::<E>()
             )
         });
-        Self {
-            store,
-            _marker: PhantomData,
-        }
+        Self { store }
     }
 
     /// Queues `event` for `to` (arrival order; application order is fixed
-    /// later by [`EventStore::drain_sorted`]).
+    /// later by [`EventReader::drain_sorted`]).
     pub fn send(&self, to: Entity, event: E) {
         self.store.send(to, event);
+    }
+
+    /// Declares exclusive access to the event queue.
+    pub fn access() -> SystemAccess {
+        SystemAccess::new().writes::<EventStore<E>>()
+    }
+}
+
+/// Event consumer parameter.
+///
+/// It declares a write because [`drain_sorted`](Self::drain_sorted) consumes
+/// queue contents. This is conservative even for a body that only calls
+/// [`read_sorted`](Self::read_sorted), ensuring consumers never share a
+/// scheduler level with producers or other consumers.
+pub struct EventReader<'a, E: Send + Sync + 'static> {
+    store: &'a EventStore<E>,
+}
+
+impl<E: Send + Sync + 'static> Clone for EventReader<'_, E> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E: Send + Sync + 'static> Copy for EventReader<'_, E> {}
+
+impl<'a, E: Send + Sync + 'static> EventReader<'a, E> {
+    /// Fetches the queue singleton; panics when [`register_events`] was
+    /// not called (same missing-resource contract as [`Res`]).
+    // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — register_events must run before the schedule; same rationale as Res::fetch above"
+    pub fn fetch(resources: &'a Resources) -> Self {
+        let store = resources.get::<EventStore<E>>().unwrap_or_else(|| {
+            panic!(
+                "smart_system: missing EventStore<'{}'> — call register_events() before running the schedule",
+                std::any::type_name::<E>()
+            )
+        });
+        Self { store }
     }
 
     /// Takes all queued events sorted by entity id.
@@ -332,23 +424,18 @@ impl<'a, E: Send + Sync + 'static> Events<'a, E> {
         self.store.clear();
     }
 
-    /// Contributes the event-queue access: write when the system sends
-    /// or clears, read when it only peeks/drains.
-    pub fn access(writes_queue: bool) -> SystemAccess {
-        if writes_queue {
-            SystemAccess::new().writes::<EventStore<E>>()
-        } else {
-            SystemAccess::new().reads::<EventStore<E>>()
-        }
+    /// Declares exclusive access because this reader can drain the queue.
+    pub fn access() -> SystemAccess {
+        SystemAccess::new().writes::<EventStore<E>>()
     }
 }
 
-/// Uniform fetch + access contribution for `#[smart_system]` parameters.
+/// Uniform fetch + access contract for typed system parameters.
 ///
-/// The macro calls `<P as SystemParam>::access()` for the static
-/// `System::access()` and `P::fetch(resources)` inside `run`; adding a
-/// new parameter kind means implementing this trait plus a macro arm —
-/// no scheduler changes.
+/// `#[smart_system]` emits the same wrapper access/fetch operations into its
+/// generated `System`; this trait also lets generic hosts use those operations
+/// without duplicating parameter bounds. Adding a macro parameter kind means
+/// implementing this trait plus parser/emitter arms — no scheduler changes.
 pub trait SystemParam: Sized {
     /// Borrowed value handed to the per-entity body.
     type Item<'a>;
@@ -373,7 +460,7 @@ impl<T: PlainResource> SystemParam for Res<'_, T> {
     }
 }
 
-impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
+impl<T: ResMutResource> SystemParam for ResMut<'_, T> {
     type Item<'a> = ResMut<'a, T>;
 
     fn access() -> SystemAccess {
@@ -382,6 +469,30 @@ impl<T: Send + Sync + 'static> SystemParam for ResMut<'_, T> {
 
     fn fetch(resources: &Resources) -> Self::Item<'_> {
         ResMut::fetch(resources)
+    }
+}
+
+impl<E: Send + Sync + 'static> SystemParam for EventWriter<'_, E> {
+    type Item<'a> = EventWriter<'a, E>;
+
+    fn access() -> SystemAccess {
+        EventWriter::<E>::access()
+    }
+
+    fn fetch(resources: &Resources) -> Self::Item<'_> {
+        EventWriter::fetch(resources)
+    }
+}
+
+impl<E: Send + Sync + 'static> SystemParam for EventReader<'_, E> {
+    type Item<'a> = EventReader<'a, E>;
+
+    fn access() -> SystemAccess {
+        EventReader::<E>::access()
+    }
+
+    fn fetch(resources: &Resources) -> Self::Item<'_> {
+        EventReader::fetch(resources)
     }
 }
 
@@ -395,12 +506,11 @@ pub fn canonical_lane_order(ids: &mut [TypeId]) {
     ids.sort();
 }
 
-/// Marker asserting at macro-expansion time that [`SmartStore`] never
-/// appears as a typed parameter: systems reach components through the
-/// first (`Pack`) parameter, and a raw store handle would bypass the
-/// derived access set. The `#[smart_system]` macro rejects
-/// `Res<SmartStore>` with a dedicated diagnostic; this alias exists so
-/// the rule is also greppable next to the parameter types.
+/// Legacy type alias naming the store handle forbidden as a system resource.
+/// Systems reach components through the first (`Pack`) parameter; a raw
+/// store handle would bypass the derived lane access set. The macro rejects
+/// direct `Res<SmartStore>` and `ResMutResource` is deliberately not
+/// implemented for `SmartStore` or [`Resources`].
 pub type NoRawStore = SmartStore;
 
 #[cfg(test)]
@@ -412,7 +522,8 @@ mod tests {
         _x: f32,
     }
 
-    impl PlainResource for Plain {}
+    unsafe impl ResMutResource for Plain {}
+    unsafe impl PlainResource for Plain {}
 
     #[test]
     fn res_declares_read_and_fetches() {
@@ -429,7 +540,10 @@ mod tests {
         resources.insert(Mutex::new(1u32));
         let access = ResMut::<Mutex<u32>>::access();
         assert_eq!(access, SystemAccess::new().writes::<Mutex<u32>>());
-        assert_eq!(*ResMut::<Mutex<u32>>::fetch(&resources).lock().unwrap(), 1);
+        assert_eq!(
+            *ResMut::<Mutex<u32>>::fetch(&resources).lock().unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -445,15 +559,11 @@ mod tests {
     }
 
     #[test]
-    fn events_access_send_is_write_drain_is_read() {
-        assert_eq!(
-            Events::<u32>::access(true),
-            SystemAccess::new().writes::<EventStore<u32>>()
-        );
-        assert_eq!(
-            Events::<u32>::access(false),
-            SystemAccess::new().reads::<EventStore<u32>>()
-        );
+    fn event_writer_and_reader_both_declare_exclusive_access() {
+        let write = SystemAccess::new().writes::<EventStore<u32>>();
+        assert_eq!(EventWriter::<u32>::access(), write);
+        // Readers may drain, so their parameter type is conservatively a write.
+        assert_eq!(EventReader::<u32>::access(), write);
     }
 
     #[test]

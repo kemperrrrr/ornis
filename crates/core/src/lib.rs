@@ -82,8 +82,8 @@ pub use schedule::{
 };
 pub use smart_store::{Pack, SmartStore};
 pub use system_param::{
-    EventStore, Events, NoRawStore, PlainResource, Res, ResMut, SystemParam, canonical_lane_order,
-    register_events,
+    EventReader, EventStore, EventWriter, NoRawStore, PlainResource, Res, ResMut,
+    ResMutResource, SystemParam, canonical_lane_order, register_events,
 };
 pub use typestate::{
     Authoritative, Building, FixedSteps, Frame, Phase, Replica, Running, SceneEntities, SceneRole,

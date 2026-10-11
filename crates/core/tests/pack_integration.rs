@@ -36,6 +36,30 @@ fn pack_register_insert_and_roundtrip() {
 }
 
 #[test]
+fn pack_get_mut_requires_every_dense_lane_entry() {
+    let mut store = SmartStore::new();
+    Transform::pack_register(&mut store);
+
+    let entity = store.create_entity();
+    store.insert(entity, Transform__x__PackLane__0(5.0));
+    assert!(
+        Transform::pack_get_mut(&mut store, entity).is_none(),
+        "a partial bundle must not produce a mutable packed view"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot access a lock-free lane")]
+fn pack_get_mut_rejects_lock_free_lanes_explicitly() {
+    let mut store = SmartStore::new();
+    store.register_lock_free::<Transform__x__PackLane__0>();
+    Transform::pack_register(&mut store);
+
+    let entity = store.create_entity();
+    let _ = Transform::pack_get_mut(&mut store, entity);
+}
+
+#[test]
 fn pack_for_each_packed_mutates_fields() {
     let mut store = SmartStore::new();
     Transform::pack_register(&mut store);

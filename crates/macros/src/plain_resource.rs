@@ -1,8 +1,9 @@
 //! Implementation of `#[derive(PlainResource)]`: structural
 //! "no interior mutability" check for `#[smart_system]` resources.
 //!
-//! The derive emits `impl ornis_core::PlainResource` with one
-//! `FieldTy: PlainResource` bound per field (every variant for enums).
+//! The derive emits `unsafe impl ornis_core::PlainResource` and the
+//! corresponding `ResMutResource` opt-in with one `FieldTy: PlainResource`
+//! bound per field (every variant for enums).
 //! Interior-mutable types (`Mutex`, `RwLock`, atomics, `Cell`/`RefCell`)
 //! never implement `PlainResource`, so a struct holding one fails with a
 //! missing-bound error pointing at the offending field type —
@@ -59,7 +60,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let expanded = quote! {
-        impl #impl_generics ornis_core::PlainResource for #name #ty_generics #where_clause {}
+        unsafe impl #impl_generics ornis_core::ResMutResource for #name #ty_generics #where_clause {}
+        unsafe impl #impl_generics ornis_core::PlainResource for #name #ty_generics #where_clause {}
     };
 
     expanded.into()

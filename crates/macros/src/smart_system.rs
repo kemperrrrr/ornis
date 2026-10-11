@@ -15,10 +15,11 @@
 //! `&T`, `T: Pack`) selects the entity set, the body runs once per
 //! entity (gather with `pack_get`, scatter with `pack_put`), and the
 //! access set follows from the parameter types (`Res` → read, `ResMut`
-//! → write, `Events` → write when sending else read, whole-bundle lanes
-//! for `u`). A raw `&Resources` parameter and `Res<SmartStore>` are
-//! compile errors, as are writes to another entity (`t.hp -= …` — use
-//! [`ornis_core::Events`] instead) and passing whole `u` to a free
+//! → write, `EventWriter`/`EventReader` → exclusive queue access,
+//! whole-bundle lanes for `u`). Raw `&Resources`, `Res<SmartStore>`, and
+//! `ResMut` aliases of `SmartStore`/`Resources` are compile errors, as are
+//! writes to another entity (`t.hp -= …` — use
+//! [`ornis_core::EventWriter`] instead) and passing whole `u` to a free
 //! function. Field-level lane inference (only touched `u.field` lanes)
 //! is a follow-up (v2b); v2 declares the whole bundle.
 //!
@@ -41,7 +42,8 @@ pub(crate) enum ParamKind {
     EntityHandle,
     Res,
     ResMut,
-    Events,
+    EventWriter,
+    EventReader,
 }
 
 pub(crate) struct TypedParam {
@@ -71,7 +73,8 @@ pub(crate) fn is_param_wrapper(seg: &syn::PathSegment) -> Option<ParamKind> {
     match name.as_str() {
         "Res" => Some(ParamKind::Res),
         "ResMut" => Some(ParamKind::ResMut),
-        "Events" => Some(ParamKind::Events),
+        "EventWriter" => Some(ParamKind::EventWriter),
+        "EventReader" => Some(ParamKind::EventReader),
         _ => None,
     }
 }
@@ -93,7 +96,10 @@ pub(crate) fn is_smart_store_ty(ty: &Type) -> bool {
 pub(crate) fn with_elided_lifetime(mut ty: Type) -> Type {
     if let Type::Path(tp) = &mut ty
         && let Some(seg) = tp.path.segments.last_mut()
-        && matches!(seg.ident.to_string().as_str(), "Res" | "ResMut" | "Events")
+        && matches!(
+            seg.ident.to_string().as_str(),
+            "Res" | "ResMut" | "EventWriter" | "EventReader"
+        )
         && let PathArguments::AngleBracketed(args) = &mut seg.arguments
         && args.args.len() == 1
     {
@@ -162,11 +168,10 @@ mod tests {
     #[test]
     fn visit_let_registers_link_alias() {
         use crate::smart_system_body_visit::BodyInfo;
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashSet;
         let mut info = BodyInfo {
             u: "u".to_string(),
             links: HashSet::new(),
-            sends: HashMap::new(),
             errors: Vec::new(),
         };
         let pat: Pat = syn::parse_quote!(t);

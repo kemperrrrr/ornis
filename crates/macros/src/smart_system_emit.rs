@@ -5,9 +5,7 @@
 //! and the `System::access` set derived from parameter types. Fetch
 //! statements are hoisted out of the loop (entity-independent borrows).
 
-use std::collections::HashMap;
-
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
@@ -27,6 +25,8 @@ fn build_body_sig(
     pack_ty: &Type,
     is_mut: bool,
     store_ident: &Ident,
+    entity_ident: &Ident,
+    local_u_ident: &Ident,
     params: &[TypedParam],
 ) -> (Vec<TokenStream2>, TokenStream2, TokenStream2, TokenStream2) {
     let mut body_inputs = Vec::new();
@@ -49,25 +49,28 @@ fn build_body_sig(
             ParamKind::EntityHandle => {
                 body_inputs.push(quote! { #name: ornis_core::Entity });
             }
-            ParamKind::Res | ParamKind::ResMut | ParamKind::Events => {
+            ParamKind::Res
+            | ParamKind::ResMut
+            | ParamKind::EventWriter
+            | ParamKind::EventReader => {
                 let ty = with_elided_lifetime(param.wrapper.clone());
                 body_inputs.push(quote! { #name: #ty });
             }
         }
     }
     let u_binding = if is_mut {
-        quote! { mut __u }
+        quote! { mut #local_u_ident }
     } else {
-        quote! { __u }
+        quote! { #local_u_ident }
     };
     let u_ref = if is_mut {
-        quote! { &mut __u }
+        quote! { &mut #local_u_ident }
     } else {
-        quote! { &__u }
+        quote! { &#local_u_ident }
     };
     let scatter = if is_mut {
         quote! {
-            ornis_core::Pack::pack_put(&__u, #store_ident, __entity);
+            ornis_core::Pack::pack_put(&#local_u_ident, #store_ident, #entity_ident);
         }
     } else {
         quote! {}
@@ -75,11 +78,10 @@ fn build_body_sig(
     (body_inputs, u_binding, u_ref, scatter)
 }
 
-/// Per-parameter access contributions, run-time fetches, body call
-/// arguments, and config bindings cloned from the system struct.
-/// Access contributions per parameter (`Res`/`ResMut`/`Events` only;
-/// configs and entity handles contribute nothing).
-fn build_access_stmts(params: &[TypedParam], sends: &HashMap<String, bool>) -> Vec<TokenStream2> {
+/// Per-parameter access contributions (`Res`/`ResMut`/event roles only;
+/// configs and entity handles contribute nothing). Event access follows
+/// the wrapper type, never the syntax of the function body.
+fn build_access_stmts(params: &[TypedParam]) -> Vec<TokenStream2> {
     let mut access_stmts = Vec::new();
     for param in params {
         if matches!(param.kind, ParamKind::Config | ParamKind::EntityHandle) {
@@ -97,15 +99,16 @@ fn build_access_stmts(params: &[TypedParam], sends: &HashMap<String, bool>) -> V
                     __access = __access.combine(ornis_core::ResMut::<#inner>::access());
                 });
             }
-            ParamKind::Events => {
-                let name = &param.name;
-                let sends = sends.get(&name.to_string()).copied().unwrap_or(false);
+            ParamKind::EventWriter => {
                 access_stmts.push(quote! {
-                    __access = __access.combine(ornis_core::Events::<#inner>::access(#sends));
+                    __access = __access.combine(ornis_core::EventWriter::<#inner>::access());
                 });
             }
-            // Config/EntityHandle skip above; the empty arm keeps the
-            // match exhaustive without a panic path.
+            ParamKind::EventReader => {
+                access_stmts.push(quote! {
+                    __access = __access.combine(ornis_core::EventReader::<#inner>::access());
+                });
+            }
             ParamKind::Config | ParamKind::EntityHandle => {}
         }
     }
@@ -117,6 +120,8 @@ fn build_access_stmts(params: &[TypedParam], sends: &HashMap<String, bool>) -> V
 /// from the system struct.
 fn build_fetch_stmts(
     params: &[TypedParam],
+    resources_ident: &Ident,
+    entity_ident: &Ident,
 ) -> (Vec<TokenStream2>, Vec<TokenStream2>, Vec<TokenStream2>) {
     let mut fetch_stmts = Vec::new();
     let mut call_args = Vec::new();
@@ -127,26 +132,33 @@ fn build_fetch_stmts(
                 call_args.push(quote! { #name.clone() });
             }
             ParamKind::EntityHandle => {
-                call_args.push(quote! { __entity });
+                call_args.push(quote! { #entity_ident });
             }
             ParamKind::Res => {
                 let inner = &param.inner;
                 fetch_stmts.push(quote! {
-                    let #name = ornis_core::Res::<#inner>::fetch(__resources);
+                    let #name = ornis_core::Res::<#inner>::fetch(#resources_ident);
                 });
                 call_args.push(quote! { #name });
             }
             ParamKind::ResMut => {
                 let inner = &param.inner;
                 fetch_stmts.push(quote! {
-                    let #name = ornis_core::ResMut::<#inner>::fetch(__resources);
+                    let #name = ornis_core::ResMut::<#inner>::fetch(#resources_ident);
                 });
                 call_args.push(quote! { #name });
             }
-            ParamKind::Events => {
+            ParamKind::EventWriter => {
                 let inner = &param.inner;
                 fetch_stmts.push(quote! {
-                    let #name = ornis_core::Events::<#inner>::fetch(__resources);
+                    let #name = ornis_core::EventWriter::<#inner>::fetch(#resources_ident);
+                });
+                call_args.push(quote! { #name });
+            }
+            ParamKind::EventReader => {
+                let inner = &param.inner;
+                fetch_stmts.push(quote! {
+                    let #name = ornis_core::EventReader::<#inner>::fetch(#resources_ident);
                 });
                 call_args.push(quote! { #name });
             }
@@ -211,6 +223,8 @@ fn emit_system(
     fetch_stmts: Vec<TokenStream2>,
     config_bindings: Vec<TokenStream2>,
     store_ident: &Ident,
+    entity_ident: &Ident,
+    resources_ident: &Ident,
     body_fn_name: &Ident,
     body_inputs: Vec<TokenStream2>,
     rewritten_stmts: Vec<syn::Stmt>,
@@ -250,8 +264,8 @@ fn emit_system(
                 __access
             }
 
-            fn run(&self, __resources: &ornis_core::Resources) {
-                let #store_ident: &ornis_core::SmartStore = __resources
+            fn run(&self, #resources_ident: &ornis_core::Resources) {
+                let #store_ident: &ornis_core::SmartStore = #resources_ident
                     .get::<ornis_core::SmartStore>()
                     .expect(concat!("smart_system `", #fn_name_str, "`: missing SmartStore resource"));
                 #(#config_bindings)*
@@ -259,9 +273,9 @@ fn emit_system(
                 // of the per-entity loop (they are pure borrows, so this is
                 // semantics-preserving and saves a map lookup per entity).
                 #(#fetch_stmts)*
-                for __entity in <#pack_ty as ornis_core::Pack>::pack_entities(#store_ident) {
+                for #entity_ident in <#pack_ty as ornis_core::Pack>::pack_entities(#store_ident) {
                     let Some(#u_binding) =
-                        <#pack_ty as ornis_core::Pack>::pack_get(#store_ident, __entity)
+                        <#pack_ty as ornis_core::Pack>::pack_get(#store_ident, #entity_ident)
                     else {
                         continue;
                     };
@@ -280,8 +294,9 @@ pub(crate) fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
     check_signature(&func)?;
     let (u_ident, pack_ty, is_mut, params) = collect_params(func.sig.inputs.iter())?;
 
-    // Pre-pass: links, sends, ban diagnostics.
-    let mut info = BodyInfo::collect(&u_ident, &params);
+    // Pre-pass: link bindings and ban diagnostics. Access is never inferred
+    // from body syntax; every resource role comes from its parameter type.
+    let mut info = BodyInfo::collect(&u_ident);
     info.visit_block(&func.block);
     if !info.errors.is_empty() {
         return Err(combine_errors(info.errors));
@@ -290,7 +305,10 @@ pub(crate) fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
     // Rewrite foreign reads (everywhere incl. closures). Bare `return`
     // needs no rewrite: the body is a separate function called once per
     // entity, so returning from it naturally skips to the next entity.
-    let store_ident = format_ident!("__smart_store");
+    let store_ident = format_ident!("__smart_store", span = Span::mixed_site());
+    let entity_ident = format_ident!("__entity", span = Span::mixed_site());
+    let local_u_ident = format_ident!("__u", span = Span::mixed_site());
+    let resources_ident = format_ident!("__resources", span = Span::mixed_site());
     let mut foreign = ForeignRewrite {
         pack_ty: &pack_ty,
         links: &info.links,
@@ -301,11 +319,23 @@ pub(crate) fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
         foreign.visit_stmt_mut(stmt);
     }
 
-    let body_fn_name = format_ident!("__smart_system_body_{}", func.sig.ident);
-    let (body_inputs, u_binding, u_ref, scatter) =
-        build_body_sig(&u_ident, &pack_ty, is_mut, &store_ident, &params);
-    let access_stmts = build_access_stmts(&params, &info.sends);
-    let (fetch_stmts, call_args, config_bindings) = build_fetch_stmts(&params);
+    let body_fn_name = format_ident!(
+        "__smart_system_body_{}",
+        func.sig.ident,
+        span = Span::mixed_site()
+    );
+    let (body_inputs, u_binding, u_ref, scatter) = build_body_sig(
+        &u_ident,
+        &pack_ty,
+        is_mut,
+        &store_ident,
+        &entity_ident,
+        &local_u_ident,
+        &params,
+    );
+    let access_stmts = build_access_stmts(&params);
+    let (fetch_stmts, call_args, config_bindings) =
+        build_fetch_stmts(&params, &resources_ident, &entity_ident);
     let struct_name = camel_system_name(&func.sig.ident);
     let fn_name_str = func.sig.ident.to_string();
     let attrs = func.attrs.clone();
@@ -323,6 +353,8 @@ pub(crate) fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
         fetch_stmts,
         config_bindings,
         &store_ident,
+        &entity_ident,
+        &resources_ident,
         &body_fn_name,
         body_inputs,
         rewritten_stmts,

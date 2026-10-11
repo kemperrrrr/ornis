@@ -722,13 +722,17 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   > кода (helper, `if let`, `match`, `.map`, alias): доступ следует из
   > **типов параметров**, как `SystemParam` в Bevy. Новый `#[smart_system]`
   > (v2): функция для одного объекта (`u: &mut T`/`&T`, `T: Pack`;
-  > `Res<T: PlainResource>` → read, `ResMut<T>` → write,
-  > `Events<E>` → write при `send`/`clear`, иначе read;
-  > `&Resources` и `Res<SmartStore>` — compile error). В v2 доступ по
-  > лейнам — целым бандлом (`Pack::pack_lane_ids`); поточечный вывод из
-  > обращений `u.field` — v2b. Гейты v2: `crates/core/tests/smart_system.rs`
-  > (цикл, фильтр, уровни, детерминированные события) + 6 trybuild-кейсов
-  > `smart_system_rejects_*`.
+  > `Res<T: PlainResource>` → read, `ResMut<T: ResMutResource>` → write,
+  > `EventWriter<E>`/`EventReader<E>` → write (draining is a write);
+  > `&Resources`, `Res<SmartStore>` и `ResMut` для `SmartStore`/`Resources` —
+  > compile error). В v2 доступ к лейнам задаётся целым бандлом
+  > (`Pack::pack_lane_ids`); вывод по отдельным `u.field` — v2b.
+  > **До реализации v2b с пакетными gather/scatter не переносить
+  > `#[smart_system]` в горячие системы и пути, критичные к времени кадра**;
+  > оставить их на ручных lane-guard циклах и измерять регрессию перед миграцией.
+  > Поэтому `physics_push` остаётся ручной системой. Гейты v2:
+  > `crates/core/tests/smart_system.rs` (loop, filters, levels, events) +
+  > `smart_system_rejects_*` trybuild cases.
 - **R4 — структурные опсы** (`add`/`remove`/`spawn`) → auto-defer / ошибка
   в параллельном контексте.
 - **R5 — захваченное изменяемое состояние** → `atomic`/`reduce`-трансформация

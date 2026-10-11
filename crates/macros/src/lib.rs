@@ -134,9 +134,10 @@ pub fn derive_shader_context(input: TokenStream) -> TokenStream {
 /// Derive the structural "no interior mutability" marker for a
 /// `#[smart_system]` resource.
 ///
-/// Emits `impl ornis_core::PlainResource` with one `Field: PlainResource`
-/// bound per field, so a struct holding a `Mutex`/`RwLock`/atomic fails
-/// to compile instead of sharing mutable state through [`Res`].
+/// Emits `unsafe impl ornis_core::PlainResource` and its `ResMutResource`
+/// marker with one `Field: PlainResource` bound per field, so a struct holding
+/// a `Mutex`/`RwLock`/atomic fails instead of sharing mutable state through
+/// [`Res`].
 /// See [`smart_system`](smart_system).
 #[proc_macro_derive(PlainResource)]
 #[allow(dead_code)] // proc-macro entry: invoked by the compiler on derive use, invisible to the call graph (8 sibling entries carry the same note via baseline)
@@ -147,8 +148,8 @@ pub fn derive_plain_resource(input: TokenStream) -> TokenStream {
 /// Per-object system kernel (IDEAS §32).
 ///
 /// Turns a function for one object (`u: &mut T` / `&T`, `T: Pack`, plus
-/// `Res`/`ResMut`/`Events`/`#[config]` parameters) into a struct
-/// implementing `ornis_core::System`, generating the entity loop and the
+/// `Res`/`ResMut`/`EventWriter`/`EventReader`/`#[config]` parameters) into
+/// a struct implementing `ornis_core::System`, generating the entity loop and the
 /// access set from the parameter types.
 #[proc_macro_attribute]
 #[allow(dead_code)] // proc-macro entry: invoked by the compiler on attribute use, invisible to the call graph (8 sibling entries carry the same note via baseline)

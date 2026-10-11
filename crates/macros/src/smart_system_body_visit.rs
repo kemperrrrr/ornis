@@ -1,7 +1,7 @@
 //! Body pre-pass and rewriting for `#[smart_system]` (IDEAS §32).
 //!
-//! [`BodyInfo`] walks one system body collecting entity-link bindings,
-//! per-`Events` send flags, and syntactic ban diagnostics, while
+//! [`BodyInfo`] walks one system body collecting entity-link bindings
+//! and syntactic ban diagnostics, while
 //! [`ForeignRewrite`] turns foreign reads (`t.field`) into pack gathers.
 //! The visitor overrides couple guard checks with descent bookkeeping by
 //! construction (same as the baselined
@@ -9,22 +9,20 @@
 //! `gpu_pipeline::parse_binding_group`); each carries a targeted
 //! `qual:allow(iosp)` pin that re-fires if logic or calls grow.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use syn::visit::Visit;
 use syn::{Expr, Ident, Pat};
 
-use crate::smart_system::{ParamKind, TypedParam};
 use crate::smart_system_body_links::{
     is_link_alias, is_link_alias_shape, member_root, mentions_entity_member, pat_idents,
 };
 
-/// Pre-pass over the body: link bindings (handles to *other* entities),
-/// per-`Events`-param send flags, and syntactic ban diagnostics.
+/// Pre-pass over the body: link bindings (handles to *other* entities)
+/// and syntactic ban diagnostics.
 pub(crate) struct BodyInfo {
     pub(crate) u: String,
     pub(crate) links: HashSet<String>,
-    pub(crate) sends: HashMap<String, bool>,
     pub(crate) errors: Vec<syn::Error>,
 }
 
@@ -162,21 +160,6 @@ impl<'ast> Visit<'ast> for BodyInfo {
         syn::visit::visit_expr(self, node);
     }
 
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        // `events.send(…)` / `events.clear()` mark the `Events` param as
-        // producing (scheduler-visible write).
-        if (node.method == "send" || node.method == "clear")
-            && let Expr::Path(base) = node.receiver.as_ref()
-            && base.qself.is_none()
-            && base.path.segments.len() == 1
-        {
-            let name = base.path.segments[0].ident.to_string();
-            if self.sends.contains_key(&name) {
-                self.sends.insert(name, true);
-            }
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
 }
 
 impl BodyInfo {
@@ -188,24 +171,19 @@ impl BodyInfo {
             self.errors.push(syn::Error::new_spanned(
                 node,
                 "smart_system: cannot write another entity's component — \
-                 `t.field` is read-only (gather); send an event via `Events<E>` instead",
+                 `t.field` is read-only (gather); send an event via `EventWriter<E>` instead",
             ));
         }
     }
 }
 
 impl BodyInfo {
-    /// Collects links, send flags, and an empty error sink for one body.
+    /// Collects link bindings and an empty error sink for one body.
     /// Straight-line construction (trait/default calls only).
-    pub(crate) fn collect(u: &Ident, params: &[TypedParam]) -> Self {
+    pub(crate) fn collect(u: &Ident) -> Self {
         Self {
             u: u.to_string(),
             links: HashSet::new(),
-            sends: params
-                .iter()
-                .filter(|p| matches!(p.kind, ParamKind::Events))
-                .map(|p| (p.name.to_string(), false))
-                .collect(),
             errors: Vec::new(),
         }
     }

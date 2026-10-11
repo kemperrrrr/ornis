@@ -17,18 +17,12 @@
 
 #![warn(missing_docs)]
 
-use std::any::TypeId;
-use std::sync::RwLockWriteGuard;
-
 use glam::Vec3;
 
 use ornis_core::units::MetersPerSecond;
-use ornis_core::{
-    ComponentStore, Engine, Entity, FixedTime, Pack, Res, Resources, SmartStore, System,
-    SystemAccess, Time,
-};
+use ornis_core::{Engine, FixedTime, Resources, SmartStore, System, SystemAccess, Time};
 use ornis_input::{InputMap, InputState};
-use ornis_macros::{RegisterComponent, smart_system};
+use ornis_macros::RegisterComponent;
 
 /// Squared-length / dt floor for near-zero gameplay intent.
 const NEAR_ZERO: f32 = 1e-6;
@@ -99,19 +93,16 @@ impl<'de> serde::Deserialize<'de> for Velocity {
 
 impl Velocity {
     /// Wraps a raw m/s vector.
-    #[allow(dead_code)] // unit-vocabulary constructor (mirrors Position::from_meters; reserved for physics-sync callers)
     pub fn from_mps(velocity: Vec3) -> Self {
         Self(velocity)
     }
 
     /// Raw m/s vector.
-    #[allow(dead_code)] // unit-vocabulary accessor (mirrors Position::as_meters; reserved for physics-sync callers)
     pub fn as_mps(self) -> Vec3 {
         self.0
     }
 
     /// Speed (magnitude) in m/s.
-    #[allow(dead_code)] // unit-vocabulary accessor (reserved for HUD/physics-sync callers)
     pub fn speed_units(self) -> MetersPerSecond {
         MetersPerSecond::new(self.0.length())
     }
@@ -147,13 +138,11 @@ impl<'de> serde::Deserialize<'de> for Position {
 
 impl Position {
     /// Wraps a raw world-space position (meters).
-    #[allow(dead_code)] // unit-vocabulary constructor (reserved for spawn paths that build from raw vectors)
     pub fn from_meters(position: Vec3) -> Self {
         Self(position)
     }
 
     /// Raw position in meters.
-    #[allow(dead_code)] // unit-vocabulary accessor (reserved for render-sync callers)
     pub fn as_meters(self) -> Vec3 {
         self.0
     }
@@ -185,8 +174,7 @@ impl Default for Position {
 ///
 /// The schedule declarations ensure deterministic levels:
 /// `player_input` writes `Velocity`/`Position` and reads `InputState`,
-/// `physics_push` (a `#[smart_system]` v2 system over [`PushBundle`])
-/// writes `Velocity`/`Position` and reads `FixedTime`,
+/// `physics_push` reads `Velocity`/`FixedTime` and writes `Position`,
 /// `transform_update` reads `Velocity`/`Time` and writes `Position`.
 /// No separate `RenderWorld` copy is required — the same world that
 /// gameplay mutates is the source for view extraction.
@@ -231,7 +219,6 @@ impl GameplayPlugin {
 
     /// Current speed in m/s (non-finite or negative raw values saturate to
     /// zero so a corrupt field never reverses movement).
-    #[allow(dead_code)] // plugin accessor (reserved for engine wiring that clamps configured speeds)
     pub fn speed_units(&self) -> MetersPerSecond {
         let v = self.player_speed;
         if v.is_finite() {
@@ -259,9 +246,7 @@ impl GameplayPlugin {
         engine.schedule_mut().add_system(PlayerInputSystem {
             speed: self.player_speed,
         });
-        engine
-            .fixed_schedule_mut()
-            .add_system(PhysicsPushSystem::new());
+        engine.fixed_schedule_mut().add_system(PhysicsPushSystem);
         engine.schedule_mut().add_system(TransformUpdateSystem);
         // Ensure deterministic ordering: input before physics-derived motion
         // within the frame, even when lanes are disjoint.
@@ -342,22 +327,38 @@ pub fn player_input(resources: &Resources, speed: f32) {
 
 /// Applies gameplay velocity to world placement at fixed rate.
 ///
-/// `#[smart_system]` v2 migration demo (RAT-31, IDEAS §32): access follows
-/// from the parameter types (`&mut PushBundle` → writes both lanes,
-/// `Res<FixedTime>` → shared read) instead of a hand-written
-/// [`SystemAccess`]. Runs in the fixed schedule under the same
-/// `"physics_push"` name, so staged plans are unaffected.
-///
 /// This is the fixed-step counterpart of [`player_input`]: it integrates
 /// horizontal intent under the authoritative `FixedTime::delta_seconds()`
 /// so that catch-up frames do not double-apply transient input. The system
 /// also preserves vertical velocity for gravity/physics consumers.
-#[allow(dead_code)]
-// consumed by #[smart_system]: the original fn is replaced by generated glue, invisible to the call graph
-#[smart_system]
-fn physics_push(bundle: &mut PushBundle, fixed: Res<FixedTime>) {
+pub fn physics_push(resources: &Resources) {
+    let Some(fixed) = resources.get::<FixedTime>() else {
+        return;
+    };
     let dt = fixed.delta();
-    bundle.position = bundle.position.advanced_by_secs(bundle.velocity, dt);
+    let Some(store) = resources.get::<SmartStore>() else {
+        return;
+    };
+    let Some(vel_lane) = store.read_lane::<Velocity>() else {
+        return;
+    };
+    let entities: Vec<(ornis_core::Entity, Vec3)> = vel_lane
+        .entities
+        .iter()
+        .zip(&vel_lane.data)
+        .map(|(&e, v)| (e, v.0))
+        .collect();
+    drop(vel_lane);
+    let Some(mut pos_lane) = store.write_lane::<Position>() else {
+        return;
+    };
+    for (entity, vel) in entities {
+        if let Some(pos) = pos_lane.get_mut(entity) {
+            *pos = pos.advanced_by_secs(Velocity::from_mps(vel), dt);
+        } else {
+            pos_lane.insert(entity, Position::from_meters(vel * dt.get()));
+        }
+    }
 }
 
 /// Integrates remaining velocity into world placement at variable rate.
@@ -438,75 +439,23 @@ impl System for PlayerInputSystem {
     }
 }
 
-/// Per-object bundle for the migrated [`physics_push`] system (RAT-31 demo).
-///
-/// Manual [`Pack`] over the existing [`Velocity`]/[`Position`] lanes — no
-/// lane fork: the v2 system reads and writes the same components the rest
-/// of the engine (physics sync, render sync) already uses. Entities missing
-/// either lane are skipped (no insert-if-missing, unlike the old manual
-/// system); tests always insert complete lane sets.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PushBundle {
-    /// Gameplay intent consumed for this step.
-    pub velocity: Velocity,
-    /// World-space placement advanced by the step.
-    pub position: Position,
-}
+struct PhysicsPushSystem;
 
-/// Mutable per-entity view over the [`PushBundle`] lanes.
-pub struct PushBundleMut<'a> {
-    _guard_velocity: RwLockWriteGuard<'a, ComponentStore<Velocity>>,
-    _guard_position: RwLockWriteGuard<'a, ComponentStore<Position>>,
-    _entity: Entity,
-}
-
-impl Pack for PushBundle {
-    type PackMut<'a> = PushBundleMut<'a>;
-
-    fn pack_register(store: &mut SmartStore) {
-        store.register::<Velocity>();
-        store.register::<Position>();
+impl System for PhysicsPushSystem {
+    fn name(&self) -> &'static str {
+        "physics_push"
     }
 
-    fn pack_insert(&self, store: &mut SmartStore, entity: Entity) {
-        store.insert(entity, self.velocity);
-        store.insert(entity, self.position);
+    fn access(&self) -> SystemAccess {
+        SystemAccess::new()
+            .reads::<FixedTime>()
+            .reads::<SmartStore>()
+            .reads_lane::<Velocity>()
+            .writes_lane::<Position>()
     }
 
-    fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self> {
-        let velocity = *store.read_lane::<Velocity>()?.get(entity)?;
-        let position = *store.read_lane::<Position>()?.get(entity)?;
-        Some(PushBundle { velocity, position })
-    }
-
-    fn pack_get_mut<'a>(store: &'a mut SmartStore, entity: Entity) -> Option<Self::PackMut<'a>> {
-        let _guard_velocity = store.write_lane::<Velocity>()?;
-        let _guard_position = store.write_lane::<Position>()?;
-        Some(PushBundleMut {
-            _guard_velocity,
-            _guard_position,
-            _entity: entity,
-        })
-    }
-
-    fn pack_put(&self, store: &SmartStore, entity: Entity) {
-        if let Some(mut lane) = store.write_lane::<Velocity>() {
-            lane.insert(entity, self.velocity);
-        }
-        if let Some(mut lane) = store.write_lane::<Position>() {
-            lane.insert(entity, self.position);
-        }
-    }
-
-    fn pack_entities(store: &SmartStore) -> Vec<Entity> {
-        match store.read_lane::<Velocity>() {
-            Some(lane) => lane.iter_entities().collect(),
-            None => Vec::new(),
-        }
-    }
-
-    fn pack_lane_ids() -> Vec<TypeId> {
-        vec![TypeId::of::<Velocity>(), TypeId::of::<Position>()]
+    fn run(&self, resources: &Resources) {
+        physics_push(resources);
     }
 }
 
@@ -653,6 +602,41 @@ mod tests {
             .0;
         // Fixed delta is 1/60, so motion ~10 * 1/60 = 0.166
         assert!((pos.x - 10.0 / 60.0).abs() < 1e-4, "pos {pos:?}");
+    }
+
+    #[test]
+    fn physics_push_declares_velocity_read_and_position_write() {
+        let access = PhysicsPushSystem.access();
+        let velocity = std::any::TypeId::of::<Velocity>();
+        let position = std::any::TypeId::of::<Position>();
+        assert!(access.reads_lanes.contains(&velocity));
+        assert!(!access.writes_lanes.contains(&velocity));
+        assert!(access.writes_lanes.contains(&position));
+    }
+
+    #[test]
+    fn physics_push_inserts_position_for_velocity_only_entities() {
+        let mut engine = Engine::new();
+        install_gameplay(&mut engine);
+        let entity = engine.world().store().unwrap().create_entity();
+        engine
+            .world_mut()
+            .store_mut()
+            .unwrap()
+            .insert(entity, Velocity(Vec3::new(6.0, 0.0, 0.0)));
+
+        engine.run_frame(1.0 / 60.0);
+
+        let pos = engine
+            .world()
+            .store()
+            .unwrap()
+            .read_lane::<Position>()
+            .unwrap()
+            .get(entity)
+            .copied()
+            .expect("physics_push preserves insert-if-missing behavior");
+        assert!((pos.0.x - 6.0 / 60.0).abs() < 1e-4, "pos {pos:?}");
     }
 
     #[test]

@@ -8,7 +8,7 @@ struct Unit {
 }
 
 // `t` is bound from a `u.field` chain, so it is another entity's handle:
-// `t.hp` is read-only (gather) — mutations go through `Events<E>`.
+// `t.hp` is read-only (gather) — mutations go through `EventWriter<E>`.
 #[smart_system]
 fn sys(u: &mut Unit) {
     let _ = [u.hp].iter().map(|t| {
