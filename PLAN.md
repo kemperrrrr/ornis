@@ -730,9 +730,12 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   > **До реализации v2b с пакетными gather/scatter не переносить
   > `#[smart_system]` в горячие системы и пути, критичные к времени кадра**;
   > оставить их на ручных lane-guard циклах и измерять регрессию перед миграцией.
-  > Поэтому `physics_push` остаётся ручной системой. Гейты v2:
-  > `crates/core/tests/smart_system.rs` (loop, filters, levels, events) +
-  > `smart_system_rejects_*` trybuild cases.
+  > Поэтому `physics_push` остаётся ручной системой. Мульти-лейновый
+  > захват (`Pack::pack_get_mut`) держит по guard'у на поле в порядке
+  > объявления; канонический порядок лейнов между разными `Pack`-видами
+  > (сортировка `TypeId`) — v2b, вместе с батчевыми gather/scatter.
+  > Гейты v2: `crates/core/tests/smart_system.rs` (loop, filters, levels,
+  > events) + `smart_system_rejects_*` trybuild cases.
 - **R4 — структурные опсы** (`add`/`remove`/`spawn`) → auto-defer / ошибка
   в параллельном контексте.
 - **R5 — захваченное изменяемое состояние** → `atomic`/`reduce`-трансформация

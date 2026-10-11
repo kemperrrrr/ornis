@@ -294,9 +294,10 @@ fn generate_pack_get(
 
 fn generate_pack_put(fields: &[FieldInfo]) -> TokenStream2 {
     // Scatter one field at a time: each `write_lane` guard is dropped
-    // before the next is taken, so lanes are never locked nested and no
-    // canonical capture order is needed (system_param::canonical_lane_order
-    // applies once multi-lane batch locking lands).
+    // before the next is taken, so lanes are never locked nested. (Nested
+    // multi-lane capture does exist in `pack_get_mut`, which holds one
+    // guard per field in declaration order; a canonical cross-pack lane
+    // order is a v2b item, tracked in PLAN.md.)
     let puts = fields.iter().map(|f| {
         let wrapper_name = &f.wrapper_name;
         let insert = insert_field_stmt(f, quote! { __lane });

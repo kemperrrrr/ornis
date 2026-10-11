@@ -30,9 +30,12 @@ pub(crate) fn generate_pack_get_mut(
         } else {
             lane_guards.push(quote! {
                 let #guard_name = store.write_lane::<#wrapper_name>()?;
-                if #guard_name.get(entity).is_none() {
-                    return None;
-                }
+                // Membership probe: a dense lane must hold `entity` or the
+                // whole view is absent. Spelled with `?` (not
+                // `if …is_none() { return None; }`) so the generated code
+                // stays clean under `-D clippy::question_mark` in every
+                // crate that derives `Pack`.
+                #guard_name.get(entity)?;
             });
         }
         guard_fields_init.push(quote! {
