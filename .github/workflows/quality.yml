@@ -62,8 +62,10 @@ jobs:
   #   never read the previous head's label. `run_attempt == 1` keeps the
   #   owner flow working: «set the label, then Re-run jobs» reruns with
   #   attempt >= 2 and must NOT strip the label just set.
-  # - A PR that edits this job (or `fast`) to dodge the reset is itself a
-  #   change under `.github/` — owned by CODEOWNERS (owner review).
+  # - Out of scope: a PR that edits this job (or `fast`) to dodge the
+  #   reset. The `pull_request` event runs the PR's own workflow files, so
+  #   such a change is visible only in the diff under `.github/` — catching
+  #   it is the owner's review (no CODEOWNERS: single-owner repo).
   reset-approval:
     if: github.event_name == 'pull_request' && github.run_attempt == 1
     runs-on: ubuntu-latest
