@@ -1,0 +1,96 @@
+error[E0277]: the trait bound `Resources: ResMutResource` is not satisfied
+  --> tests/ui/smart_system_rejects_resources_alias.rs:14:29
+   |
+14 | fn sys(u: &Unit, resources: ResMut<ResourcesAlias>) {
+   |                             ^^^^^^^^^^^^^^^^^^^^^^ the trait `ResMutResource` is not implemented for `Resources`
+   |
+   = help: the following other types implement trait `ResMutResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Atomic<bool>
+             Atomic<i16>
+             Atomic<i32>
+             Atomic<i64>
+           and $N others
+note: required by a bound in `ResMut`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct ResMut<'a, T: ResMutResource> {
+   |                          ^^^^^^^^^^^^^^ required by this bound in `ResMut`
+
+error[E0277]: the trait bound `Resources: ResMutResource` is not satisfied
+  --> tests/ui/smart_system_rejects_resources_alias.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ the trait `ResMutResource` is not implemented for `Resources`
+   |
+   = help: the following other types implement trait `ResMutResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Atomic<bool>
+             Atomic<i16>
+             Atomic<i32>
+             Atomic<i64>
+           and $N others
+note: required by a bound in `ResMut`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct ResMut<'a, T: ResMutResource> {
+   |                          ^^^^^^^^^^^^^^ required by this bound in `ResMut`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the associated function or constant `access` exists for struct `ResMut<'_, Resources>`, but its trait bounds were not satisfied
+  --> tests/ui/smart_system_rejects_resources_alias.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ associated function or constant cannot be called on `ResMut<'_, Resources>` due to unsatisfied trait bounds
+   |
+  ::: $WORKSPACE/crates/core/src/schedule.rs
+   |
+   | pub struct Resources {
+   | -------------------- doesn't satisfy `Resources: ResMutResource`
+   |
+   = note: the following trait bounds were not satisfied:
+           `Resources: ResMutResource`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the associated function or constant `fetch` exists for struct `ResMut<'_, Resources>`, but its trait bounds were not satisfied
+  --> tests/ui/smart_system_rejects_resources_alias.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ associated function or constant cannot be called on `ResMut<'_, Resources>` due to unsatisfied trait bounds
+   |
+  ::: $WORKSPACE/crates/core/src/schedule.rs
+   |
+   | pub struct Resources {
+   | -------------------- doesn't satisfy `Resources: ResMutResource`
+   |
+   = note: the following trait bounds were not satisfied:
+           `Resources: ResMutResource`
+   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `Resources: ResMutResource` is not satisfied
+  --> tests/ui/smart_system_rejects_resources_alias.rs:14:18
+   |
+14 | fn sys(u: &Unit, resources: ResMut<ResourcesAlias>) {
+   |                  ^^^^^^^^^ the trait `ResMutResource` is not implemented for `Resources`
+   |
+   = help: the following other types implement trait `ResMutResource`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A,)
+             Atomic<bool>
+             Atomic<i16>
+             Atomic<i32>
+             Atomic<i64>
+           and $N others
+note: required by a bound in `ResMut`
+  --> $WORKSPACE/crates/core/src/system_param.rs
+   |
+   | pub struct ResMut<'a, T: ResMutResource> {
+   |                          ^^^^^^^^^^^^^^ required by this bound in `ResMut`

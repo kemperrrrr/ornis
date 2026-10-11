@@ -1,0 +1,5 @@
+error: smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` (or `#[config] name: T`)
+  --> tests/ui/smart_system_rejects_body_inferred_events.rs:17:26
+   |
+17 | fn sys(u: &Unit, events: Events<u32>) {
+   |                          ^^^^^^^^^^^
