@@ -29,16 +29,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Explicit token scopes. `report` needs `pull-requests: write`
-# (failure-digest comments); `fast` needs `pull-requests: read` (it reads
-# the live `baseline-bump-approved` label via the PR API — RAT-24).
-# Every other job runs with the workflow-default `contents: read`. Shard
-# jobs only read the repo and write their own log artifacts (actions:
-# read is implicit for the runner, but listing it future-proofs against
-# org-level Workflow permission changes).
+# Explicit token scopes. Only the `report` job needs `pull-requests: write`
+# (failure-digest comments); only the `fast` job needs `pull-requests:
+# read` (it reads the live `baseline-bump-approved` label via the PR API
+# — RAT-24). Every other job runs with the workflow-default `contents:
+# read`. Shard jobs only read the repo and write their own log artifacts
+# (actions: read is implicit for the runner, but listing it future-proofs
+# against org-level Workflow permission changes).
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   # Sharding: `cargo xtask quality` is still the single source of truth for
@@ -57,6 +56,12 @@ jobs:
   fast:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # RAT-24: this is the only job that talks to the PR API (live
+    # `baseline-bump-approved` label, see below) — scope the grant here,
+    # not workflow-wide. Merges with the workflow-default `contents: read`
+    # (same mechanism as the `report` job's `pull-requests: write`).
+    permissions:
+      pull-requests: read
     steps:
       # Full history: rustqual's failure diagnostics run `git archive
       # origin/<base>` for the reference measurement.
@@ -106,16 +111,26 @@ jobs:
       # stray labels create no runs or skipped checks at all). Owner flow:
       # set `baseline-bump-approved`, then "Re-run failed jobs" — the
       # re-run sees the current labels. On push events there is no PR:
-      # always false. A failed lookup fails this job (red gate), never a
-      # silent allow. Needs `pull-requests: read` (workflow permissions).
+      # always false. The API call is hoisted out of any condition and a
+      # failed lookup fails this job red via ::error:: — a silent
+      # `false` (which would pass the gate as "not approved") must be
+      # impossible. Needs `pull-requests: read` (job permissions above).
       - name: Resolve baseline-bump approval label
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           allowed=false
-          if [ -n "$PR_NUMBER" ]; then
-            if gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name' | grep -qx 'baseline-bump-approved'; then
+          if [ -z "$PR_NUMBER" ]; then
+            echo "no pull_request in event (push) — approval impossible"
+          else
+            labels="$(gh pr view "$PR_NUMBER" --json labels --jq '.labels[].name')" || {
+              echo "::error::gh pr view failed for PR #$PR_NUMBER — cannot resolve baseline-bump-approved"
+              exit 1
+            }
+            if printf '%s\n' "$labels" | grep -qx 'baseline-bump-approved'; then
               allowed=true
             fi
           fi
