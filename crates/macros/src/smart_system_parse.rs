@@ -1,0 +1,312 @@
+//! Signature parsing for `#[smart_system]` (IDEAS §32).
+//!
+//! Turns the function signature into typed parameters ([`TypedParam`]):
+//! the first `u: &T` / `u: &mut T` (`T: Pack`) selects the entity set,
+//! the rest are `Res`/`ResMut`/`Events`/`#[config]`/`#[entity]`. Raw
+//! `&Resources`, `SmartStore`, and interior-mutable `Res<Mutex<…>>` are
+//! compile errors with dedicated diagnostics.
+
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::{FnArg, GenericArgument, Ident, ItemFn, Pat, PathArguments, Type};
+
+use crate::smart_system::{
+    ParamKind, RESERVED_PREFIX, TypedParam, is_param_wrapper, is_smart_store_ty, path_last_ident,
+};
+
+pub(crate) fn config_struct_parts(
+    params: &[TypedParam],
+) -> (Vec<TokenStream2>, Vec<TokenStream2>, Vec<TokenStream2>) {
+    let mut fields = Vec::new();
+    let mut ctor_params = Vec::new();
+    let mut ctor_inits = Vec::new();
+    for param in params {
+        if matches!(param.kind, ParamKind::Config) {
+            let name = &param.name;
+            let ty = &param.inner;
+            fields.push(quote! { pub #name: #ty, });
+            ctor_params.push(quote! { #name: #ty });
+            ctor_inits.push(quote! { #name, });
+        }
+    }
+    (fields, ctor_params, ctor_inits)
+}
+
+pub(crate) fn parse_first_param(arg: &FnArg) -> Result<(Ident, Type, bool), syn::Error> {
+    let typed = match arg {
+        FnArg::Receiver(r) => {
+            return Err(syn::Error::new_spanned(
+                r,
+                "smart_system: systems are free functions — the first parameter must be \
+                 `u: &T` / `u: &mut T` with `T: Pack`",
+            ));
+        }
+        FnArg::Typed(t) => t,
+    };
+    let name = match typed.pat.as_ref() {
+        Pat::Ident(id) => id.ident.clone(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &typed.pat,
+                "smart_system: the first parameter must be a plain binding `u: &T` / `u: &mut T`",
+            ));
+        }
+    };
+    match typed.ty.as_ref() {
+        Type::Reference(r) => {
+            let is_mut = r.mutability.is_some();
+            Ok((name, (*r.elem).clone(), is_mut))
+        }
+        _ => Err(syn::Error::new_spanned(
+            &typed.ty,
+            "smart_system: the first parameter must be `u: &T` / `u: &mut T` with `T: Pack` \
+             — owned values and other shapes are not supported",
+        )),
+    }
+}
+pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
+    let typed = match arg {
+        FnArg::Receiver(r) => {
+            return Err(syn::Error::new_spanned(
+                r,
+                "smart_system: unexpected `self` — only the first parameter is the entity, \
+                 the rest are `Res<T>` / `ResMut<T>` / `Events<E>` / `#[config]`",
+            ));
+        }
+        FnArg::Typed(t) => t,
+    };
+    let name = match typed.pat.as_ref() {
+        Pat::Ident(id) => id.ident.clone(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &typed.pat,
+                "smart_system: parameters must be plain bindings (`time: Res<FixedTime>`)",
+            ));
+        }
+    };
+    let is_config = typed.attrs.iter().any(|a| a.path().is_ident("config"));
+    if is_config {
+        let ty = (*typed.ty).clone();
+        return Ok(TypedParam::new(name, ParamKind::Config, ty.clone(), ty));
+    }
+    let is_entity = typed.attrs.iter().any(|a| a.path().is_ident("entity"));
+    if is_entity {
+        if path_last_ident(&typed.ty).as_deref() != Some("Entity") {
+            return Err(syn::Error::new_spanned(
+                &typed.ty,
+                "smart_system: `#[entity]` parameters must have type `Entity`",
+            ));
+        }
+        let ty = (*typed.ty).clone();
+        return Ok(TypedParam::new(
+            name,
+            ParamKind::EntityHandle,
+            ty.clone(),
+            ty,
+        ));
+    }
+    match typed.ty.as_ref() {
+        Type::Reference(_) => Err(syn::Error::new_spanned(
+            &typed.ty,
+            "smart_system: raw `&Resources` is forbidden — declare typed parameters \
+             (`Res<T>`, `ResMut<T>`, `Events<E>`) so access follows from types",
+        )),
+        Type::Path(tp) => parse_wrapper_param(name, &typed.ty, tp),
+        _ => Err(syn::Error::new_spanned(
+            &typed.ty,
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `Events<E>` \
+             (or `#[config] name: T`)",
+        )),
+    }
+}
+/// Validates one `Res<T>` / `ResMut<T>` / `Events<E>` wrapper parameter.
+fn parse_wrapper_param(
+    name: Ident,
+    ty: &Type,
+    tp: &syn::TypePath,
+) -> Result<TypedParam, syn::Error> {
+    let Some(seg) = tp.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `Events<E>` \
+             (or `#[config] name: T`)",
+        ));
+    };
+    let Some(kind) = is_param_wrapper(seg) else {
+        if seg.ident == "SmartStore" {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "smart_system: raw `SmartStore` is forbidden — the first `&T`/`&mut T` \
+                 (`T: Pack`) parameter already selects the entity set",
+            ));
+        }
+        return Err(syn::Error::new_spanned(
+            ty,
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `Events<E>` \
+             (or `#[config] name: T`)",
+        ));
+    };
+    let PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "smart_system: wrapper needs its inner type (`Res<FixedTime>`)",
+        ));
+    };
+    if args.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
+        ));
+    }
+    let GenericArgument::Type(inner) = &args.args[0] else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
+        ));
+    };
+    if is_smart_store_ty(inner) {
+        return Err(syn::Error::new_spanned(
+            inner,
+            "smart_system: `Res<SmartStore>` is forbidden — reach components through \
+             the first `&T`/`&mut T` (`T: Pack`) parameter",
+        ));
+    }
+    if matches!(kind, ParamKind::Res) {
+        check_plain_shape(inner)?;
+    }
+    Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
+}
+
+/// Early syntactic backstop for the `PlainResource` bound: well-known
+/// interior-mutability types are rejected with one clean diagnostic
+/// instead of a cascade of unsatisfied-bound errors (custom interior
+/// types are still caught by the `Res<T: PlainResource>` bound itself).
+pub(crate) fn check_plain_shape(inner: &Type) -> Result<(), syn::Error> {
+    // Interior-mutability names rejected with one clean diagnostic
+    // (one line per family; keep alphabetical).
+    const DENIED: &[&str] = &[
+        "Mutex",
+        "RwLock",
+        "Cell",
+        "RefCell",
+        "UnsafeCell",
+        "OnceCell",
+        "AtomicBool",
+        "AtomicI8",
+        "AtomicI16",
+        "AtomicI32",
+        "AtomicI64",
+        "AtomicIsize",
+        "AtomicU8",
+        "AtomicU16",
+        "AtomicU32",
+        "AtomicU64",
+        "AtomicUsize",
+    ];
+    if let Some(name) = path_last_ident(inner)
+        && DENIED.contains(&name.as_str())
+    {
+        return Err(syn::Error::new_spanned(
+            inner,
+            format!(
+                "smart_system: `Res<{name}<…>>` holds interior mutability and is not \
+                 `PlainResource` — use `ResMut` (declares a write) instead"
+            ),
+        ));
+    }
+    Ok(())
+}
+pub(crate) fn combine_errors(errors: Vec<syn::Error>) -> syn::Error {
+    let mut iter = errors.into_iter();
+    match iter.next() {
+        Some(first) => {
+            let mut combined = first;
+            for err in iter {
+                combined.combine(err);
+            }
+            combined
+        }
+        // Unreachable in practice (callers check non-empty first); kept
+        // total instead of panicking so error aggregation stays clean.
+        None => syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "smart_system: internal error",
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// signature validation + parameter collection (kept here so `expand` stays
+// a thin orchestrator; pure `syn` checks, no project calls)
+// ---------------------------------------------------------------------------
+
+/// Validates the system signature shape: sync, safe, non-generic, unit
+/// return, at least one input.
+pub(crate) fn check_signature(func: &ItemFn) -> Result<(), syn::Error> {
+    if func.sig.asyncness.is_some() {
+        return Err(syn::Error::new_spanned(
+            func.sig.fn_token,
+            "smart_system: async systems are not supported",
+        ));
+    }
+    if matches!(func.sig.safety, syn::Safety::Unsafe(_)) {
+        return Err(syn::Error::new_spanned(
+            func.sig.fn_token,
+            "smart_system: unsafe systems are not supported",
+        ));
+    }
+    if !func.sig.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &func.sig.generics,
+            "smart_system: generic systems are not supported in v2",
+        ));
+    }
+    if let syn::ReturnType::Type(_, ty) = &func.sig.output
+        && !matches!(**ty, Type::Tuple(ref t) if t.elems.is_empty())
+    {
+        return Err(syn::Error::new_spanned(
+            &func.sig.output,
+            "smart_system: systems must return `()` — bare `return` skips the entity",
+        ));
+    }
+    if func.sig.inputs.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &func.sig,
+            "smart_system: the first parameter must be `u: &T` / `u: &mut T` with `T: Pack`",
+        ));
+    }
+    Ok(())
+}
+
+/// Splits inputs into the entity parameter plus typed parameters,
+/// rejecting reserved `__smart_*` names.
+pub(crate) fn collect_params<'a, I>(
+    inputs: I,
+) -> Result<(Ident, Type, bool, Vec<TypedParam>), syn::Error>
+where
+    I: Iterator<Item = &'a FnArg>,
+{
+    let mut inputs = inputs;
+    let Some(first) = inputs.next() else {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "smart_system: the first parameter must be `u: &T` / `u: &mut T` with `T: Pack`",
+        ));
+    };
+    let (u_ident, pack_ty, is_mut) = parse_first_param(first)?;
+
+    let mut params: Vec<TypedParam> = Vec::new();
+    for arg in inputs {
+        params.push(parse_param(arg)?);
+    }
+
+    for param in &params {
+        if param.name.to_string().starts_with(RESERVED_PREFIX) {
+            return Err(syn::Error::new_spanned(
+                &param.name,
+                "smart_system: parameter names starting with `__smart_` are reserved",
+            ));
+        }
+    }
+    Ok((u_ident, pack_ty, is_mut, params))
+}

@@ -11,25 +11,26 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+
+use crate::pack_mut::{generate_pack_get_mut, generate_pack_mut_group};
 use syn::{
-    Data, DeriveInput, Fields, FieldsNamed, Generics, Ident, Type, TypePath, WhereClause,
-    parse_macro_input,
+    Data, DeriveInput, Fields, FieldsNamed, Generics, Ident, Type, TypePath, parse_macro_input,
 };
 
 #[derive(Clone)]
-struct FieldInfo {
-    name: Ident,
-    lane_ty: Type,
+pub(crate) struct FieldInfo {
+    pub(crate) name: Ident,
+    pub(crate) lane_ty: Type,
     // Unique wrapper type for this field's lane
-    wrapper_name: Ident,
+    pub(crate) wrapper_name: Ident,
     // `Option<T>` fields are sparse lanes of `T` (missing entry ⇔ `None`).
-    optional: bool,
+    pub(crate) optional: bool,
 }
 
 #[derive(Clone)]
-struct LaneInfo {
-    wrapper_ty: Type,
-    inner_ty: Type,
+pub(crate) struct LaneInfo {
+    pub(crate) wrapper_ty: Type,
+    pub(crate) inner_ty: Type,
 }
 
 struct PackInfo {
@@ -151,15 +152,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let pack_insert = generate_pack_insert(&info.fields);
     let pack_get = generate_pack_get(struct_name, &info.fields, &ty_generics);
     let pack_get_mut = generate_pack_get_mut(&info.fields, &ty_generics, &pack_mut_name);
-    let (pack_mut_struct, pack_mut_methods) = generate_pack_mut_struct(
+    let (pack_mut_struct, pack_mut_methods, for_each_packed) = generate_pack_mut_group(
         struct_name,
         &info.fields,
-        &ty_generics,
-        where_clause,
-        &pack_mut_name,
-    );
-    let for_each_packed = generate_for_each_packed(
-        struct_name,
         &ty_generics,
         where_clause,
         &pack_mut_name,
@@ -241,23 +236,31 @@ fn generate_pack_register(lanes: &[LaneInfo]) -> TokenStream2 {
 }
 
 fn generate_pack_insert(fields: &[FieldInfo]) -> TokenStream2 {
-    let inserts = fields.iter().map(|f| {
-        let name = &f.name;
-        let wrapper_name = &f.wrapper_name;
-        if f.optional {
-            quote! {
-                if let Some(__inner) = self.#name.clone() {
-                    store.insert(entity, #wrapper_name(__inner));
-                }
-            }
-        } else {
-            quote! {
-                store.insert(entity, #wrapper_name(self.#name.clone()));
-            }
-        }
-    });
+    let inserts = fields
+        .iter()
+        .map(|f| insert_field_stmt(f, quote! { store }));
 
     quote! { #(#inserts)* }
+}
+
+/// Per-field insert statement into `lane` (`store` for eager insert,
+/// `__lane` for guarded scatter). Sparse (`Option`) fields only write
+/// present values. Shared by insert and scatter so the optional-guard
+/// shape lives in exactly one place.
+fn insert_field_stmt(field: &FieldInfo, lane: TokenStream2) -> TokenStream2 {
+    let name = &field.name;
+    let wrapper_name = &field.wrapper_name;
+    if field.optional {
+        quote! {
+            if let Some(__inner) = self.#name.clone() {
+                #lane.insert(entity, #wrapper_name(__inner));
+            }
+        }
+    } else {
+        quote! {
+            #lane.insert(entity, #wrapper_name(self.#name.clone()));
+        }
+    }
 }
 
 fn generate_pack_get(
@@ -289,56 +292,17 @@ fn generate_pack_get(
     }
 }
 
-fn generate_pack_get_mut(
-    fields: &[FieldInfo],
-    ty_generics: &syn::TypeGenerics,
-    pack_mut_name: &Ident,
-) -> TokenStream2 {
-    let mut lane_guards = Vec::new();
-    let mut guard_fields_init = Vec::new();
-
-    for field in fields {
-        let name = &field.name;
-        let wrapper_name = &field.wrapper_name;
-        let guard_name = format_ident!("_guard_{}", name);
-        lane_guards.push(quote! {
-            let #guard_name = store.write_lane::<#wrapper_name>()?;
-        });
-        guard_fields_init.push(quote! {
-            #guard_name,
-        });
-    }
-
-    quote! {
-        #(#lane_guards)*
-        Some(#pack_mut_name #ty_generics {
-            #(#guard_fields_init)*
-            _entity: entity,
-        })
-    }
-}
-
 fn generate_pack_put(fields: &[FieldInfo]) -> TokenStream2 {
     // Scatter one field at a time: each `write_lane` guard is dropped
     // before the next is taken, so lanes are never locked nested and no
     // canonical capture order is needed (system_param::canonical_lane_order
     // applies once multi-lane batch locking lands).
     let puts = fields.iter().map(|f| {
-        let name = &f.name;
         let wrapper_name = &f.wrapper_name;
-        if f.optional {
-            quote! {
-                if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
-                    if let Some(__inner) = self.#name.clone() {
-                        __lane.insert(entity, #wrapper_name(__inner));
-                    }
-                }
-            }
-        } else {
-            quote! {
-                if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
-                    __lane.insert(entity, #wrapper_name(self.#name.clone()));
-                }
+        let insert = insert_field_stmt(f, quote! { __lane });
+        quote! {
+            if let Some(mut __lane) = store.write_lane::<#wrapper_name>() {
+                #insert
             }
         }
     });
@@ -362,92 +326,4 @@ fn generate_pack_lane_ids(lanes: &[LaneInfo]) -> TokenStream2 {
         quote! { std::any::TypeId::of::<#wrapper>() }
     });
     quote! { vec![#(#ids),*] }
-}
-
-fn generate_for_each_packed(
-    struct_name: &Ident,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&WhereClause>,
-    pack_mut_name: &Ident,
-    lanes: &[LaneInfo],
-) -> TokenStream2 {
-    // Iterate over entities present in the first generated lane; for each,
-    // acquire a `PackMut` and hand it to the caller. This is the packed
-    // analogue of `for_each_entity!` — it traverses a `Pack`-derived struct
-    // field-by-field (SoA) without materializing the whole struct.
-    let first_wrapper = &lanes[0].wrapper_ty;
-    quote! {
-        impl #ty_generics #struct_name #ty_generics #where_clause {
-            /// Iterate every entity that owns this packed component, giving
-            /// the closure `&mut PackMut` (field accessors per lane).
-            pub fn for_each_packed<F>(store: &mut ornis_core::SmartStore, mut f: F)
-            where
-                F: FnMut(&mut #pack_mut_name #ty_generics),
-            {
-                // Collect the entity set first (releasing the read guard),
-                // then acquire `PackMut` per entity — a live read-lane guard
-                // would otherwise conflict with `pack_get_mut`'s &mut store.
-                let entities: Vec<ornis_core::Entity> = match store.read_lane::<#first_wrapper>() {
-                    Some(__lane) => __lane.iter_entities().collect(),
-                    None => return,
-                };
-                for __entity in entities {
-                    if let Some(mut __pm) =
-                        <Self as ornis_core::Pack>::pack_get_mut(store, __entity)
-                    {
-                        f(&mut __pm);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn generate_pack_mut_struct(
-    _struct_name: &Ident,
-    fields: &[FieldInfo],
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&WhereClause>,
-    pack_mut_name: &Ident,
-) -> (TokenStream2, TokenStream2) {
-    let guard_fields = fields.iter().map(|f| {
-        let name = &f.name;
-        let wrapper_name = &f.wrapper_name;
-        let guard_name = format_ident!("_guard_{}", name);
-        quote! { #guard_name: std::sync::RwLockWriteGuard<'a, ornis_core::ComponentStore<#wrapper_name>>, }
-    });
-
-    let accessor_methods = fields.iter().map(|f| {
-        let name = &f.name;
-        let inner_ty = &f.lane_ty;
-        let guard_name = format_ident!("_guard_{}", name);
-        if f.optional {
-            quote! {
-                pub fn #name(&mut self) -> Option<&mut #inner_ty> {
-                    self.#guard_name.get_mut(self._entity).map(|__w| &mut __w.0)
-                }
-            }
-        } else {
-            quote! {
-                pub fn #name(&mut self) -> &mut #inner_ty {
-                    &mut self.#guard_name.get_mut(self._entity).unwrap().0
-                }
-            }
-        }
-    });
-
-    let struct_def = quote! {
-        pub struct #pack_mut_name<'a, #ty_generics> #where_clause {
-            #(#guard_fields)*
-            _entity: ornis_core::Entity,
-        }
-    };
-
-    let methods = quote! {
-        impl<'a, #ty_generics> #pack_mut_name<'a, #ty_generics> #where_clause {
-            #(#accessor_methods)*
-        }
-    };
-
-    (struct_def, methods)
 }

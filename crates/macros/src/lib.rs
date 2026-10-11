@@ -25,11 +25,16 @@ mod for_each_entity;
 mod gpu_pipeline;
 mod kernel;
 mod pack;
+mod pack_mut;
 mod pipeline_config;
 mod plain_resource;
 mod register_component;
 mod smart_pipeline;
 mod smart_system;
+mod smart_system_body_links;
+mod smart_system_body_visit;
+mod smart_system_emit;
+mod smart_system_parse;
 mod stages;
 mod static_profile;
 mod wgsl;
@@ -134,6 +139,7 @@ pub fn derive_shader_context(input: TokenStream) -> TokenStream {
 /// to compile instead of sharing mutable state through [`Res`].
 /// See [`smart_system`](smart_system).
 #[proc_macro_derive(PlainResource)]
+#[allow(dead_code)] // proc-macro entry: invoked by the compiler on derive use, invisible to the call graph (8 sibling entries carry the same note via baseline)
 pub fn derive_plain_resource(input: TokenStream) -> TokenStream {
     plain_resource::derive(input)
 }
@@ -145,6 +151,7 @@ pub fn derive_plain_resource(input: TokenStream) -> TokenStream {
 /// implementing `ornis_core::System`, generating the entity loop and the
 /// access set from the parameter types.
 #[proc_macro_attribute]
+#[allow(dead_code)] // proc-macro entry: invoked by the compiler on attribute use, invisible to the call graph (8 sibling entries carry the same note via baseline)
 pub fn smart_system(attr: TokenStream, item: TokenStream) -> TokenStream {
     smart_system::attribute(attr, item)
 }
