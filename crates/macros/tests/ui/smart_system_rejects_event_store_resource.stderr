@@ -1,0 +1,5 @@
+error: smart_system: `Res<EventStore<_>>` / `ResMut<EventStore<_>>` are forbidden — declare queue access with `EventWriter<E>` / `EventReader<E>` so duplicate and conflicting declarations stay detectable
+  --> tests/ui/smart_system_rejects_event_store_resource.rs:14:34
+   |
+14 | fn sys(u: &mut Unit, raw: ResMut<EventStore<Ping>>, inbox: EventReader<Ping>) {
+   |                                  ^^^^^^^^^^^^^^^^

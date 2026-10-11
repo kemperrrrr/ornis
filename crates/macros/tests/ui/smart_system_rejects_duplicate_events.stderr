@@ -1,0 +1,5 @@
+error: smart_system: `inbox` declares `Ping` a second time — declare each resource/queue through one parameter (`Res` reads, `ResMut` writes, `EventWriter`/`EventReader` events)
+  --> tests/ui/smart_system_rejects_duplicate_events.rs:13:46
+   |
+13 | fn sys(u: &mut Unit, out: EventWriter<Ping>, inbox: EventReader<Ping>) {
+   |                                              ^^^^^

@@ -1,6 +1,5 @@
 //! UI test: one resource declared twice (read + write) is a signature error.
 
-use ornis_core::{Res, ResMut};
 use ornis_macros::smart_system;
 
 #[derive(Clone, Debug, ornis_macros::Pack)]
