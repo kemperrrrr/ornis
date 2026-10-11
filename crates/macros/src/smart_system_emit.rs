@@ -245,7 +245,7 @@ fn emit_system(
             }
 
             fn access(&self) -> ornis_core::SystemAccess {
-                let mut __access = #lane_access;
+                #lane_access
                 #(#access_stmts)*
                 __access
             }
