@@ -57,10 +57,8 @@ impl OrbitCamera {
     const MAX_RADIUS: f32 = 1000.0;
     /// Orthographic zoom bounds: the wheel moves `half_height` inside
     /// `[0.01, 1000]` m (same exponential speed as the radius zoom).
-    const MIN_HALF_HEIGHT: f32 = 0.01;
-    /// Orthographic zoom bounds: the wheel moves `half_height` inside
-    /// `[0.01, 1000]` m (same exponential speed as the radius zoom).
-    const MAX_HALF_HEIGHT: f32 = 1000.0;
+    const MIN_HALF_HEIGHT: Meters = Meters(0.01);
+    const MAX_HALF_HEIGHT: Meters = Meters(1000.0);
     /// Keep elevation off the poles so `look_at` never degenerates.
     const ELEVATION_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
     const ROTATE_SPEED: f32 = 0.005;
@@ -184,8 +182,9 @@ impl OrbitCamera {
             }
             CameraProjection::Orthographic { half_height } => {
                 let zoomed = half_height.get() * (delta_y * Self::ZOOM_SPEED).exp();
-                *half_height =
-                    Meters::new(zoomed.clamp(Self::MIN_HALF_HEIGHT, Self::MAX_HALF_HEIGHT));
+                *half_height = Meters::new(
+                    zoomed.clamp(Self::MIN_HALF_HEIGHT.get(), Self::MAX_HALF_HEIGHT.get()),
+                );
             }
         }
     }
@@ -626,6 +625,9 @@ mod tests {
         assert!(frustum.sphere_visible(Vec3::new(0.0, 0.0, -50.0), 0.5));
         assert!(!frustum.sphere_visible(Vec3::new(10.0, 0.0, 0.0), 0.5));
         assert!(!frustum.sphere_visible(Vec3::new(0.0, -10.0, 0.0), 0.5));
+        // Boundary: the half-width edge sits at ±hh*aspect ≈ ±3.56.
+        assert!(frustum.sphere_visible(Vec3::new(3.9, 0.0, 0.0), 0.5));
+        assert!(!frustum.sphere_visible(Vec3::new(4.2, 0.0, 0.0), 0.5));
     }
 
     #[test]
@@ -655,6 +657,15 @@ mod tests {
         }
         let clamped = ortho_half_height(&orbit.view_parameters());
         assert_eq!(clamped.get(), 1000.0);
+        // The zoom clamps at the bottom instead of running away.
+        let mut orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
+        for _ in 0..100 {
+            let mut input = InputState::new();
+            input.add_wheel_delta(-100.0);
+            orbit.apply_input(&input);
+        }
+        let clamped = ortho_half_height(&orbit.view_parameters());
+        assert_eq!(clamped.get(), 0.01);
         // Rotation still works in ortho mode.
         let mut orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
         let mut input = InputState::new();

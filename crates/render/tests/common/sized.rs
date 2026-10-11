@@ -4,6 +4,8 @@
 //! keep zero duplicated harness code (the rustqual ratchet flags exact
 //! `DUPLICATE` pairs otherwise).
 
+#![allow(dead_code)]
+
 /// Offscreen frame spec for [`render_and_readback`].
 pub struct FrameSpec {
     /// Frame extent in pixels.
