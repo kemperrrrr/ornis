@@ -8,48 +8,40 @@
 //! and ~1% of entities, (c) cross-entity reads through `target: Entity`
 //! with adjacent (cache-friendly) and scattered targets.
 //!
-//! Not part of the CI gate: the Performance workflow runs it manually and
-//! the numbers go into the PR description (frame time + ratio to AoS).
+//! Scaffolding lives in `support.rs` so this file stays under the
+//! module-length cap. Not part of the CI gate: the Performance workflow
+//! runs it manually and the numbers go into the PR description (frame
+//! time + ratio to AoS).
+
+#[path = "smart_system_bench/support.rs"]
+mod support;
 
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use ornis_core::{Entity, Pack, Resources, Schedule, SmartStore, System, SystemAccess};
-
-/// Per-object bundle under test: one generated lane per field.
-#[derive(Clone, Debug, ornis_macros::Pack)]
-struct Body {
-    position: f32,
-    velocity: f32,
-    active: bool,
-    target: Option<Entity>,
-}
-
-#[allow(non_camel_case_types)]
-type PosLane = Body__position__PackLane__0;
-#[allow(non_camel_case_types)]
-type VelLane = Body__velocity__PackLane__1;
-#[allow(non_camel_case_types)]
-type ActiveLane = Body__active__PackLane__2;
-#[allow(non_camel_case_types)]
-type TargetLane = Body__target__PackLane__3;
-
-const DT: f32 = 1.0 / 60.0;
-const GRAVITY: f32 = -9.81;
-/// Pull toward the link target per step (scenario c).
-const LINK_PULL: f32 = 0.1;
+use ornis_core::{Entity, Pack, Resources, SmartStore, System, SystemAccess};
+use support::{
+    ActiveLane, Body, ENTITY_COUNTS, FilterDensity, LinkLayout, MEASURE_SECS, PosLane, SAMPLE_SIZE,
+    TargetLane, VelLane, WARMUP_SECS, aos_filter, aos_integrate, aos_link, build_aos, build_world,
+    schedule_for,
+};
+use support::{DT, GRAVITY, LINK_PULL};
 
 // ---------------------------------------------------------------------------
 // (a) linear integration
 // ---------------------------------------------------------------------------
 
+/// `#[smart_system]` kernel (consumed by the macro; invisible to the
+/// call graph, like the `comparison_bench` helpers in baseline).
+#[allow(dead_code)]
 #[ornis_macros::smart_system]
 fn integrate_body(b: &mut Body) {
     b.velocity += GRAVITY * DT;
     b.position += b.velocity * DT;
 }
 
+/// Today's style: one guard per lane, tight zip over dense data.
 struct IntegrateManual;
 
 impl System for IntegrateManual {
@@ -65,6 +57,7 @@ impl System for IntegrateManual {
         access
     }
 
+    // qual:allow(complexity, error_handling) reason: "bench-only lane fetch — lanes are guaranteed by build_world setup; mirrors production pack_put which skips missing lanes instead"
     fn run(&self, resources: &Resources) {
         let store = resources.get::<SmartStore>().expect("store");
         let mut positions = store.write_lane::<PosLane>().expect("position lane");
@@ -81,6 +74,9 @@ impl System for IntegrateManual {
 // (b) filter via early return
 // ---------------------------------------------------------------------------
 
+/// `#[smart_system]` kernel (consumed by the macro; invisible to the
+/// call graph, like the `comparison_bench` helpers in baseline).
+#[allow(dead_code)]
 #[ornis_macros::smart_system]
 fn filter_body(b: &mut Body) {
     if !b.active {
@@ -90,6 +86,7 @@ fn filter_body(b: &mut Body) {
     b.position += b.velocity * DT;
 }
 
+/// Today's style with an explicit skip over inactive lanes.
 struct FilterManual;
 
 impl System for FilterManual {
@@ -105,6 +102,7 @@ impl System for FilterManual {
         access
     }
 
+    // qual:allow(complexity, error_handling) reason: "bench-only lane fetch — lanes are guaranteed by build_world setup; mirrors production pack_put which skips missing lanes instead"
     fn run(&self, resources: &Resources) {
         let store = resources.get::<SmartStore>().expect("store");
         let mut positions = store.write_lane::<PosLane>().expect("position lane");
@@ -131,12 +129,16 @@ impl System for FilterManual {
 // (c) cross-entity read through `target`
 // ---------------------------------------------------------------------------
 
+/// `#[smart_system]` kernel (consumed by the macro; invisible to the
+/// call graph, like the `comparison_bench` helpers in baseline).
+#[allow(dead_code)]
 #[ornis_macros::smart_system]
 fn link_body(b: &mut Body) {
     let goal = b.target.map(|t| t.position).unwrap_or(0.0);
     b.position += (goal - b.position) * LINK_PULL;
 }
 
+/// Today's style: per-entity target gather through the pack API.
 struct LinkManual;
 
 impl System for LinkManual {
@@ -152,6 +154,7 @@ impl System for LinkManual {
         access
     }
 
+    // qual:allow(complexity, error_handling) reason: "bench-only lane fetch — lanes are guaranteed by build_world setup; mirrors production pack_put which skips missing lanes instead"
     fn run(&self, resources: &Resources) {
         let store = resources.get::<SmartStore>().expect("store");
         let entities: Vec<Entity> = {
@@ -175,256 +178,117 @@ impl System for LinkManual {
 }
 
 // ---------------------------------------------------------------------------
-// (3) naive AoS baseline
+// criterion groups (one trio per scenario tag)
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-struct AosBody {
-    position: f32,
-    velocity: f32,
-    active: bool,
-    target: Option<usize>,
-}
-
-fn aos_integrate(bodies: &mut [AosBody]) {
-    for body in bodies.iter_mut() {
-        body.velocity += GRAVITY * DT;
-        body.position += body.velocity * DT;
-    }
-}
-
-fn aos_filter(bodies: &mut [AosBody]) {
-    for body in bodies.iter_mut() {
-        if !body.active {
-            continue;
-        }
-        body.velocity += GRAVITY * DT;
-        body.position += body.velocity * DT;
-    }
-}
-
-fn aos_link(bodies: &mut [AosBody]) {
-    for index in 0..bodies.len() {
-        let goal = bodies[index]
-            .target
-            .map_or(0.0, |target| bodies[target].position);
-        bodies[index].position += (goal - bodies[index].position) * LINK_PULL;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// setup (not measured)
-// ---------------------------------------------------------------------------
-
-/// Deterministic xorshift for scattered targets (fixed seed, no extra deps).
-struct XorShift(u64);
-
-/// Xorshift64 step constants (Marsaglia).
-const XOR_A: u32 = 13;
-const XOR_B: u32 = 7;
-const XOR_C: u32 = 17;
-/// Fixed seed: layouts must be identical across variants.
-const XOR_SEED: u64 = 0x9E3779B97F4A7C15;
-
-impl XorShift {
-    fn next(&mut self, bound: usize) -> usize {
-        self.0 ^= self.0 << XOR_A;
-        self.0 ^= self.0 >> XOR_B;
-        self.0 ^= self.0 << XOR_C;
-        (self.0 as usize) % bound
-    }
-}
-
-enum FilterDensity {
-    Half,
-    OnePercent,
-}
-
-impl FilterDensity {
-    fn active(&self, index: usize) -> bool {
-        match self {
-            FilterDensity::Half => index.is_multiple_of(2),
-            FilterDensity::OnePercent => index.is_multiple_of(100),
-        }
-    }
-
-    fn id(&self) -> &'static str {
-        match self {
-            FilterDensity::Half => "50pct",
-            FilterDensity::OnePercent => "1pct",
-        }
-    }
-}
-
-enum LinkLayout {
-    Adjacent,
-    Scattered,
-}
-
-impl LinkLayout {
-    fn id(&self) -> &'static str {
-        match self {
-            LinkLayout::Adjacent => "adjacent",
-            LinkLayout::Scattered => "scattered",
-        }
-    }
-}
-
-fn build_world(
+/// Runs the three variants (smart/manual/AoS) for one scenario tag.
+// qual:allow(test_quality, untested) reason: "benchmark harness wiring — exercised by criterion runs, mirroring comparison_bench helpers"
+fn bench_trio(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    tag: &str,
     count: usize,
-    density: &FilterDensity,
-    layout: &LinkLayout,
-) -> (Resources, Vec<Entity>) {
-    let mut store = SmartStore::new();
-    Body::pack_register(&mut store);
-    let mut bodies = Vec::with_capacity(count);
-    for index in 0..count {
-        let entity = store.create_entity();
-        bodies.push((
-            entity,
-            Body {
-                position: index as f32,
-                velocity: 1.0,
-                active: density.active(index),
-                target: None,
-            },
-        ));
-    }
-    let mut rng = XorShift(XOR_SEED);
-    let entities: Vec<Entity> = bodies.iter().map(|(entity, _)| *entity).collect();
-    for (index, (entity, body)) in bodies.iter_mut().enumerate() {
-        let target = match layout {
-            LinkLayout::Adjacent => entities[(index + 1) % count],
-            LinkLayout::Scattered => entities[rng.next(count)],
-        };
-        body.target = Some(target);
-        body.pack_insert(&mut store, *entity);
-    }
-    let mut resources = Resources::new();
-    resources.insert(store);
-    (resources, entities)
+    smart: impl Fn(),
+    manual: impl Fn(),
+    aos: impl FnMut(),
+) {
+    group.throughput(Throughput::Elements(count as u64));
+    group.bench_with_input(BenchmarkId::new("smart_system", tag), &count, |b, _| {
+        b.iter(&smart);
+    });
+    group.bench_with_input(BenchmarkId::new("manual_system", tag), &count, |b, _| {
+        b.iter(&manual);
+    });
+    let mut aos = aos;
+    group.bench_with_input(BenchmarkId::new("naive_aos", tag), &count, |b, _| {
+        b.iter(&mut aos);
+    });
 }
 
-fn build_aos(count: usize, density: &FilterDensity, layout: &LinkLayout) -> Vec<AosBody> {
-    let mut rng = XorShift(XOR_SEED);
-    (0..count)
-        .map(|index| {
-            let target = match layout {
-                LinkLayout::Adjacent => (index + 1) % count,
-                LinkLayout::Scattered => rng.next(count),
-            };
-            AosBody {
-                position: index as f32,
-                velocity: 1.0,
-                active: density.active(index),
-                target: Some(target),
-            }
-        })
-        .collect()
-}
-
-fn schedule_for(system: impl System + 'static) -> Schedule {
-    let mut schedule = Schedule::new();
-    schedule.add_system(system);
-    schedule
-}
-
-// ---------------------------------------------------------------------------
-// criterion groups
-// ---------------------------------------------------------------------------
-
-fn bench_linear(c: &mut Criterion) {
-    let mut group = c.benchmark_group("smart_system_linear");
+/// Configures sample/measure/warm-up budgets shared by all groups.
+// qual:allow(test_quality, untested) reason: "benchmark harness wiring — exercised by criterion runs, mirroring comparison_bench helpers"
+fn bench_group<'a>(
+    c: &'a mut Criterion,
+    name: &str,
+) -> criterion::BenchmarkGroup<'a, criterion::measurement::WallTime> {
+    let mut group = c.benchmark_group(name);
     group
-        .sample_size(20)
-        .measurement_time(Duration::from_secs(4))
-        .warm_up_time(Duration::from_secs(1));
-    for count in [10_000, 100_000] {
-        group.throughput(Throughput::Elements(count as u64));
+        .sample_size(SAMPLE_SIZE)
+        .measurement_time(Duration::from_secs(MEASURE_SECS))
+        .warm_up_time(Duration::from_secs(WARMUP_SECS));
+    group
+}
+
+/// `#[allow(dead_code)]`: registered with criterion, invisible to the call graph.
+#[allow(dead_code)]
+fn bench_linear(c: &mut Criterion) {
+    let mut group = bench_group(c, "smart_system_linear");
+    for count in ENTITY_COUNTS {
         let density = FilterDensity::Half;
         let layout = LinkLayout::Adjacent;
-
         let (resources, _) = build_world(count, &density, &layout);
-        let schedule = schedule_for(IntegrateBodySystem::new());
-        group.bench_with_input(BenchmarkId::new("smart_system", count), &count, |b, _| {
-            b.iter(|| schedule.run(&resources));
-        });
-
-        let (resources, _) = build_world(count, &density, &layout);
-        let schedule = schedule_for(IntegrateManual);
-        group.bench_with_input(BenchmarkId::new("manual_system", count), &count, |b, _| {
-            b.iter(|| schedule.run(&resources));
-        });
-
+        let smart = schedule_for(IntegrateBodySystem::new());
+        let (resources_manual, _) = build_world(count, &density, &layout);
+        let manual = schedule_for(IntegrateManual);
         let mut bodies = build_aos(count, &density, &layout);
-        group.bench_with_input(BenchmarkId::new("naive_aos", count), &count, |b, _| {
-            b.iter(|| aos_integrate(&mut bodies));
-        });
+        bench_trio(
+            &mut group,
+            &count.to_string(),
+            count,
+            || smart.run(&resources),
+            || manual.run(&resources_manual),
+            || aos_integrate(&mut bodies),
+        );
     }
     group.finish();
 }
 
+/// `#[allow(dead_code)]`: registered with criterion, invisible to the call graph.
+#[allow(dead_code)]
 fn bench_filter(c: &mut Criterion) {
-    let mut group = c.benchmark_group("smart_system_filter");
-    group
-        .sample_size(20)
-        .measurement_time(Duration::from_secs(4))
-        .warm_up_time(Duration::from_secs(1));
+    let mut group = bench_group(c, "smart_system_filter");
     for density in [FilterDensity::Half, FilterDensity::OnePercent] {
-        for count in [10_000, 100_000] {
-            group.throughput(Throughput::Elements(count as u64));
+        for count in ENTITY_COUNTS {
             let layout = LinkLayout::Adjacent;
             let name = format!("{}_{}", density.id(), count);
-
             let (resources, _) = build_world(count, &density, &layout);
-            let schedule = schedule_for(FilterBodySystem::new());
-            group.bench_with_input(BenchmarkId::new("smart_system", &name), &count, |b, _| {
-                b.iter(|| schedule.run(&resources));
-            });
-
-            let (resources, _) = build_world(count, &density, &layout);
-            let schedule = schedule_for(FilterManual);
-            group.bench_with_input(BenchmarkId::new("manual_system", &name), &count, |b, _| {
-                b.iter(|| schedule.run(&resources));
-            });
-
+            let smart = schedule_for(FilterBodySystem::new());
+            let (resources_manual, _) = build_world(count, &density, &layout);
+            let manual = schedule_for(FilterManual);
             let mut bodies = build_aos(count, &density, &layout);
-            group.bench_with_input(BenchmarkId::new("naive_aos", &name), &count, |b, _| {
-                b.iter(|| aos_filter(&mut bodies));
-            });
+            bench_trio(
+                &mut group,
+                &name,
+                count,
+                || smart.run(&resources),
+                || manual.run(&resources_manual),
+                || aos_filter(&mut bodies),
+            );
         }
     }
     group.finish();
 }
 
+/// `#[allow(dead_code)]`: registered with criterion, invisible to the call graph.
+#[allow(dead_code)]
 fn bench_link(c: &mut Criterion) {
-    let mut group = c.benchmark_group("smart_system_link");
-    group
-        .sample_size(20)
-        .measurement_time(Duration::from_secs(4))
-        .warm_up_time(Duration::from_secs(1));
+    let mut group = bench_group(c, "smart_system_link");
     for layout in [LinkLayout::Adjacent, LinkLayout::Scattered] {
-        for count in [10_000, 100_000] {
-            group.throughput(Throughput::Elements(count as u64));
+        for count in ENTITY_COUNTS {
             let density = FilterDensity::Half;
             let name = format!("{}_{}", layout.id(), count);
-
             let (resources, _) = build_world(count, &density, &layout);
-            let schedule = schedule_for(LinkBodySystem::new());
-            group.bench_with_input(BenchmarkId::new("smart_system", &name), &count, |b, _| {
-                b.iter(|| schedule.run(&resources));
-            });
-
-            let (resources, _) = build_world(count, &density, &layout);
-            let schedule = schedule_for(LinkManual);
-            group.bench_with_input(BenchmarkId::new("manual_system", &name), &count, |b, _| {
-                b.iter(|| schedule.run(&resources));
-            });
-
+            let smart = schedule_for(LinkBodySystem::new());
+            let (resources_manual, _) = build_world(count, &density, &layout);
+            let manual = schedule_for(LinkManual);
             let mut bodies = build_aos(count, &density, &layout);
-            group.bench_with_input(BenchmarkId::new("naive_aos", &name), &count, |b, _| {
-                b.iter(|| aos_link(&mut bodies));
-            });
+            bench_trio(
+                &mut group,
+                &name,
+                count,
+                || smart.run(&resources),
+                || manual.run(&resources_manual),
+                || aos_link(&mut bodies),
+            );
         }
     }
     group.finish();
