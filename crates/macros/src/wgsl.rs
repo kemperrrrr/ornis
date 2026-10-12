@@ -43,6 +43,51 @@ pub(crate) fn var_type(ty: &syn::Type) -> String {
     rust_type_to_wgsl(ty)
 }
 
+/// Bind-group-layout entries for a legacy compute pipeline: one
+/// read-only storage entry per input plus one read-write output entry,
+/// matching the `@binding(i)` declarations in [`wgsl_source_from_fn`].
+/// Shared by the `#[kernel]` and legacy `#[gpu_pipeline]` entry points
+/// so the layout and the declarations cannot drift apart.
+pub fn storage_bgl_entries(param_count: usize) -> Vec<proc_macro2::TokenStream> {
+    // `bool` has no `ToTokens`, so the access flag selects between two
+    // spellings instead of interpolating.
+    fn entry(binding: u32, read_only: bool) -> proc_macro2::TokenStream {
+        if read_only {
+            quote::quote! {
+                wgpu::BindGroupLayoutEntry {
+                    binding: #binding,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            }
+        } else {
+            quote::quote! {
+                wgpu::BindGroupLayoutEntry {
+                    binding: #binding,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    for binding in 0..param_count {
+        entries.push(entry(binding as u32, true));
+    }
+    entries.push(entry(param_count as u32, false));
+    entries
+}
+
 /// Map a known scalar/glam type name to WGSL; `None` for anything else
 /// (interface/layout mirrors, whose Rust names match WGSL by convention).
 pub fn glam_type_to_wgsl(name: &str) -> Option<String> {

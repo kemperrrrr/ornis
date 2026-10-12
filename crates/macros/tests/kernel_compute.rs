@@ -104,6 +104,24 @@ fn compute_round_trip_on_non_multiple_of_64() {
         .map(|(&x, &y)| const_two::eval(x, y))
         .collect();
 
+    let Some((device, queue)) = create_test_device() else {
+        eprintln!("compute_round_trip_on_non_multiple_of_64: no wgpu device — skipped");
+        return;
+    };
+    let got = run_const_two(&device, &queue, &a, &b);
+
+    assert_eq!(got.len(), N);
+    for (i, (&got, &want)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-6,
+            "lane {i}: gpu {got} != cpu {want}"
+        );
+    }
+}
+
+/// Test device, or `None` without an adapter (CI machines without GPU
+/// drivers skip instead of failing).
+fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),
@@ -111,97 +129,93 @@ fn compute_round_trip_on_non_multiple_of_64() {
         backend_options: Default::default(),
         display: None,
     });
-    let Some(adapter) =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-            apply_limit_buckets: false,
-        }))
-        .ok()
-    else {
-        eprintln!("compute_round_trip_on_non_multiple_of_64: no wgpu adapter — skipped");
-        return;
-    };
-    let Some((device, queue)) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("ornis-macros kernel test"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .ok()
-    else {
-        eprintln!("compute_round_trip_on_non_multiple_of_64: no wgpu device — skipped");
-        return;
-    };
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+        apply_limit_buckets: false,
+    }))
+    .ok()?;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("ornis-macros kernel test"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::Performance,
+        trace: wgpu::Trace::Off,
+    }))
+    .ok()
+}
 
-    let size = (N * 4) as u64;
-    let a_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("a"),
+fn storage_buffer(
+    device: &wgpu::Device,
+    label: &'static str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
         size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        usage,
         mapped_at_creation: false,
-    });
-    let b_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("b"),
+    })
+}
+
+fn whole_buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer,
+            offset: 0,
+            size: None,
+        }),
+    }
+}
+
+/// Dispatch `const_two` over `a`/`b` and read back the output lanes.
+fn run_const_two(device: &wgpu::Device, queue: &wgpu::Queue, a: &[f32], b: &[f32]) -> Vec<f32> {
+    let size = (a.len() * 4) as u64;
+    let a_buf = storage_buffer(
+        device,
+        "a",
         size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("out"),
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
+    let b_buf = storage_buffer(
+        device,
+        "b",
         size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("staging"),
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
+    let out_buf = storage_buffer(
+        device,
+        "out",
         size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&a_buf, 0, &f32_list(&a));
-    queue.write_buffer(&b_buf, 0, &f32_list(&b));
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    );
+    let staging = storage_buffer(
+        device,
+        "staging",
+        size,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    queue.write_buffer(&a_buf, 0, &f32_list(a));
+    queue.write_buffer(&b_buf, 0, &f32_list(b));
 
     // `create_pipeline` must succeed with its storage declarations: an
     // empty bind group layout would fail pipeline creation here.
-    let bgl = const_two::create_bind_group_layout(&device);
-    let pipeline = const_two::create_pipeline(&device);
+    let bgl = const_two::create_bind_group_layout(device);
+    let pipeline = const_two::create_pipeline(device);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("const_two"),
         layout: &bgl,
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &a_buf,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &b_buf,
-                    offset: 0,
-                    size: None,
-                }),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &out_buf,
-                    offset: 0,
-                    size: None,
-                }),
-            },
+            whole_buffer_entry(0, &a_buf),
+            whole_buffer_entry(1, &b_buf),
+            whole_buffer_entry(2, &out_buf),
         ],
     });
 
-    let workgroups = N.div_ceil(64) as u32;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("const_two"),
     });
@@ -212,11 +226,15 @@ fn compute_round_trip_on_non_multiple_of_64() {
         });
         cpass.set_pipeline(&pipeline);
         cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.dispatch_workgroups(workgroups, 1, 1);
+        cpass.dispatch_workgroups(a.len().div_ceil(64) as u32, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&out_buf, 0, &staging, 0, size);
     queue.submit([encoder.finish()]);
+    read_staging(device, &staging)
+}
 
+/// Block on a staging-buffer readback and decode it as `f32` lanes.
+fn read_staging(device: &wgpu::Device, staging: &wgpu::Buffer) -> Vec<f32> {
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -238,12 +256,5 @@ fn compute_round_trip_on_non_multiple_of_64() {
         read_f32_list(&view)
     };
     staging.unmap();
-
-    assert_eq!(got.len(), N);
-    for (i, (&got, &want)) in got.iter().zip(&want).enumerate() {
-        assert!(
-            (got - want).abs() < 1e-6,
-            "lane {i}: gpu {got} != cpu {want}"
-        );
-    }
+    got
 }

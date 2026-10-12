@@ -914,39 +914,9 @@ fn legacy_gpu_pipeline(func: &ItemFn) -> TokenStream {
     let fn_name = &func.sig.ident;
     let wgsl = crate::wgsl::wgsl_source_from_fn(func);
 
-    // Same storage layout as `#[kernel]`: one read-only entry per input
-    // plus one read-write output entry, matching the `@binding(i)`
-    // declarations in `wgsl_source_from_fn`.
-    let param_count = func.sig.inputs.len();
-    let mut bgl_entries = Vec::new();
-    for binding in 0..param_count {
-        let binding = binding as u32;
-        bgl_entries.push(quote! {
-            wgpu::BindGroupLayoutEntry {
-                binding: #binding,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }
-        });
-    }
-    let output_binding = param_count as u32;
-    bgl_entries.push(quote! {
-        wgpu::BindGroupLayoutEntry {
-            binding: #output_binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }
-    });
+    // Same storage layout as `#[kernel]` — see
+    // `wgsl::storage_bgl_entries`.
+    let bgl_entries = crate::wgsl::storage_bgl_entries(func.sig.inputs.len());
 
     let expanded = quote! {
         pub mod #fn_name {

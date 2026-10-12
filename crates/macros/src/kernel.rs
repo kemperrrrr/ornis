@@ -194,39 +194,9 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     let body = &func.block;
 
     // One read-only storage entry per input plus one read-write output
-    // entry, matching the `@binding(i)` declarations in
-    // `wgsl_source_from_fn`. The pipeline layout references this; callers
-    // build their bind groups against it.
-    let param_count = func.sig.inputs.len();
-    let mut bgl_entries = Vec::new();
-    for binding in 0..param_count {
-        let binding = binding as u32;
-        bgl_entries.push(quote! {
-            wgpu::BindGroupLayoutEntry {
-                binding: #binding,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }
-        });
-    }
-    let output_binding = param_count as u32;
-    bgl_entries.push(quote! {
-        wgpu::BindGroupLayoutEntry {
-            binding: #output_binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }
-    });
+    // entry — see `wgsl::storage_bgl_entries`. The pipeline layout
+    // references this; callers build their bind groups against it.
+    let bgl_entries = crate::wgsl::storage_bgl_entries(func.sig.inputs.len());
 
     let expanded = quote! {
         // The user-facing `#[kernel] fn` carries the docs; the generated
