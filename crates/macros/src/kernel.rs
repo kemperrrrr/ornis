@@ -123,6 +123,21 @@ impl<'ast> Visit<'ast> for KernelValidator {
         visit::visit_expr_call(self, node);
     }
 
+    fn visit_expr_cast(&mut self, node: &'ast syn::ExprCast) {
+        if crate::wgsl_lower::cast_target_ty(&node.ty).is_none() {
+            let ty = node.ty.as_ref();
+            self.errors.push(syn::Error::new_spanned(
+                &node.ty,
+                format!(
+                    "cast to `{}` is not supported in GPU kernel `{}`; supported targets: f32, u32, i32",
+                    quote!(#ty),
+                    self.fn_name
+                ),
+            ));
+        }
+        visit::visit_expr_cast(self, node);
+    }
+
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         self.errors.push(syn::Error::new_spanned(
             node,

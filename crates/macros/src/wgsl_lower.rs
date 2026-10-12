@@ -203,8 +203,9 @@ fn lower_cast(c: &syn::ExprCast) -> IrExpr {
 }
 
 /// WGSL scalar for a Rust cast target; `None` for anything without a
-/// conversion-constructor spelling.
-fn cast_target_ty(ty: &syn::Type) -> Option<ShaderType> {
+/// conversion-constructor spelling. Shared with the `#[kernel]`
+/// validator so rejected targets fail at macro time, not at naga.
+pub(crate) fn cast_target_ty(ty: &syn::Type) -> Option<ShaderType> {
     if let syn::Type::Path(tp) = ty
         && let Some(last) = tp.path.segments.last()
     {

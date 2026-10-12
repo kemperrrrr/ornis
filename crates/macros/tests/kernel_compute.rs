@@ -4,7 +4,7 @@
 //! a 100-element dispatch (not a multiple of 64) and compares every lane
 //! against CPU `eval`, skipping gracefully without a wgpu adapter.
 
-use ornis_macros::kernel;
+use ornis_macros::{gpu_pipeline, kernel};
 
 /// int↔float casts: truncation on the CPU must survive into WGSL as
 /// conversion constructors.
@@ -39,11 +39,57 @@ fn casts_lower_to_wgsl_constructors() {
 #[test]
 fn cast_eval_matches_truncation_semantics() {
     // CPU `as` truncates toward zero; the WGSL constructors must compute
-    // the same values (checked on-device in `compute_round_trip` below).
+    // the same values — live-checked on-device in `cast_roundtrip_device`.
     assert_eq!(cast_add::eval(1.7, 2.3), 3.0);
     assert_eq!(cast_add::eval(0.2, 0.9), 0.0);
     // Negative float → i32 truncates toward zero on both sides (in range).
     assert_eq!(cast_add::eval(1.7, -2.3), -1.0);
+}
+
+/// Elementwise cast executed on-device: the full-shader compute path is
+/// the only kernel-DSL body shape that can run casts per lane (legacy
+/// compute bodies name whole buffers as scalars — see above), so the
+/// truncation-constructor parity gets its live GPU check here.
+#[gpu_pipeline(
+    workgroup_size = 64,
+    storage(cast_in: [f32; 64]),
+    storage(cast_out: [f32; 64], read_write),
+    builtin(cast_id: global_invocation_id),
+)]
+fn cast_roundtrip() {
+    let i = cast_id.x;
+    cast_out[i] = (cast_in[i] as u32) as f32;
+}
+
+#[test]
+fn cast_roundtrip_source_uses_constructors() {
+    let src = cast_roundtrip::wgsl_source();
+    // Source parens are preserved verbatim by the writer.
+    assert!(src.contains("f32((u32(cast_in[i])))"), "{src}");
+    validate_module("cast_roundtrip compute", src);
+}
+
+/// Every lane must equal the CPU `(x as u32) as f32`. Skips without a
+/// wgpu adapter.
+#[test]
+fn cast_roundtrip_device() {
+    const N: usize = 64;
+    let input: Vec<f32> = (0..N).map(|i| i as f32 + 0.7).collect();
+    let want: Vec<f32> = input.iter().map(|&x| (x as u32) as f32).collect();
+
+    let Some((device, queue)) = create_test_device() else {
+        eprintln!("cast_roundtrip_device: no wgpu device — skipped");
+        return;
+    };
+    let got = run_cast_roundtrip(&device, &queue, &input);
+
+    assert_eq!(got.len(), N);
+    for (i, (&got, &want)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-6,
+            "lane {i}: gpu {got} != cpu {want}"
+        );
+    }
 }
 
 /// Constant body: the only legacy-compute shape whose tail expression is
@@ -172,6 +218,50 @@ fn whole_buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEnt
     }
 }
 
+fn storage_layout_entry(binding: u32, read_only: bool) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+/// One compute dispatch plus output readback: shared by the
+/// `const_two` and `cast_roundtrip` round trips so the two call sites
+/// cannot drift apart.
+struct RoundTrip<'a> {
+    label: &'static str,
+    pipeline: &'a wgpu::ComputePipeline,
+    bind_group: &'a wgpu::BindGroup,
+    out_buf: &'a wgpu::Buffer,
+    staging: &'a wgpu::Buffer,
+    size: u64,
+    workgroups: u32,
+}
+
+fn dispatch_and_readback(device: &wgpu::Device, queue: &wgpu::Queue, job: &RoundTrip) -> Vec<f32> {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(job.label),
+    });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some(job.label),
+            timestamp_writes: None,
+        });
+        cpass.set_pipeline(job.pipeline);
+        cpass.set_bind_group(0, job.bind_group, &[]);
+        cpass.dispatch_workgroups(job.workgroups, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(job.out_buf, 0, job.staging, 0, job.size);
+    queue.submit([encoder.finish()]);
+    read_staging(device, job.staging)
+}
+
 /// Dispatch `const_two` over `a`/`b` and read back the output lanes.
 fn run_const_two(device: &wgpu::Device, queue: &wgpu::Queue, a: &[f32], b: &[f32]) -> Vec<f32> {
     let size = (a.len() * 4) as u64;
@@ -216,21 +306,19 @@ fn run_const_two(device: &wgpu::Device, queue: &wgpu::Queue, a: &[f32], b: &[f32
         ],
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("const_two"),
-    });
-    {
-        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("const_two"),
-            timestamp_writes: None,
-        });
-        cpass.set_pipeline(&pipeline);
-        cpass.set_bind_group(0, &bind_group, &[]);
-        cpass.dispatch_workgroups(a.len().div_ceil(64) as u32, 1, 1);
-    }
-    encoder.copy_buffer_to_buffer(&out_buf, 0, &staging, 0, size);
-    queue.submit([encoder.finish()]);
-    read_staging(device, &staging)
+    dispatch_and_readback(
+        device,
+        queue,
+        &RoundTrip {
+            label: "const_two",
+            pipeline: &pipeline,
+            bind_group: &bind_group,
+            out_buf: &out_buf,
+            staging: &staging,
+            size,
+            workgroups: a.len().div_ceil(64) as u32,
+        },
+    )
 }
 
 /// Block on a staging-buffer readback and decode it as `f32` lanes.
@@ -257,4 +345,77 @@ fn read_staging(device: &wgpu::Device, staging: &wgpu::Buffer) -> Vec<f32> {
     };
     staging.unmap();
     got
+}
+
+/// Dispatch `cast_roundtrip` over `input` and read back the output lanes.
+/// The full-shader mode exposes no `create_pipeline` helper, so the
+/// two-entry layout is built here against the declared bindings.
+fn run_cast_roundtrip(device: &wgpu::Device, queue: &wgpu::Queue, input: &[f32]) -> Vec<f32> {
+    let size = (input.len() * 4) as u64;
+    let in_buf = storage_buffer(
+        device,
+        "cast_in",
+        size,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
+    let out_buf = storage_buffer(
+        device,
+        "cast_out",
+        size,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+    );
+    let staging = storage_buffer(
+        device,
+        "staging",
+        size,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    queue.write_buffer(&in_buf, 0, &f32_list(input));
+
+    let shader = cast_roundtrip::create_shader_module(device);
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("cast_roundtrip"),
+        entries: &[
+            storage_layout_entry(0, true),
+            storage_layout_entry(1, false),
+        ],
+    });
+    // Read-only input, read-write output — mirrors the attribute.
+    assert!(cast_roundtrip::wgsl_source().contains("var<storage> cast_in"));
+    assert!(cast_roundtrip::wgsl_source().contains("var<storage, read_write> cast_out"));
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("cast_roundtrip"),
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("cast_roundtrip"),
+        layout: Some(&layout),
+        module: &shader,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("cast_roundtrip"),
+        layout: &bgl,
+        entries: &[
+            whole_buffer_entry(0, &in_buf),
+            whole_buffer_entry(1, &out_buf),
+        ],
+    });
+
+    dispatch_and_readback(
+        device,
+        queue,
+        &RoundTrip {
+            label: "cast_roundtrip",
+            pipeline: &pipeline,
+            bind_group: &bind_group,
+            out_buf: &out_buf,
+            staging: &staging,
+            size,
+            workgroups: input.len().div_ceil(64) as u32,
+        },
+    )
 }

@@ -1,0 +1,5 @@
+error: cast to `bool` is not supported in GPU kernel `cast_bool`; supported targets: f32, u32, i32
+  --> tests/ui/kernel_rejects_unsupported_cast.rs:10:21
+   |
+10 |     let flag = x as bool;
+   |                     ^^^^
