@@ -165,9 +165,12 @@ fn compute_round_trip_on_non_multiple_of_64() {
     }
 }
 
-/// Test device, or `None` without an adapter (CI machines without GPU
-/// drivers skip instead of failing).
+/// Test device, or `None` without an adapter (machines without GPU
+/// drivers skip instead of failing) — unless `ORNIS_REQUIRE_GPU` is set
+/// (CI `test` shard), where a missing adapter panics so silently-skipped
+/// GPU coverage cannot pass unnoticed.
 fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let require_gpu = std::env::var("ORNIS_REQUIRE_GPU").is_ok();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),
@@ -175,22 +178,37 @@ fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         backend_options: Default::default(),
         display: None,
     });
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        force_fallback_adapter: false,
-        compatible_surface: None,
-        apply_limit_buckets: false,
-    }))
-    .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("ornis-macros kernel test"),
-        required_features: wgpu::Features::empty(),
-        required_limits: wgpu::Limits::downlevel_defaults(),
-        experimental_features: wgpu::ExperimentalFeatures::disabled(),
-        memory_hints: wgpu::MemoryHints::Performance,
-        trace: wgpu::Trace::Off,
-    }))
-    .ok()
+    let Some(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .ok()
+    else {
+        if require_gpu {
+            panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
+        }
+        return None;
+    };
+    let Some((device, queue)) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("ornis-macros kernel test"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .ok()
+    else {
+        if require_gpu {
+            panic!("ORNIS_REQUIRE_GPU is set but no wgpu device could be created");
+        }
+        return None;
+    };
+    Some((device, queue))
 }
 
 fn storage_buffer(

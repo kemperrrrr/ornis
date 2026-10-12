@@ -179,11 +179,16 @@ fn path_segments(p: &syn::ExprPath) -> Vec<String> {
 }
 
 /// Lower `e as T` to a WGSL conversion constructor (`f32(x)`,
-/// `u32(x)`, `i32(x)`). Width aliases erase to their 32-bit WGSL scalar
-/// (`u64`/`usize` → `u32`, `f64` → `f32` — WGSL has no 64-bit scalars),
-/// mirroring the integer-literal suffix mapping. Anything else (bool,
-/// vectors, structs) has no conversion spelling and fails loudly instead
-/// of vanishing from the shader.
+/// `u32(x)`, `i32(x)`). Only the exact 32-bit scalar targets are
+/// accepted: narrow targets (`u8`/`i16`/…) would need masking or
+/// sign-extension to match Rust's wrapping semantics, and wide targets
+/// (`u64`/`f64`/…) would silently narrow — both are rejected loudly
+/// instead. Anything else (bool, vectors, structs) has no conversion
+/// spelling and fails loudly instead of vanishing from the shader.
+///
+/// Value-semantics note: for in-range values the constructors truncate
+/// like Rust `as`. Out-of-range float→int (where Rust saturates and maps
+/// NaN to zero) is indeterminate in WGSL — keep kernel inputs in range.
 fn lower_cast(c: &syn::ExprCast) -> IrExpr {
     let inner = lower_expr(&c.expr);
     let Some(ty) = cast_target_ty(&c.ty) else {
@@ -202,20 +207,19 @@ fn lower_cast(c: &syn::ExprCast) -> IrExpr {
     }
 }
 
-/// WGSL scalar for a Rust cast target; `None` for anything without a
-/// conversion-constructor spelling. Shared with the `#[kernel]`
-/// validator so rejected targets fail at macro time, not at naga.
+/// WGSL scalar for a Rust cast target: exactly `f32`/`u32`/`i32`, `None`
+/// for everything else. Shared with the `#[kernel]` validator so
+/// rejected targets fail at macro time, not at naga.
 pub(crate) fn cast_target_ty(ty: &syn::Type) -> Option<ShaderType> {
     if let syn::Type::Path(tp) = ty
         && let Some(last) = tp.path.segments.last()
     {
-        let name = last.ident.to_string();
-        match name.as_str() {
-            "f32" | "f64" => return Some(ShaderType::F32),
-            "u32" | "u64" | "usize" | "u16" | "u8" => return Some(ShaderType::U32),
-            "i32" | "i64" | "isize" | "i16" | "i8" => return Some(ShaderType::I32),
-            _ => return None,
-        }
+        return match last.ident.to_string().as_str() {
+            "f32" => Some(ShaderType::F32),
+            "u32" => Some(ShaderType::U32),
+            "i32" => Some(ShaderType::I32),
+            _ => None,
+        };
     }
     None
 }
@@ -798,11 +802,15 @@ mod tests {
             ("f32", ShaderType::F32),
             ("u32", ShaderType::U32),
             ("i32", ShaderType::I32),
-            ("usize", ShaderType::U32),
-            ("f64", ShaderType::F32),
         ] {
             let ty: syn::Type = syn::parse_str(rust).unwrap();
             assert_eq!(cast_target_ty(&ty), Some(wgsl), "{rust}");
+        }
+        // Narrow, wide and non-scalar targets have no conversion
+        // spelling: the validator rejects them before lowering.
+        for rust in ["u8", "i16", "u64", "usize", "f64", "bool", "Vec3"] {
+            let ty: syn::Type = syn::parse_str(rust).unwrap();
+            assert_eq!(cast_target_ty(&ty), None, "{rust}");
         }
         let expr: syn::Expr = parse_quote!(x as u32);
         assert_eq!(

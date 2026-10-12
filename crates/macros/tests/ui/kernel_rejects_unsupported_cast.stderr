@@ -3,3 +3,15 @@ error: cast to `bool` is not supported in GPU kernel `cast_bool`; supported targ
    |
 10 |     let flag = x as bool;
    |                     ^^^^
+
+error: cast to `u8` is not supported in GPU kernel `cast_u8`; supported targets: f32, u32, i32
+  --> tests/ui/kernel_rejects_unsupported_cast.rs:18:23
+   |
+18 |     let narrow = x as u8;
+   |                       ^^
+
+error: cast to `f64` is not supported in GPU kernel `cast_f64`; supported targets: f32, u32, i32
+  --> tests/ui/kernel_rejects_unsupported_cast.rs:25:21
+   |
+25 |     let wide = x as f64;
+   |                     ^^^
