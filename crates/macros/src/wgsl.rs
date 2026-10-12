@@ -4,8 +4,8 @@
 //! IR ([`wgsl_lower`], no WGSL text), then the shared
 //! `ornis-shader-lang` [`writer`](ornis_shader_lang::writer) renders IR
 //! to WGSL. [`WgslGen`] is the thin façade over both; unsupported
-//! constructs lower to loud markers naga rejects. Rust casts are
-//! dropped — WGSL infers types from context.
+//! constructs lower to loud markers naga rejects. Rust `as` casts lower
+//! to WGSL conversion constructors (`f32(x)`/`u32(x)`/`i32(x)`).
 
 use syn::{FnArg, ItemFn};
 
@@ -239,6 +239,7 @@ pub fn wgsl_source_from_fn(func: &ItemFn) -> String {
         "@compute @workgroup_size(64)\n\
          fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n\
          let i = id.x;\n\
+         if (i >= arrayLength(&output)) { return; }\n\
          output[i] = ",
     );
     wgsl.push_str(&body_wgsl);
@@ -442,9 +443,49 @@ mod tests {
     }
 
     #[test]
-    fn cast_is_dropped() {
-        let expr: syn::Expr = parse_quote!(x as u32);
-        assert_eq!(rust_to_wgsl(&expr), "x");
+    fn cast_lowers_to_wgsl_constructor() {
+        let u: syn::Expr = parse_quote!(x as u32);
+        assert_eq!(rust_to_wgsl(&u), "u32(x)");
+        let i: syn::Expr = parse_quote!(x as i32);
+        assert_eq!(rust_to_wgsl(&i), "i32(x)");
+        let f: syn::Expr = parse_quote!(x as f32);
+        assert_eq!(rust_to_wgsl(&f), "f32(x)");
+    }
+
+    #[test]
+    fn unsupported_cast_is_loud() {
+        let expr: syn::Expr = parse_quote!(x as bool);
+        assert!(
+            rust_to_wgsl(&expr).contains("compile_error"),
+            "bool cast must fail loudly, got: {}",
+            rust_to_wgsl(&expr)
+        );
+    }
+
+    #[test]
+    fn compute_entry_has_bounds_guard() {
+        // Zero-param body: the only legacy-compute shape whose tail
+        // expression is valid WGSL as-is (params lower to storage arrays
+        // while the tail names them as scalars — a pre-existing path
+        // limitation, out of scope here).
+        let func: ItemFn = parse_quote! {
+            fn two() -> f32 {
+                2.0
+            }
+        };
+        let src = wgsl_source_from_fn(&func);
+        assert!(
+            src.contains("if (i >= arrayLength(&output)) { return; }"),
+            "tail dispatch must be guarded, got: {src}"
+        );
+        let module = naga::front::wgsl::parse_str(&src)
+            .unwrap_or_else(|e| panic!("compute entry must parse: {e}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("compute entry must validate: {e:?}"));
     }
 
     #[test]

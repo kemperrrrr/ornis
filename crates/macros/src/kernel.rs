@@ -193,6 +193,41 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     let output = &func.sig.output;
     let body = &func.block;
 
+    // One read-only storage entry per input plus one read-write output
+    // entry, matching the `@binding(i)` declarations in
+    // `wgsl_source_from_fn`. The pipeline layout references this; callers
+    // build their bind groups against it.
+    let param_count = func.sig.inputs.len();
+    let mut bgl_entries = Vec::new();
+    for binding in 0..param_count {
+        let binding = binding as u32;
+        bgl_entries.push(quote! {
+            wgpu::BindGroupLayoutEntry {
+                binding: #binding,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }
+        });
+    }
+    let output_binding = param_count as u32;
+    bgl_entries.push(quote! {
+        wgpu::BindGroupLayoutEntry {
+            binding: #output_binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }
+    });
+
     let expanded = quote! {
         // The user-facing `#[kernel] fn` carries the docs; the generated
         // helper module (eval/wgsl_source/...) is intentionally bare and
@@ -233,13 +268,24 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             #[allow(dead_code)]
+            pub fn create_bind_group_layout(
+                device: &wgpu::Device,
+            ) -> wgpu::BindGroupLayout {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(stringify!(#fn_name)),
+                    entries: &[ #(#bgl_entries),* ],
+                })
+            }
+
+            #[allow(dead_code)]
             pub fn create_pipeline(
                 device: &wgpu::Device,
             ) -> wgpu::ComputePipeline {
                 let shader = create_shader_module(device);
+                let bind_group_layout = create_bind_group_layout(device);
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(stringify!(#fn_name)),
-                    bind_group_layouts: &[],
+                    bind_group_layouts: &[Some(&bind_group_layout)],
                     immediate_size: 0,
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

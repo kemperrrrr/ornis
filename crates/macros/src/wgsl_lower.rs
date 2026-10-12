@@ -75,9 +75,10 @@ pub fn lower_expr(e: &syn::Expr) -> IrExpr {
                 IrExpr::Break
             }
         }
-        // Rust casts are type-coercion hints for the DSL; WGSL infers the
-        // type from context, so the cast itself is dropped.
-        Cast(c) => lower_expr(&c.expr),
+        // Rust casts lower to WGSL conversion constructors (`x as u32`
+        // → `u32(x)`); anything without a WGSL scalar spelling is a
+        // compile error, never a silently dropped coercion.
+        Cast(c) => lower_cast(c),
         Return(r) => IrExpr::Return(r.expr.as_ref().map(|e| Box::new(lower_expr(e)))),
         Array(a) => lower_array_literal(a, None),
         Repeat(r) => lower_array_repeat(r, None),
@@ -175,6 +176,47 @@ fn path_segments(p: &syn::ExprPath) -> Vec<String> {
         .iter()
         .map(|s| s.ident.to_string())
         .collect()
+}
+
+/// Lower `e as T` to a WGSL conversion constructor (`f32(x)`,
+/// `u32(x)`, `i32(x)`). Width aliases erase to their 32-bit WGSL scalar
+/// (`u64`/`usize` → `u32`, `f64` → `f32` — WGSL has no 64-bit scalars),
+/// mirroring the integer-literal suffix mapping. Anything else (bool,
+/// vectors, structs) has no conversion spelling and fails loudly instead
+/// of vanishing from the shader.
+fn lower_cast(c: &syn::ExprCast) -> IrExpr {
+    let inner = lower_expr(&c.expr);
+    let Some(ty) = cast_target_ty(&c.ty) else {
+        return IrExpr::Verbatim(
+            syn::Error::new_spanned(
+                &c.ty,
+                "cast target not supported in WGSL kernel; supported: f32, u32, i32",
+            )
+            .to_compile_error()
+            .to_string(),
+        );
+    };
+    IrExpr::Call {
+        target: IrCallee::Constructor { ty },
+        args: vec![inner],
+    }
+}
+
+/// WGSL scalar for a Rust cast target; `None` for anything without a
+/// conversion-constructor spelling.
+fn cast_target_ty(ty: &syn::Type) -> Option<ShaderType> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(last) = tp.path.segments.last()
+    {
+        let name = last.ident.to_string();
+        match name.as_str() {
+            "f32" | "f64" => return Some(ShaderType::F32),
+            "u32" | "u64" | "usize" | "u16" | "u8" => return Some(ShaderType::U32),
+            "i32" | "i64" | "isize" | "i16" | "i8" => return Some(ShaderType::I32),
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn lower_binary(b: &syn::ExprBinary) -> IrExpr {
@@ -747,6 +789,38 @@ mod tests {
             } if name == "x"
         ));
         assert!(matches!(&stmts[1], IrStmt::Flow { semi: false, .. }));
+    }
+
+    #[test]
+    fn casts_lower_to_constructor_nodes() {
+        for (rust, wgsl) in [
+            ("f32", ShaderType::F32),
+            ("u32", ShaderType::U32),
+            ("i32", ShaderType::I32),
+            ("usize", ShaderType::U32),
+            ("f64", ShaderType::F32),
+        ] {
+            let ty: syn::Type = syn::parse_str(rust).unwrap();
+            assert_eq!(cast_target_ty(&ty), Some(wgsl), "{rust}");
+        }
+        let expr: syn::Expr = parse_quote!(x as u32);
+        assert_eq!(
+            lower_expr(&expr),
+            IrExpr::Call {
+                target: IrCallee::Constructor {
+                    ty: ShaderType::U32
+                },
+                args: vec![IrExpr::Path(vec!["x".to_string()])],
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_cast_target_is_loud() {
+        let bool_ty: syn::Type = syn::parse_str("bool").unwrap();
+        assert_eq!(cast_target_ty(&bool_ty), None);
+        let expr: syn::Expr = parse_quote!(x as bool);
+        assert!(matches!(lower_expr(&expr), IrExpr::Verbatim(_)));
     }
 
     #[test]

@@ -2853,6 +2853,7 @@ dependencies = [
  "naga",
  "ornis-core",
  "ornis-shader-lang",
+ "pollster",
  "proc-macro2",
  "quote",
  "syn 3.0.8",
