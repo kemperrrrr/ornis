@@ -17,8 +17,9 @@ pub mod frame_exec;
 pub mod frame_passes;
 /// Groundwork for GPU frustum culling with `draw_indexed_indirect`
 /// submits (CPU reference compaction, indirect-args layout,
-/// compute-shader source). No pass submits `draw_indexed_indirect` yet —
-/// the gbuffer/shadow wiring lands in a follow-up slice.
+/// compute-shader source, [`gpu_culling::Culler`] buffer owner). No
+/// pass submits `draw_indexed_indirect` yet — the gbuffer/shadow wiring
+/// lands in a follow-up slice.
 pub mod gpu_culling;
 /// GPU resources as ECS singletons for the unified scheduler (S7 design).
 /// Native-only: stores wgpu `Device`/`Queue`/`Surface`/`CommandBuffer` as
@@ -74,10 +75,10 @@ pub use frame_passes::{
     FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor,
 };
 pub use gpu_culling::{
-    CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, CULL_WORKGROUP_SIZE, CullParams,
-    DrawIndexedIndirectArgs, FRUSTUM_PLANE_COUNT, INDIRECT_ARGS_WORD_COUNT, INSTANCE_COUNT_WORD,
-    compact_visible_indices, cull_params, cull_workgroup_count, indirect_args_for_visible,
-    reset_indirect_instance_count,
+    CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, CULL_WORKGROUP_SIZE, CullParams, Culler, CullerError,
+    DrawIndexedIndirectArgs, FRUSTUM_PLANE_COUNT, INDIRECT_ARGS_WORD_BYTES,
+    INDIRECT_ARGS_WORD_COUNT, INSTANCE_COUNT_WORD, compact_visible_indices, cull_params,
+    cull_workgroup_count, indirect_args_for_visible, reset_indirect_instance_count,
 };
 pub use ibl::{
     BrdfLut, CubeFace, EnvironmentCube, SplitSum, bake_brdf_lut, convolve_irradiance,

@@ -14,9 +14,11 @@
 //!
 //! Slice 1 (this module): the CPU reference compaction, the indirect-args
 //! layout, the compute-shader source and its uniform packing, plus parity
-//! tests against the CPU culler. Pass wiring (gbuffer/shadows indirect
-//! submits, owned culler buffers on [`crate::renderer::Renderer3D`]) and
-//! the GPU benchmark column land in follow-up slices.
+//! tests against the CPU culler. Slice 2a adds [`Culler`], the owner of
+//! the dispatch buffers (staging → compacted → indirect args). Remaining
+//! follow-up slices: wiring the gbuffer/shadow passes to
+//! `draw_indexed_indirect` (CPU fallback kept) and the GPU benchmark
+//! column.
 //!
 //! Order contract: the CPU compaction preserves submission order
 //! (strictly increasing indices — deterministic, the §24.1 reference).
@@ -251,6 +253,10 @@ fn cull_instances(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 "#;
 
+mod culler;
+
+pub use culler::{Culler, CullerError};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,7 +264,6 @@ mod tests {
     use crate::extraction::cull_frame_upload;
     use crate::extraction::extract_render_data;
     use crate::renderer::PerObjectGpu;
-    use bytemuck::Zeroable;
     use ornis_assets::scene::MaterialDesc;
     use ornis_assets::scene::MeshDesc;
     use ornis_assets::scene::TransformDesc;
@@ -528,9 +533,9 @@ mod tests {
         })
     }
 
-    /// Staged source records plus the frame matrix and the CPU reference
-    /// translations of the visible instances for the dispatch tests.
-    fn cull_test_scene() -> (Vec<PerObjectGpu>, Mat4, Vec<[f32; 4]>) {
+    /// Reference scene instances, the frame matrix and the CPU
+    /// reference translations of the visible set for the culler tests.
+    fn cull_test_scene() -> (Vec<InstanceData>, Mat4, Vec<[f32; 4]>) {
         let upload = hundred_sphere_upload();
         let view = perspective_view();
         let (view_proj, _) = crate::camera::camera_view_projection(&view, (160, 90));
@@ -543,166 +548,25 @@ mod tests {
                     .to_array()
             })
             .collect::<Vec<[f32; 4]>>();
-        let staged = upload
-            .instances
-            .iter()
-            .map(|instance| {
-                let mut record = PerObjectGpu::zeroed();
-                record.model = instance.model_matrix.to_cols_array_2d();
-                record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
-                record.material_index = instance.material_index;
-                record
-            })
-            .collect::<Vec<_>>();
-        (staged, view_proj, expected)
+        (upload.instances, view_proj, expected)
     }
 
-    /// Source, destination, uniform and zeroed-args buffers for the
-    /// dispatch test.
-    fn cull_test_buffers(
+    /// Indirect-args record read back from `args` (`None` when the
+    /// headless readback fails — the caller skips instead of failing).
+    fn cull_test_read_args(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        staged: &[PerObjectGpu],
-        params: &CullParams,
-    ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
-        let bytes = std::mem::size_of_val(staged) as u64;
-        let src = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cull test src"),
-            size: bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&src, 0, bytemuck::cast_slice(staged));
-        let dst = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cull test dst"),
-            size: bytes,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let param_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cull test params"),
-            size: CULL_PARAMS_BYTE_SIZE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&param_buffer, 0, bytemuck::bytes_of(params));
-        let args_init = DrawIndexedIndirectArgs::compacted(0, 0);
-        let args = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cull test args"),
-            size: (INDIRECT_ARGS_WORD_COUNT * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::INDIRECT
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        queue.write_buffer(&args, 0, bytemuck::bytes_of(&args_init));
-        (src, dst, param_buffer, args)
-    }
-
-    /// One buffer binding of the culling pass.
-    fn cull_test_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
-        wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        }
-    }
-
-    /// Compute pipeline plus its bind-group layout for the dispatch test.
-    fn cull_test_pipeline(device: &wgpu::Device) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cull test shader"),
-            source: wgpu::ShaderSource::Wgsl(CULL_COMPUTE_WGSL.into()),
-        });
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("cull test bgl"),
-            entries: &[
-                cull_test_entry(0, wgpu::BufferBindingType::Uniform),
-                cull_test_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
-                cull_test_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
-                cull_test_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("cull test pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("cull test pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("cull_instances"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        (pipeline, layout)
-    }
-
-    /// One dispatch plus the `instance_count` word read back from the
-    /// indirect-args buffer (`None` when the headless readback fails —
-    /// the caller skips instead of failing).
-    fn cull_test_dispatch(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        pass: (&wgpu::ComputePipeline, &wgpu::BindGroupLayout),
-        buffers: (&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer),
-        instance_count: u32,
-    ) -> Option<u32> {
-        let (pipeline, layout) = pass;
-        let (src, dst, param_buffer, args) = buffers;
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cull test bind group"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: param_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: src.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: dst.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: args.as_entire_binding(),
-                },
-            ],
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("cull test encoder"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("cull test pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(cull_workgroup_count(instance_count), 1, 1);
-        }
-        queue.submit(std::iter::once(encoder.finish()));
+        args: &wgpu::Buffer,
+    ) -> Option<DrawIndexedIndirectArgs> {
         let raw = cull_test_read_bytes(
             device,
             queue,
             args,
             INDIRECT_ARGS_WORD_COUNT as u64 * INDIRECT_ARGS_WORD_BYTES,
         )?;
-        let words = raw
-            .chunks_exact(INDIRECT_ARGS_WORD_BYTES as usize)
-            .map(|word| u32::from_le_bytes(word.try_into().expect("one word is four bytes")))
-            .collect::<Vec<u32>>();
-        Some(words[INSTANCE_COUNT_WORD])
+        Some(bytemuck::pod_read_unaligned(
+            &raw[..std::mem::size_of::<DrawIndexedIndirectArgs>()],
+        ))
     }
 
     /// Copies `bytes` from `src` into a mapping buffer and reads them
@@ -777,12 +641,12 @@ mod tests {
 
     #[test]
     fn gpu_compaction_matches_cpu_across_frames() {
-        // End-to-end dispatch on a real adapter, two frames back to
-        // back: the atomic counter must equal the CPU reference count,
-        // the compacted `dst` content must match the CPU visible set
-        // (order is intentionally unchecked — atomics are
-        // nondeterministic, see module docs), and the explicit counter
-        // reset must restart the second frame instead of accumulating.
+        // End-to-end through the production `Culler`, two frames back
+        // to back: the args counter must equal the CPU reference count,
+        // the compacted `visible_buffer` content must match the CPU
+        // visible set (order is intentionally unchecked — atomics are
+        // nondeterministic, see module docs), and frame two must not
+        // accumulate over frame one.
         let Some((device, queue)) = try_device() else {
             return;
         };
@@ -790,40 +654,49 @@ mod tests {
         // (two `mat4x4` + material `u32` + 3 pad words).
         assert_eq!(std::mem::size_of::<PerObjectGpu>(), 144);
         assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 128);
-        let (staged, view_proj, expected) = cull_test_scene();
-        let instance_count = staged.len();
-        let params = cull_params(&view_proj, instance_count as u32);
-        let buffers = cull_test_buffers(&device, &queue, &staged, &params);
-        let (pipeline, layout) = cull_test_pipeline(&device);
-        let first = cull_test_dispatch(
-            &device,
-            &queue,
-            (&pipeline, &layout),
-            (&buffers.0, &buffers.1, &buffers.2, &buffers.3),
-            instance_count as u32,
-        );
-        assert_eq!(first, Some(expected.len() as u32));
-        let Some(records) = cull_test_read_records(&device, &queue, &buffers.1, instance_count)
-        else {
+        let (instances, view_proj, expected) = cull_test_scene();
+        let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
+        for frame in 0..2 {
+            culler
+                .compact(&device, &queue, &view_proj, 42, &instances)
+                .expect("instances fit the capacity");
+            let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
+                .expect("args readback succeeds");
+            assert_eq!(args.index_count, 42, "frame {frame}");
+            assert_eq!(
+                args.instance_count,
+                expected.len() as u32,
+                "frame {frame}: the counter must restart at zero each frame"
+            );
+            let records =
+                cull_test_read_records(&device, &queue, &culler.visible_buffer, instances.len())
+                    .expect("dst readback succeeds");
+            let got = records[..expected.len()]
+                .iter()
+                .map(|record| record.model[3])
+                .collect::<Vec<[f32; 4]>>();
+            assert_same_visible_set(&got, &expected);
+        }
+    }
+
+    #[test]
+    fn culler_rejects_empty_capacity_and_overflow() {
+        let Some((device, queue)) = try_device() else {
             return;
         };
-        let got = records[..expected.len()]
-            .iter()
-            .map(|record| record.model[3])
-            .collect::<Vec<[f32; 4]>>();
-        assert_same_visible_set(&got, &expected);
-        reset_indirect_instance_count(&queue, &buffers.3);
-        let second = cull_test_dispatch(
-            &device,
-            &queue,
-            (&pipeline, &layout),
-            (&buffers.0, &buffers.1, &buffers.2, &buffers.3),
-            instance_count as u32,
-        );
+        assert!(matches!(
+            Culler::try_new(&device, 0).map(|_| ()),
+            Err(CullerError::EmptyCapacity)
+        ));
+        let (instances, view_proj, _) = cull_test_scene();
+        let culler = Culler::try_new(&device, 3).expect("capacity above zero");
+        assert_eq!(culler.capacity, 3);
         assert_eq!(
-            second,
-            Some(expected.len() as u32),
-            "the counter word must restart at zero each frame"
+            culler.compact(&device, &queue, &view_proj, 0, &instances),
+            Err(CullerError::CapacityExceeded {
+                count: instances.len() as u32,
+                capacity: 3,
+            })
         );
     }
 }
