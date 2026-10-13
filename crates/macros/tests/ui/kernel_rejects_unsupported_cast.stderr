@@ -15,3 +15,9 @@ error: cast to `f64` is not supported in GPU kernel `cast_f64`; supported target
    |
 25 |     let wide = x as f64;
    |                     ^^^
+
+error: path `u8 :: MAX` is not supported in GPU kernel `cast_const_path`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead
+  --> tests/ui/kernel_rejects_unsupported_cast.rs:34:9
+   |
+34 |     x + u8::MAX as u32 as f32
+   |         ^^^^^^^

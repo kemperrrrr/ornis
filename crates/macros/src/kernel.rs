@@ -101,6 +101,37 @@ impl<'ast> Visit<'ast> for KernelValidator {
         visit::visit_expr_cast(self, node);
     }
 
+    /// Closures have no WGSL spelling: the lowerer used to smuggle the
+    /// `compile_error!` text into the WGSL string, failing only at naga.
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.errors.push(syn::Error::new_spanned(
+            node,
+            format!(
+                "closures are not supported in GPU kernel `{}`; WGSL has no closures, inline the computation instead",
+                self.fn_name
+            ),
+        ));
+        visit::visit_expr_closure(self, node);
+    }
+
+    /// Scalar-namespaced paths (`u8::MAX`, `f32::consts::PI`) have no
+    /// WGSL spelling: `u8::MAX as u32` used to lower to `u32(u8::MAX)`
+    /// and fail only at naga. Use a plain `f32`, `u32` or `i32` literal.
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if super::kernel_types::is_scalar_namespaced(&node.path, node.qself.as_ref()) {
+            let path = &node.path;
+            self.errors.push(syn::Error::new_spanned(
+                &node.path,
+                format!(
+                    "path `{}` is not supported in GPU kernel `{}`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead",
+                    quote!(#path),
+                    self.fn_name
+                ),
+            ));
+        }
+        visit::visit_expr_path(self, node);
+    }
+
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         self.errors.push(syn::Error::new_spanned(
             node,
@@ -292,4 +323,66 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KernelValidator;
+    use crate::kernel_types::is_scalar_namespaced;
+
+    fn scalar_namespaced(source: &str) -> bool {
+        let expr: syn::Expr = syn::parse_str(source).expect("test path must parse");
+        let syn::Expr::Path(path) = expr else {
+            panic!("{source} must parse as a path");
+        };
+        is_scalar_namespaced(&path.path, path.qself.as_ref())
+    }
+
+    #[test]
+    fn scalar_const_paths_are_namespaced() {
+        for path in ["u8::MAX", "u32::MAX", "f32::consts::PI", "<u8>::MAX"] {
+            assert!(scalar_namespaced(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn locals_and_shader_paths_are_not_namespaced() {
+        for path in [
+            "x",
+            "PI",
+            "Vec3::ZERO",
+            "glam::Vec3::ZERO",
+            "Vec3::new",
+            "glam::Vec3::splat",
+            "normalize",
+        ] {
+            assert!(!scalar_namespaced(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn validator_rejects_closures_and_const_paths() {
+        let func: syn::ItemFn = syn::parse_quote! {
+            fn kernel_fn(x: f32) -> f32 {
+                let f = |y: u8| y;
+                x + u8::MAX as u32 as f32 + f(0) as f32
+            }
+        };
+        let mut validator = KernelValidator::new("kernel_fn");
+        validator.validate(&func);
+        assert_eq!(validator.errors.len(), 2);
+        let messages: Vec<String> = validator.errors.iter().map(|e| e.to_string()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("closures are not supported")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("scalar associated constants")),
+            "{messages:?}"
+        );
+    }
 }
