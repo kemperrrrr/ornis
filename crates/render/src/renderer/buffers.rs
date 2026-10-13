@@ -185,6 +185,34 @@ impl Renderer3D {
             });
     }
 
+    /// Bind group of the gbuffer layout with `camera` and `per_objects`
+    /// supplied by the caller: the compacted culler buffer binds as
+    /// `per_objects` for indirect batches (the shared material table is
+    /// unchanged). Built per draw — the culler buffers never grow, unlike
+    /// the staged per-object store.
+    pub(crate) fn gbuffer_bind_group_with(
+        &self,
+        device: &wgpu::Device,
+        camera: &wgpu::Buffer,
+        per_objects: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        let material = read_lock(&self.material_buffer);
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gbuffer bind group (per_objects override)"),
+            layout: &self.gbuffer_bind_group_layout,
+            entries: &shaders::bind_group_entries(
+                &shaders::gbuffer_generated::GBUFFER_RESOURCES,
+                |r| match r.name {
+                    "camera" => Some(camera.as_entire_binding()),
+                    "per_objects" => Some(per_objects.as_entire_binding()),
+                    "materials" => Some(material.as_entire_binding()),
+                    _ => None,
+                },
+            )
+            .unwrap_or_default(),
+        })
+    }
+
     /// Ensure the per-object buffer fits `needed` instances, growing and
     /// rebinding when it does not. The lighting frame bind group is built
     /// per frame from the live buffer, so it needs no rebuild here.

@@ -498,6 +498,24 @@ impl Renderer3D {
         instance_count: u32,
         customs: &[CustomGbufferDraw<'_>],
     ) {
+        self.render_shadows_batch(device, encoder, mesh, instance_count, customs);
+    }
+
+    /// Layer/cube loop of the depth pre-pass over the staged range.
+    ///
+    /// Shadows always draw directly: the pre-pass must cover every
+    /// caster whose shadow can reach the frame, including casters
+    /// outside the camera frustum, so the camera-compacted batch is
+    /// never reused here (a per-light-frustum compaction is future
+    /// work, not this entry point).
+    fn render_shadows_batch(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        mesh: &Mesh,
+        instance_count: u32,
+        customs: &[CustomGbufferDraw<'_>],
+    ) {
         if instance_count == 0 && customs.is_empty() {
             return;
         }
@@ -513,7 +531,7 @@ impl Renderer3D {
             return;
         }
         for layer in 0..count as usize {
-            self.render_shadow_view_with_custom(
+            self.render_shadow_view_batch(
                 device,
                 encoder,
                 mesh,
@@ -528,7 +546,7 @@ impl Renderer3D {
         for cube in 0..cubes as usize {
             for face in 0..CUBE_FACE_COUNT {
                 let idx = cube * CUBE_FACE_COUNT + face;
-                self.render_shadow_view_with_custom(
+                self.render_shadow_view_batch(
                     device,
                     encoder,
                     mesh,
@@ -549,7 +567,7 @@ impl Renderer3D {
     /// one clear. Shared by 2D layers and cube faces (same layouts,
     /// mirrored pipeline for faces).
     #[allow(clippy::too_many_arguments)]
-    fn render_shadow_view_with_custom(
+    fn render_shadow_view_batch(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,

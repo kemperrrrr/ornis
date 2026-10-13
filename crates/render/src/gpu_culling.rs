@@ -4,21 +4,26 @@
 //! CPU frustum culling is opt-in and off by default
 //! ([`crate::extraction::cull_frame_upload`]); this module stages its GPU
 //! replacement without relying on `multi_draw_indirect` (emulated by a loop
-//! on Metal, wgpu #2148, no `MDI_COUNT`): one compute pass will compact the
-//! visible instances into a dense buffer and write one
-//! [`DrawIndexedIndirectArgs`], and a follow-up slice will wire the gbuffer
-//! and shadow passes to submit a single
+//! on Metal, wgpu #2148, no `MDI_COUNT`): one compute pass compacts the
+//! visible instances into a dense buffer and writes one
+//! [`DrawIndexedIndirectArgs`], and the gbuffer pass submits it as a
+//! single
 //! [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
-//! per mesh/material. **No pass submits `draw_indexed_indirect` yet** —
-//! nothing here is hooked into the frame until that wiring slice lands.
+//! per mesh batch through
+//! [`Renderer3D::render_gbuffer_indirect`](crate::renderer::Renderer3D::render_gbuffer_indirect)
+//! (pixel-identical to the direct `draw_indexed` fallback, covered by
+//! `indirect_draw_gpu`). Shadows stay on the direct pre-pass:
+//! off-frame casters can shadow the frame, so the camera-compacted batch
+//! is never reused for the shadow maps (a per-light-frustum compaction
+//! is future work). The frame plan still selects the direct path —
+//! switching it over (opt-in) is the next slice.
 //!
-//! Slice 1 (this module): the CPU reference compaction, the indirect-args
-//! layout, the compute-shader source and its uniform packing, plus parity
-//! tests against the CPU culler. Slice 2a adds [`Culler`], the owner of
-//! the dispatch buffers (staging → compacted → indirect args). Remaining
-//! follow-up slices: wiring the gbuffer/shadow passes to
-//! `draw_indexed_indirect` (CPU fallback kept) and the GPU benchmark
-//! column.
+//! Slice 1: the CPU reference compaction, the indirect-args layout, the
+//! compute-shader source and its uniform packing, plus parity tests
+//! against the CPU culler. Slice 2: [`Culler`] (owner of the dispatch
+//! buffers: staging → compacted → indirect args) and the indirect
+//! gbuffer entry point above. Remaining: frame-plan selection and the
+//! GPU benchmark column.
 //!
 //! Order contract: the CPU compaction preserves submission order
 //! (strictly increasing indices — deterministic, the §24.1 reference).

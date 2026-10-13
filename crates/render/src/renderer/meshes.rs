@@ -574,7 +574,7 @@ impl Renderer3D {
         instance: &InstanceData,
     ) {
         self.upload_instances(device, queue, std::slice::from_ref(instance));
-        self.render_gbuffer(encoder, g, mesh, 1);
+        self.render_gbuffer(device, encoder, g, mesh, 1);
     }
 
     /// Draw one per-entity skinned mesh through the skinned pipeline.

@@ -230,7 +230,7 @@ impl Renderer3D {
             material_params: &self.gbuffer.material_params_view,
             depth: &self.gbuffer.depth_view,
         };
-        self.render_gbuffer(encoder, &g, mesh, 1);
+        self.render_gbuffer(device, encoder, &g, mesh, 1);
         self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
         self.render_composite(
             device,
@@ -268,7 +268,7 @@ impl Renderer3D {
             material_params: &self.gbuffer.material_params_view,
             depth: &self.gbuffer.depth_view,
         };
-        self.render_gbuffer(encoder, &g, mesh, instance_count);
+        self.render_gbuffer(device, encoder, &g, mesh, instance_count);
         // Depth pre-passes for shadowed lights (no-op when none).
         self.render_shadows(device, encoder, mesh, instance_count);
         self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
