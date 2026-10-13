@@ -8,7 +8,6 @@
 
 // The harness is shared across the gate binaries; this gate uses only
 // the square-scene part of it.
-#[allow(dead_code)]
 mod common;
 
 use ornis_render::frame_exec::BufferRenderContext;
