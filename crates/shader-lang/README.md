@@ -14,7 +14,9 @@ fixed-size arrays of those.
 
 Everything else is rejected by the validator at macro time instead of
 failing in naga: narrow/wide scalars (`u8`, `f64`, …), heap types,
-closures, scalar-namespaced paths (`u8::MAX`), and in particular
-user-defined `struct` types — interface and layout mirrors live outside
-kernels. WGSL spellings for the accepted types come from
-`ShaderType::wgsl`; see the crate docs (`src/lib.rs`) for details.
+closures, scalar-namespaced paths (`u8::MAX`), and user-defined `struct`
+types. Struct types are not supported yet — WGSL lowering cannot carry
+field layout across the kernel boundary; `#[derive(GpuStruct)]` is
+planned in [PLAN.md §n](../../PLAN.md). WGSL spellings for the accepted
+types come from `ShaderType::wgsl`; see the crate docs (`src/lib.rs`)
+for details.
