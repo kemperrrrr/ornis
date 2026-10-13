@@ -5,7 +5,9 @@
 //! the camera-compacted batch (a per-light-frustum compaction is future
 //! work).
 
-use super::{GbufferTargets, InstanceData, MaterialIdx, Renderer3D};
+use super::{
+    BatchDraw, GbufferTargets, InstanceData, MaterialIdx, Renderer3D, select_shared_batch,
+};
 use crate::camera::Frustum;
 use crate::gpu_culling::{Culler, INDIRECT_ARGS_WORD_COUNT};
 use crate::mesh::{Mesh, create_sphere};
@@ -390,4 +392,81 @@ fn offscreen_caster_shadow_reaches_frame() {
             "caster frame is not darker (indirect={indirect}): with={mean_with:.2} without={mean_without:.2}"
         );
     }
+}
+
+/// Slice 2c selection through the frame-plan node path: with the
+/// opt-in flag armed and a prepared batch, `render_gbuffer_with_custom`
+/// submits the compacted batch — pixel-identical to both the direct
+/// fallback and the explicit indirect entry point. The selection seam
+/// itself is pinned first: only armed-with-culler routes indirectly.
+#[test]
+fn armed_with_custom_matches_direct_and_indirect() {
+    let Some((device, queue)) = open_adapter() else {
+        eprintln!("SKIPPED (armed_with_custom_matches_direct_and_indirect): no wgpu adapter");
+        return;
+    };
+    let staged_probe = Culler::try_new(&device, 4).expect("non-zero capacity");
+    assert!(matches!(
+        select_shared_batch(true, Some(&staged_probe), 3),
+        BatchDraw::Indirect { .. }
+    ));
+    assert!(matches!(
+        select_shared_batch(true, None, 3),
+        BatchDraw::Direct { .. }
+    ));
+    assert!(matches!(
+        select_shared_batch(false, Some(&staged_probe), 3),
+        BatchDraw::Direct { .. }
+    ));
+    let renderer = Renderer3D::new(&device, &surface_config(), 1);
+    let (mesh, instances, view_proj) = setup_scene(&device, &queue, &renderer, true, true);
+    let staged = instances.len() as u32;
+    renderer.set_indirect_draw(true);
+    renderer.stage_batch_inputs(view_proj, instances);
+    renderer.prepare_indirect_batch(&device, &queue, mesh.num_indices);
+    assert!(renderer.indirect_batch_ready());
+    let (target, target_view) = target_texture(&device);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("armed selection frame"),
+    });
+    let g = GbufferTargets {
+        albedo: &renderer.gbuffer.albedo_view,
+        normal: &renderer.gbuffer.normal_view,
+        material_id: &renderer.gbuffer.material_id_view,
+        world_position: &renderer.gbuffer.world_position_view,
+        material_params: &renderer.gbuffer.material_params_view,
+        depth: &renderer.gbuffer.depth_view,
+    };
+    renderer.render_gbuffer_with_custom(&device, &mut encoder, &g, &mesh, staged, &[]);
+    renderer.render_shadows(&device, &mut encoder, &mesh, staged);
+    renderer.render_lighting(&device, &mut encoder, &g, &renderer.pbr_texture_view);
+    renderer.render_composite(
+        &device,
+        &queue,
+        &mut encoder,
+        crate::renderer::CompositeInputs {
+            target: &target_view,
+            hdr: &renderer.pbr_texture_view,
+            hdr_fwd: &renderer.pbr_texture_view,
+            bloom: &renderer.pbr_texture_view,
+            bloom_intensity: 0.0,
+            mode: 0,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    let routed = readback(&device, &queue, &target);
+    let direct = render_frame(&device, &queue, false, true, true);
+    let indirect = render_frame(&device, &queue, true, true, true);
+    assert!(
+        routed.iter().any(|channel| *channel > 0),
+        "armed frame must render something"
+    );
+    assert_eq!(
+        routed, direct,
+        "armed with_custom must match the direct fallback"
+    );
+    assert_eq!(
+        routed, indirect,
+        "armed with_custom must match the explicit indirect entry point"
+    );
 }

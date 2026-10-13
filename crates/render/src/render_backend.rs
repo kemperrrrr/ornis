@@ -36,6 +36,11 @@ pub struct RenderBackendConfig {
     pub max_objects: u32,
     /// Upper bound on materials per frame.
     pub max_materials: u32,
+    /// Opt-in indirect submission of the shared mesh batch (slice 2c):
+    /// the frame compacts visible instances on the GPU and draws them
+    /// with one `draw_indexed_indirect`; `false` (default) keeps the
+    /// direct `draw_indexed` path. Shadows always draw directly.
+    pub indirect_draw: bool,
 }
 
 impl Default for RenderBackendConfig {
@@ -56,6 +61,7 @@ impl Default for RenderBackendConfig {
             exposure: 1.0,
             max_objects: 256,
             max_materials: 64,
+            indirect_draw: false,
         }
     }
 }
@@ -120,6 +126,7 @@ pub fn create_render_backend(
     let mut renderer =
         crate::renderer::Renderer3D::new(device, &config.surface_config, config.sample_count);
     renderer.set_exposure(config.exposure);
+    renderer.set_indirect_draw(config.indirect_draw);
     Box::new(renderer)
 }
 

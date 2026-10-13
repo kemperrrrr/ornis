@@ -374,6 +374,12 @@ impl System for RenderSubmit {
         instances.extend(staged.iter().map(|entry| entry.instance));
         fs.renderer
             .upload_instances(&device.0, &queue.0, &instances);
+        // Slice 2c selection: stage the shared batch for a possible
+        // indirect submit. Moved (not cloned) into the renderer — the
+        // record path takes it in `prepare_indirect_batch`. Runs
+        // whether or not indirect is opted in; without the flag the
+        // staged batch is simply never consumed.
+        fs.renderer.stage_batch_inputs(view_proj, instances);
         *custom_meshes
             .0
             .lock()
@@ -526,9 +532,20 @@ impl System for RenderPresent {
             let frame3d = &mut fs.frame3d as *mut RenderFrame3D;
             // SAFETY: both pointers derive from `fs`, whose MutexGuard is
             // held for the whole block; they target disjoint fields
-            // (`renderer` is only read, `frame3d` only written), so no
-            // aliasing `&mut` exists, and neither pointer escapes the block.
+            // (`renderer` is only used through `&`-methods with interior
+            // mutability, `frame3d` only written), so no aliasing `&mut`
+            // exists, and neither pointer escapes the block.
             unsafe {
+                // Slice 2c selection: compact the staged batch when the
+                // opt-in flag armed it (a no-op resetting to direct
+                // otherwise); the gbuffer node submits the armed batch
+                // indirectly, shadows stay direct, and a
+                // `CapacityExceeded` compact falls back to direct.
+                (*renderer).prepare_indirect_batch(
+                    &device.0,
+                    &queue.0,
+                    mesh_state.mesh.num_indices,
+                );
                 // E2: encoder context as frame data — per-pass encoders
                 // land in FrameCommandBuffers; submit + present live in
                 // RenderFlush now.

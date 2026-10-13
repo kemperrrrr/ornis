@@ -15,15 +15,20 @@
 //! `indirect_draw_gpu`). Shadows stay on the direct pre-pass:
 //! off-frame casters can shadow the frame, so the camera-compacted batch
 //! is never reused for the shadow maps (a per-light-frustum compaction
-//! is future work). The frame plan still selects the direct path —
-//! switching it over (opt-in) is the next slice.
+//! is future work). The frame plan submits the indirect batch when the
+//! opt-in flag armed it for the frame, and stays direct otherwise
+//! (including the [`CullerError::CapacityExceeded`](CullerError)
+//! fallback).
 //!
 //! Slice 1: the CPU reference compaction, the indirect-args layout, the
 //! compute-shader source and its uniform packing, plus parity tests
 //! against the CPU culler. Slice 2: [`Culler`] (owner of the dispatch
 //! buffers: staging → compacted → indirect args) and the indirect
-//! gbuffer entry point above. Remaining: frame-plan selection and the
-//! GPU benchmark column.
+//! gbuffer entry point above. Slice 2c: frame-plan selection — the
+//! [`RenderBackendConfig::indirect_draw`](crate::render_backend::RenderBackendConfig::indirect_draw)
+//! opt-in flag, [`Renderer3D::prepare_indirect_batch`](crate::renderer::Renderer3D::prepare_indirect_batch)
+//! (compact-or-direct-fallback) and the gbuffer node routing; shadows
+//! stay direct. Remaining: the GPU benchmark column.
 //!
 //! Order contract: the CPU compaction preserves submission order
 //! (strictly increasing indices — deterministic, the §24.1 reference).

@@ -78,6 +78,7 @@ fn golden_full_scene_probe_matches_snapshot() {
         exposure: 1.0,
         max_objects: 256,
         max_materials: 64,
+        indirect_draw: false,
     };
     let mut backend = create_render_backend(&device, &backend_config);
 

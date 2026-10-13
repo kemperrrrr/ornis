@@ -26,6 +26,7 @@ use wgpu::util::DeviceExt;
 
 mod buffers;
 mod construct;
+mod culling;
 mod deferred;
 mod forward;
 mod gbuffer;
@@ -106,6 +107,22 @@ pub(crate) enum BatchDraw<'a> {
         /// Culler that compacted this frame's batch.
         culler: &'a Culler,
     },
+}
+
+/// Selects how the gbuffer node submits the shared batch: the culler's
+/// compacted draw only when a batch was armed for the frame *and* the
+/// culler is present — every other combination draws the classic
+/// direct range (opt-out, missed prepare, and the
+/// `CapacityExceeded` fallback all land here).
+pub(crate) fn select_shared_batch(
+    armed: bool,
+    culler: Option<&Culler>,
+    instance_count: u32,
+) -> BatchDraw<'_> {
+    match (armed, culler) {
+        (true, Some(culler)) => BatchDraw::Indirect { culler },
+        _ => BatchDraw::Direct { instance_count },
+    }
 }
 
 /// Frame-global camera uniform (binding shared by every pass).
@@ -340,6 +357,22 @@ pub struct Renderer3D {
     /// call: draw handles at or past this are stale and record no commands
     /// (exact no-op, never an out-of-bounds bind).
     palette_count: std::sync::atomic::AtomicU32,
+    /// Culler owning the indirect-batch dispatch buffers, created lazily
+    /// by [`prepare_indirect_batch`](Self::prepare_indirect_batch) and
+    /// grown (doubling) when a frame stages more instances.
+    culler: std::sync::RwLock<Option<Culler>>,
+    /// Opt-in switch for indirect submission of the shared mesh batch
+    /// (see [`set_indirect_draw`](Self::set_indirect_draw)); default off.
+    indirect_draw: std::sync::atomic::AtomicBool,
+    /// Whether the last [`prepare_indirect_batch`](Self::prepare_indirect_batch)
+    /// left an indirect batch ready to submit; cleared on opt-out and on
+    /// fallback to the direct path.
+    indirect_ready: std::sync::atomic::AtomicBool,
+    /// Staged shared-batch inputs for a possible indirect submit:
+    /// `(view_proj, instances)` moved here by `RenderSubmit` and taken
+    /// by [`prepare_indirect_batch`](Self::prepare_indirect_batch) on
+    /// the record path. Never consumed without the opt-in flag.
+    staged_batch: std::sync::RwLock<Option<(glam::Mat4, Vec<InstanceData>)>>,
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     /// Textured-forward pipeline plus fallbacks, built on demand by
