@@ -123,6 +123,7 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
                 }
             }
         }
+    }
 }
 
 impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
