@@ -246,8 +246,13 @@ pub enum IrExpr {
     /// `continue` / `break` (labels/values lower to [`IrExpr::Unsupported`]).
     Continue,
     Break,
-    /// `e as T`: a type-coercion hint for the DSL; WGSL infers the type
-    /// from context, so the cast itself is dropped (transparent).
+    /// `e as T`: lowered to a WGSL conversion-constructor call at
+    /// lowering time (`f32(x)`/`u32(x)`/`i32(x)` — exactly the 32-bit
+    /// scalars; narrower/wider targets are rejected at macro time), so
+    /// this node no longer occurs in macro output; the writer keeps the
+    /// historical transparent spelling as a fallback. In-range values
+    /// truncate like Rust `as`; out-of-range float→int (Rust saturates,
+    /// NaN→0) is indeterminate in WGSL — kernel inputs must stay in range.
     Cast(Box<IrExpr>),
     /// Fixed-size array value with a structural element type:
     /// `array<f32, 6>(0.0, …)`. Built from Rust `[T; N]` literals and

@@ -914,6 +914,10 @@ fn legacy_gpu_pipeline(func: &ItemFn) -> TokenStream {
     let fn_name = &func.sig.ident;
     let wgsl = crate::wgsl::wgsl_source_from_fn(func);
 
+    // Same storage layout as `#[kernel]` — see
+    // `wgsl::storage_bgl_entries`.
+    let bgl_entries = crate::wgsl::storage_bgl_entries(func.sig.inputs.len());
+
     let expanded = quote! {
         pub mod #fn_name {
             #[allow(dead_code)]
@@ -935,13 +939,24 @@ fn legacy_gpu_pipeline(func: &ItemFn) -> TokenStream {
             }
 
             #[allow(dead_code)]
+            pub fn create_bind_group_layout(
+                device: &wgpu::Device,
+            ) -> wgpu::BindGroupLayout {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(pipeline_label()),
+                    entries: &[ #(#bgl_entries),* ],
+                })
+            }
+
+            #[allow(dead_code)]
             pub fn create_pipeline(
                 device: &wgpu::Device,
             ) -> wgpu::ComputePipeline {
                 let shader = create_shader_module(device);
+                let bind_group_layout = create_bind_group_layout(device);
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(pipeline_label()),
-                    bind_group_layouts: &[],
+                    bind_group_layouts: &[Some(&bind_group_layout)],
                     immediate_size: 0,
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

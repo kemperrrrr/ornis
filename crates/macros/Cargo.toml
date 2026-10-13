@@ -21,6 +21,7 @@ ornis-core = { path = "../core", version = "0.1.0" }
 glam = "0.34"
 trybuild = "1"
 wgpu = "30"
+pollster = "1"
 
 [lints]
 workspace = true

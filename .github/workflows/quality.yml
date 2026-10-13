@@ -290,6 +290,9 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      # GPU device tests must really execute here (mesa/lavapipe is
+      # installed below): a missing adapter panics instead of skipping.
+      ORNIS_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

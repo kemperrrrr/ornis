@@ -4,8 +4,8 @@
 //! IR ([`wgsl_lower`], no WGSL text), then the shared
 //! `ornis-shader-lang` [`writer`](ornis_shader_lang::writer) renders IR
 //! to WGSL. [`WgslGen`] is the thin façade over both; unsupported
-//! constructs lower to loud markers naga rejects. Rust casts are
-//! dropped — WGSL infers types from context.
+//! constructs lower to loud markers naga rejects. Rust `as` casts lower
+//! to WGSL conversion constructors (`f32(x)`/`u32(x)`/`i32(x)`).
 
 use syn::{FnArg, ItemFn};
 
@@ -41,6 +41,51 @@ pub(crate) fn var_type(ty: &syn::Type) -> String {
         return last;
     }
     rust_type_to_wgsl(ty)
+}
+
+/// Bind-group-layout entries for a legacy compute pipeline: one
+/// read-only storage entry per input plus one read-write output entry,
+/// matching the `@binding(i)` declarations in [`wgsl_source_from_fn`].
+/// Shared by the `#[kernel]` and legacy `#[gpu_pipeline]` entry points
+/// so the layout and the declarations cannot drift apart.
+pub fn storage_bgl_entries(param_count: usize) -> Vec<proc_macro2::TokenStream> {
+    // `bool` has no `ToTokens`, so the access flag selects between two
+    // spellings instead of interpolating.
+    fn entry(binding: u32, read_only: bool) -> proc_macro2::TokenStream {
+        if read_only {
+            quote::quote! {
+                wgpu::BindGroupLayoutEntry {
+                    binding: #binding,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            }
+        } else {
+            quote::quote! {
+                wgpu::BindGroupLayoutEntry {
+                    binding: #binding,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    for binding in 0..param_count {
+        entries.push(entry(binding as u32, true));
+    }
+    entries.push(entry(param_count as u32, false));
+    entries
 }
 
 /// Map a known scalar/glam type name to WGSL; `None` for anything else
@@ -239,6 +284,7 @@ pub fn wgsl_source_from_fn(func: &ItemFn) -> String {
         "@compute @workgroup_size(64)\n\
          fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n\
          let i = id.x;\n\
+         if (i >= arrayLength(&output)) { return; }\n\
          output[i] = ",
     );
     wgsl.push_str(&body_wgsl);
@@ -442,9 +488,49 @@ mod tests {
     }
 
     #[test]
-    fn cast_is_dropped() {
-        let expr: syn::Expr = parse_quote!(x as u32);
-        assert_eq!(rust_to_wgsl(&expr), "x");
+    fn cast_lowers_to_wgsl_constructor() {
+        let u: syn::Expr = parse_quote!(x as u32);
+        assert_eq!(rust_to_wgsl(&u), "u32(x)");
+        let i: syn::Expr = parse_quote!(x as i32);
+        assert_eq!(rust_to_wgsl(&i), "i32(x)");
+        let f: syn::Expr = parse_quote!(x as f32);
+        assert_eq!(rust_to_wgsl(&f), "f32(x)");
+    }
+
+    #[test]
+    fn unsupported_cast_is_loud() {
+        let expr: syn::Expr = parse_quote!(x as bool);
+        assert!(
+            rust_to_wgsl(&expr).contains("compile_error"),
+            "bool cast must fail loudly, got: {}",
+            rust_to_wgsl(&expr)
+        );
+    }
+
+    #[test]
+    fn compute_entry_has_bounds_guard() {
+        // Zero-param body: the only legacy-compute shape whose tail
+        // expression is valid WGSL as-is (params lower to storage arrays
+        // while the tail names them as scalars — a pre-existing path
+        // limitation, out of scope here).
+        let func: ItemFn = parse_quote! {
+            fn two() -> f32 {
+                2.0
+            }
+        };
+        let src = wgsl_source_from_fn(&func);
+        assert!(
+            src.contains("if (i >= arrayLength(&output)) { return; }"),
+            "tail dispatch must be guarded, got: {src}"
+        );
+        let module = naga::front::wgsl::parse_str(&src)
+            .unwrap_or_else(|e| panic!("compute entry must parse: {e}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("compute entry must validate: {e:?}"));
     }
 
     #[test]

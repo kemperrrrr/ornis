@@ -7,32 +7,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{FnArg, ItemFn, Type, parse_macro_input, visit, visit::Visit};
-
-fn is_forbidden_type(ty: &Type) -> bool {
-    match ty {
-        Type::Path(tp) => {
-            let last = tp.path.segments.last().map(|s| s.ident.to_string());
-            matches!(
-                last.as_deref(),
-                Some(
-                    "Vec"
-                        | "String"
-                        | "Box"
-                        | "Rc"
-                        | "Arc"
-                        | "HashMap"
-                        | "HashSet"
-                        | "VecDeque"
-                        | "LinkedList"
-                        | "BTreeMap"
-                        | "BTreeSet"
-                )
-            )
-        }
-        _ => false,
-    }
-}
+use syn::{FnArg, ItemFn, parse_macro_input, visit, visit::Visit};
 
 struct KernelValidator {
     fn_name: String,
@@ -58,32 +33,20 @@ impl KernelValidator {
     fn check_params(&mut self, inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>) {
         for arg in inputs {
             if let FnArg::Typed(pat_ty) = arg
-                && is_forbidden_type(&pat_ty.ty)
+                && let Some(msg) =
+                    super::kernel_types::kernel_type_error(&pat_ty.ty, "type", &self.fn_name)
             {
-                self.errors.push(syn::Error::new_spanned(
-                        &pat_ty.ty,
-                        format!(
-                            "type `{}` is not allowed in GPU kernel `{}`; use f32, i32, u32, or glam vectors instead",
-                            quote!(#pat_ty.ty),
-                            self.fn_name
-                        ),
-                    ));
+                self.errors.push(syn::Error::new_spanned(&pat_ty.ty, msg));
             }
         }
     }
 
     fn check_return_type(&mut self, output: &syn::ReturnType) {
         if let syn::ReturnType::Type(_, ty) = output
-            && is_forbidden_type(ty)
+            && let Some(msg) =
+                super::kernel_types::kernel_type_error(ty, "return type", &self.fn_name)
         {
-            self.errors.push(syn::Error::new_spanned(
-                ty,
-                format!(
-                    "return type `{}` is not allowed in GPU kernel `{}`",
-                    quote!(#ty),
-                    self.fn_name
-                ),
-            ));
+            self.errors.push(syn::Error::new_spanned(ty, msg));
         }
     }
 }
@@ -123,6 +86,21 @@ impl<'ast> Visit<'ast> for KernelValidator {
         visit::visit_expr_call(self, node);
     }
 
+    fn visit_expr_cast(&mut self, node: &'ast syn::ExprCast) {
+        if crate::wgsl_lower::cast_target_ty(&node.ty).is_none() {
+            let ty = node.ty.as_ref();
+            self.errors.push(syn::Error::new_spanned(
+                &node.ty,
+                format!(
+                    "cast to `{}` is not supported in GPU kernel `{}`; supported targets: f32, u32, i32",
+                    quote!(#ty),
+                    self.fn_name
+                ),
+            ));
+        }
+        visit::visit_expr_cast(self, node);
+    }
+
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         self.errors.push(syn::Error::new_spanned(
             node,
@@ -132,6 +110,49 @@ impl<'ast> Visit<'ast> for KernelValidator {
             ),
         ));
         visit::visit_expr_while(self, node);
+    }
+
+    /// `let` annotations must name kernel-supported types: an
+    /// annotation like `let v: u8` would otherwise mistranslate while
+    /// CPU `eval` wraps.
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Type(pt) = &node.pat
+            && let Some(msg) =
+                super::kernel_types::kernel_type_error(&pt.ty, "let annotation", &self.fn_name)
+        {
+            self.errors.push(syn::Error::new_spanned(&pt.ty, msg));
+        }
+        visit::visit_local(self, node);
+    }
+
+    /// Integer literals keep their values only with a 32-bit spelling:
+    /// narrow/wide suffixes (`100u8`, `1u64`) would mistranslate while
+    /// CPU `eval` wraps or holds 64 bits.
+    fn visit_lit_int(&mut self, node: &'ast syn::LitInt) {
+        if !matches!(node.suffix(), "" | "u32" | "i32") {
+            self.errors.push(syn::Error::new_spanned(
+                node,
+                format!(
+                    "integer suffix `{}` is not supported in GPU kernel `{}`; use plain, `u32` or `i32` literals",
+                    node.suffix(),
+                    self.fn_name
+                ),
+            ));
+        }
+    }
+
+    /// Same as above for floats: `1.0f64` would silently narrow to `f32`.
+    fn visit_lit_float(&mut self, node: &'ast syn::LitFloat) {
+        if !matches!(node.suffix(), "" | "f32") {
+            self.errors.push(syn::Error::new_spanned(
+                node,
+                format!(
+                    "float suffix `{}` is not supported in GPU kernel `{}`; use plain or `f32` literals",
+                    node.suffix(),
+                    self.fn_name
+                ),
+            ));
+        }
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
@@ -193,6 +214,11 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     let output = &func.sig.output;
     let body = &func.block;
 
+    // One read-only storage entry per input plus one read-write output
+    // entry — see `wgsl::storage_bgl_entries`. The pipeline layout
+    // references this; callers build their bind groups against it.
+    let bgl_entries = crate::wgsl::storage_bgl_entries(func.sig.inputs.len());
+
     let expanded = quote! {
         // The user-facing `#[kernel] fn` carries the docs; the generated
         // helper module (eval/wgsl_source/...) is intentionally bare and
@@ -233,13 +259,24 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
             }
 
             #[allow(dead_code)]
+            pub fn create_bind_group_layout(
+                device: &wgpu::Device,
+            ) -> wgpu::BindGroupLayout {
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some(stringify!(#fn_name)),
+                    entries: &[ #(#bgl_entries),* ],
+                })
+            }
+
+            #[allow(dead_code)]
             pub fn create_pipeline(
                 device: &wgpu::Device,
             ) -> wgpu::ComputePipeline {
                 let shader = create_shader_module(device);
+                let bind_group_layout = create_bind_group_layout(device);
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(stringify!(#fn_name)),
-                    bind_group_layouts: &[],
+                    bind_group_layouts: &[Some(&bind_group_layout)],
                     immediate_size: 0,
                 });
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
