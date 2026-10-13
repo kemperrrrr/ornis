@@ -338,17 +338,16 @@ fn indirect_args_match_compacted_batch() {
 
 /// Shadow-map regression (review #95): the depth pre-pass draws the
 /// staged range directly, so an off-frame caster on the light axis
-/// still darkens the in-frame receiver. Fails if shadows ever reuse
-/// the camera-compacted batch — the caster would vanish from the
-/// shadow map and both frames would match.
+/// still darkens the in-frame receiver — through the direct and the
+/// indirect gbuffer path alike. Fails if shadows ever reuse the
+/// camera-compacted batch: the caster would vanish from the shadow
+/// map and the frames would match the caster-free reference.
 #[test]
 fn offscreen_caster_shadow_reaches_frame() {
     let Some((device, queue)) = open_adapter() else {
         eprintln!("SKIPPED (offscreen_caster_shadow_reaches_frame): no wgpu adapter");
         return;
     };
-    let with = render_frame(&device, &queue, false, true, true);
-    let without = render_frame(&device, &queue, false, true, false);
     // Premise pin: the caster sphere is truly outside the camera
     // frustum, so only an unculled shadow pass can darken the frame.
     let probe = Renderer3D::new(&device, &surface_config(), 1);
@@ -359,32 +358,36 @@ fn offscreen_caster_shadow_reaches_frame() {
         !Frustum::from_view_proj(&view_proj).sphere_visible(center, radius),
         "caster must sit outside the camera frustum (center={center:?}, radius={radius})"
     );
-    assert_eq!(with.len(), without.len());
-    let mut diff_px = 0usize;
-    for (a, b) in with.chunks_exact(4).zip(without.chunks_exact(4)) {
-        let swing = (a[0] as i16 - b[0] as i16).abs()
-            + (a[1] as i16 - b[1] as i16).abs()
-            + (a[2] as i16 - b[2] as i16).abs();
-        if swing > PIXEL_SWING {
-            diff_px += 1;
+    let without = render_frame(&device, &queue, false, true, false);
+    for indirect in [false, true] {
+        let with = render_frame(&device, &queue, indirect, true, true);
+        assert_eq!(with.len(), without.len());
+        let mut diff_px = 0usize;
+        for (a, b) in with.chunks_exact(4).zip(without.chunks_exact(4)) {
+            let swing = (a[0] as i16 - b[0] as i16).abs()
+                + (a[1] as i16 - b[1] as i16).abs()
+                + (a[2] as i16 - b[2] as i16).abs();
+            if swing > PIXEL_SWING {
+                diff_px += 1;
+            }
         }
+        let lum = |px: &[u8]| {
+            px.chunks_exact(4)
+                .map(|c| f64::from(c[0]) + f64::from(c[1]) + f64::from(c[2]))
+                .sum::<f64>()
+                / (px.len() / 4) as f64
+        };
+        let (mean_with, mean_without) = (lum(&with), lum(&without));
+        eprintln!(
+            "offscreen caster (indirect={indirect}): diff_px={diff_px} mean_with={mean_with:.2} mean_without={mean_without:.2}"
+        );
+        assert!(
+            diff_px > MIN_SHADOW_PIXELS,
+            "off-frame caster cast no visible shadow (indirect={indirect}): {diff_px} pixels differ"
+        );
+        assert!(
+            mean_with + 0.5 < mean_without,
+            "caster frame is not darker (indirect={indirect}): with={mean_with:.2} without={mean_without:.2}"
+        );
     }
-    let lum = |px: &[u8]| {
-        px.chunks_exact(4)
-            .map(|c| f64::from(c[0]) + f64::from(c[1]) + f64::from(c[2]))
-            .sum::<f64>()
-            / (px.len() / 4) as f64
-    };
-    let (mean_with, mean_without) = (lum(&with), lum(&without));
-    eprintln!(
-        "offscreen caster: diff_px={diff_px} mean_with={mean_with:.2} mean_without={mean_without:.2}"
-    );
-    assert!(
-        diff_px > MIN_SHADOW_PIXELS,
-        "off-frame caster cast no visible shadow: {diff_px} pixels differ"
-    );
-    assert!(
-        mean_with + 0.5 < mean_without,
-        "caster frame is not darker: with={mean_with:.2} without={mean_without:.2}"
-    );
 }
