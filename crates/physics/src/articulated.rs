@@ -323,7 +323,7 @@ pub enum BaseJoint {
     Fixed,
     /// Free 6-DOF base: position/quaternion state with full spatial
     /// velocity. Total momentum is conserved (up to gravity); a
-    /// position/servo [`JointMotor`](crate::joint::JointMotor) via
+    /// position/servo [`JointMotor`] via
     /// [`FeatherstoneEngine::set_joint_motor`] tethers it to the pose
     /// captured when the motor was set.
     Floating,
@@ -544,7 +544,7 @@ impl FeatherstoneEngine {
     /// Generalized motor override on an assembled joint, mirroring the
     /// maximal-coordinate engines: `Some` replaces the spec motor,
     /// `None` clears the override. Revolute joints take any
-    /// [`JointMotor`](crate::joint::JointMotor) kind; a floating root
+    /// [`JointMotor`] kind; a floating root
     /// takes a position/servo tether to the pose captured by this call.
     ///
     /// # Errors

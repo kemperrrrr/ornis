@@ -28,7 +28,7 @@
 //! - Rigid↔rigid contacts are discrete (no CCD): substeps shrink the
 //!   tunneling window but fast/thin rigid bodies can still tunnel.
 //!   Particles get a once-per-substep conservative-advancement clamp
-//!   through [`crate::distance::cast_shape`] (each advance bounded by the
+//!   through `crate::distance::cast_shape` (each advance bounded by the
 //!   exact current gap): a fast particle stops at the first rigid wall
 //!   instead of tunneling through it. Resting contact stays the discrete
 //!   solver's job (a sweep reports no hit from a touching start).

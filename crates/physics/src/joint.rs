@@ -30,7 +30,7 @@ use crate::math::orthogonalize_axle;
 
 /// Stable index of a joint inside its owning engine.
 ///
-/// Like [`BodyHandle`](crate::body::BodyHandle) this is a dense vector index:
+/// Like [`BodyHandle`] this is a dense vector index:
 /// removal rebuilds the dense map (see `rebuild_joints`).
 ///
 /// Newtype over `u32` so joint handles never mix with body handles at the
@@ -1184,7 +1184,7 @@ pub enum SpringIntegration {
 /// Expressions mirror the historical per-engine ones op-for-op so resolved
 /// values are bit-identical to what each engine computed before.
 ///
-/// Degenerate axes (squared length below [`DEGENERATE_LEN2`]) fall back infallibly
+/// Degenerate axes (squared length below `DEGENERATE_LEN2`) fall back infallibly
 /// (`Z` for hinge/slide, `Y` for suspension — the SI policy) and set
 /// [`ResolvedJoint::degenerate`]; each engine keeps its own admission
 /// policy (SI accepts, AVBD rejects revolute/prismatic).

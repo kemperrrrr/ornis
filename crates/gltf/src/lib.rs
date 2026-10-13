@@ -404,8 +404,8 @@ impl ImportStats {
 /// Geometry import failure.
 ///
 /// Typed per cause: `Ok` values never carry error text, and each `Err`
-/// names its reason — a missing filesystem sibling ([`ExternalBuffer`])
-/// never mixes with undecodable bytes ([`Parse`]). Sample hierarchy:
+/// names its reason — a missing filesystem sibling ([`ImportError::ExternalBuffer`])
+/// never mixes with undecodable bytes ([`ImportError::Parse`]). Sample hierarchy:
 /// `TextureUploadError` in `ornis-render` (same struct-variant discipline).
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {

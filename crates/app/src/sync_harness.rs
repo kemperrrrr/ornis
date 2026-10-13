@@ -25,9 +25,9 @@
 //!   schedule, placement mappings in the frame schedule —
 //!   [`install_sync_harness`] takes both lists separately.
 //!
-//! [`RigidBody`](ornis_physics::RigidBody) is not serializable by design
+//! [`RigidBody`] is not serializable by design
 //! (mass-triple invariants, non-serde [`Shape`](ornis_physics::Shape)), so
-//! it enters the registry through a hand-written [`FieldSurface`](ornis_core::FieldSurface):
+//! it enters the registry through a hand-written [`FieldSurface`]:
 //! `position`/`orientation`/`body_type` readable, `velocity` writable with
 //! the static-body guard (a static skips with `Ok(false)`, mirroring the
 //! typed bridge). Register it with [`register_rigid_body_fields`].

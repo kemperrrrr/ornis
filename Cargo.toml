@@ -29,11 +29,20 @@ members = [
 # workspace member — keeps workspace gates and feature unification clean).
 exclude = ["third_party/rustqual"]
 
+[workspace.lints.rust]
+# Unsafe ops inside `unsafe fn` must be wrapped in an explicit inner
+# `unsafe` block with its own SAFETY justification (RAT-8).
+unsafe_op_in_unsafe_fn = "deny"
+
 [workspace.lints.clippy]
 # Baseline: all standard lints as warnings.
 # pedantic is intentionally off — too noisy for a start.
 # unwrap_used/expect_used will be enabled once the baseline is cleared.
 all = "warn"
+# Every `unsafe {}` block needs a `// SAFETY:` comment stating its
+# invariant (RAT-8). Warn (not deny) so the gate surfaces new blocks
+# without breaking unrelated shards; CI clippy runs `-D warnings`.
+undocumented_unsafe_blocks = "warn"
 
 [workspace.package]
 version = "0.1.0"

@@ -2,7 +2,7 @@
 //!
 //! Each public function here assembles a complete WGSL module by splicing
 //! math-kernel snippets (generated from Rust via `wgsl_source()`, see
-//! [`math`]) into a fixed entry-point skeleton, so CPU tests exercise the
+//! [`math`](crate::shaders::math)) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
 pub mod bloom_generated;
@@ -34,7 +34,7 @@ pub(crate) fn wgsl_decl(source: &'static str) -> String {
 ///
 /// The WGSL type name for buffers comes from the Rust side
 /// ([`WgslStruct::WGSL_NAME`](ornis_macros::WgslStruct) for derived layouts,
-/// [`OPENPBR_WGSL_NAME`] for the shared material) — never a retyped string.
+/// `OPENPBR_WGSL_NAME` for the shared material) — never a retyped string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
     /// `var<uniform> name: Ty`.

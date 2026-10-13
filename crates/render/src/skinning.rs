@@ -4,10 +4,10 @@
 //! rows ([`crate::extraction`] skin entries). This module stages the
 //! same final joint matrices (`model * inverse_bind`) as a storage palette
 //! ([`JointPalette`]) and blends them in the vertex stage
-//! ([`vs_main_skinned`], DSL-only — no handwritten WGSL outside generated
-//! sources). Bind-pose vertices ride [`SkinnedVertexInput`] (joints as
+//! (`vs_main_skinned`, DSL-only — no handwritten WGSL outside generated
+//! sources). Bind-pose vertices ride `SkinnedVertexInput` (joints as
 //! `vec4<u32>`, weights as `vec4<f32>`); the varying is the shared
-//! [`GbufferVertexOutput`](crate::shaders::interface::GbufferVertexOutput),
+//! `GbufferVertexOutput` (private shader-interface struct),
 //! so the fragment stage is untouched.
 //!
 //! CPU-vs-GPU parity is approximate, never bit-identical: both paths blend

@@ -20,7 +20,7 @@ pub struct PerObjectGpu {
     _padding: [u32; 3],
 }
 
-/// Index into the deduplicated material table ([`FrameUpload::materials`]).
+/// Index into the deduplicated material table ([`FrameUpload::materials`](crate::extraction::FrameUpload)).
 ///
 /// Newtype over `u32` so material indices never mix with texture handles
 /// or entity ids at the type level. The DSL substitutes it to WGSL `u32`
@@ -263,7 +263,7 @@ impl Renderer3D {
     /// The CPU staging vector reserves `instances.len()` exactly up front,
     /// so the conversion never reallocates mid-frame; a repeated
     /// same-size frame reuses the GPU buffer as-is
-    /// ([`Self::ensure_instance_capacity`] no-ops when the data fits).
+    /// (`Self::ensure_instance_capacity` no-ops when the data fits).
     pub fn upload_instances(
         &self,
         device: &wgpu::Device,
@@ -323,7 +323,7 @@ impl Renderer3D {
     /// zero-padded (padding is never indexed), over-long slots are
     /// truncated — both defensively, producers stage exact slots. The
     /// buffer grows when the frame needs more slots than the current
-    /// capacity; [`Renderer3D::palette_count`] records the staged count so
+    /// capacity; `Renderer3D::palette_count` records the staged count so
     /// stale handles record no commands instead of binding out of range.
     pub fn upload_skin_palettes(
         &self,

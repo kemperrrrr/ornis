@@ -1,10 +1,10 @@
 //! Transient pool — the dynamic half of the dissolved frame-plan shell
 //! (d2): declaration snapshots compile into shared layouts here.
 //!
-//! [`Schedule`] (and its render-side declaration registry) answers "what
+//! [`Schedule`](ornis_core::Schedule) (and its render-side declaration registry) answers "what
 //! runs in which order" with static keys; the pool answers "where in
 //! memory, and does it fit" with runtime keys. It compiles a borrowed
-//! declaration snapshot ([`PoolInput`]) into a shared [`FrameLayout`]:
+//! declaration snapshot (`PoolInput`) into a shared [`FrameLayout`]:
 //! resource lifetimes (`first_use..last_use`), interval-partitioned pool
 //! slots over matching [`TextureSpec`]s, per-pass live sets, parallel
 //! levels, and the [`Budget`] check. Results memoize by declaration
@@ -293,7 +293,7 @@ pub struct PassLayout {
     pub writes: Vec<(ResourceId, Option<wgpu::Color>)>,
 }
 
-/// Result of compiling a [`PoolInput`] — the computed frame layout.
+/// Result of compiling a `PoolInput` — the computed frame layout.
 #[derive(Debug, Clone)]
 pub struct FrameLayout {
     pub(crate) surface_size: (u32, u32),
@@ -756,7 +756,7 @@ fn layout_levels(passes: &[PassLayout], ordering: &[(PassId, PassId)]) -> Vec<Ve
 /// shared layout snapshots.
 ///
 /// The pool holds no declarations — only the memoized result keyed by
-/// the registry's declaration generation. [`TransientPool::ensure`]
+/// the registry's declaration generation. `TransientPool::ensure`
 /// recompiles on a generation miss (or an empty cache) and enforces the
 /// snapshot's [`Budget`]; every other call is an `Arc` clone.
 #[derive(Debug, Default)]

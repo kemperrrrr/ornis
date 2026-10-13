@@ -39,6 +39,8 @@ impl<T: 'static + Clone + Send + Sync> LaneInner<T> {
 
     fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
         let shared = self.store.load(Ordering::Acquire, guard);
+        // SAFETY: `shared` was loaded under `guard`, which the caller holds
+        // for `'g`; the epoch reclaimer cannot free the snapshot while pinned.
         unsafe { shared.deref() }
     }
 
@@ -161,8 +163,9 @@ impl LockFreeStore {
         let guard = crossbeam_epoch::pin();
         let lane = self.lanes.get(&tid)?;
         let inner = lane.as_any().downcast_ref::<LaneInner<T>>()?;
-        // Safety: `guard` is moved into the returned LockFreeReadGuard,
-        // so the epoch pin outlives the reference loaded from the lane.
+        // SAFETY: `guard` is moved into the returned LockFreeReadGuard,
+        // so the epoch pin outlives the reference loaded from the lane;
+        // `store_ptr` points at the live snapshot, never null or unaligned.
         let store_ptr: *const ComponentStore<T> = inner.read(&guard);
         let store_ref: &ComponentStore<T> = unsafe { &*store_ptr };
         Some(LockFreeReadGuard {

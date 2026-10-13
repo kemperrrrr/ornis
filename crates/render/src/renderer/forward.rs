@@ -410,9 +410,9 @@ impl Renderer3D {
     /// textures; idempotent (later calls are no-ops).
     ///
     /// The fallbacks are 1x1 white images uploaded through
-    /// [`upload_texture`](crate::textures::upload_texture) under their
+    /// [`upload_texture`] under their
     /// roles (sRGB for color, linear for data), and the sampler carries
-    /// [`sampler_descriptor_for_role`](crate::textures::sampler_descriptor_for_role)
+    /// [`sampler_descriptor_for_role`]
     /// defaults. The fragment stage is
     /// [`wgsl_source_textured`](crate::shaders::material_textures::wgsl_source_textured);
     /// everything else (vertex entry, targets, depth, MSAA) mirrors

@@ -83,6 +83,8 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
 
     fn read<'g>(&'g self, guard: &'g Guard) -> &'g ComponentStore<T> {
         let shared = self.store.load(Ordering::Acquire, guard);
+        // SAFETY: `shared` was loaded under `guard`, which the caller holds
+        // for `'g`; the epoch reclaimer cannot free the snapshot while pinned.
         unsafe { shared.deref() }
     }
 

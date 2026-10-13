@@ -20,7 +20,7 @@ pub struct CullStats {
 /// center and the longest model-matrix axis as the radius.
 ///
 /// The shared procedural meshes are unit-bounded with the size baked
-/// into the model scale (see [`extract_render_data`]), so
+/// into the model scale (see [`extract_render_data`](super::extract_render_data)), so
 /// `max(scale) * 1.0` is the sphere — a conservative overestimate for
 /// non-spherical primitives (never falsely culls, may keep a few extra).
 pub fn instance_sphere(instance: &InstanceData) -> (Vec3, f32) {
@@ -37,7 +37,7 @@ pub fn instance_sphere(instance: &InstanceData) -> (Vec3, f32) {
 /// [`FrameUpload`] entries fully outside the six planes of `view_proj`
 /// in place and reports the counts.
 ///
-/// Off by default — [`extract_render_data`] never calls this; the
+/// Off by default — [`extract_render_data`](super::extract_render_data) never calls this; the
 /// caller applies it after extraction when a frame `view_proj` (see
 /// [`crate::camera::camera_view_projection`]) is available. Degenerate
 /// planes and non-finite bounds fail open (kept, never culled). Cost is

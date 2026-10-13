@@ -1,7 +1,7 @@
 //! E1 (S5e, 2026-09-07): frame passes as ordinary `Schedule` systems.
 //!
 //! [`try_project_schedule`] mirrors a [`SystemSet`] declaration into a
-//! `ornis_core::Schedule`: every enabled pass becomes a [`PassSystem`]
+//! `ornis_core::Schedule`: every enabled pass becomes a [`PassSystem`](crate::schedule_bridge::PassSystem)
 //! declaration twin — same name, accesses projected from `ResourceId`s to
 //! the `FrameResource` `TypeId`s through the registry. The projected
 //! levels are pinned bitwise-equal to `FrameLayout::levels()` by
@@ -9,8 +9,8 @@
 //! through a borrowed encoder at the execution site
 //! ([`crate::frame_exec::RenderFrame3D::render_schedule`]) — moving the
 //! recording itself into the systems via a frame resource is E2
-//! (`FrameCommandBuffers`), not this step. [`PassSystem::run`] only
-//! appends the pass name to [`PassOrderLog`]; GPU work stays on the
+//! (`FrameCommandBuffers`), not this step. `PassSystem::run` only
+//! appends the pass name to [`PassOrderLog`](crate::schedule_bridge::PassOrderLog); GPU work stays on the
 //! borrowed-encoder dispatch.
 
 use crate::system::SystemSet;

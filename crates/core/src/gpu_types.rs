@@ -8,7 +8,7 @@
 ///
 /// Boolean values in host-shareable WGSL buffers are represented as a four-byte
 /// `u32` (`0` or `1`). Rust's native `bool` is intentionally not accepted
-/// by [`ornis_macros::WgslStruct`], because its memory representation is not a
+/// by `ornis_macros::WgslStruct`, because its memory representation is not a
 /// GPU buffer contract. Use `GpuBool::from(true)` or [`GpuBool::new`]
 /// whenever a buffer field is logically boolean.
 #[repr(transparent)]

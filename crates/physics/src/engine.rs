@@ -132,7 +132,7 @@ pub struct ManifoldPoint {
     pub penetration: f32,
 }
 
-/// Contact manifold: one normal + up to [`MAX_MANIFOLD_POINTS`] points per body pair.
+/// Contact manifold: one normal + up to `MAX_MANIFOLD_POINTS` points per body pair.
 #[derive(Clone, Debug)]
 pub struct Manifold {
     /// First body handle.
@@ -189,7 +189,7 @@ impl Manifold {
     }
 
     /// Checked constructor from a slice: `None` when empty or longer than
-    /// [`MAX_MANIFOLD_POINTS`].
+    /// `MAX_MANIFOLD_POINTS`.
     pub fn try_from_points(
         body_a: BodyHandle,
         body_b: BodyHandle,
@@ -234,7 +234,7 @@ impl Manifold {
         crate::invariants::NonEmpty4::try_from_slice(self.points_slice())
     }
 
-    /// Whether `point_count` satisfies the 1..=[`MAX_MANIFOLD_POINTS`] invariant.
+    /// Whether `point_count` satisfies the 1..=`MAX_MANIFOLD_POINTS` invariant.
     pub fn has_valid_count(&self) -> bool {
         (1..=MAX_MANIFOLD_POINTS).contains(&self.point_count)
     }
@@ -246,7 +246,7 @@ pub use crate::sequential_impulse::joints;
 pub(crate) use crate::sequential_impulse::raycast_shape_hit;
 /// Solver surface re-exported from the `sequential_impulse` subsystem
 /// (Genesis-style `solvers/rigid/` box): the engine, narrowphase, caches,
-/// solver-state and query kernels. [`PhysicsEngine`], [`Contact`] and
+/// solver-state and query kernels. [`PhysicsEngine`], `Contact` and
 /// [`Manifold`] stay defined here.
 pub use crate::sequential_impulse::{
     ContactHooks, ContactPointView, ContactView, ContinuousHit, KinematicMover, MAX_SUBSTEP_COUNT,

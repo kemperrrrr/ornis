@@ -2,10 +2,12 @@
 //!
 //! Editors (built-in or custom) and compute producers (scripting languages,
 //! procedural tools, future network replication) all speak one language:
-//! [`Mutation`] values applied through [`apply_mutations`]. A scripting
-//! language attaches as a [`MutationProducer`] on the shared [`MutationBus`];
-//! a custom editor pushes the same [`Mutation`] values. There is no second,
-//! scripting-specific write path.
+//! [`Mutation`](crate::mutation::Mutation) values applied through
+//! [`apply_mutations`](crate::mutation::apply_mutations). A scripting
+//! language attaches as a [`MutationProducer`](crate::mutation::MutationProducer)
+//! on the shared [`MutationBus`](crate::mutation::MutationBus);
+//! a custom editor pushes the same [`Mutation`](crate::mutation::Mutation)
+//! values. There is no second, scripting-specific write path.
 //!
 //! Values stay JSON at the boundary because the [`ComponentRegistry`] speaks
 //! JSON (`parse_json`/`insert_any`); producers receive `dt`/`tick` as plain
@@ -14,8 +16,9 @@
 //! `PhysicsEngine` and `RenderBackend` as plugin traits.
 //!
 //! Timing split (deliberate, one vocabulary): frame producers drain through
-//! [`MutationTick`] into the bus and apply between frames, while synchronous
-//! producers (the built-in editor) call [`apply_mutations`] directly for an
+//! [`MutationTick`](crate::mutation::MutationTick) into the bus and apply
+//! between frames, while synchronous producers (the built-in editor) call
+//! [`apply_mutations`](crate::mutation::apply_mutations) directly for an
 //! immediate report. Both paths share the type, the applier and the report.
 
 use std::sync::{

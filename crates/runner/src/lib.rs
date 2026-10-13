@@ -1,5 +1,5 @@
 //! Native shell: winit window + wgpu rendering + frame loop over one
-//! [`GameWorld`](ornis_app::GameWorld).
+//! [`GameWorld`].
 //!
 //! Extracted from the `ornis` binary so games and examples reuse the same
 //! shell instead of forking it: the caller builds a world (spheres
@@ -193,9 +193,14 @@ impl GameApp {
             display: None,
         });
 
+        // SAFETY: `event_loop` and `window` are live for this call; the
+        // target only borrows them to build the platform handle.
         let surface_target =
             unsafe { wgpu::SurfaceTargetUnsafe::from_display_and_window(event_loop, &window) }
                 .map_err(|e| format!("surface target: {e}"))?;
+        // SAFETY: the `window` and the created surface are both stored in
+        // the returned `GameContext` and live until app teardown — surface
+        // use ends when the event loop exits, before either is dropped.
         let surface: wgpu::Surface<'static> = unsafe {
             instance
                 .create_surface_unsafe(surface_target)

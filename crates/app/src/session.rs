@@ -1,7 +1,7 @@
 //! Server-side ECS world for `editor-only` mode.
 //!
 //! In `editor-only` there is no native winit loop to consume `UiCommand`s,
-//! so [`run`] spawns an `editor-world` thread that owns an [`EditorSession`]
+//! so [`run`](crate::session::run) spawns an `editor-world` thread that owns an [`EditorSession`](crate::session::EditorSession)
 //! (an `ornis-core::Engine` with its `World`, `SmartStore`, physics systems
 //! and component registry), executes commands from `POST /api/command` and
 //! publishes `GameEvent`s back to the HTTP server (`status`/`scene`
@@ -15,7 +15,7 @@
 //! `ornis_render::scene` description types — **serde-canonical** JSON
 //! (externally-tagged enums), served generically through the component
 //! registry (F0, audit §10 D2). The JSON contract of
-//! [`EditorSession::scene_json`] is:
+//! [`EditorSession::scene_json`](crate::session::EditorSession::scene_json) is:
 //!
 //! ```json
 //! {
@@ -51,7 +51,7 @@
 //!   writes it **atomically** (sibling `*.tmp` file + rename) to `path`
 //!   (default `editor/scene.ron`, the file the WASM viewport renders),
 //!   emitting `scene_saved {path, version}`. The `path` is sandboxed to
-//!   `<workspace>/assets` or `<workspace>/editor` (see [`ScenePath`]);
+//!   `<workspace>/assets` or `<workspace>/editor` (see [`ScenePath`](editor_backend::remote::ScenePath));
 //!   the world is not mutated;
 //! * `load_scene` — `{"path"?: string}`; replaces the world with the scene
 //!   read back from `path` (same sandbox), emitting `scene_loaded {path,
@@ -62,8 +62,8 @@
 //! escaping paths fail-fast in `build_command` (never queued), and this
 //! session re-resolves every path on execution (defense in depth — direct
 //! `UiCommand` senders bypass the HTTP edge). Both sides share the
-//! validated [`ScenePath`] newtype, so a raw filesystem path can never
-//! reach [`EditorSession::save_scene_file`]/[`load_scene_file`].
+//! validated [`ScenePath`](editor_backend::remote::ScenePath) newtype, so a raw filesystem path can never
+//! reach [`EditorSession::save_scene_file`](crate::session::EditorSession::save_scene_file)/[`load_scene_file`](crate::session::EditorSession::load_scene_file).
 //!
 //! `version` is incremented on every mutation so clients can cheaply detect
 //! changes. Invalid commands never panic: they produce an `error` event and
@@ -173,7 +173,7 @@ impl TickOutcome {
 }
 
 /// Outcome of one watched-scene reload check: whether the live world was
-/// replaced. A host save that the [`FileWatch`] poll observes reports
+/// replaced. A host save that the `FileWatch` poll observes reports
 /// [`ReloadDecision::SkippedSelfSave`] instead of rebuilding the world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReloadDecision {
@@ -539,7 +539,7 @@ impl EditorSession {
     }
 
     /// Spawn an entity with explicit components and an optional name
-    /// (defaults to "Entity <id>"); bumps the version counter.
+    /// (defaults to "Entity \<id\>"); bumps the version counter.
     pub fn spawn_with(
         &mut self,
         name: Option<String>,
@@ -678,7 +678,7 @@ impl EditorSession {
     /// The `path` is a validated [`ScenePath`]: only files inside
     /// `<workspace>/assets` or `<workspace>/editor` can be named — the type,
     /// not a runtime check at the call site, enforces the sandbox (the HTTP
-    /// backend and [`EditorSession::scene_path`] resolve user input into it).
+    /// backend and `EditorSession::scene_path` resolve user input into it).
     pub fn save_scene_file(&mut self, path: &ScenePath) -> Result<(), SceneFileError> {
         let resolved = path.as_path();
         let ron = self
@@ -694,7 +694,7 @@ impl EditorSession {
     /// through the asset server (retained as sources); `.glb`/`.gltf`
     /// files load geometry + scalar materials through the same replace
     /// path, then wire skeletal/object animation clips (named skeletal
-    /// playback, see [`EditorSession::wire_gltf_animation`]).
+    /// playback, see `EditorSession::wire_gltf_animation`).
     /// Any error (missing file, invalid content) leaves the world untouched.
     ///
     /// # Errors

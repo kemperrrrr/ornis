@@ -21,9 +21,9 @@ use ornis_input::{KeyCode, MouseButton};
 
 /// Browser input snapshot forwarded over WebSocket / `POST /api/input`.
 ///
-/// This is the server-side mirror of [`ornis_core::InputState`]: the browser
+/// This is the server-side mirror of [`InputState`](ornis_input::InputState): the browser
 /// sends pressed keys/buttons and pointer/wheel deltas, the engine replaces
-/// its authoritative [`ornis_core::InputState`] resource with the snapshot.
+/// its authoritative [`InputState`](ornis_input::InputState) resource with the snapshot.
 /// Transient deltas are consumed once per frame and cleared by the engine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BrowserInput {

@@ -3,7 +3,7 @@
 //! This is the rust-gpu idea at declaration scale: instead of formatting
 //! WGSL text from Rust values, the Rust side builds a [`naga::Module`]
 //! (types from [`WgslStruct`](ornis_macros::WgslStruct) derives via
-//! `naga_add_type`, globals from [`Resource`](super::Resource) tables) and
+//! `naga_add_type`, globals from [`Resource`] tables) and
 //! naga's own WGSL writer prints it. No WGSL spelling lives here — member
 //! names, offsets, address spaces and binding points are Rust data, and the
 //! `vec4<f32>`/`<uniform>` spellings belong to the naga dependency.
@@ -20,7 +20,7 @@ const F32_SCALAR_WIDTH: u8 = 4;
 const VEC4_COMPONENTS: usize = 4;
 
 /// Insert the shared `OpenPBRMaterial` layout into the module, built from
-/// the [`OPENPBR_SLOTS`] name list (20 `vec4` slots, 16 bytes each).
+/// the `OPENPBR_SLOTS` name list (20 `vec4` slots, 16 bytes each).
 pub fn openpbr_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
     let vec4f = module.types.insert(
         naga::Type {

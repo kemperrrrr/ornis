@@ -4,7 +4,7 @@
 //! API: every importer (glTF, RON scenes, future FBX) maps its own typed
 //! error into it, tagged by format, so callers never depend on a
 //! particular loader crate. The value is cheap to clone (sources sit
-//! behind [`Arc`]) because the same failure is both returned to the caller
+//! behind [`Arc`](std::sync::Arc)) because the same failure is both returned to the caller
 //! and broadcast as [`AssetEvent::Failed`](crate::AssetEvent::Failed).
 
 use std::path::{Path, PathBuf};

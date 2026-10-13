@@ -127,7 +127,7 @@ pub fn gpu_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Derive the `GLOBALS` contract list on a stage-entry context bundle.
 ///
-/// See [`wgsl_context`](mod@wgsl_context) for the bundle contract.
+/// See the private `wgsl_context` module for the bundle contract.
 #[proc_macro_derive(ShaderContext)]
 pub fn derive_shader_context(input: TokenStream) -> TokenStream {
     wgsl_context::derive(input)
@@ -139,8 +139,8 @@ pub fn derive_shader_context(input: TokenStream) -> TokenStream {
 /// Emits `unsafe impl ornis_core::PlainResource` and its `ResMutResource`
 /// marker with one `Field: PlainResource` bound per field, so a struct holding
 /// a `Mutex`/`RwLock`/atomic fails instead of sharing mutable state through
-/// [`Res`].
-/// See [`smart_system`](smart_system).
+/// `Res` (see `ornis_core::Res`).
+/// See [`smart_system`].
 #[proc_macro_derive(PlainResource)]
 #[allow(dead_code)] // proc-macro entry: invoked by the compiler on derive use, invisible to the call graph (8 sibling entries carry the same note via baseline)
 pub fn derive_plain_resource(input: TokenStream) -> TokenStream {
@@ -162,8 +162,8 @@ pub fn smart_system(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Translate a stage-entry Rust function to a WGSL entry point.
 ///
 /// The input function is DSL-only (free binding identifiers, mirror-typed
-/// locals) and is replaced by a module exposing `wgsl_source()`; see
-/// [`stages`](mod@stages) for the contract.
+/// locals) and is replaced by a module exposing `wgsl_source()`; see the
+/// private `stages` module for the contract.
 #[proc_macro_attribute]
 pub fn stage(attr: TokenStream, item: TokenStream) -> TokenStream {
     stages::stage(attr, item)
@@ -171,7 +171,7 @@ pub fn stage(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Translate a plain WGSL helper function from Rust.
 ///
-/// Same body translation as [`stage`](stage) but without the
+/// Same body translation as [`stage`] but without the
 /// `@vertex`/`@fragment` wrapper: `fn name(params) -> Ret`. The Rust body is
 /// never compiled, so helper bodies may name shader-side values freely.
 #[proc_macro_attribute]

@@ -2,7 +2,7 @@
 //!
 //! [`ExecuteLane`] is implemented by the [`CpuExecutor`] / [`GpuExecutor`]
 //! ZSTs: the CPU lane records a closure, the GPU lane a compute dispatch
-//! sized from the element count. Resolution through [`LaneTarget`]
+//! sized from the element count. Resolution through [`LaneTarget`](ornis_core::LaneTarget)
 //! monomorphizes away any runtime branch.
 
 use crate::command_sync::CommandSync;

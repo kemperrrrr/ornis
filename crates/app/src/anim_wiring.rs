@@ -1,7 +1,7 @@
 //! Pure `ornis-gltf` mirror → `ornis-animation` converters, plus the
-//! shared spawn/wire routines built on them: [`spawn_gltf_world`]
-//! (mesh entities from a loaded scene) and [`wire_loaded_animation`]
-//! (skeleton roots, named clip playlists, a character-root [`Animator`],
+//! shared spawn/wire routines built on them: [`spawn_gltf_world`](crate::anim_wiring::spawn_gltf_world)
+//! (mesh entities from a loaded scene) and [`wire_loaded_animation`](crate::anim_wiring::wire_loaded_animation)
+//! (skeleton roots, named clip playlists, a character-root [`Animator`](ornis_animation::Animator),
 //! paused object players, skinned meshes).
 //!
 //! Field-for-field mapping with no I/O beyond the caller's store: joint
@@ -275,7 +275,7 @@ pub fn attach_animator(
 /// TRS, no physics bodies (pure visual spawn — the solver never sees these
 /// entities).
 ///
-/// This is the flat layout. One entity per node with local [`Transform`]
+/// This is the flat layout. One entity per node with local [`Transform`](ornis_core::Transform)
 /// and [`ornis_core::ChildOf`] is the Core track's spawn, not this function.
 ///
 /// Lanes are registered idempotently; entities follow primitive order so

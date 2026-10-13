@@ -31,7 +31,7 @@ const CELL_REEVAL_COUNT_DENOM: usize = 4;
 ///
 /// `pair_tests`, `filter_rejections`, `static_static_skips` and
 /// `aabb_rejections` are honest totals comparable to a full rebuild and to
-/// the `SweepAndPrune` baseline: after an incremental [`UniformGrid`] update
+/// the `SweepAndPrune` baseline: after an incremental `UniformGrid` update
 /// they equal `retained clean-clean` + `new dirty-involved` counts, while
 /// `candidate_pairs` is always derived from the final de-duplicated active
 /// set. If the backend ever emitted incremental-only counters, it would be
@@ -56,7 +56,8 @@ pub struct BroadPhaseStats {
     pub large_bodies: usize,
 }
 
-/// Wall-clock breakdown of a single [`crate::SequentialImpulseEngine::step`].
+/// Wall-clock breakdown of a single `SequentialImpulseEngine::step` call
+/// (the [`PhysicsEngine`](crate::engine::PhysicsEngine) trait method).
 ///
 /// Diagnostics for benchmarks only; not part of the simulation contract.
 /// Per-substep phases are summed across the substep loop, so totals reflect

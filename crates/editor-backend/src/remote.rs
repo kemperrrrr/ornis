@@ -3,8 +3,8 @@
 //! Mutating endpoints (`POST /api/*`) are loopback-only hardening targets:
 //! every POST re-checks the `Host` header (DNS-rebinding), the `Origin`
 //! header (CSRF), and the `Content-Type` (JSON only), and bodies are read
-//! bounded ([`MAX_COMMAND_BYTES`]). Scene-file commands additionally resolve
-//! their `path` into a [`ScenePath`] sandboxed to `<workspace>/assets` or
+//! bounded ([`MAX_COMMAND_BYTES`](crate::remote::MAX_COMMAND_BYTES)). Scene-file commands additionally resolve
+//! their `path` into a [`ScenePath`](crate::remote::ScenePath) sandboxed to `<workspace>/assets` or
 //! `<workspace>/editor`.
 
 use std::collections::VecDeque;
@@ -1109,7 +1109,7 @@ impl SceneRoots {
     }
 
     /// Production roots: the workspace this crate was compiled in (the same
-    /// `../../` convention as [`assets_root`]).
+    /// `../../` convention as `assets_root`).
     #[must_use]
     pub fn workspace_defaults() -> Self {
         Self::new(&workspace_root())

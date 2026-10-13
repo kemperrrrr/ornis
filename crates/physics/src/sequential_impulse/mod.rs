@@ -843,7 +843,7 @@ impl SequentialImpulseEngine {
     ///
     /// [`crate::errors::JointError::UnknownRef`] for a stale handle,
     /// `Unsupported` for a joint kind without a driven axis, `NonFinite`
-    /// for an invalid motor (see [`crate::migration::validate_motor`]).
+    /// for an invalid motor (see `crate::migration::validate_motor`).
     pub fn set_joint_motor(
         &mut self,
         handle: JointHandle,
@@ -1059,7 +1059,7 @@ impl SequentialImpulseEngine {
     }
 
     /// Selects the single-point contact-solver path (default: wide).
-    /// [`SolvePath::Scalar`] forces the scalar path, which is bit-exact
+    /// [`SolvePath::Scalar`](crate::flags::SolvePath::Scalar) forces the scalar path, which is bit-exact
     /// with the pre-G7 solver for scenes that predate the wide batches.
     pub fn set_solve_path(&mut self, path: crate::flags::SolvePath) {
         self.wide_solver = path;

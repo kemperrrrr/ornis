@@ -1,8 +1,8 @@
 //! Typed directional light and the studio key/fill pair placed into a
 //! [`RenderLights`](crate::extraction::RenderLights) rig.
 //!
-//! The channels match a scene `Directional` light: [`UnitVec3`] points
-//! toward the light, [`Lux`] is the existing intensity `f32`, and [`Color`]
+//! The channels match a scene `Directional` light: [`UnitVec3`](ornis_core::units::UnitVec3) points
+//! toward the light, [`Lux`](ornis_core::units::Lux) is the existing intensity `f32`, and [`Color`](ornis_core::units::Color)
 //! is linear emission. [`DirectionalLight::to_light_desc`] is what the
 //! renderer uploads. [`StudioLights`] is that pair on purpose; nothing else
 //! publishes it.

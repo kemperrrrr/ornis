@@ -4,8 +4,8 @@
 //! asset (`assets/scene.ron`), the editor protocol and the WASM viewport:
 //! component payloads travel over the wire in exactly this shape.
 //!
-//! Placement, light and camera fields are typed (`Vec3`, [`UnitVec3`],
-//! [`UnitQuat`], [`Meters`], [`Degrees`]) but serialize through
+//! Placement, light and camera fields are typed (`Vec3`, [`UnitVec3`](ornis_core::units::UnitVec3),
+//! [`UnitQuat`](ornis_core::units::UnitQuat), [`Meters`](ornis_core::units::Meters), [`Degrees`](ornis_core::units::Degrees)) but serialize through
 //! `serde(with = ...)` adapters (`crate::wire`) as the legacy `[f32; 3]` /
 //! `[x, y, z, w]` / `f32` shapes, so RON files and the editor/WASM JSON
 //! protocol are byte-compatible. On read, non-unit directions and

@@ -40,7 +40,7 @@ impl From<SolverSide> for bool {
     }
 }
 
-/// Routing phase for [`crate::split`](crate::split)-style ownership passes.
+/// Routing phase for `crate::split`-style ownership passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoutePhase {
     /// Cold probe (no sleep integration, e.g. rebuilds).

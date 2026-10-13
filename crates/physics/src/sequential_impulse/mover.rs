@@ -220,10 +220,10 @@ impl SequentialImpulseEngine {
     }
 
     /// Detach a mover; no-op for an invalid handle (same convention as
-    /// [`remove_body`](PhysicsEngine::remove_body)). Surviving movers past
+    /// [`remove_body`](crate::engine::PhysicsEngine::remove_body)). Surviving movers past
     /// the removal shift down one slot (swap-remove, like bodies).
     ///
-    /// [`remove_body`](PhysicsEngine::remove_body):
+    /// [`remove_body`](crate::engine::PhysicsEngine::remove_body):
     /// [`PhysicsEngine`](crate::engine::PhysicsEngine) trait method for
     /// bodies; movers are dropped/remapped there automatically.
     pub fn remove_mover(&mut self, handle: MoverHandle) {

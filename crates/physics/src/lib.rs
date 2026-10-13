@@ -8,7 +8,7 @@
 //! - [`body`] — rigid bodies and their handles/mass model.
 //! - [`shape`] — collision shapes (sphere, box, capsule, cylinder, cone,
 //!   convex hull, heightfield terrain, triangle-soup [`shape::TriMesh`]
-//!   under a median-split AABB BVH, rigid [`shape::Compound`] unions,
+//!   under a median-split AABB BVH, rigid [`Shape::Compound`] unions,
 //!   [`shape::Shape::Round`] border skins and static [`shape::Shape::HalfSpace`]
 //!   planes) with AABB projection and inertia
 //!   tensors; cylinder/cone/hull pairs resolve through the GJK/EPA
