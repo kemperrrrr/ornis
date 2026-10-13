@@ -51,6 +51,7 @@ fn spot_shadow_falls_on_occluder_side() {
             exposure: 1.0,
             max_objects: 256,
             max_materials: 64,
+            indirect_draw: false,
         },
     );
     let mesh = crate::mesh::create_sphere(&device, 1.0, 24, 16);

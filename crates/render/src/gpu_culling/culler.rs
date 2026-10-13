@@ -51,8 +51,8 @@ pub enum CullerError {
 /// [`Self::args_buffer`] (a
 /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)-ready
 /// [`DrawIndexedIndirectArgs`] carrying the caller's `index_count`).
-/// Nothing renders through it yet — the gbuffer/shadow pass wiring is
-/// the follow-up slice.
+/// The gbuffer pass renders through it when armed (see
+/// `Renderer3D::prepare_indirect_batch`); shadows always draw directly.
 pub struct Culler {
     /// Dense compacted destination: `PerObject` records of the visible
     /// instances, in dispatch order — the buffer the future indirect

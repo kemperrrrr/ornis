@@ -54,6 +54,10 @@ fn default_config_matches_documented_defaults() {
     assert_eq!(config.exposure, 1.0);
     assert_eq!(config.max_objects, 256);
     assert_eq!(config.max_materials, 64);
+    assert!(
+        !config.indirect_draw,
+        "indirect submission defaults off (the default frame stays direct)"
+    );
 }
 
 /// MSAA/exposure passthrough gate: the default config carries

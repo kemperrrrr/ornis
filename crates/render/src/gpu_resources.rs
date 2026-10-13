@@ -279,7 +279,9 @@ impl System for RenderMesh {
 /// ([`Renderer3D::stage_custom_meshes`](crate::renderer::Renderer3D::stage_custom_meshes))
 /// with its instances uploaded contiguously above the sphere slots.
 /// `frame3d.render_to_buffers` lives in `RenderPresent` (S7 step 2).
-struct RenderSubmit;
+/// Visible inside the crate so the indirect-selection test can drive
+/// a real submit (sphere + custom lanes) instead of restaging by hand.
+pub(crate) struct RenderSubmit;
 
 impl System for RenderSubmit {
     fn name(&self) -> &'static str {
@@ -374,6 +376,12 @@ impl System for RenderSubmit {
         instances.extend(staged.iter().map(|entry| entry.instance));
         fs.renderer
             .upload_instances(&device.0, &queue.0, &instances);
+        // Slice 2c: stage the shared sphere batch ONLY (`extracted`
+        // moved, never merged) — customs must not enter indirect.
+        if fs.renderer.indirect_draw() {
+            fs.renderer
+                .stage_batch_inputs(view_proj, extracted.instances);
+        }
         *custom_meshes
             .0
             .lock()
@@ -526,9 +534,20 @@ impl System for RenderPresent {
             let frame3d = &mut fs.frame3d as *mut RenderFrame3D;
             // SAFETY: both pointers derive from `fs`, whose MutexGuard is
             // held for the whole block; they target disjoint fields
-            // (`renderer` is only read, `frame3d` only written), so no
-            // aliasing `&mut` exists, and neither pointer escapes the block.
+            // (`renderer` is only used through `&`-methods with interior
+            // mutability, `frame3d` only written), so no aliasing `&mut`
+            // exists, and neither pointer escapes the block.
             unsafe {
+                // Slice 2c selection: compact the staged batch when the
+                // opt-in flag armed it (a no-op resetting to direct
+                // otherwise); the gbuffer node submits the armed batch
+                // indirectly, shadows stay direct, and a
+                // `CapacityExceeded` compact falls back to direct.
+                (*renderer).prepare_indirect_batch(
+                    &device.0,
+                    &queue.0,
+                    mesh_state.mesh.num_indices,
+                );
                 // E2: encoder context as frame data — per-pass encoders
                 // land in FrameCommandBuffers; submit + present live in
                 // RenderFlush now.

@@ -490,13 +490,19 @@ impl Renderer3D {
     /// `mesh` batch first, then each entry of `customs` in order — one
     /// render pass, cleared once.
     ///
+    /// Slice 2c selection: when an indirect batch was armed for this
+    /// frame (`prepare_indirect_batch`), the shared batch submits with
+    /// one `draw_indexed_indirect` over the compacted records; otherwise — and for every custom entry in
+    /// both modes — the classic direct `draw_indexed` records. Customs
+    /// stay direct: single-instance draws gain nothing from indirect.
+    ///
     /// [`SkinnedDraw::Cpu`] entries draw through the classic pipeline from
     /// their per-object slot; [`SkinnedDraw::Gpu`] entries draw through
     /// the skinned pipeline with their palette slot bound. A stale handle
     /// (at or past the last staged count) records no commands for that
-    /// entry. With empty `customs` the command stream matches
-    /// [`render_gbuffer`](Self::render_gbuffer) exactly (spheres-unchanged
-    /// by construction).
+    /// entry. With empty `customs` and no armed batch the command stream
+    /// matches [`render_gbuffer`](Self::render_gbuffer) exactly
+    /// (spheres-unchanged by construction).
     ///
     /// In MSAA mode `g` must be the renderer's own multisampled views (see
     /// [`render_gbuffer`](Self::render_gbuffer)).
@@ -509,14 +515,10 @@ impl Renderer3D {
         instance_count: u32,
         customs: &[CustomGbufferDraw<'_>],
     ) {
-        self.render_gbuffer_batch_with_custom(
-            device,
-            encoder,
-            g,
-            mesh,
-            BatchDraw::Direct { instance_count },
-            customs,
-        );
+        let guard = read_lock(&self.culler);
+        let batch =
+            select_shared_batch(self.indirect_batch_ready(), guard.as_ref(), instance_count);
+        self.render_gbuffer_batch_with_custom(device, encoder, g, mesh, batch, customs);
     }
 
     /// Shared core of the gbuffer entry points: one cleared pass, the

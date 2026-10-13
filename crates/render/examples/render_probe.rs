@@ -408,6 +408,7 @@ async fn run(scene: &Scene, out_path: &str) {
         exposure: 1.0,
         max_objects: MAX_OBJECTS,
         max_materials: MAX_MATERIALS,
+        indirect_draw: false,
     };
     let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
 
