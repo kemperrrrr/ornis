@@ -337,6 +337,14 @@ impl Frustum {
         }
     }
 
+    /// Normalized frustum planes for the GPU culling uniform
+    /// ([`crate::gpu_culling::cull_params`]): the same six `vec4`s the
+    /// CPU test evaluates, so the compute pass and
+    /// [`Frustum::sphere_visible`] agree by construction.
+    pub fn planes(&self) -> [Vec4; 6] {
+        self.planes
+    }
+
     /// Tests a world-space sphere against the six planes.
     ///
     /// Returns `false` only when the sphere is fully outside at least one
