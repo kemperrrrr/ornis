@@ -10,10 +10,10 @@ use glam::Mat4;
 
 impl Renderer3D {
     /// Opt-in switch for indirect submission of the shared mesh batch:
-    /// when set, [`prepare_indirect_batch`](Self::prepare_indirect_batch)
-    /// compacts the frame and the gbuffer node submits it with one
-    /// `draw_indexed_indirect` instead of `draw_indexed`. Default off
-    /// (direct path — every existing frame is unchanged). Set from
+    /// when set, `prepare_indirect_batch` compacts the frame and the
+    /// gbuffer node submits it with one `draw_indexed_indirect` instead
+    /// of `draw_indexed`. Default off (direct path — every existing
+    /// frame is unchanged). Set from
     /// [`crate::render_backend::RenderBackendConfig::indirect_draw`].
     pub fn set_indirect_draw(&self, enabled: bool) {
         self.indirect_draw

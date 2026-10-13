@@ -26,7 +26,7 @@
 //! buffers: staging → compacted → indirect args) and the indirect
 //! gbuffer entry point above. Slice 2c: frame-plan selection — the
 //! [`RenderBackendConfig::indirect_draw`](crate::render_backend::RenderBackendConfig::indirect_draw)
-//! opt-in flag, [`Renderer3D::prepare_indirect_batch`](crate::renderer::Renderer3D::prepare_indirect_batch)
+//! opt-in flag, `Renderer3D::prepare_indirect_batch`
 //! (compact-or-direct-fallback) and the gbuffer node routing; shadows
 //! stay direct. Remaining: the GPU benchmark column.
 //!

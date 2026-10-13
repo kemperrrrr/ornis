@@ -491,9 +491,8 @@ impl Renderer3D {
     /// render pass, cleared once.
     ///
     /// Slice 2c selection: when an indirect batch was armed for this
-    /// frame ([`prepare_indirect_batch`](Self::prepare_indirect_batch)),
-    /// the shared batch submits with one `draw_indexed_indirect` over
-    /// the compacted records; otherwise — and for every custom entry in
+    /// frame (`prepare_indirect_batch`), the shared batch submits with
+    /// one `draw_indexed_indirect` over the compacted records; otherwise — and for every custom entry in
     /// both modes — the classic direct `draw_indexed` records. Customs
     /// stay direct: single-instance draws gain nothing from indirect.
     ///
