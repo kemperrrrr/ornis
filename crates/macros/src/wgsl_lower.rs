@@ -207,14 +207,19 @@ fn lower_cast(c: &syn::ExprCast) -> IrExpr {
     }
 }
 
-/// WGSL scalar for a Rust cast target: exactly `f32`/`u32`/`i32`, `None`
-/// for everything else. Shared with the `#[kernel]` validator so
-/// rejected targets fail at macro time, not at naga.
+/// WGSL scalar for a Rust cast target: exactly `f32`/`u32`/`i32` as a
+/// bare single-segment path, `None` for everything else. Qualified
+/// spellings (`foo::u32`) are rejected too: the name could shadow a
+/// different type, and kernel bodies have no use for them. Shared with
+/// the `#[kernel]` validator so rejected targets fail at macro time,
+/// not at naga.
 pub(crate) fn cast_target_ty(ty: &syn::Type) -> Option<ShaderType> {
     if let syn::Type::Path(tp) = ty
-        && let Some(last) = tp.path.segments.last()
+        && tp.qself.is_none()
+        && tp.path.segments.len() == 1
+        && let Some(seg) = tp.path.segments.first()
     {
-        return match last.ident.to_string().as_str() {
+        return match seg.ident.to_string().as_str() {
             "f32" => Some(ShaderType::F32),
             "u32" => Some(ShaderType::U32),
             "i32" => Some(ShaderType::I32),
@@ -812,6 +817,10 @@ mod tests {
             let ty: syn::Type = syn::parse_str(rust).unwrap();
             assert_eq!(cast_target_ty(&ty), None, "{rust}");
         }
+        // Qualified spellings are rejected even when the last segment
+        // names a supported scalar: the path could shadow another type.
+        let qualified: syn::Type = syn::parse_str("foo::u32").unwrap();
+        assert_eq!(cast_target_ty(&qualified), None);
         let expr: syn::Expr = parse_quote!(x as u32);
         assert_eq!(
             lower_expr(&expr),

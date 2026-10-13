@@ -170,7 +170,9 @@ fn compute_round_trip_on_non_multiple_of_64() {
 /// (CI `test` shard), where a missing adapter panics so silently-skipped
 /// GPU coverage cannot pass unnoticed.
 fn create_test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let require_gpu = std::env::var("ORNIS_REQUIRE_GPU").is_ok();
+    // `= "1"`, not `is_ok()`: an explicit `ORNIS_REQUIRE_GPU=0` must
+    // keep the skip path.
+    let require_gpu = matches!(std::env::var("ORNIS_REQUIRE_GPU").as_deref(), Ok("1"));
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),

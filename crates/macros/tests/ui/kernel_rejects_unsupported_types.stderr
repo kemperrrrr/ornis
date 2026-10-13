@@ -1,0 +1,29 @@
+error: type `u8` is not supported in GPU kernel `pu8`; supported: f32, u32, i32, bool and glam vectors/matrices
+ --> tests/ui/kernel_rejects_unsupported_types.rs:9:11
+  |
+9 | fn pu8(x: u8) -> u8 {
+  |           ^^
+
+error: return type `u8` is not supported in GPU kernel `pu8`; supported: f32, u32, i32, bool and glam vectors/matrices
+ --> tests/ui/kernel_rejects_unsupported_types.rs:9:18
+  |
+9 | fn pu8(x: u8) -> u8 {
+  |                  ^^
+
+error: integer suffix `u8` is not supported in GPU kernel `pu8`; use plain, `u32` or `i32` literals
+  --> tests/ui/kernel_rejects_unsupported_types.rs:10:9
+   |
+10 |     x + 100u8
+   |         ^^^^^
+
+error: let annotation `u8` is not supported in GPU kernel `narrow_let`; supported: f32, u32, i32, bool and glam vectors/matrices
+  --> tests/ui/kernel_rejects_unsupported_types.rs:17:12
+   |
+17 |     let v: u8 = 250u8;
+   |            ^^
+
+error: integer suffix `u8` is not supported in GPU kernel `narrow_let`; use plain, `u32` or `i32` literals
+  --> tests/ui/kernel_rejects_unsupported_types.rs:17:17
+   |
+17 |     let v: u8 = 250u8;
+   |                 ^^^^^

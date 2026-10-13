@@ -7,32 +7,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{FnArg, ItemFn, Type, parse_macro_input, visit, visit::Visit};
-
-fn is_forbidden_type(ty: &Type) -> bool {
-    match ty {
-        Type::Path(tp) => {
-            let last = tp.path.segments.last().map(|s| s.ident.to_string());
-            matches!(
-                last.as_deref(),
-                Some(
-                    "Vec"
-                        | "String"
-                        | "Box"
-                        | "Rc"
-                        | "Arc"
-                        | "HashMap"
-                        | "HashSet"
-                        | "VecDeque"
-                        | "LinkedList"
-                        | "BTreeMap"
-                        | "BTreeSet"
-                )
-            )
-        }
-        _ => false,
-    }
-}
+use syn::{FnArg, ItemFn, parse_macro_input, visit, visit::Visit};
 
 struct KernelValidator {
     fn_name: String,
@@ -58,32 +33,20 @@ impl KernelValidator {
     fn check_params(&mut self, inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>) {
         for arg in inputs {
             if let FnArg::Typed(pat_ty) = arg
-                && is_forbidden_type(&pat_ty.ty)
+                && let Some(msg) =
+                    super::kernel_types::kernel_type_error(&pat_ty.ty, "type", &self.fn_name)
             {
-                self.errors.push(syn::Error::new_spanned(
-                        &pat_ty.ty,
-                        format!(
-                            "type `{}` is not allowed in GPU kernel `{}`; use f32, i32, u32, or glam vectors instead",
-                            quote!(#pat_ty.ty),
-                            self.fn_name
-                        ),
-                    ));
+                self.errors.push(syn::Error::new_spanned(&pat_ty.ty, msg));
             }
         }
     }
 
     fn check_return_type(&mut self, output: &syn::ReturnType) {
         if let syn::ReturnType::Type(_, ty) = output
-            && is_forbidden_type(ty)
+            && let Some(msg) =
+                super::kernel_types::kernel_type_error(ty, "return type", &self.fn_name)
         {
-            self.errors.push(syn::Error::new_spanned(
-                ty,
-                format!(
-                    "return type `{}` is not allowed in GPU kernel `{}`",
-                    quote!(#ty),
-                    self.fn_name
-                ),
-            ));
+            self.errors.push(syn::Error::new_spanned(ty, msg));
         }
     }
 }
@@ -147,6 +110,49 @@ impl<'ast> Visit<'ast> for KernelValidator {
             ),
         ));
         visit::visit_expr_while(self, node);
+    }
+
+    /// `let` annotations must name kernel-supported types: an
+    /// annotation like `let v: u8` would otherwise mistranslate while
+    /// CPU `eval` wraps.
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if let syn::Pat::Type(pt) = &node.pat
+            && let Some(msg) =
+                super::kernel_types::kernel_type_error(&pt.ty, "let annotation", &self.fn_name)
+        {
+            self.errors.push(syn::Error::new_spanned(&pt.ty, msg));
+        }
+        visit::visit_local(self, node);
+    }
+
+    /// Integer literals keep their values only with a 32-bit spelling:
+    /// narrow/wide suffixes (`100u8`, `1u64`) would mistranslate while
+    /// CPU `eval` wraps or holds 64 bits.
+    fn visit_lit_int(&mut self, node: &'ast syn::LitInt) {
+        if !matches!(node.suffix(), "" | "u32" | "i32") {
+            self.errors.push(syn::Error::new_spanned(
+                node,
+                format!(
+                    "integer suffix `{}` is not supported in GPU kernel `{}`; use plain, `u32` or `i32` literals",
+                    node.suffix(),
+                    self.fn_name
+                ),
+            ));
+        }
+    }
+
+    /// Same as above for floats: `1.0f64` would silently narrow to `f32`.
+    fn visit_lit_float(&mut self, node: &'ast syn::LitFloat) {
+        if !matches!(node.suffix(), "" | "f32") {
+            self.errors.push(syn::Error::new_spanned(
+                node,
+                format!(
+                    "float suffix `{}` is not supported in GPU kernel `{}`; use plain or `f32` literals",
+                    node.suffix(),
+                    self.fn_name
+                ),
+            ));
+        }
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
