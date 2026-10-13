@@ -175,14 +175,12 @@ unsafe impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> 
 // protected value is itself an approved resource type. In particular this
 // excludes `Mutex<SmartStore>` and `Mutex<Resources>` by default.
 //
-// SAFETY: these types are interior-mutable, so they implement only
-// `ResMutResource` and are reachable exclusively through `ResMut` (a
-// declared `writes` access) — never through `Res`/`PlainResource`. The
-// `T: ResMutResource` bound keeps scheduler handles (`Mutex<SmartStore>`)
-// out, and atomics carry their own state with no reachable aliases.
-// SAFETY: interior-mutable, hence `ResMut`-only — reachable exclusively
-// through a declared `writes` access, never through `Res`; the
-// `T: ResMutResource` bound keeps scheduler handles out.
+// SAFETY: `T: ResMutResource` excludes scheduler handles
+// (`Mutex<SmartStore>`, `Mutex<Resources>`): the state belongs solely to
+// this `Mutex`, and the `writes::<Mutex<T>>()` key covers all mutation.
+// Reachable exclusively through `ResMut` (a declared `writes` access) —
+// never through `Res`/`PlainResource`.
+// SAFETY: interior-mutable, hence `ResMut`-only (see above).
 unsafe impl<T: ResMutResource> ResMutResource for Mutex<T> {}
 // SAFETY: interior-mutable, hence `ResMut`-only (see above).
 unsafe impl<T: ResMutResource> ResMutResource for RwLock<T> {}

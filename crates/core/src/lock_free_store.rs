@@ -55,7 +55,7 @@ impl<T: 'static + Clone + Send + Sync> LaneInner<T> {
         loop {
             let guard = crossbeam_epoch::pin();
             let shared = self.store.load(Ordering::Acquire, &guard);
-            // Safety: `shared` is pinned by `guard` for this iteration.
+            // SAFETY: `shared` is pinned by `guard` for this iteration.
             let mut new_store = unsafe { (*shared.deref()).clone() };
             f(&mut new_store);
             match self.store.compare_exchange(
@@ -66,7 +66,7 @@ impl<T: 'static + Clone + Send + Sync> LaneInner<T> {
                 &guard,
             ) {
                 Ok(_) => {
-                    // Safety: this thread replaced `shared`; no other thread
+                    // SAFETY: this thread replaced `shared`; no other thread
                     // can retire it because its CAS on the same `shared`
                     // pointer now fails. Epoch reclamation frees it once
                     // readers drain.
@@ -163,9 +163,11 @@ impl LockFreeStore {
         let guard = crossbeam_epoch::pin();
         let lane = self.lanes.get(&tid)?;
         let inner = lane.as_any().downcast_ref::<LaneInner<T>>()?;
-        // SAFETY: `guard` is moved into the returned LockFreeReadGuard,
-        // so the epoch pin outlives the reference loaded from the lane;
-        // `store_ptr` points at the live snapshot, never null or unaligned.
+        // SAFETY: `guard` is moved into the returned `LockFreeReadGuard`,
+        // so the epoch pin outlives the reference. Extending the reference
+        // past `&guard` is sound: the lane is borrowed from `&self` for the
+        // whole lifetime of the guard, and the snapshot cannot be reclaimed
+        // while the guard is alive.
         let store_ptr: *const ComponentStore<T> = inner.read(&guard);
         let store_ref: &ComponentStore<T> = unsafe { &*store_ptr };
         Some(LockFreeReadGuard {
