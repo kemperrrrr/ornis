@@ -19,6 +19,7 @@
 //!   prismatic, fixed, distance, rope, spring, wheel, gear, six-DOF) with
 //!   limits and the generalized [`joint::JointMotor`] drive
 //!   (velocity/position/servo, force- or acceleration-based).
+//! - [`planar`] — K1 planar (2D) motion as degenerate 3D: thin shapes plus the plane lock.
 //! - [`engine`] — the sequential-impulse step pipeline: broadphase → narrowphase → island
 //!   partitioning → substepped velocity/position solving, with optional
 //!   SIMD-wide (`wide` module) and GPU (`gpu` feature) solver paths.
@@ -81,6 +82,9 @@ pub mod gpu;
 pub mod invariants;
 pub mod joint;
 pub mod math;
+/// K1 planar (2D) motion as degenerate 3D: [`planar::MotionPlane`], thin
+/// 2D shapes and the plane lock over [`joint::JointKind::SixDof`].
+pub mod planar;
 /// Rapier-style read-only scene queries (ray / point / AABB / shape casts).
 pub mod query_pipeline;
 /// Sequential-impulse solver internals (Genesis-style `solvers/rigid/` box).
@@ -116,8 +120,8 @@ pub use engine::{
     SequentialImpulseEngine,
 };
 pub use errors::{
-    ColliderError, JointError, MeshError, MoverError, QueryError, ShapeError, SnapshotError,
-    StepError,
+    ColliderError, JointError, MeshError, MoverError, PlanarError, QueryError, ShapeError,
+    SnapshotError, StepError,
 };
 pub use flags::{
     AxisStatus, BodyRole, CachePolicy, CoordKind, Dispatch, HitKind, LimitSide, Order,
@@ -134,6 +138,10 @@ pub use joint::{
     WheelSuspension, cross_row_kind, resolve_joint,
 };
 pub use math::{AABB, Ray, RaycastHit};
+pub use planar::{
+    MAX_POLYGON_VERTICES, MotionPlane, PLANAR_THICKNESS, PLANE_ANCHOR_RADIUS, PlanarPose,
+    PlanarShape, PlaneAnchor, add_plane_anchor, constrain_to_plane, planar_body, planar_joint_kind,
+};
 pub use query_pipeline::{PointProjection, QueryFilter, QueryPipeline, QueryPredicate};
 pub use shape::{ConvexHull, Heightfield, PairSupport, Pose, Shape, TriIndex, TriMesh, Triangle};
 pub use snapshot::{WORLD_SNAPSHOT_VERSION, WorldSnapshot};

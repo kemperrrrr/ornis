@@ -1562,6 +1562,20 @@ fn solve_new_joint_position(
                         joint_linear_position_step(bodies, a, b, ra, rb, e.dot(dir), dir);
                     }
                 }
+                if let Some(k) = crate::joint::sixdof_swing_axis(&angular) {
+                    // Two locked + one free/limited angular axis: hold the swing
+                    // (alignment of the free axis, twist-independent) instead of
+                    // projecting the full error rotation vector, whose direction turns
+                    // by half the free-axis travel and diverges near a half turn.
+                    joint_angular_position_pass(
+                        bodies,
+                        a,
+                        b,
+                        FRAME[k],
+                        joint.reference_quat.conjugate() * FRAME[k],
+                    );
+                    continue;
+                }
                 // Locked world dirs from the current orientation (same
                 // X/Y/Z order as the velocity stage).
                 let mut n_lock = 0;
