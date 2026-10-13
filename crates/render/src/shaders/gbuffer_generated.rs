@@ -67,7 +67,7 @@ fn vs_main(
 ///
 /// Note: unlike the fragment skeletons, this stage terminates structs
 /// with bare `}` (no `;`), so the layouts splice raw here instead of via
-/// [`wgsl_decl`](super::wgsl_decl).
+/// `wgsl_decl`.
 pub fn wgsl_vertex_source() -> String {
     ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
@@ -119,7 +119,7 @@ fn fs_main(
 /// G-buffer fragment shader: 5-MRT packing, splicing the octahedral
 /// normal-encoding kernel via `wgsl_source()`.
 ///
-/// Assembled from the shared [`openpbr_material_decl()`], the shared varyings,
+/// Assembled from the shared `openpbr_material_decl()`, the shared varyings,
 /// the translated [`fs_main`] body and kernel; entry point `fs_main`
 /// is kept.
 pub fn wgsl_source() -> String {
@@ -139,7 +139,7 @@ pub fn wgsl_source_static() -> String {
 }
 
 /// Resource layout of the g-buffer pass. Type names come from the Rust
-/// side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
+/// side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
 pub const GBUFFER_RESOURCES: [Resource; 3] = [
     Resource {
         group: 0,

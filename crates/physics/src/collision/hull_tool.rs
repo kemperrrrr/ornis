@@ -1,4 +1,4 @@
-//! Procedural convex-hull tooling (R4): Box3D-style builders over [`ConvexHull`].
+//! Procedural convex-hull tooling (R4): Box3D-style builders over [`ConvexHull`](crate::shape::ConvexHull).
 //!
 //! Thin, validated construction helpers in the spirit of Box3D's
 //! `b3CreateCylinder` / `b3CreateCone` / `b3CreateRock` / `b3CreateHull` and
@@ -6,22 +6,22 @@
 //! `ConvexPolyhedron::from_convex_hull`, which likewise refuses degenerate
 //! input instead of building a silent no-op): analytic shapes emit minimal
 //! fan triangulations with exact volume/inertia, while the strict
-//! [`ConvexHull::from_points`] wrapper adds caller budgets and explicit
-//! degeneracy errors on top of [`ConvexHull::from_vertices`]. Narrow phase,
+//! [`ConvexHull::from_points`](crate::shape::ConvexHull::from_points) wrapper adds caller budgets and explicit
+//! degeneracy errors on top of [`ConvexHull::from_vertices`](crate::shape::ConvexHull::from_vertices). Narrow phase,
 //! solver, sleep, CCD and broadphase are untouched — this module only
 //! *builds* hulls the existing GJK/EPA path already consumes.
 //!
 //! # Limits (GJK path)
 //!
-//! * [`ConvexHull::MAX_VERTICES`]: hard tooling ceiling (256 vertices).
+//! * [`ConvexHull::MAX_VERTICES`](crate::shape::ConvexHull::MAX_VERTICES): hard tooling ceiling (256 vertices).
 //!   GJK support itself is an `O(n)` vertex scan with fixed iteration caps
 //!   (64 GJK + 32 EPA, polytope capped at 128 vertices), so larger hulls
 //!   would only burn time — anything over the ceiling is
 //!   [`MeshError::TooManyVertices`](crate::errors::MeshError), never a
 //!   silent truncation.
-//! * [`ConvexHull::FACE_CAP`]: faces triangulate only up to 64 vertices
+//! * [`ConvexHull::FACE_CAP`](crate::shape::ConvexHull::FACE_CAP): faces triangulate only up to 64 vertices
 //!   (pre-existing `O(n^4)` triple test). Builder hulls always ship explicit
-//!   fans and are never faceless; [`ConvexHull::from_points`] hulls past the
+//!   fans and are never faceless; [`ConvexHull::from_points`](crate::shape::ConvexHull::from_points) hulls past the
 //!   cap stay support-only (GJK/EPA exact, `try_inertia` falls back to the
 //!   local box, face raycasts miss) — documented here, not hidden.
 //! * Weld tolerance 1e-6 m (inherited from `from_vertices`); volume needs a

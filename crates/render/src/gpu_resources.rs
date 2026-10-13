@@ -112,8 +112,8 @@ impl FrameCommandBuffers {
 }
 
 /// Acquired swapchain texture of the current frame, handed from the
-/// acquiring system ([`RenderPresent`]) to the submitting one
-/// ([`RenderFlush`]) — the present half of the E2 handover.
+/// acquiring system (`RenderPresent`) to the submitting one
+/// (`RenderFlush`) — the present half of the E2 handover.
 ///
 /// `Mutex<Option<…>>` interior mutability, as with the other GPU
 /// resources: systems run against `&Resources`.
@@ -159,7 +159,7 @@ pub struct GpuMesh {
 /// half of X2, Extract-free).
 ///
 /// `RenderSubmit` rebuilds this every frame from the `custom_meshes` lane
-/// of [`extract_render_data`](crate::extraction::extract_render_data)
+/// of [`extract_render_data`]
 /// (see [`Renderer3D::stage_custom_meshes`](crate::renderer::Renderer3D::stage_custom_meshes)):
 /// per-entity GPU meshes plus joint palettes, in dense lane order.
 /// `RenderPresent` draws it after the shared sphere batch (custom instances
@@ -191,9 +191,9 @@ pub fn install_render_mesh(engine: &mut ornis_core::Engine, mesh: GpuMesh) {
 /// in the `schedule` observe the same objects without copying.
 ///
 /// No light rig is published here: worlds start dark. Ambient is
-/// [`GameWorld::set_ambient`](ornis_app::GameWorld::set_ambient) and does
+/// `GameWorld::set_ambient` and does
 /// not add directional lights. Those arrive from a scene or from
-/// [`GameWorld::spawn`](ornis_app::GameWorld::spawn)
+/// `GameWorld::spawn`
 /// ([`DirectionalLight`](crate::DirectionalLight),
 /// [`StudioLights`](crate::StudioLights)).
 /// Viewport lighting for lightless scenes is the editor's job (Blender-style

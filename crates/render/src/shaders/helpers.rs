@@ -84,7 +84,7 @@ pub const SHADING_DEBUG_HOT_LUMA: f32 = 1.0;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
-/// [`f32_lit`](super::f32_lit) (bit-exact, WGSL-valid). No second spelling.
+/// `f32_lit` (bit-exact, WGSL-valid). No second spelling.
 pub fn wgsl_consts() -> String {
     macro_rules! decl {
         ($name:ident) => {

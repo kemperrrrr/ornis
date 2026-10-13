@@ -1,6 +1,6 @@
 //! Undo history: op log with bounded, strategy-chosen state retention.
 //!
-//! [`UndoStack`] records every applied edit as an [`EditOp`](crate::EditOp)
+//! [`UndoStack`] records every applied edit as an [`EditOp`]
 //! intent plus the view state needed to restore it. [`UndoStrategy::Ops`]
 //! (the default) bounds history by entry count — cheap and predictable for
 //! small meshes; [`UndoStrategy::Snapshots`] bounds it by retained heap

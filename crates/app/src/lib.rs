@@ -2,9 +2,9 @@
 //!
 //! This crate bridges the backend-neutral gameplay systems in `ornis-core`
 //! with domain specifics (physics [`RigidBody`] and render
-//! [`TransformDesc`]/[`MeshDesc`]/[`MaterialDesc`]) so that the schedule
+//! [`TransformDesc`]/[`MeshDesc`](ornis_assets::scene::MeshDesc)/[`MaterialDesc`](ornis_assets::scene::MaterialDesc)) so that the schedule
 //! plans physics, render and gameplay as one DAG over a single world.
-//! [`GameWorld`](game_world::GameWorld) is the single scene-backed world
+//! [`GameWorld`] is the single scene-backed world
 //! type — extraction reads its lanes directly, never a second world copy.
 
 use glam::Vec3;

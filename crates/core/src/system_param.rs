@@ -82,7 +82,14 @@ pub unsafe trait PlainResource: ResMutResource {}
 macro_rules! plain_impl {
     ($($ty:ty),*) => {
         $(
+            // SAFETY: every expanded type is owned `'static` plain data —
+            // `&T` reaches no interior mutability, so sharing it across a
+            // level through `Res` is deterministic, and `ResMut`'s
+            // `writes::<T>()` key covers all mutation (only via `&mut`,
+            // which the scheduler serializes).
             unsafe impl ResMutResource for $ty {}
+            // SAFETY: same plain-data argument as above — no interior
+            // mutability is reachable through a shared reference.
             unsafe impl PlainResource for $ty {}
         )*
     };
@@ -105,33 +112,63 @@ plain_impl!(
 // SAFETY (container/tuple impls): purely structural forwarding — a container
 // is an approved resource only when the bound holds for everything reachable
 // from it, so no new state and no hidden interior mutability is introduced.
+// (Each impl below repeats the one-line justification so the
+// `undocumented_unsafe_blocks` gate sees it directly on the item.)
+// SAFETY: structural forwarding — `Option` adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for Option<T> {}
+// SAFETY: structural forwarding — `Option` adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for Option<T> {}
+// SAFETY: structural forwarding — `Vec` adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for Vec<T> {}
+// SAFETY: structural forwarding — `Vec` adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for Vec<T> {}
+// SAFETY: structural forwarding — `Box` adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for Box<T> {}
+// SAFETY: structural forwarding — `Box` adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for Box<T> {}
+// SAFETY: structural forwarding — `Result` adds no state beyond `T`/`E`.
 unsafe impl<T: ResMutResource, E: ResMutResource> ResMutResource for Result<T, E> {}
+// SAFETY: structural forwarding — `Result` adds no state beyond `T`/`E`.
 unsafe impl<T: PlainResource, E: PlainResource> PlainResource for Result<T, E> {}
+// SAFETY: structural forwarding — `[T; 0]` holds no values at all.
 unsafe impl<T: ResMutResource> ResMutResource for [T; 0] {}
+// SAFETY: structural forwarding — `[T; 0]` holds no values at all.
 unsafe impl<T: PlainResource> PlainResource for [T; 0] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for [T; 1] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for [T; 1] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for [T; 2] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for [T; 2] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for [T; 3] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for [T; 3] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: ResMutResource> ResMutResource for [T; 4] {}
+// SAFETY: structural forwarding — the array adds no state beyond `T`.
 unsafe impl<T: PlainResource> PlainResource for [T; 4] {}
+// SAFETY: `()` reaches no state, so sharing it is always sound.
 unsafe impl ResMutResource for () {}
+// SAFETY: `()` reaches no state, so sharing it is always sound.
 unsafe impl PlainResource for () {}
+// SAFETY: structural forwarding — the tuple adds no state beyond `A`.
 unsafe impl<A: ResMutResource> ResMutResource for (A,) {}
+// SAFETY: structural forwarding — the tuple adds no state beyond `A`.
 unsafe impl<A: PlainResource> PlainResource for (A,) {}
+// SAFETY: structural forwarding — the tuple adds no state beyond `A`/`B`.
 unsafe impl<A: ResMutResource, B: ResMutResource> ResMutResource for (A, B) {}
+// SAFETY: structural forwarding — the tuple adds no state beyond `A`/`B`.
 unsafe impl<A: PlainResource, B: PlainResource> PlainResource for (A, B) {}
+// SAFETY: structural forwarding — the tuple adds no state beyond `A`/`B`/`C`.
 unsafe impl<A: ResMutResource, B: ResMutResource, C: ResMutResource> ResMutResource for (A, B, C) {}
+// SAFETY: structural forwarding — the tuple adds no state beyond `A`/`B`/`C`.
 unsafe impl<A: PlainResource, B: PlainResource, C: PlainResource> PlainResource for (A, B, C) {}
+// SAFETY: structural forwarding — the map adds no state beyond `K`/`V`.
 unsafe impl<K: ResMutResource, V: ResMutResource> ResMutResource for HashMap<K, V> {}
+// SAFETY: structural forwarding — the map adds no state beyond `K`/`V`.
 unsafe impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> {}
 
 // Synchronization primitives are valid mutable resources only when the
@@ -143,19 +180,35 @@ unsafe impl<K: PlainResource, V: PlainResource> PlainResource for HashMap<K, V> 
 // declared `writes` access) — never through `Res`/`PlainResource`. The
 // `T: ResMutResource` bound keeps scheduler handles (`Mutex<SmartStore>`)
 // out, and atomics carry their own state with no reachable aliases.
+// SAFETY: interior-mutable, hence `ResMut`-only — reachable exclusively
+// through a declared `writes` access, never through `Res`; the
+// `T: ResMutResource` bound keeps scheduler handles out.
 unsafe impl<T: ResMutResource> ResMutResource for Mutex<T> {}
+// SAFETY: interior-mutable, hence `ResMut`-only (see above).
 unsafe impl<T: ResMutResource> ResMutResource for RwLock<T> {}
+// SAFETY: interior-mutable, hence `ResMut`-only (see above).
 unsafe impl<T: ResMutResource> ResMutResource for std::sync::OnceLock<T> {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicBool {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicI8 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicI16 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicI32 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicI64 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicIsize {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicU8 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicU16 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicU32 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicU64 {}
+// SAFETY: atomics carry their own state with no reachable aliases.
 unsafe impl ResMutResource for AtomicUsize {}
 
 /// Shared resource parameter: declares `reads::<T>`.
@@ -336,7 +389,10 @@ mod tests {
         _x: f32,
     }
 
+    // SAFETY: test-only plain-data struct — `f32` field, no interior
+    // mutability reachable through a shared reference.
     unsafe impl ResMutResource for Plain {}
+    // SAFETY: same plain-data argument as above.
     unsafe impl PlainResource for Plain {}
 
     #[test]

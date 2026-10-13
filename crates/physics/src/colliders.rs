@@ -1,8 +1,8 @@
 //! Mesh/collider recipes → solver bodies.
 //!
-//! [`body_for`] is the single place where authoring geometry becomes a
-//! [`RigidBody`]: an explicit [`ColliderDesc`] lane entry wins, otherwise
-//! the exact auto recipe ([`collider_for`]) applies. Entities without a
+//! [`body_for`](crate::colliders::body_for) is the single place where authoring geometry becomes a
+//! [`RigidBody`]: an explicit [`ColliderDesc`](ornis_assets::collider::ColliderDesc) lane entry wins, otherwise
+//! the exact auto recipe ([`collider_for`](ornis_assets::collider::collider_for)) applies. Entities without a
 //! buildable recipe get no body (`None`) — transport never invents
 //! colliders. The editor calls this on spawn and on explicit collider
 //! edits; per-step pose sync stays in the engine runtime.

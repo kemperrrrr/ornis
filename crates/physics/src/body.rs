@@ -238,7 +238,7 @@ pub enum BodyType {
 /// A single rigid body: pose, motion state, material properties and shape.
 ///
 /// Mass properties are derived from [`Shape::inertia`] at construction
-/// through the single [`Mass`](crate::invariants::Mass) site
+/// through the single [`Mass`] site
 /// ([`Mass::from_kind`](crate::invariants::Mass::from_kind)); mutate them
 /// only via [`RigidBody::set_mass_kind`], [`RigidBody::set_mass`],
 /// [`RigidBody::make_static`] or [`RigidBody::make_dynamic`] so `mass`,
@@ -311,7 +311,7 @@ pub struct RigidBody {
     /// Prefer [`Self::role`] / [`Self::set_role`] with [`crate::flags::BodyRole`].
     pub is_trigger: bool,
     /// Impact speed (m/s) at which the [`crate::Engine`] fracture pass
-    /// splits this body, compared against [`ContactEventKind::Hit`]
+    /// splits this body, compared against [`ContactEventKind::Hit`](crate::trigger::ContactEventKind::Hit)
     /// approach speeds after each step. `INFINITY` (default) never
     /// fractures — existing scenes are bit-identical. Only dynamic boxes
     /// split (along the longest axis, halves inherit everything incl.
@@ -464,8 +464,8 @@ impl RigidBody {
         self.friction_dir = None;
     }
 
-    /// Sphere body with default material ([`RESTITUTION_SPHERE`] /
-    /// [`FRICTION_SPHERE`]). Mass > 0 yields a dynamic body; mass 0 a static
+    /// Sphere body with default material (`RESTITUTION_SPHERE` /
+    /// `FRICTION_SPHERE`). Mass > 0 yields a dynamic body; mass 0 a static
     /// one.
     pub fn new_sphere(position: Vec3, radius: f32, mass: f32) -> Self {
         Self::build(
@@ -548,7 +548,7 @@ impl RigidBody {
     }
 
     /// Axis-aligned box body (half-extents per axis), default material
-    /// ([`RESTITUTION_DEFAULT`] / [`FRICTION_DEFAULT`]).
+    /// (`RESTITUTION_DEFAULT` / `FRICTION_DEFAULT`).
     pub fn new_box(position: Vec3, half_extents: Vec3, mass: f32) -> Self {
         Self::build(
             position,
@@ -561,7 +561,7 @@ impl RigidBody {
 
     /// Capsule body aligned to the local +Y axis (`half_height` is the
     /// cylinder half-length excluding the caps), capsule material
-    /// ([`RESTITUTION_CAPSULE`] / [`FRICTION_CAPSULE`]).
+    /// (`RESTITUTION_CAPSULE` / `FRICTION_CAPSULE`).
     pub fn new_capsule(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
@@ -576,7 +576,7 @@ impl RigidBody {
     }
 
     /// Flat-capped cylinder body aligned to the local +Y axis, capsule
-    /// material ([`RESTITUTION_CAPSULE`] / [`FRICTION_CAPSULE`]).
+    /// material (`RESTITUTION_CAPSULE` / `FRICTION_CAPSULE`).
     pub fn new_cylinder(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
@@ -591,8 +591,8 @@ impl RigidBody {
     }
 
     /// Solid cone body (apex `+half_height` on local +Y, base at
-    /// `-half_height`), default material ([`RESTITUTION_DEFAULT`] /
-    /// [`FRICTION_DEFAULT`]).
+    /// `-half_height`), default material (`RESTITUTION_DEFAULT` /
+    /// `FRICTION_DEFAULT`).
     pub fn new_cone(position: Vec3, radius: f32, half_height: f32, mass: f32) -> Self {
         Self::build(
             position,
@@ -812,7 +812,7 @@ impl RigidBody {
 
     /// Checked compound body from placed child shapes: each child owns a
     /// [`Pose`] in the compound frame (see [`Shape::try_compound`]).
-    /// Default material ([`RESTITUTION_DEFAULT`] / [`FRICTION_DEFAULT`]);
+    /// Default material (`RESTITUTION_DEFAULT` / `FRICTION_DEFAULT`);
     /// mass splits evenly across children with parallel-axis terms.
     ///
     /// # Errors
@@ -833,8 +833,8 @@ impl RigidBody {
     }
 
     /// Checked rounded body: `inner` dilated by `border_radius` (see
-    /// [`Shape::try_round`]). Default material ([`RESTITUTION_DEFAULT`] /
-    /// [`FRICTION_DEFAULT`]).
+    /// [`Shape::try_round`]). Default material (`RESTITUTION_DEFAULT` /
+    /// `FRICTION_DEFAULT`).
     ///
     /// # Errors
     ///

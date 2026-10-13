@@ -1,6 +1,6 @@
 //! World↔audio bridge for the unified [`Engine`](ornis_core::Engine) schedule.
 //!
-//! Mirrors [`install_gameplay_physics_bridge`](ornis_app) (if that helper is
+//! Mirrors `install_gameplay_physics_bridge` in `ornis_app` (if that helper is
 //! unavailable, see `ornis-app/src/lib.rs`): gameplay writes the authoritative
 //! `Position` lane, the bridge propagates it into the
 //! audio domain, and the [`AudioPlugin`](crate::schedule::AudioPlugin)
@@ -15,7 +15,7 @@
 //! * source positions — [`AudioEngine`](crate::engine::AudioEngine) reads the
 //!   gameplay `Position` lane first, raw `Vec3` only
 //!   as back-compat, so no copy system is needed;
-//! * listener pose/gain — [`AudioListenerSyncSystem`] (below) pushes the
+//! * listener pose/gain — `AudioListenerSyncSystem` (below) pushes the
 //!   world listener into the [`AudioHost`](crate::schedule::AudioHost) once
 //!   per frame, after motion and before `audio_step`.
 

@@ -392,7 +392,7 @@ impl QueryPipeline {
 
     /// Handles of every body passing `filter` that overlaps `shape` at
     /// `position`/`orientation`, in handle order. Overlap means the exact
-    /// surface distance is within the sweep touch band ([`SHAPE_TOUCH`],
+    /// surface distance is within the sweep touch band (`SHAPE_TOUCH`,
     /// 1 mm — the same band [`QueryPipeline::cast_shape`] stops at), so
     /// kissing shapes count as intersecting.
     pub fn intersect_shape(

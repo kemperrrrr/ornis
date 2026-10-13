@@ -1,8 +1,8 @@
 //! Single game world: one type, two roles.
 //!
-//! [`GameWorld`] is the only scene-backed world type: it owns one [`Engine`] plus the scene entity list and a monotonic mutation counter, and serves both the authoritative native/editor host and the browser replica — the two instances differ only in their [`SceneRole`] phantom parameter ([`Authoritative`](ornis_core::Authoritative) vs [`Replica`](ornis_core::Replica)) and in how scenes cross the serialization boundary (IDEAS §28), never in the world layout itself.
+//! [`GameWorld`] is the only scene-backed world type: it owns one [`Engine`] plus the scene entity list and a monotonic mutation counter, and serves both the authoritative native/editor host and the browser replica — the two instances differ only in their [`SceneRole`] phantom parameter ([`Authoritative`] vs [`Replica`]) and in how scenes cross the serialization boundary (IDEAS §28), never in the world layout itself.
 //!
-//! System registration uses the staged [`Engine`](ornis_core::Engine) plan
+//! System registration uses the staged [`Engine`] plan
 //! directly ([`Stage`](ornis_core::Stage) via
 //! [`Engine::add_stage_system`](ornis_core::Engine::add_stage_system) /
 //! [`Engine::stage_schedule_mut`](ornis_core::Engine::stage_schedule_mut)):
@@ -25,7 +25,7 @@ use ornis_render::{
 /// Single scene-backed game world: one [`Engine`] plus its scene entities.
 ///
 /// The native showcase and the editor server run the authoritative instance
-/// ([`Authoritative`](ornis_core::Authoritative), the default: a bare
+/// ([`Authoritative`], the default: a bare
 /// `GameWorld` keeps meaning the authoritative world); the browser viewport
 /// runs a [`ReplicaGameWorld`] populated from serialized snapshots across
 /// the boundary (IDEAS §28) — construct it with
@@ -38,9 +38,9 @@ use ornis_render::{
 /// platform installers are not migrated to the builder, so scene-backed
 /// setup keeps registering between frames here.
 ///
-/// Scene membership lives in a [`SceneEntities`](ornis_core::SceneEntities)
+/// Scene membership lives in a [`SceneEntities`]
 /// newtype and the mutation counter in a
-/// [`SceneVersion`](ornis_core::SceneVersion): both serialize as the plain
+/// [`SceneVersion`]: both serialize as the plain
 /// underlying JSON numbers, so snapshots and the WASM boundary are unchanged
 /// — the `/api/*` transport stays `u64` on the wire and `SceneVersion`
 /// converts with `From` at the edges.
@@ -293,7 +293,7 @@ impl<Role: SceneRole> GameWorld<Role> {
     }
 
     /// Returns the scene-entity membership as a
-    /// [`SceneEntities`](ornis_core::SceneEntities) newtype.
+    /// [`SceneEntities`] newtype.
     ///
     /// Same handles as [`Self::entities`], kept distinct from auxiliary
     /// runtime entities at the type level.

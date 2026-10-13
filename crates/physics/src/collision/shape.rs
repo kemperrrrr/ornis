@@ -1,7 +1,7 @@
 //! Convex collision primitives: sphere, box, capsule, cylinder, cone,
 //! convex hull, heightfield, triangle mesh, compound, rounded and half-space.
 //!
-//! All [`Shape`] variants are centered on the body origin (box, capsule,
+//! All [`Shape`](crate::shape::Shape) variants are centered on the body origin (box, capsule,
 //! cylinder and cone are symmetric about local +Y; the cone's apex sits at
 //! `+half_height`) and provide the two queries the pipeline relies on: an
 //! exact world-space AABB projection for the broadphase and a diagonal
@@ -15,9 +15,9 @@
 //! contacts, same standing as the capsule paths); heightfields collide
 //! column-wise and never go through GJK (they are not convex).
 //!
-//! P5 adds three shapes closing the worst rapier-audit gaps: [`Shape::Compound`]
-//! (a rigid union of placed children), [`Shape::Round`] (a convex primitive
-//! dilated by a border radius) and [`Shape::HalfSpace`] (a static infinite
+//! P5 adds three shapes closing the worst rapier-audit gaps: [`Shape::Compound`](crate::shape::Shape::Compound)
+//! (a rigid union of placed children), [`Shape::Round`](crate::shape::Shape::Round) (a convex primitive
+//! dilated by a border radius) and [`Shape::HalfSpace`](crate::shape::Shape::HalfSpace) (a static infinite
 //! plane for floors). Deliberately out of scope (follow-up, not a gap
 //! denial): segment, triangle, polyline and voxel shapes — none of the
 //! current scenes needs them, and each wants its own query kernel.
@@ -223,7 +223,7 @@ pub enum Shape {
     },
     /// Infinite plane through the body position with outward unit `normal`
     /// (free space is `dot(x − pos, n) > 0`): the static-floor primitive.
-    /// AABB is infinite along the normal and fat ([`HALFSPACE_TANGENT_FAT`])
+    /// AABB is infinite along the normal and fat (`HALFSPACE_TANGENT_FAT`)
     /// on the tangent axes, so every broadphase backend pairs it with
     /// everything it can touch (the uniform grid routes it through the
     /// large-body escape path, like giant floors). Narrow phase is the
@@ -885,7 +885,7 @@ impl Shape {
     /// their `support` arms are unreachable-by-construction fallbacks.
     /// Half-spaces are unbounded (no finite support point exists). A custom
     /// render soup has no implicit collider: hosts must build it explicitly
-    /// with [`TriMesh::from_triangles`] ([`RigidBody::try_new_trimesh`] for bodies)
+    /// with [`TriMesh::from_triangles`] ([`RigidBody::try_new_trimesh`](crate::body::RigidBody::try_new_trimesh) for bodies)
     /// — physics never substitutes a sphere placeholder.
     pub fn has_gjk_support(&self) -> bool {
         match self {

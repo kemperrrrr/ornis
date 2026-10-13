@@ -85,7 +85,7 @@ pub const THIN_FILM_PHASE_CYCLES: f32 = 4.0;
 
 /// WGSL `const` block for the kernel coefficients above.
 ///
-/// Names travel via `stringify!` and values via [`f32_lit`](super::f32_lit),
+/// Names travel via `stringify!` and values via `f32_lit`,
 /// so a rename or a bit-exact tweak cannot drift from the Rust constants.
 /// Every shader that splices a kernel referencing these names must splice
 /// this block too (`PI` / `EPS` / `INV_PI` stay in [`super::helpers::wgsl_consts`]).

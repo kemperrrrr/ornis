@@ -15,7 +15,7 @@ pub(crate) const LIGHT_KIND_POINT: f32 = 1.0;
 /// Evaluation kind of a [`GpuLight`] entry: spotlight.
 pub(crate) const LIGHT_KIND_SPOT: f32 = 2.0;
 
-/// Maximum lights uploaded per frame: the [`LightingUniform`] WGSL block
+/// Maximum lights uploaded per frame: the `LightingUniform` WGSL block
 /// spells `array<Light, 8>`, and [`Renderer3D::set_lights`] uploads the
 /// first eight entries of any kind. Excess lights are dropped and reported
 /// in [`LightUploadStats::dropped_lights`] (never silently).
@@ -458,7 +458,7 @@ impl Renderer3D {
     ///
     /// Shadowed lights (directional/spot with `shadow: ShadowCast::Enabled`) are
     /// assigned map layers `0..shadow_count` (`params.w`); their
-    /// light-space clip matrices go both into [`GpuLight::shadow_vp`]
+    /// light-space clip matrices go both into `GpuLight::shadow_vp`
     /// (sampled by the evaluators) and into the per-layer VP uniform
     /// buffers the depth pre-pass reuses through the gbuffer vertex
     /// shader's `camera` slot. Directional VPs use the legacy

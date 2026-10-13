@@ -5,7 +5,7 @@
 //! [`TextureRole`] is the three-slot role enum — the wiring stays mechanical
 //! (match on the role, upload, bind). Sampler parameters and `texCoord` sets
 //! are intentionally not carried: the import ignores them and the upload uses
-//! its own defaults (see [`sampler_descriptor_for_role`]).
+//! its own defaults (see [`sampler_descriptor_for_role`](crate::textures::sampler_descriptor_for_role)).
 //!
 //! # Storage and lifetime
 //!
@@ -29,7 +29,7 @@
 //! ([`TextureRole::MetallicRoughness`], green holds roughness, blue holds
 //! metallic) uploads as `Rgba8Unorm`: linear data that must never be
 //! decoded. CPU mirrors of both conversions live here
-//! ([`sample_albedo_linear`], [`sample_metallic_roughness`]) so tests pin
+//! ([`sample_albedo_linear`](crate::textures::sample_albedo_linear), [`sample_metallic_roughness`](crate::textures::sample_metallic_roughness)) so tests pin
 //! the convention without an adapter.
 //!
 //! # What this module does not do

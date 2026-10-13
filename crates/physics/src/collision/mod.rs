@@ -2,7 +2,7 @@
 //!
 //! Groups the narrow/broad collision pieces shared by both solver engines:
 //! [`broadphase`] candidate-pair backends, [`shape`] primitives with AABB
-//! projection, analytic [`distance`] queries and the [`gjk`] fallback for
+//! projection, analytic [`distance`] queries and the `gjk` fallback for
 //! cylinder/cone/hull pairs. Moved verbatim from the crate root (phase 3);
 //! external paths stay available through the crate-root re-exports.
 

@@ -3,7 +3,7 @@
 #![warn(missing_docs)]
 //!
 //! Renders the live scene from `/api/scene` (polled ~1/s) through
-//! the shared [`ReplicaGameWorld`](ornis_app::ReplicaGameWorld), [`FrameUpload`], and
+//! the shared [`ReplicaGameWorld`], [`FrameUpload`], and
 //! [`RenderFrame3D`] frame contract. There is no static fallback: without
 //! the remote server [`start_renderer`] fails instead of rendering a stale
 //! scene — the browser is a view over the editor's live world. The orbit
@@ -180,7 +180,7 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
 }
 
 /// Maps a browser `KeyboardEvent.code` to the platform-neutral key codes
-/// read by the server gameplay consumer ([`ornis_core::gameplay`]).
+/// read by the server gameplay consumer (`player_input`).
 /// Each key sets its winit-physical alias and its ASCII alias so both the
 /// native and the browser fallback paths in `player_input` fire.
 pub fn game_key_codes(code: &str) -> Option<&'static [u32]> {

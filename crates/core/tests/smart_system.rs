@@ -291,7 +291,9 @@ fn link_read_gathers_target_bundle() {
 fn plain_resource_bound_is_structural() {
     // Direct impl for coverage of the manual path.
     struct Manual;
+    // SAFETY: test-only unit type — reaches no state, so sharing is sound.
     unsafe impl ornis_core::ResMutResource for Manual {}
+    // SAFETY: test-only unit type — reaches no state, so sharing is sound.
     unsafe impl PlainResource for Manual {}
     let access = SystemAccess::new().reads::<Manual>();
     assert_eq!(access.reads.len(), 1);

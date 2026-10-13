@@ -1,7 +1,7 @@
 //! Shader IR: structural nodes between the Rust AST and WGSL text.
 //!
 //! The translator lowers `syn` expressions/statements to these nodes
-//! ([`IrExpr`]/[`IrStmts`]) and a separate writer renders them to WGSL.
+//! ([`IrExpr`]/[`IrStmt`]) and a separate writer renders them to WGSL.
 //! The split exists so translation is testable structurally (match on
 //! nodes, not on strings) and future passes (validation, folding) have
 //! something to consume besides text. Node shapes mirror the current

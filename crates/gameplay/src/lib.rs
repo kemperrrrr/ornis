@@ -116,8 +116,8 @@ impl Default for Velocity {
 
 /// World-space translation controlled by gameplay systems.
 ///
-/// When a render-side [`TransformDesc`](ornis_render_transform::TransformDesc)
-/// or physics [`RigidBody`](ornis_physics_body::RigidBody) lane exists the
+/// When a render-side `TransformDesc`
+/// or physics `RigidBody` lane exists the
 /// unified runtime synchronizes it; otherwise this lane is the authoritative
 /// placement for pure gameplay entities.
 #[derive(Clone, Copy, Debug, PartialEq, RegisterComponent)]

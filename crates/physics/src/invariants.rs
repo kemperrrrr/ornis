@@ -257,7 +257,7 @@ impl FrictionFrame {
 /// Capacity of [`Capped4`] / [`NonEmpty4`] (and SI manifolds).
 const CAP4: usize = 4;
 
-/// Capped inline vector of at most [`CAP4`] `Copy` points with a count invariant.
+/// Capped inline vector of at most `CAP4` `Copy` points with a count invariant.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Capped4<T: Copy> {
     buf: [Option<T>; CAP4],

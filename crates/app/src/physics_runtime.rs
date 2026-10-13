@@ -9,11 +9,11 @@
 //! details remain outside this module.
 //!
 //! Soft bodies (PLAN B2/D1.5) ride the same seam through the [`Engine`]
-//! orchestrator on its XPBD path: entities carrying a [`SoftBody`] lane
-//! component promote the world onto [`SolverKind::Xpbd`], are bound to
+//! orchestrator on its XPBD path: entities carrying a [`SoftBody`](ornis_physics::soft::SoftBody) lane
+//! component promote the world onto [`SolverKind::Xpbd`](ornis_physics::SolverKind::Xpbd), are bound to
 //! solver handles, stepped with the fixed clock together with the rigid
 //! bodies (so soft↔rigid coupling runs in the one substep loop), and
-//! written back as world-space [`MeshDesc::Custom`] soups (identity
+//! written back as world-space [`MeshDesc::Custom`](ornis_assets::scene::MeshDesc::Custom) soups (identity
 //! transform) that the existing extraction path draws unchanged.
 
 use std::cmp::Reverse;
@@ -43,7 +43,7 @@ const VEC3_COMPONENTS: usize = 3;
 ///
 /// Entities with a soft-solver binding, an empty [`SoftBody::surface`] and
 /// this lane component upload a tube soup along the solver particles every
-/// frame (see [`PhysicsRuntime::sync_soft_out`]). `radius` is the tube radius
+/// frame (see `PhysicsRuntime::sync_soft_out`). `radius` is the tube radius
 /// in world units, `sides` the cross-section resolution (minimum 3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RopeMesh {

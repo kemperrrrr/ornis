@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Typed shading-node kind: the element name inside a `<nodegraph>`.
 ///
-/// Closed over every node type [`crate::graph::evaluate::GraphEvaluator`]
+/// Closed over every node type `GraphEvaluator` (private graph interpreter)
 /// can execute (plus the generic `<node>`/`<output>`/`<surface>`/`<edf>`
 /// containers); anything else parses to [`MtlxNodeKind::Custom`] instead of
 /// being dropped, so unknown elements stay visible to diagnostics rather

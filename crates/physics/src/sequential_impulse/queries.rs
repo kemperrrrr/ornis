@@ -486,7 +486,7 @@ fn cap_spin_correction(omega: Vec3, inertia: Vec3, orientation: Quat, delta: Vec
 /// restitution-aware path is [`ccd_impact_velocity`]; friction stays with
 /// the contact/joint passes.
 ///
-/// The energy-neutral [`cap_spin_correction`] applies (see its docs).
+/// The energy-neutral `cap_spin_correction` applies (see its docs).
 /// Pure arithmetic, hence deterministic. Degenerate lever or a separating
 /// contact returns `omega` unchanged (never NaN).
 pub fn remove_angular_approach(
@@ -557,7 +557,7 @@ pub(crate) fn linear_ccd_deltas(
 /// is preserved — friction is the discrete solver's job next substep (it
 /// sees a clean touching contact thanks to the clamp+backoff), so CCD never
 /// double-applies it. The linear part applies fully (center-mass, bounded);
-/// the spin part goes through [`cap_spin_correction`]. Pure arithmetic,
+/// the spin part goes through `cap_spin_correction`. Pure arithmetic,
 /// hence deterministic.
 #[allow(clippy::too_many_arguments)]
 pub fn ccd_impact_velocity(

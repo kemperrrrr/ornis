@@ -1,5 +1,5 @@
 //! Native shell: winit window + wgpu rendering + frame loop over one
-//! [`GameWorld`](ornis_app::GameWorld).
+//! [`GameWorld`].
 //!
 //! Extracted from the `ornis` binary so games and examples reuse the same
 //! shell instead of forking it: the caller builds a world (spheres

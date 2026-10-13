@@ -19,7 +19,7 @@ use ornis_animation::skinning_matrices;
 use ornis_core::SmartStore;
 
 /// One valid `MeshDesc::Custom` entity: its CPU-side geometry plus the
-/// instance pointing at the merged [`FrameUpload::materials`] table.
+/// instance pointing at the merged [`FrameUpload::materials`](super::FrameUpload) table.
 ///
 /// The renderer uploads `vertices`/`indices` per entity
 /// (`renderer::upload_custom_mesh`) and draws the entry with `instance`.
@@ -44,8 +44,8 @@ pub struct CustomMeshEntry {
     ///
     /// Freshness is the skin system's contract (`skel_skin_cpu` runs
     /// PostFrame before the frame upload); inconsistent lane arrays skip
-    /// the entity with [`ExtractionStats::skipped_bad_skin`], never a stub
-    /// (see [`extract_render_data_with_stats`]).
+    /// the entity with [`ExtractionStats::skipped_bad_skin`](super::ExtractionStats), never a stub
+    /// (see [`extract_render_data_with_stats`](super::extract_render_data_with_stats)).
     pub skinning: SkinningMode,
     /// Staged GPU joint palette (phase D): final joint matrices
     /// (`model * inverse_bind`) as column-major arrays, one per joint —

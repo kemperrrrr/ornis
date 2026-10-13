@@ -290,7 +290,7 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 /// deterministic extraction order; [`GlobalTransform`] entities with no
 /// desc follow it. Identical [`MaterialDesc`]
 /// values share one [`FrameUpload::materials`] entry (see
-/// [`deduped_material_index`]), so `materials.len()` is the number of
+/// `deduped_material_index`), so `materials.len()` is the number of
 /// *distinct* materials, not entities. A [`ornis_core::Surface`] on the
 /// entity is applied after that conversion and is part of the dedup key.
 ///

@@ -684,7 +684,7 @@ impl AvbdEngine {
     ///
     /// [`crate::errors::JointError::UnknownRef`] for a stale handle,
     /// `Unsupported` for a joint kind without a driven axis, `NonFinite`
-    /// for an invalid motor (see [`crate::migration::validate_motor`]).
+    /// for an invalid motor (see `crate::migration::validate_motor`).
     pub fn set_joint_motor(
         &mut self,
         handle: JointHandle,

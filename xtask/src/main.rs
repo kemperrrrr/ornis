@@ -1,14 +1,14 @@
 //! Ornis build/task automation (cargo-xtask pattern, no shell required).
 //!
 //! Usage:
-//!   cargo xtask editor  [--skip-wasm] [--editor-dir <path>]
-//!   cargo xtask e2e [--port 3420] [--out <dir>]
-//!   cargo xtask quality [--ci] [--full] [--bench] [--everything] [--only <ids>] [--list-stages]
-//!   cargo xtask fuzz <target> [-- <libfuzzer args>]
-//!   cargo xtask mutants [-- <cargo-mutants args>]
+//!   cargo xtask editor  [--skip-wasm] [--editor-dir `<path>`]
+//!   cargo xtask e2e [--port 3420] [--out `<dir>`]
+//!   cargo xtask quality [--ci] [--full] [--bench] [--everything] [--only `<ids>`] [--list-stages]
+//!   cargo xtask fuzz `<target>` [-- `<libfuzzer args>`]
+//!   cargo xtask mutants [-- `<cargo-mutants args>`]
 //!   cargo xtask install-hooks
-//!   cargo xtask pre-push [<remote-name> <url>]   (git hook; reads stdin)
-//!   cargo editor   [--skip-wasm] [--editor-dir <path>]   (alias)
+//!   cargo xtask pre-push `<remote-name>` `<url>`   (git hook; reads stdin)
+//!   cargo editor   [--skip-wasm] [--editor-dir `<path>`]   (alias)
 //!
 //! `editor` builds the WASM viewport (wasm-pack) and runs the engine with the
 //! remote editor server. Cross-platform: everything goes through

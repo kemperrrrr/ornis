@@ -4,7 +4,7 @@
 //! [`ViewportCamera`], intersected against the CPU-side render lanes
 //! (`TransformDesc`/`MeshDesc`, read directly from the [`SmartStore`] — the
 //! same direct-read canon the render extraction uses, never a second
-//! world). The interim core is [`ray_triangle_hit`] (Möller–Trumbore) plus
+//! world). The interim core is [`ray_triangle_hit`](crate::picking::ray_triangle_hit) (Möller–Trumbore) plus
 //! an analytic sphere fast path; the nearest hit wins as [`PickHit`].
 //!
 //! The API is shaped for the future `geometry`-crate move (PLAN B3): the

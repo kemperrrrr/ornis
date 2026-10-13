@@ -133,9 +133,9 @@ impl SequentialImpulseEngine {
     /// Non-dynamic bodies have no island (statics are asleep from birth and
     /// never wake anything) — waking them is a no-op by construction.
     ///
-    /// Every wake also arms the post-wake grace (see [`Self::update_sleep`]):
+    /// Every wake also arms the post-wake grace (see `Self::update_sleep`):
     /// the island accumulates sleep at the normal rate for the next
-    /// [`WAKE_GRACE_STEPS`] steps even if it is numerically frozen, so a
+    /// `WAKE_GRACE_STEPS` steps even if it is numerically frozen, so a
     /// teleport overlap resolved in place cannot re-sleep before the old
     /// 0.2 s floor elapses.
     pub fn wake_island(&mut self, h: usize) {

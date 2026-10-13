@@ -6,9 +6,9 @@
 //! * page → engine: `window.ipc.postMessage(JSON)` envelopes shaped exactly
 //!   like `POST /api/command` bodies (`{"type", "request_id"?, "data"}`).
 //!   [`parse_incoming`] validates the envelope and wraps the command as
-//!   [`UiCommand::WithRequestId`](editor_backend::ipc::UiCommand::WithRequestId),
+//!   [`UiCommand::WithRequestId`],
 //!   so the engine emits a correlated
-//!   [`GameEvent::CommandCompleted`](editor_backend::ipc::GameEvent::CommandCompleted).
+//!   [`GameEvent::CommandCompleted`].
 //!   Every post gets an explicit acknowledgement ([`AckOutcome`], same JSON
 //!   shape as the HTTP `{"accepted", "request_id"[, "error"]}` ack).
 //! * engine → page: [`events_message_json`] serializes [`GameEvent`]s with
@@ -40,7 +40,7 @@ pub struct IncomingPost {
 
 impl IncomingPost {
     /// Wraps a successfully parsed command as
-    /// [`UiCommand::WithRequestId`](editor_backend::ipc::UiCommand::WithRequestId),
+    /// [`UiCommand::WithRequestId`],
     /// ready to send over `cmd_tx`; rejections pass through unchanged.
     pub fn into_queued(self) -> (RequestId, Result<UiCommand, BridgeError>) {
         let request_id = self.request_id;

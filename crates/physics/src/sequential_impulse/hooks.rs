@@ -26,7 +26,7 @@
 //!   the warm-started accumulated impulse (contact-force estimate) and the
 //!   pre-solve approach speed.
 //!
-//! [`SequentialImpulseEngine`](super::SequentialImpulseEngine) stores
+//! [`SequentialImpulseEngine`] stores
 //! `Option<Box<dyn ContactHooks>>` (default `None`). With `None` the step
 //! is bit-for-bit the legacy path: both filter passes are skipped, no
 //! override records are built, and the solver reads the legacy preamble. A

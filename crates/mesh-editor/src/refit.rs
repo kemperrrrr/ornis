@@ -6,7 +6,7 @@
 //! afterwards. Outcomes are [`RefitDecision`] (never a bool), and the swap
 //! of a background exact result over the live preview goes through
 //! [`decide_swap`] → [`SwapDecision`], keyed by [`Seq`] newest-wins
-//! ordering plus a [`PreviewStats`](crate::PreviewStats) coherence witness.
+//! ordering plus a [`PreviewStats`] coherence witness.
 
 use crate::{PreviewStats, Seq};
 

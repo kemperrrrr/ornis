@@ -3,7 +3,7 @@
 //! Each struct here is the single source of truth for one WGSL interface
 //! struct used by the render passes: the `@location`/`@builtin`/
 //! `@interpolate` assignment is generated from the field attributes via
-//! [`WgslInterface`](ornis_macros::WgslInterface), and the pass modules
+//! [`WgslInterface`], and the pass modules
 //! splice `WGSL_SOURCE` into the assembled shaders. Unlike buffer layouts,
 //! interfaces have no CPU-side memory contract — the structs below are
 //! declaration-only (hence the module-level `allow(dead_code)`; stage-body

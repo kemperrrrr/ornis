@@ -1,6 +1,6 @@
 //! Experimental persistent dynamic AABB tree broadphase.
 //!
-//! Implements the ideas from [`docs/quality/broadphase-reference-2026-08-29.md`]
+//! Implements the ideas from `docs/quality/broadphase-reference-2026-08-29.md`
 //! (Box3D/Jolt review) without copying their C/C++ source: a persistent proxy
 //! per body, a fat AABB margin, separate static/dynamic trees and an
 //! active/moved-body list so a step only re-queries bodies that actually

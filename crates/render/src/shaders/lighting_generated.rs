@@ -90,7 +90,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
-/// Rust side (`WGSL_NAME` / [`OPENPBR_WGSL_NAME`]) — never retyped.
+/// Rust side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
 pub const LIGHTING_RESOURCES: [Resource; 17] = [
     Resource {
         group: 0,
@@ -792,7 +792,7 @@ fn vs_main(
 }
 
 /// Vertex WGSL: full-screen quad (triangle strip) — quad constants built
-/// from the shared [`STANDARD_QUAD`]/[`STANDARD_UVS`] Rust data; the varying
+/// from the shared `STANDARD_QUAD`/`STANDARD_UVS` Rust data; the varying
 /// splices the shared `QuadVertexOutput` declaration (`HdrFragmentOut`)
 /// and the entry is translated.
 pub fn wgsl_vertex_source() -> String {
