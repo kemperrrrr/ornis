@@ -422,6 +422,7 @@ reload сцены уже есть: editor-world следит за mtime `editor/
   - `BodyType` dynamic/static/kinematic, `RigidBody` с ориентацией, угловой скоростью, collision layer/mask и trigger-флагом; trigger transitions доступны через `TriggerEvent`.
 - Тесты лежат в `crates/physics/tests/` (`si_step`/`si_narrow`/`si_sleep`/`si_queries`, `gpu_batches`, `avbd_*`, `solver_*`), ядро — в `sequential_impulse/` (`contacts`/`islands`/`joints` verbatim из старого `engine/`), `collision/` (`broadphase`/`shape`/`gjk`/`distance`), `gpu/` (`si_batches`/`avbd`), `avbd/` (`assembly`/`rows`/`joints_ext`/`sleep`); изотропная SI-строка — `contact_math.rs` (единый источник CPU/GPU); editor-only и native showcase используют ECS↔physics sync systems, browser-side physics намеренно не запускается поверх server snapshot.
 - **Multi-solver M3 ✅ 2026-09-16/17 (`RoutingKind::Islands`, `SplitMetrics`, тесты `solver_split`/`solver_lifecycle`)** — роутинг по островам (остров всегда в одном солвере), rebuild с mass-restore, гистерезис сна; hardening PR #12 одной строкой: inertia бокса ×4, signed overlap, angular frames (`diff.dot(*e)`), `row_live(c,f)`.
+- **K1 планарная физика ✅ (`planar.rs`: `MotionPlane`, plane-лок через SixDof + якорь, 2D-шейпы; SI-only — AVBD/XPBD/Islands вне скоупа) и swing-фикс SixDof** (позиционная стадия SI держит swing при двух Locked угловых осях).
 
 ### A3. Открытые вопросы для ревью
 1. ~~Рендер: активен ли G-buffer/lighting-путь или только forward?~~ **Закрыто в Фазе 4** — render graph c `Technique` (forward/deferred/hybrid), гибрид == legacy пиксель-в-пиксель.

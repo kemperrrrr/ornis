@@ -355,7 +355,9 @@ pub enum JointKind {
     /// equality iterations, limited linear axes the one-sided drive;
     /// limited ANGULAR axes measure per-axis twist about the assembly frame
     /// (an axis-twist approximation, not a true swing cone — documented).
-    /// All-locked degenerates to [`JointKind::Fixed`].
+    /// All-locked degenerates to [`JointKind::Fixed`]. With exactly two
+    /// locked angular axes the position pass holds the swing (alignment of
+    /// the free axis), independent of the twist travel along it.
     SixDof {
         /// Anchor point in body A's local frame (joint origin).
         local_anchor_a: Vec3,
@@ -687,6 +689,23 @@ pub enum AxisConfig {
         /// Upper bound (m or rad, relative to the assembly pose).
         max: f32,
     },
+}
+
+/// Swing axis of a [`JointKind::SixDof`] angular configuration: `Some(k)`
+/// when exactly one axis is not [`AxisConfig::Locked`] (the free or limited
+/// axis whose alignment the position pass must hold), `None` otherwise
+/// (all locked — the fixed-joint path, or more than one open axis).
+pub(crate) fn sixdof_swing_axis(angular: &[AxisConfig; 3]) -> Option<usize> {
+    let mut free = None;
+    for (i, c) in angular.iter().enumerate() {
+        if *c != AxisConfig::Locked {
+            if free.is_some() {
+                return None;
+            }
+            free = Some(i);
+        }
+    }
+    free
 }
 
 /// Linear travel window for a prismatic joint, in meters relative to the
@@ -1956,5 +1975,19 @@ mod tests {
         }
         .local_anchors();
         assert_eq!((la, lb), (Vec3::ZERO, Vec3::ZERO));
+    }
+
+    #[test]
+    fn sixdof_swing_axis_detects_two_locked() {
+        use AxisConfig::{Free, Limited, Locked};
+        let limited = Limited {
+            min: -0.1,
+            max: 0.1,
+        };
+        assert_eq!(sixdof_swing_axis(&[Locked, Locked, Free]), Some(2));
+        assert_eq!(sixdof_swing_axis(&[Free, Locked, Locked]), Some(0));
+        assert_eq!(sixdof_swing_axis(&[Locked, Locked, limited]), Some(2));
+        assert_eq!(sixdof_swing_axis(&[Locked; 3]), None);
+        assert_eq!(sixdof_swing_axis(&[Free, Free, Locked]), None);
     }
 }

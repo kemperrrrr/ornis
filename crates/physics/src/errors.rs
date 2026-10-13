@@ -211,6 +211,41 @@ pub enum JointError {
     },
 }
 
+/// Planar (K1) setup failure.
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum PlanarError {
+    /// Non-finite / non-positive thickness, extents, radius; bad mass or pose.
+    #[error("bad planar shape: {detail}")]
+    BadShape {
+        /// What was wrong.
+        detail: &'static str,
+    },
+    /// Polygon outline rejected (count, finiteness, convexity, area).
+    #[error("bad planar polygon: {detail}")]
+    BadPolygon {
+        /// What was wrong.
+        detail: &'static str,
+    },
+    /// Body handle out of range.
+    #[error("invalid body handle {handle}")]
+    InvalidBody {
+        /// Offending handle.
+        handle: usize,
+    },
+    /// Only dynamic bodies take the plane lock.
+    #[error("body {handle} is not dynamic")]
+    NotDynamic {
+        /// Offending handle.
+        handle: usize,
+    },
+    /// Hull construction failure.
+    #[error(transparent)]
+    Mesh(#[from] MeshError),
+    /// Joint admission failure (e.g. XPBD: unsupported six-DOF).
+    #[error(transparent)]
+    Joint(#[from] JointError),
+}
+
 /// Kinematic-mover admission failure: unknown handles, non-kinematic
 /// bodies and invalid displacements (R2).
 #[derive(Error, Debug, Clone, PartialEq)]
