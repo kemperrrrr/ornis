@@ -99,7 +99,7 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
         loop {
             let guard = epoch_pin();
             let shared = self.store.load(Ordering::Acquire, &guard);
-            // Safety: `shared` is pinned by `guard` for this iteration.
+            // SAFETY: `shared` is pinned by `guard` for this iteration.
             let mut new_store = unsafe { (*shared.deref()).clone() };
             f(&mut new_store);
             match self.store.compare_exchange(
@@ -110,7 +110,7 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLaneInner<T> {
                 &guard,
             ) {
                 Ok(_) => {
-                    // Safety: this thread replaced `shared`; no other thread
+                    // SAFETY: this thread replaced `shared`; no other thread
                     // can retire it because its CAS on the same `shared`
                     // pointer now fails. Epoch reclamation frees it once
                     // readers drain.

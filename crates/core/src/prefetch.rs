@@ -16,8 +16,7 @@
 /// cache levels). Pure performance hint with no observable semantics.
 pub fn prefetch_read<T, const LOCALITY: i32>(ptr: *const T) {
     // SAFETY: x86 PREFETCH is a non-faulting cache hint — it never reads
-    // memory observably and is safe for any address; callers additionally
-    // pass pointers derived from live allocations (see `prefetch_iter`).
+    // memory observably and is safe for any address.
     unsafe { std::arch::x86_64::_mm_prefetch::<LOCALITY>(ptr as *const i8) }
 }
 
