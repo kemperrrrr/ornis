@@ -82,20 +82,120 @@ fn is_bare_scalar_ty(ty: &Type) -> bool {
 }
 
 /// Whether an expression path is scalar-namespaced (`u8::MAX`,
-/// `f32::consts::PI`, `<u8>::MAX`): scalar associated constants and
-/// calls through a scalar type have no WGSL spelling — the writer
-/// would join them verbatim and naga would fail only at module
-/// creation. Vector constants (`glam::Vec3::ZERO`) and constructors
+/// `core::u8::MAX`, `std::primitive::u8::MAX`, `std::f32::consts::PI`,
+/// `<u8>::MAX`): scalar associated constants and calls through a scalar
+/// type have no WGSL spelling — the writer would join them verbatim and
+/// naga would fail only at module creation. Every segment but the last
+/// is checked, so a scalar hidden below `core`/`std` cannot slip
+/// through. Vector constants (`glam::Vec3::ZERO`) and constructors
 /// (`Vec3::new`) resolve in the writer and stay allowed.
 pub(crate) fn is_scalar_namespaced(path: &syn::Path, qself: Option<&syn::QSelf>) -> bool {
     if let Some(qself) = qself {
         return is_bare_scalar_ty(&qself.ty);
     }
-    path.segments.len() > 1
-        && path
-            .segments
-            .first()
-            .is_some_and(|head| is_scalar_head(&head.ident.to_string()))
+    path.segments
+        .iter()
+        .take(path.segments.len().saturating_sub(1))
+        .any(|seg| is_scalar_head(&seg.ident.to_string()))
+}
+
+/// Renders a type the way Rust spells it (`foo::u32`, `Vec<u8>`,
+/// `[f32; 6]`): [`quote!`] separates tokens with spaces (`foo :: u32`),
+/// which reads wrong inside error messages.
+pub(crate) fn type_string(ty: &Type) -> String {
+    match ty {
+        Type::Path(tp) if tp.qself.is_none() => path_string(&tp.path, None),
+        Type::Array(arr) => {
+            let len = &arr.len;
+            format!("[{}; {}]", type_string(&arr.elem), quote!(#len))
+        }
+        Type::Reference(r) => {
+            let lifetime = r
+                .lifetime
+                .as_ref()
+                .map(|l| format!("'{} ", l.ident))
+                .unwrap_or_default();
+            let mutability = if r.mutability.is_some() { "mut " } else { "" };
+            format!("&{lifetime}{mutability}{}", type_string(&r.elem))
+        }
+        _ => quote!(#ty).to_string(),
+    }
+}
+
+/// Renders an expression path the way Rust spells it (`u8::MAX`,
+/// `<u8>::MAX`, `glam::Vec3::new`), without the token-stream spaces
+/// [`quote!`] inserts around `::`.
+pub(crate) fn path_string(path: &syn::Path, qself: Option<&syn::QSelf>) -> String {
+    let Some(qself) = qself else {
+        let leading = if path.leading_colon.is_some() {
+            "::"
+        } else {
+            ""
+        };
+        return format!("{leading}{}", segments_string(path.segments.iter()));
+    };
+    let pos = qself.position.min(path.segments.len());
+    let mut out = format!("<{}", type_string(&qself.ty));
+    if qself.as_token.is_some() {
+        out.push_str(" as ");
+        out.push_str(&segments_string(path.segments.iter().take(pos)));
+    }
+    out.push_str(">::");
+    out.push_str(&segments_string(path.segments.iter().skip(pos)));
+    out
+}
+
+/// Joins path segments with `::` (`u8::MAX`, `glam::Vec3::new`).
+fn segments_string<'a>(segments: impl Iterator<Item = &'a syn::PathSegment>) -> String {
+    segments.map(segment_string).collect::<Vec<_>>().join("::")
+}
+
+/// Renders one path segment, keeping generic arguments readable
+/// (`Vec<u8>`, `Fn(u8) -> bool`).
+fn segment_string(segment: &syn::PathSegment) -> String {
+    match &segment.arguments {
+        syn::PathArguments::None => segment.ident.to_string(),
+        syn::PathArguments::AngleBracketed(args) => {
+            let args = args
+                .args
+                .iter()
+                .map(generic_argument_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}<{args}>", segment.ident)
+        }
+        syn::PathArguments::Parenthesized(args) => {
+            let inputs = args
+                .inputs
+                .iter()
+                .map(named_argument_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let output = match &args.output {
+                syn::ReturnType::Default => String::new(),
+                syn::ReturnType::Type(_, ty) => format!(" -> {}", type_string(ty)),
+            };
+            format!("{}({inputs}){output}", segment.ident)
+        }
+    }
+}
+
+/// Renders one parenthesized argument (`u8` in `Fn(u8)`, `x: u8` in
+/// `Fn(x: u8)`).
+fn named_argument_string(arg: &syn::NamedArg) -> String {
+    match &arg.name {
+        Some((name, _)) => format!("{name}: {}", type_string(&arg.ty)),
+        None => type_string(&arg.ty),
+    }
+}
+
+/// Renders one generic argument (`u8` in `Vec<u8>`, `'a` in `Cow<'a>`).
+fn generic_argument_string(arg: &syn::GenericArgument) -> String {
+    match arg {
+        syn::GenericArgument::Type(ty) => type_string(ty),
+        syn::GenericArgument::Lifetime(lifetime) => format!("'{}", lifetime.ident),
+        other => quote!(#other).to_string(),
+    }
 }
 
 /// Classifies one type named in a `#[kernel]` signature or `let`
@@ -147,7 +247,7 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
                 ) {
                     return Some(format!(
                         "{what} `{}` is not allowed in GPU kernel `{fn_name}`; use f32, i32, u32, or glam vectors instead",
-                        quote!(#ty),
+                        type_string(ty),
                     ));
                 }
                 // Scalars keep their values only when bare (`u32`, not
@@ -158,7 +258,7 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
                 if !(scalar || is_kernel_vector_ty(name.as_str())) {
                     return Some(format!(
                         "{what} `{}` is not supported in GPU kernel `{fn_name}`; supported: f32, u32, i32, bool and glam vectors/matrices",
-                        quote!(#ty),
+                        type_string(ty),
                     ));
                 }
                 return None;
@@ -169,7 +269,7 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
             _ => {
                 return Some(format!(
                     "{what} `{}` is not supported in GPU kernel `{fn_name}`; supported: f32, u32, i32, bool and glam vectors/matrices",
-                    quote!(#ty),
+                    type_string(ty),
                 ));
             }
         }
@@ -178,7 +278,7 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::kernel_type_error;
+    use super::{is_scalar_namespaced, kernel_type_error, path_string, type_string};
     use syn::Type;
 
     fn type_error(ty: &str) -> Option<String> {
@@ -263,6 +363,53 @@ mod tests {
                 "registry must know {rust}"
             );
             assert_eq!(type_error(rust), None, "{rust}");
+        }
+    }
+
+    /// A scalar hidden below `core`/`std` is namespaced too: every path
+    /// segment but the last is checked, not just the first.
+    #[test]
+    fn namespaced_scalar_paths_hide_below_core_std() {
+        for path in [
+            "core::u8::MAX",
+            "std::primitive::u8::MAX",
+            "std::f32::consts::PI",
+        ] {
+            let expr: syn::Expr = syn::parse_str(path).expect("test path must parse");
+            let syn::Expr::Path(expr_path) = expr else {
+                panic!("{path} must parse as a path");
+            };
+            assert!(
+                is_scalar_namespaced(&expr_path.path, expr_path.qself.as_ref()),
+                "{path}"
+            );
+        }
+    }
+
+    /// Error messages spell paths the way Rust does — `u8::MAX`, not
+    /// the `u8 :: MAX` token stream [`quote!`] prints.
+    #[test]
+    fn error_spellings_have_no_token_stream_spaces() {
+        for (ty, expected) in [
+            ("foo::u32", "foo::u32"),
+            ("[foo::u32; 4]", "[foo::u32; 4]"),
+            ("Vec<u8>", "Vec<u8>"),
+            ("HashMap<u32, f32>", "HashMap<u32, f32>"),
+            ("&mut f32", "&mut f32"),
+        ] {
+            let parsed: Type = syn::parse_str(ty).expect("test type must parse");
+            assert_eq!(type_string(&parsed), expected, "{ty}");
+        }
+        for (path, expected) in [("u8::MAX", "u8::MAX"), ("<u8>::MAX", "<u8>::MAX")] {
+            let expr: syn::Expr = syn::parse_str(path).expect("test path must parse");
+            let syn::Expr::Path(expr_path) = expr else {
+                panic!("{path} must parse as a path");
+            };
+            assert_eq!(
+                path_string(&expr_path.path, expr_path.qself.as_ref()),
+                expected,
+                "{path}"
+            );
         }
     }
 }

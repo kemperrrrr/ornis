@@ -88,12 +88,11 @@ impl<'ast> Visit<'ast> for KernelValidator {
 
     fn visit_expr_cast(&mut self, node: &'ast syn::ExprCast) {
         if crate::wgsl_lower::cast_target_ty(&node.ty).is_none() {
-            let ty = node.ty.as_ref();
             self.errors.push(syn::Error::new_spanned(
                 &node.ty,
                 format!(
                     "cast to `{}` is not supported in GPU kernel `{}`; supported targets: f32, u32, i32",
-                    quote!(#ty),
+                    super::kernel_types::type_string(&node.ty),
                     self.fn_name
                 ),
             ));
@@ -114,17 +113,17 @@ impl<'ast> Visit<'ast> for KernelValidator {
         visit::visit_expr_closure(self, node);
     }
 
-    /// Scalar-namespaced paths (`u8::MAX`, `f32::consts::PI`) have no
-    /// WGSL spelling: `u8::MAX as u32` used to lower to `u32(u8::MAX)`
-    /// and fail only at naga. Use a plain `f32`, `u32` or `i32` literal.
+    /// Scalar-namespaced paths (`u8::MAX`, `core::u8::MAX`,
+    /// `std::f32::consts::PI`) have no WGSL spelling: `u8::MAX as u32`
+    /// used to lower to `u32(u8::MAX)` and fail only at naga. Use a
+    /// plain `f32`, `u32` or `i32` literal.
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         if super::kernel_types::is_scalar_namespaced(&node.path, node.qself.as_ref()) {
-            let path = &node.path;
             self.errors.push(syn::Error::new_spanned(
                 &node.path,
                 format!(
                     "path `{}` is not supported in GPU kernel `{}`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead",
-                    quote!(#path),
+                    super::kernel_types::path_string(&node.path, node.qself.as_ref()),
                     self.fn_name
                 ),
             ));
@@ -340,7 +339,15 @@ mod tests {
 
     #[test]
     fn scalar_const_paths_are_namespaced() {
-        for path in ["u8::MAX", "u32::MAX", "f32::consts::PI", "<u8>::MAX"] {
+        for path in [
+            "u8::MAX",
+            "u32::MAX",
+            "f32::consts::PI",
+            "<u8>::MAX",
+            "core::u8::MAX",
+            "std::primitive::u8::MAX",
+            "std::f32::consts::PI",
+        ] {
             assert!(scalar_namespaced(path), "{path}");
         }
     }
