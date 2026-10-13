@@ -1347,78 +1347,8 @@ const CARGO_MACHETE_VERSION: &str = "0.9.2";
 const TYPOS_VERSION: &str = "1.51.1";
 
 /// ── Level 2 (--full): coverage + bench compile check ──────
-/// Coverage is a ratchet gate (same idea as rustqual): the workspace line
-/// rate in `coverage-baseline.json` is the floor — equal or better is PASS,
-/// only a true regression FAILs. On improvement the baseline file is updated
-/// automatically (commit it). First run without a baseline saves the current
-/// rate and PASSes. Without cargo-llvm-cov the stage SKIPs (same as before).
-/// The JSON summary stays at `target/llvm-cov/coverage-summary.json`, the
-/// HTML report at `target/llvm-cov/html` — per-crate detail lives there and
-/// in the nightly artifacts, not in the gate output.
 fn full_stages(stages: &mut StageList<'_>) {
-    if stages.enabled("coverage") && !cargo_subcommand_exists("llvm-cov") {
-        stages.skip(
-            "coverage",
-            "coverage (llvm-cov)",
-            "cargo-llvm-cov not installed (cargo install cargo-llvm-cov --locked; rustup component add llvm-tools-preview)",
-        );
-    } else if stages.enabled("coverage") {
-        stages.n += 1;
-        let started = Instant::now();
-        let (idx, total) = (stages.n, stages.total);
-        let name = "coverage (llvm-cov)";
-        eprintln!();
-        eprintln!("═══ [{idx}/{total}] {name}: cargo llvm-cov --workspace (ratchet vs {COVERAGE_BASELINE}) ═══");
-        let summary_path = stages.root.join(COVERAGE_SUMMARY);
-        if let Some(parent) = summary_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // One test run, machine-readable summary. The HTML report renders
-        // afterwards from the same data (no test re-run).
-        let tested = Command::new("cargo")
-            .args([
-                "llvm-cov",
-                "--workspace",
-                "--summary-only",
-                "--json",
-                "--output-path",
-                &summary_path.to_string_lossy(),
-            ])
-            .current_dir(stages.root)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        let (status, note) = if !tested {
-            (
-                Status::Fail,
-                "cargo llvm-cov --workspace did not finish (tests or collection broke)".to_string(),
-            )
-        } else if let Ok(text) = std::fs::read_to_string(&summary_path) {
-            let (rate, covered, count) = coverage_rate(&text);
-            let _ = Command::new("cargo")
-                .args([
-                    "llvm-cov",
-                    "report",
-                    "--html",
-                    "--output-dir",
-                    COVERAGE_HTML,
-                ])
-                .current_dir(stages.root)
-                .status();
-            eprintln!(
-                "workspace lines: {covered}/{count} = {:.2}%",
-                rate * COVERAGE_PERCENT
-            );
-            coverage_verdict(&stages.root.join(COVERAGE_BASELINE), rate, covered, count)
-        } else {
-            (
-                Status::Fail,
-                "coverage summary unreadable (report step broke)".to_string(),
-            )
-        };
-        eprintln!("── {name}: {} ({note}) ──", status.label());
-        stages.push("coverage", name, status, note, started);
-    }
+    coverage_stage(stages);
 
     stages.run(
         "bench-compile",
@@ -1461,6 +1391,90 @@ fn full_stages(stages: &mut StageList<'_>) {
             );
         }
     }
+}
+
+/// Coverage ratchet gate (same idea as rustqual): the workspace line
+/// rate in `coverage-baseline.json` is the floor — equal or better is PASS,
+/// only a true regression FAILs. On improvement the baseline file is updated
+/// automatically (commit it). First run without a baseline saves the current
+/// rate and PASSes. Without cargo-llvm-cov the stage SKIPs (same as before).
+/// The JSON summary stays at `target/llvm-cov/coverage-summary.json`, the
+/// HTML report at `target/llvm-cov/html` — per-crate detail lives there and
+/// in the nightly artifacts, not in the gate output.
+fn coverage_stage(stages: &mut StageList<'_>) {
+    if !stages.enabled("coverage") {
+        return;
+    }
+    if !cargo_subcommand_exists("llvm-cov") {
+        stages.skip(
+            "coverage",
+            "coverage (llvm-cov)",
+            "cargo-llvm-cov not installed (cargo install cargo-llvm-cov --locked; rustup component add llvm-tools-preview)",
+        );
+        return;
+    }
+    stages.n += 1;
+    let started = Instant::now();
+    let (idx, total) = (stages.n, stages.total);
+    let name = "coverage (llvm-cov)";
+    eprintln!();
+    eprintln!("═══ [{idx}/{total}] {name}: cargo llvm-cov --workspace (ratchet vs {COVERAGE_BASELINE}) ═══");
+    let summary_path = stages.root.join(COVERAGE_SUMMARY);
+    if let Some(parent) = summary_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // One test run, machine-readable summary. The HTML report renders
+    // afterwards from the same data (no test re-run).
+    let tested = Command::new("cargo")
+        .args([
+            "llvm-cov",
+            "--workspace",
+            "--summary-only",
+            "--json",
+            "--output-path",
+            &summary_path.to_string_lossy(),
+        ])
+        .current_dir(stages.root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let (status, note) = coverage_outcome(stages.root, &summary_path, tested);
+    eprintln!("── {name}: {} ({note}) ──", status.label());
+    stages.push("coverage", name, status, note, started);
+}
+
+/// Verdict for a finished coverage run: reads the llvm-cov summary,
+/// renders the HTML report from the same data, and rates the workspace
+/// line coverage against the stored floor.
+fn coverage_outcome(root: &Path, summary_path: &Path, tested: bool) -> (Status, String) {
+    if !tested {
+        return (
+            Status::Fail,
+            "cargo llvm-cov --workspace did not finish (tests or collection broke)".to_string(),
+        );
+    }
+    let Ok(text) = std::fs::read_to_string(summary_path) else {
+        return (
+            Status::Fail,
+            "coverage summary unreadable (report step broke)".to_string(),
+        );
+    };
+    let (rate, covered, count) = coverage_rate(&text);
+    let _ = Command::new("cargo")
+        .args([
+            "llvm-cov",
+            "report",
+            "--html",
+            "--output-dir",
+            COVERAGE_HTML,
+        ])
+        .current_dir(root)
+        .status();
+    eprintln!(
+        "workspace lines: {covered}/{count} = {:.2}%",
+        rate * COVERAGE_PERCENT
+    );
+    coverage_verdict(&root.join(COVERAGE_BASELINE), rate, covered, count)
 }
 
 /// Workspace line-coverage floor file (ratchet baseline, same role as
@@ -2826,7 +2840,10 @@ mod tests {
 
 #[cfg(test)]
 mod coverage_tests {
-    use super::{coverage_rate, coverage_verdict, load_coverage_floor, Status, COVERAGE_EPS};
+    use super::{
+        coverage_outcome, coverage_rate, coverage_stage, coverage_verdict, load_coverage_floor,
+        StageList, Status, COVERAGE_EPS,
+    };
 
     /// Minimal llvm-cov summary shape: totals resolve to rate/covered/total.
     #[test]
@@ -2858,5 +2875,33 @@ mod coverage_tests {
         let (status, _) = coverage_verdict(&path, 0.0, 0, 2);
         assert_eq!(status, Status::Fail);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Failure paths never panic: broken collection, unreadable summary.
+    #[test]
+    fn outcome_fails_closed() {
+        let dir = std::env::temp_dir().join("ornis-coverage-outcome-probe");
+        let _ = std::fs::create_dir_all(&dir);
+        let missing = dir.join("no-summary.json");
+        let _ = std::fs::remove_file(&missing);
+        let (status, note) = coverage_outcome(&dir, &missing, false);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("did not finish"), "unexpected: {note}");
+        let (status, note) = coverage_outcome(&dir, &missing, true);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("unreadable"), "unexpected: {note}");
+    }
+
+    /// A deselected stage records nothing (and stays test-covered).
+    #[test]
+    fn stage_stays_quiet_when_not_selected() {
+        let mut stages = StageList::new(
+            std::path::Path::new("."),
+            1,
+            Some(vec!["fmt".to_string()]),
+            false,
+        );
+        coverage_stage(&mut stages);
+        assert!(stages.results.is_empty());
     }
 }
