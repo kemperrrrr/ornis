@@ -1,19 +1,22 @@
-//! GPU frustum culling with `draw_indexed_indirect` submits ([RAT-35](/RAT/issues/RAT-35)).
+//! Groundwork for GPU frustum culling with `draw_indexed_indirect`
+//! submits ([RAT-35](/RAT/issues/RAT-35)).
 //!
 //! CPU frustum culling is opt-in and off by default
 //! ([`crate::extraction::cull_frame_upload`]); this module stages its GPU
 //! replacement without relying on `multi_draw_indirect` (emulated by a loop
-//! on Metal, wgpu #2148, no `MDI_COUNT`): one compute pass compacts the
-//! visible instances into a dense buffer and writes one
-//! [`DrawIndexedIndirectArgs`], then gbuffer and shadow passes submit a
-//! single [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
-//! per mesh/material.
+//! on Metal, wgpu #2148, no `MDI_COUNT`): one compute pass will compact the
+//! visible instances into a dense buffer and write one
+//! [`DrawIndexedIndirectArgs`], and a follow-up slice will wire the gbuffer
+//! and shadow passes to submit a single
+//! [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
+//! per mesh/material. **No pass submits `draw_indexed_indirect` yet** —
+//! nothing here is hooked into the frame until that wiring slice lands.
 //!
 //! Slice 1 (this module): the CPU reference compaction, the indirect-args
 //! layout, the compute-shader source and its uniform packing, plus parity
 //! tests against the CPU culler. Pass wiring (gbuffer/shadows indirect
 //! submits, owned culler buffers on [`crate::renderer::Renderer3D`]) and
-//! the 10k/100k benchmark table land in follow-up slices.
+//! the GPU benchmark column land in follow-up slices.
 //!
 //! Order contract: the CPU compaction preserves submission order
 //! (strictly increasing indices — deterministic, the §24.1 reference).
@@ -39,9 +42,13 @@ pub const FRUSTUM_PLANE_COUNT: usize = 6;
 /// `u32` words per [`DrawIndexedIndirectArgs`].
 pub const INDIRECT_ARGS_WORD_COUNT: usize = 5;
 
+/// Bytes per indirect-args word.
+pub const INDIRECT_ARGS_WORD_BYTES: u64 = 4;
+
 /// Word index of `instance_count` inside the indirect-args buffer: the
 /// only word the compute pass writes (via `atomicAdd`); the CPU
-/// pre-writes the rest and zeroes this word before dispatch.
+/// pre-writes the rest and zeroes this word before every dispatch with
+/// [`reset_indirect_instance_count`].
 pub const INSTANCE_COUNT_WORD: usize = 1;
 
 /// Byte size of the [`CullParams`] uniform block: six `vec4` planes plus
@@ -54,8 +61,10 @@ const CULL_PARAM_PAD_WORDS: usize = 3;
 
 /// `DrawIndexedIndirectArgs` for one
 /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
-/// submit: five `u32` words (`index_count`, `instance_count`,
-/// `first_index`, `base_vertex`, `first_instance`).
+/// submit: five 32-bit words (`index_count`, `instance_count`,
+/// `first_index`, `base_vertex`, `first_instance`) — byte-identical to
+/// [`wgpu::util::DrawIndexedIndirectArgs`], so `base_vertex` is the
+/// signed `i32` of the wgpu/Vulkan/D3D12/Metal layouts.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DrawIndexedIndirectArgs {
@@ -65,8 +74,9 @@ pub struct DrawIndexedIndirectArgs {
     pub instance_count: u32,
     /// First index into the index buffer (always `0` here).
     pub first_index: u32,
-    /// Vertex-buffer base offset (always `0` here).
-    pub base_vertex: u32,
+    /// Vertex-buffer base offset (always `0` here). Signed, as in the
+    /// wgpu arg layout (`base_vertex` may be negative in the spec).
+    pub base_vertex: i32,
     /// First instance slot (always `0`: the compacted buffer is dense).
     pub first_instance: u32,
 }
@@ -102,10 +112,21 @@ pub struct CullParams {
 /// Packs the frame culling uniform from `view_proj`: the same six
 /// normalized planes [`Frustum`] tests on the CPU, so the compute pass
 /// and [`Frustum::sphere_visible`] agree by construction.
+///
+/// Non-finite planes (degenerate `view_proj`, unusable normals) are
+/// replaced with the always-passing `(0, 0, 0, f32::MAX)` so the GPU
+/// fails open exactly like [`Frustum::sphere_visible`], which skips
+/// them on the CPU.
 pub fn cull_params(view_proj: &Mat4, count: u32) -> CullParams {
     let planes: [Vec4; FRUSTUM_PLANE_COUNT] = Frustum::from_view_proj(view_proj).planes();
     CullParams {
-        planes: planes.map(|plane| plane.to_array()),
+        planes: planes.map(|plane| {
+            if plane.is_finite() {
+                plane.to_array()
+            } else {
+                [0.0, 0.0, 0.0, f32::MAX]
+            }
+        }),
         count,
         _pad: [0; CULL_PARAM_PAD_WORDS],
     }
@@ -137,6 +158,18 @@ pub fn compact_visible_indices(instances: &[InstanceData], view_proj: &Mat4) -> 
 /// `visible` dense slots (an empty set is a valid no-op draw).
 pub fn indirect_args_for_visible(index_count: u32, visible: &[u32]) -> DrawIndexedIndirectArgs {
     DrawIndexedIndirectArgs::compacted(index_count, visible.len() as u32)
+}
+
+/// Zeroes the `instance_count` word ([`INSTANCE_COUNT_WORD`]) of an
+/// indirect-args buffer before a culling dispatch. The compute pass only
+/// ever `atomicAdd`s to that word, so every frame must restart it at
+/// zero — without this reset the counter accumulates across dispatches.
+pub fn reset_indirect_instance_count(queue: &wgpu::Queue, args: &wgpu::Buffer) {
+    queue.write_buffer(
+        args,
+        INSTANCE_COUNT_WORD as u64 * INDIRECT_ARGS_WORD_BYTES,
+        &0_u32.to_le_bytes(),
+    );
 }
 
 /// Workgroups per culling dispatch for `instance_count` source instances
@@ -203,7 +236,7 @@ fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
 @compute @workgroup_size(64)
 fn cull_instances(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = global_id.x;
-    if (i >= params.count) {
+    if (i >= params.count || i >= arrayLength(&src)) {
         return;
     }
     let sphere = instance_sphere(src[i].model);
@@ -211,6 +244,9 @@ fn cull_instances(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
     let slot = atomicAdd(&args[1u], 1u);
+    if (slot >= arrayLength(&dst)) {
+        return;
+    }
     dst[slot] = src[i];
 }
 "#;
@@ -221,6 +257,8 @@ mod tests {
     use crate::camera::CameraView;
     use crate::extraction::cull_frame_upload;
     use crate::extraction::extract_render_data;
+    use crate::renderer::PerObjectGpu;
+    use bytemuck::Zeroable;
     use ornis_assets::scene::MaterialDesc;
     use ornis_assets::scene::MeshDesc;
     use ornis_assets::scene::TransformDesc;
@@ -247,18 +285,6 @@ mod tests {
             emission: [0.0, 0.0, 0.0],
             metallic: ornis_core::Metallic::new(0.0),
         }
-    }
-
-    /// `PerObjectGpu`-layout staging record for tests: the renderer field
-    /// is private to its module, so the test mirrors the 144-byte layout
-    /// (two `mat4x4` + material `u32` + pad) instead of naming it.
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct TestPerObject {
-        model: [[f32; 4]; 4],
-        normal_matrix: [[f32; 4]; 4],
-        material_index: u32,
-        _pad: [u32; 3],
     }
 
     /// Perspective look-at frame matching the extraction cull tests.
@@ -357,9 +383,10 @@ mod tests {
 
     #[test]
     fn indirect_args_layout_matches_wgpu() {
-        // Five `u32` words, 20 bytes, field order = wgpu's
+        // Five 32-bit words, 20 bytes, field order = wgpu's
         // `DrawIndexedIndirectArgs` (`index_count`, `instance_count`,
-        // `first_index`, `base_vertex`, `first_instance`).
+        // `first_index`, `base_vertex`, `first_instance`); `base_vertex`
+        // is the signed `i32` of that layout.
         assert_eq!(std::mem::size_of::<DrawIndexedIndirectArgs>(), 20);
         assert_eq!(
             std::mem::size_of::<DrawIndexedIndirectArgs>(),
@@ -392,6 +419,28 @@ mod tests {
     }
 
     #[test]
+    fn indirect_args_bytes_match_wgpu() {
+        // Byte-for-byte identity with `wgpu::util::DrawIndexedIndirectArgs`
+        // (including the signed `base_vertex`), so a buffer written from
+        // this type is a valid `draw_indexed_indirect` args buffer.
+        let ours = DrawIndexedIndirectArgs {
+            index_count: 3,
+            instance_count: 5,
+            first_index: 7,
+            base_vertex: -11,
+            first_instance: 13,
+        };
+        let theirs = wgpu::util::DrawIndexedIndirectArgs {
+            index_count: 3,
+            instance_count: 5,
+            first_index: 7,
+            base_vertex: -11,
+            first_instance: 13,
+        };
+        assert_eq!(bytemuck::bytes_of(&ours), theirs.as_bytes());
+    }
+
+    #[test]
     fn cull_params_carry_frustum_planes() {
         // The uniform packs exactly the planes the CPU tests evaluate.
         let view = perspective_view();
@@ -407,6 +456,21 @@ mod tests {
         for (packed, plane) in params.planes.iter().zip(expected.iter()) {
             assert_eq!(*packed, plane.to_array());
         }
+    }
+
+    #[test]
+    fn cull_params_replaces_non_finite_planes_with_pass_through() {
+        // A degenerate view-proj leaves unusable plane normals (`Frustum`
+        // marks them NaN and fails open); the uniform must carry
+        // always-passing planes so the GPU test matches that rule
+        // instead of culling on garbage comparisons.
+        let params = cull_params(&Mat4::ZERO, 3);
+        for plane in &params.planes {
+            assert_eq!(*plane, [0.0, 0.0, 0.0, f32::MAX]);
+        }
+        let upload = hundred_sphere_upload();
+        let visible = compact_visible_indices(&upload.instances, &Mat4::ZERO);
+        assert_eq!(visible.len(), 100, "CPU fails open on a degenerate frustum");
     }
 
     #[test]
@@ -429,7 +493,9 @@ mod tests {
         .expect("cull compute shader must validate");
     }
 
-    /// Adapter handle, or `None` on headless CI without a GPU (skip).
+    /// Adapter handle, or `None` on headless hosts without a GPU. The
+    /// skip reason is logged so a silent no-op pass is visible in the
+    /// test output instead of looking like a green GPU run.
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -439,32 +505,53 @@ mod tests {
                 memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
                 display: None,
             });
-            let adapter = instance
+            let adapter = match instance
                 .request_adapter(&wgpu::RequestAdapterOptions::default())
                 .await
-                .ok()?;
-            adapter
+            {
+                Ok(adapter) => adapter,
+                Err(err) => {
+                    eprintln!("SKIPPED (gpu_compaction): no wgpu adapter: {err}");
+                    return None;
+                }
+            };
+            match adapter
                 .request_device(&wgpu::DeviceDescriptor::default())
                 .await
-                .ok()
+            {
+                Ok(pair) => Some(pair),
+                Err(err) => {
+                    eprintln!("SKIPPED (gpu_compaction): no wgpu device: {err}");
+                    None
+                }
+            }
         })
     }
 
-    /// Staged source records plus the frame matrix and CPU reference
-    /// count for the dispatch test.
-    fn cull_test_scene() -> (Vec<TestPerObject>, Mat4, u32) {
+    /// Staged source records plus the frame matrix and the CPU reference
+    /// translations of the visible instances for the dispatch tests.
+    fn cull_test_scene() -> (Vec<PerObjectGpu>, Mat4, Vec<[f32; 4]>) {
         let upload = hundred_sphere_upload();
         let view = perspective_view();
         let (view_proj, _) = crate::camera::camera_view_projection(&view, (160, 90));
-        let expected = compact_visible_indices(&upload.instances, &view_proj).len() as u32;
+        let expected = compact_visible_indices(&upload.instances, &view_proj)
+            .iter()
+            .map(|index| {
+                upload.instances[*index as usize]
+                    .model_matrix
+                    .w_axis
+                    .to_array()
+            })
+            .collect::<Vec<[f32; 4]>>();
         let staged = upload
             .instances
             .iter()
-            .map(|instance| TestPerObject {
-                model: instance.model_matrix.to_cols_array_2d(),
-                normal_matrix: instance.normal_matrix.to_cols_array_2d(),
-                material_index: instance.material_index.as_u32(),
-                _pad: [0; CULL_PARAM_PAD_WORDS],
+            .map(|instance| {
+                let mut record = PerObjectGpu::zeroed();
+                record.model = instance.model_matrix.to_cols_array_2d();
+                record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
+                record.material_index = instance.material_index;
+                record
             })
             .collect::<Vec<_>>();
         (staged, view_proj, expected)
@@ -475,7 +562,7 @@ mod tests {
     fn cull_test_buffers(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        staged: &[TestPerObject],
+        staged: &[PerObjectGpu],
         params: &CullParams,
     ) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
         let bytes = std::mem::size_of_val(staged) as u64;
@@ -604,15 +691,41 @@ mod tests {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(cull_workgroup_count(instance_count), 1, 1);
         }
+        queue.submit(std::iter::once(encoder.finish()));
+        let raw = cull_test_read_bytes(
+            device,
+            queue,
+            args,
+            INDIRECT_ARGS_WORD_COUNT as u64 * INDIRECT_ARGS_WORD_BYTES,
+        )?;
+        let words = raw
+            .chunks_exact(INDIRECT_ARGS_WORD_BYTES as usize)
+            .map(|word| u32::from_le_bytes(word.try_into().expect("one word is four bytes")))
+            .collect::<Vec<u32>>();
+        Some(words[INSTANCE_COUNT_WORD])
+    }
+
+    /// Copies `bytes` from `src` into a mapping buffer and reads them
+    /// back (`None` when the headless readback fails — the caller skips
+    /// instead of failing).
+    fn cull_test_read_bytes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src: &wgpu::Buffer,
+        bytes: u64,
+    ) -> Option<Vec<u8>> {
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cull test readback"),
-            size: (INDIRECT_ARGS_WORD_COUNT * 4) as u64,
+            size: bytes.max(INDIRECT_ARGS_WORD_BYTES),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        encoder.copy_buffer_to_buffer(args, 0, &readback, 0, (INDIRECT_ARGS_WORD_COUNT * 4) as u64);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cull test readback encoder"),
+        });
+        encoder.copy_buffer_to_buffer(src, 0, &readback, 0, bytes);
         queue.submit(std::iter::once(encoder.finish()));
-        let slice = readback.slice(..);
+        let slice = readback.slice(0..bytes.max(INDIRECT_ARGS_WORD_BYTES));
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
@@ -626,40 +739,91 @@ mod tests {
         let Ok(view) = slice.get_mapped_range() else {
             return None;
         };
-        let words: [u32; INDIRECT_ARGS_WORD_COUNT] = bytemuck::cast_slice(&view)
-            [..INDIRECT_ARGS_WORD_COUNT]
-            .try_into()
-            .expect("readback holds five words");
+        let out = view[..bytes as usize].to_vec();
         drop(view);
         readback.unmap();
-        Some(words[INSTANCE_COUNT_WORD])
+        Some(out)
+    }
+
+    /// First `count` compacted records read back from the destination
+    /// buffer (`None` when the headless readback fails — the caller
+    /// skips instead of failing).
+    fn cull_test_read_records(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        dst: &wgpu::Buffer,
+        count: usize,
+    ) -> Option<Vec<PerObjectGpu>> {
+        let bytes = (std::mem::size_of::<PerObjectGpu>() * count) as u64;
+        let raw = cull_test_read_bytes(device, queue, dst, bytes)?;
+        Some(
+            raw.chunks_exact(std::mem::size_of::<PerObjectGpu>())
+                .map(bytemuck::pod_read_unaligned::<PerObjectGpu>)
+                .collect(),
+        )
+    }
+
+    /// GPU output set comparison: sort the model translations and line
+    /// them up against the CPU reference (GPU compaction order is
+    /// intentionally unchecked — atomics are nondeterministic, see the
+    /// module docs).
+    fn assert_same_visible_set(got: &[[f32; 4]], want: &[[f32; 4]]) {
+        let mut got = got.to_vec();
+        let mut want = want.to_vec();
+        got.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        want.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        assert_eq!(got, want);
     }
 
     #[test]
-    fn gpu_compaction_count_matches_cpu() {
-        // End-to-end dispatch on a real adapter: the atomic counter must
-        // equal the CPU reference count (order is intentionally
-        // unchecked — atomics are nondeterministic, see module docs).
+    fn gpu_compaction_matches_cpu_across_frames() {
+        // End-to-end dispatch on a real adapter, two frames back to
+        // back: the atomic counter must equal the CPU reference count,
+        // the compacted `dst` content must match the CPU visible set
+        // (order is intentionally unchecked — atomics are
+        // nondeterministic, see module docs), and the explicit counter
+        // reset must restart the second frame instead of accumulating.
         let Some((device, queue)) = try_device() else {
             return;
         };
-        let per_object_size = std::mem::size_of::<TestPerObject>() as u64;
-        assert_eq!(per_object_size, 144);
-        assert_eq!(std::mem::offset_of!(TestPerObject, material_index), 128);
+        // The shader `PerObject` is the 144-byte `PerObjectGpu` layout
+        // (two `mat4x4` + material `u32` + 3 pad words).
+        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 144);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 128);
         let (staged, view_proj, expected) = cull_test_scene();
         let instance_count = staged.len();
         let params = cull_params(&view_proj, instance_count as u32);
         let buffers = cull_test_buffers(&device, &queue, &staged, &params);
         let (pipeline, layout) = cull_test_pipeline(&device);
-        let Some(counter) = cull_test_dispatch(
+        let first = cull_test_dispatch(
             &device,
             &queue,
             (&pipeline, &layout),
             (&buffers.0, &buffers.1, &buffers.2, &buffers.3),
             instance_count as u32,
-        ) else {
+        );
+        assert_eq!(first, Some(expected.len() as u32));
+        let Some(records) = cull_test_read_records(&device, &queue, &buffers.1, instance_count)
+        else {
             return;
         };
-        assert_eq!(counter, expected);
+        let got = records[..expected.len()]
+            .iter()
+            .map(|record| record.model[3])
+            .collect::<Vec<[f32; 4]>>();
+        assert_same_visible_set(&got, &expected);
+        reset_indirect_instance_count(&queue, &buffers.3);
+        let second = cull_test_dispatch(
+            &device,
+            &queue,
+            (&pipeline, &layout),
+            (&buffers.0, &buffers.1, &buffers.2, &buffers.3),
+            instance_count as u32,
+        );
+        assert_eq!(
+            second,
+            Some(expected.len() as u32),
+            "the counter word must restart at zero each frame"
+        );
     }
 }
