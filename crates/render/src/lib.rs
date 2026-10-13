@@ -15,11 +15,12 @@ pub mod flags;
 pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
 pub mod frame_passes;
-/// Groundwork for GPU frustum culling with `draw_indexed_indirect`
-/// submits (CPU reference compaction, indirect-args layout,
-/// compute-shader source, [`gpu_culling::Culler`] buffer owner). No
-/// pass submits `draw_indexed_indirect` yet — the gbuffer/shadow wiring
-/// lands in a follow-up slice.
+/// GPU frustum culling with `draw_indexed_indirect` submits (CPU
+/// reference compaction, indirect-args layout, compute-shader source,
+/// [`gpu_culling::Culler`] buffer owner). The gbuffer/shadow passes
+/// expose indirect entry points (`render_gbuffer_indirect` /
+/// `render_shadows_indirect`); the frame plan still draws through the
+/// direct `draw_indexed` fallback until the selection slice lands.
 pub mod gpu_culling;
 /// GPU resources as ECS singletons for the unified scheduler (S7 design).
 /// Native-only: stores wgpu `Device`/`Queue`/`Surface`/`CommandBuffer` as

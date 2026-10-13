@@ -5,6 +5,7 @@
 //! for the render-graph-driven equivalent.
 
 use crate::extraction::CustomMeshEntry;
+use crate::gpu_culling::Culler;
 use crate::mesh::{Mesh, SkinnedVertex, Vertex};
 use crate::shaders;
 use crate::skinning::{
@@ -87,6 +88,37 @@ const CPU_UNIFORM_USAGE: wgpu::BufferUsages =
 /// `BitOr` on wgpu usages is not `const`, so this is `union` (which is).
 const RENDER_TARGET_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
+
+/// How a pass submits the shared mesh batch of a frame.
+#[derive(Clone, Copy)]
+pub(crate) enum BatchDraw<'a> {
+    /// Classic `draw_indexed` over `0..instance_count` of the staged
+    /// per-object buffer.
+    Direct {
+        /// Uploaded instances of the shared mesh to draw.
+        instance_count: u32,
+    },
+    /// One
+    /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
+    /// over the culler's compacted batch: `visible_buffer` binds as
+    /// `per_objects`, `args_buffer` carries the draw.
+    Indirect {
+        /// Culler that compacted this frame's batch.
+        culler: &'a Culler,
+    },
+}
+
+impl BatchDraw<'_> {
+    /// Whether this batch records no draw commands: a zero direct range
+    /// (an indirect batch is never treated as empty — its instance count
+    /// lives on the GPU after [`Culler::compact`]).
+    fn is_empty(&self) -> bool {
+        match *self {
+            BatchDraw::Direct { instance_count } => instance_count == 0,
+            BatchDraw::Indirect { .. } => false,
+        }
+    }
+}
 
 /// Frame-global camera uniform (binding shared by every pass).
 ///
@@ -590,3 +622,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../msaa_edge_gpu.rs"]
 mod msaa_edge_gpu;
+
+#[cfg(test)]
+#[path = "../indirect_draw_gpu.rs"]
+mod indirect_draw_gpu;

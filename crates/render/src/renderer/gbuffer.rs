@@ -442,106 +442,48 @@ impl Renderer3D {
     /// recorded.
     pub fn render_gbuffer(
         &self,
+        device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         g: &GbufferTargets<'_>,
         mesh: &Mesh,
         instance_count: u32,
     ) {
-        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("gbuffer pass"),
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.albedo,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.normal,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.material_id,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.world_position,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.material_params,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-            ],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: g.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        self.render_gbuffer_batch_with_custom(
+            device,
+            encoder,
+            g,
+            mesh,
+            BatchDraw::Direct { instance_count },
+            &[],
+        );
+    }
 
-        rpass.set_pipeline(&self.gbuffer_pipeline);
-        {
-            let bind_group = read_lock(&self.gbuffer_bind_group);
-            rpass.set_bind_group(0, &*bind_group, &[]);
-        }
-        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+    // qual:api — production entry for the frame wiring slice; in-tree
+    // callers are tests until that slice lands.
+    /// Record the gbuffer pass drawing the culler's compacted batch with
+    /// one
+    /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect):
+    /// `culler.visible_buffer` binds as `per_objects` and
+    /// `culler.args_buffer` carries the draw (prepared by
+    /// [`Culler::compact`](crate::gpu_culling::Culler::compact)). The
+    /// CPU fallback is [`render_gbuffer`](Self::render_gbuffer) (direct
+    /// `draw_indexed` over the staged range).
+    pub fn render_gbuffer_indirect(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        g: &GbufferTargets<'_>,
+        mesh: &Mesh,
+        culler: &Culler,
+    ) {
+        self.render_gbuffer_batch_with_custom(
+            device,
+            encoder,
+            g,
+            mesh,
+            BatchDraw::Indirect { culler },
+            &[],
+        );
     }
 
     /// Record the gbuffer pass with per-entity custom draws: the shared
@@ -565,6 +507,28 @@ impl Renderer3D {
         g: &GbufferTargets<'_>,
         mesh: &Mesh,
         instance_count: u32,
+        customs: &[CustomGbufferDraw<'_>],
+    ) {
+        self.render_gbuffer_batch_with_custom(
+            device,
+            encoder,
+            g,
+            mesh,
+            BatchDraw::Direct { instance_count },
+            customs,
+        );
+    }
+
+    /// Shared core of the gbuffer entry points: one cleared pass, the
+    /// shared mesh batch submitted per [`BatchDraw`], then the custom
+    /// entries in order.
+    fn render_gbuffer_batch_with_custom(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        g: &GbufferTargets<'_>,
+        mesh: &Mesh,
+        batch: BatchDraw<'_>,
         customs: &[CustomGbufferDraw<'_>],
     ) {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -654,14 +618,7 @@ impl Renderer3D {
             multiview_mask: None,
         });
 
-        rpass.set_pipeline(&self.gbuffer_pipeline);
-        {
-            let bind_group = read_lock(&self.gbuffer_bind_group);
-            rpass.set_bind_group(0, &*bind_group, &[]);
-        }
-        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+        self.draw_shared_batch(device, &mut rpass, mesh, batch);
         for custom in customs {
             match custom.draw {
                 SkinnedDraw::Cpu => {
@@ -726,6 +683,44 @@ impl Renderer3D {
                         custom.instance_slot..custom.instance_slot + 1,
                     );
                 }
+            }
+        }
+    }
+
+    /// Records the shared mesh batch: classic `draw_indexed` over the
+    /// staged per-object buffer ([`BatchDraw::Direct`]) or one
+    /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
+    /// over the culler's compacted batch ([`BatchDraw::Indirect`]).
+    fn draw_shared_batch(
+        &self,
+        device: &wgpu::Device,
+        rpass: &mut wgpu::RenderPass<'_>,
+        mesh: &Mesh,
+        batch: BatchDraw<'_>,
+    ) {
+        rpass.set_pipeline(&self.gbuffer_pipeline);
+        let cached = read_lock(&self.gbuffer_bind_group);
+        let indirect;
+        let bind_group = match batch {
+            BatchDraw::Direct { .. } => &*cached,
+            BatchDraw::Indirect { culler } => {
+                indirect = self.gbuffer_bind_group_with(
+                    device,
+                    &self.camera_buffer,
+                    &culler.visible_buffer,
+                );
+                &indirect
+            }
+        };
+        rpass.set_bind_group(0, bind_group, &[]);
+        rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        match batch {
+            BatchDraw::Direct { instance_count } => {
+                rpass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+            }
+            BatchDraw::Indirect { culler } => {
+                rpass.draw_indexed_indirect(&culler.args_buffer, 0);
             }
         }
     }
