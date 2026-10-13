@@ -20,6 +20,13 @@ impl Renderer3D {
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Whether indirect submission is opted in (read by the submit
+    /// system to skip staging without the flag).
+    pub fn indirect_draw(&self) -> bool {
+        self.indirect_draw
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Grows the culler to `needed` instances (doubling, like the
     /// per-object buffer), creating it on first use. A re-created
     /// culler rebuilds its pipeline and bind groups — amortized over

@@ -5,16 +5,17 @@
 //! the camera-compacted batch (a per-light-frustum compaction is future
 //! work).
 
+use super::test_util;
 use super::{
     BatchDraw, GbufferTargets, InstanceData, MaterialIdx, Renderer3D, select_shared_batch,
 };
 use crate::camera::Frustum;
 use crate::gpu_culling::{Culler, INDIRECT_ARGS_WORD_COUNT};
 use crate::mesh::{Mesh, create_sphere};
+use ornis_core::System;
 
 const FRAME_W: u32 = 320;
 const FRAME_H: u32 = 180;
-const BPP: u32 = 4;
 /// To-light axis of the probe directional light (matches `set_lights`
 /// below): the off-frame caster sits on this axis so its shadow lands
 /// on the in-frame receiver.
@@ -30,26 +31,6 @@ const MIN_SHADOW_PIXELS: usize = 200;
 /// probe in `render_backend/tests/shadows_dir.rs`).
 const PIXEL_SWING: i16 = 12;
 
-fn open_adapter() -> Option<(wgpu::Device, wgpu::Queue)> {
-    pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        });
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .ok()?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
-    })
-}
-
 fn surface_config() -> wgpu::SurfaceConfiguration {
     wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -62,79 +43,6 @@ fn surface_config() -> wgpu::SurfaceConfiguration {
         desired_maximum_frame_latency: 2,
         color_space: wgpu::SurfaceColorSpace::Auto,
     }
-}
-
-fn target_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("indirect parity target"),
-        size: wgpu::Extent3d {
-            width: FRAME_W,
-            height: FRAME_H,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
-}
-
-fn readback(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> Vec<u8> {
-    let unpadded = FRAME_W * BPP;
-    let padded = unpadded.div_ceil(256) * 256;
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("indirect parity readback"),
-        size: u64::from(padded * FRAME_H),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("indirect parity copy"),
-    });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: None,
-            },
-        },
-        wgpu::Extent3d {
-            width: FRAME_W,
-            height: FRAME_H,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([encoder.finish()]);
-    let slice = buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv()
-        .expect("readback callback")
-        .expect("readback maps");
-    let view = slice.get_mapped_range().expect("mapped range");
-    let mut pixels = Vec::with_capacity((unpadded * FRAME_H) as usize);
-    for row in 0..FRAME_H {
-        let start = (row * padded) as usize;
-        pixels.extend_from_slice(&view[start..start + unpadded as usize]);
-    }
-    drop(view);
-    buffer.unmap();
-    pixels
 }
 
 /// Scene + camera + lights uploaded into `renderer`; returns the mesh
@@ -210,7 +118,7 @@ fn render_frame(
     let renderer = Renderer3D::new(device, &surface_config(), 1);
     let (mesh, instances, view_proj) = setup_scene(device, queue, &renderer, shadowed, with_caster);
     let staged = instances.len() as u32;
-    let (target, target_view) = target_texture(device);
+    let (target, target_view) = test_util::offscreen_target(device, FRAME_W, FRAME_H);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("indirect parity frame"),
     });
@@ -248,7 +156,7 @@ fn render_frame(
         },
     );
     queue.submit([encoder.finish()]);
-    readback(device, queue, &target)
+    test_util::readback_rgba8(device, queue, &target, FRAME_W, FRAME_H)
 }
 
 /// The compacted gbuffer submit must render the same pixels as the
@@ -256,7 +164,7 @@ fn render_frame(
 /// directly in both arms, including the off-frame caster's shadow).
 #[test]
 fn indirect_batch_draws_match_direct() {
-    let Some((device, queue)) = open_adapter() else {
+    let Some((device, queue)) = test_util::try_device() else {
         eprintln!("SKIPPED (indirect_batch_draws_match_direct): no wgpu adapter");
         return;
     };
@@ -322,7 +230,7 @@ fn readback_args(
 /// spheres (the off-frame caster is compacted away, never drawn).
 #[test]
 fn indirect_args_match_compacted_batch() {
-    let Some((device, queue)) = open_adapter() else {
+    let Some((device, queue)) = test_util::try_device() else {
         eprintln!("SKIPPED (indirect_args_match_compacted_batch): no wgpu adapter");
         return;
     };
@@ -346,7 +254,7 @@ fn indirect_args_match_compacted_batch() {
 /// map and the frames would match the caster-free reference.
 #[test]
 fn offscreen_caster_shadow_reaches_frame() {
-    let Some((device, queue)) = open_adapter() else {
+    let Some((device, queue)) = test_util::try_device() else {
         eprintln!("SKIPPED (offscreen_caster_shadow_reaches_frame): no wgpu adapter");
         return;
     };
@@ -394,6 +302,163 @@ fn offscreen_caster_shadow_reaches_frame() {
     }
 }
 
+/// Entities for the submit-selection test: two spheres plus one
+/// camera-facing custom quad (XY plane, +Z normal).
+fn submit_test_scene(store: &mut ornis_core::SmartStore) {
+    use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
+    use ornis_core::units::{Clamped01, PositiveF32, UnitQuat};
+    let material = || MaterialDesc::Dielectric {
+        base_color: [0.8, 0.8, 0.8],
+        roughness: Clamped01::new(0.5),
+        emission: [0.0, 0.0, 0.0],
+        metallic: ornis_core::Metallic::new(0.0),
+    };
+    let sphere = || MeshDesc::Sphere {
+        radius: PositiveF32::expect_valid(1.0),
+        segments: 16,
+        rings: 12,
+    };
+    let place =
+        |store: &mut ornis_core::SmartStore, translation: [f32; 3], scale: f32, mesh: MeshDesc| {
+            let handle = store.create_entity();
+            store.insert(
+                handle,
+                TransformDesc {
+                    translation: glam::Vec3::from(translation),
+                    rotation: UnitQuat::IDENTITY,
+                    scale: glam::Vec3::splat(scale),
+                },
+            );
+            store.insert(handle, mesh);
+            store.insert(handle, material());
+        };
+    place(store, [0.0, 0.0, 0.0], 1.5, sphere());
+    place(store, [2.5, 0.5, -1.0], 1.0, sphere());
+    place(
+        store,
+        [-1.5, 0.8, 2.0],
+        1.0,
+        MeshDesc::Custom {
+            positions: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+        },
+    );
+}
+
+/// Slice 2c regression (review #98): `RenderSubmit` stages the shared
+/// sphere batch ONLY for indirect compaction — customs draw their own
+/// direct slots. Drives the real submit with a customs-bearing world,
+/// then asserts the staged batch holds exactly the two spheres (never
+/// the merged vector) and the prepared args count exactly them.
+/// Fails while submit stages spheres-plus-customs (the compacted set
+/// would carry the custom record).
+#[test]
+fn submit_stages_spheres_only_for_indirect() {
+    const W: u32 = 320;
+    const H: u32 = 180;
+    let Some((device, queue)) = test_util::try_device() else {
+        eprintln!("SKIPPED (submit_stages_spheres_only_for_indirect): no wgpu adapter");
+        return;
+    };
+    let mut engine = ornis_core::Engine::new();
+    submit_test_scene(engine.world_mut().store_mut().expect("store"));
+    let orbit = crate::camera::OrbitCamera::looking_at(
+        glam::Vec3::new(0.0, 2.5, 9.0),
+        glam::Vec3::new(0.5, 0.0, 0.0),
+    );
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        width: W,
+        height: H,
+        present_mode: wgpu::PresentMode::AutoNoVsync,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+        color_space: wgpu::SurfaceColorSpace::Auto,
+    };
+    let renderer = Renderer3D::new(&device, &surface_config, 1);
+    renderer.set_indirect_draw(true);
+    let frame3d =
+        crate::frame_exec::RenderFrame3D::new(wgpu::TextureFormat::Rgba8UnormSrgb, (W, H));
+    engine
+        .world_mut()
+        .insert(std::sync::Mutex::new(orbit.clone()));
+    engine
+        .world_mut()
+        .insert(crate::extraction::RenderLights::default());
+    engine
+        .world_mut()
+        .insert(crate::gpu_resources::GpuDevice(device.clone()));
+    engine
+        .world_mut()
+        .insert(crate::gpu_resources::GpuQueue(queue.clone()));
+    engine
+        .world_mut()
+        .insert(crate::gpu_resources::GpuSurfaceState {
+            size: (W, H),
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        });
+    engine
+        .world_mut()
+        .insert(std::sync::Mutex::new(crate::gpu_resources::GpuFrameState {
+            renderer,
+            frame3d,
+        }));
+    engine
+        .world_mut()
+        .insert(crate::gpu_resources::GpuCustomMeshes::default());
+    crate::gpu_resources::RenderSubmit.run(engine.world().resources());
+    let resources = engine.world().resources();
+    let customs = resources
+        .get::<crate::gpu_resources::GpuCustomMeshes>()
+        .expect("customs resource");
+    let staged_customs = customs
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(staged_customs.len(), 1, "one custom entity staged");
+    let fs = resources
+        .get::<std::sync::Mutex<crate::gpu_resources::GpuFrameState>>()
+        .expect("frame state")
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The staged batch is the shared sphere batch ONLY — two records,
+    // never the merged spheres-plus-customs vector. Scoped: the read
+    // guard must drop before `prepare_indirect_batch` takes the write
+    // lock below (same-thread RwLock read+write deadlocks).
+    {
+        let staged = super::read_lock(&fs.renderer.staged_batch);
+        let (_, staged_instances) = staged.as_ref().expect("batch staged while armed");
+        assert_eq!(staged_instances.len(), 2);
+    }
+    // Premise pin: the custom center is truly visible, so staging it
+    // would wrongly put it in the camera-compacted set (vacuity guard).
+    let (center, radius) = crate::extraction::instance_sphere(&staged_customs[0].instance);
+    let (view_proj, _) = crate::camera::camera_view_projection(&orbit.view_parameters(), (W, H));
+    assert!(
+        crate::camera::Frustum::from_view_proj(&view_proj).sphere_visible(center, radius),
+        "custom center must sit inside the camera frustum (center={center:?})"
+    );
+    // The prepared args count exactly the two spheres.
+    let sphere_mesh = create_sphere(&device, 1.0, 24, 16);
+    fs.renderer
+        .prepare_indirect_batch(&device, &queue, sphere_mesh.num_indices);
+    assert!(fs.renderer.indirect_batch_ready());
+    let culler = super::read_lock(&fs.renderer.culler);
+    let args = readback_args(
+        &device,
+        &queue,
+        &culler.as_ref().expect("culler built").args_buffer,
+    );
+    assert_eq!(args, [sphere_mesh.num_indices, 2, 0, 0, 0]);
+}
+
 /// Slice 2c selection through the frame-plan node path: with the
 /// opt-in flag armed and a prepared batch, `render_gbuffer_with_custom`
 /// submits the compacted batch — pixel-identical to both the direct
@@ -401,7 +466,7 @@ fn offscreen_caster_shadow_reaches_frame() {
 /// itself is pinned first: only armed-with-culler routes indirectly.
 #[test]
 fn armed_with_custom_matches_direct_and_indirect() {
-    let Some((device, queue)) = open_adapter() else {
+    let Some((device, queue)) = test_util::try_device() else {
         eprintln!("SKIPPED (armed_with_custom_matches_direct_and_indirect): no wgpu adapter");
         return;
     };
@@ -425,7 +490,7 @@ fn armed_with_custom_matches_direct_and_indirect() {
     renderer.stage_batch_inputs(view_proj, instances);
     renderer.prepare_indirect_batch(&device, &queue, mesh.num_indices);
     assert!(renderer.indirect_batch_ready());
-    let (target, target_view) = target_texture(&device);
+    let (target, target_view) = test_util::offscreen_target(&device, FRAME_W, FRAME_H);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("armed selection frame"),
     });
@@ -454,7 +519,7 @@ fn armed_with_custom_matches_direct_and_indirect() {
         },
     );
     queue.submit([encoder.finish()]);
-    let routed = readback(&device, &queue, &target);
+    let routed = test_util::readback_rgba8(&device, &queue, &target, FRAME_W, FRAME_H);
     let direct = render_frame(&device, &queue, false, true, true);
     let indirect = render_frame(&device, &queue, true, true, true);
     assert!(

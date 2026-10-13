@@ -52,3 +52,91 @@ pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             .ok()
     })
 }
+
+/// Offscreen `Rgba8UnormSrgb` render target shared by the headless
+/// frame gates (single-sample, readable back).
+pub(super) fn offscreen_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("test offscreen target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+/// Reads an `Rgba8UnormSrgb` target back to tightly-packed rows.
+pub(super) fn readback_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    const BPP: u32 = 4;
+    const PAD_ROW: u32 = 256;
+    let unpadded = width * BPP;
+    let padded = unpadded.div_ceil(PAD_ROW) * PAD_ROW;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test readback"),
+        size: u64::from(padded * height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("test readback copy"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv()
+        .expect("readback callback")
+        .expect("readback maps");
+    let view = slice.get_mapped_range().expect("mapped range");
+    let mut pixels = Vec::with_capacity((unpadded * height) as usize);
+    for row in 0..height {
+        let start = (row * padded) as usize;
+        pixels.extend_from_slice(&view[start..start + unpadded as usize]);
+    }
+    drop(view);
+    buffer.unmap();
+    pixels
+}

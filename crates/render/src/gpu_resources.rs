@@ -279,7 +279,9 @@ impl System for RenderMesh {
 /// ([`Renderer3D::stage_custom_meshes`](crate::renderer::Renderer3D::stage_custom_meshes))
 /// with its instances uploaded contiguously above the sphere slots.
 /// `frame3d.render_to_buffers` lives in `RenderPresent` (S7 step 2).
-struct RenderSubmit;
+/// Visible inside the crate so the indirect-selection test can drive
+/// a real submit (sphere + custom lanes) instead of restaging by hand.
+pub(crate) struct RenderSubmit;
 
 impl System for RenderSubmit {
     fn name(&self) -> &'static str {
@@ -374,12 +376,12 @@ impl System for RenderSubmit {
         instances.extend(staged.iter().map(|entry| entry.instance));
         fs.renderer
             .upload_instances(&device.0, &queue.0, &instances);
-        // Slice 2c selection: stage the shared batch for a possible
-        // indirect submit. Moved (not cloned) into the renderer — the
-        // record path takes it in `prepare_indirect_batch`. Runs
-        // whether or not indirect is opted in; without the flag the
-        // staged batch is simply never consumed.
-        fs.renderer.stage_batch_inputs(view_proj, instances);
+        // Slice 2c: stage the shared sphere batch ONLY (`extracted`
+        // moved, never merged) — customs must not enter indirect.
+        if fs.renderer.indirect_draw() {
+            fs.renderer
+                .stage_batch_inputs(view_proj, extracted.instances);
+        }
         *custom_meshes
             .0
             .lock()
