@@ -498,46 +498,25 @@ impl Renderer3D {
         instance_count: u32,
         customs: &[CustomGbufferDraw<'_>],
     ) {
-        self.render_shadows_batch(
-            device,
-            encoder,
-            mesh,
-            BatchDraw::Direct { instance_count },
-            customs,
-        );
+        self.render_shadows_batch(device, encoder, mesh, instance_count, customs);
     }
 
-    // qual:api — production entry for the frame wiring slice; in-tree
-    // callers are tests until that slice lands.
-    /// Depth pre-pass of the culler's compacted batch over the same
-    /// layers and cube faces [`render_shadows`](Self::render_shadows)
-    /// covers: one
-    /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
-    /// per layer/face from `culler.args_buffer`, with
-    /// `culler.visible_buffer` bound as `per_objects`. CPU fallback:
-    /// [`render_shadows`](Self::render_shadows) (direct `draw_indexed`
-    /// over the staged range).
-    pub fn render_shadows_indirect(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        mesh: &Mesh,
-        culler: &Culler,
-    ) {
-        self.render_shadows_batch(device, encoder, mesh, BatchDraw::Indirect { culler }, &[]);
-    }
-
-    /// Layer/cube loop of the depth pre-pass, shared by the direct and
-    /// indirect entry points.
+    /// Layer/cube loop of the depth pre-pass over the staged range.
+    ///
+    /// Shadows always draw directly: the pre-pass must cover every
+    /// caster whose shadow can reach the frame, including casters
+    /// outside the camera frustum, so the camera-compacted batch is
+    /// never reused here (a per-light-frustum compaction is future
+    /// work, not this entry point).
     fn render_shadows_batch(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         mesh: &Mesh,
-        batch: BatchDraw<'_>,
+        instance_count: u32,
         customs: &[CustomGbufferDraw<'_>],
     ) {
-        if batch.is_empty() && customs.is_empty() {
+        if instance_count == 0 && customs.is_empty() {
             return;
         }
         let count = self
@@ -556,7 +535,7 @@ impl Renderer3D {
                 device,
                 encoder,
                 mesh,
-                batch,
+                instance_count,
                 customs,
                 &self.shadow_pipeline,
                 &self.skinned_shadow_pipeline,
@@ -571,7 +550,7 @@ impl Renderer3D {
                     device,
                     encoder,
                     mesh,
-                    batch,
+                    instance_count,
                     customs,
                     &self.shadow_cube_pipeline,
                     &self.skinned_shadow_cube_pipeline,
@@ -593,7 +572,7 @@ impl Renderer3D {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         mesh: &Mesh,
-        batch: BatchDraw<'_>,
+        instance_count: u32,
         customs: &[CustomGbufferDraw<'_>],
         classic_pipeline: &wgpu::RenderPipeline,
         skinned_pipeline: &wgpu::RenderPipeline,
@@ -602,10 +581,6 @@ impl Renderer3D {
     ) {
         let per_object = read_lock(&self.per_object_buffer);
         let material = read_lock(&self.material_buffer);
-        let per_objects: &wgpu::Buffer = match batch {
-            BatchDraw::Direct { .. } => &per_object,
-            BatchDraw::Indirect { culler } => &culler.visible_buffer,
-        };
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow bind group"),
             layout: &self.gbuffer_bind_group_layout,
@@ -613,7 +588,7 @@ impl Renderer3D {
                 &shaders::gbuffer_generated::GBUFFER_RESOURCES,
                 |r| match r.name {
                     "camera" => Some(vp_buffer.as_entire_binding()),
-                    "per_objects" => Some(per_objects.as_entire_binding()),
+                    "per_objects" => Some(per_object.as_entire_binding()),
                     "materials" => Some(material.as_entire_binding()),
                     _ => None,
                 },
@@ -637,19 +612,10 @@ impl Renderer3D {
         });
         pass.set_pipeline(classic_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        match batch {
-            BatchDraw::Direct { instance_count } => {
-                if instance_count > 0 {
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
-                }
-            }
-            BatchDraw::Indirect { culler } => {
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed_indirect(&culler.args_buffer, 0);
-            }
+        if instance_count > 0 {
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
         }
         for custom in customs {
             match custom.shadow {

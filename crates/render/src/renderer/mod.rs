@@ -108,18 +108,6 @@ pub(crate) enum BatchDraw<'a> {
     },
 }
 
-impl BatchDraw<'_> {
-    /// Whether this batch records no draw commands: a zero direct range
-    /// (an indirect batch is never treated as empty — its instance count
-    /// lives on the GPU after [`Culler::compact`]).
-    fn is_empty(&self) -> bool {
-        match *self {
-            BatchDraw::Direct { instance_count } => instance_count == 0,
-            BatchDraw::Indirect { .. } => false,
-        }
-    }
-}
-
 /// Frame-global camera uniform (binding shared by every pass).
 ///
 /// The WGSL `Camera` declaration is generated from this layout

@@ -4,25 +4,26 @@
 //! CPU frustum culling is opt-in and off by default
 //! ([`crate::extraction::cull_frame_upload`]); this module stages its GPU
 //! replacement without relying on `multi_draw_indirect` (emulated by a loop
-//! on Metal, wgpu #2148, no `MDI_COUNT`): one compute pass will compact the
-//! visible instances into a dense buffer and write one
-//! [`DrawIndexedIndirectArgs`], and the gbuffer and shadow passes submit
-//! a single
+//! on Metal, wgpu #2148, no `MDI_COUNT`): one compute pass compacts the
+//! visible instances into a dense buffer and writes one
+//! [`DrawIndexedIndirectArgs`], and the gbuffer pass submits it as a
+//! single
 //! [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
 //! per mesh batch through
 //! [`Renderer3D::render_gbuffer_indirect`](crate::renderer::Renderer3D::render_gbuffer_indirect)
-//! /
-//! [`Renderer3D::render_shadows_indirect`](crate::renderer::Renderer3D::render_shadows_indirect)
 //! (pixel-identical to the direct `draw_indexed` fallback, covered by
-//! `indirect_draw_gpu`). The frame plan still selects the direct path —
+//! `indirect_draw_gpu`). Shadows stay on the direct pre-pass:
+//! off-frame casters can shadow the frame, so the camera-compacted batch
+//! is never reused for the shadow maps (a per-light-frustum compaction
+//! is future work). The frame plan still selects the direct path —
 //! switching it over (opt-in) is the next slice.
 //!
 //! Slice 1: the CPU reference compaction, the indirect-args layout, the
 //! compute-shader source and its uniform packing, plus parity tests
 //! against the CPU culler. Slice 2: [`Culler`] (owner of the dispatch
-//! buffers: staging → compacted → indirect args) and the indirect pass
-//! entry points above. Remaining: frame-plan selection and the GPU
-//! benchmark column.
+//! buffers: staging → compacted → indirect args) and the indirect
+//! gbuffer entry point above. Remaining: frame-plan selection and the
+//! GPU benchmark column.
 //!
 //! Order contract: the CPU compaction preserves submission order
 //! (strictly increasing indices — deterministic, the §24.1 reference).
