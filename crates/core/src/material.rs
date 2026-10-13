@@ -533,12 +533,21 @@ impl GeometryGroup {
     }
     /// Current shading mode.
     pub fn shading(&self) -> ShadingMode {
-        ShadingMode::from(self.params[2] >= UNLIT_THRESHOLD)
+        if self.params[2] >= UNLIT_THRESHOLD {
+            ShadingMode::Unlit
+        } else {
+            ShadingMode::Lit
+        }
     }
 }
 
 /// GPU encoding threshold for [`ShadingMode::Unlit`] (`params[2] >= 0.5`).
-const UNLIT_THRESHOLD: f32 = 0.5;
+///
+/// Shared with the WGSL evaluators (forward + deferred + textured
+/// forward): the shader side declares the same-named `const` from this
+/// value (see `helpers::wgsl_consts`), so the CPU decode and the GPU
+/// `select` agree by construction.
+pub const UNLIT_THRESHOLD: f32 = 0.5;
 
 /// Material shading mode (typed replacement for a raw unlit flag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -556,20 +565,6 @@ impl ShadingMode {
     /// `true` for [`ShadingMode::Unlit`].
     pub fn is_unlit(self) -> bool {
         matches!(self, Self::Unlit)
-    }
-}
-
-impl From<f32> for ShadingMode {
-    /// GPU slot decoding (`params[2] >= 0.5` = unlit).
-    fn from(v: f32) -> Self {
-        Self::from(v >= UNLIT_THRESHOLD)
-    }
-}
-
-impl From<bool> for ShadingMode {
-    /// Flag polarity (`true` = unlit).
-    fn from(unlit: bool) -> Self {
-        if unlit { Self::Unlit } else { Self::Lit }
     }
 }
 

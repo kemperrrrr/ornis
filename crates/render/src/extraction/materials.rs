@@ -5,6 +5,7 @@ use super::FrameUpload;
 use ornis_assets::scene::MaterialDesc;
 use ornis_core::OpenPBRMaterial;
 use ornis_core::material::ShadingMode;
+use ornis_core::units::LinearRgb;
 
 /// Returns the [`FrameUpload::materials`] index for `material`,
 /// pushing its GPU conversion only on first sight (exact `PartialEq`
@@ -53,6 +54,25 @@ fn apply_surface_override(material: &mut OpenPBRMaterial, surface: &ornis_core::
     material.base.params[BASE_METALNESS_SLOT] = surface.metallic.get();
     material.specular.params[SPECULAR_WEIGHT_SLOT] = surface.specular.get();
 }
+/// Builds the GPU material for an unlit sprite color: no BRDF lobe
+/// (zero weights, black base), the sprite color as emission, and the
+/// unlit shading-mode flag so both evaluators (forward + deferred +
+/// textured forward) output the emission alone — no light, shadow or
+/// IBL term. Tonemap applies downstream exactly as for emission.
+///
+/// Single mapping used by the extraction itself, the debug probes and
+/// the golden frame (no per-callsite copies).
+pub fn unlit_material(color: LinearRgb) -> OpenPBRMaterial {
+    let mut output = OpenPBRMaterial::dielectric();
+    output.base.color_rgb([0.0, 0.0, 0.0]);
+    output.base.weight(0.0);
+    output.specular.weight(0.0);
+    output.base.metalness(0.0);
+    apply_emission(&mut output, color.as_array());
+    output.geometry.set_shading(ShadingMode::Unlit);
+    output
+}
+
 fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
     match material {
         // `dielectric()` and `metal()` differ only in metalness once color
@@ -118,21 +138,7 @@ fn material_to_gpu(material: &MaterialDesc) -> OpenPBRMaterial {
             output.base.metalness(material.metallic_units().get());
             output
         }
-        MaterialDesc::Unlit { color } => {
-            // Unlit sprite: no BRDF lobe (zero weights, black base), the
-            // sprite color travels as emission, and the shading-mode flag
-            // tells both evaluators (forward + deferred) to output the
-            // emission alone — no light, shadow or IBL term. Tonemap
-            // applies downstream exactly as for emission.
-            let mut output = OpenPBRMaterial::dielectric();
-            output.base.color_rgb([0.0, 0.0, 0.0]);
-            output.base.weight(0.0);
-            output.specular.weight(0.0);
-            output.base.metalness(0.0);
-            apply_emission(&mut output, *color);
-            output.geometry.set_shading(ShadingMode::Unlit);
-            output
-        }
+        MaterialDesc::Unlit { color } => unlit_material(LinearRgb::new(*color)),
     }
 }
 /// Maps an emissive RGB triple onto the OpenPBR emission group.

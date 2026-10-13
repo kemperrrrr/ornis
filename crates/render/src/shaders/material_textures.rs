@@ -577,7 +577,17 @@ fn fs_main_textured(
         base_color * (1.0 - metalness),
         ctx.lighting.ibl_weight,
     );
-    let color = sanitize_hdr(ambient + lo + emission + ibl);
+    // Unlit path (same flag as the untextured forward/deferred
+    // evaluators): textured draws of an unlit-tagged material output the
+    // (map-modulated) emission alone. Unlit sprites carry no textures in
+    // practice, but the select keeps the textured entry consistent by
+    // construction and bit-identical when the flag is off.
+    let full = ambient + lo + emission + ibl;
+    let color = sanitize_hdr(select(
+        full,
+        emission,
+        mat.geometry_params.z >= UNLIT_THRESHOLD,
+    ));
     return glam::Vec4::new(color, opacity);
 }
 

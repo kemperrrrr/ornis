@@ -1209,9 +1209,29 @@ Scene(
         // Degenerate sizes are rejected, like the plane constructor.
         assert!(MeshDesc::try_quad_units([Meters::new(0.0), Meters::new(1.0)]).is_none());
         assert!(MeshDesc::try_quad_units([Meters::new(1.0), Meters::new(-2.0)]).is_none());
-        // Old scenes without the new variants load exactly as before.
+        // Old scenes without the new variants load exactly as before:
+        // every entity keeps its Sphere mesh and original preset — no
+        // Quad mesh and no Unlit material may appear from legacy RON.
         let old = Scene::from_ron(FULL_SCENE_RON).expect("old scene");
         assert_eq!(old.entities.len(), 3);
+        assert!(
+            old.entities
+                .iter()
+                .all(|e| matches!(e.mesh, MeshDesc::Sphere { .. })),
+            "legacy scene must stay Sphere-only"
+        );
+        assert!(
+            matches!(old.entities[0].material, MaterialDesc::Dielectric { .. }),
+            "entity 0 keeps its Dielectric preset"
+        );
+        assert!(
+            matches!(old.entities[1].material, MaterialDesc::Metal { .. }),
+            "entity 1 keeps its Metal preset"
+        );
+        assert!(
+            matches!(old.entities[2].material, MaterialDesc::Coat { .. }),
+            "entity 2 keeps its Coat preset"
+        );
     }
 
     #[test]
