@@ -23,6 +23,14 @@
 //! [`Hovered`]. Chrome ([`EditorOnly`]) replicates for drawing but is not
 //! clickable in E1 — gizmo picking arrives with E3 (see
 //! [`ChromePolicy`]).
+//!
+//! Plane editing (K2) adds the 2D sheet on top: [`PlaneCamera`] pans and
+//! zooms over `z = 0` (the left button keeps selecting, never moves the
+//! camera), [`ViewportMode`] gates the plane input system, [`plane_grid`]
+//! feeds the web grid overlay as pure numbers, and the picking side grows
+//! an orthographic [`PickProjection`] branch plus [`WorkPlane`] resolution
+//! (`pointer_on_plane`). The K0a orthographic camera converts through
+//! [`PickProjection::from_camera`] with no render edge.
 
 #![warn(missing_docs)]
 
@@ -33,12 +41,22 @@ use ornis_core::{
     Engine, Entity, InputState, MouseButton, Resources, SmartStore, System, SystemAccess,
 };
 
-/// Viewport picking: rays, hits and store intersection (slice E1).
+/// Viewport picking: rays, hits and store intersection (slices E1, K2).
 pub mod picking;
 
+/// 2D grid numbers for the web overlay (slice K2).
+pub mod grid;
+
+/// Plane camera and viewport mode: pan-and-zoom over the sheet (slice K2).
+pub mod plane;
+
+pub use grid::{PlaneGrid, plane_grid};
 pub use picking::{
-    ChromePolicy, PickEpsilon, PickError, PickHit, PickOutcome, PickRay, ViewportCamera,
-    pick_closest, pick_ray,
+    ChromePolicy, PickEpsilon, PickError, PickHit, PickOutcome, PickProjection, PickRay,
+    ViewportCamera, WorkPlane, pick_closest, pick_ray, pointer_on_plane, ray_plane_point,
+};
+pub use plane::{
+    PlaneCamera, PlaneProjection, ViewportMode, install_plane_camera, read_plane_camera,
 };
 
 /// Marks an entity as editor chrome (gizmo handle, grid, selection proxy).

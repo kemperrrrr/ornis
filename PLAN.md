@@ -661,7 +661,10 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   (`RAYON_NUM_THREADS=1` vs `=32`) и канон-снапшот без регресса.
 - **K2 — редактор:** 2D-сетка, pan-and-zoom, пиккинг в плоскости
   (ложится на B3-триггер click-to-select); tilemap/flipbook — контент
-  поверх K0–K1, не ядро.
+  поверх K0–K1, не ядро. Статус: фаза A (свой `PickProjection`,
+  `PerspectiveStandIn`, pan/zoom, сетка, wasm-проводка) и фаза B (K0a уже
+  в master: `PickProjection::from_camera`, `PlaneProjection::Orthographic`,
+  рендер через `camera_view_projection`) сделаны в `editor/k2-plane-editing`.
 
 **Не-цели:** отдельный 2D-солвер/рендер, порт Box2D; виртуальный
 текстуринг и NURBS сюда не относятся (см. B3-шаг 3 и «Не делать»).
