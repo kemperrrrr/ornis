@@ -49,6 +49,7 @@ pub use cull::instance_view_depth;
 pub use cull::sort_by_depth;
 pub use cull::sort_by_depth_timed;
 pub use lights::RenderLights;
+pub use materials::unlit_material;
 pub use skinning::CustomMeshEntry;
 pub use skinning::MeshPose;
 pub use skinning::SkinInfluences;

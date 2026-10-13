@@ -654,9 +654,11 @@ fn shade_lit(
     );
     // Unlit sprites (geometry `params[2]`, see `ShadingMode`): radiance is
     // the emission alone — no BRDF, light, shadow or IBL term. `select`
-    // keeps the lit sum bit-identical when the flag is off.
+    // keeps the lit sum bit-identical when the flag is off. The threshold
+    // is `UNLIT_THRESHOLD` (shared with `ornis_core::material`, emitted
+    // into WGSL via `helpers::wgsl_consts`).
     let full = ambient + lo + emission + ibl;
-    let raw = select(full, emission, mat.geometry_params.z >= 0.5);
+    let raw = select(full, emission, mat.geometry_params.z >= UNLIT_THRESHOLD);
     let beauty = sanitize_hdr(raw);
     let mut ibl_spec = Vec3::new(0.0, 0.0, 0.0);
     if lighting.debug_view == SHADING_DEBUG_IBL_SPECULAR

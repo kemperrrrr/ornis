@@ -81,6 +81,12 @@ pub const SHADING_DEBUG_SHADOW: u32 = 6;
 pub const SHADING_DEBUG_HEAT: u32 = 7;
 /// Pre-tonemap luma above which the heat view paints the pixel red.
 pub const SHADING_DEBUG_HOT_LUMA: f32 = 1.0;
+/// GPU encoding threshold for the unlit shading-mode flag
+/// (`geometry params[2] >= threshold` = unlit). Single source of truth
+/// lives in [`ornis_core::material::UNLIT_THRESHOLD`]; this re-export
+/// puts the same-named `const` into the WGSL block below, so the CPU
+/// decode and both GPU evaluators agree by construction.
+pub const UNLIT_THRESHOLD: f32 = ornis_core::material::UNLIT_THRESHOLD;
 
 /// WGSL `const` block for the helpers, generated from the Rust constants
 /// above: the name travels via `stringify!` (rename-proof), the value via
@@ -117,6 +123,7 @@ pub fn wgsl_consts() -> String {
         decl!(KARIS_LUMA_BIAS),
         decl!(HDR_FINITE_LIMIT),
         decl!(SHADING_DEBUG_HOT_LUMA),
+        decl!(UNLIT_THRESHOLD),
     ]
     .concat();
     macro_rules! decl_u32 {

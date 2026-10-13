@@ -64,7 +64,7 @@ pub use camera::{
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{
     ExtractionStats, FrameUpload, MeshPose, RenderLights, RenderWorld, SkinInfluences,
-    extract_render_data, extract_render_data_with_stats, max_mesh_params,
+    extract_render_data, extract_render_data_with_stats, max_mesh_params, unlit_material,
 };
 pub use flags::{
     Access as AccessKind, Bloom, CompositeTechnique, DepthOwnership, PassState, ResourceBacking,

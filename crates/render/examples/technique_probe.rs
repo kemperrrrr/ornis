@@ -10,7 +10,7 @@
 use glam::Mat4;
 use ornis_assets::scene::{LightDesc, MaterialDesc, MeshDesc, Scene};
 use ornis_core::OpenPBRMaterial;
-use ornis_core::material::ShadingMode;
+use ornis_core::units::LinearRgb;
 use ornis_core::units::PositiveF32;
 use ornis_render::{InstanceData, MaterialIdx, RenderFrame3D, Renderer3D, Technique};
 
@@ -96,18 +96,7 @@ fn build_material(entity_material: &MaterialDesc) -> OpenPBRMaterial {
             mat.specular.ior(ior.get());
             mat
         }
-        MaterialDesc::Unlit { color } => {
-            // Mirrors the extraction mapping: no BRDF lobe, sprite color
-            // as emission, unlit shading-mode flag.
-            let mut mat = OpenPBRMaterial::dielectric();
-            mat.base.color_rgb([0.0, 0.0, 0.0]);
-            mat.base.weight(0.0);
-            mat.specular.weight(0.0);
-            mat.base.metalness(0.0);
-            apply_emission(&mut mat, *color);
-            mat.geometry.set_shading(ShadingMode::Unlit);
-            mat
-        }
+        MaterialDesc::Unlit { color } => ornis_render::unlit_material(LinearRgb::new(*color)),
     }
 }
 
