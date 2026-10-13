@@ -26,4 +26,12 @@ fn cast_f64(x: f32) -> f32 {
     return wide as f32;
 }
 
+// Scalar associated constants have no WGSL spelling: `u8::MAX as u32`
+// used to lower to `u32(u8::MAX)` and fail only at naga. Use a plain
+// `u32` literal instead.
+#[kernel]
+fn cast_const_path(x: f32) -> f32 {
+    x + u8::MAX as u32 as f32
+}
+
 fn main() {}

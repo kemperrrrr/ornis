@@ -27,3 +27,9 @@ error: integer suffix `u8` is not supported in GPU kernel `narrow_let`; use plai
    |
 17 |     let v: u8 = 250u8;
    |                 ^^^^^
+
+error: type `foo::u32` is not supported in GPU kernel `qualified_scalar`; supported: f32, u32, i32, bool and glam vectors/matrices
+  --> tests/ui/kernel_rejects_unsupported_types.rs:25:24
+   |
+25 | fn qualified_scalar(x: foo::u32) -> f32 {
+   |                        ^^^^^^^^

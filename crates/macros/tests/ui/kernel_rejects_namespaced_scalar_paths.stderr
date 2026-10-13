@@ -1,0 +1,17 @@
+error: path `core::u8::MAX` is not supported in GPU kernel `core_u8_max`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead
+  --> tests/ui/kernel_rejects_namespaced_scalar_paths.rs:11:9
+   |
+11 |     x + core::u8::MAX as u32 as f32
+   |         ^^^^^^^^^^^^^
+
+error: path `std::primitive::u8::MAX` is not supported in GPU kernel `std_primitive_u8_max`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead
+  --> tests/ui/kernel_rejects_namespaced_scalar_paths.rs:16:9
+   |
+16 |     x + std::primitive::u8::MAX as u32 as f32
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: path `std::f32::consts::PI` is not supported in GPU kernel `std_f32_const_pi`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead
+  --> tests/ui/kernel_rejects_namespaced_scalar_paths.rs:21:9
+   |
+21 |     x + std::f32::consts::PI
+   |         ^^^^^^^^^^^^^^^^^^^^

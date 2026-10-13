@@ -23,6 +23,16 @@
 //! through `WgslGen`), while wrong-arity calls fail with spanned errors
 //! instead of reaching naga (or panicking, as zero-arg `length_sq` did).
 //!
+//! `#[kernel]` (in `ornis-macros`) accepts only this closed world in
+//! signatures, `let` annotations and `as` casts: `f32`/`u32`/`i32` (plus
+//! pass-through `bool`), the vector/matrix registry above, transparent
+//! `u32` newtypes and fixed-size arrays of those. Everything else is
+//! rejected by the validator at macro time instead of failing in naga:
+//! narrow/wide scalars, heap types, closures, scalar-namespaced paths
+//! like `u8::MAX`, and user-defined `struct` types. Struct types are
+//! not supported yet — WGSL lowering cannot carry field layout across
+//! the kernel boundary; `#[derive(GpuStruct)]` is planned (PLAN.md §n).
+//!
 //! [`ir`] holds the structural nodes between the Rust AST and WGSL text;
 //! [`writer`] renders them. The translator lowers `syn` → IR and prints
 //! IR → WGSL, so each side is testable without the other.

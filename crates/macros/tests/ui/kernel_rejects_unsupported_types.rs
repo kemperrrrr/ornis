@@ -18,4 +18,12 @@ fn narrow_let() -> f32 {
     v as f32
 }
 
+// Qualified scalars have no kernel meaning (`foo::u32` would pass the
+// old last-segment check while casts reject it): signatures take only
+// bare `f32`/`u32`/`i32`, while `glam::Vec3` stays qualified.
+#[kernel]
+fn qualified_scalar(x: foo::u32) -> f32 {
+    x as f32
+}
+
 fn main() {}

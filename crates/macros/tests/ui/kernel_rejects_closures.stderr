@@ -1,0 +1,5 @@
+error: closures are not supported in GPU kernel `closure_u8`; WGSL has no closures, inline the computation instead
+  --> tests/ui/kernel_rejects_closures.rs:11:13
+   |
+11 |     let f = |y: u8| y;
+   |             ^^^^^^^^^
