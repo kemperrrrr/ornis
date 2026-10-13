@@ -15,6 +15,9 @@ pub mod flags;
 pub mod frame_exec;
 /// Typed pass implementations wired into the frame plan.
 pub mod frame_passes;
+/// GPU frustum culling with `draw_indexed_indirect` submits (CPU
+/// reference compaction, indirect-args layout, compute-shader source).
+pub mod gpu_culling;
 /// GPU resources as ECS singletons for the unified scheduler (S7 design).
 /// Native-only: stores wgpu `Device`/`Queue`/`Surface`/`CommandBuffer` as
 /// `World` resources (`Send + Sync` bound), but wgpu's web backend types
@@ -67,6 +70,11 @@ pub use flags::{
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use frame_passes::{
     FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor,
+};
+pub use gpu_culling::{
+    CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, CULL_WORKGROUP_SIZE, CullParams,
+    DrawIndexedIndirectArgs, FRUSTUM_PLANE_COUNT, INDIRECT_ARGS_WORD_COUNT, INSTANCE_COUNT_WORD,
+    compact_visible_indices, cull_params, cull_workgroup_count, indirect_args_for_visible,
 };
 pub use ibl::{
     BrdfLut, CubeFace, EnvironmentCube, SplitSum, bake_brdf_lut, convolve_irradiance,
