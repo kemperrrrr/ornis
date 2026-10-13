@@ -7,7 +7,7 @@
 //!   cargo xtask fuzz `<target>` [-- `<libfuzzer args>`]
 //!   cargo xtask mutants [-- `<cargo-mutants args>`]
 //!   cargo xtask install-hooks
-//!   cargo xtask pre-push `<remote-name>` `<url>`   (git hook; reads stdin)
+//!   cargo xtask pre-push [`<remote-name>` `<url>`]   (git hook; reads stdin)
 //!   cargo editor   [--skip-wasm] [--editor-dir `<path>`]   (alias)
 //!
 //! `editor` builds the WASM viewport (wasm-pack) and runs the engine with the

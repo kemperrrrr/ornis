@@ -732,7 +732,7 @@ fn finish_rustqual_stage(
 /// the caller must return.
 ///
 /// Takes `guard_ref` explicitly so tests stay hermetic: the only env
-/// read (`guard_ref`) happens once at stage entry, never
+/// read (`baseline_guard_ref`) happens once at stage entry, never
 /// inside the checked functions (RAT-24 review: env reads inside shared
 /// helpers flake under parallel `cargo test`).
 fn reject_deleted_baseline(stages: &mut StageList<'_>, guard_ref: &str) -> bool {
