@@ -213,6 +213,18 @@ button { font: inherit; color: inherit; }
 }
 .viewport-settings svg { width: 18px; height: 18px; }
 .viewport-settings:hover { fill: var(--text); }
+/* 2D/3D viewport mode switch (mock of the K2 plane camera toggle). */
+.viewport-mode {
+  position: absolute; top: 8px; right: 58px;
+  display: flex; gap: 2px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 3px 4px;
+}
+.viewport-mode button {
+  background: transparent; border: 0; border-radius: 999px;
+  padding: 3px 10px; cursor: pointer; color: var(--muted); font: inherit; font-size: 12px;
+}
+.viewport-mode button.active { background: var(--panel-2); color: var(--text); }
+.viewport.mode-2d .viewport-hint { display: none; }
 /* Browser */
 .tabs { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .tab { background: transparent; border: 0; padding: 5px 10px; border-radius: 7px; cursor: pointer; color: var(--muted); }
