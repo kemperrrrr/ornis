@@ -6,7 +6,7 @@ use super::*;
 /// ([`PerObjectGpu::WGSL_SOURCE`]); the field list here is the single source
 /// of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
 #[wgsl(name = "PerObject")]
 pub struct PerObjectGpu {
     /// Local-to-world matrix.
