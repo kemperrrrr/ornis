@@ -301,7 +301,7 @@ impl Culler {
         })
     }
 
-    /// Stages one culling frame: writes the [`dirty_ranges`] of
+    /// Stages one culling frame: writes the `dirty_ranges` of
     /// `instances` into the resident source buffer (a static scene
     /// uploads nothing), packs the
     /// [`CullParams`](super::CullParams) uniform of `view_proj`, and
