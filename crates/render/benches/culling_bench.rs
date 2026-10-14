@@ -159,6 +159,25 @@ fn read_instance_count(
     Some(words[INSTANCE_COUNT_WORD])
 }
 
+// qual:allow(test_quality, untested) reason: "bench GPU frame runner runs only under the criterion harness, never under libtest"
+/// One GPU frame: `compact` uploads, then the dispatch records into a
+/// submitted encoder (the production frame records into its own encoder
+/// instead, with no extra submit).
+fn dispatch_compact(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    culler: &Culler,
+    view_proj: &Mat4,
+    instances: &[InstanceData],
+) {
+    let _ = culler.compact(queue, view_proj, INDEX_COUNT, instances);
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("culling bench dispatch"),
+    });
+    culler.record_compact(&mut encoder);
+    queue.submit([encoder.finish()]);
+}
+
 // qual:allow(test_quality, untested) reason: "bench GPU runner runs only under the criterion harness, never under libtest"
 /// One scene size through the GPU bench: without an adapter it leaves a
 /// skip note; otherwise it warms the pipeline (compilation stays out of
@@ -180,7 +199,7 @@ fn run_gpu_bench(
             let (device, queue) = pair;
             match Culler::try_new(device, instances.len() as u32) {
                 Ok(culler) => {
-                    let _ = culler.compact(device, queue, view_proj, INDEX_COUNT, instances);
+                    dispatch_compact(device, queue, &culler, view_proj, instances);
                     let _ = device.poll(wgpu::PollType::wait_indefinitely());
                     let expected = compact_visible_indices(instances, view_proj).len() as u32;
                     if let Some(count) = read_instance_count(device, queue, &culler.args_buffer) {
@@ -195,11 +214,11 @@ fn run_gpu_bench(
                     }
                     group.bench_function(format!("gpu_{label}"), |b| {
                         b.iter(|| {
-                            let _ = culler.compact(
+                            dispatch_compact(
                                 device,
                                 queue,
+                                &culler,
                                 view_proj,
-                                INDEX_COUNT,
                                 std::hint::black_box(instances),
                             );
                             let _ = device.poll(wgpu::PollType::wait_indefinitely());

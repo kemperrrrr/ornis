@@ -662,6 +662,32 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// Mesh index-count placeholder for the culler tests: carried
+    /// through into the indirect args untouched (mirrors the bench
+    /// `INDEX_COUNT`).
+    const TEST_INDEX_COUNT: u32 = 42;
+
+    /// Full frame through a `Culler`: stage with [`Culler::compact`],
+    /// then dispatch with [`Culler::record_compact`] into a submitted
+    /// encoder (the production frame records into its own encoder
+    /// instead of submitting here).
+    fn cull_test_compact(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        culler: &Culler,
+        view_proj: &Mat4,
+        instances: &[InstanceData],
+    ) {
+        culler
+            .compact(queue, view_proj, TEST_INDEX_COUNT, instances)
+            .expect("instances fit the capacity");
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cull test compact"),
+        });
+        culler.record_compact(&mut encoder);
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
     #[test]
     fn gpu_compaction_matches_cpu_across_frames() {
         // End-to-end through the production `Culler`, two frames back
@@ -680,9 +706,7 @@ mod tests {
         let (instances, view_proj, expected) = cull_test_scene();
         let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
         for frame in 0..2 {
-            culler
-                .compact(&device, &queue, &view_proj, 42, &instances)
-                .expect("instances fit the capacity");
+            cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
             let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
                 .expect("args readback succeeds");
             assert_eq!(args.index_count, 42, "frame {frame}");
@@ -715,7 +739,7 @@ mod tests {
         let culler = Culler::try_new(&device, 3).expect("capacity above zero");
         assert_eq!(culler.capacity, 3);
         assert_eq!(
-            culler.compact(&device, &queue, &view_proj, 0, &instances),
+            culler.compact(&queue, &view_proj, 0, &instances),
             Err(CullerError::CapacityExceeded {
                 count: instances.len() as u32,
                 capacity: 3,
@@ -814,17 +838,13 @@ mod tests {
         };
         let (mut instances, view_proj, _) = cull_test_scene();
         let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
-        culler
-            .compact(&device, &queue, &view_proj, 42, &instances)
-            .expect("first frame fits");
+        cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
         instances[0].model_matrix = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
         let expected = compact_visible_indices(&instances, &view_proj)
             .iter()
             .map(|index| instances[*index as usize].model_matrix.w_axis.to_array())
             .collect::<Vec<[f32; 4]>>();
-        culler
-            .compact(&device, &queue, &view_proj, 42, &instances)
-            .expect("moved frame fits");
+        cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
         let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
             .expect("args readback succeeds");
         assert_eq!(args.instance_count, expected.len() as u32);

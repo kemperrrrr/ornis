@@ -533,6 +533,12 @@ impl Renderer3D {
         batch: BatchDraw<'_>,
         customs: &[CustomGbufferDraw<'_>],
     ) {
+        if let BatchDraw::Indirect { culler } = batch {
+            // The compaction dispatch rides this frame encoder (no
+            // extra submit): the draw below consumes the culler's
+            // args/visible buffers directly, with no CPU readback.
+            culler.record_compact(encoder);
+        }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("gbuffer pass"),
             color_attachments: &[
