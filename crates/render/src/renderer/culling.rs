@@ -2,7 +2,7 @@
 //! flag, the per-frame culler lifecycle, and the staged-batch handover
 //! between the submit system and the record path (slice 2c).
 use super::Culler;
-use super::InstanceData;
+use super::PerObjectGpu;
 use super::Renderer3D;
 use super::read_lock;
 use super::write_lock;
@@ -59,12 +59,13 @@ impl Renderer3D {
     }
 
     /// Runs the culling dispatch for this frame (slice 2c selection):
-    /// takes the batch staged by [`stage_batch_inputs`](Self::stage_batch_inputs),
-    /// compacts its instances under its `view_proj`, and arms the
+    /// takes the converted batch staged by
+    /// [`stage_batch_inputs`](Self::stage_batch_inputs), stages it
+    /// without re-converting under its `view_proj`, and arms the
     /// indirect batch when opted in via
     /// [`set_indirect_draw`](Self::set_indirect_draw). A no-op resetting
     /// to direct when opted out or when no batch was staged. When the
-    /// compact reports
+    /// staging reports
     /// [`CullerError::CapacityExceeded`](crate::gpu_culling::CullerError),
     /// the frame transparently falls back to the direct `draw_indexed`
     /// path ([`render_gbuffer`](Self::render_gbuffer) /
@@ -85,17 +86,15 @@ impl Renderer3D {
             return;
         }
         let staged = write_lock(&self.staged_batch).take();
-        let Some((view_proj, instances)) = staged else {
+        let Some((view_proj, records)) = staged else {
             self.indirect_ready
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             return;
         };
-        self.ensure_culler_capacity(device, instances.len());
-        let previous_models = read_lock(&self.previous_instance_models_frame);
-        let motion_validity = read_lock(&self.previous_instance_motion_valid_frame);
+        self.ensure_culler_capacity(device, records.len());
         let ready = read_lock(&self.culler).as_ref().is_some_and(|culler| {
             culler
-                .compact(queue, &view_proj, index_count, &instances)
+                .compact_records(queue, &view_proj, index_count, &records)
                 .is_ok()
         });
         self.indirect_ready
@@ -103,12 +102,12 @@ impl Renderer3D {
     }
 
     /// Stages the shared batch for a possible indirect submit: moves
-    /// (`view_proj`, `instances`) in for the record path to take in
-    /// [`prepare_indirect_batch`](Self::prepare_indirect_batch).
+    /// (`view_proj`, pre-converted `records`) in for the record path to
+    /// take in [`prepare_indirect_batch`](Self::prepare_indirect_batch).
     /// Unconditional — without the opt-in flag the staged batch is
     /// simply never consumed.
-    pub(crate) fn stage_batch_inputs(&self, view_proj: Mat4, instances: Vec<InstanceData>) {
-        *write_lock(&self.staged_batch) = Some((view_proj, instances));
+    pub(crate) fn stage_batch_inputs(&self, view_proj: Mat4, records: Vec<PerObjectGpu>) {
+        *write_lock(&self.staged_batch) = Some((view_proj, records));
     }
 
     /// Whether the last [`prepare_indirect_batch`](Self::prepare_indirect_batch)
@@ -125,6 +124,7 @@ mod tests {
     use super::super::{BatchDraw, select_shared_batch};
     use super::*;
     use crate::gpu_culling::CullerError;
+    use crate::renderer::InstanceData;
 
     /// Minimal surface config for renderer construction in these tests
     /// (no frame is ever presented through it).

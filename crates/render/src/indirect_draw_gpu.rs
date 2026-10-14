@@ -499,7 +499,9 @@ fn armed_with_custom_matches_direct_and_indirect() {
     let (mesh, instances, view_proj) = setup_scene(&device, &queue, &renderer, true, true);
     let staged = instances.len() as u32;
     renderer.set_indirect_draw(true);
-    renderer.stage_batch_inputs(view_proj, instances);
+    let mut converted = Vec::with_capacity(instances.len());
+    crate::gpu_culling::convert_instances(&mut converted, &instances);
+    renderer.stage_batch_inputs(view_proj, converted);
     renderer.prepare_indirect_batch(&device, &queue, mesh.num_indices);
     assert!(renderer.indirect_batch_ready());
     let (target, target_view) = test_util::offscreen_target(&device, FRAME_W, FRAME_H);

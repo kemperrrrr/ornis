@@ -358,6 +358,28 @@ impl Renderer3D {
         );
     }
 
+    /// Upload pre-converted records into the per-object buffer used by
+    /// both gbuffer and forward passes, growing the buffer (and
+    /// rebinding the passes) when the frame needs more than the current
+    /// capacity. Beyond-capacity tails are truncated, like
+    /// [`upload_instances`](Self::upload_instances).
+    pub fn upload_per_objects(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        records: &[PerObjectGpu],
+    ) {
+        self.ensure_instance_capacity(device, records.len());
+        let count = records
+            .len()
+            .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
+        queue.write_buffer(
+            &read_lock(&self.per_object_buffer),
+            0,
+            bytemuck::cast_slice(&records[..count]),
+        );
+    }
+
     /// Convert and upload instances into the per-object buffer used by
     /// both gbuffer and forward passes, growing the buffer (and rebinding
     /// the passes) when the frame needs more than the current capacity.
@@ -389,60 +411,10 @@ impl Renderer3D {
         entities: &[Entity],
     ) {
         self.ensure_instance_capacity(device, instances.len());
-        let count = instances
-            .len()
-            .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
-        let identity_complete = entities.len() >= count;
-        let previous_by_entity = read_lock(&self.previous_instance_models);
-        let mut next_by_entity = std::collections::HashMap::with_capacity(count);
         let mut gpu_objects: Vec<PerObjectGpu> =
-            Vec::with_capacity(staging_capacity_for_instances(count));
-        let mut previous_for_frame = Vec::with_capacity(count);
-        let mut motion_valid_for_frame = Vec::with_capacity(count);
-        for (index, inst) in instances.iter().take(count).enumerate() {
-            let model_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
-                inst.model_matrix.to_cols_array_2d();
-            let normal_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
-                inst.normal_matrix.to_cols_array_2d();
-            let entity = entities.get(index).copied();
-            let requested = motion_valid
-                .get(index)
-                .copied()
-                .unwrap_or(MotionValidity::Valid);
-            let (previous, validity) = previous_instance_state(
-                inst,
-                entity,
-                &previous_by_entity,
-                requested,
-                identity_complete,
-            );
-            if identity_complete && let Some(entity) = entity {
-                next_by_entity.insert(entity, inst.model_matrix);
-            }
-            gpu_objects.push(PerObjectGpu {
-                model: model_arr,
-                normal_matrix: normal_arr,
-                previous_model: previous.to_cols_array_2d(),
-                material_index: inst.material_index,
-                motion_valid: validity.shader_flag(),
-                _padding: [0; 2],
-            });
-            previous_for_frame.push(previous);
-            motion_valid_for_frame.push(validity);
-        }
-        drop(previous_by_entity);
-        *write_lock(&self.previous_instance_models) = if identity_complete {
-            next_by_entity
-        } else {
-            std::collections::HashMap::new()
-        };
-        *write_lock(&self.previous_instance_models_frame) = previous_for_frame;
-        *write_lock(&self.previous_instance_motion_valid_frame) = motion_valid_for_frame;
-        queue.write_buffer(
-            &read_lock(&self.per_object_buffer),
-            0,
-            bytemuck::cast_slice(&gpu_objects),
-        );
+            Vec::with_capacity(staging_capacity_for_instances(instances.len()));
+        crate::gpu_culling::convert_instances(&mut gpu_objects, instances);
+        self.upload_per_objects(device, queue, &gpu_objects);
     }
 
     /// Ensure the palette buffer fits `needed` slots, growing it (and only
