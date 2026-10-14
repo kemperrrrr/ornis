@@ -11,6 +11,8 @@ use super::INDIRECT_ARGS_WORD_BYTES;
 use super::INDIRECT_ARGS_WORD_COUNT;
 use super::cull_params;
 use super::cull_workgroup_count;
+use super::diff_staged_records;
+use super::stage_next_instances;
 use crate::renderer::InstanceData;
 use crate::renderer::PerObjectGpu;
 
@@ -37,59 +39,6 @@ pub enum CullerError {
         /// Per-frame capacity fixed at construction.
         capacity: u32,
     },
-}
-
-/// One dirty run of the resident staging buffer: `count` records
-/// starting at `start` (record indices, not bytes) whose content differs
-/// from the last uploaded frame and must be re-written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DirtyRange {
-    /// First differing record.
-    pub(crate) start: u32,
-    /// Records in the run.
-    pub(crate) count: u32,
-}
-
-/// Converts `instances` into the reused `next` buffer while tracking
-/// the dirty runs against `prev` in the same pass: one loop instead of
-/// convert-then-diff, so a steady-state frame pays a single scan.
-/// Returns the runs to re-write (empty when the frames are identical —
-/// a static scene uploads nothing). Indices past `prev` count as dirty
-/// (growth uploads the extension); a shorter `next` leaves a stale tail
-/// the dispatch never reads (`params.count` bounds the threads).
-pub(crate) fn stage_next_instances(
-    prev: &[PerObjectGpu],
-    next: &mut Vec<PerObjectGpu>,
-    instances: &[InstanceData],
-) -> Vec<DirtyRange> {
-    next.clear();
-    let mut ranges = Vec::new();
-    let mut run_start: Option<usize> = None;
-    let close_run = |run_start: &mut Option<usize>, end: usize, ranges: &mut Vec<DirtyRange>| {
-        if let Some(start) = run_start.take() {
-            ranges.push(DirtyRange {
-                start: start as u32,
-                count: (end - start) as u32,
-            });
-        }
-    };
-    for (index, instance) in instances.iter().enumerate() {
-        let mut record = PerObjectGpu::default();
-        record.model = instance.model_matrix.to_cols_array_2d();
-        record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
-        record.material_index = instance.material_index;
-        let same =
-            index < prev.len() && bytemuck::bytes_of(&prev[index]) == bytemuck::bytes_of(&record);
-        next.push(record);
-        if same {
-            close_run(&mut run_start, index, &mut ranges);
-        } else if run_start.is_none() {
-            run_start = Some(index);
-        }
-    }
-    let len = instances.len();
-    close_run(&mut run_start, len, &mut ranges);
-    ranges
 }
 
 /// Owned GPU resources for one culling dispatch: source staging, the
@@ -334,12 +283,66 @@ impl Culler {
             }
             std::mem::swap(prev, next);
         }
-        let params = cull_params(view_proj, instances.len() as u32);
+        self.prewrite_frame(queue, view_proj, index_count, instances.len() as u32);
+        Ok(())
+    }
+
+    /// Pre-writes the per-frame uniform, the indirect args (with a zero
+    /// instance counter, so consecutive frames never accumulate) and the
+    /// staged count shared by [`Culler::compact`] and
+    /// [`Culler::compact_records`].
+    fn prewrite_frame(&self, queue: &wgpu::Queue, view_proj: &Mat4, index_count: u32, count: u32) {
+        let params = cull_params(view_proj, count);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         let args = DrawIndexedIndirectArgs::compacted(index_count, 0);
         queue.write_buffer(&self.args_buffer, 0, bytemuck::bytes_of(&args));
         self.staged_count
-            .store(instances.len() as u32, std::sync::atomic::Ordering::Relaxed);
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stages one culling frame from caller-converted `records`: diffs
+    /// them against the last uploaded frame and writes only the dirty
+    /// runs — like [`Culler::compact`], but without converting. The
+    /// submit path converts once and shares the records between the
+    /// direct upload and this staging, so a frame converts exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CullerError::CapacityExceeded`] when `records.len()`
+    /// exceeds [`Self::capacity`].
+    pub fn compact_records(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: &Mat4,
+        index_count: u32,
+        records: &[PerObjectGpu],
+    ) -> Result<(), CullerError> {
+        if records.len() > self.capacity as usize {
+            return Err(CullerError::CapacityExceeded {
+                count: records.len() as u32,
+                capacity: self.capacity,
+            });
+        }
+        let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
+        {
+            let mut staging = self
+                .staging
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let CullerStaging { prev, next } = &mut *staging;
+            next.clear();
+            next.extend_from_slice(records);
+            for range in diff_staged_records(prev, next) {
+                let start = range.start as usize;
+                queue.write_buffer(
+                    &self.src_buffer,
+                    start as u64 * record_bytes,
+                    bytemuck::cast_slice(&next[start..start + range.count as usize]),
+                );
+            }
+            std::mem::swap(prev, next);
+        }
+        self.prewrite_frame(queue, view_proj, index_count, records.len() as u32);
         Ok(())
     }
 

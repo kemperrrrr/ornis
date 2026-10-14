@@ -376,10 +376,10 @@ pub struct Renderer3D {
     /// fallback to the direct path.
     indirect_ready: std::sync::atomic::AtomicBool,
     /// Staged shared-batch inputs for a possible indirect submit:
-    /// `(view_proj, instances)` moved here by `RenderSubmit` and taken
-    /// by [`prepare_indirect_batch`](Self::prepare_indirect_batch) on
-    /// the record path. Never consumed without the opt-in flag.
-    staged_batch: std::sync::RwLock<Option<(glam::Mat4, Vec<InstanceData>)>>,
+    /// `(view_proj, pre-converted records)` moved here by `RenderSubmit`
+    /// and taken by [`prepare_indirect_batch`](Self::prepare_indirect_batch)
+    /// on the record path. Never consumed without the opt-in flag.
+    staged_batch: std::sync::RwLock<Option<(glam::Mat4, Vec<PerObjectGpu>)>>,
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     /// Textured-forward pipeline plus fallbacks, built on demand by
