@@ -1,11 +1,10 @@
 //! GPU upload of glTF texture images (`LoadedImage` → `wgpu` texture).
 //!
-//! CPU side mirrors `ornis-gltf` field-for-field without depending on it:
-//! [`CpuImage`] is `LoadedImage` (`width`/`height`/RGBA8 `pixels`), and
-//! [`TextureRole`] is the three-slot role enum — the wiring stays mechanical
-//! (match on the role, upload, bind). Sampler parameters and `texCoord` sets
-//! are intentionally not carried: the import ignores them and the upload uses
-//! its own defaults (see [`sampler_descriptor_for_role`](crate::textures::sampler_descriptor_for_role)).
+//! CPU images and material roles are shared with glTF through `ornis-texture`.
+//! [`CpuImage`] keeps the RGBA8 API; [`TextureCache::upload_image_cached`]
+//! accepts either decoded pixels or deferred KTX2 including authored mips.
+//! Sampler parameters and `texCoord` sets are intentionally not carried:
+//! import ignores them and upload uses its own defaults.
 //!
 //! # Storage and lifetime
 //!
@@ -18,8 +17,7 @@
 //!
 //! # Sampler defaults and the sRGB decision
 //!
-//! Filtering is linear (`mag`/`min`, `mipmap` reserved for a future mip
-//! chain — a single mip is uploaded today), wrapping is `Repeat` on every
+//! Filtering is trilinear over a full role-aware mip chain; wrapping is `Repeat` on every
 //! axis (the glTF default; the import carries no wrap mode), LOD clamps are
 //! the full `0.0..=32.0` range, anisotropy is `1`, and there is no depth
 //! comparison. Color roles ([`TextureRole::BaseColor`],
@@ -47,13 +45,6 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-/// Maximum texture edge in pixels accepted by [`CpuImage::validate`].
-///
-/// Matches the guaranteed WebGPU limit (`maxTextureDimension2D` floor), so an
-/// image passing validation is uploadable on every backend.
-pub const MAX_TEXTURE_EDGE: u32 = 8192;
-/// Bytes per RGBA8 texel.
-const RGBA8_BYTES: usize = 4;
 /// Scale from an 8-bit channel to unit float.
 const U8_TO_UNIT: f32 = 255.0;
 /// sRGB IEC 61966-2-1 linear/power junction (normalized channel).
@@ -67,128 +58,7 @@ const SRGB_POWER_SCALE: f32 = 1.055;
 /// sRGB power-segment exponent.
 const SRGB_POWER_GAMMA: f32 = 2.4;
 
-/// Which material slot an uploaded image feeds.
-///
-/// Mirrors `ornis_gltf::TextureRole` without depending on that crate; the
-/// upload matches on this to pick the GPU format and the material binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TextureRole {
-    /// `baseColorTexture`: albedo multiplier (sRGB color data).
-    BaseColor,
-    /// `metallicRoughnessTexture`: green holds roughness, blue holds
-    /// metallic (linear data, never sRGB-decoded).
-    MetallicRoughness,
-    /// `emissiveTexture`: emission multiplier (sRGB color data).
-    Emissive,
-}
-
-/// CPU-side texture image: always RGBA8, row-major, top row first.
-///
-/// Field-for-field mirror of `ornis_gltf::LoadedImage` (PNG and JPEG sources
-/// both land here — the decoder normalizes channels, so the upload needs no
-/// format switch). `pixels` holds exactly `width * height * 4` bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CpuImage {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// RGBA8 bytes, row-major from the top row.
-    pub pixels: Vec<u8>,
-}
-
-impl CpuImage {
-    /// Builds an image, validating dimensions and pixel length.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TextureUploadError`] when either dimension is zero, either
-    /// edge exceeds [`MAX_TEXTURE_EDGE`], or `pixels` is not exactly
-    /// `width * height * 4` bytes.
-    pub fn from_rgba8(
-        width: u32,
-        height: u32,
-        pixels: Vec<u8>,
-    ) -> Result<Self, TextureUploadError> {
-        let image = Self {
-            width,
-            height,
-            pixels,
-        };
-        image.validate()?;
-        Ok(image)
-    }
-
-    /// Checks dimensions and pixel length (see [`Self::from_rgba8`]).
-    ///
-    /// # Errors
-    ///
-    /// Same as [`Self::from_rgba8`].
-    pub fn validate(&self) -> Result<(), TextureUploadError> {
-        if self.width == 0 || self.height == 0 {
-            return Err(TextureUploadError::EmptyDimensions {
-                width: self.width,
-                height: self.height,
-            });
-        }
-        if self.width > MAX_TEXTURE_EDGE || self.height > MAX_TEXTURE_EDGE {
-            return Err(TextureUploadError::ImageTooLarge {
-                width: self.width,
-                height: self.height,
-            });
-        }
-        let expected = self.width as u64 * self.height as u64 * RGBA8_BYTES as u64;
-        if self.pixels.len() as u64 != expected {
-            return Err(TextureUploadError::PixelLengthMismatch {
-                expected,
-                actual: self.pixels.len() as u64,
-            });
-        }
-        Ok(())
-    }
-
-    /// RGBA bytes of the texel at `(x, y)` (origin: top-left).
-    ///
-    /// Returns `None` when the coordinates are out of bounds. Pure helper
-    /// for the CPU sampling mirrors below.
-    pub fn texel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-        let offset = (y as usize * self.width as usize + x as usize) * RGBA8_BYTES;
-        let slice = self.pixels.get(offset..offset + RGBA8_BYTES)?;
-        Some([slice[0], slice[1], slice[2], slice[3]])
-    }
-}
-
-/// Rejection of a [`CpuImage`] before any GPU work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum TextureUploadError {
-    /// Either dimension is zero — there is no honest GPU texture for it.
-    #[error("texture has empty dimensions ({width}x{height})")]
-    EmptyDimensions {
-        /// Offending width.
-        width: u32,
-        /// Offending height.
-        height: u32,
-    },
-    /// An edge exceeds [`MAX_TEXTURE_EDGE`] (not uploadable everywhere).
-    #[error("texture too large ({width}x{height})")]
-    ImageTooLarge {
-        /// Offending width.
-        width: u32,
-        /// Offending height.
-        height: u32,
-    },
-    /// `pixels` is not exactly `width * height * 4` bytes.
-    #[error("texture pixel length mismatch: expected {expected}, got {actual}")]
-    PixelLengthMismatch {
-        /// Required byte count.
-        expected: u64,
-        /// Actual byte count.
-        actual: u64,
-    },
-}
+pub use ornis_texture::{CpuImage, MAX_TEXTURE_EDGE, TextureRole, TextureUploadError};
 
 /// GPU format for `role`: sRGB for color roles, linear for the data role.
 ///
@@ -200,14 +70,13 @@ pub enum TextureUploadError {
 pub fn texture_format_for_role(role: TextureRole) -> wgpu::TextureFormat {
     match role {
         TextureRole::BaseColor | TextureRole::Emissive => wgpu::TextureFormat::Rgba8UnormSrgb,
-        TextureRole::MetallicRoughness => wgpu::TextureFormat::Rgba8Unorm,
+        TextureRole::MetallicRoughness | TextureRole::Normal => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
 
 /// Upload sampler defaults for `role` (all roles share them today).
 ///
-/// Linear `mag`/`min` filtering, linear `mipmap` (reserved: a single mip is
-/// uploaded, the chain is future work), `Repeat` wrapping on every axis (the
+/// Linear `mag`/`min` and mip filtering, `Repeat` wrapping on every axis (the
 /// glTF default — the import carries no wrap mode), full LOD range,
 /// anisotropy `1`, no depth comparison. Pure (no GPU access); the label is
 /// `None` so the descriptor is `'static`.
@@ -290,13 +159,15 @@ pub struct GpuTexture {
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
+    /// Exact sum of uploaded mip payloads, excluding driver allocation overhead.
+    pub payload_bytes: u64,
 }
 
 /// Uploads `image` under `role`: texture + view + sampler.
 ///
 /// The texture uses [`texture_format_for_role`] with `TEXTURE_BINDING |
-/// `COPY_DST` usage and one mip; rows are padded to the 256-byte copy
-/// alignment, so any validated size uploads. The sampler uses
+/// `COPY_DST` usage and a complete mip chain. Queue writes use tight rows
+/// (unlike buffer copies, they need no 256-byte alignment). The sampler uses
 /// [`sampler_descriptor_for_role`].
 ///
 /// # Errors
@@ -309,60 +180,8 @@ pub fn upload_texture(
     image: &CpuImage,
     role: TextureRole,
 ) -> Result<GpuTexture, TextureUploadError> {
-    image.validate()?;
-    let format = texture_format_for_role(role);
-    let size = wgpu::Extent3d {
-        width: image.width,
-        height: image.height,
-        depth_or_array_layers: 1,
-    };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("gltf texture upload"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    // `write_texture` rows must honor the 256-byte copy alignment; pad any
-    // narrow image instead of restricting uploads to wide ones.
-    let unpadded_bytes_per_row = image.width as usize * RGBA8_BYTES;
-    let padded_bytes_per_row =
-        unpadded_bytes_per_row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
-    let mut staging = vec![0u8; padded_bytes_per_row * image.height as usize];
-    for (dst_row, src_row) in staging
-        .chunks_exact_mut(padded_bytes_per_row)
-        .zip(image.pixels.chunks_exact(unpadded_bytes_per_row))
-    {
-        dst_row[..unpadded_bytes_per_row].copy_from_slice(src_row);
-    }
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &staging,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(padded_bytes_per_row as u32),
-            rows_per_image: Some(image.height),
-        },
-        size,
-    );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&sampler_descriptor_for_role(role));
-    Ok(GpuTexture {
-        texture,
-        view,
-        sampler,
-        role,
-        width: image.width,
-        height: image.height,
-    })
+    let levels = ornis_texture::TextureLevels::from_rgba8(image, role)?;
+    crate::texture_upload::upload_levels(device, queue, &levels, role)
 }
 
 /// Handle of one uploaded image in [`TextureCache`]: entry index.
@@ -481,6 +300,38 @@ impl TextureCache {
         self.index.insert(key, handle);
         Ok(handle)
     }
+
+    /// Uploads a glTF image without losing KTX2 mips or eagerly expanding Basis data.
+    /// Content and role determine identity; repeated calls do not transcode again.
+    /// Like RGBA uploads, a cache belongs to one device.
+    ///
+    /// # Errors
+    /// Failed validation/transcoding/uploads never insert a cache entry.
+    pub fn upload_image_cached(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ornis_texture::TextureImage,
+        role: TextureRole,
+    ) -> Result<TextureHandle, TextureUploadError> {
+        if let ornis_texture::TextureImage::Rgba8(image) = image {
+            return self.upload_cached(device, queue, image, role);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // Separate encoded container keys from legacy RGBA content keys.
+        "KTX2".hash(&mut hasher);
+        role.hash(&mut hasher);
+        image.hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(handle) = self.index.get(&key) {
+            return Ok(*handle);
+        }
+        let entry = crate::texture_upload::upload_image(device, queue, image, role)?;
+        let handle = TextureHandle::from(self.entries.len());
+        self.entries.push(entry);
+        self.index.insert(key, handle);
+        Ok(handle)
+    }
 }
 
 /// Per-material texture bind: optional cache handle per [`TextureRole`].
@@ -499,6 +350,8 @@ pub struct MaterialTextureSet {
     pub metallic_roughness: Option<TextureHandle>,
     /// Handle of the emission image ([`TextureRole::Emissive`]), if bound.
     pub emissive: Option<TextureHandle>,
+    /// Normal-map upload handle; normal shading is a separate renderer concern.
+    pub normal: Option<TextureHandle>,
 }
 
 impl MaterialTextureSet {
@@ -508,6 +361,7 @@ impl MaterialTextureSet {
             TextureRole::BaseColor => self.base_color = Some(handle),
             TextureRole::MetallicRoughness => self.metallic_roughness = Some(handle),
             TextureRole::Emissive => self.emissive = Some(handle),
+            TextureRole::Normal => self.normal = Some(handle),
         }
     }
 
@@ -517,12 +371,16 @@ impl MaterialTextureSet {
             TextureRole::BaseColor => self.base_color,
             TextureRole::MetallicRoughness => self.metallic_roughness,
             TextureRole::Emissive => self.emissive,
+            TextureRole::Normal => self.normal,
         }
     }
 
     /// True when no slot is bound (legacy scalar-only material).
     pub fn is_empty(&self) -> bool {
-        self.base_color.is_none() && self.metallic_roughness.is_none() && self.emissive.is_none()
+        self.base_color.is_none()
+            && self.metallic_roughness.is_none()
+            && self.emissive.is_none()
+            && self.normal.is_none()
     }
 }
 
@@ -767,7 +625,7 @@ mod tests {
             eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
             return;
         };
-        // Narrow (2 px) rows: exercises the 256-byte staging padding.
+        // Narrow, non-square rows exercise tightly packed queue writes.
         let image = solid_image(2, 3, [200, 128, 64, 255]);
         let uploaded =
             upload_texture(&device, &queue, &image, TextureRole::BaseColor).expect("2x3 uploads");
@@ -780,6 +638,8 @@ mod tests {
         );
         assert_eq!(uploaded.texture.size().width, 2);
         assert_eq!(uploaded.texture.size().height, 3);
+        assert_eq!(uploaded.texture.mip_level_count(), 2);
+        assert_eq!(uploaded.payload_bytes, 28);
 
         let mut cache = TextureCache::new();
         let first = cache

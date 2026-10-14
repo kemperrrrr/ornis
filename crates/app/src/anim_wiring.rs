@@ -496,6 +496,7 @@ mod tests {
             base_color_texture: None,
             metallic_roughness_texture: None,
             emissive_texture: None,
+            normal_texture: None,
         }
     }
 

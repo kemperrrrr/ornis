@@ -1,0 +1,16 @@
+[package]
+name = "ornis-texture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ktx2 = "0.5"
+# Pure Rust (including Zstd): the same transcoder builds on native and wasm.
+basisu = "0.1"
+texture2ddecoder = "0.1.2"
+thiserror = "2.0"
+
+[lints]
+workspace = true

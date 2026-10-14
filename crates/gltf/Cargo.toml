@@ -6,7 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-gltf = { version = "1", default-features = false, features = ["utils", "names"] }
+ornis-texture = { path = "../texture", version = "0.1.0" }
+gltf = { version = "1", default-features = false, features = ["utils", "names", "extensions"] }
 # Minimal decoders for the core glTF image mimes (PNG/JPEG): sniffing plus
 # RGBA8 conversion. No default features — the full `image` tree (tiff, webp,
 # exr, …) stays out of a geometry-first loader.
@@ -21,3 +22,6 @@ ornis-core = { path = "../core", version = "0.1.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json = "1"

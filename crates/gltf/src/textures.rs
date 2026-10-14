@@ -1,10 +1,9 @@
-//! Texture image resolution: glTF images to RGBA8 pixels.
+//! Resolve glTF PNG/JPEG pixels and retain KTX2 containers for GPU format selection.
 //!
 //! Covers the three core image storages (buffer view, `data:` URI, external
 //! file — the last only via [`load_path`](crate::load_path), mirroring the
 //! buffer mechanics) and the two core mimes (`image/png`, `image/jpeg`).
-//! Decoding is the `image` crate with the `png`/`jpeg` features only; output
-//! is always RGBA8, so the GPU-upload step needs no format switch.
+//! PNG/JPEG use the `image` crate; KTX2 preserves its authored mip chain.
 
 use std::path::Path;
 
@@ -114,13 +113,13 @@ fn check_mime(
     context: &str,
 ) -> Result<(), ImportError> {
     match mime {
-        Some("image/png") | Some("image/jpeg") => Ok(()),
+        Some("image/png") | Some("image/jpeg") | Some("image/ktx2") => Ok(()),
         Some(other) => Err(ImportError::UnsupportedImage {
             context: format!("{context}: mime '{other}'"),
         }),
         None => match extension {
             None => Ok(()),
-            Some("png" | "jpg" | "jpeg") => Ok(()),
+            Some("png" | "jpg" | "jpeg" | "ktx2") => Ok(()),
             Some(other) => Err(ImportError::UnsupportedImage {
                 context: format!("{context}: extension '.{other}'"),
             }),
@@ -135,15 +134,22 @@ fn decode_image(bytes: &[u8], context: &str) -> Result<LoadedImage, ImportError>
             context: format!("{context}: empty"),
         });
     }
+    if bytes.starts_with(b"\xABKTX 20\xBB\r\n\x1A\n") {
+        return ornis_texture::Ktx2Image::from_bytes(bytes)
+            .map(LoadedImage::Ktx2)
+            .map_err(|error| ImportError::InvalidImage {
+                context: format!("{context}: {error}"),
+            });
+    }
     let decoded = image::load_from_memory(bytes).map_err(|_| ImportError::InvalidImage {
         context: format!("{context}: undecodable ({} bytes)", bytes.len()),
     })?;
     let (width, height) = decoded.dimensions();
-    Ok(LoadedImage {
-        width,
-        height,
-        pixels: decoded.to_rgba8().into_raw(),
-    })
+    let image = ornis_texture::CpuImage::from_rgba8(width, height, decoded.to_rgba8().into_raw())
+        .map_err(|error| ImportError::InvalidImage {
+        context: format!("{context}: {error}"),
+    })?;
+    Ok(LoadedImage::Rgba8(image))
 }
 
 #[cfg(test)]
@@ -246,13 +252,15 @@ mod tests {
             .base_color_texture
             .as_ref()
             .expect("base color bound");
-        assert_eq!(image.width, 2);
-        assert_eq!(image.height, 2);
-        assert_eq!(image.pixels, rgba);
+        assert_eq!(image.rgba8().expect("RGBA8").width, 2);
+        assert_eq!(image.rgba8().expect("RGBA8").height, 2);
+        assert_eq!(image.rgba8().expect("RGBA8").pixels, rgba);
         assert!(material.metallic_roughness_texture.is_none());
         assert!(material.emissive_texture.is_none());
         assert_eq!(
-            material.texture(TextureRole::BaseColor).map(|i| i.width),
+            material
+                .texture(TextureRole::BaseColor)
+                .map(|i| i.rgba8().expect("RGBA8").width),
             Some(2)
         );
         assert!(material.texture(TextureRole::Emissive).is_none());
@@ -279,10 +287,18 @@ mod tests {
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
         let material = &scene.primitives[0].material;
         let image = material.emissive_texture.as_ref().expect("emissive bound");
-        assert_eq!((image.width, image.height), (3, 1));
-        assert_eq!(image.pixels, rgba);
         assert_eq!(
-            material.texture(TextureRole::Emissive).map(|i| i.height),
+            (
+                image.rgba8().expect("RGBA8").width,
+                image.rgba8().expect("RGBA8").height
+            ),
+            (3, 1)
+        );
+        assert_eq!(image.rgba8().expect("RGBA8").pixels, rgba);
+        assert_eq!(
+            material
+                .texture(TextureRole::Emissive)
+                .map(|i| i.rgba8().expect("RGBA8").height),
             Some(1)
         );
         assert!(material.base_color_texture.is_none());
@@ -308,9 +324,15 @@ mod tests {
             .metallic_roughness_texture
             .as_ref()
             .expect("metallic-roughness bound");
-        assert_eq!((image.width, image.height), (4, 4));
-        assert_eq!(image.pixels.len(), 4 * 4 * 4);
-        for pixel in image.pixels.chunks_exact(4) {
+        assert_eq!(
+            (
+                image.rgba8().expect("RGBA8").width,
+                image.rgba8().expect("RGBA8").height
+            ),
+            (4, 4)
+        );
+        assert_eq!(image.rgba8().expect("RGBA8").pixels.len(), 4 * 4 * 4);
+        for pixel in image.rgba8().expect("RGBA8").pixels.chunks_exact(4) {
             assert_eq!(pixel[3], 255, "jpeg alpha is opaque");
             assert!(pixel[1] > 200, "green stays dominant: {pixel:?}");
             assert!(
@@ -319,9 +341,11 @@ mod tests {
             );
         }
         assert_eq!(
-            material
-                .texture(TextureRole::MetallicRoughness)
-                .map(|i| i.pixels.len()),
+            material.texture(TextureRole::MetallicRoughness).map(|i| i
+                .rgba8()
+                .expect("RGBA8")
+                .pixels
+                .len()),
             Some(64)
         );
     }
@@ -342,11 +366,17 @@ mod tests {
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
         let material = &scene.primitives[0].material;
         assert_eq!(
-            material.base_color_texture.as_ref().map(|i| &i.pixels),
+            material
+                .base_color_texture
+                .as_ref()
+                .map(|i| &i.rgba8().expect("RGBA8").pixels),
             Some(&rgba)
         );
         assert_eq!(
-            material.emissive_texture.as_ref().map(|i| &i.pixels),
+            material
+                .emissive_texture
+                .as_ref()
+                .map(|i| &i.rgba8().expect("RGBA8").pixels),
             Some(&rgba)
         );
     }
@@ -393,8 +423,14 @@ mod tests {
             .base_color_texture
             .as_ref()
             .expect("base color bound");
-        assert_eq!((image.width, image.height), (2, 2));
-        assert_eq!(image.pixels, rgba);
+        assert_eq!(
+            (
+                image.rgba8().expect("RGBA8").width,
+                image.rgba8().expect("RGBA8").height
+            ),
+            (2, 2)
+        );
+        assert_eq!(image.rgba8().expect("RGBA8").pixels, rgba);
         std::fs::remove_dir_all(&dir).expect("temp cleanup");
     }
 

@@ -30,9 +30,9 @@
 //! | `skins[]` + node `skin` | [`LoadedSkin`] (`parents`/`inverse_bind`/`joint_names`) + [`ModelNode::skin`] link | `Skeleton` via `ornis-animation` builders |
 //! | `animations[]` sampler `input`/`output` per `channel.target.path` | [`Model::skel_clips`] ([`LoadedSkelClip`]) + [`Model::anim_clips`] ([`LoadedAnimClip`]); tracks address [`NodeIdx`] | `SkelClip`/`AnimClip` cold lanes via the animation builders |
 //! | `baseColorFactor` / `metallicFactor` / `roughnessFactor` / `emissiveFactor` | [`LoadedMaterial`] scalars | factor kept as [`ornis_core::Metallic`]; `1` → `MaterialDesc::Metal`, else `Dielectric` |
-//! | `baseColorTexture` | [`LoadedMaterial::base_color_texture`] (RGBA8) | albedo bind at upload |
-//! | `metallicRoughnessTexture` | [`LoadedMaterial::metallic_roughness_texture`] (RGBA8; G = roughness, B = metallic) | roughness/metallic bind at upload |
-//! | `emissiveTexture` | [`LoadedMaterial::emissive_texture`] (RGBA8) | emission bind at upload |
+//! | `baseColorTexture` | [`LoadedMaterial::base_color_texture`] (RGBA8 or KTX2) | albedo bind at upload |
+//! | `metallicRoughnessTexture` | [`LoadedMaterial::metallic_roughness_texture`] (RGBA8 or KTX2; G = roughness, B = metallic) | roughness/metallic bind at upload |
+//! | `emissiveTexture` | [`LoadedMaterial::emissive_texture`] (RGBA8 or KTX2) | emission bind at upload |
 //!
 //! # Skip rules (honest: skip + counter, never a stub mesh)
 //!
@@ -46,15 +46,15 @@
 //! | no `POSITION` attribute | primitive skipped | [`ImportStats::skipped_no_position`] |
 //! | empty positions or indices | primitive skipped | [`ImportStats::skipped_empty`] |
 //! | index out of range, or unindexed count not a multiple of 3 | primitive skipped | [`ImportStats::skipped_bad_index`] |
-//! | morph targets, cameras, lights, extensions, samplers | ignored | — (documented here) |
+//! | morph targets, cameras, lights, extensions other than `KHR_texture_basisu`, samplers | ignored | — (documented here) |
 //! | animations, skeletons (beyond the topology above) | morph-target channels ignored (clip track lands later) | — (documented here) |
 //! | node without a mesh | kept in [`Model::nodes`] with an empty primitive list | — |
 //! | external buffer URI under [`load_slice`] | `Err(ExternalBuffer)` — use [`load_path`] | — |
 //!
 //! # Next steps (explicitly NOT in this crate)
 //!
-//! 1. GPU upload of the decoded [`LoadedImage`] pixels: create the texture,
-//!    sampler, and `MaterialDesc` binding in `ornis-render`. Sampling,
+//! 1. GPU upload: `ornis-render` accepts [`LoadedImage`] through
+//!    `TextureCache::upload_image_cached`, including KTX2 mips. Sampling,
 //!    filtering, and `texCoord` sets live there, not here (samplers are
 //!    ignored on import).
 //! 2. `SkelClip`/`AnimClip` assembly from `animations[]` per `docs/animation-design.md`
@@ -79,6 +79,7 @@ const METALNESS_THRESHOLD: f32 = 0.5;
 
 mod anim;
 mod base64;
+mod basis_extension;
 mod geom;
 mod import;
 mod model;
@@ -302,6 +303,8 @@ pub struct LoadedMaterial {
     pub metallic_roughness_texture: Option<LoadedImage>,
     /// Decoded `emissiveTexture` (RGBA8 emission multiplier), if present.
     pub emissive_texture: Option<LoadedImage>,
+    /// Tangent-space normal image; renderer normal shading is separate.
+    pub normal_texture: Option<LoadedImage>,
 }
 
 impl LoadedMaterial {
@@ -321,41 +324,15 @@ impl LoadedMaterial {
             TextureRole::BaseColor => self.base_color_texture.as_ref(),
             TextureRole::MetallicRoughness => self.metallic_roughness_texture.as_ref(),
             TextureRole::Emissive => self.emissive_texture.as_ref(),
+            TextureRole::Normal => self.normal_texture.as_ref(),
         }
     }
 }
 
-/// Decoded texture image: always RGBA8, row-major, top row first.
-///
-/// PNG (`image/png`) and JPEG (`image/jpeg`) sources both land here — the
-/// decoder normalizes channels (JPEG gains opaque alpha), so the GPU-upload
-/// step needs no format switch. `pixels` holds exactly
-/// `width * height * 4` bytes.
-#[derive(Debug, Clone)]
-pub struct LoadedImage {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// RGBA8 bytes, row-major from the top row.
-    pub pixels: Vec<u8>,
-}
-
-/// Which material slot a texture image feeds.
-///
-/// Mirrors the three glTF texture slots this crate resolves; the upload step
-/// matches on this to pick the GPU binding. Sampler parameters
-/// (filter/wrap) and `texCoord` sets are intentionally not carried — upload
-/// uses its own defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextureRole {
-    /// `baseColorTexture`: albedo multiplier.
-    BaseColor,
-    /// `metallicRoughnessTexture`: green holds roughness, blue holds metallic.
-    MetallicRoughness,
-    /// `emissiveTexture`: emission multiplier.
-    Emissive,
-}
+/// Material image: decoded RGBA8 or deferred KTX2, including authored mip levels.
+pub use ornis_texture::TextureImage as LoadedImage;
+/// Material slot semantics shared with the renderer's mip filtering.
+pub use ornis_texture::TextureRole;
 
 /// Primitive/skip counters for one import; see the skip-rules table.
 ///

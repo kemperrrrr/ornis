@@ -219,7 +219,9 @@ impl GameApp {
         limits.max_storage_buffers_per_shader_stage = MAX_STORAGE_BUFFERS_PER_STAGE;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ornis device"),
-            required_features: wgpu::Features::empty(),
+            required_features: ornis_render::texture_upload::texture_compression_features(
+                adapter.features(),
+            ),
             required_limits: limits,
             memory_hints: wgpu::MemoryHints::Performance,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),

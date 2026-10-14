@@ -39,11 +39,10 @@ const NEAR_ZERO: f32 = 1e-6;
 /// [`ImportError::Parse`] on malformed bytes, [`ImportError::NoScene`] on a
 /// sceneless document, buffer errors as documented per variant.
 pub fn load_slice(bytes: &[u8]) -> Result<Model, ImportError> {
-    let gltf = Gltf::from_slice(bytes).map_err(|error| ImportError::Parse {
-        message: error.to_string(),
-    })?;
+    let gltf = crate::basis_extension::parse(bytes)?;
     let buffers = resolve_buffers(&gltf, None)?;
     let images = resolve_images(&gltf, &buffers, None)?;
+    crate::basis_extension::validate_images(&gltf, &images)?;
     import_gltf(&gltf, &buffers, &images)
 }
 
@@ -58,12 +57,11 @@ pub fn load_slice(bytes: &[u8]) -> Result<Model, ImportError> {
 /// Same as [`load_slice`], plus [`ImportError::Io`] for unreadable files.
 pub fn load_path(path: &Path) -> Result<Model, ImportError> {
     let bytes = std::fs::read(path)?;
-    let gltf = Gltf::from_slice(&bytes).map_err(|error| ImportError::Parse {
-        message: error.to_string(),
-    })?;
+    let gltf = crate::basis_extension::parse(&bytes)?;
     let parent = path.parent();
     let buffers = resolve_buffers(&gltf, parent)?;
     let images = resolve_images(&gltf, &buffers, parent)?;
+    crate::basis_extension::validate_images(&gltf, &images)?;
     import_gltf(&gltf, &buffers, &images)
 }
 
@@ -688,6 +686,9 @@ fn read_material(primitive: &Primitive<'_>, images: &[LoadedImage]) -> LoadedMat
         base_color_texture: texture_image(images, pbr.base_color_texture()),
         metallic_roughness_texture: texture_image(images, pbr.metallic_roughness_texture()),
         emissive_texture: texture_image(images, material.emissive_texture()),
+        normal_texture: material
+            .normal_texture()
+            .and_then(|t| images.get(t.texture().source().index()).cloned()),
     }
 }
 
