@@ -478,6 +478,13 @@ jobs:
   # Merges the five shard logs and preserves the old single-job reporting:
   # one digest comment (QUALITY SUMMARY + tail) plus the full merged log as
   # chunked comments. Runs even when shards fail; stays silent on success.
+  # NOTE: `failure()` inside this job sees only this job's own prior steps
+  # (which almost never fail), NOT the `needs` shards — so the digest
+  # predicate is computed from `needs.*.result` in each step's `if`.
+  # (`cancelled()` is only allowed in `if`, not in job-level `env`, hence
+  # no env indirection.) `cancelled` in a shard without a cancelled run
+  # means a shard timeout — also worth a digest. A fully-cancelled run
+  # (superseded by a new push via concurrency) is skipped by the job `if`.
   report:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -488,9 +495,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # `always()` so failure digests are posted even when a shard fails;
-    # the steps below no-op on full success (except the merged-log artifact).
-    if: always()
+    # `!cancelled()` so failure digests are posted even when a shard fails,
+    # but cancelled (superseded) runs publish nothing; the steps below
+    # no-op on full success (except the merged-log artifact).
+    if: ${{ !cancelled() }}
     steps:
       - name: Download shard logs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -527,7 +535,7 @@ jobs:
       # plus a collapsible tail of the merged log. The agent reads this via
       # the PR comments endpoint and iterates from it.
       - name: Build failure digest body
-        if: failure() && github.event_name == 'pull_request'
+        if: (contains(needs.*.result, 'failure') || (contains(needs.*.result, 'cancelled') && !cancelled())) && github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.head_ref }}
           RUN_ID: ${{ github.run_id }}
@@ -566,7 +574,7 @@ jobs:
           } > target/comment-body.md
 
       - name: Post failure digest to PR
-        if: failure() && github.event_name == 'pull_request'
+        if: (contains(needs.*.result, 'failure') || (contains(needs.*.result, 'cancelled') && !cancelled())) && github.event_name == 'pull_request'
         uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043 # v4
         with:
           issue-number: ${{ github.event.pull_request.number }}
@@ -578,7 +586,7 @@ jobs:
       # permissions already granted (pull-requests: write).
       # Marker <!--quality-log--> at the body start — used for lookup on read.
       - name: Publish full log as chunked PR comments
-        if: failure() && github.event_name == 'pull_request'
+        if: (contains(needs.*.result, 'failure') || (contains(needs.*.result, 'cancelled') && !cancelled())) && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
