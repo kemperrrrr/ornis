@@ -10,7 +10,7 @@ use super::{
     BatchDraw, GbufferTargets, InstanceData, MaterialIdx, Renderer3D, select_shared_batch,
 };
 use crate::camera::Frustum;
-use crate::gpu_culling::{Culler, INDIRECT_ARGS_WORD_COUNT};
+use crate::gpu_culling::{Culler, CullerError, INDIRECT_ARGS_WORD_COUNT};
 use crate::mesh::{Mesh, create_sphere};
 use ornis_core::System;
 
@@ -464,6 +464,48 @@ fn submit_stages_spheres_only_for_indirect() {
 /// submits the compacted batch — pixel-identical to both the direct
 /// fallback and the explicit indirect entry point. The selection seam
 /// itself is pinned first: only armed-with-culler routes indirectly.
+///
+/// Over-capacity frames fall back to the direct path: [`Culler::compact`]
+/// reports [`CullerError::CapacityExceeded`], and the frame selection
+/// maps every non-armed combination (opt-out, missed prepare, exhausted
+/// capacity) to `draw_indexed` — never to a partial indirect draw.
+#[test]
+fn capacity_exceeded_falls_back_to_direct() {
+    let Some((device, queue)) = test_util::try_device() else {
+        eprintln!("SKIPPED (capacity_exceeded_falls_back_to_direct): no wgpu adapter");
+        return;
+    };
+    let culler = Culler::try_new(&device, 2).expect("non-zero capacity");
+    let instances = (0..3)
+        .map(|_| InstanceData {
+            model_matrix: glam::Mat4::IDENTITY,
+            normal_matrix: glam::Mat4::IDENTITY,
+            material_index: MaterialIdx::from_raw(0),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        culler.compact(&device, &queue, &glam::Mat4::IDENTITY, 42, &instances),
+        Err(CullerError::CapacityExceeded {
+            count: 3,
+            capacity: 2,
+        })
+    );
+    assert!(matches!(
+        select_shared_batch(true, None, 3),
+        BatchDraw::Direct { .. }
+    ));
+    assert!(matches!(
+        select_shared_batch(false, Some(&culler), 3),
+        BatchDraw::Direct { .. }
+    ));
+    let renderer = Renderer3D::new(&device, &surface_config(), 1);
+    renderer.prepare_indirect_batch(&device, &queue, 42);
+    assert!(
+        !renderer.indirect_batch_ready(),
+        "an unarmed frame must stay on the direct fallback"
+    );
+}
+
 #[test]
 fn armed_with_custom_matches_direct_and_indirect() {
     let Some((device, queue)) = test_util::try_device() else {

@@ -512,7 +512,9 @@ mod tests {
 
     /// Adapter handle, or `None` on headless hosts without a GPU. The
     /// skip reason is logged so a silent no-op pass is visible in the
-    /// test output instead of looking like a green GPU run.
+    /// test output instead of looking like a green GPU run. When
+    /// `ORNIS_REQUIRE_GPU` is set (see [`crate::gpu_required`]) a
+    /// missing adapter panics instead of skipping.
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         pollster::block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -528,6 +530,10 @@ mod tests {
             {
                 Ok(adapter) => adapter,
                 Err(err) => {
+                    assert!(
+                        !crate::gpu_required(),
+                        "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
+                    );
                     eprintln!("SKIPPED (gpu_compaction): no wgpu adapter: {err}");
                     return None;
                 }
@@ -538,6 +544,10 @@ mod tests {
             {
                 Ok(pair) => Some(pair),
                 Err(err) => {
+                    assert!(
+                        !crate::gpu_required(),
+                        "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
+                    );
                     eprintln!("SKIPPED (gpu_compaction): no wgpu device: {err}");
                     None
                 }

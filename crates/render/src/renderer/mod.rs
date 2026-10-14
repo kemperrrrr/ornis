@@ -330,6 +330,13 @@ pub struct Renderer3D {
     gbuffer_pipeline: wgpu::RenderPipeline,
     gbuffer_bind_group_layout: wgpu::BindGroupLayout,
     gbuffer_bind_group: std::sync::RwLock<wgpu::BindGroup>,
+    /// Cached gbuffer bind group binding the culler's `visible_buffer`
+    /// as `per_objects` (built by `gbuffer_bind_group_with`): the
+    /// culler buffers never move without recreating the culler, so one
+    /// cached group serves every indirect draw instead of allocating per
+    /// frame. Cleared when the culler is (re)created or the material
+    /// table grows (see `rebind_storage_buffers`).
+    indirect_bind_group: std::sync::RwLock<Option<wgpu::BindGroup>>,
     /// Skinned g-buffer pipeline: [`wgsl_vertex_source_skinned`] vertex
     /// stage (palette blend) with the classic fragment stage and the same
     /// five MRT targets. Draws interleaved [`SkinnedVertex`] buffers; bind

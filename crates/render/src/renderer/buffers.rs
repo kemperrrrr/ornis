@@ -136,10 +136,13 @@ impl Renderer3D {
 
     /// Rebind every pass that reads the grown storage buffers: each pass
     /// holds its own bind group over the same layout, so all three are
-    /// rebuilt together whenever either buffer moves.
+    /// rebuilt together whenever either buffer moves. The cached
+    /// indirect bind group (bound over the material table) is dropped
+    /// too and rebuilt on the next indirect draw.
     fn rebind_storage_buffers(&self, device: &wgpu::Device) {
         let per_object = read_lock(&self.per_object_buffer);
         let material = read_lock(&self.material_buffer);
+        *write_lock(&self.indirect_bind_group) = None;
         *write_lock(&self.gbuffer_bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gbuffer bind group (grown)"),
@@ -188,8 +191,9 @@ impl Renderer3D {
     /// Bind group of the gbuffer layout with `camera` and `per_objects`
     /// supplied by the caller: the compacted culler buffer binds as
     /// `per_objects` for indirect batches (the shared material table is
-    /// unchanged). Built per draw — the culler buffers never grow, unlike
-    /// the staged per-object store.
+    /// unchanged). Built on cache miss only — the result is cached in
+    /// `indirect_bind_group` and invalidated when the culler is
+    /// (re)created or the material table grows.
     pub(crate) fn gbuffer_bind_group_with(
         &self,
         device: &wgpu::Device,

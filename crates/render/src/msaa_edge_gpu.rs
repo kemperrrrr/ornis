@@ -70,14 +70,32 @@ fn open_adapter() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display: None,
         });
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
-            .ok()?;
-        let (device, queue) = adapter
+        {
+            Ok(adapter) => adapter,
+            Err(err) => {
+                assert!(
+                    !crate::gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
+                );
+                return None;
+            }
+        };
+        let (device, queue) = match adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
-            .ok()?;
+        {
+            Ok(pair) => pair,
+            Err(err) => {
+                assert!(
+                    !crate::gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
+                );
+                return None;
+            }
+        };
         Some((adapter, device, queue))
     })
 }

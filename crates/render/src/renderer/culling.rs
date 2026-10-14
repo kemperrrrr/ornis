@@ -48,8 +48,12 @@ impl Renderer3D {
         // `grown` is at least one by construction, so `try_new` cannot
         // fail; on the impossible error the old culler (if any) stays
         // and the frame falls back to direct in `prepare_indirect_batch`.
+        // A new culler owns new buffers, so the cached indirect bind
+        // group (bound over the old `visible_buffer`) is dropped and
+        // rebuilt on the next indirect draw.
         if let Ok(culler) = Culler::try_new(device, grown) {
             *write_lock(&self.culler) = Some(culler);
+            *write_lock(&self.indirect_bind_group) = None;
         }
     }
 
