@@ -76,6 +76,21 @@ pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     })
 }
 
+/// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a
+/// submitted encoder (the production frame records the dispatch into
+/// its own encoder instead).
+pub(super) fn dispatch_culler(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    culler: &crate::gpu_culling::Culler,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("test culler dispatch"),
+    });
+    culler.record_compact(&mut encoder);
+    queue.submit([encoder.finish()]);
+}
+
 /// Offscreen `Rgba8UnormSrgb` render target shared by the headless
 /// frame gates (single-sample, readable back).
 pub(super) fn offscreen_target(

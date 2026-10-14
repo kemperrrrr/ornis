@@ -95,17 +95,7 @@ impl Renderer3D {
         let motion_validity = read_lock(&self.previous_instance_motion_valid_frame);
         let ready = read_lock(&self.culler).as_ref().is_some_and(|culler| {
             culler
-                .compact_with_previous(
-                    device,
-                    queue,
-                    &view_proj,
-                    index_count,
-                    &instances,
-                    PreviousInstanceData {
-                        models: &previous_models,
-                        motion_validity: &motion_validity,
-                    },
-                )
+                .compact(queue, &view_proj, index_count, &instances)
                 .is_ok()
         });
         self.indirect_ready
@@ -126,5 +116,71 @@ impl Renderer3D {
     pub(crate) fn indirect_batch_ready(&self) -> bool {
         self.indirect_ready
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_util;
+    use super::super::{BatchDraw, select_shared_batch};
+    use super::*;
+    use crate::gpu_culling::CullerError;
+
+    /// Minimal surface config for renderer construction in these tests
+    /// (no frame is ever presented through it).
+    fn test_surface_config() -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            width: 64,
+            height: 64,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        }
+    }
+
+    /// Over-capacity frames fall back to the direct path:
+    /// [`Culler::compact`](crate::gpu_culling::Culler::compact) reports
+    /// [`CullerError::CapacityExceeded`], and the frame selection maps
+    /// every non-armed combination (opt-out, missed prepare, exhausted
+    /// capacity) to `draw_indexed` — never to a partial indirect draw.
+    #[test]
+    fn capacity_exceeded_falls_back_to_direct() {
+        let Some((device, queue)) = test_util::try_device() else {
+            eprintln!("SKIPPED (capacity_exceeded_falls_back_to_direct): no wgpu adapter");
+            return;
+        };
+        let culler = Culler::try_new(&device, 2).expect("non-zero capacity");
+        let instances = (0..3)
+            .map(|_| InstanceData {
+                model_matrix: glam::Mat4::IDENTITY,
+                normal_matrix: glam::Mat4::IDENTITY,
+                material_index: crate::renderer::MaterialIdx::from_raw(0),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            culler.compact(&queue, &glam::Mat4::IDENTITY, 42, &instances),
+            Err(CullerError::CapacityExceeded {
+                count: 3,
+                capacity: 2,
+            })
+        );
+        assert!(matches!(
+            select_shared_batch(true, None, 3),
+            BatchDraw::Direct { .. }
+        ));
+        assert!(matches!(
+            select_shared_batch(false, Some(&culler), 3),
+            BatchDraw::Direct { .. }
+        ));
+        let renderer = Renderer3D::new(&device, &test_surface_config(), 1);
+        renderer.prepare_indirect_batch(&device, &queue, 42);
+        assert!(
+            !renderer.indirect_batch_ready(),
+            "an unarmed frame must stay on the direct fallback"
+        );
     }
 }

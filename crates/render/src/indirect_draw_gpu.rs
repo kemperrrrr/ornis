@@ -10,7 +10,7 @@ use super::{
     BatchDraw, GbufferTargets, InstanceData, MaterialIdx, Renderer3D, select_shared_batch,
 };
 use crate::camera::Frustum;
-use crate::gpu_culling::{Culler, CullerError, INDIRECT_ARGS_WORD_COUNT};
+use crate::gpu_culling::{Culler, INDIRECT_ARGS_WORD_COUNT};
 use crate::mesh::{Mesh, create_sphere};
 use ornis_core::System;
 
@@ -135,7 +135,7 @@ fn render_frame(
     if indirect {
         let culler = Culler::try_new(device, staged).expect("scene is non-empty");
         culler
-            .compact(device, queue, &view_proj, mesh.num_indices, &instances)
+            .compact(queue, &view_proj, mesh.num_indices, &instances)
             .expect("scene fits the capacity");
         renderer.render_gbuffer_indirect(device, &mut encoder, &g, &mesh, &culler);
         renderer.render_shadows(device, &mut encoder, &mesh, staged);
@@ -241,8 +241,11 @@ fn indirect_args_match_compacted_batch() {
     let (mesh, instances, view_proj) = setup_scene(&device, &queue, &renderer, true, true);
     let culler = Culler::try_new(&device, instances.len() as u32).expect("scene is non-empty");
     culler
-        .compact(&device, &queue, &view_proj, mesh.num_indices, &instances)
+        .compact(&queue, &view_proj, mesh.num_indices, &instances)
         .expect("scene fits the capacity");
+    // The frame records the dispatch into its own encoder; dispatch
+    // explicitly here before the readback.
+    test_util::dispatch_culler(&device, &queue, &culler);
     assert_eq!(
         readback_args(&device, &queue, &culler.args_buffer),
         [mesh.num_indices, 2, 0, 0, 0],
@@ -448,11 +451,17 @@ fn submit_stages_spheres_only_for_indirect() {
         crate::camera::Frustum::from_view_proj(&view_proj).sphere_visible(center, radius),
         "custom center must sit inside the camera frustum (center={center:?})"
     );
-    // The prepared args count exactly the two spheres.
+    // The prepared args count exactly the two spheres: stage via the
+    // production prepare path, dispatch explicitly (the frame records
+    // the dispatch into its own encoder instead), then read back.
     let sphere_mesh = create_sphere(&device, 1.0, 24, 16);
     fs.renderer
         .prepare_indirect_batch(&device, &queue, sphere_mesh.num_indices);
     assert!(fs.renderer.indirect_batch_ready());
+    {
+        let culler = super::read_lock(&fs.renderer.culler);
+        test_util::dispatch_culler(&device, &queue, culler.as_ref().expect("culler built"));
+    }
     let culler = super::read_lock(&fs.renderer.culler);
     let args = readback_args(
         &device,
@@ -467,48 +476,6 @@ fn submit_stages_spheres_only_for_indirect() {
 /// submits the compacted batch — pixel-identical to both the direct
 /// fallback and the explicit indirect entry point. The selection seam
 /// itself is pinned first: only armed-with-culler routes indirectly.
-///
-/// Over-capacity frames fall back to the direct path: [`Culler::compact`]
-/// reports [`CullerError::CapacityExceeded`], and the frame selection
-/// maps every non-armed combination (opt-out, missed prepare, exhausted
-/// capacity) to `draw_indexed` — never to a partial indirect draw.
-#[test]
-fn capacity_exceeded_falls_back_to_direct() {
-    let Some((device, queue)) = test_util::try_device() else {
-        eprintln!("SKIPPED (capacity_exceeded_falls_back_to_direct): no wgpu adapter");
-        return;
-    };
-    let culler = Culler::try_new(&device, 2).expect("non-zero capacity");
-    let instances = (0..3)
-        .map(|_| InstanceData {
-            model_matrix: glam::Mat4::IDENTITY,
-            normal_matrix: glam::Mat4::IDENTITY,
-            material_index: MaterialIdx::from_raw(0),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        culler.compact(&device, &queue, &glam::Mat4::IDENTITY, 42, &instances),
-        Err(CullerError::CapacityExceeded {
-            count: 3,
-            capacity: 2,
-        })
-    );
-    assert!(matches!(
-        select_shared_batch(true, None, 3),
-        BatchDraw::Direct { .. }
-    ));
-    assert!(matches!(
-        select_shared_batch(false, Some(&culler), 3),
-        BatchDraw::Direct { .. }
-    ));
-    let renderer = Renderer3D::new(&device, &surface_config(), 1);
-    renderer.prepare_indirect_batch(&device, &queue, 42);
-    assert!(
-        !renderer.indirect_batch_ready(),
-        "an unarmed frame must stay on the direct fallback"
-    );
-}
-
 #[test]
 fn armed_with_custom_matches_direct_and_indirect() {
     let Some((device, queue)) = test_util::try_device() else {
