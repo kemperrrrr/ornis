@@ -42,5 +42,9 @@ harness = false
 name = "recording_bench"
 harness = false
 
+[[bench]]
+name = "culling_bench"
+harness = false
+
 [lints]
 workspace = true

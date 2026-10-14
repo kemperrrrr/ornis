@@ -28,7 +28,9 @@
 //! [`RenderBackendConfig::indirect_draw`](crate::render_backend::RenderBackendConfig::indirect_draw)
 //! opt-in flag, `Renderer3D::prepare_indirect_batch`
 //! (compact-or-direct-fallback) and the gbuffer node routing; shadows
-//! stay direct. Remaining: the GPU benchmark column.
+//! stay direct. Slice 3: the GPU benchmark column
+//! (`benches/culling_bench.rs` — CPU vs GPU culling at 10k/100k with the
+//! camera seeing a small part; run manually, the table goes into the PR).
 //!
 //! Order contract: the CPU compaction preserves submission order
 //! (strictly increasing indices — deterministic, the §24.1 reference).
