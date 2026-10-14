@@ -13,7 +13,7 @@ use crate::anim::{assemble_clips, node_to_joint_map};
 use crate::base64;
 use crate::geom::{self, Mat4};
 use crate::model::{Model, ModelNode, ModelPrimitive, NodeIdx, transform_from_decomposed};
-use crate::textures::resolve_images;
+use crate::texture_sources::resolve_textures;
 use crate::{ImportError, ImportStats, LoadedImage, LoadedMaterial, LoadedMesh, LoadedSkin};
 
 /// Indices per triangle (flat soup alignment).
@@ -39,11 +39,11 @@ const NEAR_ZERO: f32 = 1e-6;
 /// [`ImportError::Parse`] on malformed bytes, [`ImportError::NoScene`] on a
 /// sceneless document, buffer errors as documented per variant.
 pub fn load_slice(bytes: &[u8]) -> Result<Model, ImportError> {
-    let gltf = crate::basis_extension::parse(bytes)?;
-    let buffers = resolve_buffers(&gltf, None)?;
-    let images = resolve_images(&gltf, &buffers, None)?;
-    crate::basis_extension::validate_images(&gltf, &images)?;
-    import_gltf(&gltf, &buffers, &images)
+    let parsed = crate::basis_extension::parse(bytes)?;
+    let gltf = &parsed.gltf;
+    let buffers = resolve_buffers(gltf, None)?;
+    let images = resolve_textures(&parsed, &buffers, None)?;
+    import_gltf(gltf, &buffers, &images)
 }
 
 /// Loads a `.glb` or `.gltf` file; sibling buffer URIs resolve against the
@@ -57,12 +57,12 @@ pub fn load_slice(bytes: &[u8]) -> Result<Model, ImportError> {
 /// Same as [`load_slice`], plus [`ImportError::Io`] for unreadable files.
 pub fn load_path(path: &Path) -> Result<Model, ImportError> {
     let bytes = std::fs::read(path)?;
-    let gltf = crate::basis_extension::parse(&bytes)?;
+    let parsed = crate::basis_extension::parse(&bytes)?;
+    let gltf = &parsed.gltf;
     let parent = path.parent();
-    let buffers = resolve_buffers(&gltf, parent)?;
-    let images = resolve_images(&gltf, &buffers, parent)?;
-    crate::basis_extension::validate_images(&gltf, &images)?;
-    import_gltf(&gltf, &buffers, &images)
+    let buffers = resolve_buffers(gltf, parent)?;
+    let images = resolve_textures(&parsed, &buffers, parent)?;
+    import_gltf(gltf, &buffers, &images)
 }
 
 /// Resolves every document buffer to owned bytes.
@@ -684,26 +684,37 @@ fn read_material(primitive: &Primitive<'_>, images: &[LoadedImage]) -> LoadedMat
         roughness: pbr.roughness_factor(),
         emission: material.emissive_factor(),
         textures: crate::LoadedTextures {
-            base_color_texture: texture_image(images, pbr.base_color_texture()),
-            metallic_roughness_texture: texture_image(images, pbr.metallic_roughness_texture()),
-            emissive_texture: texture_image(images, material.emissive_texture()),
-            normal_texture: material
-                .normal_texture()
-                .and_then(|t| images.get(t.texture().source().index()).cloned()),
+            base_color_texture: texture_image(
+                images,
+                pbr.base_color_texture().map(|info| info.texture()),
+            ),
+            metallic_roughness_texture: texture_image(
+                images,
+                pbr.metallic_roughness_texture().map(|info| info.texture()),
+            ),
+            emissive_texture: texture_image(
+                images,
+                material.emissive_texture().map(|info| info.texture()),
+            ),
+            normal_texture: texture_image(
+                images,
+                material.normal_texture().map(|info| info.texture()),
+            ),
         },
     }
 }
 
-/// Clones the resolved pixels for one texture slot (`None` = untextured).
+/// Clones the selected image for one texture slot (`None` = untextured).
+/// The resolved table is texture-indexed, not image-indexed: optional Basis
+/// selection may choose different sources for textures sharing a KTX2 image.
 ///
 /// Image indices come from `Gltf::from_slice` validation, so `.get` only
 /// misses on hand-built nonsense — which maps to `None`, never a panic.
 fn texture_image(
     images: &[LoadedImage],
-    texture: Option<gltf::texture::Info<'_>>,
+    texture: Option<gltf::Texture<'_>>,
 ) -> Option<LoadedImage> {
-    let image = texture?.texture().source();
-    images.get(image.index()).cloned()
+    images.get(texture?.index()).cloned()
 }
 
 /// Casts index iterators (`u8`/`u16`/`u32`) to `u32`.

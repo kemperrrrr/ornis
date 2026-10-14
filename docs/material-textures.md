@@ -35,18 +35,33 @@ The existing `CpuImage` / `upload_texture` / `upload_cached` API remains.
   creating their own device can omit them and receive RGBA8 fallback.
 
 KTX2 material support is deliberately 2D, non-array, single-face, LDR, at
-most 8192 pixels per edge. Unsupported shapes/codecs and native-block
+most 8192 pixels per edge. `level_count == 0` is rejected rather than
+interpreted as a request to generate levels: authored KTX2 levels are preserved.
+Unsupported shapes/codecs and native-block
 supercompression return typed errors. Basis decompression lengths are
 bounded before transcoding. HDR/IBL textures retain their separate path.
 
 ## glTF integration
 
 `KHR_texture_basisu` works with required or optional extensions, with or
-without a core fallback `source`. The extension source takes precedence.
+without a core fallback `source`. A valid extension source takes precedence.
+For optional Basis, an unsupported/corrupt container or a missing/unavailable
+image source selects the core PNG/JPEG when one exists. Required Basis or
+optional Basis without a core source still returns the error. Unsafe paths
+never trigger fallback. Only selected sources are decoded: a missing or broken
+unused fallback does not reject an otherwise valid material.
 It is validated and promoted before **normal gltf-rs document validation**;
 unknown required extensions and invalid core indices still fail. KTX2 image
 bytes may come from a buffer view, data URI or a confined external path.
-Images stay encoded through import and deduplicate before transcoding.
+KTX2 stays encoded through import and deduplicates before transcoding. Source
+selection validates containers; corrupted codec bitstreams discovered only by
+deferred GPU transcoding still return an upload error.
+
+`KHR_texture_basisu` must be listed in `extensionsUsed`; explicit MIME types
+must agree with the image signature, and KTX2 is rejected in a core-only
+texture. PNG/JPEG imports retain dimensions above 8192 (CPU asset users may
+need them); the render upload API, not the importer, enforces GPU size limits.
+The four imported material slots use the same texture-indexed source resolver.
 
 The normal image is retained and can be uploaded under `TextureRole::Normal`.
 This work does not add tangent-space normal shading to the renderer, change
@@ -69,7 +84,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 perspective tilted checker with an independent analytic golden and checks
 that the base-only control aliases. It samples all six authored levels of
 real ETC1S/UASTC fixtures on a device with no compression features and, if
-available, on a compression-enabled device. Run the same test on a Mac for
+available, on a compression-enabled device. Additional GPU gates force native
+BC7/ASTC/ETC2 to RGBA8 without device features, and verify Basis/native 30×30
+images on a compression-enabled device. A CPU BC1-alpha regression pins the
+RGBA8 transcode fallback; KTX2 proptests cover arbitrary bytes and structured
+mutations. Run the same test on a Mac for
 Metal/ASTC/BC verification; a software-adapter result is not a Mac result.
 
 `GpuTexture::payload_bytes` sums the exact uploaded mip payloads. CPU tests

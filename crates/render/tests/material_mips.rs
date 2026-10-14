@@ -127,12 +127,7 @@ fn sample(
 
 #[test]
 fn tilted_checker_matches_linear_light_golden_not_moire() {
-    let Some((_, device, queue)) = pollster::block_on(common::request_device()) else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "CI requires a GPU adapter (lavapipe)"
-        );
-        eprintln!("SKIP: no wgpu adapter");
+    let Some((_, device, queue)) = device() else {
         return;
     };
     let pixels = (0..256 * 256)
@@ -179,9 +174,7 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
 
 #[test]
 fn ktx2_authored_mips_sample_on_fallback_and_native_devices() {
-    let Some((adapter, device, queue)) = pollster::block_on(common::request_device()) else {
-        assert!(std::env::var_os("CI").is_none(), "CI requires lavapipe");
-        eprintln!("SKIP: no wgpu adapter");
+    let Some((adapter, device, queue)) = device() else {
         return;
     };
     for bytes in [
@@ -216,7 +209,8 @@ fn verify_ktx_mips(
     expected: TextureEncoding,
 ) {
     let uploaded = upload_image(device, queue, image, TextureRole::BaseColor).unwrap();
-    assert_eq!(uploaded.texture.mip_level_count(), 6);
+    let (edge, height) = image.dimensions();
+    assert_eq!(edge, height, "square fixtures");
     assert_eq!(
         uploaded.texture.format(),
         ornis_render::texture_upload::gpu_texture_format(expected, TextureRole::BaseColor)
@@ -224,13 +218,17 @@ fn verify_ktx_mips(
     let reference = image
         .prepare(TextureRole::BaseColor, TextureEncoding::Rgba8)
         .unwrap();
+    assert_eq!(
+        uploaded.texture.mip_level_count(),
+        reference.levels().len() as u32
+    );
     for (mip, rgba) in reference.levels().iter().enumerate() {
         let pixels = sample(
             device,
             queue,
             &uploaded,
             &uploaded.view,
-            ((40 >> mip).max(1), Some(mip as u32)),
+            ((edge >> mip).max(1), Some(mip as u32)),
         );
         let error: u64 = pixels
             .iter()
@@ -262,4 +260,71 @@ fn verify_ktx_mips(
         .unwrap();
     assert_eq!(a, b);
     assert_eq!(cache.len(), 1);
+}
+
+fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    let result = pollster::block_on(common::request_device());
+    if result.is_none() {
+        assert!(std::env::var_os("CI").is_none(), "CI requires lavapipe");
+        eprintln!("SKIP: no wgpu adapter");
+    }
+    result
+}
+
+#[test]
+fn native_ktx_mips_fall_back_without_compression_features() {
+    let Some((_, device, queue)) = device() else {
+        return;
+    };
+    assert!(texture_compression_features(device.features()).is_empty());
+    for bytes in [
+        include_bytes!("../../texture/tests/data/bc7-40.ktx2").as_slice(),
+        include_bytes!("../../texture/tests/data/astc-40.ktx2").as_slice(),
+        include_bytes!("../../texture/tests/data/etc2-40.ktx2").as_slice(),
+    ] {
+        let ktx = Ktx2Image::from_bytes(bytes).unwrap();
+        assert_ne!(ktx.encoding(), Some(TextureEncoding::Rgba8));
+        verify_ktx_mips(
+            &device,
+            &queue,
+            &TextureImage::Ktx2(ktx),
+            TextureEncoding::Rgba8,
+        );
+    }
+}
+
+#[test]
+fn non_block_aligned_basis_and_native_mips_fall_back_on_compression_device() {
+    let Some((adapter, _, _)) = device() else {
+        return;
+    };
+    let features = texture_compression_features(adapter.features());
+    if features.is_empty() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "lavapipe must exercise the compression-enabled path"
+        );
+        eprintln!("SKIP: no compression features");
+        return;
+    }
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: features,
+        ..Default::default()
+    }))
+    .unwrap();
+    for bytes in [
+        include_bytes!("../../texture/tests/data/uastc-30.ktx2").as_slice(),
+        include_bytes!("../../texture/tests/data/bc7-30.ktx2").as_slice(),
+        include_bytes!("../../texture/tests/data/astc-30.ktx2").as_slice(),
+        include_bytes!("../../texture/tests/data/etc2-30.ktx2").as_slice(),
+    ] {
+        let ktx = Ktx2Image::from_bytes(bytes).unwrap();
+        assert_eq!(ktx.dimensions(), (30, 30));
+        verify_ktx_mips(
+            &device,
+            &queue,
+            &TextureImage::Ktx2(ktx),
+            TextureEncoding::Rgba8,
+        );
+    }
 }

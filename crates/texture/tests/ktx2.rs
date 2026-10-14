@@ -179,3 +179,12 @@ fn zstd_preserves_pixels_and_rejects_a_false_decoded_length() {
     let result = Ktx2Image::from_bytes(bad).and_then(|image| image.transcode(E::Rgba8));
     assert!(result.is_err());
 }
+
+#[test]
+fn basis_with_alpha_refuses_bc1_and_preserves_rgba_levels() {
+    let image = Ktx2Image::from_bytes(include_bytes!("data/uastc-alpha.ktx2").as_slice()).unwrap();
+    let fallback = image.transcode(E::Bc1).unwrap();
+    let rgba = image.transcode(E::Rgba8).unwrap();
+    assert_eq!(fallback.encoding(), E::Rgba8);
+    assert_eq!(fallback.levels(), rgba.levels());
+}

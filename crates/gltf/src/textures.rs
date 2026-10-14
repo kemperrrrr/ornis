@@ -7,35 +7,48 @@
 
 use std::path::Path;
 
-use gltf::Gltf;
 use image::GenericImageView as _;
 
 use crate::base64;
 use crate::import::{is_data_uri, resolve_local_uri};
 use crate::{ImportError, LoadedImage};
 
-/// Resolves every document image to RGBA8 pixels, in index order.
-///
-/// Material slots clone their image's pixels (see `texture_image` in
-/// `import.rs`); unreferenced images decode too — one straight pass, no
-/// use-tracking. `base_dir` gates external URIs exactly like buffers: `None`
-/// (i.e. [`load_slice`](crate::load_slice)) rejects them with
-/// [`ImportError::ExternalBuffer`]; `Some` (i.e.
-/// [`load_path`](crate::load_path)) joins relative URIs under it.
-pub(crate) fn resolve_images(
-    gltf: &Gltf,
+/// Decodes only the requested source; unused fallbacks are never read.
+pub(crate) fn resolve_image(
+    image: &gltf::image::Image<'_>,
     buffers: &[Vec<u8>],
     base_dir: Option<&Path>,
-) -> Result<Vec<LoadedImage>, ImportError> {
-    gltf.document
-        .images()
-        .map(|image| {
-            let context = format!("image {}", image.index());
-            let bytes = image_bytes(&image, buffers, base_dir, &context)?;
-            decode_image(&bytes, &context)
-        })
-        .collect()
+) -> Result<LoadedImage, ImportError> {
+    let context = format!("image {}", image.index());
+    let bytes = image_bytes(image, buffers, base_dir, &context)?;
+    let mime = match image.source() {
+        gltf::image::Source::View { mime_type, .. } => Some(mime_type),
+        gltf::image::Source::Uri { uri, mime_type } => mime_type.or_else(|| data_uri_mime(uri)),
+    };
+    check_signature(&bytes, mime, &context)?;
+    decode_image(&bytes, &context)
 }
+
+/// Explicit MIME declarations must agree with the actual encoded format.
+fn check_signature(bytes: &[u8], mime: Option<&str>, context: &str) -> Result<(), ImportError> {
+    let Some(mime) = mime else {
+        return Ok(());
+    };
+    let matches = match mime {
+        "image/ktx2" => bytes.starts_with(KTX2_MAGIC),
+        "image/png" => image::guess_format(bytes).ok() == Some(image::ImageFormat::Png),
+        "image/jpeg" => image::guess_format(bytes).ok() == Some(image::ImageFormat::Jpeg),
+        _ => false,
+    };
+    if !matches {
+        return Err(ImportError::InvalidImage {
+            context: format!("{context}: MIME does not match image signature"),
+        });
+    }
+    Ok(())
+}
+
+const KTX2_MAGIC: &[u8] = b"\xABKTX 20\xBB\r\n\x1A\n";
 
 /// Raw (still encoded) bytes of one image plus mime gating.
 ///
@@ -134,7 +147,7 @@ fn decode_image(bytes: &[u8], context: &str) -> Result<LoadedImage, ImportError>
             context: format!("{context}: empty"),
         });
     }
-    if bytes.starts_with(b"\xABKTX 20\xBB\r\n\x1A\n") {
+    if bytes.starts_with(KTX2_MAGIC) {
         return ornis_texture::Ktx2Image::from_bytes(bytes)
             .map(LoadedImage::Ktx2)
             .map_err(|error| ImportError::InvalidImage {
@@ -145,10 +158,13 @@ fn decode_image(bytes: &[u8], context: &str) -> Result<LoadedImage, ImportError>
         context: format!("{context}: undecodable ({} bytes)", bytes.len()),
     })?;
     let (width, height) = decoded.dimensions();
-    let image = ornis_texture::CpuImage::from_rgba8(width, height, decoded.to_rgba8().into_raw())
-        .map_err(|error| ImportError::InvalidImage {
-        context: format!("{context}: {error}"),
-    })?;
+    // Import is GPU-independent. The renderer validates the 8192/device
+    // limit at upload, preserving large PNG/JPEG images for CPU asset use.
+    let image = ornis_texture::CpuImage {
+        width,
+        height,
+        pixels: decoded.to_rgba8().into_raw(),
+    };
     Ok(LoadedImage::Rgba8(image))
 }
 
@@ -472,5 +488,33 @@ mod tests {
         assert!(material.texture(TextureRole::BaseColor).is_none());
         assert!(material.texture(TextureRole::MetallicRoughness).is_none());
         assert!(material.texture(TextureRole::Emissive).is_none());
+    }
+    #[test]
+    fn large_png_and_jpeg_import_before_gpu_dimension_validation() {
+        let width = ornis_texture::MAX_TEXTURE_EDGE + 1;
+        for encoding in [FixtureEncoding::Png, FixtureEncoding::Jpeg] {
+            let mut fixture = triangle();
+            fixture.images.push(fixture_image(
+                width,
+                1,
+                [17, 83, 191, 255].repeat(width as usize),
+                encoding,
+                FixtureImageStorage::BufferView,
+            ));
+            fixture.base_color_texture = Some(0);
+            let model = load_slice(&build_glb(&fixture)).unwrap();
+            let image = model.primitives[0]
+                .material
+                .texture(TextureRole::BaseColor)
+                .unwrap()
+                .rgba8()
+                .unwrap();
+            assert_eq!((image.width, image.height), (width, 1));
+            assert_eq!(image.pixels.len(), width as usize * 4);
+            assert!(matches!(
+                image.validate(),
+                Err(ornis_texture::TextureUploadError::ImageTooLarge { .. })
+            ));
+        }
     }
 }

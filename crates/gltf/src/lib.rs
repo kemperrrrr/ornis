@@ -83,6 +83,7 @@ mod basis_extension;
 mod geom;
 mod import;
 mod model;
+mod texture_sources;
 mod textures;
 
 #[cfg(test)]
