@@ -24,7 +24,10 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
-use ornis_render::{Culler, InstanceData, MaterialIdx, compact_visible_indices};
+use ornis_render::{
+    Culler, INDIRECT_ARGS_WORD_BYTES, INDIRECT_ARGS_WORD_COUNT, INSTANCE_COUNT_WORD, InstanceData,
+    MaterialIdx, compact_visible_indices,
+};
 
 /// Sphere mesh index count placeholder: the cull pass only compacts, the
 /// count is carried through into the indirect args untouched.
@@ -127,16 +130,17 @@ fn read_instance_count(
     queue: &wgpu::Queue,
     args: &wgpu::Buffer,
 ) -> Option<u32> {
+    let args_bytes = INDIRECT_ARGS_WORD_COUNT as u64 * INDIRECT_ARGS_WORD_BYTES;
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("culling bench args readback"),
-        size: 20,
+        size: args_bytes,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("culling bench args copy"),
     });
-    encoder.copy_buffer_to_buffer(args, 0, &staging, 0, 20);
+    encoder.copy_buffer_to_buffer(args, 0, &staging, 0, args_bytes);
     queue.submit([encoder.finish()]);
     let slice = staging.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
@@ -146,10 +150,13 @@ fn read_instance_count(
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().ok()?.ok()?;
     let view = slice.get_mapped_range().ok()?;
-    let words: [u32; 5] = bytemuck::cast_slice(&view)[..5].try_into().ok()?;
+    let words: [u32; INDIRECT_ARGS_WORD_COUNT] = bytemuck::cast_slice(&view)
+        [..INDIRECT_ARGS_WORD_COUNT]
+        .try_into()
+        .ok()?;
     drop(view);
     staging.unmap();
-    Some(words[1])
+    Some(words[INSTANCE_COUNT_WORD])
 }
 
 // qual:allow(test_quality, untested) reason: "bench GPU runner runs only under the criterion harness, never under libtest"
@@ -212,10 +219,12 @@ fn run_gpu_bench(
     }
 }
 
+// qual:allow(iosp) reason: "criterion entry pins its small-part premise with one assert by RAT-43 design; otherwise dispatch-only"
 // qual:api — criterion entry; called only by the generated harness, invisible to the call graph.
 /// CPU vs GPU culling at 10k/100k, one [`Criterion`] group (`cpu_*` vs
-/// `gpu_*`). The entry is branch-free on purpose (the harness shape the
-/// IOSP gate accepts): the adapter-absent note lives in
+/// `gpu_*`). The entry is dispatch-only apart from the single
+/// small-part premise assert below (the harness shape the IOSP gate
+/// otherwise accepts): the adapter-absent note lives in
 /// [`run_gpu_bench`], so a headless machine degrades to the CPU column
 /// instead of failing the bench.
 fn bench_culling(c: &mut Criterion) {
