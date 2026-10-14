@@ -1394,9 +1394,9 @@ fn full_stages(stages: &mut StageList<'_>) {
 }
 
 /// Coverage ratchet gate (same idea as rustqual): the workspace line
-/// rate in `coverage-baseline.json` is the floor — equal or better is PASS,
-/// only a true regression FAILs. On improvement the baseline file is updated
-/// automatically (commit it). First run without a baseline saves the current
+/// rate in `coverage-baseline.json` is the floor — within ±0.1 pp is PASS,
+/// only a deviation beyond the band matters (below FAILs, above rewrites
+/// the file — commit it). First run without a baseline saves the current
 /// rate and PASSes. Without cargo-llvm-cov the stage SKIPs (same as before).
 /// The JSON summary stays at `target/llvm-cov/coverage-summary.json`, the
 /// HTML report at `target/llvm-cov/html` — per-crate detail lives there and
@@ -1460,6 +1460,12 @@ fn coverage_outcome(root: &Path, summary_path: &Path, tested: bool) -> (Status, 
         );
     };
     let (rate, covered, count) = coverage_rate(&text);
+    if count == 0 {
+        return (
+            Status::Fail,
+            "coverage summary reports zero total lines (collection broke)".to_string(),
+        );
+    }
     let _ = Command::new("cargo")
         .args([
             "llvm-cov",
@@ -1484,8 +1490,12 @@ const COVERAGE_BASELINE: &str = "coverage-baseline.json";
 const COVERAGE_SUMMARY: &str = "target/llvm-cov/coverage-summary.json";
 /// Human-readable report rendered from the same data (no test re-run).
 const COVERAGE_HTML: &str = "target/llvm-cov/html";
-/// Float epsilon for the ratchet comparison (equal = PASS, like rustqual).
-const COVERAGE_EPS: f64 = 1e-9;
+/// Tolerance band for the ratchet comparison, in fractions (0.001 = 0.1 pp).
+/// Coverage is not fully deterministic across machines: GPU tests depend on
+/// the adapter and `cfg(target_os)` changes the instrumented line count, so
+/// a sub-0.1pp wobble around the floor is noise, not a regression. Only a
+/// deviation beyond the band FAILs (below) or rewrites the file (above).
+const COVERAGE_EPS: f64 = 1e-3;
 /// Factor for human-readable percent printing.
 const COVERAGE_PERCENT: f64 = 100.0;
 
@@ -1538,9 +1548,17 @@ fn save_coverage_floor(path: &Path, rate: f64, covered: u64, count: u64) -> std:
     )
 }
 
-/// Ratchet verdict against the stored floor: regression FAILs, first run
-/// and growth rewrite the file (commit it), equality PASSes silently.
+/// Ratchet verdict against the stored floor: a regression beyond the
+/// tolerance band FAILs, first run and growth beyond the band rewrite the
+/// file (commit it), anything inside the band PASSes silently. A zero-line
+/// summary is a collection failure, never a floor (it must not save 0.0).
 fn coverage_verdict(baseline: &Path, rate: f64, covered: u64, count: u64) -> (Status, String) {
+    if count == 0 {
+        return (
+            Status::Fail,
+            "coverage summary reports zero total lines (collection broke)".to_string(),
+        );
+    }
     let prior = load_coverage_floor(baseline);
     if prior.is_some_and(|b| rate + COVERAGE_EPS < b) {
         (
@@ -1797,6 +1815,10 @@ fn quality_usage(code: i32) -> ! {
          cargo xtask quality --ci --only fmt,audit  (CI sharding: run a subset)\n  \
          cargo xtask quality --ci --allow-skip wasm-check  (excuse a SKIP in strict CI mode)\n  \
          cargo xtask quality --list-stages  (print canonical stage ids)\n\
+          \n\
+          In strict mode (--ci or GITHUB_ACTIONS) a SKIP fails the gate unless\n  \
+          excused via --allow-skip. Locally skips only print a trailing warning.\n\
+          \n\
           External tools (audit, deny, outdated, upgrade-check, llvm-cov, rustqual, hack, machete, typos) are optional:\n  \
           missing → SKIP with install hint. rustqual is MIT.\n  \
           rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
@@ -1806,7 +1828,7 @@ fn quality_usage(code: i32) -> ! {
           must not exceed the base branch version (origin/master locally) —\n  \
           growth needs the `baseline-bump-approved` PR label.\n  \
           Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
-          (equal = PASS, only a true regression FAILs; growth rewrites the file — commit it).\n  \
+          (within ±0.1 pp = PASS; deeper regression FAILs, growth rewrites the file — commit it).\n  \
           Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
           a full instrumented workspace run takes tens of minutes.\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
@@ -2861,13 +2883,16 @@ mod coverage_tests {
         assert_eq!(coverage_rate("{}"), (0.0, 0, 0));
     }
 
-    /// Scratch baseline: first save, silent equality, lift, regression FAIL.
+    /// Scratch baseline: first save, silent in-band equality, lift, regression FAIL.
     #[test]
     fn ratchets_against_scratch_floor() {
-        let path = std::env::temp_dir().join("ornis-coverage-verdict-probe.json");
+        let path = std::env::temp_dir().join(format!(
+            "ornis-coverage-verdict-probe-{}.json",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         assert!(load_coverage_floor(&path).is_none());
-        let (status, _) = coverage_verdict(&path, 0.0, 0, 2);
+        let (status, _) = coverage_verdict(&path, 0.5, 1, 2);
         assert_eq!(status, Status::Pass);
         let (status, _) = coverage_verdict(&path, 1.0, 2, 2);
         assert_eq!(status, Status::Pass);
@@ -2877,10 +2902,51 @@ mod coverage_tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// Failure paths never panic: broken collection, unreadable summary.
+    /// Sub-0.1pp wobble around the floor is noise (adapter/OS-dependent
+    /// line counts), not a regression: in-band rates PASS without touching
+    /// the file, only out-of-band deviations move the verdict.
+    #[test]
+    fn tolerance_band_ignores_noise() {
+        let path = std::env::temp_dir().join(format!(
+            "ornis-coverage-tolerance-probe-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (status, _) = coverage_verdict(&path, 0.8, 800, 1000);
+        assert_eq!(status, Status::Pass);
+        // 0.05 pp below the floor — PASS, file untouched.
+        let (status, note) = coverage_verdict(&path, 0.7995, 7995, 10000);
+        assert_eq!(status, Status::Pass, "unexpected: {note}");
+        assert!((load_coverage_floor(&path).unwrap_or(0.0) - 0.8).abs() < COVERAGE_EPS);
+        // 0.3 pp below the floor — FAIL.
+        let (status, _) = coverage_verdict(&path, 0.797, 797, 1000);
+        assert_eq!(status, Status::Fail);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A zero-line summary is a collection failure: it FAILs and must never
+    /// be saved as a 0.0 floor (which would turn every later run into PASS).
+    #[test]
+    fn zero_total_lines_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "ornis-coverage-zero-probe-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (status, note) = coverage_verdict(&path, 0.0, 0, 0);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("zero total"), "unexpected: {note}");
+        assert!(load_coverage_floor(&path).is_none());
+    }
+
+    /// Failure paths never panic: broken collection, unreadable summary,
+    /// zero-line summary.
     #[test]
     fn outcome_fails_closed() {
-        let dir = std::env::temp_dir().join("ornis-coverage-outcome-probe");
+        let dir = std::env::temp_dir().join(format!(
+            "ornis-coverage-outcome-probe-{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
         let missing = dir.join("no-summary.json");
         let _ = std::fs::remove_file(&missing);
@@ -2890,6 +2956,15 @@ mod coverage_tests {
         let (status, note) = coverage_outcome(&dir, &missing, true);
         assert_eq!(status, Status::Fail);
         assert!(note.contains("unreadable"), "unexpected: {note}");
+        let empty = dir.join("zero-summary.json");
+        let _ = std::fs::write(
+            &empty,
+            r#"{"data": [{"totals": {"lines": {"covered": 0, "count": 0}}}]}"#,
+        );
+        let (status, note) = coverage_outcome(&dir, &empty, true);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("zero total"), "unexpected: {note}");
+        let _ = std::fs::remove_file(&empty);
     }
 
     /// A deselected stage records nothing (and stays test-covered).

@@ -17,6 +17,12 @@ on:
     - cron: "0 2 * * *"
   workflow_dispatch:
 
+# A manual dispatch on top of the nightly run must not start a second
+# 60-minute instrumented run — queue behind the in-flight one.
+concurrency:
+  group: coverage-nightly
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: 4
@@ -32,6 +38,11 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      # lavapipe (mesa-vulkan-drivers, installed above) provides the wgpu
+      # adapter in CI; supported GPU harnesses turn a missing adapter into
+      # a failure instead of a silent skip, so skipped GPU paths cannot
+      # wobble the instrumented line count between runs.
+      ORNIS_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -68,7 +79,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          shared-key: quality
+          shared-key: coverage
 
       - name: Coverage ratchet gate
         shell: bash
@@ -88,5 +99,6 @@ jobs:
             target/quality-coverage.log
             target/llvm-cov/coverage-summary.json
             target/llvm-cov/html
+            coverage-baseline.json
           retention-days: 30
           if-no-files-found: warn
