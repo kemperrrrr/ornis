@@ -730,28 +730,14 @@ impl Renderer3D {
         }
     }
 
-    /// Cached indirect bind group for `culler`: reused across frames
-    /// instead of allocating a bind group per draw. The cache is filled
-    /// on miss here and invalidated when the culler is (re)created or
-    /// the material table grows, so a live group always binds the
-    /// current `visible_buffer` and material table.
-    fn cached_indirect_bind_group<'a>(
-        &'a self,
-        device: &wgpu::Device,
-        culler: &Culler,
-    ) -> std::sync::RwLockReadGuard<'a, Option<wgpu::BindGroup>> {
-        if read_lock(&self.indirect_bind_group).is_none() {
-            let group =
-                self.gbuffer_bind_group_with(device, &self.camera_buffer, &culler.visible_buffer);
-            *write_lock(&self.indirect_bind_group) = Some(group);
-        }
-        read_lock(&self.indirect_bind_group)
-    }
-
     /// Records the shared mesh batch: classic `draw_indexed` over the
     /// staged per-object buffer ([`BatchDraw::Direct`]) or one
     /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
     /// over the culler's compacted batch ([`BatchDraw::Indirect`]).
+    /// The indirect bind group is cached across frames (rebuilt on miss
+    /// after a culler rebuild or a material-table growth); the
+    /// never-taken miss race below builds uncached rather than failing
+    /// the frame.
     fn draw_shared_batch(
         &self,
         device: &wgpu::Device,
@@ -766,14 +752,30 @@ impl Renderer3D {
             &self.gbuffer_pipeline
         });
         let cached = read_lock(&self.gbuffer_bind_group);
+        let uncached;
         let cached_indirect;
         let bind_group = match batch {
             BatchDraw::Direct { .. } => &*cached,
             BatchDraw::Indirect { culler } => {
-                cached_indirect = self.cached_indirect_bind_group(device, culler);
-                cached_indirect
-                    .as_ref()
-                    .expect("indirect bind group is cached on miss above")
+                if read_lock(&self.indirect_bind_group).is_none() {
+                    let group = self.gbuffer_bind_group_with(
+                        device,
+                        &self.camera_buffer,
+                        &culler.visible_buffer,
+                    );
+                    *write_lock(&self.indirect_bind_group) = Some(group);
+                }
+                cached_indirect = read_lock(&self.indirect_bind_group);
+                if let Some(group) = cached_indirect.as_ref() {
+                    group
+                } else {
+                    uncached = self.gbuffer_bind_group_with(
+                        device,
+                        &self.camera_buffer,
+                        &culler.visible_buffer,
+                    );
+                    &uncached
+                }
             }
         };
         rpass.set_bind_group(0, bind_group, &[]);
