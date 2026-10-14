@@ -365,7 +365,17 @@ impl<'a> StageList<'a> {
 /// (`origin/<base>` on pull_request CI, `origin/master` locally) with
 /// this same comparator. Any growth FAILs unless the PR carries the
 /// owner-set `baseline-bump-approved` label (plumbed as
-/// `ORNIS_BASELINE_BUMP_ALLOWED=1` by the workflow).
+/// `ORNIS_BASELINE_BUMP_ALLOWED=1` by the workflow) or the growth is
+/// auto-accepted by [`baseline_auto_accept`] (RAT-44: scores up, no new
+/// findings, soft-category density non-increasing).
+///
+/// `RATCHET_EPS` applies to committed `baseline.json` files, which are
+/// deterministic: the same tree always serialises the same floats. It
+/// does NOT cover fresh-runner float noise (see RAT-37/#93, 4th-decimal
+/// drift between machines): the fresh-vs-committed comparison keeps the
+/// same epsilon only because both sides are produced by the same
+/// vendored binary on similar runners; do not widen it here — widening
+/// would silently ratify real regressions in B-vs-C.
 const RATCHET_EPS: f64 = 1e-9;
 
 /// Cap on stored identity-diff samples per side (the reason line shows fewer).
@@ -606,6 +616,228 @@ fn compare_rustqual_reports(base_s: &str, cur_s: &str) -> Result<RatchetOutcome,
     })
 }
 
+/// Hard categories (RAT-44): absolute `C.k <= B.k`, no density allowance.
+/// Everything else in [`COUNT_CATEGORIES`] is soft: `C.k <= ceil(B.k *
+/// C.total / B.total)` in u128 integer arithmetic, i.e. finding density
+/// per unit of inventoried code must not grow.
+const HARD_CATEGORIES: &[&str] = &[
+    "violations",
+    "unsafe_warnings",
+    "error_handling_warnings",
+    "sdp_violations",
+    "coupling_warnings",
+    "coupling_cycles",
+    "structural_coupling_warnings",
+    "tq_no_assertion_warnings",
+    "tq_no_sut_warnings",
+    "tq_uncovered_warnings",
+    "tq_untested_logic_warnings",
+    "complexity_warnings",
+    "nesting_depth_warnings",
+    "wildcard_import_warnings",
+    "magic_number_warnings",
+];
+
+/// Outcome of [`baseline_auto_accept`]: the committed baseline may move
+/// without the owner label.
+#[derive(Debug, PartialEq, Eq)]
+struct AutoAccept {
+    /// True when at least one score strictly improved (beyond [`RATCHET_EPS`]).
+    scores_grew: bool,
+    /// True when every count category is absolutely non-increasing.
+    all_counts_down: bool,
+}
+
+/// Integer ceil(B.k * C.total / B.total) without float (u128, no overflow
+/// for realistic report sizes). Callers guarantee `base_total > 0`.
+fn density_limit(base_k: u64, base_total: u64, cur_total: u64) -> u64 {
+    let num = base_k as u128 * cur_total as u128 + base_total as u128 - 1;
+    (num / base_total as u128).min(u64::MAX as u128) as u64
+}
+
+/// Bound for rule 5 as numerator/denominator: `C.total <= B.total * 3/2`.
+/// Named so the ratio is not a magic number at the use site.
+const TOTAL_CAP_NUM: u128 = 3;
+const TOTAL_CAP_DEN: u128 = 2;
+
+/// Require a float key on both reports at once; missing/wrong-typed
+/// keys are errors, never zero (same contract as [`require_f64`]).
+fn require_f64_pair(
+    base: &serde_json::Value,
+    cur: &serde_json::Value,
+    key: &str,
+) -> Result<(f64, f64), String> {
+    Ok((
+        require_f64(base, "base", key)?,
+        require_f64(cur, "committed", key)?,
+    ))
+}
+
+/// Require an integer key on both reports at once (same contract as
+/// [`require_u64`]).
+fn require_u64_pair(
+    base: &serde_json::Value,
+    cur: &serde_json::Value,
+    key: &str,
+) -> Result<(u64, u64), String> {
+    Ok((
+        require_u64(base, "base", key)?,
+        require_u64(cur, "committed", key)?,
+    ))
+}
+
+/// Rule 2: the committed identity set must add no (file,name) pair, and
+/// `violations` must not grow. Names the finding in the reason.
+fn check_identity_subset(base: &serde_json::Value, cur: &serde_json::Value) -> Result<(), String> {
+    let b_ids = finding_identity_set(base, "base")?;
+    let c_ids = finding_identity_set(cur, "committed")?;
+    if let Some((f, n)) = c_ids.difference(&b_ids).next() {
+        let added = c_ids.difference(&b_ids).count();
+        return Err(format!(
+            "auto-accept rule 2: +{added} new finding(s), e.g. {f}::{n} (new IOSP findings need the label)"
+        ));
+    }
+    let b_v = require_u64(base, "base", "violations")?;
+    let c_v = require_u64(cur, "committed", "violations")?;
+    if c_v > b_v {
+        return Err(format!(
+            "auto-accept rule 2: violations {b_v}→{c_v} grew (needs the label)"
+        ));
+    }
+    Ok(())
+}
+
+/// Rule 3: every hard category is absolutely non-increasing.
+fn check_hard_categories(base: &serde_json::Value, cur: &serde_json::Value) -> Result<(), String> {
+    for key in HARD_CATEGORIES {
+        let b = require_u64(base, "base", key)?;
+        let c = require_u64(cur, "committed", key)?;
+        if c > b {
+            return Err(format!(
+                "auto-accept rule 3: hard category `{key}` {b}→{c} grew (limit {b}, needs the label)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Rule 4: every soft category stays within its density limit.
+/// `base_counts` carries the already-required `(key, B.k)` pairs so the
+/// missing-key check happens once in the caller.
+fn check_soft_density(
+    cur: &serde_json::Value,
+    base_counts: &[(&&str, u64)],
+    base_total: u64,
+    cur_total: u64,
+) -> Result<(), String> {
+    for (key, b) in base_counts.iter() {
+        if HARD_CATEGORIES.contains(key) {
+            continue;
+        }
+        let c = require_u64(cur, "committed", key)?;
+        let limit = density_limit(*b, base_total, cur_total);
+        if c > limit {
+            return Err(format!(
+                "auto-accept rule 4: soft category `{key}` {b}→{c} exceeds density limit {limit} (base {b} @ total {base_total}→{cur_total}, needs the label)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// RAT-44 auto-accept: pure function of the two committed reports
+/// (base branch version `B`, PR version `C`). No env, no git.
+///
+/// PASS (`Ok`) iff ALL hold:
+/// 1. scores: `C >= B - EPS` on both, and at least one score strictly
+///    grew (`> B + EPS`) OR every count category is absolutely `<=`;
+/// 2. identity: `violation_details` (file,name) set of C ⊆ B, and
+///    `C.violations <= B.violations`;
+/// 3. hard categories absolutely `<=`;
+/// 4. soft categories within density `ceil(B.k*C.total/B.total)`;
+/// 5. structure: both parse, all keys present, `B.total > 0`,
+///    `C.total <= B.total * 1.5`.
+///
+/// # Errors
+/// `Err` names the failing rule with `B→C` values and the limit, so the
+/// caller can print it as the guard FAIL reason. `Err` means "needs the
+/// `baseline-bump-approved` label", never silent PASS.
+fn baseline_auto_accept(base_s: &str, cur_s: &str) -> Result<AutoAccept, String> {
+    let base = parse_rustqual_report("base", base_s)?;
+    let cur = parse_rustqual_report("committed", cur_s)?;
+    let (b_q, c_q) = require_f64_pair(&base, &cur, "quality_score")?;
+    let (b_iosp, c_iosp) = require_f64_pair(&base, &cur, "iosp_score")?;
+    let (b_total, c_total) = require_u64_pair(&base, &cur, "total")?;
+    if b_total == 0 {
+        return Err("auto-accept rule 5: base `total` is 0".to_string());
+    }
+    // Anti-inflation cap: C.total <= B.total * NUM/DEN.
+    if (c_total as u128) * TOTAL_CAP_DEN > (b_total as u128) * TOTAL_CAP_NUM {
+        return Err(format!(
+            "auto-accept rule 5: committed `total` {c_total} exceeds 1.5x base {b_total} (inflate guard)"
+        ));
+    }
+    // Rule 1: scores must not drop beyond EPS.
+    if c_q + RATCHET_EPS < b_q {
+        return Err(format!(
+            "auto-accept rule 1: quality_score {b_q:.6}→{c_q:.6} drops beyond EPS"
+        ));
+    }
+    if c_iosp + RATCHET_EPS < b_iosp {
+        return Err(format!(
+            "auto-accept rule 1: iosp_score {b_iosp:.6}→{c_iosp:.6} drops beyond EPS"
+        ));
+    }
+    let scores_grew = c_q > b_q + RATCHET_EPS || c_iosp > b_iosp + RATCHET_EPS;
+    // Eagerly require all count keys present (same `require_*` semantics:
+    // absence is Err, never zero) before the rule-1 second half.
+    let mut base_counts = Vec::with_capacity(COUNT_CATEGORIES.len());
+    let mut cur_counts = Vec::with_capacity(COUNT_CATEGORIES.len());
+    for key in COUNT_CATEGORIES {
+        base_counts.push((key, require_u64(&base, "base", key)?));
+        cur_counts.push((key, require_u64(&cur, "committed", key)?));
+    }
+    let all_counts_down = cur_counts
+        .iter()
+        .zip(base_counts.iter())
+        .all(|((_, c), (_, b))| c <= b);
+    // Rules 2–4 run before the rule-1 growth half so the reason names
+    // the finding/category, not just "scores did not grow".
+    check_identity_subset(&base, &cur)?;
+    check_hard_categories(&base, &cur)?;
+    check_soft_density(&cur, &base_counts, b_total, c_total)?;
+    // Rule 1, second half: without a strict score gain, every count must
+    // be absolutely non-increasing — "equal scores with more findings"
+    // needs the label even when density holds.
+    if !scores_grew && !all_counts_down {
+        return Err(
+            "auto-accept rule 1: neither score strictly grew and some count increased (equal scores with more findings need the label)"
+                .to_string(),
+        );
+    }
+    Ok(AutoAccept {
+        scores_grew,
+        all_counts_down,
+    })
+}
+
+/// RAT-44 rule 6: the fresh run must inventory exactly the committed
+/// `total`, otherwise the committed baseline is forged or stale.
+/// Returns `Some(FAIL reason)` on mismatch; `None` when equal or when
+/// either side is unreadable (the ratchet stage already FAILs those).
+fn check_fresh_total_matches_committed(fresh_s: &str, committed_s: &str) -> Option<String> {
+    let fresh: serde_json::Value = serde_json::from_str(fresh_s).ok()?;
+    let committed: serde_json::Value = serde_json::from_str(committed_s).ok()?;
+    let f = fresh.get("total")?.as_u64()?;
+    let c = committed.get("total")?.as_u64()?;
+    if f != c {
+        return Some(format!(
+            "fresh rustqual `total` {f} != committed baseline `total` {c} — baseline is stale or edited by hand (обнови baseline: rustqual --save-baseline baseline.json)"
+        ));
+    }
+    None
+}
+
 /// One stage-table row.
 fn stage_result(name: &str, status: Status, note: String, elapsed: Duration) -> StageResult {
     StageResult {
@@ -801,6 +1033,44 @@ fn apply_bump_guard(
 /// it without touching process env (RAT-24 review of PR #75); the single
 /// `std::env::var` read lives in the wrapper below, called once at the
 /// `rustqual_stage` entry.
+/// RAT-44 rule 6 guard: when the committed baseline was auto-accepted
+/// vs the base branch, the fresh run must inventory exactly the
+/// committed `total`. Otherwise the committed file is forged or stale.
+/// No-op when the base baseline is unreadable, when auto-accept did not
+/// apply, or when the stage already FAILED (the ratchet/bump reason
+/// stands on its own).
+fn apply_fresh_total_guard(
+    stages: &mut StageList<'_>,
+    name: &str,
+    fresh_s: &str,
+    committed_s: &str,
+    guard_ref: &str,
+) {
+    if !matches!(stages.results.last().map(|r| r.status), Some(Status::Pass)) {
+        return;
+    }
+    let Some(base_s) = read_base_baseline(stages.root, guard_ref) else {
+        return;
+    };
+    if baseline_auto_accept(&base_s, committed_s).is_err() {
+        return;
+    }
+    if let Some(reason) = check_fresh_total_matches_committed(fresh_s, committed_s) {
+        eprintln!("── {name}: FAIL ({reason}) ──");
+        if ci_annotations() {
+            annotate(stage_title(name), &reason);
+        }
+        if let Some(last) = stages.results.last_mut() {
+            last.status = Status::Fail;
+            if last.note.is_empty() {
+                last.note = reason;
+            } else {
+                last.note = format!("{}; {reason}", last.note);
+            }
+        }
+    }
+}
+
 fn parse_bump_allowed(raw: Option<&str>) -> bool {
     matches!(raw, Some("1") | Some("true"))
 }
@@ -847,13 +1117,14 @@ fn read_base_baseline(root: &Path, guard_ref: &str) -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
-/// RAT-24 bump guard: compare the committed `baseline.json` against the
-/// base branch version with the same strict comparator, so a bump can
-/// no longer sneak through the same-PR comparison. Any growth (or an
-/// unreadable side) is a FAIL unless the bump is owner-approved (`true`
-/// only when the workflow saw the `baseline-bump-approved` label — see
+/// RAT-24 bump guard (+ RAT-44 auto-accept): compare the committed
+/// `baseline.json` against the base branch version. A non-regression
+/// (RAT-44 [`baseline_auto_accept`]: scores up, no new findings, soft
+/// density non-increasing) holds without the owner label. Anything else
+/// is a FAIL unless the bump is owner-approved (`true` only when the
+/// workflow saw the `baseline-bump-approved` label — see
 /// [`baseline_bump_allowed`]). A missing base baseline fails closed in
-/// strict mode and warns locally. Equal-or-lower is `None` (holds).
+/// strict mode and warns locally.
 ///
 /// Both `bump_allowed` and `guard_ref` are parameters, not env reads, so
 /// parallel tests cannot race each other through process env (RAT-24
@@ -873,19 +1144,22 @@ fn check_baseline_bump(
         eprintln!("xtask quality: {note} — bump guard skipped (fetch origin/master to enable)");
         return None;
     };
-    match compare_rustqual_reports(&base_s, committed_s) {
-        Err(msg) => Some(format!("baseline guard: {msg}")),
-        Ok(o) if !o.regressed_reasons.is_empty() => {
-            let reasons = o.regressed_reasons.join(", ");
+    match baseline_auto_accept(&base_s, committed_s) {
+        Ok(_) => {
+            eprintln!(
+                "baseline guard: auto-accepted (scores ↑, no new findings, density non-increasing)"
+            );
+            None
+        }
+        Err(auto_reason) => {
             if bump_allowed {
-                eprintln!("baseline guard: bump allowed by owner label ({reasons})");
+                eprintln!("baseline guard: bump allowed by owner label ({auto_reason})");
                 return None;
             }
             Some(format!(
-                "baseline.json grew vs {guard_ref} ({reasons}) — needs `baseline-bump-approved` label"
+                "baseline.json grew vs {guard_ref} ({auto_reason}) — needs `baseline-bump-approved` label"
             ))
         }
-        Ok(_) => None,
     }
 }
 
@@ -966,6 +1240,7 @@ fn rustqual_stage(stages: &mut StageList<'_>) {
                 (Ok(cur_s), Ok(base_s)) => {
                     finish_rustqual_stage(stages, name, &base_s, &cur_s, started.elapsed());
                     apply_bump_guard(stages, name, &base_s, bump_allowed, &guard_ref);
+                    apply_fresh_total_guard(stages, name, &cur_s, &base_s, &guard_ref);
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     let note = format!("read baseline/cur json: {e}");
@@ -1825,12 +2100,13 @@ fn quality_usage(code: i32) -> ! {
           Baseline: rustqual --save-baseline baseline.json; the gate re-runs rustqual\n  \
           into target/rustqual_cur.json and compares with its own ratchet\n  \
           (equal = PASS, only a true regression FAILs). The committed baseline\n  \
-          must not exceed the base branch version (origin/master locally) —\n  \
-          growth needs the `baseline-bump-approved` PR label.\n  \
-          Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
-          (within ±0.1 pp = PASS; deeper regression FAILs, growth rewrites the file — commit it).\n  \
-          Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
-          a full instrumented workspace run takes tens of minutes.\n  \
+           must not exceed the base branch version (origin/master locally) —\n  \
+           growth needs the `baseline-bump-approved` PR label unless auto-accepted\n  \
+           (scores up, no new findings, soft-category density non-increasing).\n  \
+           Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
+           (within ±0.1 pp = PASS; deeper regression FAILs, growth rewrites the file — commit it).\n  \
+           Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
+           a full instrumented workspace run takes tens of minutes.\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
@@ -2385,6 +2661,7 @@ mod ratchet_tests {
         let mut base = json!({
             "quality_score": 0.8,
             "iosp_score": 0.9,
+            "total": 1000,
             "violations": 10,
             "total_findings": 100,
             "complexity_warnings": 5,
@@ -2666,6 +2943,205 @@ mod ratchet_tests {
         let c = report_with(json!({"quality_score": 0.8 + 5e-10, "iosp_score": 0.9 - 5e-10}));
         let o = compare_rustqual_reports(&b, &c).expect("must parse");
         assert!(o.regressed_reasons.is_empty());
+    }
+
+    // ── RAT-44 auto-accept ──
+
+    /// Minimised #97 fixture: scores up, violations flat, total 7436→7516,
+    /// soft growth exactly within ceil-density.
+    fn rat97_base() -> String {
+        report_with(json!({
+            "quality_score": 0.546799,
+            "iosp_score": 0.917423,
+            "violations": 391,
+            "total": 7436,
+            "total_findings": 2829,
+            "dead_code_warnings": 421,
+            "srp_module_warnings": 100,
+            "tq_untested_warnings": 151
+        }))
+    }
+    fn rat97_cur() -> String {
+        report_with(json!({
+            "quality_score": 0.550172,
+            "iosp_score": 0.918491,
+            "violations": 391,
+            "total": 7516,
+            "total_findings": 2845,
+            "dead_code_warnings": 422,
+            "srp_module_warnings": 101,
+            "tq_untested_warnings": 153
+        }))
+    }
+
+    #[test]
+    fn auto_accept_97_fixture() {
+        let o = baseline_auto_accept(&rat97_base(), &rat97_cur()).expect("97 must auto-accept");
+        assert!(o.scores_grew);
+        // density spot-check: tq_untested 151→153 is exactly ceil(151*7516/7436).
+        assert_eq!(density_limit(151, 7436, 7516), 153);
+        assert_eq!(density_limit(2829, 7436, 7516), 2860);
+    }
+
+    #[test]
+    fn auto_accept_rejects_violations_bump_and_new_identity() {
+        // violations 10→11 needs the label…
+        let c = report_with(json!({
+            "quality_score": 0.81, "iosp_score": 0.91,
+            "violations": 11, "total": 1000, "total_findings": 100
+        }));
+        let err = baseline_auto_accept(&base_report(), &c).unwrap_err();
+        assert!(err.contains("violations"), "unexpected: {err}");
+        // …and so does a brand-new (file,name) pair with flat counts.
+        let d = report_with(json!({
+            "quality_score": 0.81, "iosp_score": 0.91,
+            "violation_details": [
+                {"name": "foo", "file": "a.rs", "line": 1},
+                {"name": "FRESH", "file": "z.rs", "line": 3}
+            ]
+        }));
+        let err2 = baseline_auto_accept(&base_report(), &d).unwrap_err();
+        assert!(err2.contains("rule 2"), "unexpected: {err2}");
+        // Bump guard mirrors it: FAIL without the label, hold with it.
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("auto-viol", &base_report(), guard_ref);
+        let reason = check_baseline_bump(&dir, &c, true, false, guard_ref).expect("must fail");
+        assert!(
+            reason.contains("baseline-bump-approved"),
+            "unexpected: {reason}"
+        );
+        assert!(check_baseline_bump(&dir, &c, true, true, guard_ref).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_accept_rejects_score_drop() {
+        let c = report_with(json!({"quality_score": 0.8 - 1e-6}));
+        let err = baseline_auto_accept(&base_report(), &c).unwrap_err();
+        assert!(
+            err.contains("rule 1") && err.contains("quality_score"),
+            "unexpected: {err}"
+        );
+        // Equal scores with more findings also need the label.
+        let d = report_with(json!({"dead_code_warnings": 11}));
+        let err2 = baseline_auto_accept(&base_report(), &d).unwrap_err();
+        assert!(
+            err2.contains("rule 1") || err2.contains("rule 4"),
+            "unexpected: {err2}"
+        );
+    }
+
+    #[test]
+    fn auto_accept_rejects_hard_growth_despite_total_growth() {
+        // unsafe +1 is hard: no density allowance even when total grows.
+        let b = report_with(json!({"total": 7436}));
+        let c = report_with(json!({"total": 7516, "unsafe_warnings": 3}));
+        let err = baseline_auto_accept(&b, &c).unwrap_err();
+        assert!(
+            err.contains("rule 3") && err.contains("unsafe_warnings"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn auto_accept_soft_density_boundary() {
+        // tq_untested 151→153 @7436→7516 is exactly the ceil limit → PASS;
+        // 154 exceeds it → label.
+        let b = report_with(json!({
+            "quality_score": 0.80, "iosp_score": 0.90,
+            "total": 7436, "tq_untested_warnings": 151
+        }));
+        let at_limit = report_with(json!({
+            "quality_score": 0.81, "iosp_score": 0.91,
+            "total": 7516, "tq_untested_warnings": 153
+        }));
+        assert!(baseline_auto_accept(&b, &at_limit).is_ok());
+        let over = report_with(json!({
+            "quality_score": 0.81, "iosp_score": 0.91,
+            "total": 7516, "tq_untested_warnings": 154
+        }));
+        let err = baseline_auto_accept(&b, &over).unwrap_err();
+        assert!(
+            err.contains("rule 4") && err.contains("tq_untested_warnings"),
+            "unexpected: {err}"
+        );
+        // Shrinking total degenerates to absolute <=.
+        let shrink =
+            report_with(json!({"total": 900, "total_findings": 90, "dead_code_warnings": 11}));
+        let err2 = baseline_auto_accept(&base_report(), &shrink).unwrap_err();
+        assert!(err2.contains("dead_code_warnings"), "unexpected: {err2}");
+    }
+
+    #[test]
+    fn auto_accept_rejects_inflated_total_and_missing_key() {
+        let doubled = report_with(json!({
+            "quality_score": 0.81, "iosp_score": 0.91, "total": 2000
+        }));
+        let err = baseline_auto_accept(&base_report(), &doubled).unwrap_err();
+        assert!(err.contains("rule 5"), "unexpected: {err}");
+        let mut v: serde_json::Value = serde_json::from_str(&base_report()).unwrap();
+        v.as_object_mut().unwrap().remove("dead_code_warnings");
+        let err2 = baseline_auto_accept(&base_report(), &v.to_string()).unwrap_err();
+        assert!(err2.contains("dead_code_warnings"), "unexpected: {err2}");
+    }
+
+    #[test]
+    fn fresh_total_mismatch_is_fail() {
+        let b = report_with(json!({"total": 1000}));
+        let f = report_with(json!({"total": 1001}));
+        let reason = check_fresh_total_matches_committed(&f, &b).expect("must fail");
+        assert!(reason.contains("обнови baseline"), "unexpected: {reason}");
+        assert!(check_fresh_total_matches_committed(&b, &b).is_none());
+    }
+
+    #[test]
+    fn fresh_total_guard_flips_pass_to_fail_on_mismatch() {
+        // Auto-accepted bump (97 fixture) + fresh total drift → FAIL;
+        // matching totals hold.
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("fresh-total", &rat97_base(), guard_ref);
+        let committed = rat97_cur();
+        let fresh_same = rat97_cur();
+        let mut ok_stages = StageList::new(&dir, 1, None, true);
+        ok_stages.results.push(stage_result(
+            "rustqual",
+            Status::Pass,
+            String::new(),
+            Duration::ZERO,
+        ));
+        apply_fresh_total_guard(
+            &mut ok_stages,
+            "rustqual",
+            &fresh_same,
+            &committed,
+            guard_ref,
+        );
+        assert_eq!(ok_stages.results[0].status, Status::Pass);
+        let mut bad_stages = StageList::new(&dir, 1, None, true);
+        bad_stages.results.push(stage_result(
+            "rustqual",
+            Status::Pass,
+            String::new(),
+            Duration::ZERO,
+        ));
+        let drifted = report_with(json!({
+            "quality_score": 0.550172, "iosp_score": 0.918491,
+            "violations": 391, "total": 7517,
+            "total_findings": 2845, "dead_code_warnings": 422,
+            "srp_module_warnings": 101, "tq_untested_warnings": 153
+        }));
+        apply_fresh_total_guard(&mut bad_stages, "rustqual", &drifted, &committed, guard_ref);
+        assert_eq!(bad_stages.results[0].status, Status::Fail);
+        assert!(bad_stages.results[0].note.contains("обнови baseline"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bump_guard_auto_accepts_97_without_label() {
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("auto97", &rat97_base(), guard_ref);
+        assert!(check_baseline_bump(&dir, &rat97_cur(), true, false, guard_ref).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_stages() -> StageList<'static> {
