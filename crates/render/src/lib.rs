@@ -61,6 +61,15 @@ pub mod textures;
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
+/// Whether GPU-gated tests must fail instead of skipping on adapter-less
+/// hosts: set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` (the CI
+/// GPU lane exports it, so a missing adapter surfaces as red rather than
+/// a silent skip).
+#[cfg(test)]
+pub(crate) fn gpu_required() -> bool {
+    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 pub use camera::{
     CameraView, OrbitCamera, camera_view_projection, install_orbit_camera, read_orbit_camera,
 };

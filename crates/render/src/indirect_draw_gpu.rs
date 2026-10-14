@@ -133,7 +133,7 @@ fn render_frame(
     if indirect {
         let culler = Culler::try_new(device, staged).expect("scene is non-empty");
         culler
-            .compact(device, queue, &view_proj, mesh.num_indices, &instances)
+            .compact(queue, &view_proj, mesh.num_indices, &instances)
             .expect("scene fits the capacity");
         renderer.render_gbuffer_indirect(device, &mut encoder, &g, &mesh, &culler);
         renderer.render_shadows(device, &mut encoder, &mesh, staged);
@@ -238,8 +238,11 @@ fn indirect_args_match_compacted_batch() {
     let (mesh, instances, view_proj) = setup_scene(&device, &queue, &renderer, true, true);
     let culler = Culler::try_new(&device, instances.len() as u32).expect("scene is non-empty");
     culler
-        .compact(&device, &queue, &view_proj, mesh.num_indices, &instances)
+        .compact(&queue, &view_proj, mesh.num_indices, &instances)
         .expect("scene fits the capacity");
+    // The frame records the dispatch into its own encoder; dispatch
+    // explicitly here before the readback.
+    test_util::dispatch_culler(&device, &queue, &culler);
     assert_eq!(
         readback_args(&device, &queue, &culler.args_buffer),
         [mesh.num_indices, 2, 0, 0, 0],
@@ -445,11 +448,17 @@ fn submit_stages_spheres_only_for_indirect() {
         crate::camera::Frustum::from_view_proj(&view_proj).sphere_visible(center, radius),
         "custom center must sit inside the camera frustum (center={center:?})"
     );
-    // The prepared args count exactly the two spheres.
+    // The prepared args count exactly the two spheres: stage via the
+    // production prepare path, dispatch explicitly (the frame records
+    // the dispatch into its own encoder instead), then read back.
     let sphere_mesh = create_sphere(&device, 1.0, 24, 16);
     fs.renderer
         .prepare_indirect_batch(&device, &queue, sphere_mesh.num_indices);
     assert!(fs.renderer.indirect_batch_ready());
+    {
+        let culler = super::read_lock(&fs.renderer.culler);
+        test_util::dispatch_culler(&device, &queue, culler.as_ref().expect("culler built"));
+    }
     let culler = super::read_lock(&fs.renderer.culler);
     let args = readback_args(
         &device,
@@ -487,7 +496,9 @@ fn armed_with_custom_matches_direct_and_indirect() {
     let (mesh, instances, view_proj) = setup_scene(&device, &queue, &renderer, true, true);
     let staged = instances.len() as u32;
     renderer.set_indirect_draw(true);
-    renderer.stage_batch_inputs(view_proj, instances);
+    let mut converted = Vec::with_capacity(instances.len());
+    crate::gpu_culling::convert_instances(&mut converted, &instances);
+    renderer.stage_batch_inputs(view_proj, converted);
     renderer.prepare_indirect_batch(&device, &queue, mesh.num_indices);
     assert!(renderer.indirect_batch_ready());
     let (target, target_view) = test_util::offscreen_target(&device, FRAME_W, FRAME_H);

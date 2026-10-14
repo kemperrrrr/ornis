@@ -533,6 +533,12 @@ impl Renderer3D {
         batch: BatchDraw<'_>,
         customs: &[CustomGbufferDraw<'_>],
     ) {
+        if let BatchDraw::Indirect { culler } = batch {
+            // The compaction dispatch rides this frame encoder (no
+            // extra submit): the draw below consumes the culler's
+            // args/visible buffers directly, with no CPU readback.
+            culler.record_compact(encoder);
+        }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("gbuffer pass"),
             color_attachments: &[
@@ -693,6 +699,10 @@ impl Renderer3D {
     /// staged per-object buffer ([`BatchDraw::Direct`]) or one
     /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
     /// over the culler's compacted batch ([`BatchDraw::Indirect`]).
+    /// The indirect bind group is cached across frames (rebuilt on miss
+    /// after a culler rebuild or a material-table growth); the
+    /// never-taken miss race below builds uncached rather than failing
+    /// the frame.
     fn draw_shared_batch(
         &self,
         device: &wgpu::Device,
@@ -702,16 +712,30 @@ impl Renderer3D {
     ) {
         rpass.set_pipeline(&self.gbuffer_pipeline);
         let cached = read_lock(&self.gbuffer_bind_group);
-        let indirect;
+        let uncached;
+        let cached_indirect;
         let bind_group = match batch {
             BatchDraw::Direct { .. } => &*cached,
             BatchDraw::Indirect { culler } => {
-                indirect = self.gbuffer_bind_group_with(
-                    device,
-                    &self.camera_buffer,
-                    &culler.visible_buffer,
-                );
-                &indirect
+                if read_lock(&self.indirect_bind_group).is_none() {
+                    let group = self.gbuffer_bind_group_with(
+                        device,
+                        &self.camera_buffer,
+                        &culler.visible_buffer,
+                    );
+                    *write_lock(&self.indirect_bind_group) = Some(group);
+                }
+                cached_indirect = read_lock(&self.indirect_bind_group);
+                if let Some(group) = cached_indirect.as_ref() {
+                    group
+                } else {
+                    uncached = self.gbuffer_bind_group_with(
+                        device,
+                        &self.camera_buffer,
+                        &culler.visible_buffer,
+                    );
+                    &uncached
+                }
             }
         };
         rpass.set_bind_group(0, bind_group, &[]);

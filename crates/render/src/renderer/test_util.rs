@@ -32,7 +32,9 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
     }
 }
 
-/// Adapter handle, or `None` on headless CI without a GPU.
+/// Adapter handle, or `None` on headless CI without a GPU. When
+/// [`crate::gpu_required`] holds (`ORNIS_REQUIRE_GPU`), a missing
+/// adapter panics instead of skipping so the GPU lane stays red.
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -42,15 +44,48 @@ pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display: None,
         });
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
-            .ok()?;
-        adapter
+        {
+            Ok(adapter) => adapter,
+            Err(err) => {
+                assert!(
+                    !crate::gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
+                );
+                return None;
+            }
+        };
+        match adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
-            .ok()
+        {
+            Ok(pair) => Some(pair),
+            Err(err) => {
+                assert!(
+                    !crate::gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
+                );
+                None
+            }
+        }
     })
+}
+
+/// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a
+/// submitted encoder (the production frame records the dispatch into
+/// its own encoder instead).
+pub(super) fn dispatch_culler(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    culler: &crate::gpu_culling::Culler,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("test culler dispatch"),
+    });
+    culler.record_compact(&mut encoder);
+    queue.submit([encoder.finish()]);
 }
 
 /// Offscreen `Rgba8UnormSrgb` render target shared by the headless

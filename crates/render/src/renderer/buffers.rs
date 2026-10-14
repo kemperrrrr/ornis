@@ -6,7 +6,7 @@ use super::*;
 /// ([`PerObjectGpu::WGSL_SOURCE`]); the field list here is the single source
 /// of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
 #[wgsl(name = "PerObject")]
 pub struct PerObjectGpu {
     /// Local-to-world matrix.
@@ -136,10 +136,13 @@ impl Renderer3D {
 
     /// Rebind every pass that reads the grown storage buffers: each pass
     /// holds its own bind group over the same layout, so all three are
-    /// rebuilt together whenever either buffer moves.
+    /// rebuilt together whenever either buffer moves. The cached
+    /// indirect bind group (bound over the material table) is dropped
+    /// too and rebuilt on the next indirect draw.
     fn rebind_storage_buffers(&self, device: &wgpu::Device) {
         let per_object = read_lock(&self.per_object_buffer);
         let material = read_lock(&self.material_buffer);
+        *write_lock(&self.indirect_bind_group) = None;
         *write_lock(&self.gbuffer_bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gbuffer bind group (grown)"),
@@ -188,8 +191,9 @@ impl Renderer3D {
     /// Bind group of the gbuffer layout with `camera` and `per_objects`
     /// supplied by the caller: the compacted culler buffer binds as
     /// `per_objects` for indirect batches (the shared material table is
-    /// unchanged). Built per draw — the culler buffers never grow, unlike
-    /// the staged per-object store.
+    /// unchanged). Built on cache miss only — the result is cached in
+    /// `indirect_bind_group` and invalidated when the culler is
+    /// (re)created or the material table grows.
     pub(crate) fn gbuffer_bind_group_with(
         &self,
         device: &wgpu::Device,
@@ -284,6 +288,28 @@ impl Renderer3D {
         );
     }
 
+    /// Upload pre-converted records into the per-object buffer used by
+    /// both gbuffer and forward passes, growing the buffer (and
+    /// rebinding the passes) when the frame needs more than the current
+    /// capacity. Beyond-capacity tails are truncated, like
+    /// [`upload_instances`](Self::upload_instances).
+    pub fn upload_per_objects(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        records: &[PerObjectGpu],
+    ) {
+        self.ensure_instance_capacity(device, records.len());
+        let count = records
+            .len()
+            .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
+        queue.write_buffer(
+            &read_lock(&self.per_object_buffer),
+            0,
+            bytemuck::cast_slice(&records[..count]),
+        );
+    }
+
     /// Convert and upload instances into the per-object buffer used by
     /// both gbuffer and forward passes, growing the buffer (and rebinding
     /// the passes) when the frame needs more than the current capacity.
@@ -299,28 +325,10 @@ impl Renderer3D {
         instances: &[InstanceData],
     ) {
         self.ensure_instance_capacity(device, instances.len());
-        let count = instances
-            .len()
-            .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
         let mut gpu_objects: Vec<PerObjectGpu> =
-            Vec::with_capacity(staging_capacity_for_instances(count));
-        for inst in instances.iter().take(count) {
-            let model_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
-                inst.model_matrix.to_cols_array_2d();
-            let normal_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
-                inst.normal_matrix.to_cols_array_2d();
-            gpu_objects.push(PerObjectGpu {
-                model: model_arr,
-                normal_matrix: normal_arr,
-                material_index: inst.material_index,
-                _padding: [0; VEC3_COMPONENTS],
-            });
-        }
-        queue.write_buffer(
-            &read_lock(&self.per_object_buffer),
-            0,
-            bytemuck::cast_slice(&gpu_objects),
-        );
+            Vec::with_capacity(staging_capacity_for_instances(instances.len()));
+        crate::gpu_culling::convert_instances(&mut gpu_objects, instances);
+        self.upload_per_objects(device, queue, &gpu_objects);
     }
 
     /// Ensure the palette buffer fits `needed` slots, growing it (and only
