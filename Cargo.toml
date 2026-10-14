@@ -9,6 +9,7 @@ members = [
     "crates/wgpu_backend",
     "crates/audio",
     "crates/render",
+    "crates/texture",
     "crates/schedule",
     "crates/materialx",
     "crates/wasm",

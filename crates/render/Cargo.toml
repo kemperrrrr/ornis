@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ornis-texture = { path = "../texture", version = "0.1.0" }
 wgpu = "30"
 naga = { version = "30", features = ["wgsl-out"] }
 bytemuck = { version = "1", features = ["derive"] }

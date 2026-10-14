@@ -399,7 +399,7 @@ impl Renderer3D {
             .and_then(|handle| cache.get(handle))
             .map_or(
                 match role {
-                    TextureRole::MetallicRoughness => fallback_data,
+                    TextureRole::MetallicRoughness | TextureRole::Normal => fallback_data,
                     TextureRole::BaseColor | TextureRole::Emissive => fallback_color,
                 },
                 |texture| &texture.view,

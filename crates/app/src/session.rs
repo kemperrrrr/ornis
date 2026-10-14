@@ -3131,9 +3131,7 @@ mod tests {
                 metallic: 0.0,
                 roughness: 0.5,
                 emission: [0.0, 0.0, 0.0],
-                base_color_texture: None,
-                metallic_roughness_texture: None,
-                emissive_texture: None,
+                textures: Default::default(),
             }
         }
         fn node(name: &str, primitives: Vec<usize>, skin: Option<usize>) -> ModelNode {

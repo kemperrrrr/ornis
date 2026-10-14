@@ -74,7 +74,7 @@ order = ["foundation", "domain", "application", "adapters"]
 unmatched_behavior = "strict_error"
 
 [architecture.layers.foundation]
-paths = ["crates/schedule/**", "crates/input/**", "crates/shader-lang/**", "crates/gltf/**"]
+paths = ["crates/schedule/**", "crates/input/**", "crates/shader-lang/**", "crates/gltf/**", "crates/texture/**"]
 
 [architecture.layers.domain]
 paths = [
@@ -108,6 +108,7 @@ ornis_schedule = "foundation"
 ornis_input = "foundation"
 ornis_shader_lang = "foundation"
 ornis_gltf = "foundation"
+ornis_texture = "foundation"
 ornis_core = "domain"
 ornis_gameplay = "domain"
 ornis_assets = "domain"
@@ -178,6 +179,7 @@ forbidden_in = [
     "crates/input/**",
     "crates/shader-lang/**",
     "crates/gltf/**",
+    "crates/texture/**",
 ]
 reason = "GPU types live behind backend seams; logic sees scalars/ids"
 
@@ -202,6 +204,7 @@ forbidden_in = [
     "crates/wasm/**",
     "crates/input/**",
     "crates/gltf/**",
+    "crates/texture/**",
     "src/**",
     "xtask/**",
 ]
@@ -221,6 +224,7 @@ forbidden_in = [
     "crates/editor-backend/src/**",
     "crates/gameplay/src/**",
     "crates/gltf/src/**",
+    "crates/texture/src/**",
     "crates/input/src/**",
     "crates/macros/src/**",
     "crates/materialx/src/**",

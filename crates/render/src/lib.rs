@@ -55,8 +55,12 @@ pub mod shaders;
 pub mod skinning;
 /// Typed plan systems + single declaration registry (d3).
 pub mod system;
+/// Compressed-format selection and material mip-chain upload.
+pub mod texture_upload;
 /// glTF texture image upload (`LoadedImage` → `wgpu` texture + sampler).
 pub mod textures;
+/// Shared CPU texture representations used by import and rendering.
+pub use ornis_texture::{Ktx2Image, TextureEncoding, TextureImage};
 /// Transient pool — the dynamic half of the dissolved frame-plan shell
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
