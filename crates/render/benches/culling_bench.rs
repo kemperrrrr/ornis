@@ -9,8 +9,18 @@
 //! issue; the numbers table goes into the PR (headless lavapipe measures
 //! the relative gap on one machine, not absolute discrete-GPU frame cost).
 //!
+//! Column asymmetry (read before comparing): the GPU column includes the
+//! per-frame staging upload of every instance (`queue.write_buffer` of the
+//! full `src` buffer) plus the blocking device poll, while the CPU column
+//! measures only the inline sphere tests. A persistent resident instance
+//! buffer (no per-frame upload, no poll wait) is the follow-up slice that
+//! closes this gap — see the RAT-43 issue.
+//!
 //! Compile-checked by the gate; manual run:
 //!   cargo bench -p ornis-render --bench culling_bench
+//!
+//! With `ORNIS_REQUIRE_GPU` set (the CI GPU lane), a missing adapter fails
+//! the bench instead of degrading to the CPU column.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
@@ -42,6 +52,12 @@ const FAR: f32 = 100.0;
 /// tenth of the scene.
 const VISIBLE_PART_DENOM: usize = 10;
 
+/// Whether GPU-gated runs must fail instead of skipping on adapter-less
+/// hosts: set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"`.
+fn gpu_required() -> bool {
+    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -50,14 +66,32 @@ async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
         memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
         display: None,
     });
-    let adapter = instance
+    let adapter = match instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
         .await
-        .ok()?;
-    adapter
+    {
+        Ok(adapter) => adapter,
+        Err(err) => {
+            assert!(
+                !gpu_required(),
+                "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
+            );
+            return None;
+        }
+    };
+    match adapter
         .request_device(&wgpu::DeviceDescriptor::default())
         .await
-        .ok()
+    {
+        Ok(pair) => Some(pair),
+        Err(err) => {
+            assert!(
+                !gpu_required(),
+                "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
+            );
+            None
+        }
+    }
 }
 
 // qual:allow(test_quality, untested) reason: "bench scene builder runs only under the criterion harness, never under libtest"
@@ -84,10 +118,45 @@ fn sees_small_part(visible: usize, total: usize) -> bool {
     visible > 0 && visible * VISIBLE_PART_DENOM < total
 }
 
+// qual:allow(test_quality, untested) reason: "bench GPU arg readback runs only under the criterion harness, never under libtest"
+/// Reads the `instance_count` word back from a culler's args buffer
+/// (`None` when the headless readback fails — the caller skips the parity
+/// check instead of failing the bench).
+fn read_instance_count(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    args: &wgpu::Buffer,
+) -> Option<u32> {
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("culling bench args readback"),
+        size: 20,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("culling bench args copy"),
+    });
+    encoder.copy_buffer_to_buffer(args, 0, &staging, 0, 20);
+    queue.submit([encoder.finish()]);
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv().ok()?.ok()?;
+    let view = slice.get_mapped_range().ok()?;
+    let words: [u32; 5] = bytemuck::cast_slice(&view)[..5].try_into().ok()?;
+    drop(view);
+    staging.unmap();
+    Some(words[1])
+}
+
 // qual:allow(test_quality, untested) reason: "bench GPU runner runs only under the criterion harness, never under libtest"
 /// One scene size through the GPU bench: without an adapter it leaves a
 /// skip note; otherwise it warms the pipeline (compilation stays out of
-/// the measurement) and measures stage-plus-dispatch. Branching lives
+/// the measurement), pins the warmed `instance_count` against the CPU
+/// visible count, and measures stage-plus-dispatch. Branching lives
 /// only in `match` arms (dispatch for the gate): the `compact` calls keep
 /// no branch since over-capacity is impossible by construction (the
 /// culler is built for exactly `instances.len()`), so their `Result`s are
@@ -106,6 +175,17 @@ fn run_gpu_bench(
                 Ok(culler) => {
                     let _ = culler.compact(device, queue, view_proj, INDEX_COUNT, instances);
                     let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                    let expected = compact_visible_indices(instances, view_proj).len() as u32;
+                    if let Some(count) = read_instance_count(device, queue, &culler.args_buffer) {
+                        assert_eq!(
+                            count, expected,
+                            "warmed GPU instance_count must match the CPU visible count ({label})"
+                        );
+                    } else {
+                        eprintln!(
+                            "culling/gpu_{label}: args readback failed — skipping parity pin"
+                        );
+                    }
                     group.bench_function(format!("gpu_{label}"), |b| {
                         b.iter(|| {
                             let _ = culler.compact(
@@ -153,10 +233,14 @@ fn bench_culling(c: &mut Criterion) {
     for (count, label) in [(SIZE_10K, "10k"), (SIZE_100K, "100k")] {
         let instances = scene_line(count);
         let visible = compact_visible_indices(&instances, &view_proj);
+        assert!(
+            sees_small_part(visible.len(), count),
+            "bench premise: the camera must see a small part of the scene ({label}: {} visible of {count})",
+            visible.len()
+        );
         premise.push_str(&format!(
-            "culling {label}: {} visible of {count} (small-part premise: {})\n",
+            "culling {label}: {} visible of {count} (small-part premise: true)\n",
             visible.len(),
-            sees_small_part(visible.len(), count)
         ));
 
         group.bench_function(format!("cpu_{label}"), |b| {

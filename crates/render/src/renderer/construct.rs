@@ -171,6 +171,7 @@ impl Renderer3D {
             gbuffer_motion_pipeline,
             gbuffer_bind_group_layout,
             gbuffer_bind_group: std::sync::RwLock::new(gbuffer_bind_group),
+            indirect_bind_group: std::sync::RwLock::new(None),
             skinned_pipeline,
             skinned_motion_pipeline,
             skinned_bind_group_layout,
