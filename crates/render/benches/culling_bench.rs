@@ -178,11 +178,25 @@ fn dispatch_compact(
     queue.submit([encoder.finish()]);
 }
 
+// qual:allow(test_quality, untested) reason: "bench GPU dispatch runner runs only under the criterion harness, never under libtest"
+/// One GPU dispatch: records the staged frame and submits (no upload,
+/// no wait — the caller polls). Isolates the GPU round trip from the
+/// CPU staging measured by `gpu_upload_*`.
+fn submit_compact(device: &wgpu::Device, queue: &wgpu::Queue, culler: &Culler) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("culling bench dispatch-only"),
+    });
+    culler.record_compact(&mut encoder);
+    queue.submit([encoder.finish()]);
+}
+
 // qual:allow(test_quality, untested) reason: "bench GPU runner runs only under the criterion harness, never under libtest"
 /// One scene size through the GPU bench: without an adapter it leaves a
 /// skip note; otherwise it warms the pipeline (compilation stays out of
 /// the measurement), pins the warmed `instance_count` against the CPU
-/// visible count, and measures stage-plus-dispatch. Branching lives
+/// visible count, and measures stage-plus-dispatch (`gpu_*`) split into
+/// CPU staging (`gpu_upload_*`, no dispatch, no wait) and the GPU round
+/// trip (`gpu_dispatch_*`, submit plus blocking poll). Branching lives
 /// only in `match` arms (dispatch for the gate): the `compact` calls keep
 /// no branch since over-capacity is impossible by construction (the
 /// culler is built for exactly `instances.len()`), so their `Result`s are
@@ -221,6 +235,22 @@ fn run_gpu_bench(
                                 view_proj,
                                 std::hint::black_box(instances),
                             );
+                            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+                        })
+                    });
+                    group.bench_function(format!("gpu_upload_{label}"), |b| {
+                        b.iter(|| {
+                            let _ = culler.compact(
+                                queue,
+                                view_proj,
+                                INDEX_COUNT,
+                                std::hint::black_box(instances),
+                            );
+                        })
+                    });
+                    group.bench_function(format!("gpu_dispatch_{label}"), |b| {
+                        b.iter(|| {
+                            submit_compact(device, queue, &culler);
                             let _ = device.poll(wgpu::PollType::wait_indefinitely());
                         })
                     });
