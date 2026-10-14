@@ -1,0 +1,104 @@
+name: Coverage Nightly
+
+# Why nightly, not a PR shard: a full instrumented workspace run
+# (`cargo llvm-cov --workspace` rebuilds everything with
+# -C instrument-coverage and runs the whole test suite) takes tens of
+# minutes — locally >25 min on a Mac workstation, on CI it would dwarf the
+# slowest quality shard (~25 min for `test` alone). The PR gate stays fast;
+# the ratchet baseline (`coverage-baseline.json`) is refreshed here and
+# committed by the owner when it grows.
+#
+# The gate itself lives in xtask (`cargo xtask quality --full --only
+# coverage`): same binary locally and in CI, ratchet vs the baseline file.
+
+on:
+  schedule:
+    # 02:00 UTC daily on master.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+# A manual dispatch on top of the nightly run must not start a second
+# 60-minute instrumented run — queue behind the in-flight one.
+concurrency:
+  group: coverage-nightly
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 4
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # lavapipe (mesa-vulkan-drivers, installed above) provides the wgpu
+      # adapter in CI; supported GPU harnesses turn a missing adapter into
+      # a failure instead of a silent skip, so skipped GPU paths cannot
+      # wobble the instrumented line count between runs.
+      ORNIS_REQUIRE_GPU: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          df -h / /tmp | head -5
+
+      - name: Install system dependencies
+        timeout-minutes: 20
+        run: |
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
+            /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update \
+            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+            -o Acquire::ForceIPv4=true
+          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
+            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      # Pinned: install-action would otherwise float to latest on every run.
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        with:
+          tool: cargo-llvm-cov@0.8.7
+
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: coverage
+
+      - name: Coverage ratchet gate
+        shell: bash
+        env:
+          RUSTFLAGS: -C link-arg=-fuse-ld=mold
+          RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
+        run: |
+          mkdir -p target
+          cargo xtask quality --full --only coverage 2>&1 | tee target/quality-coverage.log
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage-nightly
+          path: |
+            target/quality-coverage.log
+            target/llvm-cov/coverage-summary.json
+            target/llvm-cov/html
+            coverage-baseline.json
+          retention-days: 30
+          if-no-files-found: warn

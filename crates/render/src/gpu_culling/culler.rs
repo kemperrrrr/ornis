@@ -216,8 +216,7 @@ impl Culler {
         })
     }
 
-    // qual:api — production entry for the gbuffer/shadow wiring slice;
-    // in-tree callers are tests until that slice lands.
+    // Production entry for the gbuffer/shadow wiring slice.
     /// Runs one culling frame: stages `instances` into the source
     /// buffer, packs the [`CullParams`](super::CullParams) uniform of `view_proj`,
     /// pre-writes the indirect args with `index_count` and a zero

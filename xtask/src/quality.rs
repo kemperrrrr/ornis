@@ -1348,19 +1348,7 @@ const TYPOS_VERSION: &str = "1.51.1";
 
 /// ── Level 2 (--full): coverage + bench compile check ──────
 fn full_stages(stages: &mut StageList<'_>) {
-    stages.run(
-        "coverage",
-        "coverage (llvm-cov)",
-        "cargo llvm-cov --workspace --html --output-dir target/llvm-cov",
-        stages.cargo(&[
-            "llvm-cov",
-            "--workspace",
-            "--html",
-            "--output-dir",
-            "target/llvm-cov",
-        ]),
-        false,
-    );
+    coverage_stage(stages);
 
     stages.run(
         "bench-compile",
@@ -1402,6 +1390,205 @@ fn full_stages(stages: &mut StageList<'_>) {
                 &format!("cargo-hack not installed — Install:  cargo install cargo-hack --version {CARGO_HACK_VERSION} --locked"),
             );
         }
+    }
+}
+
+/// Coverage ratchet gate (same idea as rustqual): the workspace line
+/// rate in `coverage-baseline.json` is the floor — within ±0.1 pp is PASS,
+/// only a deviation beyond the band matters (below FAILs, above rewrites
+/// the file — commit it). First run without a baseline saves the current
+/// rate and PASSes. Without cargo-llvm-cov the stage SKIPs (same as before).
+/// The JSON summary stays at `target/llvm-cov/coverage-summary.json`, the
+/// HTML report at `target/llvm-cov/html` — per-crate detail lives there and
+/// in the nightly artifacts, not in the gate output.
+fn coverage_stage(stages: &mut StageList<'_>) {
+    if !stages.enabled("coverage") {
+        return;
+    }
+    if !cargo_subcommand_exists("llvm-cov") {
+        stages.skip(
+            "coverage",
+            "coverage (llvm-cov)",
+            "cargo-llvm-cov not installed (cargo install cargo-llvm-cov --locked; rustup component add llvm-tools-preview)",
+        );
+        return;
+    }
+    stages.n += 1;
+    let started = Instant::now();
+    let (idx, total) = (stages.n, stages.total);
+    let name = "coverage (llvm-cov)";
+    eprintln!();
+    eprintln!("═══ [{idx}/{total}] {name}: cargo llvm-cov --workspace (ratchet vs {COVERAGE_BASELINE}) ═══");
+    let summary_path = stages.root.join(COVERAGE_SUMMARY);
+    if let Some(parent) = summary_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // One test run, machine-readable summary. The HTML report renders
+    // afterwards from the same data (no test re-run).
+    let tested = Command::new("cargo")
+        .args([
+            "llvm-cov",
+            "--workspace",
+            "--summary-only",
+            "--json",
+            "--output-path",
+            &summary_path.to_string_lossy(),
+        ])
+        .current_dir(stages.root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let (status, note) = coverage_outcome(stages.root, &summary_path, tested);
+    eprintln!("── {name}: {} ({note}) ──", status.label());
+    stages.push("coverage", name, status, note, started);
+}
+
+/// Verdict for a finished coverage run: reads the llvm-cov summary,
+/// renders the HTML report from the same data, and rates the workspace
+/// line coverage against the stored floor.
+fn coverage_outcome(root: &Path, summary_path: &Path, tested: bool) -> (Status, String) {
+    if !tested {
+        return (
+            Status::Fail,
+            "cargo llvm-cov --workspace did not finish (tests or collection broke)".to_string(),
+        );
+    }
+    let Ok(text) = std::fs::read_to_string(summary_path) else {
+        return (
+            Status::Fail,
+            "coverage summary unreadable (report step broke)".to_string(),
+        );
+    };
+    let (rate, covered, count) = coverage_rate(&text);
+    if count == 0 {
+        return (
+            Status::Fail,
+            "coverage summary reports zero total lines (collection broke)".to_string(),
+        );
+    }
+    let _ = Command::new("cargo")
+        .args([
+            "llvm-cov",
+            "report",
+            "--html",
+            "--output-dir",
+            COVERAGE_HTML,
+        ])
+        .current_dir(root)
+        .status();
+    eprintln!(
+        "workspace lines: {covered}/{count} = {:.2}%",
+        rate * COVERAGE_PERCENT
+    );
+    coverage_verdict(&root.join(COVERAGE_BASELINE), rate, covered, count)
+}
+
+/// Workspace line-coverage floor file (ratchet baseline, same role as
+/// rustqual's `baseline.json`): FAIL only on true regression.
+const COVERAGE_BASELINE: &str = "coverage-baseline.json";
+/// Machine-readable llvm-cov summary produced by the gate run.
+const COVERAGE_SUMMARY: &str = "target/llvm-cov/coverage-summary.json";
+/// Human-readable report rendered from the same data (no test re-run).
+const COVERAGE_HTML: &str = "target/llvm-cov/html";
+/// Tolerance band for the ratchet comparison, in fractions (0.001 = 0.1 pp).
+/// Coverage is not fully deterministic across machines: GPU tests depend on
+/// the adapter and `cfg(target_os)` changes the instrumented line count, so
+/// a sub-0.1pp wobble around the floor is noise, not a regression. Only a
+/// deviation beyond the band FAILs (below) or rewrites the file (above).
+const COVERAGE_EPS: f64 = 1e-3;
+/// Factor for human-readable percent printing.
+const COVERAGE_PERCENT: f64 = 100.0;
+
+/// Workspace `(line_rate, covered, total)` from an llvm-cov
+/// `--summary-only --json` report (`data[0].totals.lines`).
+fn coverage_rate(summary: &str) -> (f64, u64, u64) {
+    let report: serde_json::Value =
+        serde_json::from_str(summary).unwrap_or(serde_json::Value::Null);
+    let lines = report
+        .get("data")
+        .and_then(|d| d.get(0))
+        .and_then(|d| d.get("totals"))
+        .and_then(|t| t.get("lines"));
+    let covered = lines
+        .and_then(|l| l.get("covered"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let count = lines
+        .and_then(|l| l.get("count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let rate = if count > 0 {
+        covered as f64 / count as f64
+    } else {
+        0.0
+    };
+    (rate, covered, count)
+}
+
+/// Floor stored in the baseline file, if present and parseable.
+fn load_coverage_floor(path: &Path) -> Option<f64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("line_rate").and_then(|x| x.as_f64()))
+}
+
+/// Overwrites the baseline file with the current measurement.
+fn save_coverage_floor(path: &Path, rate: f64, covered: u64, count: u64) -> std::io::Result<()> {
+    let doc = serde_json::json!({
+        "version": 1,
+        "line_rate": rate,
+        "lines_covered": covered,
+        "lines_total": count,
+        "generated_by": "cargo xtask quality --full (cargo-llvm-cov --workspace)",
+    });
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&doc).unwrap_or_default() + "\n",
+    )
+}
+
+/// Ratchet verdict against the stored floor: a regression beyond the
+/// tolerance band FAILs, first run and growth beyond the band rewrite the
+/// file (commit it), anything inside the band PASSes silently. A zero-line
+/// summary is a collection failure, never a floor (it must not save 0.0).
+fn coverage_verdict(baseline: &Path, rate: f64, covered: u64, count: u64) -> (Status, String) {
+    if count == 0 {
+        return (
+            Status::Fail,
+            "coverage summary reports zero total lines (collection broke)".to_string(),
+        );
+    }
+    let prior = load_coverage_floor(baseline);
+    if prior.is_some_and(|b| rate + COVERAGE_EPS < b) {
+        (
+            Status::Fail,
+            format!(
+                "workspace lines {:.2}% below baseline {:.2}%",
+                rate * COVERAGE_PERCENT,
+                prior.unwrap_or(0.0) * COVERAGE_PERCENT
+            ),
+        )
+    } else if prior.is_none_or(|b| rate > b + COVERAGE_EPS) {
+        match save_coverage_floor(baseline, rate, covered, count) {
+            Ok(()) if prior.is_none() => (
+                Status::Pass,
+                format!("baseline set at {:.2}%", rate * COVERAGE_PERCENT),
+            ),
+            Ok(()) => (
+                Status::Pass,
+                format!(
+                    "baseline lifted to {:.2}% — commit {COVERAGE_BASELINE}",
+                    rate * COVERAGE_PERCENT
+                ),
+            ),
+            Err(e) => (
+                Status::Fail,
+                format!("cannot write {COVERAGE_BASELINE}: {e}"),
+            ),
+        }
+    } else {
+        (Status::Pass, String::new())
     }
 }
 
@@ -1621,7 +1808,7 @@ fn quality_usage(code: i32) -> ! {
          USAGE:\n  \
           cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
-         cargo xtask quality --full    + coverage (llvm-cov → target/llvm-cov/html), bench compile-check and the cargo-hack feature matrix\n  \
+         cargo xtask quality --full    + coverage ratchet (llvm-cov --workspace vs coverage-baseline.json), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
          cargo xtask quality --everything\n      \
          everything: --ci + --full + --bench + mutants (ornis-core) + fuzz smoke (slow, minutes to hours)\n  \
@@ -1640,6 +1827,10 @@ fn quality_usage(code: i32) -> ! {
           (equal = PASS, only a true regression FAILs). The committed baseline\n  \
           must not exceed the base branch version (origin/master locally) —\n  \
           growth needs the `baseline-bump-approved` PR label.\n  \
+          Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
+          (within ±0.1 pp = PASS; deeper regression FAILs, growth rewrites the file — commit it).\n  \
+          Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
+          a full instrumented workspace run takes tens of minutes.\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
@@ -2666,5 +2857,126 @@ mod tests {
         // parallel runs cannot observe each other (RAT-24 review).
         let raw = std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok();
         assert_eq!(baseline_bump_allowed(), parse_bump_allowed(raw.as_deref()));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{
+        coverage_outcome, coverage_rate, coverage_stage, coverage_verdict, load_coverage_floor,
+        StageList, Status, COVERAGE_EPS,
+    };
+
+    /// Minimal llvm-cov summary shape: totals resolve to rate/covered/total.
+    #[test]
+    fn parses_summary_totals() {
+        let (rate, covered, count) =
+            coverage_rate(r#"{"data": [{"totals": {"lines": {"covered": 3, "count": 4}}}]}"#);
+        assert_eq!((covered, count), (3, 4));
+        assert!((rate - covered as f64 / count as f64).abs() < COVERAGE_EPS);
+    }
+
+    /// Garbage in — zeroed measurement out, never a panic.
+    #[test]
+    fn rejects_broken_summary() {
+        assert_eq!(coverage_rate("not json"), (0.0, 0, 0));
+        assert_eq!(coverage_rate("{}"), (0.0, 0, 0));
+    }
+
+    /// Scratch baseline: first save, silent in-band equality, lift, regression FAIL.
+    #[test]
+    fn ratchets_against_scratch_floor() {
+        let path = std::env::temp_dir().join(format!(
+            "ornis-coverage-verdict-probe-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        assert!(load_coverage_floor(&path).is_none());
+        let (status, _) = coverage_verdict(&path, 0.5, 1, 2);
+        assert_eq!(status, Status::Pass);
+        let (status, _) = coverage_verdict(&path, 1.0, 2, 2);
+        assert_eq!(status, Status::Pass);
+        assert!((load_coverage_floor(&path).unwrap_or(0.0) - 1.0).abs() < COVERAGE_EPS);
+        let (status, _) = coverage_verdict(&path, 0.0, 0, 2);
+        assert_eq!(status, Status::Fail);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Sub-0.1pp wobble around the floor is noise (adapter/OS-dependent
+    /// line counts), not a regression: in-band rates PASS without touching
+    /// the file, only out-of-band deviations move the verdict.
+    #[test]
+    fn tolerance_band_ignores_noise() {
+        let path = std::env::temp_dir().join(format!(
+            "ornis-coverage-tolerance-probe-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (status, _) = coverage_verdict(&path, 0.8, 800, 1000);
+        assert_eq!(status, Status::Pass);
+        // 0.05 pp below the floor — PASS, file untouched.
+        let (status, note) = coverage_verdict(&path, 0.7995, 7995, 10000);
+        assert_eq!(status, Status::Pass, "unexpected: {note}");
+        assert!((load_coverage_floor(&path).unwrap_or(0.0) - 0.8).abs() < COVERAGE_EPS);
+        // 0.3 pp below the floor — FAIL.
+        let (status, _) = coverage_verdict(&path, 0.797, 797, 1000);
+        assert_eq!(status, Status::Fail);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A zero-line summary is a collection failure: it FAILs and must never
+    /// be saved as a 0.0 floor (which would turn every later run into PASS).
+    #[test]
+    fn zero_total_lines_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "ornis-coverage-zero-probe-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let (status, note) = coverage_verdict(&path, 0.0, 0, 0);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("zero total"), "unexpected: {note}");
+        assert!(load_coverage_floor(&path).is_none());
+    }
+
+    /// Failure paths never panic: broken collection, unreadable summary,
+    /// zero-line summary.
+    #[test]
+    fn outcome_fails_closed() {
+        let dir = std::env::temp_dir().join(format!(
+            "ornis-coverage-outcome-probe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let missing = dir.join("no-summary.json");
+        let _ = std::fs::remove_file(&missing);
+        let (status, note) = coverage_outcome(&dir, &missing, false);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("did not finish"), "unexpected: {note}");
+        let (status, note) = coverage_outcome(&dir, &missing, true);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("unreadable"), "unexpected: {note}");
+        let empty = dir.join("zero-summary.json");
+        let _ = std::fs::write(
+            &empty,
+            r#"{"data": [{"totals": {"lines": {"covered": 0, "count": 0}}}]}"#,
+        );
+        let (status, note) = coverage_outcome(&dir, &empty, true);
+        assert_eq!(status, Status::Fail);
+        assert!(note.contains("zero total"), "unexpected: {note}");
+        let _ = std::fs::remove_file(&empty);
+    }
+
+    /// A deselected stage records nothing (and stays test-covered).
+    #[test]
+    fn stage_stays_quiet_when_not_selected() {
+        let mut stages = StageList::new(
+            std::path::Path::new("."),
+            1,
+            Some(vec!["fmt".to_string()]),
+            false,
+        );
+        coverage_stage(&mut stages);
+        assert!(stages.results.is_empty());
     }
 }
