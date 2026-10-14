@@ -32,23 +32,13 @@ fn real_basis_files_transcode_all_mips_to_every_target() {
 #[test]
 fn native_blocks_are_preserved_and_fallback_decodes_each_level() {
     let image = Ktx2Image::from_bytes(UASTC).unwrap();
-    // These encodings have the same 16-byte footprint as the source UASTC,
-    // so its level index and DFD sample layout can be reused for the test.
-    for (encoding, vk_format, model) in [
-        (E::Bc7, 145_u32, 134_u8),
-        (E::Astc4x4, 157, 162),
-        (E::Etc2, 151, 161),
+    for (encoding, format) in [
+        (E::Bc7, ktx2::Format::BC7_UNORM_BLOCK),
+        (E::Astc4x4, ktx2::Format::ASTC_4x4_UNORM_BLOCK),
+        (E::Etc2, ktx2::Format::ETC2_R8G8B8A8_UNORM_BLOCK),
     ] {
         let compressed = image.transcode(encoding).unwrap();
-        let mut native = UASTC.to_vec();
-        native[12..16].copy_from_slice(&vk_format.to_le_bytes());
-        let reader = ktx2::Reader::new(UASTC).unwrap();
-        native[reader.header().index.dfd_byte_offset as usize + 12] = model;
-        for (i, level) in compressed.levels().iter().enumerate() {
-            let offset =
-                u64::from_le_bytes(UASTC[80 + 24 * i..88 + 24 * i].try_into().unwrap()) as usize;
-            native[offset..offset + level.len()].copy_from_slice(level);
-        }
+        let native = native_container(format, 40, compressed.levels());
         let parsed = Ktx2Image::from_bytes(native).unwrap();
         assert_eq!(parsed.encoding(), Some(encoding));
         assert_eq!(
@@ -120,41 +110,11 @@ fn texture_payload_accounting_includes_small_block_mips() {
 
 #[test]
 fn authored_rgba_levels_are_not_regenerated_or_recolored() {
-    let mut header = ktx2::Reader::new(UASTC).unwrap().header();
-    header.format = Some(ktx2::Format::R8G8B8A8_SRGB);
-    header.pixel_width = 2;
-    header.pixel_height = 2;
-    header.level_count = 2;
-    header.supercompression_scheme = None;
-    let (basic, _) = ktx2::dfd::Basic::from_format(header.format.unwrap()).unwrap();
-    let dfd = ktx2::dfd::Block::Basic(basic).to_vec();
-    header.index = ktx2::Index {
-        dfd_byte_offset: 128,
-        dfd_byte_length: (4 + dfd.len()) as u32,
-        kvd_byte_offset: 0,
-        kvd_byte_length: 0,
-        sgd_byte_offset: 0,
-        sgd_byte_length: 0,
-    };
-    let mut bytes = header.as_bytes().to_vec();
-    bytes.resize(128, 0);
-    bytes.extend_from_slice(&header.index.dfd_byte_length.to_le_bytes());
-    bytes.extend_from_slice(&dfd);
-    bytes.resize(bytes.len().next_multiple_of(4), 0);
-    let tail = ktx2::LevelIndex {
-        byte_offset: bytes.len() as u64,
-        byte_length: 4,
-        uncompressed_byte_length: 4,
-    };
-    bytes.extend_from_slice(&[0, 255, 0, 255]);
-    let base = ktx2::LevelIndex {
-        byte_offset: bytes.len() as u64,
-        byte_length: 16,
-        uncompressed_byte_length: 16,
-    };
-    bytes.extend_from_slice(&[255, 0, 0, 255].repeat(4));
-    bytes[80..104].copy_from_slice(&base.as_bytes());
-    bytes[104..128].copy_from_slice(&tail.as_bytes());
+    let bytes = native_container(
+        ktx2::Format::R8G8B8A8_SRGB,
+        2,
+        &[[255, 0, 0, 255].repeat(4), vec![0, 255, 0, 255]],
+    );
     let image = ornis_texture::TextureImage::Ktx2(Ktx2Image::from_bytes(bytes).unwrap());
     let result = image
         .prepare(ornis_texture::TextureRole::BaseColor, E::Bc7)
@@ -162,4 +122,60 @@ fn authored_rgba_levels_are_not_regenerated_or_recolored() {
     assert_eq!(result.encoding(), E::Rgba8);
     assert_eq!(result.levels()[0], [255, 0, 0, 255].repeat(4));
     assert_eq!(result.levels()[1], [0, 255, 0, 255]);
+}
+
+// Write spec-shaped native containers with each format's own DFD and physical
+// block alignment, rather than relabeling the Basis DFD's channel layout.
+fn native_container(format: ktx2::Format, edge: u32, levels: &[Vec<u8>]) -> Vec<u8> {
+    let mut header = ktx2::Reader::new(UASTC).unwrap().header();
+    header.format = Some(format);
+    header.pixel_width = edge;
+    header.pixel_height = edge;
+    header.level_count = levels.len() as u32;
+    header.supercompression_scheme = None;
+    let (basic, _) = ktx2::dfd::Basic::from_format(format).unwrap();
+    let dfd = ktx2::dfd::Block::Basic(basic).to_vec();
+    let dfd_offset = 80 + levels.len() * 24;
+    header.index = ktx2::Index {
+        dfd_byte_offset: dfd_offset as u32,
+        dfd_byte_length: (4 + dfd.len()) as u32,
+        kvd_byte_offset: 0,
+        kvd_byte_length: 0,
+        sgd_byte_offset: 0,
+        sgd_byte_length: 0,
+    };
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.resize(dfd_offset, 0);
+    bytes.extend_from_slice(&header.index.dfd_byte_length.to_le_bytes());
+    bytes.extend_from_slice(&dfd);
+    for (i, level) in levels.iter().enumerate().rev() {
+        bytes.resize(bytes.len().next_multiple_of(16), 0);
+        let entry = ktx2::LevelIndex {
+            byte_offset: bytes.len() as u64,
+            byte_length: level.len() as u64,
+            uncompressed_byte_length: level.len() as u64,
+        };
+        bytes[80 + i * 24..104 + i * 24].copy_from_slice(&entry.as_bytes());
+        bytes.extend_from_slice(level);
+    }
+    bytes
+}
+
+#[test]
+fn zstd_preserves_pixels_and_rejects_a_false_decoded_length() {
+    let compressed = include_bytes!("data/uastc-zstd.ktx2");
+    let expected = Ktx2Image::from_bytes(UASTC)
+        .unwrap()
+        .transcode(E::Rgba8)
+        .unwrap();
+    let actual = Ktx2Image::from_bytes(compressed.as_slice())
+        .unwrap()
+        .transcode(E::Rgba8)
+        .unwrap();
+    assert_eq!(actual.levels(), expected.levels());
+    let mut bad = compressed.to_vec();
+    // This fits the allocation budget but is not the stream's actual length.
+    bad[96..104].copy_from_slice(&16_u64.to_le_bytes());
+    let result = Ktx2Image::from_bytes(bad).and_then(|image| image.transcode(E::Rgba8));
+    assert!(result.is_err());
 }

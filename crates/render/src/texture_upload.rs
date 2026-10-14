@@ -2,7 +2,10 @@
 
 use ornis_texture::{TextureEncoding, TextureImage, TextureLevels};
 
-use crate::textures::{GpuTexture, TextureRole, TextureUploadError, sampler_descriptor_for_role};
+use crate::textures::{
+    GpuTexture, TextureRole, TextureUploadError, sampler_descriptor_for_role,
+    texture_format_for_role,
+};
 
 /// Optional compression features to enable when creating a render device.
 /// Only supported adapter bits are requested; upload checks the enabled device bits.
@@ -42,8 +45,7 @@ pub fn gpu_texture_format(encoding: TextureEncoding, role: TextureRole) -> wgpu:
     use wgpu::TextureFormat as F;
     let srgb = matches!(role, TextureRole::BaseColor | TextureRole::Emissive);
     match (encoding, srgb) {
-        (TextureEncoding::Rgba8, false) => F::Rgba8Unorm,
-        (TextureEncoding::Rgba8, true) => F::Rgba8UnormSrgb,
+        (TextureEncoding::Rgba8, _) => texture_format_for_role(role),
         (TextureEncoding::Bc1, false) => F::Bc1RgbaUnorm,
         (TextureEncoding::Bc1, true) => F::Bc1RgbaUnormSrgb,
         (TextureEncoding::Bc3, false) => F::Bc3RgbaUnorm,
@@ -84,7 +86,8 @@ pub fn upload_image(
             target = native;
         }
     }
-    if !width.is_multiple_of(4) || !height.is_multiple_of(4) {
+    let block = TextureEncoding::Bc7.block_extent();
+    if !width.is_multiple_of(block) || !height.is_multiple_of(block) {
         target = TextureEncoding::Rgba8;
     }
     let levels = image.prepare(role, target)?;
@@ -111,13 +114,14 @@ pub(crate) fn upload_levels(
 ) -> Result<GpuTexture, TextureUploadError> {
     let (width, height) = levels.dimensions();
     validate_device_size(device, width, height)?;
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("material mip chain"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        size,
         mip_level_count: levels.levels().len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -148,7 +152,7 @@ pub(crate) fn upload_levels(
             wgpu::Extent3d {
                 width: w,
                 height: h,
-                depth_or_array_layers: 1,
+                ..size
             },
         );
     }

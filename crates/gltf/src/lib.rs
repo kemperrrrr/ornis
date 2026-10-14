@@ -30,9 +30,9 @@
 //! | `skins[]` + node `skin` | [`LoadedSkin`] (`parents`/`inverse_bind`/`joint_names`) + [`ModelNode::skin`] link | `Skeleton` via `ornis-animation` builders |
 //! | `animations[]` sampler `input`/`output` per `channel.target.path` | [`Model::skel_clips`] ([`LoadedSkelClip`]) + [`Model::anim_clips`] ([`LoadedAnimClip`]); tracks address [`NodeIdx`] | `SkelClip`/`AnimClip` cold lanes via the animation builders |
 //! | `baseColorFactor` / `metallicFactor` / `roughnessFactor` / `emissiveFactor` | [`LoadedMaterial`] scalars | factor kept as [`ornis_core::Metallic`]; `1` → `MaterialDesc::Metal`, else `Dielectric` |
-//! | `baseColorTexture` | [`LoadedMaterial::base_color_texture`] (RGBA8 or KTX2) | albedo bind at upload |
-//! | `metallicRoughnessTexture` | [`LoadedMaterial::metallic_roughness_texture`] (RGBA8 or KTX2; G = roughness, B = metallic) | roughness/metallic bind at upload |
-//! | `emissiveTexture` | [`LoadedMaterial::emissive_texture`] (RGBA8 or KTX2) | emission bind at upload |
+//! | `baseColorTexture` | [`LoadedTextures::base_color_texture`] (RGBA8 or KTX2) | albedo bind at upload |
+//! | `metallicRoughnessTexture` | [`LoadedTextures::metallic_roughness_texture`] (RGBA8 or KTX2; G = roughness, B = metallic) | roughness/metallic bind at upload |
+//! | `emissiveTexture` | [`LoadedTextures::emissive_texture`] (RGBA8 or KTX2) | emission bind at upload |
 //!
 //! # Skip rules (honest: skip + counter, never a stub mesh)
 //!
@@ -296,6 +296,13 @@ pub struct LoadedMaterial {
     pub roughness: f32,
     /// `emissiveFactor` RGB in linear space (default off).
     pub emission: [f32; 3],
+    /// Images grouped by material role, retained independently of scalar factors.
+    pub textures: LoadedTextures,
+}
+
+/// Texture slots of an imported material (RGBA8 pixels or authored KTX2 mips).
+#[derive(Debug, Clone, Default)]
+pub struct LoadedTextures {
     /// Decoded `baseColorTexture` (RGBA8 albedo multiplier), if present.
     pub base_color_texture: Option<LoadedImage>,
     /// Decoded `metallicRoughnessTexture` (RGBA8; green holds roughness,
@@ -321,10 +328,10 @@ impl LoadedMaterial {
     /// Image bound to `role`, if that slot is textured.
     pub fn texture(&self, role: TextureRole) -> Option<&LoadedImage> {
         match role {
-            TextureRole::BaseColor => self.base_color_texture.as_ref(),
-            TextureRole::MetallicRoughness => self.metallic_roughness_texture.as_ref(),
-            TextureRole::Emissive => self.emissive_texture.as_ref(),
-            TextureRole::Normal => self.normal_texture.as_ref(),
+            TextureRole::BaseColor => self.textures.base_color_texture.as_ref(),
+            TextureRole::MetallicRoughness => self.textures.metallic_roughness_texture.as_ref(),
+            TextureRole::Emissive => self.textures.emissive_texture.as_ref(),
+            TextureRole::Normal => self.textures.normal_texture.as_ref(),
         }
     }
 }

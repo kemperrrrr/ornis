@@ -314,7 +314,7 @@ impl TextureCache {
         image: &ornis_texture::TextureImage,
         role: TextureRole,
     ) -> Result<TextureHandle, TextureUploadError> {
-        if let ornis_texture::TextureImage::Rgba8(image) = image {
+        if let Some(image) = image.rgba8() {
             return self.upload_cached(device, queue, image, role);
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

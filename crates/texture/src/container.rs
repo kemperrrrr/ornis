@@ -2,105 +2,9 @@
 
 use std::sync::Arc;
 
-use basisu::{DecodeFlags, SourceFormat, TargetFormat, Transcoder};
+use crate::{MAX_TEXTURE_EDGE, TextureEncoding, TextureLevels, TextureUploadError};
 
-use crate::{CpuImage, MAX_TEXTURE_EDGE, TextureRole, TextureUploadError, generate_mipmaps};
-
-/// Storage encoding independent of color space (the material role selects sRGB).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TextureEncoding {
-    /// Four uncompressed 8-bit channels.
-    Rgba8,
-    /// BC1 RGBA, eight bytes per 4×4 block.
-    Bc1,
-    /// BC3 RGBA, sixteen bytes per 4×4 block.
-    Bc3,
-    /// BC7 RGBA, sixteen bytes per 4×4 block.
-    Bc7,
-    /// ASTC LDR RGBA, sixteen bytes per 4×4 block.
-    Astc4x4,
-    /// ETC2 RGBA8, sixteen bytes per 4×4 block.
-    Etc2,
-}
-
-impl TextureEncoding {
-    /// Texel dimensions of one storage block.
-    pub const fn block_extent(self) -> u32 {
-        if matches!(self, Self::Rgba8) { 1 } else { 4 }
-    }
-
-    /// Bytes in a storage block (or one uncompressed texel).
-    pub const fn block_bytes(self) -> u32 {
-        match self {
-            Self::Rgba8 => 4,
-            Self::Bc1 => 8,
-            _ => 16,
-        }
-    }
-
-    /// Exact payload size, including small mip levels' minimum full block.
-    pub fn byte_len(self, width: u32, height: u32) -> u64 {
-        u64::from(width.div_ceil(self.block_extent()))
-            * u64::from(height.div_ceil(self.block_extent()))
-            * u64::from(self.block_bytes())
-    }
-
-    fn basis_target(self) -> TargetFormat {
-        match self {
-            Self::Rgba8 => TargetFormat::Rgba32,
-            Self::Bc1 => TargetFormat::Bc1Rgb,
-            Self::Bc3 => TargetFormat::Bc3Rgba,
-            Self::Bc7 => TargetFormat::Bc7Rgba,
-            Self::Astc4x4 => TargetFormat::Astc4x4Rgba,
-            Self::Etc2 => TargetFormat::Etc2Rgba,
-        }
-    }
-}
-
-/// Decoded PNG/JPEG pixels or an authored KTX2 chain, never ambiguous bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum TextureImage {
-    /// RGBA8 base level; mipmaps are generated for the material role at upload.
-    Rgba8(CpuImage),
-    /// Retains the encoded file and its authored mips until device selection.
-    Ktx2(Ktx2Image),
-}
-
-impl TextureImage {
-    /// Base dimensions in texels.
-    pub fn dimensions(&self) -> (u32, u32) {
-        match self {
-            Self::Rgba8(image) => (image.width, image.height),
-            Self::Ktx2(image) => image.dimensions(),
-        }
-    }
-
-    /// Decoded pixels, or `None` for a deferred KTX2 payload.
-    pub fn rgba8(&self) -> Option<&CpuImage> {
-        match self {
-            Self::Rgba8(image) => Some(image),
-            Self::Ktx2(_) => None,
-        }
-    }
-
-    /// Produces upload-ready levels. KTX2 mip count and authored filtering are preserved.
-    ///
-    /// `target` selects Basis transcoding; native blocks pass through only if
-    /// it matches their encoding, otherwise they decode to RGBA8.
-    ///
-    /// # Errors
-    /// Invalid RGBA8 data or a failed transcode returns a typed error.
-    pub fn prepare(
-        &self,
-        role: TextureRole,
-        target: TextureEncoding,
-    ) -> Result<TextureLevels, TextureUploadError> {
-        match self {
-            Self::Rgba8(image) => TextureLevels::from_rgba8(image, role),
-            Self::Ktx2(image) => image.transcode(target),
-        }
-    }
-}
+const MAX_FILE_BYTES: usize = 512 * 1024 * 1024;
 
 /// Validated material KTX2 (single 2D image, no arrays, cubemaps or HDR).
 /// Bytes are shared on clone; untrusted dimensions and level lengths are checked
@@ -135,7 +39,7 @@ impl Ktx2Image {
         )
         .map_err(|_| TextureUploadError::InvalidKtx2("header"))?;
         validate_shape(&header)?;
-        if bytes.len() > 512 * 1024 * 1024 {
+        if bytes.len() > MAX_FILE_BYTES {
             return Err(TextureUploadError::InvalidKtx2("file exceeds 512 MiB"));
         }
         let reader = ktx2::Reader::new(bytes.as_ref())
@@ -143,7 +47,7 @@ impl Ktx2Image {
         let encoding = header.format.map(native_encoding).transpose()?;
         validate_levels(&reader, encoding)?;
         if encoding.is_none() {
-            validate_basis(&bytes)?;
+            crate::basis::validate(&reader)?;
         }
         Ok(Self {
             bytes,
@@ -178,21 +82,7 @@ impl Ktx2Image {
         let (encoding, levels) = if let Some(native) = self.encoding {
             native_levels(&reader, native, target)?
         } else {
-            let transcoder =
-                Transcoder::new(self.bytes()).map_err(|_| TextureUploadError::Transcode)?;
-            let target = if transcoder.supports(target.basis_target()) {
-                target
-            } else {
-                TextureEncoding::Rgba8
-            };
-            let levels = (0..transcoder.level_count())
-                .map(|level| {
-                    transcoder
-                        .transcode(level, target.basis_target(), DecodeFlags::HIGH_QUALITY)
-                        .map_err(|_| TextureUploadError::Transcode)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            (target, levels)
+            crate::basis::transcode(&reader, target)?
         };
         TextureLevels::checked(self.width, self.height, encoding, levels)
     }
@@ -262,21 +152,6 @@ fn validate_levels(
     Ok(())
 }
 
-fn validate_basis(bytes: &[u8]) -> Result<(), TextureUploadError> {
-    let transcoder =
-        Transcoder::new(bytes).map_err(|_| TextureUploadError::InvalidKtx2("Basis payload"))?;
-    if !matches!(
-        transcoder.source_format(),
-        SourceFormat::Etc1s | SourceFormat::UastcLdr
-    ) || transcoder.is_video()
-    {
-        return Err(TextureUploadError::UnsupportedKtx2(
-            "only ETC1S and UASTC LDR Basis materials",
-        ));
-    }
-    Ok(())
-}
-
 fn native_levels(
     reader: &ktx2::Reader<&[u8]>,
     native: TextureEncoding,
@@ -327,66 +202,6 @@ fn decode_blocks(
             [r, g, b, a]
         })
         .collect())
-}
-
-/// Validated, tightly packed mips in largest-to-smallest order.
-#[derive(Debug)]
-pub struct TextureLevels {
-    width: u32,
-    height: u32,
-    encoding: TextureEncoding,
-    levels: Vec<Vec<u8>>,
-}
-
-impl TextureLevels {
-    /// Generates a complete RGBA8 chain using the material role's filtering.
-    ///
-    /// # Errors
-    /// Rejects invalid base dimensions or pixel length.
-    pub fn from_rgba8(image: &CpuImage, role: TextureRole) -> Result<Self, TextureUploadError> {
-        let levels = generate_mipmaps(image, role)?
-            .into_iter()
-            .map(|l| l.pixels)
-            .collect();
-        Self::checked(image.width, image.height, TextureEncoding::Rgba8, levels)
-    }
-
-    fn checked(
-        width: u32,
-        height: u32,
-        encoding: TextureEncoding,
-        levels: Vec<Vec<u8>>,
-    ) -> Result<Self, TextureUploadError> {
-        for (i, level) in levels.iter().enumerate() {
-            if level.len() as u64 != encoding.byte_len((width >> i).max(1), (height >> i).max(1)) {
-                return Err(TextureUploadError::InvalidKtx2("transcoded mip length"));
-            }
-        }
-        Ok(Self {
-            width,
-            height,
-            encoding,
-            levels,
-        })
-    }
-
-    /// Base size in texels.
-    pub fn dimensions(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-    /// GPU storage encoding.
-    pub fn encoding(&self) -> TextureEncoding {
-        self.encoding
-    }
-    /// All tightly packed mip payloads, largest first.
-    pub fn levels(&self) -> &[Vec<u8>] {
-        &self.levels
-    }
-    /// Exact texture payload bytes, including block-rounded small mips.
-    /// Driver allocation granularity and metadata are not included.
-    pub fn byte_len(&self) -> u64 {
-        self.levels.iter().map(|l| l.len() as u64).sum()
-    }
 }
 
 #[cfg(test)]

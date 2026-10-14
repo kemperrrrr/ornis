@@ -2,7 +2,9 @@
 
 `ornis-texture` is a GPU-independent seam shared by `ornis-gltf` and
 `ornis-render`. `LoadedImage` is now `TextureImage::{Rgba8, Ktx2}` rather than
-an RGBA-only struct. PNG/JPEG callers can inspect `image.rgba8()`; callers
+an RGBA-only struct. Material image fields are grouped under
+`LoadedMaterial::textures` (`LoadedTextures`); `material.texture(role)` remains
+the role-based accessor. PNG/JPEG callers can inspect `image.rgba8()`; callers
 uploading imported images should use `TextureCache::upload_image_cached`.
 The existing `CpuImage` / `upload_texture` / `upload_cached` API remains.
 
@@ -19,6 +21,8 @@ The existing `CpuImage` / `upload_texture` / `upload_cached` API remains.
 - ETC1S/BasisLZ and UASTC LDR (uncompressed or Zstd) transcode to BC7, ASTC
   4×4, ETC2 RGBA8, or RGBA8, in that preference order. Selection uses the
   **enabled device** features, not just adapter advertisement.
+  Basis' bundled Zstd feature is disabled: inflation uses `ruzstd >= 0.9.1`
+  (RUSTSEC-2026-0344 fixed), bounded output and a per-mip frame-window limit.
 - Native RGBA8, BC1 RGBA, BC3, BC7, ASTC 4×4 LDR and ETC2 RGBA8 pass through
   when supported. Unsupported native compression decodes all levels to
   RGBA8. Compressed base dimensions not divisible by four use RGBA8 to

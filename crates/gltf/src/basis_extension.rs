@@ -95,6 +95,7 @@ mod tests {
         let model = crate::load_slice(&serde_json::to_vec(&doc).unwrap()).unwrap();
         let image = model.primitives[0]
             .material
+            .textures
             .base_color_texture
             .as_ref()
             .unwrap();
@@ -116,9 +117,22 @@ mod tests {
     fn optional_basis_overrides_core_fallback_and_external_files_resolve() {
         let mut doc = document();
         doc.as_object_mut().unwrap().remove("extensionsRequired");
-        doc["textures"][0]["source"] = json!(0);
+        let fallback = doc["images"][0].clone();
+        doc["images"].as_array_mut().unwrap().push(fallback);
+        doc["textures"][0]["source"] = json!(1);
         doc["images"][0] = json!({"uri": "texture.ktx2", "mimeType": "image/ktx2"});
         let bytes = serde_json::to_vec(&doc).unwrap();
+        assert_eq!(
+            parse(&bytes)
+                .unwrap()
+                .document
+                .textures()
+                .next()
+                .unwrap()
+                .source()
+                .index(),
+            0
+        );
         assert!(matches!(
             crate::load_slice(&bytes),
             Err(ImportError::ExternalBuffer(_))
@@ -136,7 +150,7 @@ mod tests {
         std::fs::write(dir.join("scene.gltf"), bytes).unwrap();
         let model = crate::load_path(&dir.join("scene.gltf")).unwrap();
         assert!(matches!(
-            model.primitives[0].material.base_color_texture,
+            model.primitives[0].material.textures.base_color_texture,
             Some(LoadedImage::Ktx2(_))
         ));
         std::fs::remove_dir_all(dir).unwrap();
@@ -155,7 +169,7 @@ mod tests {
         doc["materials"][0]["normalTexture"] = json!({"index": 0});
         let model = crate::load_slice(&serde_json::to_vec(&doc).unwrap()).unwrap();
         assert!(matches!(
-            model.primitives[0].material.normal_texture,
+            model.primitives[0].material.textures.normal_texture,
             Some(LoadedImage::Ktx2(_))
         ));
     }

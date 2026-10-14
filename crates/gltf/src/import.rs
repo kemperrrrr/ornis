@@ -683,12 +683,14 @@ fn read_material(primitive: &Primitive<'_>, images: &[LoadedImage]) -> LoadedMat
         metallic: pbr.metallic_factor(),
         roughness: pbr.roughness_factor(),
         emission: material.emissive_factor(),
-        base_color_texture: texture_image(images, pbr.base_color_texture()),
-        metallic_roughness_texture: texture_image(images, pbr.metallic_roughness_texture()),
-        emissive_texture: texture_image(images, material.emissive_texture()),
-        normal_texture: material
-            .normal_texture()
-            .and_then(|t| images.get(t.texture().source().index()).cloned()),
+        textures: crate::LoadedTextures {
+            base_color_texture: texture_image(images, pbr.base_color_texture()),
+            metallic_roughness_texture: texture_image(images, pbr.metallic_roughness_texture()),
+            emissive_texture: texture_image(images, material.emissive_texture()),
+            normal_texture: material
+                .normal_texture()
+                .and_then(|t| images.get(t.texture().source().index()).cloned()),
+        },
     }
 }
 
@@ -1559,10 +1561,14 @@ mod tests {
         assert_eq!(material.emission, [0.2, 0.0, 0.1]);
         assert!(!material.is_metallic(), "0.3 is under the legacy cut");
         let image = material
+            .textures
             .metallic_roughness_texture
             .as_ref()
             .expect("metallic-roughness still bound");
-        assert_eq!(image.pixels, vec![0, 128, 64, 255]);
+        assert_eq!(
+            image.rgba8().expect("decoded PNG").pixels,
+            vec![0, 128, 64, 255]
+        );
     }
 
     #[test]

@@ -36,8 +36,7 @@ fn sample(
     queue: &wgpu::Queue,
     image: &GpuTexture,
     view: &wgpu::TextureView,
-    size: u32,
-    level: Option<u32>,
+    (size, level): (u32, Option<u32>),
 ) -> Vec<u8> {
     let source = match level {
         Some(mip) => format!(
@@ -145,7 +144,7 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
     let image = CpuImage::from_rgba8(256, 256, pixels).unwrap();
     let uploaded = upload_texture(&device, &queue, &image, TextureRole::BaseColor).unwrap();
     assert_eq!(uploaded.texture.mip_level_count(), 9);
-    let pixels = sample(&device, &queue, &uploaded, &uploaded.view, 128, None);
+    let pixels = sample(&device, &queue, &uploaded, &uploaded.view, (128, None));
     let golden = include_bytes!("data/tilted_checker.rgba");
     assert_eq!(pixels.len(), golden.len());
     let mismatches = pixels
@@ -164,7 +163,7 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
         mip_level_count: Some(1),
         ..Default::default()
     });
-    let control = sample(&device, &queue, &uploaded, &base_only, 128, None);
+    let control = sample(&device, &queue, &uploaded, &base_only, (128, None));
     let unstable = control
         .as_chunks::<4>()
         .0
@@ -231,8 +230,7 @@ fn verify_ktx_mips(
             queue,
             &uploaded,
             &uploaded.view,
-            (40 >> mip).max(1),
-            Some(mip as u32),
+            ((40 >> mip).max(1), Some(mip as u32)),
         );
         let error: u64 = pixels
             .iter()

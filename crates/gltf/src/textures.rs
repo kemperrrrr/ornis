@@ -249,14 +249,15 @@ mod tests {
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
         let material = &scene.primitives[0].material;
         let image = material
+            .textures
             .base_color_texture
             .as_ref()
             .expect("base color bound");
         assert_eq!(image.rgba8().expect("RGBA8").width, 2);
         assert_eq!(image.rgba8().expect("RGBA8").height, 2);
         assert_eq!(image.rgba8().expect("RGBA8").pixels, rgba);
-        assert!(material.metallic_roughness_texture.is_none());
-        assert!(material.emissive_texture.is_none());
+        assert!(material.textures.metallic_roughness_texture.is_none());
+        assert!(material.textures.emissive_texture.is_none());
         assert_eq!(
             material
                 .texture(TextureRole::BaseColor)
@@ -286,7 +287,11 @@ mod tests {
         fixture.emissive_texture = Some(0);
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
         let material = &scene.primitives[0].material;
-        let image = material.emissive_texture.as_ref().expect("emissive bound");
+        let image = material
+            .textures
+            .emissive_texture
+            .as_ref()
+            .expect("emissive bound");
         assert_eq!(
             (
                 image.rgba8().expect("RGBA8").width,
@@ -301,7 +306,7 @@ mod tests {
                 .map(|i| i.rgba8().expect("RGBA8").height),
             Some(1)
         );
-        assert!(material.base_color_texture.is_none());
+        assert!(material.textures.base_color_texture.is_none());
     }
 
     #[test]
@@ -321,6 +326,7 @@ mod tests {
         let scene = load_slice(&build_glb(&fixture)).expect("textured parses");
         let material = &scene.primitives[0].material;
         let image = material
+            .textures
             .metallic_roughness_texture
             .as_ref()
             .expect("metallic-roughness bound");
@@ -367,6 +373,7 @@ mod tests {
         let material = &scene.primitives[0].material;
         assert_eq!(
             material
+                .textures
                 .base_color_texture
                 .as_ref()
                 .map(|i| &i.rgba8().expect("RGBA8").pixels),
@@ -374,6 +381,7 @@ mod tests {
         );
         assert_eq!(
             material
+                .textures
                 .emissive_texture
                 .as_ref()
                 .map(|i| &i.rgba8().expect("RGBA8").pixels),
@@ -420,6 +428,7 @@ mod tests {
         let scene = load_path(&dir.join("tri.glb")).expect("external image loads");
         let image = scene.primitives[0]
             .material
+            .textures
             .base_color_texture
             .as_ref()
             .expect("base color bound");
@@ -457,9 +466,9 @@ mod tests {
     fn untextured_material_has_no_images() {
         let scene = load_triangle();
         let material = &scene.primitives[0].material;
-        assert!(material.base_color_texture.is_none());
-        assert!(material.metallic_roughness_texture.is_none());
-        assert!(material.emissive_texture.is_none());
+        assert!(material.textures.base_color_texture.is_none());
+        assert!(material.textures.metallic_roughness_texture.is_none());
+        assert!(material.textures.emissive_texture.is_none());
         assert!(material.texture(TextureRole::BaseColor).is_none());
         assert!(material.texture(TextureRole::MetallicRoughness).is_none());
         assert!(material.texture(TextureRole::Emissive).is_none());

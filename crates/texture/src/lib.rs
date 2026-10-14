@@ -2,10 +2,15 @@
 
 #![warn(missing_docs)]
 
+mod basis;
 mod container;
+mod encoding;
+mod image;
 mod mipmaps;
 
-pub use container::{Ktx2Image, TextureEncoding, TextureImage, TextureLevels};
+pub use container::Ktx2Image;
+pub use encoding::TextureEncoding;
+pub use image::{TextureImage, TextureLevels};
 pub use mipmaps::generate_mipmaps;
 
 /// Maximum texture edge in pixels accepted by [`CpuImage::validate`].

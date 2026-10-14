@@ -151,10 +151,7 @@ mod tests {
             metallic: 1.0,
             roughness: 0.2,
             emission: [0.0, 0.0, 0.0],
-            base_color_texture: None,
-            metallic_roughness_texture: None,
-            emissive_texture: None,
-            normal_texture: None,
+            textures: Default::default(),
         }
     }
 
