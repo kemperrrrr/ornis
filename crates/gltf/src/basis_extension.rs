@@ -37,11 +37,30 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Gltf, ImportError> {
         texture.source = gltf::json::Index::new(source);
     }
     root.extensions_required.retain(|name| name != EXTENSION);
+    validate_attribute_indices(&root)?;
     let document = Document::from_json(root).map_err(parse_error)?;
     Ok(Gltf {
         document,
         blob: parsed.blob,
     })
+}
+
+// gltf-json 1.4.1 reports an invalid attribute index, then its POSITION
+// min/max hook indexes the same accessor unchecked before returning errors.
+// Guard that path until upstream publishes the bounds-checked validator.
+fn validate_attribute_indices(root: &gltf::json::Root) -> Result<(), ImportError> {
+    let invalid_index = root
+        .meshes
+        .iter()
+        .flat_map(|mesh| &mesh.primitives)
+        .flat_map(|primitive| primitive.attributes.values())
+        .any(|index| index.value() >= root.accessors.len());
+    if invalid_index {
+        return Err(ImportError::Parse {
+            message: "mesh attribute accessor index out of bounds".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// The extension specifically requires KTX2, not just any decodable image.
