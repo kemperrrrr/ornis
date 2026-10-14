@@ -40,6 +40,59 @@ pub enum CullerError {
     },
 }
 
+/// One dirty run of the resident staging buffer: `count` records
+/// starting at `start` (record indices, not bytes) whose content differs
+/// from the last uploaded frame and must be re-written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirtyRange {
+    /// First differing record.
+    pub(crate) start: u32,
+    /// Records in the run.
+    pub(crate) count: u32,
+}
+
+/// Contiguous record runs where `next` differs from `prev` (compared
+/// byte-wise): the tail past the shared prefix counts as dirty on either
+/// side (growth uploads the extension, shrinkage leaves a stale tail the
+/// dispatch never reads — `params.count` bounds the threads). Empty when
+/// the frames are identical, so a static scene uploads nothing.
+pub(crate) fn dirty_ranges(prev: &[PerObjectGpu], next: &[PerObjectGpu]) -> Vec<DirtyRange> {
+    let shared = prev.len().min(next.len());
+    let mut ranges = Vec::new();
+    let mut run: Option<DirtyRange> = None;
+    let flush = |run: &mut Option<DirtyRange>, ranges: &mut Vec<DirtyRange>| {
+        if let Some(range) = run.take() {
+            ranges.push(range);
+        }
+    };
+    for index in 0..shared {
+        if bytemuck::bytes_of(&prev[index]) == bytemuck::bytes_of(&next[index]) {
+            flush(&mut run, &mut ranges);
+        } else if let Some(range) = run.as_mut() {
+            range.count += 1;
+        } else {
+            run = Some(DirtyRange {
+                start: index as u32,
+                count: 1,
+            });
+        }
+    }
+    flush(&mut run, &mut ranges);
+    if next.len() > shared {
+        let tail = (next.len() - shared) as u32;
+        match ranges.last_mut() {
+            Some(last) if last.start + last.count == shared as u32 => {
+                last.count += tail;
+            }
+            _ => ranges.push(DirtyRange {
+                start: shared as u32,
+                count: tail,
+            }),
+        }
+    }
+    ranges
+}
+
 /// Owned GPU resources for one culling dispatch: source staging, the
 /// dense compacted destination, the indirect-args buffer and the
 /// compute pipeline of [`CULL_COMPUTE_WGSL`].
@@ -69,6 +122,21 @@ pub struct Culler {
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     src_buffer: wgpu::Buffer,
+    /// Resident CPU-side staging: `prev` is the last uploaded frame,
+    /// `next` is reused across frames (no per-frame allocation), so a
+    /// static scene re-uploads nothing — only the [`dirty_ranges`]
+    /// between the frames are written.
+    staging: std::sync::Mutex<CullerStaging>,
+}
+
+/// Double-buffered reusable staging of [`Culler`]: both vectors keep
+/// their allocation across frames and swap roles every [`Culler::compact`].
+#[derive(Debug, Default)]
+struct CullerStaging {
+    /// Last uploaded frame (diff baseline).
+    prev: Vec<PerObjectGpu>,
+    /// Frame under construction (reused, never reallocated per frame).
+    next: Vec<PerObjectGpu>,
 }
 
 /// One buffer binding of [`CULL_COMPUTE_WGSL`].
@@ -213,13 +281,14 @@ impl Culler {
             bind_group,
             params_buffer,
             src_buffer,
+            staging: std::sync::Mutex::new(CullerStaging::default()),
         })
     }
 
-    // qual:api — production entry for the gbuffer/shadow wiring slice;
-    // in-tree callers are tests until that slice lands.
-    /// Runs one culling frame: stages `instances` into the source
-    /// buffer, packs the [`CullParams`](super::CullParams) uniform of `view_proj`,
+    /// Runs one culling frame: stages `instances` into the resident
+    /// source buffer (re-writing only the [`dirty_ranges`] since the
+    /// last frame, so a static scene uploads nothing), packs the
+    /// [`CullParams`](super::CullParams) uniform of `view_proj`,
     /// pre-writes the indirect args with `index_count` and a zero
     /// instance counter, and dispatches the compaction pass. The
     /// counter reset is part of the pre-write, so consecutive frames
@@ -243,17 +312,31 @@ impl Culler {
                 capacity: self.capacity,
             });
         }
-        let staged = instances
-            .iter()
-            .map(|instance| {
+        let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
+        {
+            let mut staging = self
+                .staging
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let CullerStaging { prev, next } = &mut *staging;
+            next.clear();
+            next.extend(instances.iter().map(|instance| {
                 let mut record = PerObjectGpu::zeroed();
                 record.model = instance.model_matrix.to_cols_array_2d();
                 record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
                 record.material_index = instance.material_index;
                 record
-            })
-            .collect::<Vec<_>>();
-        queue.write_buffer(&self.src_buffer, 0, bytemuck::cast_slice(&staged));
+            }));
+            for range in dirty_ranges(prev, next) {
+                let start = range.start as usize;
+                queue.write_buffer(
+                    &self.src_buffer,
+                    start as u64 * record_bytes,
+                    bytemuck::cast_slice(&next[start..start + range.count as usize]),
+                );
+            }
+            std::mem::swap(prev, next);
+        }
         let params = cull_params(view_proj, instances.len() as u32);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         let args = DrawIndexedIndirectArgs::compacted(index_count, 0);

@@ -276,6 +276,7 @@ mod tests {
     use crate::extraction::cull_frame_upload;
     use crate::extraction::extract_render_data;
     use crate::renderer::PerObjectGpu;
+    use bytemuck::Zeroable;
     use ornis_assets::scene::MaterialDesc;
     use ornis_assets::scene::MeshDesc;
     use ornis_assets::scene::TransformDesc;
@@ -720,5 +721,120 @@ mod tests {
                 capacity: 3,
             })
         );
+    }
+
+    /// Staging record with translation `x` (diff baseline builder for the
+    /// resident-upload tests below).
+    fn staged_record(x: f32) -> PerObjectGpu {
+        let mut record = PerObjectGpu::zeroed();
+        record.model = Mat4::from_translation(glam::Vec3::new(x, 0.0, 0.0)).to_cols_array_2d();
+        record.normal_matrix = Mat4::IDENTITY.to_cols_array_2d();
+        record
+    }
+
+    #[test]
+    fn dirty_ranges_cover_first_frame_and_steady_state() {
+        use super::culler::{DirtyRange, dirty_ranges};
+        let frame: Vec<PerObjectGpu> = (0..4).map(|x| staged_record(x as f32)).collect();
+        assert_eq!(
+            dirty_ranges(&[], &frame),
+            vec![DirtyRange { start: 0, count: 4 }],
+            "first frame uploads everything"
+        );
+        assert!(
+            dirty_ranges(&frame, &frame).is_empty(),
+            "identical frames upload nothing"
+        );
+        assert!(dirty_ranges(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn dirty_ranges_isolate_changed_runs() {
+        use super::culler::{DirtyRange, dirty_ranges};
+        let prev: Vec<PerObjectGpu> = (0..6).map(|x| staged_record(x as f32)).collect();
+        let mut one = prev.clone();
+        one[2] = staged_record(100.0);
+        assert_eq!(
+            dirty_ranges(&prev, &one),
+            vec![DirtyRange { start: 2, count: 1 }]
+        );
+        let mut two = prev.clone();
+        two[1] = staged_record(100.0);
+        two[4] = staged_record(200.0);
+        assert_eq!(
+            dirty_ranges(&prev, &two),
+            vec![
+                DirtyRange { start: 1, count: 1 },
+                DirtyRange { start: 4, count: 1 },
+            ]
+        );
+        let mut adjacent = prev.clone();
+        adjacent[3] = staged_record(100.0);
+        adjacent[4] = staged_record(200.0);
+        assert_eq!(
+            dirty_ranges(&prev, &adjacent),
+            vec![DirtyRange { start: 3, count: 2 }],
+            "adjacent changes merge into one write"
+        );
+    }
+
+    #[test]
+    fn dirty_ranges_handle_growth_and_shrinkage() {
+        use super::culler::{DirtyRange, dirty_ranges};
+        let prev: Vec<PerObjectGpu> = (0..3).map(|x| staged_record(x as f32)).collect();
+        let mut grown: Vec<PerObjectGpu> = prev.clone();
+        grown.push(staged_record(3.0));
+        grown.push(staged_record(4.0));
+        assert_eq!(
+            dirty_ranges(&prev, &grown),
+            vec![DirtyRange { start: 3, count: 2 }],
+            "growth uploads the extension"
+        );
+        let mut grown_changed = prev.clone();
+        grown_changed[2] = staged_record(100.0);
+        grown_changed.push(staged_record(3.0));
+        assert_eq!(
+            dirty_ranges(&prev, &grown_changed),
+            vec![DirtyRange { start: 2, count: 2 }],
+            "a trailing change merges with the extension"
+        );
+        assert!(
+            dirty_ranges(&grown, &prev).is_empty(),
+            "shrinkage writes nothing (the tail is never read)"
+        );
+    }
+
+    #[test]
+    fn gpu_compaction_tracks_moved_instances() {
+        // The resident upload must track changes: move one visible
+        // instance offscreen and the next compact must match the CPU
+        // reference of the moved scene, not the first frame.
+        let Some((device, queue)) = try_device() else {
+            return;
+        };
+        let (mut instances, view_proj, _) = cull_test_scene();
+        let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
+        culler
+            .compact(&device, &queue, &view_proj, 42, &instances)
+            .expect("first frame fits");
+        instances[0].model_matrix = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
+        let expected = compact_visible_indices(&instances, &view_proj)
+            .iter()
+            .map(|index| instances[*index as usize].model_matrix.w_axis.to_array())
+            .collect::<Vec<[f32; 4]>>();
+        culler
+            .compact(&device, &queue, &view_proj, 42, &instances)
+            .expect("moved frame fits");
+        let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
+            .expect("args readback succeeds");
+        assert_eq!(args.instance_count, expected.len() as u32);
+        let records =
+            cull_test_read_records(&device, &queue, &culler.visible_buffer, instances.len())
+                .expect("dst readback succeeds");
+        let got = records[..expected.len()]
+            .iter()
+            .map(|record| record.model[3])
+            .collect::<Vec<[f32; 4]>>();
+        assert_same_visible_set(&got, &expected);
     }
 }
