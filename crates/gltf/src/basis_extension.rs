@@ -85,7 +85,10 @@ mod tests {
         doc["extensionsRequired"] = json!([EXTENSION]);
         doc["images"] = json!([{"uri": format!("data:image/ktx2;base64,{}", encode(IMAGE))}]);
         doc["textures"] = json!([{"extensions": {EXTENSION: {"source": 0}}}]);
-        doc["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"] = json!({"index": 0});
+        // The bare triangle fixture has no material table. Add the material
+        // and its primitive binding explicitly before assigning texture slots.
+        doc["materials"] = json!([{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}]);
+        doc["meshes"][0]["primitives"][0]["material"] = json!(0);
         doc
     }
 

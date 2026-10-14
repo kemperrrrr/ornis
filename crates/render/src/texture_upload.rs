@@ -81,10 +81,10 @@ pub fn upload_image(
     let (width, height) = image.dimensions();
     validate_device_size(device, width, height)?;
     let mut target = preferred_texture_encoding(device.features());
-    if let TextureImage::Ktx2(ktx) = image {
-        if let Some(native) = ktx.encoding().filter(|&e| supports(e, device.features())) {
-            target = native;
-        }
+    if let TextureImage::Ktx2(ktx) = image
+        && let Some(native) = ktx.encoding().filter(|&e| supports(e, device.features()))
+    {
+        target = native;
     }
     let block = TextureEncoding::Bc7.block_extent();
     if !width.is_multiple_of(block) || !height.is_multiple_of(block) {
