@@ -277,8 +277,8 @@ mod tests {
     use crate::camera::CameraView;
     use crate::extraction::cull_frame_upload;
     use crate::extraction::extract_render_data;
+    use crate::renderer::MaterialIdx;
     use crate::renderer::PerObjectGpu;
-    use bytemuck::Zeroable;
     use ornis_assets::scene::MaterialDesc;
     use ornis_assets::scene::MeshDesc;
     use ornis_assets::scene::TransformDesc;
@@ -751,83 +751,104 @@ mod tests {
         );
     }
 
-    /// Staging record with translation `x` (diff baseline builder for the
-    /// resident-upload tests below).
-    fn staged_record(x: f32) -> PerObjectGpu {
-        let mut record = PerObjectGpu::zeroed();
-        record.model = Mat4::from_translation(glam::Vec3::new(x, 0.0, 0.0)).to_cols_array_2d();
-        record.normal_matrix = Mat4::IDENTITY.to_cols_array_2d();
-        record
+    /// Test instance with translation `x` (staging input builder for
+    /// the resident-upload tests below).
+    fn test_instance(x: f32) -> InstanceData {
+        InstanceData {
+            model_matrix: Mat4::from_translation(glam::Vec3::new(x, 0.0, 0.0)),
+            normal_matrix: Mat4::IDENTITY,
+            material_index: MaterialIdx::from_raw(0),
+        }
+    }
+
+    /// One fused staging frame: converts `instances` into a fresh
+    /// buffer against `prev`, returning the buffer and its dirty runs.
+    fn stage_frame(
+        prev: &[PerObjectGpu],
+        instances: &[InstanceData],
+    ) -> (Vec<PerObjectGpu>, Vec<super::culler::DirtyRange>) {
+        let mut next = Vec::new();
+        let ranges = super::culler::stage_next_instances(prev, &mut next, instances);
+        (next, ranges)
+    }
+
+    /// Base scene of `count` translated instances plus its staged
+    /// previous frame (shared arrange-step of the staging tests).
+    fn stage_base(count: usize) -> (Vec<InstanceData>, Vec<PerObjectGpu>) {
+        let base: Vec<InstanceData> = (0..count).map(|x| test_instance(x as f32)).collect();
+        let (prev, _) = stage_frame(&[], &base);
+        (base, prev)
     }
 
     #[test]
-    fn dirty_ranges_cover_first_frame_and_steady_state() {
-        use super::culler::{DirtyRange, dirty_ranges};
-        let frame: Vec<PerObjectGpu> = (0..4).map(|x| staged_record(x as f32)).collect();
+    fn staging_covers_first_frame_and_steady_state() {
+        use super::culler::DirtyRange;
+        let (instances, _) = stage_base(4);
+        let (next, ranges) = stage_frame(&[], &instances);
         assert_eq!(
-            dirty_ranges(&[], &frame),
+            ranges,
             vec![DirtyRange { start: 0, count: 4 }],
             "first frame uploads everything"
         );
-        assert!(
-            dirty_ranges(&frame, &frame).is_empty(),
-            "identical frames upload nothing"
-        );
-        assert!(dirty_ranges(&[], &[]).is_empty());
+        let (_, steady) = stage_frame(&next, &instances);
+        assert!(steady.is_empty(), "identical frames upload nothing");
+        let (_, empty) = stage_frame(&[], &[]);
+        assert!(empty.is_empty());
     }
 
     #[test]
-    fn dirty_ranges_isolate_changed_runs() {
-        use super::culler::{DirtyRange, dirty_ranges};
-        let prev: Vec<PerObjectGpu> = (0..6).map(|x| staged_record(x as f32)).collect();
-        let mut one = prev.clone();
-        one[2] = staged_record(100.0);
+    fn staging_isolates_changed_runs() {
+        use super::culler::DirtyRange;
+        let (base, prev) = stage_base(6);
+        let mut one = base.clone();
+        one[2] = test_instance(100.0);
         assert_eq!(
-            dirty_ranges(&prev, &one),
+            stage_frame(&prev, &one).1,
             vec![DirtyRange { start: 2, count: 1 }]
         );
-        let mut two = prev.clone();
-        two[1] = staged_record(100.0);
-        two[4] = staged_record(200.0);
+        let mut two = base.clone();
+        two[1] = test_instance(100.0);
+        two[4] = test_instance(200.0);
         assert_eq!(
-            dirty_ranges(&prev, &two),
+            stage_frame(&prev, &two).1,
             vec![
                 DirtyRange { start: 1, count: 1 },
                 DirtyRange { start: 4, count: 1 },
             ]
         );
-        let mut adjacent = prev.clone();
-        adjacent[3] = staged_record(100.0);
-        adjacent[4] = staged_record(200.0);
+        let mut adjacent = base.clone();
+        adjacent[3] = test_instance(100.0);
+        adjacent[4] = test_instance(200.0);
         assert_eq!(
-            dirty_ranges(&prev, &adjacent),
+            stage_frame(&prev, &adjacent).1,
             vec![DirtyRange { start: 3, count: 2 }],
             "adjacent changes merge into one write"
         );
     }
 
     #[test]
-    fn dirty_ranges_handle_growth_and_shrinkage() {
-        use super::culler::{DirtyRange, dirty_ranges};
-        let prev: Vec<PerObjectGpu> = (0..3).map(|x| staged_record(x as f32)).collect();
-        let mut grown: Vec<PerObjectGpu> = prev.clone();
-        grown.push(staged_record(3.0));
-        grown.push(staged_record(4.0));
+    fn staging_handles_growth_and_shrinkage() {
+        use super::culler::DirtyRange;
+        let (base, prev) = stage_base(3);
+        let mut grown = base.clone();
+        grown.push(test_instance(3.0));
+        grown.push(test_instance(4.0));
         assert_eq!(
-            dirty_ranges(&prev, &grown),
+            stage_frame(&prev, &grown).1,
             vec![DirtyRange { start: 3, count: 2 }],
             "growth uploads the extension"
         );
-        let mut grown_changed = prev.clone();
-        grown_changed[2] = staged_record(100.0);
-        grown_changed.push(staged_record(3.0));
+        let mut grown_changed = base.clone();
+        grown_changed[2] = test_instance(100.0);
+        grown_changed.push(test_instance(3.0));
         assert_eq!(
-            dirty_ranges(&prev, &grown_changed),
+            stage_frame(&prev, &grown_changed).1,
             vec![DirtyRange { start: 2, count: 2 }],
             "a trailing change merges with the extension"
         );
+        let (grown_prev, _) = stage_frame(&prev, &grown);
         assert!(
-            dirty_ranges(&grown, &prev).is_empty(),
+            stage_frame(&grown_prev, &base).1.is_empty(),
             "shrinkage writes nothing (the tail is never read)"
         );
     }
