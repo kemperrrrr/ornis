@@ -110,10 +110,15 @@ the checker averages to the same linear-light 188 at every level the plane
 samples, so the golden pins the mip chain and not the anisotropy. A second
 footprint gate reuses that plane with 32-texel bands along `v`: the isotropic
 pass averages them to the same 188, while `AnisotropyLevel::DEFAULT` keeps
-full-contrast bands in the lower, stretched half, where the footprint's short
-axis sizes the level. On an adapter without `ANISOTROPIC_FILTERING` that gate
-instead asserts the default-level image is byte-identical to the isotropic one
-(`wgpu`'s degradation contract, exercised as behavior rather than as an error).
+black/white stripes in the lower, stretched half, where the footprint's short
+axis sizes the level. Both renders are counted on one interior window (the
+plane's silhouette is excluded — derivatives are one-sided there, the same
+boundary the golden gate budgets), and the gate requires the anisotropic pass
+to produce many more band-coloured pixels than the isotropic one, so a level
+of 1 and a missing mip chain both fail. On an adapter without
+`ANISOTROPIC_FILTERING` it instead asserts the default-level image is
+byte-identical to the isotropic one (`wgpu`'s degradation contract, exercised
+as behavior rather than as an error).
 
 `GpuTexture::payload_bytes` sums the exact uploaded mip payloads. CPU tests
 verify these counts from actual transcoding, including block-rounded tails:

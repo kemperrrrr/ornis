@@ -187,14 +187,22 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
 /// Footprint gate for the anisotropic material sampler (`#122`): the same
 /// tilted plane, but with 32-texel bands along `v` instead of a checker.
 ///
-/// The plane repeats the 256² texture 32 times, so its footprints are tens to
-/// hundreds of texels long and the band period (64 texels) is averaged away
-/// from mip level 6 on. Bands are constant along `u`, which makes the two
-/// samplers analytically predictable: trilinear filtering picks the level of
-/// the *longest* footprint axis (≥ 6 everywhere here) and the plane renders
-/// flat. Anisotropic sampling sizes the level by the *short* axis instead
-/// (≈ 3–5 in the lower half) and its samples run along the constant `u`, so
-/// those rows keep black/white bands at full contrast.
+/// The plane repeats the 256² texture 32 times, so a footprint covers tens of
+/// texels horizontally while its vertical extent stays near ten; the band
+/// period (64 texels) is already inside one texel from mip 6 on. That makes
+/// the two samplers analytically predictable: trilinear filtering picks the
+/// level of the *long* footprint axis (≥ 6.2 everywhere in the lower half) and
+/// averages the plane to the flat 188 — the same level the golden gate pins.
+/// Anisotropic sampling sizes the level by the *short* axis instead (3.2–4.9
+/// there) and takes its extra samples along the long one, which is constant
+/// inside a band, so those rows keep black/white stripes.
+///
+/// Both renders are measured on the same interior window (the plane's
+/// silhouette is excluded: per-quad derivatives are one-sided there and no
+/// sampler's level means anything — the golden gate budgets that same
+/// boundary). The gate then asks the anisotropic pass to produce many more
+/// band-coloured pixels than the isotropic one, which fails for a level of 1
+/// (identical images) as well as for a missing mip chain (both striped).
 #[test]
 fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
     let Some((adapter, device, queue)) = device() else {
@@ -231,30 +239,47 @@ fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
         &anisotropic.view,
         (128, None),
     );
-    // The isotropic pass defines the plane: its covered pixels all sit at the
-    // flat 188, so the black clear is the only 0. The lower half is the
-    // stretched one: there the horizontal footprint is several times the
-    // vertical one, which is where the two levels part ways.
-    let stretched: Vec<usize> = (0..128 * 128)
-        .filter(|&i| i / 128 >= 64 && flat[i * 4] != 0)
-        .collect();
+    // Interior of the lower (stretched) half, eroded two pixels sideways and
+    // one vertically: the isotropic pass defines the plane, so a covered
+    // pixel with covered neighbours is a pixel whose footprint is the plane's
+    // own, not an edge derivative artifact.
+    let covered = |x: usize, y: usize| flat[(y * 128 + x) * 4] != 0;
+    let mut window: Vec<usize> = Vec::new();
+    for y in 64..121 {
+        for x in 2..126 {
+            let inside = covered(x, y)
+                && covered(x - 1, y)
+                && covered(x + 1, y)
+                && covered(x - 2, y)
+                && covered(x + 2, y)
+                && covered(x, y - 1)
+                && covered(x, y + 1);
+            if inside {
+                window.push(y * 128 + x);
+            }
+        }
+    }
     assert!(
-        stretched.len() > 1024,
+        window.len() > 1024,
         "the lower half of the plane must cover pixels: {}",
-        stretched.len()
+        window.len()
     );
-    let isotropic_contrast = stretched
-        .iter()
-        .filter(|&&i| flat[i * 4].abs_diff(188) > 12)
-        .count();
-    assert!(
-        isotropic_contrast * 100 < stretched.len(),
-        "trilinear filtering must average the bands away, {isotropic_contrast} pixels differ"
+    // A band pixel is black or white; the averaged plane is the flat 188.
+    let banded = |render: &[u8]| {
+        window
+            .iter()
+            .filter(|&&i| {
+                let value = render[i * 4];
+                value < 64 || value > 192
+            })
+            .count()
+    };
+    let isotropic_bands = banded(&flat);
+    let anisotropic_bands = banded(&sharp);
+    eprintln!(
+        "bands: window={}, isotropic={isotropic_bands}, anisotropic={anisotropic_bands}",
+        window.len()
     );
-    let anisotropic_contrast = stretched
-        .iter()
-        .filter(|&&i| sharp[i * 4].abs_diff(188) > 24)
-        .count();
     let supported = adapter
         .get_downlevel_capabilities()
         .flags
@@ -268,10 +293,15 @@ fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
         return;
     }
     assert!(
-        anisotropic_contrast > 256,
-        "the default level must keep the stretched bands sharp: {anisotropic_contrast} of {} \
-         pixels deviate from the isotropic average",
-        stretched.len()
+        anisotropic_bands > 256,
+        "the default level must keep the stretched bands sharp: {anisotropic_bands} of {} \
+         pixels are band-coloured",
+        window.len()
+    );
+    assert!(
+        anisotropic_bands > isotropic_bands * 4,
+        "anisotropy must restore contrast the isotropic pass averaged away: \
+         {anisotropic_bands} vs {isotropic_bands} band pixels"
     );
 }
 
