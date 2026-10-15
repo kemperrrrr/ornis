@@ -19,10 +19,14 @@
 //!
 //! Filtering is trilinear over a full role-aware mip chain; wrapping is `Repeat` on every
 //! axis (the glTF default; the import carries no wrap mode), LOD clamps are
-//! the full `0.0..=32.0` range, anisotropy is `1`, and there is no depth
-//! comparison. Color roles ([`TextureRole::BaseColor`],
-//! [`TextureRole::Emissive`]) upload as `Rgba8UnormSrgb`, so the hardware
-//! decodes sRGB to linear on sample and the render stays in linear light
+//! the full `0.0..=32.0` range, and there is no depth comparison. Anisotropy
+//! is the [`AnisotropyLevel`] the caller uploads with:
+//! [`AnisotropyLevel::DEFAULT`] (16 samples) is the project default for
+//! material textures, while shadow and post-process samplers are
+//! [`SamplerKind::LinearClamp`] and stay isotropic. Color roles
+//! ([`TextureRole::BaseColor`], [`TextureRole::Emissive`]) upload as
+//! `Rgba8UnormSrgb`, so the hardware decodes sRGB to linear on sample and the
+//! render stays in linear light
 //! (the same convention as the composite pass color inputs). The data role
 //! ([`TextureRole::MetallicRoughness`], green holds roughness, blue holds
 //! metallic) uploads as `Rgba8Unorm`: linear data that must never be
@@ -44,6 +48,8 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+
+use crate::flags::{AnisotropyLevel, SamplerKind};
 
 /// Scale from an 8-bit channel to unit float.
 const U8_TO_UNIT: f32 = 255.0;
@@ -74,15 +80,20 @@ pub fn texture_format_for_role(role: TextureRole) -> wgpu::TextureFormat {
     }
 }
 
-/// Upload sampler defaults for `role` (all roles share them today).
+/// Upload sampler for `role` at `anisotropy` (all roles share the defaults
+/// today).
 ///
 /// Linear `mag`/`min` and mip filtering, `Repeat` wrapping on every axis (the
-/// glTF default — the import carries no wrap mode), full LOD range,
-/// anisotropy `1`, no depth comparison. Pure (no GPU access); the label is
-/// `None` so the descriptor is `'static`.
-pub fn sampler_descriptor_for_role(role: TextureRole) -> wgpu::SamplerDescriptor<'static> {
+/// glTF default — the import carries no wrap mode), full LOD range, the
+/// requested [`AnisotropyLevel`] (`2` or more requires the linear filters
+/// above — they are always set), no depth comparison. Pure (no GPU access);
+/// the label is `None` so the descriptor is `'static`.
+pub fn sampler_descriptor_for_role(
+    role: TextureRole,
+    anisotropy: AnisotropyLevel,
+) -> wgpu::SamplerDescriptor<'static> {
     let _ = role;
-    crate::flags::SamplerKind::LinearRepeat.descriptor()
+    SamplerKind::LinearRepeat(anisotropy).descriptor()
 }
 
 /// Decodes one sRGB-encoded channel byte to linear light.
@@ -126,15 +137,18 @@ pub fn sample_metallic_roughness(texel: [u8; 4]) -> (f32, f32) {
     )
 }
 
-/// Deterministic content key of one upload (role + size + pixels).
+/// Deterministic content key of one upload (role + anisotropy + size +
+/// pixels).
 ///
 /// Dedup key for [`TextureCache::upload_cached`]: identical images under the
-/// same role share one GPU entry (a color image and a data image with equal
-/// bytes must not alias — their formats differ). Same hashing discipline as
+/// same role and [`AnisotropyLevel`] share one GPU entry (a color image and a
+/// data image with equal bytes must not alias — their formats differ, and a
+/// different level means a different sampler). Same hashing discipline as
 /// `mesh_upload::soup_hash`.
-pub fn texture_cache_key(image: &CpuImage, role: TextureRole) -> u64 {
+pub fn texture_cache_key(image: &CpuImage, role: TextureRole, anisotropy: AnisotropyLevel) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     role.hash(&mut hasher);
+    anisotropy.hash(&mut hasher);
     image.width.hash(&mut hasher);
     image.height.hash(&mut hasher);
     image.pixels.hash(&mut hasher);
@@ -151,7 +165,8 @@ pub struct GpuTexture {
     pub texture: wgpu::Texture,
     /// Default view of [`GpuTexture::texture`].
     pub view: wgpu::TextureView,
-    /// Sampler with [`sampler_descriptor_for_role`] defaults.
+    /// Sampler built from [`sampler_descriptor_for_role`] at the upload's
+    /// [`AnisotropyLevel`].
     pub sampler: wgpu::Sampler,
     /// Role the image was uploaded under (selects format and binding).
     pub role: TextureRole,
@@ -163,12 +178,13 @@ pub struct GpuTexture {
     pub payload_bytes: u64,
 }
 
-/// Uploads `image` under `role`: texture + view + sampler.
+/// Uploads `image` under `role` at `anisotropy`: texture + view + sampler.
 ///
 /// The texture uses [`texture_format_for_role`] with `TEXTURE_BINDING |
 /// `COPY_DST` usage and a complete mip chain. Queue writes use tight rows
 /// (unlike buffer copies, they need no 256-byte alignment). The sampler uses
-/// [`sampler_descriptor_for_role`].
+/// [`sampler_descriptor_for_role`]; pass [`AnisotropyLevel::DEFAULT`] for the
+/// project default.
 ///
 /// # Errors
 ///
@@ -179,9 +195,10 @@ pub fn upload_texture(
     queue: &wgpu::Queue,
     image: &CpuImage,
     role: TextureRole,
+    anisotropy: AnisotropyLevel,
 ) -> Result<GpuTexture, TextureUploadError> {
     let levels = ornis_texture::TextureLevels::from_rgba8(image, role)?;
-    crate::texture_upload::upload_levels(device, queue, &levels, role)
+    crate::texture_upload::upload_levels(device, queue, &levels, role, anisotropy)
 }
 
 /// Handle of one uploaded image in [`TextureCache`]: entry index.
@@ -272,11 +289,13 @@ impl TextureCache {
         self.entries.get(handle.index())
     }
 
-    /// Uploads `image` under `role`, or reuses the identical entry.
+    /// Uploads `image` under `role` at `anisotropy`, or reuses the identical
+    /// entry.
     ///
     /// On a content hit ([`texture_cache_key`]) no GPU work happens and the
     /// existing handle returns; on a miss the image uploads via
-    /// [`upload_texture`] and the new handle returns.
+    /// [`upload_texture`] and the new handle returns. The level is part of the
+    /// key: the same image at another level uploads as its own entry.
     ///
     /// # Errors
     ///
@@ -288,13 +307,14 @@ impl TextureCache {
         queue: &wgpu::Queue,
         image: &CpuImage,
         role: TextureRole,
+        anisotropy: AnisotropyLevel,
     ) -> Result<TextureHandle, TextureUploadError> {
         image.validate()?;
-        let key = texture_cache_key(image, role);
+        let key = texture_cache_key(image, role, anisotropy);
         if let Some(handle) = self.index.get(&key) {
             return Ok(*handle);
         }
-        let entry = upload_texture(device, queue, image, role)?;
+        let entry = upload_texture(device, queue, image, role, anisotropy)?;
         let handle = TextureHandle::from(self.entries.len());
         self.entries.push(entry);
         self.index.insert(key, handle);
@@ -302,8 +322,8 @@ impl TextureCache {
     }
 
     /// Uploads a glTF image without losing KTX2 mips or eagerly expanding Basis data.
-    /// Content and role determine identity; repeated calls do not transcode again.
-    /// Like RGBA uploads, a cache belongs to one device.
+    /// Content, role and the anisotropic level determine identity; repeated calls
+    /// do not transcode again. Like RGBA uploads, a cache belongs to one device.
     ///
     /// # Errors
     /// Failed validation/transcoding/uploads never insert a cache entry.
@@ -313,20 +333,22 @@ impl TextureCache {
         queue: &wgpu::Queue,
         image: &ornis_texture::TextureImage,
         role: TextureRole,
+        anisotropy: AnisotropyLevel,
     ) -> Result<TextureHandle, TextureUploadError> {
         if let Some(image) = image.rgba8() {
-            return self.upload_cached(device, queue, image, role);
+            return self.upload_cached(device, queue, image, role, anisotropy);
         }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         // Separate encoded container keys from legacy RGBA content keys.
         "KTX2".hash(&mut hasher);
         role.hash(&mut hasher);
+        anisotropy.hash(&mut hasher);
         image.hash(&mut hasher);
         let key = hasher.finish();
         if let Some(handle) = self.index.get(&key) {
             return Ok(*handle);
         }
-        let entry = crate::texture_upload::upload_image(device, queue, image, role)?;
+        let entry = crate::texture_upload::upload_image(device, queue, image, role, anisotropy)?;
         let handle = TextureHandle::from(self.entries.len());
         self.entries.push(entry);
         self.index.insert(key, handle);
@@ -464,7 +486,7 @@ mod tests {
             TextureRole::MetallicRoughness,
             TextureRole::Emissive,
         ] {
-            let sampler = sampler_descriptor_for_role(role);
+            let sampler = sampler_descriptor_for_role(role, AnisotropyLevel::DEFAULT);
             assert_eq!(sampler.mag_filter, wgpu::FilterMode::Linear);
             assert_eq!(sampler.min_filter, wgpu::FilterMode::Linear);
             assert_eq!(sampler.mipmap_filter, wgpu::MipmapFilterMode::Linear);
@@ -474,8 +496,36 @@ mod tests {
             assert_eq!(sampler.lod_min_clamp, 0.0);
             assert_eq!(sampler.lod_max_clamp, 32.0);
             assert_eq!(sampler.compare, None);
-            assert_eq!(sampler.anisotropy_clamp, 1);
+            assert_eq!(sampler.anisotropy_clamp, AnisotropyLevel::DEFAULT.get());
         }
+    }
+
+    #[test]
+    fn anisotropy_level_clamps_and_clamp_kinds_stay_isotropic() {
+        // Requests saturate instead of failing, so a settings value needs no
+        // range check of its own (`0` is off, overshoot is the ceiling).
+        assert_eq!(AnisotropyLevel::new(0), AnisotropyLevel::OFF);
+        assert_eq!(AnisotropyLevel::new(1), AnisotropyLevel::OFF);
+        assert_eq!(AnisotropyLevel::new(8).get(), 8);
+        assert_eq!(AnisotropyLevel::new(u16::MAX), AnisotropyLevel::DEFAULT);
+        assert_eq!(AnisotropyLevel::DEFAULT.get(), 16);
+        // The requested level reaches the descriptor, and every filter stays
+        // linear: `wgpu` rejects anisotropy above 1 with a nearest filter.
+        let requested = SamplerKind::LinearRepeat(AnisotropyLevel::new(8)).descriptor();
+        assert_eq!(requested.anisotropy_clamp, 8);
+        for sampler in [
+            requested,
+            SamplerKind::LinearRepeat(AnisotropyLevel::OFF).descriptor(),
+        ] {
+            assert_eq!(sampler.mag_filter, wgpu::FilterMode::Linear);
+            assert_eq!(sampler.min_filter, wgpu::FilterMode::Linear);
+            assert_eq!(sampler.mipmap_filter, wgpu::MipmapFilterMode::Linear);
+        }
+        // Post/shadows keep the isotropic clamp kind (no level to carry).
+        assert_eq!(
+            SamplerKind::LinearClamp.descriptor().anisotropy_clamp,
+            AnisotropyLevel::OFF.get()
+        );
     }
 
     #[test]
@@ -562,19 +612,26 @@ mod tests {
     #[test]
     fn cache_key_is_stable_and_role_sensitive() {
         let image = solid_image(2, 2, [10, 20, 30, 40]);
+        let role = TextureRole::BaseColor;
+        let level = AnisotropyLevel::DEFAULT;
         assert_eq!(
-            texture_cache_key(&image, TextureRole::BaseColor),
-            texture_cache_key(&image, TextureRole::BaseColor),
+            texture_cache_key(&image, role, level),
+            texture_cache_key(&image, role, level),
             "stable across calls"
         );
         assert_ne!(
-            texture_cache_key(&image, TextureRole::BaseColor),
-            texture_cache_key(&image, TextureRole::MetallicRoughness),
+            texture_cache_key(&image, role, level),
+            texture_cache_key(&image, TextureRole::MetallicRoughness, level),
             "same bytes under another role must not alias (formats differ)"
         );
         assert_ne!(
-            texture_cache_key(&image, TextureRole::BaseColor),
-            texture_cache_key(&solid_image(2, 2, [11, 20, 30, 40]), TextureRole::BaseColor),
+            texture_cache_key(&image, role, level),
+            texture_cache_key(&image, role, AnisotropyLevel::OFF),
+            "another level means another sampler, so it must not alias"
+        );
+        assert_ne!(
+            texture_cache_key(&image, role, level),
+            texture_cache_key(&solid_image(2, 2, [11, 20, 30, 40]), role, level),
             "one byte flips the key"
         );
     }
@@ -627,8 +684,14 @@ mod tests {
         };
         // Narrow, non-square rows exercise tightly packed queue writes.
         let image = solid_image(2, 3, [200, 128, 64, 255]);
-        let uploaded =
-            upload_texture(&device, &queue, &image, TextureRole::BaseColor).expect("2x3 uploads");
+        let uploaded = upload_texture(
+            &device,
+            &queue,
+            &image,
+            TextureRole::BaseColor,
+            AnisotropyLevel::DEFAULT,
+        )
+        .expect("2x3 uploads");
         assert_eq!(uploaded.width, 2);
         assert_eq!(uploaded.height, 3);
         assert_eq!(uploaded.role, TextureRole::BaseColor);
@@ -643,10 +706,22 @@ mod tests {
 
         let mut cache = TextureCache::new();
         let first = cache
-            .upload_cached(&device, &queue, &image, TextureRole::BaseColor)
+            .upload_cached(
+                &device,
+                &queue,
+                &image,
+                TextureRole::BaseColor,
+                AnisotropyLevel::DEFAULT,
+            )
             .expect("first upload");
         let second = cache
-            .upload_cached(&device, &queue, &image, TextureRole::BaseColor)
+            .upload_cached(
+                &device,
+                &queue,
+                &image,
+                TextureRole::BaseColor,
+                AnisotropyLevel::DEFAULT,
+            )
             .expect("identical reuses");
         assert_eq!(
             (first, second),
@@ -658,7 +733,13 @@ mod tests {
         assert!(cache.get(TextureHandle::from_raw(1)).is_none());
         // Same bytes under the data role must not alias the color entry.
         let data_handle = cache
-            .upload_cached(&device, &queue, &image, TextureRole::MetallicRoughness)
+            .upload_cached(
+                &device,
+                &queue,
+                &image,
+                TextureRole::MetallicRoughness,
+                AnisotropyLevel::DEFAULT,
+            )
             .expect("data role uploads separately");
         assert_eq!(data_handle, TextureHandle::from_raw(1));
         assert_eq!(cache.len(), 2);
@@ -676,11 +757,9 @@ mod tests {
             height: 2,
             pixels: vec![0; 15],
         };
-        assert!(
-            cache
-                .upload_cached(&device, &queue, &bad, TextureRole::BaseColor)
-                .is_err()
-        );
+        let level = AnisotropyLevel::DEFAULT;
+        let failed = cache.upload_cached(&device, &queue, &bad, TextureRole::BaseColor, level);
+        assert!(failed.is_err());
         assert_eq!(cache.len(), 2, "failures are not cached");
     }
 

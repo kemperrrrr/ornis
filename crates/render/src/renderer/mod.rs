@@ -5,6 +5,7 @@
 //! for the render-graph-driven equivalent.
 
 use crate::extraction::CustomMeshEntry;
+use crate::flags::AnisotropyLevel;
 use crate::gpu_culling::Culler;
 use crate::mesh::{Mesh, SkinnedVertex, Vertex};
 use crate::shaders;

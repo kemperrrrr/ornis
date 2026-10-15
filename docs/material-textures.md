@@ -6,12 +6,26 @@ an RGBA-only struct. Material image fields are grouped under
 `LoadedMaterial::textures` (`LoadedTextures`); `material.texture(role)` remains
 the role-based accessor. PNG/JPEG callers can inspect `image.rgba8()`; callers
 uploading imported images should use `TextureCache::upload_image_cached`.
-The existing `CpuImage` / `upload_texture` / `upload_cached` API remains.
+The existing `CpuImage` / `upload_texture` / `upload_cached` entry points remain
+and now take the sampler's `AnisotropyLevel` (see below).
 
 ## Filtering and storage
 
 - RGBA8 gets `floor(log2(max(width,height))) + 1` levels. Area filtering
   includes odd-sized edges and handles rectangular / single-axis images.
+- Material samplers request anisotropic filtering: `AnisotropyLevel::DEFAULT`
+  is 16, `wgpu`'s clamp ceiling and the `maxAnisotropy` every target driver
+  reports. Every upload entry point (`upload_texture`, `upload_image`,
+  `upload_cached`, `upload_image_cached`) takes an `AnisotropyLevel`, so a
+  caller can choose 1–16 per material; `AnisotropyLevel::new` saturates a
+  request into that range. The texture cache key includes the level: the same
+  image at another level needs its own sampler. All filters stay linear (what
+  `wgpu` requires above 1), and an adapter without
+  `DownlevelFlags::ANISOTROPIC_FILTERING` silently receives level 1 — the
+  documented `wgpu` degradation, not an error — so requesting 16 is safe on
+  every backend. Shadow and post-process samplers are
+  `SamplerKind::LinearClamp` and stay isotropic: their fullscreen quads never
+  magnify a grazing surface.
 - Base color and emission average RGB in linear light and re-encode sRGB;
   alpha and metallic/roughness remain linear. Normal RGB is decoded to
   [-1,1], averaged and normalized; a cancelling vector becomes +Z.
@@ -90,6 +104,16 @@ images on a compression-enabled device. A CPU BC1-alpha regression pins the
 RGBA8 transcode fallback; KTX2 proptests cover arbitrary bytes and structured
 mutations. Run the same test on a Mac for
 Metal/ASTC/BC verification; a software-adapter result is not a Mac result.
+
+The tilted-plane golden is isotropic by construction (`AnisotropyLevel::OFF`):
+the checker averages to the same linear-light 188 at every level the plane
+samples, so the golden pins the mip chain and not the anisotropy. A second
+footprint gate reuses that plane with 32-texel bands along `v`: the isotropic
+pass averages them to the same 188, while `AnisotropyLevel::DEFAULT` keeps
+full-contrast bands in the lower, stretched half, where the footprint's short
+axis sizes the level. On an adapter without `ANISOTROPIC_FILTERING` that gate
+instead asserts the default-level image is byte-identical to the isotropic one
+(`wgpu`'s degradation contract, exercised as behavior rather than as an error).
 
 `GpuTexture::payload_bytes` sums the exact uploaded mip payloads. CPU tests
 verify these counts from actual transcoding, including block-rounded tails:

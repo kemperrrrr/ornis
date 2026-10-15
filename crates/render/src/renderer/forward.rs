@@ -425,16 +425,25 @@ impl Renderer3D {
         let Ok(white) = CpuImage::from_rgba8(1, 1, vec![255; 4]) else {
             return;
         };
-        let Ok(fallback_color) = upload_texture(device, queue, &white, TextureRole::BaseColor)
+        let anisotropy = AnisotropyLevel::DEFAULT;
+        let Ok(fallback_color) =
+            upload_texture(device, queue, &white, TextureRole::BaseColor, anisotropy)
         else {
             return;
         };
-        let Ok(fallback_data) =
-            upload_texture(device, queue, &white, TextureRole::MetallicRoughness)
-        else {
+        let Ok(fallback_data) = upload_texture(
+            device,
+            queue,
+            &white,
+            TextureRole::MetallicRoughness,
+            anisotropy,
+        ) else {
             return;
         };
-        let sampler = device.create_sampler(&sampler_descriptor_for_role(TextureRole::BaseColor));
+        let sampler = device.create_sampler(&sampler_descriptor_for_role(
+            TextureRole::BaseColor,
+            anisotropy,
+        ));
 
         // Same table-driven layout as every other pass: entries from the
         // textured resource table, so WGSL declarations and layout agree.

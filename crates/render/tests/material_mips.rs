@@ -9,7 +9,9 @@ use ornis_render::texture_upload::{
     preferred_texture_encoding, texture_compression_features, upload_image,
 };
 use ornis_render::textures::upload_texture;
-use ornis_render::{CpuImage, GpuTexture, Ktx2Image, TextureEncoding, TextureImage, TextureRole};
+use ornis_render::{
+    AnisotropyLevel, CpuImage, GpuTexture, Ktx2Image, TextureEncoding, TextureImage, TextureRole,
+};
 
 const SHADER: &str = r#"
 struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f }
@@ -137,7 +139,17 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
         })
         .collect();
     let image = CpuImage::from_rgba8(256, 256, pixels).unwrap();
-    let uploaded = upload_texture(&device, &queue, &image, TextureRole::BaseColor).unwrap();
+    // The analytic golden is the isotropic reference: the checker averages to
+    // the linear-light 188 at every level the plane samples, which pins the
+    // mip chain, not the anisotropy (the footprint gate below covers that).
+    let uploaded = upload_texture(
+        &device,
+        &queue,
+        &image,
+        TextureRole::BaseColor,
+        AnisotropyLevel::OFF,
+    )
+    .unwrap();
     assert_eq!(uploaded.texture.mip_level_count(), 9);
     let pixels = sample(&device, &queue, &uploaded, &uploaded.view, (128, None));
     let golden = include_bytes!("data/tilted_checker.rgba");
@@ -169,6 +181,97 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
     assert!(
         unstable > 500,
         "base-only control must demonstrate aliasing: {unstable}"
+    );
+}
+
+/// Footprint gate for the anisotropic material sampler (`#122`): the same
+/// tilted plane, but with 32-texel bands along `v` instead of a checker.
+///
+/// The plane repeats the 256² texture 32 times, so its footprints are tens to
+/// hundreds of texels long and the band period (64 texels) is averaged away
+/// from mip level 6 on. Bands are constant along `u`, which makes the two
+/// samplers analytically predictable: trilinear filtering picks the level of
+/// the *longest* footprint axis (≥ 6 everywhere here) and the plane renders
+/// flat. Anisotropic sampling sizes the level by the *short* axis instead
+/// (≈ 3–5 in the lower half) and its samples run along the constant `u`, so
+/// those rows keep black/white bands at full contrast.
+#[test]
+fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
+    let Some((adapter, device, queue)) = device() else {
+        return;
+    };
+    let pixels = (0..256 * 256)
+        .flat_map(|i| {
+            let c = if (i / 256 / 32) % 2 == 0 { 0 } else { 255 };
+            [c, c, c, 255]
+        })
+        .collect();
+    let image = CpuImage::from_rgba8(256, 256, pixels).unwrap();
+    let isotropic = upload_texture(
+        &device,
+        &queue,
+        &image,
+        TextureRole::BaseColor,
+        AnisotropyLevel::OFF,
+    )
+    .unwrap();
+    let anisotropic = upload_texture(
+        &device,
+        &queue,
+        &image,
+        TextureRole::BaseColor,
+        AnisotropyLevel::DEFAULT,
+    )
+    .unwrap();
+    let flat = sample(&device, &queue, &isotropic, &isotropic.view, (128, None));
+    let sharp = sample(
+        &device,
+        &queue,
+        &anisotropic,
+        &anisotropic.view,
+        (128, None),
+    );
+    // The isotropic pass defines the plane: its covered pixels all sit at the
+    // flat 188, so the black clear is the only 0. The lower half is the
+    // stretched one: there the horizontal footprint is several times the
+    // vertical one, which is where the two levels part ways.
+    let stretched: Vec<usize> = (0..128 * 128)
+        .filter(|&i| i / 128 >= 64 && flat[i * 4] != 0)
+        .collect();
+    assert!(
+        stretched.len() > 1024,
+        "the lower half of the plane must cover pixels: {}",
+        stretched.len()
+    );
+    let isotropic_contrast = stretched
+        .iter()
+        .filter(|&&i| flat[i * 4].abs_diff(188) > 12)
+        .count();
+    assert!(
+        isotropic_contrast * 100 < stretched.len(),
+        "trilinear filtering must average the bands away, {isotropic_contrast} pixels differ"
+    );
+    let anisotropic_contrast = stretched
+        .iter()
+        .filter(|&&i| sharp[i * 4].abs_diff(188) > 24)
+        .count();
+    let supported = adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING);
+    if !supported {
+        // No anisotropic filtering on this adapter: `wgpu` clamps the level
+        // to 1, so the default render must be the isotropic one, byte for
+        // byte (the documented degradation contract).
+        assert_eq!(flat, sharp, "unsupported anisotropy must degrade to 1");
+        eprintln!("SKIP: adapter has no anisotropic filtering");
+        return;
+    }
+    assert!(
+        anisotropic_contrast > 256,
+        "the default level must keep the stretched bands sharp: {anisotropic_contrast} of {} \
+         pixels deviate from the isotropic average",
+        stretched.len()
     );
 }
 
@@ -208,7 +311,14 @@ fn verify_ktx_mips(
     image: &TextureImage,
     expected: TextureEncoding,
 ) {
-    let uploaded = upload_image(device, queue, image, TextureRole::BaseColor).unwrap();
+    let uploaded = upload_image(
+        device,
+        queue,
+        image,
+        TextureRole::BaseColor,
+        AnisotropyLevel::DEFAULT,
+    )
+    .unwrap();
     let (edge, height) = image.dimensions();
     assert_eq!(edge, height, "square fixtures");
     assert_eq!(
@@ -252,14 +362,23 @@ fn verify_ktx_mips(
         uploaded.payload_bytes
     );
     let mut cache = ornis_render::TextureCache::new();
+    let level = AnisotropyLevel::DEFAULT;
     let a = cache
-        .upload_image_cached(device, queue, image, TextureRole::BaseColor)
+        .upload_image_cached(device, queue, image, TextureRole::BaseColor, level)
         .unwrap();
     let b = cache
-        .upload_image_cached(device, queue, image, TextureRole::BaseColor)
+        .upload_image_cached(device, queue, image, TextureRole::BaseColor, level)
         .unwrap();
     assert_eq!(a, b);
     assert_eq!(cache.len(), 1);
+    // The level is part of the dedup key: the same image at another level
+    // needs its own sampler, so it must not reuse the entry above.
+    let off = AnisotropyLevel::OFF;
+    let other = cache
+        .upload_image_cached(device, queue, image, TextureRole::BaseColor, off)
+        .unwrap();
+    assert_ne!(a, other);
+    assert_eq!(cache.len(), 2);
 }
 
 fn device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
