@@ -268,7 +268,160 @@ impl FramePass for LightingPass {
         );
         frame
             .renderer
-            .render_lighting(frame.device, frame.encoder, &g, hdr);
+            .render_lighting(frame.device, frame.encoder, &g, hdr, None);
+    }
+}
+
+/// Half-res raw AO factor (before the bilateral blur).
+pub struct AoRaw;
+typed_resource!(AoRaw, "ao_raw", owned_fraction, F::Rgba8Unorm, 2);
+
+/// Half-res blurred AO factor sampled by the lighting pass.
+pub struct Ao;
+typed_resource!(Ao, "ao", owned_fraction, F::Rgba8Unorm, 2);
+
+/// AO raw pass: runs the SSAO/GTAO kernel from `settings` over the
+/// g-buffer depth and normals into half-res [`AoRaw`].
+pub struct AoRawPass {
+    settings: crate::ao::AoSettings,
+}
+
+impl AoRawPass {
+    /// Value constructor from validated [`crate::ao::AoSettings`].
+    pub fn new(settings: crate::ao::AoSettings) -> Self {
+        Self { settings }
+    }
+
+    /// Kernel settings carried by the pass.
+    pub const fn settings(self) -> crate::ao::AoSettings {
+        self.settings
+    }
+}
+
+impl FramePass for AoRawPass {
+    type Reads = (Read<Normal>, Read<Depth>);
+    type Writes = (Write<AoRaw>,);
+    fn name(&self) -> &'static str {
+        "ao_raw"
+    }
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (Some(normal), Some(depth)) = views.reads else {
+            return;
+        };
+        let (Some(output),) = views.writes else {
+            return;
+        };
+        frame.renderer.render_ao_raw(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            crate::renderer::AoRawInputs {
+                settings: self.settings,
+                depth,
+                normal,
+                output,
+            },
+        );
+    }
+}
+
+/// AO blur pass: depth-weighted smooth of half-res [`AoRaw`] into [`Ao`],
+/// so occlusion never bleeds over silhouette edges.
+pub struct AoBlurPass {
+    settings: crate::ao::AoSettings,
+}
+
+impl AoBlurPass {
+    /// Value constructor from validated [`crate::ao::AoSettings`].
+    pub fn new(settings: crate::ao::AoSettings) -> Self {
+        Self { settings }
+    }
+
+    /// Kernel settings carried by the pass.
+    pub const fn settings(self) -> crate::ao::AoSettings {
+        self.settings
+    }
+}
+
+impl FramePass for AoBlurPass {
+    type Reads = (Read<AoRaw>, Read<Depth>);
+    type Writes = (Write<Ao>,);
+    fn name(&self) -> &'static str {
+        "ao_blur"
+    }
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (Some(ao_raw), Some(depth)) = views.reads else {
+            return;
+        };
+        let (Some(output),) = views.writes else {
+            return;
+        };
+        frame.renderer.render_ao_blur(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            crate::renderer::AoBlurInputs {
+                settings: self.settings,
+                depth,
+                ao_raw,
+                output,
+            },
+        );
+    }
+}
+
+/// Lighting pass with ambient occlusion: like [`LightingPass`], plus the
+/// blurred [`Ao`] factor modulating only the ambient and IBL terms.
+/// Registered instead of [`LightingPass`] when the plan wires AO.
+pub struct LightingAoPass;
+impl FramePass for LightingAoPass {
+    type Reads = (
+        Read<Albedo>,
+        Read<Normal>,
+        Read<MaterialId>,
+        Read<WorldPosition>,
+        Read<MaterialParams>,
+        Read<Depth>,
+        Read<Ao>,
+    );
+    type Writes = (WriteClear<Hdr, ClearBlack>,);
+    fn name(&self) -> &'static str {
+        "lighting"
+    }
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (
+            Some(albedo),
+            Some(normal),
+            Some(material_id),
+            Some(world_position),
+            Some(material_params),
+            Some(depth),
+            Some(ao),
+        ) = views.reads
+        else {
+            return;
+        };
+        let (Some(hdr),) = views.writes else {
+            return;
+        };
+        let g = GbufferTargets {
+            albedo,
+            normal,
+            material_id,
+            world_position,
+            material_params,
+            depth,
+        };
+        frame.renderer.render_shadows_with_custom(
+            frame.device,
+            frame.encoder,
+            frame.mesh,
+            frame.instance_count,
+            frame.customs,
+        );
+        frame
+            .renderer
+            .render_lighting(frame.device, frame.encoder, &g, hdr, Some(ao));
     }
 }
 
@@ -1056,6 +1209,25 @@ mod tests {
     }
 
     #[test]
+    fn ao_resources_are_half_res_filterable() {
+        // Pooled AO targets: filterable 8-bit at half resolution (the
+        // lighting pass bilinearly upsamples the blurred factor).
+        assert_eq!(AoRaw::NAME, "ao_raw");
+        assert_eq!(
+            AoRaw::spec(SURFACE),
+            TextureSpec {
+                format: crate::ao::AO_FORMAT,
+                samples: 1,
+                size: SizePolicy::Fraction(crate::ao::AO_DIVISOR),
+            }
+        );
+        assert_eq!(Ao::NAME, "ao");
+        assert_eq!(Ao::spec(SURFACE), AoRaw::spec(SURFACE));
+        assert!(!AoRaw::multisampled());
+        assert!(!Ao::multisampled());
+    }
+
+    #[test]
     fn hdr_is_scene_linear_half_float() {
         assert_eq!(Hdr::NAME, "hdr");
         assert_eq!(Hdr::kind(), ResourceKind::FrameOwned);
@@ -1210,6 +1382,43 @@ mod tests {
             writes_of::<Forward<SharedDepth>>(),
             vec![("hdr_fwd", Some(wgpu::Color::TRANSPARENT))]
         );
+    }
+
+    #[test]
+    fn ao_passes_wire_depth_normal_and_hdr() {
+        use crate::ao::{AoSettings, AoWiring};
+        // Raw: g-buffer depth + normals in, half-res factor out.
+        assert_eq!(AoRawPass::new(AoSettings::default()).name(), "ao_raw");
+        assert_eq!(reads_of::<AoRawPass>(), vec!["normal", "depth"]);
+        assert_eq!(writes_of::<AoRawPass>(), vec![("ao_raw", None)]);
+        // Blur: raw factor + depth in, blurred factor out.
+        assert_eq!(AoBlurPass::new(AoSettings::default()).name(), "ao_blur");
+        assert_eq!(reads_of::<AoBlurPass>(), vec!["ao_raw", "depth"]);
+        assert_eq!(writes_of::<AoBlurPass>(), vec![("ao", None)]);
+        // Occluded lighting: the g-buffer reads plus `ao`, same HDR write.
+        assert_eq!(LightingAoPass.name(), "lighting");
+        assert_eq!(
+            reads_of::<LightingAoPass>(),
+            vec![
+                "albedo",
+                "normal",
+                "material_id",
+                "world_position",
+                "material_params",
+                "depth",
+                "ao"
+            ]
+        );
+        assert_eq!(
+            writes_of::<LightingAoPass>(),
+            writes_of::<LightingPass>(),
+            "occluded lighting writes the same HDR layer"
+        );
+        // Wiring carries the kernel settings through.
+        let settings = AoSettings::default();
+        assert_eq!(AoWiring::new(settings).settings(), settings);
+        assert_eq!(AoRawPass::new(settings).settings(), settings);
+        assert_eq!(AoBlurPass::new(settings).settings(), settings);
     }
 
     #[test]

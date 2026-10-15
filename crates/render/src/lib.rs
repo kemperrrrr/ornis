@@ -3,6 +3,8 @@
 //! procedural meshes and the WGSL shader assembly. Scene description types
 //! live in `ornis-assets`; this crate only projects them.
 #![warn(missing_docs)]
+/// Screen-space ambient occlusion (classic SSAO plus GTAO).
+pub mod ao;
 /// Client-side orbit camera and backend-neutral input consumer.
 pub mod camera;
 /// Final PBR/UI blend pass (legacy path).
@@ -65,6 +67,10 @@ pub use ornis_texture::{Ktx2Image, TextureEncoding, TextureImage};
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
+pub use ao::{
+    AoMethod, AoSettings, AoWiring, ao_from_sum, apply_ao_to_ambient, bilateral_blur_center,
+    bilateral_weight, gtao_sample, half_extent, ssao_sample,
+};
 pub use camera::{
     CameraView, OrbitCamera, camera_view_projection, install_orbit_camera, read_orbit_camera,
 };
@@ -79,7 +85,8 @@ pub use flags::{
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use frame_passes::{
-    FogDensity, FogPass, FogPlacement, FogSettings, FogState, FogWiring, apply_fog, fog_factor,
+    Ao, AoBlurPass, AoRaw, AoRawPass, FogDensity, FogPass, FogPlacement, FogSettings, FogState,
+    FogWiring, LightingAoPass, apply_fog, fog_factor,
 };
 pub use gpu_culling::{
     CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, CULL_WORKGROUP_SIZE, CullParams, Culler, CullerError,
@@ -92,7 +99,7 @@ pub use ibl::{
     convolve_specular, integrate_brdf,
 };
 pub use light::{DirectionalLight, StudioLights};
-pub use mesh::{Mesh, SkinnedVertex, Vertex, create_sphere};
+pub use mesh::{Mesh, SkinnedVertex, Vertex, create_box, create_sphere};
 pub use mesh_upload::{
     ConvertedSoup, SoupCache, SoupHash, UploadCache, UploadError, to_vertices, upload_mesh_data,
 };
@@ -105,11 +112,12 @@ pub use render_backend::{
     RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
 };
 pub use renderer::{
-    BlendMode, CameraUniform, CompositeInputs, CompositePass, CustomGbufferDraw, FogInputs,
-    ForwardPass, GBufferTextures, GbufferTargets, InstanceData, LightingPass, MSAA_SAMPLE_COUNT,
-    MaterialIdx, PerObjectGpu, Renderer3D, SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh,
-    TransparencyError, TransparencyOptions, custom_draw_items, forward_blend_state,
-    negotiate_sample_count, normalize_sample_count, sort_by_depth, upload_vertex_rows,
+    AoBlurInputs, AoRawInputs, BlendMode, CameraUniform, CompositeInputs, CompositePass,
+    CustomGbufferDraw, FogInputs, ForwardPass, GBufferTextures, GbufferTargets, InstanceData,
+    LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu, Renderer3D, SINGLE_SAMPLE_COUNT,
+    ShadingDebug, StagedCustomMesh, TransparencyError, TransparencyOptions, custom_draw_items,
+    forward_blend_state, negotiate_sample_count, normalize_sample_count, sort_by_depth,
+    upload_vertex_rows,
 };
 pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use skinning::{

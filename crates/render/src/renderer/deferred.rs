@@ -115,6 +115,11 @@ impl Renderer3D {
     /// Record the deferred lighting pass: reconstructs surface data from the
     /// g-buffer in `g`, evaluates the OpenPBR BRDF and writes HDR color into `output`.
     ///
+    /// `ao` is the blurred half-res occlusion factor (sampled with the
+    /// lighting sampler, so it bilinearly upsamples): it modulates only the
+    /// ambient and IBL terms. `None` binds the white fallback (exact
+    /// identity), so AO-free frames render pixel-identical to before.
+    ///
     /// In MSAA mode albedo, world position and material params are sampled
     /// from the renderer's stored resolve textures. Depth, material-id and
     /// the normal bind the multisampled `g` views: interior pixels shade
@@ -129,6 +134,7 @@ impl Renderer3D {
         encoder: &mut wgpu::CommandEncoder,
         g: &GbufferTargets<'_>,
         output: &wgpu::TextureView,
+        ao: Option<&wgpu::TextureView>,
     ) {
         // The bind group is rebuilt per frame: gbuffer views come from the
         // render-plan pool (transient) or from persistent textures, and the
@@ -177,6 +183,9 @@ impl Renderer3D {
                     "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
                         self.ibl.binding(r.name)
                     }
+                    "ao_tex" => Some(wgpu::BindingResource::TextureView(
+                        ao.unwrap_or_else(|| self.ao_white_view()),
+                    )),
                     _ => None,
                 },
             )
@@ -184,6 +193,7 @@ impl Renderer3D {
         });
 
         self.encode_ibl_if_needed(encoder);
+        self.encode_ao_white_if_needed(encoder);
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -231,7 +241,7 @@ impl Renderer3D {
             depth: &self.gbuffer.depth_view,
         };
         self.render_gbuffer(device, encoder, &g, mesh, 1);
-        self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
+        self.render_lighting(device, encoder, &g, &self.pbr_texture_view, None);
         self.render_composite(
             device,
             queue,
@@ -271,7 +281,7 @@ impl Renderer3D {
         self.render_gbuffer(device, encoder, &g, mesh, instance_count);
         // Depth pre-passes for shadowed lights (no-op when none).
         self.render_shadows(device, encoder, mesh, instance_count);
-        self.render_lighting(device, encoder, &g, &self.pbr_texture_view);
+        self.render_lighting(device, encoder, &g, &self.pbr_texture_view, None);
         self.render_forward(
             encoder,
             &self.gbuffer.depth_view,

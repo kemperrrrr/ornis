@@ -25,6 +25,7 @@ use ornis_macros::WgslStruct;
 use std::borrow::Cow;
 use wgpu::util::DeviceExt;
 
+mod ao;
 mod buffers;
 mod construct;
 mod culling;
@@ -39,6 +40,9 @@ mod shadows;
 #[cfg(test)]
 mod test_util;
 
+/// AO pass inputs (re-exported for pass authors; see [`AoRawInputs`]).
+pub use ao::{AoBlurInputs, AoRawInputs};
+pub(crate) use ao::{AoPipelines, AoUniform};
 pub use buffers::{InstanceData, MaterialIdx, PerObjectGpu};
 // Path-stability re-export: `crate::renderer::staging_capacity_for_instances`
 // before the split; no in-crate users outside its module right now.
@@ -394,6 +398,15 @@ pub struct Renderer3D {
     /// Opt-in distance-fog pass (disabled by default: never runs unless a
     /// [`crate::frame_passes::FogPass`] with an enabled state records it).
     fog: FogPipeline,
+    /// Screen-space AO pipelines (raw SSAO/GTAO kernels plus the bilateral
+    /// blur) and the white fallback view. Disabled by default: never runs
+    /// unless the plan wires [`crate::frame_passes::AoRawPass`].
+    ao_passes: AoPipelines,
+    /// White texel uploaded into the AO fallback texture on the first
+    /// lighting pass (`new` has no queue — the IBL staging precedent).
+    ao_white_staging: wgpu::Buffer,
+    /// Set once the AO fallback texture holds white.
+    ao_white_uploaded: std::sync::atomic::AtomicBool,
     /// Shadow-map array (one depth layer per light slot) plus per-layer
     /// views, light-space VP uniform buffers, the depth-only pipeline,
     /// and the comparison sampler used by both lighting entries.

@@ -91,7 +91,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 17] = [
+pub const LIGHTING_RESOURCES: [Resource; 18] = [
     Resource {
         group: 0,
         binding: 0,
@@ -228,6 +228,14 @@ pub const LIGHTING_RESOURCES: [Resource; 17] = [
         kind: ResourceKind::Sampler,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 17,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "ao_tex",
+        kind: ResourceKind::TextureFloat,
+        min_size: None,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
@@ -294,6 +302,7 @@ pub(crate) struct LightingMaps {
     pub irradiance_cube: TextureCube,
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
+    pub ao_tex: Texture2d,
 }
 
 #[stage(fragment)]
@@ -322,12 +331,15 @@ fn fs_main(
     let n = octahedral_decode(normal_enc.rg);
     let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
     let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
-    return shade_lit(n, world_pos, v, albedo.a, mat);
+    let ao = textureSampleLevel(maps.ao_tex, maps.lighting_sampler, input.uv, 0.0).r;
+    return shade_lit(n, world_pos, v, albedo.a, mat, ao);
 }
 
 /// OpenPBR lighting for one decoded sample. `albedo_a` below
 /// [`ALPHA_CUTOFF`](super::helpers::ALPHA_CUTOFF) discards the fragment.
-/// Globals (`lighting`, shadow maps, IBL) are the lighting bind group.
+/// `ao` (1 = unoccluded) modulates only the ambient and IBL terms — direct
+/// light, emission and unlit sprites stay untouched. Globals (`lighting`,
+/// shadow maps, IBL) are the lighting bind group.
 #[ornis_macros::wgsl_fn]
 fn shade_lit(
     n: glam::Vec3,
@@ -335,6 +347,7 @@ fn shade_lit(
     v: glam::Vec3,
     albedo_a: f32,
     mat: OpenPBRMaterial,
+    ao: f32,
 ) -> glam::Vec4 {
     // Derivatives before `discard`: a non-uniform discard makes `dpdx` invalid.
     let specular_roughness = specular_aa_roughness(mat.specular_params.y, n);
@@ -620,7 +633,7 @@ fn shade_lit(
         lo = lo + layer_bsdf * radiance * nol;
     }
     let ambient =
-        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness);
+        lighting.ambient_color.rgb * mix(base_color, base_color * specular_weight, metalness) * ao;
     let emission = evaluate_emission(
         emission_luminance,
         emission_color,
@@ -651,7 +664,7 @@ fn shade_lit(
         f0,
         base_color * (1.0 - metalness),
         lighting.ibl_weight,
-    );
+    ) * ao;
     // Unlit sprites (geometry `params[2]`, see `ShadingMode`): radiance is
     // the emission alone — no BRDF, light, shadow or IBL term. `select`
     // keeps the lit sum bit-identical when the flag is off. The threshold
@@ -698,6 +711,7 @@ fn fs_main_msaa(
     let world_pos_enc =
         textureSampleLevel(maps.world_pos_tex, maps.lighting_sampler, input.uv, 0.0);
     let mat_params = textureSampleLevel(maps.mat_params_tex, maps.lighting_sampler, input.uv, 0.0);
+    let ao = textureSampleLevel(maps.ao_tex, maps.lighting_sampler, input.uv, 0.0).r;
     if albedo.a < ALPHA_CUTOFF {
         discard;
     }
@@ -730,7 +744,7 @@ fn fs_main_msaa(
         covered_count = covered_count + covered;
         let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
         let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
-        let lit = shade_lit(n, world_pos, v, 1.0, ctx.materials[id]);
+        let lit = shade_lit(n, world_pos, v, 1.0, ctx.materials[id], ao);
         let luma = max(luminance(lit.xyz), 0.0);
         let karis = covered / (KARIS_LUMA_BIAS + luma);
         acc = acc + lit.xyz * karis;
@@ -849,7 +863,7 @@ mod tests {
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 17);
+        assert_eq!(LIGHTING_RESOURCES.len(), 18);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -874,7 +888,7 @@ mod tests {
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
         // The header is built as naga IR from the same derives (drift is
-        // impossible by construction); pin declaration order and the 13
+        // impossible by construction); pin declaration order and the 18
         // resource bindings in the printed output.
         let src = wgsl_source();
         let cam = src.find("struct Camera").expect("Camera");
@@ -883,7 +897,7 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 17);
+        assert_eq!(src.matches("@binding(").count(), 18);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer

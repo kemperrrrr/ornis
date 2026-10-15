@@ -5,6 +5,7 @@
 //! [`math`](crate::shaders::math)) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
+pub mod ao_generated;
 pub mod bloom_generated;
 pub mod composite_generated;
 pub mod fog_generated;
@@ -89,14 +90,21 @@ impl ResourceKind {
     /// `textureLoad` call text.
     pub fn wgsl_ty_for_samples(&self, sample_count: u32) -> String {
         if sample_count > 1 && resource_stays_multisampled(self) {
-            match self {
-                Self::TextureFloat => "texture_multisampled_2d<f32>".to_string(),
-                Self::TextureUint => "texture_multisampled_2d<u32>".to_string(),
-                Self::TextureDepth => "texture_depth_multisampled_2d".to_string(),
-                _ => self.wgsl_ty_full(),
-            }
+            self.wgsl_ty_multisampled()
         } else {
             self.wgsl_ty_full()
+        }
+    }
+
+    /// Multisampled WGSL type spelling of a texture resource (the AO raw
+    /// pass keeps its normal per-sample too, so it selects this spelling
+    /// with its own predicate via [`resource_decl_where`]).
+    pub fn wgsl_ty_multisampled(&self) -> String {
+        match self {
+            Self::TextureFloat => "texture_multisampled_2d<f32>".to_string(),
+            Self::TextureUint => "texture_multisampled_2d<u32>".to_string(),
+            Self::TextureDepth => "texture_depth_multisampled_2d".to_string(),
+            _ => self.wgsl_ty_full(),
         }
     }
 
@@ -251,13 +259,27 @@ pub fn resource_stays_multisampled(kind: &ResourceKind) -> bool {
 /// [`resource_decl`] at 1x; in MSAA mode depth/integer layers spell the
 /// multisampled texture types (see [`resource_stays_multisampled`]).
 pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
+    resource_decl_where(r, sample_count > 1 && resource_stays_multisampled(&r.kind))
+}
+
+/// WGSL declaration line for one [`Resource`] with an explicit
+/// multisampled decision: passes that keep extra layers per-sample (the AO
+/// raw pass keeps its normal, like lighting) select the multisampled
+/// spelling with their own predicate instead of
+/// [`resource_stays_multisampled`].
+pub fn resource_decl_where(r: &Resource, multisampled: bool) -> String {
+    let ty = if multisampled {
+        r.kind.wgsl_ty_multisampled()
+    } else {
+        r.kind.wgsl_ty_full()
+    };
     format!(
         "@group({}) @binding({}) {} {}: {};\n",
         r.group,
         r.binding,
         r.kind.wgsl_var(),
         r.name,
-        r.kind.wgsl_ty_for_samples(sample_count),
+        ty,
     )
 }
 
@@ -334,12 +356,28 @@ impl ShaderModule {
         bindings: &[u32],
         sample_count: u32,
     ) -> Self {
+        self = self.resources_where(table, bindings, |r| {
+            sample_count > 1 && resource_stays_multisampled(&r.kind)
+        });
+        self
+    }
+
+    /// Resource declarations from a [`Resource`] table subset with a
+    /// caller-provided multisampled decision per row (see
+    /// [`resource_decl_where`]): passes that keep extra layers per-sample
+    /// (the AO raw pass keeps its normal) spell those rows multisampled.
+    pub fn resources_where(
+        mut self,
+        table: &[Resource],
+        bindings: &[u32],
+        multisampled: impl Fn(&Resource) -> bool,
+    ) -> Self {
         let mut out = String::new();
         for b in bindings {
             let Some(r) = table.iter().find(|r| r.binding == *b) else {
                 continue;
             };
-            out.push_str(&resource_decl_for_samples(r, sample_count));
+            out.push_str(&resource_decl_where(r, multisampled(r)));
         }
         self.resources.push(out);
         self
@@ -604,6 +642,33 @@ pub fn bloom_fragment() -> String {
 /// use only the generated version.
 pub fn fog_fragment() -> String {
     fog_generated::wgsl_source()
+}
+
+// ── AMBIENT OCCLUSION ───────────────────────────────────────────────
+/// Assemble the AO raw fragment shader for `method` (SSAO/GTAO kernel
+/// over the g-buffer depth and normals).
+///
+/// Single source of truth — [`ao_generated::wgsl_source_raw`]
+/// (Rust → WGSL, path 2 with raw-WGSL bodies); `renderer::create_ao_passes`
+/// and this forwarder use only the generated version.
+pub fn ao_raw_fragment(method: crate::ao::AoMethod) -> String {
+    ao_generated::wgsl_source_raw(method)
+}
+
+/// Assemble the AO bilateral-blur fragment shader.
+///
+/// Single source of truth — [`ao_generated::wgsl_source_blur`]; see
+/// [`ao_raw_fragment`].
+pub fn ao_blur_fragment() -> String {
+    ao_generated::wgsl_source_blur()
+}
+
+/// Assemble the fullscreen AO vertex shader (triangle-strip quad).
+///
+/// Single source of truth — [`ao_generated::wgsl_vertex_source`]; see
+/// [`ao_raw_fragment`].
+pub fn ao_vertex() -> String {
+    ao_generated::wgsl_vertex_source()
 }
 
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────

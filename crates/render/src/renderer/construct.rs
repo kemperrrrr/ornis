@@ -1,4 +1,5 @@
 //! Renderer construction: `new` variants plus the legacy core resources (uniform buffers, PBR pipeline, palette store, render target) owned by `Renderer3D`.
+use super::ao::ao_white_staging_bytes;
 use super::*;
 impl Renderer3D {
     /// Build every pipeline/target for `surface_config`'s format and extent.
@@ -108,6 +109,12 @@ impl Renderer3D {
         let composite_pass = Self::create_composite_pass(device, format);
         let bloom_pass = Self::create_bloom_pass(device);
         let fog = Self::create_fog_pass(device, format, sample_count);
+        let ao_passes = Self::create_ao_passes(device, sample_count);
+        let ao_white_staging = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ao white staging"),
+            contents: &ao_white_staging_bytes(),
+            usage: wgpu::BufferUsages::COPY_SRC,
+        });
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite sampler"),
             ..crate::flags::SamplerKind::LinearClamp.descriptor()
@@ -154,6 +161,9 @@ impl Renderer3D {
             composite_sampler,
             bloom_pass,
             fog,
+            ao_passes,
+            ao_white_staging,
+            ao_white_uploaded: std::sync::atomic::AtomicBool::new(false),
             shadow_maps,
             shadow_views,
             shadow_array_view,
