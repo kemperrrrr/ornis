@@ -129,9 +129,12 @@ levels, no runtime mip generation.
   upgrading `basisu`.
 - **Encoder.** Basis ships no pure-Rust encoder, so compressed payloads come
   from the reference `basisu` command line — the project the runtime transcoder
-  port (`crates/texture/src/basis.rs`) comes from. The pixel handoff is an
-  uncompressed 32-bit TGA written beside the cache entry, and every flag is
-  pinned:
+  port (`crates/texture/src/basis.rs`) comes from. The shape follows the two
+  established offline pipelines rather than inventing one: Bevy's
+  asset-processing `basisu` step (per-slot `uastc`/`etc1s` policy) and
+  KTX-Software's `toktx` (`--uastc`, `--bcmp`, generated mipmaps in the same
+  KTX2 container). The pixel handoff is an uncompressed 32-bit TGA written
+  beside the cache entry, and every flag is pinned:
 
   | Slot | Command |
   | --- | --- |
