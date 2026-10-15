@@ -31,3 +31,30 @@ silently promised by a glTF-only switch. Compression **device features** are
 requested at runtime from `wgpu::Adapter::features`, not through Cargo flags.
 The transitive `paste` advisory is unmaintained, not ignored or newly allowed;
 replacement belongs with a maintained native-block decoder update.
+
+# Offline texture bake (issue #129)
+
+Additive: nothing existing changed meaning, and every new behaviour is opt-in.
+
+- `ornis-texture` exports the KTX2 writer behind the runtime loader:
+  `encode_rgba8_ktx2(&CpuImage, TextureRole) -> Vec<u8>` writes the role-filtered
+  mip chain (transfer function follows the role: sRGB for base color/emissive,
+  linear otherwise), and `ktx2_container(format, width, height, &levels)` writes
+  one from caller-authored level payloads. Both are pure functions of their
+  inputs, so a container is byte-reproducible.
+- New `ornis_assets::bake`: `BakeSettings` (per-role `BasisMode` overrides, cache
+  directory, `EncoderSource`), `bake_texture`, `bake_model`, `Baked`,
+  `BakeOrigin`, `BakeStats` and the typed `BakeError`. Only `bake_model`
+  requires the `gltf` feature; the rest of the crate's default build has it on.
+- `ornis-assets` now depends on `ornis-texture` unconditionally (the bake types
+  are in the public API); `crates/assets/Cargo.toml` and `Cargo.lock` are the
+  only manifest changes.
+- `AssetServer` gains `with_texture_baking(BakeSettings)` and `bake_stats()`
+  (feature `gltf`). Without `with_texture_baking` the import path is unchanged:
+  decoded PNG/JPEG pixels, mips generated at upload. With it, decoded material
+  slots become validated KTX2 containers at import and reload time, and a slot
+  whose bake fails keeps its decoded pixels instead of failing the import.
+- Compressed payloads need the reference `basisu` binary; with none on `PATH`
+  (or `EncoderSource::InProcess`) the bake degrades to the in-process RGBA8
+  chain. This is the same authored-mip behaviour as before plus a container, not
+  a loss: the compressed path is what reaches the documented 4.00× reduction.

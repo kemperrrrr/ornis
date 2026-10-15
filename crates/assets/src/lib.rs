@@ -2,15 +2,17 @@
 //!
 //! This crate owns what every domain reads but nobody owns: the
 //! serde-canonical scene/component descriptions ([`scene`]), the explicit
-//! collider recipes ([`collider`]), the glTF→[`scene`] wiring (`import`,
-//! feature `gltf`), pluggable format importers ([`importer`]), typed
-//! handles ([`handle`]), the format-neutral [`AssetError`] and the asset
-//! registry ([`server`]). Baked projections stay with their
-//! consumers (GPU meshes in `ornis-render`, solver bodies in
+//! collider recipes ([`collider`]), the offline texture bake ([`bake`]), the
+//! glTF→[`scene`] wiring (`import`, feature `gltf`), pluggable format
+//! importers ([`importer`]), typed handles ([`handle`]), the format-neutral
+//! [`AssetError`] and the asset registry ([`server`]). Baked projections stay
+//! with their consumers (GPU meshes in `ornis-render`, solver bodies in
 //! `ornis-physics`); this crate holds sources and identity, never copies.
 
 #![warn(missing_docs)]
 
+/// Offline KTX2 baking of imported textures ([`bake::BakeSettings`]).
+pub mod bake;
 /// Explicit collider recipes and the mesh→collider mapping.
 pub mod collider;
 /// Format-neutral asset loading error.
@@ -30,6 +32,11 @@ pub mod server;
 mod tri;
 mod wire;
 
+#[cfg(feature = "gltf")]
+pub use bake::bake_model;
+pub use bake::{
+    BakeError, BakeOrigin, BakeSettings, BakeStats, Baked, BasisMode, EncoderSource, bake_texture,
+};
 pub use collider::{ColliderDesc, collider_for};
 pub use error::AssetError;
 pub use handle::{Asset, Handle};

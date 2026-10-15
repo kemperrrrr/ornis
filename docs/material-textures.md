@@ -106,3 +106,80 @@ than that old base-only upload. These are exact texture payload budgets,
 **not measured driver VRAM residency**: page alignment and driver metadata
 are not exposed by this counter. The GPU test prints the chosen format and
 payload after upload. Physical Mac VRAM profiling remains a manual check.
+
+## Offline bake (`ornis-assets::bake`, issue #129)
+
+The KTX2 containers above used to be something an external toolchain had to
+produce. `crates/assets/src/bake.rs` now bakes them at import time, so a
+PNG/JPEG-sourced model gets the same runtime treatment as a
+`KHR_texture_basisu` one: authored levels, no runtime mip generation.
+
+- **Codec policy.** `BasisMode::for_role` picks UASTC for
+  `TextureRole::Normal` (quality where block artifacts hurt) and ETC1S for
+  albedo, ORM and emissive (size). `BakeSettings::overrides` replaces any single
+  slot, e.g. `{ BaseColor: Uastc }` for a hero texture.
+- **Cache.** The key is FNV-1a 64 over the decoded pixels, their dimensions,
+  the role and the codec, stored as `<key>.ktx2` under
+  `BakeSettings::cache_dir`. It hashes *decoded content*, so a re-encoded PNG
+  with identical texels hits the same entry, and two primitives sharing an
+  image share one bake. An entry that stops parsing as KTX2 counts as a miss.
+  The encoder build is not part of the key: delete the cache directory after
+  upgrading `basisu`.
+- **Encoder.** Basis ships no pure-Rust encoder, so compressed payloads come
+  from the reference `basisu` command line — the project the runtime transcoder
+  port (`crates/texture/src/basis.rs`) comes from. The pixel handoff is an
+  uncompressed 32-bit TGA written beside the cache entry, and every flag is
+  pinned:
+
+  | Slot | Command |
+  | --- | --- |
+  | UASTC | `basisu -ktx2 -mipmap -output_file <key>.tool.ktx2 -uastc -uastc_level 2 <key>.tga` |
+  | ETC1S | `basisu -ktx2 -mipmap -output_file <key>.tool.ktx2 -etc1s -q 128 <key>.tga` |
+
+  `EncoderSource::Path` (the default) looks for `basisu` on `PATH`,
+  `EncoderSource::Binary` pins an exact tool, `EncoderSource::InProcess` never
+  spawns a process. Tool output is validated through `Ktx2Image::from_bytes`
+  (reader, DFD, level-length and dimension rules) *before* anything replaces
+  the slot, and only the validated bytes are cached.
+- **No encoder, no regression.** Without a `basisu` the bake still writes a
+  container from `encode_rgba8_ktx2` — the same authored chain, RGBA8 blocks
+  instead of the compressed ones — so the runtime mip cost disappears either
+  way. The compressed path is what reaches the 4.00× / 8.00× figures above.
+- **The source stays.** A failed bake (missing pinned tool, non-zero exit,
+  unparsable output) returns a typed `BakeError`; `bake_model` keeps the decoded
+  PNG/JPEG pixels of that slot and counts it in `BakeStats::fallback`, with the
+  reason in `BakeStats::last_failure`.
+
+```rust
+let mut server = AssetServer::new()
+    .with_texture_baking(BakeSettings::new("target/ornis-texture-cache"));
+let id = server.load_gltf_file(path)?;
+let stats = server.bake_stats(); // encoded / cached / authored / fallback
+```
+
+The bake is import-time and lives on `AssetServer` (feature `gltf`): every
+model written through `store`/`insert_at`, including `reload`, bakes its decoded
+slots when a policy is set and is untouched when it is not. A slot already
+holding KTX2 (`KHR_texture_basisu`) keeps the container the file authored.
+
+### Tests for the bake
+
+- `crates/texture/src/encode.rs` — round trip through the reader for all four
+  roles, role/transfer-function pairing, determinism, invalid sources,
+  rectangular chains, unknown formats rejected instead of guessed.
+- `crates/texture/tests/ktx2.rs` — `native_container` is now the crate's own
+  writer, so every existing native-format expectation (BC1/BC3/BC7/ASTC/ETC2/
+  RGBA8 chains, mip preservation, rejection paths) also exercises the writer
+  against the production reader.
+- `crates/assets/src/bake.rs` — role defaults and overrides, cache hits per
+  (content, role), byte-level determinism, pinned CLI flags plus TGA bytes via a
+  stub encoder, non-zero exit reporting, the model slot pass, and fallback.
+- `crates/assets/src/server.rs` — a glTF with a PNG albedo keeps its decoded
+  texels without a policy, and becomes a validated KTX2 chain with one.
+
+## Next steps
+
+- Ship a `basisu` build with the toolchain (or vendor a UASTC encoder) so the
+  default path produces compressed containers without a manual install.
+- Cache baked containers next to the source asset in the editor so a fresh
+  checkout skips the first re-encode.

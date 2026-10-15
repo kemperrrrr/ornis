@@ -2783,6 +2783,7 @@ dependencies = [
  "glam",
  "ornis-core",
  "ornis-gltf",
+ "ornis-texture",
  "ron",
  "serde",
  "serde_json",

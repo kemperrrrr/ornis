@@ -4,11 +4,13 @@
 
 mod basis;
 mod container;
+mod encode;
 mod encoding;
 mod image;
 mod mipmaps;
 
 pub use container::Ktx2Image;
+pub use encode::{encode_rgba8_ktx2, ktx2_container};
 pub use encoding::TextureEncoding;
 pub use image::{TextureImage, TextureLevels};
 pub use mipmaps::generate_mipmaps;
