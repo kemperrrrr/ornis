@@ -19,6 +19,7 @@ pub(super) fn forward_ibl_entries<'a>(
     shadow_array_view: &'a wgpu::TextureView,
     shadow_sampler: &'a wgpu::Sampler,
     shadow_cube_array_view: &'a wgpu::TextureView,
+    csm_array_view: &'a wgpu::TextureView,
     ibl: &'a crate::ibl::IblTargets,
 ) -> Vec<wgpu::BindGroupEntry<'a>> {
     shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| match r.name {
@@ -27,6 +28,7 @@ pub(super) fn forward_ibl_entries<'a>(
         "materials" => Some(material.as_entire_binding()),
         "lighting" => Some(lighting.as_entire_binding()),
         "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+        "csm_tex" => Some(wgpu::BindingResource::TextureView(csm_array_view)),
         "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
         "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(shadow_cube_array_view)),
         "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => ibl.binding(r.name),
@@ -239,6 +241,7 @@ impl Renderer3D {
         shadow_array_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_cube_array_view: &wgpu::TextureView,
+        csm_array_view: &wgpu::TextureView,
         ibl: &crate::ibl::IblTargets,
         width: u32,
         height: u32,
@@ -267,6 +270,7 @@ impl Renderer3D {
                         "materials" => Some(material_buffer.as_entire_binding()),
                         "lighting" => Some(lighting_buffer.as_entire_binding()),
                         "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+                        "csm_tex" => Some(wgpu::BindingResource::TextureView(csm_array_view)),
                         "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
                         "shadow_cube_tex" => {
                             Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
@@ -760,6 +764,7 @@ impl Renderer3D {
                     "shadow_tex" => {
                         Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
+                    "csm_tex" => Some(wgpu::BindingResource::TextureView(&self.csm_array_view)),
                     "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
                     "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
                         &self.shadow_cube_array_view,

@@ -368,7 +368,11 @@ impl Renderer3D {
             .point_shadow_count
             .load(std::sync::atomic::Ordering::Relaxed)
             .min(POINT_SHADOW_CUBES as u32);
-        if count == 0 && cubes == 0 {
+        let cascades = self
+            .csm_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(CSM_CASCADES as u32);
+        if count == 0 && cubes == 0 && cascades == 0 {
             return;
         }
         let per_object = read_lock(&self.per_object_buffer);
@@ -383,6 +387,20 @@ impl Renderer3D {
                 &self.skinned_shadow_pipeline,
                 &self.shadow_vp_buffers[layer],
                 &self.shadow_views[layer],
+                &per_object,
+                &material,
+                &palette,
+            );
+        }
+        for layer in 0..cascades as usize {
+            self.render_skinned_shadow_layer(
+                device,
+                encoder,
+                mesh,
+                handle,
+                &self.skinned_shadow_pipeline,
+                &self.csm_vp_buffers[layer],
+                &self.csm_views[layer],
                 &per_object,
                 &material,
                 &palette,

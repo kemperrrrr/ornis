@@ -19,7 +19,7 @@ use super::{
     ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
     wgsl_decl,
 };
-use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
+use crate::renderer::{CameraUniform, CsmBlock, CsmVp, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
 use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
@@ -37,7 +37,7 @@ pub fn wgsl_vertex_source() -> String {
 ///
 /// Bindings 7–10 are the split-sum IBL set (prefilter, irradiance, BRDF LUT,
 /// sampler) added with the image-based light path.
-const PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 /// Forward-PBR fragment shader: full OpenPBR evaluation.
 ///
@@ -71,6 +71,8 @@ pub fn wgsl_source() -> String {
     let module = ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
+        .decl(wgsl_decl(CsmVp::WGSL_SOURCE))
+        .decl(wgsl_decl(CsmBlock::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
         .resources(&PBR_RESOURCES, PBR_FRAGMENT_BINDINGS)
@@ -102,6 +104,7 @@ pub(crate) struct PbrContext {
     pub irradiance_cube: TextureCube,
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
+    pub csm_tex: DepthTextureArray,
 }
 
 #[stage(fragment)]
@@ -204,6 +207,95 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
         let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
+        // CSM directional path (#121): `params.x` carries the cascade
+        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
+        let is_csm = (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(0.5, light.params.x);
+        if is_csm > LIGHT_SELECTOR_SPLIT {
+            let view_depth = dot(
+                input.world_position - ctx.camera.camera_pos.xyz,
+                ctx.lighting.csm.view_fwd.xyz,
+            );
+            let b0 = ctx.lighting.csm.splits_lo.x;
+            let b1 = ctx.lighting.csm.splits_lo.y;
+            let b2 = ctx.lighting.csm.splits_lo.z;
+            let b3 = ctx.lighting.csm.splits_lo.w;
+            let b4 = ctx.lighting.csm.split_far;
+            let mut cascade = 0u;
+            if view_depth >= b1 {
+                cascade = 1u;
+            }
+            if view_depth >= b2 {
+                cascade = 2u;
+            }
+            if view_depth >= b3 {
+                cascade = 3u;
+            }
+            let mut upper = b1;
+            if cascade == 1u {
+                upper = b2;
+            }
+            if cascade == 2u {
+                upper = b3;
+            }
+            if cascade == 3u {
+                upper = b4;
+            }
+            let mut lower = b0;
+            if cascade == 1u {
+                lower = b1;
+            }
+            if cascade == 2u {
+                lower = b2;
+            }
+            if cascade == 3u {
+                lower = b3;
+            }
+            let clip0 = ctx.lighting.csm.vps[cascade].cols
+                * Vec4::new(
+                    input.world_position.x,
+                    input.world_position.y,
+                    input.world_position.z,
+                    1.0,
+                );
+            let ndc0 = clip0.xyz / clip0.w;
+            let uv0 = Vec2::new(
+                ndc0.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                NDC_TO_UV_HALF - ndc0.y * NDC_TO_UV_HALF,
+            );
+            let mut vis = textureSampleCompare(
+                ctx.csm_tex,
+                ctx.shadow_sampler,
+                uv0,
+                i32(cascade),
+                ndc0.z - SHADOW_REF_BIAS,
+            );
+            if cascade < 3u {
+                let band = max((upper - lower) * CSM_BLEND_FRACTION, EPS);
+                let t = clamp((upper - view_depth) / band, 0.0, 1.0);
+                let next = cascade + 1u;
+                let clip1 = ctx.lighting.csm.vps[next].cols
+                    * Vec4::new(
+                        input.world_position.x,
+                        input.world_position.y,
+                        input.world_position.z,
+                        1.0,
+                    );
+                let ndc1 = clip1.xyz / clip1.w;
+                let uv1 = Vec2::new(
+                    ndc1.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                    NDC_TO_UV_HALF - ndc1.y * NDC_TO_UV_HALF,
+                );
+                let vis1 = textureSampleCompare(
+                    ctx.csm_tex,
+                    ctx.shadow_sampler,
+                    uv1,
+                    i32(next),
+                    ndc1.z - SHADOW_REF_BIAS,
+                );
+                vis = mix(vis1, vis, t);
+            }
+            radiance = radiance * vis;
+        }
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
@@ -423,7 +515,7 @@ pub fn wgsl_source_static() -> String {
 /// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
 /// Shared by `create_pbr_bind_group` and `create_forward_pass`, whose
 /// handwritten layouts were identical. Type names come from the Rust side.
-pub const PBR_RESOURCES: [Resource; 11] = [
+pub const PBR_RESOURCES: [Resource; 12] = [
     Resource {
         group: 0,
         binding: 0,
@@ -512,6 +604,14 @@ pub const PBR_RESOURCES: [Resource; 11] = [
         kind: ResourceKind::Sampler,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 11,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "csm_tex",
+        kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
 ];
 
 #[cfg(test)]
@@ -580,6 +680,8 @@ mod tests {
         let src = wgsl_source();
         assert!(src.contains(CameraUniform::WGSL_SOURCE));
         assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(CsmVp::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(CsmBlock::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)));
         assert!(src.contains(openpbr_material_decl().as_str()));
     }
@@ -590,7 +692,7 @@ mod tests {
     fn pbr_resources_cover_stages_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         let src = wgsl_vertex_source() + &wgsl_source();
-        assert_eq!(PBR_RESOURCES.len(), 11);
+        assert_eq!(PBR_RESOURCES.len(), 12);
         for r in PBR_RESOURCES {
             assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
             let e = bgl_entry(&r, false);

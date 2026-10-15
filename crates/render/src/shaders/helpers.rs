@@ -25,6 +25,11 @@ pub const EPS: f32 = 1e-6;
 /// values risk acne (guarded by
 /// `shadowed_directional_without_occluder_has_no_acne`).
 pub const SHADOW_REF_BIAS: f32 = 0.001;
+/// Fraction of a cascade's depth range blended with the next cascade at
+/// the upper seam (#121): `1` deep inside the cascade, `0` exactly on
+/// the split. Small enough to keep the sharp near texels, wide enough
+/// to hide the resolution step between cascades.
+pub const CSM_BLEND_FRACTION: f32 = 0.08;
 /// Single-precision 1/π, matching the former `0.31830988618` bit-wise.
 pub const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
 /// Cleared g-buffer depth (far plane). A sample at this depth is background:
@@ -116,6 +121,7 @@ pub fn wgsl_consts() -> String {
         decl!(RANGE_CUTOFF_INNER_FRACTION),
         decl!(NDC_TO_UV_HALF),
         decl!(SHADOW_CUBE_NEAR),
+        decl!(CSM_BLEND_FRACTION),
         decl!(LIGHT_SELECTOR_SPLIT),
         decl!(SPECULAR_AA_VARIANCE),
         decl!(SPECULAR_AA_KERNEL_SCALE),

@@ -91,7 +91,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 18] = [
+pub const LIGHTING_RESOURCES: [Resource; 19] = [
     Resource {
         group: 0,
         binding: 0,
@@ -236,6 +236,14 @@ pub const LIGHTING_RESOURCES: [Resource; 18] = [
         kind: ResourceKind::TextureFloat,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 18,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "csm_tex",
+        kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
@@ -303,6 +311,7 @@ pub(crate) struct LightingMaps {
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
     pub ao_tex: Texture2d,
+    pub csm_tex: DepthTextureArray,
 }
 
 #[stage(fragment)]
@@ -454,6 +463,87 @@ fn shade_lit(
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
         let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
+        // CSM directional path (#121): `params.x` carries the cascade
+        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
+        // Legacy `params.w` stays -1.0 here, so the block below is the
+        // only lookup for the CSM light.
+        let is_csm = (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(0.5, light.params.x);
+        if is_csm > LIGHT_SELECTOR_SPLIT {
+            // View depth picks the cascade; the top band of each range
+            // blends into the next cascade to hide the resolution step.
+            let view_depth = dot(world_pos - camera.camera_pos.xyz, lighting.csm.view_fwd.xyz);
+            let b0 = lighting.csm.splits_lo.x;
+            let b1 = lighting.csm.splits_lo.y;
+            let b2 = lighting.csm.splits_lo.z;
+            let b3 = lighting.csm.splits_lo.w;
+            let b4 = lighting.csm.split_far;
+            let mut cascade = 0u;
+            if view_depth >= b1 {
+                cascade = 1u;
+            }
+            if view_depth >= b2 {
+                cascade = 2u;
+            }
+            if view_depth >= b3 {
+                cascade = 3u;
+            }
+            let mut upper = b1;
+            if cascade == 1u {
+                upper = b2;
+            }
+            if cascade == 2u {
+                upper = b3;
+            }
+            if cascade == 3u {
+                upper = b4;
+            }
+            let mut lower = b0;
+            if cascade == 1u {
+                lower = b1;
+            }
+            if cascade == 2u {
+                lower = b2;
+            }
+            if cascade == 3u {
+                lower = b3;
+            }
+            let clip0 = lighting.csm.vps[cascade].cols
+                * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+            let ndc0 = clip0.xyz / clip0.w;
+            let uv0 = Vec2::new(
+                ndc0.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                NDC_TO_UV_HALF - ndc0.y * NDC_TO_UV_HALF,
+            );
+            let mut vis = textureSampleCompare(
+                csm_tex,
+                shadow_sampler,
+                uv0,
+                i32(cascade),
+                ndc0.z - SHADOW_REF_BIAS,
+            );
+            if cascade < 3u {
+                let band = max((upper - lower) * CSM_BLEND_FRACTION, EPS);
+                let t = clamp((upper - view_depth) / band, 0.0, 1.0);
+                let next = cascade + 1u;
+                let clip1 = lighting.csm.vps[next].cols
+                    * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+                let ndc1 = clip1.xyz / clip1.w;
+                let uv1 = Vec2::new(
+                    ndc1.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                    NDC_TO_UV_HALF - ndc1.y * NDC_TO_UV_HALF,
+                );
+                let vis1 = textureSampleCompare(
+                    csm_tex,
+                    shadow_sampler,
+                    uv1,
+                    i32(next),
+                    ndc1.z - SHADOW_REF_BIAS,
+                );
+                vis = mix(vis1, vis, t);
+            }
+            radiance = radiance * vis;
+            shadow_vis = min(shadow_vis, vis);
+        }
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
@@ -866,7 +956,7 @@ mod tests {
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 18);
+        assert_eq!(LIGHTING_RESOURCES.len(), 19);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -891,7 +981,7 @@ mod tests {
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
         // The header is built as naga IR from the same derives (drift is
-        // impossible by construction); pin declaration order and the 18
+        // impossible by construction); pin declaration order and the 19
         // resource bindings in the printed output.
         let src = wgsl_source();
         let cam = src.find("struct Camera").expect("Camera");
@@ -900,7 +990,7 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 18);
+        assert_eq!(src.matches("@binding(").count(), 19);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer

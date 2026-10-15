@@ -964,7 +964,7 @@ mod tests {
             GbufferVertexOutput, HdrFragmentOut, UiCompositeOut,
         };
         use crate::renderer::{
-            BloomUniform, CameraUniform, GpuLight, LightingUniform, PerObjectGpu,
+            BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
         };
 
         fn is_swizzle(field: &str) -> bool {
@@ -1042,10 +1042,14 @@ mod tests {
         // Shared roots: uniform buffers by layout, materials by slot list.
         // `light` is a loop-local copy of one `Lighting.lights` element
         // (kind-selected evaluation in both fragment entries).
+        // `lighting.csm` nests one level deeper (CSM cascades, #121); the
+        // translator spells it bare (`csm.*`), hence both keys.
         let shared: &[(&str, &[&str])] = &[
             ("light", GpuLight::FIELD_NAMES),
             ("camera", CameraUniform::FIELD_NAMES),
             ("lighting", LightingUniform::FIELD_NAMES),
+            ("lighting.csm", CsmBlock::FIELD_NAMES),
+            ("csm", CsmBlock::FIELD_NAMES),
             ("bloom_params", BloomUniform::FIELD_NAMES),
             ("mat", &OPENPBR_SLOTS),
             ("obj", PerObjectGpu::FIELD_NAMES),
@@ -1065,36 +1069,63 @@ mod tests {
             let mut rest = entry.src;
             while let Some(dot) = rest.find('.') {
                 let before = &rest[..dot];
-                let root: String = before
-                    .chars()
-                    .rev()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
+                // Longest known prefix ending exactly at the dot
+                // (identifier boundary on the left), so nested paths
+                // like `lighting.csm.splits_lo` resolve level by level.
+                let mut hit: Option<(&str, &[&str])> = None;
+                for (key, fields) in roots.iter() {
+                    let Some(prefix) = before.strip_suffix(key) else {
+                        continue;
+                    };
+                    if prefix
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    {
+                        continue;
+                    }
+                    if hit.is_none_or(|(prev, _)| key.len() > prev.len()) {
+                        hit = Some((key, fields));
+                    }
+                }
                 let after = &rest[dot + 1..];
                 let field: String = after
                     .chars()
                     .take_while(|c| c.is_alphanumeric() || *c == '_')
                     .collect();
-                if !root.is_empty() && !field.is_empty() && !is_swizzle(&field) {
+                if field.is_empty() || is_swizzle(&field) {
+                    rest = after;
+                    continue;
+                }
+                let Some((root, fields)) = hit else {
+                    // A dot that follows `]`/`)`/whitespace never opens a
+                    // field use (`arr[i].xyz` reports through its swizzle).
                     // Float literals (`0.0`) look like `root.field` to the
                     // scanner; numeric roots are never field uses.
-                    if root.starts_with(|c: char| c.is_ascii_digit()) {
+                    let glued = before
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    if !glued {
                         rest = after;
                         continue;
                     }
-                    let (_, fields) = roots
-                        .iter()
-                        .find(|(r, _)| *r == root)
-                        .unwrap_or_else(|| panic!("entry {n}: unresolved root `{root}.{field}`"));
-                    assert!(
-                        fields.contains(&field.as_str()),
-                        "entry {n}: `{root}` has no field `{field}`"
-                    );
-                    checked += 1;
-                }
+                    let numeric = before
+                        .chars()
+                        .rev()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .any(|c| c.is_ascii_digit());
+                    if numeric {
+                        rest = after;
+                        continue;
+                    }
+                    panic!("entry {n}: unresolved root for `{field}`");
+                };
+                assert!(
+                    fields.contains(&field.as_str()),
+                    "entry {n}: `{root}` has no field `{field}`"
+                );
+                checked += 1;
                 rest = after;
             }
         }

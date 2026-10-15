@@ -176,6 +176,7 @@ impl Renderer3D {
                     "shadow_tex" => {
                         Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
+                    "csm_tex" => Some(wgpu::BindingResource::TextureView(&self.csm_array_view)),
                     "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
                     "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
                         &self.shadow_cube_array_view,

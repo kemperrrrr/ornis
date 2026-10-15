@@ -99,6 +99,11 @@ pub trait RenderBackend {
     /// eye position used by lighting.
     fn set_camera(&mut self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]);
 
+    /// Opt into cascaded shadows (#121): `near`/`far` are the camera view
+    /// depths in meters and `forward` its world-space view direction.
+    /// The default is a no-op (legacy single-layer shadows).
+    fn set_csm_camera(&mut self, near: f32, far: f32, forward: [f32; 3]);
+
     /// Upload ambient RGB and scene lights ([`LightDesc`]); the renderer
     /// uploads the first eight of any kind (see
     /// `crate::renderer::MAX_LIGHTS`) and reports drops via
@@ -190,6 +195,10 @@ pub mod renderer3d_backend {
             camera_pos: [f32; 3],
         ) {
             Renderer3D::set_camera(self, queue, view_proj, camera_pos);
+        }
+
+        fn set_csm_camera(&mut self, near: f32, far: f32, forward: [f32; 3]) {
+            Renderer3D::set_csm_camera(self, near, far, forward);
         }
 
         fn set_lights(&mut self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]) {

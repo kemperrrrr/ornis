@@ -3,6 +3,12 @@ use super::*;
 /// Shadow-map layers (one per light slot).
 pub const SHADOW_LAYERS: usize = 4;
 
+/// Cascades per directional light for CSM (#121).
+pub const CSM_CASCADES: usize = 4;
+
+/// Default practical-split blend: 0 = uniform, 1 = logarithmic.
+pub const CSM_SPLIT_LAMBDA: f32 = 0.5;
+
 /// Shadow-map resolution in pixels (square).
 ///
 /// Depth is `Depth32Float`; 1024² × 4 layers ≈ 16 MiB, allocated once
@@ -99,6 +105,211 @@ pub(super) fn dir_shadow_vp(to_light: glam::Vec3) -> [[f32; 4]; 4] {
         SHADOW_DIR_DIST + SHADOW_DIR_DEPTH_MARGIN,
     );
     (proj * view).to_cols_array_2d()
+}
+
+/// Uniform split at fraction `t` of the camera range.
+fn uniform_split(near: f32, far: f32, t: f32) -> f32 {
+    near + (far - near) * t
+}
+
+/// Logarithmic split at fraction `t`: geometric progression from `near` to `far`.
+fn log_split(near: f32, far: f32, t: f32) -> f32 {
+    near * (far / near).powf(t)
+}
+
+/// Cascade boundaries for a directional light (practical split blend, #121).
+///
+/// Returns `CSM_CASCADES + 1` distances from `near` to `far`; entries beyond
+/// `num_cascades` repeat `far` so the layout stays DSL-friendly (fixed
+/// `array<f32>`). `lambda` blends logarithmic (`1`) and uniform (`0`);
+/// degenerate ranges fall back to `near`/`far` without NaN.
+pub(super) fn cascade_splits(
+    near: f32,
+    far: f32,
+    num_cascades: usize,
+    lambda: f32,
+) -> [f32; CSM_CASCADES + 1] {
+    // facade: validate inputs, blend the per-fraction helpers below.
+    let count = num_cascades.clamp(1, CSM_CASCADES);
+    let clamped = lambda.clamp(0.0, 1.0);
+    if !(near.is_finite() && far.is_finite() && near > 0.0 && far > near) {
+        return fallback_splits(near, far);
+    }
+    let mut splits = [far; CSM_CASCADES + 1];
+    splits[0] = near;
+    for (i, slot) in splits.iter_mut().enumerate().take(count).skip(1) {
+        let t = i as f32 / count as f32;
+        *slot = clamped * log_split(near, far, t) + (1.0 - clamped) * uniform_split(near, far, t);
+    }
+    splits
+}
+
+/// Degenerate-range fallback: first entry `near`, the rest `far`.
+fn fallback_splits(near: f32, far: f32) -> [f32; CSM_CASCADES + 1] {
+    let mut splits = [far; CSM_CASCADES + 1];
+    splits[0] = near;
+    splits
+}
+
+/// Bounding sphere of the slice corners, or `None` for non-finite input.
+fn slice_bounding_sphere(corners: &[[f32; 3]; 8]) -> Option<(glam::Vec3, f32)> {
+    let mut center = glam::Vec3::ZERO;
+    for corner in corners {
+        let p = glam::Vec3::from_array(*corner);
+        if !p.is_finite() {
+            return None;
+        }
+        center += p;
+    }
+    let center = center / corners.len() as f32;
+    let radius = bounding_radius(center, corners);
+    (radius > 0.0 && radius.is_finite()).then_some((center, radius))
+}
+
+/// Max distance from `center` to the corners.
+fn bounding_radius(center: glam::Vec3, corners: &[[f32; 3]; 8]) -> f32 {
+    corners
+        .iter()
+        .map(|c| center.distance(glam::Vec3::from_array(*c)))
+        .fold(0.0, f32::max)
+}
+
+/// Light-space AABB of world-space frustum-slice corners under `view`.
+fn light_space_aabb(view: glam::Mat4, corners: &[[f32; 3]; 8]) -> (glam::Vec3, glam::Vec3) {
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for corner in corners {
+        let p = view.transform_point3(glam::Vec3::from_array(*corner));
+        min = min.min(p);
+        max = max.max(p);
+    }
+    (min, max)
+}
+
+/// Snap one bound down to whole texels.
+fn snap_down_to_texel(value: f32, texel: f32) -> f32 {
+    (value / texel).floor() * texel
+}
+
+/// Snapped square XY bounds for the map: floored minimum and the
+/// texel-sized side covering `max`, or `None` when degenerate.
+fn snapped_xy_bounds(
+    min: glam::Vec2,
+    max: glam::Vec2,
+    resolution: u32,
+) -> Option<(glam::Vec2, f32)> {
+    let width = (max.x - min.x).max(max.y - min.y);
+    if !(width > 0.0 && width.is_finite()) || resolution == 0 {
+        return None;
+    }
+    let texel = width / resolution as f32;
+    let snapped = glam::Vec2::new(
+        snap_down_to_texel(min.x, texel),
+        snap_down_to_texel(min.y, texel),
+    );
+    let side = ((max.x - snapped.x).max(max.y - snapped.y) / texel).ceil() * texel;
+    Some((snapped, side))
+}
+
+/// Snapped ortho VP from light-space bounds, or `None` when degenerate.
+///
+/// XY bounds snap down/up to whole texels of the square `resolution` map,
+/// so sub-texel camera motion keeps the matrix bit-identical (no shimmer,
+/// #121). Depth covers the bounds plus the fitted margins.
+fn snapped_ortho_vp(
+    view: glam::Mat4,
+    min: glam::Vec3,
+    max: glam::Vec3,
+    resolution: u32,
+) -> Option<[[f32; 4]; 4]> {
+    // facade: snap XY to texels, cover depth with the fitted margins.
+    let (snapped, side) = snapped_xy_bounds(min.truncate(), max.truncate(), resolution)?;
+    let proj = glam::camera::rh::proj::directx::orthographic(
+        snapped.x,
+        snapped.x + side,
+        snapped.y,
+        snapped.y + side,
+        -max.z - 1.0,
+        -min.z + SHADOW_FIT_FAR_PAD,
+    );
+    Some((proj * view).to_cols_array_2d())
+}
+
+/// Cascade view-projection for one camera-frustum slice (CSM, #121).
+///
+/// Fits a snapped ortho box to the slice corners in light space (see
+/// [`snapped_ortho_vp`]) while the depth range covers `depth_world`
+/// (the whole frustum): casters outside the slice still darken it, so
+/// the occluder must not be clipped by the near plane. Degenerate input
+/// falls back to [`dir_shadow_vp`], so small scenes keep the legacy box.
+pub(super) fn cascade_shadow_vp(
+    to_light: glam::Vec3,
+    corners_world: [[f32; 3]; 8],
+    depth_world: [[f32; 3]; 8],
+    resolution: u32,
+) -> [[f32; 4]; 4] {
+    // facade: bound the slice, fit it in light space, snap to texels.
+    let Some((center, radius)) = slice_bounding_sphere(&corners_world) else {
+        return dir_shadow_vp(to_light);
+    };
+    let eye = center + to_light * (radius + SHADOW_DIR_DEPTH_MARGIN);
+    let view = glam::camera::rh::view::look_at_mat4(eye, center, shadow_up(to_light));
+    let (min, max) = light_space_aabb(view, &corners_world);
+    // Depth spans the full frustum (casters outside the slice); XY stays
+    // fitted to the slice (texel density).
+    let (depth_min, depth_max) = light_space_aabb(view, &depth_world);
+    let min = glam::Vec3::new(min.x, min.y, depth_min.z);
+    let max = glam::Vec3::new(max.x, max.y, depth_max.z);
+    snapped_ortho_vp(view, min, max, resolution).unwrap_or_else(|| dir_shadow_vp(to_light))
+}
+
+/// Unproject one NDC point to world space, or `None` at/behind the camera.
+fn unproject_ndc(inv_view_proj: glam::Mat4, ndc: [f32; 3]) -> Option<[f32; 3]> {
+    let world = inv_view_proj * glam::Vec4::new(ndc[0], ndc[1], ndc[2], 1.0);
+    if world.w <= 0.0 || !world.is_finite() {
+        return None;
+    }
+    Some((world.truncate() / world.w).to_array())
+}
+
+/// World-space corners of a camera-frustum slice (CSM, #121).
+///
+/// Unprojects the NDC square at the view depths `split_near`/`split_far`
+/// through `inv_view_proj` (directx depth convention, like the main
+/// camera). Split bounds clamp into `[near, far]`; degenerate ranges
+/// return `None` so callers fall back to the legacy shadow box.
+pub(super) fn frustum_slice_corners(
+    inv_view_proj: [[f32; 4]; 4],
+    near: f32,
+    far: f32,
+    split_near: f32,
+    split_far: f32,
+) -> Option<[[f32; 3]; 8]> {
+    // facade: validate the range, map depths to NDC, unproject the slice.
+    if !(near > 0.0 && far > near && near.is_finite() && far.is_finite()) {
+        return None;
+    }
+    let inv = glam::Mat4::from_cols_array_2d(&inv_view_proj);
+    if !inv.is_finite() {
+        return None;
+    }
+    let lo = split_near.clamp(near, far);
+    let hi = split_far.clamp(near, far);
+    if lo >= hi {
+        return None;
+    }
+    // DirectX perspective: NDC z = A + B / view_depth.
+    let range = far - near;
+    let mut corners = [[0.0; 3]; 8];
+    let mut idx = 0;
+    for depth in [lo, hi] {
+        let z = far / range - near * far / range / depth;
+        for xy in [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]] {
+            corners[idx] = unproject_ndc(inv, [xy[0], xy[1], z])?;
+            idx += 1;
+        }
+    }
+    Some(corners)
 }
 
 /// Scene fit for one directional shadow map: `(center, half-extent)` from
@@ -334,6 +545,59 @@ impl Renderer3D {
         )
     }
 
+    /// Allocate the CSM depth pool: one layer per cascade with per-layer
+    /// views, the sampling array view, and VP uniform buffers (#121).
+    /// Shares the depth-only pipelines and the comparison sampler with
+    /// the legacy pool (same format, same bias).
+    pub(super) fn create_csm_targets(
+        device: &wgpu::Device,
+    ) -> (
+        wgpu::Texture,
+        [wgpu::TextureView; CSM_CASCADES],
+        wgpu::TextureView,
+        [wgpu::Buffer; CSM_CASCADES],
+    ) {
+        let csm_maps = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("csm maps"),
+            size: wgpu::Extent3d {
+                width: SHADOW_SIZE,
+                height: SHADOW_SIZE,
+                depth_or_array_layers: CSM_CASCADES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let csm_views = std::array::from_fn(|layer| {
+            csm_maps.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("csm map layer"),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        });
+        let csm_array_view = csm_maps.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("csm map array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let csm_vp_buffers = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("csm VP buffer"),
+                size: std::mem::size_of::<CameraUniform>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        (csm_maps, csm_views, csm_array_view, csm_vp_buffers)
+    }
+
     /// Depth-only pipeline for the shadow pre-pass. It reuses the
     /// gbuffer vertex shader (and its bind group layout): each layer
     /// binds its light-space VP buffer into the `camera` slot, so no
@@ -527,7 +791,11 @@ impl Renderer3D {
             .point_shadow_count
             .load(std::sync::atomic::Ordering::Relaxed)
             .min(POINT_SHADOW_CUBES as u32);
-        if count == 0 && cubes == 0 {
+        let cascades = self
+            .csm_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(CSM_CASCADES as u32);
+        if count == 0 && cubes == 0 && cascades == 0 {
             return;
         }
         for layer in 0..count as usize {
@@ -541,6 +809,19 @@ impl Renderer3D {
                 &self.skinned_shadow_pipeline,
                 &self.shadow_vp_buffers[layer],
                 &self.shadow_views[layer],
+            );
+        }
+        for layer in 0..cascades as usize {
+            self.render_shadow_view_batch(
+                device,
+                encoder,
+                mesh,
+                instance_count,
+                customs,
+                &self.shadow_pipeline,
+                &self.skinned_shadow_pipeline,
+                &self.csm_vp_buffers[layer],
+                &self.csm_views[layer],
             );
         }
         for cube in 0..cubes as usize {
@@ -958,7 +1239,17 @@ mod tests {
 
         // directional-only scenes stay pixel-identical.
         let light = dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Enabled);
-        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &[light], None, 0.0, 0.0, 0);
+        let built = build_lighting_uniform(
+            [0.1, 0.1, 0.15],
+            1.0,
+            1.0,
+            &[light],
+            None,
+            None,
+            0.0,
+            0.0,
+            0,
+        );
         let v = glam::Vec3::new(1.0, 1.0, 1.0).normalize();
         assert_eq!(built.uniform.lights[0].shadow_vp, dir_shadow_vp(v));
         assert_eq!(built.uniform.lights[0].params[3], 0.0);
@@ -995,5 +1286,244 @@ mod tests {
             shadow_fit_for_bounds([f32::NAN; 3], [0.0; 3]),
             ([0.0; 3], SHADOW_ORTHO_HALF)
         );
+    }
+
+    #[test]
+    fn cascade_splits_span_near_to_far_monotonic() {
+        let splits = cascade_splits(1.0, 101.0, CSM_CASCADES, CSM_SPLIT_LAMBDA);
+        assert!((splits[0] - 1.0).abs() < 1e-6, "{splits:?}");
+        assert!((splits[CSM_CASCADES] - 101.0).abs() < 1e-6, "{splits:?}");
+        for pair in splits.windows(2) {
+            assert!(pair[0] < pair[1], "{splits:?}");
+        }
+    }
+
+    #[test]
+    fn cascade_splits_lambda_extremes_match_uniform_and_log() {
+        let uniform = cascade_splits(1.0, 101.0, CSM_CASCADES, 0.0);
+        assert!((uniform[2] - 51.0).abs() < 1e-4, "{uniform:?}");
+        let log = cascade_splits(1.0, 101.0, CSM_CASCADES, 1.0);
+        let expected = 101.0f32.powf(0.5);
+        assert!((log[2] - expected).abs() < 1e-3, "{log:?}");
+    }
+
+    #[test]
+    fn cascade_splits_unused_tail_repeats_far() {
+        let splits = cascade_splits(0.5, 60.0, 2, CSM_SPLIT_LAMBDA);
+        assert!((splits[0] - 0.5).abs() < 1e-6, "{splits:?}");
+        assert!(splits[1] > splits[0] && splits[1] < 60.0, "{splits:?}");
+        for tail in splits.iter().skip(2) {
+            assert!((*tail - 60.0).abs() < 1e-6, "{splits:?}");
+        }
+    }
+
+    #[test]
+    fn cascade_splits_degenerate_range_falls_back() {
+        let splits = cascade_splits(10.0, 5.0, CSM_CASCADES, CSM_SPLIT_LAMBDA);
+        assert!((splits[0] - 10.0).abs() < 1e-6, "{splits:?}");
+        for tail in splits.iter().skip(1) {
+            assert!((*tail - 5.0).abs() < 1e-6, "{splits:?}");
+        }
+    }
+
+    fn box_corners(center: [f32; 3], half: f32) -> [[f32; 3]; 8] {
+        let mut corners = [[0.0; 3]; 8];
+        for (i, corner) in corners.iter_mut().enumerate() {
+            corner[0] = center[0] + if i & 1 == 0 { -half } else { half };
+            corner[1] = center[1] + if i & 2 == 0 { -half } else { half };
+            corner[2] = center[2] + if i & 4 == 0 { -half } else { half };
+        }
+        corners
+    }
+
+    #[test]
+    fn cascade_shadow_vp_contains_its_slice() {
+        let to_light = glam::Vec3::new(0.42, 0.84, 0.3).normalize();
+        let corners = box_corners([0.0, 0.0, 25.0], 5.0);
+        let vp = cascade_shadow_vp(to_light, corners, corners, SHADOW_SIZE);
+        for c in corners {
+            let n = ndc_of(vp, c);
+            assert!(
+                n[0].abs() <= 1.0 + 1e-3 && n[1].abs() <= 1.0 + 1e-3,
+                "{c:?} -> {n:?}"
+            );
+            assert!((0.0..=1.0).contains(&n[2]), "{c:?} -> {n:?}");
+        }
+    }
+
+    #[test]
+    fn cascade_texel_snap_stays_on_grid_and_contains() {
+        let min = glam::Vec2::new(2.5, -1.75);
+        let max = glam::Vec2::new(9.5, 4.25);
+        let texel = (max.x - min.x).max(max.y - min.y) / SHADOW_SIZE as f32;
+        let snapped = glam::Vec2::new(
+            snap_down_to_texel(min.x, texel),
+            snap_down_to_texel(min.y, texel),
+        );
+        assert!(snapped.x <= min.x && snapped.y <= min.y);
+        for v in [snapped.x / texel, snapped.y / texel] {
+            assert!((v.round() - v).abs() < 1e-3, "{v}");
+        }
+    }
+
+    #[test]
+    fn cascade_shadow_vp_moves_with_its_slice() {
+        let to_light = glam::Vec3::new(0.42, 0.84, 0.3).normalize();
+        let base = box_corners([0.0, 0.0, 25.0], 5.0);
+        let vp = cascade_shadow_vp(to_light, base, base, SHADOW_SIZE);
+        assert_eq!(vp, cascade_shadow_vp(to_light, base, base, SHADOW_SIZE));
+        let shifted = box_corners([40.0, 0.0, 25.0], 5.0);
+        assert_ne!(
+            vp,
+            cascade_shadow_vp(to_light, shifted, shifted, SHADOW_SIZE)
+        );
+    }
+
+    #[test]
+    fn cascade_shadow_vp_degenerate_falls_back_to_legacy() {
+        let to_light = glam::Vec3::Y;
+        assert_eq!(
+            cascade_shadow_vp(
+                to_light,
+                [[1.0, 2.0, 3.0]; 8],
+                [[1.0, 2.0, 3.0]; 8],
+                SHADOW_SIZE
+            ),
+            dir_shadow_vp(to_light)
+        );
+        assert_eq!(
+            cascade_shadow_vp(
+                to_light,
+                box_corners([0.0, 0.0, 0.0], 1.0),
+                box_corners([0.0, 0.0, 0.0], 1.0),
+                0
+            ),
+            dir_shadow_vp(to_light)
+        );
+    }
+
+    fn probe_camera() -> ([[f32; 4]; 4], glam::Vec3, glam::Vec3) {
+        let eye = glam::Vec3::new(0.0, 3.0, 10.0);
+        let fwd = (glam::Vec3::new(0.0, 1.0, 0.0) - eye).normalize();
+        let view = glam::camera::rh::view::look_at_mat4(
+            eye,
+            glam::Vec3::new(0.0, 1.0, 0.0),
+            glam::Vec3::Y,
+        );
+        let proj = glam::camera::rh::proj::directx::perspective(
+            55.0f32.to_radians(),
+            16.0 / 9.0,
+            0.1,
+            100.0,
+        );
+        let inv = (proj * view).inverse().to_cols_array_2d();
+        (inv, eye, fwd)
+    }
+
+    #[test]
+    fn frustum_slice_corners_match_ndc_faces() {
+        let (inv, _, _) = probe_camera();
+        let full = frustum_slice_corners(inv, 0.1, 100.0, 0.1, 100.0).expect("valid range");
+        let vp = glam::Mat4::from_cols_array_2d(&inv)
+            .inverse()
+            .to_cols_array_2d();
+        for (i, c) in full.iter().enumerate() {
+            let n = ndc_of(vp, *c);
+            assert!(n[0].abs() > 0.99 && n[0].abs() < 1.01, "{c:?} -> {n:?}");
+            assert!(n[1].abs() > 0.99 && n[1].abs() < 1.01, "{c:?} -> {n:?}");
+            let face = if i < 4 { 0.0 } else { 1.0 };
+            assert!((n[2] - face).abs() < 1e-3, "{c:?} -> {n:?}");
+        }
+    }
+
+    #[test]
+    fn frustum_slice_corners_split_stays_inside() {
+        let (inv, eye, fwd) = probe_camera();
+        let splits = cascade_splits(0.1, 100.0, CSM_CASCADES, CSM_SPLIT_LAMBDA);
+        for pair in splits.windows(2) {
+            let corners =
+                frustum_slice_corners(inv, 0.1, 100.0, pair[0], pair[1]).expect("valid split");
+            for c in corners {
+                let p = glam::Vec3::from_array(c);
+                let depth = (p - eye).dot(fwd);
+                assert!(
+                    depth >= pair[0] - 0.05 && depth <= pair[1] + 0.05,
+                    "{c:?} depth {depth} outside {:?}",
+                    pair
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn frustum_slice_corners_clamps_and_rejects() {
+        let (inv, _, _) = probe_camera();
+        let full = frustum_slice_corners(inv, 0.1, 100.0, 0.1, 100.0).expect("valid");
+        assert_eq!(
+            frustum_slice_corners(inv, 0.1, 100.0, -5.0, 500.0),
+            Some(full)
+        );
+        assert!(frustum_slice_corners(inv, 0.1, 100.0, 50.0, 50.0).is_none());
+        assert!(frustum_slice_corners(inv, 100.0, 0.1, 0.1, 100.0).is_none());
+        assert!(frustum_slice_corners(inv, -1.0, 100.0, 0.1, 50.0).is_none());
+    }
+
+    #[test]
+    fn build_csm_covers_golden_probe_frustum() {
+        use super::super::lights::{CsmCamera, build_csm};
+        // Exact replica of the golden CSM probe camera (200 m far plane).
+        let eye = glam::Vec3::new(0.0, 10.0, 20.0);
+        let target = glam::Vec3::new(0.0, 2.0, -60.0);
+        let fwd = (target - eye).normalize();
+        let view = glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y);
+        let proj = glam::camera::rh::proj::directx::perspective(
+            55.0f32.to_radians(),
+            320.0 / 180.0,
+            0.1,
+            200.0,
+        );
+        let inv = (proj * view).inverse().to_cols_array_2d();
+        let to_light = glam::Vec3::new(0.42, 0.84, 0.3).normalize();
+        let block = build_csm(
+            inv,
+            CsmCamera {
+                near: 0.1,
+                far: 200.0,
+                forward: fwd.to_array(),
+            },
+            to_light,
+        )
+        .expect("golden probe fit must succeed");
+        assert_eq!(block.cascade_count, CSM_CASCADES as u32);
+        let splits = [
+            block.splits_lo[0],
+            block.splits_lo[1],
+            block.splits_lo[2],
+            block.splits_lo[3],
+            block.split_far,
+        ];
+        assert!((splits[0] - 0.1).abs() < 1e-6, "{splits:?}");
+        assert!((splits[CSM_CASCADES] - 200.0).abs() < 1e-3, "{splits:?}");
+        for (i, pair) in splits.windows(2).enumerate() {
+            let corners =
+                frustum_slice_corners(inv, 0.1, 200.0, pair[0], pair[1]).expect("valid split");
+            let vp = block.vps[i].cols;
+            for c in corners {
+                let n = ndc_of(vp, c);
+                assert!(
+                    n[0].abs() <= 1.0 + 1e-3 && n[1].abs() <= 1.0 + 1e-3,
+                    "cascade {i} {c:?} -> {n:?}"
+                );
+                assert!((0.0..=1.0).contains(&n[2]), "cascade {i} {c:?} -> {n:?}");
+            }
+        }
+        // The golden probe's occluder sits in front of the last slice:
+        // its depth must still fall inside that cascade's range (#121).
+        let receiver = glam::Vec3::new(0.0, 0.0, -70.0);
+        let occluder = receiver + to_light * 10.0;
+        for p in [receiver, occluder] {
+            let n = ndc_of(block.vps[3].cols, p.to_array());
+            assert!((0.0..=1.0).contains(&n[2]), "{p:?} -> {n:?}");
+        }
     }
 }
