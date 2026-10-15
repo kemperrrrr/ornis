@@ -16,13 +16,17 @@
 //!   reference `basisu` command line (the project the runtime transcoder port
 //!   comes from). [`EncoderSource`] picks the tool: a configured binary, one
 //!   discovered on `PATH`, or none at all. When no tool runs, the bake still
-//!   removes the runtime mip cost through [`encode_rgba8_ktx2`]: the same
+//!   removes the runtime mip cost through
+//!   [`encode_rgba8_ktx2`](ornis_texture::encode_rgba8_ktx2): the same
 //!   authored levels, RGBA8 blocks instead of the ~4× smaller compressed ones.
 //! - A bake never replaces the source: [`bake_texture`] hands a container back
 //!   only on success, and [`bake_model`] keeps the decoded PNG/JPEG pixels of
 //!   any slot whose bake failed. A host that never calls
 //!   [`AssetServer::with_texture_baking`](crate::AssetServer::with_texture_baking)
 //!   keeps the previous import behaviour unchanged.
+//! - This file holds the policy types and the two entry points; the CLI driver
+//!   and TGA handoff, the content-addressed cache and the model pass live in
+//!   the private submodules beside it.
 //!
 //! ```no_run
 //! use ornis_assets::bake::{BakeSettings, EncoderSource, bake_texture};
@@ -39,56 +43,19 @@
 //! ```
 
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use ornis_texture::{CpuImage, Ktx2Image, TextureRole, TextureUploadError, encode_rgba8_ktx2};
+use ornis_texture::{CpuImage, Ktx2Image, TextureRole, TextureUploadError};
 
+mod cache;
+mod encoder;
 #[cfg(feature = "gltf")]
-use ornis_gltf::LoadedTextures;
-#[cfg(feature = "gltf")]
-use ornis_texture::TextureImage;
+mod model;
 
-/// Reference encoder program, discovered on `PATH` when none is configured.
-const ENCODER_PROGRAM: &str = "basisu";
-/// Environment variable holding the executable search path.
-const PATH_VARIABLE: &str = "PATH";
-/// Cache file suffix (validated KTX2 containers).
-const OUTPUT_SUFFIX: &str = ".ktx2";
-/// Suffix of the pixels handed to the encoder.
-const SOURCE_SUFFIX: &str = ".tga";
-/// Suffix of the container the encoder writes, before validation.
-const DUMP_SUFFIX: &str = ".tool.ktx2";
-/// Flags of every encoder run: KTX2 output with a generated mip chain.
-const FIXED_FLAGS: [&str; 3] = ["-ktx2", "-mipmap", "-output_file"];
-/// UASTC effort level, spelled out instead of relying on a tool default.
-const UASTC_LEVEL: &str = "2";
-/// ETC1S quality level, likewise spelled out (the tool's own default).
-const ETC1S_QUALITY: &str = "128";
-/// Encoder stderr bytes kept in [`BakeError::Exit`].
-const STDERR_TAIL_BYTES: usize = 512;
-/// FNV-1a 64 offset basis, the cache key's starting state.
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a 64 prime.
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-/// Channels in one RGBA texel.
-const RGBA_CHANNELS: usize = 4;
-/// Bytes in an uncompressed true-color TGA header (no ID, no color map).
-const TGA_HEADER_BYTES: usize = 18;
-/// TGA image type 2: uncompressed true-color.
-const TGA_UNCOMPRESSED_TRUE_COLOR: u8 = 2;
-/// Color-map specification bytes of an uncolored TGA header.
-const TGA_COLOR_MAP_BYTES: usize = 5;
-/// X/Y origin fields of a TGA header (both zero: bottom-up rows).
-const TGA_ORIGIN_BYTES: usize = 4;
-/// Bits per texel handed to the encoder.
-const TGA_RGBA_BITS: u8 = 32;
-/// Alpha depth 8 with the origin bit clear (rows bottom-up, the TGA default).
-const TGA_DESCRIPTOR: u8 = 8;
-/// Red channel offset of one RGBA texel.
-const RED_CHANNEL: usize = 0;
-/// Blue channel offset of one RGBA texel.
-const BLUE_CHANNEL: usize = 2;
+use self::cache::{cache_key, load_cached};
+use self::encoder::{author, encode_with_tool, encoder};
+#[cfg(feature = "gltf")]
+pub use self::model::bake_model;
 
 /// Codec the offline encoder is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -265,370 +232,21 @@ fn encode_fresh(
     }
 }
 
-/// Encoder binary to run, unless the policy keeps the bake in-process.
-fn encoder(settings: &BakeSettings) -> Option<PathBuf> {
-    match &settings.encoder {
-        EncoderSource::InProcess => None,
-        EncoderSource::Path => find_on_path(ENCODER_PROGRAM),
-        EncoderSource::Binary(program) => Some(program.clone()),
-    }
-}
-
-/// First `program` entry of the executable search path, if any.
-fn find_on_path(program: &str) -> Option<PathBuf> {
-    std::env::var_os(PATH_VARIABLE).and_then(|path| first_entry(&path, program))
-}
-
-/// First existing file named `program` in `path`.
-fn first_entry(path: &OsStr, program: &str) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
-}
-
-/// In-process fallback: the authored mip chain, stored as RGBA8 blocks.
-fn author(
-    settings: &BakeSettings,
-    image: &CpuImage,
-    role: TextureRole,
-    key: &str,
-) -> Result<Baked, BakeError> {
-    let bytes = encode_rgba8_ktx2(image, role)?;
-    let container = Ktx2Image::from_bytes(bytes)?;
-    store_cached(settings, key, container.bytes())?;
-    Ok(Baked {
-        image: container,
-        origin: BakeOrigin::Authored,
-    })
-}
-
-/// One encoder run: pixel handoff, CLI call, validation, cache store.
-fn encode_with_tool(
-    settings: &BakeSettings,
-    program: &Path,
-    image: &CpuImage,
-    role: TextureRole,
-    key: &str,
-) -> Result<Baked, BakeError> {
-    ensure_dir(settings)?;
-    let source = cache_file(settings, key, SOURCE_SUFFIX);
-    let dump = cache_file(settings, key, DUMP_SUFFIX);
-    let args = basis_args(settings.mode_of(role), &source, &dump);
-    std::fs::write(&source, tga_bytes(image)).map_err(|error| io_error(&source, error))?;
-    run_encoder(program, args)?;
-    let container = read_container(settings, &dump, key)?;
-    cleanup(&source);
-    cleanup(&dump);
-    Ok(Baked {
-        image: container,
-        origin: BakeOrigin::Encoded,
-    })
-}
-
-/// Runs the encoder once; a non-zero exit carries the tool's stderr tail.
-fn run_encoder(program: &Path, args: Vec<OsString>) -> Result<(), BakeError> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| BakeError::Spawn {
-            program: program.display().to_string(),
-            source: error,
-        })?;
-    failure_of(program, &output)
-}
-
-/// Non-zero exit status as a typed failure.
-fn failure_of(program: &Path, output: &std::process::Output) -> Result<(), BakeError> {
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(BakeError::Exit {
-        program: program.display().to_string(),
-        code: exit_code(&output.status),
-        stderr: tail(&output.stderr),
-    })
-}
-
-/// Exit code of a finished process (`-1` for a signal-terminated one).
-fn exit_code(status: &std::process::ExitStatus) -> i32 {
-    status.code().unwrap_or(-1)
-}
-
-/// Trailing, lossily decoded slice of an encoder's stderr.
-fn tail(bytes: &[u8]) -> String {
-    let start = bytes.len().saturating_sub(STDERR_TAIL_BYTES);
-    String::from_utf8_lossy(&bytes[start..]).trim().to_string()
-}
-
-/// Reads back what the encoder wrote: validated first, cached second.
-fn read_container(settings: &BakeSettings, dump: &Path, key: &str) -> Result<Ktx2Image, BakeError> {
-    let bytes = std::fs::read(dump).map_err(|error| io_error(dump, error))?;
-    let container = Ktx2Image::from_bytes(bytes)?;
-    store_cached(settings, key, container.bytes())?;
-    Ok(container)
-}
-
-/// Pinned argument vector for one encoder run.
-///
-/// The flags are the reference tool's documented names: KTX2 output with
-/// generated mips, the codec of `mode`, and an explicit effort or quality level
-/// so a bake cannot drift when a tool default changes. Only the codec is
-/// per-bake; everything else is fixed here.
-fn basis_args(mode: BasisMode, source: &Path, dump: &Path) -> Vec<OsString> {
-    let mut args: Vec<OsString> = FIXED_FLAGS.map(OsString::from).to_vec();
-    args.push(dump.into());
-    args.extend(mode_flags(mode));
-    args.push(source.into());
-    args
-}
-
-/// Codec flags of one bake mode, with the level pinned explicitly.
-fn mode_flags(mode: BasisMode) -> [OsString; 3] {
-    match mode {
-        BasisMode::Uastc => ["-uastc", "-uastc_level", UASTC_LEVEL].map(OsString::from),
-        BasisMode::Etc1s => ["-etc1s", "-q", ETC1S_QUALITY].map(OsString::from),
-    }
-}
-
-/// Uncompressed 32-bit TGA of `image`, rows bottom-up.
-///
-/// The reference encoder reads PNG/JPEG/TGA/DDS/QOI; a TGA header plus raw
-/// texels is the cheapest lossless handoff once the imported model only holds
-/// decoded pixels. Edges above `u16` are unreachable: [`bake_texture`] rejects
-/// anything past `MAX_TEXTURE_EDGE` first.
-fn tga_bytes(image: &CpuImage) -> Vec<u8> {
-    let mut bytes = tga_header(image);
-    bytes.extend_from_slice(&tga_pixels(image));
-    bytes
-}
-
-/// 18-byte uncompressed true-color TGA header with a bottom-left origin.
-fn tga_header(image: &CpuImage) -> Vec<u8> {
-    let mut header = Vec::with_capacity(TGA_HEADER_BYTES);
-    header.extend_from_slice(&[0, 0, TGA_UNCOMPRESSED_TRUE_COLOR]);
-    header.extend_from_slice(&[0; TGA_COLOR_MAP_BYTES]);
-    header.extend_from_slice(&[0; TGA_ORIGIN_BYTES]);
-    header.extend_from_slice(&(image.width as u16).to_le_bytes());
-    header.extend_from_slice(&(image.height as u16).to_le_bytes());
-    header.extend_from_slice(&[TGA_RGBA_BITS, TGA_DESCRIPTOR]);
-    header
-}
-
-/// Texels of `image` bottom-up and in TGA channel order (B, G, R, A).
-fn tga_pixels(image: &CpuImage) -> Vec<u8> {
-    let stride = image.width as usize * RGBA_CHANNELS;
-    let mut pixels: Vec<u8> = image
-        .pixels
-        .chunks(stride)
-        .rev()
-        .flatten()
-        .copied()
-        .collect();
-    swap_red_and_blue(&mut pixels);
-    pixels
-}
-
-/// Reorders every four-byte texel in place into TGA channel order.
-fn swap_red_and_blue(pixels: &mut [u8]) {
-    pixels
-        .as_chunks_mut::<RGBA_CHANNELS>()
-        .0
-        .iter_mut()
-        .for_each(|texel| texel.swap(RED_CHANNEL, BLUE_CHANNEL));
-}
-
-/// Content-addressed key of one bake input.
-///
-/// FNV-1a over the exact bytes: a cache key, not a security hash. A collision
-/// costs one stale container that still has to parse as KTX2 before it can
-/// reach the renderer.
-fn cache_key(image: &CpuImage, role: TextureRole, mode: BasisMode) -> String {
-    let mut hash = ContentHash::new();
-    hash.write(role_tag(role));
-    hash.write(mode_tag(mode));
-    hash.write(&image.width.to_le_bytes());
-    hash.write(&image.height.to_le_bytes());
-    hash.write(&image.pixels);
-    hash.hex()
-}
-
-/// Distinguishes material slots in the cache key (stable, never parsed).
-fn role_tag(role: TextureRole) -> &'static [u8] {
-    match role {
-        TextureRole::BaseColor => b"base-color",
-        TextureRole::MetallicRoughness => b"metallic-roughness",
-        TextureRole::Emissive => b"emissive",
-        TextureRole::Normal => b"normal",
-    }
-}
-
-/// Distinguishes codecs in the cache key (stable, never parsed).
-fn mode_tag(mode: BasisMode) -> &'static [u8] {
-    match mode {
-        BasisMode::Uastc => b"uastc",
-        BasisMode::Etc1s => b"etc1s",
-    }
-}
-
-/// Streaming FNV-1a 64 state for cache keys.
-#[derive(Debug)]
-struct ContentHash(u64);
-
-impl ContentHash {
-    /// Fresh state at the FNV offset basis.
-    fn new() -> Self {
-        Self(FNV_OFFSET_BASIS)
-    }
-
-    /// Mixes `bytes` into the state.
-    fn write(&mut self, bytes: &[u8]) {
-        self.0 = bytes.iter().fold(self.0, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-        });
-    }
-
-    /// Lowercase hex digest of everything written so far.
-    fn hex(&self) -> String {
-        format!("{:016x}", self.0)
-    }
-}
-
-/// One file of the cache directory: `<key><suffix>`.
-fn cache_file(settings: &BakeSettings, key: &str, suffix: &str) -> PathBuf {
-    settings.cache_dir.join(format!("{key}{suffix}"))
-}
-
-/// Reads the stored container of `key`; a missing or invalid entry is a miss.
-fn load_cached(settings: &BakeSettings, key: &str) -> Option<Baked> {
-    let path = cache_file(settings, key, OUTPUT_SUFFIX);
-    let image = Ktx2Image::from_bytes(std::fs::read(path).ok()?).ok()?;
-    Some(Baked {
-        image,
-        origin: BakeOrigin::Cached,
-    })
-}
-
-/// Creates the cache directory (idempotent).
-fn ensure_dir(settings: &BakeSettings) -> Result<(), BakeError> {
-    std::fs::create_dir_all(&settings.cache_dir)
-        .map_err(|error| io_error(&settings.cache_dir, error))
-}
-
-/// Writes one validated container into the cache under `key`.
-fn store_cached(settings: &BakeSettings, key: &str, bytes: &[u8]) -> Result<(), BakeError> {
-    ensure_dir(settings)?;
-    let path = cache_file(settings, key, OUTPUT_SUFFIX);
-    std::fs::write(&path, bytes).map_err(|error| io_error(&path, error))
-}
-
-/// Removes one encoder scratch file (best effort: the cache entry is valid).
-fn cleanup(path: &Path) {
-    let _ = std::fs::remove_file(path);
-}
-
-/// IO failure tagged with the path it happened on.
-fn io_error(path: &Path, source: std::io::Error) -> BakeError {
-    BakeError::Io {
-        path: path.to_path_buf(),
-        source,
-    }
-}
-
-/// Material slots [`bake_model`] bakes, in upload order.
-#[cfg(feature = "gltf")]
-const BAKED_ROLES: [TextureRole; 4] = [
-    TextureRole::BaseColor,
-    TextureRole::MetallicRoughness,
-    TextureRole::Emissive,
-    TextureRole::Normal,
-];
-
-/// Bakes every decoded material image of an imported model in place.
-///
-/// Slots already holding KTX2 keep the chain the file authored, and a slot
-/// whose bake fails keeps its decoded PNG/JPEG pixels, so the import result
-/// stays uploadable either way; [`BakeStats`] says what happened. Content
-/// reached by two primitives in the same role is encoded once: the second slot
-/// is served from the cache.
-#[cfg(feature = "gltf")]
-pub fn bake_model(settings: &BakeSettings, model: &mut crate::Model) -> BakeStats {
-    let mut stats = BakeStats::default();
-    for primitive in &mut model.primitives {
-        let textures = &mut primitive.material.textures;
-        BAKED_ROLES
-            .iter()
-            .for_each(|role| bake_slot(settings, slot_mut(textures, *role), *role, &mut stats));
-    }
-    stats
-}
-
-/// Bakes one material slot when it still holds decoded pixels.
-#[cfg(feature = "gltf")]
-fn bake_slot(
-    settings: &BakeSettings,
-    slot: &mut Option<TextureImage>,
-    role: TextureRole,
-    stats: &mut BakeStats,
-) {
-    let Some(source) = slot.as_ref().and_then(decoded) else {
-        return;
-    };
-    apply_baked(slot, bake_texture(settings, source, role), stats);
-}
-
-/// Mutable slot of one material role.
-#[cfg(feature = "gltf")]
-fn slot_mut(textures: &mut LoadedTextures, role: TextureRole) -> &mut Option<TextureImage> {
-    match role {
-        TextureRole::BaseColor => &mut textures.base_color_texture,
-        TextureRole::MetallicRoughness => &mut textures.metallic_roughness_texture,
-        TextureRole::Emissive => &mut textures.emissive_texture,
-        TextureRole::Normal => &mut textures.normal_texture,
-    }
-}
-
-/// Decoded pixels of a slot, if it still needs baking.
-#[cfg(feature = "gltf")]
-fn decoded(image: &TextureImage) -> Option<&CpuImage> {
-    match image {
-        TextureImage::Rgba8(pixels) => Some(pixels),
-        TextureImage::Ktx2(_) => None,
-    }
-}
-
-/// Stores a produced container, or counts the pixels left as fallback.
-#[cfg(feature = "gltf")]
-fn apply_baked(
-    slot: &mut Option<TextureImage>,
-    result: Result<Baked, BakeError>,
-    stats: &mut BakeStats,
-) {
-    match result {
-        Ok(baked) => {
-            count_origin(stats, baked.origin);
-            *slot = Some(TextureImage::Ktx2(baked.image));
-        }
-        Err(error) => {
-            stats.fallback += 1;
-            stats.last_failure = Some(error.to_string());
-        }
-    }
-}
-
-/// Adds one produced container to the counters.
-#[cfg(feature = "gltf")]
-fn count_origin(stats: &mut BakeStats, origin: BakeOrigin) {
-    match origin {
-        BakeOrigin::Cached => stats.cached += 1,
-        BakeOrigin::Encoded => stats.encoded += 1,
-        BakeOrigin::Authored => stats.authored += 1,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::path::Path;
 
+    #[cfg(feature = "gltf")]
+    use ornis_gltf::LoadedTextures;
+    #[cfg(feature = "gltf")]
+    use ornis_texture::TextureImage;
+    use ornis_texture::encode_rgba8_ktx2;
+
+    use super::cache::{OUTPUT_SUFFIX, cache_key};
+    use super::encoder::{DUMP_SUFFIX, RGBA_CHANNELS, SOURCE_SUFFIX, TGA_HEADER_BYTES, tga_bytes};
+    #[cfg(feature = "gltf")]
+    use super::model::BAKED_ROLES;
     use super::*;
 
     /// Root directory of one test: the cache lives inside it, next to any fake
@@ -927,9 +545,10 @@ cp "$(dirname "$0")/payload.ktx2" "$4"
             tga_bytes(&source)[TGA_HEADER_BYTES..]
         );
         // The second call is a cache hit: the tool does not run again.
+        let first_run = invocations(&program);
         let again = bake_texture(&settings, &source, TextureRole::BaseColor).expect("bakes");
         assert_eq!(again.origin, BakeOrigin::Cached);
-        assert_eq!(invocations(&program).len(), FIXED_FLAGS.len() + 5);
+        assert_eq!(invocations(&program), first_run, "the tool runs once");
         assert!(
             !settings
                 .cache_dir

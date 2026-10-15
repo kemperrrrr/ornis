@@ -110,9 +110,11 @@ payload after upload. Physical Mac VRAM profiling remains a manual check.
 ## Offline bake (`ornis-assets::bake`, issue #129)
 
 The KTX2 containers above used to be something an external toolchain had to
-produce. `crates/assets/src/bake.rs` now bakes them at import time, so a
-PNG/JPEG-sourced model gets the same runtime treatment as a
-`KHR_texture_basisu` one: authored levels, no runtime mip generation.
+produce. The `crates/assets/src/bake/` module (`bake.rs` for the policy and the
+entry points, `encoder.rs` for the tool driver, `cache.rs` for the keys,
+`model.rs` for the slot pass) now bakes them at import time, so a PNG/JPEG
+model gets the same runtime treatment as a `KHR_texture_basisu` one: authored
+levels, no runtime mip generation.
 
 - **Codec policy.** `BasisMode::for_role` picks UASTC for
   `TextureRole::Normal` (quality where block artifacts hurt) and ETC1S for
