@@ -268,10 +268,7 @@ fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
     let banded = |render: &[u8]| {
         window
             .iter()
-            .filter(|&&i| {
-                let value = render[i * 4];
-                value < 64 || value > 192
-            })
+            .filter(|&&i| !(64..=192).contains(&render[i * 4]))
             .count()
     };
     let isotropic_bands = banded(&flat);
