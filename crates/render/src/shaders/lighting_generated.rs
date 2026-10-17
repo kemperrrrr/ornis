@@ -332,23 +332,26 @@ fn fs_main(
     let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
     let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
     let ao = textureSampleLevel(maps.ao_tex, maps.lighting_sampler, input.uv, 0.0).r;
-    return shade_lit(n, world_pos, v, albedo.a, mat, ao);
+    return shade_lit(n, world_pos, v, Vec2::new(albedo.a, ao), mat);
 }
 
-/// OpenPBR lighting for one decoded sample. `albedo_a` below
-/// [`ALPHA_CUTOFF`](super::helpers::ALPHA_CUTOFF) discards the fragment.
-/// `ao` (1 = unoccluded) modulates only the ambient and IBL terms — direct
-/// light, emission and unlit sprites stay untouched. Globals (`lighting`,
-/// shadow maps, IBL) are the lighting bind group.
+/// OpenPBR lighting for one decoded sample. `alpha_ao.x` is the albedo
+/// alpha: below [`ALPHA_CUTOFF`](super::helpers::ALPHA_CUTOFF) the fragment
+/// is discarded. `alpha_ao.y` is the AO factor (1 = unoccluded) and
+/// modulates only the ambient and IBL terms — direct light, emission and
+/// unlit sprites stay untouched. The two scalars share one argument so the
+/// kernel keeps its parameter list. Globals (`lighting`, shadow maps, IBL)
+/// are the lighting bind group.
 #[ornis_macros::wgsl_fn]
 fn shade_lit(
     n: glam::Vec3,
     world_pos: glam::Vec3,
     v: glam::Vec3,
-    albedo_a: f32,
+    alpha_ao: glam::Vec2,
     mat: OpenPBRMaterial,
-    ao: f32,
 ) -> glam::Vec4 {
+    let albedo_a = alpha_ao.x;
+    let ao = alpha_ao.y;
     // Derivatives before `discard`: a non-uniform discard makes `dpdx` invalid.
     let specular_roughness = specular_aa_roughness(mat.specular_params.y, n);
     if albedo_a < ALPHA_CUTOFF {
@@ -744,7 +747,7 @@ fn fs_main_msaa(
         covered_count = covered_count + covered;
         let world_pos = reconstruct_world_pos(input.uv, depth, ctx.camera);
         let v = normalize(ctx.camera.camera_pos.xyz - world_pos);
-        let lit = shade_lit(n, world_pos, v, 1.0, ctx.materials[id], ao);
+        let lit = shade_lit(n, world_pos, v, Vec2::new(1.0, ao), ctx.materials[id]);
         let luma = max(luminance(lit.xyz), 0.0);
         let karis = covered / (KARIS_LUMA_BIAS + luma);
         acc = acc + lit.xyz * karis;

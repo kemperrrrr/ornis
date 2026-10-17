@@ -672,8 +672,9 @@ impl RenderFrame3D {
     /// byte-identical to [`new_with`](Self::new_with). No fog node is
     /// registered (default).
     ///
-    /// Single-sample plan; for the negotiated 4x path use
-    /// [`new_with_ao_samples`](Self::new_with_ao_samples).
+    /// Single-sample plan: pooled geometry targets are 1x. Pair with a
+    /// 1x [`Renderer3D`].
+    // qual:api — public opt-in; in-tree callers are the AO gates until a sample wires it.
     pub fn new_with_ao(
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
@@ -689,28 +690,6 @@ impl RenderFrame3D {
             None,
             Some(ao),
             crate::renderer::SINGLE_SAMPLE_COUNT,
-        )
-    }
-
-    /// Like [`new_with_ao`](Self::new_with_ao), with the pooled geometry
-    /// targets at `sample_count` (see
-    /// [`new_with_samples`](Self::new_with_samples)).
-    pub fn new_with_ao_samples(
-        surface_format: wgpu::TextureFormat,
-        surface_size: (u32, u32),
-        technique: Technique,
-        bloom: crate::flags::Bloom,
-        ao: crate::ao::AoWiring,
-        sample_count: u32,
-    ) -> Self {
-        Self::build(
-            surface_format,
-            surface_size,
-            technique,
-            bloom,
-            None,
-            Some(ao),
-            sample_count,
         )
     }
 

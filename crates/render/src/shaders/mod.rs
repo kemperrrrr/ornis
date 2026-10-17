@@ -259,7 +259,7 @@ pub fn resource_stays_multisampled(kind: &ResourceKind) -> bool {
 /// [`resource_decl`] at 1x; in MSAA mode depth/integer layers spell the
 /// multisampled texture types (see [`resource_stays_multisampled`]).
 pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
-    resource_decl_where(r, sample_count > 1 && resource_stays_multisampled(&r.kind))
+    resource_decl_with_ty(r, &r.kind.wgsl_ty_for_samples(sample_count))
 }
 
 /// WGSL declaration line for one [`Resource`] with an explicit
@@ -268,11 +268,20 @@ pub fn resource_decl_for_samples(r: &Resource, sample_count: u32) -> String {
 /// spelling with their own predicate instead of
 /// [`resource_stays_multisampled`].
 pub fn resource_decl_where(r: &Resource, multisampled: bool) -> String {
-    let ty = if multisampled {
+    resource_decl_with_ty(r, &selected_wgsl_ty(r, multisampled))
+}
+
+/// Multisampled or single-sample WGSL type for `r`, chosen by the caller.
+fn selected_wgsl_ty(r: &Resource, multisampled: bool) -> String {
+    if multisampled {
         r.kind.wgsl_ty_multisampled()
     } else {
         r.kind.wgsl_ty_full()
-    };
+    }
+}
+
+/// One `@group`/`@binding` line spelling `ty` for `r`.
+fn resource_decl_with_ty(r: &Resource, ty: &str) -> String {
     format!(
         "@group({}) @binding({}) {} {}: {};\n",
         r.group,

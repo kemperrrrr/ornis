@@ -130,14 +130,38 @@ fn wiring(method: AoMethod, intensity: f32) -> AoWiring {
     AoWiring::new(AoSettings::new(method, 0.75, intensity, 0.025).expect("valid AO settings"))
 }
 
-#[test]
-fn ao_disabled_is_bit_identical_to_no_ao() {
+/// Adapter, corner scene, and the AO-free reference frame. `None` when no
+/// adapter exists (the gate skips, same contract as the other headless tests).
+fn prepared_corner() -> Option<(
+    wgpu::Device,
+    wgpu::Queue,
+    Renderer3D,
+    ornis_render::Mesh,
+    Vec<u8>,
+)> {
     let Some((_adapter, device, queue)) = pollster::block_on(common::request_device()) else {
         eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
-        return;
+        return None;
     };
     let (renderer, mesh) = build_corner(&device, &queue);
     let reference = render_pixels(&device, &queue, &renderer, &mesh, None);
+    Some((device, queue, renderer, mesh, reference))
+}
+
+/// Fraction of texels whose RGB sum clears the near-black cutoff.
+fn lit_fraction(pixels: &[u8]) -> f64 {
+    let lit = pixels
+        .chunks_exact(4)
+        .filter(|c| c[0] as u16 + c[1] as u16 + c[2] as u16 > 36)
+        .count() as f64;
+    lit / (pixels.len() / 4) as f64
+}
+
+#[test]
+fn ao_disabled_is_bit_identical_to_no_ao() {
+    let Some((device, queue, renderer, mesh, reference)) = prepared_corner() else {
+        return;
+    };
     // Zero intensity collapses both kernels to the white factor on the
     // GPU, exactly like the unbound fallback.
     for method in [AoMethod::Ssao, AoMethod::Gtao] {
@@ -151,17 +175,10 @@ fn ao_disabled_is_bit_identical_to_no_ao() {
 
 #[test]
 fn ao_darkens_the_corner_and_never_brightens() {
-    let Some((_adapter, device, queue)) = pollster::block_on(common::request_device()) else {
-        eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
+    let Some((device, queue, renderer, mesh, reference)) = prepared_corner() else {
         return;
     };
-    let (renderer, mesh) = build_corner(&device, &queue);
-    let reference = render_pixels(&device, &queue, &renderer, &mesh, None);
-    let lit = reference
-        .chunks_exact(4)
-        .filter(|c| c[0] as u16 + c[1] as u16 + c[2] as u16 > 36)
-        .count() as f64
-        / (reference.len() / 4) as f64;
+    let lit = lit_fraction(&reference);
     eprintln!("ao corner probe: lit fraction = {lit:.3}");
     assert!(
         lit > MIN_LIT_FRACTION,

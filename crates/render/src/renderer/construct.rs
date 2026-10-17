@@ -2,6 +2,19 @@
 use super::ao::ao_white_staging_bytes;
 use super::*;
 impl Renderer3D {
+    /// Host-filled `COPY_SRC` buffer (IBL and AO white staging).
+    fn copy_src_staging(
+        device: &wgpu::Device,
+        label: &'static str,
+        contents: &[u8],
+    ) -> wgpu::Buffer {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage: wgpu::BufferUsages::COPY_SRC,
+        })
+    }
+
     /// Build every pipeline/target for `surface_config`'s format and extent.
     ///
     /// `sample_count` is [`normalize_sample_count`]ed to `{1, 4}` on entry:
@@ -36,11 +49,8 @@ impl Renderer3D {
         let (shadow_cube_maps, shadow_cube_views, shadow_cube_array_view, shadow_cube_vp_buffers) =
             Self::create_shadow_cube_targets(device);
         let ibl = crate::ibl::black_targets(device);
-        let ibl_staging = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ibl staging"),
-            contents: &crate::ibl::initial_staging_bytes(),
-            usage: wgpu::BufferUsages::COPY_SRC,
-        });
+        let ibl_staging =
+            Self::copy_src_staging(device, "ibl staging", &crate::ibl::initial_staging_bytes());
         let (bind_group_layout, bind_group) = Self::create_pbr_bind_group(
             device,
             &buffers,
@@ -110,11 +120,8 @@ impl Renderer3D {
         let bloom_pass = Self::create_bloom_pass(device);
         let fog = Self::create_fog_pass(device, format, sample_count);
         let ao_passes = Self::create_ao_passes(device, sample_count);
-        let ao_white_staging = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ao white staging"),
-            contents: &ao_white_staging_bytes(),
-            usage: wgpu::BufferUsages::COPY_SRC,
-        });
+        let ao_white_staging =
+            Self::copy_src_staging(device, "ao white staging", &ao_white_staging_bytes());
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite sampler"),
             ..crate::flags::SamplerKind::LinearClamp.descriptor()
