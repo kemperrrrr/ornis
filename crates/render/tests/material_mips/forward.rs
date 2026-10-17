@@ -1,8 +1,8 @@
 //! Textured-forward footprint of the anisotropic material sampler.
 //!
-//! The upload gate in the parent module samples `GpuTexture::sampler`.
-//! These tests draw the same tilted plane through `create_render_backend`,
-//! so a hardcoded level on the shared `material_sampler` fails.
+//! The upload gate in the parent module builds its own samplers. These
+//! tests draw the same tilted plane through `create_render_backend`, so a
+//! hardcoded level on the shared `material_sampler` fails.
 
 use super::common::sized::{FrameSpec, render_and_readback};
 use ornis_render::{
@@ -15,13 +15,14 @@ use ornis_render::{
 /// drawn by the textured-forward pass (`create_render_backend` + a striped
 /// base-color material) instead of the upload sampler's test shader.
 ///
-/// The texture is uploaded at `AnisotropyLevel::OFF`. Both frames share
-/// that entry, so a pass that sampled `GpuTexture::sampler` would stay
-/// flat at every config level and fail. `OFF` from
-/// `RenderBackendConfig::material_anisotropy` must average the bands;
-/// `DEFAULT` must keep them. After the `OFF` frame the setter raises the
-/// level to 16 and the pass is drawn again: that frame has to match
-/// `DEFAULT`, which fails when an already-built sampler is left at `OFF`.
+/// The texture is uploaded once. Its stored sampler is
+/// `AnisotropyLevel::DEFAULT`, so a pass that sampled `GpuTexture::sampler`
+/// would stay sharp at every config level and fail the `OFF` frame.
+/// `OFF` from `RenderBackendConfig::material_anisotropy` must average the
+/// bands; `DEFAULT` must keep them. After the `OFF` frame the setter raises
+/// the level to 16 and the pass is drawn again: that frame has to match
+/// `DEFAULT`. Lowering it back to `OFF` must match the flat frame. Either
+/// step fails when an already-built sampler is left in place.
 #[test]
 fn forward_tilted_bands_follow_backend_anisotropy() {
     // The clip match is pure CPU; a wrong plane fails before any adapter.
@@ -39,13 +40,7 @@ fn forward_tilted_bands_follow_backend_anisotropy() {
     // Upload sampler is isotropic on purpose. The frame must not use it.
     let mut cache = TextureCache::new();
     let handle = cache
-        .upload_cached(
-            &device,
-            &queue,
-            &image,
-            TextureRole::BaseColor,
-            AnisotropyLevel::OFF,
-        )
+        .upload_cached(&device, &queue, &image, TextureRole::BaseColor)
         .unwrap();
     let mut textures = MaterialTextureSet::default();
     textures.set(TextureRole::BaseColor, handle);
@@ -64,8 +59,10 @@ fn forward_tilted_bands_follow_backend_anisotropy() {
     // replace that sampler, not leave the first one in place.
     let mut raised = forward_backend(&device, AnisotropyLevel::OFF);
     let _ = draw_forward_bands(&scene, &mut *raised);
-    raised.set_material_anisotropy(&device, AnisotropyLevel::DEFAULT.get());
+    raised.set_material_anisotropy(&device, AnisotropyLevel::DEFAULT);
     let raised_frame = draw_forward_bands(&scene, &mut *raised);
+    raised.set_material_anisotropy(&device, AnisotropyLevel::OFF);
+    let lowered_frame = draw_forward_bands(&scene, &mut *raised);
     let supported = adapter
         .get_downlevel_capabilities()
         .flags
@@ -76,10 +73,18 @@ fn forward_tilted_bands_follow_backend_anisotropy() {
             sharp, raised_frame,
             "raising the level after the pass exists must rebuild the material sampler"
         );
+        assert_eq!(
+            flat, lowered_frame,
+            "lowering the level after the pass exists must rebuild the material sampler"
+        );
     } else {
         assert_eq!(
             flat, raised_frame,
             "unsupported anisotropy stays at 1 after the setter too"
+        );
+        assert_eq!(
+            flat, lowered_frame,
+            "unsupported anisotropy stays at 1 when the setter lowers the level too"
         );
     }
 }

@@ -130,13 +130,13 @@ pub trait RenderBackend {
     /// Anisotropic level currently stored for the material sampler.
     fn material_anisotropy(&self) -> AnisotropyLevel;
 
-    /// Replace the material-sampler level, saturating `requested` through
-    /// [`AnisotropyLevel::new`].
+    /// Replace the material-sampler level.
     ///
-    /// A textured-forward pass that already exists gets a new sampler; one
-    /// that does not is built later at this level. `device` is the sampler's
-    /// owner.
-    fn set_material_anisotropy(&mut self, device: &wgpu::Device, requested: u16);
+    /// A raw settings value saturates in [`AnisotropyLevel::new`] before it
+    /// is passed here. A textured-forward pass that already exists gets a
+    /// new sampler; one that does not is built later at this level. `device`
+    /// is the sampler's owner.
+    fn set_material_anisotropy(&mut self, device: &wgpu::Device, level: AnisotropyLevel);
 
     /// Record the textured-forward pass: the material sampler is the one
     /// configured by [`RenderBackendConfig::material_anisotropy`], and
@@ -166,7 +166,7 @@ pub fn create_render_backend(
         crate::renderer::Renderer3D::new(device, &config.surface_config, config.sample_count);
     renderer.set_exposure(config.exposure);
     renderer.set_indirect_draw(config.indirect_draw);
-    renderer.set_material_anisotropy(device, config.material_anisotropy.get());
+    renderer.set_material_anisotropy(device, config.material_anisotropy);
     Box::new(renderer)
 }
 
@@ -230,8 +230,8 @@ pub mod renderer3d_backend {
             Renderer3D::material_anisotropy(self)
         }
 
-        fn set_material_anisotropy(&mut self, device: &wgpu::Device, requested: u16) {
-            Renderer3D::set_material_anisotropy(self, device, requested);
+        fn set_material_anisotropy(&mut self, device: &wgpu::Device, level: AnisotropyLevel) {
+            Renderer3D::set_material_anisotropy(self, device, level);
         }
 
         fn render_textured_forward(

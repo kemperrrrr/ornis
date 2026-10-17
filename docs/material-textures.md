@@ -6,8 +6,8 @@ an RGBA-only struct. Material image fields are grouped under
 `LoadedMaterial::textures` (`LoadedTextures`); `material.texture(role)` remains
 the role-based accessor. PNG/JPEG callers can inspect `image.rgba8()`; callers
 uploading imported images should use `TextureCache::upload_image_cached`.
-The existing `CpuImage` / `upload_texture` / `upload_cached` entry points remain
-and now take the sampler's `AnisotropyLevel` (see below).
+The existing `CpuImage` / `upload_texture` / `upload_cached` entry points remain.
+They do not take an anisotropy level (see below).
 
 ## Filtering and storage
 
@@ -19,12 +19,12 @@ and now take the sampler's `AnisotropyLevel` (see below).
   `RenderBackendConfig::material_anisotropy` (default 16), stored on
   `Renderer3D` and bound as the one shared `material_sampler` of the
   textured-forward pass. `AnisotropyLevel::new` saturates a raw request into
-  `1..=16`; `set_material_anisotropy` applies it and rebuilds that sampler
-  when the pass already exists. Upload entry points still take an
-  `AnisotropyLevel` because `GpuTexture::sampler` is what the direct mip
-  gates bind, but the cache key does **not**: the same image at another
-  level reuses the GPU texture (only the sampler would differ, and the frame
-  does not use the per-texture one). All filters stay linear (what `wgpu`
+  `1..=16` before that value is stored on the config or passed to
+  `set_material_anisotropy`, which rebuilds the sampler when the pass
+  already exists. Upload entry points do not take a level:
+  `GpuTexture::sampler` is fixed at `AnisotropyLevel::DEFAULT`, and the
+  direct footprint gate builds the `OFF` and `DEFAULT` samplers itself.
+  The cache key is the image and its role. All filters stay linear (what `wgpu`
   requires above 1), and an adapter without
   `DownlevelFlags::ANISOTROPIC_FILTERING` silently receives level 1 — the
   documented `wgpu` degradation, not an error — so requesting 16 is safe on
@@ -123,12 +123,16 @@ to produce many more band-coloured pixels than the isotropic one, so a level
 of 1 and a missing mip chain both fail. On an adapter without
 `ANISOTROPIC_FILTERING` it instead asserts the default-level image is
 byte-identical to the isotropic one (`wgpu`'s degradation contract, exercised
-as behavior rather than as an error). That gate samples `GpuTexture::sampler`.
+as behavior rather than as an error). That gate uploads the image once and
+builds both samplers with `sampler_descriptor_for_role`, so it does not
+read `GpuTexture::sampler`.
 `forward_tilted_bands_follow_backend_anisotropy` repeats it through
-`create_render_backend`: the striped image is uploaded once at level 1, and
+`create_render_backend`: the striped image is uploaded once, and
 `RenderBackendConfig::material_anisotropy` of `OFF` and `DEFAULT` must
-produce the same contrast. The texture's own sampler stays at `OFF`, so a
-forward pass that ignored the config and sampled the cached sampler fails.
+produce the same contrast. The stored sampler is `DEFAULT`, so a forward
+pass that ignored the config and sampled it fails the `OFF` frame. After
+the pass exists the setter is raised to 16 and then lowered back to `OFF`;
+each frame has to match the config level.
 
 `GpuTexture::payload_bytes` sums the exact uploaded mip payloads. CPU tests
 verify these counts from actual transcoding, including block-rounded tails:

@@ -15,17 +15,18 @@ This unreleased change affects the Rust import/render API:
   renormalizes it. Tangent-space normal shading is not added here.
 - The RGBA8 `CpuImage`, `upload_texture` and `TextureCache::upload_cached`
   entry points remain; uploads now generate full mip chains.
-- Material samplers request anisotropic filtering. `upload_texture`,
-  `upload_image`, `TextureCache::upload_cached` and
-  `TextureCache::upload_image_cached` take an `AnisotropyLevel`
-  (`OFF` = 1, `DEFAULT` = 16, `new(u16)` saturates into `1..=16`);
-  `SamplerKind::LinearRepeat` carries the level, so exhaustive matches on it
-  need the new payload. The level a frame samples with is
-  `RenderBackendConfig::material_anisotropy` (default 16), forwarded to the
-  textured-forward `material_sampler`. The texture cache key does **not**
-  include the level: the same image at another level reuses one GPU texture.
-  `SamplerKind::LinearClamp` (composite, HDR layers, shadow maps) stays
-  isotropic and unchanged.
+- Material samplers request anisotropic filtering. `AnisotropyLevel`
+  (`OFF` = 1, `DEFAULT` = 16, `new(u16)` saturates into `1..=16`) is the
+  level; `SamplerKind::LinearRepeat` carries it, so exhaustive matches on it
+  need the new payload. Upload functions (`upload_texture`, `upload_image`,
+  `TextureCache::upload_cached`, `TextureCache::upload_image_cached`) do not
+  take a level: `GpuTexture::sampler` is `AnisotropyLevel::DEFAULT`. The
+  level a frame samples with is `RenderBackendConfig::material_anisotropy`
+  (default 16), forwarded to the textured-forward `material_sampler`.
+  `set_material_anisotropy` takes an `AnisotropyLevel` and rebuilds that
+  sampler when the pass already exists. The texture cache key is the image
+  and its role. `SamplerKind::LinearClamp` (composite, HDR layers, shadow
+  maps) stays isotropic and unchanged.
 - Optional `KHR_texture_basisu` now falls back to the core PNG/JPEG on
   unsupported/corrupt containers or unavailable sources. Required Basis
   returns an error. Unused image/fallback payloads are no longer decoded.

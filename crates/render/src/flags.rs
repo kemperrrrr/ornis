@@ -219,8 +219,10 @@ impl AnisotropyLevel {
     /// Nothing weaker than [`AnisotropyLevel::OFF`] (a `0` from a settings
     /// file, say) maps to it, and anything above [`AnisotropyLevel::DEFAULT`]
     /// saturates at the driver ceiling, so a caller needs no range check of
-    /// its own. [`crate::renderer::Renderer3D::set_material_anisotropy`] is
-    /// the production entry that applies a raw settings value.
+    /// its own. Settings code calls this before storing the value on
+    /// [`crate::render_backend::RenderBackendConfig`] or passing it to
+    /// [`crate::renderer::Renderer3D::set_material_anisotropy`].
+    // qual:api — public settings constructor; in-tree callers are the unit tests.
     pub const fn new(requested: u16) -> Self {
         if requested < Self::OFF.0 {
             Self::OFF

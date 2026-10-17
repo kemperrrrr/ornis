@@ -84,8 +84,8 @@ fn config_msaa_and_exposure_forward_to_renderer() {
 }
 
 /// The material sampler level is a renderer setting: the config value is
-/// what the backend reports, and a later raw request saturates at the
-/// same `1..=16` ceiling as [`AnisotropyLevel::new`].
+/// what the backend reports, and a later value is stored as given.
+/// A raw `u16` saturates in [`AnisotropyLevel::new`] before the setter.
 #[test]
 fn material_anisotropy_config_roundtrips_and_setter_clamps() {
     let Some((device, _queue)) = try_device() else {
@@ -98,9 +98,9 @@ fn material_anisotropy_config_roundtrips_and_setter_clamps() {
     };
     let mut backend = create_render_backend(&device, &config);
     assert_eq!(backend.material_anisotropy().get(), 8);
-    backend.set_material_anisotropy(&device, 0);
+    backend.set_material_anisotropy(&device, AnisotropyLevel::new(0));
     assert_eq!(backend.material_anisotropy(), AnisotropyLevel::OFF);
-    backend.set_material_anisotropy(&device, 17);
+    backend.set_material_anisotropy(&device, AnisotropyLevel::new(17));
     assert_eq!(backend.material_anisotropy(), AnisotropyLevel::DEFAULT);
     assert_eq!(backend.material_anisotropy().get(), 16);
 }

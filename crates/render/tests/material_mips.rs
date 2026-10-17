@@ -13,7 +13,7 @@ use ornis_render::texture_upload::{
 };
 use ornis_render::textures::upload_texture;
 use ornis_render::{
-    AnisotropyLevel, CpuImage, GpuTexture, Ktx2Image, TextureEncoding, TextureImage, TextureRole,
+    AnisotropyLevel, CpuImage, Ktx2Image, TextureEncoding, TextureImage, TextureRole,
 };
 
 const SHADER: &str = r#"
@@ -39,8 +39,8 @@ struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 fn sample(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    image: &GpuTexture,
     view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
     (size, level): (u32, Option<u32>),
 ) -> Vec<u8> {
     let source = match level {
@@ -95,7 +95,7 @@ fn sample(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&image.sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             },
         ],
     });
@@ -145,16 +145,15 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
     // The analytic golden is the isotropic reference: the checker averages to
     // the linear-light 188 at every level the plane samples, which pins the
     // mip chain, not the anisotropy (the footprint gate below covers that).
-    let uploaded = upload_texture(
-        &device,
-        &queue,
-        &image,
+    let uploaded = upload_texture(&device, &queue, &image, TextureRole::BaseColor).unwrap();
+    assert_eq!(uploaded.texture.mip_level_count(), 9);
+    // The stored sampler is DEFAULT. The golden is the isotropic reference,
+    // so this gate builds that sampler itself.
+    let isotropic = device.create_sampler(&ornis_render::textures::sampler_descriptor_for_role(
         TextureRole::BaseColor,
         AnisotropyLevel::OFF,
-    )
-    .unwrap();
-    assert_eq!(uploaded.texture.mip_level_count(), 9);
-    let pixels = sample(&device, &queue, &uploaded, &uploaded.view, (128, None));
+    ));
+    let pixels = sample(&device, &queue, &uploaded.view, &isotropic, (128, None));
     let golden = include_bytes!("data/tilted_checker.rgba");
     assert_eq!(pixels.len(), golden.len());
     let mismatches = pixels
@@ -173,7 +172,7 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
         mip_level_count: Some(1),
         ..Default::default()
     });
-    let control = sample(&device, &queue, &uploaded, &base_only, (128, None));
+    let control = sample(&device, &queue, &base_only, &isotropic, (128, None));
     let unstable = control
         .as_chunks::<4>()
         .0
@@ -218,30 +217,17 @@ fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
         })
         .collect();
     let image = CpuImage::from_rgba8(256, 256, pixels).unwrap();
-    let isotropic = upload_texture(
-        &device,
-        &queue,
-        &image,
-        TextureRole::BaseColor,
-        AnisotropyLevel::OFF,
-    )
-    .unwrap();
-    let anisotropic = upload_texture(
-        &device,
-        &queue,
-        &image,
-        TextureRole::BaseColor,
-        AnisotropyLevel::DEFAULT,
-    )
-    .unwrap();
-    let flat = sample(&device, &queue, &isotropic, &isotropic.view, (128, None));
-    let sharp = sample(
-        &device,
-        &queue,
-        &anisotropic,
-        &anisotropic.view,
-        (128, None),
-    );
+    let uploaded = upload_texture(&device, &queue, &image, TextureRole::BaseColor).unwrap();
+    let make_sampler = |level| {
+        device.create_sampler(&ornis_render::textures::sampler_descriptor_for_role(
+            TextureRole::BaseColor,
+            level,
+        ))
+    };
+    let isotropic = make_sampler(AnisotropyLevel::OFF);
+    let anisotropic = make_sampler(AnisotropyLevel::DEFAULT);
+    let flat = sample(&device, &queue, &uploaded.view, &isotropic, (128, None));
+    let sharp = sample(&device, &queue, &uploaded.view, &anisotropic, (128, None));
     let supported = adapter
         .get_downlevel_capabilities()
         .flags
@@ -285,14 +271,7 @@ fn verify_ktx_mips(
     image: &TextureImage,
     expected: TextureEncoding,
 ) {
-    let uploaded = upload_image(
-        device,
-        queue,
-        image,
-        TextureRole::BaseColor,
-        AnisotropyLevel::DEFAULT,
-    )
-    .unwrap();
+    let uploaded = upload_image(device, queue, image, TextureRole::BaseColor).unwrap();
     let (edge, height) = image.dimensions();
     assert_eq!(edge, height, "square fixtures");
     assert_eq!(
@@ -310,8 +289,8 @@ fn verify_ktx_mips(
         let pixels = sample(
             device,
             queue,
-            &uploaded,
             &uploaded.view,
+            &uploaded.sampler,
             ((edge >> mip).max(1), Some(mip as u32)),
         );
         let error: u64 = pixels
@@ -336,22 +315,13 @@ fn verify_ktx_mips(
         uploaded.payload_bytes
     );
     let mut cache = ornis_render::TextureCache::new();
-    let level = AnisotropyLevel::DEFAULT;
     let a = cache
-        .upload_image_cached(device, queue, image, TextureRole::BaseColor, level)
+        .upload_image_cached(device, queue, image, TextureRole::BaseColor)
         .unwrap();
     let b = cache
-        .upload_image_cached(device, queue, image, TextureRole::BaseColor, level)
+        .upload_image_cached(device, queue, image, TextureRole::BaseColor)
         .unwrap();
     assert_eq!(a, b);
-    assert_eq!(cache.len(), 1);
-    // The level is not part of the dedup key: the frame binds the renderer's
-    // material sampler, so a second level must reuse this texture.
-    let off = AnisotropyLevel::OFF;
-    let other = cache
-        .upload_image_cached(device, queue, image, TextureRole::BaseColor, off)
-        .unwrap();
-    assert_eq!(a, other);
     assert_eq!(cache.len(), 1);
 }
 

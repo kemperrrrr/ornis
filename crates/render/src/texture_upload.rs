@@ -70,8 +70,8 @@ pub fn gpu_texture_format(encoding: TextureEncoding, role: TextureRole) -> wgpu:
 /// Native KTX2 blocks are retained when supported; otherwise all authored levels
 /// decode to RGBA8. Non-block-aligned base extents also use RGBA8, as WebGPU
 /// requires compressed base dimensions to be multiples of their block extent.
-/// The material sampler carries `anisotropy` (`2` or more needs the linear
-/// filters this path always sets).
+/// The stored sampler is [`AnisotropyLevel::DEFAULT`]. A frame that needs
+/// another level builds its own sampler; this one is not configurable here.
 ///
 /// # Errors
 /// Rejects invalid images, failed transcodes and dimensions exceeding device limits.
@@ -80,7 +80,6 @@ pub fn upload_image(
     queue: &wgpu::Queue,
     image: &TextureImage,
     role: TextureRole,
-    anisotropy: AnisotropyLevel,
 ) -> Result<GpuTexture, TextureUploadError> {
     let (width, height) = image.dimensions();
     validate_device_size(device, width, height)?;
@@ -95,7 +94,7 @@ pub fn upload_image(
         target = TextureEncoding::Rgba8;
     }
     let levels = image.prepare(role, target)?;
-    upload_levels(device, queue, &levels, role, anisotropy)
+    upload_levels(device, queue, &levels, role)
 }
 
 fn validate_device_size(
@@ -115,7 +114,6 @@ pub(crate) fn upload_levels(
     queue: &wgpu::Queue,
     levels: &TextureLevels,
     role: TextureRole,
-    anisotropy: AnisotropyLevel,
 ) -> Result<GpuTexture, TextureUploadError> {
     let (width, height) = levels.dimensions();
     validate_device_size(device, width, height)?;
@@ -162,7 +160,8 @@ pub(crate) fn upload_levels(
         );
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&sampler_descriptor_for_role(role, anisotropy));
+    let sampler =
+        device.create_sampler(&sampler_descriptor_for_role(role, AnisotropyLevel::DEFAULT));
     Ok(GpuTexture {
         texture,
         view,
