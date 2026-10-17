@@ -16,6 +16,7 @@ use crossbeam_channel::{Receiver, Sender};
 use ornis_app::GameWorld;
 use ornis_app::session::clamp_frame_dt;
 use ornis_core::InputState;
+use ornis_render::AntiAliasMode;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -42,8 +43,9 @@ const MOUSE_FORWARD: u8 = 4;
 /// plus its entity count (window title/diagnostics).
 pub type BuildWorld = Box<dyn FnOnce() -> (GameWorld, u32)>;
 
-/// Native run options: window title plus the two CLI conventions
-/// (`--remote-editor`, `--frames N`); see [`NativeOptions::from_env`].
+/// Native run options: window title plus the CLI conventions
+/// (`--remote-editor`, `--frames N`, `--aa MODE`); see
+/// [`NativeOptions::from_env`].
 pub struct NativeOptions {
     /// Window title.
     pub title: String,
@@ -51,6 +53,8 @@ pub struct NativeOptions {
     pub frames: Option<u64>,
     /// Serve the browser editor alongside the native window.
     pub remote_editor: bool,
+    /// The anti-aliasing mode of the frame (`--aa off|msaa|taa|fxaa|smaa`).
+    pub anti_alias: AntiAliasMode,
 }
 
 impl NativeOptions {
@@ -61,18 +65,38 @@ impl NativeOptions {
         let mut args = std::env::args();
         let mut frames = None;
         let mut remote_editor = false;
+        let mut anti_alias = AntiAliasMode::Msaa;
         while let Some(arg) = args.next() {
             if arg == "--remote-editor" {
                 remote_editor = true;
             } else if arg == "--frames" {
                 frames = args.next().and_then(|n| n.parse().ok());
+            } else if arg == "--aa" {
+                anti_alias = args
+                    .next()
+                    .and_then(|mode| anti_alias_by_name(&mode))
+                    .unwrap_or(AntiAliasMode::Msaa);
             }
         }
         Self {
             title: title.into(),
             frames,
             remote_editor,
+            anti_alias,
         }
+    }
+}
+
+/// The anti-aliasing mode named on the command line (`None` for an
+/// unknown name).
+fn anti_alias_by_name(name: &str) -> Option<AntiAliasMode> {
+    match name {
+        "off" => Some(AntiAliasMode::Off),
+        "msaa" => Some(AntiAliasMode::Msaa),
+        "taa" => Some(AntiAliasMode::Taa),
+        "fxaa" => Some(AntiAliasMode::Fxaa),
+        "smaa" => Some(AntiAliasMode::Smaa),
+        _ => None,
     }
 }
 
@@ -176,6 +200,7 @@ impl GameApp {
         build: BuildWorld,
         title: String,
         frames: Option<u64>,
+        anti_alias: AntiAliasMode,
     ) -> Result<GameContext, String> {
         let window_attrs = WindowAttributes::default()
             .with_title(title)
@@ -268,16 +293,36 @@ impl GameApp {
         // format plus resolves (else the documented 1x fallback — never a
         // panic). Plan and renderer share the count: the pool holds the
         // multisampled targets, the renderer the single-sample resolves.
-        let sample_count =
-            ornis_render::negotiate_sample_count(&adapter, ornis_render::MSAA_SAMPLE_COUNT);
+        // The software anti-aliasing modes replace the hardware one, so
+        // they run single-sample (their plans are single-sample too).
+        let sample_count = match anti_alias {
+            AntiAliasMode::Msaa => {
+                ornis_render::negotiate_sample_count(&adapter, ornis_render::MSAA_SAMPLE_COUNT)
+            }
+            AntiAliasMode::Off | AntiAliasMode::Taa | AntiAliasMode::Fxaa | AntiAliasMode::Smaa => {
+                ornis_render::SINGLE_SAMPLE_COUNT
+            }
+        };
         let renderer3d = ornis_render::Renderer3D::new(&device, &surface_config, sample_count);
-        let frame3d = ornis_render::RenderFrame3D::new_with_samples(
-            surface_format,
-            (surface_config.width, surface_config.height),
-            ornis_render::Technique::Hybrid,
-            ornis_render::Bloom::Off,
-            sample_count,
-        );
+        renderer3d.set_anti_alias(anti_alias);
+        let frame3d = if anti_alias.is_enabled() {
+            ornis_render::RenderFrame3D::new_with_aa(
+                surface_format,
+                (surface_config.width, surface_config.height),
+                ornis_render::Technique::Hybrid,
+                ornis_render::Bloom::Off,
+                ornis_render::AaWiring::new(anti_alias),
+            )
+        } else {
+            ornis_render::RenderFrame3D::new_with_aa_samples(
+                surface_format,
+                (surface_config.width, surface_config.height),
+                ornis_render::Technique::Hybrid,
+                ornis_render::Bloom::Off,
+                ornis_render::AaWiring::new(anti_alias),
+                sample_count,
+            )
+        };
         let sphere_mesh = ornis_render::create_sphere(
             &device,
             1.0,
@@ -494,6 +539,7 @@ impl ApplicationHandler for GameApp {
             let build = self.build.take();
             let options_title = self.options.title.clone();
             let options_frames = self.options.frames;
+            let options_anti_alias = self.options.anti_alias;
             match build {
                 Some(build) => match Self::initialize(
                     event_loop,
@@ -502,6 +548,7 @@ impl ApplicationHandler for GameApp {
                     build,
                     options_title,
                     options_frames,
+                    options_anti_alias,
                 ) {
                     Ok(ctx) => {
                         self.context = Some(ctx);
@@ -671,5 +718,24 @@ impl ApplicationHandler for GameApp {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.context = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AntiAliasMode, anti_alias_by_name};
+
+    #[test]
+    fn native_cli_recognizes_every_anti_alias_mode() {
+        for (name, expected) in [
+            ("off", AntiAliasMode::Off),
+            ("msaa", AntiAliasMode::Msaa),
+            ("taa", AntiAliasMode::Taa),
+            ("fxaa", AntiAliasMode::Fxaa),
+            ("smaa", AntiAliasMode::Smaa),
+        ] {
+            assert_eq!(anti_alias_by_name(name), Some(expected));
+        }
+        assert_eq!(anti_alias_by_name("unknown"), None);
     }
 }

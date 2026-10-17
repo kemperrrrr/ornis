@@ -3,6 +3,9 @@
 //! procedural meshes and the WGSL shader assembly. Scene description types
 //! live in `ornis-assets`; this crate only projects them.
 #![warn(missing_docs)]
+/// Anti-aliasing: the mode selection, the temporal jitter and the CPU
+/// reference of the resolve kernels (TAA, FXAA, SMAA).
+pub mod antialias;
 /// Screen-space ambient occlusion (classic SSAO plus GTAO).
 pub mod ao;
 /// GPU eye adaptation (auto-exposure) from a log-luminance histogram of
@@ -71,6 +74,10 @@ pub use ornis_texture::{Ktx2Image, TextureEncoding, TextureImage};
 /// (d2): declaration snapshots compile into shared layouts here.
 pub mod transient_pool;
 
+pub use antialias::{
+    AaWiring, AntiAliasMode, EdgeFilterSettings, JitterSequence, MotionValidity, TaaSettings,
+    halton, jittered_projection, neighbourhood_bounds, taa_resolve, ycocg_decode, ycocg_encode,
+};
 pub use ao::{
     AoMethod, AoSettings, AoWiring, ao_from_sum, apply_ao_to_ambient, bilateral_blur_center,
     bilateral_weight, gtao_clamp_horizon, gtao_falloff, gtao_sample, half_extent,
@@ -119,11 +126,11 @@ pub use render_backend::{
 };
 pub use renderer::{
     AoBlurInputs, AoRawInputs, BlendMode, CameraUniform, CompositeInputs, CompositePass,
-    CustomGbufferDraw, FogInputs, ForwardPass, GBufferTextures, GbufferTargets, InstanceData,
-    LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu, Renderer3D, SINGLE_SAMPLE_COUNT,
-    ShadingDebug, StagedCustomMesh, TransparencyError, TransparencyOptions, custom_draw_items,
-    forward_blend_state, negotiate_sample_count, normalize_sample_count, sort_by_depth,
-    upload_vertex_rows,
+    CustomGbufferDraw, EdgeInputs, FogInputs, ForwardPass, GBufferTextures, GbufferTargets,
+    InstanceData, LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu, Renderer3D,
+    SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh, TaaInputs, TransparencyError,
+    TransparencyOptions, custom_draw_items, forward_blend_state, negotiate_sample_count,
+    normalize_sample_count, sort_by_depth, upload_vertex_rows,
 };
 pub use schedule_bridge::{ProjectionError, try_project_schedule};
 pub use skinning::{

@@ -249,6 +249,7 @@ fn gpu_assignment_matches_cpu_reference() {
         view_proj: view_proj.to_cols_array_2d(),
         inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
         camera_pos: [PARITY_EYE.x, PARITY_EYE.y, PARITY_EYE.z, 1.0],
+        previous_view_proj: view_proj.to_cols_array_2d(),
     };
     let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cluster test camera"),

@@ -54,6 +54,7 @@ use std::sync::Mutex;
 use glam::Vec3;
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
+use crate::antialias::MotionValidity;
 use crate::camera::camera_view_projection;
 use crate::extraction::{RenderLights, extract_render_data, max_mesh_params};
 use crate::frame_exec::{BufferRenderContext, RenderFrame3D};
@@ -460,8 +461,17 @@ impl System for RenderSubmit {
         let mut instances = Vec::with_capacity(extracted.instances.len() + staged.len());
         instances.extend_from_slice(&extracted.instances);
         instances.extend(staged.iter().map(|entry| entry.instance));
-        fs.renderer
-            .upload_instances(&device.0, &queue.0, &instances);
+        let mut motion_valid = vec![MotionValidity::Valid; extracted.instances.len()];
+        motion_valid.extend(staged.iter().map(|entry| entry.motion_valid));
+        let mut instance_entities = extracted.instance_entities;
+        instance_entities.extend(staged.iter().map(|entry| entry.entity));
+        fs.renderer.upload_instances_with_motion_flags(
+            &device.0,
+            &queue.0,
+            &instances,
+            &motion_valid,
+            &instance_entities,
+        );
         // Slice 2c: stage the shared sphere batch ONLY (`extracted`
         // moved, never merged) — customs must not enter indirect.
         if fs.renderer.indirect_draw() {
