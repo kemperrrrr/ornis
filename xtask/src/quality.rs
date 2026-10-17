@@ -624,8 +624,9 @@ fn compare_rustqual_reports(base_s: &str, cur_s: &str) -> Result<RatchetOutcome,
 
 /// Hard categories (RAT-44): absolute `C.k <= B.k`, no density allowance.
 /// Everything else in [`COUNT_CATEGORIES`] is soft: `C.k <= ceil(B.k *
-/// C.total / B.total)` in u128 integer arithmetic, i.e. finding density
-/// per unit of inventoried code must not grow.
+/// C.total / B.total)` in u128 integer arithmetic when inventory grows.
+/// A smaller `C.total` must not pull that ceil below `B.k`: deleting
+/// code keeps the absolute ceiling, so a flat counter still passes.
 const HARD_CATEGORIES: &[&str] = &[
     "violations",
     "unsafe_warnings",
@@ -755,6 +756,11 @@ fn check_hard_categories(
 /// Rule 4: every soft category stays within its density limit.
 /// `base_counts` carries the already-required `(key, B.k)` pairs so the
 /// missing-key check happens once in the caller.
+///
+/// The ceil uses `max(C.total, B.total)`. When the PR shrinks inventory,
+/// `ceil(B.k * C.total / B.total)` would land below `B.k` and reject a
+/// flat counter; the floor is the old count, so only a real increase
+/// needs the label.
 fn check_soft_density(
     cur: &serde_json::Value,
     base_counts: &[(&&str, u64)],
@@ -766,7 +772,7 @@ fn check_soft_density(
             continue;
         }
         let c = require_u64(cur, "committed", key).map_err(AutoReject::Structural)?;
-        let limit = density_limit(*b, base_total, cur_total);
+        let limit = density_limit(*b, base_total, cur_total.max(base_total));
         if c > limit {
             return Err(AutoReject::NeedsLabel(format!(
                 "auto-accept rule 4: soft category `{key}` {b}→{c} exceeds density limit {limit} (base {b} @ total {base_total}→{cur_total}, needs the label)"
@@ -785,7 +791,8 @@ fn check_soft_density(
 /// 2. identity: `violation_details` (file,name) set of C ⊆ B, and
 ///    `C.violations <= B.violations`;
 /// 3. hard categories absolutely `<=`;
-/// 4. soft categories within density `ceil(B.k*C.total/B.total)`;
+/// 4. soft categories within density `ceil(B.k*C.total/B.total)`, and
+///    never below `B.k` (a shrink of `total` keeps the absolute ceiling);
 /// 5. structure: both parse, all keys present, `B.total > 0`,
 ///    `C.total <= B.total * 1.5`.
 ///
@@ -3134,13 +3141,34 @@ mod ratchet_tests {
             err.contains("rule 4") && err.contains("tq_untested_warnings"),
             "unexpected: {err}"
         );
-        // Shrinking total degenerates to absolute <=.
+        // dead_code 10→11 still needs the label when total shrinks.
+        // The count itself grew; this fixture fails under either density
+        // formula and does not show that a shrink tightens the limit.
+        // Flat counts on a smaller total are the next test.
         let shrink =
             report_with(json!({"total": 900, "total_findings": 90, "dead_code_warnings": 11}));
         let err2 = baseline_auto_accept(&base_report(), &shrink)
             .unwrap_err()
             .to_string();
         assert!(err2.contains("dead_code_warnings"), "unexpected: {err2}");
+    }
+
+    #[test]
+    fn shrinking_total_with_flat_counts_auto_accepts_without_label() {
+        // total 1000→900, every count unchanged. Raw ceil(B.k*900/1000)
+        // sits below B.k (dead_code 10 → 9), so the pre-fix formula
+        // FAILs a PR that only deleted code. The limit must stay at
+        // least B.k, and the bump guard must pass without the label.
+        assert_eq!(density_limit(10, 1000, 900), 9);
+        let committed = report_with(json!({"total": 900}));
+        assert!(
+            baseline_auto_accept(&base_report(), &committed).is_ok(),
+            "flat counts on a smaller total must auto-accept"
+        );
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("shrink-flat", &base_report(), guard_ref);
+        assert!(check_baseline_bump(&dir, &committed, true, false, guard_ref).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
