@@ -154,6 +154,7 @@ fn render_frame(
             bloom_intensity: 0.0,
             mode: 0,
         },
+        crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS,
     );
     queue.submit([encoder.finish()]);
     test_util::readback_rgba8(device, queue, &target, FRAME_W, FRAME_H)
@@ -517,6 +518,7 @@ fn armed_with_custom_matches_direct_and_indirect() {
             bloom_intensity: 0.0,
             mode: 0,
         },
+        crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS,
     );
     queue.submit([encoder.finish()]);
     let routed = test_util::readback_rgba8(&device, &queue, &target, FRAME_W, FRAME_H);

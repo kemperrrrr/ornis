@@ -263,6 +263,7 @@ impl Renderer3D {
                 bloom_intensity: 0.0,
                 mode: 0,
             },
+            self.frame_dt_seconds(),
         );
     }
 
@@ -307,6 +308,7 @@ impl Renderer3D {
                 bloom_intensity: 0.0,
                 mode: 0,
             },
+            self.frame_dt_seconds(),
         );
     }
 
@@ -363,6 +365,7 @@ impl Renderer3D {
                 // Legacy path always runs the hybrid mix.
                 mode: 2,
             },
+            self.frame_dt_seconds(),
         );
     }
 }

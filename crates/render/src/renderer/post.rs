@@ -2,10 +2,6 @@
 use super::*;
 use crate::auto_exposure::{ExposureFrame, ExposureMode};
 
-/// Fixed frame delta (seconds) fed to the auto-exposure temporal smoothing.
-/// The record path carries no wall-clock dt yet; a pinned 60 Hz step keeps
-/// the adaptation deterministic and testable.
-const EXPOSURE_FRAME_DT: f32 = 1.0 / 60.0;
 /// Final blend pass mixing deferred HDR, forward HDR and bloom into the output.
 pub struct CompositePass {
     /// Full-screen triangle-strip pipeline targeting the surface format.
@@ -433,7 +429,8 @@ impl Renderer3D {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        hdr: &wgpu::TextureView,
+        inputs: &CompositeInputs<'_>,
+        dt_seconds: f32,
     ) {
         match self.exposure_mode() {
             ExposureMode::Manual { multiplier } => {
@@ -444,11 +441,13 @@ impl Renderer3D {
                 queue,
                 encoder,
                 ExposureFrame {
-                    hdr,
+                    hdr: inputs.hdr,
+                    hdr_fwd: inputs.hdr_fwd,
+                    mode: inputs.mode,
                     width: self.width,
                     height: self.height,
                     settings,
-                    dt_seconds: EXPOSURE_FRAME_DT,
+                    dt_seconds,
                 },
             ),
         }
@@ -457,18 +456,23 @@ impl Renderer3D {
     /// Record the final blend into `inputs.target`: mixes deferred + forward
     /// HDR layers per `inputs.mode` and adds bloom scaled by
     /// `inputs.bloom_intensity` (0 keeps the legacy path pixel-identical).
+    ///
+    /// `dt_seconds` is the measured frame delta handed to the auto-exposure
+    /// smoothing (see [`Renderer3D::set_frame_time`]); it is ignored on the
+    /// manual path.
     pub fn render_composite(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         inputs: CompositeInputs<'_>,
+        dt_seconds: f32,
     ) {
         // Auto-exposure runs before the composite samples: manual mode writes
         // the constant multiplier, auto mode builds the histogram of the lit
         // HDR target and adapts the exposure — both into the same uniform the
         // fragment stage reads at binding 5.
-        self.apply_exposure(device, queue, encoder, inputs.hdr);
+        self.apply_exposure(device, queue, encoder, &inputs, dt_seconds);
         // The bloom view is bound unconditionally; a zero intensity makes the
         // contribution null, so the legacy path (`render_scene`) stays
         // pixel-identical to the plan path with bloom culled.
@@ -1008,16 +1012,18 @@ mod tests {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    /// An `Rgba16Float` HDR target filled with one `f16` gray bit pattern
-    /// (avoids a `half` dev-dependency).
-    fn exposure_test_hdr(
+    /// An `Rgba16Float` HDR target that is black except for the first
+    /// `foreground_texels` texels, which are set to `foreground` (a lit
+    /// object on a black background for the auto-exposure e2e test).
+    fn exposure_test_hdr_patch(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         extent: wgpu::Extent3d,
-        gray: u16,
+        foreground: u16,
+        foreground_texels: u32,
     ) -> wgpu::TextureView {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("exposure test hdr"),
+            label: Some("exposure test hdr patch"),
             size: extent,
             mip_level_count: 1,
             sample_count: 1,
@@ -1028,8 +1034,10 @@ mod tests {
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let mut texels = Vec::with_capacity((extent.width * extent.height) as usize * 4);
-        for _ in 0..(extent.width * extent.height) {
+        let count = extent.width * extent.height;
+        let mut texels = Vec::with_capacity(count as usize * 4);
+        for i in 0..count {
+            let gray = if i < foreground_texels { foreground } else { 0 };
             texels.extend_from_slice(&[gray, gray, gray, 0x3C00]);
         }
         queue.write_texture(
@@ -1084,9 +1092,10 @@ mod tests {
 
     /// End-to-end wiring of the exposure uniform through
     /// [`Renderer3D::render_composite`]: the manual default writes exactly
-    /// `1.0`, a manual override writes its multiplier, and auto mode runs
-    /// the histogram against the bound HDR target and moves the exposure off
-    /// `1.0`. Skipped when no adapter is available.
+    /// `1.0`, a manual override writes its multiplier, and auto mode runs the
+    /// histogram against the bound HDR target and adapts to the lit object
+    /// (a grey patch on a black background — the black background must not
+    /// drag the exposure). Skipped when no adapter is available.
     #[test]
     fn composite_exposure_mode_writes_the_shared_uniform() {
         use crate::auto_exposure::{AutoExposureSettings, ExposureMode};
@@ -1116,7 +1125,8 @@ mod tests {
             depth_or_array_layers: 1,
         };
         let target = exposure_test_target(&device, extent);
-        let black = exposure_test_hdr(&device, &queue, extent, 0x0000);
+        // Lit object (`0.5` in f16) on a black background.
+        let scene = exposure_test_hdr_patch(&device, &queue, extent, 0x3800, W * H / 5);
         let composite = |hdr: &wgpu::TextureView| {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("exposure test composite encoder"),
@@ -1133,27 +1143,32 @@ mod tests {
                     bloom_intensity: 0.0,
                     mode: 0,
                 },
+                1.0 / 60.0,
             );
             queue.submit(std::iter::once(encoder.finish()));
         };
 
-        composite(&black);
+        composite(&scene);
         assert_eq!(exposure_uniform(&renderer, &device, &queue), 1.0);
 
         renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 2.5 });
-        composite(&black);
+        composite(&scene);
         let manual = exposure_uniform(&renderer, &device, &queue);
         assert!((manual - 2.5).abs() < 1e-6, "{manual}");
 
         renderer.set_exposure_mode(ExposureMode::Auto(AutoExposureSettings::default()));
-        for _ in 0..120 {
-            composite(&black);
+        for _ in 0..600 {
+            composite(&scene);
         }
         let auto = exposure_uniform(&renderer, &device, &queue);
-        assert!(auto > 1.5, "auto exposure did not adapt: {auto}");
+        // `0.5` luminance with a `0.18` key -> exposure `0.36`.
+        assert!(
+            auto > 0.2 && auto < 0.5,
+            "auto exposure should track the object (~0.36): {auto}"
+        );
 
         renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 1.0 });
-        composite(&black);
+        composite(&scene);
         assert_eq!(exposure_uniform(&renderer, &device, &queue), 1.0);
     }
 }
