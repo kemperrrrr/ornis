@@ -236,15 +236,27 @@ fn cascade_map_side(corners: &[[f32; 3]; 8], resolution: u32) -> Option<f32> {
     (side > 0.0 && side.is_finite()).then_some(side)
 }
 
+/// Which corner of an AABB each slot picks: `0` is min, `1` is max, per axis.
+const AABB_CORNER_SIGN: [[u8; 3]; 8] = [
+    [0, 0, 0],
+    [1, 0, 0],
+    [0, 1, 0],
+    [1, 1, 0],
+    [0, 0, 1],
+    [1, 0, 1],
+    [0, 1, 1],
+    [1, 1, 1],
+];
+
 /// Eight corners of an axis-aligned box.
 fn aabb_corners(min: [f32; 3], max: [f32; 3]) -> [[f32; 3]; 8] {
-    let mut corners = [[0.0; 3]; 8];
-    for (i, corner) in corners.iter_mut().enumerate() {
-        corner[0] = if i & 1 == 0 { min[0] } else { max[0] };
-        corner[1] = if i & 2 == 0 { min[1] } else { max[1] };
-        corner[2] = if i & 4 == 0 { min[2] } else { max[2] };
-    }
-    corners
+    AABB_CORNER_SIGN.map(|sign| {
+        [
+            if sign[0] == 0 { min[0] } else { max[0] },
+            if sign[1] == 0 { min[1] } else { max[1] },
+            if sign[2] == 0 { min[2] } else { max[2] },
+        ]
+    })
 }
 
 /// Widen a light-space z range so it also covers `corners`.
@@ -995,62 +1007,7 @@ impl Renderer3D {
         queue: &wgpu::Queue,
         layer: u32,
     ) -> Vec<f32> {
-        /// Bytes per Depth32Float texel.
-        const DEPTH32_BYTES: u32 = 4;
-        let size = SHADOW_SIZE;
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test shadow layer readback"),
-            size: (size * size * DEPTH32_BYTES) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("test shadow layer readback"),
-        });
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.shadow_maps,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: layer,
-                },
-                aspect: wgpu::TextureAspect::DepthOnly,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(size * DEPTH32_BYTES),
-                    rows_per_image: Some(size),
-                },
-            },
-            wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(std::iter::once(enc.finish()));
-        let slice = buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
-            return Vec::new();
-        }
-        let Ok(Ok(())) = rx.recv() else {
-            return Vec::new();
-        };
-        let Ok(data) = slice.get_mapped_range() else {
-            return Vec::new();
-        };
-        let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-        drop(data);
-        buf.unmap();
-        out
+        read_depth_layer(device, queue, &self.shadow_maps, layer)
     }
 
     /// Test-only readback of one CSM cascade layer as row-major depths.
@@ -1061,62 +1018,7 @@ impl Renderer3D {
         queue: &wgpu::Queue,
         layer: u32,
     ) -> Vec<f32> {
-        /// Bytes per Depth32Float texel.
-        const DEPTH32_BYTES: u32 = 4;
-        let size = SHADOW_SIZE;
-        let buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test csm layer readback"),
-            size: (size * size * DEPTH32_BYTES) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("test csm layer readback"),
-        });
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.csm_maps,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: layer,
-                },
-                aspect: wgpu::TextureAspect::DepthOnly,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(size * DEPTH32_BYTES),
-                    rows_per_image: Some(size),
-                },
-            },
-            wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-        );
-        queue.submit(std::iter::once(enc.finish()));
-        let slice = buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
-            return Vec::new();
-        }
-        let Ok(Ok(())) = rx.recv() else {
-            return Vec::new();
-        };
-        let Ok(data) = slice.get_mapped_range() else {
-            return Vec::new();
-        };
-        let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-        drop(data);
-        buf.unmap();
-        out
+        read_depth_layer(device, queue, &self.csm_maps, layer)
     }
 
     /// Fit the directional shadow frustum to a scene AABB (`min`/`max`
@@ -1140,6 +1042,72 @@ impl Renderer3D {
     pub fn shadow_half_extent(&self) -> f32 {
         read_lock(&self.shadow_fit).map_or(SHADOW_ORTHO_HALF, |(_, half)| half)
     }
+}
+
+/// Row-major Depth32Float readback of one array layer. Empty when the map fails.
+#[cfg(test)]
+fn read_depth_layer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    layer: u32,
+) -> Vec<f32> {
+    /// Bytes per Depth32Float texel.
+    const DEPTH32_BYTES: u32 = 4;
+    let size = SHADOW_SIZE;
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test depth layer readback"),
+        size: (size * size * DEPTH32_BYTES) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("test depth layer readback"),
+    });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::DepthOnly,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * DEPTH32_BYTES),
+                rows_per_image: Some(size),
+            },
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(enc.finish()));
+    let slice = buf.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        return Vec::new();
+    }
+    let Ok(Ok(())) = rx.recv() else {
+        return Vec::new();
+    };
+    let Ok(data) = slice.get_mapped_range() else {
+        return Vec::new();
+    };
+    let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+    drop(data);
+    buf.unmap();
+    out
 }
 
 #[cfg(test)]
@@ -1672,17 +1640,6 @@ mod tests {
         );
     }
 
-    fn yawed_eye(eye: glam::Vec3, target: glam::Vec3, yaw: f32) -> glam::Vec3 {
-        let offset = eye - target;
-        let (s, c) = yaw.sin_cos();
-        target
-            + glam::Vec3::new(
-                offset.x * c + offset.z * s,
-                offset.y,
-                -offset.x * s + offset.z * c,
-            )
-    }
-
     fn cascade_texel_bits(eye: glam::Vec3, target: glam::Vec3) -> [u32; CSM_CASCADES] {
         use super::super::lights::{CsmCamera, build_csm};
         let fwd = (target - eye).normalize();
@@ -1715,7 +1672,10 @@ mod tests {
         let target = glam::Vec3::new(0.0, 2.0, -60.0);
         let base = cascade_texel_bits(eye, target);
         for degrees in [1.0_f32, 5.0] {
-            let yawed = cascade_texel_bits(yawed_eye(eye, target, degrees.to_radians()), target);
+            let yawed = cascade_texel_bits(
+                crate::render_backend::tests::yawed_eye(eye, target, degrees.to_radians()),
+                target,
+            );
             assert_eq!(base, yawed, "yaw {degrees}° changed the texel size");
         }
     }
@@ -1754,7 +1714,8 @@ mod tests {
         let probe = target.to_array();
         let before = shadow_texel(cascade_zero_vp(eye, target), probe);
         for degrees in [1.0_f32, 5.0] {
-            let yawed = yawed_eye(eye, target, degrees.to_radians());
+            let yawed =
+                crate::render_backend::tests::yawed_eye(eye, target, degrees.to_radians());
             let after = shadow_texel(cascade_zero_vp(yawed, target), probe);
             assert!(
                 fractional_shift(before[0], after[0]) < 1e-3

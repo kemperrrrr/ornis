@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.5578895242063704,
-  "iosp_score": 0.9193315452857438,
+  "quality_score": 0.5719703734173407,
+  "iosp_score": 0.9220494417862839,
   "violations": 391,
-  "total": 7617,
+  "total": 7869,
   "complexity_warnings": 72,
   "magic_number_warnings": 129,
   "nesting_depth_warnings": 19,
@@ -14,7 +14,7 @@
   "dead_code_warnings": 421,
   "dead_type_warnings": 3,
   "fragment_groups": 648,
-  "boilerplate_warnings": 323,
+  "boilerplate_warnings": 324,
   "srp_struct_warnings": 23,
   "srp_module_warnings": 100,
   "wildcard_import_warnings": 49,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 8,
-  "tq_untested_warnings": 151,
+  "tq_untested_warnings": 150,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2826,
+  "total_findings": 2828,
   "violation_details": [
     {
       "name": "showcase_engine",
@@ -148,7 +148,7 @@
     {
       "name": "AssetServer::load",
       "file": "crates/assets/src/server.rs",
-      "line": 244
+      "line": 283
     },
     {
       "name": "AssetError::from",
@@ -208,7 +208,7 @@
     {
       "name": "Renderer3D::set_lights_full",
       "file": "crates/render/src/renderer/lights.rs",
-      "line": 652
+      "line": 656
     },
     {
       "name": "Renderer3D::create_forward_pass",
@@ -218,7 +218,7 @@
     {
       "name": "Renderer3D::render_forward_textured",
       "file": "crates/render/src/renderer/forward.rs",
-      "line": 689
+      "line": 712
     },
     {
       "name": "extract_render_data_with_stats",
@@ -318,7 +318,7 @@
     {
       "name": "RenderSubmit::run",
       "file": "crates/render/src/gpu_resources.rs",
-      "line": 311
+      "line": 396
     },
     {
       "name": "RenderFrame3D::build",

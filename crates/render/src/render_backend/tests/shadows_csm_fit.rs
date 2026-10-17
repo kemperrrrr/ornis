@@ -4,6 +4,7 @@
 //! an occluder that sits in an earlier slice.
 
 use super::super::*;
+use super::probe::{pixel_diff, yawed_eye};
 use super::*;
 use crate::flags::ShadowCast;
 use crate::mesh::Mesh;
@@ -11,8 +12,6 @@ use crate::renderer::{InstanceData, MaterialIdx, Renderer3D, SHADOW_SIZE};
 
 const PROBE_W: u32 = 320;
 const PROBE_H: u32 = 180;
-/// Channel sum above which two pixels count as different.
-const PIXEL_DIFF: i16 = 12;
 /// Depth below this belongs to a rendered caster, not the cleared far plane.
 const OCCUPIED_DEPTH: f32 = 0.98;
 
@@ -31,33 +30,8 @@ fn open_fit(label: &'static str) -> Option<FitRig> {
         eprintln!("no GPU adapter; skipping {label}");
         return None;
     };
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: PROBE_W,
-            height: PROBE_H,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-    let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: PROBE_W,
-        height: PROBE_H,
-        present_mode: wgpu::PresentMode::AutoNoVsync,
-        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-        view_formats: vec![],
-        desired_maximum_frame_latency: 2,
-        color_space: wgpu::SurfaceColorSpace::Auto,
-    };
+    let (target, view, surface_config) =
+        super::probe::probe_color_target(&device, label, PROBE_W, PROBE_H);
     let renderer = Renderer3D::new(&device, &surface_config, 1);
     let mesh = crate::mesh::create_sphere(&device, 1.0, 24, 16);
     let mut gray = ornis_core::OpenPBRMaterial::dielectric();
@@ -135,80 +109,19 @@ fn paint(rig: &FitRig, to_light: glam::Vec3, shadow: ShadowCast) -> Vec<u8> {
         &rig.mesh,
         rig.instances,
     );
-    let bpp = 4u32;
-    let unpadded = PROBE_W * bpp;
-    let padded = unpadded.div_ceil(256) * 256;
-    let readback = rig.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("csm fit readback"),
-        size: (padded * PROBE_H) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &rig.target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded),
-                rows_per_image: Some(PROBE_H),
-            },
-        },
-        wgpu::Extent3d {
-            width: PROBE_W,
-            height: PROBE_H,
-            depth_or_array_layers: 1,
-        },
-    );
-    rig.queue.submit([encoder.finish()]);
-    let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    rig.device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let data = slice.get_mapped_range().unwrap();
-    let mut pixels = vec![0u8; (unpadded * PROBE_H) as usize];
-    for y in 0..PROBE_H as usize {
-        pixels[y * unpadded as usize..][..unpadded as usize]
-            .copy_from_slice(&data[y * padded as usize..][..unpadded as usize]);
-    }
-    drop(data);
-    readback.unmap();
-    pixels
-}
-
-fn pixel_diff(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
-        .filter(|(x, y)| {
-            (x[0] as i16 - y[0] as i16).abs()
-                + (x[1] as i16 - y[1] as i16).abs()
-                + (x[2] as i16 - y[2] as i16).abs()
-                > PIXEL_DIFF
-        })
-        .count()
+    super::probe::read_color_target(
+        &rig.device,
+        &rig.queue,
+        encoder,
+        &rig.target,
+        (PROBE_W, PROBE_H),
+    )
 }
 
 fn shadow_effect(rig: &FitRig, to_light: glam::Vec3) -> usize {
     let on = paint(rig, to_light, ShadowCast::Enabled);
     let off = paint(rig, to_light, ShadowCast::Disabled);
     pixel_diff(&on, &off)
-}
-
-fn yawed_eye(eye: glam::Vec3, target: glam::Vec3, yaw: f32) -> glam::Vec3 {
-    let offset = eye - target;
-    let (s, c) = yaw.sin_cos();
-    target
-        + glam::Vec3::new(
-            offset.x * c + offset.z * s,
-            offset.y,
-            -offset.x * s + offset.z * c,
-        )
 }
 
 /// Centroid of casters in one cascade, in texel units.

@@ -268,47 +268,83 @@ impl System for RenderMesh {
     }
 }
 
-/// Enable CSM for a perspective camera and publish the extracted caster
-/// AABB. Orthographic cameras stay on the legacy single-layer path: cascade
-/// corners are unprojected with the perspective depth formula.
-fn submit_csm(
-    renderer: &crate::renderer::Renderer3D,
-    view: &crate::camera::CameraView,
-    upload: &crate::extraction::FrameUpload,
-) {
+/// Perspective CSM camera `(near, far, forward)`, or `None` when the frame
+/// stays on the legacy single-layer path.
+fn csm_camera_args(view: &crate::camera::CameraView) -> Option<(f32, f32, [f32; 3])> {
     let forward = view.target - view.eye;
-    let perspective = matches!(
+    let len2 = forward.length_squared();
+    if !matches!(
         view.projection,
         ornis_assets::scene::CameraProjection::Perspective
-    );
-    if !perspective || forward.length_squared() <= f32::EPSILON {
-        renderer.clear_csm_camera();
-        renderer.clear_csm_casters();
-        return;
+    ) || len2 <= f32::EPSILON
+    {
+        return None;
     }
-    renderer.set_csm_camera(
+    let scale = 1.0 / len2.sqrt();
+    Some((
         view.near.get(),
         view.far.get(),
-        forward.normalize().to_array(),
-    );
-    match caster_aabb(upload) {
+        (forward * scale).to_array(),
+    ))
+}
+
+/// Drop CSM so an orthographic or degenerate camera uses the legacy shadow.
+fn clear_csm(renderer: &Renderer3D) {
+    renderer.clear_csm_camera();
+    renderer.clear_csm_casters();
+}
+
+/// Publish one caster AABB, or clear it when the frame has no finite spheres.
+fn publish_csm_casters(renderer: &Renderer3D, bounds: Option<([f32; 3], [f32; 3])>) {
+    match bounds {
         Some((min, max)) => renderer.set_csm_casters(min, max),
         None => renderer.clear_csm_casters(),
     }
 }
 
+/// Enable CSM for a perspective camera and publish the extracted caster
+/// AABB. Orthographic cameras stay on the legacy single-layer path: cascade
+/// corners are unprojected with the perspective depth formula.
+fn submit_csm(
+    renderer: &Renderer3D,
+    view: &crate::camera::CameraView,
+    upload: &crate::extraction::FrameUpload,
+) {
+    match csm_camera_args(view) {
+        Some((near, far, dir)) => {
+            renderer.set_csm_camera(near, far, dir);
+            publish_csm_casters(renderer, caster_aabb(upload));
+        }
+        None => clear_csm(renderer),
+    }
+}
+
 /// Conservative AABB of every extracted instance sphere.
 fn caster_aabb(upload: &crate::extraction::FrameUpload) -> Option<([f32; 3], [f32; 3])> {
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    let mut any = false;
     let customs = upload.custom_meshes.iter().map(|entry| &entry.instance);
-    for instance in upload.instances.iter().chain(customs) {
-        let (center, radius) = crate::extraction::instance_sphere(instance);
-        if !center.is_finite() || !radius.is_finite() {
+    fold_spheres(
+        upload
+            .instances
+            .iter()
+            .chain(customs)
+            .map(crate::extraction::instance_sphere),
+    )
+}
+
+/// Union of finite instance spheres. Non-finite centers and radii are skipped.
+fn fold_spheres(spheres: impl Iterator<Item = (Vec3, f32)>) -> Option<([f32; 3], [f32; 3])> {
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    for (center, radius) in spheres {
+        if !f32::is_finite(center.x)
+            || !f32::is_finite(center.y)
+            || !f32::is_finite(center.z)
+            || !f32::is_finite(radius)
+        {
             continue;
         }
-        let extent = Vec3::splat(radius);
+        let extent = glam::Vec3::splat(radius);
         min = min.min(center - extent);
         max = max.max(center + extent);
         any = true;

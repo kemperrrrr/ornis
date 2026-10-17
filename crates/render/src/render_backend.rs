@@ -269,4 +269,4 @@ pub mod renderer3d_backend {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

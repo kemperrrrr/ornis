@@ -6,11 +6,14 @@ mod csm_submit;
 mod custom_mesh;
 mod golden;
 mod lights;
+mod probe;
 mod shadows_csm;
 mod shadows_csm_fit;
 mod shadows_dir;
 mod shadows_point;
 mod shadows_spot;
+
+pub(crate) use probe::yawed_eye;
 
 /// None when no adapter is available (CI without GPU and without
 /// lavapipe); the tests below skip in that case.

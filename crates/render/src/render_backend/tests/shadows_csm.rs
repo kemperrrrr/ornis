@@ -3,15 +3,13 @@
 //! camera moves by less than a texel.
 
 use super::super::*;
+use super::probe::pixel_diff;
 use super::*;
 use crate::flags::ShadowCast;
 use crate::mesh::Mesh;
 
 const PROBE_W: u32 = 320;
 const PROBE_H: u32 = 180;
-/// Channel sum above which two pixels count as different.
-const PIXEL_DIFF: i16 = 12;
-
 struct CsmRig {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -28,33 +26,8 @@ fn open_csm_rig(label: &'static str, skip: &'static str) -> Option<CsmRig> {
             eprintln!("{skip}");
             return None;
         };
-        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width: PROBE_W,
-                height: PROBE_H,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: PROBE_W,
-            height: PROBE_H,
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
+        let (target, view, surface_config) =
+            super::probe::probe_color_target(&device, label, PROBE_W, PROBE_H);
         let mut backend = create_render_backend(
             &device,
             &RenderBackendConfig {
@@ -125,18 +98,6 @@ fn aim_csm(
     }
 }
 
-fn pixel_diff(a: &[u8], b: &[u8]) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
-        .filter(|(x, y)| {
-            (x[0] as i16 - y[0] as i16).abs()
-                + (x[1] as i16 - y[1] as i16).abs()
-                + (x[2] as i16 - y[2] as i16).abs()
-                > PIXEL_DIFF
-        })
-        .count()
-}
-
 fn mean_luma(px: &[u8]) -> f64 {
     px.chunks_exact(4)
         .map(|c| (c[0] as f64 + c[1] as f64 + c[2] as f64) / 3.0)
@@ -172,51 +133,13 @@ fn csm_probe_frame(rig: &mut CsmRig, shadow: ShadowCast) -> Vec<u8> {
             &rig.mesh,
             2,
         );
-        let bpp = 4u32;
-        let unpadded = PROBE_W * bpp;
-        let padded = unpadded.div_ceil(256) * 256;
-        let readback = rig.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("csm probe readback"),
-            size: (padded * PROBE_H) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &rig.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(PROBE_H),
-                },
-            },
-            wgpu::Extent3d {
-                width: PROBE_W,
-                height: PROBE_H,
-                depth_or_array_layers: 1,
-            },
-        );
-        rig.queue.submit([encoder.finish()]);
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        rig.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("poll");
-        let data = slice.get_mapped_range().unwrap();
-        let mut pixels = vec![0u8; (unpadded * PROBE_H) as usize];
-        for y in 0..PROBE_H as usize {
-            pixels[y * unpadded as usize..][..unpadded as usize]
-                .copy_from_slice(&data[y * padded as usize..][..unpadded as usize]);
-        }
-        drop(data);
-        readback.unmap();
-        pixels
+        super::probe::read_color_target(
+            &rig.device,
+            &rig.queue,
+            encoder,
+            &rig.target,
+            (PROBE_W, PROBE_H),
+        )
     }
 }
 
