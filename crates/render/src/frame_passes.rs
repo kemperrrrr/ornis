@@ -1158,9 +1158,13 @@ impl<M: CompositeMode> FramePass for Composite<M> {
         let Some(inputs) = M::inputs(&views, frame.renderer) else {
             return;
         };
-        frame
-            .renderer
-            .render_composite(frame.device, frame.queue, frame.encoder, inputs);
+        frame.renderer.render_composite(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            inputs,
+            frame.renderer.frame_dt_seconds(),
+        );
     }
 }
 

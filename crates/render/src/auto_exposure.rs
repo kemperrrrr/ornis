@@ -5,27 +5,49 @@
 //! (walking out of a room into daylight or vice versa). The pass is fully
 //! GPU-resident — the histogram of the lit HDR target is built with an
 //! atomic-histogram compute pass, a second compute pass reduces it to a
-//! clipped average log-luminance, converts that to a target exposure (with
-//! an EV compensation) and smooths it over time, and the composite
-//! tone-mapper multiplies the HDR color by the resulting exposure. No
-//! value is ever read back to the CPU, so the CPU never stalls on the GPU.
+//! clipped average log-luminance, converts that to a target *exposure value
+//! in EV* (with an EV compensation) and smooths it over time, and the
+//! composite tone-mapper multiplies the HDR color by the resulting exposure.
+//! No value is ever read back to the CPU, so the CPU never stalls on the GPU.
 //!
-//! Manual mode stays available ([`crate::auto_exposure::ExposureMode::Manual`], exposure `1.0`):
+//! Manual mode stays available ([`ExposureMode::Manual`], exposure `1.0`):
 //! it records no compute work and writes the constant multiplier into the
 //! same uniform the composite reads, so the manual path is pixel-identical
 //! to the pre-auto-exposure frame (the golden probes stay green).
 //!
-//! Settings mirror the classic histogram eye-adaptation recipe:
-//! target-key luminance, EV compensation, per-percentile tail clipping,
-//! and separate up/down adaptation speeds.
+//! The recipe follows Bevy's auto exposure:
+//!
+//! * the histogram measures the same HDR the tone-mapper sees — the
+//!   `mode`-selected mix of the deferred and forward layers, never a lone
+//!   deferred layer (so forward geometry is metered too);
+//! * bin `0` is reserved for texels below `2^min_log_lum` and is excluded
+//!   from the average, so black backgrounds and letterbox bars do not drag
+//!   the exposure up. A frame with no in-range texel holds the previous
+//!   exposure;
+//! * tail clipping uses a *partial* bin weight
+//!   (`clamp(cum, low, high) - clamp(cum_before, low, high)`), so the
+//!   clipped quantiles are honoured to sub-bin precision;
+//! * smoothing runs in EV (log2 exposure): the step is
+//!   `min(speed*dt, |delta| * speed*dt / transition_distance)`, clamped to
+//!   `speed*dt`, which behaves symmetrically for brightening and darkening;
+//! * the frame delta time is supplied by the host through
+//!   [`Renderer3D::set_frame_time`](crate::renderer::Renderer3D::set_frame_time);
+//!   [`DEFAULT_FRAME_DT_SECONDS`] is only a fallback used before the first
+//!   host call.
 
-// qual:allow(srp, file_length=640) reason: "one cohesive GPU feature — the histogram build, the reduction and their settings only function together; splitting them would scatter a single pass across files."
+mod wgsl;
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use wgsl::{adapt_wgsl, histogram_wgsl};
 
 use bytemuck::Pod;
 use bytemuck::Zeroable;
 use wgpu::util::DeviceExt as _;
 
-/// Number of histogram bins. Also baked into the WGSL loop bound below.
+/// Number of histogram bins. Bin `0` is reserved for texels below the
+/// histogram window; the in-range texels land in bins `1..HISTOGRAM_BINS`.
 pub const HISTOGRAM_BINS: usize = 256;
 
 /// Threads per histogram workgroup axis: the pass is 2D (`8×8`), one
@@ -33,34 +55,53 @@ pub const HISTOGRAM_BINS: usize = 256;
 pub const HISTOGRAM_WORKGROUP_SIZE: u32 = 8;
 
 /// Lowest log2-luminance a texel can map to (`2^-8` ≈ 0.0039); darker
-/// texels saturate into bin 0.
+/// texels saturate into bin 0 and are excluded from the average.
 pub const DEFAULT_MIN_LOG_LUM: f32 = -8.0;
 
-/// Highest log2-luminance a texel can map to (`2^4` = 16); brighter texels
+/// Highest log2-luminance a texel can map to (`2^8` = 256); brighter texels
 /// saturate into the last bin.
-pub const DEFAULT_MAX_LOG_LUM: f32 = 4.0;
+pub const DEFAULT_MAX_LOG_LUM: f32 = 8.0;
 
 /// Floor applied to a texel's luminance before `log2`, so black pixels are
 /// finite and land deterministically in bin 0.
 const LUMINANCE_FLOOR: f32 = 1e-6;
 
-/// Minimum adaptation speed (seconds); guards the exponential against a
-/// zero rate.
+/// Minimum adaptation speed (EV/s); guards the step against a zero rate.
 const MIN_ADAPTATION_SPEED: f32 = 1e-3;
+
+/// Minimum exponential transition distance (EV); guards the division.
+const MIN_TRANSITION_DISTANCE: f32 = 1e-3;
+
+/// Half a bin: the offset from a bin's lower edge to its centre.
+const BIN_CENTER_OFFSET: f32 = 0.5;
+
+/// Bind-group slot of the [`HistogramParams`] uniform in the histogram pass.
+const HISTOGRAM_PARAMS_BINDING: u32 = 3;
 
 /// Rec.709 luma weights of a linear-RGB texel (shared by the CPU reference
 /// and the WGSL `log_luminance`).
 const REC709_LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
-/// Offset from a bin's lower edge to its centre (half a bin).
-const BIN_CENTER_OFFSET: f32 = 0.5;
+/// Number of in-range bins (every bin but the reserved bin `0`).
+const IN_RANGE_BINS: f32 = HISTOGRAM_BINS as f32 - 2.0;
 
-/// Largest fraction of either histogram tail the settings may clip.
-const MAX_TAIL_CLIP: f32 = 0.5;
+/// Fallback frame delta (seconds) used by the auto-exposure smoothing until
+/// the host supplies a measured delta through
+/// [`Renderer3D::set_frame_time`](crate::renderer::Renderer3D::set_frame_time).
+///
+/// The adaptation speed is expressed in F-stops per second, so it is only
+/// correct when `dt` is the real elapsed time (Bevy's `globals.delta_time`).
+/// This constant merely keeps the very first frames well-defined; hosts
+/// should call `set_frame_time` every frame.
+pub const DEFAULT_FRAME_DT_SECONDS: f32 = 1.0 / 60.0;
 
-/// Default frame delta (seconds) packed into the adapt params at startup;
-/// the renderer overwrites it with the measured frame time each frame.
-const DEFAULT_FRAME_DT: f32 = 1.0 / 60.0;
+/// Smallest frame delta (seconds) the smoothing accepts; guards against a
+/// stalled or bogus measurement freezing the adaptation.
+pub const MIN_FRAME_DT_SECONDS: f32 = 1e-4;
+
+/// Largest frame delta (seconds) the smoothing accepts; guards against a
+/// long pause advancing the adaptation by an entire second in one step.
+pub const MAX_FRAME_DT_SECONDS: f32 = 1.0;
 
 /// WGSL struct name of [`ExposureParams`]; the composite resource table uses
 /// it as the uniform type.
@@ -127,28 +168,41 @@ impl Default for ExposureMode {
 }
 
 /// Tuning knobs of the auto-exposure histogram pass.
+///
+/// The names describe the direction of the *exposure* (and therefore the
+/// rendered image), never the direction of the scene brightness.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoExposureSettings {
     /// Target average scene luminance (the classic "key" value, ~`0.18`).
     pub target_luminance: f32,
     /// Exposure-compensation bias in stops (EV): positive brightens.
     pub ev_compensation: f32,
-    /// Lower clamp of the exposure multiplier, in stops (`2^min_ev`).
+    /// Lower clamp of the exposure, in stops (`2^min_ev`).
     pub min_ev: f32,
-    /// Upper clamp of the exposure multiplier, in stops (`2^max_ev`).
+    /// Upper clamp of the exposure, in stops (`2^max_ev`).
     pub max_ev: f32,
-    /// Adaptation time constant (seconds) when the scene brightens.
-    pub speed_up: f32,
-    /// Adaptation time constant (seconds) when the scene darkens.
-    pub speed_down: f32,
-    /// Fraction of darkest pixels clipped off before averaging.
-    pub low_percentile: f32,
-    /// Fraction of brightest pixels clipped off before averaging.
-    pub high_percentile: f32,
     /// Lowest log2-luminance bin edge.
     pub min_log_lum: f32,
     /// Highest log2-luminance bin edge.
     pub max_log_lum: f32,
+    /// Lower edge of the metered quantile window: the darkest
+    /// `low_percentile` of the in-range samples are ignored.
+    pub low_percentile: f32,
+    /// Upper edge of the metered quantile window: the brightest
+    /// `1 - high_percentile` of the in-range samples are ignored. Must be
+    /// strictly greater than [`low_percentile`](Self::low_percentile).
+    pub high_percentile: f32,
+    /// How fast the exposure **rises** (image brightens) when the scene is
+    /// too dark, in EV (F-stops) per second.
+    pub brighten_speed: f32,
+    /// How fast the exposure **falls** (image darkens) when the scene is too
+    /// bright, in EV (F-stops) per second.
+    pub darken_speed: f32,
+    /// Distance in EV from the target at which adaptation switches from the
+    /// linear regime (`|delta| * speed * dt / distance`) to the saturated
+    /// `speed * dt` regime. Dampens frame-to-frame jitter while keeping large
+    /// changes fast.
+    pub exponential_transition_distance: f32,
 }
 
 impl Default for AutoExposureSettings {
@@ -158,34 +212,55 @@ impl Default for AutoExposureSettings {
             ev_compensation: 0.0,
             min_ev: -8.0,
             max_ev: 8.0,
-            speed_up: 1.5,
-            speed_down: 0.5,
-            low_percentile: 0.005,
-            high_percentile: 0.005,
             min_log_lum: DEFAULT_MIN_LOG_LUM,
             max_log_lum: DEFAULT_MAX_LOG_LUM,
+            low_percentile: 0.10,
+            high_percentile: 0.90,
+            brighten_speed: 3.0,
+            darken_speed: 1.0,
+            exponential_transition_distance: 1.5,
         }
     }
 }
 
+/// Replaces `NaN`/infinite values with `fallback`.
+fn finite_or(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() { value } else { fallback }
+}
+
 impl AutoExposureSettings {
-    /// Clamps every knob into a usable range: the histogram window stays
-    /// ordered, the tail clips stay inside `[0, 0.5)`, and the adaptation
-    /// speeds stay positive. The defaults already satisfy this, so the
-    /// default path is unchanged.
+    /// Sanitises every knob: `NaN`s fall back to the default, the histogram
+    /// window stays ordered, the quantile window stays a non-empty
+    /// `0 <= low < high <= 1`, the speeds stay positive, and the transition
+    /// distance stays above the guard. The defaults already satisfy this, so
+    /// the default path is unchanged.
     pub fn sanitized(self) -> Self {
-        let (min_log_lum, max_log_lum) = (self.min_log_lum.min(self.max_log_lum), self.max_log_lum);
+        let default = Self::default();
+        let min_log_lum = finite_or(self.min_log_lum, default.min_log_lum);
+        let max_log_lum = finite_or(self.max_log_lum, default.max_log_lum).max(min_log_lum);
+        let low = finite_or(self.low_percentile, default.low_percentile).clamp(0.0, 1.0);
+        let high = finite_or(self.high_percentile, default.high_percentile).clamp(0.0, 1.0);
+        let high = high.max(low + f32::EPSILON);
+        let min_ev = finite_or(self.min_ev, default.min_ev);
         Self {
-            target_luminance: self.target_luminance.max(f32::EPSILON),
-            ev_compensation: self.ev_compensation,
-            min_ev: self.min_ev,
-            max_ev: self.max_ev.max(self.min_ev),
-            speed_up: self.speed_up.max(MIN_ADAPTATION_SPEED),
-            speed_down: self.speed_down.max(MIN_ADAPTATION_SPEED),
-            low_percentile: self.low_percentile.clamp(0.0, MAX_TAIL_CLIP),
-            high_percentile: self.high_percentile.clamp(0.0, MAX_TAIL_CLIP),
+            target_luminance: finite_or(self.target_luminance, default.target_luminance)
+                .max(f32::EPSILON),
+            ev_compensation: finite_or(self.ev_compensation, default.ev_compensation),
+            min_ev,
+            max_ev: finite_or(self.max_ev, default.max_ev).max(min_ev),
             min_log_lum,
-            max_log_lum: max_log_lum.max(min_log_lum),
+            max_log_lum,
+            low_percentile: low,
+            high_percentile: high,
+            brighten_speed: finite_or(self.brighten_speed, default.brighten_speed)
+                .max(MIN_ADAPTATION_SPEED),
+            darken_speed: finite_or(self.darken_speed, default.darken_speed)
+                .max(MIN_ADAPTATION_SPEED),
+            exponential_transition_distance: finite_or(
+                self.exponential_transition_distance,
+                default.exponential_transition_distance,
+            )
+            .max(MIN_TRANSITION_DISTANCE),
         }
     }
 
@@ -194,10 +269,16 @@ impl AutoExposureSettings {
         (self.max_log_lum - self.min_log_lum).max(f32::EPSILON)
     }
 
-    /// Inverse bin width: `(log - min_log_lum) * inv_bin_width` yields the
-    /// fractional bin index.
-    pub fn inv_bin_width(&self) -> f32 {
-        HISTOGRAM_BINS as f32 / self.log_range()
+    /// Inverse log2 span: `(log - min_log_lum) * inv_log_range` yields the
+    /// normalised in-range coordinate in `[0, 1]`.
+    pub fn inv_log_range(&self) -> f32 {
+        1.0 / self.log_range()
+    }
+
+    /// Target exposure value in EV that maps the average scene luminance to
+    /// the key luminance (plus the EV compensation).
+    pub fn target_ev(&self) -> f32 {
+        self.target_luminance.log2() + self.ev_compensation
     }
 
     /// Lower clamp of the exposure multiplier.
@@ -224,14 +305,26 @@ pub fn log_luminance(rgb: [f32; 3]) -> f32 {
     lum.max(LUMINANCE_FLOOR).log2()
 }
 
-/// Histogram bin index of a log2-luminance, clamped into `0..HISTOGRAM_BINS`.
+/// Histogram bin index of a log2-luminance, in `0..HISTOGRAM_BINS`.
 ///
-/// Mirrors the kicker in [`histogram_wgsl`] (`inv_bin_width` is the
-/// settings' [`inv_bin_width`](AutoExposureSettings::inv_bin_width)).
+/// Bin `0` is reserved for texels below the window (`log_lum <
+/// min_log_lum`); in-range texels map into `1..HISTOGRAM_BINS`. Mirrors the
+/// WGSL `histogram_bin` in [`histogram_wgsl`].
 pub fn histogram_bin(log_lum: f32, settings: &AutoExposureSettings) -> usize {
-    let t = (log_lum - settings.min_log_lum) * settings.inv_bin_width();
-    let clamped = t.clamp(0.0, (HISTOGRAM_BINS as f32) - 1.0);
-    clamped as usize
+    if log_lum < settings.min_log_lum {
+        return 0;
+    }
+    let t = ((log_lum - settings.min_log_lum) * settings.inv_log_range()).clamp(0.0, 1.0);
+    (t * IN_RANGE_BINS) as usize + 1
+}
+
+/// Log2-luminance represented by in-range bin `index` (`1..HISTOGRAM_BINS`),
+/// i.e. the centre of the bin's normalised interval.
+///
+/// Mirrors the reconstruction in [`adapt_wgsl`].
+pub fn bin_log_luminance(index: usize, settings: &AutoExposureSettings) -> f32 {
+    let t = ((index as f32 - BIN_CENTER_OFFSET) / IN_RANGE_BINS).clamp(0.0, 1.0);
+    settings.min_log_lum + t * settings.log_range()
 }
 
 /// CPU reference of the histogram pass: bin counts of the log-luminance of
@@ -248,83 +341,83 @@ pub fn build_histogram(
     hist
 }
 
-/// Log2-luminance at the center of bin `i`.
+/// CPU reference of the reduction: the average log2-luminance over the
+/// metered quantile window `[low_percentile, high_percentile]` of the
+/// *in-range* samples (bin `0` is excluded), with partial bin weights.
 ///
-/// Mirrors the bin-center reconstruction in [`adapt_wgsl`].
-pub fn bin_center_log_lum(i: usize, settings: &AutoExposureSettings) -> f32 {
-    settings.min_log_lum + (i as f32 + BIN_CENTER_OFFSET) / settings.inv_bin_width()
-}
-
-/// CPU reference of the reduction: the average log2-luminance of the
-/// histogram with `low_percentile`/`high_percentile` tails clipped.
+/// Returns `None` when no texel falls inside the histogram window (a black
+/// frame); the caller then holds the previous exposure.
 ///
-/// Returns `None` when the histogram is empty or every counted bin is
-/// clipped away (the caller keeps the previous exposure).
-///
-/// Mirrors the clipped-average loop in [`adapt_wgsl`].
+/// Mirrors the reduction loop in [`adapt_wgsl`].
 // qual:test_helper
 pub fn average_log_luminance(
     histogram: &[u32; HISTOGRAM_BINS],
     settings: &AutoExposureSettings,
 ) -> Option<f32> {
-    let total: u64 = histogram.iter().map(|c| u64::from(*c)).sum();
+    let total: u64 = histogram[1..].iter().map(|c| u64::from(*c)).sum();
     if total == 0 {
         return None;
     }
-    let low_count = (total as f64 * f64::from(settings.low_percentile)) as u64;
-    let high_count = (total as f64 * f64::from(settings.high_percentile)) as u64;
-    let upper = total.saturating_sub(high_count);
+    let low = f64::from(settings.low_percentile) * total as f64;
+    let high = f64::from(settings.high_percentile) * total as f64;
     let mut acc = 0.0_f64;
-    let mut acc_count = 0_u64;
+    let mut weight_total = 0.0_f64;
     let mut cum = 0_u64;
-    for (i, count) in histogram.iter().enumerate() {
+    for (i, count) in histogram.iter().enumerate().skip(1) {
         let cum_before = cum;
         cum += u64::from(*count);
-        // Include a bin when its cumulative range stays inside the clipped
-        // window `[low_count, upper]`.
-        if cum > low_count && cum_before < upper {
-            acc += f64::from(*count) * f64::from(bin_center_log_lum(i, settings));
-            acc_count += u64::from(*count);
-        }
+        let weight = (cum as f64).clamp(low, high) - (cum_before as f64).clamp(low, high);
+        acc += weight * f64::from(bin_log_luminance(i, settings));
+        weight_total += weight;
     }
-    if acc_count == 0 {
+    if weight_total <= 0.0 {
         return None;
     }
-    Some((acc / acc_count as f64) as f32)
+    Some((acc / weight_total) as f32)
 }
 
-/// Exposure multiplier that maps `avg_log_lum` to the target luminance
-/// (plus EV compensation), clamped to the settings' EV window.
+/// Exposure value (in EV) that maps `avg_log_lum` to the target luminance
+/// (plus the EV compensation), clamped to the settings' EV window.
 ///
 /// Mirrors the target computation in [`adapt_wgsl`].
-// qual:test_helper
-pub fn desired_exposure(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
-    let avg_lum = exp2(avg_log_lum).max(LUMINANCE_FLOOR);
-    let target = settings.target_luminance * exp2(settings.ev_compensation) / avg_lum;
-    target.clamp(settings.min_exposure(), settings.max_exposure())
+pub fn desired_exposure_ev(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
+    (settings.target_ev() - avg_log_lum).clamp(settings.min_ev, settings.max_ev)
 }
 
-/// One temporal-smoothing step: move `prev` toward `target` by an
-/// exponential rate chosen from `speed_up` (target brighter) or
-/// `speed_down` (target darker).
+/// Exposure multiplier for `avg_log_lum` ([`desired_exposure_ev`] applied to
+/// `2^x`).
+// qual:test_helper
+pub fn desired_exposure(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
+    exp2(desired_exposure_ev(avg_log_lum, settings))
+        .clamp(settings.min_exposure(), settings.max_exposure())
+}
+
+/// One EV smoothing step: advance `prev_ev` toward `target_ev` by
+/// `min(|delta|, speed*dt, |delta| * speed*dt / transition_distance)` where
+/// `speed` is `brighten_speed` when the exposure rises and `darken_speed`
+/// when it falls. The `|delta|` clamp keeps the step from ever overshooting
+/// the target (so a large `dt` lands exactly on it).
 ///
 /// Mirrors the smoothing tail of [`adapt_wgsl`].
 // qual:test_helper
-pub fn adapt_exposure(
-    prev: f32,
-    target: f32,
+pub fn adapt_exposure_ev(
+    prev_ev: f32,
+    target_ev: f32,
     dt_seconds: f32,
     settings: &AutoExposureSettings,
 ) -> f32 {
-    let rate = if target > prev {
-        settings.speed_up
+    let delta = target_ev - prev_ev;
+    let speed = if delta > 0.0 {
+        settings.brighten_speed
     } else {
-        settings.speed_down
+        settings.darken_speed
     }
     .max(MIN_ADAPTATION_SPEED);
-    let alpha = 1.0 - (-dt_seconds / rate).exp();
-    let adapted = prev + (target - prev) * alpha;
-    adapted.clamp(settings.min_exposure(), settings.max_exposure())
+    let max_step = speed * dt_seconds;
+    let step = max_step
+        .min(delta.abs() * max_step / settings.exponential_transition_distance)
+        .min(delta.abs());
+    (prev_ev + delta.signum() * step).clamp(settings.min_ev, settings.max_ev)
 }
 
 /// Uniform block of the histogram pass.
@@ -332,18 +425,18 @@ pub fn adapt_exposure(
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct HistogramParams {
     min_log_lum: f32,
-    inv_bin_width: f32,
+    inv_log_range: f32,
     bin_count: f32,
-    _pad: f32,
+    mode: u32,
 }
 
 impl HistogramParams {
-    fn from_settings(settings: &AutoExposureSettings) -> Self {
+    fn from_settings(settings: &AutoExposureSettings, mode: u32) -> Self {
         Self {
             min_log_lum: settings.min_log_lum,
-            inv_bin_width: settings.inv_bin_width(),
+            inv_log_range: settings.inv_log_range(),
             bin_count: HISTOGRAM_BINS as f32,
-            _pad: 0.0,
+            mode,
         }
     }
 }
@@ -353,16 +446,16 @@ impl HistogramParams {
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 struct AdaptParams {
     min_log_lum: f32,
-    inv_bin_width: f32,
+    log_range: f32,
     low_clip: f32,
     high_clip: f32,
-    target_luminance: f32,
-    ev_compensation: f32,
+    target_ev: f32,
+    min_ev: f32,
+    max_ev: f32,
+    brighten_speed: f32,
+    darken_speed: f32,
+    transition_distance: f32,
     dt: f32,
-    speed_up: f32,
-    speed_down: f32,
-    min_exposure: f32,
-    max_exposure: f32,
     _pad: f32,
 }
 
@@ -370,159 +463,19 @@ impl AdaptParams {
     fn from_settings(settings: &AutoExposureSettings, dt: f32) -> Self {
         Self {
             min_log_lum: settings.min_log_lum,
-            inv_bin_width: settings.inv_bin_width(),
+            log_range: settings.log_range(),
             low_clip: settings.low_percentile,
             high_clip: settings.high_percentile,
-            target_luminance: settings.target_luminance,
-            ev_compensation: settings.ev_compensation,
+            target_ev: settings.target_ev(),
+            min_ev: settings.min_ev,
+            max_ev: settings.max_ev,
+            brighten_speed: settings.brighten_speed,
+            darken_speed: settings.darken_speed,
+            transition_distance: settings.exponential_transition_distance,
             dt,
-            speed_up: settings.speed_up,
-            speed_down: settings.speed_down,
-            min_exposure: settings.min_exposure(),
-            max_exposure: settings.max_exposure(),
             _pad: 0.0,
         }
     }
-}
-
-/// WGSL compute pass building the log-luminance histogram of the HDR target.
-///
-/// Bindings: `0` the HDR texture (`texture_2d<f32>`, sampled by load), `1`
-/// the atomic histogram (`array<atomic<u32>, HISTOGRAM_BINS>`, read-write —
-/// the CPU zeroes it before each dispatch), `2` the histogram params
-/// uniform. One `8×8` workgroup covers 64 texels; the shader guards the
-/// ragged tail against `textureDimensions`.
-pub fn histogram_wgsl() -> String {
-    format!(
-        r#"//! GPU log-luminance histogram (auto-exposure, ornis #125).
-const HISTOGRAM_BINS: u32 = {bins}u;
-const LUMINANCE_FLOOR: f32 = 1e-6;
-
-struct HistogramParams {{
-    min_log_lum: f32,
-    inv_bin_width: f32,
-    bin_count: f32,
-    pad: f32,
-}};
-
-@group(0) @binding(0) var hdr_tex: texture_2d<f32>;
-@group(0) @binding(1) var<storage, read_write> histogram: array<atomic<u32>, {bins}u>;
-@group(0) @binding(2) var<uniform> params: HistogramParams;
-
-fn log_luminance(color: vec3<f32>) -> f32 {{
-    let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    return log2(max(luma, LUMINANCE_FLOOR));
-}}
-
-@compute @workgroup_size({wg}, {wg}, 1)
-fn build_histogram(@builtin(global_invocation_id) gid: vec3<u32>) {{
-    let dims = textureDimensions(hdr_tex);
-    if (gid.x >= dims.x || gid.y >= dims.y) {{
-        return;
-    }}
-    let color = textureLoad(hdr_tex, vec2<i32>(gid.xy), 0).rgb;
-    let log_lum = log_luminance(color);
-    let t = (log_lum - params.min_log_lum) * params.inv_bin_width;
-    let bin = u32(clamp(t, 0.0, params.bin_count - 1.0));
-    atomicAdd(&histogram[bin], 1u);
-}}
-"#,
-        bins = HISTOGRAM_BINS,
-        wg = HISTOGRAM_WORKGROUP_SIZE,
-    )
-}
-
-/// WGSL compute pass reducing the histogram to the adapted exposure.
-///
-/// Bindings: `0` the histogram (`array<u32, HISTOGRAM_BINS>`, read), `1`
-/// the adapt params uniform, `2` the [`ExposureParams`] block
-/// (read-write — the smoothed exposure is read back as the composite
-/// uniform). A single invocation (`workgroup_size(1)`, one workgroup)
-/// clips the tails, averages the log-luminance, converts to a target
-/// exposure, and advances the temporal smoothing one step.
-pub fn adapt_wgsl() -> String {
-    format!(
-        r#"//! GPU eye adaptation (auto-exposure, ornis #125).
-const HISTOGRAM_BINS: u32 = {bins}u;
-const LUMINANCE_FLOOR: f32 = 1e-6;
-const MIN_ADAPTATION_SPEED: f32 = 1e-3;
-
-struct AdaptParams {{
-    min_log_lum: f32,
-    inv_bin_width: f32,
-    low_clip: f32,
-    high_clip: f32,
-    target_luminance: f32,
-    ev_compensation: f32,
-    dt: f32,
-    speed_up: f32,
-    speed_down: f32,
-    min_exposure: f32,
-    max_exposure: f32,
-    pad: f32,
-}};
-
-struct ExposureParams {{
-    exposure: f32,
-    pad0: f32,
-    pad1: f32,
-    pad2: f32,
-}};
-
-@group(0) @binding(0) var<storage, read> histogram: array<u32, {bins}u>;
-@group(0) @binding(1) var<uniform> params: AdaptParams;
-@group(0) @binding(2) var<storage, read_write> exposure_out: ExposureParams;
-
-fn bin_center_log_lum(index: u32) -> f32 {{
-    return params.min_log_lum + (f32(index) + 0.5) / params.inv_bin_width;
-}}
-
-fn desired_exposure(avg_log_lum: f32) -> f32 {{
-    let avg_lum = max(exp2(avg_log_lum), LUMINANCE_FLOOR);
-    let target_exposure = params.target_luminance * exp2(params.ev_compensation) / avg_lum;
-    return clamp(target_exposure, params.min_exposure, params.max_exposure);
-}}
-
-@compute @workgroup_size(1)
-fn adapt_exposure() {{
-    var total: u32 = 0u;
-    for (var i = 0u; i < HISTOGRAM_BINS; i = i + 1u) {{
-        total = total + histogram[i];
-    }}
-    if (total == 0u) {{
-        return;
-    }}
-    let inv_total = 1.0 / f32(total);
-    let low_count = u32(f32(total) * params.low_clip);
-    let upper = total - u32(f32(total) * params.high_clip);
-    var acc: f32 = 0.0;
-    var acc_weight: f32 = 0.0;
-    var cum: u32 = 0u;
-    for (var i = 0u; i < HISTOGRAM_BINS; i = i + 1u) {{
-        let count = histogram[i];
-        let cum_before = cum;
-        cum = cum + count;
-        if (cum > low_count && cum_before < upper) {{
-            let weight = f32(count) * inv_total;
-            acc = acc + weight * bin_center_log_lum(i);
-            acc_weight = acc_weight + weight;
-        }}
-    }}
-    if (acc_weight == 0.0) {{
-        return;
-    }}
-    let avg_log_lum = acc / acc_weight;
-    let target_exposure = desired_exposure(avg_log_lum);
-
-    let prev = exposure_out.exposure;
-    let rate = max(select(params.speed_down, params.speed_up, target_exposure > prev), MIN_ADAPTATION_SPEED);
-    let alpha = 1.0 - exp(-params.dt / rate);
-    let adapted = prev + (target_exposure - prev) * alpha;
-    exposure_out.exposure = clamp(adapted, params.min_exposure, params.max_exposure);
-}}
-"#,
-        bins = HISTOGRAM_BINS,
-    )
 }
 
 /// Bind-group-layout entry for one compute buffer binding.
@@ -539,10 +492,10 @@ fn compute_buffer_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::Bind
     }
 }
 
-/// Bind-group-layout entry for the histogram's HDR texture input.
+/// Bind-group-layout entry for a histogram HDR texture input.
 ///
-/// The pass only `textureLoad`s, so the binding is declared non-filterable
-/// and accepts any float view (the `Rgba16Float` HDR target included).
+/// The pass only `textureLoad`s, so the bindings are declared non-filterable
+/// and accept any float view (the `Rgba16Float` HDR target included).
 fn compute_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -558,11 +511,16 @@ fn compute_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 /// One frame of inputs for [`AutoExposure::encode`].
 pub struct ExposureFrame<'a> {
-    /// The lit HDR target view to histogram.
+    /// The deferred HDR layer to meter.
     pub hdr: &'a wgpu::TextureView,
-    /// HDR target width in texels.
+    /// The forward HDR layer to meter (bound as `hdr` when `mode == 0`).
+    pub hdr_fwd: &'a wgpu::TextureView,
+    /// Layer mix selector matching the composite: `0` deferred-only, `1`
+    /// forward-only, `2` hybrid (`deferred + forward * alpha`).
+    pub mode: u32,
+    /// HDR target width in texels (the bound view's extent).
     pub width: u32,
-    /// HDR target height in texels.
+    /// HDR target height in texels (the bound view's extent).
     pub height: u32,
     /// Auto-exposure tuning for this frame.
     pub settings: AutoExposureSettings,
@@ -611,16 +569,22 @@ impl AutoExposure {
         );
 
         let default_settings = AutoExposureSettings::default();
-        let histogram_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auto-exposure histogram buffer"),
-            size: (HISTOGRAM_BINS * std::mem::size_of::<u32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // Zero-initialised: the adapt pass clears it at the end of every
+        // frame, so the build pass always accumulates onto zeros. The first
+        // frame relies on this initial state.
+        let histogram_buffer = init_buffer(
+            device,
+            "auto-exposure histogram buffer",
+            &vec![0_u8; HISTOGRAM_BINS * std::mem::size_of::<u32>()],
+            // `COPY_SRC` lets tests and diagnostics read the bins back.
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+        );
         let histogram_params = init_buffer(
             device,
             "auto-exposure histogram params",
-            bytemuck::bytes_of(&HistogramParams::from_settings(&default_settings)),
+            bytemuck::bytes_of(&HistogramParams::from_settings(&default_settings, 0)),
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
         let adapt_params = init_buffer(
@@ -628,7 +592,7 @@ impl AutoExposure {
             "auto-exposure adapt params",
             bytemuck::bytes_of(&AdaptParams::from_settings(
                 &default_settings,
-                DEFAULT_FRAME_DT,
+                DEFAULT_FRAME_DT_SECONDS,
             )),
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
@@ -669,11 +633,11 @@ impl AutoExposure {
         );
     }
 
-    /// Records one auto-exposure update onto `encoder`: zero the histogram,
-    /// build it from `frame.hdr` (a non-filterable `texture_2d<f32>` view of
-    /// `frame.width × frame.height`), then reduce it to the smoothed
-    /// exposure. Two compute passes so the reduction sees a completed
-    /// build.
+    /// Records one auto-exposure update onto `encoder`: build the histogram
+    /// of the `mode`-selected HDR mix (a non-filterable `texture_2d<f32>`
+    /// view of `frame.width × frame.height`), then reduce it to the smoothed
+    /// exposure. Two compute passes so the reduction sees a completed build;
+    /// the adapt pass clears the histogram for the next frame.
     pub fn encode(
         &self,
         device: &wgpu::Device,
@@ -681,23 +645,47 @@ impl AutoExposure {
         encoder: &mut wgpu::CommandEncoder,
         frame: ExposureFrame<'_>,
     ) {
+        self.write_params(queue, &frame);
+        self.record_histogram(device, encoder, &frame);
+        self.record_adapt(device, encoder);
+    }
+
+    /// Test-only path recording just the histogram build (no reduction, so
+    /// the counts stay readable for a bin-for-bin GPU-vs-CPU comparison).
+    // qual:test_helper
+    pub fn encode_histogram_only(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: ExposureFrame<'_>,
+    ) {
+        self.write_params(queue, &frame);
+        self.record_histogram(device, encoder, &frame);
+    }
+
+    /// Uploads the histogram/adapt uniforms for one frame.
+    fn write_params(&self, queue: &wgpu::Queue, frame: &ExposureFrame<'_>) {
         let settings = frame.settings.sanitized();
-        queue.write_buffer(
-            &self.histogram_buffer,
-            0,
-            &vec![0_u8; HISTOGRAM_BINS * std::mem::size_of::<u32>()],
-        );
         queue.write_buffer(
             &self.histogram_params,
             0,
-            bytemuck::bytes_of(&HistogramParams::from_settings(&settings)),
+            bytemuck::bytes_of(&HistogramParams::from_settings(&settings, frame.mode)),
         );
         queue.write_buffer(
             &self.adapt_params,
             0,
             bytemuck::bytes_of(&AdaptParams::from_settings(&settings, frame.dt_seconds)),
         );
+    }
 
+    /// Records the histogram build pass of one frame.
+    fn record_histogram(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &ExposureFrame<'_>,
+    ) {
         let groups = [
             frame.width.div_ceil(self.workgroup),
             frame.height.div_ceil(self.workgroup),
@@ -713,10 +701,14 @@ impl AutoExposure {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: self.histogram_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::TextureView(frame.hdr_fwd),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: self.histogram_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: HISTOGRAM_PARAMS_BINDING,
                     resource: self.histogram_params.as_entire_binding(),
                 },
             ],
@@ -728,7 +720,11 @@ impl AutoExposure {
             &histogram_bind,
             groups,
         );
+    }
 
+    /// Records the histogram reduction pass of one frame (also clears the
+    /// histogram for the next frame).
+    fn record_adapt(&self, device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder) {
         let adapt_bind = bind_group(
             device,
             "auto-exposure adapt bind group",
@@ -793,15 +789,16 @@ fn auto_exposure_layouts(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu:
         "auto-exposure histogram layout",
         &[
             compute_texture_entry(0),
-            compute_buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
-            compute_buffer_entry(2, wgpu::BufferBindingType::Uniform),
+            compute_texture_entry(1),
+            compute_buffer_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+            compute_buffer_entry(HISTOGRAM_PARAMS_BINDING, wgpu::BufferBindingType::Uniform),
         ],
     );
     let adapt = compute_layout(
         device,
         "auto-exposure adapt layout",
         &[
-            compute_buffer_entry(0, wgpu::BufferBindingType::Storage { read_only: true }),
+            compute_buffer_entry(0, wgpu::BufferBindingType::Storage { read_only: false }),
             compute_buffer_entry(1, wgpu::BufferBindingType::Uniform),
             compute_buffer_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
         ],
@@ -875,331 +872,4 @@ fn compute_pipeline(
         compilation_options: Default::default(),
         cache: None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
-    /// logged, never silent).
-    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let descriptor = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        };
-        let instance = wgpu::Instance::new(descriptor);
-        match pollster::block_on(request_device(instance)) {
-            Some(pair) => Some(pair),
-            None => {
-                eprintln!("SKIPPED (auto_exposure): no wgpu device");
-                None
-            }
-        }
-    }
-
-    /// Requests the default adapter/device from `instance`, logging the
-    /// adapter error when the host has no GPU.
-    async fn request_device(instance: wgpu::Instance) -> Option<(wgpu::Device, wgpu::Queue)> {
-        let options = wgpu::RequestAdapterOptions::default();
-        let adapter = match instance.request_adapter(&options).await {
-            Ok(adapter) => adapter,
-            Err(err) => {
-                eprintln!("SKIPPED (auto_exposure): no wgpu adapter: {err}");
-                return None;
-            }
-        };
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
-    }
-
-    #[test]
-    fn exposure_params_layout_is_a_16_byte_uniform_block() {
-        assert_eq!(std::mem::size_of::<ExposureParams>(), 16);
-        assert_eq!(std::mem::offset_of!(ExposureParams, exposure), 0);
-        let packed = ExposureParams::pack(2.0);
-        assert_eq!(packed.exposure, 2.0);
-        assert_eq!(packed.pad, [0.0; 3]);
-        assert_eq!(bytemuck::bytes_of(&packed).len(), 16);
-        assert!(EXPOSURE_PARAMS_WGSL.contains("exposure: f32"));
-        assert!(EXPOSURE_PARAMS_WGSL.contains(EXPOSURE_WGSL_NAME));
-    }
-
-    #[test]
-    fn params_layouts_match_their_wgsl() {
-        assert_eq!(std::mem::size_of::<HistogramParams>(), 16);
-        assert_eq!(std::mem::size_of::<AdaptParams>(), 48);
-        assert_eq!(std::mem::offset_of!(AdaptParams, min_log_lum), 0);
-        assert_eq!(std::mem::offset_of!(AdaptParams, max_exposure), 40);
-        let hist = histogram_wgsl();
-        assert!(hist.contains("min_log_lum: f32"));
-        assert!(hist.contains("array<atomic<u32>, 256u>"));
-        let adapt = adapt_wgsl();
-        assert!(adapt.contains("speed_up: f32"));
-        assert!(adapt.contains("speed_down: f32"));
-        assert!(adapt.contains("array<u32, 256u>"));
-        assert!(adapt.contains("exposure_out.exposure"));
-    }
-
-    #[test]
-    fn shaders_validate_with_naga() {
-        for (name, source) in [("histogram", histogram_wgsl()), ("adapt", adapt_wgsl())] {
-            let module = naga::front::wgsl::parse_str(&source)
-                .unwrap_or_else(|e| panic!("{name} compute shader must parse: {e}"));
-            naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(),
-                naga::valid::Capabilities::all(),
-            )
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("{name} compute shader must validate: {e}"));
-        }
-    }
-
-    #[test]
-    fn manual_mode_defaults_to_the_pixel_identity_no_op() {
-        assert_eq!(
-            ExposureMode::default(),
-            ExposureMode::Manual { multiplier: 1.0 }
-        );
-        assert_eq!(ExposureParams::pack(1.0).exposure, 1.0);
-    }
-
-    #[test]
-    fn histogram_bins_saturate_the_dark_and_bright_tails() {
-        let settings = AutoExposureSettings::default();
-        // Black is far below the range: bin 0.
-        assert_eq!(histogram_bin(log_luminance([0.0, 0.0, 0.0]), &settings), 0);
-        // `2^20` is far above the range: the last bin.
-        assert_eq!(
-            histogram_bin(log_luminance([1.0e6, 1.0e6, 1.0e6]), &settings),
-            HISTOGRAM_BINS - 1
-        );
-    }
-
-    #[test]
-    fn average_log_luminance_recovers_a_uniform_scene() {
-        let settings = AutoExposureSettings::default();
-        let lum = 0.5_f32;
-        let texels = vec![[lum; 3]; 1024];
-        let hist = build_histogram(&texels, &settings);
-        let avg = average_log_luminance(&hist, &settings).expect("non-empty histogram");
-        assert!(
-            (avg - lum.log2()).abs() < 0.1,
-            "avg={avg} expected≈{}",
-            lum.log2()
-        );
-    }
-
-    #[test]
-    fn tail_clipping_ignores_a_bright_minority() {
-        let settings = AutoExposureSettings::default();
-        // A dark field with a few very bright fireflies: the clipped average
-        // must not be dragged up by the outliers.
-        let mut texels = vec![[0.02_f32; 3]; 1000];
-        texels.extend(std::iter::repeat_n([1000.0_f32; 3], 10));
-        let hist = build_histogram(&texels, &settings);
-        let avg = average_log_luminance(&hist, &settings).expect("non-empty histogram");
-        let fireflies = build_histogram(&texels[1000..], &settings);
-        let bright_only = average_log_luminance(&fireflies, &settings).expect("bright histogram");
-        assert!(
-            avg < bright_only - 1.0,
-            "clipped average {avg} should be far below the firefly average {bright_only}"
-        );
-        assert!((avg - 0.02_f32.log2()).abs() < 0.2, "avg={avg}");
-    }
-
-    #[test]
-    fn desired_exposure_targets_the_key_luminance() {
-        let settings = AutoExposureSettings::default();
-        // A scene at the target luminance needs exposure 1.0.
-        let exposure = desired_exposure(settings.target_luminance.log2(), &settings);
-        assert!((exposure - 1.0).abs() < 1e-3, "{exposure}");
-        // A ten-times darker scene needs a ten-times larger exposure.
-        let darker = desired_exposure((settings.target_luminance / 10.0).log2(), &settings);
-        assert!((darker - 10.0).abs() < 0.1, "{darker}");
-    }
-
-    #[test]
-    fn desired_exposure_respects_the_ev_clamp() {
-        let settings = AutoExposureSettings {
-            min_ev: -2.0,
-            max_ev: 2.0,
-            ..Default::default()
-        };
-        // An almost black scene cannot push exposure past 2^2.
-        assert_eq!(desired_exposure(-20.0, &settings), settings.max_exposure());
-        // A blown-out scene cannot push it below 2^-2.
-        assert_eq!(desired_exposure(20.0, &settings), settings.min_exposure());
-    }
-
-    #[test]
-    fn adaptation_moves_toward_the_target_at_the_chosen_speed() {
-        let settings = AutoExposureSettings::default();
-        // Darker -> brighter uses `speed_up`; one step is strictly between.
-        let step = adapt_exposure(1.0, 4.0, 1.0 / 60.0, &settings);
-        assert!(step > 1.0 && step < 4.0, "{step}");
-        // The two speeds must differ (down is the faster one by default).
-        let up = adapt_exposure(1.0, 4.0, 0.1, &settings);
-        let down = adapt_exposure(4.0, 1.0, 0.1, &settings);
-        assert!(
-            (down - 4.0).abs() > (up - 1.0).abs(),
-            "down {down} should move further than up {up}"
-        );
-        // Repeated steps converge to the target.
-        let mut exposure = 1.0;
-        for _ in 0..600 {
-            exposure = adapt_exposure(exposure, 4.0, 1.0 / 60.0, &settings);
-        }
-        assert!((exposure - 4.0).abs() < 0.05, "{exposure}");
-    }
-
-    /// Fills an `Rgba32Float` texture with a constant linear-RGB value.
-    fn constant_hdr_texture(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        rgb: [f32; 3],
-    ) -> wgpu::TextureView {
-        let size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("auto-exposure test hdr"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let mut data = Vec::with_capacity((width * height) as usize * 4);
-        for _ in 0..(width * height) {
-            data.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 1.0]);
-        }
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&data),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4 * 4),
-                rows_per_image: Some(height),
-            },
-            size,
-        );
-        texture.create_view(&wgpu::TextureViewDescriptor::default())
-    }
-
-    /// Reads the exposure multiplier back from the shared uniform.
-    fn read_exposure(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        pass: &AutoExposure,
-    ) -> Option<f32> {
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("auto-exposure test readback"),
-            size: 16,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auto-exposure test readback encoder"),
-        });
-        encoder.copy_buffer_to_buffer(pass.exposure_buffer(), 0, &readback, 0, 16);
-        queue.submit(std::iter::once(encoder.finish()));
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-        let bytes = {
-            let view = slice.get_mapped_range().ok()?;
-            [view[0], view[1], view[2], view[3]]
-        };
-        readback.unmap();
-        Some(f32::from_le_bytes(bytes))
-    }
-
-    /// Runs `frames` auto-exposure updates against a constant-luminance HDR
-    /// target and returns the final exposure.
-    fn converge(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        luminance: f32,
-        settings: &AutoExposureSettings,
-        frames: u32,
-    ) -> f32 {
-        const W: u32 = 32;
-        const H: u32 = 32;
-        let pass = AutoExposure::new(device);
-        let view = constant_hdr_texture(device, queue, W, H, [luminance; 3]);
-        let mut last = 1.0_f32;
-        for _ in 0..frames {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("auto-exposure test encoder"),
-            });
-            pass.encode(
-                device,
-                queue,
-                &mut encoder,
-                ExposureFrame {
-                    hdr: &view,
-                    width: W,
-                    height: H,
-                    settings: *settings,
-                    dt_seconds: 1.0 / 60.0,
-                },
-            );
-            queue.submit(std::iter::once(encoder.finish()));
-            last = read_exposure(device, queue, &pass).expect("exposure readback");
-        }
-        last
-    }
-
-    #[test]
-    fn dark_and_bright_scenes_converge_to_the_target_luminance() {
-        let Some((device, queue)) = try_device() else {
-            return;
-        };
-        let settings = AutoExposureSettings::default();
-        for luminance in [0.01_f32, 2.0_f32] {
-            let exposure = converge(&device, &queue, luminance, &settings, 600);
-            let expected = settings.target_luminance / luminance;
-            let relative = (exposure - expected).abs() / expected;
-            assert!(
-                relative < 0.15,
-                "luminance {luminance}: exposure {exposure} vs expected {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn gpu_histogram_matches_the_cpu_reference() {
-        let Some((device, queue)) = try_device() else {
-            return;
-        };
-        // After one update the adapted exposure tracks the CPU reference
-        // reduction of the same constant scene within a small tolerance.
-        let settings = AutoExposureSettings::default();
-        let luminance = 0.05_f32;
-        let exposure = converge(&device, &queue, luminance, &settings, 1);
-        let cpu = adapt_exposure(
-            1.0,
-            desired_exposure(luminance.log2(), &settings),
-            1.0 / 60.0,
-            &settings,
-        );
-        assert!((exposure - cpu).abs() < 1e-2, "gpu {exposure} vs cpu {cpu}");
-    }
 }

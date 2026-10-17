@@ -403,6 +403,11 @@ pub struct Renderer3D {
     /// Selected exposure mode (manual constant or histogram eye adaptation),
     /// read on the composite record path.
     exposure_mode: std::sync::RwLock<crate::auto_exposure::ExposureMode>,
+    /// Frame delta time (seconds) handed to the auto-exposure smoothing.
+    /// Written by [`Renderer3D::set_frame_time`]; starts at the documented
+    /// [`crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS`] fallback until a
+    /// host supplies the measured frame time.
+    frame_dt_seconds: std::sync::RwLock<f32>,
     /// Opt-in distance-fog pass (disabled by default: never runs unless a
     /// [`crate::frame_passes::FogPass`] with an enabled state records it).
     fog: FogPipeline,
@@ -541,6 +546,29 @@ impl Renderer3D {
     // qual:api — public renderer entry; in-tree callers are the unit tests.
     pub fn set_exposure_mode(&self, mode: crate::auto_exposure::ExposureMode) {
         *write_lock(&self.exposure_mode) = mode;
+    }
+
+    /// Measured frame delta time (seconds) used by the auto-exposure
+    /// smoothing. Defaults to
+    /// [`DEFAULT_FRAME_DT_SECONDS`](crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS)
+    /// until a host supplies the real elapsed time.
+    pub(crate) fn frame_dt_seconds(&self) -> f32 {
+        *read_lock(&self.frame_dt_seconds)
+    }
+
+    /// Sets the frame delta time (seconds) handed to the auto-exposure
+    /// smoothing (Bevy's `globals.delta_time`). Hosts should call this every
+    /// frame with the measured elapsed time; the adapt speed is expressed in
+    /// F-stops per second, so a `dt` that ignores the real frame time makes
+    /// the adaptation FPS-dependent. Values are clamped to
+    /// `[MIN_FRAME_DT_SECONDS](crate::auto_exposure::MIN_FRAME_DT_SECONDS),
+    /// [MAX_FRAME_DT_SECONDS](crate::auto_exposure::MAX_FRAME_DT_SECONDS)`.
+    // qual:api — public renderer entry; in-tree callers are the unit tests.
+    pub fn set_frame_time(&self, dt_seconds: f32) {
+        *write_lock(&self.frame_dt_seconds) = dt_seconds.clamp(
+            crate::auto_exposure::MIN_FRAME_DT_SECONDS,
+            crate::auto_exposure::MAX_FRAME_DT_SECONDS,
+        );
     }
 
     /// Deferred lighting debug term. Stored across [`set_lights`](Self::set_lights);
