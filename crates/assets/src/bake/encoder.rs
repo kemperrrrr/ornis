@@ -2,12 +2,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
-use std::time::SystemTime;
 
 use ornis_texture::{CpuImage, Ktx2Image, TextureRole, encode_rgba8_ktx2};
 
-use super::cache::{Producer, cache_file, cleanup, ensure_dir, fnv_hex, io_error, store_cached};
+use super::cache::{Producer, cache_file, cleanup, ensure_dir, io_error, store_cached};
+use super::identity::tool_identity;
 use super::{BakeError, BakeOrigin, BakeSettings, Baked, BasisMode, EncoderSource};
 
 /// Reference encoder program, discovered on `PATH` when none is configured.
@@ -85,24 +84,6 @@ const RED_CHANNEL: usize = 0;
 
 /// Blue channel offset of one RGBA texel.
 const BLUE_CHANNEL: usize = 2;
-
-/// Argument the tool prints its version for.
-const VERSION_FLAG: &str = "-version";
-
-/// Identity of one encoder binary, remembered for the process.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct IdentityStamp {
-    /// Canonical program path.
-    path: PathBuf,
-    /// `mtime` when the platform reports one.
-    modified: Option<SystemTime>,
-    /// File length, so a same-timestamp rewrite still misses.
-    len: u64,
-}
-
-/// Versions already read, keyed by [`IdentityStamp`].
-static IDENTITIES: LazyLock<Mutex<std::collections::HashMap<IdentityStamp, String>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// How a fresh bake will be produced, and the producer mixed into its key.
 pub(super) struct EncodePlan {
@@ -207,93 +188,6 @@ fn absolute_file(directory: &Path, program: &str) -> Option<PathBuf> {
 /// Canonical path when the file exists, the original path otherwise.
 fn canonical_or_keep(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Tool identity: `-version` stdout, else a content hash of the binary.
-fn tool_identity(program: &Path) -> Result<String, BakeError> {
-    if let Some(hit) = remembered(program) {
-        return Ok(hit);
-    }
-    let identity = version_stdout(program)
-        .or_else(|| file_hash(program))
-        .ok_or_else(|| identity_failure(program))?;
-    remember(program, &identity);
-    Ok(identity)
-}
-
-/// Trimmed `-version` stdout, when the tool exits successfully with some.
-fn version_stdout(program: &Path) -> Option<String> {
-    let output = std::process::Command::new(program)
-        .arg(VERSION_FLAG)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// `bin:` plus the FNV-1a digest of the tool's bytes.
-fn file_hash(program: &Path) -> Option<String> {
-    let bytes = std::fs::read(program).ok()?;
-    Some(format!("bin:{}", fnv_hex(&bytes)))
-}
-
-/// Failure reported when neither `-version` nor the content hash works.
-fn identity_failure(program: &Path) -> BakeError {
-    match std::process::Command::new(program)
-        .arg(VERSION_FLAG)
-        .output()
-    {
-        Err(source) => BakeError::Spawn {
-            program: program.display().to_string(),
-            source,
-        },
-        Ok(_) => match std::fs::read(program) {
-            Err(source) => io_error(program, source),
-            Ok(_) => BakeError::Exit {
-                program: program.display().to_string(),
-                code: 1,
-                stderr: "encoder -version produced no identity".to_string(),
-            },
-        },
-    }
-}
-
-/// Cached identity for `program`, when its stamp still matches.
-fn remembered(program: &Path) -> Option<String> {
-    let stamp = identity_stamp(program)?;
-    let guard = IDENTITIES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    guard.get(&stamp).cloned()
-}
-
-/// Stores `identity` under the current stamp of `program`.
-fn remember(program: &Path, identity: &str) {
-    let Some(stamp) = identity_stamp(program) else {
-        return;
-    };
-    let mut guard = IDENTITIES
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    guard.insert(stamp, identity.to_string());
-}
-
-/// Stamp of `program`, or `None` when the file cannot be stated.
-fn identity_stamp(program: &Path) -> Option<IdentityStamp> {
-    let meta = std::fs::metadata(program).ok()?;
-    Some(IdentityStamp {
-        path: program.to_path_buf(),
-        modified: meta.modified().ok(),
-        len: meta.len(),
-    })
 }
 
 /// In-process fallback: the authored mip chain, stored as RGBA8 blocks.

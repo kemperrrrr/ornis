@@ -31,9 +31,9 @@
 //!   any slot whose bake failed. A host that never calls
 //!   [`AssetServer::with_texture_baking`](crate::AssetServer::with_texture_baking)
 //!   keeps the previous import behaviour unchanged.
-//! - This file holds the policy types and the two entry points; the CLI driver
-//!   and TGA handoff, the content-addressed cache and the model pass live in
-//!   the private submodules beside it.
+//! - This file holds the policy types and the two entry points. The CLI driver
+//!   and TGA handoff, the tool-identity cache, the content-addressed cache and
+//!   the model pass live in the private submodules beside it.
 //!
 //! ```no_run
 //! use ornis_assets::bake::{BakeSettings, EncoderSource, bake_texture};
@@ -56,6 +56,7 @@ use ornis_texture::{CpuImage, Ktx2Image, TextureRole, TextureUploadError};
 
 mod cache;
 mod encoder;
+mod identity;
 #[cfg(feature = "gltf")]
 mod model;
 

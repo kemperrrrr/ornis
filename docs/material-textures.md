@@ -111,8 +111,9 @@ payload after upload. Physical Mac VRAM profiling remains a manual check.
 
 The KTX2 containers above used to be something an external toolchain had to
 produce. The `crates/assets/src/bake/` module (`bake.rs` for the policy and the
-entry points, `encoder.rs` for the tool driver, `cache.rs` for the keys,
-`model.rs` for the slot pass) now bakes them at import time, so a PNG/JPEG
+entry points, `encoder.rs` for the tool driver, `identity.rs` for the
+tool version mixed into the cache key, `cache.rs` for the keys, `model.rs`
+for the slot pass) now bakes them at import time, so a PNG/JPEG
 model gets the same runtime treatment as a `KHR_texture_basisu` one: authored
 levels, no runtime mip generation.
 
