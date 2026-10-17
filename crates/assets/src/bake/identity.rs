@@ -1,16 +1,26 @@
 //! Identity of the reference encoder binary, mixed into the bake cache key.
 //!
-//! A successful `-version` with non-empty stdout wins. Otherwise the key uses
-//! a content hash of the binary. The result is remembered for the process,
-//! keyed by the canonical path, mtime and length, so a replaced tool misses
-//! the previous entry without re-reading the file on every bake.
+//! The identity is the trimmed `-version` stdout plus `bin:` and an FNV-1a
+//! digest of the file. Version text alone collides: two builds that both
+//! print `basisu 2.10.0` (different commits, or SSE on versus off) would
+//! share a cache entry and could replay the wrong container. The digest
+//! separates those builds. It is a cache key, not a security hash — the same
+//! FNV-1a the entry key uses. When `-version` fails, the digest is the whole
+//! identity. When the file cannot be read after a successful `-version`, the
+//! version text is used alone.
+//!
+//! The result is remembered for the process, keyed by the canonical path,
+//! mtime and length, so a replaced tool misses the previous entry without
+//! re-reading the file on every bake. `-version` runs once per stamp; a
+//! failure is not probed a second time just to classify the error.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use super::BakeError;
-use super::cache::{fnv_hex, io_error};
+use super::cache::fnv_hex;
 
 /// Argument the tool prints its version for.
 const VERSION_FLAG: &str = "-version";
@@ -30,39 +40,67 @@ struct IdentityStamp {
 static IDENTITIES: LazyLock<Mutex<std::collections::HashMap<IdentityStamp, String>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Tool identity: `-version` stdout, else a content hash of the binary.
+/// Tool identity: `-version` stdout plus a content hash of the binary.
 ///
 /// # Errors
 ///
+/// [`BakeError::TimedOut`] when `-version` exceeds `timeout`.
 /// [`BakeError::Spawn`] when the tool cannot be started and its bytes cannot
-/// be read. A tool that starts but yields no identity is [`BakeError::Exit`],
-/// or an I/O error when the content-hash fallback cannot read the file.
-pub(super) fn tool_identity(program: &Path) -> Result<String, BakeError> {
+/// be read. A tool that starts but yields no identity and cannot be hashed
+/// is [`BakeError::Exit`].
+pub(super) fn tool_identity(program: &Path, timeout: Duration) -> Result<String, BakeError> {
     if let Some(hit) = remembered(program) {
         return Ok(hit);
     }
-    let identity = version_stdout(program)
-        .or_else(|| file_hash(program))
-        .ok_or_else(|| identity_failure(program))?;
+    let identity = identity_of(program, timeout)?;
     remember(program, &identity);
     Ok(identity)
 }
 
-/// Trimmed `-version` stdout, when the tool exits successfully with some.
-fn version_stdout(program: &Path) -> Option<String> {
-    let output = std::process::Command::new(program)
-        .arg(VERSION_FLAG)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+/// Version text and binary digest, without a second process spawn.
+fn identity_of(program: &Path, timeout: Duration) -> Result<String, BakeError> {
+    let version = match probe_version(program, timeout) {
+        Ok(version) => version,
+        Err(error @ BakeError::Spawn { .. }) => return file_hash(program).ok_or(error),
+        Err(error) => return Err(error),
+    };
+    match (version, file_hash(program)) {
+        (Some(text), Some(digest)) => Ok(format!("{text}\n{digest}")),
+        (None, Some(digest)) => Ok(digest),
+        (Some(text), None) => Ok(text),
+        (None, None) => Err(no_identity(program)),
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let trimmed = text.trim();
+}
+
+/// Trimmed `-version` stdout, or `None` when the tool exits without one.
+///
+/// # Errors
+///
+/// [`BakeError::Spawn`] and [`BakeError::TimedOut`] from the process run.
+fn probe_version(program: &Path, timeout: Duration) -> Result<Option<String>, BakeError> {
+    let output = super::process::run_timed(program, &[OsString::from(VERSION_FLAG)], timeout)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(nonempty_trim(&output.stdout))
+}
+
+/// Trimmed stdout, or `None` when it is empty.
+fn nonempty_trim(bytes: &[u8]) -> Option<String> {
+    let trimmed = String::from_utf8_lossy(bytes).trim().to_string();
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(trimmed)
+    }
+}
+
+/// Reported when neither `-version` nor the file bytes yield an identity.
+fn no_identity(program: &Path) -> BakeError {
+    BakeError::Exit {
+        program: program.display().to_string(),
+        code: 1,
+        stderr: "encoder -version produced no identity".to_string(),
     }
 }
 
@@ -70,27 +108,6 @@ fn version_stdout(program: &Path) -> Option<String> {
 fn file_hash(program: &Path) -> Option<String> {
     let bytes = std::fs::read(program).ok()?;
     Some(format!("bin:{}", fnv_hex(&bytes)))
-}
-
-/// Failure reported when neither `-version` nor the content hash works.
-fn identity_failure(program: &Path) -> BakeError {
-    match std::process::Command::new(program)
-        .arg(VERSION_FLAG)
-        .output()
-    {
-        Err(source) => BakeError::Spawn {
-            program: program.display().to_string(),
-            source,
-        },
-        Ok(_) => match std::fs::read(program) {
-            Err(source) => io_error(program, source),
-            Ok(_) => BakeError::Exit {
-                program: program.display().to_string(),
-                code: 1,
-                stderr: "encoder -version produced no identity".to_string(),
-            },
-        },
-    }
 }
 
 /// Cached identity for `program`, when its stamp still matches.

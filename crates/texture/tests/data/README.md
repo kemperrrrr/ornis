@@ -44,9 +44,14 @@ clamp). The build had SSE off, Zstandard on, OpenCL off.
 ```text
 basisu -ktx2 -mipmap -output_file bake-etc1s.ktx2 -etc1s -q 128 -srgb -mip_srgb -mip_clamp -mip_filter kaiser bake-gradient.png
 basisu -ktx2 -mipmap -output_file bake-uastc.ktx2 -uastc -uastc_level 2 -srgb -mip_srgb -mip_clamp -mip_filter kaiser bake-gradient.png
+basisu -ktx2 -mipmap -output_file bake-normal-uastc.ktx2 -uastc -uastc_level 2 -normal_map -linear -mip_linear -mip_renorm -mip_clamp -mip_filter kaiser bake-gradient.png
 ```
 
-Two runs of each command produced identical bytes. Transcoding level 0 back
-to RGBA8 stays within 22 per channel for ETC1S and 5 per channel for UASTC.
+Two runs of each command produced identical bytes. The normal-map command is
+the pinned Normal argv (linear DFD, not the sRGB DFD of the other two). The
+build had SSE off, Zstandard on, OpenCL off — `basisu -version` also prints
+`No SSE, Multithreading: 1, Zstandard support: 1, OpenCL: 0`. Transcoding
+level 0 back to RGBA8 stays within 22 per channel for ETC1S and 5 per channel
+for UASTC. The normal-map tolerance is recorded next to the bake test.
 These files are inputs to `ornis-assets` bake tests; they are not a second
 copy of the 40×40 corpus above.
