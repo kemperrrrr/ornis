@@ -165,6 +165,7 @@ mod tests {
     use super::super::test_util::test_quad;
     use super::super::test_util::test_sphere;
     use super::*;
+    use crate::antialias::MotionValidity;
     use ornis_animation::SkinningMode;
     use ornis_assets::scene::TransformDesc;
     use ornis_core::Engine;
