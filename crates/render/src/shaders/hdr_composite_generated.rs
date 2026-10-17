@@ -15,6 +15,7 @@ use super::wgsl_decl;
 use super::{
     Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d, naga_ir,
 };
+use crate::auto_exposure::{EXPOSURE_PARAMS_WGSL, EXPOSURE_WGSL_NAME, ExposureParams};
 use crate::renderer::{BloomUniform, CameraUniform};
 use crate::shaders::math::{aces_tonemap, luminance};
 use ornis_macros::stage;
@@ -50,17 +51,19 @@ pub fn wgsl_vertex_source() -> String {
 }
 
 /// Group-0 `@binding` indices the HDR composite fragment stage declares.
-const HDR_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4];
+const HDR_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4, 5];
 
 /// HDR composite fragment shader: deferred/forward layer mix + bloom.
 ///
-/// Assembled from the derived `Camera`/`BloomParams` layouts, the shared
-/// `QuadVertexOutput` varying, the two translated entries and the
-/// ACES/luminance kernels; entry point `fs_main` is kept.
+/// Assembled from the derived `Camera`/`BloomParams` layouts, the exposure
+/// uniform ([`crate::auto_exposure`]), the shared `QuadVertexOutput`
+/// varying, the two translated entries and the ACES/luminance kernels;
+/// entry point `fs_main` is kept.
 pub fn wgsl_source() -> String {
     ShaderModule::new()
         .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
         .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
+        .decl(EXPOSURE_PARAMS_WGSL)
         .resources(&HDR_RESOURCES, HDR_FRAGMENT_BINDINGS)
         .consts(vertex_quad())
         .consts(crate::shaders::math::wgsl_consts())
@@ -83,7 +86,7 @@ fn vertex_quad() -> String {
 /// Resource layout of the HDR composite pass (what `create_composite_pass`
 /// builds its layout from). The uniform carries the explicit minimum size
 /// the handwritten layout spelled.
-pub const HDR_RESOURCES: [Resource; 5] = [
+pub const HDR_RESOURCES: [Resource; 6] = [
     Resource {
         group: 0,
         binding: 0,
@@ -124,6 +127,14 @@ pub const HDR_RESOURCES: [Resource; 5] = [
         kind: ResourceKind::Uniform(BloomUniform::WGSL_NAME),
         min_size: Some(std::mem::size_of::<BloomUniform>() as u64),
     },
+    Resource {
+        group: 0,
+        binding: 5,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "exposure_params",
+        kind: ResourceKind::Uniform(EXPOSURE_WGSL_NAME),
+        min_size: Some(std::mem::size_of::<ExposureParams>() as u64),
+    },
 ];
 
 /// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
@@ -138,6 +149,7 @@ pub(crate) struct HdrContext {
     pub bloom_tex: Texture2d,
     pub composite_sampler: Sampler,
     pub bloom_params: BloomUniform,
+    pub exposure_params: ExposureParams,
 }
 
 #[stage(fragment)]
@@ -151,7 +163,8 @@ fn fs_main(input: QuadVertexOutput, ctx: Context<HdrContext>) -> super::Location
         combined = deferred_color + forward_color.rgb * forward_color.a;
     }
     let bloom = textureSample(ctx.bloom_tex, ctx.composite_sampler, input.uv).rgb;
-    let tonemapped = aces_tonemap(combined + bloom * ctx.bloom_params.intensity);
+    let hdr = (combined + bloom * ctx.bloom_params.intensity) * ctx.exposure_params.exposure;
+    let tonemapped = aces_tonemap(hdr);
     return glam::Vec4::new(tonemapped, 1.0);
 }
 
@@ -182,6 +195,8 @@ mod tests {
         let src = wgsl_source();
         assert!(src.contains("@group(0) @binding(0) var deferred_tex"));
         assert!(src.contains("@group(0) @binding(4) var<uniform> bloom_params"));
+        assert!(src.contains("@group(0) @binding(5) var<uniform> exposure_params"));
+        assert!(src.contains("struct ExposureParams"));
         assert!(src.contains("fn fs_main("));
         assert!(src.contains("fn aces_tonemap"));
         assert!(src.contains("fn luminance"));
@@ -218,11 +233,10 @@ mod tests {
         assert!(entry.contains("if (bloom_params.mode =="));
         assert!(entry.contains("combined = forward_color.rgb * forward_color.a;"));
         assert!(entry.contains("combined = deferred_color + forward_color.rgb * forward_color.a;"));
-        assert!(
-            entry.contains(
-                "let tonemapped = aces_tonemap(combined + bloom * bloom_params.intensity);"
-            )
-        );
+        assert!(entry.contains(
+            "let hdr = (combined + bloom * bloom_params.intensity) * exposure_params.exposure;"
+        ));
+        assert!(entry.contains("let tonemapped = aces_tonemap(hdr);"));
         assert!(entry.contains("return vec4<f32>(tonemapped, 1.0);"));
     }
 
@@ -244,7 +258,7 @@ mod tests {
     fn hdr_resources_cover_shader_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         let src = wgsl_source();
-        assert_eq!(HDR_RESOURCES.len(), 5);
+        assert_eq!(HDR_RESOURCES.len(), 6);
         for r in HDR_RESOURCES {
             assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
             let e = bgl_entry(&r, false);
