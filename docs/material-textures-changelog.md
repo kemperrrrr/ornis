@@ -77,6 +77,7 @@ Additive: nothing existing changed meaning, and every new behaviour is opt-in.
 - Follow-up to #136: a `PATH` downgrade stays `BakeOrigin::Downgraded` on a
   cache hit, so `bake_stats` still reports it on the next import. The tool
   identity mixes `-version` with a hash of the binary. Encoder processes time
-  out (`BakeError::TimedOut`, default 120s) and are killed. Cache entries are
+  out (`BakeError::TimedOut`, default 120s) and are killed; on Unix that kill
+  covers the child's process group. Cache entries are
   published with `rename`. `AssetServer::bake_stats` sums every model write
   instead of keeping only the last one.

@@ -52,6 +52,7 @@ the pinned Normal argv (linear DFD, not the sRGB DFD of the other two). The
 build had SSE off, Zstandard on, OpenCL off — `basisu -version` also prints
 `No SSE, Multithreading: 1, Zstandard support: 1, OpenCL: 0`. Transcoding
 level 0 back to RGBA8 stays within 22 per channel for ETC1S and 5 per channel
-for UASTC. The normal-map tolerance is recorded next to the bake test.
+for both the sRGB UASTC fixture and the normal-map UASTC fixture (measured
+maximum on this ramp).
 These files are inputs to `ornis-assets` bake tests; they are not a second
 copy of the 40×40 corpus above.

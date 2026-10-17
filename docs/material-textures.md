@@ -213,7 +213,10 @@ levels, no runtime mip generation.
   entries, `EncoderSource::Binary` pins an exact tool, `EncoderSource::InProcess`
   never spawns a process. Each external process (`-version` and the encode) is
   killed after `BakeSettings::encoder_timeout` (default two minutes,
-  `BakeError::TimedOut`); nothing from that run is cached. Tool output is validated through `Ktx2Image::from_bytes`
+  `BakeError::TimedOut`). On Unix the child is its own process group and the
+  deadline kills that group, so a wrapper's grandchild cannot keep the pipes
+  open; elsewhere only the direct child is killed. Nothing from that run is
+  cached. Tool output is validated through `Ktx2Image::from_bytes`
   (reader, DFD, level-length and dimension rules) *before* anything replaces
   the slot, and only the validated bytes are cached.
 - **No encoder is a visible downgrade, not the size goal.** Without a `basisu`

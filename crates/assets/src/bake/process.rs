@@ -2,6 +2,10 @@
 //!
 //! `basisu` is an external process. A hung `-version` or encode would stall
 //! import, so every spawn has a deadline and is killed when it elapses.
+//! On Unix the child starts in its own process group and the deadline kills
+//! that group: a wrapper that forks a grandchild (instead of `exec`) still
+//! drops the pipes. Elsewhere only the direct child is killed, so a
+//! grandchild that inherits a pipe can hold `run_timed` until it exits.
 //! Linux can return `ETXTBSY` when a just-written executable is exec'd under
 //! parallel fork load; that one error is retried.
 
@@ -68,7 +72,14 @@ fn spawn_child(program: &Path, args: &[OsString]) -> Result<Child, BakeError> {
 
 /// One `Command` spawn with both pipes captured.
 fn try_spawn(program: &Path, args: &[OsString]) -> std::io::Result<Child> {
-    Command::new(program)
+    let mut command = Command::new(program);
+    // Own process group, so a timeout can kill grandchildren with the leader.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -114,12 +125,27 @@ fn wait_deadline(
 
 /// Kills and reaps `child`, then reports the deadline.
 fn kill_timed_out(program: &Path, child: &mut Child, timeout: Duration) -> BakeError {
+    #[cfg(unix)]
+    kill_group(child);
     let _ = child.kill();
     let _ = child.wait();
     BakeError::TimedOut {
         program: program.display().to_string(),
         millis: timeout.as_millis(),
     }
+}
+
+/// Kills the process group led by `child`. A missing `kill` still leaves
+/// [`Child::kill`] for the direct child.
+#[cfg(unix)]
+fn kill_group(child: &Child) {
+    let group = format!("-{}", child.id());
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &group])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Reads a pipe to EOF. A missing pipe is empty output.

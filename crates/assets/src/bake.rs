@@ -432,10 +432,9 @@ mod tests {
     /// Per-channel error of the committed normal-map UASTC fixture's base level.
     ///
     /// Measured on the same ramp with `-normal_map -linear -mip_linear
-    /// -mip_renorm` at `-uastc_level 2`. Filled in after the first encode;
-    /// the test tightens it to the observed maximum.
+    /// -mip_renorm` at `-uastc_level 2`: the worst channel differs by 5.
     #[cfg(unix)]
-    const NORMAL_UASTC_LEVEL0_TOLERANCE: u8 = 40;
+    const NORMAL_UASTC_LEVEL0_TOLERANCE: u8 = 5;
 
     /// Body of an encoder that refuses `-version` and still copies a payload.
     #[cfg(unix)]
@@ -1060,6 +1059,34 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         );
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn a_forked_encoder_grandchild_is_killed_with_the_group() {
+        // `sleep` is a grandchild that inherits the pipe. Killing only the
+        // shell would leave it holding stdout until the 30s sleep ends.
+        let program = install_tool(
+            "hang-fork",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\nwait\n",
+            b"",
+        );
+        let settings = BakeSettings {
+            encoder: EncoderSource::Binary(program),
+            encoder_timeout: Duration::from_millis(200),
+            ..BakeSettings::new(cache_dir("hang-fork"))
+        };
+        let started = std::time::Instant::now();
+        let failure = bake_texture(&settings, &checker(), TextureRole::BaseColor);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a forked grandchild kept the pipe open: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(failure, Err(BakeError::TimedOut { .. })),
+            "expected a timeout, got {failure:?}"
+        );
+    }
+
     /// Whether the cache entry or either scratch file of `key` is still there.
     #[cfg(unix)]
     fn scratch_left(settings: &BakeSettings, key: &str) -> bool {
@@ -1407,17 +1434,19 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     }
 
     /// Tells the operator the live `basisu` check did not run.
-    ///
-    /// libtest captures [`eprintln`], so the line is also written to the
-    /// process stderr, where `cargo test` shows it without `--nocapture`.
     fn note_skipped_real_encoder() {
-        const MESSAGE: &str = "ORNIS_BASISU is unset; the real encoder round trip was not run";
-        eprintln!("{MESSAGE}");
-        let Ok(mut file) = std::fs::OpenOptions::new().write(true).open("/dev/stderr") else {
-            return;
-        };
-        use std::io::Write;
-        let _ = writeln!(file, "{MESSAGE}");
+        eprintln!("ORNIS_BASISU is unset; the real encoder round trip was not run");
+    }
+
+    /// `-version` stdout. Fails when the script does not exec.
+    #[cfg(unix)]
+    fn printed_version(program: &Path) -> String {
+        let output = std::process::Command::new(program)
+            .arg("-version")
+            .output()
+            .expect("spawn version");
+        assert!(output.status.success(), "version probe failed: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     #[test]
@@ -1425,11 +1454,11 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     fn same_version_text_with_different_bytes_misses_the_cache() {
         let payload = encode_rgba8_ktx2(&checker(), TextureRole::BaseColor).expect("encodes");
         let source = checker();
+        // The marker is a comment after the shebang, so both scripts exec.
         let body = |marker: &str| {
             format!(
-                "# {marker}\n{}",
-                r#"#!/bin/sh
-if [ "$1" = "-version" ]; then
+                "#!/bin/sh\n# {marker}\n{}",
+                r#"if [ "$1" = "-version" ]; then
     printf '%s\n' 'fake-basisu 1'
     exit 0
 fi
@@ -1439,6 +1468,14 @@ exit 0
         };
         let alpha = install_tool("id-a", &body("alpha"), &payload);
         let beta = install_tool("id-b", &body("beta"), &payload);
+        assert!(
+            std::fs::read_to_string(&alpha)
+                .expect("script")
+                .starts_with("#!/bin/sh\n"),
+            "the shebang has to be the first line"
+        );
+        assert_eq!(printed_version(&alpha), "fake-basisu 1");
+        assert_eq!(printed_version(&beta), "fake-basisu 1");
         let key_alpha = key_of(
             &binary_at(&cache_dir("id-a"), alpha),
             &source,
