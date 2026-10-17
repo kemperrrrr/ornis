@@ -10,6 +10,7 @@ pub use gpu::{AaInputs, AaResolve};
 const HALTON_PERIOD: u64 = 8;
 const HALTON_Y_BASE: u32 = 3;
 const HALF_PIXEL: f32 = 0.5;
+const PIXEL_TO_CLIP_SCALE: f32 = 2.0;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod graph;
@@ -76,8 +77,8 @@ pub fn jitter_projection(view_projection: Mat4, jitter: Vec2, extent: [u32; 2]) 
         return view_projection;
     }
     let offset = Vec2::new(
-        2.0 * jitter.x / extent[0] as f32,
-        -2.0 * jitter.y / extent[1] as f32,
+        PIXEL_TO_CLIP_SCALE * jitter.x / extent[0] as f32,
+        -PIXEL_TO_CLIP_SCALE * jitter.y / extent[1] as f32,
     );
     let mut shift = Mat4::IDENTITY;
     shift.w_axis.x = offset.x;
