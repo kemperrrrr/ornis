@@ -214,9 +214,10 @@ levels, no runtime mip generation.
   never spawns a process. Each external process (`-version` and the encode) is
   killed after `BakeSettings::encoder_timeout` (default two minutes,
   `BakeError::TimedOut`). On Unix the child is its own process group and the
-  deadline kills that group, so a wrapper's grandchild cannot keep the pipes
-  open; elsewhere only the direct child is killed. Nothing from that run is
-  cached. Tool output is validated through `Ktx2Image::from_bytes`
+  deadline kills that group, so a wrapper that forks instead of `exec` does
+  not leave a grandchild holding the pipes. Pipe readers are joined only for
+  a short bound after that, then detached. Off Unix only the direct child is
+  killed; the join bound still returns. Nothing from that run is cached. Tool output is validated through `Ktx2Image::from_bytes`
   (reader, DFD, level-length and dimension rules) *before* anything replaces
   the slot, and only the validated bytes are cached.
 - **No encoder is a visible downgrade, not the size goal.** Without a `basisu`

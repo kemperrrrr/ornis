@@ -1,6 +1,7 @@
 //! Content-addressed bake cache: keys, entries and the file plumbing.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ornis_texture::{CpuImage, Ktx2Image, TextureRole};
 
@@ -156,6 +157,9 @@ pub(super) fn ensure_dir(settings: &BakeSettings) -> Result<(), BakeError> {
 /// Suffix of the temporary file [`store_cached`] publishes with `rename`.
 const PUBLISH_SUFFIX: &str = ".tmp";
 
+/// Distinguishes temp names inside one process, including across threads.
+static PUBLISH_TICK: AtomicU64 = AtomicU64::new(0);
+
 /// Writes one validated container into the cache under `key`.
 ///
 /// Bytes land in a temporary file in the same directory, are synced, then
@@ -176,9 +180,17 @@ pub(super) fn store_cached(
     })
 }
 
-/// Temporary name for `key`, unique per process so two writers do not share it.
+/// Temporary name for `key`.
+///
+/// The process id and a per-call counter keep two threads in one process from
+/// publishing the same key through one temp file (the second `rename` would
+/// otherwise see `ENOENT`).
 fn publish_path(settings: &BakeSettings, key: &str) -> PathBuf {
-    let name = format!(".{key}.{pid}{PUBLISH_SUFFIX}", pid = std::process::id());
+    let tick = PUBLISH_TICK.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        ".{key}.{pid}.{tick}{PUBLISH_SUFFIX}",
+        pid = std::process::id()
+    );
     settings.cache_dir.join(name)
 }
 

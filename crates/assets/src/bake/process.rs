@@ -3,9 +3,11 @@
 //! `basisu` is an external process. A hung `-version` or encode would stall
 //! import, so every spawn has a deadline and is killed when it elapses.
 //! On Unix the child starts in its own process group and the deadline kills
-//! that group: a wrapper that forks a grandchild (instead of `exec`) still
-//! drops the pipes. Elsewhere only the direct child is killed, so a
-//! grandchild that inherits a pipe can hold `run_timed` until it exits.
+//! that group, including a grandchild a wrapper forked instead of `exec`.
+//! Pipe readers are joined only for a short bound after the child is reaped,
+//! then detached, so an open pipe cannot stall the caller. Off Unix only the
+//! direct child is killed; the same join bound still returns, and a
+//! grandchild that inherited a pipe can outlive the call.
 //! Linux can return `ETXTBSY` when a just-written executable is exec'd under
 //! parallel fork load; that one error is retried.
 
@@ -23,6 +25,12 @@ const SPAWN_ATTEMPTS: u32 = 8;
 
 /// Pause between those retries, and between polls while the child runs.
 const POLL_PAUSE: Duration = Duration::from_millis(20);
+
+/// How long pipe readers may run after the child has been reaped or killed.
+///
+/// A grandchild that survived the kill would otherwise hold the pipe open and
+/// `join` would wait for it. Past this bound the reader is detached.
+const READER_JOIN_BOUND: Duration = Duration::from_millis(500);
 
 /// Runs `program` with `args`, killing it when `timeout` elapses.
 ///
@@ -45,8 +53,9 @@ pub(super) fn run_timed(
     let stdout_task = thread::spawn(move || read_pipe(stdout));
     let stderr_task = thread::spawn(move || read_pipe(stderr));
     let status = wait_deadline(program, &mut child, timeout);
-    let stdout = joined(stdout_task);
-    let stderr = joined(stderr_task);
+    let join_deadline = Instant::now() + READER_JOIN_BOUND;
+    let stdout = joined_until(stdout_task, join_deadline);
+    let stderr = joined_until(stderr_task, join_deadline);
     status.map(|status| Output {
         status,
         stdout,
@@ -158,7 +167,19 @@ fn read_pipe(pipe: Option<impl Read>) -> Vec<u8> {
     bytes
 }
 
-/// Joins a pipe reader. A panicked reader contributes no bytes.
-fn joined(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
+/// Joins a pipe reader until `deadline`, then detaches it.
+///
+/// Detach drops the handle without waiting. The reader unblocks once every
+/// writer of the pipe has exited; a survivor cannot keep the caller parked.
+fn joined_until(handle: thread::JoinHandle<Vec<u8>>, deadline: Instant) -> Vec<u8> {
+    loop {
+        if handle.is_finished() {
+            return handle.join().unwrap_or_default();
+        }
+        if Instant::now() >= deadline {
+            drop(handle);
+            return Vec::new();
+        }
+        thread::sleep(POLL_PAUSE);
+    }
 }

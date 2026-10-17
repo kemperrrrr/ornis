@@ -1062,29 +1062,59 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     #[test]
     #[cfg(unix)]
     fn a_forked_encoder_grandchild_is_killed_with_the_group() {
-        // `sleep` is a grandchild that inherits the pipe. Killing only the
-        // shell would leave it holding stdout until the 30s sleep ends.
+        // The shell does not `exec`. `sleep` inherits the pipe; killing only
+        // the shell used to return after the sleep, and left it running.
+        const TIMEOUT: Duration = Duration::from_millis(500);
+        const RETURN_LIMIT: Duration = Duration::from_millis(1500);
         let program = install_tool(
             "hang-fork",
-            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\nwait\n",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nwait\n",
             b"",
         );
         let settings = BakeSettings {
-            encoder: EncoderSource::Binary(program),
-            encoder_timeout: Duration::from_millis(200),
+            encoder: EncoderSource::Binary(program.clone()),
+            encoder_timeout: TIMEOUT,
             ..BakeSettings::new(cache_dir("hang-fork"))
         };
         let started = std::time::Instant::now();
         let failure = bake_texture(&settings, &checker(), TextureRole::BaseColor);
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "a forked grandchild kept the pipe open: {:?}",
-            started.elapsed()
+            elapsed >= TIMEOUT && elapsed < RETURN_LIMIT,
+            "wrapper returned in {elapsed:?}, not near the {TIMEOUT:?} deadline"
         );
         assert!(
             matches!(failure, Err(BakeError::TimedOut { .. })),
             "expected a timeout, got {failure:?}"
         );
+        let pid_path = PathBuf::from(format!("{}.pid", program.display()));
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .expect("wrapper recorded the grandchild pid")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert!(
+            !process_still_running(pid),
+            "grandchild {pid} was still running after the timeout"
+        );
+    }
+
+    /// Whether `pid` is alive and not a zombie. A missing `/proc` entry is dead.
+    #[cfg(unix)]
+    fn process_still_running(pid: u32) -> bool {
+        let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return false;
+        };
+        text.lines().any(|line| {
+            let Some(state) = line.strip_prefix("State:") else {
+                return false;
+            };
+            let state = state.trim();
+            state.starts_with('R')
+                || state.starts_with('S')
+                || state.starts_with('D')
+                || state.starts_with('T')
+        })
     }
 
     /// Whether the cache entry or either scratch file of `key` is still there.
@@ -1515,7 +1545,7 @@ exit 0
         let source = checker();
         let baked = bake_texture(&settings, &source, TextureRole::BaseColor).expect("bakes");
         let key = key_of(&settings, &source, TextureRole::BaseColor);
-        let path = settings.cache_dir.join(format!("{key}{OUTPUT_SUFFIX}"));
+        let path = cached_entry(&settings, &key);
         #[cfg(unix)]
         let before = {
             use std::os::unix::fs::MetadataExt;
@@ -1538,6 +1568,56 @@ exit 0
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(temps.is_empty(), "publish leftover: {temps:?}");
+    }
+
+    #[test]
+    fn concurrent_cache_writes_do_not_share_a_temp_file() {
+        let settings = in_process("concurrent-publish");
+        let key = "same";
+        let left = b"left-payload";
+        let right = b"right-payload";
+        std::thread::scope(|scope| {
+            let one = scope.spawn(|| super::cache::store_cached(&settings, key, left));
+            let two = scope.spawn(|| super::cache::store_cached(&settings, key, right));
+            one.join().expect("thread").expect("left publish");
+            two.join().expect("thread").expect("right publish");
+        });
+        let path = cached_entry(&settings, key);
+        let got = std::fs::read(&path).expect("entry");
+        assert!(got.as_slice() == left || got.as_slice() == right, "{got:?}");
+        assert!(temp_files(&settings).is_empty(), "publish leftover");
+    }
+
+    #[test]
+    fn a_failed_cache_rename_removes_the_temp_file() {
+        let settings = in_process("rename-fail");
+        let key = "blocked";
+        let dest = cached_entry(&settings, key);
+        std::fs::create_dir_all(&dest).expect("destination is a directory");
+        let error = super::cache::store_cached(&settings, key, b"bytes");
+        assert!(
+            matches!(error, Err(BakeError::Io { .. })),
+            "expected a rename failure, got {error:?}"
+        );
+        assert!(
+            temp_files(&settings).is_empty(),
+            "a failed rename leaves no temp file"
+        );
+    }
+
+    /// Cache file of `key`.
+    fn cached_entry(settings: &BakeSettings, key: &str) -> PathBuf {
+        settings.cache_dir.join(format!("{key}{OUTPUT_SUFFIX}"))
+    }
+
+    /// Temp files still sitting in the cache directory.
+    fn temp_files(settings: &BakeSettings) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&settings.cache_dir)
+            .expect("cache dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().ends_with(".tmp"))
+            .collect()
     }
 
     #[test]
