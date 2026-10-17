@@ -2,7 +2,7 @@
 
 Трек net. Код этим документом не пишется.
 Основание: `PLAN.md`, раздел «l. Мультиплеер».
-Утверждения о коде сверены с master `2037842` (ревью PR #51 и PR #138, issue #108).
+Утверждения о коде сверены с master `f5f8947` (ревью PR #51 и PR #138, issue #108).
 Язык документа — русский. Каждое утверждение о коде ornis подкреплено
 путём к файлу и функции.
 
@@ -217,7 +217,12 @@ into master» и «Release & Publish 0.16» так и не закрыты, ре�
    lightyear). Применение — в начале каждого fixed-шага, из ресурса
    текущего `Tick`. Системы симуляции сокет не видят.
    Зависимости: `crates/net` зависит от `ornis-core` и `ornis-input`,
-   не наоборот и не от `ornis-app` (§4.5).
+   не наоборот и не от `ornis-app` (§4.5). `player_input` читает ресурс
+   `TickInput`, объявленный в `ornis-input`, а не в `crates/net`.
+   `ornis-gameplay` от `ornis-net` не зависит: иначе доменный геймплей
+   потянул бы транспорт. `PeerInput` лежит там же. Хост (`ornis-app`)
+   копирует в ресурс уже упорядоченные действия; `PeerId` и `InputBundle`
+   остаются в `crates/net` (§4.5).
 
 3. **Wall-clock в тике.**
    Суть: `Instant::now()` или дельта кадра выбирает, какой ввод съест
@@ -261,7 +266,9 @@ into master» и «Release & Publish 0.16» так и не закрыты, ре�
 - `FixedTime::begin_frame` и `FixedTime::start_step` приватные (`fn`, не
   `pub`, `crates/core/src/engine.rs`). Снаружи их не вызвать. Единственный
   публичный прогон кадра — `Engine::run_frame` / `run_frame_secs`; число
-  тиков внутри выбирает `begin_frame` из переданной дельты.
+  тиков внутри выбирает `begin_frame` из переданной дельты. Потикового
+  публичного входа сейчас нет; его контракт задаёт §6.1
+  (`Engine::run_fixed_step`).
   `begin_frame` ограничивает аккумулятор сверху
   `(max_steps + 1) × delta_seconds`: один лишний шаг держится как
   hitch-буфер и влияет на число шагов уже следующего кадра. Исполняется
@@ -436,17 +443,34 @@ SI-Single. Границы сетевых сцен (§4.4) отсюда и сле
    не входят: их потребители — камера и прочий variable-путь. Если такой
    оси понадобится симуляция, её квантуют до записи в журнал (§1.3).
 2. Перед каждым тиком хост, у которого есть `&mut Engine`, кладёт в ресурс
-   `TickInput` полный `InputBundle` этого тика и вызывает один шаг (§6.1).
-   В срезе L2 это ещё не `NetAdapter` (он появляется в L0): при записи —
-   локальный сэмплер, при `replay` — драйвер журнала. Удержанные действия
-   повторяются на каждый тик (флаг repeatable у Quantum, повтор последнего
-   ввода у lightyear). Одноразовые края, если когда-нибудь войдут в бандл,
-   занимают ровно один тик: сегодня `clear_frame_transients` привязан к
-   кадру, не к тику.
+   `TickInput` (`ornis-input`) упорядоченный `Vec<PeerInput>` этого тика
+   и вызывает один шаг (§6.1). Журнал хранит `InputBundle` (`crates/net`);
+   в ресурс бандл не кладётся: `ornis-input` — foundation и не называет
+   типы domain. В срезе L2 это ещё не `NetAdapter` (он появляется в L0):
+   при записи — локальный сэмплер, при `replay` — драйвер журнала.
+   Удержанные действия повторяются на каждый тик (флаг repeatable у
+   Quantum, повтор последнего ввода у lightyear). Одноразовые края, если
+   когда-нибудь войдут в бандл, занимают ровно один тик: сегодня
+   `clear_frame_transients` привязан к кадру, не к тику.
 3. `player_input` переезжает в `fixed_schedule` (`Stage::Gameplay`) и
-   встаёт перед `physics_push`. Читает `TickInput`, пишет `Velocity`.
-   Сам ресурс он не пишет: система получает только `&Resources` (§6.1).
-   `physics_push` остаётся на `FixedTime::delta()`.
+   исполняется перед `velocity_to_body`. Читает `TickInput`, пишет
+   `Velocity`. Сам ресурс он не пишет: система получает только
+   `&Resources` (§6.1). `physics_push` остаётся на `FixedTime::delta()`
+   и интегрирует уже записанную скорость; в солвер намерение доводит
+   мост, не `physics_push`.
+   `install_gameplay_physics_bridge` ставит `VelocityToBodySystem`
+   через `prepend_system`, то есть первым в fixed-расписании
+   (`crates/app/src/lib.rs`). Явное ребро режет уровни только вперёд по
+   регистрации: `try_order_before("player_input", "velocity_to_body")`
+   после обычного `add_system` — это `OrderError::BackwardEdge`,
+   `Schedule::order_before` такое ребро игнорирует (тест
+   `explicit_ordering_rejects_backward_direction` в
+   `crates/core/src/schedule.rs`). Конфликт на `Velocity` тогда тоже
+   идёт по регистрации, и мост читает скорость прошлого тика. Срез
+   регистрирует `player_input` тем же `prepend_system` уже после моста:
+   индекс `player_input` меньше, чем у `velocity_to_body`, RaW по
+   `Velocity` держит порядок `player_input` → `velocity_to_body` →
+   `physics_sync_in`.
 4. `transform_update` остаётся в `PostFrame` и не пишет авторитетные
    `Position` и `Velocity`. Комментарий про networked input в этой функции
    снимается, когда срез L2 переносит потребление ввода. Ни сэмплер L2,
@@ -580,7 +604,8 @@ bevy_ggrs (`ReadInputs` отдельно от `GgrsSchedule`).
 
 1. Сокет читается **раз в кадр**, на variable-границе (до fixed-цикла).
    В симуляцию ввод попадает **на каждый `Tick`**, в начале fixed-шага
-   этого тика, до `player_input` и `physics_push`. За кадр таких шагов
+   этого тика, до `player_input`, а тот — до `velocity_to_body` (§2.5).
+   За кадр таких шагов
    бывает от 0 до `DEFAULT_MAX_FIXED_STEPS_PER_FRAME` (8). «Раз в тик» и
    «раз в кадр» поэтому разные места.
 2. Порядок прибытия пишется в отладочный лог приёма и больше никуда.
@@ -594,18 +619,25 @@ bevy_ggrs (`ReadInputs` отдельно от `GgrsSchedule`).
    `Tick`. Опоздавший ввод этого тика — предсказание и пометка для отката
    L1, не повод применить «сколько успело прийти» и не повод пропустить
    тик из-за `dropped_seconds`.
-4. Хранилище: `Tick → InputBundle`. Бандл полон (по слоту на каждого пира);
-   отсутствующий слот помечен `predicted`. Системы видят бандл целиком.
+4. Хранилище журнала и адаптера: `Tick → InputBundle`. Бандл полон (по
+   слоту на каждого пира); отсутствующий слот помечен `predicted`.
+   Системы этот тип не видят. В мир на шаг попадает `TickInput` со всеми
+   `PeerInput` бандла, без `PeerId` и без флага предсказания.
 5. Реплей идёт **без сети**: журнал тиков + сид + версия + старт сцены (§4.3).
-6. Атомарность тика: система видит либо полный `InputBundle`, либо
-   предсказанный с флагом. «Половин» не бывает (§1.8 п.1).
+6. Атомарность тика: хост кладёт в `TickInput` либо все `PeerInput`
+   полного `InputBundle`, либо предсказанный набор с флагом на бандле.
+   Система видит уже собранный вектор. «Половин» не бывает (§1.8 п.1).
 
 Ресурс ввода, не `MutationBus`. На время одного тика в мире лежит ресурс
-`TickInput` (`Tick` + `InputBundle`). Пишет его хост до шага, не система:
-у системы только `&Resources` (§6.1). В L2 хост — локальный сэмплер при
-записи и драйвер журнала при `replay`. В L0 тот же ресурс пишет
-`NetAdapter`, тем же шагом `run_fixed_step`. `player_input` и остальные
-fixed-системы ресурс только читают и про сокет не знают.
+`TickInput` из `ornis-input`: `players: Vec<PeerInput>` в каноническом
+порядке пиров. Полей `Tick`, `PeerId` и `Prediction` в нём нет — их
+держит `InputBundle` в `crates/net`, а `ornis-input` (foundation) на
+domain не ссылается. Пишет ресурс хост до шага, не система:
+у системы только `&Resources` (§6.1). Хост копирует из бандла одни
+`PeerInput`, уже отсортированные по `PeerId`. В L2 хост — локальный
+сэмплер при записи и драйвер журнала при `replay`. В L0 тот же ресурс
+пишет `NetAdapter`, тем же шагом `run_fixed_step`. `player_input` и
+остальные fixed-системы ресурс только читают и про сокет не знают.
 `MutationBus::drain()` сюда не входит: после кадра он отдаёт JSON-`Mutation`
 редактора (§2.3). Класть туда сетевой ввод значило бы снова привязать тик
 к кадру и к `Time::delta_seconds()`.
@@ -729,10 +761,65 @@ footer: final_digest + tick_count
 
 - `crates/net` — слой `domain`. Трейт транспорта, loopback, `InputBundle`,
   журнал тиков, digest, record/replay. Зависит от `ornis-core` и
-  `ornis-input`. Не зависит от `quinn` и не зависит от `ornis-app`.
+  `ornis-input`. Не зависит от `quinn`, не зависит от `ornis-app` и не
+  зависит от `ornis-gameplay`.
 - `crates/net-quic` — слой `adapters`, рядом с `crates/wasm` и
   `editor-backend`. Единственная имплементация `Transport` на `quinn`.
   Появляется не в срезе L2, а вместе с сокетами (§6.4).
+- `PeerInput` и `TickInput` живут в `ornis-input` (слой `foundation`,
+  ключ `ornis_input`). Крейт сейчас без зависимостей
+  (`crates/input/Cargo.toml`): `Tick`, `PeerId` и `InputBundle` в эти
+  типы не входят. `ornis-gameplay` уже зависит от `ornis-input` и
+  `player_input` читает `TickInput` оттуда. Ребра `ornis-gameplay` →
+  `ornis-net` срез не добавляет.
+
+Схема слоёв, от foundation наружу. Стрелка — «зависит от»:
+
+```text
+foundation    ornis-input
+              PeerInput, TickInput
+              зависимостей на domain нет
+                 ▲                         ▲
+domain        ornis-gameplay           ornis-net
+              читает TickInput         InputBundle держит PeerInput,
+              не зависит от ornis-net  Tick из ornis-core, Transport
+                 ▲                         ▲
+application   ornis-app
+              пишет TickInput через world_mut, зависит от обоих
+adapters      ornis-net-quic
+              Transport на quinn; в срезе L2 этого крейта нет
+```
+
+Ключи `rustqual.toml`: `ornis_input` = `foundation`, `ornis_gameplay` =
+`domain`, `ornis_net` = `domain`, `ornis_app` = `application`,
+`ornis_net_quic` = `adapters`. Два крейта `domain` могут зависеть друг
+от друга, только если нет цикла; здесь цикла нет, потому что геймплей
+про сеть не знает.
+
+Типы, которые читает симуляция, объявляет `ornis-input`:
+
+```rust
+// Эскиз ornis-input. Кода нет.
+// crates/input/Cargo.toml зависимостей не имеет; Tick и PeerId сюда не входят.
+
+/// Дискретные действия одного пира. Те же слова, что InputMap::MOVE_*.
+/// Не сырой InputState: указатель и колесо в тик v1 не входят (§2.5).
+pub struct PeerInput {
+    pub move_forward: bool,
+    pub move_back: bool,
+    pub move_left: bool,
+    pub move_right: bool,
+}
+
+/// Ресурс на время одного fixed-шага. Пишет хост до run_fixed_step,
+/// читает player_input. players — канонический порядок пиров: хост
+/// отсортировал бандл по PeerId и скопировал одни PeerInput.
+/// Для L2 с одним локальным слотом в векторе один элемент.
+pub struct TickInput {
+    pub players: Vec<PeerInput>,
+}
+```
+
 - Save/load мира в `crates/net` не помещается. `PhysicsRuntime.bindings`
   и `soft_bindings` — приватные `HashMap` внутри `ornis-app`
   (`crates/app/src/physics_runtime.rs`), fixed-расписание физики собирает
@@ -740,8 +827,9 @@ footer: final_digest + tick_count
   `ornis-app` (слой `application` имеет право зависеть от `domain`):
 
 ```rust
-// Эскиз. Кода нет. Tick не объявляем второй раз.
+// Эскиз crates/net. Кода нет. Tick не объявляем второй раз.
 pub use ornis_core::Tick;
+use ornis_input::PeerInput;
 
 pub struct PeerId(pub u64);
 
@@ -768,21 +856,14 @@ pub trait Transport {
 
 pub struct LoopbackTransport;
 
-/// Полный набор вводов одного тика. В симуляцию подаётся по возрастанию PeerId.
+/// Полный набор вводов одного тика. Журнал и адаптер хранят его.
+/// В мир копируются только PeerInput, по возрастанию PeerId (§4.1).
 pub struct InputBundle {
     pub tick: Tick,
     pub peers: Vec<(PeerId, PeerInput, Prediction)>,
 }
 
 pub enum Prediction { Confirmed, Predicted }
-
-/// Дискретные действия, которые сегодня читает `player_input` через InputMap.
-/// Не сырой InputState: указатель и колесо в тик v1 не входят (§2.5).
-pub struct PeerInput { /* биты MOVE_* */ }
-
-/// Ресурс на время одного fixed-шага. Пишет хост до `run_fixed_step`,
-/// читают системы `Stage::Gameplay`.
-pub struct TickInput { pub bundle: InputBundle }
 
 /// Непрозрачный снимок мира на тик. Формат `bytes` задаёт срез снапшота
 /// (§6.2). `crates/net` байты не разбирает.
@@ -809,7 +890,8 @@ pub trait WorldCheckpoint {
 - `Rollback` вызывает `WorldCheckpoint` и `advance` журнала. Политика
   отката — в `crates/net`, конкретный save/load мира — в `ornis-app`.
 - Обратной зависимости «симуляция знает про сокет» нет: `player_input`
-  читает `TickInput`, не `Transport`.
+  читает `TickInput` из `ornis-input`, не `Transport` и не `InputBundle`.
+  `ornis-gameplay` от `crates/net` не зависит.
 
 Регистрация обоих крейтов — часть того среза, который крейт создаёт:
 `[workspace].members` в корневом `Cargo.toml`, путь в
@@ -951,13 +1033,49 @@ API ядра названо в задаче 1 среза L2.
   расписания, расписание исполняют ровно один раз на тик.
 
 **Выбор — C.** Минимальное изменение API ядра делает срез L2 в
-`ornis-core`. Метод (рабочее имя `Engine::run_fixed_step`):
+`ornis-core`. На `impl Engine<Running>` (`crates/core/src/engine.rs`,
+рядом с `run_frame`) добавляется:
 
-- увеличивает `tick` и `elapsed_seconds` на один `delta_seconds`;
-- один раз выполняет `fixed_schedule`;
-- не вызывает `begin_frame`, не читает аккумулятор и не требует, чтобы
-  тот был не меньше шага (в отличие от сегодняшнего `start_step`);
-- не двигает variable-`Time` и не вызывает `clear_frame_transients`.
+```rust
+pub fn run_fixed_step(&mut self)
+```
+
+Аргумента дельты нет: длина шага уже лежит в ресурсе
+(`FixedTime::delta_seconds`). Если ресурса нет, метод вставляет
+`FixedTime::default()`, как это делает `run_frame`. До запуска
+расписания он переписывает часы одного тика и только потом один раз
+выполняет `fixed_schedule`. Системы видят уже новый тик.
+
+Что метод делает с полями `FixedTime`:
+
+- `tick` — `saturating_add(1)`, как `start_step`;
+- `elapsed_seconds` — прибавляет `f64::from(delta_seconds)`;
+- `accumulator_seconds` — записывает `0`. Шаг не вычитается, остаток не
+  хранится. Дробь, оставшаяся от предыдущего `run_frame`, этим вызовом
+  сбрасывается: шаг журнала не продолжает wall-clock аккумулятор;
+- `steps_this_frame` — записывает `1`;
+- `current_step` — записывает `1`. Это не `saturating_add` к значению,
+  которое оставил `begin_frame`: у потикового входа кадра нет;
+- `alpha` — записывает `0`. Это не `update_alpha`: тот ставит
+  `(accumulator_seconds / delta_seconds).clamp(0, 1)` и после
+  `start_step` равен доле остатка. Здесь остатка нет;
+- `delta_seconds`, `dropped_seconds` и `max_steps_per_frame` метод не
+  меняет. `dropped_seconds` копит только `begin_frame`.
+
+Метод не вызывает `begin_frame` и не вызывает `start_step`.
+`start_step` требует аккумулятор не меньше шага (`debug_assert` в
+`crates/core/src/engine.rs`) и сам считает `alpha` из остатка — для
+журнала это другой путь. Не двигает variable-`Time`, не гоняет
+`PreUpdate`, `Input` и `PostFrame`, не вызывает `clear_frame_transients`.
+
+После вызова четыре кадровых поля всегда одни и те же:
+`accumulator_seconds = 0`, `steps_this_frame = 1`, `current_step = 1`,
+`alpha = 0`. У `run_frame` они зависят от числа шагов кадра и от
+остатка `begin_frame` (§2.1): кадр из двух ровных шагов оставляет
+`steps_this_frame = 2` и `current_step = 2` при том же `tick`, кадр с
+дробным хвостом оставляет ненулевой аккумулятор и `alpha`. Снимок
+приводит эти поля к кортежу `run_fixed_step` (§6.2), поэтому байты
+`FixedTime` не зависят от того, каким путём прошёл тик.
 
 `begin_frame` и `start_step` остаются приватными. `run_frame` остаётся
 входом локальной игры без записи. `System::run` не меняется. Это не
@@ -970,17 +1088,21 @@ API ядра названо в задаче 1 среза L2.
 - **Запись.** Локальный сэмплер в хосте L2 (тест или раннер в
   `ornis-app`, не система). Перед каждым `run_fixed_step` он берёт
   дискретные действия (`InputMap`: `MOVE_FORWARD` / `BACK` / `LEFT` /
-  `RIGHT`) и записывает `TickInput` через `world_mut`. Удержание
-  повторяется на каждый следующий тик, пока снимок кадра тот же.
-  После шага бандл дописывается в журнал.
-- **`replay`.** Драйвер журнала читает следующий кадр `.ornis-rec`,
-  кладёт его в `TickInput` и зовёт `run_fixed_step`. `InputState` и
-  `Instant` он не читает.
+  `RIGHT`), собирает `InputBundle` для журнала и копирует его
+  `PeerInput` в `TickInput` через `world_mut`. Удержание повторяется
+  на каждый следующий тик, пока снимок кадра тот же. После шага бандл
+  дописывается в журнал.
+- **`replay`.** Драйвер журнала читает следующий кадр `.ornis-rec`
+  (`InputBundle`), копирует `PeerInput` в `TickInput` и зовёт
+  `run_fixed_step`. `InputState` и `Instant` он не читает.
 - **L0.** `NetAdapter` подменяет источник бандла, метод шага тот же (§6.3).
 
-`player_input` в `fixed_schedule` перед `physics_push` только читает
-`TickInput` и пишет `Velocity`. `transform_update` не пишет авторитетную
-позу (§2.5).
+`player_input` в `fixed_schedule` стоит перед `velocity_to_body` и
+только читает `TickInput` из `ornis-input`, пишет `Velocity`.
+Регистрация — `prepend_system` после `install_gameplay_physics_bridge`:
+мост уже поставил `velocity_to_body` первым, и обратное `order_before`
+планировщик игнорирует (§2.5). `physics_push` этот порядок не задаёт.
+`transform_update` не пишет авторитетную позу (§2.5).
 
 **Гейт-сцена собирается в `ornis-app`, не вызовом `scene()`.**
 `scene()` — приватная функция интеграционного теста физики и возвращает
@@ -992,14 +1114,17 @@ API ядра названо в задаче 1 среза L2.
   sync/step, гравитация как у `scene()` (`Vec3::new(0.0, -9.81, 0.0)`);
 - `install_gameplay` (`crates/gameplay/src/lib.rs`) и
   `install_gameplay_physics_bridge` (`crates/app/src/lib.rs`): без моста
-  `Velocity`, который пишет `player_input`, не доходит до `RigidBody`;
+  `Velocity`, который пишет `player_input`, не доходит до `RigidBody`.
+  После моста `player_input` ставится `prepend_system`: мост уже сделал
+  `velocity_to_body` первым, и без этого ввод отстаёт на тик (§2.5);
 - сущности с компонентом `RigidBody` в том же духе, что тела `scene()`:
   статический пол, динамические ящики, сфера с порогом силы контакта.
   Это образец раскладки, не вызов функции. Ball joint из `scene()` в гейт
   не переносится: `add_joint` есть только у голого солвера, компонента
   сустава в `ornis-app` нет;
 - на одном динамическом теле ещё `Player`, `Position` и `Velocity`;
-- ввод — скриптованный `InputBundle` на тик через драйвер журнала, не
+- ввод — скриптованный `InputBundle` на тик в журнале; драйвер копирует
+  его `PeerInput` в ресурс `TickInput` и зовёт `run_fixed_step`, не
   живой `InputState` и не `run_frame`.
 
 3. Крейт `crates/net` в `[workspace].members` и в `rustqual.toml`
@@ -1061,9 +1186,22 @@ API ядра названо в задаче 1 среза L2.
 5. Ресурс `FixedTime` целиком, не только `tick`: `delta_seconds`,
    `accumulator_seconds`, `elapsed_seconds`, `tick`, `steps_this_frame`,
    `current_step`, `alpha`, `dropped_seconds`, `max_steps_per_frame`
-   (`crates/core/src/engine.rs`). `alpha` функция остатка и шага, но
-   снимок между шагами кадра без `current_step` и аккумулятора не
-   восстановить. Сида RNG в снимке нет (§2.9).
+   (`crates/core/src/engine.rs`). Сида RNG в снимке нет (§2.9).
+   В байты чекпоинта кадровые поля пишутся не «как лежат в живом
+   ресурсе». После `run_frame` живые `accumulator_seconds`,
+   `steps_this_frame`, `current_step` и `alpha` — это кадр, в котором
+   тик случился (два ровных шага оставляют `current_step = 2`, дробный
+   хвост — ненулевой аккумулятор и `alpha`). После `run_fixed_step` те
+   же четыре поля всегда `(0, 1, 1, 0)` (§6.1). `save` подставляет этот
+   кортеж в копию и пишет `dropped_seconds = 0`. Живой ресурс `save` не
+   переписывает: `alpha` ещё нужен интерполяции кадра.
+   `dropped_seconds` в идентичность тика не входит — его увеличивает
+   только hitch-кап `begin_frame`, `run_fixed_step` его не трогает.
+   `delta_seconds`, `elapsed_seconds`, `tick` и `max_steps_per_frame`
+   копируются как есть: на одном и том же числе шагов одной и той же
+   дельты они у обоих путей совпадают. `load` поднимает ресурс уже в
+   этом каноническом виде. Два снимка одного `tick` — после `run_frame`
+   и после `run_fixed_step` — дают одни байты `FixedTime`.
 6. `save(tick) / load(tick)` целиком или `Err` (§1.8 п.1). Реализация
    порта `WorldCheckpoint` — в `ornis-app` (§4.5).
 
@@ -1096,8 +1234,9 @@ API ядра названо в задаче 1 среза L2.
 1. `Transport` и `LoopbackTransport` в `crates/net` (§4.5). Сокетов в срезе нет.
 2. `NetAdapter` в `ornis-app` подменяет сэмплер L2 как источник бандла.
    Раз в кадр забирает `Datagram` и раскладывает по `Tick → InputBundle`
-   в каноническом порядке `PeerId`. На каждый тик сессии пишет `TickInput`
-   через `world_mut` и зовёт `Engine::run_fixed_step` (§6.1). Это код
+   в каноническом порядке `PeerId`. На каждый тик сессии копирует из
+   бандла `PeerInput` в `TickInput` через `world_mut` и зовёт
+   `Engine::run_fixed_step` (§6.1). Это код
    хоста, не система `fixed_schedule`: система не может записать ресурс.
    `player_input` только читает уже положенный `TickInput`. Не хвост
    `transform_update` и не `MutationBus::drain`.
