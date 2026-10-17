@@ -50,6 +50,7 @@ pub struct AaPass {
 
 impl AaPass {
     /// Creates a per-camera node with an RGBA16Float linear output.
+    // qual:api — opt-in custom frame-plan entry point.
     pub fn new(device: &wgpu::Device, extent: [u32; 2], mode: AntiAliasing) -> Self {
         Self {
             resolve: AaResolve::new(device, wgpu::TextureFormat::Rgba16Float, extent, mode),
@@ -57,11 +58,13 @@ impl AaPass {
     }
 
     /// Resizes history and resets accumulation. Call with the frame-plan resize.
+    // qual:api — custom plans propagate viewport changes here.
     pub fn resize(&mut self, device: &wgpu::Device, extent: [u32; 2]) {
         self.resolve.resize(device, extent);
     }
 
     /// Resets history for a camera cut or scene replacement.
+    // qual:api — custom plans report camera discontinuities here.
     pub fn reset_history(&mut self) {
         self.resolve.reset_history();
     }
