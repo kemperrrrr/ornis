@@ -51,6 +51,7 @@
 
 use std::sync::Mutex;
 
+use glam::Vec3;
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
 use crate::camera::camera_view_projection;
@@ -267,6 +268,90 @@ impl System for RenderMesh {
     }
 }
 
+/// Perspective CSM camera `(near, far, forward)`, or `None` when the frame
+/// stays on the legacy single-layer path.
+fn csm_camera_args(view: &crate::camera::CameraView) -> Option<(f32, f32, [f32; 3])> {
+    let forward = view.target - view.eye;
+    let len2 = forward.length_squared();
+    if !matches!(
+        view.projection,
+        ornis_assets::scene::CameraProjection::Perspective
+    ) || len2 <= f32::EPSILON
+    {
+        return None;
+    }
+    let scale = 1.0 / len2.sqrt();
+    Some((
+        view.near.get(),
+        view.far.get(),
+        (forward * scale).to_array(),
+    ))
+}
+
+/// Drop CSM so an orthographic or degenerate camera uses the legacy shadow.
+fn clear_csm(renderer: &Renderer3D) {
+    renderer.clear_csm_camera();
+    renderer.clear_csm_casters();
+}
+
+/// Publish one caster AABB, or clear it when the frame has no finite spheres.
+fn publish_csm_casters(renderer: &Renderer3D, bounds: Option<([f32; 3], [f32; 3])>) {
+    match bounds {
+        Some((min, max)) => renderer.set_csm_casters(min, max),
+        None => renderer.clear_csm_casters(),
+    }
+}
+
+/// Enable CSM for a perspective camera and publish the extracted caster
+/// AABB. Orthographic cameras stay on the legacy single-layer path: cascade
+/// corners are unprojected with the perspective depth formula.
+fn submit_csm(
+    renderer: &Renderer3D,
+    view: &crate::camera::CameraView,
+    upload: &crate::extraction::FrameUpload,
+) {
+    match csm_camera_args(view) {
+        Some((near, far, dir)) => {
+            renderer.set_csm_camera(near, far, dir);
+            publish_csm_casters(renderer, caster_aabb(upload));
+        }
+        None => clear_csm(renderer),
+    }
+}
+
+/// Conservative AABB of every extracted instance sphere.
+fn caster_aabb(upload: &crate::extraction::FrameUpload) -> Option<([f32; 3], [f32; 3])> {
+    let customs = upload.custom_meshes.iter().map(|entry| &entry.instance);
+    fold_spheres(
+        upload
+            .instances
+            .iter()
+            .chain(customs)
+            .map(crate::extraction::instance_sphere),
+    )
+}
+
+/// Union of finite instance spheres. Non-finite centers and radii are skipped.
+fn fold_spheres(spheres: impl Iterator<Item = (Vec3, f32)>) -> Option<([f32; 3], [f32; 3])> {
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    for (center, radius) in spheres {
+        if !f32::is_finite(center.x)
+            || !f32::is_finite(center.y)
+            || !f32::is_finite(center.z)
+            || !f32::is_finite(radius)
+        {
+            continue;
+        }
+        let extent = glam::Vec3::splat(radius);
+        min = min.min(center - extent);
+        max = max.max(center + extent);
+        any = true;
+    }
+    any.then_some((min.to_array(), max.to_array()))
+}
+
 /// Frame submit system: reads lanes + camera + lights, writes GPU state.
 ///
 /// S7 step 1: runs `set_camera`/`upload_*`. X1 (Extract-free): material and
@@ -342,11 +427,12 @@ impl System for RenderSubmit {
         let extracted = extract_render_data(store);
         // S7: the camera math lives in `camera_view_projection` — `run`
         // stays pure orchestration (IOSP).
-        let (view_proj, cam_pos) =
-            camera_view_projection(&orbit.view_parameters(), surface_state.size);
+        let view = orbit.view_parameters();
+        let (view_proj, cam_pos) = camera_view_projection(&view, surface_state.size);
 
         fs.renderer
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
+        submit_csm(&fs.renderer, &view, &extracted);
         // Typed `Color` / `Lux` stay on the resource. Raw floats exist only
         // in this upload: linear RGB here, renderer exposure inside
         // `set_lights` (the resource multipliers default to the no-op).
@@ -624,6 +710,32 @@ mod tests {
     use ornis_core::Engine;
 
     fn assert_send_sync<T: Send + Sync>() {}
+
+    /// Perspective submit keeps the camera's near, far and view forward.
+    /// `-forward` and `far * 0.25` both miss this.
+    #[test]
+    fn csm_camera_args_keeps_near_far_and_forward() {
+        let eye = glam::Vec3::new(0.0, 4.0, 12.0);
+        let target = glam::Vec3::ZERO;
+        let view = crate::camera::CameraView {
+            eye,
+            target,
+            up: glam::Vec3::Y,
+            projection: ornis_assets::scene::CameraProjection::Perspective,
+            fov: ornis_core::Degrees::new(60.0),
+            near: ornis_core::Meters::new(0.1),
+            far: ornis_core::Meters::new(200.0),
+        };
+        let (near, far, dir) = csm_camera_args(&view).expect("perspective camera");
+        let expect = (target - eye).normalize();
+        let got = glam::Vec3::from_array(dir);
+        assert!((near - view.near.get()).abs() < 1e-5, "near {near}");
+        assert!((far - view.far.get()).abs() < 1e-5, "far {far}");
+        assert!(
+            (got - expect).length() < 1e-5,
+            "forward {got:?} != {expect:?}"
+        );
+    }
 
     #[test]
     fn frame_command_buffers_are_world_resources() {

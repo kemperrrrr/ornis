@@ -54,7 +54,8 @@ pub use forward::{
     forward_blend_state, sort_by_depth,
 };
 pub use gbuffer::{GBufferTextures, GbufferTargets};
-pub(crate) use lights::{GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
+pub use lights::CsmCamera;
+pub(crate) use lights::{CsmBlock, CsmVp, GpuLight, LIGHT_KIND_DIRECTIONAL, LightingUniform};
 pub use lights::{LightUploadStats, MAX_LIGHTS, ShadingDebug, count_light_drops};
 // Path-stability re-exports: `crate::renderer::X` before the split; no
 // in-crate users outside their module right now.
@@ -67,8 +68,8 @@ pub use meshes::{
 pub use post::{BloomPass, CompositeInputs, CompositePass, CompositeResources, FogInputs};
 pub(crate) use post::{BloomUniform, FogPipeline, FogUniform};
 pub use shadows::{
-    POINT_SHADOW_CUBES, SHADOW_CUBE_NEAR, SHADOW_CUBE_SIZE, SHADOW_LAYERS, SHADOW_ORTHO_HALF,
-    SHADOW_SIZE, shadow_fit_for_bounds,
+    CSM_CASCADES, CSM_SPLIT_LAMBDA, POINT_SHADOW_CUBES, SHADOW_CUBE_NEAR, SHADOW_CUBE_SIZE,
+    SHADOW_LAYERS, SHADOW_ORTHO_HALF, SHADOW_SIZE, shadow_fit_for_bounds,
 };
 
 use shadows::CUBE_FACE_COUNT;
@@ -425,6 +426,28 @@ pub struct Renderer3D {
     /// `None` (default) keeps the legacy ±[`SHADOW_ORTHO_HALF`] box around
     /// the origin, so scenes that never set bounds render pixel-identical.
     shadow_fit: std::sync::RwLock<Option<([f32; 3], f32)>>,
+    /// CSM camera description from [`set_csm_camera`](Self::set_csm_camera).
+    /// `None` (default) keeps CSM off, so scenes that never opt in render
+    /// pixel-identical to the legacy rig.
+    csm_camera: std::sync::RwLock<Option<CsmCamera>>,
+    /// Scene caster AABB for cascade depth (`min`, `max`), from
+    /// [`set_csm_casters`](Self::set_csm_casters). `None` falls back to the
+    /// legacy [`shadow_fit`](Self::shadow_fit) cube when that is set.
+    csm_casters: std::sync::RwLock<Option<([f32; 3], [f32; 3])>>,
+    /// Last camera uniform on the CPU (written by [`set_camera`](Self::set_camera)):
+    /// cascade fitting reads its inverse view-projection.
+    camera_cpu: std::sync::RwLock<CameraUniform>,
+    /// CSM depth pool: one layer per cascade with per-layer views, the
+    /// sampling array view, and per-layer VP uniforms (separate limit
+    /// from [`SHADOW_LAYERS`], see #121). Shares the depth-only
+    /// pipelines and the comparison sampler with the legacy pool.
+    csm_maps: wgpu::Texture,
+    csm_views: [wgpu::TextureView; CSM_CASCADES],
+    csm_array_view: wgpu::TextureView,
+    csm_vp_buffers: [wgpu::Buffer; CSM_CASCADES],
+    /// Active CSM cascade count published by the last
+    /// [`set_lights`](Self::set_lights) call (layers `0..count`).
+    csm_count: std::sync::atomic::AtomicU32,
     /// Upload report of the last [`set_lights`](Self::set_lights) /
     /// [`set_lights_full`](Self::set_lights_full) call; read via
     /// [`light_upload_stats`](Self::light_upload_stats).
@@ -564,6 +587,7 @@ impl Renderer3D {
             &self.shadow_array_view,
             &self.shadow_sampler,
             &self.shadow_cube_array_view,
+            &self.csm_array_view,
             &self.ibl,
             width,
             height,
@@ -581,9 +605,9 @@ impl Renderer3D {
 
     /// Bytes allocated by the persistent textures of the legacy path: the
     /// five g-buffer MRTs plus g-buffer depth, lighting target, forward
-    /// color, shadow-map array, point-shadow cubes, and — when
-    /// [`MSAA_SAMPLE_COUNT`] is active — the single-sample MSAA resolve
-    /// targets.
+    /// color, shadow-map array, point-shadow cubes, the CSM cascade pool,
+    /// and — when [`MSAA_SAMPLE_COUNT`] is active — the single-sample MSAA
+    /// resolve targets.
     pub fn texture_budget(&self) -> u64 {
         let bpp = crate::transient_pool::format_bytes_per_pixel;
         let w = self.width as u64;
@@ -626,7 +650,12 @@ impl Renderer3D {
             * cube_size.width as u64
             * cube_size.height as u64
             * cube_size.depth_or_array_layers as u64;
-        gbuffer + pbr + forward + resolves + shadow + cubes
+        let csm_size = self.csm_maps.size();
+        let csm = bpp(wgpu::TextureFormat::Depth32Float) as u64
+            * csm_size.width as u64
+            * csm_size.height as u64
+            * csm_size.depth_or_array_layers as u64;
+        gbuffer + pbr + forward + resolves + shadow + cubes + csm
     }
 
     /// Upload the camera uniform: view-projection, its inverse (computed here)
@@ -640,7 +669,68 @@ impl Renderer3D {
             inv_view_proj,
             camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
         };
+        *write_lock(&self.camera_cpu) = uniform;
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Opt into cascaded shadows for the next [`set_lights`](Self::set_lights)
+    /// calls (#121): `near`/`far` are the camera view depths in meters and
+    /// `forward` its world-space view direction. The first shadowed
+    /// directional light then renders one snapped depth layer per cascade
+    /// into the dedicated CSM pool instead of a single legacy layer.
+    /// Call every frame the camera moves (like [`set_camera`](Self::set_camera));
+    /// scenes that never call it keep the legacy path exactly. The frame
+    /// submit does call it for a perspective camera.
+    pub fn set_csm_camera(&self, near: f32, far: f32, forward: [f32; 3]) {
+        *write_lock(&self.csm_camera) = Some(CsmCamera { near, far, forward });
+    }
+
+    /// Drop the CSM camera so the next [`set_lights`](Self::set_lights)
+    /// takes the legacy single-layer path.
+    pub fn clear_csm_camera(&self) {
+        *write_lock(&self.csm_camera) = None;
+    }
+
+    /// Scene caster AABB (`min`, `max`) whose light-space depth every
+    /// cascade must cover. Non-finite input is ignored. An inverted box
+    /// is swapped into order.
+    pub fn set_csm_casters(&self, min: [f32; 3], max: [f32; 3]) {
+        if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
+            return;
+        }
+        let lo = [min[0].min(max[0]), min[1].min(max[1]), min[2].min(max[2])];
+        let hi = [min[0].max(max[0]), min[1].max(max[1]), min[2].max(max[2])];
+        *write_lock(&self.csm_casters) = Some((lo, hi));
+    }
+
+    /// Drop the caster AABB stored by [`set_csm_casters`](Self::set_csm_casters).
+    pub fn clear_csm_casters(&self) {
+        *write_lock(&self.csm_casters) = None;
+    }
+
+    /// Caster AABB stored by the last [`set_csm_casters`](Self::set_csm_casters).
+    #[cfg(test)]
+    pub(crate) fn csm_casters_for_tests(&self) -> Option<([f32; 3], [f32; 3])> {
+        *read_lock(&self.csm_casters)
+    }
+
+    /// Active cascade count published by the last [`set_lights`](Self::set_lights).
+    /// `0` when CSM is off.
+    pub fn csm_cascade_count(&self) -> u32 {
+        self.csm_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Caster AABB for cascade depth: the explicit box when one was stored,
+    /// otherwise the legacy shadow-fit cube.
+    fn csm_caster_aabb(&self) -> Option<([f32; 3], [f32; 3])> {
+        if let Some(aabb) = *read_lock(&self.csm_casters) {
+            return Some(aabb);
+        }
+        let (center, half) = (*read_lock(&self.shadow_fit))?;
+        Some((
+            [center[0] - half, center[1] - half, center[2] - half],
+            [center[0] + half, center[1] + half, center[2] + half],
+        ))
     }
 }
 

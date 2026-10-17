@@ -32,7 +32,7 @@ use super::{
     ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
     wgsl_decl,
 };
-use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
+use crate::renderer::{CameraUniform, CsmBlock, CsmVp, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::math;
 use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
@@ -140,12 +140,13 @@ pub(crate) struct PbrTexturedContext {
     pub irradiance_cube: TextureCube,
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
+    pub csm_tex: DepthTextureArray,
 }
 
 /// Resource layout of the textured-forward pass: the legacy seven rows
 /// verbatim plus one texture row per role and the shared sampler.
 /// Type names come from the Rust side.
-pub const TEXTURED_PBR_RESOURCES: [Resource; 15] = [
+pub const TEXTURED_PBR_RESOURCES: [Resource; 16] = [
     Resource {
         group: 0,
         binding: 0,
@@ -266,6 +267,14 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 15] = [
         kind: ResourceKind::Sampler,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 15,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "csm_tex",
+        kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
 ];
 
 /// Textured forward-PBR fragment entry, translated by
@@ -380,6 +389,20 @@ fn fs_main_textured(
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
         let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
+        // CSM directional path (#121): `params.x` carries the cascade
+        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
+        let is_csm =
+            (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(CSM_ACTIVE_EDGE, light.params.x);
+        if is_csm > LIGHT_SELECTOR_SPLIT {
+            let vis = csm_visibility(
+                input.world_position,
+                ctx.camera.camera_pos.xyz,
+                ctx.lighting.csm,
+                ctx.csm_tex,
+                ctx.shadow_sampler,
+            );
+            radiance = radiance * vis;
+        }
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
@@ -595,7 +618,7 @@ fn fs_main_textured(
 ///
 /// Bindings 11–14 are the split-sum IBL set on top of the untextured
 /// forward-PBR indices.
-const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Textured forward-PBR fragment shader: the legacy evaluation plus the
 /// three role samples, assembled exactly like
@@ -630,6 +653,8 @@ pub fn wgsl_source_textured() -> String {
     let module = ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
+        .decl(wgsl_decl(CsmVp::WGSL_SOURCE))
+        .decl(wgsl_decl(CsmBlock::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
         .resources(&TEXTURED_PBR_RESOURCES, TEXTURED_PBR_FRAGMENT_BINDINGS)
@@ -731,7 +756,7 @@ mod tests {
         // Vertex-only rows (per_objects) live in the shared vertex stage,
         // like the legacy table — cover both assemblies together.
         let src = wgsl_vertex_source() + &wgsl_source_textured();
-        assert_eq!(TEXTURED_PBR_RESOURCES.len(), 15);
+        assert_eq!(TEXTURED_PBR_RESOURCES.len(), 16);
         for (i, r) in TEXTURED_PBR_RESOURCES.iter().enumerate() {
             assert!(src.contains(&resource_decl(r)), "missing {}", r.name);
             let e = bgl_entry(r, false);

@@ -4,8 +4,10 @@
 //! Acceptance: disabled AO is bit-identical to the AO-free frame; the
 //! cube/floor contact and the wall joint darken while the open floor does
 //! not; checked-in goldens pin off/SSAO/GTAO; a directional light with no
-//! ambient is untouched; a red fin at ~1 m in front of a blue wall at ~5 m
-//! keeps its occlusion on the near side of one bilateral tap.
+//! ambient is untouched, including when cascaded shadows are on; with
+//! ambient, AO still darkens under those cascades; a red fin at ~1 m in
+//! front of a blue wall at ~5 m keeps its occlusion on the near side of
+//! one bilateral tap.
 //!
 //! Skip contract: returns early with a note when no adapter exists (same
 //! as the other headless gates; CI provides lavapipe). `ORNIS_REQUIRE_GPU=1`
@@ -17,6 +19,10 @@
 
 #[allow(dead_code)]
 mod common;
+
+/// Red fin against a blue wall: the bilateral blur must not cross the step.
+#[path = "ao_corner/depth_step.rs"]
+mod depth_step;
 
 use common::sized::{FrameSpec, render_and_readback};
 use ornis_render::render_backend::RenderContext;
@@ -55,6 +61,14 @@ const NEAR_M: f32 = 0.1;
 const FAR_M: f32 = 100.0;
 /// Instanced boxes: floor, two walls, cube.
 const CORNER_INSTANCES: u32 = 4;
+/// (translation, scale) of those boxes. The mesh is a unit box, so the
+/// world AABB is each translation expanded by half the scale.
+const CORNER_BOXES: [([f32; 3], [f32; 3]); 4] = [
+    ([0.0, -0.1, 0.0], [10.0, 0.2, 10.0]),
+    ([-2.1, 3.0, 0.0], [0.2, 6.0, 10.0]),
+    ([0.0, 3.0, -2.1], [10.0, 6.0, 0.2]),
+    ([-1.73, 0.25, -1.73], [0.5, 0.5, 0.5]),
+];
 
 /// Offscreen frame spec (shared harness builds targets from it).
 fn frame_spec() -> FrameSpec {
@@ -91,14 +105,7 @@ fn build_corner(device: &wgpu::Device, queue: &wgpu::Queue) -> (Renderer3D, orni
     material.base.color_rgb([0.9, 0.9, 0.9]);
     material.specular.roughness(1.0);
     renderer.upload_materials(device, queue, &[material]);
-    // (translation, scale): floor, wall x=-2, wall z=-2, cube in the joint.
-    let boxes = [
-        ([0.0, -0.1, 0.0], [10.0, 0.2, 10.0]),
-        ([-2.1, 3.0, 0.0], [0.2, 6.0, 10.0]),
-        ([0.0, 3.0, -2.1], [10.0, 6.0, 0.2]),
-        ([-1.73, 0.25, -1.73], [0.5, 0.5, 0.5]),
-    ];
-    let instances: Vec<InstanceData> = boxes
+    let instances: Vec<InstanceData> = CORNER_BOXES
         .iter()
         .map(|(t, s)| {
             let model = glam::Mat4::from_scale_rotation_translation(
@@ -226,16 +233,7 @@ fn ao_darkens_the_corner_and_never_brightens() {
         // Determinism: the hash is per-pixel, with no temporal component.
         let again = render_pixels(&device, &queue, &renderer, &mesh, Some(wiring(method, 1.0)));
         assert_eq!(pixels, again, "{method:?} AO frame is not deterministic");
-        let mut dark = 0usize;
-        let mut bright = 0usize;
-        for (a, b) in reference.chunks_exact(4).zip(pixels.chunks_exact(4)) {
-            let darker = [0, 1, 2]
-                .iter()
-                .any(|&i| a[i].saturating_sub(b[i]) > OCCLUSION_DELTA);
-            let brighter = [0, 1, 2].iter().any(|&i| b[i].saturating_sub(a[i]) > TOL);
-            dark += darker as usize;
-            bright += brighter as usize;
-        }
+        let (dark, bright) = occlusion_counts(&reference, &pixels);
         let total = (W * H) as f64;
         let fraction = dark as f64 / total;
         eprintln!(
@@ -253,6 +251,53 @@ fn ao_darkens_the_corner_and_never_brightens() {
         assert_golden(method, &pixels);
     }
     assert_golden_off(&reference);
+}
+
+/// Pixels AO darkened (any channel drops by more than [`OCCLUSION_DELTA`])
+/// and pixels it brightened (any channel rises by more than [`TOL`]).
+fn occlusion_counts(reference: &[u8], pixels: &[u8]) -> (usize, usize) {
+    let mut dark = 0usize;
+    let mut bright = 0usize;
+    for (a, b) in reference.chunks_exact(4).zip(pixels.chunks_exact(4)) {
+        let darker = [0, 1, 2]
+            .iter()
+            .any(|&i| a[i].saturating_sub(b[i]) > OCCLUSION_DELTA);
+        let brighter = [0, 1, 2].iter().any(|&i| b[i].saturating_sub(a[i]) > TOL);
+        dark += usize::from(darker);
+        bright += usize::from(brighter);
+    }
+    (dark, bright)
+}
+
+/// World AABB of [`CORNER_BOXES`]: each unit box is centered on its translation.
+fn corner_caster_aabb() -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for (translation, scale) in CORNER_BOXES {
+        for axis in 0..translation.len() {
+            let half = scale[axis] / 2.0;
+            min[axis] = min[axis].min(translation[axis] - half);
+            max[axis] = max[axis].max(translation[axis] + half);
+        }
+    }
+    (min, max)
+}
+
+/// Shadowed directional over the corner, with CSM engaged for `ambient`.
+fn engage_corner_csm(queue: &wgpu::Queue, renderer: &Renderer3D, ambient: [f32; 3]) {
+    let eye = glam::Vec3::from_array(EYE);
+    let forward = (glam::Vec3::from_array(LOOK) - eye).normalize();
+    renderer.set_csm_camera(NEAR_M, FAR_M, forward.to_array());
+    let (min, max) = corner_caster_aabb();
+    renderer.set_csm_casters(min, max);
+    let direction = ornis_core::UnitVec3::normalize(glam::Vec3::new(-1.0, 0.8, 0.3))
+        .expect("shadowed directional");
+    let light = DirectionalLight {
+        direction,
+        ..DirectionalLight::default()
+    };
+    renderer.set_lights(queue, ambient, &[light.to_light_desc()]);
+    assert_eq!(renderer.csm_cascade_count(), 4, "CSM did not engage");
 }
 
 /// Pixel of a world point under the corner camera.
@@ -406,164 +451,50 @@ fn ao_leaves_direct_light_bit_identical() {
     }
 }
 
-/// Red fin at ~1 m in front of a blue wall at ~5 m. The crease is the
-/// silhouette the bilateral tap can reach; the two albedos name the sides.
-fn build_depth_step(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> (Renderer3D, ornis_render::Mesh) {
-    let renderer = Renderer3D::new(device, &frame_spec().surface_config(), 1);
-    let mesh = ornis_render::create_box(device, [1.0, 1.0, 1.0]);
-    let mut near_mat = OpenPBRMaterial::dielectric();
-    near_mat.base.color_rgb([0.9, 0.25, 0.25]);
-    near_mat.specular.roughness(1.0);
-    let mut far_mat = OpenPBRMaterial::dielectric();
-    far_mat.base.color_rgb([0.25, 0.25, 0.9]);
-    far_mat.specular.roughness(1.0);
-    renderer.upload_materials(device, queue, &[near_mat, far_mat]);
-    // A facing wall plus a thin fin, ~1 m away, with the blue wall ~5 m
-    // behind the fin. The crease sits on the silhouette the blur can reach.
-    let boxes = [
-        ([0.0, -0.02, 0.0], [2.0, 0.04, 2.0], 0u32),
-        ([-0.15, 0.28, 0.0], [0.55, 0.56, 0.06], 0),
-        ([0.38, 0.28, 0.18], [0.03, 0.56, 0.4], 0),
-        ([0.0, 1.0, -4.0], [12.0, 5.0, 0.1], 1),
-    ];
-    let instances: Vec<InstanceData> = boxes
-        .iter()
-        .map(|(t, s, material)| {
-            let model = glam::Mat4::from_scale_rotation_translation(
-                glam::Vec3::from_array(*s),
-                glam::Quat::IDENTITY,
-                glam::Vec3::from_array(*t),
-            );
-            InstanceData {
-                model_matrix: model,
-                normal_matrix: model.inverse().transpose(),
-                material_index: MaterialIdx::from_raw(*material),
-            }
-        })
-        .collect();
-    renderer.upload_instances(device, queue, &instances);
-    let eye = glam::Vec3::new(0.15, 0.4, 1.15);
-    let view =
-        glam::camera::rh::view::look_at_mat4(eye, glam::Vec3::new(0.05, 0.28, 0.0), glam::Vec3::Y);
-    let proj = glam::camera::rh::proj::directx::perspective(
-        50.0f32.to_radians(),
-        W as f32 / H as f32,
-        0.1,
-        30.0,
-    );
-    renderer.set_camera(
-        queue,
-        &(proj * view).to_cols_array_2d(),
-        [eye.x, eye.y, eye.z],
-    );
-    renderer.set_lights(queue, [0.55, 0.55, 0.6], &[]);
-    (renderer, mesh)
-}
-
-/// Full-res pixels covered by one bilateral tap: 1.5 half-res texels times
-/// the AO divisor. A weights=1 blur mixes exactly this far.
-const BLUR_TAP_PX: i32 = 3;
-/// Sum-of-RGB drop on the red side. One weights=1 tap out of five samples
-/// would move the blue side by at least this divided by five.
-const STEP_NEAR_DROP: i32 = 36;
-/// Sum-of-RGB drop still accepted on the blue side of the tap.
-const STEP_FAR_DROP: i32 = 6;
-/// Silhouette pairs a depth-aware blur keeps. Weight 1 leaves at most a
-/// couple on lavapipe (the fin bleeds onto the backdrop, or the near drop
-/// itself falls under [`STEP_NEAR_DROP`]); the bilateral kernel keeps
-/// more than thirty. Eight was inside the noise of a box blur.
-const STEP_PAIR_MIN: usize = 16;
-
+/// CSM on: AO stays off a direct-only frame and still darkens ambient.
+///
+/// A mutant that forces the AO factor to 1 whenever `csm.split_far` is
+/// live keeps the direct-only frames identical and leaves the ambient
+/// frames undarkened, so the darkening assert is what kills it.
 #[test]
-fn ao_blur_does_not_cross_a_depth_step() {
-    let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
+fn ao_with_csm_darkens_ambient_and_leaves_direct() {
+    let Some((device, queue, renderer, mesh, _)) = prepared_corner() else {
         return;
     };
-    let (renderer, mesh) = build_depth_step(&device, &queue);
-    let reference = render_count(&device, &queue, &renderer, &mesh, 4, None);
+    engage_corner_csm(&queue, &renderer, [0.0, 0.0, 0.0]);
+    let direct = render_pixels(&device, &queue, &renderer, &mesh, None);
+    let lit = lit_fraction(&direct);
+    eprintln!("ao+csm probe: direct-only lit fraction = {lit:.3}");
+    assert!(lit > 0.0, "direct-only CSM frame is black: {lit:.3}");
     for method in [AoMethod::Ssao, AoMethod::Gtao] {
-        let wiring = AoWiring::new(AoSettings::new(method, 0.6, 1.0, 0.02).expect("valid"));
-        let pixels = render_count(&device, &queue, &renderer, &mesh, 4, Some(wiring));
-        let pairs = depth_step_pairs(&reference, &pixels);
-        eprintln!("{method:?} depth-step pairs {pairs}");
-        assert!(
-            pairs >= STEP_PAIR_MIN,
-            "{method:?} kept only {pairs} bilateral pairs (need {STEP_PAIR_MIN})"
+        let pixels = render_pixels(&device, &queue, &renderer, &mesh, Some(wiring(method, 1.0)));
+        assert_eq!(
+            pixels, direct,
+            "{method:?} changed a direct-only CSM frame (AO must not touch direct light)"
         );
     }
-}
 
-/// Red/blue pairs one bilateral tap apart: the red pixel is occluded and the
-/// blue pixel is not. Returns how many such pairs the frame contains.
-fn depth_step_pairs(reference: &[u8], pixels: &[u8]) -> usize {
-    let mut pairs = 0usize;
-    for y in 0..H as i32 {
-        pairs += depth_step_row(reference, pixels, y);
+    engage_corner_csm(&queue, &renderer, [0.55, 0.55, 0.6]);
+    let ambient = render_pixels(&device, &queue, &renderer, &mesh, None);
+    let lit = lit_fraction(&ambient);
+    assert!(
+        lit > MIN_LIT_FRACTION,
+        "ambient CSM frame is black: {lit:.3}"
+    );
+    for method in [AoMethod::Ssao, AoMethod::Gtao] {
+        let pixels = render_pixels(&device, &queue, &renderer, &mesh, Some(wiring(method, 1.0)));
+        let (dark, bright) = occlusion_counts(&ambient, &pixels);
+        let fraction = dark as f64 / f64::from(W * H);
+        eprintln!(
+            "ao+csm probe: {method:?} darkened pixels = {dark} ({fraction:.4}), brightened = {bright}"
+        );
+        assert_eq!(
+            bright, 0,
+            "{method:?} brightened {bright} pixels under CSM (AO must never add light)"
+        );
+        assert!(
+            fraction >= MIN_DARK_FRACTION,
+            "{method:?} AO does not darken under CSM ({dark})"
+        );
     }
-    pairs
-}
-
-fn depth_step_row(reference: &[u8], pixels: &[u8], y: i32) -> usize {
-    let mut pairs = 0usize;
-    for x in 0..W as i32 {
-        pairs += depth_step_at(reference, pixels, x, y);
-    }
-    pairs
-}
-
-fn depth_step_at(reference: &[u8], pixels: &[u8], x: i32, y: i32) -> usize {
-    if !is_red(reference, x, y) {
-        return 0;
-    }
-    let near = rgb_sum(reference, x, y) - rgb_sum(pixels, x, y);
-    if near < STEP_NEAR_DROP {
-        return 0;
-    }
-    blur_taps_onto_blue(reference, pixels, x, y, near)
-}
-
-/// Cardinal taps at [`BLUR_TAP_PX`]. A weights=1 blur (center plus four
-/// taps, one of them this red pixel) would push `near / 5` onto the blue
-/// side; that has to clear [`STEP_FAR_DROP`] while the real tap does not.
-fn blur_taps_onto_blue(reference: &[u8], pixels: &[u8], x: i32, y: i32, near: i32) -> usize {
-    let mut pairs = 0usize;
-    for (dx, dy) in [
-        (BLUR_TAP_PX, 0),
-        (-BLUR_TAP_PX, 0),
-        (0, BLUR_TAP_PX),
-        (0, -BLUR_TAP_PX),
-    ] {
-        if tap_stays_on_blue(reference, pixels, x + dx, y + dy, near) {
-            pairs += 1;
-        }
-    }
-    pairs
-}
-
-fn tap_stays_on_blue(reference: &[u8], pixels: &[u8], x: i32, y: i32, near: i32) -> bool {
-    if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 || !is_blue(reference, x, y) {
-        return false;
-    }
-    let far = rgb_sum(reference, x, y) - rgb_sum(pixels, x, y);
-    far <= STEP_FAR_DROP && near / 5 > STEP_FAR_DROP
-}
-
-fn rgb_sum(pixels: &[u8], x: i32, y: i32) -> i32 {
-    let i = ((y as u32 * W + x as u32) * 4) as usize;
-    i32::from(pixels[i]) + i32::from(pixels[i + 1]) + i32::from(pixels[i + 2])
-}
-
-/// Near fin: red albedo, clearly above the blue backdrop.
-fn is_red(pixels: &[u8], x: i32, y: i32) -> bool {
-    let i = ((y as u32 * W + x as u32) * 4) as usize;
-    i32::from(pixels[i]) > i32::from(pixels[i + 2]) + i32::from(TOL) * 5
-}
-
-/// Backdrop: blue albedo, clearly above the red fin.
-fn is_blue(pixels: &[u8], x: i32, y: i32) -> bool {
-    let i = ((y as u32 * W + x as u32) * 4) as usize;
-    i32::from(pixels[i + 2]) > i32::from(pixels[i]) + i32::from(TOL) * 5
 }

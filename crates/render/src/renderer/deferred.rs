@@ -176,6 +176,7 @@ impl Renderer3D {
                     "shadow_tex" => {
                         Some(wgpu::BindingResource::TextureView(&self.shadow_array_view))
                     }
+                    "csm_tex" => Some(wgpu::BindingResource::TextureView(&self.csm_array_view)),
                     "shadow_sampler" => Some(wgpu::BindingResource::Sampler(&self.shadow_sampler)),
                     "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(
                         &self.shadow_cube_array_view,
@@ -219,6 +220,58 @@ impl Renderer3D {
         rpass.set_pipeline(&self.lighting_pass.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
         rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
+    }
+
+    /// Deferred frame whose CSM layers are constant depths instead of a
+    /// shadow pre-pass. `depths[i]` is cleared into cascade `i` after the
+    /// g-buffer and before lighting, so a probe can tell which layer the
+    /// shader sampled.
+    #[cfg(test)]
+    pub(crate) fn render_deferred_with_csm_depths(
+        &self,
+        context: crate::render_backend::RenderContext<'_>,
+        mesh: &Mesh,
+        instance_count: u32,
+        depths: [f32; CSM_CASCADES],
+    ) {
+        let g = GbufferTargets {
+            albedo: &self.gbuffer.albedo_view,
+            normal: &self.gbuffer.normal_view,
+            material_id: &self.gbuffer.material_id_view,
+            world_position: &self.gbuffer.world_position_view,
+            material_params: &self.gbuffer.material_params_view,
+            depth: &self.gbuffer.depth_view,
+        };
+        self.render_gbuffer(context.device, context.encoder, &g, mesh, instance_count);
+        self.mark_csm_depths(context.encoder, depths);
+        self.render_lighting(
+            context.device,
+            context.encoder,
+            &g,
+            &self.pbr_texture_view,
+            None,
+        );
+        self.render_composite(
+            context.device,
+            context.queue,
+            context.encoder,
+            CompositeInputs {
+                target: context.target,
+                hdr: &self.pbr_texture_view,
+                hdr_fwd: &self.pbr_texture_view,
+                bloom: &self.pbr_texture_view,
+                bloom_intensity: 0.0,
+                mode: 0,
+            },
+        );
+    }
+
+    /// Clear every cascade layer to the matching constant depth.
+    #[cfg(test)]
+    fn mark_csm_depths(&self, encoder: &mut wgpu::CommandEncoder, depths: [f32; CSM_CASCADES]) {
+        for (layer, depth) in depths.iter().enumerate() {
+            self.clear_csm_layer_for_tests(encoder, layer as u32, *depth);
+        }
     }
 
     /// Deferred g-buffer plus lighting into `target`, without the forward

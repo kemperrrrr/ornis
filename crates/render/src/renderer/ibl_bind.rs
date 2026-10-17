@@ -120,6 +120,7 @@ impl Renderer3D {
                     &self.shadow_array_view,
                     &self.shadow_sampler,
                     &self.shadow_cube_array_view,
+                    &self.csm_array_view,
                     &self.ibl,
                 ),
             });
@@ -139,6 +140,7 @@ impl Renderer3D {
                 &self.shadow_array_view,
                 &self.shadow_sampler,
                 &self.shadow_cube_array_view,
+                &self.csm_array_view,
                 &self.ibl,
             ),
         });
@@ -160,12 +162,30 @@ mod tests {
             color: [HALF, 0.25, 0.125],
             shadow: ShadowCast::Disabled,
         }];
-        let base =
-            build_lighting_uniform([HALF, 0.25, 0.125], 1.0, 1.0, &lights, None, 0.0, 0.0, 0);
+        let base = build_lighting_uniform(
+            [HALF, 0.25, 0.125],
+            1.0,
+            1.0,
+            &lights,
+            None,
+            None,
+            0.0,
+            0.0,
+            0,
+        );
         assert_eq!(base.uniform.ambient_color, [HALF, 0.25, 0.125, 1.0]);
         assert_eq!(base.uniform.lights[0].color, [HALF, 0.25, 0.125, 2.0]);
-        let scaled =
-            build_lighting_uniform([HALF, 0.25, 0.125], 2.0, 4.0, &lights, None, 0.0, 0.0, 0);
+        let scaled = build_lighting_uniform(
+            [HALF, 0.25, 0.125],
+            2.0,
+            4.0,
+            &lights,
+            None,
+            None,
+            0.0,
+            0.0,
+            0,
+        );
         assert_eq!(scaled.uniform.ambient_color, [1.0, HALF, 0.25, 1.0]);
         assert_eq!(scaled.uniform.lights[0].color, [2.0, 1.0, HALF, 2.0]);
     }

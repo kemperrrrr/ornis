@@ -19,7 +19,7 @@ use super::{
     ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
     wgsl_decl,
 };
-use crate::renderer::{CameraUniform, GpuLight, LightingUniform, PerObjectGpu};
+use crate::renderer::{CameraUniform, CsmBlock, CsmVp, GpuLight, LightingUniform, PerObjectGpu};
 use crate::shaders::{gbuffer_generated, math};
 use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
@@ -37,7 +37,7 @@ pub fn wgsl_vertex_source() -> String {
 ///
 /// Bindings 7–10 are the split-sum IBL set (prefilter, irradiance, BRDF LUT,
 /// sampler) added with the image-based light path.
-const PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 /// Forward-PBR fragment shader: full OpenPBR evaluation.
 ///
@@ -71,6 +71,8 @@ pub fn wgsl_source() -> String {
     let module = ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(wgsl_decl(GpuLight::WGSL_SOURCE))
+        .decl(wgsl_decl(CsmVp::WGSL_SOURCE))
+        .decl(wgsl_decl(CsmBlock::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
         .decl(openpbr_material_decl())
         .resources(&PBR_RESOURCES, PBR_FRAGMENT_BINDINGS)
@@ -102,6 +104,7 @@ pub(crate) struct PbrContext {
     pub irradiance_cube: TextureCube,
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
+    pub csm_tex: DepthTextureArray,
 }
 
 #[stage(fragment)]
@@ -204,6 +207,20 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
         let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
+        // CSM directional path (#121): `params.x` carries the cascade
+        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
+        let is_csm =
+            (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(CSM_ACTIVE_EDGE, light.params.x);
+        if is_csm > LIGHT_SELECTOR_SPLIT {
+            let vis = csm_visibility(
+                input.world_position,
+                ctx.camera.camera_pos.xyz,
+                ctx.lighting.csm,
+                ctx.csm_tex,
+                ctx.shadow_sampler,
+            );
+            radiance = radiance * vis;
+        }
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
@@ -423,7 +440,7 @@ pub fn wgsl_source_static() -> String {
 /// Resource layout of the forward-PBR pass (vertex 0–1, fragment 0, 2–3).
 /// Shared by `create_pbr_bind_group` and `create_forward_pass`, whose
 /// handwritten layouts were identical. Type names come from the Rust side.
-pub const PBR_RESOURCES: [Resource; 11] = [
+pub const PBR_RESOURCES: [Resource; 12] = [
     Resource {
         group: 0,
         binding: 0,
@@ -512,6 +529,14 @@ pub const PBR_RESOURCES: [Resource; 11] = [
         kind: ResourceKind::Sampler,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 11,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "csm_tex",
+        kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
 ];
 
 #[cfg(test)]
@@ -580,6 +605,8 @@ mod tests {
         let src = wgsl_source();
         assert!(src.contains(CameraUniform::WGSL_SOURCE));
         assert!(src.contains(&wgsl_decl(GpuLight::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(CsmVp::WGSL_SOURCE)));
+        assert!(src.contains(&wgsl_decl(CsmBlock::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(LightingUniform::WGSL_SOURCE)));
         assert!(src.contains(openpbr_material_decl().as_str()));
     }
@@ -590,7 +617,7 @@ mod tests {
     fn pbr_resources_cover_stages_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         let src = wgsl_vertex_source() + &wgsl_source();
-        assert_eq!(PBR_RESOURCES.len(), 11);
+        assert_eq!(PBR_RESOURCES.len(), 12);
         for r in PBR_RESOURCES {
             assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
             let e = bgl_entry(&r, false);

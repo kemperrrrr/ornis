@@ -91,7 +91,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 18] = [
+pub const LIGHTING_RESOURCES: [Resource; 19] = [
     Resource {
         group: 0,
         binding: 0,
@@ -236,6 +236,14 @@ pub const LIGHTING_RESOURCES: [Resource; 18] = [
         kind: ResourceKind::TextureFloat,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 18,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "csm_tex",
+        kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
 ];
 
 fn lighting_fragment_kernels() -> String {
@@ -303,6 +311,7 @@ pub(crate) struct LightingMaps {
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
     pub ao_tex: Texture2d,
+    pub csm_tex: DepthTextureArray,
 }
 
 #[stage(fragment)]
@@ -454,6 +463,25 @@ fn shade_lit(
         // Point lights (kind == 1) sample the cube pool; dir/spot use
         // the 2D layers. `params.w` indexes the active pool.
         let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
+        // CSM directional path (#121): `params.x` carries the cascade
+        // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
+        // Legacy `params.w` stays -1.0 here, so the block below is the
+        // only lookup for the CSM light.
+        let is_csm =
+            (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(CSM_ACTIVE_EDGE, light.params.x);
+        if is_csm > LIGHT_SELECTOR_SPLIT {
+            // View depth picks the cascade; the top band of each range
+            // blends into the next cascade to hide the resolution step.
+            let vis = csm_visibility(
+                world_pos,
+                camera.camera_pos.xyz,
+                lighting.csm,
+                csm_tex,
+                shadow_sampler,
+            );
+            radiance = radiance * vis;
+            shadow_vis = min(shadow_vis, vis);
+        }
         // Shadow: project into the light's clip space and compare
         // against its map layer (hardware 2x2 PCF via the comparison
         // sampler). Unshadowed lights keep `params.w = -1.0` and skip
@@ -860,13 +888,26 @@ mod tests {
         assert!(src.contains("fn fs_main"));
     }
 
+    /// Deferred lighting keeps both the AO factor from #137 and the CSM
+    /// helper from #121. Dropping either binding or the `csm_visibility`
+    /// call fails this; naga still has to accept the combined module.
+    #[test]
+    fn lighting_keeps_ambient_occlusion_and_csm() {
+        let src = wgsl_source();
+        assert_valid_wgsl("lighting ao+csm", &src);
+        assert!(src.contains("ao_tex"), "{src}");
+        assert!(src.contains("csm_tex"), "{src}");
+        assert!(src.contains("csm_visibility("), "{src}");
+        assert!(src.contains("* ao"), "AO must scale ambient and IBL: {src}");
+    }
+
     /// The resource table drives both sides: WGSL declarations and `wgpu`
     /// layout entries agree on numbers, visibility and kinds.
     #[test]
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 18);
+        assert_eq!(LIGHTING_RESOURCES.len(), 19);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -891,7 +932,7 @@ mod tests {
     #[test]
     fn lighting_struct_blocks_match_derived_layouts() {
         // The header is built as naga IR from the same derives (drift is
-        // impossible by construction); pin declaration order and the 18
+        // impossible by construction); pin declaration order and the 19
         // resource bindings in the printed output.
         let src = wgsl_source();
         let cam = src.find("struct Camera").expect("Camera");
@@ -900,7 +941,7 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 18);
+        assert_eq!(src.matches("@binding(").count(), 19);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer

@@ -1,6 +1,7 @@
 //! Scene lighting upload: the `GpuLight` pack, the `LightingUniform` block built by `build_lighting_uniform`, and the `set_lights` entry points with their drop accounting.
 use super::shadows::{
-    CUBE_FACE_COUNT, dir_shadow_vp, dir_shadow_vp_fitted, point_cube_face_vp, spot_shadow_vp,
+    CUBE_FACE_COUNT, cascade_shadow_vp, cascade_splits, dir_shadow_vp, dir_shadow_vp_fitted,
+    frustum_slice_corners, point_cube_face_vp, spot_shadow_vp,
 };
 use super::*;
 /// One GPU light: direction + color packed as `vec4`s.
@@ -181,6 +182,63 @@ pub enum ShadingDebug {
     Heat = 7,
 }
 
+/// One cascade light-space VP: mat4 wrapper so [`CsmBlock`] can spell an
+/// array of VPs (the derive accepts structs with a WGSL layout, not
+/// nested raw arrays, as array elements). `align(16)` satisfies the
+/// derive's nested-struct precondition (cf. [`GpuLight`]).
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "CsmVp")]
+pub(crate) struct CsmVp {
+    /// Column-major clip matrix.
+    pub(super) cols: [[f32; 4]; 4],
+}
+
+/// Cascaded-shadow data for a single directional light (#121).
+///
+/// The WGSL `Csm` declaration is generated from this layout
+/// ([`CsmBlock::WGSL_SOURCE`]); the field order keeps every `vec4` on a
+/// 16-byte boundary (cf. [`GpuLight`]) and the trailing pad rounds the
+/// block size up to a multiple of 16.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[wgsl(name = "Csm")]
+pub(crate) struct CsmBlock {
+    /// One light-space VP per cascade (index = CSM layer).
+    #[wgsl(to = "CsmVp")]
+    pub(super) vps: [CsmVp; 4],
+    /// Camera view direction (`w` = 0): cascade select uses view depth.
+    pub(super) view_fwd: [f32; 4],
+    /// Slice boundaries as view depths: camera near, then the first three
+    /// splits (spells `vec4f`; the far edge rides in [`split_far`](Self::split_far)).
+    pub(super) splits_lo: [f32; 4],
+    /// Far edge of the last cascade (camera far).
+    pub(super) split_far: f32,
+    /// Active cascade count (`0` = CSM off, legacy path).
+    pub(super) cascade_count: u32,
+    /// Trailing pad: keeps the block size (304 bytes) a multiple of 16.
+    pub(super) _pad: [u32; 2],
+}
+
+/// Compile-time pin: the WGSL derive only accepts integer literals for
+/// array lengths, so [`CsmBlock::vps`] spells `4` literally — this assert
+/// keeps the spell and the limit in sync (cf. [`MAX_LIGHTS`]).
+const _: [(); CSM_CASCADES] = [(); 4];
+
+/// Camera description for CSM cascade fitting (#121), stored by
+/// [`Renderer3D::set_csm_camera`](super::Renderer3D::set_csm_camera).
+/// CSM stays off until the backend provides it, so scenes that never opt
+/// in render pixel-identical to the legacy rig.
+#[derive(Debug, Clone, Copy)]
+pub struct CsmCamera {
+    /// Near view depth in meters (> 0).
+    pub near: f32,
+    /// Far view depth in meters (> `near`).
+    pub far: f32,
+    /// Camera view direction in world space (normalized at use).
+    pub forward: [f32; 3],
+}
+
 /// Lighting uniform block: ambient + fixed light array + count.
 ///
 /// The WGSL `Lighting` declaration is generated from this layout
@@ -204,6 +262,13 @@ pub(crate) struct LightingUniform {
     pub(super) ibl_max_mip: f32,
     /// [`ShadingDebug`] discriminant. `0` is beauty.
     pub(super) debug_view: u32,
+    /// Cascaded shadow data for one directional light (#121); zeroed
+    /// (inactive) unless [`Renderer3D::set_lights_full`] fits cascades.
+    /// The evaluators take the CSM path only for the directional entry
+    /// whose `params.x` carries the cascade count — everything else stays
+    /// pixel-identical to the pre-CSM block.
+    #[wgsl(to = "Csm")]
+    pub(super) csm: CsmBlock,
 }
 
 /// Identity clip matrix for lights that cast no shadow.
@@ -244,7 +309,10 @@ pub(super) struct BuiltLighting {
 /// reported as dropped. Directional VPs use the legacy ±
 /// [`SHADOW_ORTHO_HALF`] box when `fit` is `None` and the fitted box
 /// otherwise. Shadow layer VPs are collected in assignment order (layer
-/// `i` ↔ entry `i`).
+/// `i` ↔ entry `i`). `csm_owner` (an index into `lights`, decided by
+/// [`Renderer3D::set_lights_full` once cascades fit) marks the single
+/// directional entry whose cascades ride in [`CsmBlock`]: it consumes no
+/// generic layer and carries the cascade count in `params.x`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_lighting_uniform(
     ambient: [f32; 3],
@@ -252,6 +320,7 @@ pub(super) fn build_lighting_uniform(
     exposure: f32,
     lights: &[LightDesc],
     fit: Option<([f32; 3], f32)>,
+    csm_owner: Option<usize>,
     ibl_weight: f32,
     ibl_max_mip: f32,
     debug_view: u32,
@@ -307,12 +376,15 @@ pub(super) fn build_lighting_uniform(
                 // Already unit (normalized once on load/construction):
                 // used as-is so results match the legacy `norm3(raw)`.
                 let to_light = direction.get();
+                // CSM owner (see `set_lights_full`): cascades ride in
+                // `CsmBlock`, no generic layer is consumed.
+                let csm = csm_owner == Some(i) && shadow.is_enabled();
                 let vp = match fit {
                     None => dir_shadow_vp(to_light),
                     Some((center, half)) => dir_shadow_vp_fitted(to_light, center, half),
                 };
-                let (layer, vp) = shadow_layer!(shadow.is_enabled(), vp);
-                if shadow.is_enabled() && layer < 0.0 {
+                let (layer, vp) = shadow_layer!(shadow.is_enabled() && !csm, vp);
+                if shadow.is_enabled() && !csm && layer < 0.0 {
                     dropped_shadows += 1;
                 }
                 if layer >= 0.0 {
@@ -321,7 +393,7 @@ pub(super) fn build_lighting_uniform(
                 GpuLight {
                     direction: norm_dir(direction.as_array()),
                     color: pack_light_color(*color, *intensity, exposure),
-                    params: [0.0, 0.0, 0.0, layer],
+                    params: [if csm { CSM_CASCADES as f32 } else { 0.0 }, 0.0, 0.0, layer],
                     shadow_vp: vp,
                     ..gpu_lights[i]
                 }
@@ -427,6 +499,9 @@ pub(super) fn build_lighting_uniform(
             ibl_weight,
             ibl_max_mip,
             debug_view,
+            // Cascades patch in later (see `set_lights_full`); the pure
+            // preview path keeps the zeroed (inactive) block.
+            csm: bytemuck::Zeroable::zeroed(),
         },
         stats: LightUploadStats {
             uploaded: count as u32,
@@ -438,12 +513,87 @@ pub(super) fn build_lighting_uniform(
     }
 }
 
+/// Index of the first shadowed directional light in upload order, the
+/// single entry eligible to own the CSM cascades (`None` when absent).
+fn first_shadowed_directional_index(lights: &[LightDesc]) -> Option<usize> {
+    lights.iter().take(MAX_LIGHTS).position(|light| {
+        matches!(
+            light,
+            LightDesc::Directional { shadow, .. } if shadow.is_enabled()
+        )
+    })
+}
+
+/// CSM upload for one directional light, or `None` when the camera
+/// description is degenerate (CSM stays off, legacy path applies).
+///
+/// Splits the `[near, far]` range (practical split), fits one snapped
+/// ortho box per slice, and packs the VPs with the slice boundaries.
+/// `casters` widens every cascade's depth to the scene AABB (same box
+/// [`shadow_fit_for_bounds`](super::shadow_fit_for_bounds) describes).
+pub(super) fn build_csm(
+    inv_view_proj: [[f32; 4]; 4],
+    camera: CsmCamera,
+    to_light: glam::Vec3,
+    casters: Option<([f32; 3], [f32; 3])>,
+) -> Option<CsmBlock> {
+    // facade: validate the camera, split the range, fit every slice.
+    if !(camera.near > 0.0 && camera.far > camera.near) {
+        return None;
+    }
+    if !camera.near.is_finite() || !camera.far.is_finite() {
+        return None;
+    }
+    let fwd = glam::Vec3::from_array(camera.forward);
+    if !fwd.is_finite() || fwd.length_squared() <= f32::EPSILON {
+        return None;
+    }
+    let splits = cascade_splits(camera.near, camera.far, CSM_CASCADES, CSM_SPLIT_LAMBDA);
+    // Depth spans the whole frustum so casters outside a slice still
+    // darken it (see `cascade_shadow_vp`).
+    let frustum = frustum_slice_corners(
+        inv_view_proj,
+        camera.near,
+        camera.far,
+        camera.near,
+        camera.far,
+    )?;
+    let mut vps = [CsmVp { cols: NO_SHADOW_VP }; CSM_CASCADES];
+    for (i, pair) in splits.windows(2).enumerate() {
+        let corners =
+            frustum_slice_corners(inv_view_proj, camera.near, camera.far, pair[0], pair[1])?;
+        vps[i] = CsmVp {
+            cols: cascade_shadow_vp(to_light, corners, frustum, casters, SHADOW_SIZE),
+        };
+    }
+    let fwd = fwd.normalize();
+    Some(CsmBlock {
+        vps,
+        view_fwd: [fwd.x, fwd.y, fwd.z, 0.0],
+        splits_lo: [splits[0], splits[1], splits[2], splits[3]],
+        split_far: splits[CSM_CASCADES],
+        cascade_count: CSM_CASCADES as u32,
+        _pad: [0; 2],
+    })
+}
+
 /// Pure preview of what [`Renderer3D::set_lights`] would drop for
 /// `lights`: excess beyond [`MAX_LIGHTS`] plus shadow requests without a
 /// free layer/cube slot. No GPU access — safe to call per frame; log on
 /// scene change, not per frame.
 pub fn count_light_drops(lights: &[LightDesc]) -> LightUploadStats {
-    build_lighting_uniform([0.0; VEC3_COMPONENTS], 1.0, 1.0, lights, None, 0.0, 0.0, 0).stats
+    build_lighting_uniform(
+        [0.0; VEC3_COMPONENTS],
+        1.0,
+        1.0,
+        lights,
+        None,
+        None,
+        0.0,
+        0.0,
+        0,
+    )
+    .stats
 }
 
 impl Renderer3D {
@@ -466,6 +616,35 @@ impl Renderer3D {
     /// was set via [`set_shadow_bounds`](Self::set_shadow_bounds).
     pub fn set_lights(&self, queue: &wgpu::Queue, ambient: [f32; 3], lights: &[LightDesc]) {
         self.set_lights_full(queue, ambient, 1.0, self.exposure, lights);
+    }
+
+    /// Publish CSM cascade VPs for the depth pre-pass (as camera
+    /// uniforms, like the 2D layers) and the active cascade count.
+    fn publish_csm_buffers(&self, queue: &wgpu::Queue, block: CsmBlock) {
+        for (layer, vp) in block.vps.iter().enumerate() {
+            let uniform = CameraUniform {
+                view_proj: vp.cols,
+                inv_view_proj: NO_SHADOW_VP,
+                camera_pos: [0.0, 0.0, 0.0, 1.0],
+            };
+            queue.write_buffer(&self.csm_vp_buffers[layer], 0, bytemuck::bytes_of(&uniform));
+        }
+        self.csm_count
+            .store(CSM_CASCADES as u32, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// CSM upload for the first shadowed directional light, or `None`
+    /// when the backend never called [`set_csm_camera`](Self::set_csm_camera)
+    /// or the fit degenerates (CSM stays off, legacy path applies).
+    fn csm_upload_for(&self, lights: &[LightDesc]) -> Option<(usize, CsmBlock)> {
+        let camera = (*read_lock(&self.csm_camera))?;
+        let inv_view_proj = read_lock(&self.camera_cpu).inv_view_proj;
+        let index = first_shadowed_directional_index(lights)?;
+        let LightDesc::Directional { direction, .. } = &lights[index] else {
+            return None;
+        };
+        let casters = self.csm_caster_aabb();
+        build_csm(inv_view_proj, camera, direction.get(), casters).map(|block| (index, block))
     }
 
     /// [`set_lights`](Self::set_lights) with IBL-minimum multipliers and
@@ -494,16 +673,29 @@ impl Renderer3D {
         let debug_view = self
             .shading_debug
             .load(std::sync::atomic::Ordering::Relaxed);
-        let built = build_lighting_uniform(
+        // CSM first: the owner must be known before the pack assigns
+        // generic layers (the owner consumes none). Without a fitted
+        // block the pack keeps the legacy path exactly.
+        let csm = self.csm_upload_for(lights);
+        let csm_owner = csm.as_ref().map(|(index, _)| *index);
+        let mut built = build_lighting_uniform(
             ambient,
             ambient_intensity,
             exposure,
             lights,
             fit,
+            csm_owner,
             ibl_weight,
             ibl_max_mip,
             debug_view,
         );
+        if let Some((_, block)) = csm {
+            built.uniform.csm = block;
+            self.publish_csm_buffers(queue, block);
+        } else {
+            self.csm_count
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
         // Publish the light-space VPs for the depth pre-pass (as camera
         // uniforms: the shadow pipeline reuses the gbuffer vertex shader,
@@ -571,6 +763,7 @@ mod tests {
             LightingUniform::WGSL_SOURCE
         );
         assert!(LightingUniform::WGSL_SOURCE.contains("debug_view: u32"));
+        assert!(LightingUniform::WGSL_SOURCE.contains("csm: Csm"));
         assert_eq!(
             LightingUniform::FIELD_NAMES,
             &[
@@ -579,7 +772,8 @@ mod tests {
                 "light_count",
                 "ibl_weight",
                 "ibl_max_mip",
-                "debug_view"
+                "debug_view",
+                "csm"
             ]
         );
         assert_eq!(
@@ -587,11 +781,15 @@ mod tests {
                 - std::mem::offset_of!(LightingUniform, ibl_max_mip),
             4
         );
+        assert_eq!(std::mem::size_of::<CsmBlock>(), 304);
+        assert_eq!(std::mem::size_of::<CsmBlock>() % 16, 0);
+        assert_eq!(std::mem::offset_of!(CsmBlock, view_fwd) % 16, 0);
         let built = build_lighting_uniform(
             [0.0; VEC3_COMPONENTS],
             1.0,
             1.0,
             &[],
+            None,
             None,
             0.0,
             0.0,
@@ -599,6 +797,7 @@ mod tests {
         );
         assert_eq!(built.uniform.debug_view, ShadingDebug::Shadow as u32);
         assert_eq!(ShadingDebug::Beauty as u32, 0);
+        assert_eq!(built.uniform.csm.cascade_count, 0);
     }
 
     #[test]
@@ -606,7 +805,8 @@ mod tests {
         let lights: Vec<LightDesc> = (0..10)
             .map(|_| dir_probe([1.0, 1.0, 1.0], ornis_assets::scene::ShadowCast::Disabled))
             .collect();
-        let built = build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, 0.0, 0.0, 0);
+        let built =
+            build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, None, 0.0, 0.0, 0);
         assert_eq!(
             built.stats,
             LightUploadStats {
@@ -618,5 +818,57 @@ mod tests {
         assert_eq!(built.uniform.light_count, 8);
         // The public preview agrees with the upload path (single logic).
         assert_eq!(count_light_drops(&lights), built.stats);
+    }
+
+    #[test]
+    fn csm_owner_skips_generic_layer_and_flags_cascades() {
+        let lights = [dir_probe(
+            [1.0, 1.0, 1.0],
+            ornis_assets::scene::ShadowCast::Enabled,
+        )];
+        let legacy =
+            build_lighting_uniform([0.1, 0.1, 0.15], 1.0, 1.0, &lights, None, None, 0.0, 0.0, 0);
+        assert_eq!(legacy.uniform.lights[0].params[3], 0.0);
+        assert_eq!(legacy.stats.dropped_shadows, 0);
+        let csm = build_lighting_uniform(
+            [0.1, 0.1, 0.15],
+            1.0,
+            1.0,
+            &lights,
+            None,
+            Some(0),
+            0.0,
+            0.0,
+            0,
+        );
+        assert_eq!(csm.uniform.lights[0].params[3], -1.0);
+        assert_eq!(csm.uniform.lights[0].params[0], CSM_CASCADES as f32);
+        assert_eq!(csm.stats.dropped_shadows, 0);
+    }
+
+    #[test]
+    fn build_csm_rejects_degenerate_camera() {
+        let inv = glam::Mat4::IDENTITY.to_cols_array_2d();
+        let to_light = glam::Vec3::Y;
+        let ok = CsmCamera {
+            near: 0.1,
+            far: 100.0,
+            forward: [0.0, 0.0, -1.0],
+        };
+        // Identity inverse VP still fits (all corners unproject validly).
+        assert!(build_csm(inv, ok, to_light, None).is_some());
+        assert!(build_csm(inv, CsmCamera { far: 0.1, ..ok }, to_light, None).is_none());
+        assert!(
+            build_csm(
+                inv,
+                CsmCamera {
+                    forward: [0.0, 0.0, 0.0],
+                    ..ok
+                },
+                to_light,
+                None,
+            )
+            .is_none()
+        );
     }
 }

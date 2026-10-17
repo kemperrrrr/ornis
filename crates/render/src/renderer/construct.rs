@@ -48,6 +48,8 @@ impl Renderer3D {
             Self::create_shadow_targets(device);
         let (shadow_cube_maps, shadow_cube_views, shadow_cube_array_view, shadow_cube_vp_buffers) =
             Self::create_shadow_cube_targets(device);
+        let (csm_maps, csm_views, csm_array_view, csm_vp_buffers) =
+            Self::create_csm_targets(device);
         let ibl = crate::ibl::black_targets(device);
         let ibl_staging =
             Self::copy_src_staging(device, "ibl staging", &crate::ibl::initial_staging_bytes());
@@ -57,6 +59,7 @@ impl Renderer3D {
             &shadow_array_view,
             &shadow_sampler,
             &shadow_cube_array_view,
+            &csm_array_view,
             &ibl,
         );
         let pipeline =
@@ -110,6 +113,7 @@ impl Renderer3D {
             &shadow_array_view,
             &shadow_sampler,
             &shadow_cube_array_view,
+            &csm_array_view,
             &ibl,
             width,
             height,
@@ -179,6 +183,14 @@ impl Renderer3D {
             shadow_sampler,
             shadow_count: std::sync::atomic::AtomicU32::new(0),
             shadow_fit: std::sync::RwLock::new(None),
+            csm_camera: std::sync::RwLock::new(None),
+            csm_casters: std::sync::RwLock::new(None),
+            camera_cpu: std::sync::RwLock::new(bytemuck::Zeroable::zeroed()),
+            csm_maps,
+            csm_views,
+            csm_array_view,
+            csm_vp_buffers,
+            csm_count: std::sync::atomic::AtomicU32::new(0),
             last_light_stats: std::sync::RwLock::new(LightUploadStats {
                 uploaded: 0,
                 dropped_lights: 0,
@@ -227,6 +239,7 @@ impl Renderer3D {
                 &this.shadow_array_view,
                 &this.shadow_sampler,
                 &this.shadow_cube_array_view,
+                &this.csm_array_view,
                 &this.ibl,
                 this.width,
                 this.height,
@@ -300,6 +313,7 @@ impl Renderer3D {
             ibl_weight: 0.0,
             ibl_max_mip: 0.0,
             debug_view: 0,
+            csm: bytemuck::Zeroable::zeroed(),
         };
         let lighting_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("lighting buffer"),
@@ -321,6 +335,7 @@ impl Renderer3D {
         shadow_array_view: &wgpu::TextureView,
         shadow_sampler: &wgpu::Sampler,
         shadow_cube_array_view: &wgpu::TextureView,
+        csm_array_view: &wgpu::TextureView,
         ibl: &crate::ibl::IblTargets,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
         // Layout entries come from the pass resource table.
@@ -345,6 +360,7 @@ impl Renderer3D {
                     "materials" => Some(buffers.material.as_entire_binding()),
                     "lighting" => Some(buffers.lighting.as_entire_binding()),
                     "shadow_tex" => Some(wgpu::BindingResource::TextureView(shadow_array_view)),
+                    "csm_tex" => Some(wgpu::BindingResource::TextureView(csm_array_view)),
                     "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
                     "shadow_cube_tex" => {
                         Some(wgpu::BindingResource::TextureView(shadow_cube_array_view))
