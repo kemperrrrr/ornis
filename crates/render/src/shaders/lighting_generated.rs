@@ -888,6 +888,19 @@ mod tests {
         assert!(src.contains("fn fs_main"));
     }
 
+    /// Deferred lighting keeps both the AO factor from #137 and the CSM
+    /// helper from #121. Dropping either binding or the `csm_visibility`
+    /// call fails this; naga still has to accept the combined module.
+    #[test]
+    fn lighting_keeps_ambient_occlusion_and_csm() {
+        let src = wgsl_source();
+        assert_valid_wgsl("lighting ao+csm", &src);
+        assert!(src.contains("ao_tex"), "{src}");
+        assert!(src.contains("csm_tex"), "{src}");
+        assert!(src.contains("csm_visibility("), "{src}");
+        assert!(src.contains("* ao"), "AO must scale ambient and IBL: {src}");
+    }
+
     /// The resource table drives both sides: WGSL declarations and `wgpu`
     /// layout entries agree on numbers, visibility and kinds.
     #[test]

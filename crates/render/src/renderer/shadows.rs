@@ -1021,6 +1021,35 @@ impl Renderer3D {
         read_depth_layer(device, queue, &self.csm_maps, layer)
     }
 
+    /// Test-only: replace one cascade layer with a constant depth.
+    ///
+    /// `0` compares as shadowed and `1` as lit for a receiver whose
+    /// light-space depth sits inside the map, so a probe can mark which
+    /// layer the shader sampled.
+    #[cfg(test)]
+    pub(crate) fn clear_csm_layer_for_tests(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        layer: u32,
+        depth: f32,
+    ) {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("csm cascade marker"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.csm_views[layer as usize],
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(depth),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+
     /// Fit the directional shadow frustum to a scene AABB (`min`/`max`
     /// corners over instance translations and custom-geometry points).
     /// The ortho half-extent grows from the ±[`SHADOW_ORTHO_HALF`]

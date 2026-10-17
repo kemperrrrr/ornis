@@ -235,3 +235,159 @@ fn csm_directional_shadows_far_receiver_without_shimmer() {
         );
     }
 }
+
+/// Practical-split boundaries, same blend the shader uploads.
+fn practical_splits(near: f32, far: f32) -> [f32; 5] {
+    let count = crate::renderer::CSM_CASCADES;
+    let lambda = crate::renderer::CSM_SPLIT_LAMBDA;
+    let mut splits = [far; 5];
+    splits[0] = near;
+    for (i, slot) in splits.iter_mut().enumerate().take(count).skip(1) {
+        let t = i as f32 / count as f32;
+        let uniform = near + (far - near) * t;
+        let log = near * (far / near).powf(t);
+        *slot = lambda * log + (1.0 - lambda) * uniform;
+    }
+    splits
+}
+
+/// Center and radius of a sphere that stays inside cascade `index`,
+/// below the blend band at its far edge.
+fn interior_sphere(splits: &[f32], index: usize) -> (f32, f32) {
+    let lower = splits[index];
+    let upper = splits[index + 1];
+    let band = (upper - lower) * crate::shaders::helpers::CSM_BLEND_FRACTION;
+    let span = upper - lower - band;
+    let radius = (span * 0.2).clamp(1.0, 12.0);
+    (lower + span * 0.5, radius)
+}
+
+fn bright_pixels(px: &[u8]) -> usize {
+    px.chunks_exact(4)
+        .filter(|c| {
+            let luma = (u16::from(c[0]) + u16::from(c[1]) + u16::from(c[2])) / 3;
+            luma > 180
+        })
+        .count()
+}
+
+struct CascadeProbe<'a> {
+    renderer: &'a crate::renderer::Renderer3D,
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    mesh: &'a Mesh,
+    texture: &'a wgpu::Texture,
+    view: &'a wgpu::TextureView,
+}
+
+fn marked_cascade_frame(probe: &CascadeProbe<'_>, depths: [f32; 4]) -> Vec<u8> {
+    let mut encoder = probe
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("csm cascade select"),
+        });
+    probe.renderer.render_deferred_with_csm_depths(
+        RenderContext {
+            device: probe.device,
+            queue: probe.queue,
+            encoder: &mut encoder,
+            target: probe.view,
+        },
+        probe.mesh,
+        1,
+        depths,
+    );
+    super::probe::read_color_target(
+        probe.device,
+        probe.queue,
+        encoder,
+        probe.texture,
+        (PROBE_W, PROBE_H),
+    )
+}
+
+/// Each cascade is a constant depth marker. A receiver between `split[i]`
+/// and `split[i + 1]`, outside the blend band, must sample layer `i`.
+/// Sampling the next cascade (`+ 1`, clamped on the last) leaves that
+/// receiver lit for `i` in 0..2.
+#[test]
+fn csm_receiver_samples_the_cascade_of_its_view_depth() {
+    let Some((device, queue)) = try_device() else {
+        eprintln!("no GPU adapter; skipping cascade select probe");
+        return;
+    };
+    let (texture, view, surface_config) =
+        super::probe::probe_color_target(&device, "csm cascade select", PROBE_W, PROBE_H);
+    let renderer = crate::renderer::Renderer3D::new(&device, &surface_config, 1);
+    let mesh = crate::mesh::create_sphere(&device, 1.0, 24, 16);
+    let mut gray = ornis_core::OpenPBRMaterial::dielectric();
+    gray.base.color_rgb([0.8, 0.8, 0.8]);
+    gray.specular.roughness(0.5);
+    renderer.upload_materials(&device, &queue, &[gray]);
+    renderer.set_shading_debug(crate::renderer::ShadingDebug::Shadow);
+
+    const NEAR: f32 = 0.1;
+    const FAR: f32 = 200.0;
+    let eye = glam::Vec3::new(0.0, 1.0, 0.0);
+    let forward = glam::Vec3::new(0.0, 0.0, -1.0);
+    let splits = practical_splits(NEAR, FAR);
+    let look = glam::camera::rh::view::look_at_mat4(eye, eye + forward, glam::Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(
+        35.0f32.to_radians(),
+        PROBE_W as f32 / PROBE_H as f32,
+        NEAR,
+        FAR,
+    );
+    renderer.set_camera(&queue, &(proj * look).to_cols_array_2d(), eye.to_array());
+    renderer.set_csm_camera(NEAR, FAR, forward.to_array());
+    let to_light = ornis_core::units::UnitVec3::normalize(glam::Vec3::Y).expect("up light");
+    renderer.set_lights(
+        &queue,
+        [0.05, 0.05, 0.08],
+        &[ornis_assets::scene::LightDesc::Directional {
+            direction: to_light,
+            intensity: 1.2,
+            color: [1.0, 1.0, 1.0],
+            shadow: ornis_assets::scene::ShadowCast::from(true),
+        }],
+    );
+
+    for cascade in 0..crate::renderer::CSM_CASCADES {
+        let (center, radius) = interior_sphere(&splits, cascade);
+        let blend = crate::shaders::helpers::CSM_BLEND_FRACTION;
+        let upper = splits[cascade + 1];
+        let lower = splits[cascade];
+        let band_start = upper - (upper - lower) * blend;
+        assert!(
+            center - radius > lower && center < band_start,
+            "cascade {cascade} sphere crosses a split or the blend band"
+        );
+        let pos = eye + forward * center;
+        renderer.upload_instances(&device, &queue, &[csm_instance(pos.to_array(), radius)]);
+        let probe = CascadeProbe {
+            renderer: &renderer,
+            device: &device,
+            queue: &queue,
+            mesh: &mesh,
+            texture: &texture,
+            view: &view,
+        };
+        let lit = marked_cascade_frame(&probe, [1.0; 4]);
+        let mut depths = [1.0; 4];
+        depths[cascade] = 0.0;
+        let marked = marked_cascade_frame(&probe, depths);
+        let lit_n = bright_pixels(&lit);
+        let marked_n = bright_pixels(&marked);
+        eprintln!(
+            "cascade {cascade}: lit={lit_n} marked={marked_n} depth={center:.2} r={radius:.2}"
+        );
+        assert!(
+            lit_n > 40,
+            "cascade {cascade} receiver is not visible ({lit_n} bright pixels)"
+        );
+        assert!(
+            marked_n * 4 < lit_n,
+            "cascade {cascade} did not sample layer {cascade} ({marked_n} bright vs {lit_n} lit)"
+        );
+    }
+}

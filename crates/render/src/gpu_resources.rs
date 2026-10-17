@@ -711,6 +711,32 @@ mod tests {
 
     fn assert_send_sync<T: Send + Sync>() {}
 
+    /// Perspective submit keeps the camera's near, far and view forward.
+    /// `-forward` and `far * 0.25` both miss this.
+    #[test]
+    fn csm_camera_args_keeps_near_far_and_forward() {
+        let eye = glam::Vec3::new(0.0, 4.0, 12.0);
+        let target = glam::Vec3::ZERO;
+        let view = crate::camera::CameraView {
+            eye,
+            target,
+            up: glam::Vec3::Y,
+            projection: ornis_assets::scene::CameraProjection::Perspective,
+            fov: ornis_core::Degrees::new(60.0),
+            near: ornis_core::Meters::new(0.1),
+            far: ornis_core::Meters::new(200.0),
+        };
+        let (near, far, dir) = csm_camera_args(&view).expect("perspective camera");
+        let expect = (target - eye).normalize();
+        let got = glam::Vec3::from_array(dir);
+        assert!((near - view.near.get()).abs() < 1e-5, "near {near}");
+        assert!((far - view.far.get()).abs() < 1e-5, "far {far}");
+        assert!(
+            (got - expect).length() < 1e-5,
+            "forward {got:?} != {expect:?}"
+        );
+    }
+
     #[test]
     fn frame_command_buffers_are_world_resources() {
         // Compile-time proof of the handover design: finished buffers and
