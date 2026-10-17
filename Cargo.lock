@@ -3018,6 +3018,7 @@ dependencies = [
  "ornis-app",
  "ornis-assets",
  "ornis-core",
+ "ornis-editor",
  "ornis-render",
  "raw-window-handle",
  "serde",

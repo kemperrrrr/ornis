@@ -19,8 +19,8 @@
 //! [`SmartStore`]: ornis_core::SmartStore
 
 use glam::{Mat4, Vec3};
-use ornis_assets::scene::{MeshDesc, TransformDesc};
-use ornis_core::{Entity, PositiveF32, SmartStore, UnitVec3};
+use ornis_assets::scene::{CameraProjection, MeshDesc, TransformDesc};
+use ornis_core::{Degrees, Entity, Meters, PositiveF32, SmartStore, UnitVec3};
 use thiserror::Error;
 
 /// Squared length below which a direction is treated as degenerate.
@@ -129,15 +129,70 @@ impl Default for PickEpsilon {
     }
 }
 
+/// Projection a [`ViewportCamera`] builds its pick ray from (K2 plane editing).
+///
+/// A render-side mirror without the render dependency: the perspective case
+/// carries the vertical field of view, the orthographic case the vertical
+/// half-height of the view box. `K0a` (`CameraProjection` in `ornis-assets`)
+/// converts via [`PickProjection::from_camera`]; the editor never depends on
+/// `ornis-render` by design.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PickProjection {
+    /// Perspective foreshortening with a vertical field of view.
+    Perspective {
+        /// Vertical field of view.
+        fov_y: Degrees,
+    },
+    /// Orthographic box with a vertical half-height in world units.
+    Orthographic {
+        /// Vertical half-extent of the view box.
+        half_height: Meters,
+    },
+}
+
+impl PickProjection {
+    /// Builds the picking projection from the asset/render projection
+    /// (K0a, phase B): orthographic carries its half-height, perspective
+    /// carries the passed field of view.
+    #[must_use]
+    pub fn from_camera(projection: CameraProjection, fov: Degrees) -> Self {
+        match projection {
+            CameraProjection::Perspective => Self::Perspective { fov_y: fov },
+            CameraProjection::Orthographic { half_height } => Self::Orthographic { half_height },
+        }
+    }
+
+    /// Checked perspective projection: `None` on an out-of-range fov.
+    fn checked_perspective(fov_y_deg: f32) -> Option<Self> {
+        let fov_y = Degrees::new(fov_y_deg);
+        ViewportCamera::valid_fov(fov_y).then_some(Self::Perspective { fov_y })
+    }
+
+    /// Checked orthographic projection: `None` on a non-finite or
+    /// non-positive half-height.
+    fn checked_orthographic(half_height: Meters) -> Option<Self> {
+        (half_height.is_finite() && half_height.get() > 0.0)
+            .then_some(Self::Orthographic { half_height })
+    }
+
+    /// Checked projection from the K0a asset projection (phase B seam).
+    fn checked_from_camera(projection: CameraProjection, fov: Degrees) -> Option<Self> {
+        match Self::from_camera(projection, fov) {
+            Self::Perspective { .. } => Self::checked_perspective(fov.get()),
+            Self::Orthographic { half_height } => Self::checked_orthographic(half_height),
+        }
+    }
+}
+
 /// Client-side viewport camera picking rays are built from.
 ///
 /// View state, not authoritative scene: the server world stays
 /// camera-agnostic, while each viewport side (native window, WASM replica)
 /// holds its own camera and converts clicks locally. Build from an orbit
-/// camera via [`ViewportCamera::from_view_parameters`], which takes the
-/// look-at frame as an explicit `(position, target, up, fov, near, far)`
-/// tuple — the same components the render orbit camera publishes, without
-/// a render dependency here by design.
+/// camera via [`ViewportCamera::from_view_parameters`] (perspective tuple
+/// frame) or [`ViewportCamera::from_camera_view`] (explicit fields plus the
+/// K0a projection) — both take look-at components as values, without a
+/// render dependency here by design.
 ///
 /// Pointer convention: pixels, origin top-left, `y` down (browser canvas).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -145,7 +200,7 @@ pub struct ViewportCamera {
     position: Vec3,
     target: Vec3,
     up: Vec3,
-    fov_y_deg: f32,
+    projection: PickProjection,
     near: f32,
     far: f32,
     viewport_px: [f32; 2],
@@ -159,20 +214,19 @@ impl ViewportCamera {
     /// Widest accepted vertical field of view in degrees.
     const MAX_FOV_DEG: f32 = 179.0;
 
-    /// Checked constructor: `None` on non-finite vectors, a coincident
-    /// eye/target, an up vector parallel to the view direction, an
-    /// out-of-range field of view, a non-positive near plane, `far <= near`,
-    /// or a sub-pixel viewport.
-    #[must_use]
-    pub fn new(
+    /// Shared frame validation of [`Self::new`] and
+    /// [`Self::new_orthographic`]: finite eye/target, a non-degenerate view
+    /// offset, a finite up vector not parallel to the view, `0 < near < far`
+    /// and a non-degenerate viewport.
+    // qual:allow(srp, max_parameters=6) reason: "RAT-16 seam carries the full look-at frame plus the clip window as values, like CameraDesc::try_new_units"
+    fn validated_frame(
         position: Vec3,
         target: Vec3,
         up: Vec3,
-        fov_y_deg: f32,
         near: f32,
         far: f32,
         viewport_px: [f32; 2],
-    ) -> Option<Self> {
+    ) -> Option<()> {
         if !position.is_finite() || !target.is_finite() || !up.is_finite() {
             return None;
         }
@@ -181,9 +235,6 @@ impl ViewportCamera {
             return None;
         }
         if view.normalize().cross(up).length_squared() < DEGENERATE_LEN2 {
-            return None;
-        }
-        if !(Self::MIN_FOV_DEG..=Self::MAX_FOV_DEG).contains(&fov_y_deg) {
             return None;
         }
         if !near.is_finite() || near <= 0.0 || !far.is_finite() || far <= near {
@@ -197,24 +248,95 @@ impl ViewportCamera {
         {
             return None;
         }
+        Some(())
+    }
+
+    /// Whether a field of view is inside the accepted degree range.
+    fn valid_fov(fov_y: Degrees) -> bool {
+        fov_y.is_finite() && (Self::MIN_FOV_DEG..=Self::MAX_FOV_DEG).contains(&fov_y.get())
+    }
+
+    /// Checked perspective constructor: `None` on a degenerate frame (same
+    /// checks as the pre-K2 constructor) or an out-of-range field of view.
+    /// Pure orchestration: checked parts in, struct out.
+    #[must_use]
+    pub fn new(
+        position: Vec3,
+        target: Vec3,
+        up: Vec3,
+        fov_y_deg: f32,
+        near: f32,
+        far: f32,
+        viewport_px: [f32; 2],
+    ) -> Option<Self> {
+        Self::with_projection(
+            position,
+            target,
+            up,
+            PickProjection::checked_perspective(fov_y_deg)?,
+            near,
+            far,
+            viewport_px,
+        )
+    }
+
+    /// Checked orthographic constructor: `None` on a degenerate frame or a
+    /// non-finite/non-positive half-height. Pure orchestration, like
+    /// [`Self::new`].
+    // qual:allow(srp, max_parameters=7) reason: "RAT-16 seam carries the full look-at frame plus the scale as values, like CameraDesc::try_new_units"
+    #[must_use]
+    pub fn new_orthographic(
+        position: Vec3,
+        target: Vec3,
+        up: Vec3,
+        half_height: Meters,
+        near: f32,
+        far: f32,
+        viewport_px: [f32; 2],
+    ) -> Option<Self> {
+        Self::with_projection(
+            position,
+            target,
+            up,
+            PickProjection::checked_orthographic(half_height)?,
+            near,
+            far,
+            viewport_px,
+        )
+    }
+
+    /// Shared constructor tail: frame validation plus struct assembly.
+    /// Pure orchestration over [`Self::validated_frame`].
+    // qual:allow(srp, max_parameters=7) reason: "shared tail of the RAT-16 explicit-param constructors; splitting the frame would scatter the seam"
+    fn with_projection(
+        position: Vec3,
+        target: Vec3,
+        up: Vec3,
+        projection: PickProjection,
+        near: f32,
+        far: f32,
+        viewport_px: [f32; 2],
+    ) -> Option<Self> {
+        Self::validated_frame(position, target, up, near, far, viewport_px)?;
         Some(Self {
             position,
             target,
             up,
-            fov_y_deg,
+            projection,
             near,
             far,
             viewport_px,
         })
     }
 
-    /// Builds a picking camera from orbit view parameters and a viewport
-    /// size in pixels.
+    /// Builds a perspective picking camera from orbit view parameters and a
+    /// viewport size in pixels.
     ///
     /// `view` is the `(position, target, up, fov, near, far)` look-at frame
     /// the orbit camera publishes (as fields, not as this tuple), so
     /// viewport sides convert without depending on the render crate.
-    /// Same validation as [`Self::new`].
+    /// Same validation as [`Self::new`]. Kept while tuple callers exist;
+    /// K0a sides prefer [`Self::from_camera_view`].
     #[must_use]
     pub fn from_view_parameters(
         view: (Vec3, Vec3, Vec3, f32, f32, f32),
@@ -222,6 +344,34 @@ impl ViewportCamera {
     ) -> Option<Self> {
         let (position, target, up, fov_y_deg, near, far) = view;
         Self::new(position, target, up, fov_y_deg, near, far, viewport_px)
+    }
+
+    /// Builds a picking camera from explicit look-at fields plus the K0a
+    /// projection (phase B): orthographic carries its half-height from
+    /// `projection`, perspective carries `fov`. No render dependency — the
+    /// projection travels as [`CameraProjection`] from `ornis-assets`.
+    // qual:allow(srp, max_parameters=8) reason: "RAT-16 seam carries the full look-at frame, projection and clip window as values, like CameraDesc::try_new_units"
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_camera_view(
+        eye: Vec3,
+        target: Vec3,
+        up: Vec3,
+        projection: CameraProjection,
+        fov: Degrees,
+        near: Meters,
+        far: Meters,
+        viewport_px: [f32; 2],
+    ) -> Option<Self> {
+        Self::with_projection(
+            eye,
+            target,
+            up,
+            PickProjection::checked_from_camera(projection, fov)?,
+            near.get(),
+            far.get(),
+            viewport_px,
+        )
     }
 
     /// Eye position in world units.
@@ -242,10 +392,11 @@ impl ViewportCamera {
         self.up
     }
 
-    /// Vertical field of view in degrees.
+    /// Projection this camera builds its pick ray from.
+    // qual:allow(dry, boilerplate) reason: "RAT-16 API surface (spec-mandated accessor); keeps the projection field encapsulated behind the pick seam"
     #[must_use]
-    pub fn fov_y_deg(&self) -> f32 {
-        self.fov_y_deg
+    pub fn projection(&self) -> PickProjection {
+        self.projection
     }
 
     /// Near clip plane distance in world units (positive).
@@ -264,6 +415,47 @@ impl ViewportCamera {
     #[must_use]
     pub fn viewport_px(&self) -> [f32; 2] {
         self.viewport_px
+    }
+}
+
+/// Editor work plane: the 2D sheet a pointer position resolves onto (K2).
+///
+/// The 2D working plane is [`WorkPlane::XY`] (`z = 0`, normal `+Z`): the
+/// plane camera looks along `-Z` with up `+Y`, matching the K1 "lock Z"
+/// convention and the K0 sprite quad in XY.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkPlane {
+    origin: Vec3,
+    normal: UnitVec3,
+}
+
+impl WorkPlane {
+    /// The 2D working plane: origin at zero, normal `+Z`.
+    pub const XY: Self = Self {
+        origin: Vec3::ZERO,
+        normal: UnitVec3::Z,
+    };
+
+    /// Checked constructor: `None` on a non-finite origin (`normal` is a
+    /// [`UnitVec3`] so it is finite and non-zero by construction).
+    #[must_use]
+    pub fn new(origin: Vec3, normal: UnitVec3) -> Option<Self> {
+        if !origin.is_finite() {
+            return None;
+        }
+        Some(Self { origin, normal })
+    }
+
+    /// Plane origin in world units.
+    #[must_use]
+    pub fn origin(&self) -> Vec3 {
+        self.origin
+    }
+
+    /// Plane normal (unit length).
+    #[must_use]
+    pub fn normal(&self) -> UnitVec3 {
+        self.normal
     }
 }
 
@@ -411,6 +603,9 @@ pub enum PickError {
     /// Pointer lies outside the viewport: no selection change.
     #[error("pointer is outside the viewport")]
     OutsideViewport,
+    /// Pick ray runs parallel to the work plane: no plane point exists.
+    #[error("pick ray is parallel to the work plane")]
+    PlaneParallel,
 }
 
 /// Builds the pick ray through viewport pixel `viewport_xy`.
@@ -419,6 +614,12 @@ pub enum PickError {
 /// Out-of-viewport pointers are [`PickError::OutsideViewport`] (the click
 /// pipeline ignores them without touching the selection), non-finite input
 /// or a degenerate camera frame is [`PickError::DegenerateView`].
+///
+/// Perspective rays fan out from the eye (unchanged E1 behaviour);
+/// orthographic rays are all parallel to `forward`, with the origin shifted
+/// into the eye plane by `x = (2px/w − 1)·aspect·hh` along `right` and
+/// `y = (1 − 2py/h)·hh` along `up`. The origin stays in the eye plane, so
+/// the near/far clip check in `lib.rs` stays correct for both branches.
 pub fn pick_ray(camera: &ViewportCamera, viewport_xy: [f32; 2]) -> Result<PickRay, PickError> {
     let [px, py] = viewport_xy;
     if !px.is_finite() || !py.is_finite() {
@@ -439,12 +640,58 @@ pub fn pick_ray(camera: &ViewportCamera, viewport_xy: [f32; 2]) -> Result<PickRa
     }
     let right = right.normalize();
     let up = right.cross(forward);
-    let half_tan = (camera.fov_y_deg().to_radians() * 0.5).tan();
-    let aspect = w / h;
-    let x = (2.0 * px / w - 1.0) * aspect * half_tan;
-    let y = (1.0 - 2.0 * py / h) * half_tan;
-    let direction = x * right + y * up + forward;
-    PickRay::try_new(camera.position(), direction).ok_or(PickError::DegenerateView)
+    match camera.projection() {
+        PickProjection::Perspective { fov_y } => {
+            let half_tan = (fov_y.get().to_radians() * 0.5).tan();
+            let aspect = w / h;
+            let x = (2.0 * px / w - 1.0) * aspect * half_tan;
+            let y = (1.0 - 2.0 * py / h) * half_tan;
+            let direction = x * right + y * up + forward;
+            PickRay::try_new(camera.position(), direction).ok_or(PickError::DegenerateView)
+        }
+        PickProjection::Orthographic { half_height } => {
+            let hh = half_height.get();
+            let aspect = w / h;
+            let x = (2.0 * px / w - 1.0) * aspect * hh;
+            let y = (1.0 - 2.0 * py / h) * hh;
+            let origin = camera.position() + x * right + y * up;
+            PickRay::try_new(origin, forward).ok_or(PickError::DegenerateView)
+        }
+    }
+}
+
+/// Ray/plane intersection: the point at the first positive distance.
+///
+/// `None` when the ray runs parallel to the plane (`|dir·n|` at or below
+/// the epsilon) or the intersection sits at/behind the origin (`t` at or
+/// below the distance floor).
+#[must_use]
+pub fn ray_plane_point(ray: &PickRay, plane: WorkPlane, eps: PickEpsilon) -> Option<Vec3> {
+    let direction = Vec3::from(ray.direction());
+    let normal = Vec3::from(plane.normal());
+    let denom = direction.dot(normal);
+    if !denom.is_finite() || denom.abs() <= eps.parallel() {
+        return None;
+    }
+    let t = (plane.origin() - ray.origin()).dot(normal) / denom;
+    if t > eps.min_distance() {
+        Some(ray.at(t))
+    } else {
+        None
+    }
+}
+
+/// Viewport pixel → point on the work plane (K2 plane editing).
+///
+/// Builds the pick ray (same errors as [`pick_ray`]) and intersects it with
+/// `plane`; a parallel ray is [`PickError::PlaneParallel`].
+pub fn pointer_on_plane(
+    camera: &ViewportCamera,
+    viewport_xy: [f32; 2],
+    plane: WorkPlane,
+) -> Result<Vec3, PickError> {
+    let ray = pick_ray(camera, viewport_xy)?;
+    ray_plane_point(&ray, plane, PickEpsilon::DEFAULT).ok_or(PickError::PlaneParallel)
 }
 
 /// Analytic ray/sphere hit: nearest positive distance, if any.
@@ -1009,6 +1256,217 @@ mod tests {
             .expect("pickable scene")
             .expect("soup hit");
         assert_eq!(soup_hit.entity(), soup);
+    }
+
+    /// Orthographic rays are parallel to `forward` with origins shifted into
+    /// the eye plane by the NDC-mapped half-height offsets.
+    #[test]
+    fn orthographic_ray_is_parallel_with_shifted_origin() {
+        use ornis_core::Meters;
+        let camera = ViewportCamera::new_orthographic(
+            Vec3::new(0.0, 0.0, 6.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            Meters::new(2.0),
+            0.1,
+            100.0,
+            [200.0, 200.0],
+        )
+        .expect("valid ortho test camera");
+        assert_eq!(
+            camera.projection(),
+            PickProjection::Orthographic {
+                half_height: Meters::new(2.0)
+            }
+        );
+        // Center pixel: origin on the eye axis, direction straight forward.
+        let center = pick_ray(&camera, [100.0, 100.0]).expect("center ray");
+        assert!((center.origin() - Vec3::new(0.0, 0.0, 6.0)).length() < 1e-4);
+        assert!(
+            (Vec3::from(center.direction()) - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-6,
+            "got {:?}",
+            center.direction()
+        );
+        // Top-left corner: `x = -aspect·hh`, `y = +hh` (aspect 1 here).
+        let corner = pick_ray(&camera, [0.0, 0.0]).expect("corner ray");
+        assert!((corner.origin() - Vec3::new(-2.0, 2.0, 6.0)).length() < 1e-4);
+        assert!(
+            (Vec3::from(corner.direction()) - Vec3::from(center.direction())).length() < 1e-6,
+            "ortho rays stay parallel"
+        );
+        // Degenerate half-heights are rejected.
+        assert!(
+            ViewportCamera::new_orthographic(
+                Vec3::new(0.0, 0.0, 6.0),
+                Vec3::ZERO,
+                Vec3::Y,
+                Meters::new(0.0),
+                0.1,
+                100.0,
+                [200.0, 200.0],
+            )
+            .is_none()
+        );
+        assert!(
+            ViewportCamera::new_orthographic(
+                Vec3::new(0.0, 0.0, 6.0),
+                Vec3::ZERO,
+                Vec3::Y,
+                Meters::new(f32::NAN),
+                0.1,
+                100.0,
+                [200.0, 200.0],
+            )
+            .is_none()
+        );
+    }
+
+    /// `PickProjection::from_camera` mirrors the K0a projection: perspective
+    /// keeps the passed fov, orthographic keeps the asset half-height.
+    #[test]
+    fn pick_projection_from_camera_mirrors_k0a() {
+        use ornis_assets::scene::CameraProjection;
+        use ornis_core::{Degrees, Meters};
+        assert_eq!(
+            PickProjection::from_camera(CameraProjection::Perspective, Degrees::new(60.0)),
+            PickProjection::Perspective {
+                fov_y: Degrees::new(60.0)
+            }
+        );
+        assert_eq!(
+            PickProjection::from_camera(
+                CameraProjection::Orthographic {
+                    half_height: Meters::new(2.0)
+                },
+                Degrees::new(60.0),
+            ),
+            PickProjection::Orthographic {
+                half_height: Meters::new(2.0)
+            }
+        );
+        // The explicit-fields constructor agrees with the tuple one.
+        let via_tuple = ViewportCamera::from_view_parameters(
+            (
+                Vec3::new(0.0, 0.0, 6.0),
+                Vec3::ZERO,
+                Vec3::Y,
+                60.0,
+                0.1,
+                100.0,
+            ),
+            [200.0, 200.0],
+        )
+        .expect("tuple camera");
+        let via_fields = ViewportCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, 6.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            CameraProjection::Perspective,
+            Degrees::new(60.0),
+            Meters::new(0.1),
+            Meters::new(100.0),
+            [200.0, 200.0],
+        )
+        .expect("fields camera");
+        assert_eq!(via_tuple, via_fields);
+    }
+
+    /// Of two quads overlapping in XY, the one nearer the ortho eye wins; a
+    /// corner ray is a clean miss.
+    #[test]
+    fn orthographic_nearest_quad_wins() {
+        use ornis_core::Meters;
+        let mut engine = Engine::new();
+        let store = store_with_lanes(&mut engine);
+        for (z, size) in [(0.0, 2.0), (0.1, 2.0)] {
+            let entity = store.create_entity();
+            store.insert(
+                entity,
+                TransformDesc::from_translation(glam::Vec3::new(0.0, 0.0, z)),
+            );
+            store.insert(
+                entity,
+                MeshDesc::Quad {
+                    size: [
+                        PositiveF32::expect_valid(size),
+                        PositiveF32::expect_valid(size),
+                    ],
+                },
+            );
+        }
+        let camera = ViewportCamera::new_orthographic(
+            Vec3::new(0.0, 0.0, 6.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            Meters::new(5.0),
+            0.1,
+            100.0,
+            [200.0, 200.0],
+        )
+        .expect("valid ortho test camera");
+        let store = engine.world().store().expect("world store");
+        let ray = pick_ray(&camera, [100.0, 100.0]).expect("center ray");
+        let hit = pick_closest(store, &ray, ChromePolicy::SkipChrome)
+            .expect("pickable scene")
+            .expect("quad hit");
+        // The nearer quad sits 0.1 closer to the eye plane at z = 6.
+        assert!(
+            (hit.distance.get() - 5.9).abs() < 1e-3,
+            "got {}",
+            hit.distance.get()
+        );
+        let side = pick_ray(&camera, [199.0, 199.0]).expect("corner ray");
+        assert_eq!(
+            pick_closest(store, &side, ChromePolicy::SkipChrome).expect("pickable scene"),
+            None
+        );
+    }
+
+    /// `pointer_on_plane` hits the XY sheet under the pixel; a ray parallel
+    /// to the sheet is a typed error.
+    #[test]
+    fn pointer_on_plane_hits_xy_and_rejects_parallel() {
+        use ornis_core::Meters;
+        let camera = ViewportCamera::new_orthographic(
+            Vec3::new(1.0, -2.0, 6.0),
+            Vec3::new(1.0, -2.0, 0.0),
+            Vec3::Y,
+            Meters::new(2.0),
+            0.1,
+            100.0,
+            [200.0, 200.0],
+        )
+        .expect("valid ortho test camera");
+        // Center pixel looks straight down the eye axis.
+        let point =
+            pointer_on_plane(&camera, [100.0, 100.0], WorkPlane::XY).expect("center plane point");
+        assert!((point - Vec3::new(1.0, -2.0, 0.0)).length() < 1e-4);
+        // Offsets follow the NDC mapping: half the width right, half up.
+        let point =
+            pointer_on_plane(&camera, [150.0, 50.0], WorkPlane::XY).expect("offset plane point");
+        assert!((point - Vec3::new(2.0, -1.0, 0.0)).length() < 1e-4);
+        // A grazing ray never meets the sheet.
+        let grazing = PickRay::try_new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0))
+            .expect("valid grazing ray");
+        assert_eq!(
+            ray_plane_point(&grazing, WorkPlane::XY, PickEpsilon::DEFAULT),
+            None
+        );
+        let parallel_camera = ViewportCamera::new(
+            Vec3::new(0.0, 0.0, 6.0),
+            Vec3::new(6.0, 0.0, 6.0),
+            Vec3::Y,
+            60.0,
+            0.1,
+            100.0,
+            [200.0, 200.0],
+        )
+        .expect("sideways perspective camera");
+        assert_eq!(
+            pointer_on_plane(&parallel_camera, [100.0, 100.0], WorkPlane::XY),
+            Err(PickError::PlaneParallel)
+        );
+        assert!(WorkPlane::new(Vec3::new(f32::NAN, 0.0, 0.0), UnitVec3::Z).is_none());
     }
 
     /// Cylinder proxy intersects; the sphere pre-test rejects clear misses.
