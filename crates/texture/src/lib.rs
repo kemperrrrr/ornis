@@ -4,6 +4,7 @@
 
 mod basis;
 mod container;
+mod dfd;
 mod encode;
 mod encoding;
 mod image;
