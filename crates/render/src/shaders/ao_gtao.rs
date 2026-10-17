@@ -5,9 +5,14 @@
 //! would be dead code in that kernel.
 
 /// XeGTAO arc (`gtao_arc`, the same closed form as
-/// [`crate::ao::gtao_sample`]) and one horizon sample. A sample past
-/// `radius` falls off to the hemisphere floor, so it cannot close the
-/// horizon.
+/// [`crate::ao::gtao_sample`]) and one horizon sample.
+///
+/// A miss, or a hit at/past `radius`, returns `-1` rather than the
+/// hemisphere floor. That floor is the horizon's starting cosine
+/// (`min_cos` in the march). Returning it from a miss would make the
+/// start dead: deleting the clamp would not change a pixel, because every
+/// empty tap would put the floor back. `max` with the start still ignores
+/// `-1`, so a correct march is unchanged.
 pub(super) const AO_GTAO_HELPER: &str = r#"
 fn gtao_arc(horizon: f32, normal_angle: f32) -> f32 {
     let h = horizon;
@@ -17,19 +22,19 @@ fn gtao_arc(horizon: f32, normal_angle: f32) -> f32 {
 
 fn gtao_horizon_cos(uv: vec2<f32>, dims: vec2<f32>, center: vec3<f32>, view_vec: vec3<f32>, min_cos: f32, radius: f32) -> f32 {
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
-        return min_cos;
+        return -1.0;
     }
     let dims_u = vec2<u32>(dims);
     let texel = min(vec2<u32>(uv * dims), dims_u - vec2<u32>(1u));
     let sdepth = textureLoad(depth_tex, texel, 0);
     if (sdepth >= CLEAR_DEPTH) {
-        return min_cos;
+        return -1.0;
     }
     let sample_pos = reconstruct_world_pos(uv, sdepth, camera);
     let delta = sample_pos - center;
     let r = length(delta);
-    if (r <= EPS) {
-        return min_cos;
+    if (r <= EPS || r >= radius) {
+        return -1.0;
     }
     let falloff = clamp(1.0 - r / max(radius, EPS), 0.0, 1.0);
     let cos_h = dot(delta / r, view_vec);

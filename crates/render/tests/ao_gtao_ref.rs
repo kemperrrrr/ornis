@@ -1,10 +1,12 @@
 //! GTAO regressions the corner gate does not catch (#124).
 //!
-//! A flat floor and a pedestal compare the GPU factor to
-//! [`gtao_sample`](ornis_render::gtao_sample) on horizons clamped with
-//! [`gtao_clamp_horizon`](ornis_render::gtao_clamp_horizon). An overhang
-//! past the effect radius must stay bright: forcing the horizon weight
-//! to 1 closes it. `ORNIS_REQUIRE_GPU=1` panics when no adapter exists.
+//! A floor corner against two walls, with the floor ending inside the
+//! first screen step, is compared to [`gtao_sample`](ornis_render::gtao_sample)
+//! after [`gtao_clamp_horizon`](ornis_render::gtao_clamp_horizon). The walls
+//! hold the factor in `0.5..0.8`; the drop is past the hemisphere, so a
+//! march that starts horizons at -1 darkens it, and so does a flipped arc
+//! sign. An occluder near the effect radius stays bright because of the
+//! falloff. `ORNIS_REQUIRE_GPU=1` panics when no adapter exists.
 
 #[allow(dead_code)]
 mod common;
@@ -23,10 +25,14 @@ const H: u32 = 180;
 /// Read-back format: composite output, so the factor is recovered through
 /// the sRGB encode and the ACES fit.
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
-/// How far a recovered factor may sit from the CPU slice. Half-resolution
-/// and the bilateral blur move a flat region by less than this; the sign
-/// flip and the missing horizon clamp move it by more.
-const MATCH_TOL: f32 = 0.12;
+/// Recovered factor vs the clamped CPU march. Half-resolution, the bilateral
+/// blur and the 8-bit target sit inside this. Starting horizons at -1
+/// moves the ledge by about 0.12; flipping the arc sign moves it by about
+/// 0.30.
+const LEDGE_TOL: f32 = 0.05;
+/// Radius of the ledge march, in meters. The wall is inside it and the
+/// drop off the floor is inside the first step.
+const LEDGE_RADIUS: f32 = 0.50;
 
 /// One instanced box: translation, then full side length of the unit mesh.
 type BoxDesc = ([f32; 3], [f32; 3]);
@@ -112,10 +118,20 @@ fn render_pair(gpu: &Gpu<'_>, shot: &Shot, radius: f32, boxes: &[BoxDesc]) -> (V
     let mut material = OpenPBRMaterial::dielectric();
     material.base.color_rgb([0.9, 0.9, 0.9]);
     material.specular.roughness(1.0);
-    renderer.upload_materials(gpu.device, gpu.queue, &[material]);
+    let mut materials = vec![material];
+    if boxes.len() > 1 {
+        // A second albedo makes the walls readable in the readback. The
+        // recovered factor divides it out.
+        let mut wall = OpenPBRMaterial::dielectric();
+        wall.base.color_rgb([0.85, 0.2, 0.2]);
+        wall.specular.roughness(1.0);
+        materials.push(wall);
+    }
+    renderer.upload_materials(gpu.device, gpu.queue, &materials);
     let instances: Vec<InstanceData> = boxes
         .iter()
-        .map(|(translation, scale)| {
+        .enumerate()
+        .map(|(index, (translation, scale))| {
             let model = glam::Mat4::from_scale_rotation_translation(
                 glam::Vec3::from_array(*scale),
                 glam::Quat::IDENTITY,
@@ -124,7 +140,9 @@ fn render_pair(gpu: &Gpu<'_>, shot: &Shot, radius: f32, boxes: &[BoxDesc]) -> (V
             InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
-                material_index: MaterialIdx::from_raw(0),
+                material_index: MaterialIdx::from_raw(
+                    u32::try_from(index.min(materials.len() - 1)).unwrap(),
+                ),
             }
         })
         .collect();
@@ -193,39 +211,38 @@ fn pixel_factor(reference: &[u8], pixels: &[u8], x: i32, y: i32, n: &mut f32) ->
     acc
 }
 
-/// Open hemisphere after the GPU horizon clamp, at a normal angle where a
-/// flipped arc sign is a different number. `n = 0` hides that flip.
-fn clamped_open_visibility() -> f32 {
-    let n = std::f32::consts::FRAC_PI_6;
-    let pi = std::f32::consts::PI;
-    ornis_render::gtao_sample(
-        ornis_render::gtao_clamp_horizon(n + pi, n),
-        ornis_render::gtao_clamp_horizon(n - pi, n),
-        n,
-        1.0,
-    )
+/// Mean channel ratio of one pixel.
+fn factor_at(reference: &[u8], pixels: &[u8], x: i32, y: i32) -> f32 {
+    let mut n = 0.0;
+    let acc = pixel_factor(reference, pixels, x, y, &mut n);
+    assert!(n > 0.0, "AO probe ({x}, {y}) is outside the frame");
+    acc / n
 }
 
-/// Floor plus a thin pedestal, oblique camera. Both surfaces are open
-/// hemispheres, so the GPU factor is the clamped XeGTAO slice. The normal
-/// is off the view axis: a flipped arc sign is not the same number.
-fn pedestal_shot() -> (Shot, Vec<BoxDesc>) {
+/// Floor corner. The probe sits a couple of centimeters in front of both
+/// walls, and the floor ends inside the first step, so one horizon is past
+/// the hemisphere while the walls keep the factor in `0.5..0.8`.
+fn ledge_shot() -> (Shot, Vec<BoxDesc>) {
     let shot = Shot {
-        eye: [0.0, 0.7, 0.5],
-        look: [0.0, 0.2, 0.0],
+        eye: [0.15, 0.75, 0.85],
+        look: [-0.45, 0.5, 0.0],
         fov_y: 50.0,
         near: 0.05,
-        far: 30.0,
+        far: 40.0,
     };
+    // Floor ends at x = -0.33, so a probe near the wall is inside the
+    // first screen step of the drop. One wall faces the probe at x = -0.40;
+    // the other faces it at z = -0.08, so both slice directions occlude.
     let boxes = vec![
-        ([0.0, -0.05, 0.0], [8.0, 0.1, 8.0]),
-        ([0.0, 0.17, 0.0], [0.14, 0.06, 0.14]),
+        ([-0.765, 0.45, 0.0], [0.87, 0.1, 2.0]),
+        ([-0.55, 0.9, 0.0], [0.3, 1.0, 2.0]),
+        ([-0.45, 0.9, -0.23], [0.5, 1.0, 0.3]),
     ];
     (shot, boxes)
 }
 
 #[test]
-fn gtao_gpu_matches_the_clamped_cpu_slice() {
+fn gtao_ledge_matches_the_clamped_cpu_horizon() {
     let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
         return;
     };
@@ -233,29 +250,37 @@ fn gtao_gpu_matches_the_clamped_cpu_slice() {
         device: &device,
         queue: &queue,
     };
-    let (shot, boxes) = pedestal_shot();
-    let (reference, ao) = render_pair(&gpu, &shot, 0.55, &boxes);
-    let expected = clamped_open_visibility();
-    let top = project(&shot, [0.0, 0.2, 0.0]);
-    let floor = project(&shot, [0.0, 0.02, -1.1]);
-    let top_ao = mean_factor(&reference, &ao, top.0, top.1);
-    let floor_ao = mean_factor(&reference, &ao, floor.0, floor.1);
-    eprintln!("gtao cpu {expected:.3} pedestal {top:?} {top_ao:.3} floor {floor:?} {floor_ao:.3}");
+    let (shot, boxes) = ledge_shot();
+    let aabbs: Vec<common::gtao_cpu::Aabb> = boxes
+        .iter()
+        .map(|(translation, scale)| common::gtao_cpu::aabb(*translation, *scale))
+        .collect();
+    let probe = [-0.38_f32, 0.5, 0.0];
+    let (reference, ao) = render_pair(&gpu, &shot, LEDGE_RADIUS, &boxes);
+    let pixel = project(&shot, probe);
+    let gpu_ao = factor_at(&reference, &ao, pixel.0, pixel.1);
+    let uv = glam::Vec2::new(
+        (pixel.0 as f32 + 0.5) / W as f32,
+        (pixel.1 as f32 + 0.5) / H as f32,
+    );
+    let expected =
+        common::gtao_cpu::expected_ao(shot.eye, view_proj(&shot), &aabbs, uv, LEDGE_RADIUS);
+    eprintln!("gtao ledge pixel {pixel:?} gpu {gpu_ao:.3} cpu {expected:.3}");
     assert!(
-        (floor_ao - expected).abs() < MATCH_TOL,
-        "open floor {floor_ao} != cpu slice {expected} at {floor:?}"
+        (0.50..0.80).contains(&expected) && (0.50..0.80).contains(&gpu_ao),
+        "ledge factor gpu {gpu_ao} cpu {expected} is not in 0.50..0.80"
     );
     assert!(
-        (top_ao - expected).abs() < MATCH_TOL,
-        "pedestal {top_ao} != clamped cpu slice {expected} at {top:?}"
+        (gpu_ao - expected).abs() < LEDGE_TOL,
+        "ledge gpu {gpu_ao} != clamped cpu {expected} at {pixel:?}"
     );
 }
 
 /// A card facing the camera, and a second card closer to the camera off to
-/// the side. From the probe the second card is about half a metre away, so
-/// a 0.38 m radius must ignore it while a 1 m radius still darkens. The
-/// second card is nearer than the probe, which keeps it inside the screen
-/// march of the smaller radius.
+/// the side. From the probe the second card is under 0.3 m away: inside a
+/// 1 m radius, where it darkens the card, and inside a 0.50 m radius, where
+/// the falloff leaves the card bright. The second card is nearer than the
+/// probe, which keeps it inside the screen march.
 fn cards_shot() -> (Shot, Vec<BoxDesc>) {
     let shot = Shot {
         eye: [0.0, 0.0, 3.0],
@@ -265,12 +290,12 @@ fn cards_shot() -> (Shot, Vec<BoxDesc>) {
         far: 20.0,
     };
     // Card front at z = 1.52, right edge at x = 0.2. The second card is
-    // closer to the camera (z ≈ 2.04) and starts at x = 0.30, in front of
-    // the card plane. From (0.12, 0, 1.52) the nearest point is ~0.51 m:
-    // past a 0.38 m radius, inside a 1 m radius.
+    // closer to the camera (near face z = 1.80) and starts at x = 0.17.
+    // From (0.12, 0, 1.52) the nearest point is ~0.28 m: a 0.50 m radius
+    // reaches it with a small falloff, a 1 m radius still darkens.
     let boxes = vec![
         ([-0.15, 0.0, 1.50], [0.70, 1.2, 0.04]),
-        ([0.55, 0.0, 2.04], [0.50, 1.5, 0.08]),
+        ([0.43, 0.0, 1.85], [0.52, 1.6, 0.10]),
     ];
     (shot, boxes)
 }
@@ -285,20 +310,25 @@ fn gtao_falloff_ignores_an_occluder_past_the_radius() {
         queue: &queue,
     };
     let (shot, boxes) = cards_shot();
-    // Right side of the card. The nearer card is ~0.51 m away: outside
-    // 0.38 m, inside 1 m, and inside the screen march of the smaller radius.
+    // Right side of the card. The nearer card is ~0.28 m away: a weak
+    // contribution at 0.50 m, a clear one at 1 m.
     let probe = project(&shot, [0.12, 0.0, 1.52]);
     let (reference, covered) = render_pair(&gpu, &shot, 1.0, &boxes);
     let covered_ao = mean_factor(&reference, &covered, probe.0, probe.1);
-    let (_, past) = render_pair(&gpu, &shot, 0.38, &boxes);
+    let (_, past) = render_pair(&gpu, &shot, 0.50, &boxes);
     let past_ao = mean_factor(&reference, &past, probe.0, probe.1);
-    eprintln!("gtao falloff probe {probe:?} radius 1 m {covered_ao:.3} radius 0.38 m {past_ao:.3}");
+    eprintln!("gtao falloff probe {probe:?} radius 1 m {covered_ao:.3} radius 0.50 m {past_ao:.3}");
     assert!(
-        covered_ao < 0.985,
-        "occluder inside 1 m did not darken the card ({covered_ao} at {probe:?})"
+        covered_ao < 0.90,
+        "occluder inside 1 m did not darken the card enough ({covered_ao} at {probe:?})"
     );
     assert!(
         past_ao > 0.97,
-        "occluder past 0.38 m darkened the card ({past_ao} at {probe:?})"
+        "occluder near the 0.50 m radius darkened the card ({past_ao} at {probe:?})"
+    );
+    assert!(
+        past_ao - covered_ao > 0.08,
+        "falloff gap {} is inside the overlap (1 m {covered_ao}, 0.50 m {past_ao})",
+        past_ao - covered_ao
     );
 }

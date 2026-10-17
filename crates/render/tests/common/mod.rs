@@ -10,6 +10,8 @@
 //! the gate stays green on machines without GPU drivers (CI provides
 //! lavapipe). `ORNIS_REQUIRE_GPU=1` panics instead of skipping.
 
+/// CPU GTAO march used to check the ledge gate against `gtao_sample`.
+pub mod gtao_cpu;
 /// Sized (non-square) render/readback helpers for the 320×180 gates.
 pub mod sized;
 
