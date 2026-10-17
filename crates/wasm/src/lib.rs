@@ -125,28 +125,39 @@ fn build_gpu_scene(
     }
 }
 
-/// Maps a DOM `button` code to the platform-neutral mouse-button code.
+/// Engine mouse-button states decoded from a DOM `buttons` bitmask:
+/// `[left, right, middle]`. DOM bits are `1<<0` left, `1<<1` right, `1<<2`
+/// middle — the same order as the engine codes (`0` left, `1` right,
+/// `2` middle). Pure so a host test pins the chord decoding.
+fn dom_buttons_down(buttons: u16) -> [bool; 3] {
+    [
+        buttons & 0b001 != 0,
+        buttons & 0b010 != 0,
+        buttons & 0b100 != 0,
+    ]
+}
+
+/// Syncs all three engine mouse buttons from one DOM `buttons` bitmask.
 ///
-/// DOM and engine codes agree on the left button (`0`) but swap middle and
-/// right (`DOM 1 = middle`, `engine 1 = right`); unknown codes pass through
-/// as raw values. Pure so the mapping stays pinned by a host test.
-fn map_dom_button(button: i16) -> u8 {
-    match button {
-        0 => 0,
-        1 => 2,
-        2 => 1,
-        other => other as u8,
+/// The bitmask is the authoritative pressed set on every pointer event, so
+/// chords and missed `pointerup`s cannot leave a button stuck down: each
+/// event overwrites all three states instead of toggling one.
+fn sync_dom_buttons(input: &mut InputState, buttons: u16) {
+    for (code, down) in [0u8, 1, 2].into_iter().zip(dom_buttons_down(buttons)) {
+        input.set_mouse_button(code, down);
     }
 }
 
 /// Attach orbit-camera pointer/wheel listeners to the canvas. The closures
 /// are leaked intentionally — they live as long as the page.
 ///
-/// Buttons come from `e.button()` (a left drag orbits in 3D; middle/right
-/// drags pan in 2D and never rotate), positions are canvas-relative
-/// (`offset_x/offset_y` — the canvas fills its parent, see
-/// `resize_canvas_to_parent`). A `contextmenu` guard keeps right-drags from
-/// opening the browser menu, and middle-button downs suppress autoscroll.
+/// Buttons come from the `buttons` bitmask on every event (a left drag
+/// orbits in 3D; middle/right drags pan in 2D and never rotate; chords stay
+/// consistent because the full pressed set is re-synced per event), positions
+/// are canvas-relative (`offset_x/offset_y` — the canvas fills its parent,
+/// see `resize_canvas_to_parent`). A `contextmenu` guard keeps right-drags
+/// from opening the browser menu, and middle-button downs suppress
+/// autoscroll.
 fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell<InputState>>) {
     let on_pointerdown: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
@@ -156,7 +167,7 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
                 e.prevent_default();
             }
             let mut input = input.borrow_mut();
-            input.set_mouse_button(map_dom_button(e.button()), true);
+            sync_dom_buttons(&mut input, e.buttons());
             input.set_pointer_anchor([e.offset_x() as f32, e.offset_y() as f32]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
@@ -165,17 +176,15 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
     let on_pointermove: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
         Closure::new(move |e: web_sys::PointerEvent| {
-            input
-                .borrow_mut()
-                .set_pointer_position([e.offset_x() as f32, e.offset_y() as f32]);
+            let mut input = input.borrow_mut();
+            sync_dom_buttons(&mut input, e.buttons());
+            input.set_pointer_position([e.offset_x() as f32, e.offset_y() as f32]);
         })
     };
     let on_pointerup: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
         Closure::new(move |e: web_sys::PointerEvent| {
-            input
-                .borrow_mut()
-                .set_mouse_button(map_dom_button(e.button()), false);
+            sync_dom_buttons(&mut input.borrow_mut(), e.buttons());
         })
     };
     let on_wheel: Closure<dyn FnMut(web_sys::WheelEvent)> = {
@@ -1465,12 +1474,40 @@ mod integration_tests {
     }
 
     #[test]
-    fn dom_button_codes_map_to_engine_buttons() {
-        // Left agrees; DOM middle/right swap to the engine codes.
-        assert_eq!(map_dom_button(0), 0);
-        assert_eq!(map_dom_button(1), 2);
-        assert_eq!(map_dom_button(2), 1);
-        assert_eq!(map_dom_button(7), 7);
+    fn dom_button_bitmask_decodes_chords() {
+        // No buttons: nothing down.
+        assert_eq!(dom_buttons_down(0), [false, false, false]);
+        // Single buttons: DOM left/middle/right bits → engine left/right/middle.
+        assert_eq!(dom_buttons_down(0b001), [true, false, false]);
+        assert_eq!(dom_buttons_down(0b010), [false, true, false]);
+        assert_eq!(dom_buttons_down(0b100), [false, false, true]);
+        // Chords decode every held button, and a bitmask never sticks a
+        // button the way per-event toggles did: the released set drops out.
+        assert_eq!(dom_buttons_down(0b011), [true, true, false]);
+        assert_eq!(dom_buttons_down(0b101), [true, false, true]);
+        assert_eq!(dom_buttons_down(0b111), [true, true, true]);
+    }
+
+    #[test]
+    fn dom_button_bitmask_syncs_input_state() {
+        let mut input = InputState::new();
+        // Left+right chord lands both engine buttons.
+        sync_dom_buttons(&mut input, 0b011);
+        assert!(input.mouse_button_down(0));
+        assert!(input.mouse_button_down(1));
+        assert!(!input.mouse_button_down(2));
+        // Releasing left (bitmask now right-only) clears left and keeps right.
+        sync_dom_buttons(&mut input, 0b010);
+        assert!(!input.mouse_button_down(0));
+        assert!(input.mouse_button_down(1));
+        // Middle joins the chord; empty bitmask releases everything.
+        sync_dom_buttons(&mut input, 0b110);
+        assert!(input.mouse_button_down(1));
+        assert!(input.mouse_button_down(2));
+        sync_dom_buttons(&mut input, 0);
+        assert!(!input.mouse_button_down(0));
+        assert!(!input.mouse_button_down(1));
+        assert!(!input.mouse_button_down(2));
     }
 
     #[test]
@@ -1591,6 +1628,20 @@ mod integration_tests {
         );
         let plane = read_plane_camera(&engine).expect("plane camera installed");
         assert!((plane.center() - glam::Vec2::ZERO).length() < 1e-4);
+        // Review RAT-16 blocker 1: entering from the perspective orbit
+        // installs the orthographic sheet (fov-derived half-height), never
+        // the perspective stand-in.
+        let (_, _, _, projection, _, near, far) = plane.camera_view_params();
+        let expected_hh = 9.0 * (60.0f32.to_radians() * 0.5).tan();
+        assert_eq!(
+            projection,
+            ornis_assets::scene::CameraProjection::Orthographic {
+                half_height: ornis_core::Meters::new(expected_hh)
+            }
+        );
+        assert!((plane.half_height().get() - expected_hh).abs() < 1e-4);
+        assert_eq!(near.get(), 0.1);
+        assert_eq!(far.get(), 100.0);
         // Leaving restores the saved orbit and flips the mode back.
         assert!(apply_mode_request(
             &mut engine,

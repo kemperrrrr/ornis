@@ -188,10 +188,14 @@ impl PlaneCamera {
         distance.is_finite().then_some(distance)
     }
 
-    /// Enters 2D from explicit look-at fields plus the K0a projection
-    /// (phase B seam): orthographic keeps the asset half-height at the
-    /// current eye distance, perspective derives `hh` from the fov like
-    /// [`Self::from_view_parameters`].
+    /// Enters 2D from explicit look-at fields plus the K0a projection.
+    ///
+    /// The live path is always the orthographic sheet: an asset ortho keeps
+    /// its half-height, a perspective orbit derives `hh` from the fov
+    /// (`|eye − target|·tan(fov/2)`), and the eye sits at the orbit distance
+    /// above the sheet. The [`PlaneProjection::PerspectiveStandIn`] never
+    /// reaches this seam — its fov-derived eye height leaves the near/far
+    /// clip window at the `hh` zoom extremes and empties the viewport.
     // qual:allow(srp, max_parameters=7) reason: "RAT-16 mandates explicit-param constructors without builders; K0a seam carries the full look-at frame as values, like CameraDesc::try_new_units"
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -204,29 +208,10 @@ impl PlaneCamera {
         far: Meters,
         viewport_px: [f32; 2],
     ) -> Option<Self> {
-        match projection {
-            CameraProjection::Perspective => Self::from_view_parameters(
-                (eye, target, Vec3::Y, fov.get(), near.get(), far.get()),
-                PlaneProjection::PerspectiveStandIn { fov_y: fov },
-                viewport_px,
-            ),
-            CameraProjection::Orthographic { half_height } => {
-                Self::from_orthographic_view(eye, target, half_height, near, far, viewport_px)
-            }
-        }
-    }
-
-    /// Ortho entry from explicit fields: `center = target.xy`, the asset
-    /// half-height at the current eye distance. Pure orchestration over the
-    /// checked eye height and [`Self::new`].
-    fn from_orthographic_view(
-        eye: Vec3,
-        target: Vec3,
-        half_height: Meters,
-        near: Meters,
-        far: Meters,
-        viewport_px: [f32; 2],
-    ) -> Option<Self> {
+        let half_height = match projection {
+            CameraProjection::Perspective => Self::orbit_half_height(eye, target, fov.get())?,
+            CameraProjection::Orthographic { half_height } => half_height,
+        };
         let eye_height = Self::checked_eye_height(eye, target)?;
         Self::new(
             target.truncate(),
@@ -510,7 +495,6 @@ impl System for PlaneCameraInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_core::PositiveF32;
 
     /// Stand-in rig: center origin, `hh = 5`, `800×600` viewport.
     fn camera() -> PlaneCamera {
@@ -672,7 +656,8 @@ mod tests {
     }
 
     /// `from_view_parameters` centers on `target.xy` with the orbit-derived
-    /// half-height; `from_camera_view` keeps the ortho half-height.
+    /// half-height; `from_camera_view` always enters the orthographic sheet
+    /// (asset half-height, or the fov-derived one from a perspective orbit).
     #[test]
     fn from_orbit_frames_keeps_scale() {
         let plane = PlaneCamera::from_view_parameters(
@@ -708,6 +693,24 @@ mod tests {
         .expect("plane from ortho view");
         assert_eq!(ortho.half_height(), Meters::new(2.0));
         assert_eq!(ortho.center(), Vec2::new(1.0, 2.0));
+        // A perspective orbit enters as the orthographic sheet with the
+        // fov-derived half-height (the stand-in never reaches the live path).
+        let from_perspective = PlaneCamera::from_camera_view(
+            Vec3::new(1.0, 2.0, 9.0),
+            Vec3::new(1.0, 2.0, 0.0),
+            CameraProjection::Perspective,
+            Degrees::new(60.0),
+            Meters::new(0.1),
+            Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("plane from perspective orbit");
+        assert_eq!(
+            from_perspective.camera_view_params().3,
+            CameraProjection::Orthographic {
+                half_height: Meters::new(expected)
+            }
+        );
         // Degenerate inputs are rejected.
         assert!(
             PlaneCamera::new(
@@ -807,11 +810,77 @@ mod tests {
         );
     }
 
-    /// Grid ladder helper input validation lives with the grid tests; the
-    /// plane side only guarantees a positive scale for it.
+    /// Live 2D entry (review RAT-16 blockers 1–2): `from_camera_view` from a
+    /// perspective orbit yields the orthographic sheet on both seams, and
+    /// picking keeps hitting `z = 0` at both `hh` zoom clamp edges — the eye
+    /// height is the orbit distance, so the sheet never leaves the near/far
+    /// window the way the fov-derived stand-in eye height did.
     #[test]
-    fn grid_scale_input_is_positive() {
-        let min = PositiveF32::try_new(48.0).expect("valid grid floor");
-        assert!(camera().pixels_per_unit() * min.get() > 0.0);
+    fn live_entry_is_orthographic_and_picks_at_zoom_clamps() {
+        use crate::picking::PickProjection;
+        let mut camera = PlaneCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, 9.0),
+            Vec3::ZERO,
+            CameraProjection::Perspective,
+            Degrees::new(60.0),
+            Meters::new(0.1),
+            Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("live entry from a perspective orbit");
+        assert_eq!(
+            camera.camera_view_params().3,
+            CameraProjection::Orthographic {
+                half_height: Meters::new(9.0 * (60.0f32.to_radians() * 0.5).tan())
+            }
+        );
+        assert!(matches!(
+            camera
+                .viewport_camera()
+                .expect("picking camera")
+                .projection(),
+            PickProjection::Orthographic { .. }
+        ));
+        let center = [400.0, 300.0];
+        // Zoom out to the 1000 m clamp, then in to the 0.01 m clamp.
+        for _ in 0..200 {
+            camera.zoom_at(120.0, center);
+        }
+        assert_eq!(camera.half_height().get(), 1000.0);
+        assert_sheet_stays_pickable(&camera);
+        for _ in 0..400 {
+            camera.zoom_at(-120.0, center);
+        }
+        assert_eq!(camera.half_height().get(), 0.01);
+        assert_sheet_stays_pickable(&camera);
+    }
+
+    /// Every viewport pixel resolves onto the sheet at both zoom clamps,
+    /// matching [`PlaneCamera::screen_to_plane`] (the exactness the picking
+    /// pipeline relies on), and the center hit stays inside the pick
+    /// camera's near/far window.
+    fn assert_sheet_stays_pickable(camera: &PlaneCamera) {
+        use crate::picking::{WorkPlane, pointer_on_plane};
+        let viewport = camera.viewport_camera().expect("picking camera");
+        for px in [0.0, 400.0, 799.0] {
+            for py in [0.0, 300.0, 599.0] {
+                let via_pick =
+                    pointer_on_plane(&viewport, [px, py], WorkPlane::XY).expect("plane hit");
+                assert!((via_pick.z).abs() < 1e-4, "{px},{py}: z={}", via_pick.z);
+                assert!(
+                    (via_pick.truncate() - camera.screen_to_plane([px, py])).length() < 1e-3,
+                    "{px},{py}: {via_pick:?}"
+                );
+            }
+        }
+        let center_hit =
+            pointer_on_plane(&viewport, [400.0, 300.0], WorkPlane::XY).expect("center plane hit");
+        let depth = (center_hit - viewport.position()).length();
+        assert!(
+            depth >= viewport.near() && depth <= viewport.far(),
+            "center depth {depth} outside [{}, {}]",
+            viewport.near(),
+            viewport.far()
+        );
     }
 }
