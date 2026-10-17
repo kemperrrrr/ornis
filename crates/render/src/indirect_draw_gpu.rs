@@ -141,7 +141,7 @@ fn render_frame(
         renderer.render_gbuffer(device, &mut encoder, &g, &mesh, staged);
         renderer.render_shadows(device, &mut encoder, &mesh, staged);
     }
-    renderer.render_lighting(device, &mut encoder, &g, &renderer.pbr_texture_view);
+    renderer.render_lighting(device, &mut encoder, &g, &renderer.pbr_texture_view, None);
     renderer.render_composite(
         device,
         queue,
@@ -504,7 +504,7 @@ fn armed_with_custom_matches_direct_and_indirect() {
     };
     renderer.render_gbuffer_with_custom(&device, &mut encoder, &g, &mesh, staged, &[]);
     renderer.render_shadows(&device, &mut encoder, &mesh, staged);
-    renderer.render_lighting(&device, &mut encoder, &g, &renderer.pbr_texture_view);
+    renderer.render_lighting(&device, &mut encoder, &g, &renderer.pbr_texture_view, None);
     renderer.render_composite(
         &device,
         &queue,

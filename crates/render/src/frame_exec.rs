@@ -12,11 +12,12 @@
 
 use crate::flags::Bloom;
 use crate::frame_passes::{
-    Albedo, Bloom0, Bloom1, Bloom2, BloomBright, BloomDown1Pass, BloomDown2Pass, BloomUp0Pass,
-    BloomUp1Pass, Composite, CompositeDeferred, CompositeDeferredBloom, CompositeForward,
-    CompositeForwardBloom, CompositeHybrid, CompositeHybridBloom, Depth, FogPass, FogPlacement,
-    FogWiring, Forward, FromDeferred, FromForward, GbufferPass, Hdr, HdrFwd, LightingPass,
-    MaterialId, MaterialParams, Normal, OwnsDepth, SharedDepth, Target, WorldPosition,
+    Albedo, Ao, AoBlurPass, AoRaw, AoRawPass, Bloom0, Bloom1, Bloom2, BloomBright, BloomDown1Pass,
+    BloomDown2Pass, BloomUp0Pass, BloomUp1Pass, Composite, CompositeDeferred,
+    CompositeDeferredBloom, CompositeForward, CompositeForwardBloom, CompositeHybrid,
+    CompositeHybridBloom, Depth, FogPass, FogPlacement, FogWiring, Forward, FromDeferred,
+    FromForward, GbufferPass, Hdr, HdrFwd, LightingAoPass, LightingPass, MaterialId,
+    MaterialParams, Normal, OwnsDepth, SharedDepth, Target, WorldPosition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
@@ -584,6 +585,7 @@ impl RenderFrame3D {
             technique,
             bloom,
             None,
+            None,
             crate::renderer::SINGLE_SAMPLE_COUNT,
         )
     }
@@ -607,6 +609,7 @@ impl RenderFrame3D {
             surface_size,
             technique,
             bloom,
+            None,
             None,
             sample_count,
         )
@@ -634,6 +637,7 @@ impl RenderFrame3D {
             technique,
             bloom,
             Some(fog),
+            None,
             crate::renderer::SINGLE_SAMPLE_COUNT,
         )
     }
@@ -655,11 +659,67 @@ impl RenderFrame3D {
             technique,
             bloom,
             Some(fog),
+            None,
             sample_count,
         )
     }
 
+    /// Like [`new_with`](Self::new_with), plus opt-in screen-space ambient
+    /// occlusion from `ao` ([`AoWiring`](crate::ao::AoWiring): SSAO/GTAO
+    /// kernel plus settings). Registers the half-res `ao_raw`/`ao` targets
+    /// and the `ao_raw` → `ao_blur` → `lighting` chain; the blurred factor
+    /// modulates only the ambient and IBL terms. Without `ao` the plan is
+    /// byte-identical to [`new_with`](Self::new_with). No fog node is
+    /// registered (default).
+    ///
+    /// Single-sample plan: pooled geometry targets are 1x. Pair with a
+    /// 1x [`Renderer3D`].
+    // qual:api — public opt-in; in-tree callers are the AO gates until a sample wires it.
+    pub fn new_with_ao(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        ao: crate::ao::AoWiring,
+    ) -> Self {
+        Self::build(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            None,
+            Some(ao),
+            crate::renderer::SINGLE_SAMPLE_COUNT,
+        )
+    }
+
+    /// Registers the opt-in AO chain: the raw kernel runs over the g-buffer
+    /// depth/normals into half-res `ao_raw`, the bilateral blur smooths it
+    /// into `ao`.
+    ///
+    /// Returns whether the occluded lighting pass must be wired: true when
+    /// AO is on and the deferred chain exists to feed it. Like fog on
+    /// forward plans, wiring AO without the deferred chain fails at layout
+    /// time (read-before-write on the g-buffer layers).
+    fn register_ao(
+        systems: &mut SystemSet,
+        surface_format: wgpu::TextureFormat,
+        ao: Option<crate::ao::AoWiring>,
+        technique: Technique,
+    ) -> bool {
+        let Some(wiring) = ao else {
+            return false;
+        };
+        let settings = wiring.settings();
+        systems.register_resource::<AoRaw>(surface_format);
+        systems.register_resource::<Ao>(surface_format);
+        systems.add_system(AoRawPass::new(settings));
+        systems.add_system(AoBlurPass::new(settings));
+        technique.has_deferred()
+    }
+
     /// Shared plan builder: registers resources, technique nodes, the
+    /// optional AO chain (`ao_raw` → `ao_blur` → occluded `lighting`), the
     /// optional bloom chain, the optional fog node (at `fog` placement),
     /// then the composite pass.
     fn build(
@@ -668,6 +728,7 @@ impl RenderFrame3D {
         technique: Technique,
         bloom: crate::flags::Bloom,
         fog: Option<FogWiring>,
+        ao: Option<crate::ao::AoWiring>,
         sample_count: u32,
     ) -> Self {
         // S2: resources are registered by type; specs/names (and the
@@ -692,7 +753,15 @@ impl RenderFrame3D {
         };
         if technique.has_deferred() {
             systems.add_system(GbufferPass);
-            systems.add_system(LightingPass);
+        }
+        // Opt-in AO between gbuffer and lighting (see `register_ao`).
+        let ao_lighting = Self::register_ao(&mut systems, surface_format, ao, technique);
+        if technique.has_deferred() {
+            if ao_lighting {
+                systems.add_system(LightingAoPass);
+            } else {
+                systems.add_system(LightingPass);
+            }
         }
         if technique.has_forward() {
             // In forward-only mode the pass owns the depth buffer; in
@@ -1336,6 +1405,128 @@ mod tests {
                 FogPlacement::AfterComposite,
                 FogState::Enabled(FogSettings::default()),
             ),
+        );
+        let _ = plan.systems.build();
+    }
+
+    #[test]
+    fn default_plans_register_no_ao() {
+        use crate::ao::{AoSettings, AoWiring};
+        // Golden guard: AO is opt-in — no default plan wires `ao_raw` /
+        // `ao_blur` nodes, so the default frame stays pixel-identical (see
+        // `AoWiring`). The wired plan inserts both before `lighting`, and
+        // `lighting` then reads the blurred `ao` factor.
+        for technique in [Technique::Forward, Technique::Deferred, Technique::Hybrid] {
+            for bloom in [Bloom::Off, Bloom::On] {
+                let mut plan = RenderFrame3D::new_with(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    (32, 32),
+                    technique,
+                    bloom,
+                );
+                let names = plan
+                    .systems
+                    .build()
+                    .passes
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>();
+                assert!(
+                    !names
+                        .iter()
+                        .any(|name| name == "ao_raw" || name == "ao_blur"),
+                    "{technique:?}/{bloom:?} registers no AO: {names:?}"
+                );
+            }
+        }
+        let wiring = AoWiring::new(AoSettings::default());
+        assert_eq!(wiring.settings(), AoSettings::default());
+        for method in [crate::ao::AoMethod::Ssao, crate::ao::AoMethod::Gtao] {
+            let settings =
+                crate::ao::AoSettings::new(method, 0.5, 1.0, 0.025).expect("valid AO settings");
+            let mut plan = RenderFrame3D::new_with_ao(
+                wgpu::TextureFormat::Rgba8Unorm,
+                (32, 32),
+                Technique::Deferred,
+                Bloom::Off,
+                AoWiring::new(settings),
+            );
+            let names = plan
+                .systems
+                .build()
+                .passes
+                .iter()
+                .map(|p| p.name.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                names,
+                vec!["gbuffer", "ao_raw", "ao_blur", "lighting", "composite"]
+            );
+        }
+    }
+
+    #[test]
+    fn ao_adds_two_half_res_slots_and_extends_hdr_lifetime() {
+        use crate::ao::{AoSettings, AoWiring};
+        // Deferred, no bloom, 1280×720: the AO chain adds exactly its two
+        // half-res targets (same spec → shared only across non-overlapping
+        // windows, and `ao_raw`/`ao` overlap on the blur pass).
+        let mut plain = RenderFrame3D::new_with(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Deferred,
+            Bloom::Off,
+        );
+        let plain_slots = plain.systems.layout().slots.len();
+        let mut ao_plan = RenderFrame3D::new_with_ao(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (1280, 720),
+            Technique::Deferred,
+            Bloom::Off,
+            AoWiring::new(AoSettings::default()),
+        );
+        let layout = ao_plan.systems.layout().clone();
+        assert_eq!(
+            layout.slots.len(),
+            plain_slots + 2,
+            "AO adds exactly its two half-res slots"
+        );
+        // `ao_raw` lives [ao_raw, ao_blur], `ao` lives [ao_blur, lighting]:
+        // pass indices are gbuffer=0, ao_raw=1, ao_blur=2, lighting=3.
+        let window = |name: &str| {
+            let rl = layout
+                .resources
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("resource '{name}' missing"));
+            (rl.first_use, rl.last_use)
+        };
+        assert_eq!(window("ao_raw"), (1, 2));
+        assert_eq!(window("ao"), (2, 3));
+        assert_eq!(window("hdr"), (3, 4));
+        // Pass cost ledger for the PR: two half-res fullscreen draws plus
+        // one lighting sample — 2 × (640×360) AO texels per frame.
+        let (w, h) = crate::ao::half_extent(1280, 720);
+        assert_eq!((w, h), (640, 360));
+        assert_eq!(
+            layout.planned_pool_bytes(),
+            plain.systems.layout().planned_pool_bytes() + 2 * u64::from(w) * u64::from(h) * 4,
+            "AO pool cost is exactly two half-res Rgba8 targets"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "before any write")]
+    fn ao_on_forward_plan_fails_without_gbuffer() {
+        use crate::ao::{AoSettings, AoWiring};
+        // AO reads the g-buffer layers, which forward-only plans never
+        // write: compiling the layout fails (read-before-write, like fog).
+        let mut plan = RenderFrame3D::new_with_ao(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Forward,
+            Bloom::Off,
+            AoWiring::new(AoSettings::default()),
         );
         let _ = plan.systems.build();
     }

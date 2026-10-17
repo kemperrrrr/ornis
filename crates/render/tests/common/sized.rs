@@ -124,3 +124,14 @@ pub fn render_and_readback(
     readback.unmap();
     pixels
 }
+
+/// Continuous pixel of a clip-space point in a `width`×`height` frame.
+///
+/// NDC x grows right and NDC y grows up; the returned y grows down, matching
+/// the read-back buffer. Callers truncate or round.
+pub fn clip_to_pixel(clip: glam::Vec4, width: u32, height: u32) -> (f32, f32) {
+    let ndc = clip.truncate() / clip.w;
+    let x = (ndc.x * 0.5 + 0.5) * width as f32;
+    let y = (0.5 - ndc.y * 0.5) * height as f32;
+    (x, y)
+}

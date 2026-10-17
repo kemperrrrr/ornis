@@ -249,6 +249,7 @@ impl_access_tuple!(A, B, C);
 impl_access_tuple!(A, B, C, D);
 impl_access_tuple!(A, B, C, D, E);
 impl_access_tuple!(A, B, C, D, E, F);
+impl_access_tuple!(A, B, C, D, E, F, G);
 
 /// Resolves typed resources to live texture views during pass execution.
 #[derive(Clone, Copy)]
