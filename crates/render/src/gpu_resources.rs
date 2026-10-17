@@ -458,15 +458,15 @@ impl System for RenderSubmit {
         let staged = fs
             .renderer
             .stage_custom_meshes(&device.0, &queue.0, &extracted.custom_meshes);
-        // Convert once: merged records feed the direct upload, and the
-        // sphere prefix stages the shared batch (customs never indirect).
-        let converted =
+        // Convert once: merged records feed the direct upload; the sphere
+        // prefix stages the shared batch (customs never indirect).
+        let mut converted =
             crate::gpu_culling::merge_and_convert_instances(&extracted.instances, &staged);
         fs.renderer
             .upload_per_objects(&device.0, &queue.0, &converted);
         if fs.renderer.indirect_draw() {
-            fs.renderer
-                .stage_batch_inputs(view_proj, converted[..extracted.instances.len()].to_vec());
+            converted.truncate(extracted.instances.len());
+            fs.renderer.stage_batch_inputs(view_proj, converted);
         }
         *custom_meshes
             .0

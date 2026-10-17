@@ -73,7 +73,8 @@ pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
                 None
             }
         }
-    })
+    });
+    pair
 }
 
 /// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a

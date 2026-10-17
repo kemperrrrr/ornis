@@ -104,20 +104,16 @@ fn setup_scene(
     (mesh, instances, view_proj)
 }
 
-/// One full frame rendered either through the direct fallback draws or
-/// through the culler's compacted gbuffer batch (`draw_indexed_indirect`;
-/// shadows always take the direct pre-pass so off-frame casters keep
-/// their shadows); returns the composite pixels.
-fn render_frame(
+/// One offscreen composite frame on an existing `renderer`: builds the
+/// offscreen target, encoder and [`GbufferTargets`], runs the caller's
+/// gbuffer draw (+ shadows), then the shared lighting → composite →
+/// submit → readback tail; returns the composite pixels.
+fn offscreen_frame(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    indirect: bool,
-    shadowed: bool,
-    with_caster: bool,
+    renderer: &Renderer3D,
+    gbuffer_pass: impl FnOnce(&mut wgpu::CommandEncoder, &GbufferTargets<'_>),
 ) -> Vec<u8> {
-    let renderer = Renderer3D::new(device, &surface_config(), 1);
-    let (mesh, instances, view_proj) = setup_scene(device, queue, &renderer, shadowed, with_caster);
-    let staged = instances.len() as u32;
     let (target, target_view) = test_util::offscreen_target(device, FRAME_W, FRAME_H);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("indirect parity frame"),
@@ -132,17 +128,7 @@ fn render_frame(
         motion: None,
         previous_depth: None,
     };
-    if indirect {
-        let culler = Culler::try_new(device, staged).expect("scene is non-empty");
-        culler
-            .compact(queue, &view_proj, mesh.num_indices, &instances)
-            .expect("scene fits the capacity");
-        renderer.render_gbuffer_indirect(device, &mut encoder, &g, &mesh, &culler);
-        renderer.render_shadows(device, &mut encoder, &mesh, staged);
-    } else {
-        renderer.render_gbuffer(device, &mut encoder, &g, &mesh, staged);
-        renderer.render_shadows(device, &mut encoder, &mesh, staged);
-    }
+    gbuffer_pass(&mut encoder, &g);
     renderer.render_lighting(device, &mut encoder, &g, &renderer.pbr_texture_view, None);
     renderer.render_composite(
         device,
@@ -160,6 +146,35 @@ fn render_frame(
     );
     queue.submit([encoder.finish()]);
     test_util::readback_rgba8(device, queue, &target, FRAME_W, FRAME_H)
+}
+
+/// One full frame rendered either through the direct fallback draws or
+/// through the culler's compacted gbuffer batch (`draw_indexed_indirect`;
+/// shadows always take the direct pre-pass so off-frame casters keep
+/// their shadows); returns the composite pixels.
+fn render_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    indirect: bool,
+    shadowed: bool,
+    with_caster: bool,
+) -> Vec<u8> {
+    let renderer = Renderer3D::new(device, &surface_config(), 1);
+    let (mesh, instances, view_proj) = setup_scene(device, queue, &renderer, shadowed, with_caster);
+    let staged = instances.len() as u32;
+    offscreen_frame(device, queue, &renderer, |encoder, g| {
+        if indirect {
+            let culler = Culler::try_new(device, staged).expect("scene is non-empty");
+            culler
+                .compact(queue, &view_proj, mesh.num_indices, &instances)
+                .expect("scene fits the capacity");
+            renderer.render_gbuffer_indirect(device, encoder, g, &mesh, &culler);
+            renderer.render_shadows(device, encoder, &mesh, staged);
+        } else {
+            renderer.render_gbuffer(device, encoder, g, &mesh, staged);
+            renderer.render_shadows(device, encoder, &mesh, staged);
+        }
+    })
 }
 
 /// The compacted gbuffer submit must render the same pixels as the
@@ -504,39 +519,10 @@ fn armed_with_custom_matches_direct_and_indirect() {
     renderer.stage_batch_inputs(view_proj, converted);
     renderer.prepare_indirect_batch(&device, &queue, mesh.num_indices);
     assert!(renderer.indirect_batch_ready());
-    let (target, target_view) = test_util::offscreen_target(&device, FRAME_W, FRAME_H);
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("armed selection frame"),
+    let routed = offscreen_frame(&device, &queue, &renderer, |encoder, g| {
+        renderer.render_gbuffer_with_custom(&device, encoder, g, &mesh, staged, &[]);
+        renderer.render_shadows(&device, encoder, &mesh, staged);
     });
-    let g = GbufferTargets {
-        albedo: &renderer.gbuffer.albedo_view,
-        normal: &renderer.gbuffer.normal_view,
-        material_id: &renderer.gbuffer.material_id_view,
-        world_position: &renderer.gbuffer.world_position_view,
-        material_params: &renderer.gbuffer.material_params_view,
-        depth: &renderer.gbuffer.depth_view,
-        motion: None,
-        previous_depth: None,
-    };
-    renderer.render_gbuffer_with_custom(&device, &mut encoder, &g, &mesh, staged, &[]);
-    renderer.render_shadows(&device, &mut encoder, &mesh, staged);
-    renderer.render_lighting(&device, &mut encoder, &g, &renderer.pbr_texture_view, None);
-    renderer.render_composite(
-        &device,
-        &queue,
-        &mut encoder,
-        crate::renderer::CompositeInputs {
-            target: &target_view,
-            hdr: &renderer.pbr_texture_view,
-            hdr_fwd: &renderer.pbr_texture_view,
-            bloom: &renderer.pbr_texture_view,
-            bloom_intensity: 0.0,
-            mode: 0,
-        },
-        crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS,
-    );
-    queue.submit([encoder.finish()]);
-    let routed = test_util::readback_rgba8(&device, &queue, &target, FRAME_W, FRAME_H);
     let direct = render_frame(&device, &queue, false, true, true);
     let indirect = render_frame(&device, &queue, true, true, true);
     assert!(
@@ -552,3 +538,6 @@ fn armed_with_custom_matches_direct_and_indirect() {
         "armed with_custom must match the explicit indirect entry point"
     );
 }
+
+/// The cached-bind-group invalidation gates (review #100).
+mod bind_group_invalidation;

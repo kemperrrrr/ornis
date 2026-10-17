@@ -70,7 +70,11 @@ impl Renderer3D {
     /// the frame transparently falls back to the direct `draw_indexed`
     /// path ([`render_gbuffer`](Self::render_gbuffer) /
     /// [`render_shadows`](Self::render_shadows) — shadows always draw
-    /// directly); the next frame retries.
+    /// directly); the next frame retries. That branch is defensive:
+    /// `ensure_culler_capacity` runs just before the compact with the
+    /// same record count and grows the culler to fit (its `try_new`
+    /// fails only on zero capacity, which the doubling rules out), so a
+    /// staged frame never lands there in practice.
     pub(crate) fn prepare_indirect_batch(
         &self,
         device: &wgpu::Device,
