@@ -8,6 +8,7 @@
 //! stay identical. The conditional passes (forward, bloom_down0,
 //! composite) remain imperative until S2b.
 
+use crate::antialias::{AntiAliasMode, EdgeFilterSettings, TaaSettings};
 use crate::renderer::{CompositeInputs, GbufferTargets, Renderer3D};
 use crate::system::{
     AccessSet, ClearBlack, ClearTransparent, ClearWhite, Frame, FramePass, FrameResource, Read,
@@ -115,6 +116,25 @@ typed_resource!(
 pub struct Depth;
 typed_resource!(Depth, "depth", owned_msaa, F::Depth32Float);
 
+/// Motion vectors of the geometry (current UV minus previous UV, plus the
+/// previous NDC depth and a validity bit), written by the motion-aware
+/// g-buffer pass and read by the temporal resolve. The pooled attachment is
+/// allocated only when TAA is wired.
+pub struct Motion;
+impl FrameResource for Motion {
+    const NAME: &'static str = "motion";
+    fn kind() -> ResourceKind {
+        ResourceKind::FrameOwned
+    }
+    fn spec(_: wgpu::TextureFormat) -> TextureSpec {
+        TextureSpec {
+            format: F::Rgba16Float,
+            samples: 1,
+            size: SizePolicy::MatchSurface,
+        }
+    }
+}
+
 /// HDR layer of the deferred path.
 ///
 /// Scene-linear [`crate::renderer::DEFERRED_HDR_FORMAT`], independent of
@@ -158,6 +178,26 @@ impl FrameResource for Target {
     }
 }
 
+/// The composited image the anti-aliasing pass filters.
+///
+/// The intermediate layer between the composite and the presented target:
+/// its format follows the surface, so the anti-aliasing pass reads the
+/// colours the composite wrote and writes the filtered ones back.
+pub struct LdrLayer;
+impl FrameResource for LdrLayer {
+    const NAME: &'static str = "ldr_layer";
+    fn kind() -> ResourceKind {
+        ResourceKind::FrameOwned
+    }
+    fn spec(surface_format: wgpu::TextureFormat) -> TextureSpec {
+        TextureSpec {
+            format: surface_format,
+            samples: 1,
+            size: SizePolicy::MatchSurface,
+        }
+    }
+}
+
 /// Bloom level at 1/2 of the surface.
 pub struct Bloom0;
 typed_resource!(Bloom0, "bloom0", owned_fraction, F::Rgba16Float, 2);
@@ -175,7 +215,7 @@ typed_resource!(Bloom2, "bloom2", owned_fraction, F::Rgba16Float, 8);
 // independent access sets, so they are pure typed systems. The conditional
 // passes (forward, bloom_down0, composite) stay imperative until S2b.
 
-/// G-buffer pass: writes all six G-buffer layers.
+/// G-buffer pass: writes the six lighting layers.
 pub struct GbufferPass;
 impl FramePass for GbufferPass {
     type Reads = ();
@@ -209,6 +249,60 @@ impl FramePass for GbufferPass {
             world_position,
             material_params,
             depth,
+            motion: None,
+        };
+        frame.renderer.render_gbuffer_with_custom(
+            frame.device,
+            frame.encoder,
+            &g,
+            frame.mesh,
+            frame.instance_count,
+            frame.customs,
+        );
+    }
+}
+
+/// Motion-aware g-buffer pass used by TAA: writes the lighting layers and
+/// the reprojection vector (including previous-frame depth).
+///
+/// The temporal pass needs this extra target; other plans use
+/// [`GbufferPass`] and allocate no motion-vector attachment.
+pub struct GbufferMotionPass;
+impl FramePass for GbufferMotionPass {
+    type Reads = ();
+    type Writes = (
+        Write<Albedo>,
+        Write<Normal>,
+        Write<MaterialId>,
+        Write<WorldPosition>,
+        Write<MaterialParams>,
+        Write<Depth>,
+        Write<Motion>,
+    );
+    fn name(&self) -> &'static str {
+        "gbuffer"
+    }
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (
+            Some(albedo),
+            Some(normal),
+            Some(material_id),
+            Some(world_position),
+            Some(material_params),
+            Some(depth),
+            Some(motion),
+        ) = views.writes
+        else {
+            return;
+        };
+        let g = GbufferTargets {
+            albedo,
+            normal,
+            material_id,
+            world_position,
+            material_params,
+            depth,
+            motion: Some(motion),
         };
         frame.renderer.render_gbuffer_with_custom(
             frame.device,
@@ -258,6 +352,7 @@ impl FramePass for LightingPass {
             world_position,
             material_params,
             depth,
+            motion: None,
         };
         frame.renderer.render_shadows_with_custom(
             frame.device,
@@ -411,6 +506,7 @@ impl FramePass for LightingAoPass {
             world_position,
             material_params,
             depth,
+            motion: None,
         };
         frame.renderer.render_shadows_with_custom(
             frame.device,
@@ -706,9 +802,10 @@ pub trait CompositeMode: Sized + 'static {
     /// Modes reading the forward layer sample the renderer's
     /// single-sample resolve at 4x (the pooled forward layer is
     /// multisampled there); at 1x every view is the pooled one.
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>>;
 }
 
@@ -718,13 +815,14 @@ impl CompositeMode for CompositeDeferredBloom {
     type Reads = (Read<Hdr>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         _renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>> {
         let hdr = views.get::<Hdr>()?;
         Some(CompositeInputs {
-            target: views.get::<Target>()?,
+            target,
             hdr,
             hdr_fwd: hdr,
             bloom: views.get::<Bloom0>()?,
@@ -740,13 +838,14 @@ impl CompositeMode for CompositeDeferred {
     type Reads = (Read<Hdr>,);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         _renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>> {
         let hdr = views.get::<Hdr>()?;
         Some(CompositeInputs {
-            target: views.get::<Target>()?,
+            target,
             hdr,
             hdr_fwd: hdr,
             bloom: hdr,
@@ -762,12 +861,13 @@ impl CompositeMode for CompositeHybridBloom {
     type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>> {
         Some(CompositeInputs {
-            target: views.get::<Target>()?,
+            target,
             hdr: views.get::<Hdr>()?,
             hdr_fwd: renderer
                 .forward_resolve_view()
@@ -785,15 +885,16 @@ impl CompositeMode for CompositeHybrid {
     type Reads = (Read<Hdr>, Read<HdrFwd>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>> {
         let hdr_fwd = renderer
             .forward_resolve_view()
             .or_else(|| views.get::<HdrFwd>())?;
         Some(CompositeInputs {
-            target: views.get::<Target>()?,
+            target,
             hdr: views.get::<Hdr>()?,
             hdr_fwd,
             bloom: hdr_fwd,
@@ -809,15 +910,16 @@ impl CompositeMode for CompositeForwardBloom {
     type Reads = (Read<HdrFwd>, Read<Bloom0>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>> {
         let hdr_fwd = renderer
             .forward_resolve_view()
             .or_else(|| views.get::<HdrFwd>())?;
         Some(CompositeInputs {
-            target: views.get::<Target>()?,
+            target,
             hdr: hdr_fwd,
             hdr_fwd,
             bloom: views.get::<Bloom0>()?,
@@ -833,15 +935,16 @@ impl CompositeMode for CompositeForward {
     type Reads = (Read<HdrFwd>,);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
-    fn inputs<'a>(
-        views: &SystemViews<'a, Composite<Self>>,
+    fn inputs<'a, P: FramePass>(
+        views: &SystemViews<'a, P>,
         renderer: &'a Renderer3D,
+        target: &'a wgpu::TextureView,
     ) -> Option<CompositeInputs<'a>> {
         let hdr_fwd = renderer
             .forward_resolve_view()
             .or_else(|| views.get::<HdrFwd>())?;
         Some(CompositeInputs {
-            target: views.get::<Target>()?,
+            target,
             hdr: hdr_fwd,
             hdr_fwd,
             bloom: hdr_fwd,
@@ -1134,28 +1237,126 @@ impl FramePass for FogPass {
     }
 }
 
-/// The composite pass; `M` is the (technique × bloom) mode.
-pub struct Composite<M: CompositeMode>(PhantomData<fn() -> M>);
-impl<M: CompositeMode> Composite<M> {
+/// The temporal anti-aliasing pass: resolves the composited image against
+/// the history buffer.
+///
+/// Reads the composited [`LdrLayer`] and the g-buffer depth (the
+/// reprojection source) and writes the presented [`Target`]. The history
+/// itself lives in the renderer (the ping-pong buffers), so the pass only
+/// needs the image and the depth.
+pub struct TaaPass {
+    settings: TaaSettings,
+}
+
+impl TaaPass {
+    /// The pass with the given resolve settings.
+    pub fn new(settings: TaaSettings) -> Self {
+        Self { settings }
+    }
+}
+
+impl FramePass for TaaPass {
+    type Reads = (Read<LdrLayer>, Read<Depth>, Read<Motion>);
+    type Writes = (Write<Target>,);
+    fn name(&self) -> &'static str {
+        "taa"
+    }
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (Some(source), Some(depth), Some(motion), Some(target)) = (
+            views.get::<LdrLayer>(),
+            views.get::<Depth>(),
+            views.get::<Motion>(),
+            views.get::<Target>(),
+        ) else {
+            return;
+        };
+        frame.renderer.render_taa(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            crate::renderer::TaaInputs {
+                source,
+                depth,
+                motion,
+                target,
+                settings: self.settings,
+            },
+        );
+    }
+}
+
+/// The post-process edge filter (FXAA or SMAA): filters the composited
+/// image in one pass.
+///
+/// Reads the composited [`LdrLayer`] and writes the presented [`Target`];
+/// the depth is not needed (the filters work on the image alone).
+pub struct EdgeFilterPass {
+    mode: AntiAliasMode,
+    settings: EdgeFilterSettings,
+}
+
+impl EdgeFilterPass {
+    /// The pass for a mode (FXAA or SMAA) with the given settings.
+    pub fn new(mode: AntiAliasMode, settings: EdgeFilterSettings) -> Self {
+        Self { mode, settings }
+    }
+}
+
+impl FramePass for EdgeFilterPass {
+    type Reads = (Read<LdrLayer>,);
+    type Writes = (Write<Target>,);
+    fn name(&self) -> &'static str {
+        "edge_filter"
+    }
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let (Some(source), Some(target)) = (views.get::<LdrLayer>(), views.get::<Target>()) else {
+            return;
+        };
+        frame.renderer.render_edge_filter(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            crate::renderer::EdgeInputs {
+                source,
+                target,
+                settings: self.settings,
+                mode: self.mode,
+            },
+        );
+    }
+}
+
+/// The composite pass; `M` is the (technique × bloom) mode and `O` the frame
+/// resource the mixed image is written into.
+///
+/// The default output is the presented [`Target`]. The anti-aliasing
+/// plans write the intermediate [`LdrLayer`] instead, so the
+/// anti-aliasing pass can filter the composited image before it reaches
+/// the screen.
+pub struct Composite<M: CompositeMode, O: FrameResource = Target>(PhantomData<fn() -> (M, O)>);
+impl<M: CompositeMode, O: FrameResource> Composite<M, O> {
     /// Value constructor: a bare struct path is not a value (E0423).
     pub fn new() -> Self {
         Self(PhantomData)
     }
 }
 
-impl<M: CompositeMode> Default for Composite<M> {
+impl<M: CompositeMode, O: FrameResource> Default for Composite<M, O> {
     fn default() -> Self {
         Self(PhantomData)
     }
 }
-impl<M: CompositeMode> FramePass for Composite<M> {
+impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
     type Reads = M::Reads;
-    type Writes = (Write<Target>,);
+    type Writes = (Write<O>,);
     fn name(&self) -> &'static str {
         "composite"
     }
     fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
-        let Some(inputs) = M::inputs(&views, frame.renderer) else {
+        let Some(target) = views.get::<O>() else {
+            return;
+        };
+        let Some(inputs) = M::inputs(&views, frame.renderer, target) else {
             return;
         };
         frame

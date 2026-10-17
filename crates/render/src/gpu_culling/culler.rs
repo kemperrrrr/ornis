@@ -12,6 +12,7 @@ use super::INDIRECT_ARGS_WORD_BYTES;
 use super::INDIRECT_ARGS_WORD_COUNT;
 use super::cull_params;
 use super::cull_workgroup_count;
+use crate::antialias::MotionValidity;
 use crate::renderer::InstanceData;
 use crate::renderer::PerObjectGpu;
 
@@ -69,6 +70,16 @@ pub struct Culler {
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     src_buffer: wgpu::Buffer,
+}
+
+/// Previous per-instance transforms passed to the GPU culler.
+///
+/// The slices follow the same instance order; a missing entry falls back
+/// to the current transform and valid motion.
+#[derive(Clone, Copy)]
+pub(crate) struct PreviousInstanceData<'a> {
+    pub(crate) models: &'a [Mat4],
+    pub(crate) motion_validity: &'a [MotionValidity],
 }
 
 /// One buffer binding of [`CULL_COMPUTE_WGSL`].
@@ -236,6 +247,31 @@ impl Culler {
         index_count: u32,
         instances: &[InstanceData],
     ) -> Result<(), CullerError> {
+        self.compact_with_previous(
+            device,
+            queue,
+            view_proj,
+            index_count,
+            instances,
+            PreviousInstanceData {
+                models: &[],
+                motion_validity: &[],
+            },
+        )
+    }
+
+    /// Like [`compact`](Self::compact), with previous transforms and their
+    /// per-instance validity used by the temporal g-buffer output. Empty or
+    /// short slices fall back to the current transform and valid state.
+    pub(crate) fn compact_with_previous(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view_proj: &Mat4,
+        index_count: u32,
+        instances: &[InstanceData],
+        previous: PreviousInstanceData<'_>,
+    ) -> Result<(), CullerError> {
         if instances.len() > self.capacity as usize {
             return Err(CullerError::CapacityExceeded {
                 count: instances.len() as u32,
@@ -244,11 +280,24 @@ impl Culler {
         }
         let staged = instances
             .iter()
-            .map(|instance| {
+            .enumerate()
+            .map(|(index, instance)| {
                 let mut record = PerObjectGpu::zeroed();
                 record.model = instance.model_matrix.to_cols_array_2d();
                 record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
+                record.previous_model = previous
+                    .models
+                    .get(index)
+                    .copied()
+                    .unwrap_or(instance.model_matrix)
+                    .to_cols_array_2d();
                 record.material_index = instance.material_index;
+                record.motion_valid = previous
+                    .motion_validity
+                    .get(index)
+                    .copied()
+                    .unwrap_or(MotionValidity::Valid)
+                    .shader_flag();
                 record
             })
             .collect::<Vec<_>>();

@@ -1,6 +1,7 @@
 //! Skinned custom-mesh entries and GPU joint-palette staging.
 
 use super::TRIANGLE_VERTS;
+use crate::antialias::MotionValidity;
 use crate::mesh::SkinnedVertex;
 use crate::mesh::Vertex;
 use crate::renderer::InstanceData;
@@ -25,6 +26,8 @@ use ornis_core::SmartStore;
 /// (`renderer::upload_custom_mesh`) and draws the entry with `instance`.
 #[derive(Clone, Debug)]
 pub struct CustomMeshEntry {
+    /// Stable owner identity for palette and previous-transform lookup.
+    pub entity: ornis_core::Entity,
     /// GPU-ready vertices: pre-skinned world-space rows for
     /// [`MeshPose::Skinned`] entries (classic soup path and CPU fallback),
     /// bind-pose rows for [`MeshPose::Bind`] entries (GPU blend — the
@@ -35,6 +38,11 @@ pub struct CustomMeshEntry {
     pub indices: Vec<u32>,
     /// Model/normal matrices and the index into `FrameUpload::materials`.
     pub instance: InstanceData,
+    /// Whether the previous vertex position can be reconstructed for
+    /// temporal motion vectors. CPU-pre-skinned output has no retained
+    /// previous pose and is [`MotionValidity::Invalid`]; static custom
+    /// meshes and staged GPU skins can use their previous transforms/palettes.
+    pub motion_valid: MotionValidity,
     /// How this entry is blended (phase D, `docs/animation-design.md` §2.3):
     /// [`SkinningMode::Cpu`] on the classic soup path below (bind-pose
     /// geometry transformed by `instance.model_matrix`, never pre-skinned)
@@ -412,6 +420,7 @@ mod tests {
         assert_eq!(stats.skipped_bad_skin, 0);
         let entry = &upload.custom_meshes[0];
         assert_eq!(entry.skinning, SkinningMode::Gpu);
+        assert_eq!(entry.motion_valid, MotionValidity::Valid);
         assert!(entry.pose.is_bind());
         assert_eq!(entry.instance.model_matrix, Mat4::IDENTITY);
         let palette = entry.joint_palette.as_ref().expect("palette staged");
@@ -476,6 +485,7 @@ mod tests {
         assert_eq!(stats.skipped_bad_skin, 0);
         let entry = &upload.custom_meshes[0];
         assert_eq!(entry.skinning, SkinningMode::Cpu);
+        assert_eq!(entry.motion_valid, MotionValidity::Invalid);
         assert!(entry.joint_palette.is_none());
         assert!(matches!(entry.pose, MeshPose::Skinned));
         assert!(entry.skinned_gpu_vertices().is_none());
@@ -534,6 +544,7 @@ mod tests {
         assert_eq!(stats.skipped_bad_skin, 0);
         let entry = &upload.custom_meshes[0];
         assert_eq!(entry.skinning, SkinningMode::Cpu);
+        assert_eq!(entry.motion_valid, MotionValidity::Invalid);
         assert!(entry.joint_palette.is_none());
         assert!(matches!(entry.pose, MeshPose::Skinned));
         assert!(entry.skinned_gpu_vertices().is_none());

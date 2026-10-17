@@ -20,11 +20,14 @@ use crate::textures::{
 use glam::Mat4;
 use ornis_animation::SkinningMode;
 use ornis_assets::scene::LightDesc;
+use ornis_core::Entity;
 use ornis_core::material::{OPENPBR_MATERIAL_SIZE, OpenPBRMaterial};
 use ornis_macros::WgslStruct;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
+mod aa;
 mod ao;
 mod buffers;
 mod construct;
@@ -40,6 +43,10 @@ mod shadows;
 #[cfg(test)]
 mod test_util;
 
+pub(crate) use aa::{AaPipelines, AaState, AaUniform};
+/// Anti-aliasing pass inputs (re-exported for pass authors; see
+/// [`TaaInputs`]).
+pub use aa::{EdgeInputs, TaaInputs};
 /// AO pass inputs (re-exported for pass authors; see [`AoRawInputs`]).
 pub use ao::{AoBlurInputs, AoRawInputs};
 pub(crate) use ao::{AoPipelines, AoUniform};
@@ -140,12 +147,16 @@ pub(crate) fn select_shared_batch(
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
 #[wgsl(name = "Camera")]
 pub struct CameraUniform {
-    /// View-projection matrix.
+    /// View-projection matrix of the frame being rendered (jittered in TAA).
     pub view_proj: [[f32; 4]; 4],
     /// Its inverse: reconstructs world position from depth in the lighting pass.
     pub inv_view_proj: [[f32; 4]; 4],
     /// World-space eye position (`w` = 1) for specular falloff.
     pub camera_pos: [f32; 4],
+    /// Previous frame's view-projection matrix (jittered in TAA): paired
+    /// with the previous object transform to write the G-buffer motion
+    /// vector, including camera motion.
+    pub previous_view_proj: [[f32; 4]; 4],
 }
 
 /// Native MSAA sample count: 4x multisampled color/depth with resolve into
@@ -312,6 +323,14 @@ struct CoreBuffers {
 pub struct Renderer3D {
     camera_buffer: wgpu::Buffer,
     per_object_buffer: std::sync::RwLock<wgpu::Buffer>,
+    /// Model transforms from the preceding frame, keyed by stable entity
+    /// identity so dense-lane reordering cannot transfer motion to another object.
+    previous_instance_models: std::sync::RwLock<HashMap<Entity, glam::Mat4>>,
+    /// Previous transforms used by the most recent upload, aligned to that
+    /// frame's instance order for the indirect culler.
+    previous_instance_models_frame: std::sync::RwLock<Vec<glam::Mat4>>,
+    /// Motion-validity states aligned to `previous_instance_models_frame`.
+    previous_instance_motion_valid_frame: std::sync::RwLock<Vec<crate::antialias::MotionValidity>>,
     material_buffer: std::sync::RwLock<wgpu::Buffer>,
     lighting_buffer: wgpu::Buffer,
     _bind_group_layout: wgpu::BindGroupLayout,
@@ -340,6 +359,9 @@ pub struct Renderer3D {
     height: u32,
     gbuffer: GBufferTextures,
     gbuffer_pipeline: wgpu::RenderPipeline,
+    /// Motion-vector variant of the g-buffer pipeline; only runs for TAA
+    /// plans, which provide the extra frame-graph attachment.
+    gbuffer_motion_pipeline: wgpu::RenderPipeline,
     gbuffer_bind_group_layout: wgpu::BindGroupLayout,
     gbuffer_bind_group: std::sync::RwLock<wgpu::BindGroup>,
     /// Skinned g-buffer pipeline: [`wgsl_vertex_source_skinned`] vertex
@@ -348,9 +370,11 @@ pub struct Renderer3D {
     /// groups are built per draw from `skinned_bind_group_layout` (no
     /// cached group — the palette slot differs per entry).
     skinned_pipeline: wgpu::RenderPipeline,
+    /// Motion-vector variant of the skinned g-buffer pipeline.
+    skinned_motion_pipeline: wgpu::RenderPipeline,
     /// Bind-group layout of the skinned passes (see
     /// [`GBUFFER_SKINNED_RESOURCES`]: camera, per-objects, materials plus
-    /// the binding-3 palette).
+    /// current/previous palettes at bindings 3 and 4).
     skinned_bind_group_layout: wgpu::BindGroupLayout,
     /// Depth-only skinned pipeline for the 2D shadow pre-pass (same vertex
     /// stage, no fragment): skinned entries cast skinned depth, never
@@ -362,6 +386,12 @@ pub struct Renderer3D {
     /// Packed joint-palette storage: one [`PALETTE_BYTE_SIZE`] slot per
     /// staged entry, written by [`upload_skin_palettes`](Self::upload_skin_palettes).
     palette_buffer: std::sync::RwLock<wgpu::Buffer>,
+    /// Joint palettes uploaded by the previous frame (used by the skinned
+    /// g-buffer vertex stage to write animated motion vectors).
+    previous_palette_buffer: std::sync::RwLock<wgpu::Buffer>,
+    /// CPU shadow of the previous frame's palettes keyed by stable entity
+    /// identity; palette-slot reordering cannot borrow another skin's pose.
+    previous_skin_palettes: std::sync::RwLock<HashMap<Entity, Vec<u8>>>,
     /// Capacity of [`Renderer3D::palette_buffer`] in palette slots; grows
     /// on demand like the per-object buffer.
     max_palettes: std::sync::atomic::AtomicU32,
@@ -403,6 +433,14 @@ pub struct Renderer3D {
     /// blur) and the white fallback view. Disabled by default: never runs
     /// unless the plan wires [`crate::frame_passes::AoRawPass`].
     ao_passes: AoPipelines,
+    /// Anti-aliasing pipelines (the temporal resolve and the edge filter)
+    /// plus the history ping-pong. Idle until a plan wires
+    /// [`TaaPass`](crate::frame_passes::TaaPass) or
+    /// [`EdgeFilterPass`](crate::frame_passes::EdgeFilterPass).
+    aa_passes: AaPipelines,
+    /// The anti-aliasing state: the active mode, the jitter sequence of
+    /// the temporal mode and the camera matrices of the last two frames.
+    aa_state: AaState,
     /// White texel uploaded into the AO fallback texture on the first
     /// lighting pass (`new` has no queue — the IBL staging precedent).
     ao_white_staging: wgpu::Buffer,
@@ -562,16 +600,21 @@ impl Renderer3D {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         self.gbuffer = Self::create_gbuffer(device, width, height, self.sample_count);
-        let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
-            Self::create_gbuffer_pipeline(
-                device,
-                &self.gbuffer,
-                &self.camera_buffer,
-                &read_lock(&self.per_object_buffer),
-                &read_lock(&self.material_buffer),
-                self.sample_count,
-            );
+        let (
+            gbuffer_pipeline,
+            gbuffer_motion_pipeline,
+            gbuffer_bind_group_layout,
+            gbuffer_bind_group,
+        ) = Self::create_gbuffer_pipeline(
+            device,
+            &self.gbuffer,
+            &self.camera_buffer,
+            &read_lock(&self.per_object_buffer),
+            &read_lock(&self.material_buffer),
+            self.sample_count,
+        );
         self.gbuffer_pipeline = gbuffer_pipeline;
+        self.gbuffer_motion_pipeline = gbuffer_motion_pipeline;
         self.gbuffer_bind_group_layout = gbuffer_bind_group_layout;
         *write_lock(&self.gbuffer_bind_group) = gbuffer_bind_group;
 
@@ -596,6 +639,11 @@ impl Renderer3D {
         );
 
         self.composite_pass = Self::create_composite_pass(device, self.format);
+
+        // The temporal history follows the surface size; the old frames do
+        // not belong to the new extent, so the history starts empty.
+        self.aa_passes.resize_history(device, width, height);
+        self.aa_state.invalidate_history();
     }
 
     /// View of the final lit HDR image produced by the legacy-path lighting pass.
@@ -603,11 +651,11 @@ impl Renderer3D {
         &self.pbr_texture_view
     }
 
-    /// Bytes allocated by the persistent textures of the legacy path: the
-    /// five g-buffer MRTs plus g-buffer depth, lighting target, forward
-    /// color, shadow-map array, point-shadow cubes, the CSM cascade pool,
-    /// and — when [`MSAA_SAMPLE_COUNT`] is active — the single-sample MSAA
-    /// resolve targets.
+    /// Bytes allocated by the persistent renderer textures: the five
+    /// g-buffer MRTs plus depth, lighting and forward targets, temporal
+    /// history targets (only after the first TAA resolve), shadow-map
+    /// arrays/cubes and the CSM pool, and — when [`MSAA_SAMPLE_COUNT`] is
+    /// active — the single-sample resolve targets.
     pub fn texture_budget(&self) -> u64 {
         let bpp = crate::transient_pool::format_bytes_per_pixel;
         let w = self.width as u64;
@@ -655,19 +703,37 @@ impl Renderer3D {
             * csm_size.width as u64
             * csm_size.height as u64
             * csm_size.depth_or_array_layers as u64;
-        gbuffer + pbr + forward + resolves + shadow + cubes + csm
+        let history = if self.aa_passes.has_history() {
+            2 * bpp(crate::renderer::aa::HISTORY_FORMAT) as u64 * w * h
+        } else {
+            0
+        };
+        gbuffer + pbr + forward + resolves + history + shadow + cubes + csm
     }
 
     /// Upload the camera uniform: view-projection, its inverse (computed here)
     /// and eye position. Call once per frame before rendering.
+    ///
+    /// In the temporal anti-aliasing mode the projection carries a
+    /// sub-pixel jitter (see [`set_anti_alias`](Self::set_anti_alias)): the
+    /// frame renders with the jittered matrix and the temporal resolve
+    /// reprojects through it. Every other mode uploads the matrix
+    /// untouched, so the frame stays pixel-identical.
     pub fn set_camera(&self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], camera_pos: [f32; 3]) {
-        let inv_view_proj = glam::Mat4::from_cols_array_2d(view_proj)
-            .inverse()
-            .to_cols_array_2d();
+        let base = glam::Mat4::from_cols_array_2d(view_proj);
+        let jittered = self.aa_frame_camera(base);
+        let frames = self.aa_state.camera_frames();
+        let inv_view_proj = jittered.inverse().to_cols_array_2d();
+        let previous_view_proj = if self.aa_state.mode().is_temporal() {
+            frames.previous_view_proj
+        } else {
+            jittered
+        };
         let uniform = CameraUniform {
-            view_proj: *view_proj,
+            view_proj: jittered.to_cols_array_2d(),
             inv_view_proj,
             camera_pos: [camera_pos[0], camera_pos[1], camera_pos[2], 1.0],
+            previous_view_proj: previous_view_proj.to_cols_array_2d(),
         };
         *write_lock(&self.camera_cpu) = uniform;
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));

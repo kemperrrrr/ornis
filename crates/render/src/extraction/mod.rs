@@ -30,6 +30,7 @@ use ornis_core::OpenPBRMaterial;
 use ornis_core::SmartStore;
 use ornis_core::units::PositiveF32;
 
+use crate::antialias::MotionValidity;
 use crate::mesh_upload::SoupCache;
 use crate::mesh_upload::UploadCache;
 use crate::renderer::InstanceData;
@@ -78,6 +79,9 @@ pub struct FrameUpload {
     /// meshes only — drawn with the shared unit meshes, size baked into
     /// the model matrix).
     pub instances: Vec<InstanceData>,
+    /// Stable entity identity parallel to `instances`, used to look up
+    /// previous transforms even when dense lane order changes.
+    pub instance_entities: Vec<Entity>,
     /// Per-entity custom geometry (one entry per valid `MeshDesc::Custom`
     /// entity — drawn with its own uploaded mesh, never the sphere).
     pub custom_meshes: Vec<CustomMeshEntry>,
@@ -92,6 +96,7 @@ impl Default for FrameUpload {
             mesh_params: DEFAULT_MESH_PARAMS,
             materials: Vec::new(),
             instances: Vec::new(),
+            instance_entities: Vec::new(),
             custom_meshes: Vec::new(),
         }
     }
@@ -302,7 +307,10 @@ pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
 /// [`CustomMeshEntry::joint_palette`]); the [`SkinningMode::Cpu`]
 /// fallback keeps the skin-system output buffers (`skinned_positions` /
 /// `skinned_normals`, world space, [`MeshPose::Skinned`]) on the classic
-/// path, and `IDENTITY` matrices either way (design §2.3).
+/// path, and `IDENTITY` matrices either way (design §2.3). Because the
+/// previous CPU-skinned vertex positions are not retained, those entries
+/// set [`CustomMeshEntry::motion_valid`] to [`MotionValidity::Invalid`] so
+/// the resolve skips temporal history for those pixels.
 /// Inconsistent lane arrays skip the entity with
 /// [`ExtractionStats::skipped_bad_skin`] — even when its classic soup
 /// would decode, a claimed skin must not silently render unskinned.
@@ -391,12 +399,18 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 }
             };
             extracted.custom_meshes.push(CustomMeshEntry {
+                entity,
                 vertices,
                 indices,
                 instance: InstanceData {
                     model_matrix: Mat4::IDENTITY,
                     normal_matrix: Mat4::IDENTITY,
                     material_index,
+                },
+                motion_valid: if skinning == SkinningMode::Gpu {
+                    MotionValidity::Valid
+                } else {
+                    MotionValidity::Invalid
                 },
                 skinning,
                 joint_palette,
@@ -451,9 +465,12 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                 material_index,
             };
             extracted.custom_meshes.push(CustomMeshEntry {
+                entity,
                 vertices,
                 indices: soup_indices,
                 instance,
+                // Static custom geometry can reuse previous transforms.
+                motion_valid: MotionValidity::Valid,
                 // Classic soup path: bind-pose geometry, never pre-skinned.
                 skinning: SkinningMode::Cpu,
                 joint_palette: None,
@@ -507,6 +524,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
             normal_matrix: model.inverse().transpose(),
             material_index,
         });
+        extracted.instance_entities.push(entity);
     }
     (extracted, stats)
 }
@@ -739,6 +757,7 @@ mod tests {
             crate::renderer::MaterialIdx::from_raw(0)
         );
         let entry = &extracted.custom_meshes[0];
+        assert_eq!(entry.motion_valid, MotionValidity::Valid);
         assert_eq!(entry.vertices.len(), 4);
         assert_eq!(entry.indices, vec![0, 1, 2, 0, 2, 3]);
         assert_eq!(
