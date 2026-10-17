@@ -1,6 +1,6 @@
 //! Real ETC1S/UASTC fixtures exercise every target, mip preservation and rejection paths.
 
-use ornis_texture::{Ktx2Image, TextureEncoding as E};
+use ornis_texture::{Ktx2Image, TextureEncoding as E, TextureUploadError};
 
 const ETC1S: &[u8] = include_bytes!("data/etc1s.ktx2");
 const UASTC: &[u8] = include_bytes!("data/uastc.ktx2");
@@ -88,6 +88,43 @@ fn rejects_invalid_shape_truncation_and_decompression_bombs() {
     let mut bomb = UASTC.to_vec();
     bomb[96..104].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(Ktx2Image::from_bytes(bomb).is_err());
+}
+
+#[test]
+fn a_texel_block_dimension_of_255_is_an_error_not_a_panic() {
+    // `ktx2` 0.5.0 adds 1 to each texelBlockDimension byte and unwraps.
+    // 255 overflows in debug and unwraps None in release. Both Basis paths.
+    for bytes in [UASTC, ETC1S] {
+        assert!(Ktx2Image::from_bytes(bytes).is_ok());
+        let header = ktx2::Header::from_bytes(bytes[..ktx2::Header::LENGTH].try_into().unwrap())
+            .expect("fixture header");
+        // Basic block follows the 4-byte dfdTotalSize; dimensions sit at +12.
+        let dims = header.index.dfd_byte_offset as usize + 4 + 12;
+        // 254 + 1 = 255, a legal `NonZeroU8`. Only 255 overflows.
+        let mut legal = bytes.to_vec();
+        legal[dims] = u8::MAX - 1;
+        assert!(
+            Ktx2Image::from_bytes(legal.as_slice()).is_ok(),
+            "dimension byte 254 must still parse"
+        );
+        for offset in dims..dims + 4 {
+            let mut mutated = bytes.to_vec();
+            assert!(offset < mutated.len(), "DFD dimension offset {offset}");
+            assert_ne!(
+                mutated[offset],
+                u8::MAX,
+                "fixture byte {offset} is already 255"
+            );
+            mutated[offset] = u8::MAX;
+            assert!(
+                matches!(
+                    Ktx2Image::from_bytes(mutated.as_slice()),
+                    Err(TextureUploadError::InvalidKtx2("DFD texel block dimension"))
+                ),
+                "offset {offset}"
+            );
+        }
+    }
 }
 
 #[test]

@@ -42,6 +42,8 @@ impl Ktx2Image {
         if bytes.len() > MAX_FILE_BYTES {
             return Err(TextureUploadError::InvalidKtx2("file exceeds 512 MiB"));
         }
+        // `ktx2` 0.5.0 panics on a Basic DFD texel dimension of 255.
+        crate::dfd::validate_dfd(&bytes, &header)?;
         let reader = ktx2::Reader::new(bytes.as_ref())
             .map_err(|_| TextureUploadError::InvalidKtx2("container bounds or DFD"))?;
         let encoding = header.format.map(native_encoding).transpose()?;
