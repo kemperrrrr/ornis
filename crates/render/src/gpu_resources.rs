@@ -51,6 +51,7 @@
 
 use std::sync::Mutex;
 
+use glam::Vec3;
 use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
 use crate::camera::camera_view_projection;
@@ -267,6 +268,54 @@ impl System for RenderMesh {
     }
 }
 
+/// Enable CSM for a perspective camera and publish the extracted caster
+/// AABB. Orthographic cameras stay on the legacy single-layer path: cascade
+/// corners are unprojected with the perspective depth formula.
+fn submit_csm(
+    renderer: &crate::renderer::Renderer3D,
+    view: &crate::camera::CameraView,
+    upload: &crate::extraction::FrameUpload,
+) {
+    let forward = view.target - view.eye;
+    let perspective = matches!(
+        view.projection,
+        ornis_assets::scene::CameraProjection::Perspective
+    );
+    if !perspective || forward.length_squared() <= f32::EPSILON {
+        renderer.clear_csm_camera();
+        renderer.clear_csm_casters();
+        return;
+    }
+    renderer.set_csm_camera(
+        view.near.get(),
+        view.far.get(),
+        forward.normalize().to_array(),
+    );
+    match caster_aabb(upload) {
+        Some((min, max)) => renderer.set_csm_casters(min, max),
+        None => renderer.clear_csm_casters(),
+    }
+}
+
+/// Conservative AABB of every extracted instance sphere.
+fn caster_aabb(upload: &crate::extraction::FrameUpload) -> Option<([f32; 3], [f32; 3])> {
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
+    let customs = upload.custom_meshes.iter().map(|entry| &entry.instance);
+    for instance in upload.instances.iter().chain(customs) {
+        let (center, radius) = crate::extraction::instance_sphere(instance);
+        if !center.is_finite() || !radius.is_finite() {
+            continue;
+        }
+        let extent = Vec3::splat(radius);
+        min = min.min(center - extent);
+        max = max.max(center + extent);
+        any = true;
+    }
+    any.then_some((min.to_array(), max.to_array()))
+}
+
 /// Frame submit system: reads lanes + camera + lights, writes GPU state.
 ///
 /// S7 step 1: runs `set_camera`/`upload_*`. X1 (Extract-free): material and
@@ -342,11 +391,12 @@ impl System for RenderSubmit {
         let extracted = extract_render_data(store);
         // S7: the camera math lives in `camera_view_projection` — `run`
         // stays pure orchestration (IOSP).
-        let (view_proj, cam_pos) =
-            camera_view_projection(&orbit.view_parameters(), surface_state.size);
+        let view = orbit.view_parameters();
+        let (view_proj, cam_pos) = camera_view_projection(&view, surface_state.size);
 
         fs.renderer
             .set_camera(&queue.0, &view_proj.to_cols_array_2d(), cam_pos.to_array());
+        submit_csm(&fs.renderer, &view, &extracted);
         // Typed `Color` / `Lux` stay on the resource. Raw floats exist only
         // in this upload: linear RGB here, renderer exposure inside
         // `set_lights` (the resource multipliers default to the no-op).

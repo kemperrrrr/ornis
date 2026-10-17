@@ -64,6 +64,7 @@ fn open_csm_rig(label: &'static str, skip: &'static str) -> Option<CsmRig> {
                 max_objects: 256,
                 max_materials: 64,
                 indirect_draw: false,
+                ..RenderBackendConfig::default()
             },
         );
         let mesh = crate::mesh::create_sphere(&device, 1.0, 24, 16);

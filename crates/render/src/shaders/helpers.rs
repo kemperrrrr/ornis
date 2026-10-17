@@ -711,6 +711,8 @@ mod tests {
         assert!(src.contains("fn csm_visibility("), "{src}");
         assert!(src.contains("CSM_LAST_CASCADE"), "{src}");
         assert!(src.contains("CSM_BLEND_FRACTION"), "{src}");
+        // The seam mixes the next cascade. `vis = vis` (no blend) drops this.
+        assert!(src.contains("mix(vis1, vis, t)"), "{src}");
         assert!(src.contains("textureSampleCompare("), "{src}");
         assert!(!src.contains("cascade =="), "{src}");
     }

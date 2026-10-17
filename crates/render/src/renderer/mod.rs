@@ -430,6 +430,10 @@ pub struct Renderer3D {
     /// `None` (default) keeps CSM off, so scenes that never opt in render
     /// pixel-identical to the legacy rig.
     csm_camera: std::sync::RwLock<Option<CsmCamera>>,
+    /// Scene caster AABB for cascade depth (`min`, `max`), from
+    /// [`set_csm_casters`](Self::set_csm_casters). `None` falls back to the
+    /// legacy [`shadow_fit`](Self::shadow_fit) cube when that is set.
+    csm_casters: std::sync::RwLock<Option<([f32; 3], [f32; 3])>>,
     /// Last camera uniform on the CPU (written by [`set_camera`](Self::set_camera)):
     /// cascade fitting reads its inverse view-projection.
     camera_cpu: std::sync::RwLock<CameraUniform>,
@@ -675,9 +679,58 @@ impl Renderer3D {
     /// directional light then renders one snapped depth layer per cascade
     /// into the dedicated CSM pool instead of a single legacy layer.
     /// Call every frame the camera moves (like [`set_camera`](Self::set_camera));
-    /// scenes that never call it keep the legacy path exactly.
+    /// scenes that never call it keep the legacy path exactly. The frame
+    /// submit does call it for a perspective camera.
     pub fn set_csm_camera(&self, near: f32, far: f32, forward: [f32; 3]) {
         *write_lock(&self.csm_camera) = Some(CsmCamera { near, far, forward });
+    }
+
+    /// Drop the CSM camera so the next [`set_lights`](Self::set_lights)
+    /// takes the legacy single-layer path.
+    pub fn clear_csm_camera(&self) {
+        *write_lock(&self.csm_camera) = None;
+    }
+
+    /// Scene caster AABB (`min`, `max`) whose light-space depth every
+    /// cascade must cover. Non-finite input is ignored. An inverted box
+    /// is swapped into order.
+    pub fn set_csm_casters(&self, min: [f32; 3], max: [f32; 3]) {
+        if !min.iter().chain(max.iter()).all(|v| v.is_finite()) {
+            return;
+        }
+        let lo = [min[0].min(max[0]), min[1].min(max[1]), min[2].min(max[2])];
+        let hi = [min[0].max(max[0]), min[1].max(max[1]), min[2].max(max[2])];
+        *write_lock(&self.csm_casters) = Some((lo, hi));
+    }
+
+    /// Drop the caster AABB stored by [`set_csm_casters`](Self::set_csm_casters).
+    pub fn clear_csm_casters(&self) {
+        *write_lock(&self.csm_casters) = None;
+    }
+
+    /// Caster AABB stored by the last [`set_csm_casters`](Self::set_csm_casters).
+    #[cfg(test)]
+    pub(crate) fn csm_casters_for_tests(&self) -> Option<([f32; 3], [f32; 3])> {
+        *read_lock(&self.csm_casters)
+    }
+
+    /// Active cascade count published by the last [`set_lights`](Self::set_lights).
+    /// `0` when CSM is off.
+    pub fn csm_cascade_count(&self) -> u32 {
+        self.csm_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Caster AABB for cascade depth: the explicit box when one was stored,
+    /// otherwise the legacy shadow-fit cube.
+    fn csm_caster_aabb(&self) -> Option<([f32; 3], [f32; 3])> {
+        if let Some(aabb) = *read_lock(&self.csm_casters) {
+            return Some(aabb);
+        }
+        let (center, half) = (*read_lock(&self.shadow_fit))?;
+        Some((
+            [center[0] - half, center[1] - half, center[2] - half],
+            [center[0] + half, center[1] + half, center[2] + half],
+        ))
     }
 }
 

@@ -184,6 +184,7 @@ impl Renderer3D {
             shadow_count: std::sync::atomic::AtomicU32::new(0),
             shadow_fit: std::sync::RwLock::new(None),
             csm_camera: std::sync::RwLock::new(None),
+            csm_casters: std::sync::RwLock::new(None),
             camera_cpu: std::sync::RwLock::new(bytemuck::Zeroable::zeroed()),
             csm_maps,
             csm_views,

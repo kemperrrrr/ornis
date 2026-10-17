@@ -529,10 +529,13 @@ fn first_shadowed_directional_index(lights: &[LightDesc]) -> Option<usize> {
 ///
 /// Splits the `[near, far]` range (practical split), fits one snapped
 /// ortho box per slice, and packs the VPs with the slice boundaries.
+/// `casters` widens every cascade's depth to the scene AABB (same box
+/// [`shadow_fit_for_bounds`](super::shadow_fit_for_bounds) describes).
 pub(super) fn build_csm(
     inv_view_proj: [[f32; 4]; 4],
     camera: CsmCamera,
     to_light: glam::Vec3,
+    casters: Option<([f32; 3], [f32; 3])>,
 ) -> Option<CsmBlock> {
     // facade: validate the camera, split the range, fit every slice.
     if !(camera.near > 0.0 && camera.far > camera.near) {
@@ -560,7 +563,7 @@ pub(super) fn build_csm(
         let corners =
             frustum_slice_corners(inv_view_proj, camera.near, camera.far, pair[0], pair[1])?;
         vps[i] = CsmVp {
-            cols: cascade_shadow_vp(to_light, corners, frustum, SHADOW_SIZE),
+            cols: cascade_shadow_vp(to_light, corners, frustum, casters, SHADOW_SIZE),
         };
     }
     let fwd = fwd.normalize();
@@ -640,7 +643,8 @@ impl Renderer3D {
         let LightDesc::Directional { direction, .. } = &lights[index] else {
             return None;
         };
-        build_csm(inv_view_proj, camera, direction.get()).map(|block| (index, block))
+        let casters = self.csm_caster_aabb();
+        build_csm(inv_view_proj, camera, direction.get(), casters).map(|block| (index, block))
     }
 
     /// [`set_lights`](Self::set_lights) with IBL-minimum multipliers and
@@ -852,8 +856,8 @@ mod tests {
             forward: [0.0, 0.0, -1.0],
         };
         // Identity inverse VP still fits (all corners unproject validly).
-        assert!(build_csm(inv, ok, to_light).is_some());
-        assert!(build_csm(inv, CsmCamera { far: 0.1, ..ok }, to_light).is_none());
+        assert!(build_csm(inv, ok, to_light, None).is_some());
+        assert!(build_csm(inv, CsmCamera { far: 0.1, ..ok }, to_light, None).is_none());
         assert!(
             build_csm(
                 inv,
@@ -861,7 +865,8 @@ mod tests {
                     forward: [0.0, 0.0, 0.0],
                     ..ok
                 },
-                to_light
+                to_light,
+                None,
             )
             .is_none()
         );
