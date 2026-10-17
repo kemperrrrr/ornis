@@ -144,6 +144,7 @@ fn fs_main(
 /// is kept.
 pub fn wgsl_source() -> String {
     ShaderModule::new()
+        .decl(CameraUniform::WGSL_SOURCE)
         .decl(openpbr_material_decl())
         .resources(&GBUFFER_RESOURCES, &[0, 2])
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
@@ -306,6 +307,7 @@ mod tests {
     fn gbuffer_generated_parity_with_legacy_assembly() {
         // Layouts still splice the derived declarations.
         let src = wgsl_source();
+        assert!(src.contains(CameraUniform::WGSL_SOURCE));
         assert!(src.contains(openpbr_material_decl().as_str()));
         assert!(src.contains(&wgsl_decl(FragmentInput::WGSL_SOURCE)));
         assert!(src.contains(&wgsl_decl(GBufferOutput::WGSL_SOURCE)));

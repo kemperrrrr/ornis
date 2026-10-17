@@ -618,7 +618,7 @@ mod tests {
     fn temporal_resolve_keeps_the_history_inside_the_neighbourhood() {
         let settings = TaaSettings::default();
         let current = Vec3::new(0.5, 0.5, 0.5);
-        let neighbourhood = [current, current, current];
+        let neighbourhood = [Vec3::splat(0.3), current, Vec3::splat(0.7)];
         // A history inside the range survives the clamp unchanged.
         let history = Vec3::new(0.4, 0.4, 0.4);
         let resolved = taa_resolve(current, history, &neighbourhood, settings);
