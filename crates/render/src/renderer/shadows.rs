@@ -1116,6 +1116,7 @@ mod tests {
     use super::super::test_util::*;
     use super::super::*;
     use super::*;
+    use crate::render_backend::tests::yawed_eye;
     use ornis_assets::scene::ShadowCast;
     #[test]
     fn dir_shadow_vp_centers_origin_with_light_depth_order() {
@@ -1672,10 +1673,7 @@ mod tests {
         let target = glam::Vec3::new(0.0, 2.0, -60.0);
         let base = cascade_texel_bits(eye, target);
         for degrees in [1.0_f32, 5.0] {
-            let yawed = cascade_texel_bits(
-                crate::render_backend::tests::yawed_eye(eye, target, degrees.to_radians()),
-                target,
-            );
+            let yawed = cascade_texel_bits(yawed_eye(eye, target, degrees.to_radians()), target);
             assert_eq!(base, yawed, "yaw {degrees}° changed the texel size");
         }
     }
@@ -1714,8 +1712,7 @@ mod tests {
         let probe = target.to_array();
         let before = shadow_texel(cascade_zero_vp(eye, target), probe);
         for degrees in [1.0_f32, 5.0] {
-            let yawed =
-                crate::render_backend::tests::yawed_eye(eye, target, degrees.to_radians());
+            let yawed = yawed_eye(eye, target, degrees.to_radians());
             let after = shadow_texel(cascade_zero_vp(yawed, target), probe);
             assert!(
                 fractional_shift(before[0], after[0]) < 1e-3
