@@ -72,6 +72,16 @@ pub struct Culler {
     src_buffer: wgpu::Buffer,
 }
 
+/// Previous per-instance transforms passed to the GPU culler.
+///
+/// The slices follow the same instance order; a missing entry falls back
+/// to the current transform and valid motion.
+#[derive(Clone, Copy)]
+pub(crate) struct PreviousInstanceData<'a> {
+    pub(crate) models: &'a [Mat4],
+    pub(crate) motion_validity: &'a [MotionValidity],
+}
+
 /// One buffer binding of [`CULL_COMPUTE_WGSL`].
 fn cull_bind_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -237,7 +247,17 @@ impl Culler {
         index_count: u32,
         instances: &[InstanceData],
     ) -> Result<(), CullerError> {
-        self.compact_with_previous(device, queue, view_proj, index_count, instances, &[], &[])
+        self.compact_with_previous(
+            device,
+            queue,
+            view_proj,
+            index_count,
+            instances,
+            PreviousInstanceData {
+                models: &[],
+                motion_validity: &[],
+            },
+        )
     }
 
     /// Like [`compact`](Self::compact), with previous transforms and their
@@ -250,8 +270,7 @@ impl Culler {
         view_proj: &Mat4,
         index_count: u32,
         instances: &[InstanceData],
-        previous_models: &[Mat4],
-        motion_validity: &[MotionValidity],
+        previous: PreviousInstanceData<'_>,
     ) -> Result<(), CullerError> {
         if instances.len() > self.capacity as usize {
             return Err(CullerError::CapacityExceeded {
@@ -266,13 +285,15 @@ impl Culler {
                 let mut record = PerObjectGpu::zeroed();
                 record.model = instance.model_matrix.to_cols_array_2d();
                 record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
-                record.previous_model = previous_models
+                record.previous_model = previous
+                    .models
                     .get(index)
                     .copied()
                     .unwrap_or(instance.model_matrix)
                     .to_cols_array_2d();
                 record.material_index = instance.material_index;
-                record.motion_valid = motion_validity
+                record.motion_valid = previous
+                    .motion_validity
                     .get(index)
                     .copied()
                     .unwrap_or(MotionValidity::Valid)

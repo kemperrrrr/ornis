@@ -1,7 +1,6 @@
 //! Frustum culling and depth sorting of extracted frame payloads.
 
 use super::FrameUpload;
-use crate::antialias::MotionValidity;
 use crate::camera::Frustum;
 use crate::renderer::InstanceData;
 use glam::Mat4;

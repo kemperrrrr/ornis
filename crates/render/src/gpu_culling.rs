@@ -268,6 +268,7 @@ fn cull_instances(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 mod culler;
 
+pub(crate) use culler::PreviousInstanceData;
 pub use culler::{Culler, CullerError};
 
 #[cfg(test)]

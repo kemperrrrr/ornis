@@ -2,7 +2,7 @@
 //!
 //! Canonical source is this module: the fullscreen-quad vertex boilerplate
 //! plus the temporal fragment body, assembled with the shared
-//! [`ShaderModule`](super::ShaderModule) machinery, so naga pins the result
+//! [`ShaderModule`] machinery, so naga pins the result
 //! like every other pass.
 //!
 //! The body stays raw WGSL (not `#[stage]`): the neighbourhood clamp needs
