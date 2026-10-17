@@ -359,17 +359,15 @@ impl ViewportCamera {
         far: Meters,
         viewport_px: [f32; 2],
     ) -> Option<Self> {
-        let projection = PickProjection::checked_from_camera(projection, fov)?;
-        Self::validated_frame(eye, target, up, near.get(), far.get(), viewport_px)?;
-        Some(Self {
-            position: eye,
+        Self::with_projection(
+            eye,
             target,
             up,
-            projection,
-            near: near.get(),
-            far: far.get(),
+            PickProjection::checked_from_camera(projection, fov)?,
+            near.get(),
+            far.get(),
             viewport_px,
-        })
+        )
     }
 
     /// Eye position in world units.
@@ -1262,7 +1260,7 @@ mod tests {
     /// the eye plane by the NDC-mapped half-height offsets.
     #[test]
     fn orthographic_ray_is_parallel_with_shifted_origin() {
-        use ornis_core::{Degrees, Meters};
+        use ornis_core::Meters;
         let camera = ViewportCamera::new_orthographic(
             Vec3::new(0.0, 0.0, 6.0),
             Vec3::ZERO,
@@ -1319,7 +1317,6 @@ mod tests {
             )
             .is_none()
         );
-        let _ = Degrees::new(60.0);
     }
 
     /// `PickProjection::from_camera` mirrors the K0a projection: perspective

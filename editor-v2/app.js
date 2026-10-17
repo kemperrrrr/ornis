@@ -650,7 +650,9 @@
       var mantissas = [1, 2, 5];
       for (var i = 0; i < mantissas.length; i++) {
         var step = mantissas[i] * Math.pow(10, mag);
-        if (step * ppu >= minPx) return { step: step, px: step * ppu };
+        if (step * ppu >= minPx) {
+          return { step: step, px: step * ppu, mantissa: mantissas[i] };
+        }
       }
       mag += 1;
     }
@@ -695,7 +697,9 @@
       pixels_per_unit: view2d.pixelsPerUnit,
       grid: {
         minor_step: ladder.step,
-        major_every: 10,
+        // Same cadence as the Rust `plane_grid`: 5 minor steps per major
+        // line for the middle mantissa (2), 10 for the decade ones (1/5).
+        major_every: ladder.mantissa === 2 ? 5 : 10,
         minor_step_px: ladder.px,
         origin_px: [
           size[0] / 2 - view2d.center[0] * view2d.pixelsPerUnit,

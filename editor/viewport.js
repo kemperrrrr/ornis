@@ -20,28 +20,43 @@
         window.addEventListener('resize', resizeCanvas);
 
         // 2D/3D toggle next to canvas#bevy. The WASM module owns the mode;
-        // the overlay below only reads it back for the grid.
-        let mode2d = false;
+        // the button only queues the switch and mirrors the applied mode
+        // from `viewport_state_json().mode` — the loop applies the request
+        // on the next frame, so flipping eagerly would desync on a rejected
+        // or still-pending request.
         if (modeBtn) {
             modeBtn.addEventListener('click', () => {
-                const next = mode2d ? 'perspective3d' : 'plane2d';
-                if (typeof set_viewport_mode === 'function' && set_viewport_mode(next)) {
-                    mode2d = !mode2d;
-                    modeBtn.textContent = mode2d ? '2D' : '3D';
-                    modeBtn.setAttribute('aria-pressed', String(mode2d));
-                }
+                if (typeof set_viewport_mode !== 'function') return;
+                set_viewport_mode(currentMode() === 'plane2d' ? 'perspective3d' : 'plane2d');
             });
         }
 
-        // Grid overlay: pointer-events:none div over the canvas, driven by
-        // viewport_state_json(). Minor/major lines via layered gradients.
-        const paintGrid = () => {
-            if (!gridEl || typeof viewport_state_json !== 'function') return;
+        // The applied viewport mode from the wire state ('perspective3d'
+        // until the loop reports otherwise).
+        const currentMode = () => {
+            try {
+                const state = JSON.parse(viewport_state_json());
+                return state && state.mode === 'plane2d' ? 'plane2d' : 'perspective3d';
+            } catch (e) {
+                return 'perspective3d';
+            }
+        };
+
+        // Overlay: pointer-events:none div over the canvas, driven by
+        // viewport_state_json(). Minor/major lines via layered gradients;
+        // the mode button mirrors the applied mode in the same pass.
+        const paintOverlay = () => {
+            if (typeof viewport_state_json !== 'function') return;
             let state = null;
             try { state = JSON.parse(viewport_state_json()); } catch (e) { /* keep overlay hidden */ }
-            const grid = state && state.mode === 'plane2d' ? state.grid : null;
-            if (!grid) {
-                gridEl.hidden = true;
+            const is2d = !!(state && state.mode === 'plane2d');
+            if (modeBtn) {
+                modeBtn.textContent = is2d ? '2D' : '3D';
+                modeBtn.setAttribute('aria-pressed', String(is2d));
+            }
+            const grid = is2d ? state.grid : null;
+            if (!gridEl || !grid) {
+                if (gridEl) gridEl.hidden = true;
                 return;
             }
             gridEl.hidden = false;
@@ -58,7 +73,7 @@
             gridEl.style.backgroundPosition =
                 `${ox}px ${oy}px, ${ox}px ${oy}px, ${ox}px ${oy}px, ${ox}px ${oy}px`;
         };
-        const overlayLoop = () => { paintGrid(); requestAnimationFrame(overlayLoop); };
+        const overlayLoop = () => { paintOverlay(); requestAnimationFrame(overlayLoop); };
 
         async function boot() {
             console.log('[ornis-editor] loading WASM...');
