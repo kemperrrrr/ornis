@@ -1128,6 +1128,10 @@ mod tests {
             ("lighting.csm", CsmBlock::FIELD_NAMES),
             ("csm", CsmBlock::FIELD_NAMES),
             ("bloom_params", BloomUniform::FIELD_NAMES),
+            (
+                "exposure_params",
+                crate::auto_exposure::ExposureParams::FIELD_NAMES,
+            ),
             ("mat", &OPENPBR_SLOTS),
             ("obj", PerObjectGpu::FIELD_NAMES),
         ];

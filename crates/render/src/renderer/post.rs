@@ -1,5 +1,11 @@
 //! Post-processing: composite blend, bloom down/upsample chain, and the opt-in distance-fog pass.
 use super::*;
+use crate::auto_exposure::{ExposureFrame, ExposureMode};
+
+/// Fixed frame delta (seconds) fed to the auto-exposure temporal smoothing.
+/// The record path carries no wall-clock dt yet; a pinned 60 Hz step keeps
+/// the adaptation deterministic and testable.
+const EXPOSURE_FRAME_DT: f32 = 1.0 / 60.0;
 /// Final blend pass mixing deferred HDR, forward HDR and bloom into the output.
 pub struct CompositePass {
     /// Full-screen triangle-strip pipeline targeting the surface format.
@@ -418,6 +424,36 @@ impl Renderer3D {
         }
     }
 
+    /// Applies the selected exposure mode by filling the composite's shared
+    /// exposure uniform: manual mode uploads the constant multiplier; auto
+    /// mode runs the histogram/adapt compute passes against the lit HDR
+    /// target. Both write the same uniform the fragment stage reads.
+    fn apply_exposure(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        hdr: &wgpu::TextureView,
+    ) {
+        match self.exposure_mode() {
+            ExposureMode::Manual { multiplier } => {
+                self.auto_exposure.write_manual(queue, multiplier);
+            }
+            ExposureMode::Auto(settings) => self.auto_exposure.encode(
+                device,
+                queue,
+                encoder,
+                ExposureFrame {
+                    hdr,
+                    width: self.width,
+                    height: self.height,
+                    settings,
+                    dt_seconds: EXPOSURE_FRAME_DT,
+                },
+            ),
+        }
+    }
+
     /// Record the final blend into `inputs.target`: mixes deferred + forward
     /// HDR layers per `inputs.mode` and adds bloom scaled by
     /// `inputs.bloom_intensity` (0 keeps the legacy path pixel-identical).
@@ -428,6 +464,11 @@ impl Renderer3D {
         encoder: &mut wgpu::CommandEncoder,
         inputs: CompositeInputs<'_>,
     ) {
+        // Auto-exposure runs before the composite samples: manual mode writes
+        // the constant multiplier, auto mode builds the histogram of the lit
+        // HDR target and adapts the exposure — both into the same uniform the
+        // fragment stage reads at binding 5.
+        self.apply_exposure(device, queue, encoder, inputs.hdr);
         // The bloom view is bound unconditionally; a zero intensity makes the
         // contribution null, so the legacy path (`render_scene`) stays
         // pixel-identical to the plan path with bloom culled.
@@ -457,6 +498,11 @@ impl Renderer3D {
                     "bloom_tex" => Some(wgpu::BindingResource::TextureView(inputs.bloom)),
                     "bloom_params" => Some(wgpu::BindingResource::Buffer(
                         self.bloom_pass.params_buffer.as_entire_buffer_binding(),
+                    )),
+                    "exposure_params" => Some(wgpu::BindingResource::Buffer(
+                        self.auto_exposure
+                            .exposure_buffer()
+                            .as_entire_buffer_binding(),
                     )),
                     _ => None,
                 },
@@ -945,5 +991,169 @@ mod tests {
                 "near-zero density drifted: {faint_px:?}"
             );
         }
+    }
+
+    /// An `Rgba8Unorm` render target used as the composite output.
+    fn exposure_test_target(device: &wgpu::Device, size: wgpu::Extent3d) -> wgpu::TextureView {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("exposure test target"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// An `Rgba16Float` HDR target filled with one `f16` gray bit pattern
+    /// (avoids a `half` dev-dependency).
+    fn exposure_test_hdr(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        extent: wgpu::Extent3d,
+        gray: u16,
+    ) -> wgpu::TextureView {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("exposure test hdr"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let mut texels = Vec::with_capacity((extent.width * extent.height) as usize * 4);
+        for _ in 0..(extent.width * extent.height) {
+            texels.extend_from_slice(&[gray, gray, gray, 0x3C00]);
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(extent.width * 4 * 2),
+                rows_per_image: Some(extent.height),
+            },
+            extent,
+        );
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Reads the 16-byte exposure uniform back as an `f32`.
+    fn exposure_uniform(renderer: &Renderer3D, device: &wgpu::Device, queue: &wgpu::Queue) -> f32 {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("exposure test readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("exposure test readback encoder"),
+        });
+        encoder.copy_buffer_to_buffer(
+            renderer.auto_exposure.exposure_buffer(),
+            0,
+            &readback,
+            0,
+            16,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let value = {
+            let view = slice.get_mapped_range().expect("mapped range");
+            f32::from_le_bytes([view[0], view[1], view[2], view[3]])
+        };
+        readback.unmap();
+        value
+    }
+
+    /// End-to-end wiring of the exposure uniform through
+    /// [`Renderer3D::render_composite`]: the manual default writes exactly
+    /// `1.0`, a manual override writes its multiplier, and auto mode runs
+    /// the histogram against the bound HDR target and moves the exposure off
+    /// `1.0`. Skipped when no adapter is available.
+    #[test]
+    fn composite_exposure_mode_writes_the_shared_uniform() {
+        use crate::auto_exposure::{AutoExposureSettings, ExposureMode};
+
+        const W: u32 = 16;
+        const H: u32 = 16;
+
+        let Some((device, queue)) = try_device() else {
+            eprintln!("SKIPPED (composite exposure): no wgpu adapter");
+            return;
+        };
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: W,
+            height: H,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let renderer = Renderer3D::new(&device, &surface_config, 1);
+        let extent = wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        };
+        let target = exposure_test_target(&device, extent);
+        let black = exposure_test_hdr(&device, &queue, extent, 0x0000);
+        let composite = |hdr: &wgpu::TextureView| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("exposure test composite encoder"),
+            });
+            renderer.render_composite(
+                &device,
+                &queue,
+                &mut encoder,
+                CompositeInputs {
+                    target: &target,
+                    hdr,
+                    hdr_fwd: hdr,
+                    bloom: hdr,
+                    bloom_intensity: 0.0,
+                    mode: 0,
+                },
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+        };
+
+        composite(&black);
+        assert_eq!(exposure_uniform(&renderer, &device, &queue), 1.0);
+
+        renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 2.5 });
+        composite(&black);
+        let manual = exposure_uniform(&renderer, &device, &queue);
+        assert!((manual - 2.5).abs() < 1e-6, "{manual}");
+
+        renderer.set_exposure_mode(ExposureMode::Auto(AutoExposureSettings::default()));
+        for _ in 0..120 {
+            composite(&black);
+        }
+        let auto = exposure_uniform(&renderer, &device, &queue);
+        assert!(auto > 1.5, "auto exposure did not adapt: {auto}");
+
+        renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 1.0 });
+        composite(&black);
+        assert_eq!(exposure_uniform(&renderer, &device, &queue), 1.0);
     }
 }
