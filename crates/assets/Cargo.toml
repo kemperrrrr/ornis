@@ -9,6 +9,8 @@ license.workspace = true
 ornis-core = { path = "../core", version = "0.1.0" }
 # glTF importer (feature `gltf`, default on): pulls the `gltf`/`image` tree.
 ornis-gltf = { path = "../gltf", version = "0.1.0", optional = true }
+# Offline KTX2 bake (`bake`): roles, chains and container writing.
+ornis-texture = { path = "../texture", version = "0.1.0" }
 # `Vec3`/`Quat` behind the typed scene descriptors (same version as ornis-core).
 glam = "0.34"
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +28,10 @@ gltf = ["dep:ornis-gltf"]
 # Placeholder: registers the `.fbx` extension with an importer that returns
 # `AssetError::UnsupportedFormat` (no parser, no new dependencies yet).
 fbx = []
+
+[dev-dependencies]
+# Reads the committed bake-gradient PNG in the Basis round-trip tests.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

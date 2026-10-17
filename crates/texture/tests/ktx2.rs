@@ -125,40 +125,11 @@ fn authored_rgba_levels_are_not_regenerated_or_recolored() {
 }
 
 // Write spec-shaped native containers with each format's own DFD and physical
-// block alignment, rather than relabeling the Basis DFD's channel layout.
+// block alignment, rather than relabeling the Basis DFD's channel layout. The
+// writer is the crate's own (it also backs the offline bake), so this also
+// pins that its containers survive the reader used in production.
 fn native_container(format: ktx2::Format, edge: u32, levels: &[Vec<u8>]) -> Vec<u8> {
-    let mut header = ktx2::Reader::new(UASTC).unwrap().header();
-    header.format = Some(format);
-    header.pixel_width = edge;
-    header.pixel_height = edge;
-    header.level_count = levels.len() as u32;
-    header.supercompression_scheme = None;
-    let (basic, _) = ktx2::dfd::Basic::from_format(format).unwrap();
-    let dfd = ktx2::dfd::Block::Basic(basic).to_vec();
-    let dfd_offset = 80 + levels.len() * 24;
-    header.index = ktx2::Index {
-        dfd_byte_offset: dfd_offset as u32,
-        dfd_byte_length: (4 + dfd.len()) as u32,
-        kvd_byte_offset: 0,
-        kvd_byte_length: 0,
-        sgd_byte_offset: 0,
-        sgd_byte_length: 0,
-    };
-    let mut bytes = header.as_bytes().to_vec();
-    bytes.resize(dfd_offset, 0);
-    bytes.extend_from_slice(&header.index.dfd_byte_length.to_le_bytes());
-    bytes.extend_from_slice(&dfd);
-    for (i, level) in levels.iter().enumerate().rev() {
-        bytes.resize(bytes.len().next_multiple_of(16), 0);
-        let entry = ktx2::LevelIndex {
-            byte_offset: bytes.len() as u64,
-            byte_length: level.len() as u64,
-            uncompressed_byte_length: level.len() as u64,
-        };
-        bytes[80 + i * 24..104 + i * 24].copy_from_slice(&entry.as_bytes());
-        bytes.extend_from_slice(level);
-    }
-    bytes
+    ornis_texture::ktx2_container(format, edge, edge, levels).expect("container writes")
 }
 
 #[test]

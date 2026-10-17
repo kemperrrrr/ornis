@@ -33,6 +33,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "gltf")]
+use crate::bake::{BakeSettings, BakeStats};
 use crate::error::AssetError;
 use crate::handle::{Asset, Handle};
 use crate::importer::{ImportedAsset, Importer, ImporterRegistry, SceneImport};
@@ -168,6 +170,13 @@ pub struct AssetServer {
     by_path: HashMap<PathBuf, AssetId>,
     dirty: HashSet<AssetId>,
     events: Vec<AssetEvent>,
+    /// Offline bake policy for imported textures; `None` keeps the decoded
+    /// PNG/JPEG pixels ([`crate::bake`]).
+    #[cfg(feature = "gltf")]
+    texture_baking: Option<BakeSettings>,
+    /// Counters of the last implicit bake pass ([`AssetServer::bake_stats`]).
+    #[cfg(feature = "gltf")]
+    last_bake: BakeStats,
 }
 
 impl Default for AssetServer {
@@ -197,6 +206,10 @@ impl AssetServer {
             by_path: HashMap::new(),
             dirty: HashSet::new(),
             events: Vec::new(),
+            #[cfg(feature = "gltf")]
+            texture_baking: None,
+            #[cfg(feature = "gltf")]
+            last_bake: BakeStats::default(),
         }
     }
 
@@ -204,6 +217,26 @@ impl AssetServer {
     /// extensions, see [`ImporterRegistry::register`]).
     pub fn register_importer(&mut self, importer: impl Importer) {
         self.registry.register(importer);
+    }
+
+    /// Bakes imported model textures offline from then on ([`crate::bake`]).
+    ///
+    /// Every subsequently imported (or reloaded) glTF model has its decoded
+    /// PNG/JPEG material slots converted to KTX2 with the authored mip chain,
+    /// keyed by content in `settings.cache_dir`. Without a policy the importer
+    /// keeps the previous behaviour: decoded pixels, mips generated at upload.
+    #[cfg(feature = "gltf")]
+    // qual:api — host-facing policy entry; in-tree callers are the unit tests.
+    pub fn with_texture_baking(mut self, settings: BakeSettings) -> Self {
+        self.texture_baking = Some(settings);
+        self
+    }
+
+    /// Counters of the last implicit bake pass, `Default` when none ran.
+    #[cfg(feature = "gltf")]
+    // qual:api — host-facing diagnostics; in-tree callers are the unit tests.
+    pub fn bake_stats(&self) -> &BakeStats {
+        &self.last_bake
     }
 
     /// The extension → importer registry.
@@ -497,6 +530,18 @@ impl AssetServer {
         id
     }
 
+    /// Bakes a model's decoded textures in place when a policy is set.
+    ///
+    /// Runs on every model write, so [`AssetServer::reload`] re-bakes too; the
+    /// content-addressed cache keeps that second pass cheap.
+    #[cfg(feature = "gltf")]
+    fn bake_textures(&mut self, model: &mut crate::Model) {
+        let Some(policy) = self.texture_baking.as_ref() else {
+            return;
+        };
+        self.last_bake = crate::bake::bake_model(policy, model);
+    }
+
     /// Writes (or overwrites) every storage lane of `id`.
     fn insert_at(&mut self, id: AssetId, imported: ImportedAsset) {
         self.kinds.insert(id, imported.kind());
@@ -515,9 +560,10 @@ impl AssetServer {
                 self.scenes.insert(id, import.scene);
             }
             #[cfg(feature = "gltf")]
-            ImportedAsset::Model(model) => {
+            ImportedAsset::Model(mut model) => {
                 self.sources.remove(&id);
                 self.scenes.remove(&id);
+                self.bake_textures(&mut model);
                 self.models.insert(id, model);
             }
         }
@@ -535,10 +581,14 @@ fn insert_asset_entity(store: &mut SmartStore, desc: &EntityDesc) -> Entity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "gltf")]
+    use crate::bake::EncoderSource;
     use crate::scene::{
         CameraDesc, CameraProjection, EntityDesc, MaterialDesc, MeshDesc, TransformDesc,
     };
     use ornis_core::Engine;
+    #[cfg(feature = "gltf")]
+    use ornis_texture::{TextureEncoding, TextureImage, TextureRole, generate_mipmaps};
 
     /// Shipped demo scene: five spheres over two directional lights.
     const DEMO_RON: &str = include_str!("../../../assets/scene.ron");
@@ -809,6 +859,105 @@ mod tests {
         let uri = format!("data:application/octet-stream;base64,{TRIANGLE_B64}");
         json["buffers"][0]["uri"] = serde_json::Value::String(uri);
         serde_json::to_string(&json).expect("fixture serializes")
+    }
+
+    /// 8×8 RGBA PNG (base64): top four rows opaque red, bottom four rows
+    /// half-transparent blue. Encoded once with the `image` crate the loader
+    /// decodes with, so the texels are exactly [`png_pixels`].
+    #[cfg(feature = "gltf")]
+    const SLOT_PNG_B64: &str = concat!(
+        "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAG0lEQVR42mM4ocH1Hx",
+        "9moIMCEZs7DfgwHRQAAHu6dKGau3U0AAAAAElFTkSuQmCC",
+    );
+
+    /// Texels [`SLOT_PNG_B64`] decodes to, RGBA8 row-major.
+    #[cfg(feature = "gltf")]
+    fn png_pixels() -> Vec<u8> {
+        (0..8u8)
+            .flat_map(|row| {
+                if row < 4 {
+                    [200, 40, 10, 255].repeat(8)
+                } else {
+                    [20, 60, 220, 128].repeat(8)
+                }
+            })
+            .collect()
+    }
+
+    /// The triangle glTF with its material albedo bound to the PNG image.
+    #[cfg(feature = "gltf")]
+    fn textured_gltf_json() -> String {
+        let source = triangle_gltf_json();
+        let mut json: serde_json::Value = serde_json::from_str(&source).expect("fixture json");
+        json["images"] = serde_json::json!([{"uri": png_data_uri()}]);
+        json["textures"] = serde_json::json!([{"source": 0}]);
+        let albedo = serde_json::json!({"index": 0});
+        json["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"] = albedo;
+        serde_json::to_string(&json).expect("fixture serializes")
+    }
+
+    /// Data URI of [`SLOT_PNG_B64`], as an image `uri`.
+    #[cfg(feature = "gltf")]
+    fn png_data_uri() -> String {
+        format!("data:image/png;base64,{SLOT_PNG_B64}")
+    }
+
+    /// Albedo slot of the first primitive of the model stored under `id`.
+    #[cfg(feature = "gltf")]
+    fn albedo(server: &AssetServer, id: AssetId) -> &TextureImage {
+        server.model(id).expect("model").primitives[0]
+            .material
+            .texture(TextureRole::BaseColor)
+            .expect("bound albedo")
+    }
+
+    #[cfg(feature = "gltf")]
+    #[test]
+    fn imported_png_albedo_decodes_to_the_expected_texels() {
+        let mut server = AssetServer::new();
+        let id = server
+            .load_gltf(textured_gltf_json().as_bytes())
+            .expect("loads");
+        let image = albedo(&server, id).rgba8().expect("decoded pixels");
+        assert_eq!((image.width, image.height), (8, 8));
+        assert_eq!(image.pixels, png_pixels());
+    }
+
+    #[cfg(feature = "gltf")]
+    #[test]
+    fn texture_baking_converts_imported_png_slots_to_ktx2() {
+        let json = textured_gltf_json();
+        let mut plain = AssetServer::new();
+        let id = plain.load_gltf(json.as_bytes()).expect("loads");
+        let source = albedo(&plain, id).rgba8().expect("decoded").clone();
+        let cache = temp_file("cache.ktx2", b"")
+            .parent()
+            .expect("temp dir")
+            .to_path_buf();
+        let mut server = AssetServer::new().with_texture_baking(BakeSettings {
+            encoder: EncoderSource::InProcess,
+            ..BakeSettings::new(cache)
+        });
+        let id = server.load_gltf(json.as_bytes()).expect("loads");
+        assert_eq!(server.bake_stats().authored, 1);
+        assert_eq!(server.bake_stats().fallback, 0);
+        let slot = albedo(&server, id);
+        let TextureImage::Ktx2(container) = slot else {
+            panic!("expected a baked slot, got {slot:?}");
+        };
+        assert_eq!(container.dimensions(), (8, 8));
+        assert_eq!(container.encoding(), Some(TextureEncoding::Rgba8));
+        let levels = slot
+            .prepare(TextureRole::BaseColor, TextureEncoding::Bc7)
+            .expect("loads");
+        assert_eq!(levels.levels().len(), 4, "8x8 authored chain is complete");
+        assert_eq!(levels.levels()[0], source.pixels);
+        let expected: Vec<_> = generate_mipmaps(&source, TextureRole::BaseColor)
+            .expect("chain")
+            .into_iter()
+            .map(|level| level.pixels)
+            .collect();
+        assert_eq!(levels.levels(), expected.as_slice());
     }
 
     #[cfg(feature = "gltf")]

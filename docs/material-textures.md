@@ -106,3 +106,115 @@ than that old base-only upload. These are exact texture payload budgets,
 **not measured driver VRAM residency**: page alignment and driver metadata
 are not exposed by this counter. The GPU test prints the chosen format and
 payload after upload. Physical Mac VRAM profiling remains a manual check.
+
+## Offline bake (`ornis-assets::bake`, issue #129)
+
+The KTX2 containers above used to be something an external toolchain had to
+produce. The `crates/assets/src/bake/` module (`bake.rs` for the policy and the
+entry points, `encoder.rs` for the tool driver, `identity.rs` for the
+tool version mixed into the cache key, `cache.rs` for the keys, `model.rs`
+for the slot pass) now bakes them at import time, so a PNG/JPEG
+model gets the same runtime treatment as a `KHR_texture_basisu` one: authored
+levels, no runtime mip generation.
+
+- **Codec policy.** `BasisMode::for_role` picks UASTC for
+  `TextureRole::Normal` (quality where block artifacts hurt) and ETC1S for
+  albedo, ORM and emissive (size). `BakeSettings::overrides` replaces any single
+  slot, e.g. `{ BaseColor: Uastc }` for a hero texture.
+- **Cache.** The key is FNV-1a 64 over bake schema `1`, the decoded pixels,
+  their dimensions, the role, the codec and the producer, stored as
+  `<key>.ktx2` under `BakeSettings::cache_dir`. It hashes *decoded content*,
+  not the source file bytes, so a re-encoded PNG with identical texels hits
+  the same entry, and two primitives sharing an image share one bake. The
+  producer is `rgba8-writer-v1` for the in-process RGBA8 writer, or the tool's
+  `-version` stdout (a content hash of the binary when that fails) plus the
+  pinned flags, excluding file paths. An RGBA8 fallback and a `basisu` run
+  therefore never share an entry, and upgrading the tool or changing a flag
+  misses the old container instead of reusing it. `EncoderSource::Path`
+  resolves only absolute `PATH` entries and canonicalizes the file, so an
+  empty or relative entry cannot change the key with the current directory.
+  An entry that stops parsing as KTX2 counts as a miss.
+- **Encoder.** Basis ships no pure-Rust encoder, so compressed payloads come
+  from the reference `basisu` command line — the project the runtime transcoder
+  port (`crates/texture/src/basis.rs`) comes from. The shape follows the two
+  established offline pipelines rather than inventing one: Bevy's
+  asset-processing `basisu` step (per-slot `uastc`/`etc1s` policy) and
+  KTX-Software's `toktx` (`--uastc`, `--bcmp`, generated mipmaps in the same
+  KTX2 container). The pixel handoff is an uncompressed 32-bit TGA written
+  beside the cache entry. Colour space is pinned per role, and the mip kernel
+  is named so a tool default cannot move it. The reference tool's Kaiser
+  kernel is not the in-process area filter; the two chains are different
+  producers and do not share a cache entry.
+
+  | Role | Colour-space flags |
+  | --- | --- |
+  | BaseColor, Emissive | `-srgb -mip_srgb` |
+  | MetallicRoughness | `-linear -mip_linear` |
+  | Normal | `-normal_map -linear -mip_linear -mip_renorm` |
+
+  Codec flags are `-uastc -uastc_level 2` or `-etc1s -q 128`. Every command
+  also passes `-mip_clamp -mip_filter kaiser`. BaseColor ETC1S:
+
+  `basisu -ktx2 -mipmap -output_file <key>.tool.ktx2 -etc1s -q 128 -srgb -mip_srgb -mip_clamp -mip_filter kaiser <key>.tga`
+
+  Normal UASTC (the role default; an ETC1S override keeps the normal flags):
+
+  `basisu -ktx2 -mipmap -output_file <key>.tool.ktx2 -uastc -uastc_level 2 -normal_map -linear -mip_linear -mip_renorm -mip_clamp -mip_filter kaiser <key>.tga`
+
+  `EncoderSource::Path` (the default) looks for `basisu` on absolute `PATH`
+  entries, `EncoderSource::Binary` pins an exact tool, `EncoderSource::InProcess`
+  never spawns a process. Tool output is validated through `Ktx2Image::from_bytes`
+  (reader, DFD, level-length and dimension rules) *before* anything replaces
+  the slot, and only the validated bytes are cached.
+- **No encoder is a visible downgrade, not the size goal.** Without a `basisu`
+  the bake still writes a container from `encode_rgba8_ktx2` — the same
+  authored chain, RGBA8 blocks instead of the compressed ones — so the runtime
+  mip cost disappears either way. That RGBA8 container does **not** meet the
+  #129 compressed-size goal (the 4.00× / 8.00× figures above). An explicit
+  `EncoderSource::InProcess` is `BakeOrigin::Authored`. A `PATH` lookup that
+  finds nothing is `BakeOrigin::Downgraded`: `BakeStats::downgraded` counts
+  those slots and `BakeStats::last_failure` records the reason. The two
+  producers do not share a cache entry with a later `basisu` run.
+- **The source stays.** A failed bake (missing pinned tool, non-zero exit,
+  unparsable output) returns a typed `BakeError`; `bake_model` keeps the decoded
+  PNG/JPEG pixels of that slot and counts it in `BakeStats::fallback`, with the
+  reason in `BakeStats::last_failure`.
+
+```rust
+let mut server = AssetServer::new()
+    .with_texture_baking(BakeSettings::new("target/ornis-texture-cache"));
+let id = server.load_gltf_file(path)?;
+let stats = server.bake_stats(); // encoded / cached / authored / downgraded / fallback
+```
+
+The bake is import-time and lives on `AssetServer` (feature `gltf`): every
+model written through `store`/`insert_at`, including `reload`, bakes its decoded
+slots when a policy is set and is untouched when it is not. A slot already
+holding KTX2 (`KHR_texture_basisu`) keeps the container the file authored.
+
+### Tests for the bake
+
+- `crates/texture/src/encode.rs` — round trip through the reader for all four
+  roles, role/transfer-function pairing, determinism, invalid sources,
+  rectangular chains, unknown formats rejected instead of guessed.
+- `crates/texture/tests/ktx2.rs` — `native_container` is now the crate's own
+  writer, so every existing native-format expectation (BC1/BC3/BC7/ASTC/ETC2/
+  RGBA8 chains, mip preservation, rejection paths) also exercises the writer
+  against the production reader.
+- `crates/assets/src/bake.rs` — role defaults and overrides, cache hits per
+  (content, role, producer), byte-level determinism, pinned CLI flags for every
+  role and codec plus TGA bytes via a stub encoder, a committed ETC1S/UASTC
+  round trip, the `ORNIS_BASISU` live-encoder check, non-zero exit reporting,
+  the model slot pass, fallback, and the counted RGBA8 downgrade.
+- `crates/texture/tests/data/bake-gradient.png` plus `bake-etc1s.ktx2` and
+  `bake-uastc.ktx2` — a 16×16 ramp encoded by basisu 2.10.0 with the pinned
+  BaseColor flags (see that directory's README).
+- `crates/assets/src/server.rs` — a glTF with a PNG albedo keeps its decoded
+  texels without a policy, and becomes a validated KTX2 chain with one.
+
+## Next steps
+
+- Ship a `basisu` build with the toolchain (or vendor a UASTC encoder) so the
+  default path produces compressed containers without a manual install.
+- Cache baked containers next to the source asset in the editor so a fresh
+  checkout skips the first re-encode.
