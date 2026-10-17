@@ -20,9 +20,12 @@ This unreleased change affects the Rust import/render API:
   `TextureCache::upload_image_cached` take an `AnisotropyLevel`
   (`OFF` = 1, `DEFAULT` = 16, `new(u16)` saturates into `1..=16`);
   `SamplerKind::LinearRepeat` carries the level, so exhaustive matches on it
-  need the new payload. The texture cache key includes the level — the same
-  image at another level gets its own sampler. `SamplerKind::LinearClamp`
-  (composite, HDR layers, shadow maps) stays isotropic and unchanged.
+  need the new payload. The level a frame samples with is
+  `RenderBackendConfig::material_anisotropy` (default 16), forwarded to the
+  textured-forward `material_sampler`. The texture cache key does **not**
+  include the level: the same image at another level reuses one GPU texture.
+  `SamplerKind::LinearClamp` (composite, HDR layers, shadow maps) stays
+  isotropic and unchanged.
 - Optional `KHR_texture_basisu` now falls back to the core PNG/JPEG on
   unsupported/corrupt containers or unavailable sources. Required Basis
   returns an error. Unused image/fallback payloads are no longer decoded.

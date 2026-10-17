@@ -411,9 +411,10 @@ impl Renderer3D {
     ///
     /// The fallbacks are 1x1 white images uploaded through
     /// [`upload_texture`] under their
-    /// roles (sRGB for color, linear for data), and the sampler carries
-    /// [`sampler_descriptor_for_role`]
-    /// defaults. The fragment stage is
+    /// roles (sRGB for color, linear for data). The sampler is
+    /// [`sampler_descriptor_for_role`] at [`Renderer3D::material_anisotropy`]
+    /// (the shared `material_sampler` every textured draw binds — not the
+    /// per-texture sampler stored on the cache entry). The fragment stage is
     /// [`wgsl_source_textured`](crate::shaders::material_textures::wgsl_source_textured);
     /// everything else (vertex entry, targets, depth, MSAA) mirrors
     /// [`TransparencyOptions`]-aware [`ForwardPass`] construction, so only
@@ -425,7 +426,7 @@ impl Renderer3D {
         let Ok(white) = CpuImage::from_rgba8(1, 1, vec![255; 4]) else {
             return;
         };
-        let anisotropy = AnisotropyLevel::DEFAULT;
+        let anisotropy = self.material_anisotropy;
         let Ok(fallback_color) =
             upload_texture(device, queue, &white, TextureRole::BaseColor, anisotropy)
         else {
@@ -525,6 +526,25 @@ impl Renderer3D {
             fallback_data,
             sampler,
         });
+    }
+
+    /// Store `requested` as the material-sampler level and, when the
+    /// textured-forward pass already exists, replace its sampler.
+    ///
+    /// `requested` saturates through [`AnisotropyLevel::new`] (`0` becomes
+    /// [`AnisotropyLevel::OFF`], anything above 16 becomes
+    /// [`AnisotropyLevel::DEFAULT`]). A pass that has not been built yet
+    /// picks the stored level up in
+    /// [`ensure_textured_forward`](Self::ensure_textured_forward); `device`
+    /// owns the replacement sampler.
+    pub fn set_material_anisotropy(&mut self, device: &wgpu::Device, requested: u16) {
+        let level = AnisotropyLevel::new(requested);
+        self.material_anisotropy = level;
+        let Some(pass) = self.textured_forward.as_mut() else {
+            return;
+        };
+        pass.sampler =
+            device.create_sampler(&sampler_descriptor_for_role(TextureRole::BaseColor, level));
     }
 
     /// Record the forward pass: draws lit geometry into the HDR `output`

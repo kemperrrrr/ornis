@@ -19,11 +19,15 @@
 //!
 //! Filtering is trilinear over a full role-aware mip chain; wrapping is `Repeat` on every
 //! axis (the glTF default; the import carries no wrap mode), LOD clamps are
-//! the full `0.0..=32.0` range, and there is no depth comparison. Anisotropy
-//! is the [`AnisotropyLevel`] the caller uploads with:
-//! [`AnisotropyLevel::DEFAULT`] (16 samples) is the project default for
-//! material textures, while shadow and post-process samplers are
-//! [`SamplerKind::LinearClamp`] and stay isotropic. Color roles
+//! the full `0.0..=32.0` range, and there is no depth comparison. Each upload
+//! still builds a sampler at the [`AnisotropyLevel`] the caller passes, which
+//! direct samplers of [`GpuTexture::sampler`] use (the mip gates). The frame
+//! does not: textured draws bind one shared material sampler owned by the
+//! renderer ([`crate::renderer::Renderer3D::material_anisotropy`], default
+//! [`AnisotropyLevel::DEFAULT`]). The cache key is the image and its role, so
+//! the same pixels at two levels occupy one GPU texture. Shadow and
+//! post-process samplers are [`SamplerKind::LinearClamp`] and stay isotropic.
+//! Color roles
 //! ([`TextureRole::BaseColor`], [`TextureRole::Emissive`]) upload as
 //! `Rgba8UnormSrgb`, so the hardware decodes sRGB to linear on sample and the
 //! render stays in linear light
@@ -137,18 +141,18 @@ pub fn sample_metallic_roughness(texel: [u8; 4]) -> (f32, f32) {
     )
 }
 
-/// Deterministic content key of one upload (role + anisotropy + size +
-/// pixels).
+/// Deterministic content key of one upload (role + size + pixels).
 ///
 /// Dedup key for [`TextureCache::upload_cached`]: identical images under the
-/// same role and [`AnisotropyLevel`] share one GPU entry (a color image and a
-/// data image with equal bytes must not alias — their formats differ, and a
-/// different level means a different sampler). Same hashing discipline as
-/// `mesh_upload::soup_hash`.
-pub fn texture_cache_key(image: &CpuImage, role: TextureRole, anisotropy: AnisotropyLevel) -> u64 {
+/// same role share one GPU entry (a color image and a data image with equal
+/// bytes must not alias — their formats differ). The anisotropic level is
+/// deliberately absent: only the sampler differs, and the frame binds the
+/// renderer's material sampler rather than [`GpuTexture::sampler`], so a
+/// second level must not allocate a second texture. Same hashing discipline
+/// as `mesh_upload::soup_hash`.
+pub fn texture_cache_key(image: &CpuImage, role: TextureRole) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     role.hash(&mut hasher);
-    anisotropy.hash(&mut hasher);
     image.width.hash(&mut hasher);
     image.height.hash(&mut hasher);
     image.pixels.hash(&mut hasher);
@@ -294,8 +298,10 @@ impl TextureCache {
     ///
     /// On a content hit ([`texture_cache_key`]) no GPU work happens and the
     /// existing handle returns; on a miss the image uploads via
-    /// [`upload_texture`] and the new handle returns. The level is part of the
-    /// key: the same image at another level uploads as its own entry.
+    /// [`upload_texture`] and the new handle returns. The level is not part
+    /// of the key: the same image at another level reuses the entry (and the
+    /// sampler of the first upload). The frame samples with the renderer's
+    /// material sampler.
     ///
     /// # Errors
     ///
@@ -310,7 +316,7 @@ impl TextureCache {
         anisotropy: AnisotropyLevel,
     ) -> Result<TextureHandle, TextureUploadError> {
         image.validate()?;
-        let key = texture_cache_key(image, role, anisotropy);
+        let key = texture_cache_key(image, role);
         if let Some(handle) = self.index.get(&key) {
             return Ok(*handle);
         }
@@ -322,7 +328,8 @@ impl TextureCache {
     }
 
     /// Uploads a glTF image without losing KTX2 mips or eagerly expanding Basis data.
-    /// Content, role and the anisotropic level determine identity; repeated calls
+    /// Content and role determine identity; the anisotropic level does not, so
+    /// the same container at another level reuses the entry. Repeated calls
     /// do not transcode again. Like RGBA uploads, a cache belongs to one device.
     ///
     /// # Errors
@@ -342,7 +349,6 @@ impl TextureCache {
         // Separate encoded container keys from legacy RGBA content keys.
         "KTX2".hash(&mut hasher);
         role.hash(&mut hasher);
-        anisotropy.hash(&mut hasher);
         image.hash(&mut hasher);
         let key = hasher.finish();
         if let Some(handle) = self.index.get(&key) {
@@ -507,6 +513,12 @@ mod tests {
         assert_eq!(AnisotropyLevel::new(0), AnisotropyLevel::OFF);
         assert_eq!(AnisotropyLevel::new(1), AnisotropyLevel::OFF);
         assert_eq!(AnisotropyLevel::new(8).get(), 8);
+        // The ceiling is 16: 16 stays, 17 saturates. A threshold mutated
+        // from 16 to anything above 17 would let 17 through.
+        assert_eq!(AnisotropyLevel::new(16), AnisotropyLevel::DEFAULT);
+        assert_eq!(AnisotropyLevel::new(16).get(), 16);
+        assert_eq!(AnisotropyLevel::new(17), AnisotropyLevel::DEFAULT);
+        assert_eq!(AnisotropyLevel::new(17).get(), 16);
         assert_eq!(AnisotropyLevel::new(u16::MAX), AnisotropyLevel::DEFAULT);
         assert_eq!(AnisotropyLevel::DEFAULT.get(), 16);
         // The requested level reaches the descriptor, and every filter stays
@@ -613,25 +625,19 @@ mod tests {
     fn cache_key_is_stable_and_role_sensitive() {
         let image = solid_image(2, 2, [10, 20, 30, 40]);
         let role = TextureRole::BaseColor;
-        let level = AnisotropyLevel::DEFAULT;
         assert_eq!(
-            texture_cache_key(&image, role, level),
-            texture_cache_key(&image, role, level),
+            texture_cache_key(&image, role),
+            texture_cache_key(&image, role),
             "stable across calls"
         );
         assert_ne!(
-            texture_cache_key(&image, role, level),
-            texture_cache_key(&image, TextureRole::MetallicRoughness, level),
+            texture_cache_key(&image, role),
+            texture_cache_key(&image, TextureRole::MetallicRoughness),
             "same bytes under another role must not alias (formats differ)"
         );
         assert_ne!(
-            texture_cache_key(&image, role, level),
-            texture_cache_key(&image, role, AnisotropyLevel::OFF),
-            "another level means another sampler, so it must not alias"
-        );
-        assert_ne!(
-            texture_cache_key(&image, role, level),
-            texture_cache_key(&solid_image(2, 2, [11, 20, 30, 40]), role, level),
+            texture_cache_key(&image, role),
+            texture_cache_key(&solid_image(2, 2, [11, 20, 30, 40]), role),
             "one byte flips the key"
         );
     }
@@ -731,6 +737,19 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(cache.get(TextureHandle::from_raw(0)).is_some());
         assert!(cache.get(TextureHandle::from_raw(1)).is_none());
+        // Another anisotropic level must not allocate a second texture:
+        // the frame sampler lives on the renderer, not on this entry.
+        let other_level = cache
+            .upload_cached(
+                &device,
+                &queue,
+                &image,
+                TextureRole::BaseColor,
+                AnisotropyLevel::OFF,
+            )
+            .expect("level is not part of the key");
+        assert_eq!(other_level, first);
+        assert_eq!(cache.len(), 1);
         // Same bytes under the data role must not alias the color entry.
         let data_handle = cache
             .upload_cached(

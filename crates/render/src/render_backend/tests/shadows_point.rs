@@ -53,6 +53,7 @@ fn shadowed_point_without_occluder_has_no_acne() {
             max_objects: 256,
             max_materials: 64,
             indirect_draw: false,
+            material_anisotropy: crate::AnisotropyLevel::DEFAULT,
         },
     );
     let mesh = crate::mesh::create_sphere(&device, 1.0, 24, 16);

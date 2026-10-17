@@ -125,6 +125,7 @@ impl Renderer3D {
             pbr_texture_view,
             sample_count,
             exposure: 1.0,
+            material_anisotropy: AnisotropyLevel::DEFAULT,
             transparency: TransparencyOptions::default(),
             max_objects: std::sync::atomic::AtomicU32::new(max_objects),
             max_materials: std::sync::atomic::AtomicU32::new(max_materials),
