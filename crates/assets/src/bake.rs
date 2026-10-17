@@ -1094,27 +1094,9 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
             .parse()
             .expect("pid");
         assert!(
-            !process_still_running(pid),
+            !super::process::process_still_running(pid),
             "grandchild {pid} was still running after the timeout"
         );
-    }
-
-    /// Whether `pid` is alive and not a zombie. A missing `/proc` entry is dead.
-    #[cfg(unix)]
-    fn process_still_running(pid: u32) -> bool {
-        let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
-            return false;
-        };
-        text.lines().any(|line| {
-            let Some(state) = line.strip_prefix("State:") else {
-                return false;
-            };
-            let state = state.trim();
-            state.starts_with('R')
-                || state.starts_with('S')
-                || state.starts_with('D')
-                || state.starts_with('T')
-        })
     }
 
     /// Whether the cache entry or either scratch file of `key` is still there.
@@ -1468,13 +1450,17 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         eprintln!("ORNIS_BASISU is unset; the real encoder round trip was not run");
     }
 
-    /// `-version` stdout. Fails when the script does not exec.
+    /// `-version` stdout. Uses the same spawn as the bake, including the
+    /// `ETXTBSY` retry: a raw `Command::output` of a just-written script fails
+    /// under parallel fork load.
     #[cfg(unix)]
     fn printed_version(program: &Path) -> String {
-        let output = std::process::Command::new(program)
-            .arg("-version")
-            .output()
-            .expect("spawn version");
+        let output = super::process::run_timed(
+            program,
+            &[std::ffi::OsString::from("-version")],
+            super::DEFAULT_ENCODER_TIMEOUT,
+        )
+        .expect("spawn version");
         assert!(output.status.success(), "version probe failed: {output:?}");
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }

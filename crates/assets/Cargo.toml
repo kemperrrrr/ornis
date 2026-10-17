@@ -20,6 +20,11 @@ ron = "0.12"
 # Typed loader errors (`thiserror::Error` on `SceneLoadError`, `AssetError`).
 thiserror = "2.0"
 
+[target.'cfg(unix)'.dependencies]
+# `kill(-pid, SIGKILL)` for an encoder's process group. Unix only: wasm has
+# no process groups, and the crate must not pull this in for that target.
+rustix = { version = "1.1.5", features = ["process"] }
+
 [features]
 default = ["gltf"]
 # `.gltf`/`.glb` importer (`GltfImporter`, `AssetServer::load_gltf*`,
