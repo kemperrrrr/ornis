@@ -164,6 +164,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 |---|---|---|
 | `Renderer3D` + WGSL PBR (GGX, Smith-G, Fresnel-Schlick, split-sum IBL, ACES один раз в HDR-composite и в fog-present; deferred HDR — `Rgba16Float`, geometric specular AA, Karis-resolve только на MSAA-рёбрах, Fresnel базового слоя один раз, `ShadingDebug`) | ✅ | `crates/render/src/` |
 | Screen-space AO: SSAO + GTAO (XeGTAO, оба горизонта и интеграл дуги) в половинном разрешении, bilateral-блюр по метрической глубине, модуляция только ambient/IBL (opt-in `AoWiring`, выключено — бит-в-бит) | ✅ | `crates/render/src/ao.rs`, `shaders/ao_generated.rs`, `renderer/ao.rs`; гейты `tests/ao_corner.rs`, `tests/ao_gtao_ref.rs` |
+| Сглаживание: MSAA, TAA (Halton jitter, motion vectors объектов/камеры и GPU-skinning в g-buffer, CPU-deformed custom pixels reject history, reprojection + depth reject + YCoCg neighbourhood clamp), FXAA и SMAA-lite; TAA/FXAA/SMAA выбираются в frame plan, native CLI — `--aa off|msaa|taa|fxaa|smaa`, WASM по умолчанию FXAA | ✅ | `crates/render/src/antialias.rs`, `shaders/aa_*_generated.rs`, `renderer/aa.rs`, `frame_passes.rs`; CPU convergence/ghosting и naga gates |
 | OpenPBR-материал (20 vec4 параметров, все BSDF) | ✅ | `crates/render/src/material.rs` |
 | MaterialX: парсер `.mtlx` → AST → `OpenPBRMaterial` | ✅ | `crates/materialx/src/` |
 | Трейт `RenderBackend` + фабрика `create_render_backend` | ✅ | `crates/render/src/render_backend.rs` |

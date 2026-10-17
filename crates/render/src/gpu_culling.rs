@@ -203,8 +203,8 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
 /// (read), `2` dense destination (read-write), `3` five-word indirect
 /// args as `array<atomic<u32>, 5>` (read-write; the CPU pre-writes every
 /// word but `instance_count` and zeroes it). `PerObject` repeats
-/// the [`crate::renderer::PerObjectGpu`] layout (two `mat4x4` + `u32`
-/// material index + pad = 144 bytes) so the existing vertex stages index
+/// the [`crate::renderer::PerObjectGpu`] layout (three `mat4x4`, two `u32`
+/// fields and two pad words = 208 bytes) so the existing vertex stages index
 /// the compacted buffer unchanged.
 pub const CULL_COMPUTE_WGSL: &str = r#"
 struct CullParams {
@@ -218,10 +218,11 @@ struct CullParams {
 struct PerObject {
     model: mat4x4<f32>,
     normal_matrix: mat4x4<f32>,
+    previous_model: mat4x4<f32>,
     material_index: u32,
+    motion_valid: u32,
     pad0: u32,
     pad1: u32,
-    pad2: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: CullParams;
@@ -662,10 +663,12 @@ mod tests {
         let Some((device, queue)) = try_device() else {
             return;
         };
-        // The shader `PerObject` is the 144-byte `PerObjectGpu` layout
-        // (two `mat4x4` + material `u32` + 3 pad words).
-        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 144);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 128);
+        // The shader `PerObject` is the 208-byte `PerObjectGpu` layout
+        // (three `mat4x4`, two `u32` fields and 2 pad words).
+        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 208);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, previous_model), 128);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 192);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, motion_valid), 196);
         let (instances, view_proj, expected) = cull_test_scene();
         let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
         for frame in 0..2 {

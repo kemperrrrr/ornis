@@ -77,28 +77,35 @@ impl Renderer3D {
         );
 
         let gbuffer = Self::create_gbuffer(device, width, height, sample_count);
-        let (gbuffer_pipeline, gbuffer_bind_group_layout, gbuffer_bind_group) =
-            Self::create_gbuffer_pipeline(
-                device,
-                &gbuffer,
-                &buffers.camera,
-                &buffers.per_object,
-                &buffers.material,
-                sample_count,
-            );
+        let (
+            gbuffer_pipeline,
+            gbuffer_motion_pipeline,
+            gbuffer_bind_group_layout,
+            gbuffer_bind_group,
+        ) = Self::create_gbuffer_pipeline(
+            device,
+            &gbuffer,
+            &buffers.camera,
+            &buffers.per_object,
+            &buffers.material,
+            sample_count,
+        );
         let shadow_pipeline =
             Self::create_shadow_pipeline(device, &gbuffer_bind_group_layout, false);
         let shadow_cube_pipeline =
             Self::create_shadow_pipeline(device, &gbuffer_bind_group_layout, true);
         let palette_buffer = Self::create_palette_buffer(device, 1);
-        let (skinned_pipeline, skinned_bind_group_layout) = Self::create_skinned_pipeline(
-            device,
-            &buffers.camera,
-            &buffers.per_object,
-            &buffers.material,
-            &palette_buffer,
-            sample_count,
-        );
+        let previous_palette_buffer = Self::create_palette_buffer(device, 1);
+        let (skinned_pipeline, skinned_motion_pipeline, skinned_bind_group_layout) =
+            Self::create_skinned_pipeline(
+                device,
+                &buffers.camera,
+                &buffers.per_object,
+                &buffers.material,
+                &palette_buffer,
+                &previous_palette_buffer,
+                sample_count,
+            );
         let skinned_shadow_pipeline =
             Self::create_skinned_shadow_pipeline(device, &skinned_bind_group_layout, false);
         let skinned_shadow_cube_pipeline =
@@ -124,6 +131,7 @@ impl Renderer3D {
         let bloom_pass = Self::create_bloom_pass(device);
         let fog = Self::create_fog_pass(device, format, sample_count);
         let ao_passes = Self::create_ao_passes(device, sample_count);
+        let aa_passes = Self::create_aa_passes(device, format, sample_count);
         let ao_white_staging =
             Self::copy_src_staging(device, "ao white staging", &ao_white_staging_bytes());
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -134,6 +142,9 @@ impl Renderer3D {
         Self {
             camera_buffer: buffers.camera,
             per_object_buffer: std::sync::RwLock::new(buffers.per_object),
+            previous_instance_models: std::sync::RwLock::new(std::collections::HashMap::new()),
+            previous_instance_models_frame: std::sync::RwLock::new(Vec::new()),
+            previous_instance_motion_valid_frame: std::sync::RwLock::new(Vec::new()),
             material_buffer: std::sync::RwLock::new(buffers.material),
             lighting_buffer: buffers.lighting,
             _bind_group_layout: bind_group_layout,
@@ -152,13 +163,17 @@ impl Renderer3D {
             height,
             gbuffer,
             gbuffer_pipeline,
+            gbuffer_motion_pipeline,
             gbuffer_bind_group_layout,
             gbuffer_bind_group: std::sync::RwLock::new(gbuffer_bind_group),
             skinned_pipeline,
+            skinned_motion_pipeline,
             skinned_bind_group_layout,
             skinned_shadow_pipeline,
             skinned_shadow_cube_pipeline,
             palette_buffer: std::sync::RwLock::new(palette_buffer),
+            previous_palette_buffer: std::sync::RwLock::new(previous_palette_buffer),
+            previous_skin_palettes: std::sync::RwLock::new(std::collections::HashMap::new()),
             max_palettes: std::sync::atomic::AtomicU32::new(1),
             palette_count: std::sync::atomic::AtomicU32::new(0),
             culler: std::sync::RwLock::new(None),
@@ -173,6 +188,8 @@ impl Renderer3D {
             bloom_pass,
             fog,
             ao_passes,
+            aa_passes,
+            aa_state: AaState::new(),
             ao_white_staging,
             ao_white_uploaded: std::sync::atomic::AtomicBool::new(false),
             shadow_maps,
@@ -271,6 +288,12 @@ impl Renderer3D {
                     [0.0, 0.0, 0.0, 1.0],
                 ],
                 camera_pos: [0.0, 0.0, 0.0, 1.0],
+                previous_view_proj: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });

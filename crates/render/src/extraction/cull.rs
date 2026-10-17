@@ -1,10 +1,12 @@
 //! Frustum culling and depth sorting of extracted frame payloads.
 
 use super::FrameUpload;
+use crate::antialias::MotionValidity;
 use crate::camera::Frustum;
 use crate::renderer::InstanceData;
 use glam::Mat4;
 use glam::Vec3;
+use ornis_core::Entity;
 
 /// Per-frame cull report for [`cull_frame_upload`]: kept versus dropped
 /// entries across both instance lanes.
@@ -46,10 +48,32 @@ pub fn instance_sphere(instance: &InstanceData) -> (Vec3, f32) {
 pub fn cull_frame_upload(upload: &mut FrameUpload, view_proj: &Mat4) -> CullStats {
     let frustum = Frustum::from_view_proj(view_proj);
     let before = upload.instances.len() + upload.custom_meshes.len();
-    upload.instances.retain(|instance| {
-        let (center, radius) = instance_sphere(instance);
-        frustum.sphere_visible(center, radius)
+    let keep_instances: Vec<bool> = upload
+        .instances
+        .iter()
+        .map(|instance| {
+            let (center, radius) = instance_sphere(instance);
+            frustum.sphere_visible(center, radius)
+        })
+        .collect();
+    let mut index = 0;
+    upload.instances.retain(|_| {
+        let keep = keep_instances[index];
+        index += 1;
+        keep
     });
+    if upload.instance_entities.len() == keep_instances.len() {
+        index = 0;
+        upload.instance_entities.retain(|_| {
+            let keep = keep_instances[index];
+            index += 1;
+            keep
+        });
+    } else {
+        // Missing identities cannot be repaired after reordering/culling;
+        // the uploader will conservatively disable temporal reuse.
+        upload.instance_entities.clear();
+    }
     upload.custom_meshes.retain(|entry| {
         let (center, radius) = instance_sphere(&entry.instance);
         frustum.sphere_visible(center, radius)
@@ -82,11 +106,28 @@ pub fn instance_view_depth(instance: &InstanceData, view: &Mat4) -> f32 {
 /// and ignores instance order — this sort is a no-op today, kept for
 /// future multi-draw submits where back-to-front order is honored.
 pub fn sort_by_depth(upload: &mut FrameUpload, view: &Mat4) {
-    upload.instances.sort_by(|a, b| {
-        instance_view_depth(b, view)
-            .partial_cmp(&instance_view_depth(a, view))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    if upload.instance_entities.len() == upload.instances.len() {
+        let mut paired: Vec<(InstanceData, Entity)> = std::mem::take(&mut upload.instances)
+            .into_iter()
+            .zip(std::mem::take(&mut upload.instance_entities))
+            .collect();
+        paired.sort_by(|(a, _), (b, _)| {
+            instance_view_depth(b, view)
+                .partial_cmp(&instance_view_depth(a, view))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (instance, entity) in paired {
+            upload.instances.push(instance);
+            upload.instance_entities.push(entity);
+        }
+    } else {
+        upload.instances.sort_by(|a, b| {
+            instance_view_depth(b, view)
+                .partial_cmp(&instance_view_depth(a, view))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        upload.instance_entities.clear();
+    }
     upload.custom_meshes.sort_by(|a, b| {
         instance_view_depth(&b.instance, view)
             .partial_cmp(&instance_view_depth(&a.instance, view))
@@ -170,6 +211,8 @@ mod tests {
         assert_eq!(stats.culled, 50, "{stats:?}");
         assert_eq!(stats.kept, 50, "{stats:?}");
         assert_eq!(extracted.instances.len(), 50);
+        assert_eq!(extracted.instance_entities.len(), 50);
+        assert_eq!(extracted.instance_entities[0], Entity::new(0));
     }
 
     #[test]
@@ -181,9 +224,10 @@ mod tests {
         let (positions, indices) = quad.as_custom().expect("quad is custom");
         let (vertices, soup_indices) =
             crate::mesh_upload::custom_vertices(positions, indices).expect("quad valid");
-        for x in [0.0, 100.0] {
+        for (index, x) in [0.0, 100.0].into_iter().enumerate() {
             let model = Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
             upload.custom_meshes.push(CustomMeshEntry {
+                entity: ornis_core::Entity::new(index as u32),
                 vertices: vertices.clone(),
                 indices: soup_indices.clone(),
                 instance: InstanceData {
@@ -191,6 +235,7 @@ mod tests {
                     normal_matrix: model.inverse().transpose(),
                     material_index: crate::renderer::MaterialIdx::from_raw(0),
                 },
+                motion_valid: MotionValidity::Valid,
                 skinning: SkinningMode::Cpu,
                 joint_palette: None,
                 pose: MeshPose::Skinned,
@@ -201,6 +246,7 @@ mod tests {
         let stats = cull_frame_upload(&mut upload, &view_proj);
         assert_eq!(stats.kept, 1, "{stats:?}");
         assert_eq!(stats.culled, 1, "{stats:?}");
+        assert_eq!(upload.custom_meshes[0].entity, Entity::new(0));
     }
 
     #[test]
@@ -252,13 +298,16 @@ mod tests {
         // Identity view (camera at the origin looking down -Z): depth is
         // `-z`, so z = -1/-5/-10 sorts to -10/-5/-1. Both lanes sort.
         let mut upload = FrameUpload::default();
-        for z in [-5.0, -10.0, -1.0] {
+        for (index, z) in [-5.0, -10.0, -1.0].into_iter().enumerate() {
             let model = Mat4::from_translation(Vec3::new(0.0, 0.0, z));
             upload.instances.push(InstanceData {
                 model_matrix: model,
                 normal_matrix: model.inverse().transpose(),
                 material_index: crate::renderer::MaterialIdx::from_raw(0),
             });
+            upload
+                .instance_entities
+                .push(ornis_core::Entity::new(index as u32));
         }
         sort_by_depth(&mut upload, &Mat4::IDENTITY);
         let depths: Vec<f32> = upload
@@ -267,6 +316,10 @@ mod tests {
             .map(|instance| instance_view_depth(instance, &Mat4::IDENTITY))
             .collect();
         assert_eq!(depths, vec![10.0, 5.0, 1.0], "{depths:?}");
+        assert_eq!(
+            upload.instance_entities,
+            vec![Entity::new(1), Entity::new(0), Entity::new(2)]
+        );
         let zs: Vec<f32> = upload
             .instances
             .iter()

@@ -1,8 +1,9 @@
 //! G-buffer shader generated from Rust (Render path 2).
 //!
 //! Canonical source is the Rust code in this module: the instance-transform
-//! vertex boilerplate and the 5-MRT fragment skeleton live here as Rust
-//! strings, and the `octahedral_encode` kernel is spliced in from
+//! vertex boilerplate and the five standard MRTs plus optional motion
+//! target live here as Rust strings, and the `octahedral_encode` kernel is
+//! spliced in from
 //! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
 //! The former handwritten `shaders/wgsl/gbuffer_*.wgsl` sources were deleted
 //! after the `#[stage]` translation; the `gbuffer_*_matches_legacy_shape`
@@ -42,6 +43,10 @@ fn vs_main(
 ) -> VertexOutput {
     let obj = ctx.per_objects[instance_index];
     let world_pos = obj.model * Vec4::new(input.position, 1.0);
+    let mut previous_world_pos = obj.previous_model * Vec4::new(input.position, 1.0);
+    if obj.motion_valid == 0 {
+        previous_world_pos = Vec4::new(previous_world_pos.xyz, 0.0);
+    }
     let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
     // Tangents are directions: the model matrix, not the inverse-transpose
     // used for normals. Under non-uniform scale the inverse-transpose
@@ -50,6 +55,7 @@ fn vs_main(
     let mut output: VertexOutput;
     output.clip_position = ctx.camera.view_proj * world_pos;
     output.world_position = world_pos.xyz;
+    output.previous_world_position = previous_world_pos;
     output.world_normal = world_normal;
     output.uv = input.uv;
     output.world_tangent = world_tangent;
@@ -80,12 +86,13 @@ pub fn wgsl_vertex_source() -> String {
 }
 
 /// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
-/// 5-MRT packing. DSL-only — `materials` global declared via
-/// `#[wgsl(global)]`.
+/// five standard targets plus the optional motion target. DSL-only —
+/// `materials` global declared via `#[wgsl(global)]`.
 #[stage(fragment)]
 fn fs_main(
     input: FragmentInput,
     #[wgsl(global = "materials")] materials: [OpenPBRMaterial],
+    #[wgsl(global = "camera")] camera: CameraUniform,
 ) -> GBufferOutput {
     let mat = materials[input.material_index];
     let n = normalize(input.world_normal);
@@ -107,17 +114,30 @@ fn fs_main(
     let thin_film_weight = mat.thin_film_params.x;
     let emission_luminance = mat.emission_params.x;
     let mat_params = Vec4::new(roughness, metalness, specular_ior, coat_weight);
+    let current_clip = camera.view_proj * Vec4::new(world_pos.xyz, 1.0);
+    let previous_clip =
+        camera.previous_view_proj * Vec4::new(input.previous_world_position.xyz, 1.0);
+    let mut motion = Vec4::new(0.0, 0.0, 1.0, 0.0);
+    if current_clip.w > 0.0 && previous_clip.w > 0.0 && input.previous_world_position.w > 0.5 {
+        let current_ndc = current_clip.xyz / current_clip.w;
+        let previous_ndc = previous_clip.xyz / previous_clip.w;
+        let current_uv = Vec2::new(current_ndc.x * 0.5 + 0.5, 0.5 - current_ndc.y * 0.5);
+        let previous_uv = Vec2::new(previous_ndc.x * 0.5 + 0.5, 0.5 - previous_ndc.y * 0.5);
+        let velocity = current_uv - previous_uv;
+        motion = Vec4::new(velocity.x, velocity.y, previous_ndc.z, 1.0);
+    }
     let mut output: GBufferOutput;
     output.albedo = Vec4::new(base_color, opacity);
     output.normal = normal_enc;
     output.material_id = material_id;
     output.world_pos = world_pos_enc;
     output.mat_params = mat_params;
+    output.motion = motion;
     return output;
 }
 
-/// G-buffer fragment shader: 5-MRT packing, splicing the octahedral
-/// normal-encoding kernel via `wgsl_source()`.
+/// G-buffer fragment shader: the standard targets plus motion, splicing
+/// the octahedral normal-encoding kernel via `wgsl_source()`.
 ///
 /// Assembled from the shared `openpbr_material_decl()`, the shared varyings,
 /// the translated [`fs_main`] body and kernel; entry point `fs_main`
@@ -125,7 +145,7 @@ fn fs_main(
 pub fn wgsl_source() -> String {
     ShaderModule::new()
         .decl(openpbr_material_decl())
-        .resources(&GBUFFER_RESOURCES, &[2])
+        .resources(&GBUFFER_RESOURCES, &[0, 2])
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .decl(wgsl_decl(GBufferOutput::WGSL_SOURCE))
         .entry(fs_main::wgsl_source())
@@ -247,7 +267,7 @@ mod tests {
     }
 
     /// The translated fragment entry must keep the legacy shape: storage
-    /// read, 5-MRT packing, same kernel call. (Byte-parity no longer
+    /// read, standard attachments plus motion output, same kernel call. (Byte-parity no longer
     /// applies — the generated entry is single-line.)
     #[test]
     fn gbuffer_fragment_entry_matches_legacy_shape() {
@@ -258,6 +278,15 @@ mod tests {
         assert!(entry.contains("let normal_enc = octahedral_encode(n);"));
         assert!(entry.contains("output.mat_params = mat_params;"));
         assert!(entry.contains("return output;"));
+    }
+
+    #[test]
+    fn gbuffer_motion_rejects_unreliable_previous_positions() {
+        let vertex = vs_main::wgsl_source();
+        let fragment = fs_main::wgsl_source();
+        assert!(vertex.contains("obj.motion_valid"));
+        assert!(fragment.contains("input.previous_world_position.w > 0.5"));
+        assert!(fragment.contains("output.motion = motion;"));
     }
 
     /// Every table row's declaration appears in the assembled stages, and

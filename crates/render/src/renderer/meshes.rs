@@ -2,6 +2,8 @@
 use super::gbuffer::GbufferResolveSlot;
 use super::shadows::CUBE_FACE_COUNT;
 use super::*;
+use crate::antialias::MotionValidity;
+use ornis_core::Entity;
 /// Upload one inline `MeshDesc::Custom` soup as its own [`Mesh`].
 ///
 /// Per-entity path: each Custom entity owns its vertex/index buffers (the
@@ -162,10 +164,14 @@ pub fn upload_vertex_rows(
 /// [`CustomGbufferDraw`]. Entries that fail upload are skipped before this
 /// is built — a staged entry always draws, never a stub.
 pub struct StagedCustomMesh {
+    /// Stable owner identity for previous-transform and palette lookup.
+    pub entity: Entity,
     /// Per-entity GPU buffers (classic or interleaved skinned rows).
     pub mesh: Mesh,
     /// Model/normal matrices plus the merged-material-table index.
     pub instance: InstanceData,
+    /// Reliability of the previous vertex position for TAA reprojection.
+    pub motion_valid: MotionValidity,
     /// Color-draw decision (`Gpu` binds the staged palette slot).
     pub draw: SkinnedDraw,
     /// Depth-pre-pass decision (same rule, shadow failure variant).
@@ -215,8 +221,8 @@ pub fn custom_draw_items(
 impl Renderer3D {
     /// Skinned g-buffer pipeline: the palette-blend vertex stage
     /// ([`wgsl_vertex_source_skinned`]) with the classic fragment stage and
-    /// the same five MRT targets. The bind-group layout carries the extra
-    /// binding-3 palette (see [`GBUFFER_SKINNED_RESOURCES`]); bind groups
+    /// the same five MRT targets. The bind-group layout carries current and
+    /// previous palettes at bindings 3 and 4 (see [`GBUFFER_SKINNED_RESOURCES`]); bind groups
     /// are built per draw (the palette slot differs per entry), so only
     /// the pipeline and layout are retained.
     pub(super) fn create_skinned_pipeline(
@@ -225,8 +231,13 @@ impl Renderer3D {
         per_object_buffer: &wgpu::Buffer,
         material_buffer: &wgpu::Buffer,
         palette_buffer: &wgpu::Buffer,
+        previous_palette_buffer: &wgpu::Buffer,
         sample_count: u32,
-    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    ) -> (
+        wgpu::RenderPipeline,
+        wgpu::RenderPipeline,
+        wgpu::BindGroupLayout,
+    ) {
         // Layout entries come from the skinned pass resource table; the
         // probe bind group below pins the name → buffer mapping (a table
         // gain without an update panics loudly here, never at draw time).
@@ -248,6 +259,7 @@ impl Renderer3D {
                 "per_objects" => Some(per_object_buffer.as_entire_binding()),
                 "materials" => Some(material_buffer.as_entire_binding()),
                 "palette" => Some(palette_buffer.as_entire_binding()),
+                "previous_palette" => Some(previous_palette_buffer.as_entire_binding()),
                 _ => None,
             })
             .unwrap_or_default(),
@@ -266,75 +278,86 @@ impl Renderer3D {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("skinned gbuffer pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some(skinned_entry_point()),
-                buffers: &[Some(SkinnedVertex::desc())],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some(shaders::gbuffer_generated::fs_main::entry_point()),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        // `R16Uint`: the spec-guaranteed multisampleable
-                        // integer format (see the `material_id` field docs).
-                        format: wgpu::TextureFormat::R16Uint,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        let mut targets = vec![
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rg16Float,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
             }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            Some(wgpu::ColorTargetState {
+                // `R16Uint`: the spec-guaranteed multisampleable integer
+                // format (see the `material_id` field docs).
+                format: wgpu::TextureFormat::R16Uint,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rg16Float,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            None,
+        ];
+        let create_pipeline = |label: &'static str, targets: &[Option<wgpu::ColorTargetState>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some(skinned_entry_point()),
+                    buffers: &[Some(SkinnedVertex::desc())],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &fs_module,
+                    entry_point: Some(shaders::gbuffer_generated::fs_main::entry_point()),
+                    targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = create_pipeline("skinned gbuffer pipeline", &targets);
+        targets[5] = Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
         });
+        let motion_pipeline = create_pipeline("skinned gbuffer motion pipeline", &targets);
 
-        (pipeline, bind_group_layout)
+        (pipeline, motion_pipeline, bind_group_layout)
     }
 
     /// Render skinned depth pre-passes for one skinned entry: the same
@@ -443,6 +466,7 @@ impl Renderer3D {
         material: &wgpu::Buffer,
         palette: &wgpu::Buffer,
     ) {
+        let previous_palette = read_lock(&self.previous_palette_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skinned shadow bind group"),
             layout: &self.skinned_bind_group_layout,
@@ -452,6 +476,11 @@ impl Renderer3D {
                 "materials" => Some(material.as_entire_binding()),
                 "palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: palette,
+                    offset: handle.byte_offset(),
+                    size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                })),
+                "previous_palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &previous_palette,
                     offset: handle.byte_offset(),
                     size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
                 })),
@@ -532,40 +561,73 @@ impl Renderer3D {
                 SkinningMode::Cpu => None,
             })
             .collect();
-        let staged_palettes: Vec<Vec<u8>> = palette_bytes
+        let mut staged_palette_entities = Vec::with_capacity(entries.len());
+        let staged_palettes: Vec<Vec<u8>> = entries
             .iter()
-            .filter_map(|bytes| bytes.clone())
+            .zip(&palette_bytes)
+            .filter_map(|(entry, bytes)| {
+                bytes.as_ref().map(|bytes| {
+                    staged_palette_entities.push(entry.entity);
+                    bytes.clone()
+                })
+            })
             .collect();
-        let handles = self.upload_skin_palettes(device, queue, &staged_palettes);
-        // `handles[i]` is the slot of the `i`-th staged palette; walk the
-        // entries with a cursor over them so each GPU entry reclaims its
-        // own handle in order.
+        let (handles, palette_motion_validity) = self.upload_skin_palettes_with_entities(
+            device,
+            queue,
+            &staged_palettes,
+            &staged_palette_entities,
+        );
+        // Handles and validity entries share the dense order of staged
+        // palettes; walk the original entries with a cursor to keep them
+        // paired even when CPU-skinned entries have no palette.
         let mut palette_cursor = 0usize;
         let mut staged = Vec::with_capacity(entries.len());
         for (entry, bytes) in entries.iter().zip(&palette_bytes) {
-            let handle = match bytes {
+            let (handle, palette_motion_valid) = match bytes {
                 Some(_) => {
                     let handle = handles.get(palette_cursor).copied();
+                    let validity = palette_motion_validity.get(palette_cursor).copied();
                     palette_cursor += 1;
-                    handle
+                    (handle, validity)
                 }
-                None => None,
+                None => (None, None),
             };
             let draw = entry.draw(handle).unwrap_or(SkinnedDraw::Cpu);
             let shadow = entry.shadow_draw(handle).unwrap_or(SkinnedDraw::Cpu);
+            if entry.skinning.is_gpu() && matches!(draw, SkinnedDraw::Cpu) {
+                self.invalidate_skin_palette_history(entry.entity);
+            }
+            let motion_valid = if entry.motion_valid == MotionValidity::Invalid
+                || (entry.skinning.is_gpu()
+                    && (!matches!(draw, SkinnedDraw::Gpu(_))
+                        || palette_motion_valid != Some(MotionValidity::Valid)))
+            {
+                MotionValidity::Invalid
+            } else {
+                MotionValidity::Valid
+            };
             let mesh = match draw {
                 SkinnedDraw::Gpu(_) => match entry.skinned_gpu_vertices() {
                     Some(rows) => upload_skinned_mesh(device, &rows, &entry.indices),
-                    None => continue,
+                    None => {
+                        self.invalidate_skin_palette_history(entry.entity);
+                        continue;
+                    }
                 },
                 SkinnedDraw::Cpu => upload_vertex_rows(device, &entry.vertices, &entry.indices),
             };
             let Ok(mesh) = mesh else {
+                if entry.skinning.is_gpu() {
+                    self.invalidate_skin_palette_history(entry.entity);
+                }
                 continue;
             };
             staged.push(StagedCustomMesh {
+                entity: entry.entity,
                 mesh,
                 instance: entry.instance,
+                motion_valid,
                 draw,
                 shadow,
             });
@@ -581,7 +643,9 @@ impl Renderer3D {
     /// instance is uploaded into slot 0 and `mesh` is drawn with count 1.
     /// Rewriting slot 0 per entry is why shared draws must come first;
     /// per-frame cost is one small upload + one draw per custom entity
-    /// (no refit budget yet — see PLAN §h).
+    /// (no refit budget yet — see PLAN §h). Custom vertex data has no
+    /// previous-position stream, so this path marks its motion vector
+    /// invalid; TAA keeps the current pixel instead of reusing stale history.
     pub fn render_custom_entry(
         &self,
         device: &wgpu::Device,
@@ -591,7 +655,13 @@ impl Renderer3D {
         mesh: &Mesh,
         instance: &InstanceData,
     ) {
-        self.upload_instances(device, queue, std::slice::from_ref(instance));
+        self.upload_instances_with_motion_flags(
+            device,
+            queue,
+            std::slice::from_ref(instance),
+            &[MotionValidity::Invalid],
+            &[],
+        );
         self.render_gbuffer(device, encoder, g, mesh, 1);
     }
 
@@ -627,6 +697,7 @@ impl Renderer3D {
         }
         self.upload_instances(device, queue, std::slice::from_ref(instance));
         let palette = read_lock(&self.palette_buffer);
+        let previous_palette = read_lock(&self.previous_palette_buffer);
         let per_object = read_lock(&self.per_object_buffer);
         let material = read_lock(&self.material_buffer);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -641,84 +712,79 @@ impl Renderer3D {
                     offset: handle.byte_offset(),
                     size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
                 })),
+                "previous_palette" => Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &previous_palette,
+                    offset: handle.byte_offset(),
+                    size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                })),
                 _ => None,
             })
             .unwrap_or_default(),
         });
+        let mut color_attachments = vec![
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.albedo,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.normal,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.material_id,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.world_position,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.material_params,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ];
+        let motion = g.motion.is_some();
+        if let Some(motion) = g.motion {
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: motion,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
+        } else {
+            color_attachments.push(None);
+        }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skinned gbuffer pass"),
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.albedo,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.normal,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.material_id,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.world_position,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.material_params,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-            ],
+            color_attachments: &color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: g.depth,
                 depth_ops: Some(wgpu::Operations {
@@ -732,7 +798,11 @@ impl Renderer3D {
             multiview_mask: None,
         });
 
-        rpass.set_pipeline(&self.skinned_pipeline);
+        rpass.set_pipeline(if motion {
+            &self.skinned_motion_pipeline
+        } else {
+            &self.skinned_pipeline
+        });
         rpass.set_bind_group(0, &bind_group, &[]);
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -817,9 +887,9 @@ mod tests {
             color_space: wgpu::SurfaceColorSpace::Auto,
         };
         let renderer = Renderer3D::new(&device, &surface_config, 1);
-        // Bind-group assembly pins the layout contract: four rows off the
-        // skinned resource table, palette at binding 3, vertex-only.
-        assert_eq!(GBUFFER_SKINNED_RESOURCES.len(), 4);
+        // Bind-group assembly pins the layout contract: the classic rows
+        // plus the current and previous joint palettes.
+        assert_eq!(GBUFFER_SKINNED_RESOURCES.len(), 5);
         let palette_row = GBUFFER_SKINNED_RESOURCES
             .iter()
             .find(|r| r.binding == 3)
@@ -834,19 +904,21 @@ mod tests {
             let per_object = read_lock(&renderer.per_object_buffer);
             let material = read_lock(&renderer.material_buffer);
             let palette = read_lock(&renderer.palette_buffer);
+            let previous_palette = read_lock(&renderer.previous_palette_buffer);
             let entries =
                 crate::shaders::bind_group_entries(&GBUFFER_SKINNED_RESOURCES, |r| match r.name {
                     "camera" => Some(renderer.camera_buffer.as_entire_binding()),
                     "per_objects" => Some(per_object.as_entire_binding()),
                     "materials" => Some(material.as_entire_binding()),
                     "palette" => Some(palette.as_entire_binding()),
+                    "previous_palette" => Some(previous_palette.as_entire_binding()),
                     _ => None,
                 })
                 .expect("skinned resources resolve");
-            assert_eq!(entries.len(), 4);
+            assert_eq!(entries.len(), 5);
             assert_eq!(
                 entries.iter().map(|e| e.binding).collect::<Vec<_>>(),
-                vec![0, 1, 2, 3]
+                vec![0, 1, 2, 3, 4]
             );
         }
 
@@ -912,6 +984,7 @@ mod tests {
             world_position: &renderer.gbuffer.world_position_view,
             material_params: &renderer.gbuffer.material_params_view,
             depth: &renderer.gbuffer.depth_view,
+            motion: None,
         };
         let instance = InstanceData {
             model_matrix: glam::Mat4::IDENTITY,

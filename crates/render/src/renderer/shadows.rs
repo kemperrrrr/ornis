@@ -957,6 +957,7 @@ impl Renderer3D {
                         continue;
                     }
                     let palette = read_lock(&self.palette_buffer);
+                    let previous_palette = read_lock(&self.previous_palette_buffer);
                     let skinned_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("skinned shadow bind group"),
                         layout: &self.skinned_bind_group_layout,
@@ -968,6 +969,13 @@ impl Renderer3D {
                                 "palette" => {
                                     Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                                         buffer: &palette,
+                                        offset: handle.byte_offset(),
+                                        size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                                    }))
+                                }
+                                "previous_palette" => {
+                                    Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &previous_palette,
                                         offset: handle.byte_offset(),
                                         size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
                                     }))

@@ -5,6 +5,9 @@
 //! [`math`](crate::shaders::math)) into a fixed entry-point skeleton, so CPU tests exercise the
 //! exact BRDF code the GPU runs.
 
+mod aa_common;
+pub mod aa_edge_generated;
+pub mod aa_taa_generated;
 pub mod ao_generated;
 mod ao_gtao;
 pub mod bloom_generated;
@@ -681,6 +684,26 @@ pub fn ao_vertex() -> String {
     ao_generated::wgsl_vertex_source()
 }
 
+// ── ANTI-ALIASING ─────────────────────────────────────────────────────
+
+/// Assemble the temporal anti-aliasing fragment shader (the history
+/// resolve) at a sample count.
+///
+/// Single source of truth — [`aa_taa_generated::wgsl_source_for_samples`]
+/// (Rust → WGSL, path 2 with a raw-WGSL body); the renderer and this
+/// forwarder use only the generated version.
+pub fn taa_fragment(sample_count: u32) -> String {
+    aa_taa_generated::wgsl_source_for_samples(sample_count)
+}
+
+/// Assemble the post-process edge filter fragment shader (FXAA or SMAA).
+///
+/// Single source of truth — [`aa_edge_generated::wgsl_source`]; see
+/// [`taa_fragment`].
+pub fn aa_edge_fragment() -> String {
+    aa_edge_generated::wgsl_source()
+}
+
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────
 
 /// Assemble the gbuffer vertex shader (instance transforms + world position).
@@ -693,7 +716,7 @@ pub fn gbuffer_vertex() -> String {
 
 // ── GBUFFER_FRAGMENT ──────────────────────────────────────────────────
 
-/// Assemble the 5-MRT gbuffer fragment shader, splicing the octahedral normal-encoding kernel.
+/// Assemble the g-buffer fragment shader, splicing the octahedral normal-encoding kernel.
 ///
 /// Single source of truth — [`gbuffer_generated::wgsl_source`]
 /// (Rust → WGSL, path 2); shape pinned by `gbuffer_fragment_entry_matches_legacy_shape`.
