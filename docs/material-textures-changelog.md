@@ -79,9 +79,11 @@ Additive: nothing existing changed meaning, and every new behaviour is opt-in.
   identity mixes `-version` with a hash of the binary. Encoder processes time
   out (`BakeError::TimedOut`, default 120s) and are killed; on Unix that kill
   is `kill(-pid, SIGKILL)` on the child's process group (`rustix`, Unix-only
-  dependency). A successful exit joins pipe readers through EOF; the short
-  join bound applies only after a timeout. Cache temp names are unique per
-  call, not only per process.
+  dependency). After the child exits, pipe readers are joined through EOF
+  until that same deadline (any exit status), so a grandchild holding a
+  pipe cannot stall import or put a truncated `-version` into the cache key.
+  The short join bound applies only after a timeout. Cache temp names are
+  unique per call, not only per process.
   Cache entries are
   published with `rename`. `AssetServer::bake_stats` sums every model write
   instead of keeping only the last one.

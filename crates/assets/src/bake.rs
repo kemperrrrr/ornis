@@ -1059,13 +1059,19 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         );
     }
 
+    /// Deadline for a wrapper whose grandchild must die with the group.
+    #[cfg(unix)]
+    const GROUP_TIMEOUT: Duration = Duration::from_millis(500);
+
+    /// The call returns near [`GROUP_TIMEOUT`], not after the grandchild's sleep.
+    #[cfg(unix)]
+    const GROUP_RETURN_LIMIT: Duration = Duration::from_millis(1500);
+
     #[test]
     #[cfg(unix)]
     fn a_forked_encoder_grandchild_is_killed_with_the_group() {
         // The shell does not `exec`. `sleep` inherits the pipe; killing only
         // the shell used to return after the sleep, and left it running.
-        const TIMEOUT: Duration = Duration::from_millis(500);
-        const RETURN_LIMIT: Duration = Duration::from_millis(1500);
         let program = install_tool(
             "hang-fork",
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nwait\n",
@@ -1073,30 +1079,126 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         );
         let settings = BakeSettings {
             encoder: EncoderSource::Binary(program.clone()),
-            encoder_timeout: TIMEOUT,
+            encoder_timeout: GROUP_TIMEOUT,
             ..BakeSettings::new(cache_dir("hang-fork"))
         };
         let started = std::time::Instant::now();
         let failure = bake_texture(&settings, &checker(), TextureRole::BaseColor);
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= TIMEOUT && elapsed < RETURN_LIMIT,
-            "wrapper returned in {elapsed:?}, not near the {TIMEOUT:?} deadline"
+            elapsed >= GROUP_TIMEOUT && elapsed < GROUP_RETURN_LIMIT,
+            "wrapper returned in {elapsed:?}, not near the {GROUP_TIMEOUT:?} deadline"
         );
         assert!(
             matches!(failure, Err(BakeError::TimedOut { .. })),
             "expected a timeout, got {failure:?}"
         );
-        let pid_path = PathBuf::from(format!("{}.pid", program.display()));
-        let pid: u32 = std::fs::read_to_string(&pid_path)
-            .expect("wrapper recorded the grandchild pid")
-            .trim()
-            .parse()
-            .expect("pid");
+        let pid = grandchild_pid(&program);
         assert!(
             !super::process::process_still_running(pid),
             "grandchild {pid} was still running after the timeout"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_version_probe_with_a_background_child_times_out() {
+        // `-version` prints, backgrounds `sleep`, and exits 0. The sleep
+        // inherits the pipe; joining it used to ignore the deadline.
+        background_hold_times_out(
+            "hang-version-ok",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nsleep 30 &\necho $! > \"$0.pid\"\nexit 0\nfi\nexit 0\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_version_probe_with_a_background_child_times_out() {
+        // A non-zero exit is still a finished leader. The pipe hold must be
+        // `TimedOut`, not a hash-only identity.
+        background_hold_times_out(
+            "hang-version-fail",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nsleep 30 &\necho $! > \"$0.pid\"\nexit 3\nfi\nexit 0\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_encode_with_a_background_child_times_out() {
+        background_hold_times_out(
+            "hang-encode-ok",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nexit 0\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_encode_with_a_background_child_times_out() {
+        // Exit 3 must not be reported as `BakeError::Exit` while `sleep` lives.
+        background_hold_times_out(
+            "hang-encode-fail",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nexit 3\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_version_probe_keeps_its_full_text() {
+        // The line arrives inside the deadline. Readers must wait for it
+        // instead of returning a prefix that would change the cache key.
+        let program = install_tool(
+            "slow-version",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nsleep 0.2\nprintf '%s\\n' 'fake-basisu 1'\nprintf '%s\\n' 'slow-marker-end'\nexit 0\nfi\nexit 0\n",
+            b"",
+        );
+        let started = std::time::Instant::now();
+        let identity = super::identity::tool_identity(&program, GROUP_TIMEOUT).expect("version");
+        assert!(
+            started.elapsed() < GROUP_TIMEOUT,
+            "slow version took {:?}, past the deadline",
+            started.elapsed()
+        );
+        assert!(
+            identity.starts_with("fake-basisu 1\nslow-marker-end\n"),
+            "version text was truncated: {identity}"
+        );
+    }
+
+    /// `body` leaves a grandchild on the pipe. The bake must time out and kill it.
+    #[cfg(unix)]
+    fn background_hold_times_out(name: &str, body: &str) {
+        let program = install_tool(name, body, b"");
+        let settings = BakeSettings {
+            encoder: EncoderSource::Binary(program.clone()),
+            encoder_timeout: GROUP_TIMEOUT,
+            ..BakeSettings::new(cache_dir(name))
+        };
+        let started = std::time::Instant::now();
+        let failure = bake_texture(&settings, &checker(), TextureRole::BaseColor);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= GROUP_TIMEOUT && elapsed < GROUP_RETURN_LIMIT,
+            "{name} returned in {elapsed:?}, not near the {GROUP_TIMEOUT:?} deadline"
+        );
+        assert!(
+            matches!(failure, Err(BakeError::TimedOut { .. })),
+            "{name}: expected a timeout, got {failure:?}"
+        );
+        let pid = grandchild_pid(&program);
+        assert!(
+            !super::process::process_still_running(pid),
+            "{name}: grandchild {pid} was still running after the deadline"
+        );
+    }
+
+    /// Pid the wrapper wrote beside itself. A zombie counts as not running.
+    #[cfg(unix)]
+    fn grandchild_pid(program: &Path) -> u32 {
+        std::fs::read_to_string(format!("{}.pid", program.display()))
+            .expect("wrapper recorded the grandchild pid")
+            .trim()
+            .parse()
+            .expect("pid")
     }
 
     /// Whether the cache entry or either scratch file of `key` is still there.

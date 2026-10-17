@@ -6,9 +6,11 @@
 //! `SIGKILL` to that group, including a grandchild a wrapper forked instead
 //! of `exec`. The group is new, so a terminal Ctrl+C does not reach the
 //! encoder, and the encoder keeps running if the host dies before the
-//! deadline. After a successful exit the pipe readers are joined through
-//! EOF, so a slow `-version` is not truncated into a different cache key.
-//! After a timeout they are joined only for a short bound, then detached,
+//! deadline. After the child exits, pipe readers are joined through EOF
+//! until that same deadline, so a slow `-version` is not cut into a
+//! different cache key. A grandchild that still holds a pipe at the
+//! deadline is killed with the group and the call is a timeout. After a
+//! timeout the readers are joined only for a short bound, then detached,
 //! so an open pipe cannot stall the caller. Off Unix only the direct child
 //! is killed; the same join bound still returns, and a grandchild that
 //! inherited a pipe can outlive the call.
@@ -44,36 +46,27 @@ const READER_JOIN_BOUND: Duration = Duration::from_millis(500);
 /// # Errors
 ///
 /// [`BakeError::Spawn`] when the process cannot be started.
-/// [`BakeError::TimedOut`] when it is still running at the deadline; the
-/// child is killed and reaped.
+/// [`BakeError::TimedOut`] when the child is still running at the deadline,
+/// or it has exited while a grandchild still holds a pipe then. The process
+/// group is killed.
 pub(super) fn run_timed(
     program: &Path,
     args: &[OsString],
     timeout: Duration,
 ) -> Result<Output, BakeError> {
+    let started = Instant::now();
     let mut child = spawn_child(program, args)?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_task = thread::spawn(move || read_pipe(stdout));
     let stderr_task = thread::spawn(move || read_pipe(stderr));
-    let status = wait_deadline(program, &mut child, timeout);
-    // A successful exit closed its pipes. Join through EOF: a 500 ms cap
-    // under load drops `-version` stdout and changes the cache key. The cap
-    // stays on the timeout path, where a surviving grandchild can hold a pipe.
-    let (stdout, stderr) = if status.is_ok() {
-        (joined(stdout_task), joined(stderr_task))
-    } else {
-        let join_deadline = Instant::now() + READER_JOIN_BOUND;
-        (
-            joined_until(stdout_task, join_deadline),
-            joined_until(stderr_task, join_deadline),
-        )
-    };
-    status.map(|status| Output {
-        status,
-        stdout,
-        stderr,
-    })
+    let status = wait_deadline(program, &mut child, timeout, started);
+    // Through EOF, but not past the original deadline. This applies to any
+    // exit status: a non-zero code is still `Ok` from `wait`. A fixed 500 ms
+    // cap drops `-version` under load; an unbounded join hangs when a
+    // grandchild kept the pipe after the leader exited.
+    let pipes = collect_until(stdout_task, stderr_task, started + timeout);
+    finish_run(program, &child, timeout, status, pipes)
 }
 
 /// Spawns `program`, retrying a transient text-file-busy error.
@@ -131,8 +124,8 @@ fn wait_deadline(
     program: &Path,
     child: &mut Child,
     timeout: Duration,
+    started: Instant,
 ) -> Result<ExitStatus, BakeError> {
-    let started = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -151,6 +144,11 @@ fn kill_timed_out(program: &Path, child: &mut Child, timeout: Duration) -> BakeE
     kill_group(child);
     let _ = child.kill();
     let _ = child.wait();
+    timed_out(program, timeout)
+}
+
+/// [`BakeError::TimedOut`] naming `program`.
+fn timed_out(program: &Path, timeout: Duration) -> BakeError {
     BakeError::TimedOut {
         program: program.display().to_string(),
         millis: timeout.as_millis(),
@@ -169,23 +167,19 @@ fn kill_group(child: &Child) {
     );
 }
 
-/// Whether `pid` still exists.
+/// Whether `pid` is still executing.
 ///
-/// `kill(pid, 0)` returns `ESRCH` once the id is gone. A zombie still answers
-/// until it is reaped, so this probes a few times. Any other answer means the
-/// process is still there. `/proc` is not used: it is missing on other Unixes
-/// and would report every pid dead.
+/// On Linux a zombie (`Z` in `/proc/<pid>/stat`) is dead even when no init
+/// reaps it, so a container without an init does not fail this check. A
+/// missing `/proc` is not treated as dead. Elsewhere `kill(pid, 0)` answers
+/// `ESRCH` once the id is gone; a zombie there still answers until it is
+/// reaped, so this probes a few times. A task that is still marked running
+/// is probed again, in case the signal has not landed yet.
 #[cfg(all(unix, test))]
 pub(super) fn process_still_running(pid: u32) -> bool {
-    let Ok(raw) = i32::try_from(pid) else {
-        return false;
-    };
-    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
-        return false;
-    };
     let probes = SPAWN_ATTEMPTS * SPAWN_ATTEMPTS;
     for attempt in 1..=probes {
-        if let Err(rustix::io::Errno::SRCH) = rustix::process::test_kill_process(pid) {
+        if !task_may_be_running(pid) {
             return false;
         }
         if attempt < probes {
@@ -193,6 +187,40 @@ pub(super) fn process_still_running(pid: u32) -> bool {
         }
     }
     true
+}
+
+/// `false` when `pid` is gone or is a zombie.
+#[cfg(all(unix, test))]
+fn task_may_be_running(pid: u32) -> bool {
+    match task_state_alive(pid) {
+        Some(alive) => alive,
+        None => kill_sees_process(pid),
+    }
+}
+
+/// `kill(pid, 0)` succeeded, so the id still exists. `ESRCH` is gone.
+#[cfg(all(unix, test))]
+fn kill_sees_process(pid: u32) -> bool {
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return false;
+    };
+    !matches!(
+        rustix::process::test_kill_process(pid),
+        Err(rustix::io::Errno::SRCH)
+    )
+}
+
+/// `Some` when `/proc` shows whether `pid` is executing.
+///
+/// `Z` and `X` are dead. A missing file means this platform has no answer.
+#[cfg(all(unix, test))]
+fn task_state_alive(pid: u32) -> Option<bool> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state = text.rsplit_once(')')?.1.split_whitespace().next()?;
+    Some(state != "Z" && state != "X")
 }
 
 /// Reads a pipe to EOF. A missing pipe is empty output.
@@ -205,9 +233,80 @@ fn read_pipe(pipe: Option<impl Read>) -> Vec<u8> {
     bytes
 }
 
-/// Joins a pipe reader through EOF.
-fn joined(handle: thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
+/// Stdout and stderr readers that have not reached EOF yet.
+struct OpenReaders {
+    stdout: thread::JoinHandle<Vec<u8>>,
+    stderr: thread::JoinHandle<Vec<u8>>,
+}
+
+/// Joins both readers through EOF, or returns them when `deadline` hits.
+fn collect_until(
+    stdout: thread::JoinHandle<Vec<u8>>,
+    stderr: thread::JoinHandle<Vec<u8>>,
+    deadline: Instant,
+) -> Result<(Vec<u8>, Vec<u8>), OpenReaders> {
+    let readers = OpenReaders { stdout, stderr };
+    loop {
+        if readers.stdout.is_finished() && readers.stderr.is_finished() {
+            return Ok((
+                readers.stdout.join().unwrap_or_default(),
+                readers.stderr.join().unwrap_or_default(),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(readers);
+        }
+        thread::sleep(POLL_PAUSE);
+    }
+}
+
+/// Output when both the child and its pipes finished in time.
+///
+/// A child that exited — zero or not — while a grandchild still holds a pipe
+/// is a timeout: the group is killed, and the readers are not joined past a
+/// short bound. The partial output is dropped, so it cannot enter a cache key.
+fn finish_run(
+    program: &Path,
+    child: &Child,
+    timeout: Duration,
+    status: Result<ExitStatus, BakeError>,
+    pipes: Result<(Vec<u8>, Vec<u8>), OpenReaders>,
+) -> Result<Output, BakeError> {
+    match (status, pipes) {
+        (Ok(status), Ok((stdout, stderr))) => Ok(Output {
+            status,
+            stdout,
+            stderr,
+        }),
+        (Ok(_), Err(readers)) => Err(kill_surviving_group(program, child, timeout, readers)),
+        (Err(error), Ok(_)) => Err(error),
+        (Err(error), Err(readers)) => {
+            detach_readers(readers);
+            Err(error)
+        }
+    }
+}
+
+/// Kills a grandchild that outlived the leader, then reports the deadline.
+fn kill_surviving_group(
+    program: &Path,
+    child: &Child,
+    timeout: Duration,
+    readers: OpenReaders,
+) -> BakeError {
+    #[cfg(unix)]
+    kill_group(child);
+    #[cfg(not(unix))]
+    let _ = child.id();
+    detach_readers(readers);
+    timed_out(program, timeout)
+}
+
+/// Joins readers until a short bound, then detaches whatever is left.
+fn detach_readers(readers: OpenReaders) {
+    let join_deadline = Instant::now() + READER_JOIN_BOUND;
+    let _ = joined_until(readers.stdout, join_deadline);
+    let _ = joined_until(readers.stderr, join_deadline);
 }
 
 /// Joins a pipe reader until `deadline`, then detaches it.

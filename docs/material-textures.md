@@ -215,10 +215,12 @@ levels, no runtime mip generation.
   killed after `BakeSettings::encoder_timeout` (default two minutes,
   `BakeError::TimedOut`). On Unix the child is its own process group and the
   deadline sends `SIGKILL` to that group, so a wrapper that forks instead of
-  `exec` does not leave a grandchild holding the pipes. A successful exit
-  joins the pipe readers through EOF, so a slow `-version` is not truncated
-  into a different cache key. After a timeout the readers are joined only for
-  a short bound, then detached. Off Unix only the direct child is killed; the
+  `exec` does not leave a grandchild holding the pipes. After the child
+  exits (any status), pipe readers are joined through EOF until that same
+  deadline, so a slow `-version` is not truncated into a different cache key.
+  A grandchild that still holds a pipe at the deadline is killed with the
+  group and the call is `TimedOut`; the partial output is not cached. After a timeout the readers are joined only for a
+  short bound, then detached. Off Unix only the direct child is killed; the
   join bound still returns. Nothing from that run is cached. Tool output is validated through `Ktx2Image::from_bytes`
   (reader, DFD, level-length and dimension rules) *before* anything replaces
   the slot, and only the validated bytes are cached.
