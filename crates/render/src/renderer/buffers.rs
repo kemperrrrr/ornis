@@ -164,10 +164,8 @@ fn previous_palette_frame(
             previous_bytes.extend_from_slice(current);
             motion_validity.push(MotionValidity::Invalid);
         }
-        if identity_complete {
-            if let Some(entity) = entity {
-                next_by_entity.insert(entity, current.to_vec());
-            }
+        if identity_complete && let Some(entity) = entity {
+            next_by_entity.insert(entity, current.to_vec());
         }
     }
     (previous_bytes, motion_validity, next_by_entity)

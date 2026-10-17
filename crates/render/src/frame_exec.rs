@@ -546,6 +546,13 @@ pub struct FrameIds {
     pub bloom2: ResourceId,
 }
 
+#[derive(Default)]
+struct FramePassWiring {
+    fog: Option<FogWiring>,
+    ao: Option<crate::ao::AoWiring>,
+    aa: Option<AaWiring>,
+}
+
 impl RenderFrame3D {
     /// Builds the pass plan. `surface_format` is the render target format
     /// (the lighting pass writes into it); `surface_size` seeds
@@ -588,9 +595,7 @@ impl RenderFrame3D {
             surface_size,
             technique,
             bloom,
-            None,
-            None,
-            None,
+            FramePassWiring::default(),
             crate::renderer::SINGLE_SAMPLE_COUNT,
         )
     }
@@ -614,9 +619,7 @@ impl RenderFrame3D {
             surface_size,
             technique,
             bloom,
-            None,
-            None,
-            None,
+            FramePassWiring::default(),
             sample_count,
         )
     }
@@ -642,9 +645,10 @@ impl RenderFrame3D {
             surface_size,
             technique,
             bloom,
-            Some(fog),
-            None,
-            None,
+            FramePassWiring {
+                fog: Some(fog),
+                ..FramePassWiring::default()
+            },
             crate::renderer::SINGLE_SAMPLE_COUNT,
         )
     }
@@ -665,9 +669,10 @@ impl RenderFrame3D {
             surface_size,
             technique,
             bloom,
-            Some(fog),
-            None,
-            None,
+            FramePassWiring {
+                fog: Some(fog),
+                ..FramePassWiring::default()
+            },
             sample_count,
         )
     }
@@ -695,9 +700,10 @@ impl RenderFrame3D {
             surface_size,
             technique,
             bloom,
-            None,
-            Some(ao),
-            None,
+            FramePassWiring {
+                ao: Some(ao),
+                ..FramePassWiring::default()
+            },
             crate::renderer::SINGLE_SAMPLE_COUNT,
         )
     }
@@ -761,9 +767,10 @@ impl RenderFrame3D {
                 surface_size,
                 technique,
                 bloom,
-                None,
-                None,
-                Some(aa),
+                FramePassWiring {
+                    aa: Some(aa),
+                    ..FramePassWiring::default()
+                },
                 sample_count,
             )
         } else {
@@ -772,9 +779,10 @@ impl RenderFrame3D {
                 surface_size,
                 technique,
                 bloom,
-                None,
-                None,
-                Some(aa),
+                FramePassWiring {
+                    aa: Some(aa),
+                    ..FramePassWiring::default()
+                },
                 sample_count,
             )
         }
@@ -838,11 +846,10 @@ impl RenderFrame3D {
         surface_size: (u32, u32),
         technique: Technique,
         bloom: crate::flags::Bloom,
-        fog: Option<FogWiring>,
-        ao: Option<crate::ao::AoWiring>,
-        aa: Option<AaWiring>,
+        passes: FramePassWiring,
         sample_count: u32,
     ) -> Self {
+        let FramePassWiring { fog, ao, aa } = passes;
         // S2: resources are registered by type; specs/names (and the
         // ResourceId order) mirror the imperative wiring exactly.
         let mut systems = SystemSet::new();

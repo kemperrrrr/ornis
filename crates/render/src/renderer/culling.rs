@@ -6,6 +6,7 @@ use super::InstanceData;
 use super::Renderer3D;
 use super::read_lock;
 use super::write_lock;
+use crate::gpu_culling::PreviousInstanceData;
 use glam::Mat4;
 
 impl Renderer3D {
@@ -96,8 +97,10 @@ impl Renderer3D {
                     &view_proj,
                     index_count,
                     &instances,
-                    &previous_models,
-                    &motion_validity,
+                    PreviousInstanceData {
+                        models: &previous_models,
+                        motion_validity: &motion_validity,
+                    },
                 )
                 .is_ok()
         });

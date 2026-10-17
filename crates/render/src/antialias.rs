@@ -225,7 +225,7 @@ pub fn ycocg_decode(color: Vec3) -> Vec3 {
 /// Colour bounds of the current-frame neighbourhood, in YCoCg.
 ///
 /// The bounds are the intersection of the neighbourhood's own minimum and
-/// maximum with the mean ± [`CLAMP_GAMMA`] standard deviations: a flat
+/// maximum with the mean ± `CLAMP_GAMMA` standard deviations: a flat
 /// neighbourhood keeps its exact range, a noisy one is not widened by a
 /// single outlier. The samples are encoded first, so the bounds live in
 /// the same space the history is clamped in.
@@ -408,7 +408,7 @@ pub fn fxaa_blend(
     range: f32,
     settings: EdgeFilterSettings,
 ) -> Vec3 {
-    if !(range > settings.threshold) {
+    if range.partial_cmp(&settings.threshold) != Some(std::cmp::Ordering::Greater) {
         return center;
     }
     let blurred = (center + center + tap_a + tap_b) * QUARTER;
@@ -427,17 +427,15 @@ pub fn smaa_blend(
     center: Vec3,
     tap_a: Vec3,
     tap_b: Vec3,
-    luma_center: f32,
-    luma_a: f32,
-    luma_b: f32,
     range: f32,
     settings: EdgeFilterSettings,
 ) -> Vec3 {
-    if !(range > settings.threshold) {
+    if range.partial_cmp(&settings.threshold) != Some(std::cmp::Ordering::Greater) {
         return center;
     }
-    let weight_a = 1.0 / (1.0 + (luma_a - luma_center).abs());
-    let weight_b = 1.0 / (1.0 + (luma_b - luma_center).abs());
+    let luma_center = fxaa_luma(center);
+    let weight_a = 1.0 / (1.0 + (fxaa_luma(tap_a) - luma_center).abs());
+    let weight_b = 1.0 / (1.0 + (fxaa_luma(tap_b) - luma_center).abs());
     let total = weight_a + weight_b;
     let blended = (tap_a * weight_a + tap_b * weight_b) / total;
     let weight = ((range - settings.threshold) / range).clamp(0.0, 1.0);
@@ -558,7 +556,14 @@ mod tests {
     #[test]
     fn jittered_projection_shifts_the_image_by_the_offset() {
         let extent = (64u32, 32u32);
-        let projection = Mat4::perspective_rh(1.0, 2.0, 0.1, 100.0);
+        // Minimal perspective matrix: clip.w = -view.z, so the test
+        // verifies that the jitter stays a constant pixel shift at depth.
+        let projection = Mat4::from_cols_array_2d(&[
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, -1.0],
+            [0.0, 0.0, -0.2, 0.0],
+        ]);
         let point = glam::Vec3::new(0.3, -0.2, -5.0);
         let base = project_pixel(projection, point, extent);
         for offset in [
@@ -702,9 +707,7 @@ mod tests {
         // A flat neighbourhood has no gradient: the pixel is untouched.
         let blended = fxaa_blend(center, center, center, 0.0, settings);
         assert_eq!(blended, center);
-        let smaa = smaa_blend(
-            center, center, center, GREY_LUMA, GREY_LUMA, GREY_LUMA, 0.0, settings,
-        );
+        let smaa = smaa_blend(center, center, center, 0.0, settings);
         assert_eq!(smaa, center);
     }
 
@@ -718,16 +721,7 @@ mod tests {
         // average of both.
         let blended = fxaa_blend(bright, dark, bright, 1.0, settings);
         assert!(blended.x < 1.0 && blended.x > 0.0, "{blended:?}");
-        let smaa = smaa_blend(
-            bright,
-            dark,
-            bright,
-            fxaa_luma(bright),
-            fxaa_luma(dark),
-            fxaa_luma(bright),
-            1.0,
-            settings,
-        );
+        let smaa = smaa_blend(bright, dark, bright, 1.0, settings);
         // The matching tap wins: the blend stays above the plain average
         // of the two taps, which the similarity weighting pulls towards
         // the bright side.
