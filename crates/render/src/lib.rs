@@ -3,6 +3,8 @@
 //! procedural meshes and the WGSL shader assembly. Scene description types
 //! live in `ornis-assets`; this crate only projects them.
 #![warn(missing_docs)]
+/// Spatial and temporal anti-aliasing resolves.
+pub mod aa;
 /// Screen-space ambient occlusion (classic SSAO plus GTAO).
 pub mod ao;
 /// Client-side orbit camera and backend-neutral input consumer.

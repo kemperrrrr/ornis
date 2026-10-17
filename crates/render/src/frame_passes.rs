@@ -8,6 +8,10 @@
 //! stay identical. The conditional passes (forward, bloom_down0,
 //! composite) remain imperative until S2b.
 
+/// Opt-in anti-aliasing resources and deferred HDR resolve node.
+#[cfg(not(target_arch = "wasm32"))]
+pub use crate::aa::{AaColor, AaMotion, AaPass};
+
 use crate::renderer::{CompositeInputs, GbufferTargets, Renderer3D};
 use crate::system::{
     AccessSet, ClearBlack, ClearTransparent, ClearWhite, Frame, FramePass, FrameResource, Read,
