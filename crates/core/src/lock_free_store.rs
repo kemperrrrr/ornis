@@ -95,11 +95,13 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLane for LaneInner<T> {
 }
 
 impl<T: Clone + Send + Sync> Drop for LaneInner<T> {
+    // qual:allow(unsafe) reason: "Drop-only forwarder; the unsafe operations live in free_live_snapshot, which is the counted warning"
     fn drop(&mut self) {
         // SAFETY: `&mut self` proves exclusive access: `LockFreeReadGuard`
         // borrows the store, so no live reader of this snapshot exists and
-        // none can appear afterwards. See `free_live_snapshot` docs.
-        crate::smart_store::free_live_snapshot(&mut self.store);
+        // none can appear afterwards. `Drop` is the only caller allowed by
+        // `free_live_snapshot`.
+        unsafe { crate::smart_store::free_live_snapshot(&mut self.store) };
     }
 }
 

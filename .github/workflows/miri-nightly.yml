@@ -16,10 +16,11 @@ name: Miri Nightly
 # - Miri runs `--lib` only: integration tests use rayon thread pools
 #   (`confluence_tests`) and proptest file IO (`property_tests`), both
 #   outside Miri's supported surface.
-# - `MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-ignore-leaks`: crossbeam-epoch
-#   0.9 trips Miri's default Stacked Borrows in its thread-local registry
-#   (`internal.rs` `Local::element_of` retag — a known upstream pattern,
-#   not an Ornis bug); it is clean under Tree Borrows. Leak checking stays
+# - `MIRIFLAGS=-Zmiri-tree-borrows -Zmiri-ignore-leaks -Zmiri-permissive-provenance`:
+#   crossbeam-epoch 0.9 trips Miri's default Stacked Borrows in its
+#   thread-local registry (`internal.rs` `Local::element_of` retag — a
+#   known upstream pattern, not an Ornis bug); it is clean under Tree
+#   Borrows. Leak checking stays
 #   off even though the RAT-19 live-snapshot leak is fixed (each lock-free
 #   lane reclaims its live snapshot in `Drop`, covered by the
 #   `drop_frees_live_snapshot` tests): the 7 leaks Miri still reports with

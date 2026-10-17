@@ -81,14 +81,20 @@ struct LockFreeLaneInner<T: Clone + Send + Sync> {
 /// one snapshot per lane (RAT-19).
 ///
 /// The swap makes the call idempotent: a second call observes null and frees
-/// nothing, so a repeated call can never double-free. Call only from `Drop`:
-/// `read` dereferences the pointer unconditionally and does not expect null,
-/// so freeing anywhere else would open a use-after-free for later readers.
-/// The `&mut` borrow additionally proves exclusive access at the call site —
-/// no concurrent `write` can publish over the pointer being reclaimed.
-/// Snapshots already retired via `defer_destroy` are no longer in `store`
-/// and are left untouched here.
-pub(crate) fn free_live_snapshot<T>(store: &mut Atomic<ComponentStore<T>>) {
+/// nothing, so a repeated call can never double-free. After the swap a later
+/// `read` dereferences that null: `shared.deref()` is unconditional and does
+/// not expect null. Snapshots already retired via `defer_destroy` are no
+/// longer in `store` and are left untouched here. The `&mut` borrow proves
+/// exclusive access at the call — no concurrent `write` can publish over the
+/// pointer being reclaimed — but that borrow ends when the call returns, so
+/// the signature itself has to carry the "Drop only" precondition.
+///
+/// # Safety
+///
+/// Call only from `Drop` of the lane that owns `store`. The lane must not
+/// be read or written again: a later `read` would dereference the null this
+/// function leaves behind.
+pub(crate) unsafe fn free_live_snapshot<T>(store: &mut Atomic<ComponentStore<T>>) {
     // SAFETY: `store` is exclusively borrowed, so no other thread can touch
     // the pointer; `unprotected` only mints a token to satisfy the API.
     // `swap` atomically replaces the live pointer with null and returns the
@@ -175,12 +181,14 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
 }
 
 impl<T: Clone + Send + Sync> Drop for LockFreeLaneInner<T> {
+    // qual:allow(unsafe) reason: "Drop-only forwarder; the unsafe operations live in free_live_snapshot, which is the counted warning"
     fn drop(&mut self) {
         // SAFETY: `&mut self` proves exclusive access, and lock-free reads
         // go through `with_lock_free_lane(&self, ..)`, whose snapshot cannot
         // outlive the store — so no live reader of this snapshot exists and
-        // none can appear afterwards. See `free_live_snapshot` docs.
-        free_live_snapshot(&mut self.store);
+        // none can appear afterwards. `Drop` is the only caller allowed by
+        // `free_live_snapshot`.
+        unsafe { free_live_snapshot(&mut self.store) };
     }
 }
 
