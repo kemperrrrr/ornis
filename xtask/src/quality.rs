@@ -655,7 +655,7 @@ struct AutoAccept {
 }
 
 /// RAT-44 rejection, split so the owner label can never launder a
-/// corrupt baseline: [`AutoReject::Structural`] (unparseable JSON,
+/// corrupt baseline: [`AutoReject::Structural`] (unparsable JSON,
 /// missing/wrong-typed key, `B.total == 0`) FAILs always, while
 /// [`AutoReject::NeedsLabel`] (a numbered rule did not hold) FAILs only
 /// without the `baseline-bump-approved` label.
@@ -790,7 +790,7 @@ fn check_soft_density(
 ///    `C.total <= B.total * 1.5`.
 ///
 /// # Errors
-/// [`AutoReject::Structural`] (unparseable side, missing/wrong-typed
+/// [`AutoReject::Structural`] (unparsable side, missing/wrong-typed
 /// key, `B.total == 0`) FAILs always — the owner label cannot launder a
 /// corrupt baseline. [`AutoReject::NeedsLabel`] names the failing rule
 /// with `B→C` values and the limit for the guard FAIL reason.
@@ -861,21 +861,18 @@ fn baseline_auto_accept(base_s: &str, cur_s: &str) -> Result<AutoAccept, AutoRej
     })
 }
 
-/// True when the committed baseline actually grew vs the base branch, in
-/// the strict RAT-5 sense (any count up, any score down, any new
-/// identity). Rule 6 (`fresh.total == C.total`) guards exactly this
-/// case: a commit that only moves the baseline down (or not at all)
-/// keeps the old behavior — no freshness FAIL on untouched baselines or
-/// plain `master` pushes. Structural pairs return false here; the bump
-/// guard already FAILs those on its own.
-fn committed_grew_vs_base(base_s: &str, committed_s: &str) -> bool {
-    if base_s == committed_s {
-        return false;
-    }
-    match compare_rustqual_reports(base_s, committed_s) {
-        Ok(o) => !o.regressed_reasons.is_empty(),
-        Err(_) => false,
-    }
+/// True when the committed `baseline.json` is not the base-branch copy
+/// (`C != B`), byte for byte.
+///
+/// Rule 6 (`fresh.total == C.total`) and the auto-accept log line apply
+/// only to a real edit. An untouched file — including a plain `master`
+/// push, where the working tree blob matches `git show` — stays on the
+/// old PASS even if a fresh inventory's `total` has drifted. `total` is
+/// not a [`COUNT_CATEGORIES`] key, so a strict ratchet regression is the
+/// wrong predicate: a hand-edited `total` (or any other non-regressing
+/// change) must still be checked.
+fn committed_differs_from_base(base_s: &str, committed_s: &str) -> bool {
+    base_s != committed_s
 }
 
 /// RAT-44 rule 6: the fresh run must inventory exactly the committed
@@ -1098,13 +1095,13 @@ fn baseline_bump_allowed() -> bool {
     parse_bump_allowed(std::env::var("ORNIS_BASELINE_BUMP_ALLOWED").ok().as_deref())
 }
 
-/// RAT-44 rule 6 guard: when the committed baseline actually grew vs the
-/// base branch (see [`committed_grew_vs_base`]), the fresh run must
-/// inventory exactly the committed `total`. Otherwise the committed file
-/// is forged or stale. No-op on untouched baselines and plain `master`
-/// pushes (old behavior preserved), when the base baseline is
-/// unreadable, or when the stage already FAILED (the ratchet/bump reason
-/// stands on its own).
+/// RAT-44 rule 6 guard: when the committed baseline differs from the
+/// base branch (`C != B`, see [`committed_differs_from_base`]), the fresh
+/// run must inventory exactly the committed `total`. Otherwise the
+/// committed file is forged or stale. No-op when the file is unchanged
+/// (untouched baselines and plain `master` pushes keep the old PASS),
+/// when the base baseline is unreadable, or when the stage already
+/// FAILED (the ratchet/bump reason stands on its own).
 fn apply_fresh_total_guard(
     stages: &mut StageList<'_>,
     name: &str,
@@ -1118,7 +1115,7 @@ fn apply_fresh_total_guard(
     let Some(base_s) = read_base_baseline(stages.root, guard_ref) else {
         return;
     };
-    if !committed_grew_vs_base(&base_s, committed_s) {
+    if !committed_differs_from_base(&base_s, committed_s) {
         return;
     }
     if let Some(reason) = check_fresh_total_matches_committed(fresh_s, committed_s) {
@@ -1205,9 +1202,9 @@ fn check_baseline_bump(
     };
     match baseline_auto_accept(&base_s, committed_s) {
         Ok(_) => {
-            // Log the auto-accept only for a real move; an untouched
-            // baseline holds silently, exactly as before RAT-44.
-            if base_s != committed_s {
+            // Log the auto-accept only for a real move (`C != B`); an
+            // untouched baseline holds silently, exactly as before RAT-44.
+            if committed_differs_from_base(&base_s, committed_s) {
                 eprintln!(
                     "baseline guard: auto-accepted (scores ↑, no new findings, density non-increasing)"
                 );
@@ -2163,14 +2160,14 @@ fn quality_usage(code: i32) -> ! {
           rustqual.toml is the single source of truth (no thresholds duplicated here).\n  \
           Baseline: rustqual --save-baseline baseline.json; the gate re-runs rustqual\n  \
           into target/rustqual_cur.json and compares with its own ratchet\n  \
-           (equal = PASS, only a true regression FAILs). The committed baseline\n  \
-           must not exceed the base branch version (origin/master locally) —\n  \
-           growth needs the `baseline-bump-approved` PR label unless auto-accepted\n  \
-           (scores up, no new findings, soft-category density non-increasing).\n  \
-           Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
-           (within ±0.1 pp = PASS; deeper regression FAILs, growth rewrites the file — commit it).\n  \
-           Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
-           a full instrumented workspace run takes tens of minutes.\n  \
+          (equal = PASS, only a true regression FAILs). The committed baseline\n  \
+          must not exceed the base branch version (origin/master locally) —\n  \
+          growth needs the `baseline-bump-approved` PR label unless auto-accepted\n  \
+          (scores up, no new findings, soft-category density non-increasing).\n  \
+          Coverage ratchet: coverage-baseline.json holds the workspace line-rate floor\n  \
+          (within ±0.1 pp = PASS; deeper regression FAILs, growth rewrites the file — commit it).\n  \
+          Coverage runs nightly (.github/workflows/coverage.yml), not in PR shards:\n  \
+          a full instrumented workspace run takes tens of minutes.\n  \
          Smoke: cargo run --features editor-only must bind 127.0.0.1:3420 within 90s and stay alive"
     );
     exit(code);
@@ -3230,41 +3227,76 @@ mod ratchet_tests {
         let dir = init_guard_repo("structural", &base_report(), guard_ref);
         let mut missing = serde_json::from_str::<serde_json::Value>(&base_report()).unwrap();
         missing.as_object_mut().unwrap().remove("total");
+        let mut wrong_type = serde_json::from_str::<serde_json::Value>(&base_report()).unwrap();
+        wrong_type["dead_code_warnings"] = json!("nope");
         for (name, bad) in [
             ("malformed", "{not json".to_string()),
             ("missing-key", missing.to_string()),
+            ("wrong-type", wrong_type.to_string()),
         ] {
-            let reason = check_baseline_bump(&dir, &bad, true, true, guard_ref)
-                .unwrap_or_else(|| panic!("{name} must fail even with label"));
             assert!(
-                !reason.contains("baseline-bump-approved"),
-                "structural must not mention the label [{name}]: {reason}"
+                matches!(
+                    baseline_auto_accept(&base_report(), &bad),
+                    Err(AutoReject::Structural(_))
+                ),
+                "{name} must be a structural rejection, not a label case"
             );
+            // Both label states: a mutation that honours the label on
+            // structural errors, or that drops the structural arm when
+            // the label is absent, fails one of these.
+            for bump_allowed in [false, true] {
+                let reason = check_baseline_bump(&dir, &bad, true, bump_allowed, guard_ref)
+                    .unwrap_or_else(|| panic!("{name} must FAIL with bump_allowed={bump_allowed}"));
+                assert!(
+                    !reason.contains("baseline-bump-approved"),
+                    "structural must not mention the label [{name}, bump={bump_allowed}]: {reason}"
+                );
+            }
         }
         // `B.total == 0` is structural on the base side: swap sides.
         let mut zero = serde_json::from_str::<serde_json::Value>(&base_report()).unwrap();
         zero["total"] = json!(0);
-        let dir2 = init_guard_repo("structural-zero", &zero.to_string(), guard_ref);
-        let reason = check_baseline_bump(&dir2, &base_report(), true, true, guard_ref)
-            .expect("zero base total must fail even with label");
-        assert!(reason.contains("total"), "unexpected: {reason}");
+        let zero_s = zero.to_string();
         assert!(
-            !reason.contains("baseline-bump-approved"),
-            "structural must not mention the label: {reason}"
+            matches!(
+                baseline_auto_accept(&zero_s, &base_report()),
+                Err(AutoReject::Structural(_))
+            ),
+            "B.total == 0 must be structural"
         );
+        let dir2 = init_guard_repo("structural-zero", &zero_s, guard_ref);
+        for bump_allowed in [false, true] {
+            let reason = check_baseline_bump(&dir2, &base_report(), true, bump_allowed, guard_ref)
+                .unwrap_or_else(|| {
+                    panic!("zero base total must FAIL with bump_allowed={bump_allowed}")
+                });
+            assert!(reason.contains("total"), "unexpected: {reason}");
+            assert!(
+                !reason.contains("baseline-bump-approved"),
+                "structural must not mention the label (bump={bump_allowed}): {reason}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir2);
-        // Grown-but-clean baseline still honours the label.
+        // Grown-but-clean baseline still honours the label, and still
+        // FAILs without it (the NeedsLabel arm).
         let bumped = report_with(json!({"dead_code_warnings": 11}));
+        let unlabeled =
+            check_baseline_bump(&dir, &bumped, true, false, guard_ref).expect("growth needs label");
+        assert!(
+            unlabeled.contains("baseline-bump-approved"),
+            "unexpected: {unlabeled}"
+        );
         assert!(check_baseline_bump(&dir, &bumped, true, true, guard_ref).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn fresh_total_guard_skips_untouched_baseline() {
-        // C == B with a drifting fresh total → PASS (old behavior kept);
-        // rule 6 only guards real growth.
-        assert!(!committed_grew_vs_base(&base_report(), &base_report()));
-        assert!(committed_grew_vs_base(&rat97_base(), &rat97_cur()));
+        // Untouched baseline, fresh total drifts → PASS. Rule 6 is
+        // `C != B`, so an unchanged file (and a plain master push) keeps
+        // the old behavior.
+        assert!(!committed_differs_from_base(&base_report(), &base_report()));
+        assert!(committed_differs_from_base(&rat97_base(), &rat97_cur()));
         let guard_ref = "origin/pr-base";
         let dir = init_guard_repo("fresh-untouched", &base_report(), guard_ref);
         let mut stages = StageList::new(&dir, 1, None, true);
@@ -3277,6 +3309,47 @@ mod ratchet_tests {
         let drifted = report_with(json!({"total": 1001}));
         apply_fresh_total_guard(&mut stages, "rustqual", &drifted, &base_report(), guard_ref);
         assert_eq!(stages.results[0].status, Status::Pass);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fresh_total_guard_fails_when_file_changed_without_strict_growth() {
+        // `total` is not a count category, so 1000→1100 is `C != B` but
+        // not a strict ratchet regression. Rule 6 must still FAIL a
+        // drifting fresh total; matching totals hold. Reverting the
+        // predicate to `regressed_reasons` makes the drift case PASS
+        // and this test fail.
+        let base = base_report();
+        let committed = report_with(json!({"total": 1100}));
+        assert!(committed_differs_from_base(&base, &committed));
+        let compared = compare_rustqual_reports(&base, &committed).expect("pair parses");
+        assert!(
+            compared.regressed_reasons.is_empty(),
+            "fixture must not be a strict regression: {:?}",
+            compared.regressed_reasons
+        );
+        let guard_ref = "origin/pr-base";
+        let dir = init_guard_repo("fresh-nongrowth", &base, guard_ref);
+        let mut hold = StageList::new(&dir, 1, None, true);
+        hold.results.push(stage_result(
+            "rustqual",
+            Status::Pass,
+            String::new(),
+            Duration::ZERO,
+        ));
+        apply_fresh_total_guard(&mut hold, "rustqual", &committed, &committed, guard_ref);
+        assert_eq!(hold.results[0].status, Status::Pass);
+        let mut drift = StageList::new(&dir, 1, None, true);
+        drift.results.push(stage_result(
+            "rustqual",
+            Status::Pass,
+            String::new(),
+            Duration::ZERO,
+        ));
+        let fresh = report_with(json!({"total": 1101}));
+        apply_fresh_total_guard(&mut drift, "rustqual", &fresh, &committed, guard_ref);
+        assert_eq!(drift.results[0].status, Status::Fail);
+        assert!(drift.results[0].note.contains("обнови baseline"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
