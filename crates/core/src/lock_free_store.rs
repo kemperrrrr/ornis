@@ -94,6 +94,17 @@ impl<T: 'static + Clone + Send + Sync> LockFreeLane for LaneInner<T> {
     }
 }
 
+impl<T: Clone + Send + Sync> Drop for LaneInner<T> {
+    // qual:allow(unsafe) reason: "Drop-only forwarder; the unsafe operations live in free_live_snapshot, which is the counted warning"
+    fn drop(&mut self) {
+        // SAFETY: `&mut self` proves exclusive access: `LockFreeReadGuard`
+        // borrows the store, so no live reader of this snapshot exists and
+        // none can appear afterwards. `Drop` is the only caller allowed by
+        // `free_live_snapshot`.
+        unsafe { crate::smart_store::free_live_snapshot(&mut self.store) };
+    }
+}
+
 pub struct LockFreeStore {
     lanes: HashMap<TypeId, Box<dyn LockFreeLane>>,
     allocator: Mutex<EntityAllocator>,
@@ -201,6 +212,17 @@ mod tests {
         store.insert::<f32>(entity, 1.0);
         let guard = store.read_lane::<f32>().unwrap();
         assert_eq!(guard.get(entity), Some(&1.0));
+    }
+
+    #[test]
+    fn drop_frees_live_snapshot() {
+        let marker = std::sync::Arc::new(());
+        {
+            let mut store = LockFreeStore::new();
+            let e = store.create_entity();
+            store.insert(e, std::sync::Arc::clone(&marker));
+        } // drop: the live snapshot holding the Arc clone must be freed immediately
+        assert_eq!(std::sync::Arc::strong_count(&marker), 1);
     }
 
     #[test]
