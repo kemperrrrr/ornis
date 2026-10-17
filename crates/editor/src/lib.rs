@@ -50,14 +50,16 @@ pub mod grid;
 /// Plane camera and viewport mode: pan-and-zoom over the sheet (slice K2).
 pub mod plane;
 
+/// Plane-engine seam: resource install/read and the 2D input frame system.
+pub mod plane_input;
+
 pub use grid::{PlaneGrid, plane_grid};
 pub use picking::{
     ChromePolicy, PickEpsilon, PickError, PickHit, PickOutcome, PickProjection, PickRay,
     ViewportCamera, WorkPlane, pick_closest, pick_ray, pointer_on_plane, ray_plane_point,
 };
-pub use plane::{
-    PlaneCamera, PlaneProjection, ViewportMode, install_plane_camera, read_plane_camera,
-};
+pub use plane::{PlaneCamera, PlaneProjection, ViewportMode};
+pub use plane_input::{install_plane_camera, read_plane_camera};
 
 /// Marks an entity as editor chrome (gizmo handle, grid, selection proxy).
 ///

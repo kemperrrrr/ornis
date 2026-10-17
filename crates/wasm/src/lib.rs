@@ -125,15 +125,22 @@ fn build_gpu_scene(
     }
 }
 
+/// DOM `buttons` bitmask bit for the primary (left) button.
+const DOM_BUTTON_LEFT: u16 = 1 << 0;
+/// DOM `buttons` bitmask bit for the secondary (right) button.
+const DOM_BUTTON_RIGHT: u16 = 1 << 1;
+/// DOM `buttons` bitmask bit for the middle button.
+const DOM_BUTTON_MIDDLE: u16 = 1 << 2;
+
 /// Engine mouse-button states decoded from a DOM `buttons` bitmask:
 /// `[left, right, middle]`. DOM bits are `1<<0` left, `1<<1` right, `1<<2`
 /// middle — the same order as the engine codes (`0` left, `1` right,
 /// `2` middle). Pure so a host test pins the chord decoding.
 fn dom_buttons_down(buttons: u16) -> [bool; 3] {
     [
-        buttons & 0b001 != 0,
-        buttons & 0b010 != 0,
-        buttons & 0b100 != 0,
+        buttons & DOM_BUTTON_LEFT != 0,
+        buttons & DOM_BUTTON_RIGHT != 0,
+        buttons & DOM_BUTTON_MIDDLE != 0,
     ]
 }
 
@@ -516,26 +523,22 @@ fn build_viewport_state_json(
     plane: Option<&PlaneCamera>,
     pointer_px: Option<[f32; 2]>,
 ) -> String {
-    let state = match (plane_2d, plane) {
-        (true, Some(camera)) => ViewportStateWire {
-            mode: "plane2d",
-            center: Some(camera.center().to_array()),
-            half_height: Some(camera.half_height().get()),
-            pixels_per_unit: Some(camera.pixels_per_unit()),
-            grid: Some(plane_grid(
-                camera,
-                PositiveF32::expect_valid(MIN_GRID_STEP_PX),
-            )),
-            pointer_world: pointer_px.map(|pointer| camera.screen_to_plane(pointer).to_array()),
+    // Active only in `plane2d` once a plane camera exists (before the first
+    // frame it is still `perspective3d` with null plane fields).
+    let camera = if plane_2d { plane } else { None };
+    let state = ViewportStateWire {
+        mode: if camera.is_some() {
+            "plane2d"
+        } else {
+            "perspective3d"
         },
-        _ => ViewportStateWire {
-            mode: "perspective3d",
-            center: None,
-            half_height: None,
-            pixels_per_unit: None,
-            grid: None,
-            pointer_world: None,
-        },
+        center: camera.map(|camera| camera.center().to_array()),
+        half_height: camera.map(|camera| camera.half_height().get()),
+        pixels_per_unit: camera.map(PlaneCamera::pixels_per_unit),
+        grid: camera.map(|camera| plane_grid(camera, PositiveF32::expect_valid(MIN_GRID_STEP_PX))),
+        pointer_world: camera
+            .zip(pointer_px)
+            .map(|(camera, pointer)| camera.screen_to_plane(pointer).to_array()),
     };
     serde_json::to_string(&state).unwrap_or_else(|_| "{\"mode\":\"perspective3d\"}".into())
 }
@@ -549,6 +552,7 @@ fn build_viewport_state_json(
 /// (`install_orbit_camera` replaces the camera without a second system).
 /// The loop applies the request on the next frame, where the replica engine
 /// lives — this export never touches the engine directly.
+// qual:api — wasm-bindgen export; called from the browser page, invisible to the Rust call graph.
 #[wasm_bindgen]
 pub fn set_viewport_mode(mode: &str) -> bool {
     match mode {
@@ -622,6 +626,7 @@ fn selected_snapshot(store: &ornis_core::SmartStore) -> Vec<u32> {
 
 /// Latest viewport-state wire JSON for the grid overlay and cursor
 /// readout, refreshed by the frame loop every frame.
+// qual:api — wasm-bindgen export; called from the browser overlay, invisible to the Rust call graph.
 #[wasm_bindgen]
 pub fn viewport_state_json() -> String {
     let cached = LAST_STATE_JSON.with(|cell| cell.borrow().clone());
@@ -958,6 +963,7 @@ impl<'a> FrameState<'a> {
     /// scene entities and republishes lights: the `ViewportCamera` resource
     /// and the `Selected`/`Hovered` lanes survive a live update (marks on
     /// removed entities vanish with them; replacements start unselected).
+    // qual:allow(test_quality, untested) reason: "browser frame-loop seam over GPU/surface state; the wire shape is pinned by the build_viewport_state_json host tests and the mode switch by apply_mode_request"
     fn sync_viewport_state(&mut self) {
         let plane_2d = VIEWPORT_PLANE_2D.with(|cell| cell.get());
         let engine = self.render_world.engine_mut();
@@ -1018,6 +1024,7 @@ impl<'a> FrameState<'a> {
 
     /// Logs the `Selected` set when it changes (`[ornis-wasm] selected …`).
     /// Command-up over WS and the outline are E2, out of scope.
+    // qual:allow(test_quality, untested) reason: "browser console edge over a thread-local; the snapshot shape it logs is pinned by the selected_snapshot host test"
     fn log_selection_changes(&mut self) {
         let store = self.render_world.engine().world().store();
         let current = store.map_or_else(Vec::new, selected_snapshot);

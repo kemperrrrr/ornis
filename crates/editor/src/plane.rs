@@ -11,13 +11,9 @@
 //! it selects (E1 click); pan is middle/right drag, zoom is the wheel around
 //! the cursor.
 
-use std::sync::Mutex;
-
 use glam::{Vec2, Vec3};
 use ornis_assets::scene::CameraProjection;
-use ornis_core::{
-    Degrees, Engine, InputState, Meters, MouseButton, Resources, System, SystemAccess,
-};
+use ornis_core::{Degrees, InputState, Meters, MouseButton};
 
 use crate::picking::ViewportCamera;
 
@@ -94,6 +90,7 @@ impl PlaneCamera {
     /// non-positive half-height, an invalid projection payload (fov outside
     /// `(0, 180)` degrees, non-finite/non-positive eye height), `near`
     /// non-finite or `<= 0`, `far <= near`, or a sub-pixel viewport.
+    // qual:allow(srp, max_parameters=6) reason: "RAT-16 mandates explicit-param constructors without builders; the plane camera carries center, scale, projection, clip and viewport as values"
     #[must_use]
     pub fn new(
         center: Vec2,
@@ -143,29 +140,6 @@ impl PlaneCamera {
             far,
             viewport_px,
         })
-    }
-
-    /// Enters 2D from a tuple orbit frame: `center = target.xy`,
-    /// `hh = |eye − target|·tan(fov/2)`, near/far carried over.
-    ///
-    /// Kept while tuple callers exist; K0a sides prefer
-    /// [`Self::from_camera_view`], which also carries the projection.
-    #[must_use]
-    pub fn from_view_parameters(
-        view: (Vec3, Vec3, Vec3, f32, f32, f32),
-        projection: PlaneProjection,
-        viewport_px: [f32; 2],
-    ) -> Option<Self> {
-        let (eye, target, _, fov_deg, near, far) = view;
-        let half_height = Self::orbit_half_height(eye, target, fov_deg)?;
-        Self::new(
-            target.truncate(),
-            half_height,
-            projection,
-            Meters::new(near),
-            Meters::new(far),
-            viewport_px,
-        )
     }
 
     /// Orbit-derived half-height: `|eye − target|·tan(fov/2)`. `None` on a
@@ -235,14 +209,12 @@ impl PlaneCamera {
     }
 
     /// Sheet center in world units (XY).
-    // qual:allow(dry, boilerplate) reason: "RAT-16 API surface (spec-mandated accessor); read cross-crate by the ornis-wasm wire state"
     #[must_use]
     pub fn center(&self) -> Vec2 {
         self.center
     }
 
     /// Visible half-height on the sheet in world units.
-    // qual:allow(dry, boilerplate) reason: "RAT-16 API surface (spec-mandated accessor); read cross-crate by the ornis-wasm wire state"
     #[must_use]
     pub fn half_height(&self) -> Meters {
         self.half_height
@@ -417,80 +389,9 @@ impl PlaneCamera {
     }
 }
 
-/// Installs the plane editing domain into `engine`.
-///
-/// Inserts the [`Mutex<PlaneCamera>`] resource (replacing any previous plane
-/// camera), the [`ViewportMode`] resource (only when absent, so a host that
-/// already entered 2D keeps its mode), and the `plane_camera_input` frame
-/// system. Idempotent: a second call registers no second system (guarded on
-/// the schedule entry, like `install_orbit_camera`/`install_editor`).
-pub fn install_plane_camera(engine: &mut Engine, camera: PlaneCamera) {
-    let _ = engine.world_mut().insert(Mutex::new(camera));
-    if engine.world().resources().get::<ViewportMode>().is_none() {
-        let _ = engine.world_mut().insert(ViewportMode::Perspective3d);
-    }
-    if engine.schedule().mermaid().contains(SYSTEM_NAME) {
-        return;
-    }
-    engine.schedule_mut().add_system(PlaneCameraInput);
-}
-
-/// Clones the current plane camera from an engine resource.
-///
-/// Returns `None` when [`install_plane_camera`] has not been called.
-pub fn read_plane_camera(engine: &Engine) -> Option<PlaneCamera> {
-    engine
-        .world()
-        .resources()
-        .get::<Mutex<PlaneCamera>>()
-        .map(|camera| camera.lock().unwrap_or_else(|e| e.into_inner()).clone())
-}
-
-/// Schedule name of the plane-camera input system (idempotency guard).
-const SYSTEM_NAME: &str = "plane_camera_input";
-
-/// Frame system applying the plane input contract while in 2D.
-///
-/// No-op in [`ViewportMode::Perspective3d`] (the orbit camera owns the
-/// input there); in [`ViewportMode::Plane2d`] middle/right drag pans and the
-/// wheel zooms around the cursor, and the pick projection tracks `hh` even
-/// though the projection variant never changes here. The left button never
-/// moves this camera — it selects through `editor_maintain`.
-struct PlaneCameraInput;
-
-impl System for PlaneCameraInput {
-    /// Schedule name of this system (matches [`SYSTEM_NAME`]).
-    fn name(&self) -> &'static str {
-        SYSTEM_NAME
-    }
-
-    /// Declares the honest access set: input and mode reads, plane-camera
-    /// write (schedule enforcement panics on anything undeclared).
-    fn access(&self) -> SystemAccess {
-        SystemAccess::new()
-            .reads::<InputState>()
-            .reads::<ViewportMode>()
-            .writes::<Mutex<PlaneCamera>>()
-    }
-
-    /// 2D behaviour: pan-and-zoom from the shared input snapshot.
-    fn run(&self, resources: &Resources) {
-        let mode = resources.get::<ViewportMode>().copied().unwrap_or_default();
-        if !mode.is_plane() {
-            return;
-        }
-        let (Some(input), Some(camera)) = (
-            resources.get::<InputState>(),
-            resources.get::<Mutex<PlaneCamera>>(),
-        ) else {
-            return;
-        };
-        camera
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .apply_input(input);
-    }
-}
+// Engine-resource install/read and the 2D input frame system live in
+// `crate::plane_input` (idempotent install, `plane_camera_input` schedule
+// entry, pan/zoom gated on `ViewportMode::Plane2d`).
 
 #[cfg(test)]
 mod tests {
@@ -655,30 +556,11 @@ mod tests {
         }
     }
 
-    /// `from_view_parameters` centers on `target.xy` with the orbit-derived
-    /// half-height; `from_camera_view` always enters the orthographic sheet
-    /// (asset half-height, or the fov-derived one from a perspective orbit).
+    /// `from_camera_view` centers on `target.xy`: an asset ortho keeps its
+    /// half-height, a perspective orbit derives it from the fov and enters
+    /// the orthographic sheet.
     #[test]
     fn from_orbit_frames_keeps_scale() {
-        let plane = PlaneCamera::from_view_parameters(
-            (
-                Vec3::new(1.0, 2.0, 9.0),
-                Vec3::new(1.0, 2.0, 0.0),
-                Vec3::Y,
-                60.0,
-                0.1,
-                100.0,
-            ),
-            PlaneProjection::PerspectiveStandIn {
-                fov_y: Degrees::new(60.0),
-            },
-            [800.0, 600.0],
-        )
-        .expect("plane from orbit");
-        assert_eq!(plane.center(), Vec2::new(1.0, 2.0));
-        let expected = 9.0 * (60.0f32.to_radians() * 0.5).tan();
-        assert!((plane.half_height().get() - expected).abs() < 1e-4);
-
         let ortho = PlaneCamera::from_camera_view(
             Vec3::new(1.0, 2.0, 9.0),
             Vec3::new(1.0, 2.0, 0.0),
@@ -695,6 +577,7 @@ mod tests {
         assert_eq!(ortho.center(), Vec2::new(1.0, 2.0));
         // A perspective orbit enters as the orthographic sheet with the
         // fov-derived half-height (the stand-in never reaches the live path).
+        let expected = 9.0 * (60.0f32.to_radians() * 0.5).tan();
         let from_perspective = PlaneCamera::from_camera_view(
             Vec3::new(1.0, 2.0, 9.0),
             Vec3::new(1.0, 2.0, 0.0),
@@ -705,6 +588,8 @@ mod tests {
             [800.0, 600.0],
         )
         .expect("plane from perspective orbit");
+        assert_eq!(from_perspective.center(), Vec2::new(1.0, 2.0));
+        assert!((from_perspective.half_height().get() - expected).abs() < 1e-4);
         assert_eq!(
             from_perspective.camera_view_params().3,
             CameraProjection::Orthographic {
@@ -729,61 +614,6 @@ mod tests {
         assert!(!rejects_viewport.set_viewport_px([0.0, 600.0]));
         assert!(rejects_viewport.set_viewport_px([1024.0, 768.0]));
         assert_eq!(rejects_viewport.viewport_px, [1024.0, 768.0]);
-    }
-
-    /// The input system only drives the camera in `Plane2d`; install is
-    /// idempotent and entering 2D then leaving keeps the plane state.
-    #[test]
-    fn input_system_gates_on_mode_and_install_is_idempotent() {
-        use std::sync::Mutex;
-        let mut engine = Engine::new();
-        install_plane_camera(&mut engine, camera());
-        install_plane_camera(&mut engine, camera());
-        assert_eq!(
-            engine
-                .schedule()
-                .mermaid()
-                .matches("plane_camera_input")
-                .count(),
-            1
-        );
-        assert!(
-            engine
-                .world()
-                .resources()
-                .get::<Mutex<PlaneCamera>>()
-                .is_some()
-        );
-        // Perspective3d: the system leaves the camera alone.
-        {
-            let input = engine
-                .world_mut()
-                .resources_mut()
-                .get_mut::<InputState>()
-                .expect("engine input resource");
-            input.set_button(MouseButton::Right, true);
-            input.set_pointer_anchor([400.0, 300.0]);
-            input.set_pointer_position([500.0, 300.0]);
-        }
-        engine.run_frame(1.0 / 60.0);
-        assert_eq!(
-            read_plane_camera(&engine).expect("plane camera").center(),
-            Vec2::ZERO
-        );
-        // Plane2d: a fresh drag pans (frame transients cleared above, so
-        // move the pointer again to generate a new delta).
-        let _ = engine.world_mut().insert(ViewportMode::Plane2d);
-        {
-            let input = engine
-                .world_mut()
-                .resources_mut()
-                .get_mut::<InputState>()
-                .expect("engine input resource");
-            input.set_pointer_position([600.0, 300.0]);
-        }
-        engine.run_frame(1.0 / 60.0);
-        let moved = read_plane_camera(&engine).expect("plane camera").center();
-        assert!((moved - Vec2::new(-100.0 / 60.0, 0.0)).length() < 1e-4);
     }
 
     /// `camera_view_params` agrees with `view_parameters` on the look-at

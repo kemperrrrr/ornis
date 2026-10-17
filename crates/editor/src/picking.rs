@@ -218,6 +218,7 @@ impl ViewportCamera {
     /// [`Self::new_orthographic`]: finite eye/target, a non-degenerate view
     /// offset, a finite up vector not parallel to the view, `0 < near < far`
     /// and a non-degenerate viewport.
+    // qual:allow(srp, max_parameters=6) reason: "RAT-16 seam carries the full look-at frame plus the clip window as values, like CameraDesc::try_new_units"
     fn validated_frame(
         position: Vec3,
         target: Vec3,
@@ -282,6 +283,7 @@ impl ViewportCamera {
     /// Checked orthographic constructor: `None` on a degenerate frame or a
     /// non-finite/non-positive half-height. Pure orchestration, like
     /// [`Self::new`].
+    // qual:allow(srp, max_parameters=7) reason: "RAT-16 seam carries the full look-at frame plus the scale as values, like CameraDesc::try_new_units"
     #[must_use]
     pub fn new_orthographic(
         position: Vec3,
@@ -305,6 +307,7 @@ impl ViewportCamera {
 
     /// Shared constructor tail: frame validation plus struct assembly.
     /// Pure orchestration over [`Self::validated_frame`].
+    // qual:allow(srp, max_parameters=7) reason: "shared tail of the RAT-16 explicit-param constructors; splitting the frame would scatter the seam"
     fn with_projection(
         position: Vec3,
         target: Vec3,
@@ -347,6 +350,7 @@ impl ViewportCamera {
     /// projection (phase B): orthographic carries its half-height from
     /// `projection`, perspective carries `fov`. No render dependency — the
     /// projection travels as [`CameraProjection`] from `ornis-assets`.
+    // qual:allow(srp, max_parameters=8) reason: "RAT-16 seam carries the full look-at frame, projection and clip window as values, like CameraDesc::try_new_units"
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn from_camera_view(
@@ -443,14 +447,12 @@ impl WorkPlane {
     }
 
     /// Plane origin in world units.
-    // qual:allow(dry, boilerplate) reason: "RAT-16 API surface (spec-mandated accessor)"
     #[must_use]
     pub fn origin(&self) -> Vec3 {
         self.origin
     }
 
     /// Plane normal (unit length).
-    // qual:allow(dry, boilerplate) reason: "RAT-16 API surface (spec-mandated accessor)"
     #[must_use]
     pub fn normal(&self) -> UnitVec3 {
         self.normal
