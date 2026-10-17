@@ -1,6 +1,7 @@
 //! Content-addressed bake cache: keys, entries and the file plumbing.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ornis_texture::{CpuImage, Ktx2Image, TextureRole};
 
@@ -48,8 +49,20 @@ pub(super) fn cache_key(
     mode: BasisMode,
     producer: &Producer,
 ) -> String {
+    cache_key_with_schema(image, role, mode, producer, BAKE_SCHEMA)
+}
+
+/// [`cache_key`] with an explicit schema byte, so a test can show that bumping
+/// [`BAKE_SCHEMA`] changes the key.
+pub(super) fn cache_key_with_schema(
+    image: &CpuImage,
+    role: TextureRole,
+    mode: BasisMode,
+    producer: &Producer,
+    schema: u32,
+) -> String {
     let mut hash = ContentHash::new();
-    hash.write(&BAKE_SCHEMA.to_le_bytes());
+    hash.write(&schema.to_le_bytes());
     hash.write(role_tag(role));
     hash.write(mode_tag(mode));
     write_producer(&mut hash, producer);
@@ -141,7 +154,17 @@ pub(super) fn ensure_dir(settings: &BakeSettings) -> Result<(), BakeError> {
         .map_err(|error| io_error(&settings.cache_dir, error))
 }
 
+/// Suffix of the temporary file [`store_cached`] publishes with `rename`.
+const PUBLISH_SUFFIX: &str = ".tmp";
+
+/// Distinguishes temp names inside one process, including across threads.
+static PUBLISH_TICK: AtomicU64 = AtomicU64::new(0);
+
 /// Writes one validated container into the cache under `key`.
+///
+/// Bytes land in a temporary file in the same directory, are synced, then
+/// renamed over the entry. Readers see the previous container or the new
+/// one, never a partial write.
 pub(super) fn store_cached(
     settings: &BakeSettings,
     key: &str,
@@ -149,7 +172,44 @@ pub(super) fn store_cached(
 ) -> Result<(), BakeError> {
     ensure_dir(settings)?;
     let path = cache_file(settings, key, OUTPUT_SUFFIX);
-    std::fs::write(&path, bytes).map_err(|error| io_error(&path, error))
+    let tmp = publish_path(settings, key);
+    write_synced(&tmp, bytes)?;
+    std::fs::rename(&tmp, &path).map_err(|error| {
+        cleanup(&tmp);
+        io_error(&path, error)
+    })
+}
+
+/// Temporary name for `key`.
+///
+/// The process id and a per-call counter keep two threads in one process from
+/// publishing the same key through one temp file (the second `rename` would
+/// otherwise see `ENOENT`).
+fn publish_path(settings: &BakeSettings, key: &str) -> PathBuf {
+    let tick = PUBLISH_TICK.fetch_add(1, Ordering::Relaxed);
+    let name = format!(
+        ".{key}.{pid}.{tick}{PUBLISH_SUFFIX}",
+        pid = std::process::id()
+    );
+    settings.cache_dir.join(name)
+}
+
+/// Creates `path`, writes `bytes`, and syncs them before a rename publishes it.
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), BakeError> {
+    let result = write_all_synced(path, bytes);
+    if result.is_err() {
+        cleanup(path);
+    }
+    result
+}
+
+/// `File::create` plus `sync_all`. The caller removes `path` on failure.
+fn write_all_synced(path: &Path, bytes: &[u8]) -> Result<(), BakeError> {
+    use std::io::Write;
+    let mut file = std::fs::File::create(path).map_err(|error| io_error(path, error))?;
+    file.write_all(bytes)
+        .map_err(|error| io_error(path, error))?;
+    file.sync_all().map_err(|error| io_error(path, error))
 }
 
 /// Removes one encoder scratch file (best effort: the cache entry is valid).

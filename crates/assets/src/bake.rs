@@ -10,8 +10,9 @@
 //!   [`BakeSettings::overrides`] replaces any single slot.
 //! - The cache key is the decoded source pixels plus the policy inputs (role,
 //!   codec), the bake schema and the producer. The in-process writer is tagged
-//!   `rgba8-writer-v1`; a tool contributes its `-version` text (or a content
-//!   hash of the binary) and the pinned flags, without file paths. An RGBA8
+//!   `rgba8-writer-v1`; a tool contributes its `-version` text, a content hash
+//!   of the binary, and the pinned flags, without file paths. Version text
+//!   alone would collide across builds that print the same line. An RGBA8
 //!   fallback and a `basisu` run therefore never share an entry, and replacing
 //!   the tool or a flag misses the old container. Nothing is inferred from
 //!   file names, sizes or timestamps. The key still hashes decoded texels, not
@@ -25,7 +26,10 @@
 //!   authored levels, RGBA8 blocks instead of the compressed ones. That RGBA8
 //!   container does not meet the compressed-size goal. An explicit
 //!   [`EncoderSource::InProcess`] is [`BakeOrigin::Authored`]; a `PATH` lookup
-//!   that finds nothing is [`BakeOrigin::Downgraded`] and is counted apart.
+//!   that finds nothing is [`BakeOrigin::Downgraded`] and is counted apart,
+//!   including when the RGBA8 container is served from the cache on a later
+//!   import. Each external process is killed after
+//!   [`BakeSettings::encoder_timeout`].
 //! - A bake never replaces the source: [`bake_texture`] hands a container back
 //!   only on success, and [`bake_model`] keeps the decoded PNG/JPEG pixels of
 //!   any slot whose bake failed. A host that never calls
@@ -51,6 +55,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ornis_texture::{CpuImage, Ktx2Image, TextureRole, TextureUploadError};
 
@@ -59,6 +64,7 @@ mod encoder;
 mod identity;
 #[cfg(feature = "gltf")]
 mod model;
+mod process;
 
 use self::cache::{cache_key, load_cached};
 use self::encoder::{author, encode_with_tool, plan};
@@ -87,6 +93,13 @@ impl BasisMode {
     }
 }
 
+/// Default limit on one `basisu` process (`-version` or the encode).
+///
+/// Two minutes covers a large UASTC material on a typical CPU. Edges near
+/// [`MAX_TEXTURE_EDGE`](ornis_texture::MAX_TEXTURE_EDGE) may need a higher
+/// [`BakeSettings::encoder_timeout`].
+pub const DEFAULT_ENCODER_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Where compressed payloads come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncoderSource {
@@ -111,6 +124,11 @@ pub struct BakeSettings {
     pub cache_dir: PathBuf,
     /// Where compressed payloads come from.
     pub encoder: EncoderSource,
+    /// Limit on one external encoder process, including the `-version` probe.
+    ///
+    /// When it elapses the process is killed and the bake returns
+    /// [`BakeError::TimedOut`]. Nothing from that run is cached.
+    pub encoder_timeout: Duration,
 }
 
 impl BakeSettings {
@@ -120,6 +138,7 @@ impl BakeSettings {
             overrides: HashMap::new(),
             cache_dir: cache_dir.into(),
             encoder: EncoderSource::Path,
+            encoder_timeout: DEFAULT_ENCODER_TIMEOUT,
         }
     }
 
@@ -136,6 +155,10 @@ impl BakeSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BakeOrigin {
     /// Read back from the content-addressed cache.
+    ///
+    /// A hit whose current plan is [`BakeOrigin::Downgraded`] stays
+    /// [`BakeOrigin::Downgraded`], so a later import without `basisu` is
+    /// still counted. Other hits use this variant.
     Cached,
     /// Written by the reference encoder.
     Encoded,
@@ -179,6 +202,40 @@ pub struct BakeStats {
     pub last_failure: Option<String>,
 }
 
+impl BakeStats {
+    /// Adds one model pass into these cumulative counters.
+    ///
+    /// Counts always sum. `last_failure` keeps the first reason, unless the
+    /// new pass has a failed slot (`fallback > 0`) with its own reason, which
+    /// replaces it. A later success does not clear an earlier downgrade.
+    ///
+    /// Compiled with the model pass (`gltf`) and with the unit tests. A
+    /// no-gltf library build has no caller.
+    #[cfg(any(test, feature = "gltf"))]
+    pub(crate) fn accumulate(&mut self, pass: Self) {
+        self.encoded += pass.encoded;
+        self.cached += pass.cached;
+        self.authored += pass.authored;
+        self.downgraded += pass.downgraded;
+        self.fallback += pass.fallback;
+        keep_failure(self, &pass);
+    }
+}
+
+/// Applies `pass`'s failure reason without hiding an earlier one.
+#[cfg(any(test, feature = "gltf"))]
+fn keep_failure(stats: &mut BakeStats, pass: &BakeStats) {
+    if pass.fallback > 0 {
+        if pass.last_failure.is_some() {
+            stats.last_failure.clone_from(&pass.last_failure);
+        }
+        return;
+    }
+    if stats.last_failure.is_none() {
+        stats.last_failure.clone_from(&pass.last_failure);
+    }
+}
+
 /// Why a bake could not produce a container.
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {
@@ -201,6 +258,16 @@ pub enum BakeError {
         /// Underlying spawn error.
         source: std::io::Error,
     },
+    /// The encoder was still running when [`BakeSettings::encoder_timeout`] elapsed.
+    ///
+    /// The process was killed. Nothing from this run was cached.
+    #[error("encoder `{program}` timed out after {millis}ms and was killed")]
+    TimedOut {
+        /// Program that was killed.
+        program: String,
+        /// Deadline that elapsed, in milliseconds.
+        millis: u128,
+    },
     /// The encoder ran and exited non-zero.
     #[error("encoder `{program}` exited with code {code}: {stderr}")]
     Exit {
@@ -216,8 +283,8 @@ pub enum BakeError {
 /// Bakes `image` for `role`: cache hit, else encoder, else in-process chain.
 ///
 /// The cache key covers the decoded pixels, their dimensions, the role, the
-/// codec, the bake schema and the producer (in-process tag, or tool identity
-/// plus pinned flags). Two sources that decode to the same image share one
+/// codec, the bake schema and the producer (in-process tag, or tool version
+/// plus a hash of the binary and the pinned flags). Two sources that decode to the same image share one
 /// entry only when the same producer would write it. An entry that no longer
 /// parses as KTX2 counts as a miss and is rewritten; only containers that
 /// passed [`Ktx2Image::from_bytes`] are ever stored. Upgrading `basisu` or
@@ -226,10 +293,11 @@ pub enum BakeError {
 /// # Errors
 ///
 /// [`BakeError`] when `image` is not a valid texture, the cache is unwritable,
-/// or a configured encoder fails or returns a container this workspace rejects.
-/// A missing `basisu` on `PATH` is not an error — the RGBA8 chain still removes
-/// the runtime mip cost — but the result is [`BakeOrigin::Downgraded`], which
-/// does not meet the compressed-size goal.
+/// or a configured encoder fails, times out, or returns a container this
+/// workspace rejects. A missing `basisu` on `PATH` is not an error — the RGBA8
+/// chain still removes the runtime mip cost — but the result is
+/// [`BakeOrigin::Downgraded`], which does not meet the compressed-size goal.
+/// A later cache hit of that plan stays [`BakeOrigin::Downgraded`].
 pub fn bake_texture(
     settings: &BakeSettings,
     image: &CpuImage,
@@ -239,9 +307,30 @@ pub fn bake_texture(
     let plan = plan(settings, role)?;
     let key = cache_key(image, role, settings.mode_of(role), plan.producer());
     if let Some(cached) = load_cached(settings, &key) {
-        return Ok(cached);
+        return Ok(keep_downgrade(cached, plan.origin()));
     }
     encode_fresh(settings, image, role, &key, &plan)
+}
+
+/// Adds one model's bake into `stats`.
+///
+/// See [`BakeStats::accumulate`]: a later model does not clear an earlier
+/// downgrade.
+#[cfg(feature = "gltf")]
+pub(crate) fn record_bake(
+    stats: &mut BakeStats,
+    settings: &BakeSettings,
+    model: &mut crate::Model,
+) {
+    stats.accumulate(bake_model(settings, model));
+}
+
+/// A cached downgrade stays a downgrade; every other hit stays [`BakeOrigin::Cached`].
+fn keep_downgrade(mut baked: Baked, planned: BakeOrigin) -> Baked {
+    if planned == BakeOrigin::Downgraded {
+        baked.origin = BakeOrigin::Downgraded;
+    }
+    baked
 }
 
 /// Runs the planned encoder, or the in-process writer when the plan has none.
@@ -269,7 +358,10 @@ mod tests {
     use ornis_texture::TextureImage;
     use ornis_texture::encode_rgba8_ktx2;
 
-    use super::cache::{BAKE_SCHEMA, OUTPUT_SUFFIX, Producer, RGBA8_WRITER_TAG, cache_key};
+    use super::cache::{
+        BAKE_SCHEMA, OUTPUT_SUFFIX, Producer, RGBA8_WRITER_TAG, cache_key, cache_key_with_schema,
+        fnv_hex,
+    };
     use super::encoder::{
         DUMP_SUFFIX, RGBA_CHANNELS, SOURCE_SUFFIX, TGA_HEADER_BYTES, first_absolute, pinned_flags,
         tga_bytes,
@@ -337,14 +429,21 @@ mod tests {
     #[cfg(unix)]
     const UASTC_LEVEL0_TOLERANCE: u8 = 5;
 
+    /// Per-channel error of the committed normal-map UASTC fixture's base level.
+    ///
+    /// Measured on the same ramp with `-normal_map -linear -mip_linear
+    /// -mip_renorm` at `-uastc_level 2`: the worst channel differs by 5.
+    #[cfg(unix)]
+    const NORMAL_UASTC_LEVEL0_TOLERANCE: u8 = 5;
+
     /// Body of an encoder that refuses `-version` and still copies a payload.
     #[cfg(unix)]
     const SILENT_BODY: &str = r#"#!/bin/sh
 # @@MARKER@@
+printf '%s\n' "$@" >> "$0.args"
 if [ "$1" = "-version" ]; then
     exit 1
 fi
-printf '%s\n' "$@" >> "$0.args"
 out=""
 src=""
 skip=""
@@ -405,7 +504,6 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     /// [`fake_encoder`] whose `-version` stdout is `version`.
     #[cfg(unix)]
     fn fake_encoder_version(name: &str, payload: &[u8], version: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
         // Flags that take a value are skipped so the source path is the last
         // positional argument, whatever the role/codec flags are.
         const BODY: &str = r#"#!/bin/sh
@@ -435,15 +533,44 @@ done
 cp "$src" "$(dirname "$0")/read.tga"
 cp "$(dirname "$0")/payload.ktx2" "$out"
 "#;
+        install_tool(name, &BODY.replace("@@VERSION@@", version), payload)
+    }
+
+    /// Installs `body` as an executable by writing a temp file and renaming it.
+    ///
+    /// The script is never executed while a write handle is open, which is the
+    /// `ETXTBSY` race that made a parallel `cargo test` flake.
+    #[cfg(unix)]
+    fn install_tool(name: &str, body: &str, payload: &[u8]) -> PathBuf {
         let dir = test_root(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("script dir");
-        std::fs::write(dir.join("payload.ktx2"), payload).expect("payload");
+        if !payload.is_empty() {
+            std::fs::write(dir.join("payload.ktx2"), payload).expect("payload");
+        }
         let program = dir.join("fake-basisu.sh");
-        std::fs::write(&program, BODY.replace("@@VERSION@@", version)).expect("script body");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(EXECUTABLE_BITS))
-            .expect("executable");
+        publish_script(&program, body);
         program
+    }
+
+    /// Publishes `body` at `program` with the executable bit set before rename.
+    #[cfg(unix)]
+    fn publish_script(program: &Path, body: &str) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let tmp = program.with_extension("publishing");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(EXECUTABLE_BITS)
+                .open(&tmp)
+                .expect("temp script");
+            file.write_all(body.as_bytes()).expect("script bytes");
+            file.sync_all().expect("sync script");
+        }
+        std::fs::rename(&tmp, program).expect("publish script");
     }
 
     /// Every argument the fake encoder has been called with so far.
@@ -595,6 +722,20 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         );
         assert_eq!(BAKE_SCHEMA, 1);
         assert_eq!(RGBA8_WRITER_TAG, "rgba8-writer-v1");
+    }
+
+    #[test]
+    fn bumping_the_bake_schema_changes_the_cache_key() {
+        let source = checker();
+        let producer = Producer::InProcess;
+        let role = TextureRole::BaseColor;
+        let mode = BasisMode::Etc1s;
+        let current = cache_key(&source, role, mode, &producer);
+        let with_const = cache_key_with_schema(&source, role, mode, &producer, BAKE_SCHEMA);
+        let bumped =
+            cache_key_with_schema(&source, role, mode, &producer, BAKE_SCHEMA.wrapping_add(1));
+        assert_eq!(current, with_const, "cache_key uses BAKE_SCHEMA");
+        assert_ne!(current, bumped, "BAKE_SCHEMA is an input of the key");
     }
 
     #[test]
@@ -766,7 +907,7 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         let settings = BakeSettings {
             encoder: EncoderSource::Binary(program.clone()),
             overrides: HashMap::from([(TextureRole::Normal, BasisMode::Etc1s)]),
-            cache_dir: cache_dir("override"),
+            ..BakeSettings::new(cache_dir("override"))
         };
         assert_eq!(settings.mode_of(TextureRole::Normal), BasisMode::Etc1s);
         let baked = bake_texture(&settings, &checker(), TextureRole::Normal).expect("bakes");
@@ -810,7 +951,7 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
                 let settings = BakeSettings {
                     encoder: EncoderSource::Binary(program.clone()),
                     overrides: HashMap::from([(role, mode)]),
-                    cache_dir: cache_dir(&format!("roles-{role:?}-{mode:?}")),
+                    ..BakeSettings::new(cache_dir(&format!("roles-{role:?}-{mode:?}")))
                 };
                 let source = checker();
                 let baked = bake_texture(&settings, &source, role).expect("bakes");
@@ -831,6 +972,7 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
                     expected_argv(role, mode, &dump, &bitmap),
                     "argv for {role:?} {mode:?}"
                 );
+                let script = std::fs::read(&program).expect("script bytes");
                 assert_eq!(
                     key,
                     cache_key(
@@ -838,11 +980,11 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
                         role,
                         mode,
                         &Producer::Tool {
-                            identity: "fake-basisu 1".into(),
+                            identity: format!("fake-basisu 1\nbin:{}", fnv_hex(&script)),
                             flags: expected_flags(role, mode).join(" "),
                         },
                     ),
-                    "the cache key must carry these flags"
+                    "the cache key must carry these flags and the binary hash"
                 );
                 let _ = std::fs::write(format!("{}.args", program.display()), "");
             }
@@ -852,12 +994,13 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     #[test]
     #[cfg(unix)]
     fn an_encoder_failure_reports_its_exit_code_and_stderr() {
-        let program = fake_encoder("exit", b"");
-        std::fs::write(
-            &program,
+        // Published once, by rename. Overwriting an executable that other
+        // tests are exec'ing is the ETXTBSY flake (Spawn instead of Exit).
+        let program = install_tool(
+            "exit",
             "#!/bin/sh\ncat >&2 <<'END'\nbad pixels\nEND\nexit 3\n",
-        )
-        .expect("failing tool");
+            b"",
+        );
         let settings = BakeSettings {
             encoder: EncoderSource::Binary(program),
             ..BakeSettings::new(cache_dir("exit"))
@@ -869,6 +1012,201 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         };
         assert_eq!(code, 3);
         assert!(stderr.contains("bad pixels"), "stderr was {stderr:?}");
+        let key = key_of(&settings, &source, TextureRole::BaseColor);
+        assert!(
+            !scratch_left(&settings, &key),
+            "a failed run leaves no scratch"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hung_encoder_is_killed_with_a_timeout_error() {
+        let program = install_tool(
+            "hang",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nexec sleep 30\n",
+            b"",
+        );
+        let settings = BakeSettings {
+            encoder: EncoderSource::Binary(program),
+            encoder_timeout: Duration::from_millis(200),
+            ..BakeSettings::new(cache_dir("hang"))
+        };
+        assert_eq!(settings.encoder_timeout, Duration::from_millis(200));
+        let source = checker();
+        let started = std::time::Instant::now();
+        let failure = bake_texture(&settings, &source, TextureRole::BaseColor);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the hung tool was not killed: {:?}",
+            started.elapsed()
+        );
+        let Err(error) = failure else {
+            panic!("expected a timeout, got {failure:?}");
+        };
+        let BakeError::TimedOut { program, millis } = &error else {
+            panic!("expected a timeout, got {error:?}");
+        };
+        assert!(program.contains("fake-basisu"), "{program}");
+        assert!(*millis >= 200, "{millis}");
+        let text = error.to_string();
+        assert!(text.contains("timed out"), "{text}");
+        assert!(text.contains("killed"), "{text}");
+        let key = key_of(&settings, &source, TextureRole::BaseColor);
+        assert!(
+            !scratch_left(&settings, &key),
+            "a timed-out run leaves no scratch"
+        );
+    }
+
+    /// Deadline for a wrapper whose grandchild must die with the group.
+    #[cfg(unix)]
+    const GROUP_TIMEOUT: Duration = Duration::from_millis(500);
+
+    /// The call returns near [`GROUP_TIMEOUT`], not after the grandchild's sleep.
+    #[cfg(unix)]
+    const GROUP_RETURN_LIMIT: Duration = Duration::from_millis(1500);
+
+    #[test]
+    #[cfg(unix)]
+    fn a_forked_encoder_grandchild_is_killed_with_the_group() {
+        // The shell does not `exec`. `sleep` inherits the pipe; killing only
+        // the shell used to return after the sleep, and left it running.
+        let program = install_tool(
+            "hang-fork",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nwait\n",
+            b"",
+        );
+        let settings = BakeSettings {
+            encoder: EncoderSource::Binary(program.clone()),
+            encoder_timeout: GROUP_TIMEOUT,
+            ..BakeSettings::new(cache_dir("hang-fork"))
+        };
+        let started = std::time::Instant::now();
+        let failure = bake_texture(&settings, &checker(), TextureRole::BaseColor);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= GROUP_TIMEOUT && elapsed < GROUP_RETURN_LIMIT,
+            "wrapper returned in {elapsed:?}, not near the {GROUP_TIMEOUT:?} deadline"
+        );
+        assert!(
+            matches!(failure, Err(BakeError::TimedOut { .. })),
+            "expected a timeout, got {failure:?}"
+        );
+        let pid = grandchild_pid(&program);
+        assert!(
+            !super::process::process_still_running(pid),
+            "grandchild {pid} was still running after the timeout"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_version_probe_with_a_background_child_times_out() {
+        // `-version` prints, backgrounds `sleep`, and exits 0. The sleep
+        // inherits the pipe; joining it used to ignore the deadline.
+        background_hold_times_out(
+            "hang-version-ok",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nsleep 30 &\necho $! > \"$0.pid\"\nexit 0\nfi\nexit 0\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_version_probe_with_a_background_child_times_out() {
+        // A non-zero exit is still a finished leader. The pipe hold must be
+        // `TimedOut`, not a hash-only identity.
+        background_hold_times_out(
+            "hang-version-fail",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nsleep 30 &\necho $! > \"$0.pid\"\nexit 3\nfi\nexit 0\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_encode_with_a_background_child_times_out() {
+        background_hold_times_out(
+            "hang-encode-ok",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nexit 0\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_encode_with_a_background_child_times_out() {
+        // Exit 3 must not be reported as `BakeError::Exit` while `sleep` lives.
+        background_hold_times_out(
+            "hang-encode-fail",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nprintf '%s\\n' 'fake-basisu 1'\nexit 0\nfi\nsleep 30 &\necho $! > \"$0.pid\"\nexit 3\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_slow_version_probe_keeps_its_full_text() {
+        // The line arrives inside the deadline. Readers must wait for it
+        // instead of returning a prefix that would change the cache key.
+        let program = install_tool(
+            "slow-version",
+            "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nsleep 0.2\nprintf '%s\\n' 'fake-basisu 1'\nprintf '%s\\n' 'slow-marker-end'\nexit 0\nfi\nexit 0\n",
+            b"",
+        );
+        let started = std::time::Instant::now();
+        let identity = super::identity::tool_identity(&program, GROUP_TIMEOUT).expect("version");
+        assert!(
+            started.elapsed() < GROUP_TIMEOUT,
+            "slow version took {:?}, past the deadline",
+            started.elapsed()
+        );
+        assert!(
+            identity.starts_with("fake-basisu 1\nslow-marker-end\n"),
+            "version text was truncated: {identity}"
+        );
+    }
+
+    /// `body` leaves a grandchild on the pipe. The bake must time out and kill it.
+    #[cfg(unix)]
+    fn background_hold_times_out(name: &str, body: &str) {
+        let program = install_tool(name, body, b"");
+        let settings = BakeSettings {
+            encoder: EncoderSource::Binary(program.clone()),
+            encoder_timeout: GROUP_TIMEOUT,
+            ..BakeSettings::new(cache_dir(name))
+        };
+        let started = std::time::Instant::now();
+        let failure = bake_texture(&settings, &checker(), TextureRole::BaseColor);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= GROUP_TIMEOUT && elapsed < GROUP_RETURN_LIMIT,
+            "{name} returned in {elapsed:?}, not near the {GROUP_TIMEOUT:?} deadline"
+        );
+        assert!(
+            matches!(failure, Err(BakeError::TimedOut { .. })),
+            "{name}: expected a timeout, got {failure:?}"
+        );
+        let pid = grandchild_pid(&program);
+        assert!(
+            !super::process::process_still_running(pid),
+            "{name}: grandchild {pid} was still running after the deadline"
+        );
+    }
+
+    /// Pid the wrapper wrote beside itself. A zombie counts as not running.
+    #[cfg(unix)]
+    fn grandchild_pid(program: &Path) -> u32 {
+        std::fs::read_to_string(format!("{}.pid", program.display()))
+            .expect("wrapper recorded the grandchild pid")
+            .trim()
+            .parse()
+            .expect("pid")
+    }
+
+    /// Whether the cache entry or either scratch file of `key` is still there.
+    #[cfg(unix)]
+    fn scratch_left(settings: &BakeSettings, key: &str) -> bool {
+        [OUTPUT_SUFFIX, SOURCE_SUFFIX, DUMP_SUFFIX]
+            .iter()
+            .any(|suffix| settings.cache_dir.join(format!("{key}{suffix}")).exists())
     }
 
     #[test]
@@ -1010,14 +1348,11 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     #[test]
     #[cfg(unix)]
     fn an_absolute_path_entry_is_canonicalized() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = test_root("path-hit");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         let program = dir.join("basisu");
-        std::fs::write(&program, b"#!/bin/sh\nexit 0\n").expect("tool");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(EXECUTABLE_BITS))
-            .expect("executable");
+        publish_script(&program, "#!/bin/sh\nexit 0\n");
         let listed = std::env::join_paths([Path::new("."), &dir]).expect("join");
         let found = first_absolute(&listed, "basisu").expect("absolute entry");
         assert_eq!(found, program.canonicalize().expect("canonical"));
@@ -1062,7 +1397,12 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
             Some(ornis_texture::TextureEncoding::Rgba8)
         );
         let again = bake_texture(&settings, &checker(), TextureRole::BaseColor).expect("cached");
-        assert_eq!(again.origin, BakeOrigin::Cached);
+        assert_eq!(
+            again.origin,
+            BakeOrigin::Downgraded,
+            "a cache hit must stay a downgrade"
+        );
+        assert_eq!(again.image.bytes(), baked.image.bytes());
         #[cfg(feature = "gltf")]
         {
             let settings = BakeSettings::new(cache_dir("empty-path-model"));
@@ -1071,9 +1411,21 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
             assert_eq!(stats.downgraded, 4);
             assert_eq!(stats.authored, 0);
             assert_eq!(stats.encoded, 0);
+            assert_eq!(stats.cached, 0);
             assert_eq!(stats.fallback, 0);
             assert_eq!(
                 stats.last_failure.as_deref(),
+                Some(super::model::DOWNGRADE_REASON)
+            );
+            // A reload re-imports the pixels and hits the cache. The downgrade
+            // is still the plan, so the counters stay visible.
+            let mut reloaded = textured_model();
+            let again = bake_model(&settings, &mut reloaded);
+            assert_eq!(again.downgraded, 4, "the second pass is still a downgrade");
+            assert_eq!(again.cached, 0);
+            assert_eq!(again.authored, 0);
+            assert_eq!(
+                again.last_failure.as_deref(),
                 Some(super::model::DOWNGRADE_REASON)
             );
         }
@@ -1101,7 +1453,7 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
             let settings = BakeSettings {
                 encoder: EncoderSource::Binary(program),
                 overrides: HashMap::from([(TextureRole::BaseColor, mode)]),
-                cache_dir: cache_dir(&format!("basis-{name}")),
+                ..BakeSettings::new(cache_dir(&format!("basis-{name}")))
             };
             let baked = bake_texture(&settings, &source, TextureRole::BaseColor).expect(name);
             assert_eq!(baked.origin, BakeOrigin::Encoded, "{name}");
@@ -1117,9 +1469,43 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_normal_map_basis_container_round_trips_through_the_bake() {
+        let source = gradient_png();
+        let bytes = include_bytes!("../../texture/tests/data/bake-normal-uastc.ktx2");
+        let program = fake_encoder("basis-normal", bytes);
+        let settings = BakeSettings {
+            encoder: EncoderSource::Binary(program),
+            ..BakeSettings::new(cache_dir("basis-normal"))
+        };
+        assert_eq!(settings.mode_of(TextureRole::Normal), BasisMode::Uastc);
+        let baked = bake_texture(&settings, &source, TextureRole::Normal).expect("normal");
+        assert_eq!(baked.origin, BakeOrigin::Encoded);
+        assert_eq!(
+            baked.image.encoding(),
+            None,
+            "normal UASTC is Basis, not RGBA8"
+        );
+        let levels = baked
+            .image
+            .transcode(ornis_texture::TextureEncoding::Rgba8)
+            .expect("transcode");
+        assert_eq!(
+            levels.levels().len(),
+            source.width.max(source.height).ilog2() as usize + 1
+        );
+        assert_level0_close(
+            &levels.levels()[0],
+            &source.pixels,
+            NORMAL_UASTC_LEVEL0_TOLERANCE,
+            "normal uastc",
+        );
+    }
+
+    #[test]
     fn a_configured_basisu_is_deterministic_when_present() {
         let Ok(program) = std::env::var("ORNIS_BASISU") else {
-            eprintln!("ORNIS_BASISU is unset; the real encoder round trip was not run");
+            note_skipped_real_encoder();
             return;
         };
         let program = PathBuf::from(program);
@@ -1161,6 +1547,203 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         );
     }
 
+    /// Tells the operator the live `basisu` check did not run.
+    fn note_skipped_real_encoder() {
+        eprintln!("ORNIS_BASISU is unset; the real encoder round trip was not run");
+    }
+
+    /// `-version` stdout. Uses the same spawn as the bake, including the
+    /// `ETXTBSY` retry: a raw `Command::output` of a just-written script fails
+    /// under parallel fork load.
+    #[cfg(unix)]
+    fn printed_version(program: &Path) -> String {
+        let output = super::process::run_timed(
+            program,
+            &[std::ffi::OsString::from("-version")],
+            super::DEFAULT_ENCODER_TIMEOUT,
+        )
+        .expect("spawn version");
+        assert!(output.status.success(), "version probe failed: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn same_version_text_with_different_bytes_misses_the_cache() {
+        let payload = encode_rgba8_ktx2(&checker(), TextureRole::BaseColor).expect("encodes");
+        let source = checker();
+        // The marker is a comment after the shebang, so both scripts exec.
+        let body = |marker: &str| {
+            format!(
+                "#!/bin/sh\n# {marker}\n{}",
+                r#"if [ "$1" = "-version" ]; then
+    printf '%s\n' 'fake-basisu 1'
+    exit 0
+fi
+exit 0
+"#
+            )
+        };
+        let alpha = install_tool("id-a", &body("alpha"), &payload);
+        let beta = install_tool("id-b", &body("beta"), &payload);
+        assert!(
+            std::fs::read_to_string(&alpha)
+                .expect("script")
+                .starts_with("#!/bin/sh\n"),
+            "the shebang has to be the first line"
+        );
+        assert_eq!(printed_version(&alpha), "fake-basisu 1");
+        assert_eq!(printed_version(&beta), "fake-basisu 1");
+        let key_alpha = key_of(
+            &binary_at(&cache_dir("id-a"), alpha),
+            &source,
+            TextureRole::BaseColor,
+        );
+        let key_beta = key_of(
+            &binary_at(&cache_dir("id-b"), beta),
+            &source,
+            TextureRole::BaseColor,
+        );
+        assert_ne!(
+            key_alpha, key_beta,
+            "two builds that print the same version must not share a key"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_version_probe_runs_the_tool_once() {
+        let payload = encode_rgba8_ktx2(&checker(), TextureRole::BaseColor).expect("encodes");
+        let program = silent_encoder("once", &payload, "once");
+        let _ = key_of(
+            &binary_at(&cache_dir("once"), program.clone()),
+            &checker(),
+            TextureRole::BaseColor,
+        );
+        let version_calls = invocations(&program)
+            .into_iter()
+            .filter(|line| line == "-version")
+            .count();
+        assert_eq!(version_calls, 1, "a failed -version is not spawned again");
+    }
+
+    #[test]
+    fn a_cache_entry_is_published_by_rename() {
+        let settings = in_process("atomic");
+        let source = checker();
+        let baked = bake_texture(&settings, &source, TextureRole::BaseColor).expect("bakes");
+        let key = key_of(&settings, &source, TextureRole::BaseColor);
+        let path = cached_entry(&settings, &key);
+        #[cfg(unix)]
+        let before = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path).expect("entry").ino()
+        };
+        super::cache::store_cached(&settings, &key, baked.image.bytes()).expect("republish");
+        assert_eq!(std::fs::read(&path).expect("entry"), baked.image.bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_ne!(
+                std::fs::metadata(&path).expect("entry").ino(),
+                before,
+                "replacing the entry must be a new inode, not an in-place write"
+            );
+        }
+        let temps: Vec<_> = std::fs::read_dir(&settings.cache_dir)
+            .expect("cache dir")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(temps.is_empty(), "publish leftover: {temps:?}");
+    }
+
+    #[test]
+    fn concurrent_cache_writes_do_not_share_a_temp_file() {
+        let settings = in_process("concurrent-publish");
+        let key = "same";
+        let left = b"left-payload";
+        let right = b"right-payload";
+        std::thread::scope(|scope| {
+            let one = scope.spawn(|| super::cache::store_cached(&settings, key, left));
+            let two = scope.spawn(|| super::cache::store_cached(&settings, key, right));
+            one.join().expect("thread").expect("left publish");
+            two.join().expect("thread").expect("right publish");
+        });
+        let path = cached_entry(&settings, key);
+        let got = std::fs::read(&path).expect("entry");
+        assert!(got.as_slice() == left || got.as_slice() == right, "{got:?}");
+        assert!(temp_files(&settings).is_empty(), "publish leftover");
+    }
+
+    #[test]
+    fn a_failed_cache_rename_removes_the_temp_file() {
+        let settings = in_process("rename-fail");
+        let key = "blocked";
+        let dest = cached_entry(&settings, key);
+        std::fs::create_dir_all(&dest).expect("destination is a directory");
+        let error = super::cache::store_cached(&settings, key, b"bytes");
+        assert!(
+            matches!(error, Err(BakeError::Io { .. })),
+            "expected a rename failure, got {error:?}"
+        );
+        assert!(
+            temp_files(&settings).is_empty(),
+            "a failed rename leaves no temp file"
+        );
+    }
+
+    /// Cache file of `key`.
+    fn cached_entry(settings: &BakeSettings, key: &str) -> PathBuf {
+        settings.cache_dir.join(format!("{key}{OUTPUT_SUFFIX}"))
+    }
+
+    /// Temp files still sitting in the cache directory.
+    fn temp_files(settings: &BakeSettings) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&settings.cache_dir)
+            .expect("cache dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.to_string_lossy().ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn accumulated_stats_keep_an_earlier_downgrade() {
+        let mut total = BakeStats::default();
+        total.accumulate(BakeStats {
+            downgraded: 4,
+            last_failure: Some("no basisu".into()),
+            ..BakeStats::default()
+        });
+        total.accumulate(BakeStats {
+            cached: 1,
+            ..BakeStats::default()
+        });
+        assert_eq!(total.downgraded, 4);
+        assert_eq!(total.cached, 1);
+        assert_eq!(total.last_failure.as_deref(), Some("no basisu"));
+        total.accumulate(BakeStats {
+            fallback: 1,
+            last_failure: Some("encoder failed".into()),
+            ..BakeStats::default()
+        });
+        assert_eq!(total.fallback, 1);
+        assert_eq!(total.downgraded, 4);
+        assert_eq!(total.last_failure.as_deref(), Some("encoder failed"));
+        total.accumulate(BakeStats {
+            downgraded: 1,
+            last_failure: Some("no basisu".into()),
+            ..BakeStats::default()
+        });
+        assert_eq!(total.downgraded, 5);
+        assert_eq!(
+            total.last_failure.as_deref(),
+            Some("encoder failed"),
+            "a later downgrade must not hide a failed slot"
+        );
+    }
+
     /// Settings that write with the in-process RGBA8 writer into `dir`.
     fn in_process_at(dir: &Path) -> BakeSettings {
         BakeSettings {
@@ -1182,13 +1765,7 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     /// `marker` is a comment, so two otherwise identical tools hash apart.
     #[cfg(unix)]
     fn silent_encoder(name: &str, payload: &[u8], marker: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt as _;
-        let program = fake_encoder(name, payload);
-        let body = SILENT_BODY.replace("@@MARKER@@", marker);
-        std::fs::write(&program, body).expect("silent tool");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(EXECUTABLE_BITS))
-            .expect("executable");
-        program
+        install_tool(name, &SILENT_BODY.replace("@@MARKER@@", marker), payload)
     }
 
     #[test]

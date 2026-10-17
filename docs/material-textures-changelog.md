@@ -74,3 +74,16 @@ Additive: nothing existing changed meaning, and every new behaviour is opt-in.
   tool identity and the role's pinned flags, so that RGBA8 entry is not reused
   once `basisu` is available. Colour space is pinned per role (`-srgb` /
   `-linear` / `-normal_map -mip_renorm`).
+- Follow-up to #136: a `PATH` downgrade stays `BakeOrigin::Downgraded` on a
+  cache hit, so `bake_stats` still reports it on the next import. The tool
+  identity mixes `-version` with a hash of the binary. Encoder processes time
+  out (`BakeError::TimedOut`, default 120s) and are killed; on Unix that kill
+  is `kill(-pid, SIGKILL)` on the child's process group (`rustix`, Unix-only
+  dependency). After the child exits, pipe readers are joined through EOF
+  until that same deadline (any exit status), so a grandchild holding a
+  pipe cannot stall import or put a truncated `-version` into the cache key.
+  The short join bound applies only after a timeout. Cache temp names are
+  unique per call, not only per process.
+  Cache entries are
+  published with `rename`. `AssetServer::bake_stats` sums every model write
+  instead of keeping only the last one.

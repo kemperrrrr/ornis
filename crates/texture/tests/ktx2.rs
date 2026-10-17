@@ -124,12 +124,85 @@ fn authored_rgba_levels_are_not_regenerated_or_recolored() {
     assert_eq!(result.levels()[1], [0, 255, 0, 255]);
 }
 
-// Write spec-shaped native containers with each format's own DFD and physical
-// block alignment, rather than relabeling the Basis DFD's channel layout. The
-// writer is the crate's own (it also backs the offline bake), so this also
-// pins that its containers survive the reader used in production.
+// Independent of `ornis_texture::ktx2_container`: a header taken from a real
+// Basis file, then a per-format DFD from `ktx2::dfd`. The reader tests must
+// not be fed by the same writer they are checking.
 fn native_container(format: ktx2::Format, edge: u32, levels: &[Vec<u8>]) -> Vec<u8> {
-    ornis_texture::ktx2_container(format, edge, edge, levels).expect("container writes")
+    const DFD_LENGTH_PREFIX: usize = 4;
+    const LEVEL_ALIGNMENT: usize = 16;
+    let mut header = ktx2::Reader::new(UASTC).unwrap().header();
+    header.format = Some(format);
+    header.pixel_width = edge;
+    header.pixel_height = edge;
+    header.level_count = levels.len() as u32;
+    header.supercompression_scheme = None;
+    let (basic, _) = ktx2::dfd::Basic::from_format(format).unwrap();
+    let dfd = ktx2::dfd::Block::Basic(basic).to_vec();
+    let dfd_offset = ktx2::Header::LENGTH + levels.len() * ktx2::LevelIndex::LENGTH;
+    header.index = ktx2::Index {
+        dfd_byte_offset: dfd_offset as u32,
+        dfd_byte_length: (DFD_LENGTH_PREFIX + dfd.len()) as u32,
+        kvd_byte_offset: 0,
+        kvd_byte_length: 0,
+        sgd_byte_offset: 0,
+        sgd_byte_length: 0,
+    };
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.resize(dfd_offset, 0);
+    bytes.extend_from_slice(&header.index.dfd_byte_length.to_le_bytes());
+    bytes.extend_from_slice(&dfd);
+    for (i, level) in levels.iter().enumerate().rev() {
+        bytes.resize(bytes.len().next_multiple_of(LEVEL_ALIGNMENT), 0);
+        let entry = ktx2::LevelIndex {
+            byte_offset: bytes.len() as u64,
+            byte_length: level.len() as u64,
+            uncompressed_byte_length: level.len() as u64,
+        };
+        let at = ktx2::Header::LENGTH + i * ktx2::LevelIndex::LENGTH;
+        bytes[at..at + ktx2::LevelIndex::LENGTH].copy_from_slice(&entry.as_bytes());
+        bytes.extend_from_slice(level);
+    }
+    bytes
+}
+
+#[test]
+fn the_independent_container_agrees_with_the_crate_writer_on_levels() {
+    let levels = [vec![7u8; 16], vec![9, 8, 7, 6]];
+    let format = ktx2::Format::R8G8B8A8_SRGB;
+    let independent = native_container(format, 2, &levels);
+    let written = ornis_texture::ktx2_container(format, 2, 2, &levels).expect("writer");
+    let oracle = Ktx2Image::from_bytes(independent).unwrap();
+    let crate_writer = Ktx2Image::from_bytes(written).unwrap();
+    assert_eq!(oracle.encoding(), Some(E::Rgba8));
+    assert_eq!(
+        oracle.transcode(E::Rgba8).unwrap().levels(),
+        crate_writer.transcode(E::Rgba8).unwrap().levels()
+    );
+    assert_eq!(
+        ktx2::Reader::new(oracle.bytes())
+            .unwrap()
+            .transfer_function(),
+        Some(ktx2::TransferFunction::SRGB)
+    );
+}
+
+#[test]
+fn bake_fixtures_declare_srgb_for_albedo_and_linear_for_normals() {
+    let srgb = ktx2::Reader::new(include_bytes!("data/bake-uastc.ktx2")).unwrap();
+    let linear = ktx2::Reader::new(include_bytes!("data/bake-normal-uastc.ktx2")).unwrap();
+    assert_eq!(srgb.transfer_function(), Some(ktx2::TransferFunction::SRGB));
+    assert_eq!(srgb.color_model(), Some(ktx2::ColorModel::UASTC));
+    assert_eq!(
+        linear.transfer_function(),
+        Some(ktx2::TransferFunction::Linear)
+    );
+    assert_eq!(linear.color_model(), Some(ktx2::ColorModel::UASTC));
+    let image =
+        Ktx2Image::from_bytes(include_bytes!("data/bake-normal-uastc.ktx2").as_slice()).unwrap();
+    assert_eq!(image.encoding(), None);
+    assert_eq!(image.dimensions(), (16, 16));
+    let levels = image.transcode(E::Rgba8).unwrap();
+    assert_eq!(levels.levels().len(), 5, "16x16 keeps five authored levels");
 }
 
 #[test]

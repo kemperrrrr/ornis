@@ -2786,6 +2786,7 @@ dependencies = [
  "ornis-gltf",
  "ornis-texture",
  "ron",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

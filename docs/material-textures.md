@@ -170,10 +170,15 @@ levels, no runtime mip generation.
   not the source file bytes, so a re-encoded PNG with identical texels hits
   the same entry, and two primitives sharing an image share one bake. The
   producer is `rgba8-writer-v1` for the in-process RGBA8 writer, or the tool's
-  `-version` stdout (a content hash of the binary when that fails) plus the
-  pinned flags, excluding file paths. An RGBA8 fallback and a `basisu` run
+  `-version` stdout plus `bin:` and an FNV-1a digest of the binary (the digest
+  alone when `-version` fails) and the pinned flags, excluding file paths.
+  Version text alone would collide: two builds that both print `basisu 2.10.0`
+  (different commits, or SSE on versus off) must not share an entry. The digest
+  is a cache key, not a security hash. An RGBA8 fallback and a `basisu` run
   therefore never share an entry, and upgrading the tool or changing a flag
-  misses the old container instead of reusing it. `EncoderSource::Path`
+  misses the old container instead of reusing it. The entry is written to a
+  temporary file in the same directory and published with `rename`, so a reader
+  never observes a partial container. `EncoderSource::Path`
   resolves only absolute `PATH` entries and canonicalizes the file, so an
   empty or relative entry cannot change the key with the current directory.
   An entry that stops parsing as KTX2 counts as a miss.
@@ -206,7 +211,17 @@ levels, no runtime mip generation.
 
   `EncoderSource::Path` (the default) looks for `basisu` on absolute `PATH`
   entries, `EncoderSource::Binary` pins an exact tool, `EncoderSource::InProcess`
-  never spawns a process. Tool output is validated through `Ktx2Image::from_bytes`
+  never spawns a process. Each external process (`-version` and the encode) is
+  killed after `BakeSettings::encoder_timeout` (default two minutes,
+  `BakeError::TimedOut`). On Unix the child is its own process group and the
+  deadline sends `SIGKILL` to that group, so a wrapper that forks instead of
+  `exec` does not leave a grandchild holding the pipes. After the child
+  exits (any status), pipe readers are joined through EOF until that same
+  deadline, so a slow `-version` is not truncated into a different cache key.
+  A grandchild that still holds a pipe at the deadline is killed with the
+  group and the call is `TimedOut`; the partial output is not cached. After a timeout the readers are joined only for a
+  short bound, then detached. Off Unix only the direct child is killed; the
+  join bound still returns. Nothing from that run is cached. Tool output is validated through `Ktx2Image::from_bytes`
   (reader, DFD, level-length and dimension rules) *before* anything replaces
   the slot, and only the validated bytes are cached.
 - **No encoder is a visible downgrade, not the size goal.** Without a `basisu`
@@ -216,8 +231,11 @@ levels, no runtime mip generation.
   #129 compressed-size goal (the 4.00× / 8.00× figures above). An explicit
   `EncoderSource::InProcess` is `BakeOrigin::Authored`. A `PATH` lookup that
   finds nothing is `BakeOrigin::Downgraded`: `BakeStats::downgraded` counts
-  those slots and `BakeStats::last_failure` records the reason. The two
-  producers do not share a cache entry with a later `basisu` run.
+  those slots and `BakeStats::last_failure` records the reason. A later import
+  that hits the cache stays `Downgraded` (it is not reported as `Cached`), so
+  `bake_stats` still shows the downgrade and the reason. An explicit
+  `InProcess` hit stays `Cached`. The two producers do not share a cache entry
+  with a later `basisu` run.
 - **The source stays.** A failed bake (missing pinned tool, non-zero exit,
   unparsable output) returns a typed `BakeError`; `bake_model` keeps the decoded
   PNG/JPEG pixels of that slot and counts it in `BakeStats::fallback`, with the
@@ -230,6 +248,10 @@ let id = server.load_gltf_file(path)?;
 let stats = server.bake_stats(); // encoded / cached / authored / downgraded / fallback
 ```
 
+`bake_stats()` sums every model import and reload on that server. A later
+model does not clear an earlier downgrade or fallback. `last_failure` keeps
+the first reason unless a later pass has a failed slot, which replaces it.
+
 The bake is import-time and lives on `AssetServer` (feature `gltf`): every
 model written through `store`/`insert_at`, including `reload`, bakes its decoded
 slots when a policy is set and is untouched when it is not. A slot already
@@ -240,18 +262,22 @@ holding KTX2 (`KHR_texture_basisu`) keeps the container the file authored.
 - `crates/texture/src/encode.rs` — round trip through the reader for all four
   roles, role/transfer-function pairing, determinism, invalid sources,
   rectangular chains, unknown formats rejected instead of guessed.
-- `crates/texture/tests/ktx2.rs` — `native_container` is now the crate's own
-  writer, so every existing native-format expectation (BC1/BC3/BC7/ASTC/ETC2/
-  RGBA8 chains, mip preservation, rejection paths) also exercises the writer
-  against the production reader.
+- `crates/texture/tests/ktx2.rs` — `native_container` is again an independent
+  writer (a real Basis header plus a per-format DFD), so the native-format
+  expectations are not fed by `ktx2_container`. A separate test checks that
+  writer agrees with the oracle on level bytes. The bake fixtures assert sRGB
+  for albedo UASTC and linear for the normal-map UASTC.
 - `crates/assets/src/bake.rs` — role defaults and overrides, cache hits per
-  (content, role, producer), byte-level determinism, pinned CLI flags for every
-  role and codec plus TGA bytes via a stub encoder, a committed ETC1S/UASTC
-  round trip, the `ORNIS_BASISU` live-encoder check, non-zero exit reporting,
-  the model slot pass, fallback, and the counted RGBA8 downgrade.
-- `crates/texture/tests/data/bake-gradient.png` plus `bake-etc1s.ktx2` and
-  `bake-uastc.ktx2` — a 16×16 ramp encoded by basisu 2.10.0 with the pinned
-  BaseColor flags (see that directory's README).
+  (content, role, producer), the schema byte in the key, byte-level
+  determinism, pinned CLI flags for every role and codec plus TGA bytes via a
+  stub encoder, committed ETC1S/UASTC/normal-map round trips, the `ORNIS_BASISU`
+  live-encoder check (a visible skip when unset), non-zero exit reporting, a
+  killed hung encoder, atomic cache publish, the model slot pass, fallback,
+  and the counted RGBA8 downgrade on a cache hit as well as the first write.
+- `crates/texture/tests/data/bake-gradient.png` plus `bake-etc1s.ktx2`,
+  `bake-uastc.ktx2` and `bake-normal-uastc.ktx2` — a 16×16 ramp encoded by
+  basisu 2.10.0 (see that directory's README). The normal-map file uses
+  `-normal_map -linear`.
 - `crates/assets/src/server.rs` — a glTF with a PNG albedo keeps its decoded
   texels without a policy, and becomes a validated KTX2 chain with one.
 

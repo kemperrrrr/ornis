@@ -174,9 +174,9 @@ pub struct AssetServer {
     /// PNG/JPEG pixels ([`crate::bake`]).
     #[cfg(feature = "gltf")]
     texture_baking: Option<BakeSettings>,
-    /// Counters of the last implicit bake pass ([`AssetServer::bake_stats`]).
+    /// Cumulative bake counters ([`AssetServer::bake_stats`]).
     #[cfg(feature = "gltf")]
-    last_bake: BakeStats,
+    bake_totals: BakeStats,
 }
 
 impl Default for AssetServer {
@@ -209,7 +209,7 @@ impl AssetServer {
             #[cfg(feature = "gltf")]
             texture_baking: None,
             #[cfg(feature = "gltf")]
-            last_bake: BakeStats::default(),
+            bake_totals: BakeStats::default(),
         }
     }
 
@@ -232,11 +232,17 @@ impl AssetServer {
         self
     }
 
-    /// Counters of the last implicit bake pass, `Default` when none ran.
+    /// Cumulative counters of every implicit bake pass, `Default` when none ran.
+    ///
+    /// Each imported or reloaded model adds its pass. A later model does not
+    /// erase an earlier downgrade or fallback: those counts stay, and
+    /// [`BakeStats::last_failure`] keeps the first reason unless a later pass
+    /// has a failed slot, which replaces it. Read this after a batch of loads
+    /// to see every model's bake, not only the last one.
     #[cfg(feature = "gltf")]
     // qual:api — host-facing diagnostics; in-tree callers are the unit tests.
     pub fn bake_stats(&self) -> &BakeStats {
-        &self.last_bake
+        &self.bake_totals
     }
 
     /// The extension → importer registry.
@@ -539,7 +545,7 @@ impl AssetServer {
         let Some(policy) = self.texture_baking.as_ref() else {
             return;
         };
-        self.last_bake = crate::bake::bake_model(policy, model);
+        crate::bake::record_bake(&mut self.bake_totals, policy, model);
     }
 
     /// Writes (or overwrites) every storage lane of `id`.
@@ -941,6 +947,13 @@ mod tests {
         let id = server.load_gltf(json.as_bytes()).expect("loads");
         assert_eq!(server.bake_stats().authored, 1);
         assert_eq!(server.bake_stats().fallback, 0);
+        // A second model shares the cache. The first pass's `authored` count
+        // stays; overwriting `bake_stats` with only the new pass would zero it.
+        let second = server.load_gltf(json.as_bytes()).expect("loads again");
+        assert_ne!(second, id);
+        assert_eq!(server.bake_stats().authored, 1);
+        assert_eq!(server.bake_stats().cached, 1);
+        assert_eq!(server.bake_stats().downgraded, 0);
         let slot = albedo(&server, id);
         let TextureImage::Ktx2(container) = slot else {
             panic!("expected a baked slot, got {slot:?}");

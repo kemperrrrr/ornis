@@ -116,20 +116,19 @@ impl EncodePlan {
 ///
 /// # Errors
 ///
-/// [`BakeError::Spawn`] when a configured binary can neither print `-version`
-/// nor be read for the content-hash fallback. A missing `basisu` on `PATH` is
-/// not an error: the plan is the in-process writer with
-/// [`BakeOrigin::Downgraded`].
+/// [`BakeError::TimedOut`] when `-version` exceeds
+/// [`BakeSettings::encoder_timeout`]. [`BakeError::Spawn`] when a configured
+/// binary can neither be started nor be read for the content-hash fallback.
+/// A missing `basisu` on `PATH` is not an error: the plan is the in-process
+/// writer with [`BakeOrigin::Downgraded`].
 pub(super) fn plan(settings: &BakeSettings, role: TextureRole) -> Result<EncodePlan, BakeError> {
     match &settings.encoder {
         EncoderSource::InProcess => Ok(writer_plan(BakeOrigin::Authored)),
         EncoderSource::Path => match find_on_path(ENCODER_PROGRAM) {
-            Some(program) => tool_plan(program, role, settings.mode_of(role)),
+            Some(program) => tool_plan(program, role, settings),
             None => Ok(writer_plan(BakeOrigin::Downgraded)),
         },
-        EncoderSource::Binary(program) => {
-            tool_plan(canonical_or_keep(program), role, settings.mode_of(role))
-        }
+        EncoderSource::Binary(program) => tool_plan(canonical_or_keep(program), role, settings),
     }
 }
 
@@ -142,13 +141,14 @@ fn writer_plan(origin: BakeOrigin) -> EncodePlan {
     }
 }
 
-/// Tool plan: identity from `-version`, or a content hash when that fails.
+/// Tool plan: version text plus a hash of the binary, and the pinned flags.
 fn tool_plan(
     program: PathBuf,
     role: TextureRole,
-    mode: BasisMode,
+    settings: &BakeSettings,
 ) -> Result<EncodePlan, BakeError> {
-    let identity = tool_identity(&program)?;
+    let mode = settings.mode_of(role);
+    let identity = tool_identity(&program, settings.encoder_timeout)?;
     Ok(EncodePlan {
         program: Some(program),
         origin: BakeOrigin::Encoded,
@@ -208,6 +208,8 @@ pub(super) fn author(
 }
 
 /// One encoder run: pixel handoff, CLI call, validation, cache store.
+///
+/// Scratch files are removed on both success and failure, including a timeout.
 pub(super) fn encode_with_tool(
     settings: &BakeSettings,
     program: &Path,
@@ -219,26 +221,32 @@ pub(super) fn encode_with_tool(
     let source = cache_file(settings, key, SOURCE_SUFFIX);
     let dump = cache_file(settings, key, DUMP_SUFFIX);
     let args = basis_args(role, settings.mode_of(role), &source, &dump);
-    std::fs::write(&source, tga_bytes(image)).map_err(|error| io_error(&source, error))?;
-    run_encoder(program, args)?;
-    let container = read_container(settings, &dump, key)?;
-    cleanup(&source);
-    cleanup(&dump);
-    Ok(Baked {
-        image: container,
-        origin: BakeOrigin::Encoded,
-    })
+    let baked = (|| {
+        std::fs::write(&source, tga_bytes(image)).map_err(|error| io_error(&source, error))?;
+        run_encoder(program, args, settings.encoder_timeout)?;
+        let container = read_container(settings, &dump, key)?;
+        Ok(Baked {
+            image: container,
+            origin: BakeOrigin::Encoded,
+        })
+    })();
+    discard_scratch(&source, &dump);
+    baked
+}
+
+/// Removes the TGA handoff and the unvalidated tool output.
+fn discard_scratch(source: &Path, dump: &Path) {
+    cleanup(source);
+    cleanup(dump);
 }
 
 /// Runs the encoder once; a non-zero exit carries the tool's stderr tail.
-fn run_encoder(program: &Path, args: Vec<OsString>) -> Result<(), BakeError> {
-    let output = std::process::Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| BakeError::Spawn {
-            program: program.display().to_string(),
-            source: error,
-        })?;
+fn run_encoder(
+    program: &Path,
+    args: Vec<OsString>,
+    timeout: std::time::Duration,
+) -> Result<(), BakeError> {
+    let output = super::process::run_timed(program, &args, timeout)?;
     failure_of(program, &output)
 }
 
