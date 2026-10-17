@@ -6,6 +6,7 @@
 //! exact BRDF code the GPU runs.
 
 pub mod ao_generated;
+mod ao_gtao;
 pub mod bloom_generated;
 pub mod composite_generated;
 pub mod fog_generated;

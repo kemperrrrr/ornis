@@ -229,6 +229,7 @@ impl Renderer3D {
                     "ao_raw_tex" => Some(wgpu::BindingResource::TextureView(ao_raw)),
                     "blur_sampler" => Some(wgpu::BindingResource::Sampler(&self.ao_passes.sampler)),
                     "depth_tex" => Some(wgpu::BindingResource::TextureView(depth)),
+                    "camera" => Some(self.camera_buffer.as_entire_binding()),
                     "ao_params" => Some(wgpu::BindingResource::Buffer(
                         self.ao_passes.params_buffer.as_entire_buffer_binding(),
                     )),

@@ -69,7 +69,7 @@ pub mod transient_pool;
 
 pub use ao::{
     AoMethod, AoSettings, AoWiring, ao_from_sum, apply_ao_to_ambient, bilateral_blur_center,
-    bilateral_weight, gtao_sample, half_extent, ssao_sample,
+    bilateral_weight, gtao_falloff, gtao_sample, half_extent, linear_view_depth, ssao_sample,
 };
 pub use camera::{
     CameraView, OrbitCamera, camera_view_projection, install_orbit_camera, read_orbit_camera,

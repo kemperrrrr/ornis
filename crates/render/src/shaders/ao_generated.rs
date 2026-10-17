@@ -17,6 +17,7 @@
 //! linearized through `Camera::inv_view_proj` by the shared
 //! `reconstruct_world_pos`); normals decode from the octahedral layer.
 
+use super::ao_gtao::{AO_GTAO_BODY, AO_GTAO_HELPER};
 use super::helpers;
 use super::interface::HdrFragmentOut as QuadVertexOutput;
 use super::{
@@ -67,7 +68,7 @@ pub const AO_RAW_RESOURCES: [Resource; 4] = [
 const AO_RAW_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3];
 
 /// Resource layout of the bilateral blur pass.
-pub const AO_BLUR_RESOURCES: [Resource; 4] = [
+pub const AO_BLUR_RESOURCES: [Resource; 5] = [
     Resource {
         group: 0,
         binding: 0,
@@ -100,10 +101,18 @@ pub const AO_BLUR_RESOURCES: [Resource; 4] = [
         kind: ResourceKind::Uniform(AoUniform::WGSL_NAME),
         min_size: Some(std::mem::size_of::<AoUniform>() as u64),
     },
+    Resource {
+        group: 0,
+        binding: 4,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "camera",
+        kind: ResourceKind::Uniform(CameraUniform::WGSL_NAME),
+        min_size: None,
+    },
 ];
 
 /// Group-0 `@binding` indices the blur fragment stage declares.
-const AO_BLUR_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3];
+const AO_BLUR_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4];
 
 /// Depth and the octahedral normal stay per-sample at 4x (the normal must
 /// not go through the hardware box filter: a cleared texel is `(0, 0)`,
@@ -119,7 +128,7 @@ pub(crate) fn ao_per_sample_flag(sample_count: u32, keeps: bool) -> bool {
 }
 
 /// Shared prologue of both raw kernels: background early-out, normal
-/// decode, world-space center and tangent basis.
+/// decode, world-space center and view direction.
 const AO_PROLOGUE: &str = r#"
     let dims = vec2<f32>(textureDimensions(depth_tex));
     let coord = vec2<u32>(input.uv * dims);
@@ -130,8 +139,11 @@ const AO_PROLOGUE: &str = r#"
     let normal_enc = textureLoad(normal_tex, coord, 0);
     let n = octahedral_decode(normal_enc.rg);
     let center = reconstruct_world_pos(input.uv, depth, camera);
-    let to_eye = camera.camera_pos.xyz - center;
-    let dist = max(length(to_eye), EPS);
+"#;
+
+/// Normal-aligned tangent the SSAO hemisphere needs. Split from the
+/// prologue so the GTAO kernel does not carry an unused basis.
+const AO_SSAO_BASIS: &str = r#"
     let t = normalize(cross(n, vec3<f32>(0.0, 1.0, 0.0)) + vec3<f32>(0.0, 0.0, EPS));
     let b = cross(n, t);
 "#;
@@ -181,73 +193,45 @@ const AO_SSAO_BODY: &str = r#"
     return vec4<f32>(ao, ao, ao, 1.0);
 "#;
 
-/// GTAO body: 2 perpendicular slices × 4 marched steps; each step records
-/// the highest range-weighted elevation above the tangent plane, and the
-/// slice mean maps to the factor (the [`crate::ao::gtao_sample`] curve).
-const AO_GTAO_BODY: &str = r#"
-    let slice_base = ao_interleaved_gradient(coord) * 3.14159265359;
-    var horizon_sum = 0.0;
-    for (var s = 0u; s < 2u; s = s + 1u) {
-        let phi = slice_base + f32(s) * 1.57079632679;
-        let slice_dir = normalize(t * cos(phi) + b * sin(phi));
-        var horizon = 0.0;
-        for (var j = 1u; j <= 4u; j = j + 1u) {
-            let step_r = ao_params.radius * f32(j) / 4.0;
-            let probe = center + slice_dir * step_r + n * (ao_params.radius * 0.1);
-            let clip = camera.view_proj * vec4<f32>(probe, 1.0);
-            let ndc = clip.xyz / max(clip.w, EPS);
-            if (ndc.z > 1.0) {
-                continue;
-            }
-            let suv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-            if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) {
-                continue;
-            }
-            let sdepth = textureLoad(depth_tex, vec2<u32>(suv * dims), 0);
-            if (sdepth >= CLEAR_DEPTH) {
-                continue;
-            }
-            let sample_pos = reconstruct_world_pos(suv, sdepth, camera);
-            let w = sample_pos - center;
-            let r = length(w);
-            if (r > EPS && r < ao_params.radius) {
-                let elevation = dot(w / r, n) * (1.0 - r / ao_params.radius);
-                horizon = max(horizon, elevation);
-            }
-        }
-        horizon_sum += clamp(horizon, 0.0, 1.0);
-    }
-    let ao = clamp(1.0 - (horizon_sum / 2.0) * ao_params.intensity, 0.0, 1.0);
-    return vec4<f32>(ao, ao, ao, 1.0);
+/// Eye distance in meters. Raw NDC is not a depth the bilateral sigma
+/// (meters) can see; this is the GPU form of [`crate::ao::linear_view_depth`].
+const AO_BLUR_HELPER: &str = r#"
+fn ao_linear_depth(uv: vec2<f32>, depth: f32, camera: Camera) -> f32 {
+    let world = reconstruct_world_pos(uv, depth, camera);
+    return length(camera.camera_pos.xyz - world);
+}
 "#;
 
 /// Bilateral blur body: 4-tap cross over the half-res raw factor, weighted
-/// by the full-res depth step (the [`crate::ao::bilateral_weight`] curve),
-/// so occlusion never bleeds over silhouette edges.
+/// by the metric eye-distance step (the [`crate::ao::bilateral_weight`]
+/// curve), so occlusion never bleeds over silhouette edges.
 const AO_BLUR_BODY: &str = r#"
     let raw = textureSampleLevel(ao_raw_tex, blur_sampler, input.uv, 0.0).r;
-    let dims = vec2<f32>(textureDimensions(depth_tex));
-    let center_depth = textureLoad(depth_tex, vec2<u32>(input.uv * dims), 0);
+    let dims_u = textureDimensions(depth_tex);
+    let dims = vec2<f32>(dims_u);
+    let center_coord = min(vec2<u32>(input.uv * dims), dims_u - vec2<u32>(1u));
+    let center_z = ao_linear_depth(input.uv, textureLoad(depth_tex, center_coord, 0), camera);
     let texel = 1.0 / vec2<f32>(textureDimensions(ao_raw_tex));
     let sigma = max(ao_params.blur_sigma, EPS);
     var acc = raw;
     var weight = 1.0;
-    let off0 = vec2<f32>(1.5, 0.0) * texel;
-    let w0 = exp(-pow((center_depth - textureLoad(depth_tex, vec2<u32>((input.uv + off0) * dims), 0)) / sigma, 2.0));
-    acc += textureSampleLevel(ao_raw_tex, blur_sampler, input.uv + off0, 0.0).r * w0;
-    weight += w0;
-    let off1 = vec2<f32>(-1.5, 0.0) * texel;
-    let w1 = exp(-pow((center_depth - textureLoad(depth_tex, vec2<u32>((input.uv + off1) * dims), 0)) / sigma, 2.0));
-    acc += textureSampleLevel(ao_raw_tex, blur_sampler, input.uv + off1, 0.0).r * w1;
-    weight += w1;
-    let off2 = vec2<f32>(0.0, 1.5) * texel;
-    let w2 = exp(-pow((center_depth - textureLoad(depth_tex, vec2<u32>((input.uv + off2) * dims), 0)) / sigma, 2.0));
-    acc += textureSampleLevel(ao_raw_tex, blur_sampler, input.uv + off2, 0.0).r * w2;
-    weight += w2;
-    let off3 = vec2<f32>(0.0, -1.5) * texel;
-    let w3 = exp(-pow((center_depth - textureLoad(depth_tex, vec2<u32>((input.uv + off3) * dims), 0)) / sigma, 2.0));
-    acc += textureSampleLevel(ao_raw_tex, blur_sampler, input.uv + off3, 0.0).r * w3;
-    weight += w3;
+    let offsets = array<vec2<f32>, 4>(
+        vec2<f32>(1.5, 0.0),
+        vec2<f32>(-1.5, 0.0),
+        vec2<f32>(0.0, 1.5),
+        vec2<f32>(0.0, -1.5),
+    );
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let off = offsets[i] * texel;
+        let sample_uv = input.uv + off;
+        let clamped = clamp(sample_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+        let sample_coord = min(vec2<u32>(clamped * dims), dims_u - vec2<u32>(1u));
+        let sample_z = ao_linear_depth(sample_uv, textureLoad(depth_tex, sample_coord, 0), camera);
+        let delta = (center_z - sample_z) / sigma;
+        let w = exp(-delta * delta);
+        acc += textureSampleLevel(ao_raw_tex, blur_sampler, sample_uv, 0.0).r * w;
+        weight += w;
+    }
     let ao = acc / weight;
     return vec4<f32>(ao, ao, ao, 1.0);
 "#;
@@ -270,16 +254,18 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> QuadVertexOutput {
 }
 "#;
 
-/// Raw fragment entry for `method`: prologue plus the kernel body.
+/// Raw fragment entry for `method`: prologue, the SSAO tangent basis when
+/// that kernel is selected, and the kernel body.
 fn ao_raw_entry(method: crate::ao::AoMethod) -> String {
-    let body = if method.is_ssao() {
-        AO_SSAO_BODY
+    let (basis, body) = if method.is_ssao() {
+        (AO_SSAO_BASIS, AO_SSAO_BODY)
     } else {
-        AO_GTAO_BODY
+        ("", AO_GTAO_BODY)
     };
     format!(
-        "@fragment\nfn fs_main(input: QuadVertexOutput) -> @location(0) vec4<f32> {{{prologue}{body}}}\n",
+        "@fragment\nfn fs_main(input: QuadVertexOutput) -> @location(0) vec4<f32> {{{prologue}{basis}{body}}}\n",
         prologue = AO_PROLOGUE,
+        basis = basis,
         body = body,
     )
 }
@@ -297,7 +283,7 @@ fn ao_blur_entry() -> String {
 /// the multisampled types (both stay per-sample: depth has no resolve
 /// target and the normal must not go through the hardware box filter).
 pub fn wgsl_source_raw_for_samples(method: crate::ao::AoMethod, sample_count: u32) -> String {
-    ShaderModule::new()
+    let module = ShaderModule::new()
         .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
         .decl(wgsl_decl(AoUniform::WGSL_SOURCE))
         .resources_where(&AO_RAW_RESOURCES, AO_RAW_FRAGMENT_BINDINGS, |r| {
@@ -308,9 +294,13 @@ pub fn wgsl_source_raw_for_samples(method: crate::ao::AoMethod, sample_count: u3
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helper(helpers::wgsl_consts())
         .helper(helpers::wgsl_lighting_decode())
-        .helper(AO_HASH_HELPER)
-        .entry(ao_raw_entry(method))
-        .emit()
+        .helper(AO_HASH_HELPER);
+    let module = if method.is_ssao() {
+        module
+    } else {
+        module.helper(AO_GTAO_HELPER)
+    };
+    module.entry(ao_raw_entry(method)).emit()
 }
 
 /// Full WGSL source for the AO raw fragment stage (single-sample).
@@ -330,7 +320,7 @@ pub fn wgsl_source_blur() -> String {
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helper(helpers::wgsl_consts())
         .helper(helpers::wgsl_lighting_decode())
-        .helper(AO_HASH_HELPER)
+        .helper(AO_BLUR_HELPER)
         .entry(ao_blur_entry())
         .emit()
 }
@@ -401,11 +391,26 @@ mod tests {
         assert!(ssao.contains("i < 8u"), "ssao taps: {ssao}");
         assert!(!ssao.contains("horizon"), "ssao must not horizon-march");
         let gtao = wgsl_source_raw(AoMethod::Gtao);
-        assert!(gtao.contains("horizon"), "{gtao}");
+        assert!(gtao.contains("horizon_cos_pos"), "{gtao}");
+        assert!(gtao.contains("horizon_cos_neg"), "both slice sides: {gtao}");
         assert!(gtao.contains("slice_dir"), "{gtao}");
         assert!(gtao.contains("s < 2u"), "gtao slices: {gtao}");
         assert!(gtao.contains("j <= 4u"), "gtao steps: {gtao}");
+        assert!(gtao.contains("fn gtao_arc("), "{gtao}");
+        assert!(
+            gtao.contains("0.25 * (-cos(2.0 * h - n) + cos(n) + 2.0 * h * sin(n))"),
+            "XeGTAO integral: {gtao}"
+        );
+        assert!(
+            gtao.contains("1.0 - r / max(radius, EPS)"),
+            "radius falloff: {gtao}"
+        );
+        assert!(gtao.contains("input.uv - off"), "negative horizon: {gtao}");
         assert!(!gtao.contains("ao_params.bias"), "gtao needs no depth bias");
+        assert!(
+            !ssao.contains("gtao_arc"),
+            "ssao must not integrate horizons"
+        );
     }
 
     #[test]
@@ -414,7 +419,16 @@ mod tests {
         assert!(blur.contains("ao_raw_tex"), "{blur}");
         assert!(blur.contains("blur_sampler"), "{blur}");
         assert!(blur.contains("ao_params.blur_sigma"), "{blur}");
-        assert!(blur.contains("exp("), "{blur}");
+        assert!(blur.contains("exp(-delta * delta)"), "{blur}");
+        assert!(blur.contains("fn ao_linear_depth("), "{blur}");
+        assert!(
+            blur.contains("reconstruct_world_pos(uv, depth, camera)"),
+            "blur must linearize through inv_view_proj, not raw NDC: {blur}"
+        );
+        assert!(
+            !blur.contains("center_depth - textureLoad"),
+            "raw NDC difference must not weight the blur: {blur}"
+        );
     }
 
     #[test]
@@ -430,7 +444,7 @@ mod tests {
             let e = bgl_entry(&r, false);
             assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
         }
-        assert_eq!(AO_BLUR_RESOURCES.len(), 4);
+        assert_eq!(AO_BLUR_RESOURCES.len(), 5);
         for r in AO_BLUR_RESOURCES {
             assert!(
                 wgsl_source_blur().contains(&resource_decl(&r)),

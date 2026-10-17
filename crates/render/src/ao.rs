@@ -6,12 +6,14 @@
 //! (bilateral) blur; the blurred factor modulates only the ambient and IBL
 //! terms of the deferred lighting pass, never the direct lights.
 //!
-//! Two methods exist because they cover different platforms: GTAO (horizon
-//! search per slice) is the quality default on desktop GPUs, while the
-//! classic SSAO hemisphere kernel is the cheap fallback for weak adapters
-//! (mobile / software rasterizers) where the GTAO slice integration costs
-//! too much ALU per pixel. The CPU helpers below pin the response-curve
-//! shape both GPU kernels must follow (flat = 1, corner < 1, range [0, 1]).
+//! Two methods exist because they cover different platforms: GTAO (XeGTAO /
+//! Bevy 0.14 slice integral — both horizons, cosine-weighted arc) is the
+//! quality default on desktop GPUs, while the classic SSAO hemisphere kernel
+//! is the cheap fallback for weak adapters (mobile / software rasterizers)
+//! where the GTAO slice integration costs too much ALU per pixel. The CPU
+//! helpers below pin the response-curve shape both GPU kernels must follow
+//! (flat = 1, corner < 1, range [0, 1]). The bilateral weight takes meters,
+//! never raw NDC depth.
 
 use ornis_core::units::{Clamped01, PositiveF32};
 
@@ -140,11 +142,67 @@ pub fn ssao_sample(center: f32, sample: f32, radius: f32, bias: f32) -> f32 {
     (separation / radius).clamp(0.0, 1.0)
 }
 
-/// GTAO response of one horizon elevation: `elevation` is the cosine of the
-/// highest sample above the tangent plane in `[0, 1]` (0 = flat horizon).
-/// Output in `[0, 1]`.
-pub fn gtao_sample(elevation: f32) -> f32 {
-    elevation.clamp(0.0, 1.0)
+/// Visibility of one GTAO slice, in `[0, 1]` (`1` = open hemisphere).
+///
+/// `horizon_pos` and `horizon_neg` are the two horizon angles in radians
+/// (the `+` side and the `−` side of the slice). `normal_angle` is the
+/// signed angle of the normal projected onto the slice plane.
+/// `projected_len` is that projected normal's length. Each side is the
+/// XeGTAO cosine-weighted integral
+/// `¼ (−cos(2h − n) + cos n + 2h sin n)` (Jimenez 2016; Intel XeGTAO;
+/// Bevy 0.14 `gtao.wgsl`). The GPU kernel spells the same expression in
+/// `gtao_arc`. An open hemisphere (`±π/2`, normal along the view, length 1)
+/// returns 1; non-finite inputs return 1 so a broken sample cannot black
+/// the pixel.
+pub fn gtao_sample(
+    horizon_pos: f32,
+    horizon_neg: f32,
+    normal_angle: f32,
+    projected_len: f32,
+) -> f32 {
+    if !horizon_pos.is_finite()
+        || !horizon_neg.is_finite()
+        || !normal_angle.is_finite()
+        || !projected_len.is_finite()
+    {
+        return 1.0;
+    }
+    let n = normal_angle;
+    let quarter = 1.0 / (2.0 + 2.0);
+    let mut acc = 0.0;
+    for horizon in [horizon_pos, horizon_neg] {
+        acc += quarter * (-(2.0 * horizon - n).cos() + n.cos() + 2.0 * horizon * n.sin());
+    }
+    (projected_len * acc).clamp(0.0, 1.0)
+}
+
+/// Range weight of one GTAO horizon sample: `1` at the center, `0` at
+/// `radius` and beyond. A hit past the effect radius must not close the
+/// horizon (the GPU `1.0 - r / radius` term).
+pub fn gtao_falloff(distance: f32, radius: f32) -> f32 {
+    if !distance.is_finite() || !(radius.is_finite() && radius > 0.0) {
+        return 0.0;
+    }
+    (1.0 - distance / radius).clamp(0.0, 1.0)
+}
+
+/// Positive view-space depth in meters from a DirectX NDC depth.
+///
+/// `ndc` is `0` at the near plane and `1` at the far plane (the g-buffer
+/// convention). The closed form is `near * far / (far − ndc * (far − near))`.
+/// Raw NDC is not meters: feeding it to a meter blur sigma collapses the
+/// weight to ~1 across a real depth step. The GPU blur reconstructs the
+/// hit through `inv_view_proj` and uses the eye distance, which equals this
+/// value on the optical axis and stays metric for every projection.
+pub fn linear_view_depth(ndc: f32, near: f32, far: f32) -> f32 {
+    if !(ndc.is_finite() && near.is_finite() && far.is_finite()) || near <= 0.0 || far <= near {
+        return 0.0;
+    }
+    let denom = far - ndc * (far - near);
+    if !denom.is_finite() || denom.abs() <= f32::EPSILON {
+        return far;
+    }
+    (near * far / denom).max(0.0)
 }
 
 /// Occlusion factor from accumulated taps: `occluded` is the summed
@@ -217,8 +275,13 @@ mod tests {
         }
         assert_eq!(occluded, 0.0);
         assert_eq!(ao_from_sum(occluded, 8, 1.0), 1.0);
-        assert_eq!(gtao_sample(0.0), 0.0);
-        assert_eq!(ao_from_sum(gtao_sample(0.0), 1, 1.0), 1.0);
+        let open = gtao_sample(
+            std::f32::consts::FRAC_PI_2,
+            -std::f32::consts::FRAC_PI_2,
+            0.0,
+            1.0,
+        );
+        assert!((open - 1.0).abs() < 1.0e-5, "open hemisphere {open}");
     }
 
     #[test]
@@ -232,8 +295,11 @@ mod tests {
         }
         let ssao = ao_from_sum(occluded, taps.len() as u32, 1.0);
         assert!(ssao < 1.0 && ssao > 0.0, "ssao {ssao}");
-        let gtao = ao_from_sum(gtao_sample(0.6), 1, 1.0);
-        assert!(gtao < 1.0 && gtao > 0.0, "gtao {gtao}");
+        // Horizons closed onto the view: the slice integral goes to 0.
+        let gtao = gtao_sample(0.0, 0.0, 0.0, 1.0);
+        assert!(gtao < 1.0e-5, "gtao {gtao}");
+        let partial = gtao_sample(std::f32::consts::FRAC_PI_2, 0.0, 0.0, 1.0);
+        assert!(partial > 0.4 && partial < 0.6, "one-sided {partial}");
     }
 
     #[test]
@@ -247,9 +313,15 @@ mod tests {
                 assert!((0.0..=1.0).contains(&ao), "ao {ao}");
             }
         }
-        for elevation in [-1.0, 0.0, 0.5, 1.0, 2.0] {
-            assert!((0.0..=1.0).contains(&gtao_sample(elevation)));
+        for horizon in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+            let vis = gtao_sample(horizon, -horizon, 0.0, 1.0);
+            assert!((0.0..=1.0).contains(&vis), "gtao {vis}");
         }
+        assert_eq!(gtao_sample(f32::NAN, 0.0, 0.0, 1.0), 1.0);
+        assert_eq!(gtao_falloff(0.0, 0.5), 1.0);
+        assert_eq!(gtao_falloff(0.5, 0.5), 0.0);
+        assert_eq!(gtao_falloff(2.0, 0.5), 0.0);
+        assert_eq!(gtao_falloff(0.25, 0.0), 0.0);
         // Degenerate inputs occlude nothing instead of NaN.
         assert_eq!(ssao_sample(f32::NAN, 1.0, 0.5, 0.025), 0.0);
         assert_eq!(ssao_sample(1.0, 1.0, 0.0, 0.025), 0.0);
@@ -273,6 +345,68 @@ mod tests {
         let far = bilateral_weight(2.0, 5.0, 0.1);
         assert_eq!(near, 1.0);
         assert!(far < 1.0e-3, "far {far}");
+    }
+
+    #[test]
+    fn bilateral_step_stays_on_its_surface() {
+        // Wall at 1 m (occluded) in front of a background at 5 m.
+        // Sigma is 0.1 m: the far texel must not pick up the wall.
+        const WALL_M: f32 = 1.0;
+        const BACKGROUND_M: f32 = 5.0;
+        const NEAR_AO: f32 = 0.2;
+        const FAR_AO: f32 = 1.0;
+        let kept = bilateral_blur_center(
+            FAR_AO,
+            BACKGROUND_M,
+            &[(NEAR_AO, WALL_M)],
+            DEFAULT_AO_BLUR_SIGMA,
+        );
+        // All-weights-1 (the NDC bug, and a box blur) pulls the wall across.
+        let boxed = (FAR_AO + NEAR_AO) / 2.0;
+        assert!(kept > 0.99, "depth-aware blur bled: {kept}");
+        assert!(
+            boxed < 0.7,
+            "box reference is not dark enough to falsify weights=1: {boxed}"
+        );
+        let weight = bilateral_weight(BACKGROUND_M, WALL_M, DEFAULT_AO_BLUR_SIGMA);
+        assert!(weight < 1.0e-6, "meter step still weighted {weight}");
+    }
+
+    #[test]
+    fn raw_ndc_is_not_a_meter_depth() {
+        // DirectX NDC of a 1 m / 5 m step (near 0.1, far 100) differs by
+        // ~0.08, so a 0.1 m sigma still weights it heavily. Linearized, the
+        // weight is ~0. A 2 m step farther out (10 m vs 12 m) disappears
+        // in NDC (weight ~1) and is rejected in meters.
+        const NEAR: f32 = 0.1;
+        const FAR: f32 = 100.0;
+        let wall = linear_view_depth(ndc_of(1.0, NEAR, FAR), NEAR, FAR);
+        let background = linear_view_depth(ndc_of(5.0, NEAR, FAR), NEAR, FAR);
+        assert!((wall - 1.0).abs() < 1.0e-3, "wall {wall}");
+        assert!((background - 5.0).abs() < 1.0e-3, "background {background}");
+        let ndc_weight = bilateral_weight(
+            ndc_of(5.0, NEAR, FAR),
+            ndc_of(1.0, NEAR, FAR),
+            DEFAULT_AO_BLUR_SIGMA,
+        );
+        let metric = bilateral_weight(background, wall, DEFAULT_AO_BLUR_SIGMA);
+        assert!(ndc_weight > 0.5, "ndc weight {ndc_weight}");
+        assert!(metric < 1.0e-6, "metric weight {metric}");
+        let far_ndc = bilateral_weight(
+            ndc_of(12.0, NEAR, FAR),
+            ndc_of(10.0, NEAR, FAR),
+            DEFAULT_AO_BLUR_SIGMA,
+        );
+        let far_metric = bilateral_weight(12.0, 10.0, DEFAULT_AO_BLUR_SIGMA);
+        assert!(far_ndc > 0.99, "far ndc weight {far_ndc}");
+        assert!(far_metric < 1.0e-6, "far metric weight {far_metric}");
+        assert_eq!(linear_view_depth(f32::NAN, NEAR, FAR), 0.0);
+        assert_eq!(linear_view_depth(0.5, FAR, NEAR), 0.0);
+    }
+
+    /// DirectX NDC of a positive view distance (inverse of [`linear_view_depth`]).
+    fn ndc_of(view_z: f32, near: f32, far: f32) -> f32 {
+        far * (view_z - near) / (view_z * (far - near))
     }
 
     #[test]
