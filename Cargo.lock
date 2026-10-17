@@ -2781,6 +2781,7 @@ name = "ornis-assets"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "image",
  "ornis-core",
  "ornis-gltf",
  "ornis-texture",

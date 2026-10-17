@@ -29,5 +29,9 @@ gltf = ["dep:ornis-gltf"]
 # `AssetError::UnsupportedFormat` (no parser, no new dependencies yet).
 fbx = []
 
+[dev-dependencies]
+# Reads the committed bake-gradient PNG in the Basis round-trip tests.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [lints]
 workspace = true

@@ -5,6 +5,13 @@ use ornis_texture::{CpuImage, TextureImage, TextureRole};
 
 use super::{BakeError, BakeOrigin, BakeSettings, BakeStats, Baked, bake_texture};
 
+/// Why [`BakeOrigin::Downgraded`] was chosen.
+///
+/// Recorded in [`BakeStats::last_failure`] so a `PATH` miss is visible. The
+/// slot is still a valid RGBA8 container; this is not [`BakeStats::fallback`].
+pub(super) const DOWNGRADE_REASON: &str =
+    "no basisu on PATH; wrote RGBA8 KTX2, which does not meet the compressed-size goal";
+
 /// Material slots [`bake_model`] bakes, in upload order.
 pub(super) const BAKED_ROLES: [TextureRole; 4] = [
     TextureRole::BaseColor,
@@ -86,5 +93,14 @@ fn count_origin(stats: &mut BakeStats, origin: BakeOrigin) {
         BakeOrigin::Cached => stats.cached += 1,
         BakeOrigin::Encoded => stats.encoded += 1,
         BakeOrigin::Authored => stats.authored += 1,
+        BakeOrigin::Downgraded => count_downgrade(stats),
+    }
+}
+
+/// Counts one RGBA8 fallback and records why, unless a harder failure is set.
+fn count_downgrade(stats: &mut BakeStats) {
+    stats.downgraded += 1;
+    if stats.last_failure.is_none() {
+        stats.last_failure = Some(DOWNGRADE_REASON.to_string());
     }
 }

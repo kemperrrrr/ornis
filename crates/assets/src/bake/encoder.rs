@@ -2,10 +2,12 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 use ornis_texture::{CpuImage, Ktx2Image, TextureRole, encode_rgba8_ktx2};
 
-use super::cache::{cache_file, cleanup, ensure_dir, io_error, store_cached};
+use super::cache::{Producer, cache_file, cleanup, ensure_dir, fnv_hex, io_error, store_cached};
 use super::{BakeError, BakeOrigin, BakeSettings, Baked, BasisMode, EncoderSource};
 
 /// Reference encoder program, discovered on `PATH` when none is configured.
@@ -20,14 +22,39 @@ pub(super) const SOURCE_SUFFIX: &str = ".tga";
 /// Suffix of the container the encoder writes, before validation.
 pub(super) const DUMP_SUFFIX: &str = ".tool.ktx2";
 
-/// Flags of every encoder run: KTX2 output with a generated mip chain.
-const FIXED_FLAGS: [&str; 3] = ["-ktx2", "-mipmap", "-output_file"];
+/// Container flags of every encoder run, before the output path.
+const CONTAINER_FLAGS: [&str; 2] = ["-ktx2", "-mipmap"];
+
+/// Flag that names the container the tool must write.
+const OUTPUT_FLAG: &str = "-output_file";
 
 /// UASTC effort level, spelled out instead of relying on a tool default.
 const UASTC_LEVEL: &str = "2";
 
 /// ETC1S quality level, likewise spelled out (the tool's own default).
 const ETC1S_QUALITY: &str = "128";
+
+/// UASTC codec flags, with the effort pinned explicitly.
+const UASTC_FLAGS: [&str; 3] = ["-uastc", "-uastc_level", UASTC_LEVEL];
+
+/// ETC1S codec flags, with the quality pinned explicitly.
+const ETC1S_FLAGS: [&str; 3] = ["-etc1s", "-q", ETC1S_QUALITY];
+
+/// Mip flags pinned so a tool default cannot move the chain.
+///
+/// `kaiser` is the reference tool's own default kernel. It is not the
+/// in-process area filter: the two writers must not be treated as the same
+/// chain, which is why the cache key records these flags.
+const MIP_FLAGS: [&str; 3] = ["-mip_clamp", "-mip_filter", "kaiser"];
+
+/// sRGB colour and mip filtering (albedo and emission).
+const SRGB_FLAGS: [&str; 2] = ["-srgb", "-mip_srgb"];
+
+/// Linear colour and mip filtering (ORM data).
+const LINEAR_FLAGS: [&str; 2] = ["-linear", "-mip_linear"];
+
+/// Linear metrics, linear mips and renormalized normal mips.
+const NORMAL_FLAGS: [&str; 4] = ["-normal_map", "-linear", "-mip_linear", "-mip_renorm"];
 
 /// Encoder stderr bytes kept in [`BakeError::Exit`].
 const STDERR_TAIL_BYTES: usize = 512;
@@ -59,25 +86,214 @@ const RED_CHANNEL: usize = 0;
 /// Blue channel offset of one RGBA texel.
 const BLUE_CHANNEL: usize = 2;
 
-/// Encoder binary to run, unless the policy keeps the bake in-process.
-pub(super) fn encoder(settings: &BakeSettings) -> Option<PathBuf> {
-    match &settings.encoder {
-        EncoderSource::InProcess => None,
-        EncoderSource::Path => find_on_path(ENCODER_PROGRAM),
-        EncoderSource::Binary(program) => Some(program.clone()),
+/// Argument the tool prints its version for.
+const VERSION_FLAG: &str = "-version";
+
+/// Identity of one encoder binary, remembered for the process.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct IdentityStamp {
+    /// Canonical program path.
+    path: PathBuf,
+    /// `mtime` when the platform reports one.
+    modified: Option<SystemTime>,
+    /// File length, so a same-timestamp rewrite still misses.
+    len: u64,
+}
+
+/// Versions already read, keyed by [`IdentityStamp`].
+static IDENTITIES: LazyLock<Mutex<std::collections::HashMap<IdentityStamp, String>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// How a fresh bake will be produced, and the producer mixed into its key.
+pub(super) struct EncodePlan {
+    /// Tool to spawn, when the plan is not the in-process writer.
+    program: Option<PathBuf>,
+    /// Origin recorded when this plan writes a new container.
+    origin: BakeOrigin,
+    /// Producer half of the cache key.
+    producer: Producer,
+}
+
+impl EncodePlan {
+    /// Producer mixed into the cache key of this plan.
+    pub(super) fn producer(&self) -> &Producer {
+        &self.producer
+    }
+
+    /// Tool path, when this plan spawns one.
+    pub(super) fn program(&self) -> Option<&Path> {
+        self.program.as_deref()
+    }
+
+    /// Origin of a container this plan writes itself.
+    pub(super) fn origin(&self) -> BakeOrigin {
+        self.origin
     }
 }
 
-/// First `program` entry of the executable search path, if any.
-fn find_on_path(program: &str) -> Option<PathBuf> {
-    std::env::var_os(PATH_VARIABLE).and_then(|path| first_entry(&path, program))
+/// Resolves `settings` into a writer or a tool, including the cache producer.
+///
+/// # Errors
+///
+/// [`BakeError::Spawn`] when a configured binary can neither print `-version`
+/// nor be read for the content-hash fallback. A missing `basisu` on `PATH` is
+/// not an error: the plan is the in-process writer with
+/// [`BakeOrigin::Downgraded`].
+pub(super) fn plan(settings: &BakeSettings, role: TextureRole) -> Result<EncodePlan, BakeError> {
+    match &settings.encoder {
+        EncoderSource::InProcess => Ok(writer_plan(BakeOrigin::Authored)),
+        EncoderSource::Path => match find_on_path(ENCODER_PROGRAM) {
+            Some(program) => tool_plan(program, role, settings.mode_of(role)),
+            None => Ok(writer_plan(BakeOrigin::Downgraded)),
+        },
+        EncoderSource::Binary(program) => {
+            tool_plan(canonical_or_keep(program), role, settings.mode_of(role))
+        }
+    }
 }
 
-/// First existing file named `program` in `path`.
-fn first_entry(path: &OsStr, program: &str) -> Option<PathBuf> {
-    std::env::split_paths(path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
+/// In-process writer plan. The producer tag does not depend on `origin`.
+fn writer_plan(origin: BakeOrigin) -> EncodePlan {
+    EncodePlan {
+        program: None,
+        origin,
+        producer: Producer::InProcess,
+    }
+}
+
+/// Tool plan: identity from `-version`, or a content hash when that fails.
+fn tool_plan(
+    program: PathBuf,
+    role: TextureRole,
+    mode: BasisMode,
+) -> Result<EncodePlan, BakeError> {
+    let identity = tool_identity(&program)?;
+    Ok(EncodePlan {
+        program: Some(program),
+        origin: BakeOrigin::Encoded,
+        producer: Producer::Tool {
+            identity,
+            flags: pinned_flag_text(role, mode),
+        },
+    })
+}
+
+/// First existing `basisu` on an absolute `PATH` entry, canonicalized.
+fn find_on_path(program: &str) -> Option<PathBuf> {
+    std::env::var_os(PATH_VARIABLE).and_then(|path| first_absolute(&path, program))
+}
+
+/// First `program` file in an absolute directory of `path`.
+///
+/// Empty and relative entries are absent, so the result does not depend on
+/// the process's current directory.
+pub(super) fn first_absolute(path: &OsStr, program: &str) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|directory| absolute_file(&directory, program))
+}
+
+/// Canonical `directory/program` when `directory` is absolute and the file exists.
+fn absolute_file(directory: &Path, program: &str) -> Option<PathBuf> {
+    if !directory.is_absolute() {
+        return None;
+    }
+    let candidate = directory.join(program);
+    if candidate.is_file() {
+        candidate.canonicalize().ok()
+    } else {
+        None
+    }
+}
+
+/// Canonical path when the file exists, the original path otherwise.
+fn canonical_or_keep(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Tool identity: `-version` stdout, else a content hash of the binary.
+fn tool_identity(program: &Path) -> Result<String, BakeError> {
+    if let Some(hit) = remembered(program) {
+        return Ok(hit);
+    }
+    let identity = version_stdout(program)
+        .or_else(|| file_hash(program))
+        .ok_or_else(|| identity_failure(program))?;
+    remember(program, &identity);
+    Ok(identity)
+}
+
+/// Trimmed `-version` stdout, when the tool exits successfully with some.
+fn version_stdout(program: &Path) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .arg(VERSION_FLAG)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// `bin:` plus the FNV-1a digest of the tool's bytes.
+fn file_hash(program: &Path) -> Option<String> {
+    let bytes = std::fs::read(program).ok()?;
+    Some(format!("bin:{}", fnv_hex(&bytes)))
+}
+
+/// Failure reported when neither `-version` nor the content hash works.
+fn identity_failure(program: &Path) -> BakeError {
+    match std::process::Command::new(program)
+        .arg(VERSION_FLAG)
+        .output()
+    {
+        Err(source) => BakeError::Spawn {
+            program: program.display().to_string(),
+            source,
+        },
+        Ok(_) => match std::fs::read(program) {
+            Err(source) => io_error(program, source),
+            Ok(_) => BakeError::Exit {
+                program: program.display().to_string(),
+                code: 1,
+                stderr: "encoder -version produced no identity".to_string(),
+            },
+        },
+    }
+}
+
+/// Cached identity for `program`, when its stamp still matches.
+fn remembered(program: &Path) -> Option<String> {
+    let stamp = identity_stamp(program)?;
+    let guard = IDENTITIES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    guard.get(&stamp).cloned()
+}
+
+/// Stores `identity` under the current stamp of `program`.
+fn remember(program: &Path, identity: &str) {
+    let Some(stamp) = identity_stamp(program) else {
+        return;
+    };
+    let mut guard = IDENTITIES
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    guard.insert(stamp, identity.to_string());
+}
+
+/// Stamp of `program`, or `None` when the file cannot be stated.
+fn identity_stamp(program: &Path) -> Option<IdentityStamp> {
+    let meta = std::fs::metadata(program).ok()?;
+    Some(IdentityStamp {
+        path: program.to_path_buf(),
+        modified: meta.modified().ok(),
+        len: meta.len(),
+    })
 }
 
 /// In-process fallback: the authored mip chain, stored as RGBA8 blocks.
@@ -86,13 +302,14 @@ pub(super) fn author(
     image: &CpuImage,
     role: TextureRole,
     key: &str,
+    origin: BakeOrigin,
 ) -> Result<Baked, BakeError> {
     let bytes = encode_rgba8_ktx2(image, role)?;
     let container = Ktx2Image::from_bytes(bytes)?;
     store_cached(settings, key, container.bytes())?;
     Ok(Baked {
         image: container,
-        origin: BakeOrigin::Authored,
+        origin,
     })
 }
 
@@ -107,7 +324,7 @@ pub(super) fn encode_with_tool(
     ensure_dir(settings)?;
     let source = cache_file(settings, key, SOURCE_SUFFIX);
     let dump = cache_file(settings, key, DUMP_SUFFIX);
-    let args = basis_args(settings.mode_of(role), &source, &dump);
+    let args = basis_args(role, settings.mode_of(role), &source, &dump);
     std::fs::write(&source, tga_bytes(image)).map_err(|error| io_error(&source, error))?;
     run_encoder(program, args)?;
     let container = read_container(settings, &dump, key)?;
@@ -162,25 +379,53 @@ fn read_container(settings: &BakeSettings, dump: &Path, key: &str) -> Result<Ktx
     Ok(container)
 }
 
-/// Pinned argument vector for one encoder run.
+/// Pinned flags of one run, without the output path or the source path.
 ///
-/// The flags are the reference tool's documented names: KTX2 output with
-/// generated mips, the codec of `mode`, and an explicit effort or quality level
-/// so a bake cannot drift when a tool default changes. Only the codec is
-/// per-bake; everything else is fixed here.
-fn basis_args(mode: BasisMode, source: &Path, dump: &Path) -> Vec<OsString> {
-    let mut args: Vec<OsString> = FIXED_FLAGS.map(OsString::from).to_vec();
-    args.push(dump.into());
-    args.extend(mode_flags(mode));
+/// Colour space is per role: sRGB for albedo and emission, linear for ORM,
+/// and linear plus renormalized mips for normals. The codec and the mip
+/// kernel are pinned beside that, so a tool default cannot move the bake.
+pub(super) fn pinned_flags(role: TextureRole, mode: BasisMode) -> Vec<&'static str> {
+    let mut flags = Vec::new();
+    flags.extend(CONTAINER_FLAGS);
+    flags.extend(mode_flag_strs(mode));
+    flags.extend(role_flags(role));
+    flags.extend(MIP_FLAGS);
+    flags
+}
+
+/// Space-joined [`pinned_flags`], the flag half of a tool cache key.
+pub(super) fn pinned_flag_text(role: TextureRole, mode: BasisMode) -> String {
+    pinned_flags(role, mode).join(" ")
+}
+
+/// Pinned argument vector for one encoder run.
+fn basis_args(role: TextureRole, mode: BasisMode, source: &Path, dump: &Path) -> Vec<OsString> {
+    let mut args = Vec::new();
+    for (index, flag) in pinned_flags(role, mode).into_iter().enumerate() {
+        args.push(OsString::from(flag));
+        if index + 1 == CONTAINER_FLAGS.len() {
+            args.push(OsString::from(OUTPUT_FLAG));
+            args.push(dump.into());
+        }
+    }
     args.push(source.into());
     args
 }
 
-/// Codec flags of one bake mode, with the level pinned explicitly.
-fn mode_flags(mode: BasisMode) -> [OsString; 3] {
+/// Codec flags of one bake mode.
+fn mode_flag_strs(mode: BasisMode) -> &'static [&'static str] {
     match mode {
-        BasisMode::Uastc => ["-uastc", "-uastc_level", UASTC_LEVEL].map(OsString::from),
-        BasisMode::Etc1s => ["-etc1s", "-q", ETC1S_QUALITY].map(OsString::from),
+        BasisMode::Uastc => &UASTC_FLAGS,
+        BasisMode::Etc1s => &ETC1S_FLAGS,
+    }
+}
+
+/// Colour-space flags of one material role.
+fn role_flags(role: TextureRole) -> &'static [&'static str] {
+    match role {
+        TextureRole::BaseColor | TextureRole::Emissive => &SRGB_FLAGS,
+        TextureRole::MetallicRoughness => &LINEAR_FLAGS,
+        TextureRole::Normal => &NORMAL_FLAGS,
     }
 }
 

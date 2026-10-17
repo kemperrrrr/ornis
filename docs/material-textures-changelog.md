@@ -54,7 +54,11 @@ Additive: nothing existing changed meaning, and every new behaviour is opt-in.
   decoded PNG/JPEG pixels, mips generated at upload. With it, decoded material
   slots become validated KTX2 containers at import and reload time, and a slot
   whose bake fails keeps its decoded pixels instead of failing the import.
-- Compressed payloads need the reference `basisu` binary; with none on `PATH`
-  (or `EncoderSource::InProcess`) the bake degrades to the in-process RGBA8
-  chain. This is the same authored-mip behaviour as before plus a container, not
-  a loss: the compressed path is what reaches the documented 4.00× reduction.
+- Compressed payloads need the reference `basisu` binary. `EncoderSource::InProcess`
+  writes the in-process RGBA8 chain on purpose (`BakeOrigin::Authored`).
+  `EncoderSource::Path` with no `basisu` on an absolute `PATH` entry does the
+  same write but records `BakeOrigin::Downgraded` and `BakeStats::downgraded`:
+  RGBA8 does not meet the compressed-size goal. The cache key includes schema,
+  tool identity and the role's pinned flags, so that RGBA8 entry is not reused
+  once `basisu` is available. Colour space is pinned per role (`-srgb` /
+  `-linear` / `-normal_map -mip_renorm`).

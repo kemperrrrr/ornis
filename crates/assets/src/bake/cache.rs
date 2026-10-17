@@ -6,6 +6,26 @@ use ornis_texture::{CpuImage, Ktx2Image, TextureRole};
 
 use super::{BakeError, BakeOrigin, BakeSettings, Baked, BasisMode};
 
+/// Schema mixed into every cache key. Bump when the key's inputs change meaning.
+pub(super) const BAKE_SCHEMA: u32 = 1;
+
+/// Tag of the in-process RGBA8 writer. Stable for [`BAKE_SCHEMA`].
+pub(super) const RGBA8_WRITER_TAG: &str = "rgba8-writer-v1";
+
+/// Who produced (or would produce) the container stored under a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Producer {
+    /// The in-process RGBA8 writer ([`RGBA8_WRITER_TAG`]).
+    InProcess,
+    /// An external encoder: its identity text and the pinned flags, without paths.
+    Tool {
+        /// `-version` stdout, or `bin:` plus a content hash when that fails.
+        identity: String,
+        /// Pinned argv flags, excluding the source and output paths.
+        flags: String,
+    },
+}
+
 /// Cache file suffix (validated KTX2 containers).
 pub(super) const OUTPUT_SUFFIX: &str = ".ktx2";
 
@@ -19,14 +39,43 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 ///
 /// FNV-1a over the exact bytes: a cache key, not a security hash. A collision
 /// costs one stale container that still has to parse as KTX2 before it can
-/// reach the renderer.
-pub(super) fn cache_key(image: &CpuImage, role: TextureRole, mode: BasisMode) -> String {
+/// reach the renderer. The preimage is the schema, the role, the codec, the
+/// producer (in-process tag, or tool identity plus pinned flags) and the
+/// decoded pixels, so an RGBA8 fallback and a `basisu` run never share an entry.
+pub(super) fn cache_key(
+    image: &CpuImage,
+    role: TextureRole,
+    mode: BasisMode,
+    producer: &Producer,
+) -> String {
     let mut hash = ContentHash::new();
+    hash.write(&BAKE_SCHEMA.to_le_bytes());
     hash.write(role_tag(role));
     hash.write(mode_tag(mode));
+    write_producer(&mut hash, producer);
     hash.write(&image.width.to_le_bytes());
     hash.write(&image.height.to_le_bytes());
     hash.write(&image.pixels);
+    hash.hex()
+}
+
+/// Mixes `producer` into `hash`, with a separator so the halves cannot alias.
+fn write_producer(hash: &mut ContentHash, producer: &Producer) {
+    match producer {
+        Producer::InProcess => hash.write(RGBA8_WRITER_TAG.as_bytes()),
+        Producer::Tool { identity, flags } => {
+            hash.write(b"tool\0");
+            hash.write(identity.as_bytes());
+            hash.write(b"\0");
+            hash.write(flags.as_bytes());
+        }
+    }
+}
+
+/// Lowercase hex digest of `bytes` (the tool content-hash fallback).
+pub(super) fn fnv_hex(bytes: &[u8]) -> String {
+    let mut hash = ContentHash::new();
+    hash.write(bytes);
     hash.hex()
 }
 

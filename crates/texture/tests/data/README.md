@@ -28,3 +28,25 @@ Review-regression fixtures are derived from `uastc.ktx2` with the same license:
   selection must conservatively use RGBA8 and retain all authored levels.
 
 See also `docs/material-textures-changelog.md` for the import API migration.
+
+## Bake fixtures (issue #129)
+
+`bake-gradient.png` is a 16×16 RGBA8 ramp generated for the offline bake
+tests: red `40 + x*8`, green `30 + y*6`, blue `90 + x*2 + y`, alpha `210 + y`.
+`bake-etc1s.ktx2` and `bake-uastc.ktx2` are that PNG encoded by the reference
+`basisu` from Basis Universal tag `v2_1_0` (commit
+`45d5f41015eecd9570d5a3f89ab9cc0037a25063`). `basisu -version` reports
+`Basis Universal LDR/HDR GPU Texture Supercompression System v2.10.0`.
+
+Both commands are the pinned BaseColor argv (`-srgb -mip_srgb`, Kaiser mips,
+clamp). The build had SSE off, Zstandard on, OpenCL off.
+
+```text
+basisu -ktx2 -mipmap -output_file bake-etc1s.ktx2 -etc1s -q 128 -srgb -mip_srgb -mip_clamp -mip_filter kaiser bake-gradient.png
+basisu -ktx2 -mipmap -output_file bake-uastc.ktx2 -uastc -uastc_level 2 -srgb -mip_srgb -mip_clamp -mip_filter kaiser bake-gradient.png
+```
+
+Two runs of each command produced identical bytes. Transcoding level 0 back
+to RGBA8 stays within 22 per channel for ETC1S and 5 per channel for UASTC.
+These files are inputs to `ornis-assets` bake tests; they are not a second
+copy of the 40×40 corpus above.
