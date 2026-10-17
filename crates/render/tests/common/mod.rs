@@ -6,9 +6,9 @@
 //! exact `DUPLICATE` pair otherwise).
 //!
 //! Skip contract: [`HeadlessScene::new`] returns `None` when no wgpu
-//! adapter is available; the caller prints a SKIP note and returns, so
+//! adapter is available. [`adapter_or_skip`] prints the SKIP note, so
 //! the gate stays green on machines without GPU drivers (CI provides
-//! lavapipe).
+//! lavapipe). `ORNIS_REQUIRE_GPU=1` panics instead of skipping.
 
 /// Sized (non-square) render/readback helpers for the 320×180 gates.
 pub mod sized;
@@ -60,6 +60,25 @@ pub async fn request_device() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queu
     Some((adapter, device, queue))
 }
 
+/// Adapter triple, or `None` when the gate should skip.
+///
+/// `ORNIS_REQUIRE_GPU=1` (the CI `test` shard) panics instead of
+/// skipping: a missing adapter must not turn a GPU gate into a pass.
+/// An explicit `ORNIS_REQUIRE_GPU=0` keeps the skip.
+pub fn adapter_or_skip() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    let require_gpu = matches!(std::env::var("ORNIS_REQUIRE_GPU").as_deref(), Ok("1"));
+    match pollster::block_on(request_device()) {
+        Some(device) => Some(device),
+        None if require_gpu => {
+            panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
+        }
+        None => {
+            eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
+            None
+        }
+    }
+}
+
 fn surface_config() -> wgpu::SurfaceConfiguration {
     wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -77,7 +96,7 @@ fn surface_config() -> wgpu::SurfaceConfiguration {
 impl HeadlessScene {
     /// Creates the scene, or `None` when no adapter exists (skip).
     pub fn new() -> Option<Self> {
-        let (_, device, queue) = pollster::block_on(request_device())?;
+        let (_, device, queue) = adapter_or_skip()?;
         let renderer = Renderer3D::new(&device, &surface_config(), 1);
         let mesh = ornis_render::create_sphere(&device, 1.0, 16, 12);
 
@@ -122,17 +141,15 @@ impl HeadlessScene {
     }
 }
 
-/// Runs `gate` with a headless scene, or prints a skip note and returns
-/// when no adapter exists — the standard entry for the parity gates.
+/// Runs `gate` with a headless scene, or returns when no adapter exists.
+/// The skip note is printed by [`adapter_or_skip`].
 pub fn with_headless_scene<F>(gate: F)
 where
     F: FnOnce(&HeadlessScene),
 {
-    let Some(scene) = HeadlessScene::new() else {
-        eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
-        return;
-    };
-    gate(&scene);
+    if let Some(scene) = HeadlessScene::new() {
+        gate(&scene);
+    }
 }
 
 /// The sequential graph path over the shared scene — the reference

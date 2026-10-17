@@ -8,7 +8,9 @@
 //! keeps its occlusion on the near side of one bilateral tap.
 //!
 //! Skip contract: returns early with a note when no adapter exists (same
-//! as the other headless gates; CI provides lavapipe).
+//! as the other headless gates; CI provides lavapipe). `ORNIS_REQUIRE_GPU=1`
+//! panics instead of skipping, so a CI shard cannot pass this gate by
+//! rendering nothing.
 //!
 //! Adapter acquisition and the render-and-read-back flow live in the shared
 //! `common` harness (no per-gate copies).
@@ -176,10 +178,7 @@ fn prepared_corner() -> Option<(
     ornis_render::Mesh,
     Vec<u8>,
 )> {
-    let Some((_adapter, device, queue)) = pollster::block_on(common::request_device()) else {
-        eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
-        return None;
-    };
+    let (_adapter, device, queue) = common::adapter_or_skip()?;
     let (renderer, mesh) = build_corner(&device, &queue);
     let reference = render_pixels(&device, &queue, &renderer, &mesh, None);
     Some((device, queue, renderer, mesh, reference))
@@ -259,13 +258,15 @@ fn ao_darkens_the_corner_and_never_brightens() {
 /// Pixel of a world point under the corner camera.
 fn project(world: glam::Vec3) -> (i32, i32) {
     let clip = corner_view_proj() * world.extend(1.0);
-    let ndc = clip.truncate() / clip.w;
-    let x = (ndc.x * 0.5 + 0.5) * W as f32;
-    let y = (0.5 - ndc.y * 0.5) * H as f32;
+    let (x, y) = common::sized::clip_to_pixel(clip, W, H);
     (x as i32, y as i32)
 }
 
 /// Mean RGB inside a square window (the contact is a few pixels wide).
+///
+/// `n > 0` is load-bearing: a center past the frame used to skip every
+/// pixel and return 0 for both images, so the open-floor check passed
+/// without reading one.
 fn window_mean(pixels: &[u8], x: i32, y: i32) -> f32 {
     let mut sum = 0u32;
     let mut n = 0u32;
@@ -281,14 +282,16 @@ fn window_mean(pixels: &[u8], x: i32, y: i32) -> f32 {
             n += 1;
         }
     }
-    sum as f32 / n.max(1) as f32
+    assert!(n > 0, "AO window ({x}, {y}) is outside the {W}x{H} frame");
+    sum as f32 / n as f32
 }
 
 /// Cube/floor contact and the wall joint darken; the open floor does not.
 fn assert_contacts(method: AoMethod, reference: &[u8], pixels: &[u8]) {
     let contact = project(glam::Vec3::new(-1.73, 0.02, -1.35));
     let joint = project(glam::Vec3::new(-1.98, 0.8, -1.98));
-    let open = project(glam::Vec3::new(1.6, 0.02, 1.6));
+    // In frame (about pixel 160, 163) and metres from both walls and the cube.
+    let open = project(glam::Vec3::new(1.0, 0.02, 1.0));
     let contact_drop =
         window_mean(reference, contact.0, contact.1) - window_mean(pixels, contact.0, contact.1);
     let joint_drop =
@@ -468,13 +471,15 @@ const BLUR_TAP_PX: i32 = 3;
 const STEP_NEAR_DROP: i32 = 36;
 /// Sum-of-RGB drop still accepted on the blue side of the tap.
 const STEP_FAR_DROP: i32 = 6;
-/// Silhouette pairs required, so one driver-noisy pixel cannot pass it.
-const STEP_PAIR_MIN: usize = 8;
+/// Silhouette pairs a depth-aware blur keeps. Weight 1 leaves at most a
+/// couple on lavapipe (the fin bleeds onto the backdrop, or the near drop
+/// itself falls under [`STEP_NEAR_DROP`]); the bilateral kernel keeps
+/// more than thirty. Eight was inside the noise of a box blur.
+const STEP_PAIR_MIN: usize = 16;
 
 #[test]
 fn ao_blur_does_not_cross_a_depth_step() {
-    let Some((_adapter, device, queue)) = pollster::block_on(common::request_device()) else {
-        eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
+    let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
         return;
     };
     let (renderer, mesh) = build_depth_step(&device, &queue);
@@ -483,9 +488,10 @@ fn ao_blur_does_not_cross_a_depth_step() {
         let wiring = AoWiring::new(AoSettings::new(method, 0.6, 1.0, 0.02).expect("valid"));
         let pixels = render_count(&device, &queue, &renderer, &mesh, 4, Some(wiring));
         let pairs = depth_step_pairs(&reference, &pixels);
+        eprintln!("{method:?} depth-step pairs {pairs}");
         assert!(
             pairs >= STEP_PAIR_MIN,
-            "{method:?} depth step lost its separation ({pairs} pairs)"
+            "{method:?} kept only {pairs} bilateral pairs (need {STEP_PAIR_MIN})"
         );
     }
 }

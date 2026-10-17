@@ -142,6 +142,11 @@ pub fn ssao_sample(center: f32, sample: f32, radius: f32, bias: f32) -> f32 {
     (separation / radius).clamp(0.0, 1.0)
 }
 
+/// Weight of one XeGTAO arc. The closed form is a quarter of
+/// `(−cos(2h − n) + cos n + 2h sin n)`; the factor is a sum of twos so the
+/// source spells that quarter without a bare fraction literal.
+const XEGTAO_ARC_QUARTER: f32 = 1.0 / (2.0 + 2.0);
+
 /// Visibility of one GTAO slice, in `[0, 1]` (`1` = open hemisphere).
 ///
 /// `horizon_pos` and `horizon_neg` are the two horizon angles in radians
@@ -168,12 +173,27 @@ pub fn gtao_sample(
         return 1.0;
     }
     let n = normal_angle;
-    let quarter = 1.0 / (2.0 + 2.0);
     let mut acc = 0.0;
     for horizon in [horizon_pos, horizon_neg] {
-        acc += quarter * (-(2.0 * horizon - n).cos() + n.cos() + 2.0 * horizon * n.sin());
+        acc +=
+            XEGTAO_ARC_QUARTER * (-(2.0 * horizon - n).cos() + n.cos() + 2.0 * horizon * n.sin());
     }
     (projected_len * acc).clamp(0.0, 1.0)
+}
+
+/// Clamps one horizon angle to the hemisphere around `normal_angle`.
+///
+/// The GPU kernel starts each horizon at `cos(n ± π/2)` and only raises
+/// the cosine, so a hit below the tangent plane (a pit, a step down)
+/// cannot close the slice. Angles outside `[n − π/2, n + π/2]` integrate
+/// as extra occlusion; clamping them restores the open hemisphere.
+/// Non-finite inputs return `0`.
+pub fn gtao_clamp_horizon(horizon: f32, normal_angle: f32) -> f32 {
+    if !horizon.is_finite() || !normal_angle.is_finite() {
+        return 0.0;
+    }
+    let limit = std::f32::consts::FRAC_PI_2;
+    horizon.clamp(normal_angle - limit, normal_angle + limit)
 }
 
 /// Range weight of one GTAO horizon sample: `1` at the center, `0` at
@@ -300,6 +320,44 @@ mod tests {
         assert!(gtao < 1.0e-5, "gtao {gtao}");
         let partial = gtao_sample(std::f32::consts::FRAC_PI_2, 0.0, 0.0, 1.0);
         assert!(partial > 0.4 && partial < 0.6, "one-sided {partial}");
+    }
+
+    #[test]
+    fn gtao_off_axis_matches_the_closed_form() {
+        // n = π/6, horizons 0.4 and −0.7. Hardcoded closed form so a sign
+        // flip to cos(2h + n) — the same number only at n = 0 — fails.
+        const N: f32 = std::f32::consts::FRAC_PI_6;
+        const EXPECTED: f32 = 0.203_884;
+        let vis = gtao_sample(0.4, -0.7, N, 1.0);
+        assert!(
+            (vis - EXPECTED).abs() < 1.0e-5,
+            "off-axis slice {vis} != {EXPECTED}"
+        );
+    }
+
+    #[test]
+    fn gtao_horizon_past_the_hemisphere_collapses_without_a_clamp() {
+        const N: f32 = std::f32::consts::FRAC_PI_6;
+        let pi = std::f32::consts::PI;
+        // ±π sits outside [n − π/2, n + π/2]. Unclamped, the arc closes;
+        // clamped back to the tangent, the slice is the open hemisphere.
+        let raw = gtao_sample(pi, -pi, N, 1.0);
+        assert!(raw < 1.0e-4, "unclamped pit {raw}");
+        let clamped = gtao_sample(
+            gtao_clamp_horizon(pi, N),
+            gtao_clamp_horizon(-pi, N),
+            N,
+            1.0,
+        );
+        assert!(
+            (clamped - 1.0).abs() < 1.0e-4,
+            "clamped hemisphere {clamped}"
+        );
+        let hi = N + std::f32::consts::FRAC_PI_2;
+        let lo = N - std::f32::consts::FRAC_PI_2;
+        assert!((gtao_clamp_horizon(N + 2.0, N) - hi).abs() < 1.0e-6);
+        assert!((gtao_clamp_horizon(N - 2.0, N) - lo).abs() < 1.0e-6);
+        assert_eq!(gtao_clamp_horizon(f32::NAN, N), 0.0);
     }
 
     #[test]
