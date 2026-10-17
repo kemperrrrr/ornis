@@ -98,7 +98,8 @@ impl AaState {
 
     /// Whether the history buffer holds a resolved frame.
     pub(crate) fn history_valid(&self) -> bool {
-        self.history_valid.load(std::sync::atomic::Relaxed)
+        self.history_valid
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Marks the history buffer as holding a resolved frame.

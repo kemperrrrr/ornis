@@ -19,6 +19,7 @@ mod state;
 use super::{FULLSCREEN_QUAD_VERTS, Renderer3D, WgslStruct};
 use crate::antialias::{AntiAliasMode, EdgeFilterSettings, TaaSettings};
 use crate::shaders;
+pub(crate) use build::AaPipelines;
 use glam::Mat4;
 pub(crate) use state::AaState;
 
