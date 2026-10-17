@@ -946,6 +946,87 @@ mod tests {
         assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
     }
 
+    /// `true` when `field` is a vector swizzle (`xyzw` / `rgba`), not a member.
+    fn is_field_swizzle(field: &str) -> bool {
+        field.len() <= 4 && field.chars().all(|c| "xyzwrgba".contains(c))
+    }
+
+    /// Longest known root ending exactly at `before` (identifier boundary
+    /// on the left). A glued suffix (`lightingcsm`) is not that root.
+    fn longest_field_root<'a>(
+        before: &str,
+        roots: &[(&'a str, &'a [&'a str])],
+    ) -> Option<(&'a str, &'a [&'a str])> {
+        {
+            let mut hit: Option<(&str, &[&str])> = None;
+            for (key, fields) in roots {
+                let Some(prefix) = before.strip_suffix(key) else {
+                    continue;
+                };
+                if prefix
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                {
+                    continue;
+                }
+                if hit.is_none_or(|(prev, _)| key.len() > prev.len()) {
+                    hit = Some((*key, *fields));
+                }
+            }
+            hit
+        }
+    }
+
+    /// Step one `.` in `rest`. The bool is `true` when the dot was a
+    /// resolved field use (swizzles, unglued dots and numeric roots are
+    /// skipped). Panics with the entry index on a typo'd root or member.
+    fn resolve_next_field<'a>(
+        rest: &'a str,
+        roots: &[(&str, &[&str])],
+        entry_n: usize,
+    ) -> (&'a str, bool) {
+        {
+            let dot = rest.find('.').expect("caller checks for a dot");
+            let before = &rest[..dot];
+            let after = &rest[dot + 1..];
+            let field: String = after
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if field.is_empty() || is_field_swizzle(&field) {
+                return (after, false);
+            }
+            let Some((root, fields)) = longest_field_root(before, roots) else {
+                // A dot that follows `]`/`)`/whitespace never opens a
+                // field use (`arr[i].xyz` reports through its swizzle).
+                // Float literals (`0.0`) look like `root.field` to the
+                // scanner; numeric roots are never field uses.
+                let glued = before
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if !glued {
+                    return (after, false);
+                }
+                let numeric = before
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .any(|c| c.is_ascii_digit());
+                if numeric {
+                    return (after, false);
+                }
+                panic!("entry {entry_n}: unresolved root for `{field}`");
+            };
+            assert!(
+                fields.contains(&field.as_str()),
+                "entry {entry_n}: `{root}` has no field `{field}`"
+            );
+            (after, true)
+        }
+    }
+
     /// Every non-swizzle `root.field` use in translated entries resolves
     /// against a real definition: `camera`/`lighting`/`bloom_params`
     /// against their buffer layouts (`FIELD_NAMES`), `mat` against
@@ -966,10 +1047,6 @@ mod tests {
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
         };
-
-        fn is_swizzle(field: &str) -> bool {
-            field.len() <= 4 && field.chars().all(|c| "xyzwrgba".contains(c))
-        }
 
         // (translated entry source, input mirror fields, output mirror fields)
         struct Entry {
@@ -1067,66 +1144,10 @@ mod tests {
                 roots.push(("output", fields));
             }
             let mut rest = entry.src;
-            while let Some(dot) = rest.find('.') {
-                let before = &rest[..dot];
-                // Longest known prefix ending exactly at the dot
-                // (identifier boundary on the left), so nested paths
-                // like `lighting.csm.splits_lo` resolve level by level.
-                let mut hit: Option<(&str, &[&str])> = None;
-                for (key, fields) in roots.iter() {
-                    let Some(prefix) = before.strip_suffix(key) else {
-                        continue;
-                    };
-                    if prefix
-                        .chars()
-                        .next_back()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_')
-                    {
-                        continue;
-                    }
-                    if hit.is_none_or(|(prev, _)| key.len() > prev.len()) {
-                        hit = Some((key, fields));
-                    }
-                }
-                let after = &rest[dot + 1..];
-                let field: String = after
-                    .chars()
-                    .take_while(|c| c.is_alphanumeric() || *c == '_')
-                    .collect();
-                if field.is_empty() || is_swizzle(&field) {
-                    rest = after;
-                    continue;
-                }
-                let Some((root, fields)) = hit else {
-                    // A dot that follows `]`/`)`/whitespace never opens a
-                    // field use (`arr[i].xyz` reports through its swizzle).
-                    // Float literals (`0.0`) look like `root.field` to the
-                    // scanner; numeric roots are never field uses.
-                    let glued = before
-                        .chars()
-                        .next_back()
-                        .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                    if !glued {
-                        rest = after;
-                        continue;
-                    }
-                    let numeric = before
-                        .chars()
-                        .rev()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .any(|c| c.is_ascii_digit());
-                    if numeric {
-                        rest = after;
-                        continue;
-                    }
-                    panic!("entry {n}: unresolved root for `{field}`");
-                };
-                assert!(
-                    fields.contains(&field.as_str()),
-                    "entry {n}: `{root}` has no field `{field}`"
-                );
-                checked += 1;
-                rest = after;
+            while rest.find('.').is_some() {
+                let (next, counted) = resolve_next_field(rest, &roots, n);
+                rest = next;
+                checked += usize::from(counted);
             }
         }
         // Twelve entries, 151+ resolved uses today; fewer means the

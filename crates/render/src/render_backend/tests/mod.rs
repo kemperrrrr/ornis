@@ -5,6 +5,7 @@ use super::*;
 mod custom_mesh;
 mod golden;
 mod lights;
+mod shadows_csm;
 mod shadows_dir;
 mod shadows_point;
 mod shadows_spot;

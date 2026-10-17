@@ -30,6 +30,12 @@ pub const SHADOW_REF_BIAS: f32 = 0.001;
 /// the split. Small enough to keep the sharp near texels, wide enough
 /// to hide the resolution step between cascades.
 pub const CSM_BLEND_FRACTION: f32 = 0.08;
+/// `step` edge on a light's cascade count: at or above this, the light
+/// samples the CSM pool instead of the legacy single shadow map.
+pub const CSM_ACTIVE_EDGE: f32 = 0.5;
+/// Index of the last cascade. It is sampled once; every earlier cascade
+/// may blend into the next one.
+pub const CSM_LAST_CASCADE: u32 = 3;
 /// Single-precision 1/π, matching the former `0.31830988618` bit-wise.
 pub const INV_PI: f32 = std::f32::consts::FRAC_1_PI;
 /// Cleared g-buffer depth (far plane). A sample at this depth is background:
@@ -122,6 +128,7 @@ pub fn wgsl_consts() -> String {
         decl!(NDC_TO_UV_HALF),
         decl!(SHADOW_CUBE_NEAR),
         decl!(CSM_BLEND_FRACTION),
+        decl!(CSM_ACTIVE_EDGE),
         decl!(LIGHT_SELECTOR_SPLIT),
         decl!(SPECULAR_AA_VARIANCE),
         decl!(SPECULAR_AA_KERNEL_SCALE),
@@ -146,6 +153,7 @@ pub fn wgsl_consts() -> String {
         decl_u32!(SHADING_DEBUG_METALLIC),
         decl_u32!(SHADING_DEBUG_SHADOW),
         decl_u32!(SHADING_DEBUG_HEAT),
+        decl_u32!(CSM_LAST_CASCADE),
     ]
     .concat();
     format!("{floats}{ints}{}", msaa_samples_wgsl())
@@ -591,9 +599,74 @@ fn reconstruct_world_pos(uv: glam::Vec2, depth: f32, camera: Camera) -> glam::Ve
     return view.xyz / view.w;
 }
 
+/// Visibility of one world position in the cascaded shadow map (#121).
+///
+/// Splits are monotonic (`b0 ≤ b1 ≤ b2 ≤ b3 ≤ b4`), so the number of
+/// passed boundaries is the cascade the if-ladder used to assign.
+/// `mix` with a 0/1 selector is a bit-exact pick. The last cascade is
+/// sampled once; earlier cascades blend the top
+/// [`CSM_BLEND_FRACTION`] of their range into the next cascade.
+#[ornis_macros::wgsl_fn]
+fn csm_visibility(
+    world_pos: glam::Vec3,
+    cam_pos: glam::Vec3,
+    csm: Csm,
+    csm_tex: texture_depth_2d_array,
+    shadow_sampler: sampler_comparison,
+) -> f32 {
+    {
+        let view_depth = dot(world_pos - cam_pos, csm.view_fwd.xyz);
+        let b0 = csm.splits_lo.x;
+        let b1 = csm.splits_lo.y;
+        let b2 = csm.splits_lo.z;
+        let b3 = csm.splits_lo.w;
+        let b4 = csm.split_far;
+        let past_b1 = step(b1, view_depth);
+        let past_b2 = step(b2, view_depth);
+        let past_b3 = step(b3, view_depth);
+        let cascade = u32(past_b1 + past_b2 + past_b3);
+        let upper = mix(mix(mix(b1, b2, past_b1), b3, past_b2), b4, past_b3);
+        let lower = mix(mix(mix(b0, b1, past_b1), b2, past_b2), b3, past_b3);
+        let clip0 = csm.vps[cascade].cols * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        let ndc0 = clip0.xyz / clip0.w;
+        let uv0 = Vec2::new(
+            ndc0.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+            NDC_TO_UV_HALF - ndc0.y * NDC_TO_UV_HALF,
+        );
+        let mut vis = textureSampleCompare(
+            csm_tex,
+            shadow_sampler,
+            uv0,
+            i32(cascade),
+            ndc0.z - SHADOW_REF_BIAS,
+        );
+        if cascade < CSM_LAST_CASCADE {
+            let band = max((upper - lower) * CSM_BLEND_FRACTION, EPS);
+            let t = clamp((upper - view_depth) / band, 0.0, 1.0);
+            let next = cascade + 1u;
+            let clip1 = csm.vps[next].cols * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+            let ndc1 = clip1.xyz / clip1.w;
+            let uv1 = Vec2::new(
+                ndc1.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+                NDC_TO_UV_HALF - ndc1.y * NDC_TO_UV_HALF,
+            );
+            let vis1 = textureSampleCompare(
+                csm_tex,
+                shadow_sampler,
+                uv1,
+                i32(next),
+                ndc1.z - SHADOW_REF_BIAS,
+            );
+            vis = mix(vis1, vis, t);
+        }
+        return vis;
+    }
+}
+
 /// All shared evaluator sources concatenated (consts excluded).
 pub fn wgsl_shared_helpers() -> String {
     [
+        csm_visibility::wgsl_source(),
         specular_aa_roughness::wgsl_source(),
         sanitize_hdr::wgsl_source(),
         evaluate_base_specular::wgsl_source(),
@@ -630,6 +703,16 @@ mod tests {
         assert!(src.contains("dpdy("), "{src}");
         assert!(src.contains("SPECULAR_AA_VARIANCE"), "{src}");
         assert!(src.contains("SPECULAR_AA_KERNEL_CAP"), "{src}");
+    }
+
+    #[test]
+    fn csm_visibility_is_branchless_except_the_last_cascade() {
+        let src = csm_visibility::wgsl_source();
+        assert!(src.contains("fn csm_visibility("), "{src}");
+        assert!(src.contains("CSM_LAST_CASCADE"), "{src}");
+        assert!(src.contains("CSM_BLEND_FRACTION"), "{src}");
+        assert!(src.contains("textureSampleCompare("), "{src}");
+        assert!(!src.contains("cascade =="), "{src}");
     }
 
     #[test]

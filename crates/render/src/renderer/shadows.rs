@@ -272,6 +272,12 @@ fn unproject_ndc(inv_view_proj: glam::Mat4, ndc: [f32; 3]) -> Option<[f32; 3]> {
     Some((world.truncate() / world.w).to_array())
 }
 
+/// Components of one frustum-slice corner (`x`, `y`, `z`).
+const CORNER_LANES: usize = 3;
+
+/// Corners of a frustum slice: the near square and the far square.
+const FRUSTUM_CORNERS: usize = 8;
+
 /// World-space corners of a camera-frustum slice (CSM, #121).
 ///
 /// Unprojects the NDC square at the view depths `split_near`/`split_far`
@@ -284,7 +290,7 @@ pub(super) fn frustum_slice_corners(
     far: f32,
     split_near: f32,
     split_far: f32,
-) -> Option<[[f32; 3]; 8]> {
+) -> Option<[[f32; CORNER_LANES]; FRUSTUM_CORNERS]> {
     // facade: validate the range, map depths to NDC, unproject the slice.
     if !(near > 0.0 && far > near && near.is_finite() && far.is_finite()) {
         return None;
@@ -300,7 +306,7 @@ pub(super) fn frustum_slice_corners(
     }
     // DirectX perspective: NDC z = A + B / view_depth.
     let range = far - near;
-    let mut corners = [[0.0; 3]; 8];
+    let mut corners = [[0.0; CORNER_LANES]; FRUSTUM_CORNERS];
     let mut idx = 0;
     for depth in [lo, hi] {
         let z = far / range - near * far / range / depth;
@@ -414,6 +420,73 @@ pub(super) fn point_cube_face_vp(position: [f32; 3], range: f32, face: usize) ->
     vp
 }
 
+/// Labels for one depth-array pool (texture, layer view, array view, VP buffer).
+struct DepthPoolLabels {
+    texture: &'static str,
+    layer: &'static str,
+    array: &'static str,
+    buffer: &'static str,
+}
+
+/// Layers of the point-shadow cube array (cubes × faces).
+const POINT_SHADOW_FACE_LAYERS: usize = POINT_SHADOW_CUBES * CUBE_FACE_COUNT;
+
+/// Depth-array pool shared by the legacy shadow maps, the CSM cascades,
+/// and the point-light cube faces: one square depth texture, a 2D view
+/// per layer, one sampling view, and a VP uniform per layer.
+#[allow(clippy::type_complexity)]
+fn create_depth_array_pool<const LAYERS: usize>(
+    device: &wgpu::Device,
+    labels: DepthPoolLabels,
+    size: u32,
+    array_dim: wgpu::TextureViewDimension,
+) -> (
+    wgpu::Texture,
+    [wgpu::TextureView; LAYERS],
+    wgpu::TextureView,
+    [wgpu::Buffer; LAYERS],
+) {
+    let maps = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(labels.texture),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: LAYERS as u32,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let views = std::array::from_fn(|layer| {
+        maps.create_view(&wgpu::TextureViewDescriptor {
+            label: Some(labels.layer),
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            base_array_layer: layer as u32,
+            array_layer_count: Some(1),
+            ..Default::default()
+        })
+    });
+    let array_view = maps.create_view(&wgpu::TextureViewDescriptor {
+        label: Some(labels.array),
+        dimension: Some(array_dim),
+        ..Default::default()
+    });
+    let vp_buffers = std::array::from_fn(|_| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(labels.buffer),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    });
+    (maps, views, array_view, vp_buffers)
+}
+
 impl Renderer3D {
     /// Depth-only skinned pipeline for the shadow pre-pass: the same
     /// palette-blend vertex stage over the skinned bind-group layout, no
@@ -493,44 +566,18 @@ impl Renderer3D {
         [wgpu::Buffer; SHADOW_LAYERS],
         wgpu::Sampler,
     ) {
-        let shadow_maps = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow maps"),
-            size: wgpu::Extent3d {
-                width: SHADOW_SIZE,
-                height: SHADOW_SIZE,
-                depth_or_array_layers: SHADOW_LAYERS as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let shadow_views = std::array::from_fn(|layer| {
-            shadow_maps.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("shadow map layer"),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: layer as u32,
-                array_layer_count: Some(1),
-                ..Default::default()
-            })
-        });
-        let shadow_array_view = shadow_maps.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("shadow map array"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let shadow_vp_buffers = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("shadow VP buffer"),
-                size: std::mem::size_of::<CameraUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
+        let (shadow_maps, shadow_views, shadow_array_view, shadow_vp_buffers) =
+            create_depth_array_pool::<SHADOW_LAYERS>(
+                device,
+                DepthPoolLabels {
+                    texture: "shadow maps",
+                    layer: "shadow map layer",
+                    array: "shadow map array",
+                    buffer: "shadow VP buffer",
+                },
+                SHADOW_SIZE,
+                wgpu::TextureViewDimension::D2Array,
+            );
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow comparison sampler"),
             compare: Some(wgpu::CompareFunction::LessEqual),
@@ -557,45 +604,17 @@ impl Renderer3D {
         wgpu::TextureView,
         [wgpu::Buffer; CSM_CASCADES],
     ) {
-        let csm_maps = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("csm maps"),
-            size: wgpu::Extent3d {
-                width: SHADOW_SIZE,
-                height: SHADOW_SIZE,
-                depth_or_array_layers: CSM_CASCADES as u32,
+        create_depth_array_pool::<CSM_CASCADES>(
+            device,
+            DepthPoolLabels {
+                texture: "csm maps",
+                layer: "csm map layer",
+                array: "csm map array",
+                buffer: "csm VP buffer",
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let csm_views = std::array::from_fn(|layer| {
-            csm_maps.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("csm map layer"),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: layer as u32,
-                array_layer_count: Some(1),
-                ..Default::default()
-            })
-        });
-        let csm_array_view = csm_maps.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("csm map array"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let csm_vp_buffers = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("csm VP buffer"),
-                size: std::mem::size_of::<CameraUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
-        (csm_maps, csm_views, csm_array_view, csm_vp_buffers)
+            SHADOW_SIZE,
+            wgpu::TextureViewDimension::D2Array,
+        )
     }
 
     /// Depth-only pipeline for the shadow pre-pass. It reuses the
@@ -680,49 +699,16 @@ impl Renderer3D {
         wgpu::TextureView,
         [wgpu::Buffer; POINT_SHADOW_CUBES * CUBE_FACE_COUNT],
     ) {
-        let shadow_cube_maps = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("point shadow cubes"),
-            size: wgpu::Extent3d {
-                width: SHADOW_CUBE_SIZE,
-                height: SHADOW_CUBE_SIZE,
-                depth_or_array_layers: (POINT_SHADOW_CUBES * CUBE_FACE_COUNT) as u32,
+        create_depth_array_pool::<POINT_SHADOW_FACE_LAYERS>(
+            device,
+            DepthPoolLabels {
+                texture: "point shadow cubes",
+                layer: "point shadow cube face",
+                array: "point shadow cube array",
+                buffer: "point shadow face VP buffer",
             },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let shadow_cube_views = std::array::from_fn(|layer| {
-            shadow_cube_maps.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("point shadow cube face"),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: layer as u32,
-                array_layer_count: Some(1),
-                ..Default::default()
-            })
-        });
-        let shadow_cube_array_view = shadow_cube_maps.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("point shadow cube array"),
-            dimension: Some(wgpu::TextureViewDimension::CubeArray),
-            ..Default::default()
-        });
-        let shadow_cube_vp_buffers = std::array::from_fn(|_| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("point shadow face VP buffer"),
-                size: std::mem::size_of::<CameraUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        });
-        (
-            shadow_cube_maps,
-            shadow_cube_views,
-            shadow_cube_array_view,
-            shadow_cube_vp_buffers,
+            SHADOW_CUBE_SIZE,
+            wgpu::TextureViewDimension::CubeArray,
         )
     }
 

@@ -209,91 +209,16 @@ fn fs_main(input: FragmentInput, ctx: Context<PbrContext>) -> super::Location<0,
         let is_point = step(POINT_OR_SPOT_KIND_EDGE, kind) * (1.0 - step(SPOT_KIND_EDGE, kind));
         // CSM directional path (#121): `params.x` carries the cascade
         // count and the cascades ride in `lighting.csm` (pool `csm_tex`).
-        let is_csm = (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(0.5, light.params.x);
+        let is_csm =
+            (1.0 - step(POINT_OR_SPOT_KIND_EDGE, kind)) * step(CSM_ACTIVE_EDGE, light.params.x);
         if is_csm > LIGHT_SELECTOR_SPLIT {
-            let view_depth = dot(
-                input.world_position - ctx.camera.camera_pos.xyz,
-                ctx.lighting.csm.view_fwd.xyz,
-            );
-            let b0 = ctx.lighting.csm.splits_lo.x;
-            let b1 = ctx.lighting.csm.splits_lo.y;
-            let b2 = ctx.lighting.csm.splits_lo.z;
-            let b3 = ctx.lighting.csm.splits_lo.w;
-            let b4 = ctx.lighting.csm.split_far;
-            let mut cascade = 0u;
-            if view_depth >= b1 {
-                cascade = 1u;
-            }
-            if view_depth >= b2 {
-                cascade = 2u;
-            }
-            if view_depth >= b3 {
-                cascade = 3u;
-            }
-            let mut upper = b1;
-            if cascade == 1u {
-                upper = b2;
-            }
-            if cascade == 2u {
-                upper = b3;
-            }
-            if cascade == 3u {
-                upper = b4;
-            }
-            let mut lower = b0;
-            if cascade == 1u {
-                lower = b1;
-            }
-            if cascade == 2u {
-                lower = b2;
-            }
-            if cascade == 3u {
-                lower = b3;
-            }
-            let clip0 = ctx.lighting.csm.vps[cascade].cols
-                * Vec4::new(
-                    input.world_position.x,
-                    input.world_position.y,
-                    input.world_position.z,
-                    1.0,
-                );
-            let ndc0 = clip0.xyz / clip0.w;
-            let uv0 = Vec2::new(
-                ndc0.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
-                NDC_TO_UV_HALF - ndc0.y * NDC_TO_UV_HALF,
-            );
-            let mut vis = textureSampleCompare(
+            let vis = csm_visibility(
+                input.world_position,
+                ctx.camera.camera_pos.xyz,
+                ctx.lighting.csm,
                 ctx.csm_tex,
                 ctx.shadow_sampler,
-                uv0,
-                i32(cascade),
-                ndc0.z - SHADOW_REF_BIAS,
             );
-            if cascade < 3u {
-                let band = max((upper - lower) * CSM_BLEND_FRACTION, EPS);
-                let t = clamp((upper - view_depth) / band, 0.0, 1.0);
-                let next = cascade + 1u;
-                let clip1 = ctx.lighting.csm.vps[next].cols
-                    * Vec4::new(
-                        input.world_position.x,
-                        input.world_position.y,
-                        input.world_position.z,
-                        1.0,
-                    );
-                let ndc1 = clip1.xyz / clip1.w;
-                let uv1 = Vec2::new(
-                    ndc1.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
-                    NDC_TO_UV_HALF - ndc1.y * NDC_TO_UV_HALF,
-                );
-                let vis1 = textureSampleCompare(
-                    ctx.csm_tex,
-                    ctx.shadow_sampler,
-                    uv1,
-                    i32(next),
-                    ndc1.z - SHADOW_REF_BIAS,
-                );
-                vis = mix(vis1, vis, t);
-            }
             radiance = radiance * vis;
         }
         // Shadow: project into the light's clip space and compare
