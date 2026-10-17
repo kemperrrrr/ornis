@@ -125,11 +125,12 @@ into master» и «Release & Publish 0.16» так и не закрыты, ре�
 - **Избегаем:** бесконечный рерайт ядра вместо срезов с релизом. Прямое
   следствие: каждый срез L0/L1/L2 и срез снапшота мержится отдельно, со
   своим гейтом (§6). Планировщик, `System::run` и аккумулятор кадра ради
-  сети не переписываем. Два заранее названных метода на
+  сети не переписываем. Три заранее названных метода на
   `Engine<Running>` всё же нужны (§6.1): `run_fixed_step` шагает один
-  тик журнала, `run_variable_frame` проводит кадр рендера и ввода без
-  fixed-цикла. Одного `run_fixed_step` мало живому раннеру с записью и
-  L0: публичный `run_frame` вместе с variable-стадиями сам исполняет
+  тик журнала, `run_frame_begin` и `run_frame_end` ставят вокруг тиков
+  те же скобки, что `run_frame` (`PreUpdate`/`Input` до, `PostFrame`
+  после). Одного `run_fixed_step` мало живому раннеру с записью и L0:
+  публичный `run_frame` вместе с variable-стадиями сам исполняет
   fixed-шаги из аккумулятора. Это не рерайт планировщика.
 - **Избегаем:** расширение скоупа v1 (MMO-репликация, RPC, WebRTC) —
   см. «вне скоупа» в `PLAN.md` §l и §3.
@@ -270,7 +271,8 @@ into master» и «Release & Publish 0.16» так и не закрыты, ре�
   публичный прогон кадра — `Engine::run_frame` / `run_frame_secs`; число
   тиков внутри выбирает `begin_frame` из переданной дельты. Раздельных
   публичных входов сейчас нет; их контракт задаёт §6.1
-  (`Engine::run_fixed_step` и `Engine::run_variable_frame`).
+  (`Engine::run_fixed_step`, `Engine::run_frame_begin`,
+  `Engine::run_frame_end`).
   `begin_frame` ограничивает аккумулятор сверху
   `(max_steps + 1) × delta_seconds`: один лишний шаг держится как
   hitch-буфер и влияет на число шагов уже следующего кадра. Исполняется
@@ -464,15 +466,23 @@ SI-Single. Границы сетевых сцен (§4.4) отсюда и сле
    `Velocity`. Сам ресурс он не пишет: система получает только
    `&Resources` (§6.1). `TickInput.tick` — это `u64`, равный
    `FixedTime::tick()`, который системы видят уже внутри шага.
-   Нет ресурса или числа не сходятся — `player_input` падает явно и не
-   подставляет пустой ввод. Хост после шага снимает ресурс
-   (`World::remove`, `crates/core/src/world.rs`). Слот ввода — не «все
+   Паника — только пока в мире лежит `JournalSession` (`ornis-input`).
+   Нет ресурса или `tick` не совпал с `FixedTime::tick()` — система
+   падает и не подставляет пустой ввод. Без `JournalSession` это
+   локальная игра: `player_input` читает `InputState` и `InputMap`, как
+   сейчас, и `TickInput` не требует. `GameApp::render_frame`,
+   `editor_world_loop` и тесты с `Player` маркер не ставят и на первом
+   шаге `run_frame` не падают. В digest этот путь не входит: журнал
+   пишется только при маркере (§6.1). Хост после шага с маркером снимает
+   `TickInput` (`World::remove`, `crates/core/src/world.rs`). Слот ввода — не «все
    `Player` подряд». Сейчас `Player` — пустой маркер, и `player_input`
    пишет `Velocity` каждой такой сущности (`crates/gameplay/src/lib.rs`).
    Срез добавляет `Player.slot: u32`: это индекс в `TickInput.players`,
    позиция пира в каноническом порядке, без `PeerId` на сущности.
    Скорость пишется только сущности с этим слотом. Два маркера с одним
-   слотом или индекс длиннее вектора — явная ошибка. `physics_push` остаётся
+   слотом или индекс длиннее вектора — явная ошибка. Слот `i` есть в
+   `players`, а сущности с `Player.slot == i` нет — тик не падает, этот
+   ввод никого не двигает. `physics_push` остаётся
    на `FixedTime::delta()`
    и интегрирует уже записанную скорость; в солвер намерение доводит
    мост, не `physics_push`.
@@ -528,11 +538,13 @@ SI-Single. Границы сетевых сцен (§4.4) отсюда и сле
 записываемый прогон на этот вопрос не опирается. Он продвигает ровно
 один `Tick` на один записанный `InputBundle` методом `run_fixed_step`
 (§6.1), с дельтой `FixedTime::delta_seconds()`, без `Instant`, без
-`clamp_frame_dt` и без `dropped_seconds`. Локальный `run_frame` для
-одиночной игры без записи остаётся как есть. Живой раннер, который
-пишет журнал и рисует кадр, `run_frame` не зовёт: variable-стадии идут
-через `run_variable_frame`, тики — через `run_fixed_step`. Смешивать
-эти два входа с `run_frame` на одном `Engine` нельзя (§6.1).
+`clamp_frame_dt` и без `dropped_seconds`. Локальная игра без журнала
+по-прежнему зовёт `run_frame`: маркера `JournalSession` нет, и
+`player_input` читает `InputState` (§2.5). Живой раннер с записью и L0
+`run_frame` не зовут. Кадр у них тот же порядок, что у `run_frame`:
+`run_frame_begin`, затем пачка `run_fixed_step`, затем `run_frame_end`
+(§6.1). Смешивать `run_frame` с `run_fixed_step` на одном `Engine`
+нельзя.
 
 ### 2.7. `Entity` и аллокатор
 
@@ -704,14 +716,26 @@ domain не ссылается. `Prediction` в ресурсе нет, его д
      (`next_id`, затем `free_list`, затем `generations`), не в порядке
      обхода `HashMap`.
 
-   Лейн `Position` в digest не входит. Его из позы тела переписывает
-   `BodyToTransformSystem` (`body_to_transform`,
-   `crates/app/src/lib.rs`), а эта система висит на `schedule_mut` —
-   `PostFrame`. `run_fixed_step` `PostFrame` не гоняет, поэтому лейн
-   не функция тика: `physics_push` пишет туда интеграл `Velocity`, а
-   солверную позу туда кладёт только variable-кадр. Тот же запрет у
-   `TransformDesc`, его пишет та же система. Снапшот сессии с журналом
-   эти два лейна тоже не хранит (§6.2). Поля тела в digest остаются.
+   `Position` в digest не входит. Это функция `Velocity` этого тика:
+   в fixed-пути лейн пишет только `physics_push`
+   (`crates/gameplay/src/lib.rs`), он прибавляет `Velocity * dt` к
+   уже лежащему значению (`Position::advanced_by_secs`) и в солвер позу
+   не отдаёт. Читает её variable-путь, в том числе
+   `audio_listener_sync` (`crates/audio/src/bridge.rs`). Расхождение
+   `Position` само по себе десинк солвера не создаёт.
+
+   `TransformDesc`, `Transform` и `GlobalTransform` в digest входят.
+   Из состояния солвера они не выводятся. `PhysicsSyncIn` (fixed) читает
+   `TransformDesc` и `GlobalTransform` (`world_pose`): стартовая поза
+   нового тела и поза Static/Kinematic на каждом тике
+   (`sync_external_pose`, `crates/app/src/physics_runtime.rs`).
+   `PhysicsSyncOut` пишет `TransformDesc` и `Transform`, `SoftSyncOut`
+   пишет те же плюс `GlobalTransform`. `install_fixed_transform_propagation`
+   (`crates/core/src/hierarchy.rs`) ставит `PropagateTransforms` в
+   fixed-расписание, и тот пишет `GlobalTransform` из `Transform`.
+   В поток идут translation, rotation и scale, где поле есть, по
+   порядку аллокатора, с теми же правилами `to_bits`, `-0.0` и NaN.
+   Снимок хранит те же три лейна (§6.2). `Position` снимок не хранит.
 
    Квантовать float перед хешем нельзя: на одной архитектуре расхождение
    в младших битах и есть десинк, квантование его спрячет. Единственная
@@ -841,6 +865,10 @@ pub struct TickInput {
     pub tick: u64,
     pub players: Vec<PeerInput>,
 }
+
+/// Пока ресурс вставлен, player_input обязан читать TickInput.
+/// Без него локальная игра читает InputState, как сейчас.
+pub struct JournalSession;
 ```
 
 - Save/load мира в `crates/net` не помещается. `PhysicsRuntime.bindings`
@@ -999,7 +1027,8 @@ pub trait WorldCheckpoint {
 
 Каждый срез — независимо мержимая issue со своим гейтом
 (урок Amethyst, §1.5: без рерайта планировщика). Изменения API ядра
-названы в задаче 1 среза L2: `run_fixed_step` и `run_variable_frame`.
+названы в задаче 1 среза L2: `run_fixed_step`, `run_frame_begin`,
+`run_frame_end`.
 
 ### 6.1. Срез L2 — запись и replay (первый)
 
@@ -1008,9 +1037,10 @@ pub trait WorldCheckpoint {
 
 1. Потиковый ввод и шаг по журналу. Сейчас этого API нет, и три
    обходных пути не годятся. Сравнение и выбор — ниже. Задача среза:
-   добавить в `ornis-core` `run_fixed_step` и `run_variable_frame`.
-   Журнал гоняется только первым. Живой раннер с записью и L0 на кадр
-   зовут второй, без `run_frame` (§ ниже).
+   добавить в `ornis-core` `run_fixed_step`, `run_frame_begin` и
+   `run_frame_end`. Журнал гоняется только первым. Живой раннер с
+   записью и L0 ставят begin и end вокруг пачки тиков, в том же порядке,
+   что `run_frame`, и сам `run_frame` не зовут (§ ниже).
 2. Детерминированный старт на ECS-сцене в `ornis-app` (состав — ниже,
    это не `scene()` из теста физики). В репозитории нет `.ron` с
    компонентом `Player` (он объявлен в `crates/gameplay/src/lib.rs`).
@@ -1070,9 +1100,10 @@ pub trait WorldCheckpoint {
   `begin_frame`. Это тот же разрез, что у bevy_ggrs: ввод кладут до
   расписания, расписание исполняют ровно один раз на тик.
 
-**Выбор — C.** Срезу нужны два метода на `impl Engine<Running>`
-(`crates/core/src/engine.rs`, рядом с `run_frame`). Оба вызываются между
-кадрами, не из системы: то же ограничение, что у `world_mut`.
+**Выбор — C.** Срезу нужны три метода на `impl Engine<Running>`
+(`crates/core/src/engine.rs`, рядом с `run_frame`): `run_fixed_step`,
+`run_frame_begin`, `run_frame_end`. Все три вызываются между кадрами,
+не из системы: то же ограничение, что у `world_mut`.
 
 Первый:
 
@@ -1121,45 +1152,56 @@ pub fn run_fixed_step(&mut self)
 `FixedTime` не зависят от того, каким путём прошёл тик.
 
 `begin_frame` и `start_step` остаются приватными. `run_frame` остаётся
-входом локальной игры без записи. На одном `Engine` его не смешивают с
-`run_fixed_step`: остаток аккумулятора после `run_frame` добавил бы
-тики, которых в журнале нет. После `run_fixed_step` аккумулятор уже
-0, поэтому `run_frame(0.0)` даёт 0 шагов и не является пустым кадром:
-`Time` получает дельту 0, а `begin_frame` заново пишет
-`steps_this_frame = 0`, `current_step = 0` и пересчитывает `alpha`.
-Канонические единицы после тика затираются. Если аккумулятор ещё не
-меньше шага, тот же вызов исполнит лишний тик. `System::run` не меняется. Это не перенос
-планировщика в `crates/net` и не вторая модель систем. Граница из §1.5
-такая: планировщик и `System::run` не трогаем; добавляются два метода,
-названные здесь, и ничего сверх.
+входом локальной игры без `JournalSession`. На одном `Engine` его не
+смешивают с `run_fixed_step`: остаток аккумулятора после `run_frame`
+добавил бы тики, которых в журнале нет. `run_frame(0.0)` пустым кадром
+не является даже после того, как `run_fixed_step` обнулил аккумулятор:
+шагов выходит 0, но `Time` получает дельту 0, а `begin_frame` затирает
+`steps_this_frame` и `current_step` нулями. `System::run` не меняется.
+Это не перенос планировщика в `crates/net` и не вторая модель систем.
+Граница из §1.5 такая: планировщик и `System::run` не трогаем;
+добавляются три метода, названные здесь, и ничего сверх.
 
-Второй метод — кадр без симуляции. Живому раннеру с записью и
-`NetAdapter` раз в кадр нужны `PreUpdate`, `Input` и `PostFrame`
-(рендер, камера, `body_to_transform`, `MutationTick`). Звать ради этого
-`run_frame` нельзя: он сам наберёт fixed-шаги поверх
-`run_fixed_step`.
+Кадр живого хоста — два метода вокруг тиков, в том порядке, в каком
+скобки уже стоят в `run_frame` (`engine.rs`: `PreUpdate`, `Input`,
+затем цикл fixed, затем `PostFrame`, затем `clear_frame_transients`).
+Один `run_variable_frame` перед тиками ставил бы `PostFrame` слишком
+рано: картинка отставала бы на кадр, а `body_to_transform` писал бы
+`TransformDesc` до `PhysicsSyncIn` этого кадра.
 
 ```rust
-pub fn run_variable_frame(&mut self, delta_seconds: f32)
+pub fn run_frame_begin(&mut self, delta_seconds: f32)
+pub fn run_frame_end(&mut self)
 ```
 
-Дельта конечная и неотрицательная, как у `run_frame`. Метод публикует
-`Time` (вставляет ресурс, если его нет, и двигает той же дельтой),
-гоняет `PreUpdate` → `Input` → `PostFrame` и при наличии `InputState`
-зовёт `clear_frame_transients`. `begin_frame`, `start_step` и
-`fixed_schedule` он не вызывает и `FixedTime` не вставляет и не меняет.
-Headless-replay L2 этот метод не зовёт: гейт журнала зависит только от
-`fixed_schedule`. На кадр живого хоста порядок такой:
-`run_variable_frame` один раз, затем `run_fixed_step` столько раз,
-сколько тиков этот кадр симулирует. Число выбирает хост, не
-`begin_frame`.
+Оба на `impl Engine<Running>`, между кадрами, как `world_mut`.
+`run_frame_begin`: дельта конечная и неотрицательная; публикует `Time`
+так же, как `run_frame`; гоняет `PreUpdate` → `Input`. Fixed-цикл,
+`PostFrame`, `clear_frame_transients` и `FixedTime` не трогает.
+`run_frame_end`: гоняет `PostFrame` и при наличии `InputState` зовёт
+`clear_frame_transients`. `Time`, `FixedTime` и `fixed_schedule` не
+трогает. `PreUpdate` и `Input` симуляцию не кормят: ввод тика кладёт
+сэмплер в `TickInput` до `run_fixed_step`.
+
+Порядок кадра записи и L0: `run_frame_begin` один раз, затем
+`run_fixed_step` столько раз, сколько тиков в этой пачке, затем
+`run_frame_end`. Число тиков выбирает хост, не `begin_frame`.
+Headless-replay зовёт только `run_fixed_step`: гейт журнала не зависит
+от `PostFrame`. `run_frame_end` между тиками пишет `TransformDesc` из
+`body_to_transform`, а следующий `PhysicsSyncIn` читает эту позу у
+Static/Kinematic. Поэтому сравниваемые прогоны либо не зовут `end`
+вовсе, либо зовут его на одних и тех же границах тиков. Тест среза:
+`run_fixed_step`, `run_frame_end`, `run_fixed_step` на гейт-сцене даёт
+тот же digest, что два `run_fixed_step` без `end`, пока `PostFrame` не
+пишет позу, которой не было в `RigidBody` после `physics_sync_out`.
 
 Кто заполняет `TickInput`, пока нет `NetAdapter`:
 
 - **Запись.** Локальный сэмплер в хосте L2 (тест или раннер в
-  `ornis-app`, не система). Headless-тест зовёт только `run_fixed_step`.
-  Раннер, который ещё и рисует кадр, вместо `run_frame` зовёт
-  `run_variable_frame`, затем шаги. Перед каждым `run_fixed_step`
+  `ornis-app`, не система). На время сессии он вставляет
+  `JournalSession`. Headless-тест зовёт только `run_fixed_step`.
+  Раннер, который ещё и рисует кадр, зовёт `run_frame_begin`, затем
+  шаги, затем `run_frame_end`. Перед каждым `run_fixed_step`
   сэмплер берёт дискретные действия (`InputMap`: `MOVE_FORWARD` /
   `BACK` / `LEFT` / `RIGHT`), собирает `InputBundle` для журнала и
   пишет `TickInput` через `world_mut`. Поле `tick` — это
@@ -1173,10 +1215,11 @@ Headless-replay L2 этот метод не зовёт: гейт журнала 
   `player_input` сверяет число с `FixedTime::tick()` и падает.
 - **`replay`.** Драйвер журнала читает следующий кадр `.ornis-rec`
   (`InputBundle`), так же заполняет `TickInput` и зовёт только
-  `run_fixed_step`. `InputState`, `Instant` и `run_variable_frame` он
-  не трогает. После шага ресурс снимается тем же `remove`.
+  `run_fixed_step`. `InputState`, `Instant`, `run_frame_begin` и
+  `run_frame_end` он не трогает. После шага ресурс снимается тем же
+  `remove`.
 - **L0.** `NetAdapter` подменяет источник бандла. На кадр —
-  `run_variable_frame`, на тик — тот же `run_fixed_step` (§6.3).
+  `run_frame_begin`, пачка `run_fixed_step`, `run_frame_end` (§6.3).
 
 `player_input` в `fixed_schedule` стоит перед `velocity_to_body` и
 только читает `TickInput` из `ornis-input`, пишет `Velocity`.
@@ -1184,15 +1227,21 @@ Headless-replay L2 этот метод не зовёт: гейт журнала 
 не `add_system`: мост уже поставил `velocity_to_body` первым, и
 обратное `order_before` планировщик игнорирует (§2.5). Порядок
 `player_input` → `velocity_to_body` → `physics_sync_in`.
-`physics_push` этот порядок не задаёт. Нет `TickInput` или
-`TickInput.tick != FixedTime::tick()` — явная паника, не пустой ввод
-и не повтор прошлого вектора. Индекс слота: сегодня `Player` — пустой
-маркер, и `player_input` пишет `Velocity` всем таким сущностям.
-Срез кладёт на маркер `slot: u32` и пишет скорость только той сущности,
-чей `slot` равен индексу в `TickInput.players`. Индекс — позиция в
-каноническом порядке `PeerId`, сам `PeerId` геймплей не хранит. Два
-`Player` с одним слотом или слот за концом вектора — явная ошибка.
-В гейте L2 один `Player` со `slot = 0` и вектор из одного `PeerInput`.
+`physics_push` этот порядок не задаёт. Паника по отсутствию
+`TickInput` или по `TickInput.tick != FixedTime::tick()` — только при
+ресурсе `JournalSession`. Без маркера система читает `InputState` /
+`InputMap` и локальный `run_frame` не роняет: `GameApp::render_frame`,
+`editor_world_loop` и тесты `Player` маркер не вставляют. Журнал и
+digest идут лишь с маркером, поэтому чтение `InputState` в них не
+попадает. Индекс слота: сегодня `Player` — пустой маркер, и
+`player_input` пишет `Velocity` всем таким сущностям. Срез кладёт на
+маркер `slot: u32` и в сессии с журналом пишет скорость только той
+сущности, чей `slot` равен индексу в `TickInput.players`. Индекс —
+позиция в каноническом порядке `PeerId`, сам `PeerId` геймплей не
+хранит. Два `Player` с одним слотом или слот за концом вектора —
+явная ошибка. Слот `i` есть в `players`, а сущности с таким `slot` нет
+— тик не падает, ввод никого не двигает. В гейте L2 один `Player` со
+`slot = 0` и вектор из одного `PeerInput`.
 `transform_update` не пишет авторитетную позу (§2.5).
 
 **Гейт-сцена собирается в `ornis-app`, не вызовом `scene()`.**
@@ -1246,7 +1295,9 @@ Headless-replay L2 этот метод не зовёт: гейт журнала 
 - `replay --verify` возвращает ненулевой код, если подменить один байт ввода.
 - Формат версионирован: чтение будущей версии — явная ошибка, не тихий дрейф.
 - Два прогона одного журнала через `run_fixed_step` (по одному вызову на
-  кадр файла, без `run_frame` и без `run_variable_frame`) дают один digest.
+  кадр файла, без `run_frame`, без `run_frame_begin` и без
+  `run_frame_end`) дают один digest. Отдельный прогон с `run_frame_end`
+  между двумя шагами на гейт-сцене даёт тот же digest (§ выше).
 
 Тесты и гейт:
 
@@ -1268,11 +1319,13 @@ Headless-replay L2 этот метод не зовёт: гейт журнала 
    `SnapshotError::Unsupported`.
 2. Снапшот ECS: компоненты через `ComponentRegistry`
    (`crates/core/src/registry.rs`), `Entity` как `(id, generation)` (§4.6).
-   Лейны `Position` и `TransformDesc` в байты сессии с журналом не
-   входят. Их солверная поза появляется только в `PostFrame`
-   (`BodyToTransformSystem`), а `run_fixed_step` эту стадию не гоняет
-   (§4.2). Иначе save после одного `run_fixed_step` и save после
-   следующего `run_variable_frame` разойдутся при тех же телах.
+   `TransformDesc`, `Transform` и `GlobalTransform` в байты входят:
+   `PhysicsSyncIn` читает первые два как позу, `PhysicsSyncOut` и
+   `SoftSyncOut` их пишут, `PropagateTransforms` пишет `GlobalTransform`
+   в fixed-расписании (§4.2). Без них `load` оставит кинематике и
+   новому телу позу не того тика. `Position` в байты не входит: это
+   функция `Velocity` этого тика (`physics_push`), fixed-путь в солвер
+   её не подаёт.
 3. Состояние `EntityAllocator`: `next_id`, `free_list`, `generations`
    (`crates/core/src/entity.rs`).
 4. `PhysicsRuntime.bindings` и `soft_bindings`
@@ -1340,16 +1393,17 @@ Headless-replay L2 этот метод не зовёт: гейт журнала 
 
 1. `Transport` и `LoopbackTransport` в `crates/net` (§4.5). Сокетов в срезе нет.
 2. `NetAdapter` в `ornis-app` подменяет сэмплер L2 как источник бандла.
-   Раз в кадр зовёт `Engine::run_variable_frame` (§6.1), забирает
-   `Datagram` и раскладывает по `Tick → InputBundle` в каноническом
-   порядке `PeerId`. На каждый тик этого кадра копирует `PeerInput` в
-   `TickInput` (поле `tick` — номер, который шаг покажет системам),
-   зовёт `Engine::run_fixed_step` и снимает `TickInput` через
-   `World::remove`. `run_frame` адаптер не зовёт. Это код хоста, не
-   система `fixed_schedule`: система не может записать ресурс.
-   `player_input` только читает уже положенный `TickInput` и сверяет
-   `tick` с `FixedTime::tick()`. Не хвост `transform_update` и не
-   `MutationBus::drain`.
+   Кадр: `Engine::run_frame_begin`, затем тики, затем
+   `Engine::run_frame_end` (§6.1). В `begin` забирает `Datagram` и
+   раскладывает по `Tick → InputBundle` в каноническом порядке
+   `PeerId`. На каждый тик копирует `PeerInput` в `TickInput` (поле
+   `tick` — номер, который шаг покажет системам), зовёт
+   `Engine::run_fixed_step` и снимает `TickInput` через `World::remove`.
+   `run_frame` адаптер не зовёт. `PostFrame` идёт после тиков кадра, не
+   до них. Это код хоста, не система `fixed_schedule`. При вставленном
+   `JournalSession` `player_input` только читает уже положенный
+   `TickInput` и сверяет `tick` с `FixedTime::tick()`. Не хвост
+   `transform_update` и не `MutationBus::drain`.
    `InputState::apply_snapshot` остаётся заменой кадрового снимка из
    браузера (`GameApp::apply_browser_input`, `apply_browser_input` в
    `session.rs`). Локальный слот бандла по-прежнему заполняет сэмплер
