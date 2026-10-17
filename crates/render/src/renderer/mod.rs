@@ -5,6 +5,7 @@
 //! for the render-graph-driven equivalent.
 
 use crate::extraction::CustomMeshEntry;
+use crate::flags::AnisotropyLevel;
 use crate::gpu_culling::Culler;
 use crate::mesh::{Mesh, SkinnedVertex, Vertex};
 use crate::shaders;
@@ -318,6 +319,12 @@ pub struct Renderer3D {
     /// `1.0` (default) is the exact no-op. Set from
     /// [`crate::render_backend::RenderBackendConfig::exposure`].
     exposure: f32,
+    /// Anisotropic level of the textured-forward material sampler.
+    /// [`AnisotropyLevel::DEFAULT`] until
+    /// [`set_material_anisotropy`](Self::set_material_anisotropy) runs
+    /// (the backend factory forwards
+    /// [`crate::render_backend::RenderBackendConfig::material_anisotropy`]).
+    material_anisotropy: AnisotropyLevel,
     /// Transparency mode of the forward pipeline (see
     /// [`TransparencyOptions`]); default off (golden-pinned `REPLACE`).
     transparency: TransparencyOptions,
@@ -470,6 +477,11 @@ impl Renderer3D {
     /// [`set_lights`](Self::set_lights) calls (default `1.0`).
     pub fn set_exposure(&mut self, exposure: f32) {
         self.exposure = exposure;
+    }
+
+    /// Anisotropic level of the textured-forward material sampler.
+    pub fn material_anisotropy(&self) -> AnisotropyLevel {
+        self.material_anisotropy
     }
 
     /// Deferred lighting debug term. Stored across [`set_lights`](Self::set_lights);

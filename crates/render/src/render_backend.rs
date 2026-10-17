@@ -4,8 +4,10 @@
 //! callers (and tests) can drive a full frame — camera, lights, uploads, one
 //! draw — without touching [`crate::renderer::Renderer3D`] directly. The
 //! factory [`create_render_backend`] returns the production implementation.
+use crate::flags::AnisotropyLevel;
 use crate::mesh::Mesh;
 use crate::renderer::InstanceData;
+use crate::textures::{MaterialTextureSet, TextureCache};
 use ornis_assets::scene::LightDesc;
 use ornis_core::material::OpenPBRMaterial;
 
@@ -41,6 +43,14 @@ pub struct RenderBackendConfig {
     /// with one `draw_indexed_indirect`; `false` (default) keeps the
     /// direct `draw_indexed` path. Shadows always draw directly.
     pub indirect_draw: bool,
+    /// Anisotropic level of the textured-forward material sampler.
+    ///
+    /// [`AnisotropyLevel::DEFAULT`] (16) is the project default. The value
+    /// reaches [`crate::renderer::Renderer3D::ensure_textured_forward`]; it
+    /// is not part of the texture-cache key, so one image stays one GPU
+    /// texture whatever level a caller asks for at upload. Shadow and
+    /// post-process samplers stay isotropic.
+    pub material_anisotropy: AnisotropyLevel,
 }
 
 impl Default for RenderBackendConfig {
@@ -62,6 +72,7 @@ impl Default for RenderBackendConfig {
             max_objects: 256,
             max_materials: 64,
             indirect_draw: false,
+            material_anisotropy: AnisotropyLevel::DEFAULT,
         }
     }
 }
@@ -115,6 +126,34 @@ pub trait RenderBackend {
     /// Record the full deferred frame (gbuffer -> lighting -> composite) into
     /// `context`, drawing the first `instance_count` uploaded instances with `mesh`.
     fn render_scene(&self, context: RenderContext<'_>, mesh: &Mesh, instance_count: u32);
+
+    /// Anisotropic level currently stored for the material sampler.
+    fn material_anisotropy(&self) -> AnisotropyLevel;
+
+    /// Replace the material-sampler level.
+    ///
+    /// A raw settings value saturates in [`AnisotropyLevel::new`] before it
+    /// is passed here. A textured-forward pass that already exists gets a
+    /// new sampler; one that does not is built later at this level. `device`
+    /// is the sampler's owner.
+    fn set_material_anisotropy(&mut self, device: &wgpu::Device, level: AnisotropyLevel);
+
+    /// Record the textured-forward pass: the material sampler is the one
+    /// configured by [`RenderBackendConfig::material_anisotropy`], and
+    /// `textures` resolve through `cache` (unbound roles stay neutral white).
+    ///
+    /// `context.target` must be a single-sample `Rgba16Float` view matching
+    /// the renderer's extent; `depth` must be `Depth32Float` of that extent.
+    /// Builds the pass on first use.
+    fn render_textured_forward(
+        &mut self,
+        context: RenderContext<'_>,
+        depth: &wgpu::TextureView,
+        mesh: &Mesh,
+        instance_count: u32,
+        textures: &MaterialTextureSet,
+        cache: &TextureCache,
+    );
 }
 
 /// Build the production [`RenderBackend`] (the deferred [`crate::renderer::Renderer3D`])
@@ -127,6 +166,7 @@ pub fn create_render_backend(
         crate::renderer::Renderer3D::new(device, &config.surface_config, config.sample_count);
     renderer.set_exposure(config.exposure);
     renderer.set_indirect_draw(config.indirect_draw);
+    renderer.set_material_anisotropy(device, config.material_anisotropy);
     Box::new(renderer)
 }
 
@@ -134,7 +174,9 @@ pub fn create_render_backend(
 /// [`crate::renderer::Renderer3D`]; this is what [`create_render_backend`] hands out.
 pub mod renderer3d_backend {
     use super::*;
+    use crate::flags::AnisotropyLevel;
     use crate::renderer::Renderer3D;
+    use crate::textures::{MaterialTextureSet, TextureCache};
 
     impl RenderBackend for Renderer3D {
         fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -181,6 +223,37 @@ pub mod renderer3d_backend {
                 context.target,
                 mesh,
                 instance_count,
+            );
+        }
+
+        fn material_anisotropy(&self) -> AnisotropyLevel {
+            Renderer3D::material_anisotropy(self)
+        }
+
+        fn set_material_anisotropy(&mut self, device: &wgpu::Device, level: AnisotropyLevel) {
+            Renderer3D::set_material_anisotropy(self, device, level);
+        }
+
+        fn render_textured_forward(
+            &mut self,
+            context: RenderContext<'_>,
+            depth: &wgpu::TextureView,
+            mesh: &Mesh,
+            instance_count: u32,
+            textures: &MaterialTextureSet,
+            cache: &TextureCache,
+        ) {
+            self.ensure_textured_forward(context.device, context.queue);
+            self.render_forward_textured(
+                context.device,
+                context.encoder,
+                depth,
+                context.target,
+                mesh,
+                instance_count,
+                true,
+                textures,
+                cache,
             );
         }
     }

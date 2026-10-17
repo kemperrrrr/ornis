@@ -79,6 +79,7 @@ fn golden_full_scene_probe_matches_snapshot() {
         max_objects: 256,
         max_materials: 64,
         indirect_draw: false,
+        material_anisotropy: crate::AnisotropyLevel::DEFAULT,
     };
     let mut backend = create_render_backend(&device, &backend_config);
 

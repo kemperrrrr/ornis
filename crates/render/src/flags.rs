@@ -182,18 +182,77 @@ impl From<ShadowCast> for bool {
 /// wgpu LOD upper clamp shared by linear samplers (covers all mip levels).
 const LOD_MAX_CLAMP: f32 = 32.0;
 
+/// Ceiling of an anisotropic request: `wgpu` clamps every `anisotropy_clamp`
+/// to `1..=16`, and 16 is the `maxSamplerAnisotropy` every target driver
+/// reports.
+const ANISOTROPY_MAX_CLAMP: u16 = 16;
+
+/// Anisotropic filtering level of a material sampler (`anisotropy_clamp`).
+///
+/// `1` is isotropic trilinear filtering: one filtered sample per pixel, taken
+/// at the mip level of the footprint's *longest* axis, so a textured surface
+/// seen at a grazing angle (a floor, a road) blurs well before its texels run
+/// out. `2..=16` let the filter take up to that many samples along the longest
+/// axis and size the mip level by the shortest one, which is what keeps those
+/// surfaces sharp into the distance.
+///
+/// Shadow and post-process samplers are [`SamplerKind::LinearClamp`] and have
+/// no level at all — their fullscreen quads never magnify a grazing surface.
+///
+/// `wgpu` requires linear `mag`/`min`/`mipmap` filtering for any level above
+/// `1` (every material sampler here has it) and silently degrades to `1` on an
+/// adapter without `DownlevelFlags::ANISOTROPIC_FILTERING`, so a level is safe
+/// to request on every backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AnisotropyLevel(u16);
+
+impl AnisotropyLevel {
+    /// Isotropic trilinear filtering: anisotropy disabled (what every
+    /// sampler of this crate used before `#122`).
+    pub const OFF: Self = Self(1);
+
+    /// Project default for material samplers: the driver ceiling, `16`.
+    pub const DEFAULT: Self = Self(ANISOTROPY_MAX_CLAMP);
+
+    /// Clamping constructor for a requested level.
+    ///
+    /// Nothing weaker than [`AnisotropyLevel::OFF`] (a `0` from a settings
+    /// file, say) maps to it, and anything above [`AnisotropyLevel::DEFAULT`]
+    /// saturates at the driver ceiling, so a caller needs no range check of
+    /// its own. Settings code calls this before storing the value on
+    /// [`crate::render_backend::RenderBackendConfig`] or passing it to
+    /// [`crate::renderer::Renderer3D::set_material_anisotropy`].
+    // qual:api — public settings constructor; in-tree callers are the unit tests.
+    pub const fn new(requested: u16) -> Self {
+        if requested < Self::OFF.0 {
+            Self::OFF
+        } else if requested > ANISOTROPY_MAX_CLAMP {
+            Self::DEFAULT
+        } else {
+            Self(requested)
+        }
+    }
+
+    /// Raw `anisotropy_clamp` handed to `wgpu`, in `1..=16`.
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
 /// Sampler selection for frame/upload textures (typed replacement for
 /// inline `wgpu::SamplerDescriptor` literals scattered across the
 /// composite, renderer and texture-upload paths).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SamplerKind {
     /// Linear `mag`/`min`, nearest `mipmap`, clamp-to-edge on every axis:
-    /// fullscreen blits (composite, HDR layers, shadow maps).
+    /// fullscreen blits (composite, HDR layers, shadow maps). Always
+    /// isotropic ([`AnisotropyLevel::OFF`]).
     #[default]
     LinearClamp,
     /// Linear `mag`/`min`/`mipmap`, repeat on every axis (the glTF
-    /// default — the import carries no wrap mode): color/data textures.
-    LinearRepeat,
+    /// default — the import carries no wrap mode): color/data textures, at
+    /// the carried [`AnisotropyLevel`].
+    LinearRepeat(AnisotropyLevel),
 }
 
 impl SamplerKind {
@@ -212,10 +271,10 @@ impl SamplerKind {
                 lod_min_clamp: 0.0,
                 lod_max_clamp: LOD_MAX_CLAMP,
                 compare: None,
-                anisotropy_clamp: 1,
+                anisotropy_clamp: AnisotropyLevel::OFF.get(),
                 border_color: None,
             },
-            Self::LinearRepeat => wgpu::SamplerDescriptor {
+            Self::LinearRepeat(anisotropy) => wgpu::SamplerDescriptor {
                 label: None,
                 address_mode_u: wgpu::AddressMode::Repeat,
                 address_mode_v: wgpu::AddressMode::Repeat,
@@ -226,7 +285,7 @@ impl SamplerKind {
                 lod_min_clamp: 0.0,
                 lod_max_clamp: LOD_MAX_CLAMP,
                 compare: None,
-                anisotropy_clamp: 1,
+                anisotropy_clamp: anisotropy.get(),
                 border_color: None,
             },
         }

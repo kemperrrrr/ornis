@@ -4,12 +4,17 @@
 #[allow(dead_code)]
 mod common;
 
+#[path = "material_mips/forward.rs"]
+mod forward;
+
 use common::sized::{FrameSpec, render_and_readback};
 use ornis_render::texture_upload::{
     preferred_texture_encoding, texture_compression_features, upload_image,
 };
 use ornis_render::textures::upload_texture;
-use ornis_render::{CpuImage, GpuTexture, Ktx2Image, TextureEncoding, TextureImage, TextureRole};
+use ornis_render::{
+    AnisotropyLevel, CpuImage, Ktx2Image, TextureEncoding, TextureImage, TextureRole,
+};
 
 const SHADER: &str = r#"
 struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f }
@@ -34,8 +39,8 @@ struct Vertex { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 fn sample(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    image: &GpuTexture,
     view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
     (size, level): (u32, Option<u32>),
 ) -> Vec<u8> {
     let source = match level {
@@ -90,7 +95,7 @@ fn sample(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&image.sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             },
         ],
     });
@@ -137,9 +142,18 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
         })
         .collect();
     let image = CpuImage::from_rgba8(256, 256, pixels).unwrap();
+    // The analytic golden is the isotropic reference: the checker averages to
+    // the linear-light 188 at every level the plane samples, which pins the
+    // mip chain, not the anisotropy (the footprint gate below covers that).
     let uploaded = upload_texture(&device, &queue, &image, TextureRole::BaseColor).unwrap();
     assert_eq!(uploaded.texture.mip_level_count(), 9);
-    let pixels = sample(&device, &queue, &uploaded, &uploaded.view, (128, None));
+    // The stored sampler is DEFAULT. The golden is the isotropic reference,
+    // so this gate builds that sampler itself.
+    let isotropic = device.create_sampler(&ornis_render::textures::sampler_descriptor_for_role(
+        TextureRole::BaseColor,
+        AnisotropyLevel::OFF,
+    ));
+    let pixels = sample(&device, &queue, &uploaded.view, &isotropic, (128, None));
     let golden = include_bytes!("data/tilted_checker.rgba");
     assert_eq!(pixels.len(), golden.len());
     let mismatches = pixels
@@ -158,7 +172,7 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
         mip_level_count: Some(1),
         ..Default::default()
     });
-    let control = sample(&device, &queue, &uploaded, &base_only, (128, None));
+    let control = sample(&device, &queue, &base_only, &isotropic, (128, None));
     let unstable = control
         .as_chunks::<4>()
         .0
@@ -170,6 +184,55 @@ fn tilted_checker_matches_linear_light_golden_not_moire() {
         unstable > 500,
         "base-only control must demonstrate aliasing: {unstable}"
     );
+}
+
+/// Footprint gate for the anisotropic material sampler (`#122`): the same
+/// tilted plane, but with 32-texel bands along `v` instead of a checker.
+///
+/// The plane repeats the 256² texture 32 times, so a footprint covers tens of
+/// texels horizontally while its vertical extent stays near ten; the band
+/// period (64 texels) is already inside one texel from mip 6 on. That makes
+/// the two samplers analytically predictable: trilinear filtering picks the
+/// level of the *long* footprint axis (≥ 6.2 everywhere in the lower half) and
+/// averages the plane to the flat 188 — the same level the golden gate pins.
+/// Anisotropic sampling sizes the level by the *short* axis instead (3.2–4.9
+/// there) and takes its extra samples along the long one, which is constant
+/// inside a band, so those rows keep black/white stripes.
+///
+/// Both renders are measured on the same interior window (the plane's
+/// silhouette is excluded: per-quad derivatives are one-sided there and no
+/// sampler's level means anything — the golden gate budgets that same
+/// boundary). The gate then asks the anisotropic pass to produce many more
+/// band-coloured pixels than the isotropic one, which fails for a level of 1
+/// (identical images) as well as for a missing mip chain (both striped).
+#[test]
+fn tilted_bands_stay_sharp_with_anisotropy_at_default() {
+    let Some((adapter, device, queue)) = device() else {
+        return;
+    };
+    let pixels = (0..256 * 256)
+        .flat_map(|i| {
+            let c = if (i / 256 / 32) % 2 == 0 { 0 } else { 255 };
+            [c, c, c, 255]
+        })
+        .collect();
+    let image = CpuImage::from_rgba8(256, 256, pixels).unwrap();
+    let uploaded = upload_texture(&device, &queue, &image, TextureRole::BaseColor).unwrap();
+    let make_sampler = |level| {
+        device.create_sampler(&ornis_render::textures::sampler_descriptor_for_role(
+            TextureRole::BaseColor,
+            level,
+        ))
+    };
+    let isotropic = make_sampler(AnisotropyLevel::OFF);
+    let anisotropic = make_sampler(AnisotropyLevel::DEFAULT);
+    let flat = sample(&device, &queue, &uploaded.view, &isotropic, (128, None));
+    let sharp = sample(&device, &queue, &uploaded.view, &anisotropic, (128, None));
+    let supported = adapter
+        .get_downlevel_capabilities()
+        .flags
+        .contains(wgpu::DownlevelFlags::ANISOTROPIC_FILTERING);
+    forward::assert_anisotropic_contrast(&flat, &sharp, supported);
 }
 
 #[test]
@@ -226,8 +289,8 @@ fn verify_ktx_mips(
         let pixels = sample(
             device,
             queue,
-            &uploaded,
             &uploaded.view,
+            &uploaded.sampler,
             ((edge >> mip).max(1), Some(mip as u32)),
         );
         let error: u64 = pixels

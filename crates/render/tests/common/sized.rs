@@ -15,6 +15,16 @@ pub struct FrameSpec {
 }
 
 impl FrameSpec {
+    /// Tight bytes of one read-back pixel. `Rgba16Float` (the textured
+    /// forward target) is 8; every 8-bit color target the other gates use
+    /// is 4.
+    pub fn bytes_per_pixel(&self) -> u32 {
+        match self.format {
+            wgpu::TextureFormat::Rgba16Float => 8,
+            _ => 4,
+        }
+    }
+
     /// Swap-chain-less surface configuration for [`Renderer3D`] setup at
     /// this spec (same usage/present parameters as the square harness).
     pub fn surface_config(&self) -> wgpu::SurfaceConfiguration {
@@ -42,11 +52,10 @@ pub fn render_and_readback(
     spec: &FrameSpec,
     record: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
 ) -> Vec<u8> {
-    /// Bytes per read-back pixel.
-    const BPP: u32 = 4;
     /// `copy_texture_to_buffer` row alignment.
     const ROW_ALIGN: u32 = 256;
     let (w, h) = spec.size;
+    let bpp = spec.bytes_per_pixel();
     let target_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("pixel gate target"),
         size: wgpu::Extent3d {
@@ -67,7 +76,7 @@ pub fn render_and_readback(
     });
     record(&mut encoder, &target_view);
     queue.submit([encoder.finish()]);
-    let unpadded = w * BPP;
+    let unpadded = w * bpp;
     let padded = unpadded.div_ceil(ROW_ALIGN) * ROW_ALIGN;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("pixel gate readback"),

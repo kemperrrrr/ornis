@@ -58,6 +58,8 @@ fn default_config_matches_documented_defaults() {
         !config.indirect_draw,
         "indirect submission defaults off (the default frame stays direct)"
     );
+    assert_eq!(config.material_anisotropy, AnisotropyLevel::DEFAULT);
+    assert_eq!(config.material_anisotropy.get(), 16);
 }
 
 /// MSAA/exposure passthrough gate: the default config carries
@@ -79,6 +81,28 @@ fn config_msaa_and_exposure_forward_to_renderer() {
     // The defaults above are unchanged by constructing a custom value.
     assert_eq!(RenderBackendConfig::default().sample_count, 1);
     assert_eq!(RenderBackendConfig::default().exposure, 1.0);
+}
+
+/// The material sampler level is a renderer setting: the config value is
+/// what the backend reports, and a later value is stored as given.
+/// A raw `u16` saturates in [`AnisotropyLevel::new`] before the setter.
+#[test]
+fn material_anisotropy_config_roundtrips_and_setter_clamps() {
+    let Some((device, _queue)) = try_device() else {
+        eprintln!("no GPU adapter; skipping anisotropy config roundtrip");
+        return;
+    };
+    let config = RenderBackendConfig {
+        material_anisotropy: AnisotropyLevel::new(8),
+        ..RenderBackendConfig::default()
+    };
+    let mut backend = create_render_backend(&device, &config);
+    assert_eq!(backend.material_anisotropy().get(), 8);
+    backend.set_material_anisotropy(&device, AnisotropyLevel::new(0));
+    assert_eq!(backend.material_anisotropy(), AnisotropyLevel::OFF);
+    backend.set_material_anisotropy(&device, AnisotropyLevel::new(17));
+    assert_eq!(backend.material_anisotropy(), AnisotropyLevel::DEFAULT);
+    assert_eq!(backend.material_anisotropy().get(), 16);
 }
 
 /// Transparency-flag gate: building with default transparency options

@@ -74,8 +74,8 @@ pub use extraction::{
     extract_render_data, extract_render_data_with_stats, max_mesh_params, unlit_material,
 };
 pub use flags::{
-    Access as AccessKind, Bloom, CompositeTechnique, DepthOwnership, PassState, ResourceBacking,
-    SamplerKind, ShadowCast,
+    Access as AccessKind, AnisotropyLevel, Bloom, CompositeTechnique, DepthOwnership, PassState,
+    ResourceBacking, SamplerKind, ShadowCast,
 };
 pub use frame_exec::{FrameExecutor, FrameIds, PassViews, RenderFrame3D, Technique};
 pub use frame_passes::{

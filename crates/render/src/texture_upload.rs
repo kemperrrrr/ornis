@@ -2,6 +2,7 @@
 
 use ornis_texture::{TextureEncoding, TextureImage, TextureLevels};
 
+use crate::flags::AnisotropyLevel;
 use crate::textures::{
     GpuTexture, TextureRole, TextureUploadError, sampler_descriptor_for_role,
     texture_format_for_role,
@@ -69,6 +70,8 @@ pub fn gpu_texture_format(encoding: TextureEncoding, role: TextureRole) -> wgpu:
 /// Native KTX2 blocks are retained when supported; otherwise all authored levels
 /// decode to RGBA8. Non-block-aligned base extents also use RGBA8, as WebGPU
 /// requires compressed base dimensions to be multiples of their block extent.
+/// The stored sampler is [`AnisotropyLevel::DEFAULT`]. A frame that needs
+/// another level builds its own sampler; this one is not configurable here.
 ///
 /// # Errors
 /// Rejects invalid images, failed transcodes and dimensions exceeding device limits.
@@ -157,7 +160,8 @@ pub(crate) fn upload_levels(
         );
     }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let sampler = device.create_sampler(&sampler_descriptor_for_role(role));
+    let sampler =
+        device.create_sampler(&sampler_descriptor_for_role(role, AnisotropyLevel::DEFAULT));
     Ok(GpuTexture {
         texture,
         view,
