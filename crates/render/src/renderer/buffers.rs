@@ -410,10 +410,8 @@ impl Renderer3D {
                 requested,
                 identity_complete,
             );
-            if identity_complete {
-                if let Some(entity) = entity {
-                    next_by_entity.insert(entity, inst.model_matrix);
-                }
+            if identity_complete && let Some(entity) = entity {
+                next_by_entity.insert(entity, inst.model_matrix);
             }
             gpu_objects.push(PerObjectGpu {
                 model: model_arr,
