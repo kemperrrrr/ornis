@@ -97,6 +97,7 @@ impl AaResolve {
     }
 
     /// Switches the post mode; geometry sample count is managed by the caller.
+    // qual:api — callers select a post mode without rebuilding pipelines.
     pub fn set_mode(&mut self, mode: AntiAliasing) {
         if self.mode != mode {
             self.mode = mode;
@@ -124,6 +125,7 @@ impl AaResolve {
     }
 
     /// Current geometry jitter in pixels (zero outside TAA).
+    // qual:api — external cameras read the jitter before drawing geometry.
     pub fn jitter(&self) -> Vec2 {
         if self.mode == AntiAliasing::Taa {
             temporal_jitter(self.frame)

@@ -122,7 +122,7 @@ pub(super) fn bindings(
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     uniform: &wgpu::Buffer,
-    views: [&wgpu::TextureView; 4],
+    views: [&wgpu::TextureView; TEXTURE_BINDINGS as usize],
 ) -> wgpu::BindGroup {
     let mut entries: Vec<_> = views
         .iter()
