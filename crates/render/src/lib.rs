@@ -5,6 +5,10 @@
 #![warn(missing_docs)]
 /// Screen-space ambient occlusion (classic SSAO plus GTAO).
 pub mod ao;
+/// GPU eye adaptation (auto-exposure) from a log-luminance histogram of
+/// the lit HDR target: the histogram compute pass, the adapted exposure
+/// the composite reads, and the manual/auto [`auto_exposure::ExposureMode`].
+pub mod auto_exposure;
 /// Client-side orbit camera and backend-neutral input consumer.
 pub mod camera;
 /// Final PBR/UI blend pass (legacy path).

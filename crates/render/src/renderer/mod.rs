@@ -396,6 +396,13 @@ pub struct Renderer3D {
     composite_sampler: wgpu::Sampler,
     /// Bloom chain pipelines and params buffer.
     bloom_pass: BloomPass,
+    /// GPU auto-exposure (histogram + adapt compute) and the shared exposure
+    /// uniform the composite reads (see [`crate::auto_exposure`]); the manual
+    /// path writes the constant multiplier into the same uniform.
+    auto_exposure: crate::auto_exposure::AutoExposure,
+    /// Selected exposure mode (manual constant or histogram eye adaptation),
+    /// read on the composite record path.
+    exposure_mode: std::sync::RwLock<crate::auto_exposure::ExposureMode>,
     /// Opt-in distance-fog pass (disabled by default: never runs unless a
     /// [`crate::frame_passes::FogPass`] with an enabled state records it).
     fog: FogPipeline,
@@ -518,6 +525,22 @@ impl Renderer3D {
     /// Anisotropic level of the textured-forward material sampler.
     pub fn material_anisotropy(&self) -> AnisotropyLevel {
         self.material_anisotropy
+    }
+
+    /// Selected post-tone-mapper exposure mode (see
+    /// [`crate::auto_exposure::ExposureMode`]); manual `1.0` by default, so
+    /// frames are pixel-identical to the pre-auto-exposure renderer.
+    pub fn exposure_mode(&self) -> crate::auto_exposure::ExposureMode {
+        *read_lock(&self.exposure_mode)
+    }
+
+    /// Replace the post-tone-mapper exposure mode applied by future
+    /// composites. [`crate::auto_exposure::ExposureMode::Manual`] writes the
+    /// constant multiplier; [`crate::auto_exposure::ExposureMode::Auto`] runs
+    /// the histogram/adapt compute passes against the lit HDR target.
+    // qual:api — public renderer entry; in-tree callers are the unit tests.
+    pub fn set_exposure_mode(&self, mode: crate::auto_exposure::ExposureMode) {
+        *write_lock(&self.exposure_mode) = mode;
     }
 
     /// Deferred lighting debug term. Stored across [`set_lights`](Self::set_lights);
