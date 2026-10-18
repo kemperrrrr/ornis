@@ -307,6 +307,7 @@ impl Renderer3D {
                 write_mask: wgpu::ColorWrites::ALL,
             }),
             None,
+            None,
         ];
         let create_pipeline = |label: &'static str, targets: &[Option<wgpu::ColorTargetState>]| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -351,8 +352,13 @@ impl Renderer3D {
         };
         let pipeline = create_pipeline("skinned gbuffer pipeline", &targets);
         targets[5] = Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: wgpu::TextureFormat::Rg16Float,
             blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        targets[6] = Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::R16Uint,
+            blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         });
         let motion_pipeline = create_pipeline("skinned gbuffer motion pipeline", &targets);
@@ -985,6 +991,7 @@ mod tests {
             material_params: &renderer.gbuffer.material_params_view,
             depth: &renderer.gbuffer.depth_view,
             motion: None,
+            previous_depth: None,
         };
         let instance = InstanceData {
             model_matrix: glam::Mat4::IDENTITY,

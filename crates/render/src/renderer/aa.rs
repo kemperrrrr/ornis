@@ -27,6 +27,9 @@ pub(crate) use state::AaState;
 /// memory of an RGBA32 one and wide enough for the composited image.
 pub(crate) const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
+/// Number of trailing `AaUniform` padding floats required for 16-byte alignment.
+const AA_UNIFORM_PADDING: usize = 3;
+
 /// Per-frame parameters of the anti-aliasing passes.
 ///
 /// The temporal resolve reads the g-buffer motion vector and previous
@@ -52,7 +55,7 @@ pub(crate) struct AaUniform {
     mode: u32,
     /// Trailing pad (padding: not shader-visible).
     #[wgsl(skip)]
-    _pad: [f32; 3],
+    _pad: [f32; AA_UNIFORM_PADDING],
 }
 
 impl AaUniform {
@@ -65,7 +68,7 @@ impl AaUniform {
             clamp_radius: settings.clamp_radius() as f32,
             history_valid: if history_valid { 1.0 } else { 0.0 },
             mode: 0,
-            _pad: [0.0; 3],
+            _pad: [0.0; AA_UNIFORM_PADDING],
         }
     }
 
@@ -77,21 +80,23 @@ impl AaUniform {
             clamp_radius: 0.0,
             history_valid: 0.0,
             mode: mode.shader_mode(),
-            _pad: [0.0; 3],
+            _pad: [0.0; AA_UNIFORM_PADDING],
         }
     }
 }
 
-/// Inputs of the temporal resolve: the composited image, the g-buffer
-/// depth and motion vector the reprojection reads, and the presented target.
+/// Inputs of the temporal resolve: the composited image, g-buffer depth,
+/// motion vectors, packed previous depth, and the presented target.
 pub struct TaaInputs<'a> {
     /// The composited image the resolve reads.
     pub source: &'a wgpu::TextureView,
     /// The g-buffer depth buffer: background pixels do not reuse history.
     pub depth: &'a wgpu::TextureView,
-    /// The g-buffer motion vector (current UV minus previous UV, plus the
-    /// previous NDC depth in B) the reprojection follows.
+    /// The g-buffer motion vector (current UV minus previous UV) the
+    /// reprojection follows.
     pub motion: &'a wgpu::TextureView,
+    /// The previous NDC depth and validity marker packed into R16Uint.
+    pub previous_depth: &'a wgpu::TextureView,
     /// The presented target the resolve writes.
     pub target: &'a wgpu::TextureView,
     /// The settings of the resolve (feedback, clamp radius).
@@ -109,6 +114,18 @@ pub struct EdgeInputs<'a> {
     pub settings: EdgeFilterSettings,
     /// Which filter to run (FXAA or SMAA).
     pub mode: AntiAliasMode,
+}
+
+fn clear_color_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            store: wgpu::StoreOp::Store,
+        },
+    }
 }
 
 impl Renderer3D {
@@ -145,11 +162,13 @@ impl Renderer3D {
     /// pass in the frame plan; the post-process modes filter the composited
     /// image in one pass. Switching the mode resets the temporal state, so
     /// a stale history never leaks into the new mode.
+    // qual:api — public renderer setting for application-controlled AA.
     pub fn set_anti_alias(&self, mode: AntiAliasMode) {
         self.aa_state.set_mode(mode);
     }
 
     /// The anti-aliasing mode the renderer currently runs with.
+    // qual:api — public renderer state query for applications.
     pub fn anti_alias_mode(&self) -> AntiAliasMode {
         self.aa_state.mode()
     }
@@ -168,15 +187,16 @@ impl Renderer3D {
             source,
             depth,
             motion,
+            previous_depth,
             target,
             settings,
         } = inputs;
         self.aa_passes
             .ensure_history(device, self.width, self.height);
         let history_guard = super::read_lock(&self.aa_passes.history);
-        let history = history_guard
-            .as_ref()
-            .expect("TAA history is allocated before its resolve pass");
+        let Some(history) = history_guard.as_ref() else {
+            return;
+        };
         let (read_index, write_index) = self.aa_passes.history_slots();
         let uniform = AaUniform::pack_taa(settings, self.aa_state.history_valid());
         queue.write_buffer(
@@ -186,28 +206,13 @@ impl Renderer3D {
         );
         let history_read = &history[read_index].view;
         let history_write = &history[write_index].view;
-        let bind_group = self.aa_taa_bind_group(device, source, depth, motion, history_read);
+        let bind_group =
+            self.aa_taa_bind_group(device, source, depth, motion, previous_depth, history_read);
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("taa pass"),
             color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: history_write,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
+                Some(clear_color_attachment(target)),
+                Some(clear_color_attachment(history_write)),
             ],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -234,6 +239,7 @@ impl Renderer3D {
         source: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         motion: &wgpu::TextureView,
+        previous_depth: &wgpu::TextureView,
         history: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -245,6 +251,9 @@ impl Renderer3D {
                     "src_sampler" => Some(wgpu::BindingResource::Sampler(&self.aa_passes.sampler)),
                     "depth_tex" => Some(wgpu::BindingResource::TextureView(depth)),
                     "motion_tex" => Some(wgpu::BindingResource::TextureView(motion)),
+                    "previous_depth_tex" => {
+                        Some(wgpu::BindingResource::TextureView(previous_depth))
+                    }
                     "history_tex" => Some(wgpu::BindingResource::TextureView(history)),
                     "aa_params" => Some(wgpu::BindingResource::Buffer(
                         self.aa_passes.params_buffer.as_entire_buffer_binding(),
@@ -295,15 +304,7 @@ impl Renderer3D {
         });
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("aa edge pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
+            color_attachments: &[Some(clear_color_attachment(target))],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,

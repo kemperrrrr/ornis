@@ -20,8 +20,15 @@
 //! FXAA blends along the dominant luma gradient, SMAA weights the two
 //! samples straddling the edge by their luma similarity to the centre.
 
-use glam::{Mat4, Vec2, Vec3};
-use ornis_core::units::Clamped01;
+use glam::{Mat4, Vec2};
+
+mod reference;
+#[cfg(test)]
+use reference::{blend_history, clamp_history, neighbourhood_bounds_with_validity};
+pub use reference::{
+    edge_axis, edge_gradient, fxaa_blend, fxaa_luma, neighbourhood_bounds, smaa_blend, taa_resolve,
+    ycocg_decode, ycocg_encode,
+};
 
 /// Which anti-aliasing technique the frame renders with.
 ///
@@ -51,6 +58,7 @@ impl AntiAliasMode {
 
     /// `true` for the post-process modes (one fullscreen pass after the
     /// composite).
+    // qual:api — public mode predicate for downstream renderer policy.
     pub fn is_post_process(self) -> bool {
         matches!(self, Self::Fxaa | Self::Smaa)
     }
@@ -63,6 +71,7 @@ impl AntiAliasMode {
 
     /// `true` when the mode needs a persistent history buffer (only the
     /// temporal mode accumulates across frames).
+    // qual:api — public mode predicate for downstream renderer policy.
     pub fn needs_history(self) -> bool {
         self.is_temporal()
     }
@@ -117,6 +126,9 @@ pub fn halton(index: u32, base: u32) -> f32 {
     result
 }
 
+/// Vertical Halton base used to generate the Y jitter component.
+const HALTON_BASE_Y: u32 = 3;
+
 /// Sub-pixel jitter sequence of the temporal mode.
 ///
 /// The offsets live in `[-0.5, 0.5]` pixels (x right, y down) and cycle
@@ -153,7 +165,7 @@ impl JitterSequence {
     /// The jitter offset of `index`, in pixels (x right, y down).
     pub fn offset_at(index: u32) -> Vec2 {
         let x = halton(index + 1, 2) - Self::HALF_PIXEL;
-        let y = halton(index + 1, 3) - Self::HALF_PIXEL;
+        let y = halton(index + 1, HALTON_BASE_Y) - Self::HALF_PIXEL;
         Vec2::new(x, y)
     }
 
@@ -195,68 +207,10 @@ pub fn jittered_projection(view_proj: Mat4, offset: Vec2, extent: (u32, u32)) ->
     Mat4::from_cols_array_2d(&columns)
 }
 
-/// Quarter of a unit (the YCoCg weights).
-const QUARTER: f32 = 0.25;
-/// Half of a unit (the YCoCg weights).
-const HALF: f32 = 0.5;
-/// Variance inflation of the temporal neighbourhood clamp.
-const CLAMP_GAMMA: f32 = 1.25;
-
-/// Reversible YCoCg encoding of an RGB colour.
-///
-/// The chroma axes are decorrelated from the luma, so clamping the
-/// history in this space keeps its brightness while rejecting the colour
-/// drift that would show as ghosting.
-pub fn ycocg_encode(color: Vec3) -> Vec3 {
-    let (r, g, b) = (color.x, color.y, color.z);
-    Vec3::new(
-        QUARTER * r + HALF * g + QUARTER * b,
-        HALF * r - HALF * b,
-        -QUARTER * r + HALF * g - QUARTER * b,
-    )
-}
-
-/// Inverse of [`ycocg_encode`].
-pub fn ycocg_decode(color: Vec3) -> Vec3 {
-    let (y, co, cg) = (color.x, color.y, color.z);
-    Vec3::new(y + co - cg, y + cg, y - co - cg)
-}
-
-/// Colour bounds of the current-frame neighbourhood, in YCoCg.
-///
-/// The bounds are the intersection of the neighbourhood's own minimum and
-/// maximum with the mean ± `CLAMP_GAMMA` standard deviations: a flat
-/// neighbourhood keeps its exact range, a noisy one is not widened by a
-/// single outlier. The samples are encoded first, so the bounds live in
-/// the same space the history is clamped in.
-pub fn neighbourhood_bounds(samples: &[Vec3]) -> (Vec3, Vec3) {
-    let Some(first) = samples.first() else {
-        return (Vec3::ZERO, Vec3::ZERO);
-    };
-    let mut min = ycocg_encode(*first);
-    let mut max = min;
-    let mut sum = Vec3::ZERO;
-    let mut sum_squares = Vec3::ZERO;
-    for sample in samples {
-        let encoded = ycocg_encode(*sample);
-        min = min.min(encoded);
-        max = max.max(encoded);
-        sum += encoded;
-        sum_squares += encoded * encoded;
-    }
-    let count = samples.len() as f32;
-    let mean = sum / count;
-    let variance = (sum_squares / count - mean * mean).max(Vec3::ZERO);
-    let sigma = variance.sqrt();
-    let lower = mean - CLAMP_GAMMA * sigma;
-    let upper = mean + CLAMP_GAMMA * sigma;
-    (min.max(lower), max.min(upper))
-}
-
 /// Settings of the temporal resolve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TaaSettings {
-    feedback: Clamped01,
+    feedback: f32,
     clamp_radius: u32,
 }
 
@@ -278,7 +232,7 @@ impl TaaSettings {
             return None;
         }
         Some(Self {
-            feedback: Clamped01::new(feedback),
+            feedback: feedback.clamp(0.0, 1.0),
             clamp_radius: clamp_radius.clamp(1, Self::MAX_CLAMP_RADIUS),
         })
     }
@@ -286,7 +240,7 @@ impl TaaSettings {
     /// Weight of the history in the blend (`0` = current frame only,
     /// `1` = history only).
     pub fn feedback(self) -> f32 {
-        self.feedback.get()
+        self.feedback
     }
 
     /// Neighbourhood radius in pixels.
@@ -298,43 +252,10 @@ impl TaaSettings {
 impl Default for TaaSettings {
     fn default() -> Self {
         Self {
-            feedback: Clamped01::new(Self::DEFAULT_FEEDBACK),
+            feedback: Self::DEFAULT_FEEDBACK,
             clamp_radius: Self::DEFAULT_CLAMP_RADIUS,
         }
     }
-}
-
-/// Temporal resolve of one pixel: clamps `history` into the colour range
-/// of the current neighbourhood and blends it with `current`.
-///
-/// The clamp is what keeps a moving object from dragging its old colour
-/// across the screen: a history sample that no longer fits the current
-/// neighbourhood is pulled back to it, so the ghost fades out instead of
-/// smearing.
-pub fn taa_resolve(
-    current: Vec3,
-    history: Vec3,
-    neighbourhood: &[Vec3],
-    settings: TaaSettings,
-) -> Vec3 {
-    if neighbourhood.is_empty() {
-        return current;
-    }
-    let (lower, upper) = neighbourhood_bounds(neighbourhood);
-    let clamped = ycocg_decode(ycocg_encode(history).clamp(lower, upper));
-    current.lerp(clamped, settings.feedback())
-}
-
-/// Rec. 601 luma weights.
-const LUMA_RED: f32 = 0.299;
-/// Rec. 601 luma weights.
-const LUMA_GREEN: f32 = 0.587;
-/// Rec. 601 luma weights.
-const LUMA_BLUE: f32 = 0.114;
-
-/// Luma (Rec. 601) of a colour — the brightness the edge filters work on.
-pub fn fxaa_luma(color: Vec3) -> f32 {
-    LUMA_RED * color.x + LUMA_GREEN * color.y + LUMA_BLUE * color.z
 }
 
 /// Settings of the post-process edge filters.
@@ -369,79 +290,6 @@ impl Default for EdgeFilterSettings {
     }
 }
 
-/// Luma gradient of a pixel along the horizontal and the vertical axis.
-///
-/// The gradients are signed differences of the neighbouring luma values;
-/// their magnitudes say how much the image changes across each axis.
-pub fn edge_gradient(
-    luma_north: f32,
-    luma_south: f32,
-    luma_east: f32,
-    luma_west: f32,
-) -> (f32, f32) {
-    (luma_east - luma_west, luma_south - luma_north)
-}
-
-/// The axis (0 = horizontal, 1 = vertical) with the stronger gradient.
-///
-/// The edge filter blends across the dominant gradient, i.e. along the
-/// axis the image changes fastest — that is the direction in which the
-/// aliased edge sits.
-pub fn edge_axis(gradient_x: f32, gradient_y: f32) -> u32 {
-    if gradient_x.abs() > gradient_y.abs() {
-        0
-    } else {
-        1
-    }
-}
-
-/// FXAA blend of one pixel.
-///
-/// `tap_a` and `tap_b` are the two neighbours along the dominant
-/// gradient axis, `range` the luma range across that axis. A flat pixel
-/// (`range` below the threshold) is returned unchanged; a strong edge is
-/// blended towards the average of the two taps.
-pub fn fxaa_blend(
-    center: Vec3,
-    tap_a: Vec3,
-    tap_b: Vec3,
-    range: f32,
-    settings: EdgeFilterSettings,
-) -> Vec3 {
-    if range.partial_cmp(&settings.threshold) != Some(std::cmp::Ordering::Greater) {
-        return center;
-    }
-    let blurred = (center + center + tap_a + tap_b) * QUARTER;
-    let weight = ((range - settings.threshold) / range).clamp(0.0, 1.0);
-    center.lerp(blurred, weight)
-}
-
-/// SMAA blend of one pixel.
-///
-/// The two samples straddling the edge are weighted by their luma
-/// similarity to the centre: the sample that matches the centre keeps
-/// its weight, the other one fades — the morphological part of SMAA, with
-/// the similarity replacing the search textures of the reference
-/// implementation.
-pub fn smaa_blend(
-    center: Vec3,
-    tap_a: Vec3,
-    tap_b: Vec3,
-    range: f32,
-    settings: EdgeFilterSettings,
-) -> Vec3 {
-    if range.partial_cmp(&settings.threshold) != Some(std::cmp::Ordering::Greater) {
-        return center;
-    }
-    let luma_center = fxaa_luma(center);
-    let weight_a = 1.0 / (1.0 + (fxaa_luma(tap_a) - luma_center).abs());
-    let weight_b = 1.0 / (1.0 + (fxaa_luma(tap_b) - luma_center).abs());
-    let total = weight_a + weight_b;
-    let blended = (tap_a * weight_a + tap_b * weight_b) / total;
-    let weight = ((range - settings.threshold) / range).clamp(0.0, 1.0);
-    center.lerp(blended, weight)
-}
-
 /// Opt-in anti-aliasing wiring for the frame plan: the mode plus the
 /// settings of its kernel.
 ///
@@ -450,9 +298,12 @@ pub fn smaa_blend(
 /// exactly when the resolve expects it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AaWiring {
-    mode: AntiAliasMode,
-    taa: TaaSettings,
-    edge: EdgeFilterSettings,
+    /// Selected anti-aliasing mode.
+    pub mode: AntiAliasMode,
+    /// Temporal resolve settings.
+    pub taa_settings: TaaSettings,
+    /// Post-process edge-filter settings.
+    pub edge_settings: EdgeFilterSettings,
 }
 
 impl AaWiring {
@@ -460,35 +311,30 @@ impl AaWiring {
     pub fn new(mode: AntiAliasMode) -> Self {
         Self {
             mode,
-            taa: TaaSettings::default(),
-            edge: EdgeFilterSettings::default(),
+            taa_settings: TaaSettings::default(),
+            edge_settings: EdgeFilterSettings::default(),
         }
     }
 
     /// The wiring for a mode with explicit settings.
-    pub fn with_settings(mode: AntiAliasMode, taa: TaaSettings, edge: EdgeFilterSettings) -> Self {
-        Self { mode, taa, edge }
-    }
-
-    /// The selected mode.
-    pub fn mode(&self) -> AntiAliasMode {
-        self.mode
-    }
-
-    /// The settings of the temporal resolve.
-    pub fn taa_settings(&self) -> TaaSettings {
-        self.taa
-    }
-
-    /// The settings of the edge filters.
-    pub fn edge_settings(&self) -> EdgeFilterSettings {
-        self.edge
+    // qual:api — public constructor for caller-selected AA settings.
+    pub fn with_settings(
+        mode: AntiAliasMode,
+        taa_settings: TaaSettings,
+        edge_settings: EdgeFilterSettings,
+    ) -> Self {
+        Self {
+            mode,
+            taa_settings,
+            edge_settings,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
 
     /// Luma of a mid grey.
     const GREY_LUMA: f32 = 0.5;
@@ -608,10 +454,14 @@ mod tests {
         let samples = [Vec3::new(0.2, 0.2, 0.2), Vec3::new(0.8, 0.8, 0.8)];
         let (lower, upper) = neighbourhood_bounds(&samples);
         assert!(lower.x <= 0.2 && upper.x >= 0.8, "{lower:?} {upper:?}");
-        // An empty neighbourhood has no range at all.
+        let (_, _, validity) = neighbourhood_bounds_with_validity(&samples);
+        assert_eq!(validity, 1.0);
+        // An empty neighbourhood has no range and rejects history.
         let (lower, upper) = neighbourhood_bounds(&[]);
         assert_eq!(lower, Vec3::ZERO);
         assert_eq!(upper, Vec3::ZERO);
+        let (_, _, validity) = neighbourhood_bounds_with_validity(&[]);
+        assert_eq!(validity, 0.0);
     }
 
     #[test]
@@ -626,9 +476,18 @@ mod tests {
             resolved.x < current.x && resolved.x > history.x,
             "the blend must sit between the current pixel and the history: {resolved:?}"
         );
-        // A history outside the range is pulled back to it: no ghosting.
+        // A history outside a flat neighborhood is pulled back to the
+        // current pixel: no ghosting. Keep this neighborhood separate from
+        // the varied one above, whose range intentionally admits history.
         let stale = Vec3::new(1.0, 0.0, 0.0);
-        let clamped = taa_resolve(current, stale, &neighbourhood, settings);
+        let stale_neighbourhood = [current; 3];
+        let (lower, upper, validity) = neighbourhood_bounds_with_validity(&stale_neighbourhood);
+        let clamped_history = clamp_history(stale, lower, upper);
+        assert_eq!(
+            blend_history(current, clamped_history, settings.feedback(), validity),
+            current
+        );
+        let clamped = taa_resolve(current, stale, &stale_neighbourhood, settings);
         assert!((clamped - current).length() < 1.0e-5, "{clamped:?}");
         // An empty neighbourhood keeps the current pixel.
         assert_eq!(taa_resolve(current, stale, &[], settings), current);

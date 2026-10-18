@@ -19,7 +19,7 @@ use crate::frame_passes::{
     CompositeHybridBloom, Depth, EdgeFilterPass, FogPass, FogPlacement, FogWiring, Forward,
     FromDeferred, FromForward, GbufferMotionPass, GbufferPass, Hdr, HdrFwd, LdrLayer,
     LightingAoPass, LightingPass, MaterialId, MaterialParams, Motion, Normal, OwnsDepth,
-    SharedDepth, TaaPass, Target, WorldPosition,
+    PreviousDepth, SharedDepth, TaaPass, Target, WorldPosition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
@@ -746,6 +746,7 @@ impl RenderFrame3D {
     /// count for `Msaa`. `Off` and the shader-based modes (TAA/FXAA/SMAA)
     /// use single-sample geometry; the filters replace MSAA rather than
     /// compounding its cost.
+    // qual:allow(iosp) reason: "the runtime AA mode selects distinct generic target types in the typed render graph"
     pub fn new_with_aa_samples(
         surface_format: wgpu::TextureFormat,
         surface_size: (u32, u32),
@@ -754,14 +755,14 @@ impl RenderFrame3D {
         aa: AaWiring,
         sample_count: u32,
     ) -> Self {
-        let sample_count = match aa.mode() {
+        let sample_count = match aa.mode {
             AntiAliasMode::Off => crate::renderer::SINGLE_SAMPLE_COUNT,
             AntiAliasMode::Msaa => crate::renderer::normalize_sample_count(sample_count),
             AntiAliasMode::Taa | AntiAliasMode::Fxaa | AntiAliasMode::Smaa => {
                 crate::renderer::SINGLE_SAMPLE_COUNT
             }
         };
-        if aa.mode().is_enabled() {
+        if aa.mode.is_enabled() {
             Self::build::<LdrLayer>(
                 surface_format,
                 surface_size,
@@ -823,15 +824,15 @@ impl RenderFrame3D {
         let Some(wiring) = aa else {
             return;
         };
-        if !wiring.mode().is_enabled() {
+        if !wiring.mode.is_enabled() {
             return;
         }
-        match wiring.mode() {
+        match wiring.mode {
             AntiAliasMode::Taa => {
-                systems.add_system(TaaPass::new(wiring.taa_settings()));
+                systems.add_system(TaaPass::new(wiring.taa_settings));
             }
             AntiAliasMode::Fxaa | AntiAliasMode::Smaa => {
-                systems.add_system(EdgeFilterPass::new(wiring.mode(), wiring.edge_settings()));
+                systems.add_system(EdgeFilterPass::new(wiring.mode, wiring.edge_settings));
             }
             AntiAliasMode::Off | AntiAliasMode::Msaa => {}
         }
@@ -850,8 +851,7 @@ impl RenderFrame3D {
         sample_count: u32,
     ) -> Self {
         let FramePassWiring { fog, ao, aa } = passes;
-        // S2: resources are registered by type; specs/names (and the
-        // ResourceId order) mirror the imperative wiring exactly.
+        // Register resources by type in the plan's stable declaration order.
         let mut systems = SystemSet::new();
         systems.set_sample_count(sample_count);
         let sample_count = systems.sample_count();
@@ -870,14 +870,14 @@ impl RenderFrame3D {
             bloom1: systems.register_resource::<Bloom1>(surface_format),
             bloom2: systems.register_resource::<Bloom2>(surface_format),
         };
-        if aa.is_some_and(|wiring| wiring.mode().is_enabled()) {
-            // The composite pass is registered before the filter pass and
-            // writes this layer, so declare it before adding the composite.
+        if aa.is_some_and(|wiring| wiring.mode.is_enabled()) {
+            // The composite writes this layer before the filter reads it.
             systems.register_resource::<LdrLayer>(surface_format);
         }
-        let taa = aa.is_some_and(|wiring| wiring.mode() == AntiAliasMode::Taa);
+        let taa = aa.is_some_and(|wiring| wiring.mode == AntiAliasMode::Taa);
         if taa {
             systems.register_resource::<Motion>(surface_format);
+            systems.register_resource::<PreviousDepth>(surface_format);
         }
         if technique.has_deferred() {
             if taa {
@@ -896,8 +896,7 @@ impl RenderFrame3D {
             }
         }
         if technique.has_forward() {
-            // In forward-only mode the pass owns the depth buffer; in
-            // hybrid it was already filled by the gbuffer pass.
+            // Forward owns depth; hybrid shares the g-buffer depth.
             if technique == Technique::Forward {
                 systems.add_system(Forward::<OwnsDepth>::new());
             } else {
@@ -905,8 +904,7 @@ impl RenderFrame3D {
             }
         }
         if bloom.is_on() {
-            // The bright-pass input is the HDR layer the active technique
-            // produced: `hdr` (deferred/hybrid) or `hdr_fwd` (forward-only).
+            // Bright-pass reads the HDR layer produced by this technique.
             if technique.has_deferred() {
                 systems.add_system(BloomBright::<FromDeferred>::new());
             } else {
@@ -917,8 +915,7 @@ impl RenderFrame3D {
             systems.add_system(BloomUp1Pass);
             systems.add_system(BloomUp0Pass);
         }
-        // Opt-in fog before composite: the composite clear discards its
-        // `target` write (plan shape only, no visible effect).
+        // Before-composite fog is a plan-shape node; composite clears target.
         if let Some(FogWiring {
             placement: FogPlacement::BeforeComposite,
             state,
@@ -926,8 +923,7 @@ impl RenderFrame3D {
         {
             systems.add_system(FogPass::new(state));
         }
-        // The composite mode is a pure function of (technique, bloom):
-        // which HDR layers exist and whether the bloom chain feeds the mix.
+        // Select the composite variant from the technique and bloom state.
         match (technique, bloom) {
             (Technique::Deferred, Bloom::On) => {
                 systems.add_system(Composite::<CompositeDeferredBloom, O>::new());
@@ -948,11 +944,9 @@ impl RenderFrame3D {
                 systems.add_system(Composite::<CompositeHybrid, O>::new());
             }
         }
-        // Opt-in anti-aliasing: the pass filters the composited image, so
-        // it runs after the composite and presents the result.
+        // The AA pass filters the composite and presents the result.
         Self::register_anti_alias(&mut systems, aa);
-        // Opt-in fog after composite (recommended): its `target` write is
-        // the presented frame.
+        // After-composite fog writes the presented frame.
         if let Some(FogWiring {
             placement: FogPlacement::AfterComposite,
             state,
@@ -967,7 +961,7 @@ impl RenderFrame3D {
             systems,
             bloom,
             technique,
-            anti_alias: aa.map_or(AntiAliasMode::Msaa, |wiring| wiring.mode()),
+            anti_alias: aa.map_or(AntiAliasMode::Msaa, |wiring| wiring.mode),
             sample_count,
         }
     }
@@ -990,6 +984,7 @@ impl RenderFrame3D {
 
     /// Anti-aliasing mode this plan wires (the renderer must select the
     /// same mode through [`Renderer3D::set_anti_alias`]).
+    // qual:api — public plan setting query for external frame orchestration.
     pub fn anti_alias_mode(&self) -> AntiAliasMode {
         self.anti_alias
     }
@@ -1689,6 +1684,7 @@ mod tests {
         let _ = plan.systems.build();
     }
 
+    // qual:allow(dry, fragment) reason: "The AA mode table intentionally repeats equivalent graph assertions per technique"
     #[test]
     fn anti_alias_plans_wire_the_matching_pass() {
         // The mode decides the pass: the temporal resolve reads the
@@ -1731,6 +1727,7 @@ mod tests {
         );
     }
 
+    // qual:allow(dry, fragment) reason: "The resource graph assertions deliberately mirror the separate AA mode table"
     #[test]
     fn anti_alias_plan_filters_the_composited_layer() {
         // The composite writes the intermediate layer, the anti-aliasing
@@ -1759,9 +1756,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is registered"))
         };
         let ldr = resource("ldr_layer");
+        let motion = resource("motion");
+        let previous_depth = resource("previous_depth");
         let target = resource("target");
+        let gbuffer = pass("gbuffer");
         let composite = pass("composite");
         let taa = pass("taa");
+        assert_eq!(motion.spec.format, wgpu::TextureFormat::Rg16Float);
+        assert_eq!(previous_depth.spec.format, wgpu::TextureFormat::R16Uint);
+        assert!(gbuffer.writes.iter().any(|(id, _)| *id == motion.id));
+        assert!(
+            gbuffer
+                .writes
+                .iter()
+                .any(|(id, _)| *id == previous_depth.id)
+        );
+        assert!(taa.reads.contains(&motion.id));
+        assert!(taa.reads.contains(&previous_depth.id));
         assert!(
             composite.writes.iter().any(|(id, _)| *id == ldr.id),
             "the composite writes the intermediate layer"

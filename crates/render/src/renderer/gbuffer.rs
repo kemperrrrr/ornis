@@ -15,9 +15,11 @@ pub struct GbufferTargets<'a> {
     pub material_params: &'a wgpu::TextureView,
     /// Depth buffer view.
     pub depth: &'a wgpu::TextureView,
-    /// Optional motion-vector target (current UV − previous UV, previous
-    /// depth, validity). Present only when the temporal plan runs.
+    /// Optional motion-vector target (current UV − previous UV), present
+    /// only when the temporal plan runs.
     pub motion: Option<&'a wgpu::TextureView>,
+    /// Optional R16Uint previous-depth/validity target paired with `motion`.
+    pub previous_depth: Option<&'a wgpu::TextureView>,
 }
 
 /// Persistent g-buffer textures of the legacy path (plan path draws into
@@ -378,6 +380,7 @@ impl Renderer3D {
                 write_mask: wgpu::ColorWrites::ALL,
             }),
             None,
+            None,
         ];
         let create_pipeline = |label: &'static str, targets: &[Option<wgpu::ColorTargetState>]| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -422,8 +425,15 @@ impl Renderer3D {
         };
         let pipeline = create_pipeline("gbuffer pipeline", &targets);
         targets[5] = Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: wgpu::TextureFormat::Rg16Float,
             blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        targets[6] = Some(wgpu::ColorTargetState {
+            // `R16Uint` is spec-guaranteed as a renderable/multisampleable
+            // integer format and stores the depth code plus validity bit.
+            format: wgpu::TextureFormat::R16Uint,
+            blend: None,
             write_mask: wgpu::ColorWrites::ALL,
         });
         let motion_pipeline = create_pipeline("gbuffer motion pipeline", &targets);
@@ -599,8 +609,12 @@ impl Renderer3D {
                 },
             }),
         ];
-        let motion = g.motion.is_some();
-        if let Some(motion) = g.motion {
+        let motion = match (g.motion, g.previous_depth) {
+            (Some(_), Some(_)) => true,
+            (None, None) => false,
+            _ => panic!("motion and previous-depth g-buffer targets must be paired"),
+        };
+        if let (Some(motion), Some(previous_depth)) = (g.motion, g.previous_depth) {
             color_attachments.push(Some(wgpu::RenderPassColorAttachment {
                 view: motion,
                 depth_slice: None,
@@ -610,9 +624,19 @@ impl Renderer3D {
                     store: wgpu::StoreOp::Store,
                 },
             }));
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: previous_depth,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
         } else {
-            // The pipeline has a trailing `None` target at location 5, so
-            // the matching attachment slot is explicitly absent here too.
+            // The non-temporal pipeline has trailing `None` targets at
+            // locations 5 and 6; both matching attachment slots stay absent.
+            color_attachments.push(None);
             color_attachments.push(None);
         }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

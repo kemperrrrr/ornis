@@ -11,8 +11,9 @@
 //! [`crate::antialias`].
 //!
 //! The resolve reads the composited image (`src_tex`), the g-buffer depth
-//! (`depth_tex`, multisampled at 4x — sample 0 is loaded) and the previous
-//! frame's history (`history_tex`), and writes two colour attachments: the
+//! (`depth_tex`, multisampled at 4x — sample 0 is loaded), compact motion
+//! and previous-depth inputs, and the previous frame's history (`history_tex`),
+//! then writes two colour attachments: the
 //! presented image and the history the next frame reads.
 
 use super::aa_common::{VERTEX_ENTRY, YCOCG_HELPER};
@@ -24,7 +25,7 @@ use crate::renderer::AaUniform;
 
 /// Resource layout of the temporal resolve (what the renderer builds its
 /// bind-group layout from). The uniform carries the explicit minimum size.
-pub const TAA_RESOURCES: [Resource; 6] = [
+pub const TAA_RESOURCES: [Resource; 7] = [
     Resource {
         group: 0,
         binding: 0,
@@ -61,13 +62,21 @@ pub const TAA_RESOURCES: [Resource; 6] = [
         group: 0,
         binding: 4,
         visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "previous_depth_tex",
+        kind: ResourceKind::TextureUint,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 5,
+        visibility: wgpu::ShaderStages::FRAGMENT,
         name: "history_tex",
         kind: ResourceKind::TextureFloat,
         min_size: None,
     },
     Resource {
         group: 0,
-        binding: 5,
+        binding: 6,
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "aa_params",
         kind: ResourceKind::Uniform(AaUniform::WGSL_NAME),
@@ -76,7 +85,7 @@ pub const TAA_RESOURCES: [Resource; 6] = [
 ];
 
 /// Group-0 `@binding` indices the temporal fragment stage declares.
-pub const TAA_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4, 5];
+pub const TAA_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4, 5, 6];
 
 /// The two colour attachments of the temporal resolve: the presented image
 /// and the history the next frame reads.
@@ -106,11 +115,15 @@ const TAA_BODY: &str = r#"
     if (depth >= CLEAR_DEPTH) {
         return TaaOutput(vec4<f32>(current, 1.0), vec4<f32>(current, 1.0));
     }
-    // The g-buffer motion is current UV minus the previous UV. Its B
-    // channel is the depth this surface had in the previous frame, so the
-    // sampled history can reject disocclusions before colour blending.
-    let motion = textureLoad(motion_tex, coord, 0).rgba;
-    let prev_uv = uv - motion.xy;
+    // The g-buffer stores velocity in RG16F and packs previous NDC depth
+    // plus validity into an R16Uint value. 65535 denotes invalid motion.
+    let motion = textureLoad(motion_tex, coord, 0).rg;
+    let packed_previous_depth = textureLoad(previous_depth_tex, coord, 0).r;
+    if (packed_previous_depth == 65535u) {
+        return TaaOutput(vec4<f32>(current, 1.0), vec4<f32>(current, depth));
+    }
+    let previous_depth = f32(packed_previous_depth) / 65534.0;
+    let prev_uv = uv - motion;
     if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
         return TaaOutput(vec4<f32>(current, 1.0), vec4<f32>(current, depth));
     }
@@ -138,13 +151,12 @@ const TAA_BODY: &str = r#"
     let bounds_low = max(lower, mean - 1.25 * sigma);
     let bounds_high = min(upper, mean + 1.25 * sigma);
     var result = current;
-    if (aa_params.history_valid > 0.5 && motion.a > 0.5) {
+    if (aa_params.history_valid > 0.5) {
         let history = textureSampleLevel(history_tex, src_sampler, prev_uv, 0.0);
-        // The motion vector carries the previous NDC depth. A mismatch
-        // means the previous surface was occluded or this is a disocclusion:
-        // rejecting it is the depth test that keeps moving objects from
-        // leaving long history trails.
-        let depth_gap = abs(history.a - motion.z);
+        // A mismatch means the previous surface was occluded or this is a
+        // disocclusion: rejecting it keeps moving objects from leaving
+        // long history trails.
+        let depth_gap = abs(history.a - previous_depth);
         if (depth_gap < 0.002) {
             let clamped = aa_ycocg_decode(
                 clamp(aa_ycocg_encode(history.rgb), bounds_low, bounds_high)
@@ -170,7 +182,9 @@ pub fn wgsl_source_for_samples(sample_count: u32) -> String {
     ShaderModule::new()
         .decl(wgsl_decl(AaUniform::WGSL_SOURCE))
         .decl(TAA_OUTPUT_DECL)
-        .resources_for_samples(&TAA_RESOURCES, TAA_FRAGMENT_BINDINGS, sample_count)
+        .resources_where(&TAA_RESOURCES, TAA_FRAGMENT_BINDINGS, |resource| {
+            sample_count > 1 && resource.name == "depth_tex"
+        })
         .consts(naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS))
         .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
         .helper(crate::shaders::helpers::wgsl_consts())
@@ -248,7 +262,8 @@ mod tests {
         let source = wgsl_source();
         assert!(source.contains("history_tex"));
         assert!(source.contains("@location(1) history"));
-        assert!(source.contains("motion.a > 0.5"));
+        assert!(source.contains("packed_previous_depth == 65535u"));
+        assert!(source.contains("previous_depth_tex"));
         assert!(source.contains("depth_gap < 0.002"));
         assert!(source.contains("aa_ycocg_encode"));
     }

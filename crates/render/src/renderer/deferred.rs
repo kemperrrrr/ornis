@@ -243,6 +243,7 @@ impl Renderer3D {
             material_params: &self.gbuffer.material_params_view,
             depth: &self.gbuffer.depth_view,
             motion: None,
+            previous_depth: None,
         };
         self.render_gbuffer(context.device, context.encoder, &g, mesh, instance_count);
         self.mark_csm_depths(context.encoder, depths);
@@ -296,6 +297,7 @@ impl Renderer3D {
             material_params: &self.gbuffer.material_params_view,
             depth: &self.gbuffer.depth_view,
             motion: None,
+            previous_depth: None,
         };
         self.render_gbuffer(device, encoder, &g, mesh, 1);
         self.render_lighting(device, encoder, &g, &self.pbr_texture_view, None);
@@ -336,6 +338,7 @@ impl Renderer3D {
             material_params: &self.gbuffer.material_params_view,
             depth: &self.gbuffer.depth_view,
             motion: None,
+            previous_depth: None,
         };
         self.render_gbuffer(device, encoder, &g, mesh, instance_count);
         // Depth pre-passes for shadowed lights (no-op when none).

@@ -18,9 +18,11 @@ use super::interface::{
     GbufferVertexInput as VertexInput, GbufferVertexOutput as VertexOutput,
 };
 use super::{
-    OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule, openpbr_material_decl, wgsl_decl,
+    OPENPBR_WGSL_NAME, Resource, ResourceKind, ShaderModule, helpers, openpbr_material_decl,
+    wgsl_decl,
 };
 use crate::renderer::{CameraUniform, PerObjectGpu};
+use crate::shaders::helpers::NDC_TO_UV_HALF;
 use crate::shaders::math::octahedral_encode;
 use ornis_macros::stage;
 
@@ -86,7 +88,7 @@ pub fn wgsl_vertex_source() -> String {
 }
 
 /// G-buffer fragment entry, translated by [`stage`](ornis_macros::stage):
-/// five standard targets plus the optional motion target. DSL-only —
+/// five standard targets plus optional motion and previous-depth targets. DSL-only —
 /// `materials` global declared via `#[wgsl(global)]`.
 #[stage(fragment)]
 fn fs_main(
@@ -117,14 +119,23 @@ fn fs_main(
     let current_clip = camera.view_proj * Vec4::new(world_pos.xyz, 1.0);
     let previous_clip =
         camera.previous_view_proj * Vec4::new(input.previous_world_position.xyz, 1.0);
-    let mut motion = Vec4::new(0.0, 0.0, 1.0, 0.0);
+    let mut motion = Vec2::new(0.0, 0.0);
+    // Reserve 65535 as the invalid-motion marker; valid depth values map
+    // across 0..65534 so one 16-bit integer stores both depth and validity.
+    let mut previous_depth = 65535u32;
     if current_clip.w > 0.0 && previous_clip.w > 0.0 && input.previous_world_position.w > 0.5 {
         let current_ndc = current_clip.xyz / current_clip.w;
         let previous_ndc = previous_clip.xyz / previous_clip.w;
-        let current_uv = Vec2::new(current_ndc.x * 0.5 + 0.5, 0.5 - current_ndc.y * 0.5);
-        let previous_uv = Vec2::new(previous_ndc.x * 0.5 + 0.5, 0.5 - previous_ndc.y * 0.5);
-        let velocity = current_uv - previous_uv;
-        motion = Vec4::new(velocity.x, velocity.y, previous_ndc.z, 1.0);
+        let current_uv = Vec2::new(
+            current_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+            NDC_TO_UV_HALF - current_ndc.y * NDC_TO_UV_HALF,
+        );
+        let previous_uv = Vec2::new(
+            previous_ndc.x * NDC_TO_UV_HALF + NDC_TO_UV_HALF,
+            NDC_TO_UV_HALF - previous_ndc.y * NDC_TO_UV_HALF,
+        );
+        motion = current_uv - previous_uv;
+        previous_depth = u32(clamp(previous_ndc.z, 0.0, 1.0) * 65534.0 + 0.5);
     }
     let mut output: GBufferOutput;
     output.albedo = Vec4::new(base_color, opacity);
@@ -133,10 +144,11 @@ fn fs_main(
     output.world_pos = world_pos_enc;
     output.mat_params = mat_params;
     output.motion = motion;
+    output.previous_depth = previous_depth;
     return output;
 }
 
-/// G-buffer fragment shader: the standard targets plus motion, splicing
+/// G-buffer fragment shader: the standard targets plus motion/depth, splicing
 /// the octahedral normal-encoding kernel via `wgsl_source()`.
 ///
 /// Assembled from the shared `openpbr_material_decl()`, the shared varyings,
@@ -147,6 +159,7 @@ pub fn wgsl_source() -> String {
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(openpbr_material_decl())
         .resources(&GBUFFER_RESOURCES, &[0, 2])
+        .consts(helpers::wgsl_consts())
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
         .decl(wgsl_decl(GBufferOutput::WGSL_SOURCE))
         .entry(fs_main::wgsl_source())
@@ -288,6 +301,7 @@ mod tests {
         assert!(vertex.contains("obj.motion_valid"));
         assert!(fragment.contains("input.previous_world_position.w > 0.5"));
         assert!(fragment.contains("output.motion = motion;"));
+        assert!(fragment.contains("output.previous_depth = previous_depth;"));
     }
 
     /// Every table row's declaration appears in the assembled stages, and

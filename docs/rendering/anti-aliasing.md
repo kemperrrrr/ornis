@@ -57,7 +57,7 @@ composite/lighting/geometry:
 |---|---:|---:|---:|
 | FXAA | 1 | 5 | intermediate LDR layer |
 | SMAA-lite | 1 | 5 | intermediate LDR layer |
-| TAA | 1 | 13 по умолчанию; до 29 при максимальном 5×5 clamp (центр, depth, motion, history, neighbourhood) | intermediate LDR + 2×RGBA16F history; RGBA16F motion target |
+| TAA | 1 | 13 по умолчанию; до 29 при максимальном 5×5 clamp (центр, depth, motion, history, neighbourhood) | intermediate LDR + 2×RGBA16F history; RG16F velocity + R16Uint packed previous depth/validity |
 
 MSAA остаётся частью geometry attachments и не запускает AA post-pass. Цифры
 выборок — статическая оценка из шейдера, не GPU timing; GPU pass timing следует

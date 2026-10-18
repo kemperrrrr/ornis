@@ -130,6 +130,7 @@ fn render_frame(
         material_params: &renderer.gbuffer.material_params_view,
         depth: &renderer.gbuffer.depth_view,
         motion: None,
+        previous_depth: None,
     };
     if indirect {
         let culler = Culler::try_new(device, staged).expect("scene is non-empty");
@@ -504,6 +505,7 @@ fn armed_with_custom_matches_direct_and_indirect() {
         material_params: &renderer.gbuffer.material_params_view,
         depth: &renderer.gbuffer.depth_view,
         motion: None,
+        previous_depth: None,
     };
     renderer.render_gbuffer_with_custom(&device, &mut encoder, &g, &mesh, staged, &[]);
     renderer.render_shadows(&device, &mut encoder, &mesh, staged);

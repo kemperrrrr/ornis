@@ -207,7 +207,7 @@ fn aa_bind_layout(
     let entries: Vec<wgpu::BindGroupLayoutEntry> = table
         .iter()
         .map(|r| {
-            let multisampled = sample_count > 1 && shaders::resource_stays_multisampled(&r.kind);
+            let multisampled = sample_count > 1 && r.name == "depth_tex";
             shaders::bgl_entry(r, multisampled)
         })
         .collect();

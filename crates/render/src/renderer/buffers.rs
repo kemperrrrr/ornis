@@ -1,3 +1,4 @@
+// qual:allow(srp, file_length=440) reason: "Keep palette and instance buffer history together until this pinned module budget is exceeded"
 //! Growable GPU stores: per-object instances, materials, and skinning palettes with their capacity management and upload entry points.
 use super::*;
 use crate::antialias::MotionValidity;

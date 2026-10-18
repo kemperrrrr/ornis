@@ -139,7 +139,7 @@ pub(crate) struct GbufferFragmentInput {
     pub previous_world_position: [f32; 4],
 }
 
-/// G-buffer (6-MRT) fragment output.
+/// G-buffer fragment output: five lighting MRTs plus optional motion MRTs.
 #[derive(Clone, Copy, Debug, WgslInterface)]
 #[wgsl(name = "GBufferOutput")]
 pub(crate) struct GbufferOutput {
@@ -158,8 +158,10 @@ pub(crate) struct GbufferOutput {
     /// Packed material parameters.
     #[wgsl(location = 4)]
     pub mat_params: [f32; 4],
-    /// Motion vector `(current_uv - previous_uv, previous_ndc_depth,
-    /// valid)`: used by temporal reprojection and disocclusion rejection.
+    /// Motion vector `(current_uv - previous_uv)`.
     #[wgsl(location = 5)]
-    pub motion: [f32; 4],
+    pub motion: [f32; 2],
+    /// Quantized previous-frame depth, with `u16::MAX` meaning invalid.
+    #[wgsl(location = 6)]
+    pub previous_depth: u32,
 }

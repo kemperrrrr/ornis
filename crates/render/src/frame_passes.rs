@@ -116,24 +116,18 @@ typed_resource!(
 pub struct Depth;
 typed_resource!(Depth, "depth", owned_msaa, F::Depth32Float);
 
-/// Motion vectors of the geometry (current UV minus previous UV, plus the
-/// previous NDC depth and a validity bit), written by the motion-aware
-/// g-buffer pass and read by the temporal resolve. The pooled attachment is
-/// allocated only when TAA is wired.
+/// Motion vectors of the geometry (current UV minus previous UV), written
+/// by the motion-aware g-buffer pass and read by the temporal resolve. The
+/// pooled attachment is allocated only when TAA is wired.
 pub struct Motion;
-impl FrameResource for Motion {
-    const NAME: &'static str = "motion";
-    fn kind() -> ResourceKind {
-        ResourceKind::FrameOwned
-    }
-    fn spec(_: wgpu::TextureFormat) -> TextureSpec {
-        TextureSpec {
-            format: F::Rgba16Float,
-            samples: 1,
-            size: SizePolicy::MatchSurface,
-        }
-    }
-}
+typed_resource!(Motion, "motion", owned, F::Rg16Float);
+
+/// Previous-frame depth for each motion vector, quantized into the lower
+/// 16-bit range. `u16::MAX` marks invalid motion. Kept in its own integer
+/// attachment so the complete motion G-buffer stays within WebGPU's
+/// per-sample color-attachment byte limit.
+pub struct PreviousDepth;
+typed_resource!(PreviousDepth, "previous_depth", owned, F::R16Uint);
 
 /// HDR layer of the deferred path.
 ///
@@ -250,6 +244,7 @@ impl FramePass for GbufferPass {
             material_params,
             depth,
             motion: None,
+            previous_depth: None,
         };
         frame.renderer.render_gbuffer_with_custom(
             frame.device,
@@ -262,11 +257,11 @@ impl FramePass for GbufferPass {
     }
 }
 
-/// Motion-aware g-buffer pass used by TAA: writes the lighting layers and
-/// the reprojection vector (including previous-frame depth).
+/// Motion-aware g-buffer pass used by TAA: writes the lighting layers,
+/// reprojection vector, and packed previous-frame depth/validity.
 ///
 /// The temporal pass needs this extra target; other plans use
-/// [`GbufferPass`] and allocate no motion-vector attachment.
+/// [`GbufferPass`] and allocate no temporal attachments.
 pub struct GbufferMotionPass;
 impl FramePass for GbufferMotionPass {
     type Reads = ();
@@ -278,6 +273,7 @@ impl FramePass for GbufferMotionPass {
         Write<MaterialParams>,
         Write<Depth>,
         Write<Motion>,
+        Write<PreviousDepth>,
     );
     fn name(&self) -> &'static str {
         "gbuffer"
@@ -291,6 +287,7 @@ impl FramePass for GbufferMotionPass {
             Some(material_params),
             Some(depth),
             Some(motion),
+            Some(previous_depth),
         ) = views.writes
         else {
             return;
@@ -303,6 +300,7 @@ impl FramePass for GbufferMotionPass {
             material_params,
             depth,
             motion: Some(motion),
+            previous_depth: Some(previous_depth),
         };
         frame.renderer.render_gbuffer_with_custom(
             frame.device,
@@ -353,6 +351,7 @@ impl FramePass for LightingPass {
             material_params,
             depth,
             motion: None,
+            previous_depth: None,
         };
         frame.renderer.render_shadows_with_custom(
             frame.device,
@@ -507,6 +506,7 @@ impl FramePass for LightingAoPass {
             material_params,
             depth,
             motion: None,
+            previous_depth: None,
         };
         frame.renderer.render_shadows_with_custom(
             frame.device,
@@ -1240,10 +1240,9 @@ impl FramePass for FogPass {
 /// The temporal anti-aliasing pass: resolves the composited image against
 /// the history buffer.
 ///
-/// Reads the composited [`LdrLayer`] and the g-buffer depth (the
-/// reprojection source) and writes the presented [`Target`]. The history
-/// itself lives in the renderer (the ping-pong buffers), so the pass only
-/// needs the image and the depth.
+/// Reads the composited [`LdrLayer`], g-buffer depth, motion vectors, and
+/// packed previous-frame depth, then writes the presented [`Target`]. The
+/// history itself lives in the renderer (the ping-pong buffers).
 pub struct TaaPass {
     settings: TaaSettings,
 }
@@ -1256,16 +1255,22 @@ impl TaaPass {
 }
 
 impl FramePass for TaaPass {
-    type Reads = (Read<LdrLayer>, Read<Depth>, Read<Motion>);
+    type Reads = (
+        Read<LdrLayer>,
+        Read<Depth>,
+        Read<Motion>,
+        Read<PreviousDepth>,
+    );
     type Writes = (Write<Target>,);
     fn name(&self) -> &'static str {
         "taa"
     }
     fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
-        let (Some(source), Some(depth), Some(motion), Some(target)) = (
+        let (Some(source), Some(depth), Some(motion), Some(previous_depth), Some(target)) = (
             views.get::<LdrLayer>(),
             views.get::<Depth>(),
             views.get::<Motion>(),
+            views.get::<PreviousDepth>(),
             views.get::<Target>(),
         ) else {
             return;
@@ -1278,6 +1283,7 @@ impl FramePass for TaaPass {
                 source,
                 depth,
                 motion,
+                previous_depth,
                 target,
                 settings: self.settings,
             },
