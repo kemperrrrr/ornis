@@ -26,6 +26,7 @@ mod gpu_pipeline;
 mod kernel;
 mod kernel_types;
 mod pack;
+mod pack_lanes;
 mod pack_mut;
 mod pipeline_config;
 mod plain_resource;
