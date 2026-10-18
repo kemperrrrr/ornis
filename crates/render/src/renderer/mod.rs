@@ -48,13 +48,13 @@ pub use buffers::{InstanceData, MaterialIdx, PerObjectGpu};
 pub use clusters::ClusterLightStats;
 pub(crate) use clusters::{
     CLUSTER_DEPTH_NEAR, CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y,
-    ClusteredLights, ClusterParams, ClusterSpan, cluster_slice_scale,
+    ClusterParams, ClusterSpan, ClusteredLights, cluster_slice_scale,
 };
-// Cluster-assignment reference for the GPU parity gate (test-only,
-// like the extraction culler's CPU mirror).
+// Cluster-assignment reference and readback selector for the GPU parity
+// gate (test-only, like the extraction culler's CPU mirror).
 #[cfg(test)]
 pub(crate) use clusters::{
-    CLUSTER_COUNT, MAX_CLUSTERED_LIGHTS, cpu::cpu_assign_lights_to_clusters,
+    CLUSTER_COUNT, ClusterBuffer, MAX_CLUSTERED_LIGHTS, cpu::cpu_assign_lights_to_clusters,
 };
 // Path-stability re-export: `crate::renderer::staging_capacity_for_instances`
 // before the split; no in-crate users outside its module right now.

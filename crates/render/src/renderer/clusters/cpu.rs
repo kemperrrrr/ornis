@@ -4,8 +4,15 @@
 //! plane math, same bound spheres, same per-cluster cap, spans claimed
 //! in cluster order (the GPU claims through one atomic counter —
 //! content per cluster is identical, span placement is not).
-use super::*;
+use super::{
+    CLUSTER_COUNT, CLUSTER_DEPTH_NEAR, CLUSTER_FAR_LIMIT, CLUSTER_INDEX_LIST_LEN,
+    CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y, CLUSTER_WORKGROUPS,
+    CLUSTER_WORKGROUP_SIZE, ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER,
+    SPOT_BOUND_COS_FLOOR, cluster_log_ratio, cluster_slice_scale,
+};
+use crate::renderer::{GpuLight, LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
 use crate::shaders::helpers::NDC_TO_UV_HALF;
+use glam::Mat4;
 
 /// Upper view depth of `slice`: `near * (far/near)^(slice/(S-1))`, with
 /// the last slice extending to [`CLUSTER_FAR_LIMIT`].
@@ -58,7 +65,12 @@ pub(crate) fn cluster_tile_slice(cluster: u32) -> (u32, u32, u32) {
 /// Six cluster half-space planes packed as `(n.xyz, d)` rows: NDC tile
 /// edges from the clip-matrix rows, view-depth bounds from the `w` row.
 /// A sphere touches the cluster iff `|n·c + d| <= r·|n|` on every plane.
-pub(crate) fn cluster_planes(tile_x: u32, tile_y: u32, slice: u32, view_proj: &Mat4) -> [Vec4; 6] {
+pub(crate) fn cluster_planes(
+    tile_x: u32,
+    tile_y: u32,
+    slice: u32,
+    view_proj: &Mat4,
+) -> [glam::Vec4; 6] {
     let x0 = -1.0 + 2.0 * tile_x as f32 / CLUSTER_TILE_COUNT_X as f32;
     let x1 = -1.0 + 2.0 * (tile_x + 1) as f32 / CLUSTER_TILE_COUNT_X as f32;
     let y0 = -1.0 + 2.0 * tile_y as f32 / CLUSTER_TILE_COUNT_Y as f32;
@@ -81,7 +93,11 @@ pub(crate) fn cluster_planes(tile_x: u32, tile_y: u32, slice: u32, view_proj: &M
 }
 
 /// Sphere (`center`, `radius`) vs the six cluster planes.
-pub(crate) fn sphere_touches_planes(center: glam::Vec3, radius: f32, planes: &[Vec4; 6]) -> bool {
+pub(crate) fn sphere_touches_planes(
+    center: glam::Vec3,
+    radius: f32,
+    planes: &[glam::Vec4; 6],
+) -> bool {
     planes.iter().all(|plane| {
         let n = plane.truncate();
         (n.dot(center) + plane.w).abs() <= radius * n.length()
@@ -94,11 +110,7 @@ pub(crate) fn sphere_touches_planes(center: glam::Vec3, radius: f32, planes: &[V
 /// the point bound for cones wider than
 /// `acos(SPOT_BOUND_COS_FLOOR)`).
 pub(crate) fn light_bound_sphere(light: &GpuLight) -> (glam::Vec3, f32) {
-    let center = glam::Vec3::from_array([
-        light.position[0],
-        light.position[1],
-        light.position[2],
-    ]);
+    let center = glam::Vec3::from_array([light.position[0], light.position[1], light.position[2]]);
     let range = light.params[0];
     if light.kind[0] < LIGHT_KIND_SPOT {
         return (center, range);
@@ -109,13 +121,9 @@ pub(crate) fn light_bound_sphere(light: &GpuLight) -> (glam::Vec3, f32) {
     }
     let tan_sq = (1.0 - cos_outer * cos_outer) / (cos_outer * cos_outer);
     let radius = range * (1.0 + tan_sq) * 0.5;
-    let axis = glam::Vec3::from_array([
-        light.direction[0],
-        light.direction[1],
-        light.direction[2],
-    ])
-    .try_normalize()
-    .unwrap_or(glam::Vec3::Z);
+    let axis = glam::Vec3::from_array([light.direction[0], light.direction[1], light.direction[2]])
+        .try_normalize()
+        .unwrap_or(glam::Vec3::Z);
     (center + axis * radius, radius)
 }
 
@@ -165,22 +173,18 @@ mod tests {
 
     /// Perspective frame matching the culling tests.
     fn view_proj() -> Mat4 {
-        let view = glam::Mat4::look_at_rh(
+        let view = glam::camera::rh::view::look_at_mat4(
             glam::Vec3::new(0.0, 2.5, 9.0),
             glam::Vec3::ZERO,
             glam::Vec3::Y,
         );
-        let proj = glam::Mat4::perspective_rh(60.0f32.to_radians(), 16.0 / 9.0, 0.1, 100.0);
+        let proj = glam::camera::rh::proj::directx::perspective(
+            60.0f32.to_radians(),
+            16.0 / 9.0,
+            0.1,
+            100.0,
+        );
         proj * view
-    }
-
-    #[test]
-    fn grid_consts_agree_with_design() {
-        assert_eq!(CLUSTER_COUNT, 3456);
-        assert_eq!(CLUSTER_WORKGROUPS, 54);
-        assert_eq!(CLUSTER_INDEX_LIST_LEN, 442368);
-        // Workgroups cover the grid exactly (no remainder thread).
-        assert_eq!(CLUSTER_COUNT % CLUSTER_WORKGROUP_SIZE, 0);
     }
 
     #[test]
@@ -285,5 +289,11 @@ mod tests {
         assert!(ClusterParams::WGSL_SOURCE.contains("struct ClusterParams"));
         // The uniform block is a 16-byte multiple (WGSL uniform rule).
         assert_eq!(std::mem::size_of::<ClusterParams>() % 16, 0);
+        // Grid shape: 16×9×24 = 3456 clusters, 64 threads per workgroup,
+        // one full-coverage dispatch and the full-capacity index list.
+        assert_eq!(CLUSTER_COUNT, 3456);
+        assert_eq!(CLUSTER_WORKGROUPS, 54);
+        assert_eq!(CLUSTER_INDEX_LIST_LEN, 442368);
+        assert_eq!(CLUSTER_COUNT % CLUSTER_WORKGROUP_SIZE, 0);
     }
 }

@@ -2,7 +2,13 @@
 //! assembled from the shared derives and the same Rust constants the
 //! CPU reference and the fragment consts block use, so no layout can
 //! drift between the three.
-use super::*;
+use super::{
+    CLUSTER_COUNT, CLUSTER_DEPTH_NEAR, CLUSTER_FAR_LIMIT, CLUSTER_INDEX_LIST_LEN,
+    CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y, CLUSTER_WORKGROUP_SIZE,
+    ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER, SPOT_BOUND_COS_FLOOR,
+    cluster_log_ratio, cluster_slice_scale,
+};
+use crate::renderer::{CameraUniform, GpuLight, LIGHT_KIND_SPOT};
 
 /// Cluster-pass binding numbers (private to this pass).
 pub(super) const BINDING_CAMERA: u32 = 0;

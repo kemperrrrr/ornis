@@ -4,13 +4,15 @@
 //! lookup (`shaders::helpers::cluster_light_span`), the assignment
 //! compute pass ([`wgsl`]) and the CPU reference ([`cpu`], test-only).
 //! The GPU owner lives in [`gpu`].
-use super::*;
+use super::WgslStruct;
 
-mod gpu;
 #[cfg(test)]
 pub(crate) mod cpu;
+mod gpu;
 mod wgsl;
 
+#[cfg(test)]
+pub(crate) use gpu::ClusterBuffer;
 pub(crate) use gpu::ClusteredLights;
 
 /// Horizontal cluster tiles across the screen (#130 cluster grid 16×9×24).

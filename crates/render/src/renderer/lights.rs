@@ -68,14 +68,14 @@ const LIGHT_RANGE_EPS: f32 = 1e-3;
 #[wgsl(name = "Light")]
 pub(crate) struct GpuLight {
     /// Evaluation kind in `x`: 0.0 directional, 1.0 point, 2.0 spot.
-    pub(super) kind: [f32; 4],
+    pub(crate) kind: [f32; 4],
     /// Direction toward the light (directional) or spot axis from the
     /// light into the scene (spot); `[0, 0, 1, 0]` for points.
-    pub(super) direction: [f32; 4],
+    pub(crate) direction: [f32; 4],
     /// World-space position (point/spot); unused by directionals.
-    pub(super) position: [f32; 4],
+    pub(crate) position: [f32; 4],
     /// Emission color RGB + radiometric intensity in alpha.
-    pub(super) color: [f32; 4],
+    pub(crate) color: [f32; 4],
     /// `(range, cos_inner, cos_outer, shadow_layer)`: range cutoff for
     /// point/spot, spot cone cosines, shadow-map layer or -1.0.
     pub params: [f32; 4],
@@ -545,14 +545,13 @@ pub(super) fn pack_cluster_light_records(
                 color,
                 range,
                 ..
-            } => Some(GpuLight {
-                kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
-                direction: [0.0, 0.0, 1.0, 0.0],
-                position: [position.x, position.y, position.z, 1.0],
-                color: pack_light_color(*color, *intensity, exposure),
-                params: [range.get().max(LIGHT_RANGE_EPS), 0.0, 0.0, -1.0],
-                shadow_vp: NO_SHADOW_VP,
-            }),
+            } => Some(cluster_record(
+                [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
+                [position.x, position.y, position.z, 1.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [range.get().max(LIGHT_RANGE_EPS), 0.0, 0.0, -1.0],
+                pack_light_color(*color, *intensity, exposure),
+            )),
             LightDesc::Spot {
                 position,
                 direction,
@@ -568,19 +567,18 @@ pub(super) fn pack_cluster_light_records(
                 let axis = direction.get();
                 let ci = inner_angle.get().to_radians().cos();
                 let co = outer_angle.get().to_radians().cos();
-                Some(GpuLight {
-                    kind: [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
-                    direction: [axis.x, axis.y, axis.z, 0.0],
-                    position: [position.x, position.y, position.z, 1.0],
-                    color: pack_light_color(*color, *intensity, exposure),
-                    params: [
+                Some(cluster_record(
+                    [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
+                    [position.x, position.y, position.z, 1.0],
+                    [axis.x, axis.y, axis.z, 0.0],
+                    [
                         range.get().max(LIGHT_RANGE_EPS),
                         ci.max(co),
                         co.min(ci),
                         -1.0,
                     ],
-                    shadow_vp: NO_SHADOW_VP,
-                })
+                    pack_light_color(*color, *intensity, exposure),
+                ))
             }
         };
         match record {
@@ -590,6 +588,26 @@ pub(super) fn pack_cluster_light_records(
         }
     }
     (records, dropped)
+}
+
+/// One cluster-storage record (#130) from the packed fields plus the
+/// baked color; no shadow slot (`NO_SHADOW_VP`) — the tiny point/spot
+/// shadow pools stay with the uniform window.
+fn cluster_record(
+    kind: [f32; 4],
+    position: [f32; 4],
+    direction: [f32; 4],
+    params: [f32; 4],
+    color: [f32; 4],
+) -> GpuLight {
+    GpuLight {
+        kind,
+        direction,
+        position,
+        color,
+        params,
+        shadow_vp: NO_SHADOW_VP,
+    }
 }
 
 /// Index of the first shadowed directional light in upload order, the
@@ -776,38 +794,59 @@ impl Renderer3D {
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
-        // Cluster-side upload (#130): the uniform-window records go to
-        // cluster storage offset 0 byte-identical to `lighting.lights`
-        // (the unified shading window reads them while clustering is
-        // off, so the off path is value-identical to the legacy loop);
-        // clustered point/spot records ride after them.
+        let head_count = built.uniform.light_count as usize;
+        *write_lock(&self.last_cluster_stats) = self.upload_cluster_lights(
+            queue,
+            lights,
+            &built.uniform.lights[..head_count],
+            exposure,
+        );
+        self.publish_shadow_uniforms(queue, &built);
+        *write_lock(&self.last_light_stats) = built.stats;
+        built.stats
+    }
+
+    /// Cluster-side upload (#130): the uniform-window records (`head`,
+    /// byte-identical to `lighting.lights`) go to cluster storage
+    /// offset 0 — the unified shading window reads them even while
+    /// clustering is off, so the off path is value-identical to the
+    /// legacy loop — and the clustered point/spot records ride after
+    /// them. Returns the cluster-side upload report.
+    fn upload_cluster_lights(
+        &self,
+        queue: &wgpu::Queue,
+        lights: &[LightDesc],
+        head: &[GpuLight],
+        exposure: f32,
+    ) -> ClusterLightStats {
         let clustered_on = self
             .clustered_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
-        let head_count = built.uniform.light_count as usize;
-        let head = &built.uniform.lights[..head_count];
-        let capacity = (MAX_CLUSTERED_LIGHTS as usize).saturating_sub(head_count);
+        let capacity = (MAX_CLUSTERED_LIGHTS as usize).saturating_sub(head.len());
         let (cluster_records, dropped) = if clustered_on {
-            pack_cluster_light_records(lights, head_count, exposure, capacity)
+            pack_cluster_light_records(lights, head.len(), exposure, capacity)
         } else {
             (Vec::new(), 0)
         };
         let params = ClusterParams {
-            light_count: head_count as u32 + cluster_records.len() as u32,
-            head_count: head_count as u32,
+            light_count: head.len() as u32 + cluster_records.len() as u32,
+            head_count: head.len() as u32,
             clustered: u32::from(clustered_on),
             _pad: 0,
         };
         self.clusters
             .write_frame(queue, &params, head, &cluster_records);
-        *write_lock(&self.last_cluster_stats) = ClusterLightStats {
+        ClusterLightStats {
             clustered: cluster_records.len() as u32,
             dropped,
-        };
-        // Publish the light-space VPs for the depth pre-pass (as camera
-        // uniforms: the shadow pipeline reuses the gbuffer vertex shader,
-        // which only reads `view_proj`) and the active layer count.
-        // Layers publish in assignment order (layer `i` ↔ entry `i`).
+        }
+    }
+
+    /// Publish the light-space VPs for the depth pre-pass (as camera
+    /// uniforms: the shadow pipeline reuses the gbuffer vertex shader,
+    /// which only reads `view_proj`) and the active layer/cube counts.
+    /// Layers publish in assignment order (layer `i` ↔ entry `i`).
+    fn publish_shadow_uniforms(&self, queue: &wgpu::Queue, built: &BuiltLighting) {
         for (layer, vp) in built.shadow_layer_vps.iter().enumerate() {
             let uniform = CameraUniform {
                 view_proj: *vp,
@@ -824,8 +863,8 @@ impl Renderer3D {
             built.shadow_layer_vps.len() as u32,
             std::sync::atomic::Ordering::Relaxed,
         );
-        // Publish the cube-face VPs (as camera uniforms, like the 2D
-        // layers) and the active cube count.
+        // Cube-face VPs publish the same way (as camera uniforms); the
+        // active cube count is the face count over six.
         for (index, vp) in built.cube_face_vps.iter().enumerate() {
             let uniform = CameraUniform {
                 view_proj: *vp,
@@ -842,8 +881,6 @@ impl Renderer3D {
             (built.cube_face_vps.len() / CUBE_FACE_COUNT) as u32,
             std::sync::atomic::Ordering::Relaxed,
         );
-        *write_lock(&self.last_light_stats) = built.stats;
-        built.stats
     }
 
     /// Upload report of the last [`set_lights`](Self::set_lights) /
@@ -869,6 +906,7 @@ impl Renderer3D {
 
     /// Whether clustered point/spot lighting is enabled (see
     /// [`set_clustered_lights`](Self::set_clustered_lights)).
+    // qual:api — public render API; in-tree callers are the flag-roundtrip tests.
     pub fn clustered_lights_enabled(&self) -> bool {
         self.clustered_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -878,6 +916,7 @@ impl Renderer3D {
     /// call: point/spot lights uploaded into the cluster storage beyond
     /// the uniform window, and how many were dropped for storage
     /// capacity. Zeroed while clustering is off.
+    // qual:api — public render API; in-tree callers are the golden-cluster tests.
     pub fn cluster_light_stats(&self) -> ClusterLightStats {
         *read_lock(&self.last_cluster_stats)
     }

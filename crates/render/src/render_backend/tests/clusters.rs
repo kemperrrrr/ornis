@@ -6,12 +6,11 @@
 use super::super::*;
 use super::*;
 use crate::renderer::cpu_assign_lights_to_clusters;
-use crate::renderer::{CLUSTER_COUNT, MAX_CLUSTERED_LIGHTS};
+use crate::renderer::{CLUSTER_COUNT, ClusterBuffer, MAX_CLUSTERED_LIGHTS};
 use crate::renderer::{
     CameraUniform, ClusterParams, ClusterSpan, ClusteredLights, GpuLight, InstanceData,
     LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SPOT, MaterialIdx, Renderer3D,
 };
-use bytemuck::Zeroable;
 use ornis_assets::scene::ShadowCast;
 
 /// Probe size: 320×180 keeps every gate under a second on lavapipe.
@@ -51,6 +50,8 @@ const FAR: f32 = 200.0;
 const NDC_HALF: f32 = 0.5;
 /// Search radius (pixels) around a projected point.
 const SAMPLE_RADIUS: i32 = 2;
+/// Camera eye of the assignment-parity scene.
+const PARITY_EYE: glam::Vec3 = glam::Vec3::new(0.0, 2.5, 9.0);
 
 /// The 128-light grid: colored point lights over the origin plane.
 fn light_grid() -> Vec<LightDesc> {
@@ -80,8 +81,8 @@ fn grid_axis(i: u32, count: u32) -> f32 {
 
 /// Camera matrices of the golden scene (view, projection, eye).
 fn scene_camera() -> (glam::Mat4, glam::Mat4, [f32; 3]) {
-    let view = glam::Mat4::look_at_rh(EYE, glam::Vec3::ZERO, glam::Vec3::Y);
-    let proj = glam::Mat4::perspective_rh(
+    let view = glam::camera::rh::view::look_at_mat4(EYE, glam::Vec3::ZERO, glam::Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(
         FOV.to_radians(),
         PROBE_W as f32 / PROBE_H as f32,
         NEAR,
@@ -138,7 +139,7 @@ fn render_scene_pixels(
         &[InstanceData {
             model_matrix: glam::Mat4::IDENTITY,
             normal_matrix: glam::Mat4::IDENTITY,
-            material_index: MaterialIdx::from(0),
+            material_index: MaterialIdx::from_raw(0),
         }],
     );
     renderer.set_lights(queue, [0.02, 0.02, 0.03], lights);
@@ -197,43 +198,51 @@ fn gpu_assignment_matches_cpu_reference() {
         eprintln!("no GPU adapter; skipping cluster assignment parity");
         return;
     };
-    let view = glam::Mat4::look_at_rh(
-        glam::Vec3::new(0.0, 2.5, 9.0),
-        glam::Vec3::ZERO,
-        glam::Vec3::Y,
+    let view = glam::camera::rh::view::look_at_mat4(PARITY_EYE, glam::Vec3::ZERO, glam::Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(
+        FOV.to_radians(),
+        16.0 / 9.0,
+        0.1,
+        100.0,
     );
-    let proj = glam::Mat4::perspective_rh(FOV.to_radians(), 16.0 / 9.0, 0.1, 100.0);
     let view_proj = proj * view;
     let mut records = Vec::new();
-    for i in 0..2u32 {
-        let mut light = GpuLight::zeroed();
-        light.kind = [LIGHT_KIND_DIRECTIONAL, 0.0, 0.0, 0.0];
-        light.color = [1.0, 1.0, 1.0, i as f32];
-        records.push(light);
+    // Two head directionals (kind only — the assignment never reads
+    // their color), twelve ranged points along x, one far offscreen
+    // point and one downward spot.
+    for _ in 0..2u32 {
+        records.push(gpu_record(
+            LIGHT_KIND_DIRECTIONAL,
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, -1.0],
+        ));
     }
     for i in 0..12u32 {
-        let mut light = GpuLight::zeroed();
-        light.kind = [LIGHT_KIND_POINT, 0.0, 0.0, 0.0];
-        light.position = [i as f32 * 0.3, 0.5, 0.0, 1.0];
-        light.params = [1.5, 0.0, 0.0, -1.0];
-        records.push(light);
+        records.push(gpu_record(
+            LIGHT_KIND_POINT,
+            [i as f32 * 0.3, 0.5, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [1.5, 0.0, 0.0, -1.0],
+        ));
     }
-    let mut offscreen = GpuLight::zeroed();
-    offscreen.kind = [LIGHT_KIND_POINT, 0.0, 0.0, 0.0];
-    offscreen.position = [500.0, 0.0, 0.0, 1.0];
-    offscreen.params = [2.0, 0.0, 0.0, -1.0];
-    records.push(offscreen);
-    let mut spot = GpuLight::zeroed();
-    spot.kind = [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0];
-    spot.direction = [0.0, -1.0, 0.0, 0.0];
-    spot.position = [0.0, 5.0, 0.0, 1.0];
-    spot.params = [6.0, 0.9, 0.8, -1.0];
-    records.push(spot);
+    records.push(gpu_record(
+        LIGHT_KIND_POINT,
+        [500.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [2.0, 0.0, 0.0, -1.0],
+    ));
+    records.push(gpu_record(
+        LIGHT_KIND_SPOT,
+        [0.0, 5.0, 0.0, 1.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [6.0, 0.9, 0.8, -1.0],
+    ));
 
     let camera = CameraUniform {
         view_proj: view_proj.to_cols_array_2d(),
         inv_view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-        camera_pos: [0.0, 2.5, 9.0, 1.0],
+        camera_pos: [PARITY_EYE.x, PARITY_EYE.y, PARITY_EYE.z, 1.0],
     };
     let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cluster test camera"),
@@ -263,30 +272,33 @@ fn gpu_assignment_matches_cpu_reference() {
     queue.submit(std::iter::once(encoder.finish()));
 
     let reference = cpu_assign_lights_to_clusters(&records, head_count, &view_proj);
-    let grid_bytes = read_buffer_bytes(
-        &device,
-        &queue,
-        clusters.grid_buffer(),
-        CLUSTER_COUNT as u64 * std::mem::size_of::<ClusterSpan>() as u64,
-    )
-    .expect("grid readback");
+    let grid_bytes = clusters
+        .read_back(
+            &device,
+            &queue,
+            ClusterBuffer::Grid,
+            CLUSTER_COUNT as u64 * std::mem::size_of::<ClusterSpan>() as u64,
+        )
+        .expect("grid readback");
     let grid: Vec<ClusterSpan> = grid_bytes
         .chunks_exact(std::mem::size_of::<ClusterSpan>())
         .map(|chunk| bytemuck::pod_read_unaligned(chunk))
         .collect();
-    let counters: [u32; 2] = bytemuck::pod_read_unaligned(
-        &read_buffer_bytes(&device, &queue, clusters.counters_buffer(), 8).expect("counters")[..8],
-    );
+    let counter_bytes = clusters
+        .read_back(&device, &queue, ClusterBuffer::Counters, 8)
+        .expect("counters");
+    let counters: [u32; 2] = bytemuck::pod_read_unaligned(&counter_bytes[..8]);
     let total: u32 = reference.lists.iter().map(|list| list.len() as u32).sum();
     assert_eq!(counters[0], total, "cursor must claim the reference total");
     assert_eq!(counters[1], reference.overflow, "no overflow expected");
-    let list_bytes = read_buffer_bytes(
-        &device,
-        &queue,
-        clusters.indices_buffer(),
-        total as u64 * std::mem::size_of::<u32>() as u64,
-    )
-    .expect("index-list readback");
+    let list_bytes = clusters
+        .read_back(
+            &device,
+            &queue,
+            ClusterBuffer::Indices,
+            total as u64 * std::mem::size_of::<u32>() as u64,
+        )
+        .expect("index-list readback");
     let list: Vec<u32> = list_bytes
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().expect("u32 word")))
@@ -337,7 +349,8 @@ fn hundred_point_lights_reach_the_frame() {
                 (b, r, g)
             };
             assert!(
-                strong > weak_a + DOMINANCE_MARGIN && strong > weak_b + DOMINANCE_MARGIN,
+                i32::from(strong) > i32::from(weak_a) + DOMINANCE_MARGIN
+                    && i32::from(strong) > i32::from(weak_b) + DOMINANCE_MARGIN,
                 "light ({col},{row}) must tint the ground: {strong} vs {weak_a}/{weak_b}"
             );
             assert!(
@@ -390,38 +403,16 @@ fn clustered_window_is_bit_identical_below_eight_lights() {
     assert_eq!(pixels_off, pixels_on, "≤8 lights: bit-identical frames");
 }
 
-/// Read `bytes` back from `src` (`None` when the readback fails).
-fn read_buffer_bytes(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    src: &wgpu::Buffer,
-    bytes: u64,
-) -> Option<Vec<u8>> {
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("cluster test readback"),
-        size: bytes.max(4),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("cluster test readback encoder"),
-    });
-    encoder.copy_buffer_to_buffer(src, 0, &readback, 0, bytes);
-    queue.submit(std::iter::once(encoder.finish()));
-    let slice = readback.slice(0..bytes.max(4));
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-    let Ok(Ok(())) = rx.recv() else {
-        return None;
-    };
-    let Ok(view) = slice.get_mapped_range() else {
-        return None;
-    };
-    let out = view[..bytes as usize].to_vec();
-    drop(view);
-    readback.unmap();
-    Some(out)
+/// One packed assignment-gate record from the raw fields (#130): color
+/// is irrelevant to the assignment (never read), the shadow slot stays
+/// zeroed.
+fn gpu_record(kind: f32, position: [f32; 4], direction: [f32; 4], params: [f32; 4]) -> GpuLight {
+    GpuLight {
+        kind: [kind, 0.0, 0.0, 0.0],
+        direction,
+        position,
+        color: [1.0, 1.0, 1.0, 1.0],
+        params,
+        shadow_vp: [[0.0; 4]; 4],
+    }
 }

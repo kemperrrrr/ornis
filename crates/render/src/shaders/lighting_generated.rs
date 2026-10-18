@@ -94,6 +94,7 @@ fn add_lighting_global(
 
 /// Cluster binding types for the lighting header (see
 /// [`lighting_wgsl_header_for_samples`]).
+#[derive(Clone, Copy)]
 struct ClusterHeaderTypes {
     params: naga::Handle<naga::Type>,
     span: naga::Handle<naga::Type>,
@@ -128,7 +129,15 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
         ),
     };
     for r in LIGHTING_RESOURCES {
-        add_lighting_global(&mut module, sample_count, &r, cam, lighting, mat, cluster_types);
+        add_lighting_global(
+            &mut module,
+            sample_count,
+            &r,
+            cam,
+            lighting,
+            mat,
+            cluster_types,
+        );
     }
     naga_ir::write_module(&module, &LIGHTING_RESOURCES)
 }
