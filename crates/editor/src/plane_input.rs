@@ -89,21 +89,19 @@ impl System for PlaneCameraInput {
 #[cfg(test)]
 mod tests {
     use glam::Vec2;
-    use ornis_core::{Degrees, Engine, InputState, Meters, MouseButton};
+    use ornis_core::{Engine, InputState, MouseButton};
 
     use super::*;
-    use crate::plane::{PlaneCamera, PlaneProjection};
+    use crate::plane::PlaneCamera;
 
-    /// Stand-in rig: center origin, `hh = 5`, `800×600` viewport.
+    /// Ortho rig: center origin, `hh = 5`, eye at 10, `800×600` viewport.
     fn camera() -> PlaneCamera {
         PlaneCamera::new(
-            Vec2::ZERO,
-            Meters::new(5.0),
-            PlaneProjection::PerspectiveStandIn {
-                fov_y: Degrees::new(60.0),
-            },
-            Meters::new(0.1),
-            Meters::new(100.0),
+            glam::Vec2::ZERO,
+            ornis_core::Meters::new(5.0),
+            ornis_core::Meters::new(10.0),
+            ornis_core::Meters::new(0.1),
+            ornis_core::Meters::new(100.0),
             [800.0, 600.0],
         )
         .expect("camera")

@@ -58,7 +58,7 @@ pub use picking::{
     ChromePolicy, PickEpsilon, PickError, PickHit, PickOutcome, PickProjection, PickRay,
     ViewportCamera, WorkPlane, pick_closest, pick_ray, pointer_on_plane, ray_plane_point,
 };
-pub use plane::{PlaneCamera, PlaneProjection, ViewportMode};
+pub use plane::{PlaneCamera, ViewportMode};
 pub use plane_input::{install_plane_camera, read_plane_camera};
 
 /// Marks an entity as editor chrome (gizmo handle, grid, selection proxy).

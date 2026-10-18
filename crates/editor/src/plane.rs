@@ -2,14 +2,12 @@
 //!
 //! 2D games are degenerate 3D: an orthographic camera over the XY sheet
 //! (`z = 0`, looking along `-Z`, up `+Y`). [`PlaneCamera`] owns that view as
-//! `center + half_height` state plus the viewport size, and drives both K2
-//! phases through one [`PlaneProjection`]: [`PlaneProjection::PerspectiveStandIn`]
-//! renders a top-down perspective until the K0a orthographic camera lands,
-//! [`PlaneProjection::Orthographic`] renders the true ortho box. Either way
-//! `pixels_per_unit = viewport_h / (2·hh)` on the sheet, so pan, zoom and
-//! the grid agree by construction. The left button never moves this camera —
-//! it selects (E1 click); pan is middle/right drag, zoom is the wheel around
-//! the cursor.
+//! `center + half_height` state plus the viewport size. The K0a orthographic
+//! camera is the only live projection (the phase-A perspective stand-in was
+//! removed once `CameraProjection` landed in master): `pixels_per_unit =
+//! viewport_h / (2·hh)` on the sheet, so pan, zoom and the grid agree by
+//! construction. The left button never moves this camera — it selects (E1
+//! click); pan is middle/right drag, zoom is the wheel around the cursor.
 
 use glam::{Vec2, Vec3};
 use ornis_assets::scene::CameraProjection;
@@ -36,30 +34,15 @@ impl ViewportMode {
     }
 }
 
-/// Projection backing a [`PlaneCamera`]: one state, two render phases.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PlaneProjection {
-    /// Phase A stand-in: top-down perspective (`-Z`, up `+Y`) until the K0a
-    /// orthographic camera lands. The eye height derives from `hh` so the
-    /// sheet scale matches the ortho phase exactly.
-    PerspectiveStandIn {
-        /// Vertical field of view of the top-down perspective.
-        fov_y: Degrees,
-    },
-    /// Phase B: the K0a orthographic box; the eye stays at a fixed height
-    /// above the sheet while `hh` sets the scale.
-    Orthographic {
-        /// Eye height above the sheet (scale comes from `half_height`).
-        eye_height: Meters,
-    },
-}
-
 /// 2D plane camera: `center + half_height` over the XY sheet.
+///
+/// The projection is always the K0a orthographic box: the eye sits at a
+/// fixed `eye_height` above the sheet while `half_height` sets the scale.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlaneCamera {
     center: Vec2,
     half_height: Meters,
-    projection: PlaneProjection,
+    eye_height: Meters,
     near: Meters,
     far: Meters,
     viewport_px: [f32; 2],
@@ -75,8 +58,6 @@ impl PlaneCamera {
     /// Floor for a derived ortho eye height (degenerate eye/target pairs
     /// sit this far above the sheet instead of collapsing).
     const MIN_EYE_HEIGHT: Meters = Meters(0.01);
-    /// Exclusive upper bound of the stand-in field of view in degrees.
-    const FOV_MAX_DEG_EXCLUSIVE: f32 = 180.0;
     /// Half-angle scale: the sheet half-height spans `tan(fov/2)` per unit
     /// of eye height.
     const HALF_ANGLE: f32 = 0.5;
@@ -85,17 +66,22 @@ impl PlaneCamera {
     /// Placeholder fov carried in tuple frames for the orthographic phase
     /// (the tuple has no projection slot; picking ignores it).
     const ORTHO_TUPLE_FOV_DEG: f32 = 60.0;
+    /// Clip-window factor: when the orbit-derived near/far would clip the
+    /// sheet, shrink `near` to `eye_height·CLIP_MARGIN` (below the sheet
+    /// distance) and grow `far` to `eye_height·CLIP_MARGIN_INV` (above it).
+    const CLIP_MARGIN: f32 = 0.1;
+    /// Reciprocal of [`Self::CLIP_MARGIN`] for the far-clip expansion.
+    const CLIP_MARGIN_INV: f32 = 10.0;
 
     /// Checked constructor: `None` on a non-finite center, a non-finite or
-    /// non-positive half-height, an invalid projection payload (fov outside
-    /// `(0, 180)` degrees, non-finite/non-positive eye height), `near`
-    /// non-finite or `<= 0`, `far <= near`, or a sub-pixel viewport.
-    // qual:allow(srp, max_parameters=6) reason: "RAT-16 mandates explicit-param constructors without builders; the plane camera carries center, scale, projection, clip and viewport as values"
+    /// non-positive half-height or eye height, `near` non-finite or `<= 0`,
+    /// `far <= near`, or a sub-pixel viewport.
+    // qual:allow(srp, max_parameters=6) reason: "RAT-16 mandates explicit-param constructors without builders; the plane camera carries center, scale, eye height, clip and viewport as values"
     #[must_use]
     pub fn new(
         center: Vec2,
         half_height: Meters,
-        projection: PlaneProjection,
+        eye_height: Meters,
         near: Meters,
         far: Meters,
         viewport_px: [f32; 2],
@@ -106,20 +92,8 @@ impl PlaneCamera {
         if !half_height.is_finite() || half_height.get() <= 0.0 {
             return None;
         }
-        match projection {
-            PlaneProjection::PerspectiveStandIn { fov_y } => {
-                if !fov_y.is_finite()
-                    || fov_y.get() <= 0.0
-                    || fov_y.get() >= Self::FOV_MAX_DEG_EXCLUSIVE
-                {
-                    return None;
-                }
-            }
-            PlaneProjection::Orthographic { eye_height } => {
-                if !eye_height.is_finite() || eye_height.get() <= 0.0 {
-                    return None;
-                }
-            }
+        if !eye_height.is_finite() || eye_height.get() <= 0.0 {
+            return None;
         }
         if !near.is_finite() || near.get() <= 0.0 || !far.is_finite() || far.get() <= near.get() {
             return None;
@@ -135,7 +109,7 @@ impl PlaneCamera {
         Some(Self {
             center,
             half_height,
-            projection,
+            eye_height,
             near,
             far,
             viewport_px,
@@ -144,12 +118,9 @@ impl PlaneCamera {
 
     /// Orbit-derived half-height: `|eye − target|·tan(fov/2)`. `None` on a
     /// degenerate eye/target pair.
-    // qual:allow(iosp) reason: "single ?-propagated validation feeding one closed-form geometric formula (no branches, no mutation); splitting further would scatter the hh derivation across shims"
     fn orbit_half_height(eye: Vec3, target: Vec3, fov_deg: f32) -> Option<Meters> {
-        let distance = Self::checked_eye_distance(eye, target)?;
-        Some(Meters::new(
-            distance * (fov_deg.to_radians() * Self::HALF_ANGLE).tan(),
-        ))
+        Self::checked_eye_distance(eye, target)
+            .map(|distance| Meters::new(distance * (fov_deg.to_radians() * Self::HALF_ANGLE).tan()))
     }
 
     /// Eye/target distance for an orbit entry: `None` on a non-finite eye,
@@ -166,10 +137,10 @@ impl PlaneCamera {
     ///
     /// The live path is always the orthographic sheet: an asset ortho keeps
     /// its half-height, a perspective orbit derives `hh` from the fov
-    /// (`|eye − target|·tan(fov/2)`), and the eye sits at the orbit distance
-    /// above the sheet. The [`PlaneProjection::PerspectiveStandIn`] never
-    /// reaches this seam — its fov-derived eye height leaves the near/far
-    /// clip window at the `hh` zoom extremes and empties the viewport.
+    /// (`|eye − target|·tan(fov/2)`), and the derived `hh` is clamped to the
+    /// K0a range. The eye sits at `max(target.z, 0) + |eye − target|` above
+    /// the sheet so geometry above the orbit target stays inside the clip
+    /// window, and near/far are widened when needed to cover the sheet.
     // qual:allow(srp, max_parameters=7) reason: "RAT-16 mandates explicit-param constructors without builders; K0a seam carries the full look-at frame as values, like CameraDesc::try_new_units"
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -186,11 +157,17 @@ impl PlaneCamera {
             CameraProjection::Perspective => Self::orbit_half_height(eye, target, fov.get())?,
             CameraProjection::Orthographic { half_height } => half_height,
         };
+        let half_height = Meters::new(
+            half_height
+                .get()
+                .clamp(Self::MIN_HALF_HEIGHT.get(), Self::MAX_HALF_HEIGHT.get()),
+        );
         let eye_height = Self::checked_eye_height(eye, target)?;
+        let (near, far) = Self::sheet_clip_window(near, far, eye_height);
         Self::new(
             target.truncate(),
             half_height,
-            PlaneProjection::Orthographic { eye_height },
+            eye_height,
             near,
             far,
             viewport_px,
@@ -198,14 +175,24 @@ impl PlaneCamera {
     }
 
     /// Eye height above the sheet for an ortho entry: `None` on a
-    /// non-finite eye/target pair, floored at [`Self::MIN_EYE_HEIGHT`].
+    /// non-finite eye/target pair. The eye sits at least `|eye − target|`
+    /// above the orbit target and never below the sheet, so geometry above
+    /// the target (and the sheet itself) stay in the clip window.
     fn checked_eye_height(eye: Vec3, target: Vec3) -> Option<Meters> {
-        if !eye.is_finite() || !target.is_finite() {
-            return None;
-        }
-        Some(Meters::new(
-            (eye - target).length().max(Self::MIN_EYE_HEIGHT.get()),
-        ))
+        Self::checked_eye_distance(eye, target).map(|distance| {
+            let height = (target.z.max(0.0) + distance).max(Self::MIN_EYE_HEIGHT.get());
+            Meters::new(height)
+        })
+    }
+
+    /// Widens the orbit near/far window when it would clip the sheet at
+    /// distance `eye_height`: `near` shrinks below the sheet distance, `far`
+    /// grows above it, so `z = 0` always lies inside `[near, far]`.
+    fn sheet_clip_window(near: Meters, far: Meters, eye_height: Meters) -> (Meters, Meters) {
+        let h = eye_height.get();
+        let near = near.get().min(h * Self::CLIP_MARGIN).max(f32::EPSILON);
+        let far = far.get().max(h * Self::CLIP_MARGIN_INV);
+        (Meters::new(near), Meters::new(far))
     }
 
     /// Sheet center in world units (XY).
@@ -235,16 +222,14 @@ impl PlaneCamera {
         true
     }
 
-    /// Screen pixels per world unit on the sheet (`viewport_h / (2·hh)`),
-    /// identical in both phases by construction.
+    /// Screen pixels per world unit on the sheet (`viewport_h / (2·hh)`).
     #[must_use]
     pub fn pixels_per_unit(&self) -> f32 {
         self.viewport_px[1] / (2.0 * self.half_height.get())
     }
 
-    /// Viewport pixel → sheet point (exact on `z = 0` in both phases: the
-    /// stand-in eye height is derived from `hh`, so the perspective
-    /// foreshortening cancels at the sheet).
+    /// Viewport pixel → sheet point (exact on `z = 0`: the ortho rays are
+    /// parallel and the projection is linear).
     #[must_use]
     pub fn screen_to_plane(&self, pointer_px: [f32; 2]) -> Vec2 {
         let [w, h] = self.viewport_px;
@@ -302,30 +287,15 @@ impl PlaneCamera {
         }
     }
 
-    /// Eye height above the sheet: derived from `hh` in the stand-in phase,
-    /// the fixed `eye_height` in the ortho phase.
+    /// Eye height above the sheet (fixed at construction).
     fn eye_height(&self) -> f32 {
-        match self.projection {
-            PlaneProjection::PerspectiveStandIn { fov_y } => {
-                self.half_height.get() / (fov_y.get().to_radians() / 2.0).tan()
-            }
-            PlaneProjection::Orthographic { eye_height } => eye_height.get(),
-        }
-    }
-
-    /// Field of view for tuple frames: the stand-in fov, or a placeholder
-    /// in the ortho phase (the tuple has no projection slot; picking
-    /// ignores it there — see [`Self::camera_view_params`]).
-    fn tuple_fov_deg(&self) -> f32 {
-        match self.projection {
-            PlaneProjection::PerspectiveStandIn { fov_y } => fov_y.get(),
-            PlaneProjection::Orthographic { .. } => Self::ORTHO_TUPLE_FOV_DEG,
-        }
+        self.eye_height.get()
     }
 
     /// The same tuple frame `OrbitCamera::view_parameters` used to publish
     /// (for the WASM `update_camera` and [`ViewportCamera`] seams): the eye
     /// sits at `(cx, cy, eye_height)` looking at `(cx, cy, 0)`, up `+Y`.
+    /// The fov is a placeholder (the ortho projection ignores it).
     #[must_use]
     pub fn view_parameters(&self) -> (Vec3, Vec3, Vec3, f32, f32, f32) {
         let eye = Vec3::new(self.center.x, self.center.y, self.eye_height());
@@ -334,58 +304,47 @@ impl PlaneCamera {
             eye,
             target,
             Vec3::Y,
-            self.tuple_fov_deg(),
+            Self::ORTHO_TUPLE_FOV_DEG,
             self.near.get(),
             self.far.get(),
         )
     }
 
     /// Look-at fields plus the K0a projection for the render
-    /// `camera_view_projection` seam (phase B): `(eye, target, up,
-    /// projection, fov, near, far)`. The WASM side builds the render
-    /// `CameraView` from these without an `ornis-render` edge here.
+    /// `camera_view_projection` seam: `(eye, target, up, projection, fov,
+    /// near, far)`. The WASM side builds the render `CameraView` from these
+    /// without an `ornis-render` edge here.
     #[must_use]
     pub fn camera_view_params(
         &self,
     ) -> (Vec3, Vec3, Vec3, CameraProjection, Degrees, Meters, Meters) {
         let (eye, target, up, _, _, _) = self.view_parameters();
-        let (projection, fov) = match self.projection {
-            PlaneProjection::PerspectiveStandIn { fov_y } => (CameraProjection::Perspective, fov_y),
-            PlaneProjection::Orthographic { .. } => (
-                CameraProjection::Orthographic {
-                    half_height: self.half_height,
-                },
-                Degrees::new(Self::ORTHO_TUPLE_FOV_DEG),
-            ),
-        };
-        (eye, target, up, projection, fov, self.near, self.far)
+        (
+            eye,
+            target,
+            up,
+            CameraProjection::Orthographic {
+                half_height: self.half_height,
+            },
+            Degrees::new(Self::ORTHO_TUPLE_FOV_DEG),
+            self.near,
+            self.far,
+        )
     }
 
-    /// Picking camera for this plane view: top-down perspective in phase A,
-    /// true orthographic in phase B.
+    /// Picking camera for this plane view: true orthographic over the sheet.
     #[must_use]
     pub fn viewport_camera(&self) -> Option<ViewportCamera> {
         let (eye, target, up, _, _, _) = self.view_parameters();
-        match self.projection {
-            PlaneProjection::PerspectiveStandIn { fov_y } => ViewportCamera::new(
-                eye,
-                target,
-                up,
-                fov_y.get(),
-                self.near.get(),
-                self.far.get(),
-                self.viewport_px,
-            ),
-            PlaneProjection::Orthographic { .. } => ViewportCamera::new_orthographic(
-                eye,
-                target,
-                up,
-                self.half_height,
-                self.near.get(),
-                self.far.get(),
-                self.viewport_px,
-            ),
-        }
+        ViewportCamera::new_orthographic(
+            eye,
+            target,
+            up,
+            self.half_height,
+            self.near.get(),
+            self.far.get(),
+            self.viewport_px,
+        )
     }
 }
 
@@ -397,14 +356,12 @@ impl PlaneCamera {
 mod tests {
     use super::*;
 
-    /// Stand-in rig: center origin, `hh = 5`, `800×600` viewport.
+    /// Ortho rig: center origin, `hh = 5`, eye at 10, `800×600` viewport.
     fn camera() -> PlaneCamera {
         PlaneCamera::new(
             Vec2::ZERO,
             Meters::new(5.0),
-            PlaneProjection::PerspectiveStandIn {
-                fov_y: Degrees::new(60.0),
-            },
+            Meters::new(10.0),
             Meters::new(0.1),
             Meters::new(100.0),
             [800.0, 600.0],
@@ -412,40 +369,21 @@ mod tests {
         .expect("valid test camera")
     }
 
-    /// Ortho rig: same framing, true orthographic projection.
-    fn ortho_camera() -> PlaneCamera {
-        PlaneCamera::new(
-            Vec2::ZERO,
-            Meters::new(5.0),
-            PlaneProjection::Orthographic {
-                eye_height: Meters::new(10.0),
-            },
-            Meters::new(0.1),
-            Meters::new(100.0),
-            [800.0, 600.0],
-        )
-        .expect("valid ortho test camera")
-    }
-
-    /// `pixels_per_unit` is `viewport_h / (2·hh)` in both phases.
+    /// `pixels_per_unit` is `viewport_h / (2·hh)`.
     #[test]
     fn pixels_per_unit_matches_half_height() {
         assert_eq!(camera().pixels_per_unit(), 60.0);
-        assert_eq!(ortho_camera().pixels_per_unit(), 60.0);
     }
 
-    /// The tuple frame looks straight down `-Z` with up `+Y`; the stand-in
-    /// eye height derives from `hh`, the ortho one is fixed.
+    /// The tuple frame looks straight down `-Z` with up `+Y`; the eye sits
+    /// at the fixed `eye_height`.
     #[test]
     fn view_parameters_look_down_with_up_y() {
         let (eye, target, up, fov, near, far) = camera().view_parameters();
-        let expected_height = 5.0 / (60.0f32.to_radians() * 0.5).tan();
-        assert!((eye - Vec3::new(0.0, 0.0, expected_height)).length() < 1e-4);
+        assert_eq!(eye, Vec3::new(0.0, 0.0, 10.0));
         assert_eq!(target, Vec3::ZERO);
         assert_eq!(up, Vec3::Y);
         assert_eq!((fov, near, far), (60.0, 0.1, 100.0));
-        let (ortho_eye, _, _, _, _, _) = ortho_camera().view_parameters();
-        assert_eq!(ortho_eye, Vec3::new(0.0, 0.0, 10.0));
     }
 
     /// `screen_to_plane`/`plane_to_screen` round-trip, and the center pixel
@@ -536,29 +474,27 @@ mod tests {
     }
 
     /// Gate: `screen_to_plane` agrees with `pointer_on_plane` over the
-    /// picking camera in both phases, corners included.
+    /// picking camera, corners included.
     #[test]
     fn screen_to_plane_agrees_with_pointer_on_plane() {
         use crate::picking::{WorkPlane, pointer_on_plane};
-        for camera in [camera(), ortho_camera()] {
-            let viewport = camera.viewport_camera().expect("picking camera");
-            for px in [0.0, 200.0, 400.0, 799.0] {
-                for py in [0.0, 150.0, 300.0, 599.0] {
-                    let via_plane = camera.screen_to_plane([px, py]);
-                    let via_pick =
-                        pointer_on_plane(&viewport, [px, py], WorkPlane::XY).expect("plane hit");
-                    assert!(
-                        (via_pick.truncate() - via_plane).length() < 1e-3,
-                        "{px},{py}: {via_pick:?} vs {via_plane:?}"
-                    );
-                }
+        let camera = camera();
+        let viewport = camera.viewport_camera().expect("picking camera");
+        for px in [0.0, 200.0, 400.0, 799.0] {
+            for py in [0.0, 150.0, 300.0, 599.0] {
+                let via_plane = camera.screen_to_plane([px, py]);
+                let via_pick =
+                    pointer_on_plane(&viewport, [px, py], WorkPlane::XY).expect("plane hit");
+                assert!(
+                    (via_pick.truncate() - via_plane).length() < 1e-3,
+                    "{px},{py}: {via_pick:?} vs {via_plane:?}"
+                );
             }
         }
     }
 
     /// `from_camera_view` centers on `target.xy`: an asset ortho keeps its
-    /// half-height, a perspective orbit derives it from the fov and enters
-    /// the orthographic sheet.
+    /// half-height (clamped), a perspective orbit derives it from the fov.
     #[test]
     fn from_orbit_frames_keeps_scale() {
         let ortho = PlaneCamera::from_camera_view(
@@ -576,7 +512,7 @@ mod tests {
         assert_eq!(ortho.half_height(), Meters::new(2.0));
         assert_eq!(ortho.center(), Vec2::new(1.0, 2.0));
         // A perspective orbit enters as the orthographic sheet with the
-        // fov-derived half-height (the stand-in never reaches the live path).
+        // fov-derived half-height.
         let expected = 9.0 * (60.0f32.to_radians() * 0.5).tan();
         let from_perspective = PlaneCamera::from_camera_view(
             Vec3::new(1.0, 2.0, 9.0),
@@ -601,9 +537,7 @@ mod tests {
             PlaneCamera::new(
                 Vec2::new(f32::NAN, 0.0),
                 Meters::new(5.0),
-                PlaneProjection::PerspectiveStandIn {
-                    fov_y: Degrees::new(60.0)
-                },
+                Meters::new(10.0),
                 Meters::new(0.1),
                 Meters::new(100.0),
                 [800.0, 600.0],
@@ -617,34 +551,27 @@ mod tests {
     }
 
     /// `camera_view_params` agrees with `view_parameters` on the look-at
-    /// frame and carries the K0a projection (stand-in: perspective with the
-    /// fov; ortho: asset half-height).
+    /// frame and always carries the K0a orthographic projection.
     #[test]
     fn camera_view_params_match_tuple_frame() {
-        use ornis_assets::scene::CameraProjection;
         let camera = camera();
         let (eye, target, up, projection, fov, near, far) = camera.camera_view_params();
         let (t_eye, t_target, t_up, t_fov, t_near, t_far) = camera.view_parameters();
         assert_eq!((eye, target, up), (t_eye, t_target, t_up));
-        assert_eq!(projection, CameraProjection::Perspective);
-        assert_eq!(fov, Degrees::new(60.0));
-        assert_eq!(fov.get(), t_fov);
-        assert_eq!((near.get(), far.get()), (t_near, t_far));
-        let ortho = ortho_camera();
-        let (_, _, _, projection, _, _, _) = ortho.camera_view_params();
         assert_eq!(
             projection,
             CameraProjection::Orthographic {
                 half_height: Meters::new(5.0)
             }
         );
+        assert_eq!(fov, Degrees::new(60.0));
+        assert_eq!(fov.get(), t_fov);
+        assert_eq!((near.get(), far.get()), (t_near, t_far));
     }
 
-    /// Live 2D entry (review RAT-16 blockers 1–2): `from_camera_view` from a
-    /// perspective orbit yields the orthographic sheet on both seams, and
-    /// picking keeps hitting `z = 0` at both `hh` zoom clamp edges — the eye
-    /// height is the orbit distance, so the sheet never leaves the near/far
-    /// window the way the fov-derived stand-in eye height did.
+    /// Live 2D entry: `from_camera_view` from a perspective orbit yields
+    /// the orthographic sheet on both seams, and picking keeps hitting
+    /// `z = 0` at both `hh` zoom clamp edges.
     #[test]
     fn live_entry_is_orthographic_and_picks_at_zoom_clamps() {
         use crate::picking::PickProjection;
@@ -686,9 +613,8 @@ mod tests {
     }
 
     /// Every viewport pixel resolves onto the sheet at both zoom clamps,
-    /// matching [`PlaneCamera::screen_to_plane`] (the exactness the picking
-    /// pipeline relies on), and the center hit stays inside the pick
-    /// camera's near/far window.
+    /// matching [`PlaneCamera::screen_to_plane`], and the center hit stays
+    /// inside the pick camera's near/far window.
     fn assert_sheet_stays_pickable(camera: &PlaneCamera) {
         use crate::picking::{WorkPlane, pointer_on_plane};
         let viewport = camera.viewport_camera().expect("picking camera");
@@ -712,5 +638,91 @@ mod tests {
             viewport.near(),
             viewport.far()
         );
+    }
+
+    /// Review blocker: geometry above the sheet stays in the clip window
+    /// even when it sits higher than the orbit radius, and an orbit with
+    /// `|eye − target| < near` still lands the sheet inside `[near, far]`.
+    #[test]
+    fn eye_height_covers_geometry_above_orbit_radius() {
+        // Orbit of radius 3 around target.z = 5: eye height is 8, so an
+        // object at z = 5 (above the orbit radius) is between the eye and
+        // the sheet, inside the clip window.
+        let camera = PlaneCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, 8.0),
+            Vec3::new(0.0, 0.0, 5.0),
+            CameraProjection::Perspective,
+            Degrees::new(60.0),
+            Meters::new(0.1),
+            Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("entry with elevated target");
+        let (eye, _, _, _, _, near, far) = camera.camera_view_params();
+        assert!((eye.z - 8.0).abs() < 1e-4, "eye.z = {}", eye.z);
+        // Sheet at distance 8 from the eye is inside the clip window.
+        assert!(near.get() < 8.0 && far.get() > 8.0);
+        let viewport = camera.viewport_camera().expect("picking camera");
+        let hit = crate::picking::pointer_on_plane(
+            &viewport,
+            [400.0, 300.0],
+            crate::picking::WorkPlane::XY,
+        )
+        .expect("sheet hit");
+        let depth = (hit - viewport.position()).length();
+        assert!(depth >= viewport.near() && depth <= viewport.far());
+    }
+
+    /// An orbit with `|eye − target| < near` (degenerate close orbit)
+    /// still lands the sheet inside the widened `[near, far]` window.
+    #[test]
+    fn close_orbit_entry_widens_clip_window_to_cover_sheet() {
+        let camera = PlaneCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, 0.05),
+            Vec3::ZERO,
+            CameraProjection::Perspective,
+            Degrees::new(60.0),
+            Meters::new(0.1),
+            Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("close orbit entry");
+        let (_, _, _, _, _, near, far) = camera.camera_view_params();
+        let eye_height = camera.eye_height();
+        assert!(
+            near.get() < eye_height && far.get() > eye_height,
+            "sheet at {eye_height} outside [{}, {}]",
+            near.get(),
+            far.get()
+        );
+    }
+
+    /// The derived `hh` is clamped to the K0a range on entry.
+    #[test]
+    fn derived_half_height_is_clamped_on_entry() {
+        // A very wide fov around a far orbit would exceed MAX_HALF_HEIGHT.
+        let wide = PlaneCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, 9000.0),
+            Vec3::ZERO,
+            CameraProjection::Perspective,
+            Degrees::new(179.0),
+            Meters::new(0.1),
+            Meters::new(100000.0),
+            [800.0, 600.0],
+        )
+        .expect("wide entry");
+        assert_eq!(wide.half_height(), PlaneCamera::MAX_HALF_HEIGHT);
+        // A tiny distance / fov would fall below MIN_HALF_HEIGHT.
+        let tiny = PlaneCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, 0.001),
+            Vec3::ZERO,
+            CameraProjection::Perspective,
+            Degrees::new(0.01),
+            Meters::new(0.0001),
+            Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("tiny entry");
+        assert_eq!(tiny.half_height(), PlaneCamera::MIN_HALF_HEIGHT);
     }
 }

@@ -70,18 +70,16 @@ pub fn plane_grid(camera: &PlaneCamera, min_step_px: PositiveF32) -> PlaneGrid {
 mod tests {
     use super::*;
     use glam::Vec2;
-    use ornis_core::{Degrees, Meters};
+    use ornis_core::Meters;
 
-    use crate::plane::{PlaneCamera, PlaneProjection};
+    use crate::plane::PlaneCamera;
 
     /// Rig with `60 px` per unit (`hh = 5` on a `600 px` tall viewport).
     fn camera() -> PlaneCamera {
         PlaneCamera::new(
             Vec2::ZERO,
             Meters::new(5.0),
-            PlaneProjection::PerspectiveStandIn {
-                fov_y: Degrees::new(60.0),
-            },
+            Meters::new(10.0),
             Meters::new(0.1),
             Meters::new(100.0),
             [800.0, 600.0],

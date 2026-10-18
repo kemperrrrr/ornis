@@ -1321,6 +1321,54 @@ mod tests {
         );
     }
 
+    /// Orthographic pick ray on a non-square viewport (w ≠ h): the NDC
+    /// mapping scales x by `aspect·hh` and y by `hh`, matching
+    /// `pointer_on_plane` exactly.
+    #[test]
+    fn orthographic_ray_on_non_square_viewport() {
+        use ornis_core::Meters;
+        let camera = ViewportCamera::new_orthographic(
+            Vec3::new(0.0, 0.0, 6.0),
+            Vec3::ZERO,
+            Vec3::Y,
+            Meters::new(2.0),
+            0.1,
+            100.0,
+            [400.0, 200.0],
+        )
+        .expect("valid non-square ortho camera");
+        // Aspect = 400/200 = 2. Center ray: origin on the eye axis.
+        let center = pick_ray(&camera, [200.0, 100.0]).expect("center ray");
+        assert!((center.origin() - Vec3::new(0.0, 0.0, 6.0)).length() < 1e-4);
+        // Left edge (x = 0): NDC x = −1 → origin at −aspect·hh = −4.
+        let left = pick_ray(&camera, [0.0, 100.0]).expect("left ray");
+        assert!((left.origin() - Vec3::new(-4.0, 0.0, 6.0)).length() < 1e-4);
+        // Top edge (y = 0): NDC y = +1 → origin at +hh = +2.
+        let top = pick_ray(&camera, [200.0, 0.0]).expect("top ray");
+        assert!((top.origin() - Vec3::new(0.0, 2.0, 6.0)).length() < 1e-4);
+        // Corner: x = −aspect·hh, y = +hh.
+        let corner = pick_ray(&camera, [0.0, 0.0]).expect("corner ray");
+        assert!((corner.origin() - Vec3::new(-4.0, 2.0, 6.0)).length() < 1e-4);
+        // All rays stay parallel.
+        let dir = Vec3::from(center.direction());
+        for ray in [&left, &top, &corner] {
+            assert!((Vec3::from(ray.direction()) - dir).length() < 1e-6);
+        }
+        // `pointer_on_plane` agrees with the NDC mapping on the same pixels.
+        for px in [0.0, 100.0, 200.0, 399.0] {
+            for py in [0.0, 50.0, 100.0, 199.0] {
+                let via_plane = pointer_on_plane(&camera, [px, py], WorkPlane::XY)
+                    .expect("plane hit on non-square viewport");
+                let ndc_x = 2.0 * px / 400.0 - 1.0;
+                let ndc_y = 1.0 - 2.0 * py / 200.0;
+                assert!(
+                    (via_plane - Vec3::new(ndc_x * 2.0 * 2.0, ndc_y * 2.0, 0.0)).length() < 1e-3,
+                    "{px},{py}: {via_plane:?}"
+                );
+            }
+        }
+    }
+
     /// `PickProjection::from_camera` mirrors the K0a projection: perspective
     /// keeps the passed fov, orthographic keeps the asset half-height.
     #[test]
