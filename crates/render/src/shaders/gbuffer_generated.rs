@@ -22,7 +22,6 @@ use super::{
     wgsl_decl,
 };
 use crate::renderer::{CameraUniform, PerObjectGpu};
-use crate::shaders::helpers::NDC_TO_UV_HALF;
 use crate::shaders::math::octahedral_encode;
 use ornis_macros::stage;
 
@@ -120,10 +119,12 @@ fn fs_main(
     let previous_clip =
         camera.previous_view_proj * Vec4::new(input.previous_world_position.xyz, 1.0);
     let mut motion = Vec2::new(0.0, 0.0);
-    // Reserve 65535 as the invalid-motion marker; valid depth values map
-    // across 0..65534 so one 16-bit integer stores both depth and validity.
-    let mut previous_depth = 65535u32;
-    if current_clip.w > 0.0 && previous_clip.w > 0.0 && input.previous_world_position.w > 0.5 {
+    // The reserved integer code and depth scale pack validity and prior depth.
+    let mut previous_depth = PREVIOUS_DEPTH_INVALID;
+    if current_clip.w > 0.0
+        && previous_clip.w > 0.0
+        && input.previous_world_position.w > MOTION_VALID_THRESHOLD
+    {
         let current_ndc = current_clip.xyz / current_clip.w;
         let previous_ndc = previous_clip.xyz / previous_clip.w;
         let current_uv = Vec2::new(
@@ -135,7 +136,8 @@ fn fs_main(
             NDC_TO_UV_HALF - previous_ndc.y * NDC_TO_UV_HALF,
         );
         motion = current_uv - previous_uv;
-        previous_depth = u32(clamp(previous_ndc.z, 0.0, 1.0) * 65534.0 + 0.5);
+        previous_depth =
+            u32(clamp(previous_ndc.z, 0.0, 1.0) * PREVIOUS_DEPTH_MAX + DEPTH_ROUNDING_BIAS);
     }
     let mut output: GBufferOutput;
     output.albedo = Vec4::new(base_color, opacity);

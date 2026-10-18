@@ -218,6 +218,21 @@ pub fn custom_draw_items(
         .collect()
 }
 
+fn staged_motion_validity(
+    requested: MotionValidity,
+    gpu_skinning: bool,
+    gpu_draw: bool,
+    palette_validity: Option<MotionValidity>,
+) -> MotionValidity {
+    if requested == MotionValidity::Invalid
+        || (gpu_skinning && (!gpu_draw || palette_validity != Some(MotionValidity::Valid)))
+    {
+        MotionValidity::Invalid
+    } else {
+        MotionValidity::Valid
+    }
+}
+
 impl Renderer3D {
     /// Skinned g-buffer pipeline: the palette-blend vertex stage
     /// ([`wgsl_vertex_source_skinned`]) with the classic fragment stage and
@@ -265,47 +280,27 @@ impl Renderer3D {
             .unwrap_or_default(),
         });
 
-        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("skinned gbuffer vertex"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(wgsl_vertex_source_skinned())),
-        });
-        let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("skinned gbuffer fragment"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_fragment())),
-        });
+        let vs_module = super::gbuffer::gbuffer_shader_module(
+            device,
+            "skinned gbuffer vertex",
+            wgsl_vertex_source_skinned(),
+        );
+        let fs_module = super::gbuffer::gbuffer_shader_module(
+            device,
+            "skinned gbuffer fragment",
+            shaders::gbuffer_fragment(),
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("skinned gbuffer pipeline layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
         let mut targets = vec![
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rg16Float,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                // `R16Uint`: the spec-guaranteed multisampleable integer
-                // format (see the `material_id` field docs).
-                format: wgpu::TextureFormat::R16Uint,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rg16Float,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba16Float,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
+            super::gbuffer::gbuffer_float_target(wgpu::TextureFormat::Rgba8Unorm),
+            super::gbuffer::gbuffer_float_target(wgpu::TextureFormat::Rg16Float),
+            super::gbuffer::gbuffer_integer_target(wgpu::TextureFormat::R16Uint),
+            super::gbuffer::gbuffer_float_target(wgpu::TextureFormat::Rg16Float),
+            super::gbuffer::gbuffer_float_target(wgpu::TextureFormat::Rgba16Float),
             None,
             None,
         ];
@@ -351,16 +346,8 @@ impl Renderer3D {
             })
         };
         let pipeline = create_pipeline("skinned gbuffer pipeline", &targets);
-        targets[5] = Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rg16Float,
-            blend: Some(wgpu::BlendState::REPLACE),
-            write_mask: wgpu::ColorWrites::ALL,
-        });
-        targets[6] = Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::R16Uint,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        });
+        targets[5] = super::gbuffer::gbuffer_float_target(wgpu::TextureFormat::Rg16Float);
+        targets[6] = super::gbuffer::gbuffer_integer_target(wgpu::TextureFormat::R16Uint);
         let motion_pipeline = create_pipeline("skinned gbuffer motion pipeline", &targets);
 
         (pipeline, motion_pipeline, bind_group_layout)
@@ -553,10 +540,7 @@ impl Renderer3D {
         queue: &wgpu::Queue,
         entries: &[CustomMeshEntry],
     ) -> Vec<StagedCustomMesh> {
-        // Palettes first, in entry order: one upload call stages every
-        // GPU-mode palette, so handles come back densely (`0..count`).
-        // Entries that cannot stage bytes keep `None` and resolve through
-        // the `draw()` / `shadow_draw()` CPU fallback below.
+        // Stage GPU palettes in entry order; absent entries fall back to CPU.
         let palette_bytes: Vec<Option<Vec<u8>>> = entries
             .iter()
             .map(|entry| match entry.skinning {
@@ -584,9 +568,7 @@ impl Renderer3D {
             &staged_palettes,
             &staged_palette_entities,
         );
-        // Handles and validity entries share the dense order of staged
-        // palettes; walk the original entries with a cursor to keep them
-        // paired even when CPU-skinned entries have no palette.
+        // One cursor keeps handles and validity aligned across CPU entries.
         let mut palette_cursor = 0usize;
         let mut staged = Vec::with_capacity(entries.len());
         for (entry, bytes) in entries.iter().zip(&palette_bytes) {
@@ -604,15 +586,12 @@ impl Renderer3D {
             if entry.skinning.is_gpu() && matches!(draw, SkinnedDraw::Cpu) {
                 self.invalidate_skin_palette_history(entry.entity);
             }
-            let motion_valid = if entry.motion_valid == MotionValidity::Invalid
-                || (entry.skinning.is_gpu()
-                    && (!matches!(draw, SkinnedDraw::Gpu(_))
-                        || palette_motion_valid != Some(MotionValidity::Valid)))
-            {
-                MotionValidity::Invalid
-            } else {
-                MotionValidity::Valid
-            };
+            let motion_valid = staged_motion_validity(
+                entry.motion_valid,
+                entry.skinning.is_gpu(),
+                matches!(draw, SkinnedDraw::Gpu(_)),
+                palette_motion_valid,
+            );
             let mesh = match draw {
                 SkinnedDraw::Gpu(_) => match entry.skinned_gpu_vertices() {
                     Some(rows) => upload_skinned_mesh(device, &rows, &entry.indices),
@@ -822,6 +801,46 @@ mod tests {
     use super::super::*;
     use super::*;
     use ornis_assets::scene::ShadowCast;
+
+    #[test]
+    fn staged_motion_validity_requires_matching_previous_data() {
+        assert_eq!(
+            staged_motion_validity(MotionValidity::Invalid, false, false, None,),
+            MotionValidity::Invalid,
+        );
+        assert_eq!(
+            staged_motion_validity(MotionValidity::Valid, false, false, None),
+            MotionValidity::Valid,
+        );
+        assert_eq!(
+            staged_motion_validity(
+                MotionValidity::Valid,
+                true,
+                false,
+                Some(MotionValidity::Valid),
+            ),
+            MotionValidity::Invalid,
+        );
+        assert_eq!(
+            staged_motion_validity(
+                MotionValidity::Valid,
+                true,
+                true,
+                Some(MotionValidity::Invalid),
+            ),
+            MotionValidity::Invalid,
+        );
+        assert_eq!(
+            staged_motion_validity(
+                MotionValidity::Valid,
+                true,
+                true,
+                Some(MotionValidity::Valid),
+            ),
+            MotionValidity::Valid,
+        );
+    }
+
     #[test]
     fn skinned_pipeline_sources_validate_with_naga() {
         // The skinned pipelines assemble the skinned vertex stage with the

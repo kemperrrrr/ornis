@@ -139,3 +139,43 @@ fn mode_from_u32(value: u32) -> AntiAliasMode {
         _ => AntiAliasMode::Msaa,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changing_mode_resets_history_and_jitter() {
+        let state = AaState::new();
+        state.set_mode(AntiAliasMode::Taa);
+        state.advance_jitter();
+        state.mark_history_valid();
+        state.arm_temporal();
+        state.advance_jitter();
+
+        state.set_mode(AntiAliasMode::Fxaa);
+
+        assert_eq!(state.mode(), AntiAliasMode::Fxaa);
+        assert!(!state.history_valid());
+        assert!(!state.temporal_armed());
+        let mut expected = JitterSequence::new();
+        assert_eq!(state.advance_jitter(), expected.advance());
+    }
+
+    #[test]
+    fn setting_same_mode_preserves_temporal_state() {
+        let state = AaState::new();
+        state.set_mode(AntiAliasMode::Taa);
+        let mut expected = JitterSequence::new();
+        assert_eq!(state.advance_jitter(), expected.advance());
+        state.mark_history_valid();
+        state.arm_temporal();
+
+        state.set_mode(AntiAliasMode::Taa);
+
+        assert_eq!(state.mode(), AntiAliasMode::Taa);
+        assert!(state.history_valid());
+        assert!(state.temporal_armed());
+        assert_eq!(state.advance_jitter(), expected.advance());
+    }
+}

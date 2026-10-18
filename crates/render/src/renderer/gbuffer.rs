@@ -98,6 +98,38 @@ pub(super) enum GbufferResolveSlot {
     MaterialParams,
 }
 
+/// Build a WGSL shader module for either g-buffer vertex layout.
+pub(super) fn gbuffer_shader_module(
+    device: &wgpu::Device,
+    label: &'static str,
+    source: String,
+) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
+    })
+}
+
+/// Float g-buffer output target with replacement blending.
+pub(super) fn gbuffer_float_target(format: wgpu::TextureFormat) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(wgpu::BlendState::REPLACE),
+        write_mask: wgpu::ColorWrites::ALL,
+    })
+}
+
+/// Integer g-buffer output target, which must not use blending.
+pub(super) fn gbuffer_integer_target(
+    format: wgpu::TextureFormat,
+) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })
+}
+
 impl Renderer3D {
     pub(super) fn create_gbuffer(
         device: &wgpu::Device,
@@ -335,15 +367,9 @@ impl Renderer3D {
             .unwrap_or_default(),
         });
 
-        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gbuffer vertex"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_vertex())),
-        });
-
-        let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gbuffer fragment"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_fragment())),
-        });
+        let vs_module = gbuffer_shader_module(device, "gbuffer vertex", shaders::gbuffer_vertex());
+        let fs_module =
+            gbuffer_shader_module(device, "gbuffer fragment", shaders::gbuffer_fragment());
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gbuffer pipeline layout"),
@@ -352,33 +378,11 @@ impl Renderer3D {
         });
 
         let mut targets = vec![
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rg16Float,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                // `R16Uint`: the spec-guaranteed multisampleable integer
-                // format (see the `material_id` field docs).
-                format: wgpu::TextureFormat::R16Uint,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rg16Float,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
-            Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rgba16Float,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            }),
+            gbuffer_float_target(wgpu::TextureFormat::Rgba8Unorm),
+            gbuffer_float_target(wgpu::TextureFormat::Rg16Float),
+            gbuffer_integer_target(wgpu::TextureFormat::R16Uint),
+            gbuffer_float_target(wgpu::TextureFormat::Rg16Float),
+            gbuffer_float_target(wgpu::TextureFormat::Rgba16Float),
             None,
             None,
         ];
@@ -424,18 +428,8 @@ impl Renderer3D {
             })
         };
         let pipeline = create_pipeline("gbuffer pipeline", &targets);
-        targets[5] = Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Rg16Float,
-            blend: Some(wgpu::BlendState::REPLACE),
-            write_mask: wgpu::ColorWrites::ALL,
-        });
-        targets[6] = Some(wgpu::ColorTargetState {
-            // `R16Uint` is spec-guaranteed as a renderable/multisampleable
-            // integer format and stores the depth code plus validity bit.
-            format: wgpu::TextureFormat::R16Uint,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        });
+        targets[5] = gbuffer_float_target(wgpu::TextureFormat::Rg16Float);
+        targets[6] = gbuffer_integer_target(wgpu::TextureFormat::R16Uint);
         let motion_pipeline = create_pipeline("gbuffer motion pipeline", &targets);
 
         (pipeline, motion_pipeline, bind_group_layout, bind_group)
@@ -609,11 +603,7 @@ impl Renderer3D {
                 },
             }),
         ];
-        let motion = match (g.motion, g.previous_depth) {
-            (Some(_), Some(_)) => true,
-            (None, None) => false,
-            _ => panic!("motion and previous-depth g-buffer targets must be paired"),
-        };
+        let motion = g.motion.is_some() && g.previous_depth.is_some();
         if let (Some(motion), Some(previous_depth)) = (g.motion, g.previous_depth) {
             color_attachments.push(Some(wgpu::RenderPassColorAttachment {
                 view: motion,

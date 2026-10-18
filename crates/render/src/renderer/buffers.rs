@@ -375,6 +375,7 @@ impl Renderer3D {
     /// ECS identities. A missing identity or first-seen entity disables
     /// temporal reuse; CPU-deformed custom meshes do the same through
     /// [`MotionValidity::Invalid`].
+    // qual:allow(iosp) reason: "Keep instance identities, previous transforms, and GPU staging aligned in one frame transition"
     pub(crate) fn upload_instances_with_motion_flags(
         &self,
         device: &wgpu::Device,
@@ -485,6 +486,7 @@ impl Renderer3D {
     /// Keyed palette upload used by extracted GPU-skinned entities. Previous
     /// matrices are matched by entity identity, not dense palette slot, and
     /// newly seen/missing identities receive an invalid-motion state.
+    // qual:allow(iosp) reason: "Stage current and previous palettes together so dense slots preserve per-entity motion history"
     pub(crate) fn upload_skin_palettes_with_entities(
         &self,
         device: &wgpu::Device,

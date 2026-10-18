@@ -55,7 +55,7 @@ pub(crate) struct AaUniform {
     mode: u32,
     /// Trailing pad (padding: not shader-visible).
     #[wgsl(skip)]
-    _pad: [f32; AA_UNIFORM_PADDING],
+    _pad: [f32; 3],
 }
 
 impl AaUniform {
@@ -162,7 +162,6 @@ impl Renderer3D {
     /// pass in the frame plan; the post-process modes filter the composited
     /// image in one pass. Switching the mode resets the temporal state, so
     /// a stale history never leaks into the new mode.
-    // qual:api — public renderer setting for application-controlled AA.
     pub fn set_anti_alias(&self, mode: AntiAliasMode) {
         self.aa_state.set_mode(mode);
     }

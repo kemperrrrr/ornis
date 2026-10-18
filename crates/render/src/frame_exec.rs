@@ -838,6 +838,73 @@ impl RenderFrame3D {
         }
     }
 
+    /// Register typed resources and the geometry pass in declaration order.
+    fn register_frame_resources(
+        systems: &mut SystemSet,
+        surface_format: wgpu::TextureFormat,
+        technique: Technique,
+        aa: Option<AaWiring>,
+    ) -> FrameIds {
+        let ids = FrameIds {
+            albedo: systems.register_resource::<Albedo>(surface_format),
+            normal: systems.register_resource::<Normal>(surface_format),
+            material_id: systems.register_resource::<MaterialId>(surface_format),
+            world_position: systems.register_resource::<WorldPosition>(surface_format),
+            material_params: systems.register_resource::<MaterialParams>(surface_format),
+            depth: systems.register_resource::<Depth>(surface_format),
+            hdr: systems.register_resource::<Hdr>(surface_format),
+            hdr_fwd: systems.register_resource::<HdrFwd>(surface_format),
+            target: systems.register_resource::<Target>(surface_format),
+            bloom0: systems.register_resource::<Bloom0>(surface_format),
+            bloom1: systems.register_resource::<Bloom1>(surface_format),
+            bloom2: systems.register_resource::<Bloom2>(surface_format),
+        };
+        if aa.is_some_and(|wiring| wiring.mode.is_enabled()) {
+            systems.register_resource::<LdrLayer>(surface_format);
+        }
+        let taa = aa.is_some_and(|wiring| wiring.mode == AntiAliasMode::Taa);
+        if taa {
+            systems.register_resource::<Motion>(surface_format);
+            systems.register_resource::<PreviousDepth>(surface_format);
+        }
+        if technique.has_deferred() {
+            if taa {
+                systems.add_system(GbufferMotionPass);
+            } else {
+                systems.add_system(GbufferPass);
+            }
+        }
+        ids
+    }
+
+    /// Register the technique- and bloom-specific composite node.
+    fn register_composite<O: crate::system::FrameResource>(
+        systems: &mut SystemSet,
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+    ) {
+        match (technique, bloom) {
+            (Technique::Deferred, Bloom::On) => {
+                systems.add_system(Composite::<CompositeDeferredBloom, O>::new());
+            }
+            (Technique::Deferred, Bloom::Off) => {
+                systems.add_system(Composite::<CompositeDeferred, O>::new());
+            }
+            (Technique::Forward, Bloom::On) => {
+                systems.add_system(Composite::<CompositeForwardBloom, O>::new());
+            }
+            (Technique::Forward, Bloom::Off) => {
+                systems.add_system(Composite::<CompositeForward, O>::new());
+            }
+            (Technique::Hybrid, Bloom::On) => {
+                systems.add_system(Composite::<CompositeHybridBloom, O>::new());
+            }
+            (Technique::Hybrid, Bloom::Off) => {
+                systems.add_system(Composite::<CompositeHybrid, O>::new());
+            }
+        }
+    }
+
     /// Shared plan builder: registers resources, technique nodes, the
     /// optional AO chain (`ao_raw` → `ao_blur` → occluded `lighting`), the
     /// optional bloom chain, the optional fog node (at `fog` placement),
@@ -856,36 +923,7 @@ impl RenderFrame3D {
         systems.set_sample_count(sample_count);
         let sample_count = systems.sample_count();
         systems.set_surface_size(surface_size);
-        let ids = FrameIds {
-            albedo: systems.register_resource::<Albedo>(surface_format),
-            normal: systems.register_resource::<Normal>(surface_format),
-            material_id: systems.register_resource::<MaterialId>(surface_format),
-            world_position: systems.register_resource::<WorldPosition>(surface_format),
-            material_params: systems.register_resource::<MaterialParams>(surface_format),
-            depth: systems.register_resource::<Depth>(surface_format),
-            hdr: systems.register_resource::<Hdr>(surface_format),
-            hdr_fwd: systems.register_resource::<HdrFwd>(surface_format),
-            target: systems.register_resource::<Target>(surface_format),
-            bloom0: systems.register_resource::<Bloom0>(surface_format),
-            bloom1: systems.register_resource::<Bloom1>(surface_format),
-            bloom2: systems.register_resource::<Bloom2>(surface_format),
-        };
-        if aa.is_some_and(|wiring| wiring.mode.is_enabled()) {
-            // The composite writes this layer before the filter reads it.
-            systems.register_resource::<LdrLayer>(surface_format);
-        }
-        let taa = aa.is_some_and(|wiring| wiring.mode == AntiAliasMode::Taa);
-        if taa {
-            systems.register_resource::<Motion>(surface_format);
-            systems.register_resource::<PreviousDepth>(surface_format);
-        }
-        if technique.has_deferred() {
-            if taa {
-                systems.add_system(GbufferMotionPass);
-            } else {
-                systems.add_system(GbufferPass);
-            }
-        }
+        let ids = Self::register_frame_resources(&mut systems, surface_format, technique, aa);
         // Opt-in AO between gbuffer and lighting (see `register_ao`).
         let ao_lighting = Self::register_ao(&mut systems, surface_format, ao, technique);
         if technique.has_deferred() {
@@ -923,27 +961,7 @@ impl RenderFrame3D {
         {
             systems.add_system(FogPass::new(state));
         }
-        // Select the composite variant from the technique and bloom state.
-        match (technique, bloom) {
-            (Technique::Deferred, Bloom::On) => {
-                systems.add_system(Composite::<CompositeDeferredBloom, O>::new());
-            }
-            (Technique::Deferred, Bloom::Off) => {
-                systems.add_system(Composite::<CompositeDeferred, O>::new());
-            }
-            (Technique::Forward, Bloom::On) => {
-                systems.add_system(Composite::<CompositeForwardBloom, O>::new());
-            }
-            (Technique::Forward, Bloom::Off) => {
-                systems.add_system(Composite::<CompositeForward, O>::new());
-            }
-            (Technique::Hybrid, Bloom::On) => {
-                systems.add_system(Composite::<CompositeHybridBloom, O>::new());
-            }
-            (Technique::Hybrid, Bloom::Off) => {
-                systems.add_system(Composite::<CompositeHybrid, O>::new());
-            }
-        }
+        Self::register_composite::<O>(&mut systems, technique, bloom);
         // The AA pass filters the composite and presents the result.
         Self::register_anti_alias(&mut systems, aa);
         // After-composite fog writes the presented frame.
@@ -984,6 +1002,7 @@ impl RenderFrame3D {
 
     /// Anti-aliasing mode this plan wires (the renderer must select the
     /// same mode through [`Renderer3D::set_anti_alias`]).
+    // qual:allow(dry, boilerplate) reason: "Keep the wired mode read-only so callers cannot desynchronize it from the registered passes"
     // qual:api — public plan setting query for external frame orchestration.
     pub fn anti_alias_mode(&self) -> AntiAliasMode {
         self.anti_alias
@@ -1684,12 +1703,12 @@ mod tests {
         let _ = plan.systems.build();
     }
 
-    // qual:allow(dry, fragment) reason: "The AA mode table intentionally repeats equivalent graph assertions per technique"
     #[test]
     fn anti_alias_plans_wire_the_matching_pass() {
         // The mode decides the pass: the temporal resolve reads the
         // depth, the post-process filters only the composited image. The
         // disabled mode keeps the plain plan (no filter pass at all).
+        // qual:allow(dry, fragment) reason: "The mode matrix repeats identical graph inspection to compare each selected technique"
         let names_of = |mode: AntiAliasMode| {
             let mut plan = RenderFrame3D::new_with_aa(
                 wgpu::TextureFormat::Rgba8Unorm,
@@ -1727,7 +1746,6 @@ mod tests {
         );
     }
 
-    // qual:allow(dry, fragment) reason: "The resource graph assertions deliberately mirror the separate AA mode table"
     #[test]
     fn anti_alias_plan_filters_the_composited_layer() {
         // The composite writes the intermediate layer, the anti-aliasing
@@ -1791,6 +1809,7 @@ mod tests {
     #[test]
     fn technique_bloom_input_follows_hdr_layer() {
         // Forward-only: bloom's bright-pass input is `hdr_fwd` (hdr dead).
+        // qual:allow(dry, fragment) reason: "The forward and hybrid checks intentionally mirror one bloom input probe"
         let mut forward = RenderFrame3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
@@ -1805,6 +1824,7 @@ mod tests {
             .expect("bloom_down0 exists");
         assert_eq!(down0.reads, vec![forward.ids.hdr_fwd]);
         // Hybrid: bright-pass input is `hdr`.
+        // qual:allow(dry, fragment) reason: "The forward and hybrid checks intentionally mirror one bloom input probe"
         let mut hybrid = RenderFrame3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),
@@ -1822,6 +1842,7 @@ mod tests {
 
     #[test]
     fn technique_forward_owns_depth_in_forward_mode() {
+        // qual:allow(dry, fragment) reason: "Plan ownership checks mirror the shared setup used by neighboring technique tests"
         let mut forward = RenderFrame3D::new_with(
             wgpu::TextureFormat::Rgba8Unorm,
             (32, 32),

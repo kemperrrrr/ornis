@@ -56,23 +56,20 @@ pub(super) fn neighbourhood_bounds_with_validity(samples: &[Vec3]) -> (Vec3, Vec
     if samples.is_empty() {
         return (Vec3::ZERO, Vec3::ZERO, 0.0);
     }
-    let first = samples[0];
-    let (r, g, b) = (first.x, first.y, first.z);
-    let mut min = Vec3 {
-        x: QUARTER * r + HALF * g + QUARTER * b,
-        y: HALF * r - HALF * b,
-        z: -QUARTER * r + HALF * g - QUARTER * b,
+    let encode = |sample: Vec3| {
+        let (r, g, b) = (sample.x, sample.y, sample.z);
+        Vec3 {
+            x: QUARTER * r + HALF * g + QUARTER * b,
+            y: HALF * r - HALF * b,
+            z: -QUARTER * r + HALF * g - QUARTER * b,
+        }
     };
+    let mut min = encode(samples[0]);
     let mut max = min;
     let mut sum = Vec3::ZERO;
     let mut sum_squares = Vec3::ZERO;
     for sample in samples {
-        let (r, g, b) = (sample.x, sample.y, sample.z);
-        let encoded = Vec3 {
-            x: QUARTER * r + HALF * g + QUARTER * b,
-            y: HALF * r - HALF * b,
-            z: -QUARTER * r + HALF * g - QUARTER * b,
-        };
+        let encoded = encode(*sample);
         min = min.min(encoded);
         max = max.max(encoded);
         sum += encoded;
@@ -134,7 +131,6 @@ pub fn fxaa_luma(color: Vec3) -> f32 {
 ///
 /// The gradients are signed differences of the neighbouring luma values;
 /// their magnitudes say how much the image changes across each axis.
-// qual:api — public CPU reference helper for downstream filter validation.
 pub fn edge_gradient(
     luma_north: f32,
     luma_south: f32,
@@ -149,7 +145,6 @@ pub fn edge_gradient(
 /// The edge filter blends across the dominant gradient, i.e. along the
 /// axis the image changes fastest — that is the direction in which the
 /// aliased edge sits.
-// qual:api — public CPU reference helper for downstream filter validation.
 pub fn edge_axis(gradient_x: f32, gradient_y: f32) -> u32 {
     if gradient_x.abs() > gradient_y.abs() {
         0
@@ -164,7 +159,6 @@ pub fn edge_axis(gradient_x: f32, gradient_y: f32) -> u32 {
 /// gradient axis, `range` the luma range across that axis. A flat pixel
 /// (`range` below the threshold) is returned unchanged; a strong edge is
 /// blended towards the average of the two taps.
-// qual:api — public CPU reference helper for downstream filter validation.
 pub fn fxaa_blend(
     center: Vec3,
     tap_a: Vec3,
@@ -187,7 +181,6 @@ pub fn fxaa_blend(
 /// its weight, the other one fades — the morphological part of SMAA, with
 /// the similarity replacing the search textures of the reference
 /// implementation.
-// qual:api — public CPU reference helper for downstream filter validation.
 pub fn smaa_blend(
     center: Vec3,
     tap_a: Vec3,
