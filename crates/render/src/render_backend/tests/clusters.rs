@@ -175,6 +175,14 @@ fn dominant_in_window(pixels: &[u8], px: i32, py: i32) -> (u8, u8, u8) {
     best
 }
 
+/// The exact probe pixel at (`px`, `py`), clamped into the frame.
+fn pixel_at(pixels: &[u8], px: i32, py: i32) -> (u8, u8, u8) {
+    let x = px.clamp(0, PROBE_W as i32 - 1) as usize;
+    let y = py.clamp(0, PROBE_H as i32 - 1) as usize;
+    let offset = (y * PROBE_W as usize + x) * 4;
+    (pixels[offset], pixels[offset + 1], pixels[offset + 2])
+}
+
 /// The flag is off by default and round-trips through the setter.
 #[test]
 fn clustered_flag_roundtrips() {
@@ -358,12 +366,14 @@ fn hundred_point_lights_reach_the_frame() {
         }
     }
     // The grid center (0, 0, 0) is a cell-center point: 2.75 m from
-    // each of the four nearest lights — beyond every range, ambient
-    // only (with the even 16×8 grid it sits between lights, not under
-    // one).
+    // each of the four nearest lights, so its exact pixel (including
+    // the pixel's own footprint) stays beyond the 2.4 m range —
+    // ambient only. Checked at the exact pixel: the brightest-in-window
+    // probe would graze the hot spot of the (8,4) light two pixels
+    // away (the cutoff only starts at 99% of the range).
     let mid = glam::Vec3::ZERO;
     let (mx, my) = project_pixel(&view_proj, mid);
-    let (r, g, b) = dominant_in_window(&pixels, mx, my);
+    let (r, g, b) = pixel_at(&pixels, mx, my);
     assert!(
         r.max(g).max(b) < DARK_CEILING,
         "cell midpoint must stay dark: {r}/{g}/{b}"
