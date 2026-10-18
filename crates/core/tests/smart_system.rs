@@ -135,6 +135,18 @@ fn detach(c: &mut Chaser) {
     }
 }
 
+#[smart_system]
+fn forward_fields(m: &mut Mote) {
+    m.position += 1.0;
+    m.velocity += 1.0;
+}
+
+#[smart_system]
+fn backward_fields(m: &mut Mote) {
+    m.velocity += 1.0;
+    m.position += 1.0;
+}
+
 fn mote(position: f32, velocity: f32) -> Mote {
     Mote { position, velocity }
 }
@@ -497,4 +509,50 @@ fn plain_resource_bound_is_structural() {
     unsafe impl PlainResource for Manual {}
     let access = SystemAccess::new().reads::<Manual>();
     assert_eq!(access.reads.len(), 1);
+}
+
+/// Two systems over one bundle touch its fields in opposite orders and run
+/// concurrently on the same store. Guards are taken in canonical (field-name)
+/// order, so neither thread can hold one lane while waiting for the other
+/// in reverse; a usage-ordered acquisition deadlocks here and trips the timeout.
+#[test]
+fn opposite_field_orders_run_concurrently_without_deadlock() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    const ITERS: usize = 200;
+    let motes: Vec<Mote> = (0..64).map(|i| mote(i as f32, 0.0)).collect();
+    let (resources, entities) = resources_with_motes(&motes);
+    let resources = Arc::new(resources);
+    let (done_tx, done_rx) = mpsc::channel();
+
+    for forward in [true, false] {
+        let resources = Arc::clone(&resources);
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            for _ in 0..ITERS {
+                if forward {
+                    ForwardFieldsSystem::new().run(&resources);
+                } else {
+                    BackwardFieldsSystem::new().run(&resources);
+                }
+            }
+            let _ = done.send(());
+        });
+    }
+    drop(done_tx);
+
+    for _ in 0..2 {
+        done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("opposite field orders deadlocked on lane guards");
+    }
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let expected = (2 * ITERS) as f32;
+    for (i, entity) in entities.iter().enumerate() {
+        let got = Mote::pack_get(store, *entity).expect("bundle");
+        assert_eq!(got.position, i as f32 + expected);
+        assert_eq!(got.velocity, expected);
+    }
 }
