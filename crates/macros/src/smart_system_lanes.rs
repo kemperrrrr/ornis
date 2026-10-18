@@ -158,12 +158,17 @@ fn step_stmts(
     user_args: &[TokenStream2],
     entity: &Ident,
     hint: &Ident,
+    aligned: bool,
 ) -> TokenStream2 {
     let own: Vec<&LaneSpec> = lanes.iter().filter(|lane| lane.own).collect();
     let indices = own.iter().map(|lane| {
-        let guard = lane.guard();
         let index = lane.index();
-        quote! { let #index = #guard.index_hinted(#entity, #hint); }
+        if aligned {
+            quote! { let #index = Some(#hint); }
+        } else {
+            let guard = lane.guard();
+            quote! { let #index = #guard.index_hinted(#entity, #hint); }
+        }
     });
     let gathers = own.iter().map(|lane| {
         let ty = &lane.lane_ty;
@@ -239,8 +244,8 @@ pub(crate) fn run_loop(
         let guard = lane.guard();
         quote! { __smart_membership.narrow(&*#guard); }
     });
-    let fast_step = step_stmts(lanes, body_fn, user_args, entity, hint);
-    let general_step = step_stmts(lanes, body_fn, user_args, entity, hint);
+    let fast_step = step_stmts(lanes, body_fn, user_args, entity, hint, true);
+    let general_step = step_stmts(lanes, body_fn, user_args, entity, hint, false);
     let assert = driver_assert(lanes);
     quote! {
         #assert
