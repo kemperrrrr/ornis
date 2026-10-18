@@ -51,9 +51,6 @@ harness = false
 name = "smart_system_bench"
 harness = false
 
-[[bench]]
-name = "simd_gate_bench"
-harness = false
 
 [lints]
 workspace = true
