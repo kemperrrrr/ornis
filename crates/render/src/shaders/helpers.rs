@@ -156,7 +156,22 @@ pub fn wgsl_consts() -> String {
         decl_u32!(CSM_LAST_CASCADE),
     ]
     .concat();
-    format!("{floats}{ints}{}", msaa_samples_wgsl())
+    // Cluster grid constants (#130): formatted from the single renderer
+    // source (`renderer::clusters`), so the CPU reference, this consts
+    // block and the assignment compute shader cannot drift.
+    let cluster = format!(
+        "const CLUSTERS_X: u32 = {x}u;\n\
+         const CLUSTERS_Y: u32 = {y}u;\n\
+         const CLUSTERS_Z: u32 = {z}u;\n\
+         const CLUSTER_DEPTH_NEAR: f32 = {near};\n\
+         const CLUSTER_SLICE_SCALE: f32 = {scale};\n",
+        x = crate::renderer::CLUSTER_TILE_COUNT_X,
+        y = crate::renderer::CLUSTER_TILE_COUNT_Y,
+        z = crate::renderer::CLUSTER_SLICE_COUNT,
+        near = super::f32_lit(crate::renderer::CLUSTER_DEPTH_NEAR),
+        scale = super::f32_lit(crate::renderer::cluster_slice_scale()),
+    );
+    format!("{floats}{ints}{cluster}{}", msaa_samples_wgsl())
 }
 
 /// `u32` sample count shared with [`crate::renderer::MSAA_SAMPLE_COUNT`].
@@ -663,9 +678,47 @@ fn csm_visibility(
     }
 }
 
+/// Cluster lookup for one world position (#130): the NDC tile ×
+/// view-depth slice index of the 16×9×24 grid, `u32`-safe for
+/// behind-eye and NaN inputs (the depth `max` folds both onto the near
+/// plane, the tile `clamp` bounds the NDC blow-up), returning the
+/// pixel's `(offset, count)` span of the shared cluster index list.
+///
+/// Reads the `camera`, `cluster_grid` and `cluster_params` globals by
+/// bare name, so it splices only into modules that bind all three —
+/// every lit stage does (`wgsl_shared_helpers` is included by the
+/// deferred lighting and both forward PBR entries, not by fog/AO).
+/// `cluster_params.clustered` zeroes the span while the feature is off,
+/// which makes the unified light window exactly the legacy loop.
+#[ornis_macros::wgsl_fn]
+fn cluster_light_span(world_pos: glam::Vec3) -> glam::UVec2 {
+    {
+        let clip = camera.view_proj * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        let w = max(clip.w, CLUSTER_DEPTH_NEAR);
+        let ndc = clip.xyz / w;
+        let tile_f = (ndc.xy * NDC_TO_UV_HALF + NDC_TO_UV_HALF)
+            * Vec2::new(CLUSTERS_X as f32, CLUSTERS_Y as f32);
+        let tile = clamp(
+            UVec2::new(u32(floor(tile_f.x)), u32(floor(tile_f.y))),
+            UVec2::new(0u32, 0u32),
+            UVec2::new(CLUSTERS_X - 1u32, CLUSTERS_Y - 1u32),
+        );
+        let slice = clamp(
+            u32(ceil(CLUSTER_SLICE_SCALE * log(w / CLUSTER_DEPTH_NEAR))),
+            0u32,
+            CLUSTERS_Z - 1u32,
+        );
+        let cluster = tile.x + tile.y * CLUSTERS_X + slice * CLUSTERS_X * CLUSTERS_Y;
+        let span = cluster_grid[cluster];
+        let active = cluster_params.clustered;
+        return UVec2::new(span.offset * active, span.count * active);
+    }
+}
+
 /// All shared evaluator sources concatenated (consts excluded).
 pub fn wgsl_shared_helpers() -> String {
     [
+        cluster_light_span::wgsl_source(),
         csm_visibility::wgsl_source(),
         specular_aa_roughness::wgsl_source(),
         sanitize_hdr::wgsl_source(),

@@ -99,7 +99,11 @@ pub fn add_global(
         ResourceKind::StorageReadArray(_) => {
             let stride = match module.types[ty].inner {
                 naga::TypeInner::Struct { span, .. } => span,
-                // Non-struct element (caller bug): assume vec4 stride.
+                // Scalar elements (`array<u32>` index lists, #130): the
+                // stride is the scalar width.
+                naga::TypeInner::Scalar(naga::Scalar { width, .. }) => u32::from(width),
+                // Anything else as an element (caller bug): assume vec4
+                // stride.
                 _ => VEC4_STRIDE,
             };
             let arr = module.types.insert(

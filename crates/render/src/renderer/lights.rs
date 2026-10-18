@@ -1,4 +1,5 @@
 //! Scene lighting upload: the `GpuLight` pack, the `LightingUniform` block built by `build_lighting_uniform`, and the `set_lights` entry points with their drop accounting.
+use super::clusters::MAX_CLUSTERED_LIGHTS;
 use super::shadows::{
     CUBE_FACE_COUNT, cascade_shadow_vp, cascade_splits, dir_shadow_vp, dir_shadow_vp_fitted,
     frustum_slice_corners, point_cube_face_vp, spot_shadow_vp,
@@ -36,7 +37,11 @@ const _: [(); MAX_LIGHTS] = [(); 8];
 pub struct LightUploadStats {
     /// Lights written into the uniform (`min(len, MAX_LIGHTS)`).
     pub uploaded: u32,
-    /// Scene lights beyond [`MAX_LIGHTS`] that were not uploaded.
+    /// Scene lights beyond [`MAX_LIGHTS`] that were not uploaded into
+    /// the uniform window. With clustered lighting on, the point/spot
+    /// lights among them are uploaded into the cluster storage instead
+    /// (see [`Renderer3D::cluster_light_stats`]); only the directionals
+    /// stay unrendered.
     pub dropped_lights: u32,
     /// Shadow requests (`shadow: ShadowCast::Enabled`) that received no map slot: 2D
     /// layers ([`SHADOW_LAYERS`]) for directional/spot lights and cube
@@ -441,7 +446,7 @@ pub(super) fn build_lighting_uniform(
                 let (position, direction, range) =
                     (&position.to_array(), &direction.as_array(), &range.get());
                 let (inner_angle, outer_angle) = (&inner_angle.get(), &outer_angle.get());
-                // Cosineordered: inner must be the tighter cone.
+                // Cosine-ordered: inner must be the tighter cone.
                 let ci = ornis_core::units::Degrees::new(*inner_angle)
                     .to_radians()
                     .get()
@@ -511,6 +516,80 @@ pub(super) fn build_lighting_uniform(
         shadow_layer_vps,
         cube_face_vps,
     }
+}
+
+/// Pack the point/spot lights beyond the uniform window into cluster
+/// storage records (#130). Head lights (`lights[..head_count]`) already
+/// live in the uniform window and are written to storage offset 0 by
+/// [`Renderer3D::set_lights_full`] byte-identical; these records ride
+/// after them and reach pixels only through the cluster lists.
+/// Directionals beyond the window stay dropped (only positioned lights
+/// cluster), and clustered lights carry no shadow slot — the tiny
+/// point/spot shadow pools stay with the uniform window; a shadow atlas
+/// is follow-up work. Returns the records plus how many point/spot
+/// lights did not fit the storage capacity.
+pub(super) fn pack_cluster_light_records(
+    lights: &[LightDesc],
+    head_count: usize,
+    exposure: f32,
+    capacity: usize,
+) -> (Vec<GpuLight>, u32) {
+    let mut records = Vec::new();
+    let mut dropped = 0u32;
+    for light in lights.iter().skip(head_count) {
+        let record = match light {
+            LightDesc::Directional { .. } => None,
+            LightDesc::Point {
+                position,
+                intensity,
+                color,
+                range,
+                ..
+            } => Some(GpuLight {
+                kind: [LIGHT_KIND_POINT, 0.0, 0.0, 0.0],
+                direction: [0.0, 0.0, 1.0, 0.0],
+                position: [position.x, position.y, position.z, 1.0],
+                color: pack_light_color(*color, *intensity, exposure),
+                params: [range.get().max(LIGHT_RANGE_EPS), 0.0, 0.0, -1.0],
+                shadow_vp: NO_SHADOW_VP,
+            }),
+            LightDesc::Spot {
+                position,
+                direction,
+                intensity,
+                color,
+                range,
+                inner_angle,
+                outer_angle,
+                ..
+            } => {
+                // Cosine-ordered like the uniform window: inner is the
+                // tighter cone (bigger cosine).
+                let axis = direction.get();
+                let ci = inner_angle.get().to_radians().cos();
+                let co = outer_angle.get().to_radians().cos();
+                Some(GpuLight {
+                    kind: [LIGHT_KIND_SPOT, 0.0, 0.0, 0.0],
+                    direction: [axis.x, axis.y, axis.z, 0.0],
+                    position: [position.x, position.y, position.z, 1.0],
+                    color: pack_light_color(*color, *intensity, exposure),
+                    params: [
+                        range.get().max(LIGHT_RANGE_EPS),
+                        ci.max(co),
+                        co.min(ci),
+                        -1.0,
+                    ],
+                    shadow_vp: NO_SHADOW_VP,
+                })
+            }
+        };
+        match record {
+            Some(record) if records.len() < capacity => records.push(record),
+            Some(_) => dropped += 1,
+            None => {}
+        }
+    }
+    (records, dropped)
 }
 
 /// Index of the first shadowed directional light in upload order, the
@@ -697,6 +776,34 @@ impl Renderer3D {
                 .store(0, std::sync::atomic::Ordering::Relaxed);
         }
         queue.write_buffer(&self.lighting_buffer, 0, bytemuck::bytes_of(&built.uniform));
+        // Cluster-side upload (#130): the uniform-window records go to
+        // cluster storage offset 0 byte-identical to `lighting.lights`
+        // (the unified shading window reads them while clustering is
+        // off, so the off path is value-identical to the legacy loop);
+        // clustered point/spot records ride after them.
+        let clustered_on = self
+            .clustered_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let head_count = built.uniform.light_count as usize;
+        let head = &built.uniform.lights[..head_count];
+        let capacity = (MAX_CLUSTERED_LIGHTS as usize).saturating_sub(head_count);
+        let (cluster_records, dropped) = if clustered_on {
+            pack_cluster_light_records(lights, head_count, exposure, capacity)
+        } else {
+            (Vec::new(), 0)
+        };
+        let params = ClusterParams {
+            light_count: head_count as u32 + cluster_records.len() as u32,
+            head_count: head_count as u32,
+            clustered: u32::from(clustered_on),
+            _pad: 0,
+        };
+        self.clusters
+            .write_frame(queue, &params, head, &cluster_records);
+        *write_lock(&self.last_cluster_stats) = ClusterLightStats {
+            clustered: cluster_records.len() as u32,
+            dropped,
+        };
         // Publish the light-space VPs for the depth pre-pass (as camera
         // uniforms: the shadow pipeline reuses the gbuffer vertex shader,
         // which only reads `view_proj`) and the active layer count.
@@ -745,6 +852,49 @@ impl Renderer3D {
     /// slot). Starts at zero before the first upload.
     pub fn light_upload_stats(&self) -> LightUploadStats {
         *read_lock(&self.last_light_stats)
+    }
+
+    /// Opt into (or out of) clustered point/spot lighting (#130).
+    /// Takes effect at the next [`set_lights`](Self::set_lights) call,
+    /// which moves point/spot lights beyond the uniform window
+    /// ([`MAX_LIGHTS`]) into the cluster storage; every lit pass then
+    /// dispatches the per-cluster assignment compute pass first. Off
+    /// (the default) keeps every frame bit-identical to the legacy
+    /// uniform window: the shading window multiplies the cluster span
+    /// by this flag, so not even a stale grid can leak a light.
+    pub fn set_clustered_lights(&self, enabled: bool) {
+        self.clustered_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether clustered point/spot lighting is enabled (see
+    /// [`set_clustered_lights`](Self::set_clustered_lights)).
+    pub fn clustered_lights_enabled(&self) -> bool {
+        self.clustered_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cluster-side report of the last [`set_lights`](Self::set_lights)
+    /// call: point/spot lights uploaded into the cluster storage beyond
+    /// the uniform window, and how many were dropped for storage
+    /// capacity. Zeroed while clustering is off.
+    pub fn cluster_light_stats(&self) -> ClusterLightStats {
+        *read_lock(&self.last_cluster_stats)
+    }
+
+    /// Record the cluster assignment pass on `encoder` while clustering
+    /// is enabled; a no-op otherwise. Called by every lit pass — a frame
+    /// that records both the deferred lighting and a forward pass
+    /// dispatches twice; the second run rewrites identical results (the
+    /// span cursor resets per dispatch), so no frame-state guard is
+    /// needed.
+    pub(super) fn dispatch_light_clusters(&self, encoder: &mut wgpu::CommandEncoder) {
+        if self
+            .clustered_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.clusters.dispatch(encoder);
+        }
     }
 }
 

@@ -409,6 +409,8 @@ async fn run(scene: &Scene, out_path: &str) {
         max_objects: MAX_OBJECTS,
         max_materials: MAX_MATERIALS,
         indirect_draw: false,
+        clustered_lights: false,
+
         material_anisotropy: ornis_render::AnisotropyLevel::DEFAULT,
     };
     let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);

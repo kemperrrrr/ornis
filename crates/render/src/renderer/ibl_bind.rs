@@ -122,6 +122,7 @@ impl Renderer3D {
                     &self.shadow_cube_array_view,
                     &self.csm_array_view,
                     &self.ibl,
+                    &self.clusters,
                 ),
             });
     }
@@ -142,6 +143,7 @@ impl Renderer3D {
                 &self.shadow_cube_array_view,
                 &self.csm_array_view,
                 &self.ibl,
+                &self.clusters,
             ),
         });
     }

@@ -32,7 +32,10 @@ use super::{
     ResourceKind, Sampler, ShaderModule, Texture2d, TextureCube, helpers, openpbr_material_decl,
     wgsl_decl,
 };
-use crate::renderer::{CameraUniform, CsmBlock, CsmVp, GpuLight, LightingUniform, PerObjectGpu};
+use crate::renderer::{
+    CameraUniform, ClusterParams, ClusterSpan, CsmBlock, CsmVp, GpuLight, LightingUniform,
+    PerObjectGpu,
+};
 use crate::shaders::math;
 use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
@@ -141,12 +144,16 @@ pub(crate) struct PbrTexturedContext {
     pub brdf_lut: Texture2d,
     pub ibl_sampler: Sampler,
     pub csm_tex: DepthTextureArray,
+    pub cluster_params: ClusterParams,
+    pub clustered_lights: Vec<GpuLight>,
+    pub cluster_light_indices: Vec<u32>,
+    pub cluster_grid: Vec<ClusterSpan>,
 }
 
 /// Resource layout of the textured-forward pass: the legacy seven rows
-/// verbatim plus one texture row per role and the shared sampler.
-/// Type names come from the Rust side.
-pub const TEXTURED_PBR_RESOURCES: [Resource; 16] = [
+/// verbatim plus one texture row per role, the shared sampler and the
+/// clustered-lighting set (#130). Type names come from the Rust side.
+pub const TEXTURED_PBR_RESOURCES: [Resource; 20] = [
     Resource {
         group: 0,
         binding: 0,
@@ -275,6 +282,38 @@ pub const TEXTURED_PBR_RESOURCES: [Resource; 16] = [
         kind: ResourceKind::TextureDepthArray,
         min_size: None,
     },
+    Resource {
+        group: 0,
+        binding: 16,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "cluster_params",
+        kind: ResourceKind::Uniform(ClusterParams::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 17,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "clustered_lights",
+        kind: ResourceKind::StorageReadArray(GpuLight::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 18,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "cluster_light_indices",
+        kind: ResourceKind::StorageReadArray("u32"),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 19,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "cluster_grid",
+        kind: ResourceKind::StorageReadArray(ClusterSpan::WGSL_NAME),
+        min_size: None,
+    },
 ];
 
 /// Textured forward-PBR fragment entry, translated by
@@ -352,8 +391,19 @@ fn fs_main_textured(
         subsurface_weight,
         subsurface_color,
     );
-    for i in 0u..ctx.lighting.light_count {
-        let light = ctx.lighting.lights[i];
+    // Clustered window (#130): head slots read the uniform-window records
+    // from the cluster light storage (byte-identical to
+    // `lighting.lights`), cluster slots index this pixel's cluster
+    // list. `span.y` is zero while clustering is off, so the window is
+    // exactly the legacy `light_count` loop.
+    let span = cluster_light_span(input.world_position);
+    let total = ctx.lighting.light_count + span.y;
+    for k in 0u..total {
+        let mut light = ctx.clustered_lights[k];
+        if k >= ctx.lighting.light_count {
+            light = ctx.clustered_lights
+                [ctx.cluster_light_indices[span.x + (k - ctx.lighting.light_count)]];
+        }
         let kind = light.kind.x;
         // Point/spot: vector from the surface to the light + range cutoff.
         // Directionals keep the legacy infinite-light path (pixel-identical).
@@ -618,7 +668,10 @@ fn fs_main_textured(
 ///
 /// Bindings 11–14 are the split-sum IBL set on top of the untextured
 /// forward-PBR indices.
-const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] = &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+/// Bindings 16–19 are the clustered-lighting set (#130): params, storage,
+/// index list, grid.
+const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] =
+    &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
 
 /// Textured forward-PBR fragment shader: the legacy evaluation plus the
 /// three role samples, assembled exactly like
@@ -656,6 +709,8 @@ pub fn wgsl_source_textured() -> String {
         .decl(wgsl_decl(CsmVp::WGSL_SOURCE))
         .decl(wgsl_decl(CsmBlock::WGSL_SOURCE))
         .decl(wgsl_decl(LightingUniform::WGSL_SOURCE))
+        .decl(wgsl_decl(ClusterParams::WGSL_SOURCE))
+        .decl(wgsl_decl(ClusterSpan::WGSL_SOURCE))
         .decl(openpbr_material_decl())
         .resources(&TEXTURED_PBR_RESOURCES, TEXTURED_PBR_FRAGMENT_BINDINGS)
         .decl(wgsl_decl(FragmentInput::WGSL_SOURCE))
@@ -756,7 +811,7 @@ mod tests {
         // Vertex-only rows (per_objects) live in the shared vertex stage,
         // like the legacy table — cover both assemblies together.
         let src = wgsl_vertex_source() + &wgsl_source_textured();
-        assert_eq!(TEXTURED_PBR_RESOURCES.len(), 16);
+        assert_eq!(TEXTURED_PBR_RESOURCES.len(), 20);
         for (i, r) in TEXTURED_PBR_RESOURCES.iter().enumerate() {
             assert!(src.contains(&resource_decl(r)), "missing {}", r.name);
             let e = bgl_entry(r, false);

@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod clusters;
 mod csm_submit;
 mod custom_mesh;
 mod golden;
@@ -63,6 +64,10 @@ fn default_config_matches_documented_defaults() {
     assert!(
         !config.indirect_draw,
         "indirect submission defaults off (the default frame stays direct)"
+    );
+    assert!(
+        !config.clustered_lights,
+        "clustered lighting defaults off (the default frame is bit-identical)"
     );
     assert_eq!(config.material_anisotropy, AnisotropyLevel::DEFAULT);
     assert_eq!(config.material_anisotropy.get(), 16);

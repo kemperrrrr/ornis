@@ -179,7 +179,7 @@ impl Renderer3D {
                         "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
                             self.ibl.binding(r.name)
                         }
-                        _ => None,
+                        _ => self.clusters.entry(r.name),
                     },
                 )
                 .unwrap_or_default(),

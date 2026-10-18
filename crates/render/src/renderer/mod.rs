@@ -27,6 +27,7 @@ use wgpu::util::DeviceExt;
 
 mod ao;
 mod buffers;
+mod clusters;
 mod construct;
 mod culling;
 mod deferred;
@@ -44,6 +45,17 @@ mod test_util;
 pub use ao::{AoBlurInputs, AoRawInputs};
 pub(crate) use ao::{AoPipelines, AoUniform};
 pub use buffers::{InstanceData, MaterialIdx, PerObjectGpu};
+pub use clusters::ClusterLightStats;
+pub(crate) use clusters::{
+    CLUSTER_DEPTH_NEAR, CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y,
+    ClusteredLights, ClusterParams, ClusterSpan, cluster_slice_scale,
+};
+// Cluster-assignment reference for the GPU parity gate (test-only,
+// like the extraction culler's CPU mirror).
+#[cfg(test)]
+pub(crate) use clusters::{
+    CLUSTER_COUNT, MAX_CLUSTERED_LIGHTS, cpu::cpu_assign_lights_to_clusters,
+};
 // Path-stability re-export: `crate::renderer::staging_capacity_for_instances`
 // before the split; no in-crate users outside its module right now.
 #[allow(unused_imports)]
@@ -452,6 +464,18 @@ pub struct Renderer3D {
     /// [`set_lights_full`](Self::set_lights_full) call; read via
     /// [`light_upload_stats`](Self::light_upload_stats).
     last_light_stats: std::sync::RwLock<LightUploadStats>,
+    /// Clustered-lighting GPU state (#130): the light storage, grid and
+    /// index-list buffers plus the assignment compute pass. Bound by
+    /// every lit pass; the assignment runs only while
+    /// [`clustered_enabled`](Self::clustered_lights_enabled) is set.
+    clusters: ClusteredLights,
+    /// Opt-in switch for clustered point/spot lighting (see
+    /// [`set_clustered_lights`](Self::set_clustered_lights)); default
+    /// off — frames are bit-identical to the legacy window loop.
+    clustered_enabled: std::sync::atomic::AtomicBool,
+    /// Cluster-side report of the last [`set_lights`](Self::set_lights)
+    /// call; read via [`cluster_light_stats`](Self::cluster_light_stats).
+    last_cluster_stats: std::sync::RwLock<ClusterLightStats>,
     /// Point-light shadow cubes: one depth cube per slot (6 faces),
     /// per-face views, sampling array view, per-face VP uniforms, and
     /// the active cube count. `params.w` on a point light indexes the
@@ -589,6 +613,7 @@ impl Renderer3D {
             &self.shadow_cube_array_view,
             &self.csm_array_view,
             &self.ibl,
+            &self.clusters,
             width,
             height,
             self.sample_count,
