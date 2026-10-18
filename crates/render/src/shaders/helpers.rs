@@ -164,12 +164,14 @@ pub fn wgsl_consts() -> String {
          const CLUSTERS_Y: u32 = {y}u;\n\
          const CLUSTERS_Z: u32 = {z}u;\n\
          const CLUSTER_DEPTH_NEAR: f32 = {near};\n\
-         const CLUSTER_SLICE_SCALE: f32 = {scale};\n",
+         const CLUSTER_SLICE_SCALE: f32 = {scale};\n\
+         const CLUSTER_SLICE_LOOKUP_EPS: f32 = {eps};\n",
         x = crate::renderer::CLUSTER_TILE_COUNT_X,
         y = crate::renderer::CLUSTER_TILE_COUNT_Y,
         z = crate::renderer::CLUSTER_SLICE_COUNT,
         near = super::f32_lit(crate::renderer::CLUSTER_DEPTH_NEAR),
         scale = super::f32_lit(crate::renderer::cluster_slice_scale()),
+        eps = super::f32_lit(crate::renderer::CLUSTER_SLICE_LOOKUP_EPS),
     );
     format!("{floats}{ints}{cluster}{}", msaa_samples_wgsl())
 }
@@ -704,14 +706,16 @@ fn cluster_light_span(world_pos: glam::Vec3) -> glam::UVec2 {
             UVec2::new(CLUSTERS_X - 1u32, CLUSTERS_Y - 1u32),
         );
         let slice = clamp(
-            u32(ceil(CLUSTER_SLICE_SCALE * log(w / CLUSTER_DEPTH_NEAR))),
+            u32(ceil(
+                CLUSTER_SLICE_SCALE * log(w / CLUSTER_DEPTH_NEAR) - CLUSTER_SLICE_LOOKUP_EPS,
+            )),
             0u32,
             CLUSTERS_Z - 1u32,
         );
         let cluster = tile.x + tile.y * CLUSTERS_X + slice * CLUSTERS_X * CLUSTERS_Y;
         let span = cluster_grid[cluster];
-        let active = cluster_params.clustered;
-        return UVec2::new(span.offset * active, span.count * active);
+        let clustered = cluster_params.clustered;
+        return UVec2::new(span.offset * clustered, span.count * clustered);
     }
 }
 

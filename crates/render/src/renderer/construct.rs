@@ -341,6 +341,7 @@ impl Renderer3D {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_pbr_bind_group(
         device: &wgpu::Device,
         buffers: &CoreBuffers,

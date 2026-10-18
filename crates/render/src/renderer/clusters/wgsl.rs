@@ -95,7 +95,7 @@ fn sphere_in_cluster(center: vec3<f32>, radius: f32, planes: ClusterPlanes) -> b
     for (var i = 0u; i < 6u; i = i + 1u) {
         let plane = planes.p[i];
         let n = plane.xyz;
-        if (abs(dot(n, center) + plane.w) > radius * length(n)) {
+        if (dot(n, center) + plane.w < -(radius * length(n))) {
             return false;
         }
     }

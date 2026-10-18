@@ -32,19 +32,16 @@ fn lighting_header_type(
     camera: naga::Handle<naga::Type>,
     lighting: naga::Handle<naga::Type>,
     material: naga::Handle<naga::Type>,
-    cluster_params: naga::Handle<naga::Type>,
-    cluster_span: naga::Handle<naga::Type>,
-    cluster_light: naga::Handle<naga::Type>,
-    cluster_u32: naga::Handle<naga::Type>,
+    cluster: ClusterHeaderTypes,
 ) -> naga::Handle<naga::Type> {
     match name {
         "camera" => camera,
         "lighting" => lighting,
         "materials" => material,
-        "cluster_params" => cluster_params,
-        "cluster_grid" => cluster_span,
-        "clustered_lights" => cluster_light,
-        "cluster_light_indices" => cluster_u32,
+        "cluster_params" => cluster.params,
+        "cluster_grid" => cluster.span,
+        "clustered_lights" => cluster.light,
+        "cluster_light_indices" => cluster.u32,
         _ => camera,
     }
 }
@@ -74,16 +71,7 @@ fn add_lighting_global(
 ) {
     naga_ir::add_global(
         module,
-        lighting_header_type(
-            resource.name,
-            camera,
-            lighting,
-            material,
-            cluster_types.params,
-            cluster_types.span,
-            cluster_types.light,
-            cluster_types.u32,
-        ),
+        lighting_header_type(resource.name, camera, lighting, material, cluster_types),
         resource,
         per_sample_flag(
             sample_count,

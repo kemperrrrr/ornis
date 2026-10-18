@@ -6,9 +6,9 @@
 //! content per cluster is identical, span placement is not).
 use super::{
     CLUSTER_COUNT, CLUSTER_DEPTH_NEAR, CLUSTER_FAR_LIMIT, CLUSTER_INDEX_LIST_LEN,
-    CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y, CLUSTER_WORKGROUP_SIZE,
-    CLUSTER_WORKGROUPS, ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER, SPOT_BOUND_COS_FLOOR,
-    cluster_log_ratio, cluster_slice_scale,
+    CLUSTER_SLICE_COUNT, CLUSTER_SLICE_LOOKUP_EPS, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y,
+    CLUSTER_WORKGROUP_SIZE, CLUSTER_WORKGROUPS, ClusterParams, ClusterSpan,
+    MAX_LIGHTS_PER_CLUSTER, SPOT_BOUND_COS_FLOOR, cluster_log_ratio, cluster_slice_scale,
 };
 use crate::renderer::{GpuLight, LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
 use crate::shaders::helpers::NDC_TO_UV_HALF;
@@ -48,7 +48,8 @@ pub(crate) fn cluster_index_for(world_pos: glam::Vec3, view_proj: &Mat4) -> u32 
         glam::UVec2::ZERO,
         glam::UVec2::new(CLUSTER_TILE_COUNT_X - 1, CLUSTER_TILE_COUNT_Y - 1),
     );
-    let slice = (cluster_slice_scale() * (w / CLUSTER_DEPTH_NEAR).ln())
+    let depth = cluster_slice_scale() * (w / CLUSTER_DEPTH_NEAR).ln();
+    let slice = (depth - CLUSTER_SLICE_LOOKUP_EPS)
         .ceil()
         .clamp(0.0, CLUSTER_SLICE_COUNT as f32 - 1.0) as u32;
     tile.x + tile.y * CLUSTER_TILE_COUNT_X + slice * CLUSTER_TILE_COUNT_X * CLUSTER_TILE_COUNT_Y
@@ -64,7 +65,8 @@ pub(crate) fn cluster_tile_slice(cluster: u32) -> (u32, u32, u32) {
 
 /// Six cluster half-space planes packed as `(n.xyz, d)` rows: NDC tile
 /// edges from the clip-matrix rows, view-depth bounds from the `w` row.
-/// A sphere touches the cluster iff `|n·c + d| <= r·|n|` on every plane.
+/// A sphere is rejected from the cluster iff `n·c + d < -r·|n|` on some
+/// plane (fully beyond one face); false touches only widen the lists.
 pub(crate) fn cluster_planes(
     tile_x: u32,
     tile_y: u32,
@@ -92,7 +94,8 @@ pub(crate) fn cluster_planes(
     ]
 }
 
-/// Sphere (`center`, `radius`) vs the six cluster planes.
+/// Whether the sphere (`center`, `radius`) can touch the cluster of
+/// `planes` (conservative: rejected only when fully beyond one face).
 pub(crate) fn sphere_touches_planes(
     center: glam::Vec3,
     radius: f32,
@@ -100,7 +103,7 @@ pub(crate) fn sphere_touches_planes(
 ) -> bool {
     planes.iter().all(|plane| {
         let n = plane.truncate();
-        (n.dot(center) + plane.w).abs() <= radius * n.length()
+        n.dot(center) + plane.w >= -radius * n.length()
     })
 }
 
@@ -203,11 +206,13 @@ mod tests {
             CLUSTER_FAR_LIMIT
         );
         // The lookup scale inverts the boundary map: every boundary maps
-        // back onto its own slice (ceil semantics: the boundary belongs
-        // to the slice it closes).
+        // back onto its own slice (ceil semantics with the lookup
+        // epsilon: the boundary belongs to the slice it closes).
         for slice in 0..CLUSTER_SLICE_COUNT - 1 {
             let depth = cluster_slice_z_max(slice);
-            let looked_up = cluster_slice_scale() * (depth / CLUSTER_DEPTH_NEAR).ln();
+            let looked_up =
+                cluster_slice_scale() * (depth / CLUSTER_DEPTH_NEAR).ln()
+                    - CLUSTER_SLICE_LOOKUP_EPS;
             assert_eq!(
                 looked_up.ceil() as u32,
                 slice,

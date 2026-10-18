@@ -167,19 +167,21 @@ impl ClusteredLights {
                 device,
                 "cluster grid",
                 CLUSTER_COUNT as u64 * std::mem::size_of::<ClusterSpan>() as u64,
-                wgpu::BufferUsages::STORAGE,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             ),
             cluster_buffer(
                 device,
                 "cluster light index list",
                 CLUSTER_INDEX_LIST_LEN as u64 * std::mem::size_of::<u32>() as u64,
-                wgpu::BufferUsages::STORAGE,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             ),
             cluster_buffer(
                 device,
                 "cluster counters",
                 std::mem::size_of::<[u32; 2]>() as u64,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             ),
         ]
     }
@@ -251,7 +253,7 @@ impl ClusteredLights {
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(params));
         queue.write_buffer(&self.lights_buffer, 0, bytemuck::cast_slice(head));
         if !clustered.is_empty() {
-            let offset = (head.len() * std::mem::size_of::<GpuLight>()) as u64;
+            let offset = std::mem::size_of_val(head) as u64;
             queue.write_buffer(&self.lights_buffer, offset, bytemuck::cast_slice(clustered));
         }
     }

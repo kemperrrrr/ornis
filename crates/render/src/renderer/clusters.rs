@@ -48,6 +48,12 @@ pub(crate) const CLUSTER_WORKGROUPS: u32 = CLUSTER_COUNT / CLUSTER_WORKGROUP_SIZ
 /// Outer-cone cosine below which the spot bound falls back to the plain
 /// point-light sphere (cone too wide to shrink).
 pub(crate) const SPOT_BOUND_COS_FLOOR: f32 = 0.1;
+/// Slice-lookup epsilon: a depth that lands exactly on a slice boundary
+/// belongs to the slice it closes, but the `ln`/`exp` round trip drifts
+/// a few ulps upward, which `ceil` would round one slice up. Every
+/// lookup (CPU reference and fragment shader) subtracts this before
+/// the `ceil`.
+pub(crate) const CLUSTER_SLICE_LOOKUP_EPS: f32 = 1.0e-4;
 
 /// `ln(far/near)` of the exponential slice split. A function (not a
 /// `const`) because `ln` is not const-evaluable; every consumer — the
@@ -58,7 +64,7 @@ pub(crate) fn cluster_log_ratio() -> f32 {
 }
 
 /// Multiplier turning `ln(depth/near)` into a slice index:
-/// `slice = ceil(scale * ln(depth/near))`, clamped to
+/// `slice = ceil(scale * ln(depth/near) - eps)`, clamped to
 /// `[0, CLUSTER_SLICE_COUNT - 1]` — the inverse of the exponential
 /// slice boundary map (see `clusters::cpu::cluster_slice_z_max`).
 pub(crate) fn cluster_slice_scale() -> f32 {

@@ -278,7 +278,7 @@ fn gpu_assignment_matches_cpu_reference() {
         .expect("grid readback");
     let grid: Vec<ClusterSpan> = grid_bytes
         .chunks_exact(std::mem::size_of::<ClusterSpan>())
-        .map(|chunk| bytemuck::pod_read_unaligned(chunk))
+        .map(bytemuck::pod_read_unaligned)
         .collect();
     let counter_bytes = clusters
         .read_back(&device, &queue, ClusterBuffer::Counters, 8)
