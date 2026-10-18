@@ -38,8 +38,10 @@ const DOMINANCE_MARGIN: i32 = 40;
 const BRIGHT_FLOOR: u8 = 110;
 /// Ceiling for a cell-midpoint pixel (ambient only — no light reaches).
 const DARK_CEILING: u8 = 90;
-/// Camera frame of the golden scene.
-const EYE: glam::Vec3 = glam::Vec3::new(0.0, 24.0, 18.0);
+/// Camera frame of the golden scene: high and far enough that every
+/// light's ground point stays inside the frame (the window check needs
+/// the ground pixel, not the clamped frame edge).
+const EYE: glam::Vec3 = glam::Vec3::new(0.0, 30.0, 26.0);
 /// Camera field of view.
 const FOV: f32 = 60.0;
 /// Camera near plane.

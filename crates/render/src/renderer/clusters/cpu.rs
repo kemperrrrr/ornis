@@ -7,8 +7,8 @@
 use super::{
     CLUSTER_COUNT, CLUSTER_DEPTH_NEAR, CLUSTER_FAR_LIMIT, CLUSTER_INDEX_LIST_LEN,
     CLUSTER_SLICE_COUNT, CLUSTER_SLICE_LOOKUP_EPS, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y,
-    CLUSTER_WORKGROUP_SIZE, CLUSTER_WORKGROUPS, ClusterParams, ClusterSpan,
-    MAX_LIGHTS_PER_CLUSTER, SPOT_BOUND_COS_FLOOR, cluster_log_ratio, cluster_slice_scale,
+    CLUSTER_WORKGROUP_SIZE, CLUSTER_WORKGROUPS, ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER,
+    SPOT_BOUND_COS_FLOOR, cluster_log_ratio, cluster_slice_scale,
 };
 use crate::renderer::{GpuLight, LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
 use crate::shaders::helpers::NDC_TO_UV_HALF;
@@ -210,9 +210,8 @@ mod tests {
         // epsilon: the boundary belongs to the slice it closes).
         for slice in 0..CLUSTER_SLICE_COUNT - 1 {
             let depth = cluster_slice_z_max(slice);
-            let looked_up =
-                cluster_slice_scale() * (depth / CLUSTER_DEPTH_NEAR).ln()
-                    - CLUSTER_SLICE_LOOKUP_EPS;
+            let looked_up = cluster_slice_scale() * (depth / CLUSTER_DEPTH_NEAR).ln()
+                - CLUSTER_SLICE_LOOKUP_EPS;
             assert_eq!(
                 looked_up.ceil() as u32,
                 slice,

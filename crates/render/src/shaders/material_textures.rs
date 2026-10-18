@@ -792,8 +792,12 @@ mod tests {
         assert!(entry.contains("textureSample(emissive_tex, material_sampler, input.uv)"));
         assert!(entry.contains("apply_base_color_map(mat.base_color.rgb, base_map.rgb)"));
         assert!(entry.contains("apply_emissive_map(mat.emission_color.rgb, emissive_map.rgb)"));
-        // Shared evaluation shape is unchanged past the prelude.
-        assert!(entry.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));
+        // Shared evaluation shape is unchanged past the prelude: the
+        // unified window loop with the cluster tail (#130).
+        assert!(entry.contains("for (var k: u32 = 0; k < total; k = k + 1)"));
+        assert!(
+            entry.contains("ctx.cluster_light_indices[span.x + (k - ctx.lighting.light_count)]")
+        );
         assert!(entry.contains("continue;"));
         assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
         assert!(entry.contains(
