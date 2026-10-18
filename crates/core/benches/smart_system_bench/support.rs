@@ -17,13 +17,13 @@ pub struct Body {
 }
 
 #[allow(non_camel_case_types)]
-pub type PosLane = Body__position__PackLane__0;
+pub type PosLane = Body__position__PackLane;
 #[allow(non_camel_case_types)]
-pub type VelLane = Body__velocity__PackLane__1;
+pub type VelLane = Body__velocity__PackLane;
 #[allow(non_camel_case_types)]
-pub type ActiveLane = Body__active__PackLane__2;
+pub type ActiveLane = Body__active__PackLane;
 #[allow(non_camel_case_types)]
-pub type TargetLane = Body__target__PackLane__3;
+pub type TargetLane = Body__target__PackLane;
 
 /// Fixed step shared by all variants (seconds).
 pub const DT: f32 = 1.0 / 60.0;
