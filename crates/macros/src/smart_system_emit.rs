@@ -1,86 +1,119 @@
-//! Code generation for `#[smart_system]` (IDEAS §32).
+//! Code generation for `#[smart_system]` (IDEAS §32, v2b).
 //!
-//! Expands one validated signature plus its analyzed body into the
-//! per-entity loop (`pack_entities` → `pack_get` → body → `pack_put`)
-//! and the `System::access` set derived from parameter types. Fetch
-//! statements are hoisted out of the loop (entity-independent borrows).
-//! The per-parameter pieces (body signature, access statements, fetches)
-//! live in [`crate::smart_system_emit_params`].
+//! Expands one validated system into the body kernel (a function per
+//! entity that takes the touched fields by reference), the system struct
+//! with its constructor, and the `System` impl. Field analysis lives in
+//! [`crate::smart_system_fields`], lane guards and the run loop in
+//! [`crate::smart_system_lanes`], and the per-parameter pieces in
+//! [`crate::smart_system_emit_params`].
 
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
-use syn::{Ident, ItemFn, Type};
+use syn::{ItemFn, Type};
 
 use crate::smart_system::camel_system_name;
-use crate::smart_system_body_links::ForeignRewrite;
 use crate::smart_system_body_visit::BodyInfo;
-use crate::smart_system_emit_params::{build_access_stmts, build_body_sig, build_fetch_stmts};
+use crate::smart_system_emit_params::{build_access_stmts, build_fetch_stmts, build_user_params};
+use crate::smart_system_fields::{FieldRewrite, scan_fields};
+use crate::smart_system_lanes::{
+    body_lane_params, build_lane_specs, guard_stmts, lane_access_stmts, run_loop,
+};
 use crate::smart_system_parse::{
     check_signature, collect_params, combine_errors, config_struct_parts,
 };
 
-/// Whole-bundle lane access plus the `SmartStore` read every system
-/// declares. `is_mut` selects write vs read declarations.
-fn build_lane_access(pack_ty: &Type, is_mut: bool) -> TokenStream2 {
-    quote! {
-        let mut __access =
-            ornis_core::SystemAccess::new().reads::<ornis_core::SmartStore>();
-        for __lane in <#pack_ty as ornis_core::Pack>::pack_lane_ids() {
-            __access = if #is_mut {
-                __access.writes_lane_id(__lane)
-            } else {
-                __access.reads_lane_id(__lane)
-            };
-        }
-    }
-}
+/// Expands one validated system function into the body kernel plus the
+/// generated `System` impl. Thin orchestration over the parse / analyze /
+/// build helpers.
+pub(crate) fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
+    check_signature(&func)?;
+    let (u_ident, pack_ty, is_mut, params) = collect_params(func.sig.inputs.iter())?;
+    let Type::Path(pack_type) = &pack_ty else {
+        return Err(syn::Error::new_spanned(
+            &pack_ty,
+            "smart_system: the first parameter must be `u: &T` with `T: Pack` — a named bundle type",
+        ));
+    };
+    let pack_path = pack_type.path.clone();
 
-/// The per-entity body function (rewritten user body, store handle first).
-fn emit_body_fn(
-    body_fn_name: &Ident,
-    body_inputs: Vec<TokenStream2>,
-    rewritten_stmts: Vec<syn::Stmt>,
-) -> TokenStream2 {
-    quote! {
+    // Pre-pass: link bindings and ban diagnostics. Access is never inferred
+    // from body syntax; every resource role comes from its parameter type.
+    let mut info = BodyInfo::collect(&u_ident);
+    info.visit_block(&func.block);
+    if !info.errors.is_empty() {
+        return Err(combine_errors(info.errors));
+    }
+
+    let u_name = u_ident.to_string();
+    let usage = scan_fields(&func.block, &u_name, &info.links);
+    if let Some(span) = usage.bare {
+        return Err(syn::Error::new(
+            span,
+            "smart_system: `u` may only appear as `u.field` — the body sees fields, not the whole entity",
+        ));
+    }
+    if usage.own.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &u_ident,
+            "smart_system: the body must read or write at least one `u.field`; the touched fields define the entity set",
+        ));
+    }
+    if !is_mut && let Some(field) = usage.written.iter().next() {
+        return Err(syn::Error::new_spanned(
+            &u_ident,
+            format!("smart_system: `u.{field}` is written, so `u` must be `&mut`"),
+        ));
+    }
+
+    let lanes = build_lane_specs(&usage, &pack_path);
+
+    let mut rewrite = FieldRewrite {
+        u: &u_name,
+        pack_path: &pack_path,
+        links: &info.links,
+    };
+    let mut body_stmts = func.block.stmts.clone();
+    for stmt in &mut body_stmts {
+        rewrite.visit_stmt_mut(stmt);
+    }
+
+    let store_ident = format_ident!("__smart_store", span = Span::mixed_site());
+    let entity_ident = format_ident!("__entity", span = Span::mixed_site());
+    let hint_ident = format_ident!("__smart_hint", span = Span::mixed_site());
+    let resources_ident = format_ident!("__resources", span = Span::mixed_site());
+    let body_fn_name = format_ident!(
+        "__smart_system_body_{}",
+        func.sig.ident,
+        span = Span::mixed_site()
+    );
+
+    let mut body_inputs = body_lane_params(&lanes);
+    body_inputs.extend(build_user_params(&params));
+    let (fetch_stmts, call_args, config_bindings) =
+        build_fetch_stmts(&params, &resources_ident, &entity_ident);
+    let lane_access = lane_access_stmts(&lanes);
+    let access_stmts = build_access_stmts(&params);
+    let guards = guard_stmts(&lanes, &store_ident);
+    let loop_tokens = run_loop(
+        &lanes,
+        &body_fn_name,
+        &call_args,
+        &entity_ident,
+        &hint_ident,
+    );
+
+    let struct_name = camel_system_name(&func.sig.ident);
+    let fn_name_str = func.sig.ident.to_string();
+    let attrs = &func.attrs;
+    let (struct_fields, ctor_params, ctor_inits) = config_struct_parts(&params);
+
+    Ok(quote! {
         #[allow(unused_variables)]
         fn #body_fn_name(#(#body_inputs),*) {
-            #(#rewritten_stmts)*
+            #(#body_stmts)*
         }
-    }
-}
-
-/// Assembles the generated items: the per-entity body function, the
-/// system struct (+ constructor), and the `System` impl.
-#[allow(clippy::too_many_arguments)]
-fn emit_system(
-    struct_name: &Ident,
-    fn_name_str: &str,
-    attrs: &[syn::Attribute],
-    struct_fields: Vec<TokenStream2>,
-    ctor_params: Vec<TokenStream2>,
-    ctor_inits: Vec<TokenStream2>,
-    pack_ty: &Type,
-    is_mut: bool,
-    access_stmts: Vec<TokenStream2>,
-    fetch_stmts: Vec<TokenStream2>,
-    config_bindings: Vec<TokenStream2>,
-    store_ident: &Ident,
-    entity_ident: &Ident,
-    resources_ident: &Ident,
-    body_fn_name: &Ident,
-    body_inputs: Vec<TokenStream2>,
-    rewritten_stmts: Vec<syn::Stmt>,
-    call_args: Vec<TokenStream2>,
-    u_binding: TokenStream2,
-    u_ref: TokenStream2,
-    scatter: TokenStream2,
-) -> TokenStream2 {
-    let lane_access = build_lane_access(pack_ty, is_mut);
-    let body_fn = emit_body_fn(body_fn_name, body_inputs, rewritten_stmts);
-    quote! {
-        #body_fn
 
         #(#attrs)*
         #[allow(non_camel_case_types)]
@@ -103,7 +136,9 @@ fn emit_system(
             }
 
             fn access(&self) -> ornis_core::SystemAccess {
-                #lane_access
+                let mut __access =
+                    ornis_core::SystemAccess::new().reads::<ornis_core::SmartStore>();
+                #(#lane_access)*
                 #(#access_stmts)*
                 __access
             }
@@ -113,98 +148,12 @@ fn emit_system(
                     .get::<ornis_core::SmartStore>()
                     .expect(concat!("smart_system `", #fn_name_str, "`: missing SmartStore resource"));
                 #(#config_bindings)*
-                // Parameter fetches are entity-independent: hoist them out
-                // of the per-entity loop (they are pure borrows, so this is
-                // semantics-preserving and saves a map lookup per entity).
+                // Parameter fetches and lane guards are entity-independent:
+                // taken once per run, not per entity.
                 #(#fetch_stmts)*
-                for #entity_ident in <#pack_ty as ornis_core::Pack>::pack_entities(#store_ident) {
-                    let Some(#u_binding) =
-                        <#pack_ty as ornis_core::Pack>::pack_get(#store_ident, #entity_ident)
-                    else {
-                        continue;
-                    };
-                    #body_fn_name(#u_ref, #store_ident, #(#call_args),*);
-                    #scatter
-                }
+                #(#guards)*
+                #loop_tokens
             }
         }
-    }
-}
-
-/// Expands one validated system function into the body kernel plus the
-/// generated `System` impl. Thin orchestration over the parse / analyze
-/// / build helpers above (each kept branch- or call-pure on its own).
-pub(crate) fn expand(func: ItemFn) -> Result<TokenStream2, syn::Error> {
-    check_signature(&func)?;
-    let (u_ident, pack_ty, is_mut, params) = collect_params(func.sig.inputs.iter())?;
-
-    // Pre-pass: link bindings and ban diagnostics. Access is never inferred
-    // from body syntax; every resource role comes from its parameter type.
-    let mut info = BodyInfo::collect(&u_ident);
-    info.visit_block(&func.block);
-    if !info.errors.is_empty() {
-        return Err(combine_errors(info.errors));
-    }
-
-    // Rewrite foreign reads (everywhere incl. closures). Bare `return`
-    // needs no rewrite: the body is a separate function called once per
-    // entity, so returning from it naturally skips to the next entity.
-    let store_ident = format_ident!("__smart_store", span = Span::mixed_site());
-    let entity_ident = format_ident!("__entity", span = Span::mixed_site());
-    let local_u_ident = format_ident!("__u", span = Span::mixed_site());
-    let resources_ident = format_ident!("__resources", span = Span::mixed_site());
-    let mut foreign = ForeignRewrite {
-        pack_ty: &pack_ty,
-        links: &info.links,
-        store_ident: store_ident.clone(),
-    };
-    let mut rewritten_stmts = func.block.stmts.clone();
-    for stmt in &mut rewritten_stmts {
-        foreign.visit_stmt_mut(stmt);
-    }
-
-    let body_fn_name = format_ident!(
-        "__smart_system_body_{}",
-        func.sig.ident,
-        span = Span::mixed_site()
-    );
-    let (body_inputs, u_binding, u_ref, scatter) = build_body_sig(
-        &u_ident,
-        &pack_ty,
-        is_mut,
-        &store_ident,
-        &entity_ident,
-        &local_u_ident,
-        &params,
-    );
-    let access_stmts = build_access_stmts(&params);
-    let (fetch_stmts, call_args, config_bindings) =
-        build_fetch_stmts(&params, &resources_ident, &entity_ident);
-    let struct_name = camel_system_name(&func.sig.ident);
-    let fn_name_str = func.sig.ident.to_string();
-    let attrs = func.attrs.clone();
-    let (struct_fields, ctor_params, ctor_inits) = config_struct_parts(&params);
-    Ok(emit_system(
-        &struct_name,
-        &fn_name_str,
-        &attrs,
-        struct_fields,
-        ctor_params,
-        ctor_inits,
-        &pack_ty,
-        is_mut,
-        access_stmts,
-        fetch_stmts,
-        config_bindings,
-        &store_ident,
-        &entity_ident,
-        &resources_ident,
-        &body_fn_name,
-        body_inputs,
-        rewritten_stmts,
-        call_args,
-        u_binding,
-        u_ref,
-        scatter,
-    ))
+    })
 }

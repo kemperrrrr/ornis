@@ -1,9 +1,8 @@
 //! Body pre-pass and rewriting for `#[smart_system]` (IDEAS §32).
 //!
 //! [`BodyInfo`] walks one system body collecting entity-link bindings
-//! and syntactic ban diagnostics, while
-//! [`ForeignRewrite`] turns foreign reads (`t.field`) into pack gathers.
-//! The visitor overrides couple guard checks with descent bookkeeping by
+//! and syntactic ban diagnostics. Field usage and rewriting live in
+//! [`crate::smart_system_fields`]. The visitor overrides couple guard checks with descent bookkeeping by
 //! construction (same as the baselined
 //! `pipeline_config::TypeAnalyzer::visit_type` and
 //! `gpu_pipeline::parse_binding_group`); each carries a targeted

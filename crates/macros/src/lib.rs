@@ -36,6 +36,8 @@ mod smart_system_body_links;
 mod smart_system_body_visit;
 mod smart_system_emit;
 mod smart_system_emit_params;
+mod smart_system_fields;
+mod smart_system_lanes;
 mod smart_system_parse;
 mod smart_system_parse_params;
 mod stages;

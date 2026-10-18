@@ -1,0 +1,5 @@
+error: smart_system: `u` may only appear as `u.field` — the body sees fields, not the whole entity
+  --> tests/ui/smart_system_rejects_bare_entity.rs:13:18
+   |
+13 |     let _whole = u;
+   |                  ^

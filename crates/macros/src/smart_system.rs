@@ -11,19 +11,23 @@
 //! ```
 //!
 //! The macro generates a `ChaseSystem` struct implementing
-//! [`ornis_core::System`](System): the first parameter (`u: &mut T` /
-//! `&T`, `T: Pack`) selects the entity set, the body runs once per
-//! entity (gather with `pack_get`, scatter with `pack_put`), and the
-//! access set follows from the parameter types (`Res` → read, `ResMut`
-//! → write, `EventWriter`/`EventReader` → exclusive queue access,
-//! whole-bundle lanes for `u`). Raw `&Resources`, `Res<SmartStore>`, and
-//! `ResMut` aliases of `SmartStore`/`Resources` are compile errors, as are
-//! writes to another entity (`t.hp -= …` — use
-//! [`ornis_core::EventWriter`] instead), passing whole `u` to a free
-//! function, and declaring one resource twice when either declaration
-//! writes (`Res<C>` + `ResMut<C>`). Field-level lane inference (only
-//! touched `u.field` lanes) is a follow-up (v2b); v2 declares the whole
-//! bundle.
+//! [`ornis_core::System`](System). The first parameter (`u: &T` / `&mut T`,
+//! `T: Pack`) selects the bundle; the body runs once per entity and sees each
+//! field it touches by reference (`u.position` → `&T` or `&mut T`), so the
+//! access set lists only those lanes, and only the written ones as writes.
+//! Field gather and scatter run per entity on lanes guarded once per run.
+//!
+//! Entities are selected by the touched required (non-`Option`) fields, in
+//! entity-id order. A body must touch at least one required field (checked at
+//! compile time), because optional lanes list only the entries that exist.
+//! Access also follows from parameter types: `Res` → read, `ResMut` → write,
+//! `EventWriter`/`EventReader` → exclusive queue access. Raw `&Resources`,
+//! `Res<SmartStore>`, and `ResMut` aliases of `SmartStore`/`Resources` are
+//! compile errors, as are writes to another entity (`t.hp -= …` — use
+//! [`ornis_core::EventWriter`] instead), passing whole `u` to a free function
+//! or using `u` other than as `u.field`, writing `u.field` through `&`, and
+//! declaring one resource twice when either declaration writes
+//! (`Res<C>` + `ResMut<C>`).
 //!
 //! [System]: https://docs.rs/ornis-core/latest/ornis_core/schedule/trait.System.html
 

@@ -1,24 +1,17 @@
 error[E0425]: cannot find value `__smart_store` in this scope
-  --> tests/ui/smart_system_rejects_hidden_bindings.rs:14:13
+  --> tests/ui/smart_system_rejects_hidden_bindings.rs:15:13
    |
-14 |     let _ = __smart_store.write_lane::<Unit>();
+15 |     let _ = __smart_store.write_lane::<Unit>();
    |             ^^^^^^^^^^^^^ not found in this scope
-   |
-help: an identifier with the same name is defined here, but is not accessible due to macro hygiene
-  --> tests/ui/smart_system_rejects_hidden_bindings.rs:10:1
-   |
-10 | #[smart_system]
-   | ^^^^^^^^^^^^^^^
-   = note: this error originates in the attribute macro `smart_system` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0425]: cannot find value `__entity` in this scope
-  --> tests/ui/smart_system_rejects_hidden_bindings.rs:15:14
+  --> tests/ui/smart_system_rejects_hidden_bindings.rs:16:14
    |
-15 |     let _ = (__entity, __u);
+16 |     let _ = (__entity, __u);
    |              ^^^^^^^^ not found in this scope
 
 error[E0425]: cannot find value `__u` in this scope
-  --> tests/ui/smart_system_rejects_hidden_bindings.rs:15:24
+  --> tests/ui/smart_system_rejects_hidden_bindings.rs:16:24
    |
-15 |     let _ = (__entity, __u);
+16 |     let _ = (__entity, __u);
    |                        ^^^ not found in this scope

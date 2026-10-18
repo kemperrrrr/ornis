@@ -106,6 +106,30 @@ fn chase(c: &mut Chaser) {
     }
 }
 
+#[smart_system]
+fn nudge_position(m: &mut Mote) {
+    m.position += 1.0;
+}
+
+#[smart_system]
+fn nudge_velocity(m: &mut Mote) {
+    m.velocity += 1.0;
+}
+
+#[smart_system]
+fn retarget(c: &mut Chaser, #[config] to: Option<Entity>) {
+    if c.position >= 0.0 {
+        c.target = to;
+    }
+}
+
+#[smart_system]
+fn detach(c: &mut Chaser) {
+    if c.position >= 0.0 {
+        c.target = None;
+    }
+}
+
 fn mote(position: f32, velocity: f32) -> Mote {
     Mote { position, velocity }
 }
@@ -283,6 +307,141 @@ fn link_read_gathers_target_bundle() {
     assert_eq!(target_body.position, 10.0);
     let loner_body = Chaser::pack_get(store, loner).expect("loner bundle");
     assert_eq!(loner_body.position, 1.0);
+}
+
+/// Field-level access: a body that touches only `u.position` declares only
+/// that lane, so it does not conflict with a writer of `velocity`.
+#[test]
+fn field_access_declares_only_touched_lanes() {
+    let access = NudgePositionSystem::new().access();
+    let position = std::any::TypeId::of::<Mote__position__PackLane>();
+    let velocity = std::any::TypeId::of::<Mote__velocity__PackLane>();
+    assert_eq!(access.writes_lanes.len(), 1);
+    assert!(access.writes_lanes.contains(&position));
+    assert!(access.reads_lanes.is_empty());
+    assert!(!access.writes_lanes.contains(&velocity));
+}
+
+/// Writers of disjoint fields of one bundle share a level.
+#[test]
+fn disjoint_field_writers_share_a_level() {
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgePositionSystem::new());
+    schedule.add_system(NudgeVelocitySystem::new());
+    assert_eq!(schedule.levels(), vec![vec![0, 1]]);
+}
+
+/// Both disjoint writers apply to every entity they touch.
+#[test]
+fn disjoint_field_writers_both_apply() {
+    let (resources, entities) = resources_with_motes(&[mote(1.0, 2.0), mote(3.0, 4.0)]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgePositionSystem::new());
+    schedule.add_system(NudgeVelocitySystem::new());
+    schedule.run(&resources);
+
+    assert_eq!(mote_of(&resources, entities[0]), mote(2.0, 3.0));
+    assert_eq!(mote_of(&resources, entities[1]), mote(4.0, 5.0));
+}
+
+/// The touched fields define the entity set: an entity that owns the
+/// `position` lane but no `velocity` is visited by a position-only body and
+/// skipped by a velocity-only body.
+#[test]
+fn touched_fields_define_the_entity_set() {
+    let (mut resources, entities) = resources_with_motes(&[mote(1.0, 0.0)]);
+    let partial = {
+        let store = resources.get_mut::<SmartStore>().expect("store");
+        let entity = store.create_entity();
+        store
+            .write_lane::<Mote__position__PackLane>()
+            .expect("position lane")
+            .insert(entity, Mote__position__PackLane(5.0));
+        entity
+    };
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgePositionSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let lane = store.read_lane::<Mote__position__PackLane>().expect("lane");
+    assert_eq!(lane.get(partial).map(|p| p.0), Some(6.0));
+    assert_eq!(lane.get(entities[0]).map(|p| p.0), Some(2.0));
+    drop(lane);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgeVelocitySystem::new());
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    let velocity = store.read_lane::<Mote__velocity__PackLane>().expect("lane");
+    assert!(!velocity.contains(partial));
+    assert_eq!(velocity.get(entities[0]).map(|v| v.0), Some(1.0));
+}
+
+/// Optional fields: writing `Some` inserts the sparse entry and writing
+/// `None` removes it, so `pack_get` reads the absent value back as `None`.
+#[test]
+fn sparse_field_write_inserts_and_removes_entry() {
+    let mut resources = Resources::new();
+    let mut store = SmartStore::new();
+    Chaser::pack_register(&mut store);
+    let other = store.create_entity();
+    let subject = store.create_entity();
+    Chaser {
+        position: 0.0,
+        target: None,
+    }
+    .pack_insert(&mut store, subject);
+    resources.insert(store);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(RetargetSystem::new(Some(other)));
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    assert_eq!(
+        Chaser::pack_get(store, subject).expect("bundle").target,
+        Some(other)
+    );
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(DetachSystem::new());
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    assert_eq!(
+        Chaser::pack_get(store, subject).expect("bundle").target,
+        None
+    );
+    let target_lane = store
+        .read_lane::<Chaser__target__PackLane>()
+        .expect("target lane");
+    assert!(!target_lane.contains(subject));
+}
+
+/// A self-link reads the target's value before this entity's write-back,
+/// the same value the pre-field-access loop observed.
+#[test]
+fn self_link_reads_pre_body_value() {
+    let mut resources = Resources::new();
+    let mut store = SmartStore::new();
+    Chaser::pack_register(&mut store);
+    let entity = store.create_entity();
+    Chaser {
+        position: 4.0,
+        target: Some(entity),
+    }
+    .pack_insert(&mut store, entity);
+    resources.insert(store);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(ChaseSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    assert_eq!(
+        Chaser::pack_get(store, entity).expect("bundle").position,
+        4.0 + 4.0 * 0.5
+    );
 }
 
 /// `Res` requires `PlainResource`: covered at compile time by trybuild

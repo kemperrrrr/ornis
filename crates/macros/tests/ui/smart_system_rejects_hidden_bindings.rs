@@ -9,6 +9,7 @@ struct Unit {
 
 #[smart_system]
 fn sys(u: &Unit) {
+    let _ = u.hp;
     // These names are implementation details. In particular, exposing the
     // store would let the body access lanes outside its declared Pack.
     let _ = __smart_store.write_lane::<Unit>();
