@@ -226,6 +226,30 @@ impl<T> ComponentStore<T> {
         Some(DenseIndex::from_raw(dense_idx))
     }
 
+    /// Dense index of `entity` as a plain `usize` (generation-checked).
+    pub fn index_of(&self, entity: Entity) -> Option<usize> {
+        self.dense_index(entity).map(usize::from)
+    }
+
+    /// [`index_of`](ComponentStore::index_of) with a first guess: when
+    /// `entities[hint]` already is `entity`, the sparse lookup is skipped. A
+    /// wrong hint only costs that lookup, never a wrong answer.
+    pub fn index_hinted(&self, entity: Entity, hint: usize) -> Option<usize> {
+        if self.entities.get(hint) == Some(&entity) {
+            return Some(hint);
+        }
+        self.index_of(entity)
+    }
+
+    /// Whether the dense array lists entities in ascending entity-id order,
+    /// so iterating `data` visits them in the order of
+    /// [`iter_entities`](ComponentStore::iter_entities).
+    pub fn is_id_ordered(&self) -> bool {
+        self.entities
+            .windows(2)
+            .all(|pair| pair[0].entity_id() < pair[1].entity_id())
+    }
+
     /// Iterates `(entity, &A, &B)` pairs for every entity present in both
     /// stores, skipping entities whose generations disagree between them.
     pub fn iter_zip<'a, 'b, U>(&'a self, other: &'b ComponentStore<U>) -> ZipIter<'a, 'b, T, U> {

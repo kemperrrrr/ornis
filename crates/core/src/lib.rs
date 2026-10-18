@@ -80,7 +80,7 @@ pub use registry::{
 pub use schedule::{
     OrderError, Resources, Schedule, System, SystemAccess, SystemName, compute_levels,
 };
-pub use smart_store::{Pack, SmartStore};
+pub use smart_store::{Pack, PackLane, PackMembership, SmartStore};
 pub use system_param::{
     EventReader, EventStore, EventWriter, PlainResource, Res, ResMut, ResMutResource, SystemParam,
     register_events,
