@@ -13,17 +13,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Mutex;
 
-use ornis_core::{InputState, PositiveF32};
+use ornis_core::InputState;
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_editor::{
-    PlaneCamera, PlaneGrid, Selected, ViewportMode, install_editor, install_plane_camera,
-    plane_grid, read_plane_camera,
+    PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
 };
 use ornis_render::{
     CameraView, FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D,
@@ -31,8 +29,13 @@ use ornis_render::{
 };
 
 mod scene_api;
+mod viewport;
 
 use scene_api::LiveScene;
+use viewport::{
+    PENDING_MODE, VIEWPORT_MODE, apply_mode_request, refresh_viewport_state_json,
+    sync_picking_camera,
+};
 
 /// Shared handle to the requestAnimationFrame closure (self-rescheduling
 /// render loop needs to reference itself).
@@ -156,36 +159,17 @@ fn sync_dom_buttons(input: &mut InputState, buttons: u16) {
     }
 }
 
-/// Releases every mouse button on window blur: a tab switch or window
-/// deactivation delivers no `pointerup`, so without this a stuck button
-/// would orbit/pan forever. Leaked with the other controls closures.
-// qual:allow(test_quality, untested) reason: "browser-only DOM listener; no host-testable logic beyond the sync_dom_buttons call, which has its own host tests"
-fn attach_blur_release(input: &Rc<RefCell<InputState>>) {
-    let on_blur: Closure<dyn FnMut(web_sys::Event)> = {
-        let input = input.clone();
-        Closure::new(move |_e: web_sys::Event| {
-            sync_dom_buttons(&mut input.borrow_mut(), 0);
-        })
-    };
-    if let Some(window) = web_sys::window()
-        && let Err(e) =
-            window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref())
-    {
-        console::warn_1(&format!("[ornis-wasm] failed to attach blur: {e:?}").into());
-    }
-    on_blur.forget();
-}
-
 /// Attach orbit-camera pointer/wheel listeners to the canvas. The closures
 /// are leaked intentionally — they live as long as the page.
 ///
 /// Buttons come from the `buttons` bitmask on every event (a left drag
 /// orbits in 3D; middle/right drags pan in 2D and never rotate; chords stay
 /// consistent because the full pressed set is re-synced per event), positions
-/// are canvas-relative (`offset_x/offset_y` — the canvas fills its parent,
-/// see `resize_canvas_to_parent`). A `contextmenu` guard keeps right-drags
-/// from opening the browser menu, and middle-button downs suppress
-/// autoscroll.
+/// are canvas-relative (`offset_x/offset_y`, scaled by the device pixel
+/// ratio into the backing-store pixels the camera viewport uses — the
+/// canvas fills its parent, see `resize_canvas_to_parent`). A `contextmenu`
+/// guard keeps right-drags from opening the browser menu, and middle-button
+/// downs suppress autoscroll.
 ///
 /// Button-state safety: `pointerdown` and `pointerup`/`pointercancel`
 /// always sync from the bitmask (cancel carries `button = -1`, which the
@@ -193,8 +177,9 @@ fn attach_blur_release(input: &Rc<RefCell<InputState>>) {
 /// when the canvas has pointer capture — otherwise a drag that started
 /// outside the canvas (no capture) would report a fresh front edge and
 /// trigger a spurious pick. `lostpointercapture` releases every button so a
-/// lost capture never leaves a button stuck; window blur is handled by
-/// [`attach_blur_release`].
+/// lost capture never leaves a button stuck; window blur releases every
+/// button the same way — a tab switch or window deactivation delivers no
+/// `pointerup`, so without it a stuck button would orbit/pan forever.
 fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell<InputState>>) {
     let on_pointerdown: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
@@ -205,7 +190,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             }
             let mut input = input.borrow_mut();
             sync_dom_buttons(&mut input, e.buttons());
-            input.set_pointer_anchor([e.offset_x() as f32, e.offset_y() as f32]);
+            let dpr = device_pixel_ratio();
+            input.set_pointer_anchor([e.offset_x() as f32 * dpr, e.offset_y() as f32 * dpr]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
         })
@@ -221,7 +207,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             if canvas.has_pointer_capture(e.pointer_id()) {
                 sync_dom_buttons(&mut input, e.buttons());
             }
-            input.set_pointer_position([e.offset_x() as f32, e.offset_y() as f32]);
+            let dpr = device_pixel_ratio();
+            input.set_pointer_position([e.offset_x() as f32 * dpr, e.offset_y() as f32 * dpr]);
         })
     };
     let on_pointerup: Closure<dyn FnMut(web_sys::PointerEvent)> = {
@@ -244,11 +231,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             input.borrow_mut().add_wheel_delta(e.delta_y() as f32);
         })
     };
-    let on_contextmenu: Closure<dyn FnMut(web_sys::MouseEvent)> = {
-        Closure::new(move |e: web_sys::MouseEvent| {
-            e.prevent_default();
-        })
-    };
+    let on_contextmenu: Closure<dyn FnMut(web_sys::MouseEvent)> =
+        Closure::new(move |e: web_sys::MouseEvent| e.prevent_default());
 
     for (kind, cb) in [
         ("pointerdown", on_pointerdown.as_ref().unchecked_ref()),
@@ -266,7 +250,6 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             console::warn_1(&format!("[ornis-wasm] failed to attach {kind}: {e:?}").into());
         }
     }
-    attach_blur_release(input);
 
     on_pointerdown.forget();
     on_pointermove.forget();
@@ -297,14 +280,28 @@ pub fn game_key_codes(code: &str) -> Option<&'static [u32]> {
 }
 
 /// Builds the shared backend-neutral input and attaches all DOM listeners:
-/// orbit pointer/wheel on the canvas, gameplay keys on the window. DOM
-/// events first enter [`InputState`]; the camera and future browser systems
-/// share one input path.
+/// orbit pointer/wheel on the canvas, gameplay keys and the blur-button
+/// release on the window. DOM events first enter [`InputState`]; the camera
+/// and future browser systems share one input path.
 fn setup_input(canvas: &web_sys::HtmlCanvasElement) -> Rc<RefCell<InputState>> {
     let input = Rc::new(RefCell::new(InputState::new()));
     attach_orbit_controls(canvas, &input);
     if let Some(window) = web_sys::window() {
         attach_gameplay_keys(&window, &input);
+        // Window blur (tab switch): without a pointerup the bitmask would
+        // stick, so release all buttons when focus leaves the page.
+        let on_blur: Closure<dyn FnMut(web_sys::Event)> = {
+            let input = input.clone();
+            Closure::new(move |_e: web_sys::Event| {
+                sync_dom_buttons(&mut input.borrow_mut(), 0);
+            })
+        };
+        if let Err(e) =
+            window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref())
+        {
+            console::warn_1(&format!("[ornis-wasm] failed to attach blur: {e:?}").into());
+        }
+        on_blur.forget();
     }
     input
 }
@@ -513,167 +510,9 @@ impl InputPoster {
     }
 }
 
-// Viewport mode and camera-switch state (K2 plane editing).
-//
-// The render loop owns the replica engine, but `set_viewport_mode` is
-// called from JS outside the frame closure. Both run on the single browser
-// thread, so the export only queues a mode request and the loop applies it
-// on the next frame — no shared engine pointer, no unsafe.
 thread_local! {
-    /// Active viewport mode (perspective orbit or 2D plane sheet).
-    static VIEWPORT_MODE: std::cell::Cell<ViewportMode> =
-        const { std::cell::Cell::new(ViewportMode::Perspective3d) };
-    /// Pending mode request from `set_viewport_mode`, applied by the loop.
-    static PENDING_MODE: std::cell::Cell<Option<ModeRequest>> = const { std::cell::Cell::new(None) };
-    /// Orbit camera saved on entry into 2D, restored on exit.
-    static SAVED_ORBIT: RefCell<Option<OrbitCamera>> = const { RefCell::new(None) };
-    /// Latest viewport-state wire JSON, refreshed every frame.
-    static LAST_STATE_JSON: RefCell<String> =
-        const { RefCell::new(String::new()) };
     /// Last logged `Selected` entity ids (change-triggered console log).
     static LAST_SELECTED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Mode request queued by [`set_viewport_mode`] for the frame loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModeRequest {
-    /// Enter the 2D plane sheet (saves the orbit camera).
-    Plane2d,
-    /// Return to the perspective orbit (restores the saved camera).
-    Perspective3d,
-}
-
-/// Minimum grid step on screen for the overlay wire state.
-const MIN_GRID_STEP_PX: f32 = 48.0;
-
-/// Wire state for the grid overlay and cursor readout, shared by the live
-/// `editor/` overlay and the `editor-v2` mock (`applyViewState` accepts this
-/// exact shape). In `perspective3d` the plane fields are all `null`.
-#[derive(serde::Serialize)]
-struct ViewportStateWire {
-    /// `"perspective3d"` or `"plane2d"`.
-    mode: &'static str,
-    /// Sheet center in world units (2D only).
-    center: Option<[f32; 2]>,
-    /// Visible half-height in world units (2D only).
-    half_height: Option<f32>,
-    /// Screen pixels per world unit on the sheet (2D only).
-    pixels_per_unit: Option<f32>,
-    /// Grid numbers for the overlay (2D only).
-    grid: Option<PlaneGrid>,
-    /// Sheet point under the cursor (2D only).
-    pointer_world: Option<[f32; 2]>,
-}
-
-/// Builds the [`ViewportStateWire`] JSON: pure over the mode, an optional
-/// plane camera and an optional cursor, so host tests pin the shape without
-/// a browser.
-fn build_viewport_state_json(
-    mode: ViewportMode,
-    plane: Option<&PlaneCamera>,
-    pointer_px: Option<[f32; 2]>,
-) -> String {
-    // Active only in `plane2d` once a plane camera exists (before the first
-    // frame it is still `perspective3d` with null plane fields).
-    let camera = if mode.is_plane() { plane } else { None };
-    let state = ViewportStateWire {
-        mode: if camera.is_some() {
-            "plane2d"
-        } else {
-            "perspective3d"
-        },
-        center: camera.map(|camera| camera.center().to_array()),
-        half_height: camera.map(|camera| camera.half_height().get()),
-        pixels_per_unit: camera.map(PlaneCamera::pixels_per_unit),
-        grid: camera.map(|camera| plane_grid(camera, PositiveF32::expect_valid(MIN_GRID_STEP_PX))),
-        pointer_world: camera
-            .zip(pointer_px)
-            .map(|(camera, pointer)| camera.screen_to_plane(pointer).to_array()),
-    };
-    serde_json::to_string(&state).unwrap_or_else(|_| "{\"mode\":\"perspective3d\"}".into())
-}
-
-/// Queues a viewport mode switch for the frame loop: orbit
-/// (`"perspective3d"`) or the 2D plane sheet (`"plane2d"`). Returns `false`
-/// on an unknown mode.
-///
-/// Entering 2D saves the orbit camera and derives the plane camera from its
-/// current view (K0a projection included); leaving restores the saved orbit
-/// (`install_orbit_camera` replaces the camera without a second system).
-/// The loop applies the request on the next frame, where the replica engine
-/// lives — this export never touches the engine directly.
-// qual:api — wasm-bindgen export; called from the browser page, invisible to the Rust call graph.
-#[wasm_bindgen]
-pub fn set_viewport_mode(mode: &str) -> bool {
-    match mode {
-        "plane2d" => {
-            PENDING_MODE.with(|cell| cell.set(Some(ModeRequest::Plane2d)));
-            true
-        }
-        "perspective3d" => {
-            PENDING_MODE.with(|cell| cell.set(Some(ModeRequest::Perspective3d)));
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Applies a viewport [`ModeRequest`] against an engine: entering 2D saves
-/// the orbit camera and derives the plane camera from its current view at
-/// `surface_px` (K0a projection included), leaving restores the saved orbit
-/// (`install_orbit_camera` replaces the camera without a second system).
-/// Pure engine wiring (no DOM/GPU), so host tests pin the switch. Returns
-/// whether the switch applied (entering without an orbit camera no-ops;
-/// re-entering 2D while already in 2D is a no-op so the saved orbit is
-/// never overwritten by a rotated one).
-fn apply_mode_request(
-    engine: &mut ornis_core::Engine,
-    request: ModeRequest,
-    surface_px: (u32, u32),
-) -> bool {
-    match request {
-        ModeRequest::Plane2d => {
-            // Early exit: already in 2D — do not overwrite SAVED_ORBIT
-            // with the (possibly rotated) hidden orbit camera.
-            if VIEWPORT_MODE.with(|cell| cell.get()).is_plane() {
-                return false;
-            }
-            let Some(orbit) = read_orbit_camera(engine) else {
-                return false;
-            };
-            let view = orbit.view_parameters();
-            let plane = PlaneCamera::from_camera_view(
-                view.eye,
-                view.target,
-                view.projection,
-                view.fov,
-                view.near,
-                view.far,
-                [surface_px.0 as f32, surface_px.1 as f32],
-            );
-            let Some(plane) = plane else { return false };
-            SAVED_ORBIT.with(|saved| *saved.borrow_mut() = Some(orbit));
-            install_plane_camera(engine, plane);
-            let _ = engine.world_mut().insert(ViewportMode::Plane2d);
-            // Remove the orbit camera resource so `orbit_camera_input`
-            // no-ops in 2D (left-drag and the wheel must not rotate the
-            // hidden orbit camera).
-            let _ = engine
-                .world_mut()
-                .resources_mut()
-                .remove::<Mutex<OrbitCamera>>();
-            VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Plane2d));
-            true
-        }
-        ModeRequest::Perspective3d => {
-            if let Some(saved) = SAVED_ORBIT.with(|saved| saved.borrow_mut().take()) {
-                ornis_render::install_orbit_camera(engine, saved);
-            }
-            let _ = engine.world_mut().insert(ViewportMode::Perspective3d);
-            VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
-            true
-        }
-    }
 }
 
 /// Sorted `Selected` entity ids for the change-triggered selection log.
@@ -688,124 +527,6 @@ fn selected_snapshot(store: &ornis_core::SmartStore) -> Vec<u32> {
     ids
 }
 
-/// Latest viewport-state wire JSON for the grid overlay and cursor
-/// readout, refreshed by the frame loop every frame.
-// qual:api — wasm-bindgen export; called from the browser overlay, invisible to the Rust call graph.
-#[wasm_bindgen]
-pub fn viewport_state_json() -> String {
-    let cached = LAST_STATE_JSON.with(|cell| cell.borrow().clone());
-    if cached.is_empty() {
-        build_viewport_state_json(ViewportMode::Perspective3d, None, None)
-    } else {
-        cached
-    }
-}
-
-/// Pure plan for one viewport sync: given the mode, an optional plane
-/// camera, an optional orbit camera, the surface size and the pointer
-/// position, returns the picking camera to publish (if any) and the wire
-/// JSON to cache. No DOM/GPU/engine state, so host tests pin the switch
-/// including the 3D-without-orbit edge (JSON resets to `perspective3d`).
-fn viewport_sync_plan(
-    mode: ViewportMode,
-    plane: Option<&PlaneCamera>,
-    orbit: Option<&OrbitCamera>,
-    size_px: (u32, u32),
-    pointer_px: Option<[f32; 2]>,
-) -> (Option<ornis_editor::ViewportCamera>, String) {
-    let size = [size_px.0 as f32, size_px.1 as f32];
-    if mode.is_plane() {
-        let picking = plane.and_then(PlaneCamera::viewport_camera);
-        let json = build_viewport_state_json(mode, plane, pointer_px);
-        (picking, json)
-    } else {
-        let picking = orbit.and_then(|orbit| {
-            let view = orbit.view_parameters();
-            ornis_editor::ViewportCamera::from_camera_view(
-                view.eye,
-                view.target,
-                view.up,
-                view.projection,
-                view.fov,
-                view.near,
-                view.far,
-                size,
-            )
-        });
-        // Always refresh the JSON in 3D — including without an orbit
-        // camera, so a previous plane2d overlay never sticks.
-        let json = build_viewport_state_json(mode, None, None);
-        (picking, json)
-    }
-}
-
-/// Pure plan for the sheet-viewport size sync: in `plane2d` the plane
-/// camera's pixel viewport tracks the surface (`handle_resize` and the
-/// entering size from `set_viewport_mode` both land here). Returns the
-/// viewport to write, or `None` when nothing must change (3D mode, no
-/// plane camera, or the viewport already matches `size_px`). No engine or
-/// DOM state, so host tests pin the branch.
-fn plane_viewport_sync_plan(
-    mode: ViewportMode,
-    plane: Option<&PlaneCamera>,
-    size_px: (u32, u32),
-) -> Option<[f32; 2]> {
-    if !mode.is_plane() {
-        return None;
-    }
-    plane.and_then(|plane| {
-        let size = [size_px.0 as f32, size_px.1 as f32];
-        (plane.viewport_px != size).then_some(size)
-    })
-}
-
-/// Applies the thread-local viewport mode to the replica engine every
-/// frame: keeps the `ViewportMode` resource in sync (so the plane input
-/// system gates correctly), publishes the active picking camera (so the
-/// E1 click/hover pipeline runs on the replica), and refreshes the wire
-/// JSON for the grid overlay.
-///
-/// Resource and thread-local I/O only — every decision lives in the pure
-/// [`plane_viewport_sync_plan`] / [`viewport_sync_plan`] seams, and the
-/// whole function is driven by a host test on a bare engine. The
-/// selection log is a separate browser edge ([`FrameState::log_selection_changes`])
-/// called by the frame loop right after this one.
-///
-/// `replace_scene` (via `FrameState::apply_live_scene`) only destroys
-/// scene entities and republishes lights: the `ViewportCamera` resource
-/// and the `Selected`/`Hovered` lanes survive a live update (marks on
-/// removed entities vanish with them; replacements start unselected).
-fn sync_viewport_state(engine: &mut ornis_core::Engine, size: (u32, u32)) {
-    let mode = VIEWPORT_MODE.with(|cell| cell.get());
-    let _ = engine.world_mut().insert(mode);
-    let plane = read_plane_camera(engine);
-    if let Some(viewport_px) = plane_viewport_sync_plan(mode, plane.as_ref(), size)
-        && let Some(mutex) = engine
-            .world()
-            .resources()
-            .get::<std::sync::Mutex<PlaneCamera>>()
-    {
-        mutex
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .set_viewport_px(viewport_px);
-    }
-    let plane = read_plane_camera(engine);
-    let orbit = read_orbit_camera(engine);
-    let pointer = engine
-        .world()
-        .resources()
-        .get::<InputState>()
-        .map(|input| input.pointer_position());
-    let (picking, json) = viewport_sync_plan(mode, plane.as_ref(), orbit.as_ref(), size, pointer);
-    if let Some(picking) = picking {
-        let _ = engine.world_mut().insert(picking);
-    }
-    LAST_STATE_JSON.with(|cell| {
-        *cell.borrow_mut() = json;
-    });
-}
-
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
 fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
     let window = web_sys::window().ok_or("no window")?;
@@ -817,11 +538,25 @@ fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
         .map_err(Into::into)
 }
 
-/// Resize the canvas to fill its parent element.
+/// Device pixel ratio of the current display (1.0 off-browser or without
+/// a window): the canvas backing store and the pointer coordinates share
+/// this scale so HiDPI displays render 1:1 instead of upscaling CSS
+/// pixels.
+// qual:allow(test_quality, untested) reason: "browser helper — web_sys::window() has no host-test seam, same population as the sibling DOM helpers"
+fn device_pixel_ratio() -> f32 {
+    web_sys::window()
+        .map(|w| w.device_pixel_ratio() as f32)
+        .unwrap_or(1.0)
+        .max(1.0)
+}
+
+/// Resize the canvas backing store to fill its parent element, scaled by
+/// [`device_pixel_ratio`].
 fn resize_canvas_to_parent(canvas: &web_sys::HtmlCanvasElement) {
     if let Some(parent) = canvas.parent_element() {
-        canvas.set_width(parent.client_width() as u32);
-        canvas.set_height(parent.client_height() as u32);
+        let dpr = device_pixel_ratio();
+        canvas.set_width((parent.client_width() as f32 * dpr) as u32);
+        canvas.set_height((parent.client_height() as f32 * dpr) as u32);
     }
 }
 
@@ -997,18 +732,20 @@ struct FrameState<'a> {
 }
 
 impl<'a> FrameState<'a> {
-    /// Match the canvas (and surface) size to its parent element.
+    /// Match the canvas (and surface) size to its parent element, scaled
+    /// by the device pixel ratio so the backing store is HiDPI-sharp.
     fn handle_resize(&mut self, canvas: &web_sys::HtmlCanvasElement) {
+        let dpr = device_pixel_ratio();
         let pw = canvas
             .parent_element()
-            .map(|p| p.client_width() as u32)
-            .unwrap_or(canvas.width())
-            .max(1);
+            .map(|p| p.client_width() as f32 * dpr)
+            .unwrap_or(canvas.width() as f32)
+            .max(1.0) as u32;
         let ph = canvas
             .parent_element()
-            .map(|p| p.client_height() as u32)
-            .unwrap_or(canvas.height())
-            .max(1);
+            .map(|p| p.client_height() as f32 * dpr)
+            .unwrap_or(canvas.height() as f32)
+            .max(1.0) as u32;
         if canvas.width() != pw || canvas.height() != ph {
             canvas.set_width(pw);
             canvas.set_height(ph);
@@ -1387,19 +1124,17 @@ fn spawn_render_loop(
         if let Some(request) = PENDING_MODE.with(|cell| cell.take()) {
             let size = (frame.config.width, frame.config.height);
             if apply_mode_request(frame.render_world.engine_mut(), request, size) {
-                let name = match request {
-                    ModeRequest::Plane2d => "plane2d",
-                    ModeRequest::Perspective3d => "perspective3d",
-                };
-                console::log_1(&format!("[ornis-wasm] viewport mode -> {name}").into());
+                console::log_1(
+                    &format!("[ornis-wasm] viewport mode -> {}", request.as_str()).into(),
+                );
             }
         }
-        // Publish the picking camera and wire JSON before the schedule so
-        // the frame's pick systems and the overlay read the current mode.
-        // The sync seam is resource I/O over the bare engine — host-tested;
-        // only the selection log stays a browser-only console edge.
+        // Publish the picking camera before the schedule so the frame's
+        // pick systems see the current mode. The seams are resource I/O
+        // over the bare engine — host-tested; only the selection log
+        // stays a browser-only console edge.
         let size = (frame.config.width, frame.config.height);
-        sync_viewport_state(frame.render_world.engine_mut(), size);
+        sync_picking_camera(frame.render_world.engine_mut(), size);
         frame.log_selection_changes();
         frame.render_world.frame(DT);
 
@@ -1417,6 +1152,10 @@ fn spawn_render_loop(
         }
 
         frame.update_camera();
+        // Refresh the overlay JSON now that `frame(DT)` has applied this
+        // frame's pan/zoom — publishing it earlier left the grid one
+        // frame behind the camera.
+        refresh_viewport_state_json(frame.render_world.engine_mut(), size);
 
         match frame.surface.get_current_texture() {
             // Surface lost its configuration — reconfigure and retry next frame.
@@ -1624,89 +1363,6 @@ mod integration_tests {
     }
 
     #[test]
-    fn viewport_state_wire_matches_mock_shape() {
-        // Perspective: the plane fields are all null (the editor-v2 mock
-        // `applyViewState` keys off this exact shape).
-        let v: serde_json::Value = serde_json::from_str(&build_viewport_state_json(
-            ViewportMode::Perspective3d,
-            None,
-            None,
-        ))
-        .expect("wire is JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-        for field in [
-            "center",
-            "half_height",
-            "pixels_per_unit",
-            "grid",
-            "pointer_world",
-        ] {
-            assert!(v[field].is_null(), "{field} must be null, got {}", v[field]);
-        }
-        // Plane: the grid and cursor ride the same JSON the live overlay
-        // reads in `editor/viewport.js`.
-        let plane = PlaneCamera::new(
-            glam::Vec2::ZERO,
-            ornis_core::Meters::new(5.0),
-            ornis_core::Meters::new(10.0),
-            ornis_core::Meters::new(0.1),
-            ornis_core::Meters::new(100.0),
-            [800.0, 600.0],
-        )
-        .expect("valid test plane camera");
-        let v: serde_json::Value = serde_json::from_str(&build_viewport_state_json(
-            ViewportMode::Plane2d,
-            Some(&plane),
-            Some([400.0, 300.0]),
-        ))
-        .expect("wire is JSON");
-        assert_eq!(v["mode"], serde_json::json!("plane2d"));
-        assert_eq!(v["center"], serde_json::json!([0.0, 0.0]));
-        assert_eq!(v["half_height"], serde_json::json!(5.0));
-        assert_eq!(v["pixels_per_unit"], serde_json::json!(60.0));
-        assert_eq!(v["grid"]["minor_step"], serde_json::json!(1.0));
-        assert_eq!(v["grid"]["major_every"], serde_json::json!(10));
-        assert_eq!(v["grid"]["origin_px"], serde_json::json!([400.0, 300.0]));
-        assert_eq!(v["pointer_world"], serde_json::json!([0.0, 0.0]));
-        // No plane camera yet (before the first frame): nulls, plane flag
-        // notwithstanding.
-        let v: serde_json::Value = serde_json::from_str(&build_viewport_state_json(
-            ViewportMode::Plane2d,
-            None,
-            None,
-        ))
-        .expect("wire is JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-    }
-
-    #[test]
-    fn viewport_mode_export_accepts_known_modes_only() {
-        // Host-safe: queue only, no engine access (the loop applies it).
-        assert!(set_viewport_mode("plane2d"));
-        assert!(set_viewport_mode("perspective3d"));
-        assert!(!set_viewport_mode("orbit"));
-        assert!(!set_viewport_mode(""));
-        // A queued request does not rewrite the cached wire JSON by itself.
-        PENDING_MODE.with(|cell| cell.set(None));
-    }
-
-    #[test]
-    fn viewport_state_json_export_serves_cached_or_default_shape() {
-        LAST_STATE_JSON.with(|cell| cell.borrow_mut().clear());
-        let v: serde_json::Value =
-            serde_json::from_str(&viewport_state_json()).expect("wire is JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-        LAST_STATE_JSON.with(|cell| {
-            *cell.borrow_mut() = build_viewport_state_json(ViewportMode::Perspective3d, None, None);
-        });
-        assert_eq!(
-            viewport_state_json(),
-            build_viewport_state_json(ViewportMode::Perspective3d, None, None)
-        );
-        LAST_STATE_JSON.with(|cell| cell.borrow_mut().clear());
-    }
-
-    #[test]
     fn selection_snapshot_sorts_and_handles_missing_lanes() {
         use ornis_core::Engine;
         // No store lanes at all: empty snapshot, no panic.
@@ -1718,273 +1374,6 @@ mod integration_tests {
         ornis_editor::install_editor(&mut installed);
         let store = installed.world().store().expect("world store");
         assert!(selected_snapshot(store).is_empty());
-    }
-
-    #[test]
-    fn mode_request_enters_and_leaves_plane() {
-        use ornis_core::Engine;
-        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
-        SAVED_ORBIT.with(|cell| *cell.borrow_mut() = None);
-        let mut engine = Engine::new();
-        // Entering without an orbit camera no-ops.
-        assert!(!apply_mode_request(
-            &mut engine,
-            ModeRequest::Plane2d,
-            (800, 600)
-        ));
-        ornis_render::install_orbit_camera(
-            &mut engine,
-            OrbitCamera::looking_at(glam::Vec3::new(0.0, 0.0, 9.0), glam::Vec3::ZERO),
-        );
-        assert!(apply_mode_request(
-            &mut engine,
-            ModeRequest::Plane2d,
-            (800, 600)
-        ));
-        assert_eq!(
-            engine.world().resources().get::<ViewportMode>().copied(),
-            Some(ViewportMode::Plane2d)
-        );
-        let plane = read_plane_camera(&engine).expect("plane camera installed");
-        assert!((plane.center() - glam::Vec2::ZERO).length() < 1e-4);
-        // Review RAT-16 blocker 1: entering from the perspective orbit
-        // installs the orthographic sheet (fov-derived half-height), never
-        // the perspective stand-in.
-        let (_, _, _, projection, _, near, far) = plane.camera_view_params();
-        let expected_hh = 9.0 * (60.0f32.to_radians() * 0.5).tan();
-        assert_eq!(
-            projection,
-            ornis_assets::scene::CameraProjection::Orthographic {
-                half_height: ornis_core::Meters::new(expected_hh)
-            }
-        );
-        assert!((plane.half_height().get() - expected_hh).abs() < 1e-4);
-        assert_eq!(near.get(), 0.1);
-        assert_eq!(far.get(), 100.0);
-        // Re-entering while already in 2D is a no-op: the early exit must
-        // protect SAVED_ORBIT from being overwritten by a hidden orbit and
-        // the sheet must not be rebuilt from it. Re-installing a distinctly
-        // positioned orbit makes the branch observable — without it
-        // `read_orbit_camera` would return `None` and the no-op would be
-        // indistinguishable from the missing-orbit no-op (the `Mutex` is
-        // removed on entry, so a bare re-call returns `false` either way).
-        ornis_render::install_orbit_camera(
-            &mut engine,
-            OrbitCamera::looking_at(
-                glam::Vec3::new(3.0, 4.0, 9.0),
-                glam::Vec3::new(1.0, 1.0, 0.0),
-            ),
-        );
-        let saved_before =
-            SAVED_ORBIT.with(|cell| cell.borrow().as_ref().map(|orbit| orbit.position()));
-        let sheet_before = read_plane_camera(&engine).expect("plane camera");
-        assert!(!apply_mode_request(
-            &mut engine,
-            ModeRequest::Plane2d,
-            (800, 600)
-        ));
-        let saved_after =
-            SAVED_ORBIT.with(|cell| cell.borrow().as_ref().map(|orbit| orbit.position()));
-        let original = saved_before.expect("SAVED_ORBIT written on entry");
-        assert!(
-            (original - glam::Vec3::new(0.0, 0.0, 9.0)).length() < 1e-3,
-            "SAVED_ORBIT must keep the original entry orbit, got {original:?}"
-        );
-        assert_eq!(
-            saved_after, saved_before,
-            "re-entering 2D must not overwrite SAVED_ORBIT"
-        );
-        let sheet_after = read_plane_camera(&engine).expect("plane camera");
-        assert_eq!(
-            sheet_after, sheet_before,
-            "re-entering 2D must not rebuild the sheet from the hidden orbit"
-        );
-        // Leaving restores the saved orbit and flips the mode back.
-        assert!(apply_mode_request(
-            &mut engine,
-            ModeRequest::Perspective3d,
-            (800, 600)
-        ));
-        assert_eq!(
-            engine.world().resources().get::<ViewportMode>().copied(),
-            Some(ViewportMode::Perspective3d)
-        );
-        let orbit = read_orbit_camera(&engine).expect("orbit restored");
-        assert!((orbit.position() - glam::Vec3::new(0.0, 0.0, 9.0)).length() < 1e-3);
-        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
-        SAVED_ORBIT.with(|cell| *cell.borrow_mut() = None);
-    }
-
-    /// `viewport_sync_plan` pins the pure sync branch: 2D publishes the
-    /// plane picking camera and plane JSON; 3D publishes the orbit picking
-    /// camera and resets the JSON; 3D without an orbit camera returns a
-    /// null picking camera but still resets the JSON (so a previous
-    /// plane2d overlay never sticks).
-    #[test]
-    fn viewport_sync_plan_switches_cleanly() {
-        let plane = PlaneCamera::new(
-            glam::Vec2::ZERO,
-            ornis_core::Meters::new(5.0),
-            ornis_core::Meters::new(10.0),
-            ornis_core::Meters::new(0.1),
-            ornis_core::Meters::new(100.0),
-            [800.0, 600.0],
-        )
-        .expect("valid test plane camera");
-        let orbit = OrbitCamera::looking_at(glam::Vec3::new(0.0, 0.0, 9.0), glam::Vec3::ZERO);
-
-        // 2D with plane: picking camera present, plane JSON.
-        let (picking, json) = viewport_sync_plan(
-            ViewportMode::Plane2d,
-            Some(&plane),
-            Some(&orbit),
-            (800, 600),
-            None,
-        );
-        assert!(picking.is_some(), "2D publishes the plane picking camera");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("JSON");
-        assert_eq!(v["mode"], serde_json::json!("plane2d"));
-
-        // 3D with orbit: picking camera present, perspective JSON (nulls).
-        let (picking, json) = viewport_sync_plan(
-            ViewportMode::Perspective3d,
-            Some(&plane),
-            Some(&orbit),
-            (800, 600),
-            None,
-        );
-        assert!(picking.is_some(), "3D publishes the orbit picking camera");
-        let v: serde_json::Value = serde_json::from_str(&json).expect("JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-        assert!(v["center"].is_null());
-
-        // 3D without an orbit camera: null picking camera, JSON still
-        // resets to perspective3d (does not leave a stale plane overlay).
-        let (picking, json) = viewport_sync_plan(
-            ViewportMode::Perspective3d,
-            Some(&plane),
-            None,
-            (800, 600),
-            None,
-        );
-        assert!(
-            picking.is_none(),
-            "3D without orbit publishes no picking camera"
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).expect("JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-        assert!(v["center"].is_null());
-
-        // 2D without a plane camera: null picking camera, perspective JSON.
-        let (picking, json) =
-            viewport_sync_plan(ViewportMode::Plane2d, None, Some(&orbit), (800, 600), None);
-        assert!(
-            picking.is_none(),
-            "2D without plane publishes no picking camera"
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).expect("JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-    }
-
-    /// `plane_viewport_sync_plan` pins the sheet-viewport size sync: in 2D
-    /// a viewport that lags the surface is rewritten to `size_px`, a fresh
-    /// one is left alone, and neither 3D nor a missing plane camera ever
-    /// writes the sheet viewport.
-    #[test]
-    fn plane_viewport_sync_plan_targets_surface_size() {
-        let plane = PlaneCamera::new(
-            glam::Vec2::ZERO,
-            ornis_core::Meters::new(5.0),
-            ornis_core::Meters::new(10.0),
-            ornis_core::Meters::new(0.1),
-            ornis_core::Meters::new(100.0),
-            [800.0, 600.0],
-        )
-        .expect("valid test plane camera");
-        // 2D + stale surface: rewrite to the new size.
-        assert_eq!(
-            plane_viewport_sync_plan(ViewportMode::Plane2d, Some(&plane), (1024, 768)),
-            Some([1024.0, 768.0])
-        );
-        // 2D + already fresh: nothing to write.
-        assert_eq!(
-            plane_viewport_sync_plan(ViewportMode::Plane2d, Some(&plane), (800, 600)),
-            None
-        );
-        // 3D never touches the sheet viewport.
-        assert_eq!(
-            plane_viewport_sync_plan(ViewportMode::Perspective3d, Some(&plane), (1024, 768)),
-            None
-        );
-        // Plane mode without a plane camera: nothing to write.
-        assert_eq!(
-            plane_viewport_sync_plan(ViewportMode::Plane2d, None, (1024, 768)),
-            None
-        );
-    }
-
-    /// `sync_viewport_state` end-to-end on a bare engine: it publishes the
-    /// mode and picking-camera resources, keeps the sheet viewport in step
-    /// with the surface in 2D (and leaves it alone in 3D), and caches the
-    /// matching wire JSON. This is what makes the seam host-tested — the
-    /// body is resource I/O over the plans pinned above.
-    #[test]
-    fn sync_viewport_state_publishes_resources() {
-        use ornis_core::Engine;
-        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Plane2d));
-        LAST_STATE_JSON.with(|cell| cell.borrow_mut().clear());
-        let mut engine = Engine::new();
-        let plane = PlaneCamera::new(
-            glam::Vec2::ZERO,
-            ornis_core::Meters::new(5.0),
-            ornis_core::Meters::new(10.0),
-            ornis_core::Meters::new(0.1),
-            ornis_core::Meters::new(100.0),
-            [800.0, 600.0],
-        )
-        .expect("valid test plane camera");
-        install_plane_camera(&mut engine, plane);
-
-        // Plane mode: stale 800×600 viewport vs surface 1024×768 → synced.
-        sync_viewport_state(&mut engine, (1024, 768));
-        let synced = read_plane_camera(&engine).expect("plane camera");
-        assert_eq!(synced.viewport_px, [1024.0, 768.0]);
-        assert_eq!(
-            engine.world().resources().get::<ViewportMode>().copied(),
-            Some(ViewportMode::Plane2d)
-        );
-        assert!(
-            engine
-                .world()
-                .resources()
-                .get::<ornis_editor::ViewportCamera>()
-                .is_some(),
-            "plane picking camera published"
-        );
-        let v: serde_json::Value = serde_json::from_str(&viewport_state_json()).expect("JSON");
-        assert_eq!(v["mode"], serde_json::json!("plane2d"));
-        assert_eq!(v["center"], serde_json::json!([0.0, 0.0]));
-
-        // 3D: mode flips, JSON resets to perspective3d (null plane fields),
-        // and the sheet viewport stays where 2D left it.
-        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
-        ornis_render::install_orbit_camera(
-            &mut engine,
-            OrbitCamera::looking_at(glam::Vec3::new(0.0, 0.0, 9.0), glam::Vec3::ZERO),
-        );
-        sync_viewport_state(&mut engine, (640, 480));
-        assert_eq!(
-            engine.world().resources().get::<ViewportMode>().copied(),
-            Some(ViewportMode::Perspective3d)
-        );
-        let v: serde_json::Value = serde_json::from_str(&viewport_state_json()).expect("JSON");
-        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
-        assert!(v["center"].is_null());
-        let plane = read_plane_camera(&engine).expect("plane camera");
-        assert_eq!(plane.viewport_px, [1024.0, 768.0], "3D leaves 2D state");
-
-        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
-        LAST_STATE_JSON.with(|cell| cell.borrow_mut().clear());
     }
 
     #[test]

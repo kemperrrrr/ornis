@@ -59,6 +59,15 @@ impl PlaneCamera {
     /// Floor for a derived ortho eye height (degenerate eye/target pairs
     /// sit this far above the sheet instead of collapsing).
     const MIN_EYE_HEIGHT: Meters = Meters(0.01);
+    /// Fixed eye stand-off above the orbit target level for ortho entry.
+    /// Ortho scale is `half_height`, so the eye height never affects
+    /// framing — it only sets the clip window. The stand-off is
+    /// independent of the orbit radius so geometry above the orbit (a
+    /// raised target with a close orbit used to put the eye below the
+    /// scene) stays inside the band; geometry above
+    /// `max(target.z, 0) + ORTHO_EYE_STANDOFF − near` remains clipped
+    /// until the scene bounding box is plumbed in (accepted K2 limit).
+    const ORTHO_EYE_STANDOFF: Meters = Meters(100.0);
     /// Half-angle scale: the sheet half-height spans `tan(fov/2)` per unit
     /// of eye height.
     const HALF_ANGLE: f32 = 0.5;
@@ -69,8 +78,8 @@ impl PlaneCamera {
     const ORTHO_TUPLE_FOV_DEG: f32 = 60.0;
     /// Clip-window factor: when the orbit-derived near/far would clip the
     /// sheet or the target level, shrink `near` to
-    /// `|eye − target|·CLIP_MARGIN` (below both distances) and grow `far`
-    /// to `eye_height·CLIP_MARGIN_INV` (above the sheet).
+    /// `ORTHO_EYE_STANDOFF·CLIP_MARGIN` (below both distances) and grow
+    /// `far` to `eye_height·CLIP_MARGIN_INV` (above the sheet).
     const CLIP_MARGIN: f32 = 0.1;
     /// Reciprocal of [`Self::CLIP_MARGIN`] for the far-clip expansion.
     const CLIP_MARGIN_INV: f32 = 10.0;
@@ -140,16 +149,15 @@ impl PlaneCamera {
     /// The live path is always the orthographic sheet: an asset ortho keeps
     /// its half-height, a perspective orbit derives `hh` from the fov
     /// (`|eye − target|·tan(fov/2)`), and the derived `hh` is clamped to the
-    /// K0a range. The eye sits at `max(target.z, 0) + |eye − target|` above
-    /// the sheet so geometry above the orbit target stays inside the clip
-    /// window, and near/far are widened when needed to cover the sheet and
-    /// the target level.
+    /// K0a range. The eye sits at a fixed `ORTHO_EYE_STANDOFF`
+    /// above `max(target.z, 0)` — independent of the orbit radius, so
+    /// geometry above the orbit stays inside the clip window — and near/far
+    /// are widened when needed to cover the sheet and the target level.
     ///
-    /// Coverage follows the orbit, not the scene: the band reaches up to
-    /// `max(target.z, 0) + |eye − target|`, so geometry higher than the
-    /// orbit radius above the target sits behind the eye and stays clipped
-    /// in 2D (an accepted K2 limitation — the scene bounding box never
-    /// enters the eye-height derivation).
+    /// Coverage is a fixed band, not the scene: geometry above
+    /// `max(target.z, 0) + ORTHO_EYE_STANDOFF − near` still sits above the
+    /// eye and stays clipped in 2D (an accepted K2 limitation — the scene
+    /// bounding box never enters the eye-height derivation).
     // qual:allow(srp, max_parameters=7) reason: "RAT-16 mandates explicit-param constructors without builders; K0a seam carries the full look-at frame as values, like CameraDesc::try_new_units"
     #[must_use]
     #[allow(clippy::too_many_arguments)]
@@ -164,16 +172,19 @@ impl PlaneCamera {
     ) -> Option<Self> {
         let half_height = match projection {
             CameraProjection::Perspective => Self::orbit_half_height(eye, target, fov.get())?,
-            CameraProjection::Orthographic { half_height } => half_height,
+            CameraProjection::Orthographic { half_height } => {
+                // Reject non-finite frames on the ortho path too.
+                Self::checked_eye_distance(eye, target)?;
+                half_height
+            }
         };
         let half_height = Meters::new(
             half_height
                 .get()
                 .clamp(Self::MIN_HALF_HEIGHT.get(), Self::MAX_HALF_HEIGHT.get()),
         );
-        let distance = Self::checked_eye_distance(eye, target)?;
-        let eye_height = Self::checked_eye_height(target, distance);
-        let (near, far) = Self::sheet_clip_window(near, far, eye_height, distance);
+        let eye_height = Self::checked_eye_height(target);
+        let (near, far) = Self::sheet_clip_window(near, far, eye_height);
         Self::new(
             target.truncate(),
             half_height,
@@ -184,32 +195,25 @@ impl PlaneCamera {
         )
     }
 
-    /// Eye height above the sheet for a validated eye/target `distance`
-    /// ([`Self::checked_eye_distance`] output): the eye sits `distance`
-    /// above the orbit target, floored at `target.z ≥ 0` and
-    /// [`Self::MIN_EYE_HEIGHT`], so geometry above the target (and the
-    /// sheet itself) stays in the clip window.
-    fn checked_eye_height(target: Vec3, distance: f32) -> Meters {
-        Meters::new((target.z.max(0.0) + distance).max(Self::MIN_EYE_HEIGHT.get()))
+    /// Eye height above the sheet: a fixed [`Self::ORTHO_EYE_STANDOFF`]
+    /// above the orbit target level `max(target.z, 0)`, floored at
+    /// [`Self::MIN_EYE_HEIGHT`]. Independent of the orbit radius so a
+    /// raised target with a close orbit keeps its geometry below the eye.
+    fn checked_eye_height(target: Vec3) -> Meters {
+        Meters::new(
+            (target.z.max(0.0) + Self::ORTHO_EYE_STANDOFF.get()).max(Self::MIN_EYE_HEIGHT.get()),
+        )
     }
 
     /// Widens the orbit near/far window when it would clip the sheet at
-    /// distance `eye_height` or the target level at `eye_target_distance`:
-    /// `near` shrinks below both distances, `far` grows above the sheet, so
-    /// `z = 0` and `target.z` always lie inside `[near, far]`.
-    ///
-    /// Bounding `near` by the eye/target distance is what keeps a raised
-    /// target with a close orbit visible: there `eye_height` is large while
-    /// the geometry sits only `|eye − target|` in front of the eye.
-    fn sheet_clip_window(
-        near: Meters,
-        far: Meters,
-        eye_height: Meters,
-        eye_target_distance: f32,
-    ) -> (Meters, Meters) {
+    /// distance `eye_height` or geometry just below the eye: `near` shrinks
+    /// to a small fraction of the eye stand-off, `far` grows above the
+    /// sheet, so `z = 0` and the target level always lie inside
+    /// `[near, far]`.
+    fn sheet_clip_window(near: Meters, far: Meters, eye_height: Meters) -> (Meters, Meters) {
         let near = near
             .get()
-            .min(eye_target_distance * Self::CLIP_MARGIN)
+            .min(Self::ORTHO_EYE_STANDOFF.get() * Self::CLIP_MARGIN)
             .max(f32::EPSILON);
         let far = far.get().max(eye_height.get() * Self::CLIP_MARGIN_INV);
         (Meters::new(near), Meters::new(far))
@@ -660,38 +664,46 @@ mod tests {
         );
     }
 
-    /// Review blocker: geometry above the sheet stays in the clip window
-    /// even when it sits higher than the orbit radius, and an orbit with
-    /// `|eye − target| < near` still lands the sheet inside `[near, far]`.
-    #[test]
-    fn eye_height_covers_geometry_above_orbit_radius() {
-        // Orbit of radius 3 around target.z = 5: eye height is 8, so an
-        // object at z = 5 (above the orbit radius) is between the eye and
-        // the sheet, inside the clip window.
-        let camera = PlaneCamera::from_camera_view(
-            Vec3::new(0.0, 0.0, 8.0),
-            Vec3::new(0.0, 0.0, 5.0),
+    /// Shared entry for the fixed-stand-off tests: a perspective orbit
+    /// at the given eye/target heights over a flat sheet.
+    fn perspective_orbit(eye_z: f32, target_z: f32) -> PlaneCamera {
+        PlaneCamera::from_camera_view(
+            Vec3::new(0.0, 0.0, eye_z),
+            Vec3::new(0.0, 0.0, target_z),
             CameraProjection::Perspective,
             Degrees::new(60.0),
             Meters::new(0.1),
             Meters::new(100.0),
             [800.0, 600.0],
         )
-        .expect("entry with elevated target");
+        .expect("perspective orbit entry")
+    }
+
+    /// Review blocker (Editor track): the eye sits at a fixed stand-off
+    /// above the target level, not at the orbit radius, so geometry above
+    /// a close orbit stays inside the clip window and under the pick ray.
+    #[test]
+    fn fixed_eye_height_covers_geometry_above_close_orbit() {
+        // (а) target.z = 0, orbit radius 0.5: the eye is at the fixed
+        // stand-off (100), not at 0.5 — an object at z = 2 that used to
+        // sit behind the eye is now in front of it, in-window.
+        let camera = perspective_orbit(0.5, 0.0);
         let (eye, _, _, _, _, near, far) = camera.camera_view_params();
-        assert!((eye.z - 8.0).abs() < 1e-4, "eye.z = {}", eye.z);
-        // Sheet at distance 8 from the eye is inside the clip window.
-        assert!(near.get() < 8.0 && far.get() > 8.0);
-        // The comment's object at z = 5 sits 3 in front of the eye — the
-        // depth of the raised point itself is inside the window, not just
-        // the sheet below it.
-        let above_depth = (Vec3::new(0.0, 0.0, 5.0) - eye).length();
+        assert!(
+            (eye.z - PlaneCamera::ORTHO_EYE_STANDOFF.get()).abs() < 1e-3,
+            "eye.z = {} (fixed stand-off, not the 0.5 radius)",
+            eye.z
+        );
+        // Geometry at z = 2 lies between the eye and the sheet, in-window.
+        let above_depth = (Vec3::new(0.0, 0.0, 2.0) - eye).length();
         assert!(
             above_depth >= near.get() && above_depth <= far.get(),
-            "object at z=5 depth {above_depth} outside [{}, {}]",
+            "object at z=2 depth {above_depth} outside [{}, {}]",
             near.get(),
             far.get()
         );
+        // The same object is pickable: the ortho ray through its screen
+        // position (center) carries it inside the pick window.
         let viewport = camera.viewport_camera().expect("picking camera");
         let hit = crate::picking::pointer_on_plane(
             &viewport,
@@ -699,30 +711,32 @@ mod tests {
             crate::picking::WorkPlane::XY,
         )
         .expect("sheet hit");
-        let depth = (hit - viewport.position()).length();
-        assert!(depth >= viewport.near() && depth <= viewport.far());
+        let point_depth = (Vec3::new(hit.x, hit.y, 2.0) - viewport.position()).length();
+        assert!(
+            point_depth >= viewport.near() && point_depth <= viewport.far(),
+            "picked z=2 point depth {point_depth} outside [{}, {}]",
+            viewport.near(),
+            viewport.far()
+        );
     }
 
-    /// Review blocker: a raised target with a close orbit keeps the target
-    /// level visible — `near` is bounded by `|eye − target|·CLIP_MARGIN`,
-    /// not only by `eye_height·CLIP_MARGIN` (which would leave `near`
-    /// beyond a target sitting closer to the eye than `near`).
+    /// Review blocker (Editor track): a raised target with a close orbit
+    /// keeps the target level inside the clip window — the eye stands a
+    /// fixed stand-off above `target.z`, never a radius-length behind it.
     #[test]
     fn raised_target_close_orbit_keeps_target_in_clip_window() {
-        // target.z = 5, |eye − target| = 0.05: the eye is at 5.05 and the
-        // object at 5 is only 0.05 in front of it — closer than an
-        // `eye_height`-derived near of 0.505 would allow.
-        let camera = PlaneCamera::from_camera_view(
-            Vec3::new(0.0, 0.0, 5.05),
-            Vec3::new(0.0, 0.0, 5.0),
-            CameraProjection::Perspective,
-            Degrees::new(60.0),
-            Meters::new(0.1),
-            Meters::new(100.0),
-            [800.0, 600.0],
-        )
-        .expect("raised close orbit entry");
+        // (б) target.z = 5, orbit radius 0.05: the eye is at 5 + 100 = 105,
+        // so the object at z = 5 is a full stand-off in front of it — in
+        // the window even though the radius is far smaller than the input
+        // near (0.1).
+        let camera = perspective_orbit(5.05, 5.0);
+        let sheet_height = camera.eye_height();
         let (eye, _, _, _, _, near, far) = camera.camera_view_params();
+        assert!(
+            (eye.z - (5.0 + PlaneCamera::ORTHO_EYE_STANDOFF.get())).abs() < 1e-3,
+            "eye.z = {} (target.z + stand-off, not 5.05)",
+            eye.z
+        );
         let target = Vec3::new(0.0, 0.0, 5.0);
         let depth = (target - eye).length();
         assert!(
@@ -731,11 +745,10 @@ mod tests {
             near.get(),
             far.get()
         );
-        // The sheet below stays covered too (sheet depth = eye height 5.05).
-        let sheet_depth = eye.length();
+        // The sheet below stays covered too (sheet depth = eye height).
         assert!(
-            sheet_depth >= near.get() && sheet_depth <= far.get(),
-            "sheet depth {sheet_depth} outside [{}, {}]",
+            sheet_height >= near.get() && sheet_height <= far.get(),
+            "sheet depth {sheet_height} outside [{}, {}]",
             near.get(),
             far.get()
         );

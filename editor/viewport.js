@@ -11,10 +11,14 @@
         // need touch-action:none so the browser doesn't hijack drags.
         if (canvasEl) canvasEl.style.touchAction = 'none';
 
+        // The WASM module owns the backing store (it resizes every frame
+        // at devicePixelRatio); this boot-time resize only prevents a
+        // wrong-size flash before the first frame.
         const resizeCanvas = () => {
             if (!viewportEl || !canvasEl) return;
-            canvasEl.width = viewportEl.clientWidth;
-            canvasEl.height = viewportEl.clientHeight;
+            const dpr = window.devicePixelRatio || 1;
+            canvasEl.width = Math.max(1, Math.round(viewportEl.clientWidth * dpr));
+            canvasEl.height = Math.max(1, Math.round(viewportEl.clientHeight * dpr));
         };
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
@@ -60,9 +64,13 @@
                 return;
             }
             gridEl.hidden = false;
-            const minor = grid.minor_step_px;
+            // Wire grid values are backing-store (device) pixels; the
+            // overlay paints in CSS pixels.
+            const dpr = window.devicePixelRatio || 1;
+            const minor = grid.minor_step_px / dpr;
             const major = minor * grid.major_every;
-            const [ox, oy] = grid.origin_px;
+            const ox = grid.origin_px[0] / dpr;
+            const oy = grid.origin_px[1] / dpr;
             gridEl.style.backgroundImage =
                 'linear-gradient(rgba(255,255,255,.10) 1px, transparent 1px),' +
                 'linear-gradient(90deg, rgba(255,255,255,.10) 1px, transparent 1px),' +
