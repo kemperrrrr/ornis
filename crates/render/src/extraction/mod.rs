@@ -278,6 +278,13 @@ fn world_trs(
         desc.map(|desc| (desc.translation, desc.rotation.get(), desc.scale))
     }
 }
+fn skin_motion_validity(skinning: SkinningMode) -> MotionValidity {
+    match skinning {
+        SkinningMode::Gpu => MotionValidity::Valid,
+        SkinningMode::Cpu => MotionValidity::Invalid,
+    }
+}
+
 /// Extracts complete renderable entities from the ECS store.
 ///
 /// Thin wrapper over [`extract_render_data_with_stats`] discarding the
@@ -407,11 +414,7 @@ pub fn extract_render_data_with_stats(store: &SmartStore) -> (FrameUpload, Extra
                     normal_matrix: Mat4::IDENTITY,
                     material_index,
                 },
-                motion_valid: if skinning == SkinningMode::Gpu {
-                    MotionValidity::Valid
-                } else {
-                    MotionValidity::Invalid
-                },
+                motion_valid: skin_motion_validity(skinning),
                 skinning,
                 joint_palette,
                 pose,
@@ -594,6 +597,18 @@ mod tests {
     use ornis_assets::scene::TransformDesc;
     use ornis_core::Engine;
     use ornis_core::units::Clamped01;
+
+    #[test]
+    fn skin_motion_validity_requires_gpu_history() {
+        assert_eq!(
+            skin_motion_validity(SkinningMode::Gpu),
+            MotionValidity::Valid
+        );
+        assert_eq!(
+            skin_motion_validity(SkinningMode::Cpu),
+            MotionValidity::Invalid
+        );
+    }
 
     #[test]
     fn extraction_uses_global_transform_not_the_local_desc() {

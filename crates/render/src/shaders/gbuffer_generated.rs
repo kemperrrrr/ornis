@@ -301,7 +301,7 @@ mod tests {
         let vertex = vs_main::wgsl_source();
         let fragment = fs_main::wgsl_source();
         assert!(vertex.contains("obj.motion_valid"));
-        assert!(fragment.contains("input.previous_world_position.w > 0.5"));
+        assert!(fragment.contains("input.previous_world_position.w > MOTION_VALID_THRESHOLD"));
         assert!(fragment.contains("output.motion = motion;"));
         assert!(fragment.contains("output.previous_depth = previous_depth;"));
     }

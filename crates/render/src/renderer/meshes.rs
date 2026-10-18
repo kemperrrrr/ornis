@@ -753,8 +753,8 @@ impl Renderer3D {
                 },
             }),
         ];
-        let motion = g.motion.is_some();
-        if let Some(motion) = g.motion {
+        let motion = g.motion.is_some() && g.previous_depth.is_some();
+        if let (Some(motion), Some(previous_depth)) = (g.motion, g.previous_depth) {
             color_attachments.push(Some(wgpu::RenderPassColorAttachment {
                 view: motion,
                 depth_slice: None,
@@ -764,7 +764,18 @@ impl Renderer3D {
                     store: wgpu::StoreOp::Store,
                 },
             }));
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: previous_depth,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
         } else {
+            // Keep both trailing output slots aligned with the seven-target pipeline.
+            color_attachments.push(None);
             color_attachments.push(None);
         }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
