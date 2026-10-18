@@ -739,6 +739,73 @@ fn viewport_sync_plan(
     }
 }
 
+/// Pure plan for the sheet-viewport size sync: in `plane2d` the plane
+/// camera's pixel viewport tracks the surface (`handle_resize` and the
+/// entering size from `set_viewport_mode` both land here). Returns the
+/// viewport to write, or `None` when nothing must change (3D mode, no
+/// plane camera, or the viewport already matches `size_px`). No engine or
+/// DOM state, so host tests pin the branch.
+fn plane_viewport_sync_plan(
+    mode: ViewportMode,
+    plane: Option<&PlaneCamera>,
+    size_px: (u32, u32),
+) -> Option<[f32; 2]> {
+    if !mode.is_plane() {
+        return None;
+    }
+    plane.and_then(|plane| {
+        let size = [size_px.0 as f32, size_px.1 as f32];
+        (plane.viewport_px != size).then_some(size)
+    })
+}
+
+/// Applies the thread-local viewport mode to the replica engine every
+/// frame: keeps the `ViewportMode` resource in sync (so the plane input
+/// system gates correctly), publishes the active picking camera (so the
+/// E1 click/hover pipeline runs on the replica), and refreshes the wire
+/// JSON for the grid overlay.
+///
+/// Resource and thread-local I/O only — every decision lives in the pure
+/// [`plane_viewport_sync_plan`] / [`viewport_sync_plan`] seams, and the
+/// whole function is driven by a host test on a bare engine. The
+/// selection log is a separate browser edge ([`FrameState::log_selection_changes`])
+/// called by the frame loop right after this one.
+///
+/// `replace_scene` (via `FrameState::apply_live_scene`) only destroys
+/// scene entities and republishes lights: the `ViewportCamera` resource
+/// and the `Selected`/`Hovered` lanes survive a live update (marks on
+/// removed entities vanish with them; replacements start unselected).
+fn sync_viewport_state(engine: &mut ornis_core::Engine, size: (u32, u32)) {
+    let mode = VIEWPORT_MODE.with(|cell| cell.get());
+    let _ = engine.world_mut().insert(mode);
+    let plane = read_plane_camera(engine);
+    if let Some(viewport_px) = plane_viewport_sync_plan(mode, plane.as_ref(), size)
+        && let Some(mutex) = engine
+            .world()
+            .resources()
+            .get::<std::sync::Mutex<PlaneCamera>>()
+    {
+        mutex
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_viewport_px(viewport_px);
+    }
+    let plane = read_plane_camera(engine);
+    let orbit = read_orbit_camera(engine);
+    let pointer = engine
+        .world()
+        .resources()
+        .get::<InputState>()
+        .map(|input| input.pointer_position());
+    let (picking, json) = viewport_sync_plan(mode, plane.as_ref(), orbit.as_ref(), size, pointer);
+    if let Some(picking) = picking {
+        let _ = engine.world_mut().insert(picking);
+    }
+    LAST_STATE_JSON.with(|cell| {
+        *cell.borrow_mut() = json;
+    });
+}
+
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
 fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
     let window = web_sys::window().ok_or("no window")?;
@@ -1055,54 +1122,6 @@ impl<'a> FrameState<'a> {
         );
     }
 
-    /// Applies the thread-local viewport mode to the replica engine every
-    /// frame: keeps the `ViewportMode` resource in sync (so the plane input
-    /// system gates correctly), publishes the active picking camera (so the
-    /// E1 click/hover pipeline runs on the replica), and refreshes the wire
-    /// JSON for the grid overlay.
-    ///
-    /// `replace_scene` (via [`FrameState::apply_live_scene`]) only destroys
-    /// scene entities and republishes lights: the `ViewportCamera` resource
-    /// and the `Selected`/`Hovered` lanes survive a live update (marks on
-    /// removed entities vanish with them; replacements start unselected).
-    // qual:allow(test_quality, untested) reason: "browser frame-loop seam over GPU/surface state; the pure branch is pinned by viewport_sync_plan host tests and the mode switch by apply_mode_request"
-    fn sync_viewport_state(&mut self) {
-        let mode = VIEWPORT_MODE.with(|cell| cell.get());
-        let engine = self.render_world.engine_mut();
-        let _ = engine.world_mut().insert(mode);
-        let size = (self.config.width, self.config.height);
-        if mode.is_plane() {
-            // Keep the plane viewport in sync with the surface (resize and
-            // the entering size from `set_viewport_mode` both land here).
-            if let Some(mutex) = engine
-                .world()
-                .resources()
-                .get::<std::sync::Mutex<PlaneCamera>>()
-            {
-                mutex
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .set_viewport_px([size.0 as f32, size.1 as f32]);
-            }
-        }
-        let plane = read_plane_camera(engine);
-        let orbit = read_orbit_camera(engine);
-        let pointer = engine
-            .world()
-            .resources()
-            .get::<InputState>()
-            .map(|input| input.pointer_position());
-        let (picking, json) =
-            viewport_sync_plan(mode, plane.as_ref(), orbit.as_ref(), size, pointer);
-        if let Some(picking) = picking {
-            let _ = engine.world_mut().insert(picking);
-        }
-        LAST_STATE_JSON.with(|cell| {
-            *cell.borrow_mut() = json;
-        });
-        self.log_selection_changes();
-    }
-
     /// Logs the `Selected` set when it changes (`[ornis-wasm] selected …`).
     /// Command-up over WS and the outline are E2, out of scope.
     // qual:allow(test_quality, untested) reason: "browser console edge over a thread-local; the snapshot shape it logs is pinned by the selected_snapshot host test"
@@ -1377,7 +1396,11 @@ fn spawn_render_loop(
         }
         // Publish the picking camera and wire JSON before the schedule so
         // the frame's pick systems and the overlay read the current mode.
-        frame.sync_viewport_state();
+        // The sync seam is resource I/O over the bare engine — host-tested;
+        // only the selection log stays a browser-only console edge.
+        let size = (frame.config.width, frame.config.height);
+        sync_viewport_state(frame.render_world.engine_mut(), size);
+        frame.log_selection_changes();
         frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
@@ -1738,13 +1761,44 @@ mod integration_tests {
         assert!((plane.half_height().get() - expected_hh).abs() < 1e-4);
         assert_eq!(near.get(), 0.1);
         assert_eq!(far.get(), 100.0);
-        // Re-entering while already in 2D is a no-op (does not overwrite
-        // SAVED_ORBIT with the hidden orbit camera).
+        // Re-entering while already in 2D is a no-op: the early exit must
+        // protect SAVED_ORBIT from being overwritten by a hidden orbit and
+        // the sheet must not be rebuilt from it. Re-installing a distinctly
+        // positioned orbit makes the branch observable — without it
+        // `read_orbit_camera` would return `None` and the no-op would be
+        // indistinguishable from the missing-orbit no-op (the `Mutex` is
+        // removed on entry, so a bare re-call returns `false` either way).
+        ornis_render::install_orbit_camera(
+            &mut engine,
+            OrbitCamera::looking_at(
+                glam::Vec3::new(3.0, 4.0, 9.0),
+                glam::Vec3::new(1.0, 1.0, 0.0),
+            ),
+        );
+        let saved_before =
+            SAVED_ORBIT.with(|cell| cell.borrow().as_ref().map(|orbit| orbit.position()));
+        let sheet_before = read_plane_camera(&engine).expect("plane camera");
         assert!(!apply_mode_request(
             &mut engine,
             ModeRequest::Plane2d,
             (800, 600)
         ));
+        let saved_after =
+            SAVED_ORBIT.with(|cell| cell.borrow().as_ref().map(|orbit| orbit.position()));
+        let original = saved_before.expect("SAVED_ORBIT written on entry");
+        assert!(
+            (original - glam::Vec3::new(0.0, 0.0, 9.0)).length() < 1e-3,
+            "SAVED_ORBIT must keep the original entry orbit, got {original:?}"
+        );
+        assert_eq!(
+            saved_after, saved_before,
+            "re-entering 2D must not overwrite SAVED_ORBIT"
+        );
+        let sheet_after = read_plane_camera(&engine).expect("plane camera");
+        assert_eq!(
+            sheet_after, sheet_before,
+            "re-entering 2D must not rebuild the sheet from the hidden orbit"
+        );
         // Leaving restores the saved orbit and flips the mode back.
         assert!(apply_mode_request(
             &mut engine,
@@ -1830,6 +1884,107 @@ mod integration_tests {
         );
         let v: serde_json::Value = serde_json::from_str(&json).expect("JSON");
         assert_eq!(v["mode"], serde_json::json!("perspective3d"));
+    }
+
+    /// `plane_viewport_sync_plan` pins the sheet-viewport size sync: in 2D
+    /// a viewport that lags the surface is rewritten to `size_px`, a fresh
+    /// one is left alone, and neither 3D nor a missing plane camera ever
+    /// writes the sheet viewport.
+    #[test]
+    fn plane_viewport_sync_plan_targets_surface_size() {
+        let plane = PlaneCamera::new(
+            glam::Vec2::ZERO,
+            ornis_core::Meters::new(5.0),
+            ornis_core::Meters::new(10.0),
+            ornis_core::Meters::new(0.1),
+            ornis_core::Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("valid test plane camera");
+        // 2D + stale surface: rewrite to the new size.
+        assert_eq!(
+            plane_viewport_sync_plan(ViewportMode::Plane2d, Some(&plane), (1024, 768)),
+            Some([1024.0, 768.0])
+        );
+        // 2D + already fresh: nothing to write.
+        assert_eq!(
+            plane_viewport_sync_plan(ViewportMode::Plane2d, Some(&plane), (800, 600)),
+            None
+        );
+        // 3D never touches the sheet viewport.
+        assert_eq!(
+            plane_viewport_sync_plan(ViewportMode::Perspective3d, Some(&plane), (1024, 768)),
+            None
+        );
+        // Plane mode without a plane camera: nothing to write.
+        assert_eq!(
+            plane_viewport_sync_plan(ViewportMode::Plane2d, None, (1024, 768)),
+            None
+        );
+    }
+
+    /// `sync_viewport_state` end-to-end on a bare engine: it publishes the
+    /// mode and picking-camera resources, keeps the sheet viewport in step
+    /// with the surface in 2D (and leaves it alone in 3D), and caches the
+    /// matching wire JSON. This is what makes the seam host-tested — the
+    /// body is resource I/O over the plans pinned above.
+    #[test]
+    fn sync_viewport_state_publishes_resources() {
+        use ornis_core::Engine;
+        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Plane2d));
+        LAST_STATE_JSON.with(|cell| cell.borrow_mut().clear());
+        let mut engine = Engine::new();
+        let plane = PlaneCamera::new(
+            glam::Vec2::ZERO,
+            ornis_core::Meters::new(5.0),
+            ornis_core::Meters::new(10.0),
+            ornis_core::Meters::new(0.1),
+            ornis_core::Meters::new(100.0),
+            [800.0, 600.0],
+        )
+        .expect("valid test plane camera");
+        install_plane_camera(&mut engine, plane);
+
+        // Plane mode: stale 800×600 viewport vs surface 1024×768 → synced.
+        sync_viewport_state(&mut engine, (1024, 768));
+        let synced = read_plane_camera(&engine).expect("plane camera");
+        assert_eq!(synced.viewport_px, [1024.0, 768.0]);
+        assert_eq!(
+            engine.world().resources().get::<ViewportMode>().copied(),
+            Some(ViewportMode::Plane2d)
+        );
+        assert!(
+            engine
+                .world()
+                .resources()
+                .get::<ornis_editor::ViewportCamera>()
+                .is_some(),
+            "plane picking camera published"
+        );
+        let v: serde_json::Value = serde_json::from_str(&viewport_state_json()).expect("JSON");
+        assert_eq!(v["mode"], serde_json::json!("plane2d"));
+        assert_eq!(v["center"], serde_json::json!([0.0, 0.0]));
+
+        // 3D: mode flips, JSON resets to perspective3d (null plane fields),
+        // and the sheet viewport stays where 2D left it.
+        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
+        ornis_render::install_orbit_camera(
+            &mut engine,
+            OrbitCamera::looking_at(glam::Vec3::new(0.0, 0.0, 9.0), glam::Vec3::ZERO),
+        );
+        sync_viewport_state(&mut engine, (640, 480));
+        assert_eq!(
+            engine.world().resources().get::<ViewportMode>().copied(),
+            Some(ViewportMode::Perspective3d)
+        );
+        let v: serde_json::Value = serde_json::from_str(&viewport_state_json()).expect("JSON");
+        assert_eq!(v["mode"], serde_json::json!("perspective3d"));
+        assert!(v["center"].is_null());
+        let plane = read_plane_camera(&engine).expect("plane camera");
+        assert_eq!(plane.viewport_px, [1024.0, 768.0], "3D leaves 2D state");
+
+        VIEWPORT_MODE.with(|cell| cell.set(ViewportMode::Perspective3d));
+        LAST_STATE_JSON.with(|cell| cell.borrow_mut().clear());
     }
 
     #[test]
