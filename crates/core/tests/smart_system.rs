@@ -117,6 +117,11 @@ fn nudge_velocity(m: &mut Mote) {
 }
 
 #[smart_system]
+fn integrate_mote(m: &mut Mote) {
+    m.position += m.velocity * 0.5;
+}
+
+#[smart_system]
 fn retarget(c: &mut Chaser, #[config] to: Option<Entity>) {
     if c.position >= 0.0 {
         c.target = to;
@@ -307,6 +312,42 @@ fn link_read_gathers_target_bundle() {
     assert_eq!(target_body.position, 10.0);
     let loner_body = Chaser::pack_get(store, loner).expect("loner bundle");
     assert_eq!(loner_body.position, 1.0);
+}
+
+/// The generated per-object loop produces the same bits as a hand-written
+/// lane loop over the same columns.
+#[test]
+fn generated_loop_matches_manual_lane_loop() {
+    let motes: Vec<Mote> = (0..257)
+        .map(|i| mote(i as f32 * 0.5, (i % 5) as f32 - 2.0))
+        .collect();
+    let (generated, generated_entities) = resources_with_motes(&motes);
+    let mut schedule = Schedule::new();
+    schedule.add_system(IntegrateMoteSystem::new());
+    schedule.run(&generated);
+
+    let (manual, manual_entities) = resources_with_motes(&motes);
+    {
+        let store = manual.get::<SmartStore>().expect("store");
+        let mut positions = store
+            .write_lane::<Mote__position__PackLane>()
+            .expect("position lane");
+        let velocities = store
+            .read_lane::<Mote__velocity__PackLane>()
+            .expect("velocity lane");
+        for (position, velocity) in positions.data.iter_mut().zip(velocities.data.iter()) {
+            position.0 += velocity.0 * 0.5;
+        }
+    }
+
+    let generated_store = generated.get::<SmartStore>().expect("store");
+    let manual_store = manual.get::<SmartStore>().expect("store");
+    for (left, right) in generated_entities.iter().zip(&manual_entities) {
+        let a = Mote::pack_get(generated_store, *left).expect("bundle");
+        let b = Mote::pack_get(manual_store, *right).expect("bundle");
+        assert_eq!(a.position.to_bits(), b.position.to_bits());
+        assert_eq!(a.velocity.to_bits(), b.velocity.to_bits());
+    }
 }
 
 /// Field-level access: a body that touches only `u.position` declares only
