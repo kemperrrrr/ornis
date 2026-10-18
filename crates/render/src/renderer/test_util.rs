@@ -34,9 +34,9 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
 
 /// Adapter handle, or `None` on headless CI without a GPU.
 ///
-/// `ORNIS_REQUIRE_GPU=1` (the CI `test` shard) panics instead of skipping, so
-/// a missing adapter can never turn a GPU gate into a pass; an explicit
-/// `ORNIS_REQUIRE_GPU=0` keeps the skip.
+/// A set `ORNIS_REQUIRE_GPU` (non-empty, not `"0"` — the CI `test` shard
+/// sets `=1`) panics instead of skipping, so a missing adapter can never
+/// turn a GPU gate into a pass; unset or explicit `"0"` keeps the skip.
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let pair = pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -56,15 +56,17 @@ pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             .ok()
     });
     if pair.is_none() && require_gpu() {
-        panic!("ORNIS_REQUIRE_GPU=1 but no wgpu adapter is available");
+        panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
     }
     pair
 }
 
 /// Whether the harness must fail (rather than skip) when no adapter exists.
-/// `= "1"`; an explicit `ORNIS_REQUIRE_GPU=0` keeps the skip.
+/// Set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` — the same
+/// semantics the gpu-culling slice centralizes as `gpu_required()`, so the
+/// two helpers collapse into one when both land.
 fn require_gpu() -> bool {
-    matches!(std::env::var("ORNIS_REQUIRE_GPU").as_deref(), Ok("1"))
+    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Offscreen `Rgba8UnormSrgb` render target shared by the headless

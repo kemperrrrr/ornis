@@ -10,9 +10,9 @@ use super::*;
 /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
 /// logged, never silent).
 ///
-/// `ORNIS_REQUIRE_GPU=1` (the CI `test` shard) panics instead of skipping:
-/// a missing adapter must never turn a GPU gate into a pass. An explicit
-/// `ORNIS_REQUIRE_GPU=0` keeps the skip.
+/// A set `ORNIS_REQUIRE_GPU` (non-empty, not `"0"` — the CI `test` shard
+/// sets `=1`) panics instead of skipping: a missing adapter must never turn
+/// a GPU gate into a pass. Unset or explicit `"0"` keeps the skip.
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let descriptor = wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -35,9 +35,11 @@ fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 }
 
 /// Whether the harness must fail (rather than skip) when no adapter exists.
-/// `= "1"` — an explicit `ORNIS_REQUIRE_GPU=0` keeps the skip.
+/// Set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` — the same
+/// semantics the gpu-culling slice centralizes as `gpu_required()`, so the
+/// two helpers collapse into one when both land.
 fn require_gpu() -> bool {
-    matches!(std::env::var("ORNIS_REQUIRE_GPU").as_deref(), Ok("1"))
+    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Requests the default adapter/device from `instance`, logging the
@@ -162,9 +164,12 @@ fn histogram_reserves_bin_zero_for_below_range_texels() {
 }
 
 /// A non-finite texel is metered as black on both sides: the CPU floors it
-/// to the luminance floor, and the WGSL `select(..., !isFinite(luma))` does
-/// the same, so a NaN can never land in an in-range bin and diverge from the
-/// host reference.
+/// to the luminance floor, and the WGSL guard
+/// (`luma != luma || abs(luma) > 3.4e38` — the `isFinite` replacement this
+/// WGSL frontend lacks) does the same, so neither a NaN nor a ±Inf can land
+/// in an in-range bin and diverge from the host reference. Metering `+Inf`
+/// as black is deliberate: it is treated like any other non-finite sample,
+/// not as an over-range hit, keeping GPU and CPU bit-identical.
 #[test]
 fn non_finite_texels_are_metered_as_black() {
     let settings = AutoExposureSettings::default();
@@ -184,12 +189,19 @@ fn non_finite_texels_are_metered_as_black() {
         );
         assert_eq!(histogram_bin(log_luminance(bad), &settings), 0);
     }
-    // The GPU histogram agrees: one NaN texel next to one mid-grey texel
-    // leaves bin 0 and the mid-grey bin each holding exactly one count.
+    // The GPU histogram agrees: the NaN and the ±Inf texels land in bin 0
+    // next to the mid-grey texel's own bin. The infinities matter most —
+    // without the magnitude guard `+Inf` would slip into the last bin as a
+    // phantom over-range sample.
     if let Some((device, queue)) = try_device() {
-        const W: u32 = 2;
+        const W: u32 = 4;
         const H: u32 = 1;
-        let texels = [[f32::NAN; 3], [0.5; 3]];
+        let texels = [
+            [f32::NAN; 3],
+            [f32::INFINITY; 3],
+            [f32::NEG_INFINITY; 3],
+            [0.5; 3],
+        ];
         let view = hdr_texture_from_texels(&device, &queue, W, H, &texels);
         let pass = AutoExposure::new(&device);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -213,7 +225,7 @@ fn non_finite_texels_are_metered_as_black() {
         let gpu = read_histogram(&device, &queue, &pass);
         let mid_bin = histogram_bin(log_luminance([0.5; 3]), &settings);
         assert_eq!(gpu, build_histogram(&texels, &settings));
-        assert_eq!(gpu[0], 1, "the NaN texel must land in bin 0");
+        assert_eq!(gpu[0], 3, "the NaN/+Inf/-Inf texels must land in bin 0");
         assert_eq!(gpu[mid_bin], 1, "the mid-grey texel must land in its bin");
     }
 }
@@ -349,6 +361,38 @@ fn adaptation_step_is_clamped_to_speed_times_dt() {
         ev = adapt_exposure_ev(ev, 4.0, 1.0 / 60.0, &settings);
     }
     assert!((ev - 4.0).abs() < 1e-2, "{ev}");
+}
+
+/// Both ends of the smoothing step clamp into the EV window, mirroring the
+/// `prev_ev`/`target_ev` clamps of the WGSL adapt pass: a previous exposure
+/// or a target outside the window behaves exactly like the clamped value,
+/// and every clamped pair stays inside the window (no final clamp needed).
+#[test]
+fn adapt_exposure_ev_clamps_both_ends_into_the_ev_window() {
+    let settings = AutoExposureSettings {
+        min_ev: -1.0,
+        max_ev: 1.0,
+        ..AutoExposureSettings::default()
+    };
+    let dt = 1.0 / 60.0;
+    // A previous exposure far above the window behaves as if it started at
+    // the window's top edge (e.g. a switch out of a Manual multiplier of
+    // 100.0, or a window narrowed under a running Auto).
+    let from_outside = adapt_exposure_ev(6.64, -0.4, dt, &settings);
+    let from_edge = adapt_exposure_ev(1.0, -0.4, dt, &settings);
+    assert_eq!(from_outside, from_edge, "prev_ev must be clamped");
+    // A target far below the window is clamped to the bottom edge before
+    // the step is taken, so the step follows the clamped target.
+    let along_raw = adapt_exposure_ev(0.0, -9.1, dt, &settings);
+    let along_clamped = adapt_exposure_ev(0.0, -1.0, dt, &settings);
+    assert_eq!(along_raw, along_clamped, "target_ev must be clamped");
+    // Whatever the ends, the result is inside the window.
+    for ev in [from_outside, along_raw] {
+        assert!(
+            (settings.min_ev..=settings.max_ev).contains(&ev),
+            "adapted {ev} escaped the EV window"
+        );
+    }
 }
 
 /// Uploads an `Rgba32Float` texture holding `texels` (opaque alpha).
@@ -1014,13 +1058,11 @@ fn gpu_forward_only_mode_meters_the_forward_layer() {
     );
 }
 
-/// The forward layer carries coverage: the composite tone-maps
-/// `fwd.rgb * fwd.a`, so the histogram must meter that premultiplied value —
-/// The histogram meters the forward layer through its alpha in both plans
-/// that sample it: `mode == 1` (forward-only, the deferred layer is ignored)
-/// and `mode == 2` (hybrid, deferred + forward). The layer is premultiplied
-/// (`fwd.rgb * fwd.a`) — dropping the alpha weight moves the metered
-/// luminance and must fail.
+/// The forward layer carries coverage: the histogram must meter the
+/// premultiplied `fwd.rgb * fwd.a` in both plans that sample it —
+/// `mode == 1` (forward-only, the deferred layer is ignored) and
+/// `mode == 2` (hybrid, deferred + forward). Dropping the alpha weight
+/// moves the metered luminance and must fail.
 #[test]
 fn gpu_forward_layer_is_metered_through_its_alpha() {
     let Some((device, queue)) = try_device() else {
@@ -1134,6 +1176,111 @@ fn gpu_one_step_matches_the_cpu_speed_in_both_directions() {
             "luminance {luminance}: the exposure must {direction} ({gpu})"
         );
     }
+}
+
+/// A manual exposure above the EV window must be adapted from the window's
+/// top edge, not from the raw value: the WGSL `prev_ev` clamp and the CPU
+/// mirror in `adapt_exposure_ev` are both load-bearing.
+#[test]
+fn gpu_one_step_from_a_manual_exposure_outside_the_window_matches_the_cpu() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let settings = AutoExposureSettings {
+        min_ev: -1.0,
+        max_ev: 1.0,
+        ..AutoExposureSettings::default()
+    };
+    // Manual 100.0 is EV ≈ 6.64, far above the window; the scene below wants
+    // an in-window target, so the step is dictated by the clamped previous
+    // EV (exactly one stop of headroom above the target).
+    let luminance = 0.25_f32;
+    let texels = vec![[luminance; 3]; (W * H) as usize];
+    let avg = average_log_luminance(&build_histogram(&texels, &settings), &settings)
+        .expect("uniform in-range scene");
+    let target = settings.target_ev() - avg;
+    assert!(
+        target > settings.min_ev && target < settings.max_ev,
+        "the target {target} must sit inside the window"
+    );
+    let pass = AutoExposure::new(&device);
+    pass.write_manual(&queue, 100.0);
+    let view = constant_hdr(&device, &queue, W, H, [luminance; 3]);
+    let gpu = advance(
+        &device,
+        &queue,
+        &pass,
+        Meter::deferred(&view, &settings, W, H, 1.0 / 60.0),
+    );
+    // The CPU reference receives the raw previous EV (log2 of the manual
+    // multiplier) and clamps it internally, like the shader does.
+    let expected = exp2(adapt_exposure_ev(
+        100.0_f32.log2(),
+        target,
+        1.0 / 60.0,
+        &settings,
+    ));
+    let relative = (gpu - expected).abs() / expected;
+    assert!(
+        relative < 0.005,
+        "gpu {gpu} vs cpu {expected} (clamped prev EV)"
+    );
+    // The step moved down from EV 1.0 (exposure 2.0), not from the raw
+    // manual EV — an unclamped prev would still sit near 98.
+    assert!(gpu < 2.0, "must leave the window's top edge, got {gpu}");
+}
+
+/// A target far below the EV window is clamped before the step is taken:
+/// with the previous EV at the window's top edge and the clamped target one
+/// stop down, the linear regime moves `|delta| / transition_distance` of a
+/// `speed * dt` — the raw (unclamped) target would saturate at the full
+/// `speed * dt` and land further.
+#[test]
+fn gpu_step_along_a_clamped_target_matches_the_cpu() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let settings = AutoExposureSettings {
+        min_ev: -1.0,
+        max_ev: 0.0,
+        ..AutoExposureSettings::default()
+    };
+    // Bright scene: target ≈ log2(0.18) − log2(100) ≈ −9.1, deep below the
+    // window; the clamped target is −1.0, exactly one stop from the EV-0
+    // start (a fresh pass sits at exposure 1.0).
+    let luminance = 100.0_f32;
+    let texels = vec![[luminance; 3]; (W * H) as usize];
+    let avg = average_log_luminance(&build_histogram(&texels, &settings), &settings)
+        .expect("uniform in-range scene");
+    let target_raw = settings.target_ev() - avg;
+    assert!(
+        target_raw < settings.min_ev,
+        "the raw target {target_raw} must sit below the window"
+    );
+    let view = constant_hdr(&device, &queue, W, H, [luminance; 3]);
+    let gpu = advance(
+        &device,
+        &queue,
+        &AutoExposure::new(&device),
+        Meter::deferred(&view, &settings, W, H, 1.0 / 60.0),
+    );
+    let expected = exp2(adapt_exposure_ev(0.0, target_raw, 1.0 / 60.0, &settings));
+    // The clamped delta is exactly 1 EV, so the step is (1/60) / 1.5 EV —
+    // the deterministic value the GPU must reproduce.
+    let reference = exp2(-1.0 / 60.0 / settings.exponential_transition_distance);
+    assert!(
+        (expected - reference).abs() / reference < 1e-4,
+        "cpu {expected} vs analytic {reference}"
+    );
+    let relative = (gpu - expected).abs() / expected;
+    assert!(
+        relative < 1e-4,
+        "gpu {gpu} vs cpu {expected} (clamped target)"
+    );
 }
 
 /// One stop of EV compensation doubles the exposure the target maps onto

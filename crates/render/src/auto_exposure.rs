@@ -27,9 +27,10 @@
 //! * tail clipping uses a *partial* bin weight
 //!   (`clamp(cum, low, high) - clamp(cum_before, low, high)`), so the
 //!   clipped quantiles are honoured to sub-bin precision;
-//! * smoothing runs in EV (log2 exposure): the step is
-//!   `min(speed*dt, |delta| * speed*dt / transition_distance)`, clamped to
-//!   `speed*dt`, which behaves symmetrically for brightening and darkening;
+//! * smoothing runs in EV (log2 exposure): the previous and the target EV
+//!   are both clamped to the `[min_ev, max_ev]` window, and the step is
+//!   `min(speed*dt, |delta| * speed*dt / transition_distance, |delta|)`,
+//!   which behaves symmetrically for brightening and darkening;
 //! * the frame delta time is supplied by the host through
 //!   [`Renderer3D::set_frame_time`](crate::renderer::Renderer3D::set_frame_time);
 //!   [`DEFAULT_FRAME_DT_SECONDS`](crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS) is only a fallback used before the first
@@ -430,6 +431,11 @@ pub(crate) fn desired_exposure(avg_log_lum: f32, settings: &AutoExposureSettings
 /// when it falls. The `|delta|` clamp keeps the step from ever overshooting
 /// the target (so a large `dt` lands exactly on it).
 ///
+/// Both ends are clamped into the settings' `[min_ev, max_ev]` window
+/// first, mirroring the `prev_ev`/`target_ev` clamps of `adapt_wgsl`; with
+/// both ends inside the window and the step never overshooting, the result
+/// is already inside the window and needs no final clamp.
+///
 /// Mirrors the smoothing tail of `adapt_wgsl`.
 #[cfg(test)]
 pub(crate) fn adapt_exposure_ev(
@@ -438,6 +444,8 @@ pub(crate) fn adapt_exposure_ev(
     dt_seconds: f32,
     settings: &AutoExposureSettings,
 ) -> f32 {
+    let prev_ev = prev_ev.clamp(settings.min_ev, settings.max_ev);
+    let target_ev = target_ev.clamp(settings.min_ev, settings.max_ev);
     let delta = target_ev - prev_ev;
     let speed = if delta > 0.0 {
         settings.brighten_speed
@@ -449,7 +457,7 @@ pub(crate) fn adapt_exposure_ev(
     let step = max_step
         .min(delta.abs() * max_step / settings.exponential_transition_distance)
         .min(delta.abs());
-    (prev_ev + delta.signum() * step).clamp(settings.min_ev, settings.max_ev)
+    prev_ev + delta.signum() * step
 }
 
 /// Uniform block of the histogram pass.
@@ -550,7 +558,9 @@ pub struct ExposureFrame<'a> {
     /// Layer mix selector matching the composite: `0` deferred-only, `1`
     /// forward-only, `2` hybrid (`deferred + forward * alpha`).
     pub mode: u32,
-    /// HDR target width in texels (the bound view's extent).
+    /// HDR target width in texels (the bound view's extent; every HDR view
+    /// is frame-owned at `SizePolicy::MatchSurface`, so the renderer's
+    /// surface extent is that extent — wgpu exposes no view-size getter).
     pub width: u32,
     /// HDR target height in texels (the bound view's extent).
     pub height: u32,

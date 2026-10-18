@@ -193,7 +193,10 @@ fn adapt_exposure() {{
         let clamped = min(step, abs(delta));
         adapted = prev_ev + sign(delta) * clamped;
     }}
-    exposure_out.exposure = exp2(clamp(adapted, params.min_ev, params.max_ev));
+    // `adapted` is between the clamped `prev_ev` and `target_ev` (the step
+    // is clamped to `|delta|`), so it is already inside the EV window and
+    // needs no final clamp.
+    exposure_out.exposure = exp2(adapted);
 }}
 "#,
         bins = HISTOGRAM_BINS,

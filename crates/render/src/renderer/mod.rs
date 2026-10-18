@@ -567,8 +567,9 @@ impl Renderer3D {
     /// [`DEFAULT_FRAME_DT_SECONDS`](crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS)
     /// fallback is used, which makes the adaptation frame-rate dependent).
     ///
-    /// The multiplier is applied **after** tone mapping in the composite; it
-    /// is a different knob from the Lux pre-exposure of
+    /// The multiplier is applied **before** tone mapping (post-lighting,
+    /// pre-tonemap) in the composite — `aces(hdr * multiplier)`; it is a
+    /// different knob from the Lux pre-exposure of
     /// [`set_exposure`](Self::set_exposure), which is baked into the light
     /// colors on CPU.
     // qual:api — public renderer entry; in-tree callers are the unit tests.
@@ -887,6 +888,44 @@ mod tests {
         assert_eq!(renderer.frame_dt_seconds(), MAX_FRAME_DT_SECONDS);
         renderer.set_frame_time(f32::INFINITY);
         assert_eq!(renderer.frame_dt_seconds(), MAX_FRAME_DT_SECONDS);
+    }
+
+    /// [`Renderer3D::set_exposure`] stores finite multipliers and ignores
+    /// non-finite ones, so a bad host value can never poison the light
+    /// pre-exposure baked into the next [`set_lights`](Self::set_lights).
+    #[test]
+    fn set_exposure_ignores_non_finite_values() {
+        let Some((device, queue)) = test_util::try_device() else {
+            eprintln!("SKIPPED (set_exposure): no wgpu adapter");
+            return;
+        };
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: 4,
+            height: 4,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let mut renderer = Renderer3D::new(&device, &surface_config, 1);
+        drop(queue);
+
+        renderer.set_exposure(2.0);
+        assert_eq!(renderer.exposure(), 2.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            renderer.set_exposure(bad);
+            assert_eq!(
+                renderer.exposure(),
+                2.0,
+                "set_exposure({bad}) must be ignored"
+            );
+        }
+        // Finite values still land.
+        renderer.set_exposure(0.5);
+        assert_eq!(renderer.exposure(), 0.5);
     }
 }
 
