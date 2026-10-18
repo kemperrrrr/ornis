@@ -795,9 +795,7 @@ mod tests {
         // Shared evaluation shape is unchanged past the prelude: the
         // unified window loop with the cluster tail (#130).
         assert!(entry.contains("for (var k: u32 = 0; k < total; k = k + 1)"));
-        assert!(
-            entry.contains("ctx.cluster_light_indices[span.x + (k - ctx.lighting.light_count)]")
-        );
+        assert!(entry.contains("cluster_light_indices[span.x + (k - lighting.light_count)]"));
         assert!(entry.contains("continue;"));
         assert!(entry.contains("let base_bsdf = evaluate_base_layer("));
         assert!(entry.contains(

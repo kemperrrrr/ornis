@@ -357,8 +357,11 @@ fn hundred_point_lights_reach_the_frame() {
             );
         }
     }
-    // A cell midpoint sits beyond every light's range: ambient only.
-    let mid = glam::Vec3::new(GRID_SPACING * NDC_HALF, 0.0, GRID_SPACING * NDC_HALF);
+    // The grid center (0, 0, 0) is a cell-center point: 2.75 m from
+    // each of the four nearest lights — beyond every range, ambient
+    // only (with the even 16×8 grid it sits between lights, not under
+    // one).
+    let mid = glam::Vec3::ZERO;
     let (mx, my) = project_pixel(&view_proj, mid);
     let (r, g, b) = dominant_in_window(&pixels, mx, my);
     assert!(
