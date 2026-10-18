@@ -6,9 +6,9 @@
 //! content per cluster is identical, span placement is not).
 use super::{
     CLUSTER_COUNT, CLUSTER_DEPTH_NEAR, CLUSTER_FAR_LIMIT, CLUSTER_INDEX_LIST_LEN,
-    CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y, CLUSTER_WORKGROUPS,
-    CLUSTER_WORKGROUP_SIZE, ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER,
-    SPOT_BOUND_COS_FLOOR, cluster_log_ratio, cluster_slice_scale,
+    CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y, CLUSTER_WORKGROUP_SIZE,
+    CLUSTER_WORKGROUPS, ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER, SPOT_BOUND_COS_FLOOR,
+    cluster_log_ratio, cluster_slice_scale,
 };
 use crate::renderer::{GpuLight, LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
 use crate::shaders::helpers::NDC_TO_UV_HALF;
@@ -198,7 +198,10 @@ mod tests {
             previous = hi;
         }
         assert_eq!(cluster_slice_z_max(0), CLUSTER_DEPTH_NEAR);
-        assert_eq!(cluster_slice_z_max(CLUSTER_SLICE_COUNT - 1), CLUSTER_FAR_LIMIT);
+        assert_eq!(
+            cluster_slice_z_max(CLUSTER_SLICE_COUNT - 1),
+            CLUSTER_FAR_LIMIT
+        );
         // The lookup scale inverts the boundary map: every boundary maps
         // back onto its own slice (ceil semantics: the boundary belongs
         // to the slice it closes).

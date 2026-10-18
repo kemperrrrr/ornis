@@ -199,12 +199,8 @@ fn gpu_assignment_matches_cpu_reference() {
         return;
     };
     let view = glam::camera::rh::view::look_at_mat4(PARITY_EYE, glam::Vec3::ZERO, glam::Vec3::Y);
-    let proj = glam::camera::rh::proj::directx::perspective(
-        FOV.to_radians(),
-        16.0 / 9.0,
-        0.1,
-        100.0,
-    );
+    let proj =
+        glam::camera::rh::proj::directx::perspective(FOV.to_radians(), 16.0 / 9.0, 0.1, 100.0);
     let view_proj = proj * view;
     let mut records = Vec::new();
     // Two head directionals (kind only — the assignment never reads

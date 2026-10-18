@@ -670,8 +670,9 @@ fn fs_main_textured(
 /// forward-PBR indices.
 /// Bindings 16–19 are the clustered-lighting set (#130): params, storage,
 /// index list, grid.
-const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] =
-    &[0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19];
+const TEXTURED_PBR_FRAGMENT_BINDINGS: &[u32] = &[
+    0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+];
 
 /// Textured forward-PBR fragment shader: the legacy evaluation plus the
 /// three role samples, assembled exactly like

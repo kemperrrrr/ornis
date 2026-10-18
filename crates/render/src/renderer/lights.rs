@@ -610,6 +610,16 @@ fn cluster_record(
     }
 }
 
+/// One shadow-space camera uniform: the shadow pipelines reuse the
+/// gbuffer vertex shader, which only reads `view_proj`.
+fn shadow_camera_uniform(vp: &[[f32; 4]; 4]) -> CameraUniform {
+    CameraUniform {
+        view_proj: *vp,
+        inv_view_proj: NO_SHADOW_VP,
+        camera_pos: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
 /// Index of the first shadowed directional light in upload order, the
 /// single entry eligible to own the CSM cascades (`None` when absent).
 fn first_shadowed_directional_index(lights: &[LightDesc]) -> Option<usize> {
@@ -848,11 +858,7 @@ impl Renderer3D {
     /// Layers publish in assignment order (layer `i` ↔ entry `i`).
     fn publish_shadow_uniforms(&self, queue: &wgpu::Queue, built: &BuiltLighting) {
         for (layer, vp) in built.shadow_layer_vps.iter().enumerate() {
-            let uniform = CameraUniform {
-                view_proj: *vp,
-                inv_view_proj: NO_SHADOW_VP,
-                camera_pos: [0.0, 0.0, 0.0, 1.0],
-            };
+            let uniform = shadow_camera_uniform(vp);
             queue.write_buffer(
                 &self.shadow_vp_buffers[layer],
                 0,
@@ -866,11 +872,7 @@ impl Renderer3D {
         // Cube-face VPs publish the same way (as camera uniforms); the
         // active cube count is the face count over six.
         for (index, vp) in built.cube_face_vps.iter().enumerate() {
-            let uniform = CameraUniform {
-                view_proj: *vp,
-                inv_view_proj: NO_SHADOW_VP,
-                camera_pos: [0.0, 0.0, 0.0, 1.0],
-            };
+            let uniform = shadow_camera_uniform(vp);
             queue.write_buffer(
                 &self.shadow_cube_vp_buffers[index],
                 0,

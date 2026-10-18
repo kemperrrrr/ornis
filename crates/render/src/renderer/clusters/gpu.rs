@@ -13,7 +13,8 @@ use crate::renderer::GpuLight;
 use std::borrow::Cow;
 
 /// Which cluster buffer a test readback pulls (#130 parity gate).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// qual:api — test-visible selector; in-tree callers are the parity gates.
+#[cfg(test)]
 pub(crate) enum ClusterBuffer {
     /// The per-cluster `array<ClusterSpan>` grid.
     Grid,
@@ -88,8 +89,13 @@ impl ClusteredLights {
     /// current `view_proj` from it, so it never depends on
     /// `set_lights`/`set_camera` call order.
     pub(crate) fn new(device: &wgpu::Device, camera: &wgpu::Buffer) -> Self {
-        let [params_buffer, lights_buffer, grid_buffer, indices_buffer, counters_buffer] =
-            Self::assignment_buffers(device);
+        let [
+            params_buffer,
+            lights_buffer,
+            grid_buffer,
+            indices_buffer,
+            counters_buffer,
+        ] = Self::assignment_buffers(device);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cluster assignment shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Owned(super::wgsl::cluster_compute_wgsl())),
@@ -122,7 +128,7 @@ impl ClusteredLights {
             device,
             &bind_group_layout,
             camera,
-            &[
+            [
                 &params_buffer,
                 &lights_buffer,
                 &grid_buffer,
@@ -281,9 +287,12 @@ impl ClusteredLights {
             ClusterBuffer::Indices => &self.indices_buffer,
             ClusterBuffer::Counters => &self.counters_buffer,
         };
+        // wgpu maps need a non-empty range: floor the readback at one
+        // u32 word.
+        let size = bytes.max(std::mem::size_of::<u32>() as u64);
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cluster test readback"),
-            size: bytes.max(4),
+            size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -293,7 +302,7 @@ impl ClusteredLights {
         encoder.copy_buffer_to_buffer(src, 0, &readback, 0, bytes);
         queue.submit([encoder.finish()]);
         pollster::block_on(async {
-            let slice = readback.slice(0..bytes.max(4));
+            let slice = readback.slice(0..size);
             slice.map_async(wgpu::MapMode::Read, |_| {});
             device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
             let view = slice.get_mapped_range().ok()?;
