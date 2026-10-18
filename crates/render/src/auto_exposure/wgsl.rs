@@ -40,7 +40,14 @@ var<workgroup> histogram_shared: array<atomic<u32>, {bins}u>;
 
 fn log_luminance(color: vec3<f32>) -> f32 {{
     let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    return log2(max(luma, LUMINANCE_FLOOR));
+    // A non-finite luminance (NaN from a bad texel, or an infinity from a
+    // blown-out source) is floored to black, so it lands in the reserved
+    // bin 0 exactly like the CPU reference does. `x != x` is true only for
+    // NaN and the magnitude test catches ±Inf; together they replace the
+    // `isFinite` builtin, which this WGSL frontend does not expose.
+    let non_finite = luma != luma || abs(luma) > 3.4e38;
+    let safe = select(luma, LUMINANCE_FLOOR, non_finite);
+    return log2(max(safe, LUMINANCE_FLOOR));
 }}
 
 fn histogram_bin(log_lum: f32) -> u32 {{

@@ -9,6 +9,10 @@ use super::*;
 
 /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
 /// logged, never silent).
+///
+/// `ORNIS_REQUIRE_GPU=1` (the CI `test` shard) panics instead of skipping:
+/// a missing adapter must never turn a GPU gate into a pass. An explicit
+/// `ORNIS_REQUIRE_GPU=0` keeps the skip.
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let descriptor = wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -20,11 +24,20 @@ fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(descriptor);
     match pollster::block_on(request_device(instance)) {
         Some(pair) => Some(pair),
+        None if require_gpu() => {
+            panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
+        }
         None => {
             eprintln!("SKIPPED (auto_exposure): no wgpu device");
             None
         }
     }
+}
+
+/// Whether the harness must fail (rather than skip) when no adapter exists.
+/// `= "1"` — an explicit `ORNIS_REQUIRE_GPU=0` keeps the skip.
+fn require_gpu() -> bool {
+    matches!(std::env::var("ORNIS_REQUIRE_GPU").as_deref(), Ok("1"))
 }
 
 /// Requests the default adapter/device from `instance`, logging the
@@ -146,6 +159,63 @@ fn histogram_reserves_bin_zero_for_below_range_texels() {
         histogram_bin(log_luminance([1.0e6, 1.0e6, 1.0e6]), &settings),
         HISTOGRAM_BINS - 1
     );
+}
+
+/// A non-finite texel is metered as black on both sides: the CPU floors it
+/// to the luminance floor, and the WGSL `select(..., !isFinite(luma))` does
+/// the same, so a NaN can never land in an in-range bin and diverge from the
+/// host reference.
+#[test]
+fn non_finite_texels_are_metered_as_black() {
+    let settings = AutoExposureSettings::default();
+    let black = log_luminance([0.0, 0.0, 0.0]);
+    for bad in [
+        [f32::NAN, 0.0, 0.0],
+        [0.0, f32::NAN, 0.0],
+        [0.0, 0.0, f32::NAN],
+        [f32::NAN, f32::NAN, f32::NAN],
+        [f32::INFINITY, 0.0, 0.0],
+        [0.0, f32::NEG_INFINITY, 0.0],
+    ] {
+        assert_eq!(
+            log_luminance(bad),
+            black,
+            "non-finite texel {bad:?} must meter as black"
+        );
+        assert_eq!(histogram_bin(log_luminance(bad), &settings), 0);
+    }
+    // The GPU histogram agrees: one NaN texel next to one mid-grey texel
+    // leaves bin 0 and the mid-grey bin each holding exactly one count.
+    if let Some((device, queue)) = try_device() {
+        const W: u32 = 2;
+        const H: u32 = 1;
+        let texels = [[f32::NAN; 3], [0.5; 3]];
+        let view = hdr_texture_from_texels(&device, &queue, W, H, &texels);
+        let pass = AutoExposure::new(&device);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auto-exposure non-finite histogram encoder"),
+        });
+        pass.encode_histogram_only(
+            &device,
+            &queue,
+            &mut encoder,
+            ExposureFrame {
+                hdr: &view,
+                hdr_fwd: &view,
+                mode: 0,
+                width: W,
+                height: H,
+                settings,
+                dt_seconds: DEFAULT_FRAME_DT_SECONDS,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let gpu = read_histogram(&device, &queue, &pass);
+        let mid_bin = histogram_bin(log_luminance([0.5; 3]), &settings);
+        assert_eq!(gpu, build_histogram(&texels, &settings));
+        assert_eq!(gpu[0], 1, "the NaN texel must land in bin 0");
+        assert_eq!(gpu[mid_bin], 1, "the mid-grey texel must land in its bin");
+    }
 }
 
 #[test]
@@ -289,6 +359,19 @@ fn hdr_texture_from_texels(
     height: u32,
     texels: &[[f32; 3]],
 ) -> wgpu::TextureView {
+    let opaque: Vec<[f32; 4]> = texels.iter().map(|t| [t[0], t[1], t[2], 1.0]).collect();
+    hdr_texture_from_rgba(device, queue, width, height, &opaque)
+}
+
+/// Uploads an `Rgba32Float` texture holding `texels` with their own alpha
+/// (the forward layer carries coverage: the histogram meters `rgb * a`).
+fn hdr_texture_from_rgba(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    texels: &[[f32; 4]],
+) -> wgpu::TextureView {
     assert_eq!(texels.len(), (width * height) as usize);
     let size = wgpu::Extent3d {
         width,
@@ -305,10 +388,6 @@ fn hdr_texture_from_texels(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let mut data = Vec::with_capacity(texels.len() * 4);
-    for texel in texels {
-        data.extend_from_slice(&[texel[0], texel[1], texel[2], 1.0]);
-    }
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
@@ -316,7 +395,7 @@ fn hdr_texture_from_texels(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        bytemuck::cast_slice(&data),
+        bytemuck::cast_slice(texels),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(width * 4 * 4),
@@ -474,6 +553,31 @@ fn cpu_target(texels: &[[f32; 3]], settings: &AutoExposureSettings) -> f32 {
     desired_exposure(avg, settings)
 }
 
+/// Uploads `texels` as one HDR layer, advances the exposure one saturated
+/// step, and returns `(exposure, relative_error_vs_cpu_target)`. The shared
+/// body of every GPU-vs-CPU conformance check.
+fn gpu_saturated_exposure(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: (u32, u32),
+    texels: &[[f32; 3]],
+    settings: &AutoExposureSettings,
+) -> (f32, f32) {
+    // A huge dt saturates the step, so one update lands exactly on the
+    // target without temporal dependence.
+    const SATURATED_DT: f32 = 100.0;
+    let (width, height) = size;
+    let view = hdr_texture_from_texels(device, queue, width, height, texels);
+    let gpu = advance(
+        device,
+        queue,
+        &AutoExposure::new(device),
+        Meter::deferred(&view, settings, width, height, SATURATED_DT),
+    );
+    let expected = cpu_target(texels, settings);
+    (gpu, (gpu - expected).abs() / expected)
+}
+
 /// Two constant-luminance HDR scenes (a metering pair).
 fn scenes(
     device: &wgpu::Device,
@@ -511,15 +615,13 @@ fn gradient_texels(width: u32, height: u32, settings: &AutoExposureSettings) -> 
             .sum();
         // Sweep the whole window, plus below-range and above-range samples.
         let bin = 1 + (i % (HISTOGRAM_BINS - 2));
-        let (log_lum, lum) = if i % 7 == 0 {
-            (-20.0_f32, 2.0_f32.powf(-20.0))
+        let lum = if i % 7 == 0 {
+            2.0_f32.powf(-20.0)
         } else if i % 11 == 0 {
-            (20.0_f32, 2.0_f32.powf(20.0))
+            2.0_f32.powf(20.0)
         } else {
-            let l = bin_log_luminance(bin, settings);
-            (l, 2.0_f32.powf(l))
+            2.0_f32.powf(bin_log_luminance(bin, settings))
         };
-        let _ = log_lum;
         let scale = lum / weight;
         texels.push([
             direction[0] * scale,
@@ -581,21 +683,14 @@ fn gpu_reduction_matches_the_cpu_reduction_on_a_gradient() {
     const H: u32 = 13;
     let settings = AutoExposureSettings::default();
     let texels = gradient_texels(W, H, &settings);
-    let expected = cpu_target(&texels, &settings);
-    let view = hdr_texture_from_texels(&device, &queue, W, H, &texels);
 
     // A huge dt saturates the step, so one update lands exactly on the target
     // without temporal dependence.
-    let gpu = advance(
-        &device,
-        &queue,
-        &AutoExposure::new(&device),
-        Meter::deferred(&view, &settings, W, H, 100.0),
-    );
-    let relative = (gpu - expected).abs() / expected;
+    let (gpu, relative) = gpu_saturated_exposure(&device, &queue, (W, H), &texels, &settings);
     assert!(
         relative < 0.01,
-        "gpu exposure {gpu} vs cpu-derived {expected}"
+        "gpu exposure {gpu} vs cpu-derived {}",
+        cpu_target(&texels, &settings)
     );
 }
 
@@ -778,7 +873,8 @@ fn adaptation_speed_scales_with_dt() {
     const W: u32 = 16;
     const H: u32 = 16;
     let settings = AutoExposureSettings::default();
-    // A scene slightly above the target so the step stays in the linear
+    // A scene slightly below the target (darker than the `0.18` key, so the
+    // exposure rises) with a small enough delta to stay in the linear
     // regime (`|delta| < transition_distance`).
     let luminance = 0.127_f32;
     let view = constant_hdr(&device, &queue, W, H, [luminance; 3]);
@@ -795,10 +891,360 @@ fn adaptation_speed_scales_with_dt() {
     };
     let slow = step_ev(1.0 / 60.0);
     let fast = step_ev(1.0 / 30.0);
-    assert!(slow > 0.0, "scene is brighter than the key: {slow}");
+    assert!(slow > 0.0, "scene is darker than the key: {slow}");
     let ratio = fast / slow;
     assert!(
         (ratio - 2.0).abs() < 0.1,
         "doubling dt must double the EV step: {slow} -> {fast} (ratio {ratio})"
     );
+}
+
+/// The metered quantile window clips *partial* bins: with 1000 dark and 200
+/// blown-out texels (1200 in-range samples, window `[120, 1080]`) only 880 of
+/// the 1000 dark samples and 80 of the 200 bright ones are metered. A
+/// whole-bin reduction would weight both bins by their full counts and land
+/// more than a stop away.
+#[test]
+fn tail_clipping_uses_partial_bin_weights() {
+    let settings = AutoExposureSettings::default();
+    assert_eq!(
+        (settings.low_percentile, settings.high_percentile),
+        (0.10, 0.90)
+    );
+    let mut texels = vec![[0.01_f32; 3]; 1000];
+    texels.extend(std::iter::repeat_n([1000.0_f32; 3], 200));
+    let dark_bin = histogram_bin(log_luminance([0.01; 3]), &settings);
+    let bright_bin = histogram_bin(log_luminance([1000.0; 3]), &settings);
+    assert!((1..HISTOGRAM_BINS).contains(&dark_bin), "bin {dark_bin}");
+    assert!(
+        (1..HISTOGRAM_BINS).contains(&bright_bin),
+        "bin {bright_bin}"
+    );
+    assert_ne!(dark_bin, bright_bin, "the two scenes must not merge");
+
+    let hist = build_histogram(&texels, &settings);
+    let avg = average_log_luminance(&hist, &settings).expect("both bins are in range");
+    let exact = (880.0 * bin_log_luminance(dark_bin, &settings)
+        + 80.0 * bin_log_luminance(bright_bin, &settings))
+        / 960.0;
+    assert!((avg - exact).abs() < 1e-3, "avg {avg} vs exact {exact}");
+
+    let whole = (1000.0 * bin_log_luminance(dark_bin, &settings)
+        + 200.0 * bin_log_luminance(bright_bin, &settings))
+        / 1200.0;
+    assert!(
+        (avg - whole).abs() > 1.0,
+        "avg {avg} must not be the whole-bin mean {whole}"
+    );
+}
+
+/// GPU counterpart: one saturated step (`dt = 100 s`) lands exactly on the
+/// partial-weight reference, and nowhere near the whole-bin mean.
+#[test]
+fn gpu_partial_bin_weights_match_the_clipped_reference() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    // 1200 texels — exactly the sample count the `[p10, p90]` window of
+    // `[120, 1080]` above was derived for.
+    const W: u32 = 60;
+    const H: u32 = 20;
+    let settings = AutoExposureSettings::default();
+    let mut texels = vec![[0.01_f32; 3]; 1000];
+    texels.extend(std::iter::repeat_n([1000.0_f32; 3], 200));
+    let dark_bin = histogram_bin(log_luminance([0.01; 3]), &settings);
+    let bright_bin = histogram_bin(log_luminance([1000.0; 3]), &settings);
+    let exact = (880.0 * bin_log_luminance(dark_bin, &settings)
+        + 80.0 * bin_log_luminance(bright_bin, &settings))
+        / 960.0;
+    let expected = desired_exposure(exact, &settings);
+
+    let (gpu, relative) = gpu_saturated_exposure(&device, &queue, (W, H), &texels, &settings);
+    assert!(
+        relative < 0.01,
+        "gpu exposure {gpu} vs partial-weight reference {expected}"
+    );
+
+    let whole = (1000.0 * bin_log_luminance(dark_bin, &settings)
+        + 200.0 * bin_log_luminance(bright_bin, &settings))
+        / 1200.0;
+    let whole_ev = desired_exposure_ev(whole, &settings);
+    assert!(
+        (gpu.log2() - whole_ev).abs() > 1.0,
+        "gpu {gpu} must sit over a stop from the whole-bin mean (ev {whole_ev})"
+    );
+}
+
+/// Mode 1 (forward-only technique): the deferred layer is ignored and the
+/// forward layer alone is metered — a black deferred layer plus a bright
+/// forward layer must still adapt instead of holding the previous exposure.
+#[test]
+fn gpu_forward_only_mode_meters_the_forward_layer() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let settings = AutoExposureSettings::default();
+    let (black, forward) = scenes(&device, &queue, W, H, [[0.0; 3], [4.0; 3]]);
+    let expected = cpu_target(&vec![[4.0_f32; 3]; (W * H) as usize], &settings);
+
+    let exposure = advance(
+        &device,
+        &queue,
+        &AutoExposure::new(&device),
+        Meter {
+            hdr: &black,
+            hdr_fwd: &forward,
+            mode: 1,
+            width: W,
+            height: H,
+            settings: &settings,
+            dt: 100.0,
+        },
+    );
+    assert!(
+        exposure < 0.5,
+        "the forward layer must be metered on its own: {exposure}"
+    );
+    let relative = (exposure - expected).abs() / expected;
+    assert!(
+        relative < 0.02,
+        "exposure {exposure} vs CPU reference {expected}"
+    );
+}
+
+/// The forward layer carries coverage: the composite tone-maps
+/// `fwd.rgb * fwd.a`, so the histogram must meter that premultiplied value —
+/// The histogram meters the forward layer through its alpha in both plans
+/// that sample it: `mode == 1` (forward-only, the deferred layer is ignored)
+/// and `mode == 2` (hybrid, deferred + forward). The layer is premultiplied
+/// (`fwd.rgb * fwd.a`) — dropping the alpha weight moves the metered
+/// luminance and must fail.
+#[test]
+fn gpu_forward_layer_is_metered_through_its_alpha() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let settings = AutoExposureSettings::default();
+    let samples = (W * H) as usize;
+    let forward = hdr_texture_from_rgba(
+        &device,
+        &queue,
+        W,
+        H,
+        &vec![[4.0_f32, 4.0, 4.0, 0.5]; samples],
+    );
+
+    // A fresh pass per measurement: the build pass accumulates into the
+    // histogram buffer, and only the adapt pass clears it.
+    let meter = |hdr: &wgpu::TextureView, mode: u32| -> [u32; HISTOGRAM_BINS] {
+        let pass = AutoExposure::new(&device);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auto-exposure alpha histogram encoder"),
+        });
+        pass.encode_histogram_only(
+            &device,
+            &queue,
+            &mut encoder,
+            ExposureFrame {
+                hdr,
+                hdr_fwd: &forward,
+                mode,
+                width: W,
+                height: H,
+                settings,
+                dt_seconds: DEFAULT_FRAME_DT_SECONDS,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        read_histogram(&device, &queue, &pass)
+    };
+
+    // `mode == 1`: forward-only plans meter the forward layer alone.
+    let black = constant_hdr(&device, &queue, W, H, [0.0; 3]);
+    let gpu = meter(&black, 1);
+    let premultiplied = vec![[2.0_f32; 3]; samples];
+    assert_eq!(
+        gpu,
+        build_histogram(&premultiplied, &settings),
+        "forward-only must meter fwd.rgb * fwd.a"
+    );
+    let straight = vec![[4.0_f32; 3]; samples];
+    assert_ne!(
+        gpu,
+        build_histogram(&straight, &settings),
+        "the alpha weight was dropped from the forward-only branch"
+    );
+
+    // `mode == 2`: the hybrid composite adds `deferred + fwd.rgb * fwd.a`.
+    let deferred = constant_hdr(&device, &queue, W, H, [1.0; 3]);
+    let gpu = meter(&deferred, 2);
+    let hybrid = vec![[3.0_f32; 3]; samples];
+    assert_eq!(
+        gpu,
+        build_histogram(&hybrid, &settings),
+        "hybrid must meter deferred + fwd.rgb * fwd.a"
+    );
+    let straight_hybrid = vec![[5.0_f32; 3]; samples];
+    assert_ne!(
+        gpu,
+        build_histogram(&straight_hybrid, &settings),
+        "the alpha weight was dropped from the hybrid branch"
+    );
+}
+
+/// One GPU step of `1/60 s` in each direction must land exactly where the
+/// CPU reference lands: `brighten_speed` while the exposure rises,
+/// `darken_speed` while it falls (the two rates must not be swapped).
+#[test]
+fn gpu_one_step_matches_the_cpu_speed_in_both_directions() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let settings = AutoExposureSettings::default();
+    // Uniform scenes (a single bin, so the reduction is exact) off-key in
+    // opposite directions; a fresh pass starts at `1.0` (EV 0).
+    for (luminance, rises) in [(0.05_f32, true), (0.6_f32, false)] {
+        let texels = vec![[luminance; 3]; (W * H) as usize];
+        let view = constant_hdr(&device, &queue, W, H, [luminance; 3]);
+        let gpu = advance(
+            &device,
+            &queue,
+            &AutoExposure::new(&device),
+            Meter::deferred(&view, &settings, W, H, 1.0 / 60.0),
+        );
+        let avg = average_log_luminance(&build_histogram(&texels, &settings), &settings)
+            .expect("uniform in-range scene");
+        let target = desired_exposure_ev(avg, &settings);
+        let expected = exp2(adapt_exposure_ev(0.0, target, 1.0 / 60.0, &settings));
+        let relative = (gpu - expected).abs() / expected;
+        assert!(
+            relative < 0.005,
+            "luminance {luminance}: gpu {gpu} vs cpu {expected}"
+        );
+        let direction = if rises { "rise" } else { "fall" };
+        assert_eq!(
+            gpu > 1.0,
+            rises,
+            "luminance {luminance}: the exposure must {direction} ({gpu})"
+        );
+    }
+}
+
+/// One stop of EV compensation doubles the exposure the target maps onto
+/// (`target_ev = log2(key) + ev_compensation`), the other direction halves it.
+#[test]
+fn ev_compensation_shifts_the_target_ev_by_a_stop() {
+    let settings = AutoExposureSettings::default();
+    let up = AutoExposureSettings {
+        ev_compensation: 1.0,
+        ..settings
+    };
+    let down = AutoExposureSettings {
+        ev_compensation: -1.0,
+        ..settings
+    };
+    for avg in [-6.0_f32, -1.0, 0.0, 3.0] {
+        let base = desired_exposure_ev(avg, &settings);
+        assert!(
+            (desired_exposure_ev(avg, &up) - (base + 1.0)).abs() < 1e-6,
+            "+1 EV at avg {avg}"
+        );
+        assert!(
+            (desired_exposure_ev(avg, &down) - (base - 1.0)).abs() < 1e-6,
+            "-1 EV at avg {avg}"
+        );
+        let base_exposure = desired_exposure(avg, &settings);
+        assert!(
+            (desired_exposure(avg, &up) / base_exposure - 2.0).abs() < 1e-3,
+            "+1 EV must double the exposure"
+        );
+        assert!(
+            (desired_exposure(avg, &down) / base_exposure - 0.5).abs() < 1e-3,
+            "-1 EV must halve the exposure"
+        );
+    }
+}
+
+/// The GPU target carries the same bias: a compensated metering lands at
+/// twice the exposure of the unbiased one.
+#[test]
+fn gpu_ev_compensation_doubles_the_exposure() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let unbiased = AutoExposureSettings::default();
+    let settings = AutoExposureSettings {
+        ev_compensation: 1.0,
+        ..unbiased
+    };
+    let luminance = 0.5_f32;
+    let texels = vec![[luminance; 3]; (W * H) as usize];
+    let view = constant_hdr(&device, &queue, W, H, [luminance; 3]);
+    // A huge `dt` saturates the step, so one update lands on the target.
+    let gpu = advance(
+        &device,
+        &queue,
+        &AutoExposure::new(&device),
+        Meter::deferred(&view, &settings, W, H, 100.0),
+    );
+    let expected = cpu_target(&texels, &settings);
+    let relative = (gpu - expected).abs() / expected;
+    assert!(
+        relative < 0.02,
+        "gpu exposure {gpu} vs cpu reference {expected}"
+    );
+    let plain = cpu_target(&texels, &unbiased);
+    assert!(
+        (gpu / plain - 2.0).abs() < 0.05,
+        "+1 EV must double the exposure: {gpu} vs {plain}"
+    );
+}
+
+/// The EV window clamps the adapted exposure on the GPU: scenes that want an
+/// EV far outside `[-2, 2]` land exactly on `2^2` / `2^-2` after one
+/// saturated step (both scenes sit inside the histogram window, so neither
+/// clamps as "below range").
+#[test]
+fn gpu_ev_window_clamps_the_adapted_exposure() {
+    let Some((device, queue)) = try_device() else {
+        return;
+    };
+    const W: u32 = 16;
+    const H: u32 = 16;
+    let settings = AutoExposureSettings {
+        min_ev: -2.0,
+        max_ev: 2.0,
+        ..AutoExposureSettings::default()
+    };
+    for (luminance, clamped) in [(0.01_f32, 4.0_f32), (100.0_f32, 0.25)] {
+        let texels = vec![[luminance; 3]; (W * H) as usize];
+        let avg = average_log_luminance(&build_histogram(&texels, &settings), &settings)
+            .expect("both scenes sit inside the histogram window");
+        let unclamped = settings.target_ev() - avg;
+        assert!(
+            unclamped.abs() > 3.0,
+            "luminance {luminance} must want an EV outside the window: {unclamped}"
+        );
+
+        let view = constant_hdr(&device, &queue, W, H, [luminance; 3]);
+        let gpu = advance(
+            &device,
+            &queue,
+            &AutoExposure::new(&device),
+            Meter::deferred(&view, &settings, W, H, 100.0),
+        );
+        let relative = (gpu - clamped).abs() / clamped;
+        assert!(
+            relative < 1e-4,
+            "luminance {luminance}: exposure {gpu} vs clamp {clamped}"
+        );
+    }
 }

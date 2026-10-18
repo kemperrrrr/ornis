@@ -997,6 +997,27 @@ mod tests {
         }
     }
 
+    /// Minimal surface configuration for a headless [`Renderer3D`]: the exposure
+    /// tests composite into a texture of the same shape, so the renderer's
+    /// histogram dispatch (`self.width/self.height`) matches the target.
+    fn headless_surface_config(
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        }
+    }
+
     /// An `Rgba8Unorm` render target used as the composite output.
     fn exposure_test_target(device: &wgpu::Device, size: wgpu::Extent3d) -> wgpu::TextureView {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1107,17 +1128,7 @@ mod tests {
             eprintln!("SKIPPED (composite exposure): no wgpu adapter");
             return;
         };
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            width: W,
-            height: H,
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
+        let surface_config = headless_surface_config(W, H, wgpu::TextureFormat::Rgba8Unorm);
         let renderer = Renderer3D::new(&device, &surface_config, 1);
         let extent = wgpu::Extent3d {
             width: W,
@@ -1170,5 +1181,241 @@ mod tests {
         renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 1.0 });
         composite(&scene);
         assert_eq!(exposure_uniform(&renderer, &device, &queue), 1.0);
+    }
+
+    /// The composite applies the mode multiplier exactly once, and the Lux
+    /// pre-exposure ([`Renderer3D::set_exposure`]) never reaches it: the two
+    /// knobs are independent (pre-exposure is baked into the light colors by
+    /// the next light upload, the mode multiplier is applied by the
+    /// tone-mapper on the post-exposure HDR). Skipped when no adapter is
+    /// available.
+    #[test]
+    fn composite_manual_multiplier_is_applied_once() {
+        use crate::auto_exposure::ExposureMode;
+        use crate::shaders::math::aces_tonemap;
+
+        const W: u32 = 8;
+        const H: u32 = 8;
+        /// Mid-grey in `f16` (`0x3800`), the HDR layer fed to the composite.
+        const GREY: f32 = 0.5;
+        /// u8 rounding (1/255) plus one guard code for the f32 round trip.
+        const TOL: f32 = 2.0 / 255.0;
+
+        let Some((device, queue)) = try_device() else {
+            eprintln!("SKIPPED (composite exposure pixels): no wgpu adapter");
+            return;
+        };
+        let surface_config = headless_surface_config(W, H, wgpu::TextureFormat::Rgba8Unorm);
+        let mut renderer = Renderer3D::new(&device, &surface_config, 1);
+        let extent = wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        };
+        let target_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("exposure pixel target"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // Uniform mid-grey layer: the tone-mapper input is `grey * exposure`.
+        let scene = exposure_test_hdr_patch(&device, &queue, extent, 0x3800, W * H);
+
+        let composite = |renderer: &Renderer3D| -> [f32; 3] {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("exposure pixel encoder"),
+            });
+            renderer.render_composite(
+                &device,
+                &queue,
+                &mut encoder,
+                CompositeInputs {
+                    target: &target,
+                    hdr: &scene,
+                    hdr_fwd: &scene,
+                    bloom: &scene,
+                    bloom_intensity: 0.0,
+                    mode: 0,
+                },
+                1.0 / 60.0,
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+            let pixels = readback_rgba8(&device, &queue, &target_tex, W, H);
+            [
+                f32::from(pixels[0]) / 255.0,
+                f32::from(pixels[1]) / 255.0,
+                f32::from(pixels[2]) / 255.0,
+            ]
+        };
+        let aces = |rgb: [f32; 3]| {
+            let mapped = aces_tonemap::eval(glam::Vec3::from(rgb));
+            [mapped.x, mapped.y, mapped.z]
+        };
+        let near = |actual: [f32; 3], expected: [f32; 3]| {
+            (0..3).all(|i| (actual[i] - expected[i]).abs() <= TOL)
+        };
+
+        renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 1.0 });
+        let baseline = composite(&renderer);
+        assert!(
+            near(baseline, aces([GREY; 3])),
+            "identity multiplier must keep aces({GREY}): {baseline:?}"
+        );
+
+        // Lux pre-exposure: baked into the light colors on the next light
+        // upload — it must not touch the composite's shared uniform.
+        renderer.set_exposure(2.0);
+        let pre_exposed = composite(&renderer);
+        assert_eq!(
+            exposure_uniform(&renderer, &device, &queue),
+            1.0,
+            "Lux pre-exposure must not reach the tone-mapper uniform"
+        );
+        assert!(
+            near(pre_exposed, baseline),
+            "pre-exposure moved the composite pixels: {pre_exposed:?} vs {baseline:?}"
+        );
+
+        renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 2.0 });
+        let doubled = composite(&renderer);
+        assert!(
+            near(doubled, aces([GREY * 2.0; 3])),
+            "2x must tone-map exactly 2*{GREY}: {doubled:?}"
+        );
+        assert!(
+            !near(doubled, aces([GREY * 4.0; 3])),
+            "the multiplier was applied twice: {doubled:?}"
+        );
+    }
+
+    /// Smallest lit scene whose HDR the auto-exposure histogram can meter: one
+    /// sphere in front of the camera with a key light and ambient fill (the black
+    /// background falls into bin 0 and is excluded). Shared by the plan-level
+    /// exposure tests.
+    fn plan_probe_scene(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &Renderer3D,
+    ) -> crate::mesh::Mesh {
+        let mesh = crate::mesh::create_sphere(device, 1.0, 16, 12);
+        let mut material = crate::OpenPBRMaterial::dielectric();
+        material.base.color_rgb([0.8, 0.4, 0.2]);
+        material.specular.roughness(0.5);
+        renderer.upload_materials(device, queue, &[material]);
+        let model = glam::Mat4::from_scale_rotation_translation(
+            glam::Vec3::ONE,
+            glam::Quat::IDENTITY,
+            glam::Vec3::ZERO,
+        );
+        renderer.upload_instances(
+            device,
+            queue,
+            &[crate::InstanceData {
+                model_matrix: model,
+                normal_matrix: model.inverse().transpose(),
+                material_index: crate::MaterialIdx::from_raw(0),
+            }],
+        );
+        let view = glam::camera::rh::view::look_at_mat4(
+            glam::Vec3::new(0.0, 0.0, 3.0),
+            glam::Vec3::ZERO,
+            glam::Vec3::Y,
+        );
+        let proj =
+            glam::camera::rh::proj::directx::perspective(60.0f32.to_radians(), 1.0, 0.1, 10.0);
+        renderer.set_camera(queue, &(proj * view).to_cols_array_2d(), [0.0, 0.0, 3.0]);
+        renderer.set_lights(
+            queue,
+            [0.1, 0.1, 0.1],
+            &[crate::renderer::test_util::dir_probe(
+                [0.3, -1.0, 0.5],
+                ornis_assets::scene::ShadowCast::Disabled,
+            )],
+        );
+        mesh
+    }
+
+    /// The frame-plan composite hands [`Renderer3D::frame_dt_seconds`] to the
+    /// adapt pass, so the host hook [`Renderer3D::set_frame_time`] really
+    /// drives the eye adaptation: identical scenes stepped at `1/30 s` must
+    /// move exactly twice as far (in EV) as at `1/60 s`. Also pins the
+    /// documented clamp of the measurement and that non-finite input is
+    /// ignored. Skipped when no adapter is available.
+    #[test]
+    fn plan_frame_time_drives_the_adaptation_step() {
+        use crate::auto_exposure::{AutoExposureSettings, ExposureMode};
+        use crate::frame_exec::RenderFrame3D;
+        use crate::render_backend::RenderContext;
+
+        let Some((device, queue)) = try_device() else {
+            eprintln!("SKIPPED (plan frame time): no wgpu adapter");
+            return;
+        };
+        const W: u32 = 64;
+        const H: u32 = 64;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let surface_config = headless_surface_config(W, H, format);
+        let renderer = Renderer3D::new(&device, &surface_config, 1);
+
+        // A lit sphere on a black background: the histogram sees in-range HDR
+        // (an empty frame would hold the exposure and hide the frame time).
+        let mesh = plan_probe_scene(&device, &queue, &renderer);
+
+        let (_target, target_view) = offscreen_target(&device, W, H);
+        let plan_frame = |renderer: &Renderer3D| {
+            let mut plan = RenderFrame3D::new_with(
+                format,
+                (W, H),
+                crate::Technique::Deferred,
+                crate::Bloom::Off,
+            );
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("plan frame time encoder"),
+            });
+            plan.render(
+                RenderContext {
+                    device: &device,
+                    queue: &queue,
+                    encoder: &mut encoder,
+                    target: &target_view,
+                },
+                renderer,
+                &mesh,
+                1,
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+        };
+        // Warm-up: the first frame may stage one-shot resources (IBL/AO),
+        // so every measured frame runs in steady state.
+        plan_frame(&renderer);
+
+        // One plan frame from a known (`1.0`) exposure; the uniform then
+        // holds the EV step the adaptation took with `dt`.
+        let step_ev = |dt: f32| -> f32 {
+            renderer.set_exposure_mode(ExposureMode::Manual { multiplier: 1.0 });
+            plan_frame(&renderer);
+            assert_eq!(
+                exposure_uniform(&renderer, &device, &queue),
+                1.0,
+                "manual mode must reset the shared uniform"
+            );
+            renderer.set_exposure_mode(ExposureMode::Auto(AutoExposureSettings::default()));
+            renderer.set_frame_time(dt);
+            plan_frame(&renderer);
+            exposure_uniform(&renderer, &device, &queue).log2()
+        };
+        let slow = step_ev(1.0 / 60.0);
+        let fast = step_ev(1.0 / 30.0);
+        assert!(slow.abs() > 1.0e-4, "the scene must be off-key: {slow}");
+        let ratio = fast / slow;
+        assert!(
+            (ratio - 2.0).abs() < 0.05,
+            "doubling the frame time must double the EV step: {slow} -> {fast} (ratio {ratio})"
+        );
     }
 }

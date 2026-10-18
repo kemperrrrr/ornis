@@ -522,9 +522,21 @@ impl Renderer3D {
     }
 
     /// Replace the exposure multiplier applied by future
-    /// [`set_lights`](Self::set_lights) calls (default `1.0`).
+    /// [`set_lights`](Self::set_lights) calls (default `1.0`). Non-finite
+    /// input is ignored.
+    ///
+    /// This is the **pre-exposure**: the value is folded into the light
+    /// colors on CPU by the next light upload, so it changes the HDR the
+    /// auto-exposure histogram meters but never the tone-mapper's own
+    /// [`ExposureMode`](crate::auto_exposure::ExposureMode) multiplier. The
+    /// two therefore never double-apply: under `Manual` the light color
+    /// carries `exposure` and the composite carries the manual multiplier;
+    /// under `Auto` the adaptation meters the pre-exposed HDR and compensates
+    /// for it (the adapted exposure tracks scene brightness, not this bias).
     pub fn set_exposure(&mut self, exposure: f32) {
-        self.exposure = exposure;
+        if exposure.is_finite() {
+            self.exposure = exposure;
+        }
     }
 
     /// Anisotropic level of the textured-forward material sampler.
@@ -543,6 +555,22 @@ impl Renderer3D {
     /// composites. [`crate::auto_exposure::ExposureMode::Manual`] writes the
     /// constant multiplier; [`crate::auto_exposure::ExposureMode::Auto`] runs
     /// the histogram/adapt compute passes against the lit HDR target.
+    ///
+    /// Both modes write the same shared uniform, so a switch starts from the
+    /// multiplier the previous mode last wrote: the first `Auto` frame
+    /// smooths away from the manual multiplier that was on screen, not from
+    /// `1.0`.
+    ///
+    /// `Auto` advances in EV **per second**, so it needs the real frame delta:
+    /// hosts must call [`set_frame_time`](Self::set_frame_time) on every frame
+    /// while auto mode is active (until then the documented
+    /// [`DEFAULT_FRAME_DT_SECONDS`](crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS)
+    /// fallback is used, which makes the adaptation frame-rate dependent).
+    ///
+    /// The multiplier is applied **after** tone mapping in the composite; it
+    /// is a different knob from the Lux pre-exposure of
+    /// [`set_exposure`](Self::set_exposure), which is baked into the light
+    /// colors on CPU.
     // qual:api — public renderer entry; in-tree callers are the unit tests.
     pub fn set_exposure_mode(&self, mode: crate::auto_exposure::ExposureMode) {
         *write_lock(&self.exposure_mode) = mode;
@@ -558,13 +586,20 @@ impl Renderer3D {
 
     /// Sets the frame delta time (seconds) handed to the auto-exposure
     /// smoothing (Bevy's `globals.delta_time`). Hosts should call this every
-    /// frame with the measured elapsed time; the adapt speed is expressed in
-    /// F-stops per second, so a `dt` that ignores the real frame time makes
-    /// the adaptation FPS-dependent. Values are clamped to
+    /// frame with the measured elapsed time while
+    /// [`ExposureMode::Auto`](crate::auto_exposure::ExposureMode::Auto) is
+    /// active; the adapt speed is expressed in F-stops per second, so a `dt`
+    /// that ignores the real frame time makes the adaptation FPS-dependent.
+    /// Values are clamped to
     /// `[MIN_FRAME_DT_SECONDS](crate::auto_exposure::MIN_FRAME_DT_SECONDS),
-    /// [MAX_FRAME_DT_SECONDS](crate::auto_exposure::MAX_FRAME_DT_SECONDS)`.
+    /// [MAX_FRAME_DT_SECONDS](crate::auto_exposure::MAX_FRAME_DT_SECONDS)` and
+    /// non-finite input is ignored (a stored `NaN` step would black out every
+    /// later frame).
     // qual:api — public renderer entry; in-tree callers are the unit tests.
     pub fn set_frame_time(&self, dt_seconds: f32) {
+        if !dt_seconds.is_finite() {
+            return;
+        }
         *write_lock(&self.frame_dt_seconds) = dt_seconds.clamp(
             crate::auto_exposure::MIN_FRAME_DT_SECONDS,
             crate::auto_exposure::MAX_FRAME_DT_SECONDS,
@@ -788,6 +823,10 @@ impl Renderer3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auto_exposure::{
+        DEFAULT_FRAME_DT_SECONDS, MAX_FRAME_DT_SECONDS, MIN_FRAME_DT_SECONDS,
+    };
+
     #[test]
     fn msaa_sample_counts_normalize_to_one_or_four() {
         // The native MSAA count and the single-sample default/fallback.
@@ -803,6 +842,51 @@ mod tests {
                 "requested {requested} must fall back to 1x"
             );
         }
+    }
+
+    /// [`Renderer3D::set_frame_time`] is the host hook the frame-plan
+    /// composite hands to the adapt pass: the measurement is clamped to the
+    /// documented window and non-finite input is ignored instead of poisoning
+    /// the stored step.
+    #[test]
+    fn set_frame_time_clamps_the_measurement_to_the_documented_window() {
+        let Some((device, queue)) = test_util::try_device() else {
+            eprintln!("SKIPPED (set_frame_time clamp): no wgpu adapter");
+            return;
+        };
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: 4,
+            height: 4,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let renderer = Renderer3D::new(&device, &surface_config, 1);
+        drop(queue);
+
+        // In-window values are stored verbatim (the plan path reads this
+        // field on every composite).
+        renderer.set_frame_time(1.0 / 30.0);
+        assert_eq!(renderer.frame_dt_seconds(), 1.0 / 30.0);
+        renderer.set_frame_time(DEFAULT_FRAME_DT_SECONDS);
+        assert_eq!(renderer.frame_dt_seconds(), DEFAULT_FRAME_DT_SECONDS);
+        // A stalled or bogus measurement never freezes or leaps the step.
+        renderer.set_frame_time(0.0);
+        assert_eq!(renderer.frame_dt_seconds(), MIN_FRAME_DT_SECONDS);
+        renderer.set_frame_time(-1.0);
+        assert_eq!(renderer.frame_dt_seconds(), MIN_FRAME_DT_SECONDS);
+        renderer.set_frame_time(10.0);
+        assert_eq!(renderer.frame_dt_seconds(), MAX_FRAME_DT_SECONDS);
+        // Non-finite input keeps the stored value (`NaN` would make every
+        // subsequent exposure `NaN`).
+        renderer.set_frame_time(f32::NAN);
+        assert_eq!(renderer.frame_dt_seconds(), MAX_FRAME_DT_SECONDS);
+        renderer.set_frame_time(f32::INFINITY);
+        assert_eq!(renderer.frame_dt_seconds(), MAX_FRAME_DT_SECONDS);
     }
 }
 

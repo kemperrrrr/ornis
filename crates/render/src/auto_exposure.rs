@@ -10,7 +10,7 @@
 //! composite tone-mapper multiplies the HDR color by the resulting exposure.
 //! No value is ever read back to the CPU, so the CPU never stalls on the GPU.
 //!
-//! Manual mode stays available ([`ExposureMode::Manual`], exposure `1.0`):
+//! Manual mode stays available ([`ExposureMode::Manual`](crate::auto_exposure::ExposureMode::Manual), exposure `1.0`):
 //! it records no compute work and writes the constant multiplier into the
 //! same uniform the composite reads, so the manual path is pixel-identical
 //! to the pre-auto-exposure frame (the golden probes stay green).
@@ -32,8 +32,23 @@
 //!   `speed*dt`, which behaves symmetrically for brightening and darkening;
 //! * the frame delta time is supplied by the host through
 //!   [`Renderer3D::set_frame_time`](crate::renderer::Renderer3D::set_frame_time);
-//!   [`DEFAULT_FRAME_DT_SECONDS`] is only a fallback used before the first
-//!   host call.
+//!   [`DEFAULT_FRAME_DT_SECONDS`](crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS) is only a fallback used before the first
+//!   host call;
+//! * the shared exposure uniform is never reset by the pass: switching to
+//!   [`ExposureMode::Auto`](crate::auto_exposure::ExposureMode::Auto) makes
+//!   the first frame smooth away from the multiplier the previous mode last
+//!   wrote, so a manual multiplier that was on screen fades out over the
+//!   transition distance instead of snapping back to `1.0` (a freshly
+//!   created uniform already holds `1.0`);
+//! * host writes to that uniform ([`ExposureMode::Manual`](crate::auto_exposure::ExposureMode::Manual),
+//!   a mode switch, the initial value) go through `queue.write_buffer`
+//!   while the frame is being encoded, so they land **before** the submitted
+//!   command buffer runs: several composites encoded into one submit all read
+//!   the last host write made before that submit. Only the auto path writes
+//!   the uniform from inside the command buffer (the adapt compute pass), so
+//!   auto composites in the same submit still see their own preceding adapt
+//!   pass. Encode one composite per submit when different composites must see
+//!   different exposures.
 
 mod wgsl;
 
@@ -64,6 +79,7 @@ pub const DEFAULT_MAX_LOG_LUM: f32 = 8.0;
 
 /// Floor applied to a texel's luminance before `log2`, so black pixels are
 /// finite and land deterministically in bin 0.
+#[cfg(test)]
 const LUMINANCE_FLOOR: f32 = 1e-6;
 
 /// Minimum adaptation speed (EV/s); guards the step against a zero rate.
@@ -73,6 +89,7 @@ const MIN_ADAPTATION_SPEED: f32 = 1e-3;
 const MIN_TRANSITION_DISTANCE: f32 = 1e-3;
 
 /// Half a bin: the offset from a bin's lower edge to its centre.
+#[cfg(test)]
 const BIN_CENTER_OFFSET: f32 = 0.5;
 
 /// Bind-group slot of the [`HistogramParams`] uniform in the histogram pass.
@@ -80,9 +97,11 @@ const HISTOGRAM_PARAMS_BINDING: u32 = 3;
 
 /// Rec.709 luma weights of a linear-RGB texel (shared by the CPU reference
 /// and the WGSL `log_luminance`).
+#[cfg(test)]
 const REC709_LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
 /// Number of in-range bins (every bin but the reserved bin `0`).
+#[cfg(test)]
 const IN_RANGE_BINS: f32 = HISTOGRAM_BINS as f32 - 2.0;
 
 /// Fallback frame delta (seconds) used by the auto-exposure smoothing until
@@ -282,11 +301,13 @@ impl AutoExposureSettings {
     }
 
     /// Lower clamp of the exposure multiplier.
+    // qual:test_helper
     pub fn min_exposure(&self) -> f32 {
         exp2(self.min_ev)
     }
 
     /// Upper clamp of the exposure multiplier.
+    // qual:test_helper
     pub fn max_exposure(&self) -> f32 {
         exp2(self.max_ev)
     }
@@ -299,18 +320,27 @@ fn exp2(x: f32) -> f32 {
 
 /// Log2-luminance of a linear-RGB texel, floored so black is finite.
 ///
-/// Mirrors the WGSL `log_luminance` in [`histogram_wgsl`].
-pub fn log_luminance(rgb: [f32; 3]) -> f32 {
+/// A non-finite luminance (NaN from a bad texel, or an infinity from a
+/// blown-out source) is floored to black, so it lands in the reserved bin 0
+/// exactly like the WGSL `log_luminance` in `histogram_wgsl` does.
+#[cfg(test)]
+pub(crate) fn log_luminance(rgb: [f32; 3]) -> f32 {
     let lum = REC709_LUMA[0] * rgb[0] + REC709_LUMA[1] * rgb[1] + REC709_LUMA[2] * rgb[2];
-    lum.max(LUMINANCE_FLOOR).log2()
+    let safe = if lum.is_finite() {
+        lum
+    } else {
+        LUMINANCE_FLOOR
+    };
+    safe.max(LUMINANCE_FLOOR).log2()
 }
 
 /// Histogram bin index of a log2-luminance, in `0..HISTOGRAM_BINS`.
 ///
 /// Bin `0` is reserved for texels below the window (`log_lum <
 /// min_log_lum`); in-range texels map into `1..HISTOGRAM_BINS`. Mirrors the
-/// WGSL `histogram_bin` in [`histogram_wgsl`].
-pub fn histogram_bin(log_lum: f32, settings: &AutoExposureSettings) -> usize {
+/// WGSL `histogram_bin` in `histogram_wgsl`.
+#[cfg(test)]
+pub(crate) fn histogram_bin(log_lum: f32, settings: &AutoExposureSettings) -> usize {
     if log_lum < settings.min_log_lum {
         return 0;
     }
@@ -321,16 +351,17 @@ pub fn histogram_bin(log_lum: f32, settings: &AutoExposureSettings) -> usize {
 /// Log2-luminance represented by in-range bin `index` (`1..HISTOGRAM_BINS`),
 /// i.e. the centre of the bin's normalised interval.
 ///
-/// Mirrors the reconstruction in [`adapt_wgsl`].
-pub fn bin_log_luminance(index: usize, settings: &AutoExposureSettings) -> f32 {
+/// Mirrors the reconstruction in `adapt_wgsl`.
+#[cfg(test)]
+pub(crate) fn bin_log_luminance(index: usize, settings: &AutoExposureSettings) -> f32 {
     let t = ((index as f32 - BIN_CENTER_OFFSET) / IN_RANGE_BINS).clamp(0.0, 1.0);
     settings.min_log_lum + t * settings.log_range()
 }
 
 /// CPU reference of the histogram pass: bin counts of the log-luminance of
 /// every texel in `texels`.
-// qual:test_helper
-pub fn build_histogram(
+#[cfg(test)]
+pub(crate) fn build_histogram(
     texels: &[[f32; 3]],
     settings: &AutoExposureSettings,
 ) -> [u32; HISTOGRAM_BINS] {
@@ -348,9 +379,9 @@ pub fn build_histogram(
 /// Returns `None` when no texel falls inside the histogram window (a black
 /// frame); the caller then holds the previous exposure.
 ///
-/// Mirrors the reduction loop in [`adapt_wgsl`].
-// qual:test_helper
-pub fn average_log_luminance(
+/// Mirrors the reduction loop in `adapt_wgsl`.
+#[cfg(test)]
+pub(crate) fn average_log_luminance(
     histogram: &[u32; HISTOGRAM_BINS],
     settings: &AutoExposureSettings,
 ) -> Option<f32> {
@@ -379,15 +410,16 @@ pub fn average_log_luminance(
 /// Exposure value (in EV) that maps `avg_log_lum` to the target luminance
 /// (plus the EV compensation), clamped to the settings' EV window.
 ///
-/// Mirrors the target computation in [`adapt_wgsl`].
-pub fn desired_exposure_ev(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
+/// Mirrors the target computation in `adapt_wgsl`.
+#[cfg(test)]
+pub(crate) fn desired_exposure_ev(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
     (settings.target_ev() - avg_log_lum).clamp(settings.min_ev, settings.max_ev)
 }
 
 /// Exposure multiplier for `avg_log_lum` ([`desired_exposure_ev`] applied to
 /// `2^x`).
-// qual:test_helper
-pub fn desired_exposure(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
+#[cfg(test)]
+pub(crate) fn desired_exposure(avg_log_lum: f32, settings: &AutoExposureSettings) -> f32 {
     exp2(desired_exposure_ev(avg_log_lum, settings))
         .clamp(settings.min_exposure(), settings.max_exposure())
 }
@@ -398,9 +430,9 @@ pub fn desired_exposure(avg_log_lum: f32, settings: &AutoExposureSettings) -> f3
 /// when it falls. The `|delta|` clamp keeps the step from ever overshooting
 /// the target (so a large `dt` lands exactly on it).
 ///
-/// Mirrors the smoothing tail of [`adapt_wgsl`].
-// qual:test_helper
-pub fn adapt_exposure_ev(
+/// Mirrors the smoothing tail of `adapt_wgsl`.
+#[cfg(test)]
+pub(crate) fn adapt_exposure_ev(
     prev_ev: f32,
     target_ev: f32,
     dt_seconds: f32,
@@ -652,8 +684,8 @@ impl AutoExposure {
 
     /// Test-only path recording just the histogram build (no reduction, so
     /// the counts stay readable for a bin-for-bin GPU-vs-CPU comparison).
-    // qual:test_helper
-    pub fn encode_histogram_only(
+    #[cfg(test)]
+    pub(crate) fn encode_histogram_only(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
