@@ -46,6 +46,19 @@ pub trait PackLane: Sized + Send + Sync + 'static {
     fn scatter_at(lane: &mut ComponentStore<Self>, index: usize, value: Self::Field);
 }
 
+/// Dense (non-`Option`) field lane: the stored cell is [`PackLane::Field`].
+///
+/// Sparse wrappers do not implement this. Aligned `#[smart_system]` runs
+/// zip the columns through it, so that path is only type-checked when every
+/// own lane of the system is dense.
+pub trait DensePackLane: PackLane {
+    /// Shared view of the stored field.
+    fn inner(&self) -> &Self::Field;
+
+    /// Mutable view of the stored field.
+    fn inner_mut(&mut self) -> &mut Self::Field;
+}
+
 /// Entity set of one `#[smart_system]` run: the entities that own every
 /// required (non-`Option`) lane the body touches.
 ///

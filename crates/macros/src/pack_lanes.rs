@@ -129,5 +129,17 @@ fn generate_dense_impl(lane: &LaneInfo) -> TokenStream2 {
                 lane.data[index] = Self(value);
             }
         }
+
+        impl ornis_core::DensePackLane for #wrapper {
+            #[inline(always)]
+            fn inner(&self) -> &Self::Field {
+                &self.0
+            }
+
+            #[inline(always)]
+            fn inner_mut(&mut self) -> &mut Self::Field {
+                &mut self.0
+            }
+        }
     }
 }
