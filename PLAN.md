@@ -137,7 +137,8 @@
      объектов есть лишь `set_playing`/`rewind_player`
      (`crates/app/src/anim_wiring.rs:325,343`). Нужен `play_crossfade` для
      `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade` (сегодня —
-     прямая вставка в лейн).
+     прямая вставка в лейн). Решение (2026-10-19): фасад в `anim_wiring`,
+     не расширение `Animator` — порядок работ в п. 10.
   3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
      и любая комбинация из нескольких слоёв сейчас невозможна.
   4. **Осознанно отложено** (`docs/animation-design.md` §6): бленд-дерево, IK,
@@ -180,7 +181,29 @@
      скорости); motion warping — деформация позы под целевую точку или
      траекторию (шаг на платформу, прыжок). Оба ложатся поверх сэмплера
      (доступ к позам по времени + коррекция/IK), то есть логично после
-     слоёв/общего API и — для warping — после IK, который тоже отложен (§6).
+      слоёв/общего API и — для warping — после IK, который тоже отложен (§6).
+  10. **Шаги разблокировки гейта (порядок; решение 2026-10-19).**
+     - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`**, рядом с
+       `set_playing`/`rewind_player` (`:325,343`): `play_crossfade(store,
+       entity, name, duration)` плюс типизированный вход для `SkelLayer`/`AnimFade`.
+       Скелетная ветка делегирует в `AnimatorMut::play_crossfade` через
+       `try_animator` (одна реализация фейда), объектная пишет `AnimFade`
+       (и `AnimPlayer`) прямо на сущности. Топологии разные: каталог на корне
+       с `targets: Vec<Entity>` (`crates/animation/src/animator.rs:26-30`)
+       против плеера на самой анимируемой сущности, — поэтому один тип не
+       объединяем, а ставим драйвер поверх каталога, как Godot `AnimationTree`
+       над `AnimationPlayer` (общий базовый `AnimationMixer`) или Bevy
+       `AnimationTransitions` отдельным компонентом от `AnimationPlayer`.
+     - **Шаг 2 — первый прод-вызывающий:** `GameWorld::play_animation`
+       (`crates/app/src/game_world.rs:131`) сейчас зовёт только `set_playing`
+       (без имени и без фейда); после шага 1 он же снимает `qual:api`
+       с `Animator::play_crossfade` (`crates/animation/src/animator.rs:119`).
+       Точка входа `EntityMut::animator()` уже есть
+       (`crates/app/src/game_world.rs:831`).
+     - **Шаг 3 — стек слоёв** (п. 3) тем же типизированным входом фасада.
+       Слои остаются только скелетными: `SkelLayer`
+       (`crates/animation/src/blend.rs:44`) — единственный тип слоя,
+       объектного в модели нет.
 
 ## Дорожная карта (по приоритетам)
 
