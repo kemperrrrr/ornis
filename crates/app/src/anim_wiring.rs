@@ -15,8 +15,8 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointPose, JointTrack, Key,
-    KeyTrack, SkelClip, SkelPlayer, Skeleton, SkinnedMesh,
+    AnimClip, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointMask, JointPose, JointTrack,
+    Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer, Skeleton, SkinnedMesh,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Entity, Seconds, SmartStore};
@@ -376,7 +376,10 @@ pub fn wire_loaded_animation(
     store.register::<JointPose>();
     store.register::<SkinnedMesh>();
     store.register::<SkelPlayer>();
+    store.register::<SkelLayer>();
+    store.register::<SkelFade>();
     store.register_cold::<SkelClip>();
+    store.register_cold::<JointMask>();
     store.register::<AnimPlayer>();
     store.register_cold::<AnimClip>();
 

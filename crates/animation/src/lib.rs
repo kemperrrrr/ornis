@@ -58,6 +58,10 @@ pub use animator::{Animator, AnimatorAccess, AnimatorError, AnimatorMut, try_ani
 
 pub mod skinning;
 
+mod blend;
+pub use blend::{JointMask, MaskId, SkelFade, SkelLayer};
+use blend::{BlendedPose, fade_progress, sample_joints};
+
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
     blend_vertex_reference, canonical_staged_weights, joint_normal_matrix,
@@ -1654,7 +1658,10 @@ impl System for SkelSampleSystem {
             .reads_lane::<Skeleton>()
             .reads_lane::<TransformDesc>()
             .reads_lane::<ChildOf>()
+            .reads_lane::<JointMask>()
             .writes_lane::<SkelPlayer>()
+            .writes_lane::<SkelLayer>()
+            .writes_lane::<SkelFade>()
             .writes_lane::<JointPose>()
             .writes_lane::<Transform>()
             .writes_lane::<Children>()
@@ -1685,11 +1692,20 @@ pub fn run_skel_sample(resources: &Resources) -> SkelSampleStats {
     publish_poses(store)
 }
 
-/// Advances playing [`SkelPlayer`] cursors against their clip duration.
+/// Advances playing [`SkelPlayer`] cursors, overlay layers and crossfade
+/// clocks.
 ///
 /// Missing clips hold their cursor (counted as bad skin at sample time,
-/// not here).
+/// not here). A crossfade drops its [`SkelFade`] once `elapsed` reaches
+/// `duration`.
 fn advance_skel_players(store: &SmartStore, dt: f32) {
+    advance_base_players(store, dt);
+    advance_layers(store, dt);
+    advance_fades(store, dt);
+}
+
+/// Advances playing [`SkelPlayer`] cursors against their clip duration.
+fn advance_base_players(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
@@ -1711,6 +1727,63 @@ fn advance_skel_players(store: &SmartStore, dt: f32) {
             clip.duration,
             player.looping,
         ));
+    }
+}
+
+/// Advances playing [`SkelLayer`] cursors against their clip duration.
+fn advance_layers(store: &SmartStore, dt: f32) {
+    let Some(clips) = store.read_cold_lane::<SkelClip>() else {
+        return;
+    };
+    let Some(mut layers) = store.write_lane::<SkelLayer>() else {
+        return;
+    };
+    for index in 0..layers.data.len() {
+        let layer = &mut layers.data[index];
+        if !layer.playing {
+            continue;
+        }
+        let Some(clip) = clips.get(layer.clip.0) else {
+            continue;
+        };
+        layer.time = Seconds::new(advance_player_time(
+            layer.time.get(),
+            dt,
+            layer.speed.get(),
+            clip.duration,
+            layer.looping,
+        ));
+    }
+}
+
+/// Advances outgoing crossfade clocks and retires finished fades.
+fn advance_fades(store: &SmartStore, dt: f32) {
+    let Some(clips) = store.read_cold_lane::<SkelClip>() else {
+        return;
+    };
+    let Some(mut fades) = store.write_lane::<SkelFade>() else {
+        return;
+    };
+    let mut finished = Vec::new();
+    for index in 0..fades.data.len() {
+        let entity = fades.entities[index];
+        let fade = &mut fades.data[index];
+        if let Some(clip) = clips.get(fade.from.clip.0) {
+            fade.from.time = Seconds::new(advance_player_time(
+                fade.from.time.get(),
+                dt,
+                fade.from.speed.get(),
+                clip.duration,
+                fade.from.looping,
+            ));
+        }
+        fade.elapsed = Seconds::new(fade.elapsed.get() + dt);
+        if fade.elapsed.get() >= fade.duration.get() {
+            finished.push(entity);
+        }
+    }
+    for entity in finished {
+        fades.remove(entity);
     }
 }
 
@@ -1738,6 +1811,17 @@ fn publish_poses(store: &SmartStore) -> SkelSampleStats {
     stats
 }
 
+/// Read-only view of every lane one pose evaluation needs.
+struct SampleLanes<'a> {
+    clips: &'a ColdComponentStore<SkelClip>,
+    skeletons: &'a ComponentStore<Skeleton>,
+    transforms: Option<&'a ComponentStore<TransformDesc>>,
+    poses: Option<&'a ComponentStore<JointPose>>,
+    fades: Option<&'a ComponentStore<SkelFade>>,
+    layers: Option<&'a ComponentStore<SkelLayer>>,
+    masks: Option<&'a ColdComponentStore<JointMask>>,
+}
+
 /// Collects model matrices without holding lane guards across the later
 /// write: every imperfect entity bumps `skipped_bad_skin`.
 fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBatch {
@@ -1756,6 +1840,18 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBat
     };
     let transforms = store.read_lane::<TransformDesc>();
     let poses = store.read_lane::<JointPose>();
+    let fades = store.read_lane::<SkelFade>();
+    let layers = store.read_lane::<SkelLayer>();
+    let masks = store.read_cold_lane::<JointMask>();
+    let lanes = SampleLanes {
+        clips: &clips,
+        skeletons: &skeletons,
+        transforms: transforms.as_deref(),
+        poses: poses.as_deref(),
+        fades: fades.as_deref(),
+        layers: layers.as_deref(),
+        masks: masks.as_deref(),
+    };
     let mut batch = PoseBatch {
         joints: Vec::new(),
         nodes: Vec::new(),
@@ -1764,14 +1860,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBat
         if !player.playing {
             continue;
         }
-        match sample_entity(
-            *entity,
-            player,
-            &clips,
-            &skeletons,
-            transforms.as_deref(),
-            poses.as_deref(),
-        ) {
+        match sample_entity(*entity, player, &lanes) {
             Some(sampled) => {
                 batch.nodes.extend(sampled.nodes);
                 batch.joints.push(JointMatrices {
@@ -1785,86 +1874,95 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBat
     batch
 }
 
-/// Samples one playing cursor: tracks → locals → model matrices.
+/// Samples one playing cursor: base clip, optional crossfade, optional
+/// overlay layer, then model matrices.
 ///
-/// [`None`] (bad skin) on missing clip/skeleton/pose lane or on invalid
-/// topology; the caller counts it. Absent [`TransformDesc`] roots at
-/// identity (lenient); everything else is strict.
+/// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid topology,
+/// or a layer whose mask does not match the joint count. The caller counts
+/// it. Absent [`TransformDesc`] roots at identity (lenient); everything else
+/// is strict.
 fn sample_entity(
     entity: Entity,
     player: &SkelPlayer,
-    clips: &ColdComponentStore<SkelClip>,
-    skeletons: &ComponentStore<Skeleton>,
-    transforms: Option<&ComponentStore<TransformDesc>>,
-    poses: Option<&ComponentStore<JointPose>>,
+    lanes: &SampleLanes<'_>,
 ) -> Option<SampledClip> {
-    let clip = clips.get(player.clip.0)?;
-    let skeleton = skeletons.get(entity)?;
-    if poses.is_none_or(|lane| lane.get(entity).is_none()) {
+    let clip = lanes.clips.get(player.clip.0)?;
+    let skeleton = lanes.skeletons.get(entity)?;
+    if lanes.poses.is_none_or(|lane| lane.get(entity).is_none()) {
         return None;
     }
+    let count = skeleton.joint_count();
     let time = player.time.get();
-    let locals = sample_locals(clip, skeleton.joint_count(), time);
-    let matrices = compose_model_matrices(skeleton, &locals, &root_matrix(transforms, entity))?;
+    let mut pose = BlendedPose::from_samples(
+        &sample_joints(clip, count, time),
+        player.weight.get(),
+    );
+    if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
+        let from_clip = lanes.clips.get(fade.from.clip.0)?;
+        let from_pose = BlendedPose::from_samples(
+            &sample_joints(from_clip, count, fade.from.time.get()),
+            fade.from.weight.get(),
+        );
+        pose = BlendedPose::mix(&from_pose, &pose, fade_progress(fade));
+    }
+    if let Some(layer) = lanes.layers.and_then(|lane| lane.get(entity)) {
+        let mask = lanes.masks?.get(layer.mask.0)?;
+        if mask.weights.len() != count {
+            return None;
+        }
+        let layer_clip = lanes.clips.get(layer.clip.0)?;
+        pose.overlay(
+            &sample_joints(layer_clip, count, layer.time.get()),
+            &mask.weights,
+            layer.weight,
+        );
+    }
+    let locals: Vec<Mat4> = pose.trs.iter().map(|trs| trs.matrix()).collect();
+    let root = root_matrix(lanes.transforms, entity);
+    let matrices = compose_model_matrices(skeleton, &locals, &root)?;
     Some(SampledClip {
         matrices,
-        nodes: node_poses(clip, time),
+        nodes: node_poses(clip, &pose),
     })
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.
 ///
-/// First track per joint wins, matching [`sample_locals`]. An empty channel
-/// stays [`None`] so the node's bind pose survives; the skin chain still
-/// reads that empty channel as identity.
-fn node_poses(clip: &SkelClip, time: f32) -> Vec<LocalWrite> {
-    let mut out = Vec::new();
-    let mut painted_joints = Vec::new();
-    let mut painted_nodes = Vec::new();
+/// First track per joint wins, matching [`sample_joints`]. Channels no
+/// contributor provided stay [`None`] so the node's bind pose survives; the
+/// blended values of the others come from the final pose.
+fn node_poses(clip: &SkelClip, pose: &BlendedPose) -> Vec<LocalWrite> {
+    let mut out: Vec<LocalWrite> = Vec::new();
+    let mut painted = vec![false; pose.trs.len()];
     for track in &clip.tracks {
         let joint = track.joint.index();
-        if painted_joints.contains(&joint) {
+        if joint >= painted.len() || painted[joint] {
             continue;
         }
-        painted_joints.push(joint);
+        painted[joint] = true;
         let Some(entity) = track.node else {
             continue;
         };
-        if painted_nodes.contains(&entity) {
+        if out.iter().any(|write| write.entity == entity) {
             continue;
         }
-        painted_nodes.push(entity);
         out.push(LocalWrite {
             entity,
-            pose: SampledPose {
-                translation: track.translation.sample(time),
-                rotation: track.rotation.sample(time),
-                scale: track.scale.sample(time),
-            },
+            pose: sampled_pose(pose, joint),
         });
     }
     out
 }
 
-/// Samples every [`JointTrack`] at `time`; untracked joints stay identity.
-///
-/// First track per joint wins on duplicates (same rule as `AnimClip`).
-fn sample_locals(clip: &SkelClip, joint_count: usize, time: f32) -> Vec<Mat4> {
-    let mut locals = vec![Mat4::IDENTITY; joint_count];
-    let mut painted = vec![false; joint_count];
-    for track in &clip.tracks {
-        let joint = track.joint.index();
-        if joint >= joint_count || painted[joint] {
-            continue;
-        }
-        painted[joint] = true;
-        locals[joint] = joint_local_matrix(
-            track.translation.sample(time),
-            track.rotation.sample(time),
-            track.scale.sample(time),
-        );
+/// Final channels of one joint, with absent ones as [`None`].
+fn sampled_pose(pose: &BlendedPose, joint: usize) -> SampledPose {
+    let trs = pose.trs[joint];
+    let [translation, rotation, scale] = pose.present[joint];
+    SampledPose {
+        translation: translation.then_some(trs.translation),
+        rotation: rotation.then_some(trs.rotation),
+        scale: scale.then_some(trs.scale),
     }
-    locals
 }
 
 /// Root matrix from the entity's [`TransformDesc`], identity when absent.
