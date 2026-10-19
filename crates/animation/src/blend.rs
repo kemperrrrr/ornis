@@ -14,7 +14,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::{Clamped01, Entity, Seconds};
 
-use crate::{ClipId, SkelClip, SkelPlayer};
+use crate::{SkelClip, SkelPlayer};
 
 /// Handle of the playlist entity holding a [`JointMask`] in the cold lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -223,6 +223,7 @@ pub(crate) fn fade_progress(fade: &SkelFade) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClipId;
 
     fn sample_t(value: Vec3) -> JointSample {
         JointSample {

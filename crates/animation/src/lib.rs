@@ -59,8 +59,8 @@ pub use animator::{Animator, AnimatorAccess, AnimatorError, AnimatorMut, try_ani
 pub mod skinning;
 
 mod blend;
-pub use blend::{JointMask, MaskId, SkelFade, SkelLayer};
 use blend::{BlendedPose, fade_progress, sample_joints};
+pub use blend::{JointMask, MaskId, SkelFade, SkelLayer};
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,

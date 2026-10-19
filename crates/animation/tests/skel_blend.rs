@@ -146,33 +146,47 @@ fn close(a: Vec3, b: Vec3) -> bool {
     (a - b).length() < 1e-4
 }
 
+/// Asserts where joint `joint` of the pose on `root` ends up.
+fn assert_origin(engine: &Engine, root: Entity, joint: usize, expected: Vec3) {
+    let got = origin(pose(engine, root)[joint]);
+    assert!(close(got, expected), "joint {joint}: got {got:?}");
+}
+
+fn has_fade(engine: &Engine, root: Entity) -> bool {
+    fade_of(engine, root).is_some()
+}
+
+/// Playlist clip: joint 0 rests at the origin.
+fn idle_clip(engine: &mut Engine) -> ClipId {
+    add_clip(engine, clip("idle", vec![constant(0, Vec3::ZERO)]))
+}
+
+/// Playlist clip: joint 0 sits at x = 4.
+fn walk_clip(engine: &mut Engine) -> ClipId {
+    add_clip(
+        engine,
+        clip("walk", vec![constant(0, Vec3::new(4.0, 0.0, 0.0))]),
+    )
+}
+
 #[test]
 fn half_weight_pulls_the_pose_halfway_to_rest() {
     let mut engine = engine();
     let root = rig(&mut engine, vec![None]);
-    let walk = add_clip(
-        &mut engine,
-        clip("walk", vec![constant(0, Vec3::new(4.0, 0.0, 0.0))]),
-    );
+    let walk = walk_clip(&mut engine);
     put(&mut engine, root, player(walk, 0.5));
 
     engine.run_frame(0.1);
 
-    assert!(close(
-        origin(pose(&engine, root)[0]),
-        Vec3::new(2.0, 0.0, 0.0)
-    ));
+    assert_origin(&engine, root, 0, Vec3::new(2.0, 0.0, 0.0));
 }
 
 #[test]
 fn crossfade_mixes_both_clips_then_retires() {
     let mut engine = engine();
     let root = rig(&mut engine, vec![None]);
-    let idle = add_clip(&mut engine, clip("idle", vec![constant(0, Vec3::ZERO)]));
-    let walk = add_clip(
-        &mut engine,
-        clip("walk", vec![constant(0, Vec3::new(4.0, 0.0, 0.0))]),
-    );
+    let idle = idle_clip(&mut engine);
+    let walk = walk_clip(&mut engine);
     put(&mut engine, root, player(walk, 1.0));
     let fade = SkelFade {
         from: player(idle, 1.0),
@@ -183,23 +197,13 @@ fn crossfade_mixes_both_clips_then_retires() {
 
     // Halfway through a 2 s fade: the outgoing and incoming poses average.
     engine.run_frame(1.0);
-    assert!(close(
-        origin(pose(&engine, root)[0]),
-        Vec3::new(2.0, 0.0, 0.0)
-    ));
-    assert!(
-        fade_of(&engine, root).is_some(),
-        "fade stays active until its duration elapses"
-    );
+    assert_origin(&engine, root, 0, Vec3::new(2.0, 0.0, 0.0));
+    assert!(has_fade(&engine, root), "fade still running");
 
     // Past the end: the incoming clip alone, and the fade component is gone.
     engine.run_frame(1.0);
-    assert!(close(
-        origin(pose(&engine, root)[0]),
-        Vec3::new(4.0, 0.0, 0.0)
-    ));
-    let retired = fade_of(&engine, root).is_none();
-    assert!(retired, "finished fade is removed");
+    assert_origin(&engine, root, 0, Vec3::new(4.0, 0.0, 0.0));
+    assert!(!has_fade(&engine, root), "finished fade is removed");
 }
 
 #[test]
@@ -235,20 +239,16 @@ fn layer_lerps_only_the_masked_joints() {
 
     engine.run_frame(0.1);
 
-    let poses = pose(&engine, root);
     // Masked joint 0 takes the layer; joint 1 (mask 0) keeps the base pose.
-    assert!(close(origin(poses[0]), Vec3::new(0.0, 8.0, 0.0)));
-    assert!(close(origin(poses[1]), Vec3::new(4.0, 8.0, 0.0)));
+    assert_origin(&engine, root, 0, Vec3::new(0.0, 8.0, 0.0));
+    assert_origin(&engine, root, 1, Vec3::new(4.0, 8.0, 0.0));
 }
 
 #[test]
 fn mask_length_mismatch_skips_the_entity() {
     let mut engine = engine();
     let root = rig(&mut engine, vec![None]);
-    let base = add_clip(
-        &mut engine,
-        clip("base", vec![constant(0, Vec3::new(4.0, 0.0, 0.0))]),
-    );
+    let base = walk_clip(&mut engine);
     let wave = add_clip(
         &mut engine,
         clip("wave", vec![constant(0, Vec3::new(0.0, 8.0, 0.0))]),
@@ -268,11 +268,8 @@ fn mask_length_mismatch_skips_the_entity() {
 fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
     let mut engine = engine();
     let root = rig(&mut engine, vec![None]);
-    let idle = add_clip(&mut engine, clip("idle", vec![constant(0, Vec3::ZERO)]));
-    let walk = add_clip(
-        &mut engine,
-        clip("walk", vec![constant(0, Vec3::new(4.0, 0.0, 0.0))]),
-    );
+    let idle = idle_clip(&mut engine);
+    let walk = walk_clip(&mut engine);
     let clips = [("idle".to_string(), idle), ("walk".to_string(), walk)]
         .into_iter()
         .collect();
@@ -288,6 +285,5 @@ fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
     assert_eq!(fade.duration, Seconds::new(1.0));
 
     animator(&mut engine, root).play("walk").unwrap();
-    let cut = fade_of(&engine, root).is_none();
-    assert!(cut, "a hard play cancels the crossfade");
+    assert!(!has_fade(&engine, root), "play cuts the fade");
 }
