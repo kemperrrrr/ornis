@@ -270,6 +270,29 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   не дал ни один игрок, не пишется (как раньше у объектов). Animator-API для слоёв и
   фейдов пока нет: `SkelLayer` и `AnimFade` вставляются напрямую.
 
+  **Дальше (сверено по коду 2026-10-19 на `55f1b0a`):**
+
+  1. **Прод-доступность фазы E.** У `Animator::play_crossfade`, `SkelLayer`,
+     `JointMask` и `AnimFade` нет ни одного нетестового вызывателя — только
+     регистрация лейнов (`crates/app/src/anim_wiring.rs:395-400`). Пока так,
+     `qual:api` на `Animator::play_crossfade` остаётся обещанием, а не фактом.
+  2. **Общий `Animator`-фасад.** `Animator` (`crates/animation/src/animator.rs:105-223`)
+     ведёт только скелетный плейлист (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`);
+     у объектов — лишь `set_playing`/`rewind_player` (`crates/app/src/anim_wiring.rs:325,343`).
+     Нужен `play_crossfade` для `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade`,
+     чтобы §5 не требовал прямой вставки в лейн.
+  3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
+     и любые комбинации нескольких слоёв сейчас невозможны.
+  4. **Осознанно отложено** (см. §6): бленд-дерево, IK, ретаргет, анимационный
+     state machine, события/уведомления по ключам, root motion (кроме `Velocity`).
+     Гейт — сначала пункты 1–3, морфы (#153) — отдельным PR.
+  5. **Перф-бэклог горячего пути.** `tick_fades` идёт по `frozen.contains` на
+     каждую запись, O(fades × physics bodies) на кадр
+     (`crates/animation/src/lib.rs:1891`); скелетный путь даёт ~5–7 пер-кадровых
+     `Vec` (`collect_pose_work`/`sample_entity`/`node_poses`), объектный — 2 `Vec`
+     на сущность (`track_of`, `side_pose`, `crates/animation/src/lib.rs:672-684`).
+     Нужны битовая маска/`HashSet` для frozen и переиспользование буферов.
+
 ## 6. Осознанно НЕ делаем
 
 - Суставы как ECS-сущности (см. §2.1 — раздувание итерации экстракции).
@@ -280,6 +303,8 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
 - Свой `Transform` (`render/src/transform.rs:7-14`) как лейн: рендер читает
   `TransformDesc`, второй placement-источник = рассинхрон.
 - Бленд-дерево/IK/ретаргет в фазах A–D; морфы (blend shapes) — только после E.
+  То же отложено и для анимационного state machine и событий/уведомлений по
+  ключам: гейт — прод-доступность фазы E и общий `Animator`-фасад (§5, «Дальше»).
 - Изменение `InstanceData`/шейдеров ради фаз A–C (объектная ложится в `model_matrix`,
   скиннинг — в `custom_meshes`).
 - Тихие фолбэки: незагрузившийся скелет/вес/клип = скип + счётчик, никогда сфера-заглушка

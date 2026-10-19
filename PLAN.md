@@ -125,6 +125,30 @@
   (reverb/EQ/compression) чистыми функциями + стриминг длинной музыки через
   кольцевой буфер; GPU-аудио (свёртка/FFT) — только после, если вообще.
   База (`AudioSource`/`AudioListener`, cpal/Web Audio, symphonia) есть.
+- **Анимация (фаза E, фоллоу-апы; проверено по коду 2026-10-19 на `55f1b0a`)**
+  — модель готова и покрыта тестами, прод-доступность нет:
+  1. **Прод-доступность фазы E.** У `Animator::play_crossfade`, `SkelLayer`,
+     `JointMask` и `AnimFade` нет ни одного нетестового вызывателя — только
+     регистрация лейнов (`crates/app/src/anim_wiring.rs:395-400`). Поэтому
+     `qual:api` на `Animator::play_crossfade` стоит до первого прод-вызывателя.
+  2. **Общий `Animator`-фасад для объектов.** `Animator`
+     (`crates/animation/src/animator.rs:105-223`) работает только со скелетным
+     плейлистом (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`); у
+     объектов есть лишь `set_playing`/`rewind_player`
+     (`crates/app/src/anim_wiring.rs:325,343`). Нужен `play_crossfade` для
+     `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade` (сегодня —
+     прямая вставка в лейн).
+  3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
+     и любая комбинация из нескольких слоёв сейчас невозможна.
+  4. **Осознанно отложено** (`docs/animation-design.md` §6): бленд-дерево, IK,
+     ретаргет, анимационный state machine, события/уведомления по ключам,
+     root motion (кроме `Velocity`). Морфы — #153.
+  5. **Перф-бэклог горячего пути.** `tick_fades` — `frozen.contains` на каждую
+     запись, O(fades × physics bodies) на кадр
+     (`crates/animation/src/lib.rs:1891`); скелетный путь даёт ~5–7 пер-кадровых
+     `Vec`, объектный — 2 `Vec` на сущность (`track_of`, `side_pose`,
+     `crates/animation/src/lib.rs:672-684`). Нужны битовая маска/`HashSet` для
+     frozen и переиспользование буферов.
 
 ## Дорожная карта (по приоритетам)
 
@@ -259,7 +283,7 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 (`install_skeletal_animation`, `AssetServer` удерживает `LoadedScene`,
 autoplay `playing: true`; стартер `assets/starter/ual1_standard.glb`,
 регрессия `starter_pack_playback_moves_joints`).
-✅ **2026-10-19 — анимация, фаза E: веса, кроссфейд, маски (PR #174, `crates/animation`).** Скелет: `SkelPlayer.weight`, кроссфейд `SkelFade` на корне (`Animator::play_crossfade`; `play`/`stop` отменяют фейд), слои `SkelLayer` с холодным `JointMask` по суставам (длина маски ≠ числу суставов → скип со счётчиком). Объекты: `AnimPlayer.weight` и горячий `AnimFade`. Модель детерминированная, как Godot: отсутствующий канал читается как авторский покой (`Skeleton::rest`, `AnimTrack::rest`), покой берётся из TRS glTF-узла (`LoadedSkin.rest`, `LoadedAnimTrack.rest`). На ревью найдено: identity вместо покоя деформировал скин с ненулевыми bind-TRS. Не сделано: Animator-API для объектных фейдов и слоёв; морф-таргеты (#153) — отдельный PR.
+✅ **2026-10-19 — анимация, фаза E: веса, кроссфейд, маски (PR #174, `crates/animation`).** Скелет: `SkelPlayer.weight`, кроссфейд `SkelFade` на корне (`Animator::play_crossfade`; `play`/`stop` отменяют фейд), слои `SkelLayer` с холодным `JointMask` по суставам (длина маски ≠ числу суставов → скип со счётчиком). Объекты: `AnimPlayer.weight` и горячий `AnimFade`. Модель детерминированная, как Godot: отсутствующий канал читается как авторский покой (`Skeleton::rest`, `AnimTrack::rest`), покой берётся из TRS glTF-узла (`LoadedSkin.rest`, `LoadedAnimTrack.rest`). На ревью найдено: identity вместо покоя деформировал скин с ненулевыми bind-TRS. Не сделано: Animator-API для объектных фейдов и слоёв; морф-таргеты (#153) — отдельный PR. Пять фоллоу-апов (прод-доступность, объектный фасад, стек слоёв, отложенное, перф) — в разделе «Частично — что достроить» → **Анимация (фаза E, фоллоу-апы)** и в `docs/animation-design.md` §5, «Дальше».
 ✅ **2026-10-03 — сцена-first фасад + честный свет (проверено).**
 `GameWorld::spawn_gltf/add_directional_light/set_ambient/add_orbit_camera`
 (`SpawnError`), пример — ~25 строк без engine (`ornis_runner::run_native`
