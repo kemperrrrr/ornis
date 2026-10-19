@@ -144,6 +144,7 @@ fn emit_system_struct(func: &ItemFn, struct_name: &Ident, params: &[TypedParam])
         #[allow(non_camel_case_types)]
         pub struct #struct_name {
             #(#struct_fields)*
+            __smart_alignment: ::std::sync::Mutex<Option<(::std::vec::Vec<u64>, bool)>>,
         }
 
         impl #struct_name {
@@ -151,6 +152,7 @@ fn emit_system_struct(func: &ItemFn, struct_name: &Ident, params: &[TypedParam])
             pub fn new(#(#ctor_params),*) -> Self {
                 Self {
                     #(#ctor_inits)*
+                    __smart_alignment: ::std::sync::Mutex::new(None),
                 }
             }
         }

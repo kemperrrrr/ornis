@@ -247,11 +247,42 @@ pub(crate) fn run_loop(
     let fast_step = step_stmts(lanes, body_fn, user_args, entity, hint, true);
     let general_step = step_stmts(lanes, body_fn, user_args, entity, hint, false);
     let assert = driver_assert(lanes);
+    let general_branch = quote! {
+        let mut __smart_membership = ornis_core::PackMembership::new();
+        #(#membership_terms)*
+        let __smart_entities = __smart_membership.into_entities();
+        for (__smart_i, #entity) in __smart_entities.into_iter().enumerate() {
+            let #hint = __smart_i;
+            #general_step
+        }
+    };
+    let layout_reads = own.iter().map(|lane| {
+        let guard = lane.guard();
+        quote! { #guard.layout() }
+    });
     quote! {
         #assert
-        let __smart_aligned = #first_guard.is_id_ordered()
-            #(#aligned_terms)*
-            #(#mutable_sparse_terms)*;
+        let __smart_layouts = [#(#layout_reads),*];
+        let __smart_cached = {
+            let __smart_cache = self.__smart_alignment.lock().unwrap_or_else(|e| e.into_inner());
+            match &*__smart_cache {
+                Some((layouts, aligned)) if layouts.as_slice() == __smart_layouts.as_slice() => {
+                    Some(*aligned)
+                }
+                _ => None,
+            }
+        };
+        let __smart_aligned = match __smart_cached {
+            Some(aligned) => aligned,
+            None => {
+                let aligned = #first_guard.is_id_ordered()
+                    #(#aligned_terms)*
+                    #(#mutable_sparse_terms)*;
+                *self.__smart_alignment.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((__smart_layouts.to_vec(), aligned));
+                aligned
+            }
+        };
         if __smart_aligned {
             for __smart_i in 0..#first_guard.entities.len() {
                 let #entity = #first_guard.entities[__smart_i];
@@ -259,13 +290,7 @@ pub(crate) fn run_loop(
                 #fast_step
             }
         } else {
-            let mut __smart_membership = ornis_core::PackMembership::new();
-            #(#membership_terms)*
-            let __smart_entities = __smart_membership.into_entities();
-            for (__smart_i, #entity) in __smart_entities.into_iter().enumerate() {
-                let #hint = __smart_i;
-                #general_step
-            }
+            #general_branch
         }
     }
 }
