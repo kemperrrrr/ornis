@@ -15,12 +15,13 @@ use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{Ident, ItemFn, Stmt, Type};
 
-use crate::smart_system::{TypedParam, camel_system_name};
+use crate::smart_system::{ParamKind, TypedParam, camel_system_name};
 use crate::smart_system_body_visit::BodyInfo;
 use crate::smart_system_emit_params::{build_access_stmts, build_fetch_stmts, build_user_params};
 use crate::smart_system_fields::{FieldRewrite, FieldUsage, scan_fields};
 use crate::smart_system_lanes::{
-    LaneSpec, body_lane_params, build_lane_specs, guard_stmts, lane_access_stmts, run_loop,
+    LaneSpec, LoopIdents, body_lane_params, build_lane_specs, guard_stmts, lane_access_stmts,
+    run_loop,
 };
 use crate::smart_system_parse::{
     check_signature, collect_params, combine_errors, config_struct_parts,
@@ -177,7 +178,15 @@ fn emit_system_impl(
     let lane_access = lane_access_stmts(lanes);
     let access_stmts = build_access_stmts(params);
     let guards = guard_stmts(lanes, &store_ident);
-    let loop_tokens = run_loop(lanes, body_fn_name, &call_args, &entity_ident, &hint_ident);
+    let binds_entity = params
+        .iter()
+        .any(|param| matches!(param.kind, ParamKind::EntityHandle));
+    let ids = LoopIdents {
+        entity: &entity_ident,
+        hint: &hint_ident,
+        binds_entity,
+    };
+    let loop_tokens = run_loop(lanes, body_fn_name, &call_args, &ids);
 
     quote! {
         impl ornis_core::System for #struct_name {

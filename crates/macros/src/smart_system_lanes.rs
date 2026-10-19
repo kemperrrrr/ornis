@@ -151,7 +151,9 @@ fn body_arg_stmts(lanes: &[LaneSpec]) -> Vec<TokenStream2> {
 }
 
 /// Per-entity step: index resolution, gather, body call, scatter. Uses
-/// `continue` to skip an entity, so it must sit directly in the loop.
+/// `continue` to skip an entity, so it must sit directly in the loop. The
+/// aligned variant reads by the loop index and never skips, so it needs no
+/// entity and no `Option`.
 fn step_stmts(
     lanes: &[LaneSpec],
     body_fn: &Ident,
@@ -161,14 +163,52 @@ fn step_stmts(
     aligned: bool,
 ) -> TokenStream2 {
     let own: Vec<&LaneSpec> = lanes.iter().filter(|lane| lane.own).collect();
+    let (indices, gathers, scatters) = if aligned {
+        aligned_lane_ops(&own, hint)
+    } else {
+        general_lane_ops(&own, entity, hint)
+    };
+    let body_args = body_arg_stmts(lanes);
+    quote! {
+        #(#indices)*
+        #(#gathers)*
+        #body_fn(#(#body_args,)* #(#user_args),*);
+        #(#scatters)*
+    }
+}
+
+type LaneOps = (Vec<TokenStream2>, Vec<TokenStream2>, Vec<TokenStream2>);
+
+fn aligned_lane_ops(own: &[&LaneSpec], hint: &Ident) -> LaneOps {
+    let gathers = own.iter().map(|lane| {
+        let ty = &lane.lane_ty;
+        let guard = lane.guard();
+        let value = lane.value();
+        let mutability = if lane.written {
+            quote! { mut }
+        } else {
+            quote! {}
+        };
+        quote! {
+            let #mutability #value = <#ty as ornis_core::PackLane>::gather_at(&*#guard, #hint);
+        }
+    });
+    let scatters = own.iter().filter(|lane| lane.written).map(|lane| {
+        let ty = &lane.lane_ty;
+        let guard = lane.guard();
+        let value = lane.value();
+        quote! {
+            <#ty as ornis_core::PackLane>::scatter_at(&mut *#guard, #hint, #value);
+        }
+    });
+    (Vec::new(), gathers.collect(), scatters.collect())
+}
+
+fn general_lane_ops(own: &[&LaneSpec], entity: &Ident, hint: &Ident) -> LaneOps {
     let indices = own.iter().map(|lane| {
         let index = lane.index();
-        if aligned {
-            quote! { let #index = Some(#hint); }
-        } else {
-            let guard = lane.guard();
-            quote! { let #index = #guard.index_hinted(#entity, #hint); }
-        }
+        let guard = lane.guard();
+        quote! { let #index = #guard.index_hinted(#entity, #hint); }
     });
     let gathers = own.iter().map(|lane| {
         let ty = &lane.lane_ty;
@@ -185,7 +225,6 @@ fn step_stmts(
                 <#ty as ornis_core::PackLane>::gather(&*#guard, #index) else { continue; };
         }
     });
-    let body_args = body_arg_stmts(lanes);
     let scatters = own.iter().filter(|lane| lane.written).map(|lane| {
         let ty = &lane.lane_ty;
         let guard = lane.guard();
@@ -195,12 +234,7 @@ fn step_stmts(
             <#ty as ornis_core::PackLane>::scatter(&mut *#guard, #entity, #index, #value);
         }
     });
-    quote! {
-        #(#indices)*
-        #(#gathers)*
-        #body_fn(#(#body_args,)* #(#user_args),*);
-        #(#scatters)*
-    }
+    (indices.collect(), gathers.collect(), scatters.collect())
 }
 
 /// Compile-time check that some touched own field is required (not
@@ -220,15 +254,28 @@ fn driver_assert(lanes: &[LaneSpec]) -> TokenStream2 {
     }
 }
 
+/// Loop variables of a whole-run loop. `binds_entity` is set when the body
+/// takes an `Entity` parameter; the aligned fast path then loads the entity
+/// per step, and otherwise never touches the entity list.
+pub(crate) struct LoopIdents<'a> {
+    pub(crate) entity: &'a Ident,
+    pub(crate) hint: &'a Ident,
+    pub(crate) binds_entity: bool,
+}
+
 /// Whole-run loop: the aligned fast path (dense lane walk) or the general
 /// membership walk. Both visit the same entities in the same order.
 pub(crate) fn run_loop(
     lanes: &[LaneSpec],
     body_fn: &Ident,
     user_args: &[TokenStream2],
-    entity: &Ident,
-    hint: &Ident,
+    ids: &LoopIdents,
 ) -> TokenStream2 {
+    let LoopIdents {
+        entity,
+        hint,
+        binds_entity,
+    } = *ids;
     let own: Vec<&LaneSpec> = lanes.iter().filter(|lane| lane.own).collect();
     let first = own[0];
     let first_guard = first.guard();
@@ -245,6 +292,11 @@ pub(crate) fn run_loop(
         quote! { __smart_membership.narrow(&*#guard); }
     });
     let fast_step = step_stmts(lanes, body_fn, user_args, entity, hint, true);
+    let fast_bind = if binds_entity {
+        quote! { let #entity = #first_guard.entities[#hint]; }
+    } else {
+        quote! {}
+    };
     let general_step = step_stmts(lanes, body_fn, user_args, entity, hint, false);
     let assert = driver_assert(lanes);
     let general_branch = quote! {
@@ -284,9 +336,8 @@ pub(crate) fn run_loop(
             }
         };
         if __smart_aligned {
-            for __smart_i in 0..#first_guard.entities.len() {
-                let #entity = #first_guard.entities[__smart_i];
-                let #hint = __smart_i;
+            for #hint in 0..#first_guard.entities.len() {
+                #fast_bind
                 #fast_step
             }
         } else {
