@@ -15,14 +15,17 @@
         // the Rust-clamped devicePixelRatio); this boot-time resize only
         // prevents a wrong-size flash before the first frame, so it runs
         // once with the same truncating formula Rust uses
-        // (`(clientWidth * dpr).max(1.0) as u32`) and never attaches a
+        // (`(borderRect * dpr).max(1.0) as u32` — fractional
+        // getBoundingClientRect, not the integer clientWidth, so fractional
+        // layouts stay within one device pixel) and never attaches a
         // resize listener — a JS resize would fight the per-frame Rust
         // resize and diverge in rounding on fractional devicePixelRatio.
         const resizeCanvas = () => {
             if (!viewportEl || !canvasEl) return;
             const dpr = Math.max(1, window.devicePixelRatio || 1);
-            canvasEl.width = Math.max(1, Math.trunc(viewportEl.clientWidth * dpr));
-            canvasEl.height = Math.max(1, Math.trunc(viewportEl.clientHeight * dpr));
+            const rect = viewportEl.getBoundingClientRect();
+            canvasEl.width = Math.max(1, Math.trunc(rect.width * dpr));
+            canvasEl.height = Math.max(1, Math.trunc(rect.height * dpr));
         };
         resizeCanvas();
 
@@ -68,14 +71,21 @@
             }
             gridEl.hidden = false;
             // Wire grid values are backing-store (device) pixels; the
-            // overlay paints in CSS pixels with the same display scale the
-            // surface multiplied with — `state.dpr` (Rust-clamped >= 1),
-            // falling back to the browser value only if the wire has none.
-            const dpr = (state && state.dpr) || window.devicePixelRatio || 1;
-            const minor = grid.minor_step_px / dpr;
+            // overlay paints in CSS pixels using the *measured* display
+            // scale `canvas.width / rect.width` — exact even on fractional
+            // layouts, where the truncating backing store makes the real
+            // device-px-per-CSS-px differ from the nominal `state.dpr`
+            // (Rust-clamped >= 1) by up to ~1 CSS px across the box. The
+            // wire/browser dpr remains the fallback only while the canvas
+            // has no laid-out box yet.
+            const rect = canvasEl ? canvasEl.getBoundingClientRect() : null;
+            const scale = rect && rect.width > 0 && canvasEl.width > 0
+                ? canvasEl.width / rect.width
+                : ((state && state.dpr) || window.devicePixelRatio || 1);
+            const minor = grid.minor_step_px / scale;
             const major = minor * grid.major_every;
-            const ox = grid.origin_px[0] / dpr;
-            const oy = grid.origin_px[1] / dpr;
+            const ox = grid.origin_px[0] / scale;
+            const oy = grid.origin_px[1] / scale;
             gridEl.style.backgroundImage =
                 'linear-gradient(rgba(255,255,255,.10) 1px, transparent 1px),' +
                 'linear-gradient(90deg, rgba(255,255,255,.10) 1px, transparent 1px),' +

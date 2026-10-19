@@ -569,13 +569,50 @@ fn effective_dpr(raw: Option<f64>) -> f32 {
         .max(1.0)
 }
 
+#[wasm_bindgen]
+extern "C" {
+    /// Structural view of a DOM element carrying only the method this
+    /// crate needs: `web-sys` gates `Element::get_bounding_client_rect`
+    /// behind the disabled `DomRect` feature and Cargo.toml is frozen for
+    /// this slice, so the binding is declared by hand.
+    type JsElement;
+
+    /// `Element.prototype.getBoundingClientRect`.
+    #[wasm_bindgen(js_name = getBoundingClientRect, method)]
+    fn get_bounding_client_rect(this: &JsElement) -> JsDomRect;
+
+    /// Minimal `DOMRect` view: the border-box members layout reads.
+    type JsDomRect;
+
+    /// Border-box width in CSS pixels.
+    #[wasm_bindgen(method, getter)]
+    fn width(this: &JsDomRect) -> f64;
+
+    /// Border-box height in CSS pixels.
+    #[wasm_bindgen(method, getter)]
+    fn height(this: &JsDomRect) -> f64;
+}
+
+/// Fractional border-box size of `element` in CSS pixels from
+/// `getBoundingClientRect()`. `clientWidth`/`clientHeight` are integers
+/// and drift by up to ~1 CSS px on fractional layouts (odd zoom steps,
+/// dpr 1.25), which skewed both the backing store and the overlay grid.
+// qual:allow(test_quality, untested) reason: "DOM geometry read through a wasm-bindgen extern import; unreachable from host tests — covered by the wasm32 check and the manual fractional-layout verification"
+fn element_border_px(element: &web_sys::Element) -> (f32, f32) {
+    let rect = element
+        .unchecked_ref::<JsElement>()
+        .get_bounding_client_rect();
+    (rect.width() as f32, rect.height() as f32)
+}
+
 /// Resize the canvas backing store to fill its parent element, scaled by
 /// [`device_pixel_ratio`].
 fn resize_canvas_to_parent(canvas: &web_sys::HtmlCanvasElement) {
     if let Some(parent) = canvas.parent_element() {
         let dpr = device_pixel_ratio();
-        canvas.set_width((parent.client_width() as f32 * dpr) as u32);
-        canvas.set_height((parent.client_height() as f32 * dpr) as u32);
+        let (width, height) = element_border_px(&parent);
+        canvas.set_width((width * dpr) as u32);
+        canvas.set_height((height * dpr) as u32);
     }
 }
 
@@ -773,16 +810,12 @@ impl<'a> FrameState<'a> {
                 .resources_mut()
                 .insert(PointerDpr(dpr));
         }
-        let pw = canvas
+        let (parent_w, parent_h) = canvas
             .parent_element()
-            .map(|p| p.client_width() as f32 * dpr)
-            .unwrap_or(canvas.width() as f32)
-            .max(1.0) as u32;
-        let ph = canvas
-            .parent_element()
-            .map(|p| p.client_height() as f32 * dpr)
-            .unwrap_or(canvas.height() as f32)
-            .max(1.0) as u32;
+            .map(|p| element_border_px(&p))
+            .unwrap_or((canvas.width() as f32, canvas.height() as f32));
+        let pw = (parent_w * dpr).max(1.0) as u32;
+        let ph = (parent_h * dpr).max(1.0) as u32;
         if canvas.width() != pw || canvas.height() != ph {
             canvas.set_width(pw);
             canvas.set_height(ph);
