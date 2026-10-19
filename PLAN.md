@@ -125,6 +125,85 @@
   (reverb/EQ/compression) чистыми функциями + стриминг длинной музыки через
   кольцевой буфер; GPU-аудио (свёртка/FFT) — только после, если вообще.
   База (`AudioSource`/`AudioListener`, cpal/Web Audio, symphonia) есть.
+- **Анимация (фаза E, фоллоу-апы; проверено по коду 2026-10-19 на `55f1b0a`)**
+  — модель готова и покрыта тестами, прод-доступность нет:
+  1. **Прод-доступность фазы E.** У `Animator::play_crossfade`, `SkelLayer`,
+     `JointMask` и `AnimFade` нет ни одного нетестового вызывателя — только
+     регистрация лейнов (`crates/app/src/anim_wiring.rs:395-400`). Поэтому
+     `qual:api` на `Animator::play_crossfade` стоит до первого прод-вызывателя.
+  2. **Общий `Animator`-фасад для объектов.** `Animator`
+     (`crates/animation/src/animator.rs:105-223`) работает только со скелетным
+     плейлистом (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`); у
+     объектов есть лишь `set_playing`/`rewind_player`
+     (`crates/app/src/anim_wiring.rs:325,343`). Нужен `play_crossfade` для
+     `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade` (сегодня —
+     прямая вставка в лейн). Решение (2026-10-19): фасад в `anim_wiring`,
+     не расширение `Animator` — порядок работ в п. 10.
+  3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
+     и любая комбинация из нескольких слоёв сейчас невозможна.
+  4. **Осознанно отложено** (`docs/animation-design.md` §6): бленд-дерево, IK,
+     ретаргет, анимационный state machine, события/уведомления по ключам,
+     root motion (кроме `Velocity`). Морфы — #153.
+  5. **Перф-бэклог горячего пути.** `tick_fades` — `frozen.contains` на каждую
+     запись, O(fades × physics bodies) на кадр
+     (`crates/animation/src/lib.rs:1891`); скелетный путь даёт ~5–7 пер-кадровых
+     `Vec`, объектный — 2 `Vec` на сущность (`track_of`, `side_pose`,
+     `crates/animation/src/lib.rs:672-684`). Нужны битовая маска/`HashSet` для
+     frozen и переиспользование буферов.
+  6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
+     стороны анимации). Упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет. База в
+     физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
+     (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,
+     `set_joint_motor`/`set_joint_damping`/`set_joint_friction`) и
+     maximal-coordinate constraints `crates/physics/src/joint.rs` (G5) для
+     сцен с контактами. Нет шва «физика ↔ скелет»: физика не знает
+     `Skeleton`/`JointPose`, анимация про физику — только пропуск
+     `RigidBody`-сущностей в `anim_sample`. Ragdoll = скин + суставы физики +
+     blending «физика ↔ анимация» по образцу `SkinningMode::Cpu/Gpu`.
+  7. **Animation tree (бленд-дерево / граф переходов) — отложено осознанно**
+     (`docs/animation-design.md` §6: «бленд-дерево/IK/ретаргет в фазах A–D»).
+     Реализации нет, как отдельного пункта в планах он тоже не стоял — есть
+     только эта строка «не делаем». Текущая модель уже покрывает простые случаи:
+     база + один слой (`SkelLayer`) + один кроссфейд на корень (`SkelFade`).
+     Дерево — это произвольный граф нод (blend1d/2d, state machine с переходами
+     по условию, синхронизация по меткам). Гейт — сначала фоллоу-апы 1–3
+     (прод-доступность, общий `Animator`-фасад, стек слоёв): иначе дерево
+     строится поверх API, которого нет.
+  8. **Motion matching — не начато.** Упоминаний в коде, `PLAN.md`, `IDEAS.md`
+     и `docs/` нет. Состав: база движений (клипы + метки контактов),
+     feature-выборка позы/скоростей, детерминированный поиск/выбор кадра по
+     дистанции, инерциализация переходов. Опора у фазы E уже есть —
+     `SkelClip`/`KeyTrack` как источник поз и детерминированная модель бленда
+     (без состояния между кадрами) как раз нужна для повторяемого выбора.
+  9. **Distance matching / motion warping — не начато.** Упоминаний нет.
+     Distance matching — привязка фазы цикла не только ко времени, но и к
+     пройденной дистанции/моменту контакта (лечит «скольжение ног» при разной
+     скорости); motion warping — деформация позы под целевую точку или
+     траекторию (шаг на платформу, прыжок). Оба ложатся поверх сэмплера
+     (доступ к позам по времени + коррекция/IK), то есть логично после
+      слоёв/общего API и — для warping — после IK, который тоже отложен (§6).
+  10. **Шаги разблокировки гейта (порядок; решение 2026-10-19).**
+     - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`**, рядом с
+       `set_playing`/`rewind_player` (`:325,343`): `play_crossfade(store,
+       entity, name, duration)` плюс типизированный вход для `SkelLayer`/`AnimFade`.
+       Скелетная ветка делегирует в `AnimatorMut::play_crossfade` через
+       `try_animator` (одна реализация фейда), объектная пишет `AnimFade`
+       (и `AnimPlayer`) прямо на сущности. Топологии разные: каталог на корне
+       с `targets: Vec<Entity>` (`crates/animation/src/animator.rs:26-30`)
+       против плеера на самой анимируемой сущности, — поэтому один тип не
+       объединяем, а ставим драйвер поверх каталога, как Godot `AnimationTree`
+       над `AnimationPlayer` (общий базовый `AnimationMixer`) или Bevy
+       `AnimationTransitions` отдельным компонентом от `AnimationPlayer`.
+     - **Шаг 2 — первый прод-вызывающий:** `GameWorld::play_animation`
+       (`crates/app/src/game_world.rs:131`) сейчас зовёт только `set_playing`
+       (без имени и без фейда); после шага 1 он же снимает `qual:api`
+       с `Animator::play_crossfade` (`crates/animation/src/animator.rs:119`).
+       Точка входа `EntityMut::animator()` уже есть
+       (`crates/app/src/game_world.rs:831`).
+     - **Шаг 3 — стек слоёв** (п. 3) тем же типизированным входом фасада.
+       Слои остаются только скелетными: `SkelLayer`
+       (`crates/animation/src/blend.rs:44`) — единственный тип слоя,
+       объектного в модели нет.
 
 ## Дорожная карта (по приоритетам)
 
@@ -259,7 +338,7 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 (`install_skeletal_animation`, `AssetServer` удерживает `LoadedScene`,
 autoplay `playing: true`; стартер `assets/starter/ual1_standard.glb`,
 регрессия `starter_pack_playback_moves_joints`).
-✅ **2026-10-19 — анимация, фаза E: веса, кроссфейд, маски (PR #174, `crates/animation`).** Скелет: `SkelPlayer.weight`, кроссфейд `SkelFade` на корне (`Animator::play_crossfade`; `play`/`stop` отменяют фейд), слои `SkelLayer` с холодным `JointMask` по суставам (длина маски ≠ числу суставов → скип со счётчиком). Объекты: `AnimPlayer.weight` и горячий `AnimFade`. Модель детерминированная, как Godot: отсутствующий канал читается как авторский покой (`Skeleton::rest`, `AnimTrack::rest`), покой берётся из TRS glTF-узла (`LoadedSkin.rest`, `LoadedAnimTrack.rest`). На ревью найдено: identity вместо покоя деформировал скин с ненулевыми bind-TRS. Не сделано: Animator-API для объектных фейдов и слоёв; морф-таргеты (#153) — отдельный PR.
+✅ **2026-10-19 — анимация, фаза E: веса, кроссфейд, маски (PR #174, `crates/animation`).** Скелет: `SkelPlayer.weight`, кроссфейд `SkelFade` на корне (`Animator::play_crossfade`; `play`/`stop` отменяют фейд), слои `SkelLayer` с холодным `JointMask` по суставам (длина маски ≠ числу суставов → скип со счётчиком). Объекты: `AnimPlayer.weight` и горячий `AnimFade`. Модель детерминированная, как Godot: отсутствующий канал читается как авторский покой (`Skeleton::rest`, `AnimTrack::rest`), покой берётся из TRS glTF-узла (`LoadedSkin.rest`, `LoadedAnimTrack.rest`). На ревью найдено: identity вместо покоя деформировал скин с ненулевыми bind-TRS. Не сделано: Animator-API для объектных фейдов и слоёв; морф-таргеты (#153) — отдельный PR. Фоллоу-апы (доступность и API, слои, отложенное, перф, ragdoll, дерево / motion matching / warping) — в разделе «Частично — что достроить» → **Анимация (фаза E, фоллоу-апы)** и в `docs/animation-design.md` §5, «Дальше».
 ✅ **2026-10-03 — сцена-first фасад + честный свет (проверено).**
 `GameWorld::spawn_gltf/add_directional_light/set_ambient/add_orbit_camera`
 (`SpawnError`), пример — ~25 строк без engine (`ornis_runner::run_native`
