@@ -5,7 +5,7 @@
 use crate::component_store::ComponentStore;
 use crate::entity::Entity;
 
-/// One field lane of a [`Pack`] bundle: the generated wrapper type that
+/// One field lane of a [`crate::Pack`] bundle: the generated wrapper type that
 /// stores a single field for each entity owning it.
 ///
 /// `#[derive(Pack)]` implements this for every wrapper. `#[smart_system]`

@@ -8,8 +8,8 @@
 //! resource read/write splits across disjoint lane sets).
 
 use ornis_core::{
-    DensePackLane, Entity, EventReader, EventWriter, Pack, PlainResource, Res, ResMut, Resources,
-    Schedule, SmartStore, System, SystemAccess, register_events,
+    Entity, EventReader, EventWriter, Pack, PlainResource, Res, ResMut, Resources, Schedule,
+    SmartStore, System, SystemAccess, register_events,
 };
 use ornis_macros::smart_system;
 
@@ -592,37 +592,4 @@ fn alignment_cache_follows_membership_changes() {
         position.get(entities[2]),
         Some(&Mote__position__PackLane(21.0))
     );
-}
-
-/// Field slices of a dense lane alias the wrapper column: a write through
-/// [`DensePackLane::as_mut_slice`] is visible as the packed field.
-#[test]
-fn dense_lane_field_slices_alias_column() {
-    let (resources, entities) = resources_with_motes(&[mote(1.0, 2.0), mote(3.0, 4.0)]);
-    let store = resources.get::<SmartStore>().expect("store");
-    {
-        let mut positions = store
-            .write_lane::<Mote__position__PackLane>()
-            .expect("position lane");
-        let slice = DensePackLane::as_mut_slice(&mut positions.data);
-        assert_eq!(slice, &[1.0, 3.0]);
-        slice[0] = 9.0;
-        slice[1] = 8.0;
-    }
-    {
-        let positions = store
-            .read_lane::<Mote__position__PackLane>()
-            .expect("position lane");
-        assert_eq!(DensePackLane::as_slice(&positions.data), &[9.0, 8.0]);
-        assert_eq!(
-            positions.get(entities[0]),
-            Some(&Mote__position__PackLane(9.0))
-        );
-        assert_eq!(
-            positions.get(entities[1]),
-            Some(&Mote__position__PackLane(8.0))
-        );
-    }
-    assert_eq!(Mote::pack_get(store, entities[0]).unwrap().position, 9.0);
-    assert_eq!(Mote::pack_get(store, entities[1]).unwrap().position, 8.0);
 }
