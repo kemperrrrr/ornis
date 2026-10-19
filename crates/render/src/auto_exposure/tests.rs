@@ -447,33 +447,16 @@ fn read_histogram(
     hist
 }
 
-/// Copies `size` bytes from the start of `src` into a mappable buffer and
-/// returns them.
+/// Copies `size` bytes from the start of `src` and reads them back —
+/// the shared [`crate::read_bytes_back`] bootstrap, the same readback
+/// every GPU-gated test and bench uses.
 fn read_buffer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     src: &wgpu::Buffer,
     size: u64,
 ) -> Vec<u8> {
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("auto-exposure test readback"),
-        size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("auto-exposure test readback encoder"),
-    });
-    encoder.copy_buffer_to_buffer(src, 0, &readback, 0, size);
-    queue.submit(std::iter::once(encoder.finish()));
-    let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let bytes = slice.get_mapped_range().expect("mapped range").to_vec();
-    readback.unmap();
-    bytes
+    crate::read_bytes_back(device, queue, src, size).expect("auto-exposure readback succeeds")
 }
 
 /// One auto-exposure update: the two HDR layers, the shader mix mode, the

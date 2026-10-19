@@ -626,9 +626,15 @@ mod tests {
 
     /// Adapter handle, or `None` on headless hosts without a GPU — the
     /// shared bootstrap [`crate::try_headless_device`], which panics
-    /// instead of skipping when [`crate::gpu_required`] holds.
+    /// instead of skipping when [`crate::gpu_required`] holds. Logs the
+    /// skip so every GPU test in this module is visible in the output
+    /// rather than a silent green pass.
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        crate::try_headless_device()
+        let pair = crate::try_headless_device();
+        if pair.is_none() {
+            eprintln!("SKIPPED (gpu_culling tests): no wgpu adapter or device");
+        }
+        pair
     }
 
     /// Reference scene instances, the frame matrix and the CPU
@@ -748,8 +754,16 @@ mod tests {
         culler
             .compact(queue, view_proj, TEST_INDEX_COUNT, instances)
             .expect("instances fit the capacity");
+        cull_test_dispatch(device, queue, culler);
+    }
+
+    /// Records the compaction dispatch into a fresh encoder and submits
+    /// it. No explicit wait here: the readback that follows
+    /// ([`cull_test_read_args`]) polls the device until the submission
+    /// lands, so it always sees this frame's output.
+    fn cull_test_dispatch(device: &wgpu::Device, queue: &wgpu::Queue, culler: &Culler) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("cull test compact"),
+            label: Some("cull test dispatch"),
         });
         culler.record_compact(&mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
@@ -1038,11 +1052,7 @@ mod tests {
         from_records
             .compact_records(&queue, &view_proj, TEST_INDEX_COUNT, &converted)
             .expect("records fit the capacity");
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("compact records dispatch"),
-        });
-        from_records.record_compact(&mut encoder);
-        queue.submit(std::iter::once(encoder.finish()));
+        cull_test_dispatch(&device, &queue, &from_records);
         let args_records = cull_test_read_args(&device, &queue, &from_records.args_buffer)
             .expect("args readback succeeds");
         let args_compact = cull_test_read_args(&device, &queue, &from_instances.args_buffer)
@@ -1056,6 +1066,61 @@ mod tests {
             instances.len(),
             &expected,
         );
+    }
+
+    /// Capping the staged record count at one workgroup —
+    /// `records.len().min(64)` at the [`Culler::compact_records`]
+    /// `prewrite_frame` call — would drop every instance at index ≥ 64
+    /// from the cull pass: with 65 visible instances the tail vanishes
+    /// from the indirect args. Sizes 63 and 64 pin the boundary from the
+    /// other side.
+    #[test]
+    fn compact_records_counts_visible_instances_past_workgroup_zero() {
+        let Some((device, queue)) = try_device() else {
+            return;
+        };
+        let view = perspective_view();
+        let (view_proj, _) = crate::camera::camera_view_projection(&view, (160, 90));
+        for size in [63u32, 64, 65] {
+            let instances: Vec<InstanceData> =
+                (0..size).map(|i| test_instance(i as f32 * 0.05)).collect();
+            let visible = compact_visible_indices(&instances, &view_proj);
+            assert_eq!(
+                visible.len(),
+                size as usize,
+                "size {size}: the sphere line must sit fully in the frustum"
+            );
+            if size > CULL_WORKGROUP_SIZE {
+                assert!(
+                    visible.iter().any(|index| *index >= CULL_WORKGROUP_SIZE),
+                    "premise: the visible set must span workgroup 1"
+                );
+            }
+            let expected: Vec<[f32; 4]> = visible
+                .iter()
+                .map(|index| instances[*index as usize].model_matrix.w_axis.to_array())
+                .collect();
+            let culler = Culler::try_new(&device, size).expect("capacity above zero");
+            let mut records = Vec::with_capacity(size as usize);
+            super::convert_instances(&mut records, &instances);
+            culler
+                .compact_records(&queue, &view_proj, TEST_INDEX_COUNT, &records)
+                .expect("records fit the capacity");
+            cull_test_dispatch(&device, &queue, &culler);
+            let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
+                .expect("args readback succeeds");
+            assert_eq!(
+                args.instance_count, size,
+                "size {size}: every visible instance must reach the cull pass"
+            );
+            assert_visible_records_match(
+                &device,
+                &queue,
+                &culler.visible_buffer,
+                instances.len(),
+                &expected,
+            );
+        }
     }
 
     /// Shared body of the two moved-visible tests: frames 1 and 2 of a
@@ -1086,10 +1151,10 @@ mod tests {
     ) {
         let (mut instances, view_proj, _) = cull_test_scene();
         let culler = Culler::try_new(device, instances.len() as u32).expect("capacity above zero");
-        stage(device, queue, &culler, &view_proj, &instances);
 
-        // Frame 1: the staged scene must match the CPU reference before
-        // any move, so frame 2's result can only come from re-staging.
+        // Frame 1: the premise is a pure CPU check against the frustum,
+        // so it gates the first (and only) staging of the unmoved scene;
+        // frame 2's result can then only come from re-staging.
         let before = compact_visible_indices(&instances, &view_proj);
         assert!(
             before.contains(&0) && before.contains(&3) && before.contains(&4),
@@ -1137,16 +1202,6 @@ mod tests {
         );
     }
 
-    /// Records the compaction dispatch into a submitted encoder and
-    /// waits, so the readback that follows sees frame `n`'s output.
-    fn dispatch_and_wait(queue: &wgpu::Queue, device: &wgpu::Device, culler: &Culler) {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("moved-visible compaction dispatch"),
-        });
-        culler.record_compact(&mut encoder);
-        queue.submit(std::iter::once(encoder.finish()));
-    }
-
     /// [`Culler::compact`] — converts then diffs — must track the move.
     #[test]
     fn gpu_compaction_tracks_moved_instances() {
@@ -1180,7 +1235,7 @@ mod tests {
                 culler
                     .compact_records(queue, view_proj, TEST_INDEX_COUNT, &converted)
                     .expect("records fit the capacity");
-                dispatch_and_wait(queue, device, culler);
+                cull_test_dispatch(device, queue, culler);
             },
         );
     }

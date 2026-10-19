@@ -88,7 +88,9 @@ pub use ao::{
 /// `"0"` (the CI GPU lane exports it, so a missing adapter surfaces as red
 /// rather than a silent skip). Public so the criterion bench — a separate
 /// crate root that never compiles under `cfg(test)` — shares this one
-/// definition with the in-crate tests.
+/// definition with the in-crate tests. `#[doc(hidden)]`: a cross-target
+/// implementation detail, not a stable API.
+#[doc(hidden)]
 pub fn gpu_required() -> bool {
     std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }

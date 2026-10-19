@@ -248,9 +248,10 @@ impl Culler {
         })
     }
 
-    /// Stages one culling frame: converts `instances` into the resident
-    /// source buffer while tracking dirty runs in the same pass (a
-    /// static scene uploads nothing), packs the
+    /// Stages one culling frame: converts `instances` into records,
+    /// diffs them against the previously staged frame to track dirty
+    /// runs (a static scene uploads nothing), writes only those runs
+    /// into the resident source buffer, packs the
     /// [`CullParams`](super::CullParams) uniform of `view_proj`, and
     /// pre-writes the indirect args with `index_count` and a zero
     /// instance counter (consecutive frames never accumulate). Uploads
