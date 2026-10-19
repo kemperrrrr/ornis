@@ -14,7 +14,9 @@ use crate::base64;
 use crate::geom::{self, Mat4};
 use crate::model::{Model, ModelNode, ModelPrimitive, NodeIdx, transform_from_decomposed};
 use crate::texture_sources::resolve_textures;
-use crate::{ImportError, ImportStats, LoadedImage, LoadedMaterial, LoadedMesh, LoadedSkin};
+use crate::{
+    ImportError, ImportStats, LoadedImage, LoadedJointRest, LoadedMaterial, LoadedMesh, LoadedSkin,
+};
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
@@ -495,10 +497,22 @@ fn load_skin(
                 .unwrap_or_else(|| format!("joint_{}", node.index()))
         })
         .collect();
+    let rest = joints
+        .iter()
+        .map(|node| {
+            let (translation, rotation, scale) = geom::decompose(&local_matrix(&node.transform()));
+            LoadedJointRest {
+                translation,
+                rotation,
+                scale,
+            }
+        })
+        .collect();
     Some(LoadedSkin {
         parents,
         inverse_bind,
         joint_names,
+        rest,
     })
 }
 
@@ -662,7 +676,7 @@ fn local_transform(node: &Node<'_>) -> ornis_core::Transform {
 
 /// Local node matrix: TRS composes through the crate convention, an
 /// explicit matrix passes through verbatim.
-fn local_matrix(transform: &Transform) -> Mat4 {
+pub(crate) fn local_matrix(transform: &Transform) -> Mat4 {
     match *transform {
         Transform::Matrix { matrix } => matrix,
         Transform::Decomposed {
@@ -1141,7 +1155,7 @@ mod tests {
                 track.translation.interpolation,
                 crate::LoadedInterpolation::Linear
             );
-            // Untargeted joint channels stay empty (= identity, not untouched).
+            // Untargeted joint channels stay empty (= rest, not untouched).
             assert!(track.rotation.keys.is_empty());
             assert!(track.scale.keys.is_empty());
         }
@@ -1392,6 +1406,23 @@ mod tests {
         assert_eq!(scene.stats.skipped_cubicspline, 1);
         assert_eq!(scene.stats.skipped_clips, 1);
         assert!(!scene.stats.is_clean());
+    }
+
+    #[test]
+    fn object_track_rest_is_the_authored_node_transform() {
+        // Node 0 is authored at (1, 2, 3) and is not a joint, so its track is
+        // an object track: the rest it blends toward is that node transform.
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        let scene = load_slice(&build_glb(&fixture)).expect("object clip parses");
+        let rest = scene.anim_clips[0].tracks[0].rest;
+        assert_eq!(rest.translation, [1.0, 2.0, 3.0]);
+        assert!(
+            (rest.rotation[3] - 1.0).abs() < 1e-6,
+            "got {:?}",
+            rest.rotation
+        );
+        assert_eq!(rest.scale, [1.0, 1.0, 1.0]);
     }
 
     #[test]

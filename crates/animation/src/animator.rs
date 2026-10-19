@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
 
-use crate::{ClipId, SkelPlayer};
+use crate::{ClipId, SkelFade, SkelPlayer};
 
 /// Clip-name index on the character root.
 ///
@@ -96,12 +96,32 @@ impl AnimatorMut<'_> {
     /// raw value is the playback rate, not a duration), full weight, and
     /// the animator's current looping flag. A second `play` of the same
     /// name restarts. Targets that do not exist yet still receive a cursor.
+    /// Any crossfade in progress is cut.
     ///
     /// # Errors
     ///
     /// [`AnimatorError::UnknownClip`] when `name` is not in the map.
     /// [`AnimatorError::Missing`] when the [`Animator`] was removed.
     pub fn play(&mut self, name: &str) -> Result<(), AnimatorError> {
+        self.start(name, None)
+    }
+
+    /// Starts `name` on every target, fading from the current clip.
+    ///
+    /// The previous playing cursor keeps advancing for `duration` while the
+    /// new clip blends in ([`SkelFade`], linear). A non-positive duration
+    /// behaves like [`Self::play`]. Targets with no playing cursor start
+    /// without a fade.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::play`].
+    // qual:api — public crossfade entry; in-tree callers are tests for now.
+    pub fn play_crossfade(&mut self, name: &str, duration: Seconds) -> Result<(), AnimatorError> {
+        self.start(name, Some(duration))
+    }
+
+    fn start(&mut self, name: &str, fade: Option<Seconds>) -> Result<(), AnimatorError> {
         let (clip, targets, looping) = {
             let lane = self
                 .store
@@ -125,10 +145,41 @@ impl AnimatorMut<'_> {
             playing: true,
             looping,
         };
+        let previous: Vec<(Entity, SkelPlayer)> = match self.store.read_lane::<SkelPlayer>() {
+            Some(lane) => targets
+                .iter()
+                .filter_map(|target| lane.get(*target).map(|old| (*target, *old)))
+                .collect(),
+            None => Vec::new(),
+        };
         for target in targets {
+            let outgoing = previous
+                .iter()
+                .find(|(entity, _)| *entity == target)
+                .map(|(_, old)| *old);
+            match (fade, outgoing) {
+                (Some(duration), Some(old)) if old.playing && duration.get() > 0.0 => {
+                    self.store.insert(
+                        target,
+                        SkelFade {
+                            from: old,
+                            duration,
+                            elapsed: Seconds::ZERO,
+                        },
+                    );
+                }
+                _ => self.drop_fade(target),
+            }
             self.store.insert(target, player);
         }
         Ok(())
+    }
+
+    /// Removes an in-progress crossfade on `target`, if any.
+    fn drop_fade(&self, target: Entity) {
+        if let Some(mut fades) = self.store.write_lane::<SkelFade>() {
+            fades.remove(target);
+        }
     }
 
     /// Holds every target cursor: time stops advancing and the pose is kept.
@@ -151,6 +202,10 @@ impl AnimatorMut<'_> {
     ///
     /// [`AnimatorError::Missing`] when the [`Animator`] was removed.
     pub fn stop(&mut self) -> Result<(), AnimatorError> {
+        let targets = self.targets()?;
+        for target in &targets {
+            self.drop_fade(*target);
+        }
         self.map_players(|player| {
             player.playing = false;
             player.time = Seconds::ZERO;
@@ -185,17 +240,21 @@ impl AnimatorMut<'_> {
         Ok(())
     }
 
+    /// Skeleton roots this handle's animator drives.
+    fn targets(&self) -> Result<Vec<Entity>, AnimatorError> {
+        let lane = self
+            .store
+            .read_lane::<Animator>()
+            .ok_or(AnimatorError::Missing)?;
+        Ok(lane
+            .get(self.entity)
+            .ok_or(AnimatorError::Missing)?
+            .targets
+            .clone())
+    }
+
     fn map_players(&mut self, mut apply: impl FnMut(&mut SkelPlayer)) -> Result<(), AnimatorError> {
-        let targets = {
-            let lane = self
-                .store
-                .read_lane::<Animator>()
-                .ok_or(AnimatorError::Missing)?;
-            lane.get(self.entity)
-                .ok_or(AnimatorError::Missing)?
-                .targets
-                .clone()
-        };
+        let targets = self.targets()?;
         if let Some(mut players) = self.store.write_lane::<SkelPlayer>() {
             for target in targets {
                 if let Some(player) = players.get_mut(target) {

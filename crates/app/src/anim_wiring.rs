@@ -15,8 +15,9 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointPose, JointTrack, Key,
-    KeyTrack, SkelClip, SkelPlayer, Skeleton, SkinnedMesh,
+    AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointMask, JointPose,
+    JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer, Skeleton,
+    SkinnedMesh,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Entity, Seconds, SmartStore};
@@ -74,6 +75,7 @@ pub fn anim_clip_from_loaded(
         };
         tracks.push(AnimTrack {
             entity,
+            rest: joint_trs_from_loaded(&track.rest),
             translation: vec3_track_from_loaded(&track.translation),
             rotation: quat_track_from_loaded(&track.rotation),
             scale: vec3_track_from_loaded(&track.scale),
@@ -90,12 +92,25 @@ pub fn anim_clip_from_loaded(
     )
 }
 
+/// Converts an authored mirror rest transform to a live [`JointTrs`].
+///
+/// Plain arrays in, `glam` values out: translation and scale verbatim,
+/// rotation `(x, y, z, w)` as stored.
+pub fn joint_trs_from_loaded(rest: &ornis_gltf::LoadedJointRest) -> JointTrs {
+    JointTrs {
+        translation: Vec3::from_array(rest.translation),
+        rotation: Quat::from_array(rest.rotation),
+        scale: Vec3::from_array(rest.scale),
+    }
+}
+
 /// Converts a mirror skin to a live [`Skeleton`].
 ///
 /// Parents map `-1` → root (`None`) via [`JointId::from_raw_opt`]; bind
 /// inverses are glTF column-major (`m[col][row]`) and convert with
 /// [`Mat4::from_cols_array_2d`]; names copy verbatim (diagnostics only).
 pub fn skeleton_from_loaded(skin: &LoadedSkin) -> Skeleton {
+    let rest: Vec<JointTrs> = skin.rest.iter().map(joint_trs_from_loaded).collect();
     Skeleton::new(
         skin.parents
             .iter()
@@ -107,6 +122,7 @@ pub fn skeleton_from_loaded(skin: &LoadedSkin) -> Skeleton {
             .collect(),
         skin.joint_names.clone(),
     )
+    .with_rest(rest)
 }
 
 /// Builds a live [`SkinnedMesh`] from mirror bind data, or [`None`] when the
@@ -376,8 +392,12 @@ pub fn wire_loaded_animation(
     store.register::<JointPose>();
     store.register::<SkinnedMesh>();
     store.register::<SkelPlayer>();
+    store.register::<SkelLayer>();
+    store.register::<SkelFade>();
     store.register_cold::<SkelClip>();
+    store.register_cold::<JointMask>();
     store.register::<AnimPlayer>();
+    store.register::<AnimFade>();
     store.register_cold::<AnimClip>();
 
     let mut wiring = AnimationWiring {
@@ -736,6 +756,7 @@ mod tests {
             looping: true,
             tracks: vec![LoadedAnimTrack {
                 node: loader,
+                rest: ornis_gltf::LoadedJointRest::default(),
                 translation: MirrorTrack::cubic(
                     vec![
                         LoadedKey {
@@ -846,8 +867,16 @@ mod tests {
                 ],
             ],
             joint_names: vec!["root".to_string(), "tip".to_string()],
+            rest: vec![
+                ornis_gltf::LoadedJointRest::default(),
+                ornis_gltf::LoadedJointRest {
+                    translation: [0.0, 3.0, 0.0],
+                    ..Default::default()
+                },
+            ],
         };
         let live = skeleton_from_loaded(&skin);
+        assert_eq!(live.rest[1].translation, glam::Vec3::new(0.0, 3.0, 0.0));
         assert_eq!(live.parents.len(), 2);
         assert_eq!(live.inverse_bind.len(), 2);
         assert_eq!(live.parents[0], None);
@@ -932,6 +961,7 @@ mod tests {
     fn object_track(node: NodeIdx) -> LoadedAnimTrack {
         LoadedAnimTrack {
             node,
+            rest: ornis_gltf::LoadedJointRest::default(),
             translation: LoadedKeyTrack::linear(vec![LoadedKey {
                 time: 0.0,
                 value: [1.0, 0.0, 0.0],
@@ -973,6 +1003,7 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ]],
                 joint_names: vec!["root".into()],
+                rest: vec![ornis_gltf::LoadedJointRest::default()],
             }],
             skel_clips: clips,
             anim_clips: Vec::new(),

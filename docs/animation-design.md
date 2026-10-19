@@ -1,7 +1,8 @@
 # Дизайн системы анимации (объектная + скелетная)
 
-> Статус: только дизайн, кода нет. Новый файл, соседние треки работают
-> параллельно: glTF-лоадер — отдельный трек, здесь описан только стык.
+> Статус: фазы A–E в коде (`crates/animation`): веса, кроссфейд и маски слоёв
+> — для скелета и для объектных треков (см. §5).
+> Стык с glTF-лоадером описан в §4; соседние треки работают параллельно.
 > Стиль ссылок — `файл:строка` от корня репозитория.
 
 ## 0. Что уже есть (точки опоры)
@@ -51,13 +52,15 @@
 
 - `AnimClip` — **холодный** компонент/ресурс (клип меняется редко, сэмплируется часто):
   имя, длительность, `loop: bool`, треки `Vec<AnimTrack>`.
-  `AnimTrack { entity: Entity, translation: KeyTrack<Vec3>, rotation: KeyTrack<Quat>, scale: KeyTrack<Vec3> }`.
+  `AnimTrack { entity: Entity, rest: JointTrs, translation: KeyTrack<Vec3>, rotation: KeyTrack<Quat>, scale: KeyTrack<Vec3> }`,
+  где `rest` — авторский TRS узла (RESET, фаза E).
   Ключи: `(time: f32, value)` отсортированы; интерполяция — lerp для T/S, slerp для R.
   Хранить в cold-лейне (`register_cold`, ср. `smart_store.rs:180-192`) или ресурсе
   `Assets<AnimClip>`; решение — cold-лейн на сущность-плейлист + ресурс-таблица для
   разделяемых клипов (как `materials` dedup в `extraction.rs:580-593`).
 - `AnimPlayer` — **горячий** лейн на анимируемой сущности:
-  `{ clip: ClipId, time: f32, speed: f32, weight: f32, playing: bool }`.
+  `{ clip: ClipId, time: f32, speed: f32, weight: f32, playing: bool }`; `weight` — фаза E:
+  поза `rest + weight·(поза − rest)`.
   `Clone + Send + Sync` (требование `smart_store.rs:114-116,144-149`).
 
 ### 1.2. Сэмплирование и куда пишется
@@ -206,7 +209,7 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
    → `SkinnedMesh` (+ `MeshDesc::Custom`-совместимый soup для CPU-фолбэка).
 2. **Скелет:** `skins[0]` → `Skeleton { parents (из `nodes` иерархии),
    inverse_bind (из `inverseBindMatrices`, при отсутствии — identity),
-   joint_names }`; `skeleton` — сущность-корень (обычно glTF-`node` со `skin`).
+   joint_names, rest (TRS узла скина) }`; `skeleton` — сущность-корень (обычно glTF-`node` со `skin`).
 3. **Веса:** `JOINTS_0` (u8/u16 → u16) + `WEIGHTS_0` → `joints`/`weights`,
    нормализовать; >4 влияний — оставить топ-4 с перенормировкой + warn в stderr
    (паттерн `RenderLights::from_scene`, `extraction.rs:153-168`: лог раз при загрузке,
@@ -215,7 +218,7 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
    (translation/quaternion/scale) по `channel.target.path`; интерполяция:
    фаза 1 — `LINEAR` (+ `STEP` как вырожденный lerp), `CUBICSPLINE` — фаза 3.
    Объектные треки (анимация `node` без `skin`) → `AnimClip`/`AnimTrack`
-   с привязкой к сущности лоадера.
+   с привязкой к сущности лоадера; `AnimTrack::rest` ← TRS узла (RESET, фаза E).
 5. **Сущности:** лоадер создаёт: корень (`TransformDesc` из node-TRS + `Skeleton` +
    `JointPose::identity` + `SkelPlayer` на клип 0 paused) и меш-сущности
    (`SkinnedMesh { skeleton: root }`). Маппинг `node_index → Entity/joint`
@@ -246,6 +249,26 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
 - **Фаза E (M, опционально): бленд/маски.** `weight` в плеерах, кроссфейд N→M кадров,
   верх/низ маски; `CUBICSPLINE`; иерархия `Parent` + `GlobalTransform` для
   не-скелетных ригов. Только после D.
+
+  **Статус (скелет, сделано):** модель детерминированная, как в Godot: отсутствующий
+  канал читается как покой кости — её локальный TRS из узла скина (как
+  rest-поза Skeleton в Godot; `Skeleton::rest`, при импорте из `LoadedSkin.rest`),
+  игрок с весом `w` даёт
+  `покой + w·(поза − покой)`, без состояния между кадрами. Кроссфейд — `SkelFade`
+  на корне: внешний игрок живёт своими часами, прогресс линейный,
+  `Animator::play_crossfade`; `play` и `stop` отменяют фейд. Маска слоя — `SkelLayer`
+  (один на корень) и холодный `JointMask` по суставам: слой лерпит поверх базы с
+  весом `layer_weight·mask[j]`; длина маски не совпадает с числом суставов → скип со
+  счётчиком. Скелетный покой — identity только для скелетов без авторского rest
+  (`Skeleton::new` по умолчанию).
+
+  **Объектные треки (`AnimPlayer`), сделано:** вариант A — явный RESET (T/R/S узла)
+  на каждом `AnimTrack::rest`, как RESET в Godot; импорт glTF заполняет его из узла
+  (`LoadedAnimTrack::rest`). `AnimPlayer::weight` работает по тому же правилу, что и
+  скелет: `rest + w·(поза − rest)`. Кроссфейд объекта — горячий `AnimFade` на
+  сущности (внешний `AnimPlayer` — `from`, его часы идут до конца фейда). Канал, которого
+  не дал ни один игрок, не пишется (как раньше у объектов). Animator-API для слоёв и
+  фейдов пока нет: `SkelLayer` и `AnimFade` вставляются напрямую.
 
 ## 6. Осознанно НЕ делаем
 

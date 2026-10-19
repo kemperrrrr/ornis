@@ -16,9 +16,9 @@ use std::f32::consts::FRAC_PI_2;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    CPU_GPU_TOLERANCE, ClipId, JointId, JointPose, JointTrack, Key, KeyTrack, SkelClip, SkelPlayer,
-    SkelSampleSystem, SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport, SkinningMode,
-    blend_vertex_reference, skeleton_from_import, skinned_mesh_from_import,
+    CPU_GPU_TOLERANCE, ClipId, JointId, JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip,
+    SkelPlayer, SkelSampleSystem, SkelSkinSystem, SkinImport, SkinnedMesh, SkinnedMeshImport,
+    SkinningMode, blend_vertex_reference, skeleton_from_import, skinned_mesh_from_import,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::units::{Clamped01, Seconds};
@@ -58,6 +58,7 @@ fn two_bone_skin_import() -> SkinImport {
         parents: vec![-1, 0],
         inverse_bind: vec![Mat4::IDENTITY; 2],
         joint_names: vec!["root".to_string(), "tip".to_string()],
+        rest: vec![JointTrs::IDENTITY; 2],
     }
 }
 

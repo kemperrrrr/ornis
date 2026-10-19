@@ -11,7 +11,9 @@
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use glam::{Quat, Vec3};
-use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, Key, KeyTrack};
+use ornis_animation::{
+    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, JointTrs, Key, KeyTrack,
+};
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{Engine, Entity, Resources, Stage, System, SystemAccess};
@@ -57,6 +59,7 @@ fn ride_clip(target: Entity) -> AnimClip {
         looping: false,
         tracks: vec![AnimTrack {
             entity: target,
+            rest: JointTrs::IDENTITY,
             translation: KeyTrack::linear(vec![
                 Key {
                     time: 0.0,

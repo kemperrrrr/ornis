@@ -3171,6 +3171,7 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ]],
                 joint_names: vec!["j0".into()],
+                rest: vec![ornis_gltf::LoadedJointRest::default()],
             }],
             skel_clips: vec![LoadedSkelClip {
                 name: String::new(),
@@ -3199,6 +3200,7 @@ mod tests {
                 tracks: vec![
                     LoadedAnimTrack {
                         node: NodeIdx(1),
+                        rest: ornis_gltf::LoadedJointRest::default(),
                         translation: LoadedKeyTrack::linear(vec![LoadedKey {
                             time: 0.0,
                             value: [0.0, 0.0, 0.0],
@@ -3208,6 +3210,7 @@ mod tests {
                     },
                     LoadedAnimTrack {
                         node: NodeIdx(99),
+                        rest: ornis_gltf::LoadedJointRest::default(),
                         translation: LoadedKeyTrack::linear(vec![LoadedKey {
                             time: 0.0,
                             value: [5.0, 5.0, 5.0],
