@@ -1,6 +1,8 @@
 //! Generated per-field lane types for `#[derive(Pack)]`: each field gets a
 //! `repr(transparent)` wrapper stored in its own `ComponentStore`, plus the
-//! `ornis_core::PackLane` impl that gathers and scatters that field.
+//! `ornis_core::PackLane` impl that gathers and scatters that field. Dense
+//! wrappers also implement `ornis_core::DensePackLane`, including field
+//! slices over the wrapper column.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -91,6 +93,15 @@ fn generate_sparse_impl(lane: &LaneInfo) -> TokenStream2 {
 }
 
 fn generate_dense_impl(lane: &LaneInfo) -> TokenStream2 {
+    let pack = generate_dense_pack_lane(lane);
+    let view = generate_dense_view(lane);
+    quote! {
+        #pack
+        #view
+    }
+}
+
+fn generate_dense_pack_lane(lane: &LaneInfo) -> TokenStream2 {
     let wrapper = &lane.wrapper_ty;
     let field_ty = &lane.field_ty;
     quote! {
@@ -129,6 +140,17 @@ fn generate_dense_impl(lane: &LaneInfo) -> TokenStream2 {
                 lane.data[index] = Self(value);
             }
         }
+    }
+}
+
+fn generate_dense_view(lane: &LaneInfo) -> TokenStream2 {
+    let wrapper = &lane.wrapper_ty;
+    let field_ty = &lane.field_ty;
+    quote! {
+        const _: () = {
+            assert!(::std::mem::size_of::<#wrapper>() == ::std::mem::size_of::<#field_ty>());
+            assert!(::std::mem::align_of::<#wrapper>() == ::std::mem::align_of::<#field_ty>());
+        };
 
         impl ornis_core::DensePackLane for #wrapper {
             #[inline(always)]
@@ -139,6 +161,25 @@ fn generate_dense_impl(lane: &LaneInfo) -> TokenStream2 {
             #[inline(always)]
             fn inner_mut(&mut self) -> &mut Self::Field {
                 &mut self.0
+            }
+
+            #[inline(always)]
+            fn as_slice(data: &[Self]) -> &[Self::Field] {
+                // SAFETY: Self is `repr(transparent)` over Field; size/align asserted above.
+                unsafe {
+                    ::std::slice::from_raw_parts(data.as_ptr().cast::<Self::Field>(), data.len())
+                }
+            }
+
+            #[inline(always)]
+            fn as_mut_slice(data: &mut [Self]) -> &mut [Self::Field] {
+                // SAFETY: Self is `repr(transparent)` over Field; size/align asserted above.
+                unsafe {
+                    ::std::slice::from_raw_parts_mut(
+                        data.as_mut_ptr().cast::<Self::Field>(),
+                        data.len(),
+                    )
+                }
             }
         }
     }

@@ -2,9 +2,9 @@
 //!
 //! Systems that read `t.field` keep the gather loop: a zip would hold
 //! `&mut data` and `&store` at once. `Dispatch<false, …>` zips dense
-//! columns through [`ornis_core::DensePackLane`]; `Dispatch<true, …>`
-//! gathers. The kernel is a closure so the zip impl never names the
-//! concrete body.
+//! field columns through [`ornis_core::DensePackLane::as_slice`];
+//! `Dispatch<true, …>` gathers. The kernel is a closure so the zip impl
+//! never names the concrete body (`L::Field` vs the body's `f32`).
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
@@ -91,27 +91,45 @@ fn kernel_params(
 }
 
 fn zip_loop(spec: &DispatchSpec<'_>, own: &[&LaneSpec]) -> TokenStream2 {
-    let first = own[0].guard();
+    let slices: Vec<TokenStream2> = own
+        .iter()
+        .enumerate()
+        .map(|(i, lane)| {
+            let guard = lane.guard();
+            let slice = format_ident!("__s{i}");
+            if lane.written {
+                quote! {
+                    let #slice = ornis_core::DensePackLane::as_mut_slice(&mut #guard.data);
+                }
+            } else {
+                quote! {
+                    let #slice = ornis_core::DensePackLane::as_slice(&#guard.data);
+                }
+            }
+        })
+        .collect();
+    let first_slice = format_ident!("__s0");
     let mut iter = if own[0].written {
-        quote! { #first.data.iter_mut() }
+        quote! { #first_slice.iter_mut() }
     } else {
-        quote! { #first.data.iter() }
+        quote! { #first_slice.iter() }
     };
     let id0 = format_ident!("__z0");
     let mut pat = quote! { #id0 };
-    let mut call = vec![inner_arg(&id0, own[0].written)];
+    let mut call = vec![quote! { #id0 }];
     for (i, lane) in own.iter().enumerate().skip(1) {
-        let guard = lane.guard();
+        let slice = format_ident!("__s{i}");
         let id = format_ident!("__z{i}");
         let next = if lane.written {
-            quote! { #guard.data.iter_mut() }
+            quote! { #slice.iter_mut() }
         } else {
-            quote! { #guard.data.iter() }
+            quote! { #slice.iter() }
         };
         iter = quote! { #iter.zip(#next) };
         pat = quote! { (#pat, #id) };
-        call.push(inner_arg(&id, lane.written));
+        call.push(quote! { #id });
     }
+    let first = own[0].guard();
     let entity = spec.entity;
     if spec.binds_entity {
         iter = quote! { #iter.zip(#first.entities.iter().copied()) };
@@ -119,17 +137,10 @@ fn zip_loop(spec: &DispatchSpec<'_>, own: &[&LaneSpec]) -> TokenStream2 {
         call.push(quote! { #entity });
     }
     quote! {
+        #(#slices)*
         for #pat in #iter {
             __smart_kernel(#(#call),*);
         }
-    }
-}
-
-fn inner_arg(id: &Ident, written: bool) -> TokenStream2 {
-    if written {
-        quote! { ornis_core::DensePackLane::inner_mut(#id) }
-    } else {
-        quote! { ornis_core::DensePackLane::inner(#id) }
     }
 }
 

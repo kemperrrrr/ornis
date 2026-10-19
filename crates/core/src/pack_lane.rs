@@ -50,13 +50,24 @@ pub trait PackLane: Sized + Send + Sync + 'static {
 ///
 /// Sparse wrappers do not implement this. Aligned `#[smart_system]` runs
 /// zip the columns through it, so that path is only type-checked when every
-/// own lane of the system is dense.
+/// own lane of the system is dense. `#[derive(Pack)]` emits
+/// `repr(transparent)` wrappers, so [`as_slice`](Self::as_slice) /
+/// [`as_mut_slice`](Self::as_mut_slice) view the column as `[Field]`.
 pub trait DensePackLane: PackLane {
     /// Shared view of the stored field.
     fn inner(&self) -> &Self::Field;
 
     /// Mutable view of the stored field.
     fn inner_mut(&mut self) -> &mut Self::Field;
+
+    /// Shared field column: `data` as `[Field]`.
+    ///
+    /// The wrapper is `repr(transparent)` over [`PackLane::Field`], so the
+    /// dense `Vec<Self>` has the same layout as `[Field]`.
+    fn as_slice(data: &[Self]) -> &[Self::Field];
+
+    /// Mutable field column. Same layout contract as [`as_slice`](Self::as_slice).
+    fn as_mut_slice(data: &mut [Self]) -> &mut [Self::Field];
 }
 
 /// Entity set of one `#[smart_system]` run: the entities that own every
