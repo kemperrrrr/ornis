@@ -292,6 +292,17 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
      `Vec` (`collect_pose_work`/`sample_entity`/`node_poses`), объектный — 2 `Vec`
      на сущность (`track_of`, `side_pose`, `crates/animation/src/lib.rs:672-684`).
      Нужны битовая маска/`HashSet` для frozen и переиспользование буферов.
+  6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
+     стороны анимации; упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет). База в
+     физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
+     (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,
+     `set_joint_motor`/`set_joint_damping`/`set_joint_friction`) и
+     maximal-coordinate constraints `crates/physics/src/joint.rs` (G5) для
+     сцен с контактами. Чего нет — шва «физика ↔ скелет»: физика не знает
+     `Skeleton`/`JointPose`, анимация про физику знает только пропуск
+     `RigidBody`-сущностей в `anim_sample` (`crates/app/src/lib.rs:104`).
+     Ragdoll = скин + суставы физики + blending «физика ↔ анимация», по
+     образцу `SkinningMode::Cpu/Gpu` (см. §2.3).
 
 ## 6. Осознанно НЕ делаем
 

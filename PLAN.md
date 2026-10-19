@@ -149,6 +149,16 @@
      `Vec`, объектный — 2 `Vec` на сущность (`track_of`, `side_pose`,
      `crates/animation/src/lib.rs:672-684`). Нужны битовая маска/`HashSet` для
      frozen и переиспользование буферов.
+  6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
+     стороны анимации). Упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет. База в
+     физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
+     (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,
+     `set_joint_motor`/`set_joint_damping`/`set_joint_friction`) и
+     maximal-coordinate constraints `crates/physics/src/joint.rs` (G5) для
+     сцен с контактами. Нет шва «физика ↔ скелет»: физика не знает
+     `Skeleton`/`JointPose`, анимация про физику — только пропуск
+     `RigidBody`-сущностей в `anim_sample`. Ragdoll = скин + суставы физики +
+     blending «физика ↔ анимация» по образцу `SkinningMode::Cpu/Gpu`.
 
 ## Дорожная карта (по приоритетам)
 
@@ -283,7 +293,7 @@ sRGB решает железо (`Rgba8UnormSrgb` albedo/emission, `Unorm` metaln
 (`install_skeletal_animation`, `AssetServer` удерживает `LoadedScene`,
 autoplay `playing: true`; стартер `assets/starter/ual1_standard.glb`,
 регрессия `starter_pack_playback_moves_joints`).
-✅ **2026-10-19 — анимация, фаза E: веса, кроссфейд, маски (PR #174, `crates/animation`).** Скелет: `SkelPlayer.weight`, кроссфейд `SkelFade` на корне (`Animator::play_crossfade`; `play`/`stop` отменяют фейд), слои `SkelLayer` с холодным `JointMask` по суставам (длина маски ≠ числу суставов → скип со счётчиком). Объекты: `AnimPlayer.weight` и горячий `AnimFade`. Модель детерминированная, как Godot: отсутствующий канал читается как авторский покой (`Skeleton::rest`, `AnimTrack::rest`), покой берётся из TRS glTF-узла (`LoadedSkin.rest`, `LoadedAnimTrack.rest`). На ревью найдено: identity вместо покоя деформировал скин с ненулевыми bind-TRS. Не сделано: Animator-API для объектных фейдов и слоёв; морф-таргеты (#153) — отдельный PR. Пять фоллоу-апов (прод-доступность, объектный фасад, стек слоёв, отложенное, перф) — в разделе «Частично — что достроить» → **Анимация (фаза E, фоллоу-апы)** и в `docs/animation-design.md` §5, «Дальше».
+✅ **2026-10-19 — анимация, фаза E: веса, кроссфейд, маски (PR #174, `crates/animation`).** Скелет: `SkelPlayer.weight`, кроссфейд `SkelFade` на корне (`Animator::play_crossfade`; `play`/`stop` отменяют фейд), слои `SkelLayer` с холодным `JointMask` по суставам (длина маски ≠ числу суставов → скип со счётчиком). Объекты: `AnimPlayer.weight` и горячий `AnimFade`. Модель детерминированная, как Godot: отсутствующий канал читается как авторский покой (`Skeleton::rest`, `AnimTrack::rest`), покой берётся из TRS glTF-узла (`LoadedSkin.rest`, `LoadedAnimTrack.rest`). На ревью найдено: identity вместо покоя деформировал скин с ненулевыми bind-TRS. Не сделано: Animator-API для объектных фейдов и слоёв; морф-таргеты (#153) — отдельный PR. Шесть фоллоу-апов (прод-доступность, объектный фасад, стек слоёв, отложенное, перф, ragdoll) — в разделе «Частично — что достроить» → **Анимация (фаза E, фоллоу-апы)** и в `docs/animation-design.md` §5, «Дальше».
 ✅ **2026-10-03 — сцена-first фасад + честный свет (проверено).**
 `GameWorld::spawn_gltf/add_directional_light/set_ambient/add_orbit_camera`
 (`SpawnError`), пример — ~25 строк без engine (`ornis_runner::run_native`
