@@ -171,6 +171,11 @@ impl Renderer3D {
             composite_pass,
             composite_sampler,
             bloom_pass,
+            auto_exposure: crate::auto_exposure::AutoExposure::new(device),
+            exposure_mode: std::sync::RwLock::new(crate::auto_exposure::ExposureMode::default()),
+            frame_dt_seconds: std::sync::RwLock::new(
+                crate::auto_exposure::DEFAULT_FRAME_DT_SECONDS,
+            ),
             fog,
             ao_passes,
             ao_white_staging,
