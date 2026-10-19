@@ -95,6 +95,16 @@ fn spawn(engine: &mut Engine, placement: TransformDesc) -> Entity {
     entity
 }
 
+/// Starts a one-second fade on `target` from `outgoing` at full weight.
+fn fade_from(engine: &mut Engine, target: Entity, outgoing: ClipId) {
+    let fade = AnimFade {
+        from: player(outgoing, 1.0),
+        duration: Seconds::new(1.0),
+        elapsed: Seconds::ZERO,
+    };
+    insert(engine, target, fade);
+}
+
 /// Constant track: two keys holding `value` over `0..1`, or no keys.
 fn held<T: Copy>(value: Option<T>) -> KeyTrack<T> {
     let Some(value) = value else {
@@ -262,12 +272,7 @@ fn crossfade_mixes_outgoing_and_incoming_then_retires() {
     let walk_track = track(target, rest, Some(Vec3::new(10.0, 0.0, 0.0)), None);
     let walk = add_clip(&mut engine, "walk", walk_track);
     play(&mut engine, target, walk, 1.0);
-    let fade = AnimFade {
-        from: player(idle, 1.0),
-        duration: Seconds::new(1.0),
-        elapsed: Seconds::ZERO,
-    };
-    insert(&mut engine, target, fade);
+    fade_from(&mut engine, target, idle);
 
     engine.run_frame(0.5);
     let mid = transform_of(&engine, target).translation;
@@ -295,12 +300,7 @@ fn crossfade_into_a_clip_without_the_entity_fades_out_to_rest() {
     let elsewhere = track(other, rest, Some(Vec3::new(9.0, 0.0, 0.0)), None);
     let walk = add_clip(&mut engine, "walk", elsewhere);
     play(&mut engine, target, walk, 1.0);
-    let fade = AnimFade {
-        from: player(idle, 1.0),
-        duration: Seconds::new(1.0),
-        elapsed: Seconds::ZERO,
-    };
-    insert(&mut engine, target, fade);
+    fade_from(&mut engine, target, idle);
 
     engine.run_frame(0.5);
     // Halfway from the outgoing pose (0) to the rest it falls back to (2).

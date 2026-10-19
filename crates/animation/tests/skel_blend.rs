@@ -343,18 +343,23 @@ fn mask_length_mismatch_skips_the_entity() {
     assert_eq!(pose(&engine, root)[0], Mat4::IDENTITY);
 }
 
-#[test]
-fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
-    let mut engine = engine();
-    let root = rig(&mut engine, vec![None]);
-    let idle = idle_clip(&mut engine);
-    let walk = walk_clip(&mut engine);
+/// Single-joint rig whose animator knows "idle" and "walk" and plays "idle".
+fn idle_walk_animator(engine: &mut Engine) -> (Entity, ClipId) {
+    let root = rig(engine, vec![None]);
+    let idle = idle_clip(engine);
+    let walk = walk_clip(engine);
     let clips = [("idle".to_string(), idle), ("walk".to_string(), walk)]
         .into_iter()
         .collect();
-    put(&mut engine, root, Animator::new(clips, vec![root]));
+    put(engine, root, Animator::new(clips, vec![root]));
+    animator(engine, root).play("idle").unwrap();
+    (root, idle)
+}
 
-    animator(&mut engine, root).play("idle").unwrap();
+#[test]
+fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
+    let mut engine = engine();
+    let (root, idle) = idle_walk_animator(&mut engine);
     animator(&mut engine, root)
         .play_crossfade("walk", Seconds::new(1.0))
         .unwrap();
@@ -370,15 +375,7 @@ fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
 #[test]
 fn animator_stop_cancels_a_running_crossfade() {
     let mut engine = engine();
-    let root = rig(&mut engine, vec![None]);
-    let idle = idle_clip(&mut engine);
-    let walk = walk_clip(&mut engine);
-    let clips = [("idle".to_string(), idle), ("walk".to_string(), walk)]
-        .into_iter()
-        .collect();
-    put(&mut engine, root, Animator::new(clips, vec![root]));
-
-    animator(&mut engine, root).play("idle").unwrap();
+    let (root, _idle) = idle_walk_animator(&mut engine);
     animator(&mut engine, root)
         .play_crossfade("walk", Seconds::new(1.0))
         .unwrap();

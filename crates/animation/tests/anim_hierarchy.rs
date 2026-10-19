@@ -258,6 +258,27 @@ fn held_joint(joint: u32, node: Option<Entity>, value: Vec3) -> JointTrack {
     }
 }
 
+/// One-second skeletal clip over `tracks`.
+fn skel_clip(name: &str, tracks: Vec<JointTrack>) -> SkelClip {
+    SkelClip {
+        name: name.to_string(),
+        duration: 1.0,
+        tracks,
+    }
+}
+
+/// Looping, playing cursor on `clip` at full weight.
+fn skel_player(clip: ClipId) -> SkelPlayer {
+    SkelPlayer {
+        clip,
+        time: Seconds::ZERO,
+        speed: Seconds::new(1.0),
+        weight: Clamped01::ONE,
+        playing: true,
+        looping: true,
+    }
+}
+
 /// A layer alone drives joint 1, which the base clip never touches. Its
 /// bound node must follow the blended joint, not keep its bind pose.
 #[test]
@@ -282,20 +303,12 @@ fn layer_only_joint_moves_its_bound_node() {
         store.insert(root, JointPose::identity(2));
 
         let base = store.create_entity();
-        let idle = SkelClip {
-            name: "idle".to_string(),
-            duration: 1.0,
-            tracks: vec![held_joint(0, None, Vec3::ZERO)],
-        };
+        let idle = skel_clip("idle", vec![held_joint(0, None, Vec3::ZERO)]);
         store.insert_cold(base, idle);
 
         let overlay = store.create_entity();
-        let wave = SkelClip {
-            name: "wave".to_string(),
-            duration: 1.0,
-            tracks: vec![held_joint(1, Some(node), Vec3::new(4.0, 0.0, 0.0))],
-        };
-        store.insert_cold(overlay, wave);
+        let wave_joint = held_joint(1, Some(node), Vec3::new(4.0, 0.0, 0.0));
+        store.insert_cold(overlay, skel_clip("wave", vec![wave_joint]));
 
         let mask = store.create_entity();
         let mask_weights = JointMask {
@@ -304,24 +317,9 @@ fn layer_only_joint_moves_its_bound_node() {
         };
         store.insert_cold(mask, mask_weights);
 
-        let player = SkelPlayer {
-            clip: ClipId(base),
-            time: Seconds::ZERO,
-            speed: Seconds::new(1.0),
-            weight: Clamped01::ONE,
-            playing: true,
-            looping: true,
-        };
-        store.insert(root, player);
+        store.insert(root, skel_player(ClipId(base)));
         let layer = SkelLayer {
-            player: SkelPlayer {
-                clip: ClipId(overlay),
-                time: Seconds::ZERO,
-                speed: Seconds::new(1.0),
-                weight: Clamped01::ONE,
-                playing: true,
-                looping: true,
-            },
+            player: skel_player(ClipId(overlay)),
             mask: MaskId(mask),
         };
         store.insert(root, layer);
