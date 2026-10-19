@@ -17,6 +17,7 @@ use syn::{Ident, ItemFn, Stmt, Type};
 
 use crate::smart_system::{ParamKind, TypedParam, camel_system_name};
 use crate::smart_system_body_visit::BodyInfo;
+use crate::smart_system_dispatch::{self, DispatchSpec};
 use crate::smart_system_emit_params::{build_access_stmts, build_fetch_stmts, build_user_params};
 use crate::smart_system_fields::{FieldRewrite, FieldUsage, scan_fields};
 use crate::smart_system_lanes::{
@@ -130,6 +131,7 @@ fn emit_body_fn(
     body_inputs.extend(build_user_params(params));
     quote! {
         #[allow(unused_variables)]
+        #[inline(always)]
         fn #body_fn_name(#(#body_inputs),*) {
             #(#body_stmts)*
         }
@@ -178,17 +180,31 @@ fn emit_system_impl(
     let lane_access = lane_access_stmts(lanes);
     let access_stmts = build_access_stmts(params);
     let guards = guard_stmts(lanes, &store_ident);
+    let trait_name = format_ident!("{}__Dispatch", body_fn_name);
     let binds_entity = params
         .iter()
         .any(|param| matches!(param.kind, ParamKind::EntityHandle));
-    let ids = LoopIdents {
+    let dispatch = DispatchSpec {
+        trait_name: &trait_name,
+        body_fn: body_fn_name,
+        lanes,
+        params,
+        user_args: &call_args,
         entity: &entity_ident,
         hint: &hint_ident,
         binds_entity,
     };
+    let (dispatch_defs, aligned_call) = smart_system_dispatch::plan(&dispatch);
+    let ids = LoopIdents {
+        entity: &entity_ident,
+        hint: &hint_ident,
+        aligned_call,
+    };
     let loop_tokens = run_loop(lanes, body_fn_name, &call_args, &ids);
 
     quote! {
+        #dispatch_defs
+
         impl ornis_core::System for #struct_name {
             fn name(&self) -> &'static str {
                 #fn_name_str
