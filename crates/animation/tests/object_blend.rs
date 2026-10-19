@@ -297,5 +297,8 @@ fn crossfade_mixes_retires_and_falls_back_to_rest_without_a_track() {
     fade_from(&mut engine, target, idle);
     engine.run_frame(0.5);
     let back = transform_of(&engine, target).translation;
-    assert!(close(back, Vec3::new(1.0, 0.0, 0.0)), "fallback got {back:?}");
+    assert!(
+        close(back, Vec3::new(1.0, 0.0, 0.0)),
+        "fallback got {back:?}"
+    );
 }
