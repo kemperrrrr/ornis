@@ -92,6 +92,105 @@ pub use ao::{
 pub fn gpu_required() -> bool {
     std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }
+/// Headless adapter/device pair, or `None` on a host with no wgpu adapter.
+///
+/// This is the single bootstrap every GPU-gated test and bench calls, so
+/// they share one code path instead of three near-copies. When
+/// [`gpu_required`] holds (`ORNIS_REQUIRE_GPU` — non-empty, not `"0"`; the
+/// CI `test` shard sets `=1`) a missing adapter or device panics instead of
+/// returning `None`, so it can never turn a GPU gate into a pass; unset or
+/// explicit `"0"` keeps the skip, which callers should log before returning.
+///
+/// `#[doc(hidden)]`: public only so the criterion bench — a separate crate
+/// root that never compiles under `cfg(test)` — reaches it, exactly like
+/// [`gpu_required`]. Not a stable API.
+#[doc(hidden)]
+pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
+            backend_options: wgpu::BackendOptions::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            display: None,
+        });
+        let adapter = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+        {
+            Ok(adapter) => adapter,
+            Err(err) => {
+                assert!(
+                    !gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
+                );
+                return None;
+            }
+        };
+        match adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+        {
+            Ok(pair) => Some(pair),
+            Err(err) => {
+                assert!(
+                    !gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
+                );
+                None
+            }
+        }
+    })
+}
+
+/// Copies `bytes` from `src` into a mapping buffer and reads them back
+/// (`None` when the headless readback fails — the caller skips instead of
+/// failing).
+///
+/// Shared by every GPU-gated test and bench that needs a buffer readback,
+/// so they hold one copy instead of two near-identical ones. `#[doc(hidden)]`:
+/// public only so the criterion bench — a separate crate root that never
+/// compiles under `cfg(test)` — reaches it, exactly like [`gpu_required`]
+/// and [`try_headless_device`]. Not a stable API.
+#[doc(hidden)]
+pub fn read_bytes_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    src: &wgpu::Buffer,
+    bytes: u64,
+) -> Option<Vec<u8>> {
+    let floor = std::mem::size_of::<u32>() as u64;
+    let span = bytes.max(floor);
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpu test readback"),
+        size: span,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gpu test readback encoder"),
+    });
+    encoder.copy_buffer_to_buffer(src, 0, &readback, 0, bytes);
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = readback.slice(0..span);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    if device.poll(wgpu::PollType::wait_indefinitely()).is_err() {
+        return None;
+    }
+    let Ok(Ok(())) = rx.recv() else {
+        return None;
+    };
+    let Ok(view) = slice.get_mapped_range() else {
+        return None;
+    };
+    let out = view[..bytes as usize].to_vec();
+    drop(view);
+    readback.unmap();
+    Some(out)
+}
 pub use camera::{
     CameraView, OrbitCamera, PointerDpr, camera_view_projection, install_orbit_camera,
     read_orbit_camera,

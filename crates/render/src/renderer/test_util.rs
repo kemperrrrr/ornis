@@ -34,46 +34,11 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
 
 /// Adapter handle, or `None` on headless CI without a GPU.
 ///
-/// When [`crate::gpu_required`] holds (`ORNIS_REQUIRE_GPU` — non-empty,
-/// not `"0"`; the CI `test` shard sets `=1`) a missing adapter panics
-/// instead of skipping, so it can never turn a GPU gate into a pass;
-/// unset or explicit `"0"` keeps the skip.
+/// Thin wrapper over [`crate::try_headless_device`], which holds the one
+/// bootstrap every GPU-gated test and bench shares (and the
+/// [`crate::gpu_required`] panic-instead-of-skip contract).
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        });
-        let adapter = match instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-        {
-            Ok(adapter) => adapter,
-            Err(err) => {
-                assert!(
-                    !crate::gpu_required(),
-                    "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
-                );
-                return None;
-            }
-        };
-        match adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-        {
-            Ok(pair) => Some(pair),
-            Err(err) => {
-                assert!(
-                    !crate::gpu_required(),
-                    "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
-                );
-                None
-            }
-        }
-    })
+    crate::try_headless_device()
 }
 
 /// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a

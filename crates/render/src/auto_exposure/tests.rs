@@ -10,46 +10,16 @@ use super::*;
 /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
 /// logged, never silent).
 ///
-/// A set [`crate::gpu_required`] (`ORNIS_REQUIRE_GPU` — non-empty, not
-/// `"0"`; the CI `test` shard sets `=1`) panics instead of skipping: a
-/// missing adapter must never turn a GPU gate into a pass. Unset or
-/// explicit `"0"` keeps the skip.
+/// Shared bootstrap [`crate::try_headless_device`]: when
+/// [`crate::gpu_required`] holds (`ORNIS_REQUIRE_GPU` — non-empty, not
+/// `"0"`; the CI `test` shard sets `=1`) a missing adapter panics instead
+/// of skipping, so a missing device can never turn a GPU gate into a pass.
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let descriptor = wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        flags: wgpu::InstanceFlags::empty(),
-        backend_options: wgpu::BackendOptions::default(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        display: None,
-    };
-    let instance = wgpu::Instance::new(descriptor);
-    match pollster::block_on(request_device(instance)) {
-        Some(pair) => Some(pair),
-        None if crate::gpu_required() => {
-            panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
-        }
-        None => {
-            eprintln!("SKIPPED (auto_exposure): no wgpu device");
-            None
-        }
+    let pair = crate::try_headless_device();
+    if pair.is_none() {
+        eprintln!("SKIPPED (auto_exposure): no wgpu device");
     }
-}
-
-/// Requests the default adapter/device from `instance`, logging the
-/// adapter error when the host has no GPU.
-async fn request_device(instance: wgpu::Instance) -> Option<(wgpu::Device, wgpu::Queue)> {
-    let options = wgpu::RequestAdapterOptions::default();
-    let adapter = match instance.request_adapter(&options).await {
-        Ok(adapter) => adapter,
-        Err(err) => {
-            eprintln!("SKIPPED (auto_exposure): no wgpu adapter: {err}");
-            return None;
-        }
-    };
-    adapter
-        .request_device(&wgpu::DeviceDescriptor::default())
-        .await
-        .ok()
+    pair
 }
 
 #[test]

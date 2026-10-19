@@ -26,7 +26,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::{
     Culler, INDIRECT_ARGS_WORD_BYTES, INDIRECT_ARGS_WORD_COUNT, INSTANCE_COUNT_WORD, InstanceData,
-    MaterialIdx, compact_visible_indices, gpu_required,
+    MaterialIdx, compact_visible_indices,
 };
 
 /// Sphere mesh index count placeholder: the cull pass only compacts, the
@@ -55,40 +55,11 @@ const FAR: f32 = 100.0;
 /// tenth of the scene.
 const VISIBLE_PART_DENOM: usize = 10;
 
-async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        flags: wgpu::InstanceFlags::empty(),
-        backend_options: wgpu::BackendOptions::default(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        display: None,
-    });
-    let adapter = match instance
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await
-    {
-        Ok(adapter) => adapter,
-        Err(err) => {
-            assert!(
-                !gpu_required(),
-                "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
-            );
-            return None;
-        }
-    };
-    match adapter
-        .request_device(&wgpu::DeviceDescriptor::default())
-        .await
-    {
-        Ok(pair) => Some(pair),
-        Err(err) => {
-            assert!(
-                !gpu_required(),
-                "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
-            );
-            None
-        }
-    }
+/// Headless adapter/device pair for the bench, or `None` on a host with no
+/// wgpu adapter — the shared bootstrap [`ornis_render::try_headless_device`],
+/// which panics instead of skipping when [`gpu_required`] holds.
+fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    ornis_render::try_headless_device()
 }
 
 // qual:allow(test_quality, untested) reason: "bench scene builder runs only under the criterion harness, never under libtest"
@@ -125,31 +96,11 @@ fn read_instance_count(
     args: &wgpu::Buffer,
 ) -> Option<u32> {
     let args_bytes = INDIRECT_ARGS_WORD_COUNT as u64 * INDIRECT_ARGS_WORD_BYTES;
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("culling bench args readback"),
-        size: args_bytes,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("culling bench args copy"),
-    });
-    encoder.copy_buffer_to_buffer(args, 0, &staging, 0, args_bytes);
-    queue.submit([encoder.finish()]);
-    let slice = staging.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    rx.recv().ok()?.ok()?;
-    let view = slice.get_mapped_range().ok()?;
-    let words: [u32; INDIRECT_ARGS_WORD_COUNT] = bytemuck::cast_slice(&view)
-        [..INDIRECT_ARGS_WORD_COUNT]
-        .try_into()
-        .ok()?;
-    drop(view);
-    staging.unmap();
+    let bytes = ornis_render::read_bytes_back(device, queue, args, args_bytes)?;
+    let words: [u32; INDIRECT_ARGS_WORD_COUNT] =
+        bytemuck::cast_slice(&bytes[..INDIRECT_ARGS_WORD_COUNT * std::mem::size_of::<u32>()])
+            .try_into()
+            .ok()?;
     Some(words[INSTANCE_COUNT_WORD])
 }
 
@@ -275,7 +226,7 @@ fn bench_culling(c: &mut Criterion) {
         glam::camera::rh::view::look_at_mat4(Vec3::from_array(CAMERA_EYE), Vec3::ZERO, Vec3::Y);
     let proj = glam::camera::rh::proj::directx::perspective(FOV_RAD, ASPECT, NEAR, FAR);
     let view_proj = proj.mul_mat4(&view);
-    let gpu = pollster::block_on(device());
+    let gpu = device();
 
     let mut group = c.benchmark_group("culling");
     // Premise lines accumulate here on purpose: the `for` body below must
