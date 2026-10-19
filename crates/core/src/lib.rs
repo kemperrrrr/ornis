@@ -22,6 +22,7 @@ mod entity;
 pub mod gpu_types;
 /// Parent links, local [`Transform`], and world [`GlobalTransform`].
 pub mod hierarchy;
+mod layout_clock;
 #[cfg(feature = "lock-free")]
 mod lock_free_store;
 pub mod material;
