@@ -83,12 +83,13 @@ pub use ao::{
     bilateral_weight, gtao_clamp_horizon, gtao_falloff, gtao_sample, half_extent,
     linear_view_depth, ssao_sample,
 };
-/// Whether GPU-gated tests must fail instead of skipping on adapter-less
-/// hosts: set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` (the CI
-/// GPU lane exports it, so a missing adapter surfaces as red rather than
-/// a silent skip).
-#[cfg(test)]
-pub(crate) fn gpu_required() -> bool {
+/// Whether GPU-gated tests and benches must fail instead of skipping on
+/// adapter-less hosts: set when `ORNIS_REQUIRE_GPU` is non-empty and not
+/// `"0"` (the CI GPU lane exports it, so a missing adapter surfaces as red
+/// rather than a silent skip). Public so the criterion bench — a separate
+/// crate root that never compiles under `cfg(test)` — shares this one
+/// definition with the in-crate tests.
+pub fn gpu_required() -> bool {
     std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 pub use camera::{

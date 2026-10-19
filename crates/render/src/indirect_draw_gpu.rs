@@ -540,4 +540,5 @@ fn armed_with_custom_matches_direct_and_indirect() {
 }
 
 /// The cached-bind-group invalidation gates (review #100).
+#[path = "bind_group_invalidation.rs"]
 mod bind_group_invalidation;

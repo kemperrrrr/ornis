@@ -10,9 +10,10 @@ use super::*;
 /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
 /// logged, never silent).
 ///
-/// A set `ORNIS_REQUIRE_GPU` (non-empty, not `"0"` — the CI `test` shard
-/// sets `=1`) panics instead of skipping: a missing adapter must never turn
-/// a GPU gate into a pass. Unset or explicit `"0"` keeps the skip.
+/// A set [`crate::gpu_required`] (`ORNIS_REQUIRE_GPU` — non-empty, not
+/// `"0"`; the CI `test` shard sets `=1`) panics instead of skipping: a
+/// missing adapter must never turn a GPU gate into a pass. Unset or
+/// explicit `"0"` keeps the skip.
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let descriptor = wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -24,7 +25,7 @@ fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(descriptor);
     match pollster::block_on(request_device(instance)) {
         Some(pair) => Some(pair),
-        None if require_gpu() => {
+        None if crate::gpu_required() => {
             panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
         }
         None => {
@@ -32,14 +33,6 @@ fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             None
         }
     }
-}
-
-/// Whether the harness must fail (rather than skip) when no adapter exists.
-/// Set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` — the same
-/// semantics the gpu-culling slice centralizes as `gpu_required()`, so the
-/// two helpers collapse into one when both land.
-fn require_gpu() -> bool {
-    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 /// Requests the default adapter/device from `instance`, logging the

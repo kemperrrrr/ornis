@@ -26,7 +26,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use glam::{Mat4, Vec3};
 use ornis_render::{
     Culler, INDIRECT_ARGS_WORD_BYTES, INDIRECT_ARGS_WORD_COUNT, INSTANCE_COUNT_WORD, InstanceData,
-    MaterialIdx, compact_visible_indices,
+    MaterialIdx, compact_visible_indices, gpu_required,
 };
 
 /// Sphere mesh index count placeholder: the cull pass only compacts, the
@@ -54,12 +54,6 @@ const FAR: f32 = 100.0;
 /// Denominator of the bench premise: the camera must cover less than a
 /// tenth of the scene.
 const VISIBLE_PART_DENOM: usize = 10;
-
-/// Whether GPU-gated runs must fail instead of skipping on adapter-less
-/// hosts: set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"`.
-fn gpu_required() -> bool {
-    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
-}
 
 async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

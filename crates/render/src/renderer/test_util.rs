@@ -39,7 +39,7 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
 /// instead of skipping, so it can never turn a GPU gate into a pass;
 /// unset or explicit `"0"` keeps the skip.
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let pair = pollster::block_on(async {
+    pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
@@ -73,8 +73,7 @@ pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
                 None
             }
         }
-    });
-    pair
+    })
 }
 
 /// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a
