@@ -611,15 +611,9 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
             let Some(rest) = incoming.or(outgoing).map(|track| track.rest) else {
                 continue;
             };
-            let mut pose = match incoming {
-                Some(track) => track_pose(track, player.time, player.weight),
-                None => rest_pose(rest),
-            };
+            let mut pose = side_pose(incoming, rest, player.time, player.weight);
             if let Some(fade) = fade {
-                let from_pose = match outgoing {
-                    Some(track) => track_pose(track, fade.from.time, fade.from.weight),
-                    None => rest_pose(rest),
-                };
+                let from_pose = side_pose(outgoing, rest, fade.from.time, fade.from.weight);
                 let progress = fade_progress(fade.duration, fade.elapsed);
                 pose = BlendedPose::mix(&from_pose, &pose, progress);
             }
@@ -679,9 +673,19 @@ fn track_of(clip: &AnimClip, entity: Entity) -> Option<&AnimTrack> {
     clip.tracks.iter().find(|track| track.entity == entity)
 }
 
-/// Pose of a side with no channels: the rest, with every channel absent.
-fn rest_pose(rest: JointTrs) -> BlendedPose {
-    BlendedPose::from_samples(&[JointSample::default()], std::slice::from_ref(&rest), 1.0)
+/// Pose with every joint at `rest` and no channel present (a side that
+/// animates nothing).
+fn rest_only(rest: &[JointTrs]) -> BlendedPose {
+    BlendedPose::from_samples(&vec![JointSample::default(); rest.len()], rest, 1.0)
+}
+
+/// Pose of one blend side: its track at `time` and `weight`, or the rest when
+/// the side has no track for the entity.
+fn side_pose(track: Option<&AnimTrack>, rest: JointTrs, time: f32, weight: f32) -> BlendedPose {
+    match track {
+        Some(track) => track_pose(track, time, weight),
+        None => rest_only(std::slice::from_ref(&rest)),
+    }
 }
 
 /// Blended pose of one object track at `time` and `weight`.
@@ -2037,7 +2041,7 @@ fn sample_entity(
                 )
             }
             // A vanished outgoing clip reads as rest, as on object tracks.
-            None => BlendedPose::from_samples(&vec![JointSample::default(); count], rest, 1.0),
+            None => rest_only(rest),
         };
         pose = BlendedPose::mix(
             &from_pose,
