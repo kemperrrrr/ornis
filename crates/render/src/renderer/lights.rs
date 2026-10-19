@@ -617,6 +617,7 @@ fn shadow_camera_uniform(vp: &[[f32; 4]; 4]) -> CameraUniform {
         view_proj: *vp,
         inv_view_proj: NO_SHADOW_VP,
         camera_pos: [0.0, 0.0, 0.0, 1.0],
+        previous_view_proj: *vp,
     }
 }
 
@@ -733,6 +734,7 @@ impl Renderer3D {
                 view_proj: vp.cols,
                 inv_view_proj: NO_SHADOW_VP,
                 camera_pos: [0.0, 0.0, 0.0, 1.0],
+                previous_view_proj: vp.cols,
             };
             queue.write_buffer(&self.csm_vp_buffers[layer], 0, bytemuck::bytes_of(&uniform));
         }

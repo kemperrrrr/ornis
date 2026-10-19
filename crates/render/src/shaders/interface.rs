@@ -106,6 +106,11 @@ pub(crate) struct GbufferVertexOutput {
     /// Material index (flat: no interpolation; DSL substitutes `MaterialIdx` to WGSL `u32`).
     #[wgsl(location = 4, interpolate = "flat")]
     pub material_index: MaterialIdx,
+    /// Previous-frame world position, computed with the previous object
+    /// transform and (when present) the previous skin palette. W is the
+    /// per-object motion-valid flag (1 = reproject, 0 = reject history).
+    #[wgsl(location = 5)]
+    pub previous_world_position: [f32; 4],
 }
 
 /// G-buffer / forward-PBR fragment input (matches the vertex output).
@@ -127,9 +132,14 @@ pub(crate) struct GbufferFragmentInput {
     /// Material index (flat: no interpolation; DSL substitutes `MaterialIdx` to WGSL `u32`).
     #[wgsl(location = 4, interpolate = "flat")]
     pub material_index: MaterialIdx,
+    /// Previous-frame world position, computed with the previous object
+    /// transform and (when present) the previous skin palette. W is the
+    /// per-object motion-valid flag (1 = reproject, 0 = reject history).
+    #[wgsl(location = 5)]
+    pub previous_world_position: [f32; 4],
 }
 
-/// G-buffer (5-MRT) fragment output.
+/// G-buffer fragment output: five lighting MRTs plus optional motion MRTs.
 #[derive(Clone, Copy, Debug, WgslInterface)]
 #[wgsl(name = "GBufferOutput")]
 pub(crate) struct GbufferOutput {
@@ -148,4 +158,10 @@ pub(crate) struct GbufferOutput {
     /// Packed material parameters.
     #[wgsl(location = 4)]
     pub mat_params: [f32; 4],
+    /// Motion vector `(current_uv - previous_uv)`.
+    #[wgsl(location = 5)]
+    pub motion: [f32; 2],
+    /// Quantized previous-frame depth, with `u16::MAX` meaning invalid.
+    #[wgsl(location = 6)]
+    pub previous_depth: u32,
 }

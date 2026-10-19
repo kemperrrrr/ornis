@@ -24,8 +24,8 @@ use ornis_editor::{
     PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
 };
 use ornis_render::{
-    CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D, RenderLights,
-    Renderer3D, Technique, camera_view_projection, read_orbit_camera,
+    AntiAliasMode, CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D,
+    RenderLights, Renderer3D, Technique, camera_view_projection, read_orbit_camera,
 };
 
 mod scene_api;
@@ -1062,11 +1062,13 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
     let renderer = Renderer3D::new(&ctx.device, &ctx.config, 1);
-    let frame3d = RenderFrame3D::new_with(
+    renderer.set_anti_alias(AntiAliasMode::Fxaa); // WASM has no hardware MSAA.
+    let frame3d = RenderFrame3D::new_with_aa(
         ctx.config.format,
         (ctx.config.width, ctx.config.height),
         Technique::Hybrid,
         ornis_render::Bloom::Off,
+        ornis_render::AaWiring::new(AntiAliasMode::Fxaa),
     );
 
     // Client-side input: orbit pointer/wheel plus gameplay keys share one

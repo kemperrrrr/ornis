@@ -184,7 +184,7 @@ impl AccessDesc {
 
 /// A type-level set of accesses: tuples of access markers, e.g.
 /// `(Read<Albedo>, Write<Hdr>)`. Collect order = declaration order.
-/// Arity is supported up to 6 (one `impl_access_tuple!` line below adds
+/// Arity is supported up to 8 (one `impl_access_tuple!` line below adds
 /// more if a pass ever needs it).
 pub trait AccessSet {
     /// Push this set's accesses onto `out`, in declaration order.
@@ -250,6 +250,7 @@ impl_access_tuple!(A, B, C, D);
 impl_access_tuple!(A, B, C, D, E);
 impl_access_tuple!(A, B, C, D, E, F);
 impl_access_tuple!(A, B, C, D, E, F, G);
+impl_access_tuple!(A, B, C, D, E, F, G, H);
 
 /// Resolves typed resources to live texture views during pass execution.
 #[derive(Clone, Copy)]

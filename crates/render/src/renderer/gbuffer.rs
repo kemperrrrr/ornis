@@ -15,6 +15,11 @@ pub struct GbufferTargets<'a> {
     pub material_params: &'a wgpu::TextureView,
     /// Depth buffer view.
     pub depth: &'a wgpu::TextureView,
+    /// Optional motion-vector target (current UV − previous UV), present
+    /// only when the temporal plan runs.
+    pub motion: Option<&'a wgpu::TextureView>,
+    /// Optional R16Uint previous-depth/validity target paired with `motion`.
+    pub previous_depth: Option<&'a wgpu::TextureView>,
 }
 
 /// Persistent g-buffer textures of the legacy path (plan path draws into
@@ -91,6 +96,38 @@ pub(super) enum GbufferResolveSlot {
     WorldPosition,
     /// Material parameter layer.
     MaterialParams,
+}
+
+/// Build a WGSL shader module for either g-buffer vertex layout.
+pub(super) fn gbuffer_shader_module(
+    device: &wgpu::Device,
+    label: &'static str,
+    source: String,
+) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(Cow::Owned(source)),
+    })
+}
+
+/// Float g-buffer output target with replacement blending.
+pub(super) fn gbuffer_float_target(format: wgpu::TextureFormat) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend: Some(wgpu::BlendState::REPLACE),
+        write_mask: wgpu::ColorWrites::ALL,
+    })
+}
+
+/// Integer g-buffer output target, which must not use blending.
+pub(super) fn gbuffer_integer_target(
+    format: wgpu::TextureFormat,
+) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })
 }
 
 impl Renderer3D {
@@ -298,7 +335,12 @@ impl Renderer3D {
         per_object_buffer: &wgpu::Buffer,
         material_buffer: &wgpu::Buffer,
         sample_count: u32,
-    ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::BindGroup) {
+    ) -> (
+        wgpu::RenderPipeline,
+        wgpu::RenderPipeline,
+        wgpu::BindGroupLayout,
+        wgpu::BindGroup,
+    ) {
         // Layout entries come from the pass resource table.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> =
             shaders::gbuffer_generated::GBUFFER_RESOURCES
@@ -325,15 +367,9 @@ impl Renderer3D {
             .unwrap_or_default(),
         });
 
-        let vs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gbuffer vertex"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_vertex())),
-        });
-
-        let fs_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("gbuffer fragment"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(shaders::gbuffer_fragment())),
-        });
+        let vs_module = gbuffer_shader_module(device, "gbuffer vertex", shaders::gbuffer_vertex());
+        let fs_module =
+            gbuffer_shader_module(device, "gbuffer fragment", shaders::gbuffer_fragment());
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gbuffer pipeline layout"),
@@ -341,75 +377,62 @@ impl Renderer3D {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("gbuffer pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
-                buffers: &[Some(Vertex::desc())],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some(shaders::gbuffer_generated::fs_main::entry_point()),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        // `R16Uint`: the spec-guaranteed multisampleable
-                        // integer format (see the `material_id` field docs).
-                        format: wgpu::TextureFormat::R16Uint,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let mut targets = vec![
+            gbuffer_float_target(wgpu::TextureFormat::Rgba8Unorm),
+            gbuffer_float_target(wgpu::TextureFormat::Rg16Float),
+            gbuffer_integer_target(wgpu::TextureFormat::R16Uint),
+            gbuffer_float_target(wgpu::TextureFormat::Rg16Float),
+            gbuffer_float_target(wgpu::TextureFormat::Rgba16Float),
+            None,
+            None,
+        ];
+        let create_pipeline = |label: &'static str, targets: &[Option<wgpu::ColorTargetState>]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
+                    buffers: &[Some(Vertex::desc())],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &fs_module,
+                    entry_point: Some(shaders::gbuffer_generated::fs_main::entry_point()),
+                    targets,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: sample_count,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = create_pipeline("gbuffer pipeline", &targets);
+        targets[5] = gbuffer_float_target(wgpu::TextureFormat::Rg16Float);
+        targets[6] = gbuffer_integer_target(wgpu::TextureFormat::R16Uint);
+        let motion_pipeline = create_pipeline("gbuffer motion pipeline", &targets);
 
-        (pipeline, bind_group_layout, bind_group)
+        (pipeline, motion_pipeline, bind_group_layout, bind_group)
     }
 
     /// Resolve target for one MSAA g-buffer float color layer: the stored
@@ -533,80 +556,82 @@ impl Renderer3D {
         batch: BatchDraw<'_>,
         customs: &[CustomGbufferDraw<'_>],
     ) {
+        let mut color_attachments = vec![
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.albedo,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.normal,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.material_id,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.world_position,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.material_params,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ];
+        let motion = g.motion.is_some() && g.previous_depth.is_some();
+        if let (Some(motion), Some(previous_depth)) = (g.motion, g.previous_depth) {
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: motion,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: previous_depth,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
+        } else {
+            // The non-temporal pipeline has trailing `None` targets at
+            // locations 5 and 6; both matching attachment slots stay absent.
+            color_attachments.push(None);
+            color_attachments.push(None);
+        }
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("gbuffer pass"),
-            color_attachments: &[
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.albedo,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.normal,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.material_id,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.world_position,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: g.material_params,
-                    depth_slice: None,
-                    resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-            ],
+            color_attachments: &color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: g.depth,
                 depth_ops: Some(wgpu::Operations {
@@ -620,11 +645,15 @@ impl Renderer3D {
             multiview_mask: None,
         });
 
-        self.draw_shared_batch(device, &mut rpass, mesh, batch);
+        self.draw_shared_batch(device, &mut rpass, mesh, batch, motion);
         for custom in customs {
             match custom.draw {
                 SkinnedDraw::Cpu => {
-                    rpass.set_pipeline(&self.gbuffer_pipeline);
+                    rpass.set_pipeline(if motion {
+                        &self.gbuffer_motion_pipeline
+                    } else {
+                        &self.gbuffer_pipeline
+                    });
                     {
                         let bind_group = read_lock(&self.gbuffer_bind_group);
                         rpass.set_bind_group(0, &*bind_group, &[]);
@@ -650,6 +679,7 @@ impl Renderer3D {
                         continue;
                     }
                     let palette = read_lock(&self.palette_buffer);
+                    let previous_palette = read_lock(&self.previous_palette_buffer);
                     let per_object = read_lock(&self.per_object_buffer);
                     let material = read_lock(&self.material_buffer);
                     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -667,12 +697,23 @@ impl Renderer3D {
                                         size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
                                     }))
                                 }
+                                "previous_palette" => {
+                                    Some(wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                        buffer: &previous_palette,
+                                        offset: handle.byte_offset(),
+                                        size: std::num::NonZeroU64::new(PALETTE_BYTE_SIZE as u64),
+                                    }))
+                                }
                                 _ => None,
                             }
                         })
                         .unwrap_or_default(),
                     });
-                    rpass.set_pipeline(&self.skinned_pipeline);
+                    rpass.set_pipeline(if motion {
+                        &self.skinned_motion_pipeline
+                    } else {
+                        &self.skinned_pipeline
+                    });
                     rpass.set_bind_group(0, &bind_group, &[]);
                     rpass.set_vertex_buffer(0, custom.mesh.vertex_buffer.slice(..));
                     rpass.set_index_buffer(
@@ -699,8 +740,13 @@ impl Renderer3D {
         rpass: &mut wgpu::RenderPass<'_>,
         mesh: &Mesh,
         batch: BatchDraw<'_>,
+        motion: bool,
     ) {
-        rpass.set_pipeline(&self.gbuffer_pipeline);
+        rpass.set_pipeline(if motion {
+            &self.gbuffer_motion_pipeline
+        } else {
+            &self.gbuffer_pipeline
+        });
         let cached = read_lock(&self.gbuffer_bind_group);
         let indirect;
         let bind_group = match batch {

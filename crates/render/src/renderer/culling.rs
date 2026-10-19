@@ -6,6 +6,7 @@ use super::InstanceData;
 use super::Renderer3D;
 use super::read_lock;
 use super::write_lock;
+use crate::gpu_culling::PreviousInstanceData;
 use glam::Mat4;
 
 impl Renderer3D {
@@ -86,9 +87,21 @@ impl Renderer3D {
             return;
         };
         self.ensure_culler_capacity(device, instances.len());
+        let previous_models = read_lock(&self.previous_instance_models_frame);
+        let motion_validity = read_lock(&self.previous_instance_motion_valid_frame);
         let ready = read_lock(&self.culler).as_ref().is_some_and(|culler| {
             culler
-                .compact(device, queue, &view_proj, index_count, &instances)
+                .compact_with_previous(
+                    device,
+                    queue,
+                    &view_proj,
+                    index_count,
+                    &instances,
+                    PreviousInstanceData {
+                        models: &previous_models,
+                        motion_validity: &motion_validity,
+                    },
+                )
                 .is_ok()
         });
         self.indirect_ready

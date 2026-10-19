@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use ornis_schedule::{MermaidDiagram, bitset_level_plan};
 
-/// Bytes per pixel for 16-bit formats (`R16Uint` material ids).
+/// Bytes per pixel for 16-bit integer formats (`R16Uint` ids/depth).
 const BYTES_PER_PIXEL_16: u32 = 2;
 /// Bytes per pixel for 32-bit formats (RGBA8 / R32 / Depth32 / …).
 const BYTES_PER_PIXEL_32: u32 = 4;

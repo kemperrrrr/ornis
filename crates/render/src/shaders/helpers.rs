@@ -60,6 +60,14 @@ pub const SPOT_KIND_EDGE: f32 = 1.5;
 pub const RANGE_CUTOFF_INNER_FRACTION: f32 = 0.99;
 /// Half-extent that maps NDC `[-1, 1]` onto a texture UV `[0, 1]`.
 pub const NDC_TO_UV_HALF: f32 = 0.5;
+/// Threshold separating valid previous-position `w` from the invalid marker.
+pub const MOTION_VALID_THRESHOLD: f32 = NDC_TO_UV_HALF;
+/// Round-to-nearest bias for packing normalized depth into a 16-bit code.
+pub const DEPTH_ROUNDING_BIAS: f32 = NDC_TO_UV_HALF;
+/// Largest depth code that still represents a valid motion sample.
+pub const PREVIOUS_DEPTH_MAX: f32 = (u16::MAX - 1) as f32;
+/// Reserved 16-bit marker for pixels without a valid previous position.
+pub const PREVIOUS_DEPTH_INVALID: u32 = u16::MAX as u32;
 /// Near plane of a point-light cube-shadow face. The far plane is the light range.
 pub const SHADOW_CUBE_NEAR: f32 = 0.1;
 /// Split on a 0/1 light selector: at or below this, the light is not a point light.
@@ -126,6 +134,9 @@ pub fn wgsl_consts() -> String {
         decl!(SPOT_KIND_EDGE),
         decl!(RANGE_CUTOFF_INNER_FRACTION),
         decl!(NDC_TO_UV_HALF),
+        decl!(MOTION_VALID_THRESHOLD),
+        decl!(DEPTH_ROUNDING_BIAS),
+        decl!(PREVIOUS_DEPTH_MAX),
         decl!(SHADOW_CUBE_NEAR),
         decl!(CSM_BLEND_FRACTION),
         decl!(CSM_ACTIVE_EDGE),
@@ -154,6 +165,7 @@ pub fn wgsl_consts() -> String {
         decl_u32!(SHADING_DEBUG_SHADOW),
         decl_u32!(SHADING_DEBUG_HEAT),
         decl_u32!(CSM_LAST_CASCADE),
+        decl_u32!(PREVIOUS_DEPTH_INVALID),
     ]
     .concat();
     // Cluster grid constants (#130): formatted from the single renderer
