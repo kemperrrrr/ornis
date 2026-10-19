@@ -264,9 +264,9 @@ fn absent_channels_stay_untouched_even_below_full_weight() {
 }
 
 #[test]
-fn crossfade_mixes_outgoing_and_incoming_then_retires() {
+fn crossfade_mixes_retires_and_falls_back_to_rest_without_a_track() {
     let (mut engine, target) = scene();
-    let rest = rest_at(Vec3::ZERO, Quat::IDENTITY);
+    let rest = rest_at(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
     let idle_track = track(target, rest, Some(Vec3::ZERO), None);
     let idle = add_clip(&mut engine, "idle", idle_track);
     let walk_track = track(target, rest, Some(Vec3::new(10.0, 0.0, 0.0)), None);
@@ -286,24 +286,16 @@ fn crossfade_mixes_outgoing_and_incoming_then_retires() {
         !fade_active(&engine, target),
         "finished fade must be dropped"
     );
-}
 
-#[test]
-fn crossfade_into_a_clip_without_the_entity_fades_out_to_rest() {
-    let (mut engine, target) = scene();
+    // Incoming clip without a track for `target`: the outgoing idle pose (0)
+    // falls back toward its rest (2), so halfway reads 1.
     let placement = TransformDesc::from_arrays([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]);
     let other = spawn(&mut engine, placement);
-    let rest = rest_at(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
-    let idle_track = track(target, rest, Some(Vec3::ZERO), None);
-    let idle = add_clip(&mut engine, "idle", idle_track);
-    // The incoming clip animates only `other`, so `target` has no track in it.
     let elsewhere = track(other, rest, Some(Vec3::new(9.0, 0.0, 0.0)), None);
-    let walk = add_clip(&mut engine, "walk", elsewhere);
-    play(&mut engine, target, walk, 1.0);
+    let elsewhere_clip = add_clip(&mut engine, "elsewhere", elsewhere);
+    play(&mut engine, target, elsewhere_clip, 1.0);
     fade_from(&mut engine, target, idle);
-
     engine.run_frame(0.5);
-    // Halfway from the outgoing pose (0) to the rest it falls back to (2).
-    let mid = transform_of(&engine, target).translation;
-    assert!(close(mid, Vec3::new(1.0, 0.0, 0.0)), "midway got {mid:?}");
+    let back = transform_of(&engine, target).translation;
+    assert!(close(back, Vec3::new(1.0, 0.0, 0.0)), "fallback got {back:?}");
 }

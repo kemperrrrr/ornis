@@ -357,7 +357,7 @@ fn idle_walk_animator(engine: &mut Engine) -> (Entity, ClipId) {
 }
 
 #[test]
-fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
+fn animator_crossfade_is_cut_by_play_and_stop() {
     let mut engine = engine();
     let (root, idle) = idle_walk_animator(&mut engine);
     animator(&mut engine, root)
@@ -370,17 +370,11 @@ fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
 
     animator(&mut engine, root).play("walk").unwrap();
     assert!(!has_fade(&engine, root), "play cuts the fade");
-}
 
-#[test]
-fn animator_stop_cancels_a_running_crossfade() {
-    let mut engine = engine();
-    let (root, _idle) = idle_walk_animator(&mut engine);
     animator(&mut engine, root)
-        .play_crossfade("walk", Seconds::new(1.0))
+        .play_crossfade("idle", Seconds::new(1.0))
         .unwrap();
-    assert!(has_fade(&engine, root), "crossfade started");
-
+    assert!(has_fade(&engine, root), "crossfade restarted");
     animator(&mut engine, root).stop().unwrap();
     assert!(!has_fade(&engine, root), "stop cancels the fade");
 }
