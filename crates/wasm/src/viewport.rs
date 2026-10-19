@@ -4,10 +4,10 @@
 //! The render loop owns the replica engine, but [`set_viewport_mode`] is
 //! called from JS outside the frame closure. Both run on the single
 //! browser thread, so the export only queues a mode request and the loop
-//! applies it on the next frame via [`apply_mode_request`] — no shared
+//! applies it on the next frame via `apply_mode_request` — no shared
 //! engine pointer, no unsafe. The frame loop then publishes the picking
-//! camera before the schedule ([`sync_picking_camera`]) and refreshes the
-//! overlay JSON after it ([`refresh_viewport_state_json`]).
+//! camera before the schedule (`sync_picking_camera`) and refreshes the
+//! overlay JSON after it (`refresh_viewport_state_json`).
 
 use std::cell::{Cell, RefCell};
 use std::sync::Mutex;

@@ -29,7 +29,10 @@ use ornis_render::{
 };
 
 mod scene_api;
-mod viewport;
+// Public so the `qual:api` markers on the wasm-bindgen exports
+// (`set_viewport_mode`, `viewport_state_json`) are nameable from outside
+// the crate — a private module makes them ORPHAN_SUPPRESSION findings.
+pub mod viewport;
 
 use scene_api::LiveScene;
 use viewport::{
@@ -544,19 +547,26 @@ fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
 /// pixels.
 fn device_pixel_ratio() -> f32 {
     // `web_sys::window()` panics on non-wasm targets (imported statics), so
-    // host tests and any native build read the documented off-browser
-    // fallback directly instead of touching the DOM.
+    // host tests and any native build feed the documented off-browser
+    // fallback (`None`) instead of touching the DOM.
     #[cfg(target_arch = "wasm32")]
     {
-        web_sys::window()
-            .map(|w| w.device_pixel_ratio() as f32)
-            .unwrap_or(1.0)
-            .max(1.0)
+        effective_dpr(web_sys::window().map(|w| w.device_pixel_ratio()))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        1.0
+        effective_dpr(None)
     }
+}
+
+/// Clamp a raw `devicePixelRatio` reading into the engine scale: a missing
+/// window (`None`), a non-finite or non-positive value becomes `1.0`, and
+/// fractional ratios below one clamp up (CSS-pixel backends are the floor).
+fn effective_dpr(raw: Option<f64>) -> f32 {
+    raw.map(|r| r as f32)
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or(1.0)
+        .max(1.0)
 }
 
 /// Resize the canvas backing store to fill its parent element, scaled by
@@ -745,14 +755,24 @@ impl<'a> FrameState<'a> {
     /// by the device pixel ratio so the backing store is HiDPI-sharp.
     fn handle_resize(&mut self, canvas: &web_sys::HtmlCanvasElement) {
         let dpr = device_pixel_ratio();
-        // Publish the pointer scale for the orbit input system: browser
-        // pointer deltas are device pixels, rotation is CSS-anchored.
-        let _ = self
+        // Publish the pointer scale for the orbit input system only when it
+        // actually changes: browser pointer deltas are device pixels, and
+        // rotation is CSS-anchored. Steady-state frames skip the write.
+        let scale_changed = self
             .render_world
-            .engine_mut()
-            .world_mut()
-            .resources_mut()
-            .insert(PointerDpr(dpr));
+            .engine()
+            .world()
+            .resources()
+            .get::<PointerDpr>()
+            .is_none_or(|p| p.0 != dpr);
+        if scale_changed {
+            let _ = self
+                .render_world
+                .engine_mut()
+                .world_mut()
+                .resources_mut()
+                .insert(PointerDpr(dpr));
+        }
         let pw = canvas
             .parent_element()
             .map(|p| p.client_width() as f32 * dpr)
@@ -1246,6 +1266,19 @@ mod integration_tests {
     #[test]
     fn native_device_pixel_ratio_falls_back_to_one() {
         assert_eq!(device_pixel_ratio(), 1.0);
+    }
+
+    /// The pure scale clamp shared by the wasm and host paths: missing
+    /// window, NaN, negatives and sub-1 fractional ratios all resolve to
+    /// the CSS-pixel floor, real HiDPI ratios pass through.
+    #[test]
+    fn effective_dpr_clamps_and_falls_back() {
+        assert_eq!(effective_dpr(None), 1.0);
+        assert_eq!(effective_dpr(Some(2.0)), 2.0);
+        assert_eq!(effective_dpr(Some(1.5)), 1.5);
+        assert_eq!(effective_dpr(Some(0.5)), 1.0);
+        assert_eq!(effective_dpr(Some(-3.0)), 1.0);
+        assert_eq!(effective_dpr(Some(f64::NAN)), 1.0);
     }
 
     #[test]
