@@ -2007,8 +2007,8 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBat
 ///
 /// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid topology,
 /// or a layer whose mask does not match the joint count. The caller counts
-/// it. A missing outgoing clip reads as rest. Absent [`TransformDesc`] roots at identity (lenient); everything else
-/// is strict.
+/// it. A missing outgoing clip reads as rest. Absent [`TransformDesc`] roots
+/// at identity (lenient); everything else is strict.
 fn sample_entity(
     entity: Entity,
     player: &SkelPlayer,
