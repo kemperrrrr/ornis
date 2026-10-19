@@ -1704,6 +1704,24 @@ fn advance_skel_players(store: &SmartStore, dt: f32) {
     advance_fades(store, dt);
 }
 
+/// Advances a playing cursor against its clip duration. Paused or
+/// clip-less cursors hold their time.
+fn step_player(player: &mut SkelPlayer, clips: &ColdComponentStore<SkelClip>, dt: f32) {
+    if !player.playing {
+        return;
+    }
+    let Some(clip) = clips.get(player.clip.0) else {
+        return;
+    };
+    player.time = Seconds::new(advance_player_time(
+        player.time.get(),
+        dt,
+        player.speed.get(),
+        clip.duration,
+        player.looping,
+    ));
+}
+
 /// Advances playing [`SkelPlayer`] cursors against their clip duration.
 fn advance_base_players(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
@@ -1712,21 +1730,8 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
     let Some(mut players) = store.write_lane::<SkelPlayer>() else {
         return;
     };
-    for index in 0..players.data.len() {
-        let player = &mut players.data[index];
-        if !player.playing {
-            continue;
-        }
-        let Some(clip) = clips.get(player.clip.0) else {
-            continue;
-        };
-        player.time = Seconds::new(advance_player_time(
-            player.time.get(),
-            dt,
-            player.speed.get(),
-            clip.duration,
-            player.looping,
-        ));
+    for player in players.data.iter_mut() {
+        step_player(player, &clips, dt);
     }
 }
 
@@ -1738,21 +1743,8 @@ fn advance_layers(store: &SmartStore, dt: f32) {
     let Some(mut layers) = store.write_lane::<SkelLayer>() else {
         return;
     };
-    for index in 0..layers.data.len() {
-        let layer = &mut layers.data[index];
-        if !layer.playing {
-            continue;
-        }
-        let Some(clip) = clips.get(layer.clip.0) else {
-            continue;
-        };
-        layer.time = Seconds::new(advance_player_time(
-            layer.time.get(),
-            dt,
-            layer.speed.get(),
-            clip.duration,
-            layer.looping,
-        ));
+    for layer in layers.data.iter_mut() {
+        step_player(&mut layer.player, &clips, dt);
     }
 }
 
@@ -1768,15 +1760,7 @@ fn advance_fades(store: &SmartStore, dt: f32) {
     for index in 0..fades.data.len() {
         let entity = fades.entities[index];
         let fade = &mut fades.data[index];
-        if let Some(clip) = clips.get(fade.from.clip.0) {
-            fade.from.time = Seconds::new(advance_player_time(
-                fade.from.time.get(),
-                dt,
-                fade.from.speed.get(),
-                clip.duration,
-                fade.from.looping,
-            ));
-        }
+        step_player(&mut fade.from, &clips, dt);
         fade.elapsed = Seconds::new(fade.elapsed.get() + dt);
         if fade.elapsed.get() >= fade.duration.get() {
             finished.push(entity);
@@ -1893,10 +1877,8 @@ fn sample_entity(
     }
     let count = skeleton.joint_count();
     let time = player.time.get();
-    let mut pose = BlendedPose::from_samples(
-        &sample_joints(clip, count, time),
-        player.weight.get(),
-    );
+    let mut pose =
+        BlendedPose::from_samples(&sample_joints(clip, count, time), player.weight.get());
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
         let from_clip = lanes.clips.get(fade.from.clip.0)?;
         let from_pose = BlendedPose::from_samples(
@@ -1910,11 +1892,11 @@ fn sample_entity(
         if mask.weights.len() != count {
             return None;
         }
-        let layer_clip = lanes.clips.get(layer.clip.0)?;
+        let layer_clip = lanes.clips.get(layer.player.clip.0)?;
         pose.overlay(
-            &sample_joints(layer_clip, count, layer.time.get()),
+            &sample_joints(layer_clip, count, layer.player.time.get()),
             &mask.weights,
-            layer.weight,
+            layer.player.weight,
         );
     }
     let locals: Vec<Mat4> = pose.trs.iter().map(|trs| trs.matrix()).collect();

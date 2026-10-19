@@ -37,24 +37,15 @@ pub struct JointMask {
 /// Overlay layer on a skeleton root: a second clip blended over the base
 /// pose through a [`JointMask`].
 ///
-/// Hot lane, at most one layer per root. Same cursor rules as
-/// [`SkelPlayer`]: advances on variable time while `playing`.
+/// Hot lane, at most one layer per root. The embedded [`SkelPlayer`] is
+/// the layer cursor: its `weight` is the layer strength before the mask,
+/// and it advances exactly like a base player.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkelLayer {
-    /// Playlist entity holding the layer's [`SkelClip`].
-    pub clip: ClipId,
+    /// Clip cursor and layer strength (`player.weight`).
+    pub player: SkelPlayer,
     /// Playlist entity holding the [`JointMask`] that scales the layer.
     pub mask: MaskId,
-    /// Current layer clip time.
-    pub time: Seconds,
-    /// Playback rate (`Seconds::new(1.0)` = real time).
-    pub speed: Seconds,
-    /// Layer strength before the per-joint mask.
-    pub weight: Clamped01,
-    /// Paused layers hold their pose and time.
-    pub playing: bool,
-    /// Wrap (`true`) or clamp (`false`) at the clip ends.
-    pub looping: bool,
 }
 
 /// Crossfade in progress on a skeleton root.
@@ -333,7 +324,7 @@ mod tests {
 
     #[test]
     fn fade_progress_is_linear_and_clamped() {
-        let mut store = ornis_core::SmartStore::new();
+        let store = ornis_core::SmartStore::new();
         let clip_entity = store.create_entity();
         let from = SkelPlayer {
             clip: ClipId(clip_entity),
