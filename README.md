@@ -156,6 +156,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | Command-Based Sync: реальное GPU-исполнение (compute dispatch + flush) | ✅ | `crates/wgpu_backend/src/command_sync.rs`, есть тест `gpu_dispatch_records_and_flushes` |
 | Линтер: compile-time предупреждения при непараллелизуемых паттернах | 🟡 | `#[smart_pipeline]` помечает такие циклы через deprecated-note трюк (видно в IDE и терминале; `crates/macros/src/smart_pipeline.rs`), но нет расширяемого набора правил |
 | Component Packing (`#[derive(Pack)]`) | ✅ | генерируются wrapper-ленты и `Pack::for_each_packed` (packed-аналог `for_each_entity!`); wrapper-ленты — обычные компоненты и напрямую совместимы с `for_each_entity!` (`crates/core/tests/pack_integration.rs`) |
+| `#[smart_system]` (функция для одного объекта; доступ по полям, пакетные gather/scatter) | ✅ | `crates/macros/src/smart_system*.rs`, `crates/core/tests/smart_system.rs`; замеры — `crates/core/benches/smart_system_bench.rs` |
 | SmartBuffer (ручной примитив residency CPU↔GPU) + `AutoLane`/`GpuLanes` (автослой) | 🟡 | `SmartBuffer` — ручной примитив (dirty-флаги); автоматический слой — `AutoLane` (`ornis-wgpu-backend`: политика + residency + CPU-фолбэк) и typed `GpuLanes`-мост; покрытие вне доказанных kernel'ов — открыто |
 
 ### Рендер и материалы

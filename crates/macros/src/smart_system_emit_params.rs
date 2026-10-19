@@ -1,75 +1,42 @@
 //! Parameter-side code generation for `#[smart_system]` (IDEAS §32).
 //!
-//! Builds the per-parameter pieces of the generated system: the body
-//! function's parameter list, the access contributions
+//! Builds the per-parameter pieces of the generated system: the user
+//! parameters of the body function, the access contributions
 //! (`Res`/`ResMut`/event roles), and the run-time fetches with their call
-//! arguments and `#[config]` bindings. [`crate::smart_system_emit`] owns
-//! the surrounding system-struct and per-entity-loop emission.
+//! arguments and `#[config]` bindings. The lane side (field access, guards,
+//! the per-entity loop) lives in [`crate::smart_system_lanes`], and
+//! [`crate::smart_system_emit`] owns the surrounding emission.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Ident, Type};
+use syn::Ident;
 
 use crate::smart_system::{ParamKind, TypedParam, with_elided_lifetime};
 
-/// Body-function signature pieces: parameter inputs plus the entity
-/// binding, its reference form, and the scatter-back statement.
-pub(crate) fn build_body_sig(
-    u_ident: &Ident,
-    pack_ty: &Type,
-    is_mut: bool,
-    store_ident: &Ident,
-    entity_ident: &Ident,
-    local_u_ident: &Ident,
-    params: &[TypedParam],
-) -> (Vec<TokenStream2>, TokenStream2, TokenStream2, TokenStream2) {
-    let mut body_inputs = Vec::new();
-    body_inputs.push({
-        let u = u_ident;
-        if is_mut {
-            quote! { #u: &mut #pack_ty }
-        } else {
-            quote! { #u: &#pack_ty }
-        }
-    });
-    body_inputs.push(quote! { #store_ident: &ornis_core::SmartStore });
-    for param in params {
-        let name = &param.name;
-        match &param.kind {
-            ParamKind::Config => {
-                let ty = &param.inner;
-                body_inputs.push(quote! { #name: #ty });
+/// Body-function parameters for the user's own parameters (after the lane
+/// parameters): `#[config]` by value, `#[entity]` as `Entity`, resource and
+/// event roles by their wrapper type.
+pub(crate) fn build_user_params(params: &[TypedParam]) -> Vec<TokenStream2> {
+    params
+        .iter()
+        .map(|param| {
+            let name = &param.name;
+            match &param.kind {
+                ParamKind::Config => {
+                    let ty = &param.inner;
+                    quote! { #name: #ty }
+                }
+                ParamKind::EntityHandle => quote! { #name: ornis_core::Entity },
+                ParamKind::Res
+                | ParamKind::ResMut
+                | ParamKind::EventWriter
+                | ParamKind::EventReader => {
+                    let ty = with_elided_lifetime(param.wrapper.clone());
+                    quote! { #name: #ty }
+                }
             }
-            ParamKind::EntityHandle => {
-                body_inputs.push(quote! { #name: ornis_core::Entity });
-            }
-            ParamKind::Res
-            | ParamKind::ResMut
-            | ParamKind::EventWriter
-            | ParamKind::EventReader => {
-                let ty = with_elided_lifetime(param.wrapper.clone());
-                body_inputs.push(quote! { #name: #ty });
-            }
-        }
-    }
-    let u_binding = if is_mut {
-        quote! { mut #local_u_ident }
-    } else {
-        quote! { #local_u_ident }
-    };
-    let u_ref = if is_mut {
-        quote! { &mut #local_u_ident }
-    } else {
-        quote! { &#local_u_ident }
-    };
-    let scatter = if is_mut {
-        quote! {
-            ornis_core::Pack::pack_put(&#local_u_ident, #store_ident, #entity_ident);
-        }
-    } else {
-        quote! {}
-    };
-    (body_inputs, u_binding, u_ref, scatter)
+        })
+        .collect()
 }
 
 /// Per-parameter access contributions (`Res`/`ResMut`/event roles only;

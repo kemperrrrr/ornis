@@ -1,0 +1,5 @@
+error: smart_system: `u.hp` is written, so `u` must be `&mut`
+  --> tests/ui/smart_system_rejects_write_through_shared.rs:11:8
+   |
+11 | fn sys(u: &Unit) {
+   |        ^

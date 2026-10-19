@@ -11,6 +11,7 @@ use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
 
 use crate::entity::{DenseIndex, Entity};
+use crate::layout_clock::next_layout;
 use crate::page_table::PageTable;
 use crate::prefetch::{PREFETCH_STRIDE, prefetch_iter};
 
@@ -38,9 +39,12 @@ pub struct ComponentStore<T> {
     /// (modulo swap-on-remove). Iterate this slice for cache-friendly reads.
     pub data: Vec<T>,
     /// Entity owning the component at the same index in [`Self::data`].
+    /// Change order or membership only through the store's methods: they
+    /// keep [`Self::layout`] in step with this sequence.
     pub entities: Vec<Entity>,
     sparse: PageTable<usize>,
     bitset: FixedBitSet,
+    layout: u64,
 }
 
 impl<T> Default for ComponentStore<T> {
@@ -50,6 +54,7 @@ impl<T> Default for ComponentStore<T> {
             entities: Vec::new(),
             sparse: PageTable::default(),
             bitset: FixedBitSet::new(),
+            layout: next_layout(),
         }
     }
 }
@@ -61,6 +66,7 @@ impl<T: Clone> Clone for ComponentStore<T> {
             entities: self.entities.clone(),
             sparse: self.sparse.clone(),
             bitset: self.bitset.clone(),
+            layout: self.layout,
         }
     }
 }
@@ -69,6 +75,13 @@ impl<T> ComponentStore<T> {
     /// Creates an empty store with no allocations beyond the defaults.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Version of the entity sequence in [`Self::entities`]. Changes whenever
+    /// membership or order changes, and never repeats for a different
+    /// sequence in the process, so equal values mean identical `entities`.
+    pub fn layout(&self) -> u64 {
+        self.layout
     }
 
     /// Inserts or replaces the component for `entity`.
@@ -85,12 +98,16 @@ impl<T> ComponentStore<T> {
             // A handle may carry a newer generation: without updating the entry,
             // a fresh handle could not read its own component
             // (found by proptest store_matches_hashmap_model).
-            self.entities[dense_idx] = entity;
+            if self.entities[dense_idx] != entity {
+                self.entities[dense_idx] = entity;
+                self.layout = next_layout();
+            }
             return;
         }
         let dense_idx = self.data.len();
         self.data.push(component);
         self.entities.push(entity);
+        self.layout = next_layout();
         self.sparse.set(id, dense_idx);
         self.bitset.grow(id + 1);
         self.bitset.set(id, true);
@@ -124,6 +141,7 @@ impl<T> ComponentStore<T> {
 
         let component = self.data.pop();
         self.entities.pop();
+        self.layout = next_layout();
         component
     }
 
@@ -226,6 +244,30 @@ impl<T> ComponentStore<T> {
         Some(DenseIndex::from_raw(dense_idx))
     }
 
+    /// Dense index of `entity` as a plain `usize` (generation-checked).
+    pub fn index_of(&self, entity: Entity) -> Option<usize> {
+        self.dense_index(entity).map(usize::from)
+    }
+
+    /// [`index_of`](ComponentStore::index_of) with a first guess: when
+    /// `entities[hint]` already is `entity`, the sparse lookup is skipped. A
+    /// wrong hint only costs that lookup, never a wrong answer.
+    pub fn index_hinted(&self, entity: Entity, hint: usize) -> Option<usize> {
+        if self.entities.get(hint) == Some(&entity) {
+            return Some(hint);
+        }
+        self.index_of(entity)
+    }
+
+    /// Whether the dense array lists entities in ascending entity-id order,
+    /// so iterating `data` visits them in the order of
+    /// [`iter_entities`](ComponentStore::iter_entities).
+    pub fn is_id_ordered(&self) -> bool {
+        self.entities
+            .windows(2)
+            .all(|pair| pair[0].entity_id() < pair[1].entity_id())
+    }
+
     /// Iterates `(entity, &A, &B)` pairs for every entity present in both
     /// stores, skipping entities whose generations disagree between them.
     pub fn iter_zip<'a, 'b, U>(&'a self, other: &'b ComponentStore<U>) -> ZipIter<'a, 'b, T, U> {
@@ -326,6 +368,7 @@ impl<T> ComponentStore<T> {
             self.data.push(component);
             self.entities.push(entity);
         }
+        self.layout = next_layout();
     }
 }
 

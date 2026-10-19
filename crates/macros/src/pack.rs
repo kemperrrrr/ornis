@@ -12,29 +12,43 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 
+use crate::pack_lanes::generate_wrapper_defs;
 use crate::pack_mut::{generate_pack_get_mut, generate_pack_mut_group};
 use syn::{
-    Data, DeriveInput, Fields, FieldsNamed, Generics, Ident, Type, TypePath, parse_macro_input,
+    Data, DeriveInput, Fields, FieldsNamed, Generics, Ident, Type, TypePath, Visibility,
+    parse_macro_input,
 };
 
 #[derive(Clone)]
 pub(crate) struct FieldInfo {
     pub(crate) name: Ident,
     pub(crate) lane_ty: Type,
+    /// Declared field type (`Option<T>` for sparse fields).
+    pub(crate) field_ty: Type,
     // Unique wrapper type for this field's lane
     pub(crate) wrapper_name: Ident,
     // `Option<T>` fields are sparse lanes of `T` (missing entry ⇔ `None`).
     pub(crate) optional: bool,
 }
 
+/// Name of the lane wrapper for `field` of `struct_name`. Derived from the
+/// struct and field names only (no field index), so `#[smart_system]` can
+/// name a lane from the bundle type path and the field identifier.
+pub(crate) fn lane_wrapper_name(struct_name: &Ident, field: &Ident) -> Ident {
+    format_ident!("{}__{}__PackLane", struct_name, field)
+}
+
 #[derive(Clone)]
 pub(crate) struct LaneInfo {
     pub(crate) wrapper_ty: Type,
     pub(crate) inner_ty: Type,
+    pub(crate) field_ty: Type,
+    pub(crate) optional: bool,
 }
 
 struct PackInfo {
     struct_name: Ident,
+    vis: Visibility,
     generics: Generics,
     fields: Vec<FieldInfo>,
     lanes: Vec<LaneInfo>,
@@ -44,15 +58,15 @@ fn extract_field_info(struct_name: &Ident, fields: &FieldsNamed) -> Vec<FieldInf
     fields
         .named
         .iter()
-        .enumerate()
-        .filter_map(|(idx, f)| {
+        .filter_map(|f| {
             let name = f.ident.as_ref()?.clone();
             let ty = f.ty.clone();
             let (lane_ty, optional) = unpack_option(ty.clone());
-            let wrapper_name = format_ident!("{}__{}__PackLane__{}", struct_name, name, idx);
+            let wrapper_name = lane_wrapper_name(struct_name, &name);
             Some(FieldInfo {
                 name,
                 lane_ty,
+                field_ty: ty,
                 wrapper_name,
                 optional,
             })
@@ -88,6 +102,8 @@ fn generate_lanes(fields: &[FieldInfo]) -> Vec<LaneInfo> {
             LaneInfo {
                 wrapper_ty,
                 inner_ty: field.lane_ty.clone(),
+                field_ty: field.field_ty.clone(),
+                optional: field.optional,
             }
         })
         .collect()
@@ -95,6 +111,7 @@ fn generate_lanes(fields: &[FieldInfo]) -> Vec<LaneInfo> {
 
 fn extract_pack_info(input: &DeriveInput) -> Result<PackInfo, syn::Error> {
     let struct_name = input.ident.clone();
+    let vis = input.vis.clone();
     let generics = input.generics.clone();
 
     let fields = match &input.data {
@@ -127,6 +144,7 @@ fn extract_pack_info(input: &DeriveInput) -> Result<PackInfo, syn::Error> {
 
     Ok(PackInfo {
         struct_name,
+        vis,
         generics,
         fields: field_infos,
         lanes,
@@ -147,7 +165,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let pack_mut_name = format_ident!("PackMut{}", struct_name);
 
     // Generate wrapper type definitions
-    let wrapper_defs = generate_wrapper_defs(&info.lanes);
+    let wrapper_defs = generate_wrapper_defs(&info.vis, &info.lanes);
     let pack_register = generate_pack_register(&info.lanes);
     let pack_insert = generate_pack_insert(&info.fields);
     let pack_get = generate_pack_get(struct_name, &info.fields, &ty_generics);
@@ -209,21 +227,6 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     expanded.into()
-}
-
-fn generate_wrapper_defs(lanes: &[LaneInfo]) -> TokenStream2 {
-    let defs = lanes.iter().map(|lane| {
-        let wrapper_name = &lane.wrapper_ty;
-        let inner_ty = &lane.inner_ty;
-        quote! {
-            #[derive(Clone, Debug, PartialEq)]
-            #[repr(transparent)]
-            // The name is generated as Struct__field__PackLane__N — deliberately not CamelCase.
-            #[allow(non_camel_case_types)]
-            pub struct #wrapper_name(pub #inner_ty);
-        }
-    });
-    quote! { #(#defs)* }
 }
 
 fn generate_pack_register(lanes: &[LaneInfo]) -> TokenStream2 {

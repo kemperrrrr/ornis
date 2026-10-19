@@ -26,6 +26,10 @@ use support::{
     TargetLane, VelLane, WARMUP_SECS, aos_filter, aos_integrate, aos_link, build_aos, build_world,
     schedule_for,
 };
+use support::{
+    Body__active__PackLane, Body__position__PackLane, Body__target__PackLane,
+    Body__velocity__PackLane,
+};
 use support::{DT, GRAVITY, LINK_PULL};
 
 // ---------------------------------------------------------------------------

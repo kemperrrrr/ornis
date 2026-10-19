@@ -41,7 +41,7 @@ fn pack_get_mut_requires_every_dense_lane_entry() {
     Transform::pack_register(&mut store);
 
     let entity = store.create_entity();
-    store.insert(entity, Transform__x__PackLane__0(5.0));
+    store.insert(entity, Transform__x__PackLane(5.0));
     assert!(
         Transform::pack_get_mut(&mut store, entity).is_none(),
         "a partial bundle must not produce a mutable packed view"
@@ -52,7 +52,7 @@ fn pack_get_mut_requires_every_dense_lane_entry() {
 #[should_panic(expected = "cannot access a lock-free lane")]
 fn pack_get_mut_rejects_lock_free_lanes_explicitly() {
     let mut store = SmartStore::new();
-    store.register_lock_free::<Transform__x__PackLane__0>();
+    store.register_lock_free::<Transform__x__PackLane>();
     Transform::pack_register(&mut store);
 
     let entity = store.create_entity();
@@ -113,9 +113,9 @@ fn pack_lanes_compatible_with_for_each_entity() {
     }
     .pack_insert(&mut store, e);
 
-    // `Transform__x__PackLane__0` is the generated wrapper for field `x`.
+    // `Transform__x__PackLane` is the generated wrapper for field `x`.
     let mut seen = Vec::new();
-    for_each_entity!(store, |lane: &Transform__x__PackLane__0| {
+    for_each_entity!(store, |lane: &Transform__x__PackLane| {
         seen.push(lane.0);
     });
     assert_eq!(seen, vec![5.0]);

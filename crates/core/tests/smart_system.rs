@@ -106,6 +106,47 @@ fn chase(c: &mut Chaser) {
     }
 }
 
+#[smart_system]
+fn nudge_position(m: &mut Mote) {
+    m.position += 1.0;
+}
+
+#[smart_system]
+fn nudge_velocity(m: &mut Mote) {
+    m.velocity += 1.0;
+}
+
+#[smart_system]
+fn integrate_mote(m: &mut Mote) {
+    m.position += m.velocity * 0.5;
+}
+
+#[smart_system]
+fn retarget(c: &mut Chaser, #[config] to: Option<Entity>) {
+    if c.position >= 0.0 {
+        c.target = to;
+    }
+}
+
+#[smart_system]
+fn detach(c: &mut Chaser) {
+    if c.position >= 0.0 {
+        c.target = None;
+    }
+}
+
+#[smart_system]
+fn forward_fields(m: &mut Mote) {
+    m.position += 1.0;
+    m.velocity += 1.0;
+}
+
+#[smart_system]
+fn backward_fields(m: &mut Mote) {
+    m.velocity += 1.0;
+    m.position += 1.0;
+}
+
 fn mote(position: f32, velocity: f32) -> Mote {
     Mote { position, velocity }
 }
@@ -285,6 +326,177 @@ fn link_read_gathers_target_bundle() {
     assert_eq!(loner_body.position, 1.0);
 }
 
+/// The generated per-object loop produces the same bits as a hand-written
+/// lane loop over the same columns.
+#[test]
+fn generated_loop_matches_manual_lane_loop() {
+    let motes: Vec<Mote> = (0..257)
+        .map(|i| mote(i as f32 * 0.5, (i % 5) as f32 - 2.0))
+        .collect();
+    let (generated, generated_entities) = resources_with_motes(&motes);
+    let mut schedule = Schedule::new();
+    schedule.add_system(IntegrateMoteSystem::new());
+    schedule.run(&generated);
+
+    let (manual, manual_entities) = resources_with_motes(&motes);
+    {
+        let store = manual.get::<SmartStore>().expect("store");
+        let mut positions = store
+            .write_lane::<Mote__position__PackLane>()
+            .expect("position lane");
+        let velocities = store
+            .read_lane::<Mote__velocity__PackLane>()
+            .expect("velocity lane");
+        for (position, velocity) in positions.data.iter_mut().zip(velocities.data.iter()) {
+            position.0 += velocity.0 * 0.5;
+        }
+    }
+
+    let generated_store = generated.get::<SmartStore>().expect("store");
+    let manual_store = manual.get::<SmartStore>().expect("store");
+    for (left, right) in generated_entities.iter().zip(&manual_entities) {
+        let a = Mote::pack_get(generated_store, *left).expect("bundle");
+        let b = Mote::pack_get(manual_store, *right).expect("bundle");
+        assert_eq!(a.position.to_bits(), b.position.to_bits());
+        assert_eq!(a.velocity.to_bits(), b.velocity.to_bits());
+    }
+}
+
+/// Field-level access: a body that touches only `u.position` declares only
+/// that lane, so it does not conflict with a writer of `velocity`.
+#[test]
+fn field_access_declares_only_touched_lanes() {
+    let access = NudgePositionSystem::new().access();
+    let position = std::any::TypeId::of::<Mote__position__PackLane>();
+    let velocity = std::any::TypeId::of::<Mote__velocity__PackLane>();
+    assert_eq!(access.writes_lanes.len(), 1);
+    assert!(access.writes_lanes.contains(&position));
+    assert!(access.reads_lanes.is_empty());
+    assert!(!access.writes_lanes.contains(&velocity));
+}
+
+/// Writers of disjoint fields of one bundle share a level.
+#[test]
+fn disjoint_field_writers_share_a_level() {
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgePositionSystem::new());
+    schedule.add_system(NudgeVelocitySystem::new());
+    assert_eq!(schedule.levels(), vec![vec![0, 1]]);
+}
+
+/// Both disjoint writers apply to every entity they touch.
+#[test]
+fn disjoint_field_writers_both_apply() {
+    let (resources, entities) = resources_with_motes(&[mote(1.0, 2.0), mote(3.0, 4.0)]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgePositionSystem::new());
+    schedule.add_system(NudgeVelocitySystem::new());
+    schedule.run(&resources);
+
+    assert_eq!(mote_of(&resources, entities[0]), mote(2.0, 3.0));
+    assert_eq!(mote_of(&resources, entities[1]), mote(4.0, 5.0));
+}
+
+/// The touched fields define the entity set: an entity that owns the
+/// `position` lane but no `velocity` is visited by a position-only body and
+/// skipped by a velocity-only body.
+#[test]
+fn touched_fields_define_the_entity_set() {
+    let (mut resources, entities) = resources_with_motes(&[mote(1.0, 0.0)]);
+    let partial = {
+        let store = resources.get_mut::<SmartStore>().expect("store");
+        let entity = store.create_entity();
+        store
+            .write_lane::<Mote__position__PackLane>()
+            .expect("position lane")
+            .insert(entity, Mote__position__PackLane(5.0));
+        entity
+    };
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgePositionSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let lane = store.read_lane::<Mote__position__PackLane>().expect("lane");
+    assert_eq!(lane.get(partial).map(|p| p.0), Some(6.0));
+    assert_eq!(lane.get(entities[0]).map(|p| p.0), Some(2.0));
+    drop(lane);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(NudgeVelocitySystem::new());
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    let velocity = store.read_lane::<Mote__velocity__PackLane>().expect("lane");
+    assert!(!velocity.contains(partial));
+    assert_eq!(velocity.get(entities[0]).map(|v| v.0), Some(1.0));
+}
+
+/// Optional fields: writing `Some` inserts the sparse entry and writing
+/// `None` removes it, so `pack_get` reads the absent value back as `None`.
+#[test]
+fn sparse_field_write_inserts_and_removes_entry() {
+    let mut resources = Resources::new();
+    let mut store = SmartStore::new();
+    Chaser::pack_register(&mut store);
+    let other = store.create_entity();
+    let subject = store.create_entity();
+    Chaser {
+        position: 0.0,
+        target: None,
+    }
+    .pack_insert(&mut store, subject);
+    resources.insert(store);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(RetargetSystem::new(Some(other)));
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    assert_eq!(
+        Chaser::pack_get(store, subject).expect("bundle").target,
+        Some(other)
+    );
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(DetachSystem::new());
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    assert_eq!(
+        Chaser::pack_get(store, subject).expect("bundle").target,
+        None
+    );
+    let target_lane = store
+        .read_lane::<Chaser__target__PackLane>()
+        .expect("target lane");
+    assert!(!target_lane.contains(subject));
+}
+
+/// A self-link reads the target's value before this entity's write-back,
+/// the same value the pre-field-access loop observed.
+#[test]
+fn self_link_reads_pre_body_value() {
+    let mut resources = Resources::new();
+    let mut store = SmartStore::new();
+    Chaser::pack_register(&mut store);
+    let entity = store.create_entity();
+    Chaser {
+        position: 4.0,
+        target: Some(entity),
+    }
+    .pack_insert(&mut store, entity);
+    resources.insert(store);
+
+    let mut schedule = Schedule::new();
+    schedule.add_system(ChaseSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    assert_eq!(
+        Chaser::pack_get(store, entity).expect("bundle").position,
+        4.0 + 4.0 * 0.5
+    );
+}
+
 /// `Res` requires `PlainResource`: covered at compile time by trybuild
 /// (`smart_system_rejects_*`); `SystemAccess` builder parity here.
 #[test]
@@ -297,4 +509,87 @@ fn plain_resource_bound_is_structural() {
     unsafe impl PlainResource for Manual {}
     let access = SystemAccess::new().reads::<Manual>();
     assert_eq!(access.reads.len(), 1);
+}
+
+/// Two systems over one bundle touch its fields in opposite orders and run
+/// concurrently on the same store. Guards are taken in canonical (field-name)
+/// order, so neither thread can hold one lane while waiting for the other
+/// in reverse; a usage-ordered acquisition deadlocks here and trips the timeout.
+#[test]
+fn opposite_field_orders_run_concurrently_without_deadlock() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    const ITERS: usize = 200;
+    let motes: Vec<Mote> = (0..64).map(|i| mote(i as f32, 0.0)).collect();
+    let (resources, entities) = resources_with_motes(&motes);
+    let resources = Arc::new(resources);
+    let (done_tx, done_rx) = mpsc::channel();
+
+    for forward in [true, false] {
+        let resources = Arc::clone(&resources);
+        let done = done_tx.clone();
+        std::thread::spawn(move || {
+            for _ in 0..ITERS {
+                if forward {
+                    ForwardFieldsSystem::new().run(&resources);
+                } else {
+                    BackwardFieldsSystem::new().run(&resources);
+                }
+            }
+            let _ = done.send(());
+        });
+    }
+    drop(done_tx);
+
+    for _ in 0..2 {
+        done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("opposite field orders deadlocked on lane guards");
+    }
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let expected = (2 * ITERS) as f32;
+    for (i, entity) in entities.iter().enumerate() {
+        let got = Mote::pack_get(store, *entity).expect("bundle");
+        assert_eq!(got.position, i as f32 + expected);
+        assert_eq!(got.velocity, expected);
+    }
+}
+
+/// The alignment cache follows membership: after the velocity lane loses one
+/// entity, the next run must skip that entity. Reusing the stale fast path
+/// would pair lanes by position and move the wrong rows.
+#[test]
+fn alignment_cache_follows_membership_changes() {
+    let (resources, entities) =
+        resources_with_motes(&[mote(0.0, 1.0), mote(10.0, 1.0), mote(20.0, 1.0)]);
+    let system = IntegrateMoteSystem::new();
+    system.run(&resources);
+
+    {
+        let store = resources.get::<SmartStore>().expect("store");
+        store
+            .write_lane::<Mote__velocity__PackLane>()
+            .expect("velocity lane")
+            .remove(entities[1]);
+    }
+    system.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let position = store
+        .read_lane::<Mote__position__PackLane>()
+        .expect("position lane");
+    assert_eq!(
+        position.get(entities[0]),
+        Some(&Mote__position__PackLane(1.0))
+    );
+    assert_eq!(
+        position.get(entities[1]),
+        Some(&Mote__position__PackLane(10.5))
+    );
+    assert_eq!(
+        position.get(entities[2]),
+        Some(&Mote__position__PackLane(21.0))
+    );
 }

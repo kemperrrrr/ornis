@@ -9,8 +9,7 @@
 use std::collections::HashSet;
 
 use syn::visit::Visit;
-use syn::visit_mut::VisitMut;
-use syn::{Expr, Ident, Pat, Type};
+use syn::{Expr, Pat};
 
 /// Root ident of a `a.b.c` member chain, when the base is a plain ident.
 // qual:allow(iosp) reason: "recursive member-chain walk mixing match logic with a self call — same shape as baselined smart_pipeline::collect_pat_idents"
@@ -127,43 +126,5 @@ pub(crate) fn is_link_alias_shape(expr: &Expr) -> bool {
             matches!(m.method.to_string().as_str(), "clone" | "copied")
         }
         _ => false,
-    }
-}
-
-/// Rewrites foreign reads `t.field` into a pack gather through the store
-/// handle. Descends everywhere, including closures.
-pub(crate) struct ForeignRewrite<'a> {
-    pub(crate) pack_ty: &'a Type,
-    pub(crate) links: &'a HashSet<String>,
-    pub(crate) store_ident: Ident,
-}
-
-impl VisitMut for ForeignRewrite<'_> {
-    fn visit_expr_field_mut(&mut self, node: &mut syn::ExprField) {
-        // Recurse first so nested `t.a.b` rewrites inside-out.
-        syn::visit_mut::visit_expr_field_mut(self, node);
-        if let Expr::Path(base) = node.base.as_ref()
-            && base.qself.is_none()
-            && base.path.segments.len() == 1
-            && self
-                .links
-                .contains(&base.path.segments[0].ident.to_string())
-        {
-            let link = &base.path.segments[0].ident;
-            let field = &node.member;
-            let pack_ty = self.pack_ty;
-            let store = &self.store_ident;
-            let replacement: Expr = syn::parse_quote! {
-                <#pack_ty as ornis_core::Pack>::pack_get(#store, #link)
-                    .expect("smart_system: related entity is missing the pack bundle")
-                    .#field
-            };
-            *node = match replacement {
-                Expr::Field(f) => f,
-                // Unreachable by construction (the quote is a field access);
-                // return instead of panicking so error-handling stays clean.
-                _ => return,
-            };
-        }
     }
 }

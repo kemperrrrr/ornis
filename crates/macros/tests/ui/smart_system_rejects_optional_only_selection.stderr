@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: smart_system: touch at least one non-`Option` field of the bundle — optional fields alone do not select entities
+  --> tests/ui/smart_system_rejects_optional_only_selection.rs:13:1
+   |
+13 | #[smart_system]
+   | ^^^^^^^^^^^^^^^ evaluation of `<DetachSystem as ornis_core::System>::run::_` failed here
