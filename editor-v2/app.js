@@ -619,6 +619,160 @@
       log("gizmo: " + b.dataset.tool + " (mock)");
     });
   });
+
+  // ---- 2D plane mode (mock of the K2 plane camera; no backend, no canvas) ----
+  var viewportEl = document.getElementById("viewport");
+  var gridBg = viewportEl.querySelector(".grid-bg");
+  var viewMode = "perspective3d";
+  // Same units as the Rust plane camera: world units on the sheet, y up.
+  var view2d = { center: [0, 0], pixelsPerUnit: 28 };
+  var BASE_PPU = 28; // mock grid baseline, matches the 28px CSS step
+
+  function viewportSize() {
+    return [viewportEl.clientWidth || 800, viewportEl.clientHeight || 600];
+  }
+  function halfHeight() {
+    return viewportSize()[1] / (2 * view2d.pixelsPerUnit);
+  }
+  // Mirror of `PlaneCamera::screen_to_plane` (screen y down, sheet y up).
+  function screenToWorld(px, py) {
+    var size = viewportSize();
+    return [
+      view2d.center[0] + (px - size[0] / 2) / view2d.pixelsPerUnit,
+      view2d.center[1] + (size[1] / 2 - py) / view2d.pixelsPerUnit,
+    ];
+  }
+  // Mirror of the 1/2/5 ladder in `plane_grid` (mock resolution).
+  function ladderStep(minPx) {
+    var ppu = view2d.pixelsPerUnit;
+    var mag = Math.floor(Math.log10(minPx / ppu)) - 1;
+    for (;;) {
+      var mantissas = [1, 2, 5];
+      for (var i = 0; i < mantissas.length; i++) {
+        var step = mantissas[i] * Math.pow(10, mag);
+        if (step * ppu >= minPx) {
+          return { step: step, px: step * ppu, mantissa: mantissas[i] };
+        }
+      }
+      mag += 1;
+    }
+  }
+  function paintMockGrid() {
+    if (viewMode !== "plane2d") {
+      gridBg.style.backgroundSize = "";
+      gridBg.style.backgroundPosition = "";
+      return;
+    }
+    var size = viewportSize();
+    var ladder = ladderStep(48);
+    var ox = size[0] / 2 - view2d.center[0] * view2d.pixelsPerUnit;
+    var oy = size[1] / 2 + view2d.center[1] * view2d.pixelsPerUnit;
+    gridBg.style.backgroundSize = ladder.px + "px " + ladder.px + "px";
+    gridBg.style.backgroundPosition = ox + "px " + oy + "px";
+  }
+  // Same JSON shape as the WASM `viewport_state_json()` wire: drives the
+  // grid overlay and the shape layer from one state object.
+  function applyViewState(state) {
+    if (typeof state === "string") {
+      try { state = JSON.parse(state); } catch (e) { return; }
+    }
+    if (!state || state.mode !== "plane2d" || !state.grid) return;
+    view2d.center = state.center.slice();
+    view2d.pixelsPerUnit = state.pixels_per_unit;
+    var grid = state.grid;
+    gridBg.style.backgroundSize = grid.minor_step_px + "px " + grid.minor_step_px + "px";
+    gridBg.style.backgroundPosition = grid.origin_px[0] + "px " + grid.origin_px[1] + "px";
+    var scale = state.pixels_per_unit / BASE_PPU;
+    shapes.style.transform =
+      "translate(" + (-state.center[0] * state.pixels_per_unit) + "px," +
+      (state.center[1] * state.pixels_per_unit) + "px) scale(" + scale + ")";
+  }
+  function mockWireState() {
+    var size = viewportSize();
+    var ladder = ladderStep(48);
+    return {
+      mode: "plane2d",
+      center: view2d.center.slice(),
+      half_height: halfHeight(),
+      pixels_per_unit: view2d.pixelsPerUnit,
+      grid: {
+        minor_step: ladder.step,
+        // Same cadence as the Rust `plane_grid`: 5 minor steps per major
+        // line for the middle mantissa (2), 10 for the decade ones (1/5).
+        major_every: ladder.mantissa === 2 ? 5 : 10,
+        minor_step_px: ladder.px,
+        origin_px: [
+          size[0] / 2 - view2d.center[0] * view2d.pixelsPerUnit,
+          size[1] / 2 + view2d.center[1] * view2d.pixelsPerUnit,
+        ],
+      },
+      pointer_world: null,
+    };
+  }
+  function setViewMode(mode) {
+    viewMode = mode;
+    var is2d = mode === "plane2d";
+    viewportEl.classList.toggle("mode-2d", is2d);
+    document.getElementById("mode-3d").classList.toggle("active", !is2d);
+    document.getElementById("mode-2d").classList.toggle("active", is2d);
+    document.getElementById("mode-3d").setAttribute("aria-pressed", String(!is2d));
+    document.getElementById("mode-2d").setAttribute("aria-pressed", String(is2d));
+    if (is2d) {
+      applyViewState(mockWireState());
+      log("viewport: plane2d (mock)");
+    } else {
+      shapes.style.transform = "";
+      paintMockGrid();
+      log("viewport: perspective3d (mock)");
+    }
+  }
+  document.getElementById("mode-3d").addEventListener("click", function () { setViewMode("perspective3d"); });
+  document.getElementById("mode-2d").addEventListener("click", function () { setViewMode("plane2d"); });
+  // Wheel zooms around the cursor (same exp(delta*0.001) speed as the Rust
+  // camera; hh clamp [0.01, 1000] m expressed as pixels-per-unit bounds).
+  viewportEl.addEventListener("wheel", function (ev) {
+    if (viewMode !== "plane2d") return;
+    ev.preventDefault();
+    var rect = viewportEl.getBoundingClientRect();
+    var px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+    var before = screenToWorld(px, py);
+    var size = viewportSize();
+    var minPpu = size[1] / 2000, maxPpu = size[1] / 0.02;
+    view2d.pixelsPerUnit = Math.min(maxPpu, Math.max(minPpu,
+      view2d.pixelsPerUnit * Math.exp(-ev.deltaY * 0.001)));
+    var after = screenToWorld(px, py);
+    view2d.center[0] += before[0] - after[0];
+    view2d.center[1] += before[1] - after[1];
+    applyViewState(mockWireState());
+  }, { passive: false });
+  // Middle/right drag pans; the left button only selects, never pans.
+  var panDrag = null;
+  viewportEl.addEventListener("pointerdown", function (ev) {
+    if (viewMode !== "plane2d") return;
+    if (ev.button === 1 || ev.button === 2) {
+      ev.preventDefault();
+      panDrag = { x: ev.clientX, y: ev.clientY };
+      viewportEl.setPointerCapture(ev.pointerId);
+    }
+  });
+  viewportEl.addEventListener("pointermove", function (ev) {
+    if (!panDrag) return;
+    view2d.center[0] -= (ev.clientX - panDrag.x) / view2d.pixelsPerUnit;
+    view2d.center[1] += (ev.clientY - panDrag.y) / view2d.pixelsPerUnit;
+    panDrag = { x: ev.clientX, y: ev.clientY };
+    applyViewState(mockWireState());
+  });
+  function endPan(ev) {
+    if (panDrag && ev) {
+      try { viewportEl.releasePointerCapture(ev.pointerId); } catch (e) { /* already released */ }
+    }
+    panDrag = null;
+  }
+  viewportEl.addEventListener("pointerup", endPan);
+  viewportEl.addEventListener("pointercancel", endPan);
+  viewportEl.addEventListener("contextmenu", function (ev) {
+    if (viewMode === "plane2d") ev.preventDefault();
+  });
   // ---- side panel toggles ----
   var layout = document.querySelector(".layout");
   var toggleLeft = document.getElementById("toggle-left");

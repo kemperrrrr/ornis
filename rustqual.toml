@@ -92,7 +92,7 @@ paths = [
 ]
 
 [architecture.layers.application]
-paths = ["crates/app/**"]
+paths = ["crates/app/**", "crates/editor/**"]
 
 [architecture.layers.adapters]
 paths = [
@@ -122,6 +122,7 @@ ornis_wgpu_backend = "domain"
 ornis_macros = "domain"
 ornis_app = "application"
 editor_backend = "adapters"
+ornis_editor = "application"
 ornis_wasm = "adapters"
 
 # Solver isolation: the two physics solvers meet only at the seams

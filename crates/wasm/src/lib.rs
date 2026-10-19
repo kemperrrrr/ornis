@@ -20,14 +20,25 @@ use web_sys::console;
 
 use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
+use ornis_editor::{
+    PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
+};
 use ornis_render::{
-    FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D, Technique,
-    camera_view_projection, read_orbit_camera,
+    CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D, RenderLights,
+    Renderer3D, Technique, camera_view_projection, read_orbit_camera,
 };
 
 mod scene_api;
+// Public so the `qual:api` markers on the wasm-bindgen exports
+// (`set_viewport_mode`, `viewport_state_json`) are nameable from outside
+// the crate — a private module makes them ORPHAN_SUPPRESSION findings.
+pub mod viewport;
 
 use scene_api::LiveScene;
+use viewport::{
+    PENDING_MODE, VIEWPORT_MODE, apply_mode_request, refresh_viewport_state_json,
+    sync_picking_camera,
+};
 
 /// Shared handle to the requestAnimationFrame closure (self-rescheduling
 /// render loop needs to reference itself).
@@ -121,32 +132,99 @@ fn build_gpu_scene(
     }
 }
 
+/// DOM `buttons` bitmask bit for the primary (left) button.
+const DOM_BUTTON_LEFT: u16 = 1 << 0;
+/// DOM `buttons` bitmask bit for the secondary (right) button.
+const DOM_BUTTON_RIGHT: u16 = 1 << 1;
+/// DOM `buttons` bitmask bit for the middle button.
+const DOM_BUTTON_MIDDLE: u16 = 1 << 2;
+
+/// Engine mouse-button states decoded from a DOM `buttons` bitmask:
+/// `[left, right, middle]`. DOM bits are `1<<0` left, `1<<1` right, `1<<2`
+/// middle — the same order as the engine codes (`0` left, `1` right,
+/// `2` middle). Pure so a host test pins the chord decoding.
+fn dom_buttons_down(buttons: u16) -> [bool; 3] {
+    [
+        buttons & DOM_BUTTON_LEFT != 0,
+        buttons & DOM_BUTTON_RIGHT != 0,
+        buttons & DOM_BUTTON_MIDDLE != 0,
+    ]
+}
+
+/// Syncs all three engine mouse buttons from one DOM `buttons` bitmask.
+///
+/// The bitmask is the authoritative pressed set on every pointer event, so
+/// chords and missed `pointerup`s cannot leave a button stuck down: each
+/// event overwrites all three states instead of toggling one.
+fn sync_dom_buttons(input: &mut InputState, buttons: u16) {
+    for (code, down) in [0u8, 1, 2].into_iter().zip(dom_buttons_down(buttons)) {
+        input.set_mouse_button(code, down);
+    }
+}
+
 /// Attach orbit-camera pointer/wheel listeners to the canvas. The closures
 /// are leaked intentionally — they live as long as the page.
+///
+/// Buttons come from the `buttons` bitmask on every event (a left drag
+/// orbits in 3D; middle/right drags pan in 2D and never rotate; chords stay
+/// consistent because the full pressed set is re-synced per event), positions
+/// are canvas-relative (`offset_x/offset_y`, scaled by the device pixel
+/// ratio into the backing-store pixels the camera viewport uses — the
+/// canvas fills its parent, see `resize_canvas_to_parent`). A `contextmenu`
+/// guard keeps right-drags from opening the browser menu, and middle-button
+/// downs suppress autoscroll.
+///
+/// Button-state safety: `pointerdown` and `pointerup`/`pointercancel`
+/// always sync from the bitmask (cancel carries `button = -1`, which the
+/// bitmask correctly reports as no buttons held). `pointermove` only syncs
+/// when the canvas has pointer capture — otherwise a drag that started
+/// outside the canvas (no capture) would report a fresh front edge and
+/// trigger a spurious pick. `lostpointercapture` releases every button so a
+/// lost capture never leaves a button stuck; window blur releases every
+/// button the same way — a tab switch or window deactivation delivers no
+/// `pointerup`, so without it a stuck button would orbit/pan forever.
 fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell<InputState>>) {
     let on_pointerdown: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
         let canvas = canvas.clone();
         Closure::new(move |e: web_sys::PointerEvent| {
+            if e.button() == 1 {
+                e.prevent_default();
+            }
             let mut input = input.borrow_mut();
-            input.set_mouse_button(0, true);
-            input.set_pointer_anchor([e.client_x() as f32, e.client_y() as f32]);
+            sync_dom_buttons(&mut input, e.buttons());
+            let dpr = device_pixel_ratio();
+            input.set_pointer_anchor([e.offset_x() as f32 * dpr, e.offset_y() as f32 * dpr]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
         })
     };
     let on_pointermove: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
+        let canvas = canvas.clone();
         Closure::new(move |e: web_sys::PointerEvent| {
-            input
-                .borrow_mut()
-                .set_pointer_position([e.client_x() as f32, e.client_y() as f32]);
+            let mut input = input.borrow_mut();
+            // Only sync the bitmask while the canvas holds capture: a
+            // pointermove from a drag that started elsewhere (no capture)
+            // must not report a fresh front edge that would trigger a pick.
+            if canvas.has_pointer_capture(e.pointer_id()) {
+                sync_dom_buttons(&mut input, e.buttons());
+            }
+            let dpr = device_pixel_ratio();
+            input.set_pointer_position([e.offset_x() as f32 * dpr, e.offset_y() as f32 * dpr]);
         })
     };
     let on_pointerup: Closure<dyn FnMut(web_sys::PointerEvent)> = {
         let input = input.clone();
+        Closure::new(move |e: web_sys::PointerEvent| {
+            sync_dom_buttons(&mut input.borrow_mut(), e.buttons());
+        })
+    };
+    let on_lost_capture: Closure<dyn FnMut(web_sys::PointerEvent)> = {
+        let input = input.clone();
         Closure::new(move |_e: web_sys::PointerEvent| {
-            input.borrow_mut().set_mouse_button(0, false);
+            // Capture lost (element removed, pointer stolen): release all.
+            sync_dom_buttons(&mut input.borrow_mut(), 0);
         })
     };
     let on_wheel: Closure<dyn FnMut(web_sys::WheelEvent)> = {
@@ -156,27 +234,32 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             input.borrow_mut().add_wheel_delta(e.delta_y() as f32);
         })
     };
+    let on_contextmenu: Closure<dyn FnMut(web_sys::MouseEvent)> =
+        Closure::new(move |e: web_sys::MouseEvent| e.prevent_default());
 
     for (kind, cb) in [
-        ("pointerdown", &on_pointerdown),
-        ("pointermove", &on_pointermove),
-        ("pointerup", &on_pointerup),
-        ("pointercancel", &on_pointerup),
+        ("pointerdown", on_pointerdown.as_ref().unchecked_ref()),
+        ("pointermove", on_pointermove.as_ref().unchecked_ref()),
+        ("pointerup", on_pointerup.as_ref().unchecked_ref()),
+        ("pointercancel", on_pointerup.as_ref().unchecked_ref()),
+        (
+            "lostpointercapture",
+            on_lost_capture.as_ref().unchecked_ref(),
+        ),
+        ("wheel", on_wheel.as_ref().unchecked_ref()),
+        ("contextmenu", on_contextmenu.as_ref().unchecked_ref()),
     ] {
-        if let Err(e) = canvas.add_event_listener_with_callback(kind, cb.as_ref().unchecked_ref()) {
+        if let Err(e) = canvas.add_event_listener_with_callback(kind, cb) {
             console::warn_1(&format!("[ornis-wasm] failed to attach {kind}: {e:?}").into());
         }
-    }
-    if let Err(e) =
-        canvas.add_event_listener_with_callback("wheel", on_wheel.as_ref().unchecked_ref())
-    {
-        console::warn_1(&format!("[ornis-wasm] failed to attach wheel: {e:?}").into());
     }
 
     on_pointerdown.forget();
     on_pointermove.forget();
     on_pointerup.forget();
+    on_lost_capture.forget();
     on_wheel.forget();
+    on_contextmenu.forget();
 }
 
 /// Maps a browser `KeyboardEvent.code` to the platform-neutral key codes
@@ -200,14 +283,28 @@ pub fn game_key_codes(code: &str) -> Option<&'static [u32]> {
 }
 
 /// Builds the shared backend-neutral input and attaches all DOM listeners:
-/// orbit pointer/wheel on the canvas, gameplay keys on the window. DOM
-/// events first enter [`InputState`]; the camera and future browser systems
-/// share one input path.
+/// orbit pointer/wheel on the canvas, gameplay keys and the blur-button
+/// release on the window. DOM events first enter [`InputState`]; the camera
+/// and future browser systems share one input path.
 fn setup_input(canvas: &web_sys::HtmlCanvasElement) -> Rc<RefCell<InputState>> {
     let input = Rc::new(RefCell::new(InputState::new()));
     attach_orbit_controls(canvas, &input);
     if let Some(window) = web_sys::window() {
         attach_gameplay_keys(&window, &input);
+        // Window blur (tab switch): without a pointerup the bitmask would
+        // stick, so release all buttons when focus leaves the page.
+        let on_blur: Closure<dyn FnMut(web_sys::Event)> = {
+            let input = input.clone();
+            Closure::new(move |_e: web_sys::Event| {
+                sync_dom_buttons(&mut input.borrow_mut(), 0);
+            })
+        };
+        if let Err(e) =
+            window.add_event_listener_with_callback("blur", on_blur.as_ref().unchecked_ref())
+        {
+            console::warn_1(&format!("[ornis-wasm] failed to attach blur: {e:?}").into());
+        }
+        on_blur.forget();
     }
     input
 }
@@ -416,6 +513,23 @@ impl InputPoster {
     }
 }
 
+thread_local! {
+    /// Last logged `Selected` entity ids (change-triggered console log).
+    static LAST_SELECTED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Sorted `Selected` entity ids for the change-triggered selection log.
+/// Pure store read (no console edge), so host tests pin the shape; the
+/// browser-only log edge lives in `FrameState::log_selection_changes`.
+fn selected_snapshot(store: &ornis_core::SmartStore) -> Vec<u32> {
+    let mut ids: Vec<u32> = store
+        .read_lane::<Selected>()
+        .map(|lane| lane.entities.iter().map(|e| e.id()).collect())
+        .unwrap_or_default();
+    ids.sort_unstable();
+    ids
+}
+
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
 fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
     let window = web_sys::window().ok_or("no window")?;
@@ -427,11 +541,41 @@ fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
         .map_err(Into::into)
 }
 
-/// Resize the canvas to fill its parent element.
+/// Device pixel ratio of the current display (1.0 off-browser or without
+/// a window): the canvas backing store and the pointer coordinates share
+/// this scale so HiDPI displays render 1:1 instead of upscaling CSS
+/// pixels.
+fn device_pixel_ratio() -> f32 {
+    // `web_sys::window()` panics on non-wasm targets (imported statics), so
+    // host tests and any native build feed the documented off-browser
+    // fallback (`None`) instead of touching the DOM.
+    #[cfg(target_arch = "wasm32")]
+    {
+        effective_dpr(web_sys::window().map(|w| w.device_pixel_ratio()))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        effective_dpr(None)
+    }
+}
+
+/// Clamp a raw `devicePixelRatio` reading into the engine scale: a missing
+/// window (`None`), a non-finite or non-positive value becomes `1.0`, and
+/// fractional ratios below one clamp up (CSS-pixel backends are the floor).
+fn effective_dpr(raw: Option<f64>) -> f32 {
+    raw.map(|r| r as f32)
+        .filter(|r| r.is_finite() && *r > 0.0)
+        .unwrap_or(1.0)
+        .max(1.0)
+}
+
+/// Resize the canvas backing store to fill its parent element, scaled by
+/// [`device_pixel_ratio`].
 fn resize_canvas_to_parent(canvas: &web_sys::HtmlCanvasElement) {
     if let Some(parent) = canvas.parent_element() {
-        canvas.set_width(parent.client_width() as u32);
-        canvas.set_height(parent.client_height() as u32);
+        let dpr = device_pixel_ratio();
+        canvas.set_width((parent.client_width() as f32 * dpr) as u32);
+        canvas.set_height((parent.client_height() as f32 * dpr) as u32);
     }
 }
 
@@ -607,18 +751,38 @@ struct FrameState<'a> {
 }
 
 impl<'a> FrameState<'a> {
-    /// Match the canvas (and surface) size to its parent element.
+    /// Match the canvas (and surface) size to its parent element, scaled
+    /// by the device pixel ratio so the backing store is HiDPI-sharp.
     fn handle_resize(&mut self, canvas: &web_sys::HtmlCanvasElement) {
+        let dpr = device_pixel_ratio();
+        // Publish the pointer scale for the orbit input system only when it
+        // actually changes: browser pointer deltas are device pixels, and
+        // rotation is CSS-anchored. Steady-state frames skip the write.
+        let scale_changed = self
+            .render_world
+            .engine()
+            .world()
+            .resources()
+            .get::<PointerDpr>()
+            .is_none_or(|p| p.0 != dpr);
+        if scale_changed {
+            let _ = self
+                .render_world
+                .engine_mut()
+                .world_mut()
+                .resources_mut()
+                .insert(PointerDpr(dpr));
+        }
         let pw = canvas
             .parent_element()
-            .map(|p| p.client_width() as u32)
-            .unwrap_or(canvas.width())
-            .max(1);
+            .map(|p| p.client_width() as f32 * dpr)
+            .unwrap_or(canvas.width() as f32)
+            .max(1.0) as u32;
         let ph = canvas
             .parent_element()
-            .map(|p| p.client_height() as u32)
-            .unwrap_or(canvas.height())
-            .max(1);
+            .map(|p| p.client_height() as f32 * dpr)
+            .unwrap_or(canvas.height() as f32)
+            .max(1.0) as u32;
         if canvas.width() != pw || canvas.height() != ph {
             canvas.set_width(pw);
             canvas.set_height(ph);
@@ -692,19 +856,64 @@ impl<'a> FrameState<'a> {
     }
 
     /// Upload the orbit-derived camera for the current surface size.
+    ///
+    /// In `plane2d` the plane camera drives the frame through the same
+    /// `camera_view_projection` seam (the K0a orthographic box from
+    /// [`PlaneCamera::camera_view_params`]); in `perspective3d` the orbit
+    /// camera renders exactly as before.
     fn update_camera(&mut self) {
+        let size = (self.config.width, self.config.height);
+        if VIEWPORT_MODE.with(|cell| cell.get()).is_plane() {
+            let Some(plane) = read_plane_camera(self.render_world.engine()) else {
+                return;
+            };
+            let (eye, target, up, projection, fov, near, far) = plane.camera_view_params();
+            let view = CameraView {
+                eye,
+                target,
+                up,
+                projection,
+                fov,
+                near,
+                far,
+            };
+            let (view_proj, cam_pos) = camera_view_projection(&view, size);
+            self.renderer.set_camera(
+                &self.queue,
+                &view_proj.to_cols_array_2d(),
+                cam_pos.to_array(),
+            );
+            return;
+        }
         let Some(orbit) = read_orbit_camera(self.render_world.engine()) else {
             return;
         };
-        let (view_proj, cam_pos) = camera_view_projection(
-            &orbit.view_parameters(),
-            (self.config.width, self.config.height),
-        );
+        let (view_proj, cam_pos) = camera_view_projection(&orbit.view_parameters(), size);
         self.renderer.set_camera(
             &self.queue,
             &view_proj.to_cols_array_2d(),
             cam_pos.to_array(),
         );
+    }
+
+    /// Logs the `Selected` set when it changes (`[ornis-wasm] selected …`).
+    /// Command-up over WS and the outline are E2, out of scope.
+    // qual:allow(test_quality, untested) reason: "browser console edge over a thread-local; the snapshot shape it logs is pinned by the selected_snapshot host test"
+    fn log_selection_changes(&mut self) {
+        let store = self.render_world.engine().world().store();
+        let current = store.map_or_else(Vec::new, selected_snapshot);
+        let changed = LAST_SELECTED.with(|cell| {
+            let mut last = cell.borrow_mut();
+            if *last == current {
+                false
+            } else {
+                *last = current.clone();
+                true
+            }
+        });
+        if changed {
+            console::log_1(&format!("[ornis-wasm] selected {current:?}").into());
+        }
     }
 
     /// Draw one frame into the given swap-chain view through the shared
@@ -828,6 +1037,27 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     // through the `Replica` role.
     let mut render_world = ReplicaGameWorld::from_scene_replica(&scene);
     render_world.spawn(OrbitCamera::from_desc(&scene.camera));
+    // Editor domain on the replica: click/hover picking plus the plane
+    // camera. `Perspective3d` stays the active mode, so orbit input works
+    // exactly as before until `set_viewport_mode("plane2d")`.
+    install_editor(render_world.engine_mut());
+    {
+        let engine = render_world.engine_mut();
+        if let Some(orbit) = read_orbit_camera(engine) {
+            let view = orbit.view_parameters();
+            if let Some(plane) = PlaneCamera::from_camera_view(
+                view.eye,
+                view.target,
+                view.projection,
+                view.fov,
+                view.near,
+                view.far,
+                [canvas.width() as f32, canvas.height() as f32],
+            ) {
+                install_plane_camera(engine, plane);
+            }
+        }
+    }
     render_world.frame(0.0);
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
@@ -925,6 +1155,24 @@ fn spawn_render_loop(
         frame.handle_resize(&canvas);
         frame.maybe_post_input(frame_count);
         frame.sync_input();
+        // Mode switches run before the schedule so the frame sees the
+        // switched camera. The closure body is not statically analyzed;
+        // the switch itself is host-tested via `apply_mode_request`.
+        if let Some(request) = PENDING_MODE.with(|cell| cell.take()) {
+            let size = (frame.config.width, frame.config.height);
+            if apply_mode_request(frame.render_world.engine_mut(), request, size) {
+                console::log_1(
+                    &format!("[ornis-wasm] viewport mode -> {}", request.as_str()).into(),
+                );
+            }
+        }
+        // Publish the picking camera before the schedule so the frame's
+        // pick systems see the current mode. The seams are resource I/O
+        // over the bare engine — host-tested; only the selection log
+        // stays a browser-only console edge.
+        let size = (frame.config.width, frame.config.height);
+        sync_picking_camera(frame.render_world.engine_mut(), size);
+        frame.log_selection_changes();
         frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
@@ -941,6 +1189,10 @@ fn spawn_render_loop(
         }
 
         frame.update_camera();
+        // Refresh the overlay JSON now that `frame(DT)` has applied this
+        // frame's pan/zoom — publishing it earlier left the grid one
+        // frame behind the camera.
+        refresh_viewport_state_json(frame.render_world.engine_mut(), size);
 
         match frame.surface.get_current_texture() {
             // Surface lost its configuration — reconfigure and retry next frame.
@@ -1007,6 +1259,27 @@ async fn fetch_api_text(url: &str) -> Option<String> {
 mod integration_tests {
     use super::*;
     use ornis_render::MaterialIdx;
+
+    /// The off-browser fallback of `device_pixel_ratio`: host builds never
+    /// touch `web_sys::window()` (it panics on non-wasm targets), so the
+    /// wire and the surface math see the documented `1.0`.
+    #[test]
+    fn native_device_pixel_ratio_falls_back_to_one() {
+        assert_eq!(device_pixel_ratio(), 1.0);
+    }
+
+    /// The pure scale clamp shared by the wasm and host paths: missing
+    /// window, NaN, negatives and sub-1 fractional ratios all resolve to
+    /// the CSS-pixel floor, real HiDPI ratios pass through.
+    #[test]
+    fn effective_dpr_clamps_and_falls_back() {
+        assert_eq!(effective_dpr(None), 1.0);
+        assert_eq!(effective_dpr(Some(2.0)), 2.0);
+        assert_eq!(effective_dpr(Some(1.5)), 1.5);
+        assert_eq!(effective_dpr(Some(0.5)), 1.0);
+        assert_eq!(effective_dpr(Some(-3.0)), 1.0);
+        assert_eq!(effective_dpr(Some(f64::NAN)), 1.0);
+    }
 
     #[test]
     fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {
@@ -1108,6 +1381,57 @@ mod integration_tests {
         assert_eq!(game_key_codes("KeyD"), Some(&[32, 68][..]));
         assert_eq!(game_key_codes("ArrowUp"), Some(&[38][..]));
         assert_eq!(game_key_codes("KeyQ"), None);
+    }
+
+    #[test]
+    fn dom_button_bitmask_decodes_chords() {
+        // No buttons: nothing down.
+        assert_eq!(dom_buttons_down(0), [false, false, false]);
+        // Single buttons: DOM left/middle/right bits → engine left/right/middle.
+        assert_eq!(dom_buttons_down(0b001), [true, false, false]);
+        assert_eq!(dom_buttons_down(0b010), [false, true, false]);
+        assert_eq!(dom_buttons_down(0b100), [false, false, true]);
+        // Chords decode every held button, and a bitmask never sticks a
+        // button the way per-event toggles did: the released set drops out.
+        assert_eq!(dom_buttons_down(0b011), [true, true, false]);
+        assert_eq!(dom_buttons_down(0b101), [true, false, true]);
+        assert_eq!(dom_buttons_down(0b111), [true, true, true]);
+    }
+
+    #[test]
+    fn dom_button_bitmask_syncs_input_state() {
+        let mut input = InputState::new();
+        // Left+right chord lands both engine buttons.
+        sync_dom_buttons(&mut input, 0b011);
+        assert!(input.mouse_button_down(0));
+        assert!(input.mouse_button_down(1));
+        assert!(!input.mouse_button_down(2));
+        // Releasing left (bitmask now right-only) clears left and keeps right.
+        sync_dom_buttons(&mut input, 0b010);
+        assert!(!input.mouse_button_down(0));
+        assert!(input.mouse_button_down(1));
+        // Middle joins the chord; empty bitmask releases everything.
+        sync_dom_buttons(&mut input, 0b110);
+        assert!(input.mouse_button_down(1));
+        assert!(input.mouse_button_down(2));
+        sync_dom_buttons(&mut input, 0);
+        assert!(!input.mouse_button_down(0));
+        assert!(!input.mouse_button_down(1));
+        assert!(!input.mouse_button_down(2));
+    }
+
+    #[test]
+    fn selection_snapshot_sorts_and_handles_missing_lanes() {
+        use ornis_core::Engine;
+        // No store lanes at all: empty snapshot, no panic.
+        let engine = Engine::new();
+        let empty = selected_snapshot(engine.world().store().expect("world store"));
+        assert!(empty.is_empty());
+        // Lane present but empty: still empty.
+        let mut installed = Engine::new();
+        ornis_editor::install_editor(&mut installed);
+        let store = installed.world().store().expect("world store");
+        assert!(selected_snapshot(store).is_empty());
     }
 
     #[test]

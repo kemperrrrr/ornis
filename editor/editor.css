@@ -300,7 +300,33 @@
         }
 
         .viewport-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
             overflow: hidden;
+        }
+
+        .plane-grid {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+        }
+
+        .viewport-bar {
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            display: flex;
+            gap: 0.25rem;
+        }
+
+        .viewport-bar button {
+            padding: 0.25rem 0.6rem;
+            border: none;
+            border-radius: 0.3rem;
+            background: var(--input-background);
+            color: inherit;
+            cursor: pointer;
         }
 
         .files {
