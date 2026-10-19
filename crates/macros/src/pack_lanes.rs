@@ -31,62 +31,102 @@ pub(crate) fn generate_wrapper_defs(vis: &Visibility, lanes: &[LaneInfo]) -> Tok
 /// [`ornis_core::PackLane`] for one wrapper: dense fields index the lane
 /// directly, sparse (`Option`) fields insert on `Some` and remove on `None`.
 fn generate_lane_impl(lane: &LaneInfo) -> TokenStream2 {
+    if lane.optional {
+        generate_sparse_impl(lane)
+    } else {
+        generate_dense_impl(lane)
+    }
+}
+
+fn generate_sparse_impl(lane: &LaneInfo) -> TokenStream2 {
     let wrapper = &lane.wrapper_ty;
     let field_ty = &lane.field_ty;
-    if lane.optional {
-        quote! {
-            impl ornis_core::PackLane for #wrapper {
-                type Field = #field_ty;
-                const SPARSE: bool = true;
+    quote! {
+        impl ornis_core::PackLane for #wrapper {
+            type Field = #field_ty;
+            const SPARSE: bool = true;
 
-                fn gather(
-                    lane: &ornis_core::ComponentStore<Self>,
-                    index: Option<usize>,
-                ) -> Option<#field_ty> {
-                    Some(index.map(|i| lane.data[i].0.clone()))
+            fn gather(
+                lane: &ornis_core::ComponentStore<Self>,
+                index: Option<usize>,
+            ) -> Option<#field_ty> {
+                Some(index.map(|i| lane.data[i].0.clone()))
+            }
+
+            fn scatter(
+                lane: &mut ornis_core::ComponentStore<Self>,
+                entity: ornis_core::Entity,
+                index: Option<usize>,
+                value: #field_ty,
+            ) {
+                match (index, value) {
+                    (Some(i), Some(v)) => lane.data[i] = Self(v),
+                    (None, Some(v)) => lane.insert(entity, Self(v)),
+                    (Some(_), None) => {
+                        lane.remove(entity);
+                    }
+                    (None, None) => {}
                 }
+            }
 
-                fn scatter(
-                    lane: &mut ornis_core::ComponentStore<Self>,
-                    entity: ornis_core::Entity,
-                    index: Option<usize>,
-                    value: #field_ty,
-                ) {
-                    match (index, value) {
-                        (Some(i), Some(v)) => lane.data[i] = Self(v),
-                        (None, Some(v)) => lane.insert(entity, Self(v)),
-                        (Some(_), None) => {
-                            lane.remove(entity);
-                        }
-                        (None, None) => {}
+            fn gather_at(lane: &ornis_core::ComponentStore<Self>, index: usize) -> #field_ty {
+                Some(lane.data[index].0.clone())
+            }
+
+            fn scatter_at(
+                lane: &mut ornis_core::ComponentStore<Self>,
+                index: usize,
+                value: #field_ty,
+            ) {
+                match value {
+                    Some(v) => lane.data[index] = Self(v),
+                    None => {
+                        let entity = lane.entities[index];
+                        lane.remove(entity);
                     }
                 }
             }
         }
-    } else {
-        quote! {
-            impl ornis_core::PackLane for #wrapper {
-                type Field = #field_ty;
-                const SPARSE: bool = false;
+    }
+}
 
-                fn gather(
-                    lane: &ornis_core::ComponentStore<Self>,
-                    index: Option<usize>,
-                ) -> Option<#field_ty> {
-                    index.map(|i| lane.data[i].0.clone())
-                }
+fn generate_dense_impl(lane: &LaneInfo) -> TokenStream2 {
+    let wrapper = &lane.wrapper_ty;
+    let field_ty = &lane.field_ty;
+    quote! {
+        impl ornis_core::PackLane for #wrapper {
+            type Field = #field_ty;
+            const SPARSE: bool = false;
 
-                fn scatter(
-                    lane: &mut ornis_core::ComponentStore<Self>,
-                    entity: ornis_core::Entity,
-                    index: Option<usize>,
-                    value: #field_ty,
-                ) {
-                    match index {
-                        Some(i) => lane.data[i] = Self(value),
-                        None => lane.insert(entity, Self(value)),
-                    }
+            fn gather(
+                lane: &ornis_core::ComponentStore<Self>,
+                index: Option<usize>,
+            ) -> Option<#field_ty> {
+                index.map(|i| lane.data[i].0.clone())
+            }
+
+            fn scatter(
+                lane: &mut ornis_core::ComponentStore<Self>,
+                entity: ornis_core::Entity,
+                index: Option<usize>,
+                value: #field_ty,
+            ) {
+                match index {
+                    Some(i) => lane.data[i] = Self(value),
+                    None => lane.insert(entity, Self(value)),
                 }
+            }
+
+            fn gather_at(lane: &ornis_core::ComponentStore<Self>, index: usize) -> #field_ty {
+                lane.data[index].0.clone()
+            }
+
+            fn scatter_at(
+                lane: &mut ornis_core::ComponentStore<Self>,
+                index: usize,
+                value: #field_ty,
+            ) {
+                lane.data[index] = Self(value);
             }
         }
     }

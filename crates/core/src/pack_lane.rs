@@ -34,6 +34,16 @@ pub trait PackLane: Sized + Send + Sync + 'static {
         index: Option<usize>,
         value: Self::Field,
     );
+
+    /// Reads the field at dense `index` of a lane that is known to hold an
+    /// entry for every entity of the run, so no entity lookup or skip check
+    /// is needed. Sparse fields return the stored value as `Some`.
+    fn gather_at(lane: &ComponentStore<Self>, index: usize) -> Self::Field;
+
+    /// Writes `value` at dense `index` under the same precondition as
+    /// [`gather_at`](Self::gather_at). Sparse `None` removes the entry at
+    /// `index` through the lane's own entity list.
+    fn scatter_at(lane: &mut ComponentStore<Self>, index: usize, value: Self::Field);
 }
 
 /// Entity set of one `#[smart_system]` run: the entities that own every
