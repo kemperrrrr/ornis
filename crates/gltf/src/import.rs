@@ -14,7 +14,9 @@ use crate::base64;
 use crate::geom::{self, Mat4};
 use crate::model::{Model, ModelNode, ModelPrimitive, NodeIdx, transform_from_decomposed};
 use crate::texture_sources::resolve_textures;
-use crate::{ImportError, ImportStats, LoadedImage, LoadedMaterial, LoadedMesh, LoadedSkin};
+use crate::{
+    ImportError, ImportStats, LoadedImage, LoadedJointRest, LoadedMaterial, LoadedMesh, LoadedSkin,
+};
 
 /// Indices per triangle (flat soup alignment).
 const TRIANGLE_VERTS: usize = 3;
@@ -495,10 +497,22 @@ fn load_skin(
                 .unwrap_or_else(|| format!("joint_{}", node.index()))
         })
         .collect();
+    let rest = joints
+        .iter()
+        .map(|node| {
+            let (translation, rotation, scale) = geom::decompose(&local_matrix(&node.transform()));
+            LoadedJointRest {
+                translation,
+                rotation,
+                scale,
+            }
+        })
+        .collect();
     Some(LoadedSkin {
         parents,
         inverse_bind,
         joint_names,
+        rest,
     })
 }
 

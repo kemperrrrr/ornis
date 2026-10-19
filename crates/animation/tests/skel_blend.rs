@@ -5,8 +5,9 @@
 
 use glam::{Mat4, Vec3};
 use ornis_animation::{
-    Animator, AnimatorMut, ClipId, JointId, JointMask, JointPose, JointTrack, Key, KeyTrack,
-    MaskId, SkelClip, SkelFade, SkelLayer, SkelPlayer, SkelSampleSystem, Skeleton, try_animator,
+    Animator, AnimatorMut, ClipId, JointId, JointMask, JointPose, JointTrack, JointTrs, Key,
+    KeyTrack, MaskId, SkelClip, SkelFade, SkelLayer, SkelPlayer, SkelSampleSystem, Skeleton,
+    try_animator,
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::{Clamped01, Seconds};
@@ -116,6 +117,19 @@ fn layer(clip: ClipId, mask: MaskId) -> SkelLayer {
     }
 }
 
+/// Skeleton root with one joint whose authored rest pose is `rest`.
+fn rig_with_rest(engine: &mut Engine, rest: JointTrs) -> Entity {
+    let names = vec!["root".to_string()];
+    let mut skeleton = Skeleton::new(vec![None], vec![Mat4::IDENTITY], names);
+    skeleton = skeleton.with_rest(vec![rest]);
+    let store = store_mut(engine);
+    let root = store.create_entity();
+    store.insert(root, TransformDesc::IDENTITY);
+    store.insert(root, skeleton);
+    store.insert(root, JointPose::identity(1));
+    root
+}
+
 fn pose(engine: &Engine, root: Entity) -> Vec<Mat4> {
     store_ref(engine)
         .read_lane::<JointPose>()
@@ -179,6 +193,41 @@ fn half_weight_pulls_the_pose_halfway_to_rest() {
     engine.run_frame(0.1);
 
     assert_origin(&engine, root, 0, Vec3::new(2.0, 0.0, 0.0));
+}
+
+#[test]
+fn untracked_joint_reads_its_authored_rest_pose() {
+    let mut engine = engine();
+    let rest = JointTrs {
+        translation: Vec3::new(2.0, 0.0, 0.0),
+        ..JointTrs::IDENTITY
+    };
+    let root = rig_with_rest(&mut engine, rest);
+    let empty = add_clip(&mut engine, clip("empty", Vec::new()));
+    put(&mut engine, root, player(empty, 1.0));
+
+    engine.run_frame(0.1);
+
+    // No track drives the joint: at full weight it sits at its node pose,
+    // not at identity (which would deform a bind-posed mesh).
+    assert_origin(&engine, root, 0, Vec3::new(2.0, 0.0, 0.0));
+}
+
+#[test]
+fn half_weight_blends_toward_the_authored_rest_not_identity() {
+    let mut engine = engine();
+    let rest = JointTrs {
+        translation: Vec3::new(2.0, 0.0, 0.0),
+        ..JointTrs::IDENTITY
+    };
+    let root = rig_with_rest(&mut engine, rest);
+    let walk = walk_clip(&mut engine);
+    put(&mut engine, root, player(walk, 0.5));
+
+    engine.run_frame(0.1);
+
+    // rest + 0.5 · (4 − 2) = 3; blending toward identity would give 2.
+    assert_origin(&engine, root, 0, Vec3::new(3.0, 0.0, 0.0));
 }
 
 #[test]

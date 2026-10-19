@@ -2,8 +2,9 @@
 //! players, crossfades and joint-masked overlay layers.
 //!
 //! The model is deterministic and stateless per frame, in the spirit of
-//! Godot's default blending: every missing channel reads as the rest value
-//! (identity for joints, see [`JointTrs::IDENTITY`]), a player at weight `w`
+//! Godot's default blending: every missing channel reads as the joint's
+//! authored rest value (its node transform in the skin, see
+//! [`Skeleton::rest`](crate::Skeleton::rest)), a player at weight `w`
 //! contributes `rest + w·(pose − rest)`, and a layer at weight `w·mask[j]`
 //! lerps its joint `j` over the base pose. The only mutable state is the
 //! cursor clocks, so no pose ever feeds back into the next frame's sample.
@@ -72,28 +73,36 @@ pub(crate) struct JointSample {
     pub(crate) scale: Option<Vec3>,
 }
 
-/// Joint-local transform with channel defaults at rest.
+/// Joint-local transform: a rest pose or one blended result.
+///
+/// The authored rest of each joint is its node transform in the skin
+/// (glTF `node.transform().decomposed()`); skeletons built without one
+/// default to [`JointTrs::IDENTITY`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct JointTrs {
-    pub(crate) translation: Vec3,
-    pub(crate) rotation: Quat,
-    pub(crate) scale: Vec3,
+pub struct JointTrs {
+    /// Joint-local translation.
+    pub translation: Vec3,
+    /// Joint-local rotation.
+    pub rotation: Quat,
+    /// Joint-local scale.
+    pub scale: Vec3,
 }
 
 impl JointTrs {
-    /// Rest value of every channel: the value an absent track reads as.
-    pub(crate) const IDENTITY: Self = Self {
+    /// Identity transform: the default rest for skeletons without authored
+    /// rest data.
+    pub const IDENTITY: Self = Self {
         translation: Vec3::ZERO,
         rotation: Quat::IDENTITY,
         scale: Vec3::ONE,
     };
 
-    /// Fills absent channels with rest values.
-    pub(crate) fn from_sample(sample: JointSample) -> Self {
+    /// Fills absent channels from `rest`, so a missing track reads as rest.
+    pub(crate) fn from_sample(sample: JointSample, rest: JointTrs) -> Self {
         Self {
-            translation: sample.translation.unwrap_or(Vec3::ZERO),
-            rotation: sample.rotation.unwrap_or(Quat::IDENTITY),
-            scale: sample.scale.unwrap_or(Vec3::ONE),
+            translation: sample.translation.unwrap_or(rest.translation),
+            rotation: sample.rotation.unwrap_or(rest.rotation),
+            scale: sample.scale.unwrap_or(rest.scale),
         }
     }
 
@@ -158,11 +167,15 @@ pub(crate) struct BlendedPose {
 
 impl BlendedPose {
     /// One clip at weight `weight`: `rest + weight·(pose − rest)` per joint.
-    pub(crate) fn from_samples(samples: &[JointSample], weight: f32) -> Self {
+    ///
+    /// `rest` holds one authored rest per joint; callers pass the skeleton's
+    /// rest with the same length as `samples`.
+    pub(crate) fn from_samples(samples: &[JointSample], rest: &[JointTrs], weight: f32) -> Self {
         Self {
             trs: samples
                 .iter()
-                .map(|sample| JointTrs::IDENTITY.lerp(JointTrs::from_sample(*sample), weight))
+                .zip(rest)
+                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight))
                 .collect(),
             present: samples.iter().map(presence).collect(),
         }
@@ -193,18 +206,20 @@ impl BlendedPose {
     pub(crate) fn overlay(
         &mut self,
         samples: &[JointSample],
+        rest: &[JointTrs],
         mask: &[Clamped01],
         layer_weight: Clamped01,
     ) {
         for (joint, sample) in samples.iter().enumerate() {
-            let Some(mask_weight) = mask.get(joint) else {
+            let (Some(mask_weight), Some(base)) = (mask.get(joint), rest.get(joint)) else {
                 continue;
             };
             let weight = layer_weight.get() * mask_weight.get();
             if weight <= 0.0 {
                 continue;
             }
-            self.trs[joint] = self.trs[joint].lerp(JointTrs::from_sample(*sample), weight);
+            let layer = JointTrs::from_sample(*sample, *base);
+            self.trs[joint] = self.trs[joint].lerp(layer, weight);
             self.present[joint] = union(self.present[joint], presence(sample));
         }
     }
@@ -239,25 +254,35 @@ mod tests {
         }
     }
 
+    /// Identity rest for `n` joints.
+    fn ident(n: usize) -> Vec<JointTrs> {
+        vec![JointTrs::IDENTITY; n]
+    }
+
+    /// One clip over identity rest.
+    fn pose_of(samples: &[JointSample], weight: f32) -> BlendedPose {
+        pose_of(samples, &ident(samples.len()), weight)
+    }
+
     fn close(a: Vec3, b: Vec3) -> bool {
         (a - b).length() < 1e-5
     }
 
     #[test]
     fn weight_one_is_the_pose_itself() {
-        let pose = BlendedPose::from_samples(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 1.0);
+        let pose = pose_of(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 1.0);
         assert!(close(pose.trs[0].translation, Vec3::new(4.0, 0.0, 0.0)));
     }
 
     #[test]
     fn weight_half_pulls_translation_toward_rest() {
-        let pose = BlendedPose::from_samples(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 0.5);
+        let pose = pose_of(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 0.5);
         assert!(close(pose.trs[0].translation, Vec3::new(2.0, 0.0, 0.0)));
     }
 
     #[test]
     fn weight_zero_is_rest() {
-        let pose = BlendedPose::from_samples(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 0.0);
+        let pose = pose_of(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 0.0);
         assert!(close(pose.trs[0].translation, Vec3::ZERO));
         assert_eq!(pose.trs[0].rotation, Quat::IDENTITY);
     }
@@ -265,22 +290,22 @@ mod tests {
     #[test]
     fn weight_half_halves_rotation_angle() {
         let full = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
-        let pose = BlendedPose::from_samples(&[sample_r(full)], 0.5);
+        let pose = pose_of(&[sample_r(full)], 0.5);
         let half = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
         assert!((pose.trs[0].rotation - half).length() < 1e-5);
     }
 
     #[test]
     fn absent_channels_stay_at_rest_and_untracked() {
-        let pose = BlendedPose::from_samples(&[JointSample::default()], 0.7);
+        let pose = pose_of(&[JointSample::default()], 0.7);
         assert_eq!(pose.trs[0], JointTrs::IDENTITY);
         assert_eq!(pose.present[0], [false, false, false]);
     }
 
     #[test]
     fn mix_endpoints_are_the_inputs() {
-        let from = BlendedPose::from_samples(&[sample_t(Vec3::X)], 1.0);
-        let to = BlendedPose::from_samples(&[sample_t(Vec3::Y)], 1.0);
+        let from = pose_of(&[sample_t(Vec3::X)], 1.0);
+        let to = pose_of(&[sample_t(Vec3::Y)], 1.0);
         assert!(close(
             BlendedPose::mix(&from, &to, 0.0).trs[0].translation,
             Vec3::X
@@ -297,29 +322,29 @@ mod tests {
 
     #[test]
     fn overlay_follows_mask_per_joint() {
-        let mut base = BlendedPose::from_samples(&[sample_t(Vec3::X), sample_t(Vec3::X)], 1.0);
+        let mut base = pose_of(&[sample_t(Vec3::X), sample_t(Vec3::X)], 1.0);
         let layer = [sample_t(Vec3::Y), sample_t(Vec3::Y)];
         let mask = [Clamped01::ONE, Clamped01::ZERO];
-        base.overlay(&layer, &mask, Clamped01::ONE);
+        base.overlay(&layer, &ident(layer.len()), &mask, Clamped01::ONE);
         assert!(close(base.trs[0].translation, Vec3::Y));
         assert!(close(base.trs[1].translation, Vec3::X));
     }
 
     #[test]
     fn overlay_weight_scales_the_mask() {
-        let mut base = BlendedPose::from_samples(&[sample_t(Vec3::X)], 1.0);
+        let mut base = pose_of(&[sample_t(Vec3::X)], 1.0);
         let layer = [sample_t(Vec3::Y)];
-        base.overlay(&layer, &[Clamped01::ONE], Clamped01::new(0.5));
+        base.overlay(&layer, &ident(layer.len()), &[Clamped01::ONE], Clamped01::new(0.5));
         assert!(close(base.trs[0].translation, Vec3::new(0.5, 0.5, 0.0)));
     }
 
     #[test]
     fn overlay_marks_presence_only_where_it_contributes() {
-        let mut base = BlendedPose::from_samples(&[JointSample::default()], 1.0);
+        let mut base = pose_of(&[JointSample::default()], 1.0);
         let layer = [sample_t(Vec3::Y)];
-        base.overlay(&layer, &[Clamped01::ZERO], Clamped01::ONE);
+        base.overlay(&layer, &ident(layer.len()), &[Clamped01::ZERO], Clamped01::ONE);
         assert_eq!(base.present[0], [false, false, false]);
-        base.overlay(&layer, &[Clamped01::ONE], Clamped01::ONE);
+        base.overlay(&layer, &ident(layer.len()), &[Clamped01::ONE], Clamped01::ONE);
         assert_eq!(base.present[0], [true, false, false]);
     }
 

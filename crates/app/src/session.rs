@@ -3171,6 +3171,11 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ]],
                 joint_names: vec!["j0".into()],
+                rest: vec![ornis_gltf::LoadedJointRest {
+                    translation: [0.0; 3],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0; 3],
+                }],
             }],
             skel_clips: vec![LoadedSkelClip {
                 name: String::new(),

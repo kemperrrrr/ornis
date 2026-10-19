@@ -116,7 +116,7 @@ impl AnimatorMut<'_> {
     /// # Errors
     ///
     /// Same as [`Self::play`].
-    // qual:api — public crossfade entry; in-tree callers are tests until a gameplay trigger uses it.
+    // qual:api — public crossfade entry; in-tree callers are tests for now.
     pub fn play_crossfade(&mut self, name: &str, duration: Seconds) -> Result<(), AnimatorError> {
         self.start(name, Some(duration))
     }

@@ -196,6 +196,20 @@ pub struct LoadedMesh {
     pub weights: Option<Vec<[f32; 4]>>,
 }
 
+/// Authored local transform of one skin joint: its node transform, the
+/// rest pose a joint reads as when no animation track drives it.
+///
+/// Plain arrays, same convention as [`LoadedSkin`]. Rotation is `[x, y, z, w]`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LoadedJointRest {
+    /// Parent-space translation.
+    pub translation: [f32; 3],
+    /// Parent-space rotation quaternion, `[x, y, z, w]`.
+    pub rotation: [f32; 4],
+    /// Parent-space scale.
+    pub scale: [f32; 3],
+}
+
 /// One resolved `skins[]` element: joint topology plus bind inverses.
 ///
 /// Plain arrays (no `glam`, no `ornis-animation` dependency): the wiring
@@ -213,6 +227,9 @@ pub struct LoadedSkin {
     pub inverse_bind: Vec<[[f32; 4]; 4]>,
     /// Joint labels: node names, else `joint_{node_index}` (diagnostics only).
     pub joint_names: Vec<String>,
+    /// Authored rest pose per joint, in skin order (node transforms). Same
+    /// length as `parents`.
+    pub rest: Vec<LoadedJointRest>,
 }
 
 impl LoadedMesh {

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointMask, JointPose, JointTrack,
-    Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer, Skeleton, SkinnedMesh,
+    JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer, Skeleton, SkinnedMesh,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Entity, Seconds, SmartStore};
@@ -96,6 +96,15 @@ pub fn anim_clip_from_loaded(
 /// inverses are glTF column-major (`m[col][row]`) and convert with
 /// [`Mat4::from_cols_array_2d`]; names copy verbatim (diagnostics only).
 pub fn skeleton_from_loaded(skin: &LoadedSkin) -> Skeleton {
+    let rest: Vec<JointTrs> = skin
+        .rest
+        .iter()
+        .map(|rest| JointTrs {
+            translation: glam::Vec3::from_array(rest.translation),
+            rotation: glam::Quat::from_array(rest.rotation),
+            scale: glam::Vec3::from_array(rest.scale),
+        })
+        .collect();
     Skeleton::new(
         skin.parents
             .iter()
@@ -107,6 +116,7 @@ pub fn skeleton_from_loaded(skin: &LoadedSkin) -> Skeleton {
             .collect(),
         skin.joint_names.clone(),
     )
+    .with_rest(rest)
 }
 
 /// Builds a live [`SkinnedMesh`] from mirror bind data, or [`None`] when the
@@ -830,6 +840,15 @@ mod tests {
         assert!(!live.looping);
     }
 
+    /// Identity node transform for skin fixtures.
+    fn identity_rest() -> ornis_gltf::LoadedJointRest {
+        ornis_gltf::LoadedJointRest {
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }
+    }
+
     #[test]
     fn skeleton_maps_parents_binds_and_names() {
         let skin = LoadedSkin {
@@ -849,8 +868,16 @@ mod tests {
                 ],
             ],
             joint_names: vec!["root".to_string(), "tip".to_string()],
+            rest: vec![
+                identity_rest(),
+                ornis_gltf::LoadedJointRest {
+                    translation: [0.0, 3.0, 0.0],
+                    ..identity_rest()
+                },
+            ],
         };
         let live = skeleton_from_loaded(&skin);
+        assert_eq!(live.rest[1].translation, glam::Vec3::new(0.0, 3.0, 0.0));
         assert_eq!(live.parents.len(), 2);
         assert_eq!(live.inverse_bind.len(), 2);
         assert_eq!(live.parents[0], None);
@@ -976,6 +1003,7 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ]],
                 joint_names: vec!["root".into()],
+                rest: vec![identity_rest()],
             }],
             skel_clips: clips,
             anim_clips: Vec::new(),

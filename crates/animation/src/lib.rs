@@ -60,7 +60,7 @@ pub mod skinning;
 
 mod blend;
 use blend::{BlendedPose, fade_progress, sample_joints};
-pub use blend::{JointMask, MaskId, SkelFade, SkelLayer};
+pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer};
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
@@ -1129,21 +1129,36 @@ pub struct Skeleton {
     pub inverse_bind: Arc<[Mat4]>,
     /// Human-readable joint labels, diagnostics only (length unchecked).
     pub joint_names: Arc<[String]>,
+    /// Authored rest pose per joint: the local transform a joint reads as
+    /// when no track drives it (glTF node transform in the skin). Length
+    /// must equal the joint count; see [`Skeleton::with_rest`].
+    pub rest: Arc<[JointTrs]>,
 }
 
 impl Skeleton {
-    /// Builds a skeleton; topology is checked by [`Skeleton::validate`],
-    /// not here, so loaders can assemble first and fail with a reason.
+    /// Builds a skeleton with identity rest; topology is checked by
+    /// [`Skeleton::validate`], not here, so loaders can assemble first and
+    /// fail with a reason.
     pub fn new(
         parents: Vec<Option<JointId>>,
         inverse_bind: Vec<Mat4>,
         joint_names: Vec<String>,
     ) -> Self {
+        let rest = vec![JointTrs::IDENTITY; parents.len()];
         Self {
             parents: Arc::from(parents),
             inverse_bind: Arc::from(inverse_bind),
             joint_names: Arc::from(joint_names),
+            rest: Arc::from(rest),
         }
+    }
+
+    /// Replaces the identity rest with the authored rest pose, one entry per
+    /// joint. A length mismatch is reported by [`Skeleton::validate`].
+    #[must_use]
+    pub fn with_rest(mut self, rest: Vec<JointTrs>) -> Self {
+        self.rest = Arc::from(rest);
+        self
     }
 
     /// Number of joints (`parents.len()`).
@@ -1166,7 +1181,7 @@ impl Skeleton {
         if count > MAX_JOINTS {
             return Err(SkelError::TooManyJoints);
         }
-        if self.inverse_bind.len() != count {
+        if self.inverse_bind.len() != count || self.rest.len() != count {
             return Err(SkelError::LengthMismatch);
         }
         for joint in 0..count {
@@ -1876,13 +1891,18 @@ fn sample_entity(
         return None;
     }
     let count = skeleton.joint_count();
+    if skeleton.rest.len() != count {
+        return None;
+    }
+    let rest: &[JointTrs] = &skeleton.rest;
     let time = player.time.get();
-    let mut pose =
-        BlendedPose::from_samples(&sample_joints(clip, count, time), player.weight.get());
+    let weight = player.weight.get();
+    let mut pose = BlendedPose::from_samples(&sample_joints(clip, count, time), rest, weight);
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
         let from_clip = lanes.clips.get(fade.from.clip.0)?;
         let from_pose = BlendedPose::from_samples(
             &sample_joints(from_clip, count, fade.from.time.get()),
+            rest,
             fade.from.weight.get(),
         );
         pose = BlendedPose::mix(&from_pose, &pose, fade_progress(fade));
@@ -1895,6 +1915,7 @@ fn sample_entity(
         let layer_clip = lanes.clips.get(layer.player.clip.0)?;
         pose.overlay(
             &sample_joints(layer_clip, count, layer.player.time.get()),
+            rest,
             &mask.weights,
             layer.player.weight,
         );
