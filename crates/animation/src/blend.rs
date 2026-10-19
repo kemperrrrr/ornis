@@ -261,7 +261,7 @@ mod tests {
 
     /// One clip over identity rest.
     fn pose_of(samples: &[JointSample], weight: f32) -> BlendedPose {
-        pose_of(samples, &ident(samples.len()), weight)
+        BlendedPose::from_samples(samples, &ident(samples.len()), weight)
     }
 
     fn close(a: Vec3, b: Vec3) -> bool {
@@ -334,7 +334,12 @@ mod tests {
     fn overlay_weight_scales_the_mask() {
         let mut base = pose_of(&[sample_t(Vec3::X)], 1.0);
         let layer = [sample_t(Vec3::Y)];
-        base.overlay(&layer, &ident(layer.len()), &[Clamped01::ONE], Clamped01::new(0.5));
+        base.overlay(
+            &layer,
+            &ident(layer.len()),
+            &[Clamped01::ONE],
+            Clamped01::new(0.5),
+        );
         assert!(close(base.trs[0].translation, Vec3::new(0.5, 0.5, 0.0)));
     }
 
@@ -342,9 +347,19 @@ mod tests {
     fn overlay_marks_presence_only_where_it_contributes() {
         let mut base = pose_of(&[JointSample::default()], 1.0);
         let layer = [sample_t(Vec3::Y)];
-        base.overlay(&layer, &ident(layer.len()), &[Clamped01::ZERO], Clamped01::ONE);
+        base.overlay(
+            &layer,
+            &ident(layer.len()),
+            &[Clamped01::ZERO],
+            Clamped01::ONE,
+        );
         assert_eq!(base.present[0], [false, false, false]);
-        base.overlay(&layer, &ident(layer.len()), &[Clamped01::ONE], Clamped01::ONE);
+        base.overlay(
+            &layer,
+            &ident(layer.len()),
+            &[Clamped01::ONE],
+            Clamped01::ONE,
+        );
         assert_eq!(base.present[0], [true, false, false]);
     }
 
