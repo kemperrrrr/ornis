@@ -366,3 +366,24 @@ fn animator_crossfade_starts_a_fade_and_play_cuts_it() {
     animator(&mut engine, root).play("walk").unwrap();
     assert!(!has_fade(&engine, root), "play cuts the fade");
 }
+
+#[test]
+fn animator_stop_cancels_a_running_crossfade() {
+    let mut engine = engine();
+    let root = rig(&mut engine, vec![None]);
+    let idle = idle_clip(&mut engine);
+    let walk = walk_clip(&mut engine);
+    let clips = [("idle".to_string(), idle), ("walk".to_string(), walk)]
+        .into_iter()
+        .collect();
+    put(&mut engine, root, Animator::new(clips, vec![root]));
+
+    animator(&mut engine, root).play("idle").unwrap();
+    animator(&mut engine, root)
+        .play_crossfade("walk", Seconds::new(1.0))
+        .unwrap();
+    assert!(has_fade(&engine, root), "crossfade started");
+
+    animator(&mut engine, root).stop().unwrap();
+    assert!(!has_fade(&engine, root), "stop cancels the fade");
+}

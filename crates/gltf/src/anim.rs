@@ -74,7 +74,7 @@ pub struct LoadedKey<T> {
 /// One sorted channel of keys (translation, rotation or scale).
 ///
 /// Mirrors `ornis-animation` `KeyTrack`: an empty track on a joint channel
-/// means identity, on an object channel it means "leave untouched".
+/// means the joint's rest value, on an object channel it means "leave untouched".
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedKeyTrack<T> {
     /// Keys sorted by ascending `time`.
@@ -120,9 +120,9 @@ impl<T> LoadedKeyTrack<T> {
 /// index maps through `JointId::from_raw` (skin order, same as
 /// [`LoadedSkin::parents`](crate::LoadedSkin::parents)). `node` is the same
 /// joint as a [`NodeIdx`] so spawn can bind the channel to the hierarchy.
-/// Empty lanes read as identity (zero translation, unit rotation, unit
-/// scale) so untracked joints hold the bind offset instead of collapsing
-/// the chain.
+/// Empty lanes read as the joint's authored rest (see
+/// [`LoadedSkin::rest`](crate::LoadedSkin::rest)) so untracked joints hold
+/// their rest pose instead of collapsing the chain.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedJointTrack {
     /// Animated joint index into the skin order (see [`node_to_joint_map`]).
@@ -131,7 +131,8 @@ pub struct LoadedJointTrack {
     pub node: NodeIdx,
     /// Translation keys; empty means zero translation.
     pub translation: LoadedKeyTrack<[f32; 3]>,
-    /// Rotation keys (`(x, y, z, w)` unit quaternions); empty means identity.
+    /// Rotation keys (`(x, y, z, w)` unit quaternions); empty means the rest
+    /// rotation.
     pub rotation: LoadedKeyTrack<[f32; 4]>,
     /// Scale keys; empty means unit scale.
     pub scale: LoadedKeyTrack<[f32; 3]>,
@@ -412,10 +413,9 @@ impl ClipAssembly {
                 continue;
             };
             joints.push(LoadedJointTrack {
-                // Empty joint channel = identity (NOT "untouched" like
-                // object tracks): absent paths stay empty, and the wiring
-                // reads them as zero translation / unit rotation / unit
-                // scale instead of collapsing the chain.
+                // Empty joint channel = the joint's rest (NOT "untouched"
+                // like object tracks): absent paths stay empty, and the wiring
+                // reads them as the authored rest instead of collapsing the chain.
                 joint: joint as u32,
                 node: model_node,
                 translation: part

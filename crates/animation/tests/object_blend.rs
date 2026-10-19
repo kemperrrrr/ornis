@@ -282,3 +282,28 @@ fn crossfade_mixes_outgoing_and_incoming_then_retires() {
         "finished fade must be dropped"
     );
 }
+
+#[test]
+fn crossfade_into_a_clip_without_the_entity_fades_out_to_rest() {
+    let (mut engine, target) = scene();
+    let placement = TransformDesc::from_arrays([0.0; 3], [0.0, 0.0, 0.0, 1.0], [1.0; 3]);
+    let other = spawn(&mut engine, placement);
+    let rest = rest_at(Vec3::new(2.0, 0.0, 0.0), Quat::IDENTITY);
+    let idle_track = track(target, rest, Some(Vec3::ZERO), None);
+    let idle = add_clip(&mut engine, "idle", idle_track);
+    // The incoming clip animates only `other`, so `target` has no track in it.
+    let elsewhere = track(other, rest, Some(Vec3::new(9.0, 0.0, 0.0)), None);
+    let walk = add_clip(&mut engine, "walk", elsewhere);
+    play(&mut engine, target, walk, 1.0);
+    let fade = AnimFade {
+        from: player(idle, 1.0),
+        duration: Seconds::new(1.0),
+        elapsed: Seconds::ZERO,
+    };
+    insert(&mut engine, target, fade);
+
+    engine.run_frame(0.5);
+    // Halfway from the outgoing pose (0) to the rest it falls back to (2).
+    let mid = transform_of(&engine, target).translation;
+    assert!(close(mid, Vec3::new(1.0, 0.0, 0.0)), "midway got {mid:?}");
+}

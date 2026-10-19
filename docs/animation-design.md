@@ -265,7 +265,7 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   **Объектные треки (`AnimPlayer`), сделано:** вариант A — явный RESET (T/R/S узла)
   на каждом `AnimTrack::rest`, как RESET в Godot; импорт glTF заполняет его из узла
   (`LoadedAnimTrack::rest`). `AnimPlayer::weight` работает по тому же правилу, что и
-  скелет: `rest + w·(поза − rest)`. Кроссфейд объекта — холодный `AnimFade` на
+  скелет: `rest + w·(поза − rest)`. Кроссфейд объекта — горячий `AnimFade` на
   сущности (внешний `AnimPlayer` — `from`, его часы идут до конца фейда). Канал, которого
   не дал ни один игрок, не пишется (как раньше у объектов). Animator-API для слоёв и
   фейдов пока нет: `SkelLayer` и `AnimFade` вставляются напрямую.

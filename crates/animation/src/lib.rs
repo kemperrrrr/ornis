@@ -598,22 +598,27 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
             let Some(clip) = clips.get(player.clip.0) else {
                 continue;
             };
-            let Some(track) = track_of(clip, entity) else {
+            let fade = fades.as_ref().and_then(|lane| lane.get(entity));
+            let incoming = track_of(clip, entity);
+            let outgoing = fade.and_then(|fade| {
+                clips
+                    .get(fade.from.clip.0)
+                    .and_then(|clip| track_of(clip, entity))
+            });
+            // The entity's rest comes from whichever side has a track for it.
+            // A side without one reads as rest, so a crossfade into a clip
+            // that does not animate this entity still fades out to rest.
+            let Some(rest) = incoming.or(outgoing).map(|track| track.rest) else {
                 continue;
             };
-            let mut pose = track_pose(track, player.time, player.weight);
-            if let Some(fade) = fades.as_ref().and_then(|lane| lane.get(entity)) {
-                // Outgoing clip without a track for this entity reads as rest.
-                let from_track = clips
-                    .get(fade.from.clip.0)
-                    .and_then(|clip| track_of(clip, entity));
-                let from_pose = match from_track {
-                    Some(outgoing) => track_pose(outgoing, fade.from.time, fade.from.weight),
-                    None => BlendedPose::from_samples(
-                        &[JointSample::default()],
-                        std::slice::from_ref(&track.rest),
-                        1.0,
-                    ),
+            let mut pose = match incoming {
+                Some(track) => track_pose(track, player.time, player.weight),
+                None => rest_pose(rest),
+            };
+            if let Some(fade) = fade {
+                let from_pose = match outgoing {
+                    Some(track) => track_pose(track, fade.from.time, fade.from.weight),
+                    None => rest_pose(rest),
                 };
                 let progress = fade_progress(fade.duration, fade.elapsed);
                 pose = BlendedPose::mix(&from_pose, &pose, progress);
@@ -672,6 +677,11 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
 /// The track `clip` holds for `entity`; the first match wins.
 fn track_of(clip: &AnimClip, entity: Entity) -> Option<&AnimTrack> {
     clip.tracks.iter().find(|track| track.entity == entity)
+}
+
+/// Pose of a side with no channels: the rest, with every channel absent.
+fn rest_pose(rest: JointTrs) -> BlendedPose {
+    BlendedPose::from_samples(&[JointSample::default()], std::slice::from_ref(&rest), 1.0)
 }
 
 /// Blended pose of one object track at `time` and `weight`.
@@ -1485,8 +1495,8 @@ pub struct SkelSkinStats {
 /// Composes one joint-local matrix (`T·R·S`, the render convention).
 ///
 /// Absent channels read as identity (zero translation, unit rotation,
-/// unit scale) so untracked joints hold the bind offset instead of
-/// collapsing the chain.
+/// unit scale). The skeleton sampler substitutes each joint's authored rest
+/// for absent channels instead, so this helper is for standalone use.
 ///
 /// # Examples
 ///
@@ -1993,7 +2003,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBat
 ///
 /// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid topology,
 /// or a layer whose mask does not match the joint count. The caller counts
-/// it. Absent [`TransformDesc`] roots at identity (lenient); everything else
+/// it. A missing outgoing clip reads as rest. Absent [`TransformDesc`] roots at identity (lenient); everything else
 /// is strict.
 fn sample_entity(
     entity: Entity,
@@ -2012,14 +2022,23 @@ fn sample_entity(
     let rest: &[JointTrs] = &skeleton.rest;
     let time = player.time.get();
     let weight = player.weight.get();
+    // Every clip that shapes the pose, so a joint driven only by a layer or
+    // by the outgoing side of a fade still moves its bound node.
+    let mut contributors = vec![clip];
     let mut pose = BlendedPose::from_samples(&sample_joints(clip, count, time), rest, weight);
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
-        let from_clip = lanes.clips.get(fade.from.clip.0)?;
-        let from_pose = BlendedPose::from_samples(
-            &sample_joints(from_clip, count, fade.from.time.get()),
-            rest,
-            fade.from.weight.get(),
-        );
+        let from_pose = match lanes.clips.get(fade.from.clip.0) {
+            Some(from_clip) => {
+                contributors.push(from_clip);
+                BlendedPose::from_samples(
+                    &sample_joints(from_clip, count, fade.from.time.get()),
+                    rest,
+                    fade.from.weight.get(),
+                )
+            }
+            // A vanished outgoing clip reads as rest, as on object tracks.
+            None => BlendedPose::from_samples(&vec![JointSample::default(); count], rest, 1.0),
+        };
         pose = BlendedPose::mix(
             &from_pose,
             &pose,
@@ -2032,6 +2051,7 @@ fn sample_entity(
             return None;
         }
         let layer_clip = lanes.clips.get(layer.player.clip.0)?;
+        contributors.push(layer_clip);
         pose.overlay(
             &sample_joints(layer_clip, count, layer.player.time.get()),
             rest,
@@ -2044,19 +2064,20 @@ fn sample_entity(
     let matrices = compose_model_matrices(skeleton, &locals, &root)?;
     Some(SampledClip {
         matrices,
-        nodes: node_poses(clip, &pose),
+        nodes: node_poses(&contributors, &pose),
     })
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.
 ///
-/// First track per joint wins, matching [`sample_joints`]. Channels no
-/// contributor provided stay [`None`] so the node's bind pose survives; the
+/// `clips` lists every clip that shapes `pose` (base, outgoing fade, layer).
+/// First track per joint wins across them, matching [`sample_joints`]. Channels
+/// no contributor provided stay [`None`] so the node's bind pose survives; the
 /// blended values of the others come from the final pose.
-fn node_poses(clip: &SkelClip, pose: &BlendedPose) -> Vec<LocalWrite> {
+fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
     let mut out: Vec<LocalWrite> = Vec::new();
     let mut painted = vec![false; pose.trs.len()];
-    for track in &clip.tracks {
+    for track in clips.iter().flat_map(|clip| clip.tracks.iter()) {
         let joint = track.joint.index();
         if joint >= painted.len() || painted[joint] {
             continue;

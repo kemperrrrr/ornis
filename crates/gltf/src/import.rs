@@ -1155,7 +1155,7 @@ mod tests {
                 track.translation.interpolation,
                 crate::LoadedInterpolation::Linear
             );
-            // Untargeted joint channels stay empty (= identity, not untouched).
+            // Untargeted joint channels stay empty (= rest, not untouched).
             assert!(track.rotation.keys.is_empty());
             assert!(track.scale.keys.is_empty());
         }
