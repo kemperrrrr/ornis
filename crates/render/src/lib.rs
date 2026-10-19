@@ -77,7 +77,8 @@ pub use ao::{
     linear_view_depth, ssao_sample,
 };
 pub use camera::{
-    CameraView, OrbitCamera, camera_view_projection, install_orbit_camera, read_orbit_camera,
+    CameraView, OrbitCamera, PointerDpr, camera_view_projection, install_orbit_camera,
+    read_orbit_camera,
 };
 pub use composite::CompositePass as LegacyCompositePass;
 pub use extraction::{

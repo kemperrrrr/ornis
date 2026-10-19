@@ -24,8 +24,8 @@ use ornis_editor::{
     PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
 };
 use ornis_render::{
-    CameraView, FrameUpload, OrbitCamera, RenderContext, RenderFrame3D, RenderLights, Renderer3D,
-    Technique, camera_view_projection, read_orbit_camera,
+    CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D, RenderLights,
+    Renderer3D, Technique, camera_view_projection, read_orbit_camera,
 };
 
 mod scene_api;
@@ -542,12 +542,21 @@ fn get_canvas(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
 /// a window): the canvas backing store and the pointer coordinates share
 /// this scale so HiDPI displays render 1:1 instead of upscaling CSS
 /// pixels.
-// qual:allow(test_quality, untested) reason: "browser helper — web_sys::window() has no host-test seam, same population as the sibling DOM helpers"
 fn device_pixel_ratio() -> f32 {
-    web_sys::window()
-        .map(|w| w.device_pixel_ratio() as f32)
-        .unwrap_or(1.0)
-        .max(1.0)
+    // `web_sys::window()` panics on non-wasm targets (imported statics), so
+    // host tests and any native build read the documented off-browser
+    // fallback directly instead of touching the DOM.
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .map(|w| w.device_pixel_ratio() as f32)
+            .unwrap_or(1.0)
+            .max(1.0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        1.0
+    }
 }
 
 /// Resize the canvas backing store to fill its parent element, scaled by
@@ -736,6 +745,14 @@ impl<'a> FrameState<'a> {
     /// by the device pixel ratio so the backing store is HiDPI-sharp.
     fn handle_resize(&mut self, canvas: &web_sys::HtmlCanvasElement) {
         let dpr = device_pixel_ratio();
+        // Publish the pointer scale for the orbit input system: browser
+        // pointer deltas are device pixels, rotation is CSS-anchored.
+        let _ = self
+            .render_world
+            .engine_mut()
+            .world_mut()
+            .resources_mut()
+            .insert(PointerDpr(dpr));
         let pw = canvas
             .parent_element()
             .map(|p| p.client_width() as f32 * dpr)
@@ -1222,6 +1239,14 @@ async fn fetch_api_text(url: &str) -> Option<String> {
 mod integration_tests {
     use super::*;
     use ornis_render::MaterialIdx;
+
+    /// The off-browser fallback of `device_pixel_ratio`: host builds never
+    /// touch `web_sys::window()` (it panics on non-wasm targets), so the
+    /// wire and the surface math see the documented `1.0`.
+    #[test]
+    fn native_device_pixel_ratio_falls_back_to_one() {
+        assert_eq!(device_pixel_ratio(), 1.0);
+    }
 
     #[test]
     fn live_snapshot_crosses_serialization_boundary_into_shared_game_world() {

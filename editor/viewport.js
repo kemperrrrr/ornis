@@ -11,17 +11,20 @@
         // need touch-action:none so the browser doesn't hijack drags.
         if (canvasEl) canvasEl.style.touchAction = 'none';
 
-        // The WASM module owns the backing store (it resizes every frame
-        // at devicePixelRatio); this boot-time resize only prevents a
-        // wrong-size flash before the first frame.
+        // The WASM module owns the backing store (it resizes every frame at
+        // the Rust-clamped devicePixelRatio); this boot-time resize only
+        // prevents a wrong-size flash before the first frame, so it runs
+        // once with the same truncating formula Rust uses
+        // (`(clientWidth * dpr).max(1.0) as u32`) and never attaches a
+        // resize listener — a JS resize would fight the per-frame Rust
+        // resize and diverge in rounding on fractional devicePixelRatio.
         const resizeCanvas = () => {
             if (!viewportEl || !canvasEl) return;
-            const dpr = window.devicePixelRatio || 1;
-            canvasEl.width = Math.max(1, Math.round(viewportEl.clientWidth * dpr));
-            canvasEl.height = Math.max(1, Math.round(viewportEl.clientHeight * dpr));
+            const dpr = Math.max(1, window.devicePixelRatio || 1);
+            canvasEl.width = Math.max(1, Math.trunc(viewportEl.clientWidth * dpr));
+            canvasEl.height = Math.max(1, Math.trunc(viewportEl.clientHeight * dpr));
         };
         resizeCanvas();
-        window.addEventListener('resize', resizeCanvas);
 
         // 2D/3D toggle next to canvas#bevy. The WASM module owns the mode;
         // the button only queues the switch and mirrors the applied mode
@@ -65,8 +68,10 @@
             }
             gridEl.hidden = false;
             // Wire grid values are backing-store (device) pixels; the
-            // overlay paints in CSS pixels.
-            const dpr = window.devicePixelRatio || 1;
+            // overlay paints in CSS pixels with the same display scale the
+            // surface multiplied with — `state.dpr` (Rust-clamped >= 1),
+            // falling back to the browser value only if the wire has none.
+            const dpr = (state && state.dpr) || window.devicePixelRatio || 1;
             const minor = grid.minor_step_px / dpr;
             const major = minor * grid.major_every;
             const ox = grid.origin_px[0] / dpr;

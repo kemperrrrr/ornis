@@ -12,6 +12,18 @@ use ornis_core::{Degrees, Engine, InputState, Meters, Resources, System, SystemA
 
 use ornis_assets::scene::{CameraDesc, CameraProjection};
 
+/// Device pixel ratio of the pointer backend feeding [`OrbitCamera`].
+///
+/// Platform adapters deliver pointer deltas in device pixels, while orbit
+/// rotation is anchored to CSS pixels: on a hidpi surface (dpr 2) one CSS
+/// pixel of mouse movement arrives as two device pixels, and without this
+/// resource the rotation would spin twice as fast as on a 1x display.
+/// Absent from the world (native, plain 1x browsers), the input system
+/// falls back to `1.0`. Wheel zoom is not scaled — it is a discrete
+/// gesture, not a positional delta.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointerDpr(pub f32);
+
 /// Client-side orbit camera: azimuth/elevation around a target plus a zoom
 /// radius. It is view state, not part of the server-authoritative scene.
 #[derive(Clone, Debug)]
@@ -154,12 +166,20 @@ impl OrbitCamera {
     }
 
     /// Applies the shared input contract: left-button drag rotates and wheel
-    /// movement zooms. Transient deltas are cleared by [`Engine`] after the
+    /// movement zooms. Pointer deltas arrive in device pixels and are divided
+    /// by `pointer_dpr` (see [`PointerDpr`]) so rotation speed is identical
+    /// across display scales; a non-finite or non-positive dpr is treated as
+    /// `1.0`. Transient deltas are cleared by [`Engine`] after the
     /// once-per-frame schedule consumes the same input resource.
-    pub fn apply_input(&mut self, input: &InputState) {
+    pub fn apply_input(&mut self, input: &InputState, pointer_dpr: f32) {
         if input.mouse_button_down(0) {
             let [dx, dy] = input.pointer_delta();
-            self.rotate(dx, dy);
+            let dpr = if pointer_dpr.is_finite() && pointer_dpr > 0.0 {
+                pointer_dpr
+            } else {
+                1.0
+            };
+            self.rotate(dx / dpr, dy / dpr);
         }
         self.zoom(input.wheel_delta());
     }
@@ -240,6 +260,7 @@ impl System for OrbitCameraSystem {
     fn access(&self) -> SystemAccess {
         SystemAccess::new()
             .reads::<InputState>()
+            .reads::<PointerDpr>()
             .writes::<Mutex<OrbitCamera>>()
     }
 
@@ -250,10 +271,11 @@ impl System for OrbitCameraSystem {
         let Some(camera) = resources.get::<Mutex<OrbitCamera>>() else {
             return;
         };
+        let pointer_dpr = resources.get::<PointerDpr>().map_or(1.0, |dpr| dpr.0);
         camera
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .apply_input(input);
+            .apply_input(input, pointer_dpr);
     }
 }
 
@@ -419,7 +441,7 @@ mod tests {
         input.set_pointer_position([10.0, 4.0]);
         input.add_wheel_delta(100.0);
 
-        orbit.apply_input(&input);
+        orbit.apply_input(&input, 1.0);
 
         assert_ne!(orbit.position(), initial);
         assert!(orbit.position().length() > 0.5);
@@ -526,9 +548,56 @@ mod tests {
         let mut input = InputState::new();
         input.set_mouse_button(0, true);
         input.set_pointer_position([0.0, 100_000.0]);
-        orbit.apply_input(&input);
+        orbit.apply_input(&input, 1.0);
         let position = orbit.position();
         assert!(position.y.abs() < position.length());
+    }
+
+    /// Review (round 4): the scheduled input system divides device-pixel
+    /// deltas by the [`PointerDpr`] resource — the same 40px drag yields
+    /// half the rotation at dpr 2 — while a world without the resource
+    /// (native, plain 1x browser) keeps the full 1x behaviour. Runs
+    /// through `run_frame`, so the declared `PointerDpr` read is enforced
+    /// by the access checker too.
+    #[test]
+    fn pointer_dpr_scales_rotation_for_device_pixel_backends() {
+        let mut engine = Engine::new();
+        install_orbit_camera(&mut engine, OrbitCamera::from_desc(&camera()));
+        let drag = |input: &mut InputState| {
+            input.set_mouse_button(0, true);
+            input.set_pointer_anchor([0.0, 0.0]);
+            input.set_pointer_position([40.0, 0.0]);
+        };
+        {
+            let input = engine
+                .world_mut()
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("engine input resource");
+            drag(input);
+        }
+        let initial = read_orbit_camera(&engine).expect("camera resource").azimuth;
+        engine.run_frame(0.0);
+        let full = read_orbit_camera(&engine).expect("camera resource").azimuth - initial;
+        assert!(full.abs() > 0.0, "a 40px drag must rotate at dpr 1");
+
+        // Same drag with a 2x backend: half the rotation.
+        let _ = engine.world_mut().resources_mut().insert(PointerDpr(2.0));
+        {
+            let input = engine
+                .world_mut()
+                .resources_mut()
+                .get_mut::<InputState>()
+                .expect("engine input resource");
+            drag(input);
+        }
+        let before = read_orbit_camera(&engine).expect("camera resource").azimuth;
+        engine.run_frame(0.0);
+        let half = read_orbit_camera(&engine).expect("camera resource").azimuth - before;
+        assert!(
+            (full - 2.0 * half).abs() < 1e-5,
+            "dpr 1 rotation {full} vs dpr 2 rotation {half}"
+        );
     }
 
     #[test]
@@ -645,7 +714,7 @@ mod tests {
         let eye_before = before.eye;
         let mut input = InputState::new();
         input.add_wheel_delta(100.0);
-        orbit.apply_input(&input);
+        orbit.apply_input(&input, 1.0);
         let after = orbit.view_parameters();
         // The orbit radius (hence the eye) stays put in ortho mode.
         assert_eq!(after.eye, eye_before);
@@ -661,7 +730,7 @@ mod tests {
         for _ in 0..100 {
             let mut input = InputState::new();
             input.add_wheel_delta(100.0);
-            orbit.apply_input(&input);
+            orbit.apply_input(&input, 1.0);
         }
         let clamped = ortho_half_height(&orbit.view_parameters());
         assert_eq!(clamped.get(), 1000.0);
@@ -670,7 +739,7 @@ mod tests {
         for _ in 0..100 {
             let mut input = InputState::new();
             input.add_wheel_delta(-100.0);
-            orbit.apply_input(&input);
+            orbit.apply_input(&input, 1.0);
         }
         let clamped = ortho_half_height(&orbit.view_parameters());
         assert_eq!(clamped.get(), 0.01);
@@ -679,7 +748,7 @@ mod tests {
         let mut input = InputState::new();
         input.set_mouse_button(0, true);
         input.set_pointer_position([10.0, 4.0]);
-        orbit.apply_input(&input);
+        orbit.apply_input(&input, 1.0);
         assert_ne!(orbit.position(), eye_before);
     }
 }
