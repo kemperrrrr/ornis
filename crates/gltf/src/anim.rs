@@ -129,12 +129,12 @@ pub struct LoadedJointTrack {
     pub joint: u32,
     /// Model node of this joint.
     pub node: NodeIdx,
-    /// Translation keys; empty means zero translation.
+    /// Translation keys; empty means the joint's rest translation.
     pub translation: LoadedKeyTrack<[f32; 3]>,
     /// Rotation keys (`(x, y, z, w)` unit quaternions); empty means the rest
     /// rotation.
     pub rotation: LoadedKeyTrack<[f32; 4]>,
-    /// Scale keys; empty means unit scale.
+    /// Scale keys; empty means the joint's rest scale.
     pub scale: LoadedKeyTrack<[f32; 3]>,
 }
 
