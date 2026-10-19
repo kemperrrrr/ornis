@@ -549,32 +549,19 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                 advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
         }
         if let Some(mut fades) = store.write_lane::<AnimFade>() {
-            let mut finished = Vec::new();
-            for index in 0..fades.data.len() {
-                let entity = fades.entities[index];
-                if driven.contains(&entity) {
-                    continue;
-                }
-                let fade = &mut fades.data[index];
+            tick_fades(&mut fades, dt, &driven, |fade, step| {
                 if fade.from.playing
                     && let Some(clip) = clips.get(fade.from.clip.0)
                 {
                     fade.from.time = advance_player_time(
                         fade.from.time,
-                        dt,
+                        step,
                         fade.from.speed,
                         clip.duration,
                         clip.looping,
                     );
                 }
-                fade.elapsed = Seconds::new(fade.elapsed.get() + dt);
-                if fade.elapsed.get() >= fade.duration.get() {
-                    finished.push(entity);
-                }
-            }
-            for entity in finished {
-                fades.remove(entity);
-            }
+            });
         }
     }
     sample_and_publish(resources, driven);
@@ -1855,6 +1842,52 @@ fn advance_layers(store: &SmartStore, dt: f32) {
     }
 }
 
+/// Clock of a crossfade component, shared by [`AnimFade`] and [`SkelFade`].
+trait FadeClock {
+    /// Adds `dt` seconds to the clock; `true` once the fade is over.
+    fn tick(&mut self, dt: f32) -> bool;
+}
+
+impl FadeClock for AnimFade {
+    fn tick(&mut self, dt: f32) -> bool {
+        self.elapsed = Seconds::new(self.elapsed.get() + dt);
+        self.elapsed.get() >= self.duration.get()
+    }
+}
+
+impl FadeClock for SkelFade {
+    fn tick(&mut self, dt: f32) -> bool {
+        self.elapsed = Seconds::new(self.elapsed.get() + dt);
+        self.elapsed.get() >= self.duration.get()
+    }
+}
+
+/// Steps every crossfade by `dt`: `advance_from` moves the outgoing cursor,
+/// the clock moves on, and finished fades are removed. Entities in `frozen`
+/// keep their fade untouched this frame.
+fn tick_fades<F: FadeClock>(
+    fades: &mut ComponentStore<F>,
+    dt: f32,
+    frozen: &[Entity],
+    mut advance_from: impl FnMut(&mut F, f32),
+) {
+    let mut finished = Vec::new();
+    for index in 0..fades.data.len() {
+        let entity = fades.entities[index];
+        if frozen.contains(&entity) {
+            continue;
+        }
+        let fade = &mut fades.data[index];
+        advance_from(fade, dt);
+        if fade.tick(dt) {
+            finished.push(entity);
+        }
+    }
+    for entity in finished {
+        fades.remove(entity);
+    }
+}
+
 /// Advances outgoing crossfade clocks and retires finished fades.
 fn advance_fades(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
@@ -1863,19 +1896,9 @@ fn advance_fades(store: &SmartStore, dt: f32) {
     let Some(mut fades) = store.write_lane::<SkelFade>() else {
         return;
     };
-    let mut finished = Vec::new();
-    for index in 0..fades.data.len() {
-        let entity = fades.entities[index];
-        let fade = &mut fades.data[index];
-        step_player(&mut fade.from, &clips, dt);
-        fade.elapsed = Seconds::new(fade.elapsed.get() + dt);
-        if fade.elapsed.get() >= fade.duration.get() {
-            finished.push(entity);
-        }
-    }
-    for entity in finished {
-        fades.remove(entity);
-    }
+    tick_fades(&mut fades, dt, &[], |fade, step| {
+        step_player(&mut fade.from, &clips, step);
+    });
 }
 
 /// Samples playing cursors and publishes whole [`JointPose`] vectors.
@@ -1997,7 +2020,11 @@ fn sample_entity(
             rest,
             fade.from.weight.get(),
         );
-        pose = BlendedPose::mix(&from_pose, &pose, fade_progress(fade.duration, fade.elapsed));
+        pose = BlendedPose::mix(
+            &from_pose,
+            &pose,
+            fade_progress(fade.duration, fade.elapsed),
+        );
     }
     if let Some(layer) = lanes.layers.and_then(|lane| lane.get(entity)) {
         let mask = lanes.masks?.get(layer.mask.0)?;
@@ -2548,7 +2575,10 @@ mod import_tests {
         assert_eq!(skeleton.rest[1].rotation, tilt);
         // A rest list shorter than the joints is a defect, not a default.
         import.rest.pop();
-        assert_eq!(skeleton_from_import(&import), Err(SkelError::LengthMismatch));
+        assert_eq!(
+            skeleton_from_import(&import),
+            Err(SkelError::LengthMismatch)
+        );
     }
 
     #[test]

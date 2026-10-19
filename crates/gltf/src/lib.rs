@@ -210,6 +210,17 @@ pub struct LoadedJointRest {
     pub scale: [f32; 3],
 }
 
+impl Default for LoadedJointRest {
+    /// Identity transform: no translation, unit rotation, unit scale.
+    fn default() -> Self {
+        Self {
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0; 3],
+        }
+    }
+}
+
 /// One resolved `skins[]` element: joint topology plus bind inverses.
 ///
 /// Plain arrays (no `glam`, no `ornis-animation` dependency): the wiring

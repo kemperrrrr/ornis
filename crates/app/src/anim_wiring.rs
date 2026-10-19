@@ -756,7 +756,7 @@ mod tests {
             looping: true,
             tracks: vec![LoadedAnimTrack {
                 node: loader,
-                rest: identity_rest(),
+                rest: ornis_gltf::LoadedJointRest::default(),
                 translation: MirrorTrack::cubic(
                     vec![
                         LoadedKey {
@@ -848,15 +848,6 @@ mod tests {
         assert!(!live.looping);
     }
 
-    /// Identity node transform for skin fixtures.
-    fn identity_rest() -> ornis_gltf::LoadedJointRest {
-        ornis_gltf::LoadedJointRest {
-            translation: [0.0; 3],
-            rotation: [0.0, 0.0, 0.0, 1.0],
-            scale: [1.0; 3],
-        }
-    }
-
     #[test]
     fn skeleton_maps_parents_binds_and_names() {
         let skin = LoadedSkin {
@@ -877,10 +868,10 @@ mod tests {
             ],
             joint_names: vec!["root".to_string(), "tip".to_string()],
             rest: vec![
-                identity_rest(),
+                ornis_gltf::LoadedJointRest::default(),
                 ornis_gltf::LoadedJointRest {
                     translation: [0.0, 3.0, 0.0],
-                    ..identity_rest()
+                    ..Default::default()
                 },
             ],
         };
@@ -970,7 +961,7 @@ mod tests {
     fn object_track(node: NodeIdx) -> LoadedAnimTrack {
         LoadedAnimTrack {
             node,
-            rest: identity_rest(),
+            rest: ornis_gltf::LoadedJointRest::default(),
             translation: LoadedKeyTrack::linear(vec![LoadedKey {
                 time: 0.0,
                 value: [1.0, 0.0, 0.0],
@@ -1012,7 +1003,7 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ]],
                 joint_names: vec!["root".into()],
-                rest: vec![identity_rest()],
+                rest: vec![ornis_gltf::LoadedJointRest::default()],
             }],
             skel_clips: clips,
             anim_clips: Vec::new(),

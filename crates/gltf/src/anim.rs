@@ -208,15 +208,6 @@ fn node_rests(document: &Document) -> HashMap<usize, LoadedJointRest> {
         .collect()
 }
 
-/// Identity rest for a node the document does not list (never expected).
-fn identity_rest() -> LoadedJointRest {
-    LoadedJointRest {
-        translation: [0.0; 3],
-        rotation: [0.0, 0.0, 0.0, 1.0],
-        scale: [1.0; 3],
-    }
-}
-
 /// Builds the node→joint map from the document skins (first skin wins).
 ///
 /// Mirrors the skin import source data (`skin.joints()` order): nodes that
@@ -449,7 +440,7 @@ impl ClipAssembly {
             // paths stay empty tracks via the constructors below.
             entities.push(LoadedAnimTrack {
                 node: model_node,
-                rest: rests.get(&node).copied().unwrap_or_else(identity_rest),
+                rest: rests.get(&node).copied().unwrap_or_default(),
                 translation: part
                     .translation
                     .unwrap_or_else(|| LoadedKeyTrack::linear(Vec::new())),

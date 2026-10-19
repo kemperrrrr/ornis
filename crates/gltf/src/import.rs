@@ -1417,7 +1417,11 @@ mod tests {
         let scene = load_slice(&build_glb(&fixture)).expect("object clip parses");
         let rest = scene.anim_clips[0].tracks[0].rest;
         assert_eq!(rest.translation, [1.0, 2.0, 3.0]);
-        assert!((rest.rotation[3] - 1.0).abs() < 1e-6, "got {:?}", rest.rotation);
+        assert!(
+            (rest.rotation[3] - 1.0).abs() < 1e-6,
+            "got {:?}",
+            rest.rotation
+        );
         assert_eq!(rest.scale, [1.0, 1.0, 1.0]);
     }
 
