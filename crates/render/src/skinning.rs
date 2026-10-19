@@ -548,19 +548,27 @@ mod tests {
         assert!(entry.starts_with(
             "@vertex\nfn vs_main_skinned(input: SkinnedVertexInput, @builtin(instance_index) instance_index: u32)"
         ));
-        assert!(entry.contains("-> VertexOutput"));
-        assert!(entry.contains("let joint0 = palette[input.joints.x];"));
-        assert!(entry.contains("let joint3 = palette[input.joints.w];"));
-        assert!(entry.contains("let previous_joint3 = previous_palette[input.joints.w];"));
-        assert!(entry.contains("obj.previous_model"));
-        assert!(entry.contains("obj.motion_valid"));
-        assert!(entry.contains("output.previous_world_position = previous_world_pos;"));
-        assert!(entry.contains("joint0.matrix * "));
-        assert!(entry.contains("joint0.normal_matrix * "));
-        assert!(entry.contains("input.weights.x"));
-        assert!(entry.contains("output.clip_position = camera.view_proj * world_pos;"));
-        assert!(entry.contains("output.material_index = obj.material_index;"));
-        assert!(entry.contains("return output;"));
+        // Skinned motion reuses the g-buffer previous-world varying: pin the
+        // palette history and validity flag, not the unrolled contains-chain
+        // the forward-fragment shape test uses.
+        let needles = [
+            "-> VertexOutput",
+            "let joint0 = palette[input.joints.x];",
+            "let joint3 = palette[input.joints.w];",
+            "let previous_joint3 = previous_palette[input.joints.w];",
+            "obj.previous_model",
+            "obj.motion_valid",
+            "output.previous_world_position = previous_world_pos;",
+            "joint0.matrix * ",
+            "joint0.normal_matrix * ",
+            "input.weights.x",
+            "output.clip_position = camera.view_proj * world_pos;",
+            "output.material_index = obj.material_index;",
+            "return output;",
+        ];
+        for needle in needles {
+            assert!(entry.contains(needle), "{needle}");
+        }
     }
 
     #[test]
