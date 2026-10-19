@@ -1,16 +1,15 @@
-//! Phase E skeletal blending (`docs/animation-design.md` §5 E): weighted
-//! players, crossfades and joint-masked overlay layers.
+//! Phase E blending (`docs/animation-design.md` §5 E): weighted players,
+//! crossfades and joint-masked overlay layers, for skeletal joints and
+//! object tracks alike.
 //!
 //! The model is deterministic and stateless per frame, in the spirit of
-//! Godot's default blending: every missing channel reads as the joint's
-//! authored rest value (its node transform in the skin, see
-//! [`Skeleton::rest`](crate::Skeleton::rest)), a player at weight `w`
+//! Godot's default blending: every missing channel reads as the authored
+//! rest value (a joint's node transform in the skin, see
+//! [`Skeleton::rest`](crate::Skeleton::rest); an object track's
+//! [`AnimTrack::rest`](crate::AnimTrack::rest)), a player at weight `w`
 //! contributes `rest + w·(pose − rest)`, and a layer at weight `w·mask[j]`
 //! lerps its joint `j` over the base pose. The only mutable state is the
 //! cursor clocks, so no pose ever feeds back into the next frame's sample.
-//!
-//! Object (non-skeletal) tracks are out of scope for this module: they write
-//! into live placement components and need an authored rest pose first.
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::{Clamped01, Entity, Seconds};
@@ -75,8 +74,8 @@ pub(crate) struct JointSample {
 
 /// Joint-local transform: a rest pose or one blended result.
 ///
-/// The authored rest of each joint is its node transform in the skin
-/// (glTF `node.transform().decomposed()`); skeletons built without one
+/// The authored rest of a joint or object track is its node transform in
+/// the source (glTF `node.transform().decomposed()`); builders without one
 /// default to [`JointTrs::IDENTITY`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JointTrs {
@@ -227,18 +226,17 @@ impl BlendedPose {
 
 /// Crossfade progress in `0..=1`: linear in `elapsed / duration`, instant
 /// for a non-positive duration.
-pub(crate) fn fade_progress(fade: &SkelFade) -> f32 {
-    let duration = fade.duration.get();
+pub(crate) fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
+    let duration = duration.get();
     if duration <= crate::NEAR_ZERO {
         return 1.0;
     }
-    (fade.elapsed.get() / duration).clamp(0.0, 1.0)
+    (elapsed.get() / duration).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ClipId;
 
     fn sample_t(value: Vec3) -> JointSample {
         JointSample {
@@ -365,25 +363,9 @@ mod tests {
 
     #[test]
     fn fade_progress_is_linear_and_clamped() {
-        let store = ornis_core::SmartStore::new();
-        let clip_entity = store.create_entity();
-        let from = SkelPlayer {
-            clip: ClipId(clip_entity),
-            time: Seconds::ZERO,
-            speed: Seconds::new(1.0),
-            weight: Clamped01::ONE,
-            playing: true,
-            looping: true,
-        };
-        let mut fade = SkelFade {
-            from,
-            duration: Seconds::new(2.0),
-            elapsed: Seconds::new(0.5),
-        };
-        assert!((fade_progress(&fade) - 0.25).abs() < 1e-6);
-        fade.elapsed = Seconds::new(9.0);
-        assert!((fade_progress(&fade) - 1.0).abs() < 1e-6);
-        fade.duration = Seconds::ZERO;
-        assert!((fade_progress(&fade) - 1.0).abs() < 1e-6);
+        let two = Seconds::new(2.0);
+        assert!((fade_progress(two, Seconds::new(0.5)) - 0.25).abs() < 1e-6);
+        assert!((fade_progress(two, Seconds::new(9.0)) - 1.0).abs() < 1e-6);
+        assert!((fade_progress(Seconds::ZERO, Seconds::ZERO) - 1.0).abs() < 1e-6);
     }
 }

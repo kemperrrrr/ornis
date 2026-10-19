@@ -3,7 +3,7 @@
 //! time and retire, and overlay layers follow their per-joint mask. Bad
 //! masks skip the entity (bad skin), never truncate.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     Animator, AnimatorMut, ClipId, JointId, JointMask, JointPose, JointTrack, JointTrs, Key,
     KeyTrack, MaskId, SkelClip, SkelFade, SkelLayer, SkelPlayer, SkelSampleSystem, Skeleton,
@@ -228,6 +228,36 @@ fn half_weight_blends_toward_the_authored_rest_not_identity() {
 
     // rest + 0.5 · (4 − 2) = 3; blending toward identity would give 2.
     assert_origin(&engine, root, 0, Vec3::new(3.0, 0.0, 0.0));
+}
+
+#[test]
+fn half_weight_rotation_slerps_halfway_to_the_authored_rest() {
+    let mut engine = engine();
+    let rest = JointTrs {
+        rotation: Quat::from_rotation_y(std::f32::consts::FRAC_PI_3),
+        ..JointTrs::IDENTITY
+    };
+    let root = rig_with_rest(&mut engine, rest);
+    let upright_key = Key {
+        time: 0.0,
+        value: Quat::IDENTITY,
+    };
+    let track = JointTrack {
+        joint: JointId::from_raw(0),
+        node: None,
+        translation: KeyTrack::linear(Vec::new()),
+        rotation: KeyTrack::linear(vec![upright_key]),
+        scale: KeyTrack::linear(Vec::new()),
+    };
+    let upright = add_clip(&mut engine, clip("upright", vec![track]));
+    put(&mut engine, root, player(upright, 0.5));
+
+    engine.run_frame(0.1);
+
+    // Halfway from the 60° rest back to identity: 30°, not identity.
+    let (_, rotation, _) = pose(&engine, root)[0].to_scale_rotation_translation();
+    let halfway = Quat::from_rotation_y(std::f32::consts::FRAC_PI_6);
+    assert!(rotation.angle_between(halfway) < 1e-4, "got {rotation:?}");
 }
 
 #[test]

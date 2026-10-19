@@ -676,7 +676,7 @@ fn local_transform(node: &Node<'_>) -> ornis_core::Transform {
 
 /// Local node matrix: TRS composes through the crate convention, an
 /// explicit matrix passes through verbatim.
-fn local_matrix(transform: &Transform) -> Mat4 {
+pub(crate) fn local_matrix(transform: &Transform) -> Mat4 {
     match *transform {
         Transform::Matrix { matrix } => matrix,
         Transform::Decomposed {
@@ -1406,6 +1406,19 @@ mod tests {
         assert_eq!(scene.stats.skipped_cubicspline, 1);
         assert_eq!(scene.stats.skipped_clips, 1);
         assert!(!scene.stats.is_clean());
+    }
+
+    #[test]
+    fn object_track_rest_is_the_authored_node_transform() {
+        // Node 0 is authored at (1, 2, 3) and is not a joint, so its track is
+        // an object track: the rest it blends toward is that node transform.
+        let mut fixture = triangle();
+        fixture.animations = 1;
+        let scene = load_slice(&build_glb(&fixture)).expect("object clip parses");
+        let rest = scene.anim_clips[0].tracks[0].rest;
+        assert_eq!(rest.translation, [1.0, 2.0, 3.0]);
+        assert!((rest.rotation[3] - 1.0).abs() < 1e-6, "got {:?}", rest.rotation);
+        assert_eq!(rest.scale, [1.0, 1.0, 1.0]);
     }
 
     #[test]

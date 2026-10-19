@@ -7,8 +7,8 @@
 
 use glam::{Mat4, Vec3};
 use ornis_animation::{
-    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, JointId, JointPose, JointTrack, Key,
-    KeyTrack, SkelClip, SkelPlayer, SkelSampleSystem, Skeleton,
+    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, JointId, JointPose, JointTrack,
+    JointTrs, Key, KeyTrack, SkelClip, SkelPlayer, SkelSampleSystem, Skeleton,
 };
 use ornis_assets::scene::MeshDesc;
 use ornis_core::units::{Clamped01, PositiveF32, Seconds};
@@ -92,6 +92,7 @@ fn object_track_on_meshless_parent_moves_child_mesh() {
                 looping: false,
                 tracks: vec![AnimTrack {
                     entity: parent,
+                    rest: JointTrs::IDENTITY,
                     translation: KeyTrack::linear(vec![
                         Key {
                             time: 0.0,

@@ -170,7 +170,7 @@ active-100k) и #112.
   Workflows не тронуты осознанно (single-source гейта — xtask).
 - **Дизайн анимации — DONE как документ** (`docs/animation-design.md`):
   объектная (фаза A, S) + скелетная (фазы B–E, M–L), CPU-скининг
-  первым, GPU — позже; стык с glTF-треком расписан. Кода нет.
+  первым, GPU — позже; стык с glTF-треком расписан. Код фаз A–C и E есть (см. `PLAN.md`).
 - **Волна 2 — DONE (проверено): `ornis-input` + `ornis-gltf` +
   `ornis-gameplay` + объектная анимация.**
   Gameplay извлечён из core под корень (`RenderWorldView` удалён);

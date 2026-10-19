@@ -23,6 +23,9 @@ use gltf::animation::Property;
 use gltf::animation::util::ReadOutputs;
 
 use crate::ImportStats;
+use crate::LoadedJointRest;
+use crate::geom;
+use crate::import::local_matrix;
 use crate::model::NodeIdx;
 
 /// Squared length below which a quaternion is treated as degenerate.
@@ -158,6 +161,9 @@ pub struct LoadedSkelClip {
 pub struct LoadedAnimTrack {
     /// Animated model node.
     pub node: NodeIdx,
+    /// Authored local transform of the node: the reset pose the track
+    /// blends toward when weighted or crossfaded (glTF node transform).
+    pub rest: LoadedJointRest,
     /// Translation keys; empty means "leave translation untouched".
     pub translation: LoadedKeyTrack<[f32; 3]>,
     /// Rotation keys; empty means "leave rotation untouched".
@@ -181,6 +187,34 @@ pub struct LoadedAnimClip {
     /// Per-node tracks in glTF document-node order. Each [`LoadedAnimTrack::node`]
     /// is a [`NodeIdx`](crate::NodeIdx), including mesh-less parents.
     pub tracks: Vec<LoadedAnimTrack>,
+}
+
+/// Authored local transform per glTF node index, decomposed the same way
+/// as the model node transforms (so a rest pose matches its placement).
+fn node_rests(document: &Document) -> HashMap<usize, LoadedJointRest> {
+    document
+        .nodes()
+        .map(|node| {
+            let (translation, rotation, scale) = geom::decompose(&local_matrix(&node.transform()));
+            (
+                node.index(),
+                LoadedJointRest {
+                    translation,
+                    rotation,
+                    scale,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Identity rest for a node the document does not list (never expected).
+fn identity_rest() -> LoadedJointRest {
+    LoadedJointRest {
+        translation: [0.0; 3],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        scale: [1.0; 3],
+    }
 }
 
 /// Builds the node→joint map from the document skins (first skin wins).
@@ -222,6 +256,7 @@ pub fn assemble_clips(
     node_to_model: &HashMap<usize, NodeIdx>,
     stats: &mut ImportStats,
 ) -> (Vec<LoadedSkelClip>, Vec<LoadedAnimClip>) {
+    let rests = node_rests(document);
     let mut skel_clips = Vec::new();
     let mut anim_clips = Vec::new();
     for (index, animation) in document.animations().enumerate() {
@@ -240,7 +275,8 @@ pub fn assemble_clips(
             };
             assembly.push(node, keys, node_to_joint.contains_key(&node));
         }
-        let (joint_tracks, object_tracks) = assembly.into_tracks(node_to_joint, node_to_model);
+        let (joint_tracks, object_tracks) =
+            assembly.into_tracks(node_to_joint, node_to_model, &rests);
         let duration = track_duration(&joint_tracks, &object_tracks);
         let mut emitted = false;
         if !joint_tracks.is_empty() {
@@ -373,6 +409,7 @@ impl ClipAssembly {
         self,
         node_to_joint: &HashMap<usize, usize>,
         node_to_model: &HashMap<usize, NodeIdx>,
+        rests: &HashMap<usize, LoadedJointRest>,
     ) -> (Vec<LoadedJointTrack>, Vec<LoadedAnimTrack>) {
         let mut staged: Vec<(usize, JointPart)> = self.joints.into_iter().collect();
         staged.sort_by_key(|(node, _)| *node);
@@ -412,6 +449,7 @@ impl ClipAssembly {
             // paths stay empty tracks via the constructors below.
             entities.push(LoadedAnimTrack {
                 node: model_node,
+                rest: rests.get(&node).copied().unwrap_or_else(identity_rest),
                 translation: part
                     .translation
                     .unwrap_or_else(|| LoadedKeyTrack::linear(Vec::new())),
