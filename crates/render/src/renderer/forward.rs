@@ -21,6 +21,7 @@ pub(super) fn forward_ibl_entries<'a>(
     shadow_cube_array_view: &'a wgpu::TextureView,
     csm_array_view: &'a wgpu::TextureView,
     ibl: &'a crate::ibl::IblTargets,
+    clusters: &'a ClusteredLights,
 ) -> Vec<wgpu::BindGroupEntry<'a>> {
     shaders::bind_group_entries(&shaders::pbr_generated::PBR_RESOURCES, |r| match r.name {
         "camera" => Some(camera.as_entire_binding()),
@@ -32,7 +33,7 @@ pub(super) fn forward_ibl_entries<'a>(
         "shadow_sampler" => Some(wgpu::BindingResource::Sampler(shadow_sampler)),
         "shadow_cube_tex" => Some(wgpu::BindingResource::TextureView(shadow_cube_array_view)),
         "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => ibl.binding(r.name),
-        _ => None,
+        _ => clusters.entry(r.name),
     })
     .unwrap_or_default()
 }
@@ -243,6 +244,7 @@ impl Renderer3D {
         shadow_cube_array_view: &wgpu::TextureView,
         csm_array_view: &wgpu::TextureView,
         ibl: &crate::ibl::IblTargets,
+        clusters: &ClusteredLights,
         width: u32,
         height: u32,
         sample_count: u32,
@@ -278,7 +280,7 @@ impl Renderer3D {
                         "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
                             ibl.binding(r.name)
                         }
-                        _ => None,
+                        _ => clusters.entry(r.name),
                     },
                 )
                 .unwrap_or_default(),
@@ -564,6 +566,7 @@ impl Renderer3D {
         clear_depth: bool,
     ) {
         self.encode_ibl_if_needed(encoder);
+        self.dispatch_light_clusters(encoder);
         let depth_ops = wgpu::Operations {
             load: if clear_depth {
                 wgpu::LoadOp::Clear(1.0)
@@ -633,6 +636,7 @@ impl Renderer3D {
         customs: &[CustomGbufferDraw<'_>],
     ) {
         self.encode_ibl_if_needed(encoder);
+        self.dispatch_light_clusters(encoder);
         let depth_ops = wgpu::Operations {
             load: if clear_depth {
                 wgpu::LoadOp::Clear(1.0)
@@ -725,6 +729,7 @@ impl Renderer3D {
             return;
         };
         self.encode_ibl_if_needed(encoder);
+        self.dispatch_light_clusters(encoder);
         // The bind group is rebuilt per frame: the material buffer may have
         // grown and the bound set may have changed. Binding numbers come
         // from the table; only the name → live resource mapping is here.
@@ -776,7 +781,7 @@ impl Renderer3D {
                     "metallic_roughness_tex" => Some(wgpu::BindingResource::TextureView(data_view)),
                     "emissive_tex" => Some(wgpu::BindingResource::TextureView(emissive_view)),
                     "material_sampler" => Some(wgpu::BindingResource::Sampler(&pass.sampler)),
-                    _ => None,
+                    _ => self.clusters.entry(r.name),
                 },
             )
             .unwrap_or_default(),

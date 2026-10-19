@@ -44,6 +44,9 @@ impl Renderer3D {
         let height = surface_config.height.max(1);
 
         let buffers = Self::create_core_buffers(device, max_objects, max_materials);
+        // Clustered-light state binds the shared camera buffer, so it is
+        // created before every pass bind group that resolves its names.
+        let clusters = ClusteredLights::new(device, &buffers.camera);
         let (shadow_maps, shadow_views, shadow_array_view, shadow_vp_buffers, shadow_sampler) =
             Self::create_shadow_targets(device);
         let (shadow_cube_maps, shadow_cube_views, shadow_cube_array_view, shadow_cube_vp_buffers) =
@@ -61,6 +64,7 @@ impl Renderer3D {
             &shadow_cube_array_view,
             &csm_array_view,
             &ibl,
+            &clusters,
         );
         let pipeline =
             Self::create_pbr_pipeline(device, surface_config, sample_count, &bind_group_layout);
@@ -115,6 +119,7 @@ impl Renderer3D {
             &shadow_cube_array_view,
             &csm_array_view,
             &ibl,
+            &clusters,
             width,
             height,
             sample_count,
@@ -201,6 +206,12 @@ impl Renderer3D {
                 dropped_lights: 0,
                 dropped_shadows: 0,
             }),
+            clusters,
+            clustered_enabled: std::sync::atomic::AtomicBool::new(false),
+            last_cluster_stats: std::sync::RwLock::new(ClusterLightStats {
+                clustered: 0,
+                dropped: 0,
+            }),
             shadow_cube_maps,
             shadow_cube_views,
             shadow_cube_array_view,
@@ -246,6 +257,7 @@ impl Renderer3D {
                 &this.shadow_cube_array_view,
                 &this.csm_array_view,
                 &this.ibl,
+                &this.clusters,
                 this.width,
                 this.height,
                 this.sample_count,
@@ -334,6 +346,7 @@ impl Renderer3D {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_pbr_bind_group(
         device: &wgpu::Device,
         buffers: &CoreBuffers,
@@ -342,6 +355,7 @@ impl Renderer3D {
         shadow_cube_array_view: &wgpu::TextureView,
         csm_array_view: &wgpu::TextureView,
         ibl: &crate::ibl::IblTargets,
+        clusters: &ClusteredLights,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
         // Layout entries come from the pass resource table.
         let bgl_entries: Vec<wgpu::BindGroupLayoutEntry> = shaders::pbr_generated::PBR_RESOURCES
@@ -373,7 +387,7 @@ impl Renderer3D {
                     "prefilter_cube" | "irradiance_cube" | "brdf_lut" | "ibl_sampler" => {
                         ibl.binding(r.name)
                     }
-                    _ => None,
+                    _ => clusters.entry(r.name),
                 }
             })
             .unwrap_or_default(),

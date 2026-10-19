@@ -187,13 +187,14 @@ impl Renderer3D {
                     "ao_tex" => Some(wgpu::BindingResource::TextureView(
                         ao.unwrap_or_else(|| self.ao_white_view()),
                     )),
-                    _ => None,
+                    _ => self.clusters.entry(r.name),
                 },
             )
             .unwrap_or_default(),
         });
 
         self.encode_ibl_if_needed(encoder);
+        self.dispatch_light_clusters(encoder);
         self.encode_ao_white_if_needed(encoder);
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lighting pass"),

@@ -52,6 +52,8 @@ fn custom_quad_renders_nonempty_pixels_distinct_from_empty() {
             max_objects: 256,
             max_materials: 64,
             indirect_draw: false,
+            clustered_lights: false,
+
             material_anisotropy: crate::AnisotropyLevel::DEFAULT,
         },
     );

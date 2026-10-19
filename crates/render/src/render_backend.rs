@@ -43,6 +43,13 @@ pub struct RenderBackendConfig {
     /// with one `draw_indexed_indirect`; `false` (default) keeps the
     /// direct `draw_indexed` path. Shadows always draw directly.
     pub indirect_draw: bool,
+    /// Opt-in clustered point/spot lighting (#130): point/spot lights
+    /// beyond the uniform window
+    /// ([`crate::renderer::MAX_LIGHTS`]) reach pixels through a
+    /// per-cluster GPU assignment instead of being dropped;
+    /// `false` (default) keeps every frame bit-identical to the legacy
+    /// uniform window.
+    pub clustered_lights: bool,
     /// Anisotropic level of the textured-forward material sampler.
     ///
     /// [`AnisotropyLevel::DEFAULT`] (16) is the project default. The value
@@ -72,6 +79,7 @@ impl Default for RenderBackendConfig {
             max_objects: 256,
             max_materials: 64,
             indirect_draw: false,
+            clustered_lights: false,
             material_anisotropy: AnisotropyLevel::DEFAULT,
         }
     }
@@ -171,6 +179,7 @@ pub fn create_render_backend(
         crate::renderer::Renderer3D::new(device, &config.surface_config, config.sample_count);
     renderer.set_exposure(config.exposure);
     renderer.set_indirect_draw(config.indirect_draw);
+    renderer.set_clustered_lights(config.clustered_lights);
     renderer.set_material_anisotropy(device, config.material_anisotropy);
     Box::new(renderer)
 }

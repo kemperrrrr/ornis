@@ -53,6 +53,8 @@ fn shadowed_point_without_occluder_has_no_acne() {
             max_objects: 256,
             max_materials: 64,
             indirect_draw: false,
+            clustered_lights: false,
+
             material_anisotropy: crate::AnisotropyLevel::DEFAULT,
         },
     );

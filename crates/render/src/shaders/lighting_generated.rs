@@ -14,7 +14,7 @@ use super::{
     Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d,
     Texture2dUint, TextureCube, naga_ir, wgsl_decl,
 };
-use crate::renderer::{CameraUniform, GpuLight, LightingUniform};
+use crate::renderer::{CameraUniform, ClusterParams, ClusterSpan, GpuLight, LightingUniform};
 use crate::shaders::math;
 use ornis_core::material::OpenPBRMaterial;
 use ornis_macros::stage;
@@ -32,11 +32,16 @@ fn lighting_header_type(
     camera: naga::Handle<naga::Type>,
     lighting: naga::Handle<naga::Type>,
     material: naga::Handle<naga::Type>,
+    cluster: ClusterHeaderTypes,
 ) -> naga::Handle<naga::Type> {
     match name {
         "camera" => camera,
         "lighting" => lighting,
         "materials" => material,
+        "cluster_params" => cluster.params,
+        "cluster_grid" => cluster.span,
+        "clustered_lights" => cluster.light,
+        "cluster_light_indices" => cluster.u32,
         _ => camera,
     }
 }
@@ -62,16 +67,27 @@ fn add_lighting_global(
     camera: naga::Handle<naga::Type>,
     lighting: naga::Handle<naga::Type>,
     material: naga::Handle<naga::Type>,
+    cluster_types: ClusterHeaderTypes,
 ) {
     naga_ir::add_global(
         module,
-        lighting_header_type(resource.name, camera, lighting, material),
+        lighting_header_type(resource.name, camera, lighting, material, cluster_types),
         resource,
         per_sample_flag(
             sample_count,
             keeps_per_sample(resource.name, &resource.kind),
         ),
     );
+}
+
+/// Cluster binding types for the lighting header (see
+/// [`lighting_wgsl_header_for_samples`]).
+#[derive(Clone, Copy)]
+struct ClusterHeaderTypes {
+    params: naga::Handle<naga::Type>,
+    span: naga::Handle<naga::Type>,
+    light: naga::Handle<naga::Type>,
+    u32: naga::Handle<naga::Type>,
 }
 
 fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
@@ -82,8 +98,34 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
     let _light = GpuLight::naga_add_type(&mut module);
     let lighting = LightingUniform::naga_add_type(&mut module);
     let mat = naga_ir::openpbr_type(&mut module);
+    // Cluster binding types (#130): the params/span structs (same
+    // derives), the Light handle above, and the plain `u32` element of
+    // the index-list array.
+    let cluster_types = ClusterHeaderTypes {
+        params: ClusterParams::naga_add_type(&mut module),
+        span: ClusterSpan::naga_add_type(&mut module),
+        light: _light,
+        u32: module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Scalar(naga::Scalar {
+                    kind: naga::ScalarKind::Uint,
+                    width: std::mem::size_of::<u32>() as u8,
+                }),
+            },
+            naga::Span::default(),
+        ),
+    };
     for r in LIGHTING_RESOURCES {
-        add_lighting_global(&mut module, sample_count, &r, cam, lighting, mat);
+        add_lighting_global(
+            &mut module,
+            sample_count,
+            &r,
+            cam,
+            lighting,
+            mat,
+            cluster_types,
+        );
     }
     naga_ir::write_module(&module, &LIGHTING_RESOURCES)
 }
@@ -91,7 +133,7 @@ fn lighting_wgsl_header_for_samples(sample_count: u32) -> String {
 /// Resource layout of the deferred-lighting pass: where each resource
 /// binds, when it is visible, under what name. Type names come from the
 /// Rust side (`WGSL_NAME` / `OPENPBR_WGSL_NAME`) — never retyped.
-pub const LIGHTING_RESOURCES: [Resource; 19] = [
+pub const LIGHTING_RESOURCES: [Resource; 23] = [
     Resource {
         group: 0,
         binding: 0,
@@ -242,6 +284,38 @@ pub const LIGHTING_RESOURCES: [Resource; 19] = [
         visibility: wgpu::ShaderStages::FRAGMENT,
         name: "csm_tex",
         kind: ResourceKind::TextureDepthArray,
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 19,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "cluster_params",
+        kind: ResourceKind::Uniform(ClusterParams::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 20,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "clustered_lights",
+        kind: ResourceKind::StorageReadArray(GpuLight::WGSL_NAME),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 21,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "cluster_light_indices",
+        kind: ResourceKind::StorageReadArray("u32"),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 22,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        name: "cluster_grid",
+        kind: ResourceKind::StorageReadArray(ClusterSpan::WGSL_NAME),
         min_size: None,
     },
 ];
@@ -426,8 +500,18 @@ fn shade_lit(
     );
     let t = normalize(cross(n, Vec3::new(0.0, 1.0, 0.0)) + Vec3::new(0.0, 0.0, EPS));
     let b = cross(n, t);
-    for i in 0u..lighting.light_count {
-        let light = lighting.lights[i];
+    // Clustered window (#130): head slots read the uniform-window
+    // records from the cluster light storage (byte-identical to
+    // `lighting.lights`), cluster slots index this pixel's cluster
+    // list. `span.y` is zero while clustering is off, so the window is
+    // exactly the legacy `light_count` loop.
+    let span = cluster_light_span(world_pos);
+    let total = lighting.light_count + span.y;
+    for k in 0u..total {
+        let mut light = clustered_lights[k];
+        if k >= lighting.light_count {
+            light = clustered_lights[cluster_light_indices[span.x + (k - lighting.light_count)]];
+        }
         let kind = light.kind.x;
         // Point/spot: vector from the surface to the light + range cutoff.
         // Directionals keep the legacy infinite-light path (pixel-identical).
@@ -907,7 +991,7 @@ mod tests {
     fn lighting_resources_drive_bgl_and_wgsl() {
         use super::super::{bgl_entry, resource_decl};
         use super::LIGHTING_RESOURCES;
-        assert_eq!(LIGHTING_RESOURCES.len(), 19);
+        assert_eq!(LIGHTING_RESOURCES.len(), 23);
         for r in LIGHTING_RESOURCES {
             let decl = resource_decl(&r);
             assert!(decl.starts_with(&format!("@group({}) @binding({}) ", r.group, r.binding)));
@@ -941,7 +1025,7 @@ mod tests {
         let mat = src.find("struct OpenPBRMaterial").expect("OpenPBR");
         let b9 = src.find("lighting_sampler").expect("bindings");
         assert!(cam < light && light < lighting && lighting < mat && mat < b9);
-        assert_eq!(src.matches("@binding(").count(), 19);
+        assert_eq!(src.matches("@binding(").count(), 23);
     }
 
     /// The translated fragment entry must keep the legacy shape: g-buffer
@@ -958,7 +1042,9 @@ mod tests {
         assert!(entry.contains("shade_lit("));
         let src = wgsl_source();
         assert!(src.contains("discard;"));
-        assert!(src.contains("for (var i: u32 = 0; i < lighting.light_count; i = i + 1)"));
+        assert!(src.contains("for (var k: u32 = 0; k < total; k = k + 1)"));
+        assert!(src.contains("var light = clustered_lights[k];"));
+        assert!(src.contains("cluster_light_indices[span.x + (k - lighting.light_count)]"));
         assert!(src.contains("continue;"));
         assert!(src.contains("let base_bsdf = evaluate_base_layer("));
         assert!(src.contains(

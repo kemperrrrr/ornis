@@ -409,6 +409,7 @@ async fn run(scene: &Scene, out_path: &str) {
         max_objects: MAX_OBJECTS,
         max_materials: MAX_MATERIALS,
         indirect_draw: false,
+        clustered_lights: false,
         material_anisotropy: ornis_render::AnisotropyLevel::DEFAULT,
     };
     let mut renderer: Box<dyn RenderBackend> = create_render_backend(&device, &backend_config);
@@ -438,7 +439,6 @@ async fn run(scene: &Scene, out_path: &str) {
     print_instance_dump(&instances);
 
     // ── Render ────────────────────────────────────────────────────────
-    let bytes_per_pixel = BYTES_PER_PIXEL;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("probe encoder"),
     });
@@ -452,11 +452,11 @@ async fn run(scene: &Scene, out_path: &str) {
         &mesh,
         instances.len() as u32,
     );
-    let pixels = read_back_pixels(&device, &queue, encoder, &target_texture, bytes_per_pixel);
+    let pixels = read_back_pixels(&device, &queue, encoder, &target_texture, BYTES_PER_PIXEL);
 
     // ── Save PNG ──────────────────────────────────────────────────────
     save_png(out_path, &pixels);
 
     // Quick pixel sanity samples.
-    log_pixel_samples(&pixels, bytes_per_pixel);
+    log_pixel_samples(&pixels, BYTES_PER_PIXEL);
 }
