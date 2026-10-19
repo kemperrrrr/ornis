@@ -11,7 +11,7 @@ use ornis_animation::{
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::{Clamped01, Seconds};
-use ornis_core::{Engine, Entity, SmartStore, Stage};
+use ornis_core::{Engine, Entity, SmartStore, Stage, Transform};
 
 fn engine() -> Engine {
     let mut engine = Engine::new();
@@ -383,4 +383,35 @@ fn animator_stop_cancels_a_running_crossfade() {
 
     animator(&mut engine, root).stop().unwrap();
     assert!(!has_fade(&engine, root), "stop cancels the fade");
+}
+
+/// A layer alone drives joint 1, which the base clip never touches. The node
+/// bound to that joint must follow the blended pose, not keep its bind pose.
+#[test]
+fn layer_only_joint_moves_its_bound_node() {
+    let mut engine = engine();
+    let node = store_mut(&mut engine).create_entity();
+    put(&mut engine, node, Transform::IDENTITY);
+    let root = rig(&mut engine, vec![None, Some(JointId::from_raw(0))]);
+
+    let base = add_clip(&mut engine, clip("idle", vec![constant(0, Vec3::ZERO)]));
+    let wave_track = JointTrack {
+        node: Some(node),
+        ..constant(1, Vec3::new(4.0, 0.0, 0.0))
+    };
+    let wave = add_clip(&mut engine, clip("wave", vec![wave_track]));
+    let mask = add_mask(&mut engine, "all", vec![Clamped01::ONE, Clamped01::ONE]);
+    put(&mut engine, root, player(base, 1.0));
+    put(&mut engine, root, layer(wave, mask));
+
+    engine.run_frame(0.5);
+
+    let moved = store_ref(&engine)
+        .read_lane::<Transform>()
+        .expect("lane registered")
+        .get(node)
+        .expect("node keeps its transform")
+        .translation;
+    assert!(close(moved, Vec3::new(4.0, 0.0, 0.0)), "got {moved:?}");
+    assert_origin(&engine, root, 1, Vec3::new(4.0, 0.0, 0.0));
 }
