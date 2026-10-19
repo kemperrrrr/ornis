@@ -1097,14 +1097,12 @@ mod tests {
         // A disjoint change plus growth would additionally catch a
         // trailing-extension bug, but that needs a larger-capacity culler
         // than this scene; the unit cases above cover the pure diff.
-        // qual:allow(dry, fragment) reason: "same headless-GPU skip preamble as every other GPU test in this module; the scenes and assertions that matter differ"
         let Some((device, queue)) = try_device() else {
             return;
         };
         let (mut instances, view_proj, _) = cull_test_scene();
         let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
         cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
-        // qual:allow(dry, fragment) reason: "the moved-visible scene is deliberately the same across both staging entries so a failure names the path, not the fixture"
         let offscreen = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
         instances[0].model_matrix = offscreen;
         instances[3].model_matrix = offscreen;
@@ -1138,7 +1136,6 @@ mod tests {
     /// half the submit path takes, where the review found the gap.
     #[test]
     fn compact_records_tracks_moved_instances() {
-        // qual:allow(dry, fragment) reason: "same headless-GPU skip preamble as every other GPU test in this module; the scenes and assertions that matter differ"
         let Some((device, queue)) = try_device() else {
             return;
         };
@@ -1172,7 +1169,6 @@ mod tests {
         // Index 0, an index above zero and an adjacent pair, mirroring
         // the coverage [`gpu_compaction_tracks_moved_instances`] gives
         // [`Culler::compact`].
-        // qual:allow(dry, fragment) reason: "the moved-visible scene is deliberately the same across both staging entries so a failure names the path, not the fixture"
         let offscreen = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
         instances[0].model_matrix = offscreen;
         instances[3].model_matrix = offscreen;

@@ -38,7 +38,6 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
 /// not `"0"`; the CI `test` shard sets `=1`) a missing adapter panics
 /// instead of skipping, so it can never turn a GPU gate into a pass;
 /// unset or explicit `"0"` keeps the skip.
-// qual:allow(dry, duplicate) reason: "same headless adapter/device bootstrap as the culling bench's device(); that bench is a separate crate target and cannot share this test-only helper"
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
