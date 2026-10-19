@@ -55,6 +55,7 @@ const FAR: f32 = 100.0;
 /// tenth of the scene.
 const VISIBLE_PART_DENOM: usize = 10;
 
+// qual:allow(dry, duplicate) reason: "same headless adapter/device bootstrap as renderer::test_util::try_device; the bench is a separate crate target and cannot reach test-only helpers"
 async fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -124,6 +125,7 @@ fn read_instance_count(
     queue: &wgpu::Queue,
     args: &wgpu::Buffer,
 ) -> Option<u32> {
+    // qual:allow(dry, fragment) reason: "same headless args-buffer readback preamble as gpu_culling's cull_test_read_args; the bench is a separate crate target and cannot share the test helper"
     let args_bytes = INDIRECT_ARGS_WORD_COUNT as u64 * INDIRECT_ARGS_WORD_BYTES;
     let staging = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("culling bench args readback"),
