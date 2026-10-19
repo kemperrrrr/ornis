@@ -556,3 +556,40 @@ fn opposite_field_orders_run_concurrently_without_deadlock() {
         assert_eq!(got.velocity, expected);
     }
 }
+
+/// The alignment cache follows membership: after the velocity lane loses one
+/// entity, the next run must skip that entity. Reusing the stale fast path
+/// would pair lanes by position and move the wrong rows.
+#[test]
+fn alignment_cache_follows_membership_changes() {
+    let (resources, entities) =
+        resources_with_motes(&[mote(0.0, 1.0), mote(10.0, 1.0), mote(20.0, 1.0)]);
+    let system = IntegrateMoteSystem::new();
+    system.run(&resources);
+
+    {
+        let store = resources.get::<SmartStore>().expect("store");
+        store
+            .write_lane::<Mote__velocity__PackLane>()
+            .expect("velocity lane")
+            .remove(entities[1]);
+    }
+    system.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let position = store
+        .read_lane::<Mote__position__PackLane>()
+        .expect("position lane");
+    assert_eq!(
+        position.get(entities[0]),
+        Some(&Mote__position__PackLane(1.0))
+    );
+    assert_eq!(
+        position.get(entities[1]),
+        Some(&Mote__position__PackLane(10.5))
+    );
+    assert_eq!(
+        position.get(entities[2]),
+        Some(&Mote__position__PackLane(21.0))
+    );
+}
