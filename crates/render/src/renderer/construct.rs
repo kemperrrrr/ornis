@@ -148,8 +148,6 @@ impl Renderer3D {
             camera_buffer: buffers.camera,
             per_object_buffer: std::sync::RwLock::new(buffers.per_object),
             previous_instance_models: std::sync::RwLock::new(std::collections::HashMap::new()),
-            previous_instance_models_frame: std::sync::RwLock::new(Vec::new()),
-            previous_instance_motion_valid_frame: std::sync::RwLock::new(Vec::new()),
             material_buffer: std::sync::RwLock::new(buffers.material),
             lighting_buffer: buffers.lighting,
             _bind_group_layout: bind_group_layout,

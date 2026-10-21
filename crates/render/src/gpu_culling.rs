@@ -43,12 +43,11 @@
 use glam::Mat4;
 use glam::Vec4;
 
+use crate::antialias::MotionValidity;
 use crate::camera::Frustum;
 use crate::extraction::instance_sphere;
 use crate::renderer::InstanceData;
 use crate::renderer::PerObjectGpu;
-use crate::renderer::StagedCustomMesh;
-use crate::renderer::staging_capacity_for_instances;
 
 /// Threads per compute workgroup in [`CULL_COMPUTE_WGSL`].
 pub const CULL_WORKGROUP_SIZE: u32 = 64;
@@ -255,32 +254,19 @@ pub(crate) fn stage_next_instances(
 
 /// Convert CPU instances into GPU records appended to `out`: one
 /// straight pass, no branches (pure delegation for the gate — the
-/// caller owns reuse and allocation). Shared by the direct upload and
-/// the submit path so a frame converts once.
+/// caller owns reuse and allocation). The previous transform falls back
+/// to the current one and the motion flag to valid, so a record built
+/// without the temporal history still describes a well-formed instance.
 pub(crate) fn convert_instances(out: &mut Vec<PerObjectGpu>, instances: &[InstanceData]) {
     out.extend(instances.iter().map(|inst| {
         let mut record = PerObjectGpu::default();
         record.model = inst.model_matrix.to_cols_array_2d();
         record.normal_matrix = inst.normal_matrix.to_cols_array_2d();
+        record.previous_model = inst.model_matrix.to_cols_array_2d();
         record.material_index = inst.material_index;
+        record.motion_valid = MotionValidity::Valid.shader_flag();
         record
     }));
-}
-
-/// Merge sphere and custom instances and convert them once: the merged
-/// records feed the direct upload, and the sphere prefix (customs
-/// follow in dense lane order) stages the shared batch without
-/// converting twice. One allocation, no branches.
-pub(crate) fn merge_and_convert_instances(
-    spheres: &[InstanceData],
-    customs: &[StagedCustomMesh],
-) -> Vec<PerObjectGpu> {
-    let mut instances = Vec::with_capacity(spheres.len().saturating_add(customs.len()));
-    instances.extend_from_slice(spheres);
-    instances.extend(customs.iter().map(|entry| entry.instance));
-    let mut converted = Vec::with_capacity(staging_capacity_for_instances(instances.len()));
-    convert_instances(&mut converted, &instances);
-    converted
 }
 
 /// Zeroes the `instance_count` word ([`INSTANCE_COUNT_WORD`]) of an
@@ -377,7 +363,6 @@ fn cull_instances(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 mod culler;
 
-pub(crate) use culler::PreviousInstanceData;
 pub use culler::{Culler, CullerError};
 
 #[cfg(test)]
@@ -789,10 +774,12 @@ mod tests {
         let Some((device, queue)) = try_device() else {
             return;
         };
-        // The shader `PerObject` is the 144-byte `PerObjectGpu` layout
-        // (two `mat4x4` + material `u32` + 3 pad words).
-        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 144);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 128);
+        // The shader `PerObject` is the 208-byte `PerObjectGpu` layout
+        // (three `mat4x4` + material `u32` + motion `u32` + 2 pad words).
+        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 208);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, previous_model), 128);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 192);
+        assert_eq!(std::mem::offset_of!(PerObjectGpu, motion_valid), 196);
         let (mut instances, view_proj, expected) = cull_test_scene();
         // Workgroup 0 covers indices `0..CULL_WORKGROUP_SIZE`, so three
         // spheres straddling that boundary put the visible set across two

@@ -556,6 +556,79 @@ impl Renderer3D {
         batch: BatchDraw<'_>,
         customs: &[CustomGbufferDraw<'_>],
     ) {
+        let mut color_attachments = vec![
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.albedo,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Albedo),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.normal,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::Normal),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.material_id,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.world_position,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::WorldPosition),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+            Some(wgpu::RenderPassColorAttachment {
+                view: g.material_params,
+                depth_slice: None,
+                resolve_target: self.gbuffer_resolve_target(GbufferResolveSlot::MaterialParams),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ];
+        let motion = g.motion.is_some() && g.previous_depth.is_some();
+        if let (Some(motion), Some(previous_depth)) = (g.motion, g.previous_depth) {
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: motion,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
+            color_attachments.push(Some(wgpu::RenderPassColorAttachment {
+                view: previous_depth,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }));
+        } else {
+            // The non-temporal pipeline has trailing `None` targets at
+            // locations 5 and 6; both matching attachment slots stay absent.
+            color_attachments.push(None);
+            color_attachments.push(None);
+        }
         if let BatchDraw::Indirect { culler } = batch {
             // The compaction dispatch rides this frame encoder (no
             // extra submit): the draw below consumes the culler's

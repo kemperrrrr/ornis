@@ -338,11 +338,6 @@ pub struct Renderer3D {
     /// Model transforms from the preceding frame, keyed by stable entity
     /// identity so dense-lane reordering cannot transfer motion to another object.
     previous_instance_models: std::sync::RwLock<HashMap<Entity, glam::Mat4>>,
-    /// Previous transforms used by the most recent upload, aligned to that
-    /// frame's instance order for the indirect culler.
-    previous_instance_models_frame: std::sync::RwLock<Vec<glam::Mat4>>,
-    /// Motion-validity states aligned to `previous_instance_models_frame`.
-    previous_instance_motion_valid_frame: std::sync::RwLock<Vec<crate::antialias::MotionValidity>>,
     material_buffer: std::sync::RwLock<wgpu::Buffer>,
     lighting_buffer: wgpu::Buffer,
     _bind_group_layout: wgpu::BindGroupLayout,

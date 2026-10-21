@@ -91,16 +91,6 @@ struct CullerStaging {
     next: Vec<PerObjectGpu>,
 }
 
-/// Previous per-instance transforms passed to the GPU culler.
-///
-/// The slices follow the same instance order; a missing entry falls back
-/// to the current transform and valid motion.
-#[derive(Clone, Copy)]
-pub(crate) struct PreviousInstanceData<'a> {
-    pub(crate) models: &'a [Mat4],
-    pub(crate) motion_validity: &'a [MotionValidity],
-}
-
 /// One buffer binding of [`CULL_COMPUTE_WGSL`].
 fn cull_bind_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -269,31 +259,6 @@ impl Culler {
         view_proj: &Mat4,
         index_count: u32,
         instances: &[InstanceData],
-    ) -> Result<(), CullerError> {
-        self.compact_with_previous(
-            device,
-            queue,
-            view_proj,
-            index_count,
-            instances,
-            PreviousInstanceData {
-                models: &[],
-                motion_validity: &[],
-            },
-        )
-    }
-
-    /// Like [`compact`](Self::compact), with previous transforms and their
-    /// per-instance validity used by the temporal g-buffer output. Empty or
-    /// short slices fall back to the current transform and valid state.
-    pub(crate) fn compact_with_previous(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view_proj: &Mat4,
-        index_count: u32,
-        instances: &[InstanceData],
-        previous: PreviousInstanceData<'_>,
     ) -> Result<(), CullerError> {
         if instances.len() > self.capacity as usize {
             return Err(CullerError::CapacityExceeded {

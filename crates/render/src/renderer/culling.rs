@@ -6,7 +6,6 @@ use super::PerObjectGpu;
 use super::Renderer3D;
 use super::read_lock;
 use super::write_lock;
-use crate::gpu_culling::PreviousInstanceData;
 use glam::Mat4;
 
 impl Renderer3D {
