@@ -257,7 +257,10 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 пишет явный вес IBL в `RenderLights` (куб не создаёт); пока его не звали, вес
 по-прежнему 0 без куба и 1 с кубом.
 `spawn_scene` — корень RON-сцены. Клип запускается через
-`entity_mut(root).animator()?.play(name)`, окно открывает `ornis::run`
+`play_animation(root, name, duration)` (именной старт с кроссфейдом для
+скелета и объектных треков; `duration = 0` — мгновенный рез) или через
+`entity_mut(root).animator()?.play(name)`; пауза/стоп/резюме —
+`pause_animation`/`stop_animation`/`resume_animation`. Окно открывает `ornis::run`
 с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет
 локальный `Transform` целевого узла (object-треки и суставы, отображённые
 через `node_to_entity`), поэтому дети двигаются распространением позы.

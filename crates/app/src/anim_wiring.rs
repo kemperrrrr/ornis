@@ -15,9 +15,9 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, ClipId, JointId, JointMask, JointPose,
-    JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer, Skeleton,
-    SkinnedMesh,
+    AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, JointId, JointMask,
+    JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer,
+    Skeleton, SkinnedMesh, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Entity, Seconds, SmartStore};
@@ -354,6 +354,161 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
         return true;
     }
     false
+}
+
+/// Why named playback ([`play_crossfade`]) could not start.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PlaybackError {
+    /// The entity has no [`Animator`] catalog and no [`AnimPlayer`] cursor.
+    #[error("entity has no animation player")]
+    Missing,
+    /// No indexed clip matches the requested name.
+    #[error("unknown clip `{name}`")]
+    UnknownClip {
+        /// Requested clip name.
+        name: String,
+    },
+}
+
+/// Starts `name` on `entity`, fading from whatever plays there now.
+///
+/// The host-facing driver over both playback topologies
+/// (`docs/animation-design.md` §5 «Дальше», п. 10): a character root
+/// carrying an [`Animator`] catalog starts the named skeletal clip on
+/// every target through
+/// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)
+/// — one fade implementation — and an object entity with an [`AnimPlayer`]
+/// cursor receives a typed [`AnimFade`](ornis_animation::AnimFade)
+/// crossfade to the named clip ([`fade_to_clip`]). A non-positive
+/// `duration` cuts without a fade, like
+/// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play).
+///
+/// Object names resolve through the playlist's [`Name`] — what
+/// [`wire_loaded_animation`] writes from the glTF animation name. Among
+/// same-named playlists the earliest-created one that tracks `entity`
+/// wins (the "first name wins" rule of the skeletal catalog).
+///
+/// # Errors
+///
+/// [`PlaybackError::Missing`] when `entity` carries neither catalog nor
+/// cursor (hand-built skeletal cursors without an [`Animator`] start
+/// through [`set_playing`] instead). [`PlaybackError::UnknownClip`] when
+/// `name` is not indexed.
+pub fn play_crossfade(
+    store: &mut SmartStore,
+    entity: Entity,
+    name: &str,
+    duration: Seconds,
+) -> Result<(), PlaybackError> {
+    if let Ok(mut animator) = try_animator(store, entity) {
+        return animator
+            .play_crossfade(name, duration)
+            .map_err(|err| match err {
+                AnimatorError::UnknownClip { name } => PlaybackError::UnknownClip { name },
+                AnimatorError::Missing => PlaybackError::Missing,
+            });
+    }
+    if store
+        .read_lane::<AnimPlayer>()
+        .is_none_or(|players| players.get(entity).is_none())
+    {
+        return Err(PlaybackError::Missing);
+    }
+    let clip =
+        object_clip_named(store, entity, name).ok_or_else(|| PlaybackError::UnknownClip {
+            name: name.to_owned(),
+        })?;
+    fade_to_clip(store, entity, clip, duration)
+}
+
+/// Object playlist holding an [`AnimClip`] that tracks `entity`, indexed
+/// by the playlist [`Name`]. The earliest-created match wins.
+fn object_clip_named(store: &SmartStore, entity: Entity, name: &str) -> Option<ClipId> {
+    let names = store.read_lane::<Name>()?;
+    let clips = store.read_cold_lane::<AnimClip>()?;
+    names
+        .entities
+        .iter()
+        .zip(&names.data)
+        .filter(|(_, label)| label.0 == name)
+        .map(|(playlist, _)| *playlist)
+        .filter(|playlist| {
+            clips
+                .get(*playlist)
+                .is_some_and(|clip| clip.tracks.iter().any(|track| track.entity == entity))
+        })
+        .min_by_key(|playlist| playlist.id())
+        .map(ClipId)
+}
+
+/// Crossfades `entity`'s object cursor to `clip` — the typed [`AnimFade`]
+/// input, so hosts never install the lane component themselves.
+///
+/// Snapshots the current [`AnimPlayer`] into [`AnimFade::from`] (its
+/// clock keeps advancing until the fade retires) and installs a fresh
+/// full-weight cursor on `clip` from time zero — the
+/// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)
+/// semantics for the object topology. A non-positive `duration`, a paused
+/// cursor, or a replay of an in-flight fade cuts without one and drops
+/// any [`AnimFade`] already on the entity.
+///
+/// # Errors
+///
+/// [`PlaybackError::Missing`] when `entity` has no [`AnimPlayer`].
+pub fn fade_to_clip(
+    store: &mut SmartStore,
+    entity: Entity,
+    clip: ClipId,
+    duration: Seconds,
+) -> Result<(), PlaybackError> {
+    let outgoing = store
+        .read_lane::<AnimPlayer>()
+        .and_then(|players| players.get(entity).copied())
+        .ok_or(PlaybackError::Missing)?;
+    store.register::<AnimPlayer>();
+    store.register::<AnimFade>();
+    if outgoing.playing && duration.get() > 0.0 {
+        store.insert(
+            entity,
+            AnimFade {
+                from: outgoing,
+                duration,
+                elapsed: Seconds::ZERO,
+            },
+        );
+    } else if let Some(mut fades) = store.write_lane::<AnimFade>() {
+        fades.remove(entity);
+    }
+    store.insert(
+        entity,
+        AnimPlayer {
+            clip,
+            time: 0.0,
+            speed: 1.0,
+            weight: 1.0,
+            playing: true,
+        },
+    );
+    Ok(())
+}
+
+/// Installs the overlay `layer` on a skeleton root — the typed
+/// [`SkelLayer`] input, so hosts never install the lane component
+/// themselves. At most one layer per root: `layer` replaces whatever
+/// sits there.
+///
+/// Returns whether `root` carries a [`Skeleton`] (the layer's anchor);
+/// nothing is written without one.
+pub fn set_skel_layer(store: &mut SmartStore, root: Entity, layer: SkelLayer) -> bool {
+    if store
+        .read_lane::<Skeleton>()
+        .is_none_or(|skeletons| skeletons.get(root).is_none())
+    {
+        return false;
+    }
+    store.register::<SkelLayer>();
+    store.insert(root, layer);
+    true
 }
 
 /// Wires animation from a loaded glTF scene into an already-spawned
@@ -1093,5 +1248,245 @@ mod tests {
         let animators = store.read_lane::<Animator>().unwrap();
         assert!(animators.get(root).is_some());
         assert!(animators.get(spawn.entities[0]).is_none());
+    }
+
+    /// Object playlist named `name` with one track on `target`, plus a
+    /// mid-flight player (`playing`, clock at `2.0`) so fades are visible.
+    fn object_scene(store: &mut SmartStore, name: &str, target: Entity) -> ClipId {
+        let playlist = store.create_entity();
+        store.insert(playlist, Name(name.to_string()));
+        store.insert_cold(
+            playlist,
+            AnimClip {
+                name: name.to_string(),
+                duration: 1.0,
+                looping: true,
+                tracks: vec![AnimTrack {
+                    entity: target,
+                    rest: JointTrs::IDENTITY,
+                    translation: KeyTrack::linear(Vec::new()),
+                    rotation: KeyTrack::linear(Vec::new()),
+                    scale: KeyTrack::linear(Vec::new()),
+                }],
+            },
+        );
+        let clip = ClipId(playlist);
+        store.insert(
+            target,
+            AnimPlayer {
+                clip,
+                time: 2.0,
+                speed: 1.0,
+                weight: 1.0,
+                playing: true,
+            },
+        );
+        clip
+    }
+
+    /// The facade starts named skeletal clips on every target and fades
+    /// replays from the outgoing cursor — the `AnimatorMut` behavior,
+    /// reached without touching the lanes by hand.
+    #[test]
+    fn play_crossfade_starts_named_skeletal_clips_and_fades_replays() {
+        use ornis_animation::SkelFade;
+        let loaded = skinned_scene(vec![named_clip("Walk_Loop")]);
+        let mut store = SmartStore::new();
+        let spawn = spawn_gltf_world(&mut store, &loaded);
+        let wiring = wire_loaded_animation(&mut store, &loaded, &spawn);
+        let hero = spawn.entities[0];
+        let root = wiring.roots[0];
+
+        play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("Walk_Loop");
+        let cursor = store
+            .read_lane::<SkelPlayer>()
+            .unwrap()
+            .get(root)
+            .copied()
+            .expect("cursor on the skeleton root");
+        assert!(cursor.playing);
+        assert_eq!(cursor.clip, wiring.clips["Walk_Loop"]);
+        assert!(
+            store
+                .read_lane::<SkelFade>()
+                .is_none_or(|fades| fades.get(root).is_none()),
+            "a first start has nothing to fade from"
+        );
+
+        play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("replay");
+        let fade = store
+            .read_lane::<SkelFade>()
+            .unwrap()
+            .get(root)
+            .copied()
+            .expect("fade on replay");
+        assert_eq!(fade.from.clip, wiring.clips["Walk_Loop"]);
+        assert_eq!(fade.duration, Seconds::new(0.25));
+    }
+
+    /// The object branch resolves the playlist by `Name` (the earliest
+    /// created wins on duplicates) and writes `AnimFade` plus a fresh
+    /// `AnimPlayer` — the typed inputs, not raw lane inserts.
+    #[test]
+    fn play_crossfade_fades_object_players_through_playlist_names() {
+        let mut store = SmartStore::new();
+        let target = store.create_entity();
+        let clip = object_scene(&mut store, "Wave", target);
+        let second = object_scene(&mut store, "Wave", target);
+        assert_ne!(clip, second);
+
+        play_crossfade(&mut store, target, "Wave", Seconds::new(0.5)).expect("Wave");
+        let player = store
+            .read_lane::<AnimPlayer>()
+            .unwrap()
+            .get(target)
+            .copied()
+            .expect("player");
+        assert_eq!(player.clip, clip, "the earliest-created playlist wins");
+        assert_eq!(player.time, 0.0);
+        assert!(player.playing);
+        let fade = store
+            .read_lane::<AnimFade>()
+            .unwrap()
+            .get(target)
+            .copied()
+            .expect("fade");
+        assert_eq!(fade.from.clip, second, "the outgoing cursor snapshot");
+        assert_eq!(fade.from.time, 2.0);
+        assert_eq!(fade.duration, Seconds::new(0.5));
+        assert_eq!(fade.elapsed, Seconds::ZERO);
+    }
+
+    /// Unknown names and catalog-less entities fail with typed errors.
+    #[test]
+    fn play_crossfade_reports_unknown_clips_and_missing_players() {
+        let mut store = SmartStore::new();
+        let target = store.create_entity();
+        object_scene(&mut store, "Wave", target);
+        assert_eq!(
+            play_crossfade(&mut store, target, "Nope", Seconds::new(0.5)),
+            Err(PlaybackError::UnknownClip {
+                name: "Nope".into()
+            })
+        );
+        assert_eq!(
+            play_crossfade(&mut store, Entity::new(999), "Wave", Seconds::new(0.5)),
+            Err(PlaybackError::Missing)
+        );
+
+        // A clip that exists but does not track the entity is not its name.
+        let bystander = store.create_entity();
+        store.insert(
+            bystander,
+            AnimPlayer {
+                clip: ClipId(store.create_entity()),
+                time: 0.0,
+                speed: 1.0,
+                weight: 1.0,
+                playing: true,
+            },
+        );
+        assert_eq!(
+            play_crossfade(&mut store, bystander, "Wave", Seconds::new(0.5)),
+            Err(PlaybackError::UnknownClip {
+                name: "Wave".into()
+            })
+        );
+    }
+
+    /// `fade_to_clip` cuts without a fade on a paused cursor or a
+    /// non-positive duration and drops any fade in flight — the
+    /// `AnimatorMut::start` rules for the object topology.
+    #[test]
+    fn fade_to_clip_cuts_without_a_fade_when_paused_or_zero() {
+        let mut store = SmartStore::new();
+        let target = store.create_entity();
+        let outgoing = object_scene(&mut store, "Wave", target);
+        let incoming = object_scene(&mut store, "Close", target);
+
+        // Zero duration: instant cut, no fade.
+        fade_to_clip(&mut store, target, incoming, Seconds::ZERO).expect("cut");
+        assert!(
+            store
+                .read_lane::<AnimFade>()
+                .is_none_or(|fades| fades.get(target).is_none())
+        );
+        assert_eq!(
+            store
+                .read_lane::<AnimPlayer>()
+                .unwrap()
+                .get(target)
+                .unwrap()
+                .clip,
+            incoming
+        );
+
+        // Paused cursor: no fade even with a positive duration.
+        store
+            .write_lane::<AnimPlayer>()
+            .unwrap()
+            .get_mut(target)
+            .unwrap()
+            .playing = false;
+        fade_to_clip(&mut store, target, outgoing, Seconds::new(0.5)).expect("cut");
+        assert!(
+            store
+                .read_lane::<AnimFade>()
+                .is_none_or(|fades| fades.get(target).is_none())
+        );
+
+        // An in-flight fade dies on the next cut.
+        fade_to_clip(&mut store, target, incoming, Seconds::new(0.5)).expect("fade");
+        assert!(store.read_lane::<AnimFade>().unwrap().get(target).is_some());
+        fade_to_clip(&mut store, target, outgoing, Seconds::ZERO).expect("cut");
+        assert!(
+            store
+                .read_lane::<AnimFade>()
+                .is_none_or(|fades| fades.get(target).is_none())
+        );
+
+        assert_eq!(
+            fade_to_clip(&mut store, Entity::new(999), incoming, Seconds::ZERO),
+            Err(PlaybackError::Missing)
+        );
+    }
+
+    /// `set_skel_layer` anchors on a `Skeleton` root: nothing is written
+    /// without one, one layer per root replaces in place.
+    #[test]
+    fn set_skel_layer_requires_a_skeleton_root() {
+        use ornis_animation::MaskId;
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        let playlist = store.create_entity();
+        let layer = SkelLayer {
+            player: SkelPlayer {
+                clip: ClipId(playlist),
+                time: Seconds::ZERO,
+                speed: Seconds::new(1.0),
+                weight: Clamped01::ONE,
+                playing: true,
+                looping: true,
+            },
+            mask: MaskId(playlist),
+        };
+
+        assert!(!set_skel_layer(&mut store, root, layer), "no Skeleton yet");
+        assert!(
+            store
+                .read_lane::<SkelLayer>()
+                .is_none_or(|layers| layers.get(root).is_none()),
+            "nothing is written without the anchor"
+        );
+
+        store.insert(
+            root,
+            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+        );
+        assert!(set_skel_layer(&mut store, root, layer));
+        assert_eq!(
+            store.read_lane::<SkelLayer>().unwrap().get(root),
+            Some(&layer)
+        );
     }
 }

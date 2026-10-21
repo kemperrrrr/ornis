@@ -131,6 +131,10 @@
      `JointMask` и `AnimFade` нет ни одного нетестового вызывателя — только
      регистрация лейнов (`crates/app/src/anim_wiring.rs:395-400`). Поэтому
      `qual:api` на `Animator::play_crossfade` стоит до первого прод-вызывателя.
+     **Шаги 1–2 сделаны (2026-10-21, #179):** `play_crossfade` и `AnimFade`
+     получили прод-вызов (`GameWorld::play_animation` → фасад
+     `anim_wiring::play_crossfade`), `qual:api` с `Animator::play_crossfade`
+     снят; `SkelLayer`/`JointMask` прод-вызывателя пока не имеют (ждут шага 3).
   2. **Общий `Animator`-фасад для объектов.** `Animator`
      (`crates/animation/src/animator.rs:105-223`) работает только со скелетным
      плейлистом (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`); у
@@ -139,6 +143,12 @@
      `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade` (сегодня —
      прямая вставка в лейн). Решение (2026-10-19): фасад в `anim_wiring`,
      не расширение `Animator` — порядок работ в п. 10.
+     **Сделано (2026-10-21, #179):** фасад `anim_wiring::play_crossfade`
+     (обе топологии; имена объектных клипов — по `Name` плейлиста),
+     `fade_to_clip` (типизированный `AnimFade`), `set_skel_layer`
+     (типизированный `SkelLayer`); `GameWorld::play_animation(entity, name,
+     duration)` — первый прод-вызов, резюме/пауза/стоп — `resume_animation`/
+     `pause_animation`/`stop_animation`.
   3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
      и любая комбинация из нескольких слоёв сейчас невозможна.
   4. **Осознанно отложено** (`docs/animation-design.md` §6): бленд-дерево, IK,
@@ -183,7 +193,8 @@
      (доступ к позам по времени + коррекция/IK), то есть логично после
       слоёв/общего API и — для warping — после IK, который тоже отложен (§6).
   10. **Шаги разблокировки гейта (порядок; решение 2026-10-19).**
-     - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`**, рядом с
+     - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`** ✅ (2026-10-21,
+       #179), рядом с
        `set_playing`/`rewind_player` (`:325,343`): `play_crossfade(store,
        entity, name, duration)` плюс типизированный вход для `SkelLayer`/`AnimFade`.
        Скелетная ветка делегирует в `AnimatorMut::play_crossfade` через
@@ -194,7 +205,8 @@
        объединяем, а ставим драйвер поверх каталога, как Godot `AnimationTree`
        над `AnimationPlayer` (общий базовый `AnimationMixer`) или Bevy
        `AnimationTransitions` отдельным компонентом от `AnimationPlayer`.
-     - **Шаг 2 — первый прод-вызывающий:** `GameWorld::play_animation`
+     - **Шаг 2 — первый прод-вызывающий:** ✅ (2026-10-21, #179)
+       `GameWorld::play_animation`
        (`crates/app/src/game_world.rs:131`) сейчас зовёт только `set_playing`
        (без имени и без фейда); после шага 1 он же снимает `qual:api`
        с `Animator::play_crossfade` (`crates/animation/src/animator.rs:119`).
