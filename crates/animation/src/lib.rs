@@ -492,22 +492,89 @@ struct LocalWrite {
     pose: SampledPose,
 }
 
-/// Model-space joint matrices plus the hierarchy nodes that clip writes.
-struct SampledClip {
-    matrices: Vec<Mat4>,
-    nodes: Vec<LocalWrite>,
-}
-
-/// Joint matrices and node writes collected before output lanes are locked.
-struct PoseBatch {
-    joints: Vec<JointMatrices>,
-    nodes: Vec<LocalWrite>,
-}
-
-/// Model matrices for one skeleton root.
-struct JointMatrices {
+/// One object entity's routed result before output lanes are locked.
+struct ObjWork {
     entity: Entity,
+    pose: SampledPose,
+    renderable: bool,
+}
+
+/// Bitset word width of [`FrozenBits`] (bits per `u64` slot).
+const FROZEN_WORD_BITS: usize = 64;
+
+/// Snapshot of physics-driven entities to skip this frame.
+///
+/// Bitset over live [`Entity::id`] slots: the per-cursor and per-fade skip
+/// tests are O(1), where the old `frozen.contains` scan cost
+/// O(entries × bodies) per frame. Live entities never share a slot, so the
+/// id alone is a sound key here.
+#[derive(Default)]
+struct FrozenBits {
+    bits: Vec<u64>,
+}
+
+impl FrozenBits {
+    /// Bitset of exactly `entities`.
+    fn from_entities(entities: &[Entity]) -> Self {
+        let mut out = Self::default();
+        for entity in entities {
+            out.insert(*entity);
+        }
+        out
+    }
+
+    /// Adds one entity to the snapshot.
+    fn insert(&mut self, entity: Entity) {
+        let id = entity.id() as usize;
+        let word = id / FROZEN_WORD_BITS;
+        if self.bits.len() <= word {
+            self.bits.resize(word + 1, 0);
+        }
+        self.bits[word] |= 1 << (id % FROZEN_WORD_BITS);
+    }
+
+    /// Whether the snapshot contains `entity`.
+    fn contains(&self, entity: Entity) -> bool {
+        let id = entity.id() as usize;
+        self.bits
+            .get(id / FROZEN_WORD_BITS)
+            .is_some_and(|word| word & (1 << (id % FROZEN_WORD_BITS)) != 0)
+    }
+}
+
+/// Scratch buffers of one animation sample pass, reused across frames.
+///
+/// The pass allocates nothing once the scene settles: pose buffers,
+/// sampled joints, model matrices and routed writes all refill in place.
+#[derive(Default)]
+struct AnimScratch {
+    frozen: FrozenBits,
+    obj_work: Vec<ObjWork>,
+    obj_locals: Vec<LocalWrite>,
+    pose_a: BlendedPose,
+    pose_b: BlendedPose,
+    samples: Vec<JointSample>,
+    painted: Vec<bool>,
+    skel_locals: Vec<Mat4>,
     matrices: Vec<Mat4>,
+    nodes: Vec<LocalWrite>,
+    node_painted: Vec<bool>,
+}
+
+thread_local! {
+    /// Per-thread scratch for the sample passes (one pass runs at a time
+    /// on a thread; nested use falls back to a temporary).
+    static SCRATCH: std::cell::RefCell<AnimScratch> = std::cell::RefCell::new(AnimScratch::default());
+}
+
+/// Runs `f` with the thread's [`AnimScratch`], reusing its buffers.
+fn with_scratch<R>(f: impl FnOnce(&mut AnimScratch) -> R) -> R {
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut scratch) => f(&mut scratch),
+        // Reentrant sample (never in the shipped schedule): keep the
+        // function total instead of panicking on the borrow.
+        Err(_) => f(&mut AnimScratch::default()),
+    })
 }
 
 /// Advances a playback cursor; pure function of `(clip, time)` for determinism.
@@ -531,69 +598,63 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
     let Some(store) = resources.get::<SmartStore>() else {
         return;
     };
+    with_scratch(|scratch| {
+        // Snapshot of physics-driven entities (empty when the authority lane
+        // is not registered): both passes below skip them, cursor included.
+        scratch.frozen = store
+            .read_lane::<P>()
+            .map(|lane| FrozenBits::from_entities(&lane.entities))
+            .unwrap_or_default();
 
-    // Snapshot of physics-driven entities (empty when the authority lane is
-    // not registered): both passes below skip them, cursor included.
-    let driven: Vec<Entity> = store
-        .read_lane::<P>()
-        .map(|lane| lane.entities.clone())
-        .unwrap_or_default();
-
-    // Pass 1 — advance playing cursors against their clip duration, and the
-    // outgoing cursor plus clock of every crossfade in progress.
-    {
-        let Some(clips) = store.read_cold_lane::<AnimClip>() else {
-            return;
-        };
-        let Some(mut players) = store.write_lane::<AnimPlayer>() else {
-            return;
-        };
-        for index in 0..players.data.len() {
-            let entity = players.entities[index];
-            let player = &mut players.data[index];
-            if !player.playing || driven.contains(&entity) {
-                continue;
-            }
-            let Some(clip) = clips.get(player.clip.0) else {
-                continue;
+        // Pass 1 — advance playing cursors against their clip duration, and the
+        // outgoing cursor plus clock of every crossfade in progress.
+        {
+            let Some(clips) = store.read_cold_lane::<AnimClip>() else {
+                return;
             };
-            player.time =
-                advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
-        }
-        if let Some(mut fades) = store.write_lane::<AnimFade>() {
-            tick_fades(&mut fades, dt, &driven, |fade, step| {
-                if fade.from.playing
-                    && let Some(clip) = clips.get(fade.from.clip.0)
-                {
-                    fade.from.time = advance_player_time(
-                        fade.from.time,
-                        step,
-                        fade.from.speed,
-                        clip.duration,
-                        clip.looping,
-                    );
+            let Some(mut players) = store.write_lane::<AnimPlayer>() else {
+                return;
+            };
+            for index in 0..players.data.len() {
+                let entity = players.entities[index];
+                let player = &mut players.data[index];
+                if !player.playing || scratch.frozen.contains(entity) {
+                    continue;
                 }
-            });
+                let Some(clip) = clips.get(player.clip.0) else {
+                    continue;
+                };
+                player.time =
+                    advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
+            }
+            if let Some(mut fades) = store.write_lane::<AnimFade>() {
+                tick_fades(&mut fades, dt, &scratch.frozen, |fade, step| {
+                    if fade.from.playing
+                        && let Some(clip) = clips.get(fade.from.clip.0)
+                    {
+                        fade.from.time = advance_player_time(
+                            fade.from.time,
+                            step,
+                            fade.from.speed,
+                            clip.duration,
+                            clip.looping,
+                        );
+                    }
+                });
+            }
         }
-    }
-    sample_and_publish(resources, driven);
+        sample_and_publish(store, scratch);
+    });
 }
 
 /// Samples playing cursors and publishes the poses.
 ///
-/// `driven` is the snapshot of physics-driven entities to skip (empty when
-/// no authority lane is registered).
-fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
-    let Some(store) = resources.get::<SmartStore>() else {
-        return;
-    };
+/// `scratch` carries the frame's [`FrozenBits`] snapshot of physics-driven
+/// entities to skip and the reused work buffers; routing runs first, then
+/// publication, so no two lane guards overlap.
+fn sample_and_publish(store: &SmartStore, scratch: &mut AnimScratch) {
     // Route first, then publish: collect the work so no two lane guards overlap.
-    struct Work {
-        entity: Entity,
-        pose: SampledPose,
-        renderable: bool,
-    }
-    let work: Vec<Work> = {
+    {
         let Some(clips) = store.read_cold_lane::<AnimClip>() else {
             return;
         };
@@ -602,9 +663,9 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
         };
         let fades = store.read_lane::<AnimFade>();
         let meshes = store.read_lane::<MeshDesc>();
-        let mut out = Vec::new();
+        scratch.obj_work.clear();
         for (&entity, player) in players.entities.iter().zip(&players.data) {
-            if !player.playing || driven.contains(&entity) {
+            if !player.playing || scratch.frozen.contains(entity) {
                 continue;
             }
             let Some(clip) = clips.get(player.clip.0) else {
@@ -623,36 +684,58 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
             let Some(rest) = incoming.or(outgoing).map(|track| track.rest) else {
                 continue;
             };
-            let mut pose = side_pose(incoming, rest, player.time, player.weight);
-            if let Some(fade) = fade {
-                let from_pose = side_pose(outgoing, rest, fade.from.time, fade.from.weight);
-                let progress = fade_progress(fade.duration, fade.elapsed);
-                pose = BlendedPose::mix(&from_pose, &pose, progress);
-            }
-            out.push(Work {
+            let pose = if let Some(fade) = fade {
+                side_pose(
+                    outgoing,
+                    rest,
+                    fade.from.time,
+                    fade.from.weight,
+                    &mut scratch.pose_b,
+                );
+                side_pose(
+                    incoming,
+                    rest,
+                    player.time,
+                    player.weight,
+                    &mut scratch.pose_a,
+                );
+                scratch
+                    .pose_b
+                    .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
+                sampled_pose(&scratch.pose_b, 0)
+            } else {
+                side_pose(
+                    incoming,
+                    rest,
+                    player.time,
+                    player.weight,
+                    &mut scratch.pose_a,
+                );
+                sampled_pose(&scratch.pose_a, 0)
+            };
+            scratch.obj_work.push(ObjWork {
                 entity,
-                pose: sampled_pose(&pose, 0),
+                pose,
                 renderable: meshes
                     .as_ref()
                     .is_some_and(|lane| lane.get(entity).is_some()),
             });
         }
-        out
-    };
-    if work.is_empty() {
+    }
+    if scratch.obj_work.is_empty() {
         return;
     }
-    let locals: Vec<LocalWrite> = work
-        .iter()
-        .map(|item| LocalWrite {
+    scratch.obj_locals.clear();
+    scratch
+        .obj_locals
+        .extend(scratch.obj_work.iter().map(|item| LocalWrite {
             entity: item.entity,
             pose: item.pose,
-        })
-        .collect();
-    let wrote_local = publish_local_transforms(store, &locals);
+        }));
+    let wrote_local = publish_local_transforms(store, &scratch.obj_locals);
     let mut descs = store.write_lane::<TransformDesc>();
     let mut positions = store.write_lane::<Position>();
-    for item in &work {
+    for item in &scratch.obj_work {
         if item.renderable
             && let Some(desc) = descs.as_mut().and_then(|lane| lane.get_mut(item.entity))
         {
@@ -685,36 +768,30 @@ fn track_of(clip: &AnimClip, entity: Entity) -> Option<&AnimTrack> {
     clip.tracks.iter().find(|track| track.entity == entity)
 }
 
-/// Pose with every joint at `rest` and no channel present (a side that
-/// animates nothing).
-fn rest_only(rest: &[JointTrs]) -> BlendedPose {
-    BlendedPose::from_samples(&vec![JointSample::default(); rest.len()], rest, 1.0)
-}
-
-/// Pose of one blend side: its track at `time` and `weight`, or the rest when
-/// the side has no track for the entity.
-fn side_pose(track: Option<&AnimTrack>, rest: JointTrs, time: f32, weight: f32) -> BlendedPose {
+/// Fills `out` with the pose of one blend side: its track at `time` and
+/// `weight`, or the authored rest when the side has no track for the entity.
+fn side_pose(
+    track: Option<&AnimTrack>,
+    rest: JointTrs,
+    time: f32,
+    weight: f32,
+    out: &mut BlendedPose,
+) {
     match track {
-        Some(track) => track_pose(track, time, weight),
-        None => rest_only(std::slice::from_ref(&rest)),
+        Some(track) => {
+            let sample = JointSample {
+                translation: track.translation.sample(time),
+                rotation: track.rotation.sample(time),
+                scale: track.scale.sample(time),
+            };
+            out.refill(
+                &[sample],
+                std::slice::from_ref(&track.rest),
+                Clamped01::new(weight).get(),
+            );
+        }
+        None => out.refill_rest(std::slice::from_ref(&rest)),
     }
-}
-
-/// Blended pose of one object track at `time` and `weight`.
-///
-/// The track's rest is the single "joint" of the blend, so absent channels
-/// read as rest and presence flags mark what the track actually drives.
-fn track_pose(track: &AnimTrack, time: f32, weight: f32) -> BlendedPose {
-    let sample = JointSample {
-        translation: track.translation.sample(time),
-        rotation: track.rotation.sample(time),
-        scale: track.scale.sample(time),
-    };
-    BlendedPose::from_samples(
-        &[sample],
-        std::slice::from_ref(&track.rest),
-        Clamped01::new(weight).get(),
-    )
 }
 
 /// Writes sampled channels onto an existing local [`Transform`].
@@ -1125,6 +1202,179 @@ mod tests {
     #[test]
     fn advance_freezes_on_zero_duration() {
         assert_eq!(advance_player_time(3.0, 1.0, 1.0, 0.0, true), 3.0);
+    }
+
+    // ── Hot-path benchmarks (PLAN.md, фаза E, п. 5): before/after shots of
+    // the two optimized kernels. The pre-optimization shapes stay here as
+    // the "before" side; numbers are printed and, in CI, mirrored to the
+    // step summary and a `::notice` annotation (job logs are not
+    // downloadable from review tooling).
+
+    use std::time::{Duration, Instant};
+
+    /// Best-of-32 wall times of `body`; the minimum is noise-resistant on
+    /// shared CI runners.
+    fn best_time(mut body: impl FnMut() -> u64) -> Duration {
+        (0..32)
+            .map(|_| {
+                let start = Instant::now();
+                let hits = std::hint::black_box(body());
+                let done = start.elapsed();
+                std::hint::black_box(hits);
+                done
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
+    /// Publishes one before/after measurement: stdout, the Actions step
+    /// summary, and a workflow-command annotation under CI.
+    fn report_bench(label: &str, before: Duration, after: Duration) {
+        let line = format!(
+            "{label}: before {before:.2?} → after {after:.2?} ({:.1}× faster)",
+            before.as_secs_f64() / after.as_secs_f64().max(1e-12)
+        );
+        println!("{line}");
+        if let Ok(summary) = std::env::var("GITHUB_STEP_SUMMARY") {
+            use std::io::Write as _;
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(summary)
+                .and_then(|mut file| writeln!(file, "- {line}"));
+        }
+        if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "::notice title=Anim hot path:: {line}"
+            );
+        }
+    }
+
+    /// The pre-optimization frozen skip: one linear scan per entry.
+    fn legacy_frozen_scan(frozen: &[Entity], entity: Entity) -> bool {
+        frozen.contains(&entity)
+    }
+
+    /// The pre-optimization pose build: fresh `Vec`s per side.
+    fn legacy_pose(samples: &[JointSample], rest: &[JointTrs], weight: f32) -> BlendedPose {
+        BlendedPose {
+            trs: samples
+                .iter()
+                .zip(rest)
+                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight))
+                .collect(),
+            present: samples
+                .iter()
+                .map(|s| {
+                    [
+                        s.translation.is_some(),
+                        s.rotation.is_some(),
+                        s.scale.is_some(),
+                    ]
+                })
+                .collect(),
+        }
+    }
+
+    /// The pre-optimization crossfade: a fresh blended pose per call.
+    fn legacy_mix(from: &BlendedPose, to: &BlendedPose, progress: f32) -> BlendedPose {
+        BlendedPose {
+            trs: from
+                .trs
+                .iter()
+                .zip(&to.trs)
+                .map(|(a, b)| a.lerp(*b, progress))
+                .collect(),
+            present: from
+                .present
+                .iter()
+                .zip(&to.present)
+                .map(|(a, b)| [a[0] || b[0], a[1] || b[1], a[2] || b[2]])
+                .collect(),
+        }
+    }
+
+    /// Замер до/после (frozen skip): linear `contains` per fade entry — the
+    /// O(fades × bodies) scan — against the per-frame bitset.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn frozen_skip_benchmark() {
+        let driven: Vec<Entity> = (0..256).map(Entity::new).collect();
+        let faded: Vec<Entity> = (0..256).map(|i| Entity::new(1024 + i)).collect();
+        let legacy = best_time(|| {
+            faded
+                .iter()
+                .map(|&entity| legacy_frozen_scan(&driven, entity) as u64)
+                .sum()
+        });
+        let bits = FrozenBits::from_entities(&driven);
+        let fast = best_time(|| {
+            faded
+                .iter()
+                .map(|&entity| bits.contains(entity) as u64)
+                .sum()
+        });
+        report_bench(
+            "frozen skip, 65 536 lookups (256 fades × 256 bodies)",
+            legacy,
+            fast,
+        );
+        let win = legacy.as_secs_f64() / fast.as_secs_f64().max(1e-12);
+        assert!(
+            win > 2.0,
+            "bitset lookup must beat the linear scan by >2×, got {win:.1}× ({fast:?} vs {legacy:?})"
+        );
+    }
+
+    /// Замер до/после (buffer reuse): the allocating pose build and mix per
+    /// blend side against the reused `BlendedPose` buffers — no allocation
+    /// at all on the new side.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pose_buffer_reuse_benchmark() {
+        let rest = vec![JointTrs::IDENTITY; 1];
+        let incoming = [JointSample {
+            translation: Some(Vec3::X),
+            ..JointSample::default()
+        }; 1];
+        let outgoing = [JointSample {
+            translation: Some(Vec3::Y),
+            ..JointSample::default()
+        }; 1];
+        let legacy = best_time(|| {
+            let mut checksum = 0u64;
+            for step in 0..256u64 {
+                let pose = legacy_pose(&incoming, &rest, 1.0);
+                let from = legacy_pose(&outgoing, &rest, 1.0);
+                let mixed = legacy_mix(&from, &pose, step as f32 * 0.01);
+                checksum += mixed.trs.len() as u64;
+            }
+            checksum
+        });
+        let mut from_buf = BlendedPose::default();
+        let mut pose_buf = BlendedPose::default();
+        let fast = best_time(|| {
+            (0..256u64)
+                .map(|step| {
+                    from_buf.refill(&outgoing, &rest, 1.0);
+                    pose_buf.refill(&incoming, &rest, 1.0);
+                    from_buf.mix_towards(&pose_buf, step as f32 * 0.01);
+                    from_buf.trs.len() as u64
+                })
+                .sum()
+        });
+        let worst = fast.as_secs_f64().max(1e-12);
+        assert!(
+            worst < legacy.as_secs_f64() / 1.3,
+            "reused buffers must beat the allocating build ({fast:?} vs {legacy:?})"
+        );
+        report_bench(
+            "object pose build+mix ×256 entities × 1 joint",
+            legacy,
+            fast,
+        );
     }
 }
 
@@ -1542,17 +1792,23 @@ pub fn joint_local_matrix(
 /// parent order is unrestricted; out-of-range parents and cycles resolve
 /// to [`None`]. Cost is `O(joints × depth)` (joints ≤ [`MAX_JOINTS`]).
 ///
-/// Returns [`None`] when the topology is bad (empty, over-cap, length or
-/// parent defect) — the caller skips the entity and counts it.
+/// `out` is caller-owned scratch: it is cleared and refilled with the
+/// model matrices, so the per-frame sample path never allocates here.
+/// Returns the joint count written, or [`None`] when the topology is bad
+/// (empty, over-cap, length or parent defect) — the caller skips the
+/// entity and counts it.
 pub fn compose_model_matrices(
     skeleton: &Skeleton,
     locals: &[Mat4],
     root: &Mat4,
-) -> Option<Vec<Mat4>> {
+    out: &mut Vec<Mat4>,
+) -> Option<usize> {
     let count = checked_count(skeleton, locals.len())?;
-    (0..count)
-        .map(|joint| model_via_chain(&skeleton.parents, locals, root, joint))
-        .collect()
+    out.clear();
+    for joint in 0..count {
+        out.push(model_via_chain(&skeleton.parents, locals, root, joint)?);
+    }
+    Some(out.len())
 }
 
 /// Joint count after the structural checks shared by sampling and skinning.
@@ -1570,30 +1826,40 @@ fn checked_count(skeleton: &Skeleton, locals_len: usize) -> Option<usize> {
     Some(count)
 }
 
-/// Resolves one joint: multiplies `root * local` down its parent chain.
+/// Resolves one joint: multiplies `root * local` down its parent chain,
+/// iteratively (a recursive self-call would classify as a "logic + calls"
+/// IOSP violation; the fixed stack keeps the walk allocation-free).
 ///
-/// [`None`] on out-of-range parents or cycles. Terminates: every pushed
-/// link is new (the `contains` guard), drawn from a finite joint set.
+/// [`None`] on out-of-range parents or cycles (the stack cap is the joint
+/// count — a chain longer than the parent list repeats).
 fn model_via_chain(
     parents: &[Option<JointId>],
     locals: &[Mat4],
     root: &Mat4,
     joint: usize,
 ) -> Option<Mat4> {
-    let mut chain = vec![joint];
-    while let Some(&cursor) = chain.last() {
-        let Some(parent) = *parents.get(cursor)? else {
+    let mut chain = [usize::MAX; MAX_JOINTS];
+    let mut len = 0usize;
+    let mut cursor = joint;
+    loop {
+        if cursor >= parents.len() || len >= parents.len() {
+            return None;
+        }
+        chain[len] = cursor;
+        len += 1;
+        let Some(parent) = parents[cursor] else {
             break;
         };
         let parent = parent.index();
-        if parent >= parents.len() || chain.contains(&parent) {
+        if parent >= parents.len() {
             return None;
         }
-        chain.push(parent);
+        cursor = parent;
     }
     let mut model = *root;
-    for &link in chain.iter().rev() {
-        model *= locals[link];
+    while len > 0 {
+        len -= 1;
+        model *= locals[chain[len]];
     }
     Some(model)
 }
@@ -1894,13 +2160,13 @@ impl FadeClock for SkelFade {
 fn tick_fades<F: FadeClock>(
     fades: &mut ComponentStore<F>,
     dt: f32,
-    frozen: &[Entity],
+    frozen: &FrozenBits,
     mut advance_from: impl FnMut(&mut F, f32),
 ) {
     let mut finished = Vec::new();
     for index in 0..fades.data.len() {
         let entity = fades.entities[index];
-        if frozen.contains(&entity) {
+        if frozen.contains(entity) {
             continue;
         }
         let fade = &mut fades.data[index];
@@ -1922,7 +2188,7 @@ fn advance_fades(store: &SmartStore, dt: f32) {
     let Some(mut fades) = store.write_lane::<SkelFade>() else {
         return;
     };
-    tick_fades(&mut fades, dt, &[], |fade, step| {
+    tick_fades(&mut fades, dt, &FrozenBits::default(), |fade, step| {
         step_player(&mut fade.from, &clips, step);
     });
 }
@@ -1932,23 +2198,14 @@ fn advance_fades(store: &SmartStore, dt: f32) {
 /// Bound joint nodes also receive a local [`Transform`] write, then one
 /// propagation so their children move in this frame.
 fn publish_poses(store: &SmartStore) -> SkelSampleStats {
-    let mut stats = SkelSampleStats::default();
-    let batch = collect_pose_work(store, &mut stats);
-    if !batch.joints.is_empty() {
-        let Some(mut poses) = store.write_lane::<JointPose>() else {
-            return stats;
-        };
-        for item in batch.joints {
-            if let Some(pose) = poses.get_mut(item.entity) {
-                pose.matrices = item.matrices;
-                stats.sampled += 1;
-            }
+    with_scratch(|scratch| {
+        let mut stats = SkelSampleStats::default();
+        collect_pose_work(store, &mut stats, scratch);
+        if publish_local_transforms(store, &scratch.nodes) {
+            ornis_core::propagate_registered(store);
         }
-    }
-    if publish_local_transforms(store, &batch.nodes) {
-        ornis_core::propagate_registered(store);
-    }
-    stats
+        stats
+    })
 }
 
 /// Read-only view of every lane one pose evaluation needs.
@@ -1956,66 +2213,52 @@ struct SampleLanes<'a> {
     clips: &'a ColdComponentStore<SkelClip>,
     skeletons: &'a ComponentStore<Skeleton>,
     transforms: Option<&'a ComponentStore<TransformDesc>>,
-    poses: Option<&'a ComponentStore<JointPose>>,
     fades: Option<&'a ComponentStore<SkelFade>>,
     layers: Option<&'a ComponentStore<SkelLayer>>,
     masks: Option<&'a ColdComponentStore<JointMask>>,
 }
 
-/// Collects model matrices without holding lane guards across the later
-/// write: every imperfect entity bumps `skipped_bad_skin`.
-fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBatch {
-    let empty = || PoseBatch {
-        joints: Vec::new(),
-        nodes: Vec::new(),
-    };
+/// Samples every playing cursor into the scratch buffers: model matrices
+/// land in each root's [`JointPose`] (reusing its buffer), node writes in
+/// `scratch.nodes`. Every imperfect entity bumps `skipped_bad_skin`.
+fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &mut AnimScratch) {
+    scratch.nodes.clear();
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
-        return empty();
+        return;
     };
     let Some(players) = store.read_lane::<SkelPlayer>() else {
-        return empty();
+        return;
     };
     let Some(skeletons) = store.read_lane::<Skeleton>() else {
-        return empty();
+        return;
     };
     let transforms = store.read_lane::<TransformDesc>();
-    let poses = store.read_lane::<JointPose>();
     let fades = store.read_lane::<SkelFade>();
     let layers = store.read_lane::<SkelLayer>();
     let masks = store.read_cold_lane::<JointMask>();
+    let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
         clips: &clips,
         skeletons: &skeletons,
         transforms: transforms.as_deref(),
-        poses: poses.as_deref(),
         fades: fades.as_deref(),
         layers: layers.as_deref(),
         masks: masks.as_deref(),
-    };
-    let mut batch = PoseBatch {
-        joints: Vec::new(),
-        nodes: Vec::new(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
             continue;
         }
-        match sample_entity(*entity, player, &lanes) {
-            Some(sampled) => {
-                batch.nodes.extend(sampled.nodes);
-                batch.joints.push(JointMatrices {
-                    entity: *entity,
-                    matrices: sampled.matrices,
-                });
-            }
+        match sample_entity(*entity, player, &lanes, poses.as_deref_mut(), scratch) {
+            Some(()) => stats.sampled += 1,
             None => stats.skipped_bad_skin += 1,
         }
     }
-    batch
 }
 
 /// Samples one playing cursor: base clip, optional crossfade, optional
-/// overlay layer, then model matrices.
+/// overlay layer, then model matrices into `poses` and node writes into
+/// `scratch`.
 ///
 /// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid topology,
 /// or a layer whose mask does not match the joint count. The caller counts
@@ -2025,41 +2268,90 @@ fn sample_entity(
     entity: Entity,
     player: &SkelPlayer,
     lanes: &SampleLanes<'_>,
-) -> Option<SampledClip> {
+    poses: Option<&mut ComponentStore<JointPose>>,
+    scratch: &mut AnimScratch,
+) -> Option<()> {
     let clip = lanes.clips.get(player.clip.0)?;
     let skeleton = lanes.skeletons.get(entity)?;
-    if lanes.poses.is_none_or(|lane| lane.get(entity).is_none()) {
-        return None;
-    }
     let count = skeleton.joint_count();
     if skeleton.rest.len() != count {
         return None;
     }
-    let rest: &[JointTrs] = &skeleton.rest;
-    let time = player.time.get();
-    let weight = player.weight.get();
-    // Every clip that shapes the pose, so a joint driven only by a layer or
-    // by the outgoing side of a fade still moves its bound node.
-    let mut contributors = vec![clip];
-    let mut pose = BlendedPose::from_samples(&sample_joints(clip, count, time), rest, weight);
+    // Absent `JointPose` is bad skin: verdict before any blending work.
+    let pose = poses?.get_mut(entity)?;
+    let contributors =
+        blend_skel_pose(entity, player, lanes, clip, count, &skeleton.rest, scratch)?;
+    scratch.skel_locals.clear();
+    scratch
+        .skel_locals
+        .extend(scratch.pose_a.trs.iter().map(|trs| trs.matrix()));
+    let root = root_matrix(lanes.transforms, entity);
+    compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
+    node_poses(
+        &contributors,
+        &scratch.pose_a,
+        &mut scratch.nodes,
+        &mut scratch.node_painted,
+    );
+    pose.matrices.clear();
+    pose.matrices.extend_from_slice(&scratch.matrices);
+    Some(())
+}
+
+/// Blends one root's base clip, optional crossfade and overlay layer into
+/// `scratch.pose_a`, returning the clips that shaped the pose (base,
+/// outgoing fade, layer — unused slots `None`).
+///
+/// [`None`] when a layer's mask does not match the joint count — the same
+/// bad-skin verdict as a missing clip. A vanished outgoing clip reads as
+/// rest, as on object tracks.
+///
+/// `contributors` carries every clip that shapes the pose, so a joint
+/// driven only by a layer or by the outgoing side of a fade still moves
+/// its bound node. At most three (base, outgoing, layer) — fixed slots,
+/// no per-entity Vec.
+fn blend_skel_pose<'a>(
+    entity: Entity,
+    player: &SkelPlayer,
+    lanes: &SampleLanes<'a>,
+    clip: &'a SkelClip,
+    count: usize,
+    rest: &[JointTrs],
+    scratch: &mut AnimScratch,
+) -> Option<[Option<&'a SkelClip>; 3]> {
+    let mut contributors = [Some(clip), None, None];
+    sample_joints(
+        clip,
+        count,
+        player.time.get(),
+        &mut scratch.samples,
+        &mut scratch.painted,
+    );
+    scratch
+        .pose_a
+        .refill(&scratch.samples, rest, player.weight.get());
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
-        let from_pose = match lanes.clips.get(fade.from.clip.0) {
+        match lanes.clips.get(fade.from.clip.0) {
             Some(from_clip) => {
-                contributors.push(from_clip);
-                BlendedPose::from_samples(
-                    &sample_joints(from_clip, count, fade.from.time.get()),
-                    rest,
-                    fade.from.weight.get(),
-                )
+                contributors[1] = Some(from_clip);
+                sample_joints(
+                    from_clip,
+                    count,
+                    fade.from.time.get(),
+                    &mut scratch.samples,
+                    &mut scratch.painted,
+                );
+                scratch
+                    .pose_b
+                    .refill(&scratch.samples, rest, fade.from.weight.get());
             }
             // A vanished outgoing clip reads as rest, as on object tracks.
-            None => rest_only(rest),
-        };
-        pose = BlendedPose::mix(
-            &from_pose,
-            &pose,
-            fade_progress(fade.duration, fade.elapsed),
-        );
+            None => scratch.pose_b.refill_rest(rest),
+        }
+        scratch
+            .pose_b
+            .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
+        std::mem::swap(&mut scratch.pose_a, &mut scratch.pose_b);
     }
     if let Some(layer) = lanes.layers.and_then(|lane| lane.get(entity)) {
         let mask = lanes.masks?.get(layer.mask.0)?;
@@ -2067,21 +2359,19 @@ fn sample_entity(
             return None;
         }
         let layer_clip = lanes.clips.get(layer.player.clip.0)?;
-        contributors.push(layer_clip);
-        pose.overlay(
-            &sample_joints(layer_clip, count, layer.player.time.get()),
-            rest,
-            &mask.weights,
-            layer.player.weight,
+        contributors[2] = Some(layer_clip);
+        sample_joints(
+            layer_clip,
+            count,
+            layer.player.time.get(),
+            &mut scratch.samples,
+            &mut scratch.painted,
         );
+        scratch
+            .pose_a
+            .overlay(&scratch.samples, rest, &mask.weights, layer.player.weight);
     }
-    let locals: Vec<Mat4> = pose.trs.iter().map(|trs| trs.matrix()).collect();
-    let root = root_matrix(lanes.transforms, entity);
-    let matrices = compose_model_matrices(skeleton, &locals, &root)?;
-    Some(SampledClip {
-        matrices,
-        nodes: node_poses(&contributors, &pose),
-    })
+    Some(contributors)
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.
@@ -2089,11 +2379,18 @@ fn sample_entity(
 /// `clips` lists every clip that shapes `pose` (base, outgoing fade, layer).
 /// First track per joint wins across them, matching [`sample_joints`]. Channels
 /// no contributor provided stay [`None`] so the node's bind pose survives; the
-/// blended values of the others come from the final pose.
-fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
-    let mut out: Vec<LocalWrite> = Vec::new();
-    let mut painted = vec![false; pose.trs.len()];
-    for track in clips.iter().flat_map(|clip| clip.tracks.iter()) {
+/// blended values of the others come from the final pose. `out` accumulates
+/// across entities (deduplicated per call) and `painted` is reusable scratch.
+fn node_poses(
+    clips: &[Option<&SkelClip>],
+    pose: &BlendedPose,
+    out: &mut Vec<LocalWrite>,
+    painted: &mut Vec<bool>,
+) {
+    let start = out.len();
+    painted.clear();
+    painted.resize(pose.trs.len(), false);
+    for track in clips.iter().flatten().flat_map(|clip| clip.tracks.iter()) {
         let joint = track.joint.index();
         if joint >= painted.len() || painted[joint] {
             continue;
@@ -2102,7 +2399,7 @@ fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
         let Some(entity) = track.node else {
             continue;
         };
-        if out.iter().any(|write| write.entity == entity) {
+        if out[start..].iter().any(|write| write.entity == entity) {
             continue;
         }
         out.push(LocalWrite {
@@ -2110,7 +2407,6 @@ fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
             pose: sampled_pose(pose, joint),
         });
     }
-    out
 }
 
 /// Final channels of one joint, with absent ones as [`None`].

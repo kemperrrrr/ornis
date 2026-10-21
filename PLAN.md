@@ -156,12 +156,19 @@
   4. **Осознанно отложено** (`docs/animation-design.md` §6): бленд-дерево, IK,
      ретаргет, анимационный state machine, события/уведомления по ключам,
      root motion (кроме `Velocity`). Морфы — #153.
-  5. **Перф-бэклог горячего пути.** `tick_fades` — `frozen.contains` на каждую
-     запись, O(fades × physics bodies) на кадр
+  5. **Перф-бэклог горячего пути. ✅ Сделано (2026-10-21).** `tick_fades` —
+     `frozen.contains` на каждую запись, O(fades × physics bodies) на кадр
      (`crates/animation/src/lib.rs:1891`); скелетный путь даёт ~5–7 пер-кадровых
      `Vec`, объектный — 2 `Vec` на сущность (`track_of`, `side_pose`,
      `crates/animation/src/lib.rs:672-684`). Нужны битовая маска/`HashSet` для
      frozen и переиспользование буферов.
+     Битовая маска `FrozenBits` (O(1) skip-тест) вместо линейного `contains`;
+     пер-кадровые буферы путей переиспользуются через `AnimScratch`
+     (`BlendedPose::refill`/`mix_towards`, `sample_joints` с scratch,
+     `compose_model_matrices` в caller-буфер, `model_via_chain` без
+     аллокаций). Замеры до/после — бенч-тесты `frozen_skip_benchmark` и
+     `pose_buffer_reuse_benchmark` (legacy-форма как «до»), цифры уходят в
+     job summary и аннотацию CI.
   6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
      стороны анимации). Упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет. База в
      физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA

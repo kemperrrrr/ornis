@@ -135,13 +135,23 @@ fn union(a: Presence, b: Presence) -> Presence {
     [a[0] || b[0], a[1] || b[1], a[2] || b[2]]
 }
 
-/// Samples every joint track at `time`; untracked joints stay absent.
+/// Samples every joint track at `time` into `out`; untracked joints stay absent.
 ///
 /// First track per joint wins on duplicates (same rule as object tracks).
-/// Tracks naming a joint outside `0..joint_count` are ignored.
-pub(crate) fn sample_joints(clip: &SkelClip, joint_count: usize, time: f32) -> Vec<JointSample> {
-    let mut out = vec![JointSample::default(); joint_count];
-    let mut painted = vec![false; joint_count];
+/// Tracks naming a joint outside `0..joint_count` are ignored. `out` and
+/// `painted` are caller-owned scratch: both are cleared and refilled, so
+/// the per-frame sample path never allocates.
+pub(crate) fn sample_joints(
+    clip: &SkelClip,
+    joint_count: usize,
+    time: f32,
+    out: &mut Vec<JointSample>,
+    painted: &mut Vec<bool>,
+) {
+    out.clear();
+    out.resize(joint_count, JointSample::default());
+    painted.clear();
+    painted.resize(joint_count, false);
     for track in &clip.tracks {
         let joint = track.joint.index();
         if joint >= joint_count || painted[joint] {
@@ -154,11 +164,13 @@ pub(crate) fn sample_joints(clip: &SkelClip, joint_count: usize, time: f32) -> V
             scale: track.scale.sample(time),
         };
     }
-    out
 }
 
 /// Blended joint transforms plus which channels any contributor provided.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A reusable blend buffer: `refill`/`mix_towards`/`overlay` write into the
+/// existing allocations instead of returning new ones.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BlendedPose {
     pub(crate) trs: Vec<JointTrs>,
     pub(crate) present: Vec<Presence>,
@@ -168,33 +180,41 @@ impl BlendedPose {
     /// One clip at weight `weight`: `rest + weight·(pose − rest)` per joint.
     ///
     /// `rest` holds one authored rest per joint; callers pass the skeleton's
-    /// rest with the same length as `samples`.
-    pub(crate) fn from_samples(samples: &[JointSample], rest: &[JointTrs], weight: f32) -> Self {
-        Self {
-            trs: samples
+    /// rest with the same length as `samples`. Previous content is replaced;
+    /// the backing allocations are reused.
+    pub(crate) fn refill(&mut self, samples: &[JointSample], rest: &[JointTrs], weight: f32) {
+        self.trs.clear();
+        self.present.clear();
+        self.trs.extend(
+            samples
                 .iter()
                 .zip(rest)
-                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight))
-                .collect(),
-            present: samples.iter().map(presence).collect(),
-        }
+                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight)),
+        );
+        self.present.extend(samples.iter().map(presence));
     }
 
-    /// Crossfade: `from` at `1 − progress`, `to` at `progress`, per joint.
-    pub(crate) fn mix(from: &Self, to: &Self, progress: f32) -> Self {
-        Self {
-            trs: from
-                .trs
-                .iter()
-                .zip(&to.trs)
-                .map(|(a, b)| a.lerp(*b, progress))
-                .collect(),
-            present: from
-                .present
-                .iter()
-                .zip(&to.present)
-                .map(|(a, b)| union(*a, *b))
-                .collect(),
+    /// Every joint at authored `rest` with no channel present — the pose of
+    /// a side that animates nothing (or whose clip vanished). Reuses the
+    /// buffer like [`Self::refill`].
+    pub(crate) fn refill_rest(&mut self, rest: &[JointTrs]) {
+        self.trs.clear();
+        self.present.clear();
+        self.trs.extend(rest.iter().copied());
+        self.present.resize(rest.len(), Presence::default());
+    }
+
+    /// Crossfade in place: `self` is the outgoing side and `to` the incoming
+    /// one, `self` becomes `from·(1 − progress) + to·progress` per joint.
+    ///
+    /// Callers keep `self` and `to` in distinct buffers (the blend is
+    /// element-wise and would otherwise read half-written joints).
+    pub(crate) fn mix_towards(&mut self, to: &Self, progress: f32) {
+        for (a, b) in self.trs.iter_mut().zip(&to.trs) {
+            *a = a.lerp(*b, progress);
+        }
+        for (a, b) in self.present.iter_mut().zip(&to.present) {
+            *a = union(*a, *b);
         }
     }
 
@@ -259,7 +279,9 @@ mod tests {
 
     /// One clip over identity rest.
     fn pose_of(samples: &[JointSample], weight: f32) -> BlendedPose {
-        BlendedPose::from_samples(samples, &ident(samples.len()), weight)
+        let mut pose = BlendedPose::default();
+        pose.refill(samples, &ident(samples.len()), weight);
+        pose
     }
 
     fn close(a: Vec3, b: Vec3) -> bool {
@@ -304,18 +326,15 @@ mod tests {
     fn mix_endpoints_are_the_inputs() {
         let from = pose_of(&[sample_t(Vec3::X)], 1.0);
         let to = pose_of(&[sample_t(Vec3::Y)], 1.0);
-        assert!(close(
-            BlendedPose::mix(&from, &to, 0.0).trs[0].translation,
-            Vec3::X
-        ));
-        assert!(close(
-            BlendedPose::mix(&from, &to, 1.0).trs[0].translation,
-            Vec3::Y
-        ));
-        assert!(close(
-            BlendedPose::mix(&from, &to, 0.5).trs[0].translation,
-            Vec3::new(0.5, 0.5, 0.0)
-        ));
+        let mut out = from.clone();
+        out.mix_towards(&to, 0.0);
+        assert!(close(out.trs[0].translation, Vec3::X));
+        out = from.clone();
+        out.mix_towards(&to, 1.0);
+        assert!(close(out.trs[0].translation, Vec3::Y));
+        out = from;
+        out.mix_towards(&to, 0.5);
+        assert!(close(out.trs[0].translation, Vec3::new(0.5, 0.5, 0.0)));
     }
 
     #[test]
