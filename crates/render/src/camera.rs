@@ -14,15 +14,28 @@ use ornis_assets::scene::{CameraDesc, CameraProjection};
 
 /// Device pixel ratio of the pointer backend feeding [`OrbitCamera`].
 ///
-/// Platform adapters deliver pointer deltas in device pixels, while orbit
+/// Browser adapters deliver pointer deltas in device pixels, while orbit
 /// rotation is anchored to CSS pixels: on a hidpi surface (dpr 2) one CSS
 /// pixel of mouse movement arrives as two device pixels, and without this
 /// resource the rotation would spin twice as fast as on a 1x display.
-/// Absent from the world (native, plain 1x browsers), the input system
-/// falls back to `1.0`. Wheel zoom is not scaled — it is a discrete
-/// gesture, not a positional delta.
+/// The wasm render loop publishes the window's `devicePixelRatio`; the
+/// world without the resource falls back to [`PointerDpr::default`]
+/// (`1.0`). Note this default matches native only on 1x displays: the
+/// native showcase feeds `CursorMoved` physical pixels and never inserts
+/// this resource, so the camera divides them by `1.0` instead of the
+/// display scale — on a HiDPI native monitor the orbit rotates
+/// `scale_factor` times faster than on a 1x display (pre-existing native
+/// behaviour, tracked separately by the render track — not a regression
+/// of this type). Wheel zoom is not scaled — it is a discrete gesture,
+/// not a positional delta.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PointerDpr(pub f32);
+
+impl Default for PointerDpr {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
 
 /// Client-side orbit camera: azimuth/elevation around a target plus a zoom
 /// radius. It is view state, not part of the server-authoritative scene.
@@ -271,7 +284,7 @@ impl System for OrbitCameraSystem {
         let Some(camera) = resources.get::<Mutex<OrbitCamera>>() else {
             return;
         };
-        let pointer_dpr = resources.get::<PointerDpr>().map_or(1.0, |dpr| dpr.0);
+        let pointer_dpr = resources.get::<PointerDpr>().copied().unwrap_or_default().0;
         camera
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -598,6 +611,42 @@ mod tests {
             (full - 2.0 * half).abs() < 1e-5,
             "dpr 1 rotation {full} vs dpr 2 rotation {half}"
         );
+    }
+
+    /// Review (round 6): the dpr guard inside [`OrbitCamera::apply_input`]
+    /// must treat every non-positive or non-finite scale as `1.0`, so
+    /// `0.0`, `-1.0`, `NaN` and `INFINITY` rotate by exactly the same
+    /// angles as an unguarded `1.0` call (kills the "condition = true"
+    /// mutation, which would feed `dx / 0.0` straight into `rotate`).
+    #[test]
+    fn apply_input_treats_degenerate_pointer_dpr_as_one() {
+        assert_eq!(PointerDpr::default().0, 1.0, "default lives in the type");
+        let rotation_at = |dpr: f32| {
+            let mut orbit = OrbitCamera::from_desc(&camera());
+            let mut input = InputState::new();
+            input.set_mouse_button(0, true);
+            input.set_pointer_anchor([0.0, 0.0]);
+            input.set_pointer_position([40.0, 25.0]);
+            orbit.apply_input(&input, dpr);
+            (orbit.azimuth, orbit.elevation)
+        };
+        let (reference_azimuth, reference_elevation) = rotation_at(1.0);
+        let untouched = OrbitCamera::from_desc(&camera());
+        assert_ne!(
+            reference_azimuth, untouched.azimuth,
+            "the drag must actually rotate at dpr 1"
+        );
+        for degenerate in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let (azimuth, elevation) = rotation_at(degenerate);
+            assert!(
+                (azimuth - reference_azimuth).abs() < 1e-6,
+                "dpr {degenerate} azimuth {azimuth} != 1.0 azimuth {reference_azimuth}"
+            );
+            assert!(
+                (elevation - reference_elevation).abs() < 1e-6,
+                "dpr {degenerate} elevation {elevation} != 1.0 elevation {reference_elevation}"
+            );
+        }
     }
 
     #[test]
