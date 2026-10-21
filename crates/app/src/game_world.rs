@@ -161,12 +161,11 @@ impl GameWorld {
     /// # Errors
     ///
     /// [`PlaybackError::Missing`] when `entity` has no player.
+    // qual:api — host playback control; in-tree callers are tests.
     pub fn resume_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let Some(store) = self.engine_mut().world_mut().store_mut() else {
+            return Err(PlaybackError::Missing);
+        };
         if crate::anim_wiring::set_playing(store, entity, true) {
             Ok(())
         } else {

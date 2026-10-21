@@ -378,7 +378,7 @@ pub enum PlaybackError {
 /// every target through
 /// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)
 /// — one fade implementation — and an object entity with an [`AnimPlayer`]
-/// cursor receives a typed [`AnimFade`](ornis_animation::AnimFade)
+/// cursor receives a typed [`AnimFade`]
 /// crossfade to the named clip ([`fade_to_clip`]). A non-positive
 /// `duration` cuts without a fade, like
 /// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play).
@@ -499,6 +499,8 @@ pub fn fade_to_clip(
 ///
 /// Returns whether `root` carries a [`Skeleton`] (the layer's anchor);
 /// nothing is written without one.
+// qual:api — typed `SkelLayer` input for hosts; in-tree callers are tests
+// until the layer stack (step 3 of the gate plan) lands.
 pub fn set_skel_layer(store: &mut SmartStore, root: Entity, layer: SkelLayer) -> bool {
     if store
         .read_lane::<Skeleton>()
