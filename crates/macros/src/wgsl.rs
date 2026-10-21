@@ -30,7 +30,7 @@ pub fn rust_to_wgsl(expr: &syn::Expr) -> String {
 /// A kernel/helper return or `let` type as its lowered `IrType`, used
 /// as the expected type that names `Some`/`None` constructors and the
 /// declaration of a value-position `match`. Returns `None` for types
-/// with no registry mapping (uniform/varying structs, `Entity`, …).
+/// with no registry mapping (uniform/varying structs, …).
 pub(crate) fn rust_ty_to_ir(ty: &syn::Type) -> Option<IrType> {
     if let Some(payload) = option_ir_ty(ty) {
         return Some(IrType::Optional(Box::new(payload)));
@@ -38,6 +38,9 @@ pub(crate) fn rust_ty_to_ir(ty: &syn::Type) -> Option<IrType> {
     let syn::Type::Path(tp) = ty else {
         return None;
     };
+    if tp.qself.is_none() && tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Entity" {
+        return Some(IrType::Entity);
+    }
     let seg = tp.path.segments.last()?;
     if seg.ident == "bool" {
         return Some(IrType::Bool);
@@ -143,6 +146,9 @@ pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
             match last {
                 // Bare `bool` keeps its previous spelling (not a primitive).
                 Some("bool") => "bool".to_string(),
+                // The DSL entity handle: the per-kernel generated
+                // struct, not a registry primitive.
+                Some("Entity") => "Entity".to_string(),
                 _ => {
                     let name = last.unwrap_or("f32");
                     ornis_shader_lang::ShaderType::from_rust(name)
@@ -274,9 +280,13 @@ pub fn wgsl_fn_source(func: &ItemFn) -> String {
         .map(|(pat, ty)| format!("{}: {}", param_name(pat), rust_type_to_wgsl(ty)))
         .collect();
 
-    let body = convert_body_to_wgsl(func);
+    // The gather plan owns both the body rewrite (a recorded
+    // `t.position` lowers to its lane helper call) and the prefix
+    // decls (Entity struct, lanes, helpers).
+    let plan = crate::wgsl_gather::scan(func);
+    let body = crate::wgsl_gather::with_reads(&plan, || convert_body_to_wgsl(func));
 
-    let decls = collect_option_decls(func);
+    let decls = crate::wgsl_gather::decls_prefix(&plan, &collect_option_decls(func), true);
     let prefix = if decls.is_empty() {
         String::new()
     } else {
@@ -314,9 +324,14 @@ pub fn wgsl_source_from_fn(func: &ItemFn) -> String {
 
     let param_names: Vec<String> = params.iter().map(|(pat, _)| param_name(pat)).collect();
     let param_types: Vec<String> = params.iter().map(|(_, ty)| rust_type_to_wgsl(ty)).collect();
+    // Legacy compute form: no lane binding slots (the body lowers
+    // without the gather plan, so a gather fails loudly at naga — see
+    // the entity-gather design note); the `Entity` struct itself is
+    // still declared so `array<Entity>` params parse.
+    let plan = crate::wgsl_gather::scan(func);
     let body_wgsl = extract_and_convert_body(func);
 
-    let mut wgsl = collect_option_decls(func);
+    let mut wgsl = crate::wgsl_gather::decls_prefix(&plan, &collect_option_decls(func), false);
     if !wgsl.is_empty() {
         wgsl.push('\n');
     }

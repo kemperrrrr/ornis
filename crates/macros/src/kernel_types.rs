@@ -204,9 +204,9 @@ fn generic_argument_string(arg: &syn::GenericArgument) -> String {
 /// (`"type"`, `"return type"`, `"let annotation"`).
 ///
 /// Single home for both name lists — heap types (rejected as before)
-/// and supported spellings (`f32`/`u32`/`i32`, verbatim `bool`, and the
+/// and supported spellings (`f32`/`u32`/`i32`, verbatim `bool`, the
 /// vector/matrix registry on the last path segment, so `glam::Vec3`
-/// works). The vector list mirrors
+/// works, and the bare `Entity` handle / `Option<Entity>` payloads). The vector list mirrors
 /// [`ornis_shader_lang::ShaderType::from_rust`]; the unit test below
 /// pins them together.
 ///
@@ -276,7 +276,8 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
                         }
                     }
                 }
-                let scalar = bare && matches!(name.as_str(), "f32" | "u32" | "i32" | "bool");
+                let scalar =
+                    bare && matches!(name.as_str(), "f32" | "u32" | "i32" | "bool" | "Entity");
                 if !(scalar || is_kernel_vector_ty(name.as_str())) {
                     return Some(format!(
                         "{what} `{}` is not supported in GPU kernel `{fn_name}`; supported: f32, u32, i32, bool and glam vectors/matrices",
@@ -307,6 +308,18 @@ pub(crate) fn is_option_type(ty: &Type) -> bool {
     {
         return seg.ident == "Option"
             && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+    }
+    false
+}
+
+/// Whether a type is the bare DSL `Entity` handle — the only spelling
+/// the macro can resolve to the struct it emits per kernel module.
+pub(crate) fn is_entity_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && tp.path.segments.len() == 1
+    {
+        return tp.path.segments[0].ident == "Entity";
     }
     false
 }
@@ -389,6 +402,8 @@ mod tests {
             "Quat",
             "MaterialIdx",
             "[f32; 6]",
+            "Entity",
+            "Option<Entity>",
         ] {
             assert_eq!(type_error(ty), None, "{ty}");
         }
@@ -407,6 +422,8 @@ mod tests {
             "[foo::u32; 4]",
             "MyStruct",
             "&f32",
+            "foo::Entity",
+            "crate::Entity",
         ] {
             assert!(type_error(ty).is_some(), "{ty}");
         }

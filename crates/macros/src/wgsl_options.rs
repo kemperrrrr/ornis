@@ -36,6 +36,11 @@ pub(crate) fn option_ir_ty(ty: &syn::Type) -> Option<IrType> {
         // `Option` payload like it is an array element.
         return Some(IrType::Bool);
     }
+    if inner_seg.ident == "Entity" {
+        // The DSL handle: bare spelling validated by `kernel_types`
+        // (`Option<Entity>` payloads mirror bare `Entity` params).
+        return Some(IrType::Entity);
+    }
     ShaderType::from_rust(&inner_seg.ident.to_string()).map(IrType::Scalar)
 }
 

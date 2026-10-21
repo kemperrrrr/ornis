@@ -1,0 +1,5 @@
+error: `t.position` must be bound through an annotated let in GPU kernel `unannotated` (`let p: Vec3 = t.position;`) — the annotation is the field's type
+  --> tests/ui/kernel_rejects_unannotated_gather.rs:11:13
+   |
+11 |     let p = t.position;
+   |             ^

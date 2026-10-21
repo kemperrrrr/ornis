@@ -1,0 +1,5 @@
+error: Entity `==`/`!=` has no WGSL spelling in GPU kernel `entity_eq`; compare `.index` (and `.generation`) explicitly
+  --> tests/ui/kernel_rejects_entity_eq.rs:11:8
+   |
+11 |     if t == other { 1u32 } else { 0u32 }
+   |        ^

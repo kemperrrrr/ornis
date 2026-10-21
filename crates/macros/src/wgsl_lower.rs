@@ -229,8 +229,19 @@ fn lower_expr_expected(e: &syn::Expr, expected: Option<&IrType>) -> IrExpr {
     }
 }
 
-/// `base.member` — the member is a lexical name, never a WGSL decision.
+/// `base.member` — the member is a lexical name, never a WGSL
+/// decision. The one exception is a recorded `Entity` gather site
+/// (`t.position` on an entity binding): the plan names its lane
+/// helper, and the access lowers to that helper call.
 fn lower_field(f: &syn::ExprField) -> IrExpr {
+    if let Some((root, member)) = crate::wgsl_entity_shape::entity_field_shape(f)
+        && let Some(helper) = crate::wgsl_gather::helper_for(&root, &member)
+    {
+        return IrExpr::Call {
+            target: IrCallee::Verbatim(helper),
+            args: vec![IrExpr::Path(vec![root])],
+        };
+    }
     IrExpr::Field {
         base: Box::new(lower_expr(&f.base)),
         member: member_name(&f.member),

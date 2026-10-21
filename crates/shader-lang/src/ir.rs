@@ -109,12 +109,18 @@ pub enum IrType {
     /// Nested `Option` is rejected upstream — WGSL has no recursive
     /// struct layout.
     Optional(Box<IrType>),
+    /// The DSL entity handle (`index: u32, generation: u32`): a
+    /// generated struct (see `writer::entity_struct_decl`), spelled
+    /// `Entity` in WGSL and mirrored by the per-kernel CPU struct the
+    /// macro emits.
+    Entity,
 }
 
 impl IrType {
     /// Zero-valued literal for this type: the payload placeholder for
     /// `None`. Vectors and matrices expand to positional constructors
-    /// filled with component zeros; anything without a literal spelling
+    /// filled with component zeros; [`IrType::Entity`] expands to the
+    /// null handle `Entity(0u, 0u)`; anything without a literal spelling
     /// (`Custom`, arrays, nested `Optional`) is [`IrExpr::Unsupported`].
     ///
     /// Scalar dispatch and the component table live in the same body, so
@@ -127,6 +133,15 @@ impl IrType {
             IrType::Scalar(ShaderType::I32) => IrExpr::Int(I32_ZERO.to_string()),
             IrType::Scalar(ShaderType::U32) => IrExpr::Int(U32_ZERO.to_string()),
             IrType::Bool => IrExpr::Bool(false),
+            // The null handle: positional constructor over the two `u32`
+            // fields, the same spelling a struct literal lowers to.
+            IrType::Entity => IrExpr::Call {
+                target: IrCallee::Expr(Box::new(IrExpr::Path(vec!["Entity".to_string()]))),
+                args: vec![
+                    IrExpr::Int(U32_ZERO.to_string()),
+                    IrExpr::Int(U32_ZERO.to_string()),
+                ],
+            },
             IrType::Scalar(t) => {
                 // Component count and that component's zero literal, in one
                 // table: `Mat3`/`Mat4` are square float matrices, scalars

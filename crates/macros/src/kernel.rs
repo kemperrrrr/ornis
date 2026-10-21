@@ -208,6 +208,17 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
         });
     }
 
+    // `Entity` gather plan: validates read positions, rejects writes
+    // and entity equality, and names the lanes the generated WGSL and
+    // `eval` share. Its errors are macro-time like the validator's.
+    let plan = crate::wgsl_gather::scan(&func);
+    if !plan.errors.is_empty() {
+        let compile_errors = plan.errors.iter().map(|e| e.to_compile_error());
+        return TokenStream::from(quote! {
+            #(#compile_errors)*
+        });
+    }
+
     // Generate WGSL function source string
     if let Err(e) = ornis_shader_lang::check_builtin_arity(&func) {
         return TokenStream::from(e.to_compile_error());
@@ -227,20 +238,58 @@ pub fn kernel(args: TokenStream, input: TokenStream) -> TokenStream {
     // references this; callers build their bind groups against it.
     let bgl_entries = crate::wgsl::storage_bgl_entries(func.sig.inputs.len());
 
+    // `eval` mirrors the WGSL gather exactly: one trailing `&[T]` lane
+    // parameter per recorded (binding, field), the rewritten body
+    // calling the slice gather helper.
+    let lane_params: Vec<_> = plan
+        .lanes()
+        .map(|lane| {
+            let ident = syn::Ident::new(&lane.lane_ident, proc_macro2::Span::call_site());
+            let ty = &lane.elem_ty;
+            quote! { #ident: &[#ty] }
+        })
+        .collect();
+    let eval_inputs = if lane_params.is_empty() {
+        quote! { ( #inputs ) }
+    } else {
+        quote! { ( #inputs, #(#lane_params),* ) }
+    };
+    let entity_items = if plan.has_entity() {
+        let entity = crate::wgsl_gather::entity_struct_tokens();
+        quote! { #entity }
+    } else {
+        quote! {}
+    };
+    let gather_fns = if plan.has_lanes() {
+        let gather = crate::wgsl_gather::cpu_gather_tokens();
+        quote! { #gather }
+    } else {
+        quote! {}
+    };
+    let eval_body = if plan.has_lanes() {
+        let rewritten = crate::wgsl_gather::rewrite_eval_body(&func.block, &plan);
+        quote! { #rewritten }
+    } else {
+        quote! { #body }
+    };
+
     let expanded = quote! {
         // The user-facing `#[kernel] fn` carries the docs; the generated
         // helper module (eval/wgsl_source/...) is intentionally bare and
         // hidden from rustdoc.
         #[doc(hidden)]
         pub mod #fn_name {
+            #entity_items
+            #gather_fns
+
             // The user-facing `#[kernel] fn` carries the docs; the generated
             // helper surface (eval/wgsl_source/...) is intentionally bare and
             // hidden from rustdoc.
             #[allow(missing_docs)]
             #[allow(non_snake_case)]
-            pub fn eval ( #inputs ) #output {
+            pub fn eval #eval_inputs #output {
                 use super::*;
-                #body
+                #eval_body
             }
 
             #[allow(dead_code)]
