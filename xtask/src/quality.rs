@@ -157,11 +157,18 @@ impl QualityFlags {
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
     /// With `--only` the total is the filtered count.
+    ///
+    /// The clippy stage runs two commands (the workspace lint and the
+    /// render-bench lint under `test-util`), so it counts twice: the
+    /// denominator has to be right before the first stage prints its
+    /// header, not after the clippy stage already ran.
     fn total_stages(&self) -> usize {
-        self.active_ids()
+        let stages = self
+            .active_ids()
             .iter()
             .filter(|id| self.enabled(id))
-            .count()
+            .count();
+        stages + usize::from(self.enabled("clippy"))
     }
 }
 
@@ -1420,11 +1427,9 @@ fn level1(stages: &mut StageList<'_>) {
         ]),
         false,
     );
-    // A second command under the same stage id: the stage counter grows
-    // with it, so the summary keeps the "n/total" numbering honest.
-    if stages.enabled("clippy") {
-        stages.total += 1;
-    }
+    // The second command runs under the same stage id, so the stage
+    // counter grows with it — the denominator already accounts for it
+    // (`QualityFlags::total_stages`).
     stages.run(
         "clippy",
         "clippy (render bench)",
@@ -3499,6 +3504,19 @@ mod tests {
         assert_eq!(format_duration(Duration::from_millis(400)), "0.4s");
         assert_eq!(format_duration(Duration::from_secs(12)), "12s");
         assert_eq!(format_duration(Duration::from_secs(184)), "3m04s");
+    }
+
+    #[test]
+    fn total_stages_counts_the_render_bench_lint() {
+        // The clippy stage runs two commands (the workspace lint and the
+        // render-bench lint under `test-util`): the denominator must
+        // count both, otherwise the printed "n/total" drifts.
+        let only_clippy = QualityFlags::parse(&["--only=clippy".to_string()]);
+        assert_eq!(only_clippy.total_stages(), 2);
+        let only_fmt_clippy = QualityFlags::parse(&["--only=fmt,clippy".to_string()]);
+        assert_eq!(only_fmt_clippy.total_stages(), 3);
+        let only_fmt = QualityFlags::parse(&["--only=fmt".to_string()]);
+        assert_eq!(only_fmt.total_stages(), 1);
     }
 
     #[test]
