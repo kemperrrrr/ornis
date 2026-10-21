@@ -245,7 +245,6 @@ fn run_history_probe(device: &wgpu::Device, queue: &wgpu::Queue) -> HistoryProbe
 #[test]
 fn indirect_staging_keeps_the_temporal_history() {
     let Some((device, queue)) = test_util::try_device() else {
-        eprintln!("SKIPPED (indirect_staging_keeps_the_temporal_history): no wgpu adapter");
         return;
     };
     let probe = run_history_probe(&device, &queue);
@@ -271,11 +270,18 @@ fn indirect_staging_keeps_the_temporal_history() {
         moved_second.motion_valid, 1,
         "a known entity has a valid motion history"
     );
-    // The static sphere keeps its own transform as the previous one.
+    // The static sphere keeps its own transform as the previous one and
+    // carries a valid motion flag as well — the flag is what the
+    // temporal pass reads, the transform alone would not catch a
+    // dropped flag.
     let static_second = record_at(&probe.staged_second, STATIC_AT);
     assert_eq!(
         static_second.previous_model, static_second.model,
         "a sphere that did not move keeps its transform"
+    );
+    assert_eq!(
+        static_second.motion_valid, 1,
+        "a sphere that did not move still has a valid motion history"
     );
     // The compacted GPU batch carries the same history: the compute
     // pass copies the whole record.

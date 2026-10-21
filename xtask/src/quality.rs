@@ -1400,14 +1400,22 @@ fn level1(stages: &mut StageList<'_>) {
     // does not fit a PR shard either: the ignored nightly gates need
     // ~7 min each in a debug build (see determinism-nightly.yml), so they
     // stay in the Determinism Nightly workflow.
+    // The render criterion bench lives behind the crate feature
+    // `test-util` (the headless device bootstrap is test-only), so a
+    // plain workspace run skips its target silently — the bench would
+    // rot unnoticed. The package-qualified feature puts the target back
+    // into the lint (`cargo clippy -v` shows `culling_bench` only with
+    // it).
     stages.run(
         "clippy",
         "clippy",
-        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo clippy --workspace --all-targets --features ornis-render/test-util -- -D warnings",
         stages.cargo(&[
             "clippy",
             "--workspace",
             "--all-targets",
+            "--features",
+            "ornis-render/test-util",
             "--",
             "-D",
             "warnings",
@@ -1693,11 +1701,20 @@ const TYPOS_VERSION: &str = "1.51.1";
 fn full_stages(stages: &mut StageList<'_>) {
     coverage_stage(stages);
 
+    // The `test-util` feature of ornis-render gates the criterion bench
+    // (the headless bootstrap is test-only): without it Cargo skips the
+    // target silently, so the bench would never be compiled here.
     stages.run(
         "bench-compile",
         "bench compile-check",
-        "cargo bench --workspace --no-run",
-        stages.cargo(&["bench", "--workspace", "--no-run"]),
+        "cargo bench --workspace --no-run --features ornis-render/test-util",
+        stages.cargo(&[
+            "bench",
+            "--workspace",
+            "--no-run",
+            "--features",
+            "ornis-render/test-util",
+        ]),
         false,
     );
 
