@@ -1,0 +1,5 @@
+error: type `Option` payload `[f32; 4]` is not supported in GPU kernel `array_payload`; supported payloads: f32, u32, i32, bool and glam vectors/matrices
+  --> tests/ui/kernel_rejects_option_payload_array.rs:10:21
+   |
+10 | fn array_payload(x: Option<[f32; 4]>) -> f32 {
+   |                     ^^^^^^^^^^^^^^^^

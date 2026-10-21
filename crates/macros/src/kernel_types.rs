@@ -254,6 +254,15 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
                 // `foo::u32`); vectors, matrices and newtypes stay
                 // last-segment so qualified `glam::Vec3` keeps working.
                 let bare = tp.qself.is_none() && tp.path.segments.len() == 1;
+                if name == "Option" && !bare {
+                    return Some(format!(
+                        "{what} `Option` must be spelled bare in GPU kernel `{fn_name}`, not `{}`",
+                        type_string(ty),
+                    ));
+                }
+                if name == "Option" {
+                    return option_payload_error(tp, what, fn_name);
+                }
                 let scalar = bare && matches!(name.as_str(), "f32" | "u32" | "i32" | "bool");
                 if !(scalar || is_kernel_vector_ty(name.as_str())) {
                     return Some(format!(
@@ -274,6 +283,66 @@ pub(crate) fn kernel_type_error(ty: &Type, what: &str, fn_name: &str) -> Option<
             }
         }
     }
+}
+
+/// Whether a type is a bare `Option<T>` path — the only spelling the
+/// lowerer can resolve to a generated struct.
+pub(crate) fn is_option_type(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return seg.ident == "Option"
+            && matches!(seg.arguments, syn::PathArguments::AngleBracketed(_));
+    }
+    false
+}
+
+/// Validate the payload of an `Option<T>` kernel type: exactly one bare
+/// registry scalar/`bool`/vector, never another `Option` (WGSL structs
+/// have no recursive layout) and never a heap type.
+fn option_payload_error(tp: &syn::TypePath, what: &str, fn_name: &str) -> Option<String> {
+    let fail = |msg: String| Some(msg);
+    let Some(seg) = tp.path.segments.last() else {
+        return fail(format!(
+            "{what} `Option` is not supported in GPU kernel `{fn_name}`; it needs a payload, e.g. `Option<f32>`"
+        ));
+    };
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return fail(format!(
+            "{what} `Option` needs a payload type in GPU kernel `{fn_name}`; e.g. `Option<f32>`"
+        ));
+    };
+    if args.args.len() != 1 {
+        return fail(format!(
+            "{what} `Option` takes exactly one payload type in GPU kernel `{fn_name}`"
+        ));
+    }
+    let Some(syn::GenericArgument::Type(inner)) = args.args.first() else {
+        return fail(format!(
+            "{what} `Option` payload must be a type in GPU kernel `{fn_name}`"
+        ));
+    };
+    if let Type::Path(inner_tp) = inner
+        && inner_tp
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "Option")
+    {
+        return fail(format!(
+            "{what} `Option<Option<_>>` is not supported in GPU kernel `{fn_name}`; WGSL structs have no recursive layout"
+        ));
+    }
+    if matches!(inner, Type::Array(_) | Type::Reference(_) | Type::Slice(_)) {
+        return fail(format!(
+            "{what} `Option` payload `{}` is not supported in GPU kernel `{fn_name}`; supported payloads: f32, u32, i32, bool and glam vectors/matrices",
+            type_string(inner),
+        ));
+    }
+    // Reuse the ordinary type check on the payload, relabelled so the
+    // message names the position precisely.
+    kernel_type_error(inner, &format!("{what} `Option` payload"), fn_name)
 }
 
 #[cfg(test)]

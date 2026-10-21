@@ -85,6 +85,58 @@ pub enum IrType {
     /// Runtime-sized `array<T>` (storage buffers document capacity in
     /// Rust, WGSL sizes at bind time).
     RuntimeArray(Box<IrType>),
+    /// `Option<T>` for a registry scalar/vector/bool: lowered to a
+    /// generated two-field struct (see `writer::option_struct_decl`).
+    /// Nested `Option` is rejected upstream — WGSL has no recursive
+    /// struct layout.
+    Optional(Box<IrType>),
+}
+
+impl IrType {
+    /// Zero-valued literal for this type: the payload placeholder for
+    /// `None`. Vectors and matrices expand to positional constructors
+    /// filled with component zeros; anything without a literal spelling
+    /// (`Custom`, arrays, nested `Optional`) is [`IrExpr::Unsupported`].
+    pub fn zero_expr(&self) -> IrExpr {
+        match self {
+            IrType::Scalar(ShaderType::F32) => IrExpr::Float("0.0".to_string()),
+            IrType::Scalar(ShaderType::I32) => IrExpr::Int("0i".to_string()),
+            IrType::Scalar(ShaderType::U32) => IrExpr::Int("0u".to_string()),
+            IrType::Bool => IrExpr::Bool(false),
+            IrType::Scalar(t) => {
+                let (count, comp) = component_zeros(*t);
+                let zero = comp.zero_expr();
+                IrExpr::Call {
+                    target: IrCallee::Constructor { ty: *t },
+                    args: std::iter::repeat_n(zero, count).collect(),
+                }
+            }
+            _ => IrExpr::Unsupported,
+        }
+    }
+}
+
+/// Component count and component type of a vector/matrix registry type,
+/// for [`IrType::zero_expr`]. `Mat3`/`Mat4` are square float matrices.
+fn component_zeros(t: ShaderType) -> (usize, IrType) {
+    match t {
+        ShaderType::Vec2 => (2, IrType::Scalar(ShaderType::F32)),
+        ShaderType::Vec3 => (3, IrType::Scalar(ShaderType::F32)),
+        ShaderType::Vec4 => (4, IrType::Scalar(ShaderType::F32)),
+        ShaderType::UVec2 => (2, IrType::Scalar(ShaderType::U32)),
+        ShaderType::UVec3 => (3, IrType::Scalar(ShaderType::U32)),
+        ShaderType::UVec4 => (4, IrType::Scalar(ShaderType::U32)),
+        ShaderType::IVec2 => (2, IrType::Scalar(ShaderType::I32)),
+        ShaderType::IVec3 => (3, IrType::Scalar(ShaderType::I32)),
+        ShaderType::IVec4 => (4, IrType::Scalar(ShaderType::I32)),
+        ShaderType::BVec2 => (2, IrType::Bool),
+        ShaderType::BVec3 => (3, IrType::Bool),
+        ShaderType::BVec4 => (4, IrType::Bool),
+        ShaderType::Mat3 => (9, IrType::Scalar(ShaderType::F32)),
+        ShaderType::Mat4 => (16, IrType::Scalar(ShaderType::F32)),
+        // Scalars never reach here (handled before the match).
+        _ => (1, IrType::Scalar(ShaderType::F32)),
+    }
 }
 
 /// Module-scope declaration: what the item IS, not how it prints.

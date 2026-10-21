@@ -1,0 +1,5 @@
+error: struct patterns have no WGSL spelling in `#[kernel]`; match on scalars or `Option` payloads instead
+  --> tests/ui/kernel_rejects_match_struct_pattern.rs:10:9
+   |
+10 |         f32 { .. } => x,
+   |         ^^^^^^^^^^

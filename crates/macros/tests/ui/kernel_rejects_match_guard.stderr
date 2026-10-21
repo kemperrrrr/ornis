@@ -1,0 +1,5 @@
+error: match guards (`pat if cond`) have no WGSL spelling in `#[kernel]` (on `v > 0.0`); restructure with an explicit `if` inside the arm body, or split into an extra arm
+  --> tests/ui/kernel_rejects_match_guard.rs:11:9
+   |
+11 |         Some(v) if v > 0.0 => v,
+   |         ^^^^^^^^^^^^^^^^^^

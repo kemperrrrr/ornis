@@ -13,6 +13,19 @@ struct KernelValidator {
     fn_name: String,
     errors: Vec<syn::Error>,
     match_depth: usize,
+    /// Whether the expression currently being visited sits in a position
+    /// where a value-position `match` lowers (a `let` initializer or a
+    /// whole statement). Set just before descending into those nodes.
+    match_ok: bool,
+    /// Whether that host needs the value form (whose arms must be
+    /// single expressions) rather than the statement form.
+    match_value: bool,
+    /// Whether the body mentions `Some`/`None` at all — checked against
+    /// the signature/annotation Option types after the walk.
+    uses_option_ctors: bool,
+    /// Whether the signature or any `let` annotation mentions
+    /// `Option<T>` — the only contexts the lowerer can resolve.
+    has_option_type: bool,
 }
 
 impl KernelValidator {
@@ -21,6 +34,10 @@ impl KernelValidator {
             fn_name: fn_name.to_string(),
             errors: Vec::new(),
             match_depth: 0,
+            match_ok: false,
+            match_value: false,
+            uses_option_ctors: false,
+            has_option_type: false,
         }
     }
 
@@ -28,31 +45,57 @@ impl KernelValidator {
         self.check_params(&func.sig.inputs);
         self.check_return_type(&func.sig.output);
         self.visit_block(&func.block);
+        self.check_option_context();
     }
 
     fn check_params(&mut self, inputs: &syn::punctuated::Punctuated<FnArg, syn::Token![,]>) {
         for arg in inputs {
-            if let FnArg::Typed(pat_ty) = arg
-                && let Some(msg) =
+            if let FnArg::Typed(pat_ty) = arg {
+                if super::kernel_types::is_option_type(&pat_ty.ty) {
+                    self.has_option_type = true;
+                }
+                if let Some(msg) =
                     super::kernel_types::kernel_type_error(&pat_ty.ty, "type", &self.fn_name)
-            {
-                self.errors.push(syn::Error::new_spanned(&pat_ty.ty, msg));
+                {
+                    self.errors.push(syn::Error::new_spanned(&pat_ty.ty, msg));
+                }
             }
         }
     }
 
     fn check_return_type(&mut self, output: &syn::ReturnType) {
-        if let syn::ReturnType::Type(_, ty) = output
-            && let Some(msg) =
+        if let syn::ReturnType::Type(_, ty) = output {
+            if super::kernel_types::is_option_type(ty) {
+                self.has_option_type = true;
+            }
+            if let Some(msg) =
                 super::kernel_types::kernel_type_error(ty, "return type", &self.fn_name)
-        {
-            self.errors.push(syn::Error::new_spanned(ty, msg));
+            {
+                self.errors.push(syn::Error::new_spanned(ty, msg));
+            }
         }
     }
-}
 
-impl<'ast> Visit<'ast> for KernelValidator {
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+    /// `Some(...)`/`None` have no type of their own: the lowerer needs
+    /// an `Option<T>` annotation or return type to know which generated
+    /// struct to build. Catch the unannotated case at macro time instead
+    /// of letting a `compile_error!` string reach naga.
+    fn check_option_context(&mut self) {
+        if self.uses_option_ctors && !self.has_option_type {
+            self.errors.push(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "`Some(...)`/`None` need an `Option<T>` type context in GPU kernel `{}`; \
+                     annotate the `let` binding (`let x: Option<f32> = Some(1.0);`) or the \
+                     function return type",
+                    self.fn_name
+                ),
+            ));
+        }
+    }
+
+    /// Heap allocation and self-recursion: both have no WGSL spelling.
+    fn check_kernel_call(&mut self, node: &syn::ExprCall) {
         if let syn::Expr::Path(p) = node.func.as_ref() {
             let callee = p
                 .path
@@ -82,10 +125,61 @@ impl<'ast> Visit<'ast> for KernelValidator {
                 ));
             }
         }
-
-        visit::visit_expr_call(self, node);
     }
 
+    /// Classify a `match`'s arms: patterns must sit in the shared
+    /// subset, and a `_`/binding arm must come last.
+    fn check_match_arms(&mut self, node: &syn::ExprMatch) {
+        let mut seen_catch_all = false;
+        for arm in &node.arms {
+            let unreachable_arm = |this: &mut Self| {
+                this.errors.push(syn::Error::new_spanned(
+                    &arm.pat,
+                    format!(
+                        "this arm is unreachable in GPU kernel `{}`; a `_` or binding arm \
+                         must come last",
+                        this.fn_name
+                    ),
+                ));
+            };
+            if self.match_value {
+                if let syn::Expr::Block(b) = arm.body.as_ref() {
+                    let single = matches!(b.block.stmts.as_slice(), [syn::Stmt::Expr(_, None)]);
+                    if !single {
+                        self.errors.push(syn::Error::new_spanned(
+                            arm.body.as_ref(),
+                            format!(
+                                "arms of a value `match` in GPU kernel `{}` must be a single \
+                                 expression; bind intermediate results with `let` and keep the \
+                                 arm to one trailing expression",
+                                self.fn_name
+                            ),
+                        ));
+                    }
+                }
+            }
+            match crate::wgsl_lower::classify_pattern(&arm.pat) {
+                Ok(crate::wgsl_lower::ArmPattern::Wild)
+                | Ok(crate::wgsl_lower::ArmPattern::Bind(_)) => {
+                    if seen_catch_all {
+                        unreachable_arm(self);
+                    }
+                    seen_catch_all = true;
+                }
+                Ok(_) => {
+                    if seen_catch_all {
+                        unreachable_arm(self);
+                    }
+                }
+                Err(msg) => {
+                    self.errors.push(syn::Error::new_spanned(&arm.pat, msg));
+                }
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for KernelValidator {
     fn visit_expr_cast(&mut self, node: &'ast syn::ExprCast) {
         if crate::wgsl_lower::cast_target_ty(&node.ty).is_none() {
             self.errors.push(syn::Error::new_spanned(
@@ -113,24 +207,8 @@ impl<'ast> Visit<'ast> for KernelValidator {
         visit::visit_expr_closure(self, node);
     }
 
-    /// Scalar-namespaced paths (`u8::MAX`, `core::u8::MAX`,
-    /// `std::f32::consts::PI`) have no WGSL spelling: `u8::MAX as u32`
-    /// used to lower to `u32(u8::MAX)` and fail only at naga. Use a
-    /// plain `f32`, `u32` or `i32` literal.
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        if super::kernel_types::is_scalar_namespaced(&node.path, node.qself.as_ref()) {
-            self.errors.push(syn::Error::new_spanned(
-                &node.path,
-                format!(
-                    "path `{}` is not supported in GPU kernel `{}`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead",
-                    super::kernel_types::path_string(&node.path, node.qself.as_ref()),
-                    self.fn_name
-                ),
-            ));
-        }
-        visit::visit_expr_path(self, node);
-    }
-
+    /// `while` has no bounded spelling: a GPU loop must be a fixed
+    /// `for`, never an unbounded `while`.
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         self.errors.push(syn::Error::new_spanned(
             node,
@@ -146,13 +224,27 @@ impl<'ast> Visit<'ast> for KernelValidator {
     /// annotation like `let v: u8` would otherwise mistranslate while
     /// CPU `eval` wraps.
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        if let syn::Pat::Type(pt) = &node.pat
-            && let Some(msg) =
+        if let syn::Pat::Type(pt) = &node.pat {
+            if super::kernel_types::is_option_type(&pt.ty) {
+                self.has_option_type = true;
+            }
+            if let Some(msg) =
                 super::kernel_types::kernel_type_error(&pt.ty, "let annotation", &self.fn_name)
+            {
+                self.errors.push(syn::Error::new_spanned(&pt.ty, msg));
+            }
+        }
+        // `let x = match …`: the value form only lowers as the direct
+        // initializer of a binding — annotated or not.
+        if let Some(init) = &node.init
+            && matches!(init.expr.as_ref(), syn::Expr::Match(_))
         {
-            self.errors.push(syn::Error::new_spanned(&pt.ty, msg));
+            self.match_ok = true;
+            self.match_value = true;
         }
         visit::visit_local(self, node);
+        self.match_ok = false;
+        self.match_value = false;
     }
 
     /// Integer literals keep their values only with a 32-bit spelling:
@@ -196,8 +288,89 @@ impl<'ast> Visit<'ast> for KernelValidator {
                 ),
             ));
         }
+        if !self.match_ok {
+            self.errors.push(syn::Error::new_spanned(
+                node,
+                format!(
+                    "`match` in GPU kernel `{}` only lowers as a statement or as the direct \
+                     initializer of a `let` binding; bind the result first, then `return` it",
+                    self.fn_name
+                ),
+            ));
+        }
+        self.check_match_arms(node);
+        // Arm bodies do not inherit the value-position context.
+        let outer = std::mem::replace(&mut self.match_ok, false);
         visit::visit_expr_match(self, node);
+        self.match_ok = outer;
         self.match_depth -= 1;
+    }
+
+    /// A statement-position `match` is a supported host for the value
+    /// form's sibling: arm bodies may be full blocks there. `return
+    /// match …` hosts the value form, whose arms must be single
+    /// expressions.
+    fn visit_stmt(&mut self, node: &'ast syn::Stmt) {
+        let (host, value) = match node {
+            syn::Stmt::Expr(syn::Expr::Match(_), _) => (true, false),
+            syn::Stmt::Expr(syn::Expr::Return(r), _) => {
+                (matches!(r.expr.as_deref(), Some(syn::Expr::Match(_))), true)
+            }
+            _ => (false, false),
+        };
+        if host {
+            self.match_ok = true;
+            self.match_value = value;
+            visit::visit_stmt(self, node);
+            self.match_ok = false;
+            self.match_value = false;
+            return;
+        }
+        visit::visit_stmt(self, node);
+    }
+
+    /// `if let` / `while let` patterns share the `match` subset.
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        if let Err(msg) = crate::wgsl_lower::classify_pattern(&node.pat) {
+            self.errors.push(syn::Error::new_spanned(
+                &node.pat,
+                format!("{msg} (in `if let` of GPU kernel `{}`)", self.fn_name),
+            ));
+        }
+        visit::visit_expr_let(self, node);
+    }
+
+    /// `Some(...)`/`None` mark the body as needing an `Option<T>` type
+    /// context somewhere in the signature or a `let` annotation.
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = node.func.as_ref()
+            && p.path.segments.len() == 1
+            && matches!(
+                p.path.segments[0].ident.to_string().as_str(),
+                "Some" | "None"
+            )
+        {
+            self.uses_option_ctors = true;
+        }
+        self.check_kernel_call(node);
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node.path.get_ident().is_some_and(|i| i == "None") {
+            self.uses_option_ctors = true;
+        }
+        if super::kernel_types::is_scalar_namespaced(&node.path, node.qself.as_ref()) {
+            self.errors.push(syn::Error::new_spanned(
+                &node.path,
+                format!(
+                    "path `{}` is not supported in GPU kernel `{}`; scalar associated constants have no WGSL spelling, use a plain `f32`, `u32` or `i32` literal instead",
+                    super::kernel_types::path_string(&node.path, node.qself.as_ref()),
+                    self.fn_name
+                ),
+            ));
+        }
+        visit::visit_expr_path(self, node);
     }
 }
 

@@ -26,7 +26,40 @@ pub fn print_ty(t: &IrType) -> String {
         IrType::Custom(name) => name.as_str().to_owned(),
         IrType::Array { elem, len } => format!("array<{}, {len}>", print_ty(elem)),
         IrType::RuntimeArray(elem) => format!("array<{}>", print_ty(elem)),
+        IrType::Optional(inner) => option_struct_name(&print_ty(inner)),
     }
+}
+
+/// WGSL identifier spelling of the generated `Option<T>` struct.
+/// `vec3<f32>` becomes `Option_vec3_f32` — every non-alphanumeric
+/// character collapses to `_`, so the name is always a valid WGSL
+/// identifier derived deterministically from the payload spelling.
+pub fn option_struct_name(inner_wgsl: &str) -> String {
+    let mut sanitized = String::new();
+    for c in inner_wgsl.chars() {
+        if c.is_ascii_alphanumeric() {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    // Trailing separators are dropped so `vec3<f32>` becomes
+    // `Option_vec3_f32`, not `Option_vec3_f32_`.
+    while sanitized.ends_with('_') {
+        sanitized.pop();
+    }
+    format!("Option_{sanitized}")
+}
+
+/// Module-scope struct declaration backing `Option<T>`: a discriminant
+/// tag plus a payload slot. `None` carries a zero payload so the struct
+/// stays a fixed layout (WGSL has no union).
+pub fn option_struct_decl(inner_wgsl: &str) -> String {
+    format!(
+        "struct {} {{\n    has: u32,\n    value: {},\n}};",
+        option_struct_name(inner_wgsl),
+        inner_wgsl
+    )
 }
 
 /// Render one entry-point parameter. The type follows the semantic:

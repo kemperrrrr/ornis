@@ -7,6 +7,9 @@
 //! constructs lower to loud markers naga rejects. Rust `as` casts lower
 //! to WGSL conversion constructors (`f32(x)`/`u32(x)`/`i32(x)`).
 
+use ornis_shader_lang::ShaderType;
+use ornis_shader_lang::ir::IrType;
+use ornis_shader_lang::writer::{option_struct_decl, print_ty};
 use syn::{FnArg, ItemFn};
 
 #[allow(dead_code)]
@@ -23,10 +26,123 @@ pub fn rust_to_wgsl(expr: &syn::Expr) -> String {
     WgslGen::expr(expr)
 }
 
+/// Lower `Option<T>` to its generated-struct IR type. `None` when the
+/// path is not a bare `Option` with exactly one registry-representable
+/// payload (the validator rejects those forms with a spanned error).
+pub(crate) fn option_ir_ty(ty: &syn::Type) -> Option<IrType> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    let syn::GenericArgument::Type(inner) = args.args.first()? else {
+        return None;
+    };
+    let syn::Type::Path(inner_tp) = inner else {
+        return None;
+    };
+    let inner_seg = inner_tp.path.segments.last()?;
+    if inner_seg.ident == "bool" {
+        // Registry-excluded for call classification; printable as an
+        // `Option` payload like it is an array element.
+        return Some(IrType::Bool);
+    }
+    ShaderType::from_rust(&inner_seg.ident.to_string()).map(IrType::Scalar)
+}
+
+/// A kernel/helper return or `let` type as its lowered `IrType`, used
+/// as the expected type that names `Some`/`None` constructors and the
+/// declaration of a value-position `match`. Returns `None` for types
+/// with no registry mapping (uniform/varying structs, `Entity`, …).
+pub(crate) fn rust_ty_to_ir(ty: &syn::Type) -> Option<IrType> {
+    if let Some(payload) = option_ir_ty(ty) {
+        return Some(IrType::Optional(Box::new(payload)));
+    }
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    if seg.ident == "bool" {
+        return Some(IrType::Bool);
+    }
+    ShaderType::from_rust(&seg.ident.to_string()).map(IrType::Scalar)
+}
+
+/// `Option<T>` as the lowered struct type, ready for `print_ty`.
+pub(crate) fn option_struct_ty(ty: &syn::Type) -> Option<IrType> {
+    option_ir_ty(ty).map(|inner| IrType::Optional(Box::new(inner)))
+}
+
+/// Every `Option<T>` a kernel/helper signature or `let` annotation
+/// mentions, deduplicated by WGSL struct name. The generated struct
+/// declarations are prepended to the source so the spelling used in the
+/// body always has a definition in scope.
+fn collect_option_decls(func: &ItemFn) -> String {
+    use syn::visit::Visit;
+    struct Collector(Vec<IrType>);
+    impl<'ast> Visit<'ast> for Collector {
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if let syn::Pat::Type(pt) = &local.pat
+                && let Some(ty) = option_struct_ty(&pt.ty)
+            {
+                self.0.push(ty);
+            }
+            syn::visit::visit_local(self, local);
+        }
+    }
+    let mut collector = Collector(Vec::new());
+    for arg in &func.sig.inputs {
+        if let FnArg::Typed(pat_ty) = arg
+            && let Some(ty) = option_struct_ty(&pat_ty.ty)
+        {
+            collector.0.push(ty);
+        }
+    }
+    if let syn::ReturnType::Type(_, ty) = &func.sig.output
+        && let Some(ty) = option_struct_ty(ty)
+    {
+        collector.0.push(ty);
+    }
+    collector.visit_block(&func.block);
+
+    // One declaration per distinct struct name. The declaration is
+    // written from the *payload* spelling: `option_struct_decl` itself
+    // adds the `Option_` prefix, so passing the full name would emit
+    // `Option_Option_f32` and leave `Option_f32` undefined.
+    let mut decls: Vec<(String, String)> = collector
+        .0
+        .iter()
+        .filter_map(|ty| {
+            let IrType::Optional(inner) = ty else {
+                return None;
+            };
+            Some((print_ty(ty), option_struct_decl(&print_ty(inner))))
+        })
+        .collect();
+    decls.sort();
+    decls.dedup_by(|a, b| a.0 == b.0);
+    decls
+        .into_iter()
+        .map(|(_, decl)| decl)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// WGSL type for an uninitialized `var` declaration. Scalars and glam
 /// vectors map to their WGSL spellings; any other named type passes
 /// through verbatim (varying/uniform struct names).
 pub(crate) fn var_type(ty: &syn::Type) -> String {
+    if let Some(ty) = option_struct_ty(ty) {
+        return print_ty(&ty);
+    }
     if let syn::Type::Path(tp) = ty
         && let Some(last) = tp.path.segments.last().map(|s| s.ident.to_string())
     {
@@ -103,6 +219,9 @@ fn wgsl_type(ty: &str) -> Option<String> {
 }
 
 pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
+    if let Some(ty) = option_struct_ty(ty) {
+        return print_ty(&ty);
+    }
     match ty {
         syn::Type::Path(tp) => {
             let segs: Vec<_> = tp
@@ -144,7 +263,17 @@ fn extract_and_convert_body(func: &ItemFn) -> String {
 
 /// Convert the entire function body to WGSL statements
 fn convert_body_to_wgsl(func: &ItemFn) -> String {
-    ornis_shader_lang::writer::print_block(&crate::wgsl_lower::lower_body(&func.block.stmts))
+    // The return type is the only type context available at the top of
+    // the body: `return None;` and a tail `None` need it to know which
+    // `Option_<T>` struct to build.
+    let return_ty = match &func.sig.output {
+        syn::ReturnType::Type(_, ty) => rust_ty_to_ir(ty),
+        syn::ReturnType::Default => None,
+    };
+    ornis_shader_lang::writer::print_block(&crate::wgsl_lower::lower_body_typed(
+        &func.block.stmts,
+        return_ty.as_ref(),
+    ))
 }
 
 /// Generate a standalone WGSL function definition (not a compute shader).
@@ -238,8 +367,16 @@ pub fn wgsl_fn_source(func: &ItemFn) -> String {
 
     let body = convert_body_to_wgsl(func);
 
+    let decls = collect_option_decls(func);
+    let prefix = if decls.is_empty() {
+        String::new()
+    } else {
+        format!("{decls}\n")
+    };
+
     format!(
-        "fn {}({}) -> {} {{ {} }}",
+        "{}fn {}({}) -> {} {{ {} }}",
+        prefix,
         fn_name,
         param_wgsl.join(", "),
         return_ty,
@@ -270,7 +407,10 @@ pub fn wgsl_source_from_fn(func: &ItemFn) -> String {
     let param_types: Vec<String> = params.iter().map(|(_, ty)| rust_type_to_wgsl(ty)).collect();
     let body_wgsl = extract_and_convert_body(func);
 
-    let mut wgsl = String::new();
+    let mut wgsl = collect_option_decls(func);
+    if !wgsl.is_empty() {
+        wgsl.push('\n');
+    }
     for (i, (pname, ptype)) in param_names.iter().zip(param_types.iter()).enumerate() {
         wgsl.push_str(&format!(
             "@group(0) @binding({i}) var<storage, read> {pname}: array<{ptype}>;\n"
