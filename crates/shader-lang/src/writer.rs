@@ -26,15 +26,17 @@ pub fn print_ty(t: &IrType) -> String {
         IrType::Custom(name) => name.as_str().to_owned(),
         IrType::Array { elem, len } => format!("array<{}, {len}>", print_ty(elem)),
         IrType::RuntimeArray(elem) => format!("array<{}>", print_ty(elem)),
-        IrType::Optional(inner) => option_struct_name(&print_ty(inner)),
+        IrType::Optional(inner) => format!("Option_{}", option_payload_name(&print_ty(inner))),
     }
 }
 
-/// WGSL identifier spelling of the generated `Option<T>` struct.
-/// `vec3<f32>` becomes `Option_vec3_f32` — every non-alphanumeric
-/// character collapses to `_`, so the name is always a valid WGSL
-/// identifier derived deterministically from the payload spelling.
-pub fn option_struct_name(inner_wgsl: &str) -> String {
+/// WGSL identifier fragment for an `Option<T>` payload: every
+/// non-alphanumeric character of the payload spelling collapses to `_`,
+/// so the result is always a valid identifier piece.
+///
+/// `vec3<f32>` becomes `vec3_f32` — trailing separators are dropped so
+/// the piece never ends in `_`.
+pub fn option_payload_name(inner_wgsl: &str) -> String {
     let mut sanitized = String::new();
     for c in inner_wgsl.chars() {
         if c.is_ascii_alphanumeric() {
@@ -43,12 +45,17 @@ pub fn option_struct_name(inner_wgsl: &str) -> String {
             sanitized.push('_');
         }
     }
-    // Trailing separators are dropped so `vec3<f32>` becomes
-    // `Option_vec3_f32`, not `Option_vec3_f32_`.
     while sanitized.ends_with('_') {
         sanitized.pop();
     }
-    format!("Option_{sanitized}")
+    sanitized
+}
+
+/// WGSL identifier spelling of the generated `Option<T>` struct:
+/// [`option_payload_name`] behind the `Option_` prefix.
+/// `vec3<f32>` becomes `Option_vec3_f32`.
+pub fn option_struct_name(inner_wgsl: &str) -> String {
+    format!("Option_{}", option_payload_name(inner_wgsl))
 }
 
 /// Module-scope struct declaration backing `Option<T>`: a discriminant

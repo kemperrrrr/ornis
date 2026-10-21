@@ -73,8 +73,8 @@ fn option_roundtrip(x: f32) -> f32 {
     let a: Option<f32> = Some(x + 1.0);
     let b: Option<f32> = None;
     let picked = match a {
-        Some(v) => v,
-        None => 0.0,
+        Some(v) => v * 2.0,
+        None => -1.0,
     };
     let mut fallback = 0.5;
     if let Some(v) = b {
@@ -165,8 +165,8 @@ fn if_let_binds_payload() {
 
 #[test]
 fn some_and_none_lower_from_the_annotation() {
-    assert_eq!(option_roundtrip::eval(1.0), 2.5);
-    assert_eq!(option_roundtrip::eval(0.0), 1.5);
+    assert_eq!(option_roundtrip::eval(1.0), 4.5);
+    assert_eq!(option_roundtrip::eval(0.0), 2.5);
     let src = option_roundtrip::wgsl_source();
     assert!(src.contains("Option_f32(1u,"), "{src}");
     assert!(src.contains("Option_f32(0u, 0.0)"), "{src}");
