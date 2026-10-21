@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
     Authoritative, Color, Engine, Entity, EnvironmentWeight, Position, Replica, SceneEntities,
-    SceneRole, SceneVersion, Seconds, Surface, UnitQuat,
+    SceneRole, SceneVersion, Seconds, SmartStore, Surface, UnitQuat,
 };
 use ornis_render::extraction::{RenderLights, extract_render_data};
 use ornis_render::{
@@ -128,8 +128,10 @@ impl GameWorld {
     /// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)),
     /// an object entity crossfades its [`AnimPlayer`](ornis_animation::AnimPlayer)
     /// to the named clip. Loading never autoplays. A non-positive
-    /// `duration` cuts without a fade; paused clocks and stop/replay
-    /// semantics stay with [`Self::resume_animation`],
+    /// `duration` cuts without a fade, as does a start over a fade still
+    /// in flight (one fade per entity); the fresh cursor resets `speed`
+    /// and `weight` to `1.0`. Paused clocks and stop/replay semantics
+    /// stay with [`Self::resume_animation`],
     /// [`Self::pause_animation`] and [`Self::stop_animation`].
     ///
     /// # Errors
@@ -143,11 +145,7 @@ impl GameWorld {
         name: &str,
         duration: Seconds,
     ) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
         crate::anim_wiring::play_crossfade(store, entity, name, duration)
     }
 
@@ -163,9 +161,7 @@ impl GameWorld {
     /// [`PlaybackError::Missing`] when `entity` has no player.
     // qual:api — host playback control; in-tree callers are tests.
     pub fn resume_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let Some(store) = self.engine_mut().world_mut().store_mut() else {
-            return Err(PlaybackError::Missing);
-        };
+        let store = self.anim_store()?;
         if crate::anim_wiring::set_playing(store, entity, true) {
             Ok(())
         } else {
@@ -179,11 +175,7 @@ impl GameWorld {
     ///
     /// [`PlaybackError::Missing`] when `entity` has no player.
     pub fn pause_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
         if crate::anim_wiring::set_playing(store, entity, false) {
             Ok(())
         } else {
@@ -197,11 +189,7 @@ impl GameWorld {
     ///
     /// [`PlaybackError::Missing`] when `entity` has no player.
     pub fn stop_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
         let found = crate::anim_wiring::set_playing(store, entity, false);
         let rewound = crate::anim_wiring::rewind_player(store, entity);
         if found || rewound {
@@ -209,6 +197,16 @@ impl GameWorld {
         } else {
             Err(PlaybackError::Missing)
         }
+    }
+
+    /// Store the playback entries write through. The engine always
+    /// carries one; without it a playback call reports
+    /// [`PlaybackError::Missing`] instead of panicking.
+    fn anim_store(&mut self) -> Result<&mut SmartStore, PlaybackError> {
+        self.engine_mut()
+            .world_mut()
+            .store_mut()
+            .ok_or(PlaybackError::Missing)
     }
 }
 

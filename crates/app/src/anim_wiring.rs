@@ -360,6 +360,9 @@ pub fn rewind_player(store: &SmartStore, entity: Entity) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlaybackError {
     /// The entity has no [`Animator`] catalog and no [`AnimPlayer`] cursor.
+    /// The [`GameWorld`](crate::game_world::GameWorld) playback entries
+    /// also report it when the world carries no engine store — an
+    /// invariant that never happens in a running app.
     #[error("entity has no animation player")]
     Missing,
     /// No indexed clip matches the requested name.
@@ -381,7 +384,8 @@ pub enum PlaybackError {
 /// cursor receives a typed [`AnimFade`]
 /// crossfade to the named clip ([`fade_to_clip`]). A non-positive
 /// `duration` cuts without a fade, like
-/// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play).
+/// [`AnimatorMut::play`](ornis_animation::AnimatorMut::play), and so
+/// does a start over a fade still in flight — one fade per entity.
 ///
 /// Object names resolve through the playlist's [`Name`] — what
 /// [`wire_loaded_animation`] writes from the glTF animation name. Among
@@ -446,11 +450,17 @@ fn object_clip_named(store: &SmartStore, entity: Entity, name: &str) -> Option<C
 ///
 /// Snapshots the current [`AnimPlayer`] into [`AnimFade::from`] (its
 /// clock keeps advancing until the fade retires) and installs a fresh
-/// full-weight cursor on `clip` from time zero — the
+/// cursor on `clip` from time zero — `speed` and `weight` reset to `1.0`,
+/// the
 /// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)
 /// semantics for the object topology. A non-positive `duration`, a paused
-/// cursor, or a replay of an in-flight fade cuts without one and drops
-/// any [`AnimFade`] already on the entity.
+/// cursor, or a start while a fade is still in flight cuts without one and
+/// drops any [`AnimFade`] already on the entity: one fade per entity, and
+/// it only starts from a settled playing cursor.
+///
+/// The caller owns `clip`'s validity — [`play_crossfade`] resolves names
+/// through the playlist [`Name`] — and nothing here checks that `clip`
+/// tracks `entity`.
 ///
 /// # Errors
 ///
@@ -467,7 +477,8 @@ pub fn fade_to_clip(
         .ok_or(PlaybackError::Missing)?;
     store.register::<AnimPlayer>();
     store.register::<AnimFade>();
-    if outgoing.playing && duration.get() > 0.0 {
+    let fading = fade_in_flight(store, entity);
+    if outgoing.playing && duration.get() > 0.0 && !fading {
         store.insert(
             entity,
             AnimFade {
@@ -490,6 +501,13 @@ pub fn fade_to_clip(
         },
     );
     Ok(())
+}
+
+/// Whether `entity` already carries an [`AnimFade`] in flight.
+fn fade_in_flight(store: &SmartStore, entity: Entity) -> bool {
+    store
+        .read_lane::<AnimFade>()
+        .is_some_and(|fades| fades.get(entity).is_some())
 }
 
 /// Installs the overlay `layer` on a skeleton root — the typed
@@ -1326,6 +1344,41 @@ mod tests {
         assert_eq!(fade.duration, Seconds::new(0.25));
     }
 
+    /// One fade per root: a start over a `SkelFade` still in flight cuts
+    /// to the fresh cursor at once — the in-flight fade is dropped,
+    /// never restarted or stacked.
+    #[test]
+    fn play_crossfade_cuts_over_an_inflight_skel_fade() {
+        use ornis_animation::SkelFade;
+        let loaded = skinned_scene(vec![named_clip("Walk_Loop")]);
+        let mut store = SmartStore::new();
+        let spawn = spawn_gltf_world(&mut store, &loaded);
+        let wiring = wire_loaded_animation(&mut store, &loaded, &spawn);
+        let hero = spawn.entities[0];
+        let root = wiring.roots[0];
+
+        play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("start");
+        play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("fade");
+        assert!(store.read_lane::<SkelFade>().unwrap().get(root).is_some());
+
+        play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("cut over fade");
+        assert!(
+            store
+                .read_lane::<SkelFade>()
+                .is_none_or(|fades| fades.get(root).is_none()),
+            "an in-flight fade is cut, not restarted"
+        );
+        let cursor = store
+            .read_lane::<SkelPlayer>()
+            .unwrap()
+            .get(root)
+            .copied()
+            .expect("cursor");
+        assert_eq!(cursor.clip, wiring.clips["Walk_Loop"]);
+        assert_eq!(cursor.time, Seconds::ZERO);
+        assert!(cursor.playing);
+    }
+
     /// The object branch resolves the playlist by `Name` (the earliest
     /// created wins on duplicates) and writes `AnimFade` plus a fresh
     /// `AnimPlayer` — the typed inputs, not raw lane inserts.
@@ -1451,6 +1504,36 @@ mod tests {
             fade_to_clip(&mut store, Entity::new(999), incoming, Seconds::ZERO),
             Err(PlaybackError::Missing)
         );
+    }
+
+    /// One fade per entity: a start over a fade still in flight cuts to
+    /// the new clip at once — the in-flight `AnimFade` is dropped, never
+    /// restarted or stacked (`AnimatorMut::start` rule, object topology).
+    #[test]
+    fn fade_to_clip_cuts_over_an_inflight_fade() {
+        let mut store = SmartStore::new();
+        let target = store.create_entity();
+        let wave = object_scene(&mut store, "Wave", target);
+        let close = object_scene(&mut store, "Close", target);
+
+        fade_to_clip(&mut store, target, wave, Seconds::new(0.5)).expect("fade");
+        assert!(store.read_lane::<AnimFade>().unwrap().get(target).is_some());
+
+        fade_to_clip(&mut store, target, close, Seconds::new(0.5)).expect("cut over fade");
+        assert!(
+            store
+                .read_lane::<AnimFade>()
+                .is_none_or(|fades| fades.get(target).is_none()),
+            "an in-flight fade is cut, not restarted"
+        );
+        let player = store
+            .read_lane::<AnimPlayer>()
+            .unwrap()
+            .get(target)
+            .copied()
+            .expect("player");
+        assert_eq!(player.clip, close);
+        assert_eq!(player.time, 0.0, "the cut lands on a fresh cursor");
     }
 
     /// `set_skel_layer` anchors on a `Skeleton` root: nothing is written

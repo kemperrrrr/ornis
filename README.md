@@ -258,9 +258,13 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 по-прежнему 0 без куба и 1 с кубом.
 `spawn_scene` — корень RON-сцены. Клип запускается через
 `play_animation(root, name, duration)` (именной старт с кроссфейдом для
-скелета и объектных треков; `duration = 0` — мгновенный рез) или через
+скелета и объектных треков; `duration = 0` — мгновенный рез, как и
+повторный старт в полёте фейда — фейд один на сущность) или через
 `entity_mut(root).animator()?.play(name)`; пауза/стоп/резюме —
-`pause_animation`/`stop_animation`/`resume_animation`. Окно открывает `ornis::run`
+`pause_animation`/`stop_animation`/`resume_animation`. Ломающее изменение
+API (PR #180): старое `play_animation(entity)` (резюм) теперь
+`resume_animation`, а `PlaybackError` стал enum `Missing`/`UnknownClip`
+(больше не `Copy`). Окно открывает `ornis::run`
 с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет
 локальный `Transform` целевого узла (object-треки и суставы, отображённые
 через `node_to_entity`), поэтому дети двигаются распространением позы.

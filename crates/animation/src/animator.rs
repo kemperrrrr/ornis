@@ -111,7 +111,9 @@ impl AnimatorMut<'_> {
     /// The previous playing cursor keeps advancing for `duration` while the
     /// new clip blends in ([`SkelFade`], linear). A non-positive duration
     /// behaves like [`Self::play`]. Targets with no playing cursor start
-    /// without a fade.
+    /// without a fade. One fade per target: a start over a crossfade still
+    /// in flight cuts to the new clip at once (the in-flight [`SkelFade`]
+    /// is dropped) instead of stacking fades.
     ///
     /// # Errors
     ///
@@ -156,22 +158,40 @@ impl AnimatorMut<'_> {
                 .iter()
                 .find(|(entity, _)| *entity == target)
                 .map(|(_, old)| *old);
-            match (fade, outgoing) {
-                (Some(duration), Some(old)) if old.playing && duration.get() > 0.0 => {
-                    self.store.insert(
-                        target,
-                        SkelFade {
-                            from: old,
-                            duration,
-                            elapsed: Seconds::ZERO,
-                        },
-                    );
-                }
-                _ => self.drop_fade(target),
-            }
-            self.store.insert(target, player);
+            self.start_target(target, fade, outgoing, player);
         }
         Ok(())
+    }
+
+    /// Writes one target's start: fade from `outgoing` only when the call
+    /// fades, the cursor plays, and no crossfade is in flight — otherwise
+    /// the in-flight [`SkelFade`] is cut and the fresh player takes over
+    /// at once (one fade per target, never stacked).
+    fn start_target(
+        &mut self,
+        target: Entity,
+        fade: Option<Seconds>,
+        outgoing: Option<SkelPlayer>,
+        player: SkelPlayer,
+    ) {
+        let fading = self
+            .store
+            .read_lane::<SkelFade>()
+            .is_some_and(|fades| fades.get(target).is_some());
+        match (fade, outgoing) {
+            (Some(duration), Some(old)) if old.playing && duration.get() > 0.0 && !fading => {
+                self.store.insert(
+                    target,
+                    SkelFade {
+                        from: old,
+                        duration,
+                        elapsed: Seconds::ZERO,
+                    },
+                );
+            }
+            _ => self.drop_fade(target),
+        }
+        self.store.insert(target, player);
     }
 
     /// Removes an in-progress crossfade on `target`, if any.

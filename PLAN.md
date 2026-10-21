@@ -147,7 +147,9 @@
      (обе топологии; имена объектных клипов — по `Name` плейлиста),
      `fade_to_clip` (типизированный `AnimFade`), `set_skel_layer`
      (типизированный `SkelLayer`); `GameWorld::play_animation(entity, name,
-     duration)` — первый прод-вызов, резюме/пауза/стоп — `resume_animation`/
+     duration)` — прод-точка входа (первый нетестовый вызыватель
+     `AnimatorMut::play_crossfade`; у самой цепочки внутридеревных
+     вызывателей пока нет), резюме/пауза/стоп — `resume_animation`/
      `pause_animation`/`stop_animation`.
   3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
      и любая комбинация из нескольких слоёв сейчас невозможна.
