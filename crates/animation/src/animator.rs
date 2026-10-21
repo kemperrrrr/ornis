@@ -174,10 +174,7 @@ impl AnimatorMut<'_> {
         outgoing: Option<SkelPlayer>,
         player: SkelPlayer,
     ) {
-        let fading = self
-            .store
-            .read_lane::<SkelFade>()
-            .is_some_and(|fades| fades.get(target).is_some());
+        let fading = crate::fade_in_flight::<SkelFade>(self.store, target);
         match (fade, outgoing) {
             (Some(duration), Some(old)) if old.playing && duration.get() > 0.0 && !fading => {
                 self.store.insert(

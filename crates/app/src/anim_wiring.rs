@@ -17,7 +17,7 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, JointId, JointMask,
     JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer,
-    Skeleton, SkinnedMesh, try_animator,
+    Skeleton, SkinnedMesh, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Entity, Seconds, SmartStore};
@@ -477,7 +477,7 @@ pub fn fade_to_clip(
         .ok_or(PlaybackError::Missing)?;
     store.register::<AnimPlayer>();
     store.register::<AnimFade>();
-    let fading = fade_in_flight(store, entity);
+    let fading = fade_in_flight::<AnimFade>(store, entity);
     if outgoing.playing && duration.get() > 0.0 && !fading {
         store.insert(
             entity,
@@ -501,13 +501,6 @@ pub fn fade_to_clip(
         },
     );
     Ok(())
-}
-
-/// Whether `entity` already carries an [`AnimFade`] in flight.
-fn fade_in_flight(store: &SmartStore, entity: Entity) -> bool {
-    store
-        .read_lane::<AnimFade>()
-        .is_some_and(|fades| fades.get(entity).is_some())
 }
 
 /// Installs the overlay `layer` on a skeleton root — the typed

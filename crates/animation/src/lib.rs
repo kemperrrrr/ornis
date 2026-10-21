@@ -377,6 +377,18 @@ pub struct AnimFade {
     pub elapsed: Seconds,
 }
 
+/// Whether `entity` already carries a crossfade of type `F` in flight.
+///
+/// The one in-flight check behind the "one fade per entity" rule: the
+/// skeletal ([`SkelFade`]) and object ([`AnimFade`]) topologies both ask
+/// this before installing a fade, and a start over a running fade cuts
+/// instead of stacking.
+pub fn fade_in_flight<F: 'static + Send + Sync>(store: &SmartStore, entity: Entity) -> bool {
+    store
+        .read_lane::<F>()
+        .is_some_and(|fades| fades.get(entity).is_some())
+}
+
 /// Default physics-authority lane for [`AnimSampleSystem`]: a lane that is
 /// never populated, so nothing is ever skipped.
 ///
