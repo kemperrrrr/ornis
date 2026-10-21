@@ -587,6 +587,24 @@ mod tests {
         );
         assert_eq!(previous_new, current_b.model_matrix);
         assert_eq!(validity_new, MotionValidity::Invalid);
+
+        // An incomplete identity map (fewer entities than instances)
+        // cannot be matched against the history: the motion stays
+        // invalid even for an entity the history knows, so the temporal
+        // pass never reprojects from an untrusted frame.
+        let (previous_incomplete, validity_incomplete) = previous_instance_state(
+            &current_b,
+            Some(entity_b),
+            &previous,
+            MotionValidity::Valid,
+            false,
+        );
+        assert_eq!(
+            previous_incomplete,
+            Mat4::from_translation(glam::Vec3::Y),
+            "the stored transform stays, but the motion flag does not trust it"
+        );
+        assert_eq!(validity_incomplete, MotionValidity::Invalid);
     }
 
     #[test]

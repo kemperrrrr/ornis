@@ -14,12 +14,9 @@ use super::*;
 /// [`crate::gpu_required`] holds (`ORNIS_REQUIRE_GPU` — non-empty, not
 /// `"0"`; the CI `test` shard sets `=1`) a missing adapter panics instead
 /// of skipping, so a missing device can never turn a GPU gate into a pass.
+/// The shared bootstrap logs the skip itself.
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let pair = crate::try_headless_device();
-    if pair.is_none() {
-        eprintln!("SKIPPED (auto_exposure): no wgpu device");
-    }
-    pair
+    crate::try_headless_device()
 }
 
 #[test]

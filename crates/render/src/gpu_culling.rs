@@ -257,6 +257,14 @@ pub(crate) fn stage_next_instances(
 /// caller owns reuse and allocation). The previous transform falls back
 /// to the current one and the motion flag to valid, so a record built
 /// without the temporal history still describes a well-formed instance.
+///
+/// **Not for a rendered frame.** The fallback means every record claims
+/// a valid motion and a previous transform equal to the current one —
+/// the temporal reprojection would read a history that never existed.
+/// A rendered frame must go through the instance upload of
+/// [`Renderer3D`](crate::renderer::Renderer3D), which resolves the
+/// previous transform and the motion validity per entity; the culler
+/// stages exactly those records.
 pub(crate) fn convert_instances(out: &mut Vec<PerObjectGpu>, instances: &[InstanceData]) {
     out.extend(instances.iter().map(|inst| {
         let mut record = PerObjectGpu::default();
@@ -611,15 +619,11 @@ mod tests {
 
     /// Adapter handle, or `None` on headless hosts without a GPU — the
     /// shared bootstrap [`crate::try_headless_device`], which panics
-    /// instead of skipping when [`crate::gpu_required`] holds. Logs the
-    /// skip so every GPU test in this module is visible in the output
-    /// rather than a silent green pass.
+    /// instead of skipping when [`crate::gpu_required`] holds and logs
+    /// the skip itself, so every GPU test in this module is visible in
+    /// the output rather than a silent green pass.
     fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let pair = crate::try_headless_device();
-        if pair.is_none() {
-            eprintln!("SKIPPED (gpu_culling tests): no wgpu adapter or device");
-        }
-        pair
+        crate::try_headless_device()
     }
 
     /// Reference scene instances, the frame matrix and the CPU

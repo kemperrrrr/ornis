@@ -36,15 +36,10 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
 ///
 /// Thin wrapper over [`crate::try_headless_device`], which holds the one
 /// bootstrap every GPU-gated test and bench shares (and the
-/// [`crate::gpu_required`] panic-instead-of-skip contract). Logs the skip
-/// so a no-GPU run is visible in the test output rather than a silent
-/// green pass.
+/// [`crate::gpu_required`] panic-instead-of-skip contract). The shared
+/// bootstrap logs the skip itself, so no caller can skip silently.
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let pair = crate::try_headless_device();
-    if pair.is_none() {
-        eprintln!("SKIPPED (renderer tests): no wgpu adapter or device");
-    }
-    pair
+    crate::try_headless_device()
 }
 
 /// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a

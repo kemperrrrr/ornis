@@ -17,7 +17,11 @@
 //! closes this gap — see the RAT-43 issue.
 //!
 //! Compile-checked by the gate; manual run:
-//!   cargo bench -p ornis-render --bench culling_bench
+//!   cargo bench -p ornis-render --bench culling_bench --features test-util
+//!
+//! The bench needs the `test-util` feature: the shared headless bootstrap
+//! lives behind it, so the wasm/production graph does not pull the poller
+//! in.
 //!
 //! With `ORNIS_REQUIRE_GPU` set (the CI GPU lane), a missing adapter fails
 //! the bench instead of degrading to the CPU column.

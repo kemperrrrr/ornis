@@ -90,6 +90,7 @@ pub use ao::{
 /// crate root that never compiles under `cfg(test)` — shares this one
 /// definition with the in-crate tests. `#[doc(hidden)]`: a cross-target
 /// implementation detail, not a stable API.
+#[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub fn gpu_required() -> bool {
     std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
@@ -101,11 +102,13 @@ pub fn gpu_required() -> bool {
 /// [`gpu_required`] holds (`ORNIS_REQUIRE_GPU` — non-empty, not `"0"`; the
 /// CI `test` shard sets `=1`) a missing adapter or device panics instead of
 /// returning `None`, so it can never turn a GPU gate into a pass; unset or
-/// explicit `"0"` keeps the skip, which callers should log before returning.
+/// explicit `"0"` keeps the skip, which is logged here — the shared
+/// bootstrap reports every skip, so no caller can skip silently.
 ///
 /// `#[doc(hidden)]`: public only so the criterion bench — a separate crate
 /// root that never compiles under `cfg(test)` — reaches it, exactly like
 /// [`gpu_required`]. Not a stable API.
+#[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
@@ -126,6 +129,7 @@ pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
                     !gpu_required(),
                     "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
                 );
+                eprintln!("SKIPPED (try_headless_device): no wgpu adapter — GPU gate skipped");
                 return None;
             }
         };
@@ -139,6 +143,7 @@ pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
                     !gpu_required(),
                     "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
                 );
+                eprintln!("SKIPPED (try_headless_device): no wgpu device — GPU gate skipped");
                 None
             }
         }
@@ -154,6 +159,7 @@ pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 /// public only so the criterion bench — a separate crate root that never
 /// compiles under `cfg(test)` — reaches it, exactly like [`gpu_required`]
 /// and [`try_headless_device`]. Not a stable API.
+#[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub fn read_bytes_back(
     device: &wgpu::Device,

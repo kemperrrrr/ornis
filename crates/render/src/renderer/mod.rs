@@ -1029,3 +1029,7 @@ mod msaa_edge_gpu;
 #[cfg(test)]
 #[path = "../indirect_draw_gpu.rs"]
 mod indirect_draw_gpu;
+
+#[cfg(test)]
+#[path = "../motion_history_gpu.rs"]
+mod motion_history_gpu;
