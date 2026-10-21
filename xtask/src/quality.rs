@@ -1403,19 +1403,40 @@ fn level1(stages: &mut StageList<'_>) {
     // The render criterion bench lives behind the crate feature
     // `test-util` (the headless device bootstrap is test-only), so a
     // plain workspace run skips its target silently — the bench would
-    // rot unnoticed. The package-qualified feature puts the target back
-    // into the lint (`cargo clippy -v` shows `culling_bench` only with
-    // it).
+    // rot unnoticed. The second run lints the render package with the
+    // feature on; it is verbose on purpose, so the CI log names the
+    // bench crate and proves the target was really built.
     stages.run(
         "clippy",
         "clippy",
-        "cargo clippy --workspace --all-targets --features ornis-render/test-util -- -D warnings",
+        "cargo clippy --workspace --all-targets -- -D warnings",
         stages.cargo(&[
             "clippy",
             "--workspace",
             "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        false,
+    );
+    // A second command under the same stage id: the stage counter grows
+    // with it, so the summary keeps the "n/total" numbering honest.
+    if stages.enabled("clippy") {
+        stages.total += 1;
+    }
+    stages.run(
+        "clippy",
+        "clippy (render bench)",
+        "cargo clippy -v -p ornis-render --all-targets --features test-util -- -D warnings",
+        stages.cargo(&[
+            "clippy",
+            "-v",
+            "-p",
+            "ornis-render",
+            "--all-targets",
             "--features",
-            "ornis-render/test-util",
+            "test-util",
             "--",
             "-D",
             "warnings",
