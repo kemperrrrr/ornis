@@ -371,6 +371,13 @@ pub enum PlaybackError {
         /// Requested clip name.
         name: String,
     },
+    /// The [`ClipId`] is not a live playlist with a track for the entity:
+    /// a stale or fabricated handle, or a clip that does not animate it.
+    #[error("clip {clip:?} does not track the entity")]
+    InvalidClip {
+        /// Rejected clip handle.
+        clip: ClipId,
+    },
 }
 
 /// Starts `name` on `entity`, fading from whatever plays there now.
@@ -397,7 +404,8 @@ pub enum PlaybackError {
 /// [`PlaybackError::Missing`] when `entity` carries neither catalog nor
 /// cursor (hand-built skeletal cursors without an [`Animator`] start
 /// through [`set_playing`] instead). [`PlaybackError::UnknownClip`] when
-/// `name` is not indexed.
+/// `name` is not indexed. [`PlaybackError::InvalidClip`] is unreachable
+/// here: object names resolve only to playlists that track `entity`.
 pub fn play_crossfade(
     store: &mut SmartStore,
     entity: Entity,
@@ -458,13 +466,17 @@ fn object_clip_named(store: &SmartStore, entity: Entity, name: &str) -> Option<C
 /// drops any [`AnimFade`] already on the entity: one fade per entity, and
 /// it only starts from a settled playing cursor.
 ///
-/// The caller owns `clip`'s validity — [`play_crossfade`] resolves names
-/// through the playlist [`Name`] — and nothing here checks that `clip`
-/// tracks `entity`.
+/// The caller passes `clip` by handle; [`fade_to_clip`] rejects anything
+/// that is not a live playlist tracking `entity` with
+/// [`PlaybackError::InvalidClip`], and [`play_crossfade`] resolves names
+/// through the playlist [`Name`] — both paths keep `entity`'s cursor
+/// intact on failure.
 ///
 /// # Errors
 ///
 /// [`PlaybackError::Missing`] when `entity` has no [`AnimPlayer`].
+/// [`PlaybackError::InvalidClip`] when `clip` is not a live playlist
+/// with a track for `entity`.
 pub fn fade_to_clip(
     store: &mut SmartStore,
     entity: Entity,
@@ -475,6 +487,15 @@ pub fn fade_to_clip(
         .read_lane::<AnimPlayer>()
         .and_then(|players| players.get(entity).copied())
         .ok_or(PlaybackError::Missing)?;
+    let clips = store.read_cold_lane::<AnimClip>();
+    let valid = clips
+        .as_deref()
+        .and_then(|clips| clips.get(clip.0))
+        .is_some_and(|playlist| playlist.tracks.iter().any(|track| track.entity == entity));
+    drop(clips);
+    if !valid {
+        return Err(PlaybackError::InvalidClip { clip });
+    }
     store.register::<AnimPlayer>();
     store.register::<AnimFade>();
     let fading = fade_in_flight::<AnimFade>(store, entity);
@@ -1508,6 +1529,49 @@ mod tests {
         assert_eq!(
             fade_to_clip(&mut store, Entity::new(999), incoming, Seconds::ZERO),
             Err(PlaybackError::Missing)
+        );
+    }
+
+    /// A [`ClipId`] that is not a live playlist tracking `entity` is
+    /// rejected with [`PlaybackError::InvalidClip`] and writes nothing.
+    #[test]
+    fn fade_to_clip_rejects_an_invalid_clip_id() {
+        let (mut store, target, _wave, _close) = fade_scene();
+        let before = store
+            .read_lane::<AnimPlayer>()
+            .unwrap()
+            .get(target)
+            .copied()
+            .expect("fade_scene installs a cursor");
+
+        // A playlist of someone else's: valid handle, wrong entity.
+        let foreign_root = store.create_entity();
+        let foreign = object_scene(&mut store, "Idle", foreign_root);
+        let err = fade_to_clip(&mut store, target, foreign, Seconds::new(0.5))
+            .expect_err("a clip that does not track the entity is invalid");
+        assert_eq!(err, PlaybackError::InvalidClip { clip: foreign });
+
+        // A fabricated handle: no playlist at that entity at all.
+        let missing = ClipId(store.create_entity());
+        let err = fade_to_clip(&mut store, target, missing, Seconds::new(0.5))
+            .expect_err("a handle with no playlist is invalid");
+        assert_eq!(err, PlaybackError::InvalidClip { clip: missing });
+
+        assert_eq!(
+            store
+                .read_lane::<AnimPlayer>()
+                .unwrap()
+                .get(target)
+                .copied()
+                .expect("cursor stays"),
+            before,
+            "an invalid clip writes nothing"
+        );
+        assert!(
+            store
+                .read_lane::<AnimFade>()
+                .is_none_or(|fades| fades.get(target).is_none()),
+            "an invalid clip installs no fade"
         );
     }
 
