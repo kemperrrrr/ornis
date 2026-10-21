@@ -434,7 +434,7 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// Parents `child` under `parent`, updating [`ChildOf`](ornis_core::ChildOf)
     /// and the parent's [`Children`](ornis_core::Children) together.
     ///
-    /// This is the world entry point for parenting. [`SmartStore`](ornis_core::SmartStore)
+    /// This is the world entry point for parenting. [`SmartStore`]
     /// has no insert hook, so a raw `insert(ChildOf)` leaves the cache stale
     /// until [`reconcile_children`](ornis_core::reconcile_children).
     ///
