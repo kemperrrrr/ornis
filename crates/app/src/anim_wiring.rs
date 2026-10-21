@@ -1304,18 +1304,38 @@ mod tests {
         clip
     }
 
+    /// `Walk_Loop` fixture for the playback tests: a wired single-clip
+    /// world with its hero, skeleton root and the clip's playlist id.
+    fn walk_loop_hero() -> (SmartStore, Entity, Entity, ClipId) {
+        let loaded = skinned_scene(vec![named_clip("Walk_Loop")]);
+        let mut store = SmartStore::new();
+        let spawn = spawn_gltf_world(&mut store, &loaded);
+        let wiring = wire_loaded_animation(&mut store, &loaded, &spawn);
+        (
+            store,
+            spawn.entities[0],
+            wiring.roots[0],
+            wiring.clips["Walk_Loop"],
+        )
+    }
+
+    /// Object fixture for the fade tests: a playing mid-flight cursor on
+    /// `target` plus two named clips (`Wave`, `Close`) to retarget between.
+    fn fade_scene() -> (SmartStore, Entity, ClipId, ClipId) {
+        let mut store = SmartStore::new();
+        let target = store.create_entity();
+        let wave = object_scene(&mut store, "Wave", target);
+        let close = object_scene(&mut store, "Close", target);
+        (store, target, wave, close)
+    }
+
     /// The facade starts named skeletal clips on every target and fades
     /// replays from the outgoing cursor — the `AnimatorMut` behavior,
     /// reached without touching the lanes by hand.
     #[test]
     fn play_crossfade_starts_named_skeletal_clips_and_fades_replays() {
         use ornis_animation::SkelFade;
-        let loaded = skinned_scene(vec![named_clip("Walk_Loop")]);
-        let mut store = SmartStore::new();
-        let spawn = spawn_gltf_world(&mut store, &loaded);
-        let wiring = wire_loaded_animation(&mut store, &loaded, &spawn);
-        let hero = spawn.entities[0];
-        let root = wiring.roots[0];
+        let (mut store, hero, root, clip) = walk_loop_hero();
 
         play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("Walk_Loop");
         let cursor = store
@@ -1325,7 +1345,7 @@ mod tests {
             .copied()
             .expect("cursor on the skeleton root");
         assert!(cursor.playing);
-        assert_eq!(cursor.clip, wiring.clips["Walk_Loop"]);
+        assert_eq!(cursor.clip, clip);
         assert!(
             store
                 .read_lane::<SkelFade>()
@@ -1340,7 +1360,7 @@ mod tests {
             .get(root)
             .copied()
             .expect("fade on replay");
-        assert_eq!(fade.from.clip, wiring.clips["Walk_Loop"]);
+        assert_eq!(fade.from.clip, clip);
         assert_eq!(fade.duration, Seconds::new(0.25));
     }
 
@@ -1350,12 +1370,7 @@ mod tests {
     #[test]
     fn play_crossfade_cuts_over_an_inflight_skel_fade() {
         use ornis_animation::SkelFade;
-        let loaded = skinned_scene(vec![named_clip("Walk_Loop")]);
-        let mut store = SmartStore::new();
-        let spawn = spawn_gltf_world(&mut store, &loaded);
-        let wiring = wire_loaded_animation(&mut store, &loaded, &spawn);
-        let hero = spawn.entities[0];
-        let root = wiring.roots[0];
+        let (mut store, hero, root, clip) = walk_loop_hero();
 
         play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("start");
         play_crossfade(&mut store, hero, "Walk_Loop", Seconds::new(0.25)).expect("fade");
@@ -1374,7 +1389,7 @@ mod tests {
             .get(root)
             .copied()
             .expect("cursor");
-        assert_eq!(cursor.clip, wiring.clips["Walk_Loop"]);
+        assert_eq!(cursor.clip, clip);
         assert_eq!(cursor.time, Seconds::ZERO);
         assert!(cursor.playing);
     }
@@ -1454,10 +1469,7 @@ mod tests {
     /// `AnimatorMut::start` rules for the object topology.
     #[test]
     fn fade_to_clip_cuts_without_a_fade_when_paused_or_zero() {
-        let mut store = SmartStore::new();
-        let target = store.create_entity();
-        let outgoing = object_scene(&mut store, "Wave", target);
-        let incoming = object_scene(&mut store, "Close", target);
+        let (mut store, target, outgoing, incoming) = fade_scene();
 
         // Zero duration: instant cut, no fade.
         fade_to_clip(&mut store, target, incoming, Seconds::ZERO).expect("cut");
@@ -1511,10 +1523,7 @@ mod tests {
     /// restarted or stacked (`AnimatorMut::start` rule, object topology).
     #[test]
     fn fade_to_clip_cuts_over_an_inflight_fade() {
-        let mut store = SmartStore::new();
-        let target = store.create_entity();
-        let wave = object_scene(&mut store, "Wave", target);
-        let close = object_scene(&mut store, "Close", target);
+        let (mut store, target, wave, close) = fade_scene();
 
         fade_to_clip(&mut store, target, wave, Seconds::new(0.5)).expect("fade");
         assert!(store.read_lane::<AnimFade>().unwrap().get(target).is_some());
