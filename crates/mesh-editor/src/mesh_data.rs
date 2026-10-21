@@ -168,11 +168,12 @@ impl MeshData {
                 normals_out.push(n);
                 uvs.push([(k == 1 || k == 2) as u8 as f32, (k >= 2) as u8 as f32]);
             }
-            // Two CCW triangles per quad face (verts 0-1-2 and 0-2-3).
+            // The face corner lists run clockwise seen from outside, so emit
+            // (0,2,1)/(0,3,2): CCW from outside, geometric normal == `n`.
             const V1: u32 = 1;
             const V2: u32 = 2;
             const V3: u32 = 3;
-            indices.extend([base, base + V1, base + V2, base, base + V2, base + V3]);
+            indices.extend([base, base + V2, base + V1, base, base + V3, base + V2]);
         }
         Self {
             positions,
@@ -252,6 +253,32 @@ mod tests {
         mesh.validate().expect("unit box valid");
         assert_eq!(mesh.triangle_count(), 12);
         assert_eq!(mesh.vertex_count(), 24);
+    }
+
+    #[test]
+    fn unit_box_winding_faces_outward() {
+        let mesh = MeshData::unit_box();
+        let mut signed_volume = 0.0_f64;
+        for tri in mesh.indices.chunks(3) {
+            let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| mesh.positions[i as usize]);
+            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let geom = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            let n = mesh.normals[tri[0] as usize];
+            let dot = n[0] * geom[0] + n[1] * geom[1] + n[2] * geom[2];
+            assert!(dot > 0.0, "triangle {tri:?} winds against its normal {n:?}");
+            let triple = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]);
+            signed_volume += f64::from(triple) / 6.0;
+        }
+        assert!(
+            (signed_volume - 1.0).abs() < 1e-6,
+            "signed volume {signed_volume}"
+        );
     }
 
     #[test]

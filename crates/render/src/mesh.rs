@@ -301,13 +301,10 @@ pub fn box_data(size: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
                 tangent,
             });
         }
-        // Mirrored vs the `MeshData::unit_box` corner order: the stored
-        // per-face normals are the true outward normals, and the engine
+        // The corner lists run clockwise seen from outside; the engine
         // convention is CCW seen from outside (`front_face: Ccw`), so
-        // each quad is emitted as (0,2,1)/(0,3,2). NOTE: this differs
-        // from `MeshData::unit_box`, whose index winding yields the
-        // negated face normals — see the report; the editor crate is
-        // outside this change.
+        // each quad is emitted as (0,2,1)/(0,3,2), same as
+        // `MeshData::unit_box`.
         // Two CCW triangles per quad: (0,2,1) and (0,3,2).
         const V1: u32 = 1;
         const V2: u32 = 2;
