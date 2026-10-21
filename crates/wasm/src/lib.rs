@@ -168,9 +168,10 @@ fn sync_dom_buttons(input: &mut InputState, buttons: u16) {
 /// Buttons come from the `buttons` bitmask on every event (a left drag
 /// orbits in 3D; middle/right drags pan in 2D and never rotate; chords stay
 /// consistent because the full pressed set is re-synced per event), positions
-/// are canvas-relative (`offset_x/offset_y`, scaled by the device pixel
-/// ratio into the backing-store pixels the camera viewport uses — the
-/// canvas fills its parent, see `resize_canvas_to_parent`). A `contextmenu`
+/// are canvas-relative (`offset_x/offset_y`, scaled by the measured
+/// device-pixels-per-CSS-pixel ratio into the backing-store pixels the
+/// camera viewport uses — the canvas fills its parent, see
+/// `resize_canvas_to_parent`). A `contextmenu`
 /// guard keeps right-drags from opening the browser menu, and middle-button
 /// downs suppress autoscroll.
 ///
@@ -193,8 +194,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             }
             let mut input = input.borrow_mut();
             sync_dom_buttons(&mut input, e.buttons());
-            let dpr = device_pixel_ratio();
-            input.set_pointer_anchor([e.offset_x() as f32 * dpr, e.offset_y() as f32 * dpr]);
+            let scale = canvas_display_scale(&canvas);
+            input.set_pointer_anchor([e.offset_x() as f32 * scale, e.offset_y() as f32 * scale]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
         })
@@ -210,8 +211,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             if canvas.has_pointer_capture(e.pointer_id()) {
                 sync_dom_buttons(&mut input, e.buttons());
             }
-            let dpr = device_pixel_ratio();
-            input.set_pointer_position([e.offset_x() as f32 * dpr, e.offset_y() as f32 * dpr]);
+            let scale = canvas_display_scale(&canvas);
+            input.set_pointer_position([e.offset_x() as f32 * scale, e.offset_y() as f32 * scale]);
         })
     };
     let on_pointerup: Closure<dyn FnMut(web_sys::PointerEvent)> = {
@@ -603,6 +604,34 @@ fn element_border_px(element: &web_sys::Element) -> (f32, f32) {
         .unchecked_ref::<JsElement>()
         .get_bounding_client_rect();
     (rect.width() as f32, rect.height() as f32)
+}
+
+/// Device pixels per CSS pixel actually in effect for a canvas whose
+/// backing store is `canvas_px` wide while its CSS box is `css_px` wide.
+///
+/// The nominal `devicePixelRatio` and this measured scale differ on
+/// fractional layouts: the backing store is truncated to whole device
+/// pixels, so `canvas_px / css_px` sits slightly below the nominal ratio
+/// (`1392.9` CSS px at dpr `1.25` give a `1741` px backing store, so the
+/// measured scale is `≈ 1.24991`). Pointer coordinates and the overlay
+/// grid both live in device pixels, so both must use this scale to stay
+/// aligned on such boxes. `fallback` covers a canvas without a laid-out
+/// box yet.
+fn measured_display_scale(canvas_px: u32, css_px: f32, fallback: f32) -> f32 {
+    if css_px.is_finite() && css_px > 0.0 && canvas_px > 0 {
+        canvas_px as f32 / css_px
+    } else {
+        fallback
+    }
+}
+
+/// Measured device pixels per CSS pixel for `canvas`: its backing-store
+/// width over its measured CSS width, so a pointer position lands on the
+/// same device pixel the overlay grid paints.
+// qual:allow(test_quality, untested) reason: "DOM geometry read through a wasm-bindgen extern import; unreachable from host tests — covered by the wasm32 check and the manual fractional-layout verification"
+fn canvas_display_scale(canvas: &web_sys::HtmlCanvasElement) -> f32 {
+    let (css_width, _) = element_border_px(canvas);
+    measured_display_scale(canvas.width(), css_width, device_pixel_ratio())
 }
 
 /// Resize the canvas backing store to fill its parent element, scaled by
@@ -1314,6 +1343,34 @@ mod integration_tests {
         assert_eq!(effective_dpr(Some(0.5)), 1.0);
         assert_eq!(effective_dpr(Some(-3.0)), 1.0);
         assert_eq!(effective_dpr(Some(f64::NAN)), 1.0);
+    }
+
+    /// The scale the wasm adapter applies to CSS-pixel pointer offsets
+    /// must be the *measured* backing-store ratio, not the nominal
+    /// `devicePixelRatio`: the backing store is truncated to whole device
+    /// pixels, so on fractional layouts the nominal ratio overshoots and
+    /// the pointer drifts off the grid line it should hit (`1392.9` CSS
+    /// px at dpr `1.25` give a `1741` px backing store, so the measured
+    /// scale is `≈ 1.24991`). A canvas without a laid-out box keeps the
+    /// nominal ratio, and an empty backing store must never divide by
+    /// zero.
+    #[test]
+    fn measured_display_scale_uses_the_backing_store_ratio() {
+        let measured = measured_display_scale(1741, 1392.9, 1.0);
+        assert!(
+            (measured - 1.24991).abs() < 1e-4,
+            "measured scale {measured} must follow the backing store"
+        );
+        assert!(
+            measured < 1.25,
+            "the truncated backing store must scale below the nominal dpr"
+        );
+        // Integer CSS boxes keep the nominal ratio exactly.
+        assert_eq!(measured_display_scale(2784, 1392.0, 1.0), 2.0);
+        // No laid-out box yet, empty backing store, non-finite width.
+        assert_eq!(measured_display_scale(0, 0.0, 1.25), 1.25);
+        assert_eq!(measured_display_scale(1741, 0.0, 1.25), 1.25);
+        assert_eq!(measured_display_scale(1741, f32::NAN, 1.25), 1.25);
     }
 
     #[test]

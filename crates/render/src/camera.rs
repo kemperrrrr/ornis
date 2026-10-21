@@ -22,8 +22,9 @@ use ornis_assets::scene::{CameraDesc, CameraProjection};
 /// world without the resource falls back to [`PointerDpr::default`]
 /// (`1.0`). Note this default matches native only on 1x displays: the
 /// native showcase feeds `CursorMoved` physical pixels and never inserts
-/// this resource, so on a HiDPI native monitor the orbit rotates
-/// `scale_factor` times slower than a 1x display (pre-existing native
+/// this resource, so the camera divides them by `1.0` instead of the
+/// display scale — on a HiDPI native monitor the orbit rotates
+/// `scale_factor` times faster than on a 1x display (pre-existing native
 /// behaviour, tracked separately by the render track — not a regression
 /// of this type). Wheel zoom is not scaled — it is a discrete gesture,
 /// not a positional delta.
