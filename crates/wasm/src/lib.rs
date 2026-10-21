@@ -168,7 +168,7 @@ fn sync_dom_buttons(input: &mut InputState, buttons: u16) {
 /// Buttons come from the `buttons` bitmask on every event (a left drag
 /// orbits in 3D; middle/right drags pan in 2D and never rotate; chords stay
 /// consistent because the full pressed set is re-synced per event), positions
-/// are canvas-relative (`offset_x/offset_y`, scaled by the measured
+/// are canvas-relative (`offset_x/offset_y`, scaled per axis by the measured
 /// device-pixels-per-CSS-pixel ratio into the backing-store pixels the
 /// camera viewport uses — the canvas fills its parent, see
 /// `resize_canvas_to_parent`). A `contextmenu`
@@ -194,8 +194,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             }
             let mut input = input.borrow_mut();
             sync_dom_buttons(&mut input, e.buttons());
-            let scale = canvas_display_scale(&canvas);
-            input.set_pointer_anchor([e.offset_x() as f32 * scale, e.offset_y() as f32 * scale]);
+            let (sx, sy) = canvas_display_scale(&canvas);
+            input.set_pointer_anchor([e.offset_x() as f32 * sx, e.offset_y() as f32 * sy]);
             // Capture so the drag continues when the pointer leaves the canvas.
             let _ = canvas.set_pointer_capture(e.pointer_id());
         })
@@ -211,8 +211,8 @@ fn attach_orbit_controls(canvas: &web_sys::HtmlCanvasElement, input: &Rc<RefCell
             if canvas.has_pointer_capture(e.pointer_id()) {
                 sync_dom_buttons(&mut input, e.buttons());
             }
-            let scale = canvas_display_scale(&canvas);
-            input.set_pointer_position([e.offset_x() as f32 * scale, e.offset_y() as f32 * scale]);
+            let (sx, sy) = canvas_display_scale(&canvas);
+            input.set_pointer_position([e.offset_x() as f32 * sx, e.offset_y() as f32 * sy]);
         })
     };
     let on_pointerup: Closure<dyn FnMut(web_sys::PointerEvent)> = {
@@ -625,13 +625,40 @@ fn measured_display_scale(canvas_px: u32, css_px: f32, fallback: f32) -> f32 {
     }
 }
 
-/// Measured device pixels per CSS pixel for `canvas`: its backing-store
-/// width over its measured CSS width, so a pointer position lands on the
+/// Measured device pixels per CSS pixel for `canvas`: its backing store
+/// over its measured CSS box, per axis, so a pointer position lands on the
 /// same device pixel the overlay grid paints.
+///
+/// The two axes are measured separately: the backing store is truncated to
+/// whole device pixels per axis, so a fractional CSS box yields a
+/// slightly different ratio on X and Y. One shared scale would push the
+/// pointer off the grid line on the axis with the larger rounding error.
 // qual:allow(test_quality, untested) reason: "DOM geometry read through a wasm-bindgen extern import; unreachable from host tests — covered by the wasm32 check and the manual fractional-layout verification"
-fn canvas_display_scale(canvas: &web_sys::HtmlCanvasElement) -> f32 {
-    let (css_width, _) = element_border_px(canvas);
-    measured_display_scale(canvas.width(), css_width, device_pixel_ratio())
+fn canvas_display_scale(canvas: &web_sys::HtmlCanvasElement) -> (f32, f32) {
+    let (css_width, css_height) = element_border_px(canvas);
+    let fallback = device_pixel_ratio();
+    (
+        measured_display_scale(canvas.width(), css_width, fallback),
+        measured_display_scale(canvas.height(), css_height, fallback),
+    )
+}
+
+/// Backing-store size for the canvas: the parent element's CSS box scaled
+/// by the device pixel ratio, or the current size when the canvas has no
+/// parent element.
+///
+/// The fallback branch keeps the current backing store unchanged: it is
+/// already in device pixels, so scaling it by `dpr` again would grow the
+/// store by `dpr` on every frame (800 px → 1000 → 1250 → …) until the
+/// surface limit is hit or the `u32` conversion overflows.
+fn backing_size(parent_css: Option<(f32, f32)>, current: (u32, u32), dpr: f32) -> (u32, u32) {
+    match parent_css {
+        Some((width, height)) => (
+            (width * dpr).max(1.0) as u32,
+            (height * dpr).max(1.0) as u32,
+        ),
+        None => current,
+    }
 }
 
 /// Resize the canvas backing store to fill its parent element, scaled by
@@ -839,12 +866,14 @@ impl<'a> FrameState<'a> {
                 .resources_mut()
                 .insert(PointerDpr(dpr));
         }
-        let (parent_w, parent_h) = canvas
-            .parent_element()
-            .map(|p| element_border_px(&p))
-            .unwrap_or((canvas.width() as f32, canvas.height() as f32));
-        let pw = (parent_w * dpr).max(1.0) as u32;
-        let ph = (parent_h * dpr).max(1.0) as u32;
+        // Only the parent box is scaled by the device pixel ratio: without a
+        // parent the current backing store is already in device pixels and
+        // scaling it again would grow it by `dpr` on every frame.
+        let (pw, ph) = backing_size(
+            canvas.parent_element().map(|p| element_border_px(&p)),
+            (canvas.width(), canvas.height()),
+            dpr,
+        );
         if canvas.width() != pw || canvas.height() != ph {
             canvas.set_width(pw);
             canvas.set_height(ph);
@@ -1371,6 +1400,31 @@ mod integration_tests {
         assert_eq!(measured_display_scale(0, 0.0, 1.25), 1.25);
         assert_eq!(measured_display_scale(1741, 0.0, 1.25), 1.25);
         assert_eq!(measured_display_scale(1741, f32::NAN, 1.25), 1.25);
+        // An empty backing store and a non-finite CSS box both fall back to
+        // the nominal ratio instead of dividing by zero or by infinity.
+        assert_eq!(measured_display_scale(0, 100.0, 1.25), 1.25);
+        assert_eq!(measured_display_scale(1741, f32::INFINITY, 1.25), 1.25);
+    }
+
+    /// The backing store follows the parent element's CSS box scaled by the
+    /// device pixel ratio. A canvas detached from the DOM has no parent
+    /// box, and its current backing store is already in device pixels —
+    /// scaling it again would grow the store by `dpr` on every frame.
+    #[test]
+    fn backing_size_scales_the_parent_box_and_keeps_a_detached_canvas() {
+        // Parent present: the CSS box becomes device pixels.
+        assert_eq!(
+            backing_size(Some((800.0, 600.0)), (0, 0), 1.25),
+            (1000, 750)
+        );
+        // A collapsed parent box still yields a usable one-pixel store.
+        assert_eq!(backing_size(Some((0.0, 0.0)), (0, 0), 2.0), (1, 1));
+        // Detached canvas: the current backing store is kept as is.
+        let current = (800, 600);
+        assert_eq!(backing_size(None, current, 1.25), current);
+        // Idempotent: a repeated call on the previous result is stable.
+        let once = backing_size(None, current, 1.25);
+        assert_eq!(backing_size(None, once, 1.25), once);
     }
 
     #[test]

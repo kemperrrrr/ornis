@@ -77,22 +77,30 @@
             // device-px-per-CSS-px differ from the nominal `state.dpr`
             // (Rust-clamped >= 1) by up to ~1 CSS px across the box. The
             // wire/browser dpr remains the fallback only while the canvas
-            // has no laid-out box yet.
+            // has no laid-out box yet. The two axes are measured
+            // separately: the backing store is truncated per axis, so a
+            // fractional box rounds differently on X and Y.
             const rect = canvasEl ? canvasEl.getBoundingClientRect() : null;
-            const scale = rect && rect.width > 0 && canvasEl.width > 0
+            const fallback = (state && state.dpr) || window.devicePixelRatio || 1;
+            const scaleX = rect && rect.width > 0 && canvasEl.width > 0
                 ? canvasEl.width / rect.width
-                : ((state && state.dpr) || window.devicePixelRatio || 1);
-            const minor = grid.minor_step_px / scale;
-            const major = minor * grid.major_every;
-            const ox = grid.origin_px[0] / scale;
-            const oy = grid.origin_px[1] / scale;
+                : fallback;
+            const scaleY = rect && rect.height > 0 && canvasEl.height > 0
+                ? canvasEl.height / rect.height
+                : fallback;
+            const minorX = grid.minor_step_px / scaleX;
+            const minorY = grid.minor_step_px / scaleY;
+            const majorX = minorX * grid.major_every;
+            const majorY = minorY * grid.major_every;
+            const ox = grid.origin_px[0] / scaleX;
+            const oy = grid.origin_px[1] / scaleY;
             gridEl.style.backgroundImage =
                 'linear-gradient(rgba(255,255,255,.10) 1px, transparent 1px),' +
                 'linear-gradient(90deg, rgba(255,255,255,.10) 1px, transparent 1px),' +
                 'linear-gradient(rgba(255,255,255,.22) 1px, transparent 1px),' +
                 'linear-gradient(90deg, rgba(255,255,255,.22) 1px, transparent 1px)';
             gridEl.style.backgroundSize =
-                `${minor}px ${minor}px, ${minor}px ${minor}px, ${major}px ${major}px, ${major}px ${major}px`;
+                `${minorX}px ${minorY}px, ${minorX}px ${minorY}px, ${majorX}px ${majorY}px, ${majorX}px ${majorY}px`;
             gridEl.style.backgroundPosition =
                 `${ox}px ${oy}px, ${ox}px ${oy}px, ${ox}px ${oy}px, ${ox}px ${oy}px`;
         };
