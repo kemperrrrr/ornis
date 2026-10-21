@@ -2,7 +2,6 @@
 //! ([`Culler`]); the parent module holds the shared layout and the CPU
 //! reference.
 
-use bytemuck::Zeroable;
 use glam::Mat4;
 
 use super::CULL_COMPUTE_WGSL;
@@ -12,7 +11,8 @@ use super::INDIRECT_ARGS_WORD_BYTES;
 use super::INDIRECT_ARGS_WORD_COUNT;
 use super::cull_params;
 use super::cull_workgroup_count;
-use crate::antialias::MotionValidity;
+use super::diff_staged_records;
+use super::stage_next_instances;
 use crate::renderer::InstanceData;
 use crate::renderer::PerObjectGpu;
 
@@ -45,8 +45,9 @@ pub enum CullerError {
 /// dense compacted destination, the indirect-args buffer and the
 /// compute pipeline of [`CULL_COMPUTE_WGSL`].
 ///
-/// [`Self::compact`] stages one frame of instances, pre-writes the
-/// indirect args with a zero counter and runs the compaction pass,
+/// [`Self::compact`] stages one frame of instances and pre-writes the
+/// indirect args with a zero counter; [`Self::record_compact`] records
+/// the compaction dispatch into the caller's encoder (no extra submit),
 /// leaving the result in [`Self::visible_buffer`] (dense
 /// [`PerObjectGpu`](crate::renderer::PerObjectGpu) records) and
 /// [`Self::args_buffer`] (a
@@ -70,16 +71,24 @@ pub struct Culler {
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     src_buffer: wgpu::Buffer,
+    /// Resident CPU-side staging: `prev` is the last uploaded frame,
+    /// `next` is reused across frames (no per-frame allocation), so a
+    /// static scene re-uploads nothing — only the dirty runs tracked
+    /// by the fused convert-and-diff pass are written.
+    staging: std::sync::Mutex<CullerStaging>,
+    /// Instances staged by the last [`Culler::compact`] (drives the
+    /// [`Culler::record_compact`] dispatch width).
+    staged_count: std::sync::atomic::AtomicU32,
 }
 
-/// Previous per-instance transforms passed to the GPU culler.
-///
-/// The slices follow the same instance order; a missing entry falls back
-/// to the current transform and valid motion.
-#[derive(Clone, Copy)]
-pub(crate) struct PreviousInstanceData<'a> {
-    pub(crate) models: &'a [Mat4],
-    pub(crate) motion_validity: &'a [MotionValidity],
+/// Double-buffered reusable staging of [`Culler`]: both vectors keep
+/// their allocation across frames and swap roles every [`Culler::compact`].
+#[derive(Debug, Default)]
+struct CullerStaging {
+    /// Last uploaded frame (diff baseline).
+    prev: Vec<PerObjectGpu>,
+    /// Frame under construction (reused, never reallocated per frame).
+    next: Vec<PerObjectGpu>,
 }
 
 /// One buffer binding of [`CULL_COMPUTE_WGSL`].
@@ -224,16 +233,21 @@ impl Culler {
             bind_group,
             params_buffer,
             src_buffer,
+            staging: std::sync::Mutex::new(CullerStaging::default()),
+            staged_count: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
-    // Production entry for the gbuffer/shadow wiring slice.
-    /// Runs one culling frame: stages `instances` into the source
-    /// buffer, packs the [`CullParams`](super::CullParams) uniform of `view_proj`,
+    /// Stages one culling frame: converts `instances` into records,
+    /// diffs them against the previously staged frame to track dirty
+    /// runs (a static scene uploads nothing), writes only those runs
+    /// into the resident source buffer, packs the
+    /// [`CullParams`](super::CullParams) uniform of `view_proj`, and
     /// pre-writes the indirect args with `index_count` and a zero
-    /// instance counter, and dispatches the compaction pass. The
-    /// counter reset is part of the pre-write, so consecutive frames
-    /// never accumulate.
+    /// instance counter (consecutive frames never accumulate). Uploads
+    /// only — the compaction dispatch is recorded separately by
+    /// [`Culler::record_compact`] into the caller's encoder, so the
+    /// frame needs no extra submit.
     ///
     /// # Errors
     ///
@@ -241,36 +255,10 @@ impl Culler {
     /// `instances.len()` exceeds [`Self::capacity`].
     pub fn compact(
         &self,
-        device: &wgpu::Device,
         queue: &wgpu::Queue,
         view_proj: &Mat4,
         index_count: u32,
         instances: &[InstanceData],
-    ) -> Result<(), CullerError> {
-        self.compact_with_previous(
-            device,
-            queue,
-            view_proj,
-            index_count,
-            instances,
-            PreviousInstanceData {
-                models: &[],
-                motion_validity: &[],
-            },
-        )
-    }
-
-    /// Like [`compact`](Self::compact), with previous transforms and their
-    /// per-instance validity used by the temporal g-buffer output. Empty or
-    /// short slices fall back to the current transform and valid state.
-    pub(crate) fn compact_with_previous(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view_proj: &Mat4,
-        index_count: u32,
-        instances: &[InstanceData],
-        previous: PreviousInstanceData<'_>,
     ) -> Result<(), CullerError> {
         if instances.len() > self.capacity as usize {
             return Err(CullerError::CapacityExceeded {
@@ -278,47 +266,105 @@ impl Culler {
                 capacity: self.capacity,
             });
         }
-        let staged = instances
-            .iter()
-            .enumerate()
-            .map(|(index, instance)| {
-                let mut record = PerObjectGpu::zeroed();
-                record.model = instance.model_matrix.to_cols_array_2d();
-                record.normal_matrix = instance.normal_matrix.to_cols_array_2d();
-                record.previous_model = previous
-                    .models
-                    .get(index)
-                    .copied()
-                    .unwrap_or(instance.model_matrix)
-                    .to_cols_array_2d();
-                record.material_index = instance.material_index;
-                record.motion_valid = previous
-                    .motion_validity
-                    .get(index)
-                    .copied()
-                    .unwrap_or(MotionValidity::Valid)
-                    .shader_flag();
-                record
-            })
-            .collect::<Vec<_>>();
-        queue.write_buffer(&self.src_buffer, 0, bytemuck::cast_slice(&staged));
-        let params = cull_params(view_proj, instances.len() as u32);
+        let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
+        {
+            let mut staging = self
+                .staging
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let CullerStaging { prev, next } = &mut *staging;
+            let staged = stage_next_instances(prev, next, instances);
+            for range in staged {
+                let start = range.start as usize;
+                queue.write_buffer(
+                    &self.src_buffer,
+                    start as u64 * record_bytes,
+                    bytemuck::cast_slice(&next[start..start + range.count as usize]),
+                );
+            }
+            std::mem::swap(prev, next);
+        }
+        self.prewrite_frame(queue, view_proj, index_count, instances.len() as u32);
+        Ok(())
+    }
+
+    /// Pre-writes the per-frame uniform, the indirect args (with a zero
+    /// instance counter, so consecutive frames never accumulate) and the
+    /// staged count shared by [`Culler::compact`] and
+    /// [`Culler::compact_records`].
+    fn prewrite_frame(&self, queue: &wgpu::Queue, view_proj: &Mat4, index_count: u32, count: u32) {
+        let params = cull_params(view_proj, count);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
         let args = DrawIndexedIndirectArgs::compacted(index_count, 0);
         queue.write_buffer(&self.args_buffer, 0, bytemuck::bytes_of(&args));
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("culler encoder"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("culler pass"),
-                timestamp_writes: None,
+        self.staged_count
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stages one culling frame from caller-converted `records`: diffs
+    /// them against the last uploaded frame and writes only the dirty
+    /// runs — like [`Culler::compact`], but without converting. The
+    /// submit path converts once and shares the records between the
+    /// direct upload and this staging, so a frame converts exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CullerError::CapacityExceeded`] when `records.len()`
+    /// exceeds [`Self::capacity`].
+    pub fn compact_records(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: &Mat4,
+        index_count: u32,
+        records: &[PerObjectGpu],
+    ) -> Result<(), CullerError> {
+        if records.len() > self.capacity as usize {
+            return Err(CullerError::CapacityExceeded {
+                count: records.len() as u32,
+                capacity: self.capacity,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.dispatch_workgroups(cull_workgroup_count(instances.len() as u32), 1, 1);
         }
-        queue.submit(std::iter::once(encoder.finish()));
+        let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
+        {
+            let mut staging = self
+                .staging
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let CullerStaging { prev, next } = &mut *staging;
+            next.clear();
+            next.extend_from_slice(records);
+            for range in diff_staged_records(prev, next) {
+                let start = range.start as usize;
+                queue.write_buffer(
+                    &self.src_buffer,
+                    start as u64 * record_bytes,
+                    bytemuck::cast_slice(&next[start..start + range.count as usize]),
+                );
+            }
+            std::mem::swap(prev, next);
+        }
+        self.prewrite_frame(queue, view_proj, index_count, records.len() as u32);
         Ok(())
+    }
+
+    /// Records the compaction dispatch into the caller's encoder (no
+    /// submit — the frame submits once, downstream): one compute pass
+    /// over the [`Culler::compact`] staging, compacting the visible
+    /// instances into [`Culler::visible_buffer`] and counting them into
+    /// [`Culler::args_buffer`]. The `queue.write_buffer` uploads of
+    /// `compact` are ordered before any later submit, so recording here
+    /// always sees the staged frame.
+    pub fn record_compact(&self, encoder: &mut wgpu::CommandEncoder) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("culler pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.dispatch_workgroups(
+            cull_workgroup_count(self.staged_count.load(std::sync::atomic::Ordering::Relaxed)),
+            1,
+            1,
+        );
     }
 }

@@ -9,7 +9,7 @@ use ornis_core::Entity;
 /// ([`PerObjectGpu::WGSL_SOURCE`]); the field list here is the single source
 /// of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
 #[wgsl(name = "PerObject")]
 pub struct PerObjectGpu {
     /// Local-to-world matrix.
@@ -205,10 +205,13 @@ impl Renderer3D {
 
     /// Rebind every pass that reads the grown storage buffers: each pass
     /// holds its own bind group over the same layout, so all three are
-    /// rebuilt together whenever either buffer moves.
+    /// rebuilt together whenever either buffer moves. The cached
+    /// indirect bind group (bound over the material table) is dropped
+    /// too and rebuilt on the next indirect draw.
     fn rebind_storage_buffers(&self, device: &wgpu::Device) {
         let per_object = read_lock(&self.per_object_buffer);
         let material = read_lock(&self.material_buffer);
+        *write_lock(&self.indirect_bind_group) = None;
         *write_lock(&self.gbuffer_bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gbuffer bind group (grown)"),
@@ -258,8 +261,9 @@ impl Renderer3D {
     /// Bind group of the gbuffer layout with `camera` and `per_objects`
     /// supplied by the caller: the compacted culler buffer binds as
     /// `per_objects` for indirect batches (the shared material table is
-    /// unchanged). Built per draw — the culler buffers never grow, unlike
-    /// the staged per-object store.
+    /// unchanged). Built on cache miss only — the result is cached in
+    /// `indirect_bind_group` and invalidated when the culler is
+    /// (re)created or the material table grows.
     pub(crate) fn gbuffer_bind_group_with(
         &self,
         device: &wgpu::Device,
@@ -375,6 +379,10 @@ impl Renderer3D {
     /// ECS identities. A missing identity or first-seen entity disables
     /// temporal reuse; CPU-deformed custom meshes do the same through
     /// [`MotionValidity::Invalid`].
+    ///
+    /// The converted records come back next to the upload, so the caller
+    /// can stage the very same records for the GPU culler instead of
+    /// converting the frame a second time.
     // qual:allow(iosp) reason: "Keep instance identities, previous transforms, and GPU staging aligned in one frame transition"
     pub(crate) fn upload_instances_with_motion_flags(
         &self,
@@ -383,7 +391,7 @@ impl Renderer3D {
         instances: &[InstanceData],
         motion_valid: &[MotionValidity],
         entities: &[Entity],
-    ) {
+    ) -> Vec<PerObjectGpu> {
         self.ensure_instance_capacity(device, instances.len());
         let count = instances
             .len()
@@ -393,8 +401,6 @@ impl Renderer3D {
         let mut next_by_entity = std::collections::HashMap::with_capacity(count);
         let mut gpu_objects: Vec<PerObjectGpu> =
             Vec::with_capacity(staging_capacity_for_instances(count));
-        let mut previous_for_frame = Vec::with_capacity(count);
-        let mut motion_valid_for_frame = Vec::with_capacity(count);
         for (index, inst) in instances.iter().take(count).enumerate() {
             let model_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
                 inst.model_matrix.to_cols_array_2d();
@@ -423,8 +429,6 @@ impl Renderer3D {
                 motion_valid: validity.shader_flag(),
                 _padding: [0; 2],
             });
-            previous_for_frame.push(previous);
-            motion_valid_for_frame.push(validity);
         }
         drop(previous_by_entity);
         *write_lock(&self.previous_instance_models) = if identity_complete {
@@ -432,13 +436,12 @@ impl Renderer3D {
         } else {
             std::collections::HashMap::new()
         };
-        *write_lock(&self.previous_instance_models_frame) = previous_for_frame;
-        *write_lock(&self.previous_instance_motion_valid_frame) = motion_valid_for_frame;
         queue.write_buffer(
             &read_lock(&self.per_object_buffer),
             0,
             bytemuck::cast_slice(&gpu_objects),
         );
+        gpu_objects
     }
 
     /// Ensure the palette buffer fits `needed` slots, growing it (and only
@@ -584,6 +587,24 @@ mod tests {
         );
         assert_eq!(previous_new, current_b.model_matrix);
         assert_eq!(validity_new, MotionValidity::Invalid);
+
+        // An incomplete identity map (fewer entities than instances)
+        // cannot be matched against the history: the motion stays
+        // invalid even for an entity the history knows, so the temporal
+        // pass never reprojects from an untrusted frame.
+        let (previous_incomplete, validity_incomplete) = previous_instance_state(
+            &current_b,
+            Some(entity_b),
+            &previous,
+            MotionValidity::Valid,
+            false,
+        );
+        assert_eq!(
+            previous_incomplete,
+            Mat4::from_translation(glam::Vec3::Y),
+            "the stored transform stays, but the motion flag does not trust it"
+        );
+        assert_eq!(validity_incomplete, MotionValidity::Invalid);
     }
 
     #[test]

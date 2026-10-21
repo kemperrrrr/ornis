@@ -34,39 +34,27 @@ pub(super) fn dir_probe(direction: [f32; 3], shadow: ornis_assets::scene::Shadow
 
 /// Adapter handle, or `None` on headless CI without a GPU.
 ///
-/// A set `ORNIS_REQUIRE_GPU` (non-empty, not `"0"` — the CI `test` shard
-/// sets `=1`) panics instead of skipping, so a missing adapter can never
-/// turn a GPU gate into a pass; unset or explicit `"0"` keeps the skip.
+/// Thin wrapper over [`crate::try_headless_device`], which holds the one
+/// bootstrap every GPU-gated test and bench shares (and the
+/// [`crate::gpu_required`] panic-instead-of-skip contract). The shared
+/// bootstrap logs the skip itself, so no caller can skip silently.
 pub(super) fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let pair = pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        });
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .ok()?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
-    });
-    if pair.is_none() && require_gpu() {
-        panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
-    }
-    pair
+    crate::try_headless_device()
 }
 
-/// Whether the harness must fail (rather than skip) when no adapter exists.
-/// Set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` — the same
-/// semantics the gpu-culling slice centralizes as `gpu_required()`, so the
-/// two helpers collapse into one when both land.
-fn require_gpu() -> bool {
-    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
+/// Dispatches a staged [`Culler`](crate::gpu_culling::Culler) into a
+/// submitted encoder (the production frame records the dispatch into
+/// its own encoder instead).
+pub(super) fn dispatch_culler(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    culler: &crate::gpu_culling::Culler,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("test culler dispatch"),
+    });
+    culler.record_compact(&mut encoder);
+    queue.submit([encoder.finish()]);
 }
 
 /// Offscreen `Rgba8UnormSrgb` render target shared by the headless

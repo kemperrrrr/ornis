@@ -157,11 +157,18 @@ impl QualityFlags {
     /// The total is computed up-front so the stage numbering stays
     /// honest even when a deep stage is skipped (tool not installed).
     /// With `--only` the total is the filtered count.
+    ///
+    /// The clippy stage runs two commands (the workspace lint and the
+    /// render-bench lint under `test-util`), so it counts twice: the
+    /// denominator has to be right before the first stage prints its
+    /// header, not after the clippy stage already ran.
     fn total_stages(&self) -> usize {
-        self.active_ids()
+        let stages = self
+            .active_ids()
             .iter()
             .filter(|id| self.enabled(id))
-            .count()
+            .count();
+        stages + usize::from(self.enabled("clippy"))
     }
 }
 
@@ -1400,6 +1407,12 @@ fn level1(stages: &mut StageList<'_>) {
     // does not fit a PR shard either: the ignored nightly gates need
     // ~7 min each in a debug build (see determinism-nightly.yml), so they
     // stay in the Determinism Nightly workflow.
+    // The render criterion bench lives behind the crate feature
+    // `test-util` (the headless device bootstrap is test-only), so a
+    // plain workspace run skips its target silently — the bench would
+    // rot unnoticed. The second run lints the render package with the
+    // feature on; it is verbose on purpose, so the CI log names the
+    // bench crate and proves the target was really built.
     stages.run(
         "clippy",
         "clippy",
@@ -1408,6 +1421,27 @@ fn level1(stages: &mut StageList<'_>) {
             "clippy",
             "--workspace",
             "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ]),
+        false,
+    );
+    // The second command runs under the same stage id, so the stage
+    // counter grows with it — the denominator already accounts for it
+    // (`QualityFlags::total_stages`).
+    stages.run(
+        "clippy",
+        "clippy (render bench)",
+        "cargo clippy -v -p ornis-render --all-targets --features test-util -- -D warnings",
+        stages.cargo(&[
+            "clippy",
+            "-v",
+            "-p",
+            "ornis-render",
+            "--all-targets",
+            "--features",
+            "test-util",
             "--",
             "-D",
             "warnings",
@@ -1693,11 +1727,20 @@ const TYPOS_VERSION: &str = "1.51.1";
 fn full_stages(stages: &mut StageList<'_>) {
     coverage_stage(stages);
 
+    // The `test-util` feature of ornis-render gates the criterion bench
+    // (the headless bootstrap is test-only): without it Cargo skips the
+    // target silently, so the bench would never be compiled here.
     stages.run(
         "bench-compile",
         "bench compile-check",
-        "cargo bench --workspace --no-run",
-        stages.cargo(&["bench", "--workspace", "--no-run"]),
+        "cargo bench --workspace --no-run --features ornis-render/test-util",
+        stages.cargo(&[
+            "bench",
+            "--workspace",
+            "--no-run",
+            "--features",
+            "ornis-render/test-util",
+        ]),
         false,
     );
 
@@ -3461,6 +3504,19 @@ mod tests {
         assert_eq!(format_duration(Duration::from_millis(400)), "0.4s");
         assert_eq!(format_duration(Duration::from_secs(12)), "12s");
         assert_eq!(format_duration(Duration::from_secs(184)), "3m04s");
+    }
+
+    #[test]
+    fn total_stages_counts_the_render_bench_lint() {
+        // The clippy stage runs two commands (the workspace lint and the
+        // render-bench lint under `test-util`): the denominator must
+        // count both, otherwise the printed "n/total" drifts.
+        let only_clippy = QualityFlags::parse(&["--only=clippy".to_string()]);
+        assert_eq!(only_clippy.total_stages(), 2);
+        let only_fmt_clippy = QualityFlags::parse(&["--only=fmt,clippy".to_string()]);
+        assert_eq!(only_fmt_clippy.total_stages(), 3);
+        let only_fmt = QualityFlags::parse(&["--only=fmt".to_string()]);
+        assert_eq!(only_fmt.total_stages(), 1);
     }
 
     #[test]

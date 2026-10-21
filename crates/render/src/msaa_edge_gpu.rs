@@ -61,6 +61,10 @@ fn edge_holds(pixels: &[u8]) -> bool {
     interior > MIN_INTERIOR && bright_enough(channel_sum(pixels, last), interior)
 }
 
+/// Opens an adapter + device + queue. The adapter is returned because
+/// [`negotiate_sample_count`] needs it; this is why this is not the shared
+/// [`crate::try_headless_device`] (device/queue only — pairing a re-requested
+/// adapter with an unrelated device would be a correctness hazard).
 fn open_adapter() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -70,14 +74,32 @@ fn open_adapter() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             display: None,
         });
-        let adapter = instance
+        let adapter = match instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
             .await
-            .ok()?;
-        let (device, queue) = adapter
+        {
+            Ok(adapter) => adapter,
+            Err(err) => {
+                assert!(
+                    !crate::gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
+                );
+                return None;
+            }
+        };
+        let (device, queue) = match adapter
             .request_device(&wgpu::DeviceDescriptor::default())
             .await
-            .ok()?;
+        {
+            Ok(pair) => pair,
+            Err(err) => {
+                assert!(
+                    !crate::gpu_required(),
+                    "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
+                );
+                return None;
+            }
+        };
         Some((adapter, device, queue))
     })
 }

@@ -275,7 +275,8 @@ impl ClusteredLights {
 
     /// Read `bytes` of one cluster buffer back (`None` when the map
     /// fails). Test-only: the parity gate compares the assignment
-    /// output against the CPU reference.
+    /// output against the CPU reference. The readback itself is the
+    /// shared [`crate::read_bytes_back`] — one copy for the whole crate.
     #[cfg(test)]
     pub(crate) fn read_back(
         &self,
@@ -289,29 +290,6 @@ impl ClusteredLights {
             ClusterBuffer::Indices => &self.indices_buffer,
             ClusterBuffer::Counters => &self.counters_buffer,
         };
-        // wgpu maps need a non-empty range: floor the readback at one
-        // u32 word.
-        let size = bytes.max(std::mem::size_of::<u32>() as u64);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cluster test readback"),
-            size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("cluster test readback encoder"),
-        });
-        encoder.copy_buffer_to_buffer(src, 0, &readback, 0, bytes);
-        queue.submit([encoder.finish()]);
-        pollster::block_on(async {
-            let slice = readback.slice(0..size);
-            slice.map_async(wgpu::MapMode::Read, |_| {});
-            device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
-            let view = slice.get_mapped_range().ok()?;
-            let out = view[..bytes as usize].to_vec();
-            drop(view);
-            readback.unmap();
-            Some(out)
-        })
+        crate::read_bytes_back(device, queue, src, bytes)
     }
 }

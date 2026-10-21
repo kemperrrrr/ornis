@@ -465,18 +465,18 @@ impl System for RenderSubmit {
         motion_valid.extend(staged.iter().map(|entry| entry.motion_valid));
         let mut instance_entities = extracted.instance_entities;
         instance_entities.extend(staged.iter().map(|entry| entry.entity));
-        fs.renderer.upload_instances_with_motion_flags(
+        // Convert once: the merged records feed the direct upload, and the
+        // sphere prefix (customs never indirect) stages the shared batch.
+        let mut converted = fs.renderer.upload_instances_with_motion_flags(
             &device.0,
             &queue.0,
             &instances,
             &motion_valid,
             &instance_entities,
         );
-        // Slice 2c: stage the shared sphere batch ONLY (`extracted`
-        // moved, never merged) — customs must not enter indirect.
         if fs.renderer.indirect_draw() {
-            fs.renderer
-                .stage_batch_inputs(view_proj, extracted.instances);
+            converted.truncate(extracted.instances.len());
+            fs.renderer.stage_batch_inputs(view_proj, converted);
         }
         *custom_meshes
             .0

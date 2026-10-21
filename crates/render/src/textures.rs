@@ -674,7 +674,7 @@ mod tests {
         // Real `upload_texture` + `upload_cached` dedup when an adapter
         // exists; a loud skip otherwise (same contract as the pixel-parity
         // harness — CI provides lavapipe, adapter-less machines stay green).
-        let Some((device, queue)) = pollster::block_on(try_device()) else {
+        let Some((device, queue)) = try_device() else {
             eprintln!("SKIP: no wgpu adapter (CI runs this on lavapipe)");
             return;
         };
@@ -734,21 +734,9 @@ mod tests {
         assert_eq!(cache.len(), 2, "failures are not cached");
     }
 
-    async fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            backend_options: wgpu::BackendOptions::default(),
-            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-            display: None,
-        });
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .ok()?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
+    /// Adapter handle, or `None` on headless hosts without a GPU — the
+    /// shared bootstrap [`crate::try_headless_device`].
+    fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        crate::try_headless_device()
     }
 }

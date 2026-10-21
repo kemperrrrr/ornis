@@ -10,53 +10,13 @@ use super::*;
 /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
 /// logged, never silent).
 ///
-/// A set `ORNIS_REQUIRE_GPU` (non-empty, not `"0"` — the CI `test` shard
-/// sets `=1`) panics instead of skipping: a missing adapter must never turn
-/// a GPU gate into a pass. Unset or explicit `"0"` keeps the skip.
+/// Shared bootstrap [`crate::try_headless_device`]: when
+/// [`crate::gpu_required`] holds (`ORNIS_REQUIRE_GPU` — non-empty, not
+/// `"0"`; the CI `test` shard sets `=1`) a missing adapter panics instead
+/// of skipping, so a missing device can never turn a GPU gate into a pass.
+/// The shared bootstrap logs the skip itself.
 fn try_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let descriptor = wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        flags: wgpu::InstanceFlags::empty(),
-        backend_options: wgpu::BackendOptions::default(),
-        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-        display: None,
-    };
-    let instance = wgpu::Instance::new(descriptor);
-    match pollster::block_on(request_device(instance)) {
-        Some(pair) => Some(pair),
-        None if require_gpu() => {
-            panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter is available");
-        }
-        None => {
-            eprintln!("SKIPPED (auto_exposure): no wgpu device");
-            None
-        }
-    }
-}
-
-/// Whether the harness must fail (rather than skip) when no adapter exists.
-/// Set when `ORNIS_REQUIRE_GPU` is non-empty and not `"0"` — the same
-/// semantics the gpu-culling slice centralizes as `gpu_required()`, so the
-/// two helpers collapse into one when both land.
-fn require_gpu() -> bool {
-    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
-}
-
-/// Requests the default adapter/device from `instance`, logging the
-/// adapter error when the host has no GPU.
-async fn request_device(instance: wgpu::Instance) -> Option<(wgpu::Device, wgpu::Queue)> {
-    let options = wgpu::RequestAdapterOptions::default();
-    let adapter = match instance.request_adapter(&options).await {
-        Ok(adapter) => adapter,
-        Err(err) => {
-            eprintln!("SKIPPED (auto_exposure): no wgpu adapter: {err}");
-            return None;
-        }
-    };
-    adapter
-        .request_device(&wgpu::DeviceDescriptor::default())
-        .await
-        .ok()
+    crate::try_headless_device()
 }
 
 #[test]
@@ -484,33 +444,16 @@ fn read_histogram(
     hist
 }
 
-/// Copies `size` bytes from the start of `src` into a mappable buffer and
-/// returns them.
+/// Copies `size` bytes from the start of `src` and reads them back —
+/// the shared [`crate::read_bytes_back`] bootstrap, the same readback
+/// every GPU-gated test and bench uses.
 fn read_buffer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     src: &wgpu::Buffer,
     size: u64,
 ) -> Vec<u8> {
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("auto-exposure test readback"),
-        size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("auto-exposure test readback encoder"),
-    });
-    encoder.copy_buffer_to_buffer(src, 0, &readback, 0, size);
-    queue.submit(std::iter::once(encoder.finish()));
-    let slice = readback.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |_| {});
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    let bytes = slice.get_mapped_range().expect("mapped range").to_vec();
-    readback.unmap();
-    bytes
+    crate::read_bytes_back(device, queue, src, size).expect("auto-exposure readback succeeds")
 }
 
 /// One auto-exposure update: the two HDR layers, the shader mix mode, the

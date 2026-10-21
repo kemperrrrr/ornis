@@ -338,11 +338,6 @@ pub struct Renderer3D {
     /// Model transforms from the preceding frame, keyed by stable entity
     /// identity so dense-lane reordering cannot transfer motion to another object.
     previous_instance_models: std::sync::RwLock<HashMap<Entity, glam::Mat4>>,
-    /// Previous transforms used by the most recent upload, aligned to that
-    /// frame's instance order for the indirect culler.
-    previous_instance_models_frame: std::sync::RwLock<Vec<glam::Mat4>>,
-    /// Motion-validity states aligned to `previous_instance_models_frame`.
-    previous_instance_motion_valid_frame: std::sync::RwLock<Vec<crate::antialias::MotionValidity>>,
     material_buffer: std::sync::RwLock<wgpu::Buffer>,
     lighting_buffer: wgpu::Buffer,
     _bind_group_layout: wgpu::BindGroupLayout,
@@ -376,6 +371,13 @@ pub struct Renderer3D {
     gbuffer_motion_pipeline: wgpu::RenderPipeline,
     gbuffer_bind_group_layout: wgpu::BindGroupLayout,
     gbuffer_bind_group: std::sync::RwLock<wgpu::BindGroup>,
+    /// Cached gbuffer bind group binding the culler's `visible_buffer`
+    /// as `per_objects` (built by `gbuffer_bind_group_with`): the
+    /// culler buffers never move without recreating the culler, so one
+    /// cached group serves every indirect draw instead of allocating per
+    /// frame. Cleared when the culler is (re)created or the material
+    /// table grows (see `rebind_storage_buffers`).
+    indirect_bind_group: std::sync::RwLock<Option<wgpu::BindGroup>>,
     /// Skinned g-buffer pipeline: [`wgsl_vertex_source_skinned`] vertex
     /// stage (palette blend) with the classic fragment stage and the same
     /// five MRT targets. Draws interleaved [`SkinnedVertex`] buffers; bind
@@ -423,10 +425,10 @@ pub struct Renderer3D {
     /// fallback to the direct path.
     indirect_ready: std::sync::atomic::AtomicBool,
     /// Staged shared-batch inputs for a possible indirect submit:
-    /// `(view_proj, instances)` moved here by `RenderSubmit` and taken
-    /// by [`prepare_indirect_batch`](Self::prepare_indirect_batch) on
-    /// the record path. Never consumed without the opt-in flag.
-    staged_batch: std::sync::RwLock<Option<(glam::Mat4, Vec<InstanceData>)>>,
+    /// `(view_proj, pre-converted records)` moved here by `RenderSubmit`
+    /// and taken by [`prepare_indirect_batch`](Self::prepare_indirect_batch)
+    /// on the record path. Never consumed without the opt-in flag.
+    staged_batch: std::sync::RwLock<Option<(glam::Mat4, Vec<PerObjectGpu>)>>,
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     /// Textured-forward pipeline plus fallbacks, built on demand by
@@ -1027,3 +1029,7 @@ mod msaa_edge_gpu;
 #[cfg(test)]
 #[path = "../indirect_draw_gpu.rs"]
 mod indirect_draw_gpu;
+
+#[cfg(test)]
+#[path = "../motion_history_gpu.rs"]
+mod motion_history_gpu;
