@@ -2872,6 +2872,7 @@ version = "0.1.0"
 name = "ornis-macros"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "glam",
  "naga",
  "ornis-core",

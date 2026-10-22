@@ -46,12 +46,12 @@ pub(crate) struct LaneInfo {
     pub(crate) optional: bool,
 }
 
-struct PackInfo {
-    struct_name: Ident,
-    vis: Visibility,
-    generics: Generics,
-    fields: Vec<FieldInfo>,
-    lanes: Vec<LaneInfo>,
+pub(crate) struct PackInfo {
+    pub(crate) struct_name: Ident,
+    pub(crate) vis: Visibility,
+    pub(crate) generics: Generics,
+    pub(crate) fields: Vec<FieldInfo>,
+    pub(crate) lanes: Vec<LaneInfo>,
 }
 
 fn extract_field_info(struct_name: &Ident, fields: &FieldsNamed) -> Vec<FieldInfo> {
@@ -153,11 +153,18 @@ fn extract_pack_info(input: &DeriveInput) -> Result<PackInfo, syn::Error> {
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    match expand(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
 
-    let info = match extract_pack_info(&input) {
-        Ok(info) => info,
-        Err(e) => return e.to_compile_error().into(),
-    };
+/// Full `#[derive(Pack)]` expansion. Fallible: a struct that is not a
+/// named-field struct, or a rejected `#[pack(gpu)]` column, surfaces
+/// here as the spanned error the wrapper turns into `compile_error!`.
+fn expand(input: &DeriveInput) -> Result<TokenStream2, syn::Error> {
+    let info = extract_pack_info(input)?;
+    let pack_gpu = crate::pack_gpu::pack_gpu_tokens(input, &info)?;
 
     let struct_name = &info.struct_name;
     let (impl_generics, ty_generics, where_clause) = info.generics.split_for_impl();
@@ -224,9 +231,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         #for_each_packed
+
+        #pack_gpu
     };
 
-    expanded.into()
+    Ok(expanded)
 }
 
 fn generate_pack_register(lanes: &[LaneInfo]) -> TokenStream2 {

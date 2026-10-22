@@ -38,7 +38,10 @@
 //! IR → WGSL, so each side is testable without the other.
 
 pub mod ir;
+pub mod pack_lane;
 pub mod writer;
+
+pub use pack_lane::PackLaneDesc;
 
 use syn::visit::Visit;
 

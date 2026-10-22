@@ -135,8 +135,10 @@ fn _ornis_gather<T: Copy + Default>(lane: &[T], e: Entity) -> T {
 
 - **Lane-биндинги в compute-форме** — требуют протокола привязки
   storage-массивов к legacy-пути.
-- **`derive(Pack)`-интеграция** — feature 2 (RAT-50): сериализация
-  компонентов в лейн-буферы.
+- **`derive(Pack)`-интеграция** — закрыто feature 2 (RAT-50): колонки
+  `#[pack(gpu)]`-бандлов автоматически становятся storage-лейнами
+  `#[gpu_pipeline(pack(T))]`; контракт —
+  `docs/rendering/shader-lang-pack-lanes.md`.
 - **Ренумерация биндингов при композиции** — когда несколько
   kernel-модулей склеиваются в один shader string, номера биндингов
   должны переиндексироваться по единому протоколу.

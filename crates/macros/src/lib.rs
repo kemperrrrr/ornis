@@ -23,9 +23,12 @@
 mod auto_pipeline;
 mod for_each_entity;
 mod gpu_pipeline;
+mod gpu_pipeline_pack;
+mod gpu_pipeline_pack_layout;
 mod kernel;
 mod kernel_types;
 mod pack;
+mod pack_gpu;
 mod pack_lanes;
 mod pack_mut;
 mod pipeline_config;
