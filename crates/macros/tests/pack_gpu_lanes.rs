@@ -188,13 +188,22 @@ fn sparse_first_field_keeps_dense_entities_in_every_column() {
 }
 
 /// An all-sparse bundle has no dense anchor: the index space is the
-/// sorted union of every lane, so both half-present entities appear.
+/// sorted union of every lane. Lanes overlap (entity `c` is in both)
+/// and insertions run outside id order, so dropping `sort_by_key` or
+/// `dedup_by_key` in `index_space_tokens` fails this test.
 #[test]
 fn all_sparse_bundle_uses_sorted_union_index_space() {
     let mut store = SmartStore::new();
     AllSparse::pack_register(&mut store);
     let a = store.create_entity();
     let b = store.create_entity();
+    let c = store.create_entity();
+    // Insert out of id order; `c` lands in both lanes.
+    AllSparse {
+        a: Some(3),
+        b: Some(3.5),
+    }
+    .pack_insert(&mut store, c);
     AllSparse {
         a: Some(1),
         b: None,
@@ -207,9 +216,9 @@ fn all_sparse_bundle_uses_sorted_union_index_space() {
     .pack_insert(&mut store, b);
 
     let upload = AllSparse::pack_gpu_upload(&store).expect("upload");
-    assert_eq!(upload.len, 2, "union of both lanes");
-    assert_eq!(upload.columns[0], bytes_of(&[1u32, 0]));
-    assert_eq!(upload.columns[1], bytes_of(&[0.0f32, 2.5]));
+    assert_eq!(upload.len, 3, "sorted union of both lanes, deduped");
+    assert_eq!(upload.columns[0], bytes_of(&[1u32, 0, 3]));
+    assert_eq!(upload.columns[1], bytes_of(&[0.0f32, 2.5, 3.5]));
 }
 
 // ── gpu_pipeline(pack(T)) stitching ───────────────────────────────────────

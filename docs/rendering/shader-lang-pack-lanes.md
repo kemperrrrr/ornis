@@ -49,9 +49,10 @@ Feature 1 (RAT-49, `docs/rendering/shader-lang-entity-gather.md`) дал
   закреплено `size_of`-ассертами `#[derive(WgslStruct)]`, а у ручной
   WGSL-структуры без `WgslStruct` это соответствие — контракт автора.
   Зарезервированные в WGSL имена полей (`ref`, `type`, `loop`, `filter`,
-  …) — compile error на спане поля, а не naga-падение: имя поля и есть
-  имя storage-переменной (trybuild
-  `pack_gpu_rejects_reserved_field_name`). `bool`/`BVecN` и вложенный
+  …) и префикс `__` (зарезервирован самой грамматикой) — compile error
+  на спане поля, а не naga-падение: имя поля и есть имя storage-
+  переменной (trybuild `pack_gpu_rejects_reserved_field_name`,
+  `pack_gpu_rejects_dunder_field`). `bool`/`BVecN` и вложенный
   `Option` — compile error (trybuild `pack_gpu_rejects_bool_lane`,
   `…_nested_option`).
 - **Номера биндингов**: лейны идут после явных
@@ -67,7 +68,9 @@ Feature 1 (RAT-49, `docs/rendering/shader-lang-entity-gather.md`) дал
   `sparse_first_field_keeps_dense_entities_in_every_column`). Если все
   поля спарс-овые (dense-якоря нет), индекс-пространство —
   отсортированное объединение всех лейнов (тест
-  `all_sparse_bundle_uses_sorted_union_index_space`). CPU-правило
+  `all_sparse_bundle_uses_sorted_union_index_space`: лейны пересекаются
+  по сущности и вставляются вне порядка id, так что удаление
+  сортировки или дедупликации в генерации ломает тест). CPU-правило
   `Pack::pack_entities` («первый лейн») не менялось — при спарс-первом
   поле порядки сознательно различаются. Каждый лейн ищет сущность по
   id; после swap-remove dense-порядок «дышит», но колонки не расходятся
@@ -77,7 +80,11 @@ Feature 1 (RAT-49, `docs/rendering/shader-lang-entity-gather.md`) дал
 - **Пустой стор**: `len == 0` — не ошибка: каждая колонка несёт один
   элемент-ноль, иначе wgpu отвергнет нулевой буферный биндинг; пустая
   сцена при старте должна биндиться (тест
-  `empty_store_lane_buffers_bind_without_validation_error`).
+  `empty_store_lane_buffers_bind_without_validation_error`). Внимание
+  ядрам: при пустом сторе WGSL `arrayLength` вернёт 1 (построчный
+  паддинг), поэтому перебирать нужно по `len` (или uniform-длине), а
+  не по `arrayLength` — иначе ядро обработает фантомную нулевую
+  сущность.
 - **Дубликаты**: имена лейнов не должны пересекаться между бандлами и
   с явными биндингами/структурами (WGSL module-scope — одно имя).
   Макрос не видит чужих имён, поэтому коллизия падает в
@@ -133,8 +140,8 @@ wgpu 30 (`bind_group_layouts: &[Some(&bgl)]`, `immediate_size: 0`).
   явного выхода == CPU-вычисление того же стора.
 
 Отклонения закреплены trybuild (`tests/ui/pack_gpu_*.rs` — opt-in,
-`bool`/вложенный `Option`, зарезервированное WGSL-имя поля, non-Pod
-колонка, конфликт `#[derive(AutoPipeline, Pack)]` с одной
+`bool`/вложенный `Option`, зарезервированное WGSL-имя поля, префикс
+`__`, non-Pod колонка, конфликт `#[derive(AutoPipeline, Pack)]` с одной
 `#[pack]`-атрибутом; `gpu_pipeline_rejects_pack_before_storage.rs`).
 
 ## Честные границы v1

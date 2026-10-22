@@ -1,0 +1,5 @@
+error: field name `__x` starts with `__`, which WGSL reserves for its own identifiers; a pack lane reuses its field name as the storage-variable name, so rename the field
+  --> tests/ui/pack_gpu_rejects_dunder_field.rs:10:5
+   |
+10 |     __x: f32,
+   |     ^^^
