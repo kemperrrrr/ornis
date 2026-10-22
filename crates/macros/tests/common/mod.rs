@@ -5,11 +5,12 @@
 /// Test device, or `None` without an adapter (machines without GPU
 /// drivers skip instead of failing) — unless `ORNIS_REQUIRE_GPU` is set
 /// (CI `test` shard), where a missing adapter panics so silently-skipped
-/// GPU coverage cannot pass unnoticed.
+/// GPU coverage cannot pass unnoticed. The predicate mirrors
+/// `ornis_render::gpu_required` (the macros tests cannot dev-depend on
+/// the render crate — the dependency direction is the other way):
+/// any non-empty value except the explicit `0` requires the GPU.
 pub(crate) fn create_test_device(label: &'static str) -> Option<(wgpu::Device, wgpu::Queue)> {
-    // `= "1"`, not `is_ok()`: an explicit `ORNIS_REQUIRE_GPU=0` must
-    // keep the skip path.
-    let require_gpu = matches!(std::env::var("ORNIS_REQUIRE_GPU").as_deref(), Ok("1"));
+    let require_gpu = std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|v| !v.is_empty() && v != "0");
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         flags: wgpu::InstanceFlags::empty(),

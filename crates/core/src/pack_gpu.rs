@@ -9,11 +9,16 @@
 //!
 //! [`PackGpu::pack_gpu_upload`] serializes the store's lanes into column
 //! bytes aligned to one shared index space: the ascending entity-id
-//! order of the first lane's members (the same order
-//! [`crate::Pack::pack_entities`] yields). Each lane is looked up per
-//! entity, so dense-order churn from swap-removal never misaligns a
-//! column; entities missing from a lane (sparse `None`, or a desynced
-//! dense lane) upload as the all-zero element.
+//! order of the first non-sparse lane's members (an all-sparse bundle —
+//! every field `Option<T>` — takes the sorted union of its lanes
+//! instead, so a leading sparse field cannot drop entities from the
+//! other columns; CPU-side [`crate::Pack::pack_entities`] keeps its own
+//! first-field rule). Each lane is looked up per entity, so
+//! dense-order churn from swap-removal never misaligns a column;
+//! entities missing from a lane (sparse `None`, or a desynced
+//! dense lane) upload as the all-zero element. An empty store uploads
+//! one zeroed element per column: wgpu rejects zero-size buffer
+//! bindings, so a scene that starts empty must still bind.
 
 use crate::Pack;
 use crate::smart_store::SmartStore;
@@ -45,8 +50,10 @@ pub struct PackGpuUpload {
     /// Number of entities in the shared index space (column length).
     pub len: usize,
     /// One byte column per lane, in [`PackGpu::pack_gpu_lanes`] order.
-    /// Each column is `len * size_of::<Elem>()` bytes, laid out exactly
-    /// as `array<Elem>` expects for the lane's element type.
+    /// For `len > 0` each column is `len * size_of::<Elem>()` bytes,
+    /// laid out exactly as `array<Elem>` expects for the lane's element
+    /// type; for `len == 0` a column carries one zeroed element, because
+    /// wgpu rejects zero-size buffer bindings.
     pub columns: Vec<Vec<u8>>,
 }
 
@@ -54,7 +61,8 @@ pub struct PackGpuUpload {
 ///
 /// Implemented by `#[derive(Pack)]` when the struct carries
 /// `#[pack(gpu)]`; field types must be `bytemuck::Pod` (the upload
-/// casts columns with `bytemuck::cast_slice`).
+/// writes the column with `bytemuck::bytes_of`, and the derive asserts
+/// the bound on the field's span).
 pub trait PackGpu: Pack {
     /// Lanes in field declaration order. Empty for bundles that are
     /// CPU-only (no `#[pack(gpu)]`).

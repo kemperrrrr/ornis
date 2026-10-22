@@ -275,7 +275,10 @@ fn create_pack_buffers_tokens(columns_loader: &Ident) -> TokenStream2 {
         /// Serializes the store's pack lanes into one storage buffer
         /// per lane, in `pack(...)` order — the buffers the pack
         /// entries of [`create_bind_group_layout`] describe. `None`
-        /// when the store does not carry the packs.
+        /// when the store does not carry the packs. An empty store is
+        /// not an error: every upload pads its columns with one zeroed
+        /// element (wgpu rejects zero-size bindings), so `len == 0`
+        /// still produces bindable buffers.
         #[allow(dead_code)]
         pub fn create_pack_buffers(
             device: &wgpu::Device,

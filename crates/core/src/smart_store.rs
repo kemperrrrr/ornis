@@ -541,7 +541,9 @@ pub trait Pack: Clone + Send + Sync + 'static {
 
     /// Entities owning the bundle (membership of the first lane).
     /// The `#[smart_system]` loop iterates this set; entities missing
-    /// other lanes are skipped by [`pack_get`](Pack::pack_get).
+    /// other lanes are skipped by [`pack_get`](Pack::pack_get). (The
+    /// GPU upload anchors its shared index space on the first
+    /// *non-sparse* lane instead — see [`crate::PackGpu::pack_gpu_upload`].)
     fn pack_entities(store: &SmartStore) -> Vec<Entity>;
 
     /// `TypeId`s of every lane this bundle owns (one per field).

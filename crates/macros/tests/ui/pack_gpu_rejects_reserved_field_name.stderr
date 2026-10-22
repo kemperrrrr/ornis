@@ -1,0 +1,5 @@
+error: field name `type` is reserved in WGSL; a pack lane reuses its field name as the storage-variable name, so rename the field
+  --> tests/ui/pack_gpu_rejects_reserved_field_name.rs:11:5
+   |
+11 |     r#type: u32,
+   |     ^^^^^^

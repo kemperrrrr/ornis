@@ -1,0 +1,5 @@
+error: `#[derive(AutoPipeline)]` reads only bare `#[pack]` (its field-type pack mode); a `pack(...)` payload is `#[derive(Pack)]`'s GPU opt-in. On a struct deriving both, the attribute cannot do both jobs: keep bare `#[pack]` and drop Pack, or `#[pack(gpu)]` and drop AutoPipeline
+  --> tests/ui/pack_gpu_rejects_autopipeline_pack_conflict.rs:10:1
+   |
+10 | #[pack(gpu)]
+   | ^^^^^^^^^^^^

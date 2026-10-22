@@ -39,9 +39,11 @@
 
 pub mod ir;
 pub mod pack_lane;
+pub mod words;
 pub mod writer;
 
 pub use pack_lane::PackLaneDesc;
+pub use words::WGSL_RESERVED_WORDS;
 
 use syn::visit::Visit;
 

@@ -1,17 +1,16 @@
-error[E0599]: no associated function or constant named `pack_gpu_lanes` found for struct `CpuOnly` in the current scope
+error[E0277]: the trait bound `CpuOnly: PackGpu` is not satisfied
+  --> tests/ui/pack_gpu_requires_opt_in.rs:16:22
+   |
+16 |     needs_pack_gpu::<CpuOnly>();
+   |                      ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `PackGpu` is not implemented for `CpuOnly`
+  --> tests/ui/pack_gpu_requires_opt_in.rs:9:1
+   |
+ 9 | struct CpuOnly {
+   | ^^^^^^^^^^^^^^
+note: required by a bound in `needs_pack_gpu`
   --> tests/ui/pack_gpu_requires_opt_in.rs:13:22
    |
- 8 | struct CpuOnly {
-   | -------------- associated function or constant `pack_gpu_lanes` not found for this struct
-...
-13 |     let _ = CpuOnly::pack_gpu_lanes();
-   |                      ^^^^^^^^^^^^^^ associated function or constant not found in `CpuOnly`
-   |
-   = help: items from traits can only be used if the trait is implemented and in scope
-   = note: the following trait defines an item `pack_gpu_lanes`, perhaps you need to implement it:
-           candidate #1: `PackGpu`
-help: there is an associated function `pack_get` with a similar name
-  --> $WORKSPACE/crates/core/src/smart_store.rs
-   |
-   |     fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self>;
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 | fn needs_pack_gpu<T: ornis_core::PackGpu>() {}
+   |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `needs_pack_gpu`

@@ -138,7 +138,11 @@ fn _ornis_gather<T: Copy + Default>(lane: &[T], e: Entity) -> T {
 - **`derive(Pack)`-интеграция** — закрыто feature 2 (RAT-50): колонки
   `#[pack(gpu)]`-бандлов автоматически становятся storage-лейнами
   `#[gpu_pipeline(pack(T))]`; контракт —
-  `docs/rendering/shader-lang-pack-lanes.md`.
+  `docs/rendering/shader-lang-pack-lanes.md`. Учтите: индекс-пространства
+  **не связаны** — gather-лейны (`_ornis_lane_…`, индекс =
+  `Entity.index`, слот в вызывающих lane'ах, см. «Модель») и pack-лейны
+  (индекс = позиция в возрастающем порядке id, см. pack-lanes.md) в v1
+  независимы; совпадают только при плотных id `0..n` без удалений.
 - **Ренумерация биндингов при композиции** — когда несколько
   kernel-модулей склеиваются в один shader string, номера биндингов
   должны переиндексироваться по единому протоколу.

@@ -29,6 +29,25 @@ struct Sparse {
     tag: Option<u32>,
 }
 
+/// Sparse-*first* pack: the shared index space must come from the
+/// dense field, not from field order — a `tag: None` entity must keep
+/// its slot in the `pos` column.
+#[derive(Debug, Clone, PartialEq, PackDerive)]
+#[pack(gpu)]
+struct SparseFirst {
+    tag: Option<u32>,
+    pos: f32,
+}
+
+/// All-sparse pack: no dense anchor exists — the index space is the
+/// sorted union of every lane.
+#[derive(Debug, Clone, PartialEq, PackDerive)]
+#[pack(gpu)]
+struct AllSparse {
+    a: Option<u32>,
+    b: Option<f32>,
+}
+
 /// Plain (non-GPU) pack: must *not* implement PackGpu (opt-in only).
 #[derive(Debug, Clone, PartialEq, PackDerive)]
 struct CpuOnly {
@@ -135,6 +154,62 @@ fn sparse_lane_absent_entity_uploads_all_zero_element() {
     assert_eq!(upload.columns[0], bytes_of(&[5.0f32, 9.0]));
     // `b` has no `tag` entry → zeroed u32 placeholder.
     assert_eq!(upload.columns[1], bytes_of(&[7u32, 0]));
+}
+
+/// A leading `Option<T>` field must not shrink the shared index space:
+/// the anchor is the first *non-sparse* lane, so the `tag: None`
+/// entity keeps its slot in the dense column instead of vanishing
+/// from every column.
+#[test]
+fn sparse_first_field_keeps_dense_entities_in_every_column() {
+    let mut store = SmartStore::new();
+    SparseFirst::pack_register(&mut store);
+    let a = store.create_entity();
+    let b = store.create_entity();
+    SparseFirst {
+        tag: Some(7),
+        pos: 1.0,
+    }
+    .pack_insert(&mut store, a);
+    SparseFirst {
+        tag: None,
+        pos: 9.0,
+    }
+    .pack_insert(&mut store, b);
+
+    let upload = SparseFirst::pack_gpu_upload(&store).expect("upload");
+    assert_eq!(upload.len, 2, "`tag: None` must not drop the entity");
+    assert_eq!(upload.columns[0], bytes_of(&[7u32, 0]), "tag zero-fills b");
+    assert_eq!(
+        upload.columns[1],
+        bytes_of(&[1.0f32, 9.0]),
+        "pos keeps b's row"
+    );
+}
+
+/// An all-sparse bundle has no dense anchor: the index space is the
+/// sorted union of every lane, so both half-present entities appear.
+#[test]
+fn all_sparse_bundle_uses_sorted_union_index_space() {
+    let mut store = SmartStore::new();
+    AllSparse::pack_register(&mut store);
+    let a = store.create_entity();
+    let b = store.create_entity();
+    AllSparse {
+        a: Some(1),
+        b: None,
+    }
+    .pack_insert(&mut store, a);
+    AllSparse {
+        a: None,
+        b: Some(2.5),
+    }
+    .pack_insert(&mut store, b);
+
+    let upload = AllSparse::pack_gpu_upload(&store).expect("upload");
+    assert_eq!(upload.len, 2, "union of both lanes");
+    assert_eq!(upload.columns[0], bytes_of(&[1u32, 0]));
+    assert_eq!(upload.columns[1], bytes_of(&[0.0f32, 2.5]));
 }
 
 // ── gpu_pipeline(pack(T)) stitching ───────────────────────────────────────
@@ -478,4 +553,41 @@ fn pack_pipeline_dispatch_matches_cpu_evaluation() {
 
     assert_eq!(cpu, vec![3.0, 5.0], "CPU reference values");
     assert_eq!(data[0..cpu.len()], cpu[..], "GPU readback vs CPU");
+}
+
+/// An empty store (registered, zero entities) must still bind: every
+/// column carries one zeroed element, because wgpu rejects zero-size
+/// buffer bindings — an empty scene start is the normal case, not an
+/// error.
+#[test]
+fn empty_store_lane_buffers_bind_without_validation_error() {
+    let Some((device, _queue)) = create_test_device("ornis-macros pack gpu test") else {
+        eprintln!("skipping: no wgpu adapter");
+        return;
+    };
+
+    let mut store = SmartStore::new();
+    Dense::pack_register(&mut store);
+
+    let upload = Dense::pack_gpu_upload(&store).expect("upload of registered empty store");
+    assert_eq!(upload.len, 0, "no entities in the index space");
+    assert_eq!(upload.columns[0].len(), 4, "one zeroed f32 element");
+    assert_eq!(upload.columns[1].len(), 4, "one zeroed u32 element");
+
+    let pack_buffers = lanes_only::create_pack_buffers(&device, &store).expect("pack buffers");
+    assert_eq!(pack_buffers.len(), 2, "one buffer per lane");
+    assert_eq!(pack_buffers[0].size(), 4, "no zero-size buffer created");
+
+    let bgl = lanes_only::create_bind_group_layout(&device);
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bgl,
+        entries: &[
+            whole_buffer_entry(0, &pack_buffers[0]),
+            whole_buffer_entry(1, &pack_buffers[1]),
+        ],
+    });
+    let err = pollster::block_on(scope.pop());
+    assert!(err.is_none(), "empty-store lane buffers must bind: {err:?}");
 }

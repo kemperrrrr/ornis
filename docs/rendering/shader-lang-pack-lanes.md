@@ -44,22 +44,40 @@ Feature 1 (RAT-49, `docs/rendering/shader-lang-entity-gather.md`) дал
   зеркалится по листовому идентификатору (`glam::Vec3` → `Vec3`).
   Регитри-маппинг (`Vec3` → `vec3<f32>`) сознательно запрещён: storage-
   массив `vec3<f32>` имеет stride 16, у glam `Vec3` — 12; угаданный
-  spelling соврал бы о раскладке. Зеркало проверяется naga/wgpu как
-  есть. `bool`/`BVecN` и вложенный `Option` — compile error (trybuild
-  `pack_gpu_rejects_bool_lane`, `…_nested_option`).
+  spelling соврал бы о раскладке. Написание зеркала проверяет naga
+  (валидация модуля); соответствие `size_of::<T>()` и WGSL-stride
+  закреплено `size_of`-ассертами `#[derive(WgslStruct)]`, а у ручной
+  WGSL-структуры без `WgslStruct` это соответствие — контракт автора.
+  Зарезервированные в WGSL имена полей (`ref`, `type`, `loop`, `filter`,
+  …) — compile error на спане поля, а не naga-падение: имя поля и есть
+  имя storage-переменной (trybuild
+  `pack_gpu_rejects_reserved_field_name`). `bool`/`BVecN` и вложенный
+  `Option` — compile error (trybuild `pack_gpu_rejects_bool_lane`,
+  `…_nested_option`).
 - **Номера биндингов**: лейны идут после явных
   `storage`/`uniform`/`texture`/`sampler`-опций: `base = число явных
   биндингов`, лейн `i` — биндинг `base + i`. `pack(...)` **обязан**
   стоять после явных опций (compile error, trybuild
   `gpu_pipeline_rejects_pack_before_storage`) — иначе база не
   константа на этапе макроса.
-- **Индексация**: общий индекс-пространство всех лейнов одного
-  пайплайна — восходящий порядок id сущностей первого лейна (тот же,
-  что `Pack::pack_entities`). Каждый лейн ищет сущность по id; после
-  swap-remove dense-порядок «дышит», но колонки не расходятся
+- **Индексация**: общий индекс-пространство всех колонок одного бандла —
+  восходящий порядок id сущностей первого **не-sparse**-лейна (первого
+  поля без `Option`): ведущее спарс-поле с `None` не вправе выкидывать
+  сущность из остальных колонок (тест
+  `sparse_first_field_keeps_dense_entities_in_every_column`). Если все
+  поля спарс-овые (dense-якоря нет), индекс-пространство —
+  отсортированное объединение всех лейнов (тест
+  `all_sparse_bundle_uses_sorted_union_index_space`). CPU-правило
+  `Pack::pack_entities` («первый лейн») не менялось — при спарс-первом
+  поле порядки сознательно различаются. Каждый лейн ищет сущность по
+  id; после swap-remove dense-порядок «дышит», но колонки не расходятся
   (тест `upload_survives_dense_order_churn`).
 - **Спарс-лейны**: `Option<T>`-поле — спарс-колонка; отсутствующая у
   сущности запись заливается элементом-нулём (`Pod ⇒ Zeroable`).
+- **Пустой стор**: `len == 0` — не ошибка: каждая колонка несёт один
+  элемент-ноль, иначе wgpu отвергнет нулевой буферный биндинг; пустая
+  сцена при старте должна биндиться (тест
+  `empty_store_lane_buffers_bind_without_validation_error`).
 - **Дубликаты**: имена лейнов не должны пересекаться между бандлами и
   с явными биндингами/структурами (WGSL module-scope — одно имя).
   Макрос не видит чужих имён, поэтому коллизия падает в
@@ -97,7 +115,9 @@ wgpu 30 (`bind_group_layouts: &[Some(&bgl)]`, `immediate_size: 0`).
 
 - дескрипторы лейнов (порядок, spelling, спарс-флаг);
 - выравнивание колонок: shared-order, churn после swap-remove,
-  нулевой плейсхолдер спарс-лейна;
+  нулевой плейсхолдер спарс-лейна; спарс-первое поле не теряет
+  сущности в других колонках; все-спарс-бандл берёт объединение
+  лейнов;
 - склейка `wgsl_source()`: явный биндинг → лейны по номерам, naga-
   валидация, пин против `PackLaneDesc::decl`;
 - паника дубликата;
@@ -106,13 +126,16 @@ wgpu 30 (`bind_group_layouts: &[Some(&bgl)]`, `immediate_size: 0`).
   (`missing_lane_bindings_are_a_validation_error_not_ub`); слот
   `texture_depth_cube_array` требует view размерности `CubeArray` —
   неверная размерность ловится при создании bind group
-  (`cube_array_texture_slot_accepts_a_cube_view`);
+  (`cube_array_texture_slot_accepts_a_cube_view`); пустой стор биндится
+  без ошибок валидации (`empty_store_lane_buffers_bind_without_validation_error`);
 - device-gated (Metal локально; CI `test-physics,smoke` — lavapipe):
   `create_pack_buffers` + `create_pipeline` + dispatch → readback
   явного выхода == CPU-вычисление того же стора.
 
-Отклонения закреплены trybuild (`tests/ui/pack_gpu_*.rs`,
-`gpu_pipeline_rejects_pack_before_storage.rs`).
+Отклонения закреплены trybuild (`tests/ui/pack_gpu_*.rs` — opt-in,
+`bool`/вложенный `Option`, зарезервированное WGSL-имя поля, non-Pod
+колонка, конфликт `#[derive(AutoPipeline, Pack)]` с одной
+`#[pack]`-атрибутом; `gpu_pipeline_rejects_pack_before_storage.rs`).
 
 ## Честные границы v1
 
