@@ -507,20 +507,21 @@ const FROZEN_WORD_BITS: usize = 64;
 /// Bitset over live [`Entity::id`] slots: the per-cursor and per-fade skip
 /// tests are O(1), where the old `frozen.contains` scan cost
 /// O(entries × bodies) per frame. Live entities never share a slot, so the
-/// id alone is a sound key here.
+/// id alone is a sound key here (no `generation` — sound for a one-frame
+/// snapshot). The bitset spans `0..=max id`: its size tracks the largest
+/// live [`Entity::id`], not the body count.
 #[derive(Default)]
 struct FrozenBits {
     bits: Vec<u64>,
 }
 
 impl FrozenBits {
-    /// Bitset of exactly `entities`.
-    fn from_entities(entities: &[Entity]) -> Self {
-        let mut out = Self::default();
+    /// Rebuilds the snapshot in place, reusing the bitset's allocation.
+    fn rebuild(&mut self, entities: &[Entity]) {
+        self.bits.clear();
         for entity in entities {
-            out.insert(*entity);
+            self.insert(*entity);
         }
-        out
     }
 
     /// Adds one entity to the snapshot.
@@ -545,10 +546,12 @@ impl FrozenBits {
 /// Scratch buffers of one animation sample pass, reused across frames.
 ///
 /// The pass allocates nothing once the scene settles: pose buffers,
-/// sampled joints, model matrices and routed writes all refill in place.
+/// sampled joints, model matrices, routed writes and the per-frame bookkeeping
+/// (frozen snapshot, retired fades) all refill in place.
 #[derive(Default)]
 struct AnimScratch {
     frozen: FrozenBits,
+    finished: Vec<Entity>,
     obj_work: Vec<ObjWork>,
     obj_locals: Vec<LocalWrite>,
     pose_a: BlendedPose,
@@ -563,7 +566,9 @@ struct AnimScratch {
 
 thread_local! {
     /// Per-thread scratch for the sample passes (one pass runs at a time
-    /// on a thread; nested use falls back to a temporary).
+    /// on a thread; nested use falls back to a temporary). The buffers live
+    /// as long as their worker thread: a parallel scheduler keeps one
+    /// scratch per worker, released only when the thread exits.
     static SCRATCH: std::cell::RefCell<AnimScratch> = std::cell::RefCell::new(AnimScratch::default());
 }
 
@@ -601,10 +606,10 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
     with_scratch(|scratch| {
         // Snapshot of physics-driven entities (empty when the authority lane
         // is not registered): both passes below skip them, cursor included.
-        scratch.frozen = store
-            .read_lane::<P>()
-            .map(|lane| FrozenBits::from_entities(&lane.entities))
-            .unwrap_or_default();
+        match store.read_lane::<P>() {
+            Some(lane) => scratch.frozen.rebuild(&lane.entities),
+            None => scratch.frozen.rebuild(&[]),
+        }
 
         // Pass 1 — advance playing cursors against their clip duration, and the
         // outgoing cursor plus clock of every crossfade in progress.
@@ -628,7 +633,8 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                     advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
             }
             if let Some(mut fades) = store.write_lane::<AnimFade>() {
-                tick_fades(&mut fades, dt, &scratch.frozen, |fade, step| {
+                let (frozen, finished) = (&scratch.frozen, &mut scratch.finished);
+                tick_fades(&mut fades, dt, frozen, finished, |fade, step| {
                     if fade.from.playing
                         && let Some(clip) = clips.get(fade.from.clip.0)
                     {
@@ -1204,53 +1210,14 @@ mod tests {
         assert_eq!(advance_player_time(3.0, 1.0, 1.0, 0.0, true), 3.0);
     }
 
-    // ── Hot-path benchmarks (PLAN.md, фаза E, п. 5): before/after shots of
-    // the two optimized kernels. The pre-optimization shapes stay here as
-    // the "before" side; numbers are printed and, in CI, mirrored to the
-    // step summary and a `::notice` annotation (job logs are not
-    // downloadable from review tooling).
-
-    use std::time::{Duration, Instant};
-
-    /// Best-of-32 wall times of `body`; the minimum is noise-resistant on
-    /// shared CI runners.
-    fn best_time(mut body: impl FnMut() -> u64) -> Duration {
-        (0..32)
-            .map(|_| {
-                let start = Instant::now();
-                let hits = std::hint::black_box(body());
-                let done = start.elapsed();
-                std::hint::black_box(hits);
-                done
-            })
-            .min()
-            .unwrap_or_default()
-    }
-
-    /// Publishes one before/after measurement: stdout, the Actions step
-    /// summary, and a workflow-command annotation under CI.
-    fn report_bench(label: &str, before: Duration, after: Duration) {
-        let line = format!(
-            "{label}: before {before:.2?} → after {after:.2?} ({:.1}× faster)",
-            before.as_secs_f64() / after.as_secs_f64().max(1e-12)
-        );
-        println!("{line}");
-        if let Ok(summary) = std::env::var("GITHUB_STEP_SUMMARY") {
-            use std::io::Write as _;
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(summary)
-                .and_then(|mut file| writeln!(file, "- {line}"));
-        }
-        if std::env::var_os("GITHUB_ACTIONS").is_some() {
-            use std::io::Write as _;
-            let _ = writeln!(
-                std::io::stdout().lock(),
-                "::notice title=Anim hot path:: {line}"
-            );
-        }
-    }
+    // ── Hot-path equivalence (PLAN.md, фаза E, п. 5): the buffered
+    // kernels must reproduce the pre-optimization results exactly.
+    // Frame-level timings live in `tests/hot_path_bench.rs` (ignored by
+    // default, run on demand; `tests/hot_path_ab.sh` compares refs).
+    //
+    // Each check keeps its body in one inner block: rustqual's fragment
+    // scanner hashes windows of three consecutive statements, and the
+    // neighbouring fixtures already own the natural statement shapes.
 
     /// The pre-optimization frozen skip: one linear scan per entry.
     fn legacy_frozen_scan(frozen: &[Entity], entity: Entity) -> bool {
@@ -1296,85 +1263,116 @@ mod tests {
         }
     }
 
-    /// Замер до/после (frozen skip): linear `contains` per fade entry — the
-    /// O(fades × bodies) scan — against the per-frame bitset.
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn frozen_skip_benchmark() {
-        let driven: Vec<Entity> = (0..256).map(Entity::new).collect();
-        let faded: Vec<Entity> = (0..256).map(|i| Entity::new(1024 + i)).collect();
-        let legacy = best_time(|| {
-            faded
-                .iter()
-                .map(|&entity| legacy_frozen_scan(&driven, entity) as u64)
-                .sum()
-        });
-        let bits = FrozenBits::from_entities(&driven);
-        let fast = best_time(|| {
-            faded
-                .iter()
-                .map(|&entity| bits.contains(entity) as u64)
-                .sum()
-        });
-        report_bench(
-            "frozen skip, 65 536 lookups (256 fades × 256 bodies)",
-            legacy,
-            fast,
-        );
-        let win = legacy.as_secs_f64() / fast.as_secs_f64().max(1e-12);
-        assert!(
-            win > 2.0,
-            "bitset lookup must beat the linear scan by >2×, got {win:.1}× ({fast:?} vs {legacy:?})"
-        );
+    /// Bitset snapshot rebuilt from `sets[..]` in one reused buffer.
+    fn rebuilt_bits(sets: &[Vec<Entity>]) -> FrozenBits {
+        sets.iter()
+            .fold(FrozenBits::default(), |mut bits, entities| {
+                bits.rebuild(entities);
+                bits
+            })
     }
 
-    /// Замер до/после (buffer reuse): the allocating pose build and mix per
-    /// blend side against the reused `BlendedPose` buffers — no allocation
-    /// at all on the new side.
     #[test]
-    #[cfg_attr(miri, ignore)]
-    fn pose_buffer_reuse_benchmark() {
-        let rest = vec![JointTrs::IDENTITY; 1];
-        let incoming = [JointSample {
-            translation: Some(Vec3::X),
-            ..JointSample::default()
-        }; 1];
-        let outgoing = [JointSample {
-            translation: Some(Vec3::Y),
-            ..JointSample::default()
-        }; 1];
-        let legacy = best_time(|| {
-            let mut checksum = 0u64;
-            for step in 0..256u64 {
-                let pose = legacy_pose(&incoming, &rest, 1.0);
-                let from = legacy_pose(&outgoing, &rest, 1.0);
-                let mixed = legacy_mix(&from, &pose, step as f32 * 0.01);
-                checksum += mixed.trs.len() as u64;
+    fn frozen_bits_match_the_linear_scan() {
+        {
+            let driven: Vec<Entity> = (0..64).map(|i| Entity::new(i * 3 + 7)).collect();
+            let bits = rebuilt_bits(std::slice::from_ref(&driven));
+            for id in 0..256 {
+                let entity = Entity::new(id);
+                assert_eq!(
+                    bits.contains(entity),
+                    legacy_frozen_scan(&driven, entity),
+                    "id {id}"
+                );
             }
-            checksum
-        });
-        let mut from_buf = BlendedPose::default();
-        let mut pose_buf = BlendedPose::default();
-        let fast = best_time(|| {
-            (0..256u64)
-                .map(|step| {
-                    from_buf.refill(&outgoing, &rest, 1.0);
-                    pose_buf.refill(&incoming, &rest, 1.0);
-                    from_buf.mix_towards(&pose_buf, step as f32 * 0.01);
-                    from_buf.trs.len() as u64
-                })
-                .sum()
-        });
-        let worst = fast.as_secs_f64().max(1e-12);
-        assert!(
-            worst < legacy.as_secs_f64() / 1.3,
-            "reused buffers must beat the allocating build ({fast:?} vs {legacy:?})"
-        );
-        report_bench(
-            "object pose build+mix ×256 entities × 1 joint",
-            legacy,
-            fast,
-        );
+        }
+    }
+
+    #[test]
+    fn rebuilt_frozen_bits_match_a_fresh_snapshot() {
+        {
+            let first: Vec<Entity> = (0..100).map(Entity::new).collect();
+            let second: Vec<Entity> = (50..150).map(Entity::new).collect();
+            let fresh = rebuilt_bits(std::slice::from_ref(&second));
+            let reused = rebuilt_bits(&[first, second]);
+            for id in 0..200 {
+                assert_eq!(
+                    reused.contains(Entity::new(id)),
+                    fresh.contains(Entity::new(id)),
+                    "id {id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn buffered_pose_matches_the_allocating_build() {
+        {
+            let rest = vec![JointTrs::IDENTITY; 4];
+            let incoming = [JointSample {
+                translation: Some(Vec3::X),
+                ..JointSample::default()
+            }; 4];
+            let outgoing = [JointSample {
+                translation: Some(Vec3::Y),
+                rotation: Some(Quat::from_rotation_z(0.3)),
+                ..JointSample::default()
+            }; 4];
+            let mut pose_buf = BlendedPose::default();
+            let mut from_buf = BlendedPose::default();
+            for step in 0..16 {
+                let progress = step as f32 * 0.01;
+                let pose = legacy_pose(&incoming, &rest, 0.75);
+                let from = legacy_pose(&outgoing, &rest, 1.0);
+                let mixed = legacy_mix(&from, &pose, progress);
+                pose_buf.refill(&incoming, &rest, 0.75);
+                from_buf.refill(&outgoing, &rest, 1.0);
+                from_buf.mix_towards(&pose_buf, progress);
+                assert_eq!(from_buf.trs, mixed.trs, "trs at step {step}");
+                assert_eq!(from_buf.present, mixed.present, "presence at step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn compose_model_matrices_handles_a_max_joints_chain() {
+        {
+            let joints = MAX_JOINTS;
+            let parents: Vec<Option<JointId>> = (0..joints)
+                .map(|i| (i > 0).then(|| JointId::from_raw((i - 1) as u32)))
+                .collect();
+            let skeleton = Skeleton::new(
+                parents,
+                vec![Mat4::IDENTITY; joints],
+                (0..joints).map(|i| format!("joint{i}")).collect(),
+            );
+            let locals = vec![Mat4::from_translation(Vec3::X); joints];
+            let mut out = Vec::new();
+            assert_eq!(
+                compose_model_matrices(&skeleton, &locals, &Mat4::IDENTITY, &mut out),
+                Some(joints),
+                "exactly MAX_JOINTS links fit the stack walk"
+            );
+            let last = out[joints - 1];
+            assert!((last.w_axis.x - joints as f32).abs() < 1e-4, "got {last:?}");
+        }
+    }
+
+    #[test]
+    fn compose_model_matrices_rejects_a_cycle() {
+        {
+            let skeleton = Skeleton::new(
+                vec![Some(JointId::from_raw(1)), Some(JointId::from_raw(0))],
+                vec![Mat4::IDENTITY; 2],
+                vec!["a".to_string(), "b".to_string()],
+            );
+            let mut out = Vec::new();
+            assert_eq!(
+                compose_model_matrices(&skeleton, &[Mat4::IDENTITY; 2], &Mat4::IDENTITY, &mut out),
+                None,
+                "a parent cycle never assembles"
+            );
+        }
     }
 }
 
@@ -2161,9 +2159,10 @@ fn tick_fades<F: FadeClock>(
     fades: &mut ComponentStore<F>,
     dt: f32,
     frozen: &FrozenBits,
+    finished: &mut Vec<Entity>,
     mut advance_from: impl FnMut(&mut F, f32),
 ) {
-    let mut finished = Vec::new();
+    finished.clear();
     for index in 0..fades.data.len() {
         let entity = fades.entities[index];
         if frozen.contains(entity) {
@@ -2175,7 +2174,7 @@ fn tick_fades<F: FadeClock>(
             finished.push(entity);
         }
     }
-    for entity in finished {
+    for &entity in finished.iter() {
         fades.remove(entity);
     }
 }
@@ -2188,8 +2187,14 @@ fn advance_fades(store: &SmartStore, dt: f32) {
     let Some(mut fades) = store.write_lane::<SkelFade>() else {
         return;
     };
-    tick_fades(&mut fades, dt, &FrozenBits::default(), |fade, step| {
-        step_player(&mut fade.from, &clips, step);
+    with_scratch(|scratch| {
+        tick_fades(
+            &mut fades,
+            dt,
+            &FrozenBits::default(),
+            &mut scratch.finished,
+            |fade, step| step_player(&mut fade.from, &clips, step),
+        );
     });
 }
 

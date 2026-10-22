@@ -263,8 +263,11 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 `entity_mut(root).animator()?.play(name)`; пауза/стоп/резюме —
 `pause_animation`/`stop_animation`/`resume_animation`. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
-`resume_animation`, а `PlaybackError` стал enum `Missing`/`UnknownClip`
-(больше не `Copy`). Окно открывает `ornis::run`
+`resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
+`InvalidClip` (больше не `Copy`; `InvalidClip` — `fade_to_clip` отклоняет
+чужой или выдуманный `ClipId` до любой записи), а `compose_model_matrices`
+теперь пишет матрицы в caller-owned буфер:
+`compose_model_matrices(.., out: &mut Vec<Mat4>) -> Option<usize>`. Окно открывает `ornis::run`
 с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет
 локальный `Transform` целевого узла (object-треки и суставы, отображённые
 через `node_to_entity`), поэтому дети двигаются распространением позы.

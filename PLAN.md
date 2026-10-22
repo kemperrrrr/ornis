@@ -162,13 +162,17 @@
      `Vec`, объектный — 2 `Vec` на сущность (`track_of`, `side_pose`,
      `crates/animation/src/lib.rs:672-684`). Нужны битовая маска/`HashSet` для
      frozen и переиспользование буферов.
-     Битовая маска `FrozenBits` (O(1) skip-тест) вместо линейного `contains`;
-     пер-кадровые буферы путей переиспользуются через `AnimScratch`
-     (`BlendedPose::refill`/`mix_towards`, `sample_joints` с scratch,
-     `compose_model_matrices` в caller-буфер, `model_via_chain` без
-     аллокаций). Замеры до/после — бенч-тесты `frozen_skip_benchmark` и
-     `pose_buffer_reuse_benchmark` (legacy-форма как «до»), цифры уходят в
-     job summary и аннотацию CI.
+     Битовая маска `FrozenBits` (O(1) skip-тест) вместо линейного `contains`
+     (снимок переиспользуется через `FrozenBits::rebuild`, как и `finished` в
+     `tick_fades`); пер-кадровые буферы путей переиспользуются через
+     `AnimScratch` (`BlendedPose::refill`/`mix_towards`, `sample_joints` с
+     scratch, `compose_model_matrices` в caller-буфер, `model_via_chain` без
+     аллокаций). Замеры до/после — кадровый бенч
+     `crates/animation/tests/hot_path_bench.rs` (`#[ignore]`, сценарии
+     empty/small/skel_heavy/object_heavy/full_mix) и A/B-скрипт
+     `tests/hot_path_ab.sh` (merge-base↔head, раздельные target-каталоги);
+     замеры base↔head и отсутствие регресса на empty/small — в PR #180.
+     Эквивалентность старого и нового ядер — обычные тесты без таймингов.
   6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
      стороны анимации). Упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет. База в
      физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
