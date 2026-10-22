@@ -1,0 +1,5 @@
+error: `t.position` must be bound through an annotated let in GPU kernel `nested` (`let p: Vec3 = t.position;`) — the annotation is the field's type
+  --> tests/ui/kernel_rejects_nested_gather.rs:10:19
+   |
+10 |     let px: f32 = t.position.x;
+   |                   ^

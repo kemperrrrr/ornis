@@ -23,9 +23,12 @@
 mod auto_pipeline;
 mod for_each_entity;
 mod gpu_pipeline;
+mod gpu_pipeline_pack;
+mod gpu_pipeline_pack_layout;
 mod kernel;
 mod kernel_types;
 mod pack;
+mod pack_gpu;
 mod pack_lanes;
 mod pack_mut;
 mod pipeline_config;
@@ -47,8 +50,14 @@ mod stages;
 mod static_profile;
 mod wgsl;
 mod wgsl_context;
+mod wgsl_entity_shape;
+mod wgsl_gather;
+mod wgsl_gather_emit;
+mod wgsl_gather_rejects;
+mod wgsl_gather_scan;
 mod wgsl_interface;
 mod wgsl_lower;
+mod wgsl_options;
 mod wgsl_struct;
 
 use proc_macro::TokenStream;

@@ -1,0 +1,5 @@
+error: #[derive(Pack)] reads `#[pack(...)]` as GPU opt-in; write `#[pack(gpu)]` (bare `#[pack]` is `#[derive(AutoPipeline)]`'s field-type pack mode and has no meaning on this derive)
+ --> tests/ui/pack_gpu_rejects_bare_pack_attr.rs:8:1
+  |
+8 | #[pack]
+  | ^^^^^^^

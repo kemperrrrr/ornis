@@ -16,6 +16,25 @@ use crate::{ShaderBuiltin, ShaderType};
 /// (`no definition in scope`), never to pass silently.
 pub const UNSUPPORTED_MARKER: &str = "__wgsl_dsl_unsupported_statement__()";
 
+/// Component counts of the registry's vector and matrix spellings.
+/// Named rather than written inline so constructor arithmetic reads as
+/// dimensions — the magic-number allow-list only covers `0`/`1`/`2`/`-1`.
+const VEC3_DIM: usize = 3;
+/// Component count of a glam / WGSL `Vec4`.
+const VEC4_DIM: usize = 4;
+/// Component count of a glam / WGSL `Mat3` (square, row-major).
+const MAT3_DIM: usize = 9;
+/// Component count of a glam / WGSL `Mat4` (square, row-major).
+const MAT4_DIM: usize = 16;
+
+/// Zero component spellings per scalar kind, shared by every constructor
+/// [`IrType::zero_expr`] expands to.
+const F32_ZERO: &str = "0.0";
+/// Zero component spelling for `i32`.
+const I32_ZERO: &str = "0i";
+/// Zero component spelling for `u32`.
+const U32_ZERO: &str = "0u";
+
 /// Opaque user-defined shader type (struct mirrors): a lexical name that is
 /// neither a [`ShaderType`] primitive nor `bool`.
 ///
@@ -85,6 +104,75 @@ pub enum IrType {
     /// Runtime-sized `array<T>` (storage buffers document capacity in
     /// Rust, WGSL sizes at bind time).
     RuntimeArray(Box<IrType>),
+    /// `Option<T>` for a registry scalar/vector/bool: lowered to a
+    /// generated two-field struct (see `writer::option_struct_decl`).
+    /// Nested `Option` is rejected upstream — WGSL has no recursive
+    /// struct layout.
+    Optional(Box<IrType>),
+    /// The DSL entity handle (`index: u32, generation: u32`): a
+    /// generated struct (see `writer::entity_struct_decl`), spelled
+    /// `Entity` in WGSL and mirrored by the per-kernel CPU struct the
+    /// macro emits.
+    Entity,
+}
+
+impl IrType {
+    /// Zero-valued literal for this type: the payload placeholder for
+    /// `None`. Vectors and matrices expand to positional constructors
+    /// filled with component zeros; [`IrType::Entity`] expands to the
+    /// null handle `Entity(0u, 0u)`; anything without a literal spelling
+    /// (`Custom`, arrays, nested `Optional`) is [`IrExpr::Unsupported`].
+    ///
+    /// Scalar dispatch and the component table live in the same body, so
+    /// the function stays pure logic — no project call next to the
+    /// branching, which is what lets the `None` placeholder be reasoned
+    /// about on its own.
+    pub fn zero_expr(&self) -> IrExpr {
+        match self {
+            IrType::Scalar(ShaderType::F32) => IrExpr::Float(F32_ZERO.to_string()),
+            IrType::Scalar(ShaderType::I32) => IrExpr::Int(I32_ZERO.to_string()),
+            IrType::Scalar(ShaderType::U32) => IrExpr::Int(U32_ZERO.to_string()),
+            IrType::Bool => IrExpr::Bool(false),
+            // The null handle: positional constructor over the two `u32`
+            // fields, the same spelling a struct literal lowers to.
+            IrType::Entity => IrExpr::Call {
+                target: IrCallee::Expr(Box::new(IrExpr::Path(vec!["Entity".to_string()]))),
+                args: vec![
+                    IrExpr::Int(U32_ZERO.to_string()),
+                    IrExpr::Int(U32_ZERO.to_string()),
+                ],
+            },
+            IrType::Scalar(t) => {
+                // Component count and that component's zero literal, in one
+                // table: `Mat3`/`Mat4` are square float matrices, scalars
+                // never reach here (the arms above take them).
+                let (count, zero) = match t {
+                    ShaderType::Vec2 => (2, IrExpr::Float(F32_ZERO.to_string())),
+                    ShaderType::Vec3 => (VEC3_DIM, IrExpr::Float(F32_ZERO.to_string())),
+                    ShaderType::Vec4 => (VEC4_DIM, IrExpr::Float(F32_ZERO.to_string())),
+                    ShaderType::UVec2 => (2, IrExpr::Int(U32_ZERO.to_string())),
+                    ShaderType::UVec3 => (VEC3_DIM, IrExpr::Int(U32_ZERO.to_string())),
+                    ShaderType::UVec4 => (VEC4_DIM, IrExpr::Int(U32_ZERO.to_string())),
+                    ShaderType::IVec2 => (2, IrExpr::Int(I32_ZERO.to_string())),
+                    ShaderType::IVec3 => (VEC3_DIM, IrExpr::Int(I32_ZERO.to_string())),
+                    ShaderType::IVec4 => (VEC4_DIM, IrExpr::Int(I32_ZERO.to_string())),
+                    ShaderType::BVec2 => (2, IrExpr::Bool(false)),
+                    ShaderType::BVec3 => (VEC3_DIM, IrExpr::Bool(false)),
+                    ShaderType::BVec4 => (VEC4_DIM, IrExpr::Bool(false)),
+                    ShaderType::Mat3 => (MAT3_DIM, IrExpr::Float(F32_ZERO.to_string())),
+                    ShaderType::Mat4 => (MAT4_DIM, IrExpr::Float(F32_ZERO.to_string())),
+                    // A lone scalar reads as a one-element constructor,
+                    // which naga still accepts.
+                    _ => (1, IrExpr::Float(F32_ZERO.to_string())),
+                };
+                IrExpr::Call {
+                    target: IrCallee::Constructor { ty: *t },
+                    args: std::iter::repeat_n(zero, count).collect(),
+                }
+            }
+            _ => IrExpr::Unsupported,
+        }
+    }
 }
 
 /// Module-scope declaration: what the item IS, not how it prints.

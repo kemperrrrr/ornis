@@ -18,7 +18,9 @@ glam = { version = "0.34", optional = true }
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in", "wgsl-out"] }
 ornis-core = { path = "../core", version = "0.1.0" }
+ornis-shader-lang = { path = "../shader-lang", version = "0.1.0" }
 glam = "0.34"
+bytemuck = { version = "1", features = ["derive"] }
 trybuild = "1"
 wgpu = "30"
 pollster = "1"

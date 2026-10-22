@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `CpuOnly: PackGpu` is not satisfied
+  --> tests/ui/pack_gpu_requires_opt_in.rs:16:22
+   |
+16 |     needs_pack_gpu::<CpuOnly>();
+   |                      ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `PackGpu` is not implemented for `CpuOnly`
+  --> tests/ui/pack_gpu_requires_opt_in.rs:9:1
+   |
+ 9 | struct CpuOnly {
+   | ^^^^^^^^^^^^^^
+note: required by a bound in `needs_pack_gpu`
+  --> tests/ui/pack_gpu_requires_opt_in.rs:13:22
+   |
+13 | fn needs_pack_gpu<T: ornis_core::PackGpu>() {}
+   |                      ^^^^^^^^^^^^^^^^^^^ required by this bound in `needs_pack_gpu`

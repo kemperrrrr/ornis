@@ -1,0 +1,5 @@
+error: type `Option<Option<_>>` is not supported in GPU kernel `nested`; WGSL structs have no recursive layout
+ --> tests/ui/kernel_rejects_nested_option.rs:9:14
+  |
+9 | fn nested(x: Option<Option<f32>>) -> f32 {
+  |              ^^^^^^^^^^^^^^^^^^^

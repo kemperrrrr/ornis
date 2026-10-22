@@ -7,6 +7,10 @@
 //! constructs lower to loud markers naga rejects. Rust `as` casts lower
 //! to WGSL conversion constructors (`f32(x)`/`u32(x)`/`i32(x)`).
 
+use crate::wgsl_options::{collect_option_decls, option_ir_ty, option_struct_ty};
+use ornis_shader_lang::ShaderType;
+use ornis_shader_lang::ir::IrType;
+use ornis_shader_lang::writer::print_ty;
 use syn::{FnArg, ItemFn};
 
 #[allow(dead_code)]
@@ -23,10 +27,34 @@ pub fn rust_to_wgsl(expr: &syn::Expr) -> String {
     WgslGen::expr(expr)
 }
 
+/// A kernel/helper return or `let` type as its lowered `IrType`, used
+/// as the expected type that names `Some`/`None` constructors and the
+/// declaration of a value-position `match`. Returns `None` for types
+/// with no registry mapping (uniform/varying structs, …).
+pub(crate) fn rust_ty_to_ir(ty: &syn::Type) -> Option<IrType> {
+    if let Some(payload) = option_ir_ty(ty) {
+        return Some(IrType::Optional(Box::new(payload)));
+    }
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    if tp.qself.is_none() && tp.path.segments.len() == 1 && tp.path.segments[0].ident == "Entity" {
+        return Some(IrType::Entity);
+    }
+    let seg = tp.path.segments.last()?;
+    if seg.ident == "bool" {
+        return Some(IrType::Bool);
+    }
+    ShaderType::from_rust(&seg.ident.to_string()).map(IrType::Scalar)
+}
+
 /// WGSL type for an uninitialized `var` declaration. Scalars and glam
 /// vectors map to their WGSL spellings; any other named type passes
 /// through verbatim (varying/uniform struct names).
 pub(crate) fn var_type(ty: &syn::Type) -> String {
+    if let Some(ty) = option_struct_ty(ty) {
+        return print_ty(&ty);
+    }
     if let syn::Type::Path(tp) = ty
         && let Some(last) = tp.path.segments.last().map(|s| s.ident.to_string())
     {
@@ -103,6 +131,9 @@ fn wgsl_type(ty: &str) -> Option<String> {
 }
 
 pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
+    if let Some(ty) = option_struct_ty(ty) {
+        return print_ty(&ty);
+    }
     match ty {
         syn::Type::Path(tp) => {
             let segs: Vec<_> = tp
@@ -115,6 +146,9 @@ pub fn rust_type_to_wgsl(ty: &syn::Type) -> String {
             match last {
                 // Bare `bool` keeps its previous spelling (not a primitive).
                 Some("bool") => "bool".to_string(),
+                // The DSL entity handle: the per-kernel generated
+                // struct, not a registry primitive.
+                Some("Entity") => "Entity".to_string(),
                 _ => {
                     let name = last.unwrap_or("f32");
                     ornis_shader_lang::ShaderType::from_rust(name)
@@ -144,7 +178,17 @@ fn extract_and_convert_body(func: &ItemFn) -> String {
 
 /// Convert the entire function body to WGSL statements
 fn convert_body_to_wgsl(func: &ItemFn) -> String {
-    ornis_shader_lang::writer::print_block(&crate::wgsl_lower::lower_body(&func.block.stmts))
+    // The return type is the only type context available at the top of
+    // the body: `return None;` and a tail `None` need it to know which
+    // `Option_<T>` struct to build.
+    let return_ty = match &func.sig.output {
+        syn::ReturnType::Type(_, ty) => rust_ty_to_ir(ty),
+        syn::ReturnType::Default => None,
+    };
+    ornis_shader_lang::writer::print_block(&crate::wgsl_lower::lower_body_typed(
+        &func.block.stmts,
+        return_ty.as_ref(),
+    ))
 }
 
 /// Generate a standalone WGSL function definition (not a compute shader).
@@ -236,10 +280,22 @@ pub fn wgsl_fn_source(func: &ItemFn) -> String {
         .map(|(pat, ty)| format!("{}: {}", param_name(pat), rust_type_to_wgsl(ty)))
         .collect();
 
-    let body = convert_body_to_wgsl(func);
+    // The gather plan owns both the body rewrite (a recorded
+    // `t.position` lowers to its lane helper call) and the prefix
+    // decls (Entity struct, lanes, helpers).
+    let plan = crate::wgsl_gather::scan(func);
+    let body = crate::wgsl_gather::with_reads(&plan, || convert_body_to_wgsl(func));
+
+    let decls = crate::wgsl_gather::decls_prefix(&plan, &collect_option_decls(func), true);
+    let prefix = if decls.is_empty() {
+        String::new()
+    } else {
+        format!("{decls}\n")
+    };
 
     format!(
-        "fn {}({}) -> {} {{ {} }}",
+        "{}fn {}({}) -> {} {{ {} }}",
+        prefix,
         fn_name,
         param_wgsl.join(", "),
         return_ty,
@@ -268,9 +324,17 @@ pub fn wgsl_source_from_fn(func: &ItemFn) -> String {
 
     let param_names: Vec<String> = params.iter().map(|(pat, _)| param_name(pat)).collect();
     let param_types: Vec<String> = params.iter().map(|(_, ty)| rust_type_to_wgsl(ty)).collect();
+    // Legacy compute form: no lane binding slots (the body lowers
+    // without the gather plan, so a gather fails loudly at naga — see
+    // the entity-gather design note); the `Entity` struct itself is
+    // still declared so `array<Entity>` params parse.
+    let plan = crate::wgsl_gather::scan(func);
     let body_wgsl = extract_and_convert_body(func);
 
-    let mut wgsl = String::new();
+    let mut wgsl = crate::wgsl_gather::decls_prefix(&plan, &collect_option_decls(func), false);
+    if !wgsl.is_empty() {
+        wgsl.push('\n');
+    }
     for (i, (pname, ptype)) in param_names.iter().zip(param_types.iter()).enumerate() {
         wgsl.push_str(&format!(
             "@group(0) @binding({i}) var<storage, read> {pname}: array<{ptype}>;\n"

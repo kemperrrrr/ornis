@@ -1,0 +1,5 @@
+error: `Option` inside a pack GPU column has no storage layout; the outer `Option<T>` field is already the sparse-column form
+ --> tests/ui/pack_gpu_rejects_nested_option.rs:9:15
+  |
+9 |     x: Option<Option<f32>>,
+  |               ^^^^^^^^^^^

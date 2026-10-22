@@ -14,72 +14,211 @@ use ornis_shader_lang::ShaderType;
 use ornis_shader_lang::ir::{
     IrBinOp, IrBlock, IrCallee, IrElse, IrExpr, IrStmt, IrType, IrUnOp, UNSUPPORTED_MARKER,
 };
-use ornis_shader_lang::writer::print_ty;
+use ornis_shader_lang::writer::{option_struct_name, print_ty};
+use syn::spanned::Spanned;
 use syn::{Block, ExprForLoop, Local, Pat, Stmt};
 
-/// Lower one expression.
+/// The subset of Rust patterns a `#[kernel]` `match` / `if let` can
+/// spell in WGSL.
+pub(crate) enum ArmPattern {
+    /// `_` — matches anything, binds nothing.
+    Wild,
+    /// A bare identifier — binds the whole remaining value (must be the
+    /// last arm / the only `if let` branch).
+    Bind(String),
+    /// A literal — compared with `==`.
+    Lit,
+    /// `Some(x)` — discriminant test plus a payload binding.
+    Some(String),
+    /// `None` — discriminant test only.
+    None,
+}
+
+/// Fall-through message for a pattern shape the lowerer does not model:
+/// every unsupported pattern reports exactly this text.
+const UNSUPPORTED_PATTERN: &str = "this pattern is not supported in a `#[kernel]` `match`";
+
+/// Classify one `match`/`if let` pattern into the supported subset.
+/// `Err` carries a message suitable for a spanned macro-time error.
+///
+/// Every arm delegates to a helper, so this reads as routing rather
+/// than branching: the shape decisions live in the `classify_*` functions
+/// below, each of which is either pure logic or pure delegation.
+pub(crate) fn classify_pattern(pat: &Pat) -> Result<ArmPattern, String> {
+    match pat {
+        Pat::Wild(_) => Ok(ArmPattern::Wild),
+        Pat::Ident(pi) => classify_ident_pattern(pi),
+        Pat::Lit(_) => Ok(ArmPattern::Lit),
+        Pat::Path(p) => classify_path_pattern(&p.path),
+        Pat::TupleStruct(ts) => classify_some_pattern(ts),
+        Pat::Paren(pp) => classify_pattern(&pp.pat),
+        Pat::Guard(pg) => Err(format!(
+            "match guards (`pat if cond`) have no WGSL spelling in `#[kernel]` (on `{}`); \
+             restructure with an explicit `if` inside the arm body, or split into an extra arm",
+            quote::ToTokens::to_token_stream(&pg.guard)
+        )),
+        Pat::Range(_) => Err(
+            "range patterns have no WGSL spelling in `#[kernel]`; compare with explicit \
+             literal arms instead"
+                .to_string(),
+        ),
+        Pat::Or(_) => Err(
+            "or-patterns (`a | b`) have no WGSL spelling in `#[kernel]`; split them into \
+             separate arms"
+                .to_string(),
+        ),
+        Pat::Struct(_) => Err(
+            "struct patterns have no WGSL spelling in `#[kernel]`; match on scalars or \
+             `Option` payloads instead"
+                .to_string(),
+        ),
+        Pat::Tuple(_) => Err(
+            "tuple patterns have no WGSL spelling in `#[kernel]`; WGSL has no tuples".to_string(),
+        ),
+        _ => Err(UNSUPPORTED_PATTERN.to_string()),
+    }
+}
+
+/// `Pat::Ident`: the bare `None`/`Some` discriminants (syn 3 parses both
+/// as identifier patterns) and the plain binding case. `x @ subpattern`
+/// and `ref` bindings have no WGSL spelling and fall through loudly.
+fn classify_ident_pattern(pi: &syn::PatIdent) -> Result<ArmPattern, String> {
+    if pi.subpat.is_some() || pi.by_ref.is_some() {
+        return Err(UNSUPPORTED_PATTERN.to_string());
+    }
+    // syn 3 parses the bare `None` path pattern as an identifier
+    // pattern; it is a discriminant test, not a binding.
+    if pi.ident == "None" {
+        return Ok(ArmPattern::None);
+    }
+    if pi.ident == "Some" {
+        return Err("`Some` in a pattern must bind a payload: `Some(x)`".to_string());
+    }
+    Ok(ArmPattern::Bind(pi.ident.to_string()))
+}
+
+/// `Pat::Path`: only the `None` discriminant (bare, or through
+/// `Option`/`core::option`). Every other path names an enum variant,
+/// which has no WGSL spelling.
+fn classify_path_pattern(path: &syn::Path) -> Result<ArmPattern, String> {
+    if path.segments.last().is_some_and(|s| s.ident == "None") {
+        return Ok(ArmPattern::None);
+    }
+    Err(
+        "enum-variant paths have no WGSL spelling in `#[kernel]`; fieldless enums lower to \
+         a `u32` tag — match on the integer tag with literal arms instead"
+            .to_string(),
+    )
+}
+
+/// `Pat::TupleStruct`: only `Some(binding)`, binding exactly one plain
+/// identifier. Any other tuple-struct pattern is unsupported.
+fn classify_some_pattern(ts: &syn::PatTupleStruct) -> Result<ArmPattern, String> {
+    if !ts.path.segments.last().is_some_and(|s| s.ident == "Some") {
+        return Err(UNSUPPORTED_PATTERN.to_string());
+    }
+    if ts.elems.len() != 1 {
+        return Err("`Some(...)` in a pattern binds exactly one payload".to_string());
+    }
+    let Pat::Ident(pi) = &ts.elems[0] else {
+        return Err(
+            "`Some(...)` in a pattern must bind a plain identifier, not a nested pattern"
+                .to_string(),
+        );
+    };
+    if pi.subpat.is_some() || pi.by_ref.is_some() {
+        return Err(
+            "`Some(...)` in a pattern must bind a plain identifier, not a nested pattern"
+                .to_string(),
+        );
+    }
+    Ok(ArmPattern::Some(pi.ident.to_string()))
+}
+
+thread_local! {
+    /// The enclosing kernel's return type, in scope for the whole of one
+    /// `lower_body_typed` call. `return None` inside an `if` block has
+    /// no local type context; this is the only place it can come from.
+    static RETURN_TY: std::cell::RefCell<Option<IrType>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set the return type for the duration of `f`, restoring the previous
+/// value afterwards so nested bodies do not leak into each other.
+fn with_return_ty<T>(ty: Option<&IrType>, f: impl FnOnce() -> T) -> T {
+    // A nested body with no context of its own (an `if` block, a
+    // statement-position `match`) keeps the enclosing kernel's return
+    // type: `None` here means "not given", not "returns nothing".
+    let Some(ty) = ty else {
+        return f();
+    };
+    let prev = RETURN_TY.with(|cell| cell.borrow_mut().take());
+    RETURN_TY.with(|cell| *cell.borrow_mut() = Some(ty.clone()));
+    let out = f();
+    RETURN_TY.with(|cell| *cell.borrow_mut() = prev);
+    out
+}
+
+fn current_return_ty() -> Option<IrType> {
+    RETURN_TY.with(|c| c.borrow().clone())
+}
+
+/// The type context a `return` expression and the `Some`/`None`
+/// constructors should use: local propagation first, then the
+/// function's return type.
+fn expected_or_return(expected: Option<&IrType>) -> Option<IrType> {
+    expected.cloned().or_else(current_return_ty)
+}
+
+/// A loud placeholder: any message that must survive to a naga parse
+/// error rather than being dropped at macro time.
+fn loud(msg: &str, span: proc_macro2::Span) -> IrExpr {
+    IrExpr::Verbatim(
+        syn::Error::new(span, format!("{UNSUPPORTED_MARKER}: {msg}"))
+            .to_compile_error()
+            .to_string(),
+    )
+}
+
+/// Lower one expression with no type context.
 pub fn lower_expr(e: &syn::Expr) -> IrExpr {
+    lower_expr_expected(e, None)
+}
+
+/// Lower one expression, propagating the expected type so `Some`/`None`
+/// know which generated `Option_<T>` struct to construct.
+///
+/// Every arm is a delegation call, so this match routes rather than
+/// branches (IOSP Integration); each shape builds in its own helper.
+fn lower_expr_expected(e: &syn::Expr, expected: Option<&IrType>) -> IrExpr {
     use syn::Expr::*;
     match e {
         Lit(l) => lower_lit(l),
-        Path(p) => IrExpr::Path(path_segments(p)),
-        Field(f) => {
-            let member = match &f.member {
-                syn::Member::Named(ident) => ident.to_string(),
-                syn::Member::Unnamed(index) => index.index.to_string(),
-            };
-            IrExpr::Field {
-                base: Box::new(lower_expr(&f.base)),
-                member,
-            }
-        }
+        Path(p) => lower_path(p, expected),
+        Field(f) => lower_field(f),
         Binary(b) => lower_binary(b),
-        Unary(u) => {
-            use syn::UnOp::*;
-            let op = match &u.op {
-                Neg(_) => IrUnOp::Neg,
-                Not(_) => IrUnOp::Not,
-                // Deref and anything else both spelled `*` (historical).
-                _ => IrUnOp::DerefOrUnknown,
-            };
-            IrExpr::Unary {
-                op,
-                expr: Box::new(lower_expr(&u.expr)),
-            }
-        }
-        Paren(p) => IrExpr::Paren(Box::new(lower_expr(&p.expr))),
-        Call(c) => lower_call(c),
+        Unary(u) => lower_unary(u),
+        Paren(p) => IrExpr::Paren(Box::new(lower_expr_expected(&p.expr, expected))),
+        Call(c) => lower_call(c, expected),
         MethodCall(m) => lower_method_call(m),
-        If(i) => lower_if(i),
+        If(i) => lower_if(i, expected),
+        Let(_) => loud("a bare `let` expression has no WGSL spelling", e.span()),
+        Match(m) => lower_match_expr(m),
         Block(b) => IrExpr::Block(lower_block(&b.block)),
-        Assign(a) => IrExpr::Assign {
-            left: Box::new(lower_expr(&a.left)),
-            right: Box::new(lower_expr(&a.right)),
-        },
-        Index(ix) => IrExpr::Index {
-            base: Box::new(lower_expr(&ix.expr)),
-            index: Box::new(lower_expr(&ix.index)),
-        },
+        Assign(a) => lower_assign(a),
+        Index(ix) => lower_index(ix),
         Struct(s) => lower_struct_lit(s),
-        Continue(c) => {
-            if c.label.is_some() {
-                IrExpr::Unsupported
-            } else {
-                IrExpr::Continue
-            }
-        }
-        Break(b) => {
-            if b.label.is_some() || b.expr.is_some() {
-                IrExpr::Unsupported
-            } else {
-                IrExpr::Break
-            }
-        }
+        Continue(c) => lower_continue(c),
+        Break(b) => lower_break(b),
         // Rust casts lower to WGSL conversion constructors (`x as u32`
         // → `u32(x)`); anything without a WGSL scalar spelling is a
         // compile error, never a silently dropped coercion.
         Cast(c) => lower_cast(c),
-        Return(r) => IrExpr::Return(r.expr.as_ref().map(|e| Box::new(lower_expr(e)))),
+        Return(r) => IrExpr::Return(
+            r.expr
+                .as_ref()
+                .map(|e| Box::new(lower_expr_expected(e, expected))),
+        ),
         Array(a) => lower_array_literal(a, None),
         Repeat(r) => lower_array_repeat(r, None),
         _ => IrExpr::Verbatim(
@@ -90,37 +229,203 @@ pub fn lower_expr(e: &syn::Expr) -> IrExpr {
     }
 }
 
-/// Lower a whole body: statements in order, last one flagged as tail.
-pub fn lower_body(stmts: &[Stmt]) -> IrBlock {
-    let count = stmts.len();
-    stmts
-        .iter()
-        .enumerate()
-        .flat_map(|(i, s)| lower_stmt(s, i == count - 1))
-        .collect()
+/// `base.member` — the member is a lexical name, never a WGSL
+/// decision. The one exception is a recorded `Entity` gather site
+/// (`t.position` on an entity binding): the plan names its lane
+/// helper, and the access lowers to that helper call.
+fn lower_field(f: &syn::ExprField) -> IrExpr {
+    if let Some((root, member)) = crate::wgsl_entity_shape::entity_field_shape(f)
+        && let Some(helper) = crate::wgsl_gather::helper_for(&root, &member)
+    {
+        return IrExpr::Call {
+            target: IrCallee::Verbatim(helper),
+            args: vec![IrExpr::Path(vec![root])],
+        };
+    }
+    IrExpr::Field {
+        base: Box::new(lower_expr(&f.base)),
+        member: member_name(&f.member),
+    }
 }
 
-/// Lower one statement (a `let = if` expands to two).
-pub fn lower_stmt(s: &Stmt, is_tail: bool) -> Vec<IrStmt> {
+/// Spelling of a struct field reference: the identifier, or the tuple
+/// field's ordinal.
+fn member_name(member: &syn::Member) -> String {
+    match member {
+        syn::Member::Named(ident) => ident.to_string(),
+        syn::Member::Unnamed(index) => index.index.to_string(),
+    }
+}
+
+/// `-x` / `!x` / `*x` — the operator maps one-to-one, except that every
+/// non-unary spelling shares the historical `*` fallback.
+fn lower_unary(u: &syn::ExprUnary) -> IrExpr {
+    IrExpr::Unary {
+        op: un_op_of(&u.op),
+        expr: Box::new(lower_expr(&u.expr)),
+    }
+}
+
+/// WGSL spelling of a Rust unary operator.
+fn un_op_of(op: &syn::UnOp) -> IrUnOp {
+    match op {
+        syn::UnOp::Neg(_) => IrUnOp::Neg,
+        syn::UnOp::Not(_) => IrUnOp::Not,
+        // Deref and anything else both spelled `*` (historical).
+        _ => IrUnOp::DerefOrUnknown,
+    }
+}
+
+/// `lhs = rhs` — both sides lower independently.
+fn lower_assign(a: &syn::ExprAssign) -> IrExpr {
+    IrExpr::Assign {
+        left: Box::new(lower_expr(&a.left)),
+        right: Box::new(lower_expr(&a.right)),
+    }
+}
+
+/// `base[index]` — both sides lower independently.
+fn lower_index(ix: &syn::ExprIndex) -> IrExpr {
+    IrExpr::Index {
+        base: Box::new(lower_expr(&ix.expr)),
+        index: Box::new(lower_expr(&ix.index)),
+    }
+}
+
+/// `'label: continue` has no WGSL spelling (WGSL labels only bind
+/// loops); an unlabelled one lowers straight through.
+fn lower_continue(c: &syn::ExprContinue) -> IrExpr {
+    if c.label.is_some() {
+        IrExpr::Unsupported
+    } else {
+        IrExpr::Continue
+    }
+}
+
+/// `'label: break` and `break value` both have no WGSL spelling; only
+/// the bare loop break lowers through.
+fn lower_break(b: &syn::ExprBreak) -> IrExpr {
+    if b.label.is_some() || b.expr.is_some() {
+        IrExpr::Unsupported
+    } else {
+        IrExpr::Break
+    }
+}
+
+/// Lower a whole body: statements in order, last one flagged as tail.
+pub fn lower_body(stmts: &[Stmt]) -> IrBlock {
+    lower_body_typed(stmts, None)
+}
+
+/// Lower a whole body with a return-type context. The context names the
+/// generated `Option_<T>` struct for a tail `None`/`Some` and for a
+/// tail or `return match …`.
+pub fn lower_body_typed(stmts: &[Stmt], return_ty: Option<&IrType>) -> IrBlock {
+    with_return_ty(return_ty, || {
+        let count = stmts.len();
+        stmts
+            .iter()
+            .enumerate()
+            .flat_map(|(i, s)| {
+                let is_tail = i == count - 1;
+                lower_stmt_expected(s, is_tail, if is_tail { return_ty } else { None })
+            })
+            .collect()
+    })
+}
+
+/// Lower one statement. Every arm delegates, so this match routes
+/// rather than branches (IOSP Integration).
+fn lower_stmt_expected(s: &Stmt, is_tail: bool, expected: Option<&IrType>) -> Vec<IrStmt> {
     match s {
         Stmt::Local(local) => lower_local(local),
         Stmt::Expr(syn::Expr::ForLoop(f), _) => lower_for_range(f),
-        Stmt::Expr(expr, semi) => match expr {
-            syn::Expr::If(_) | syn::Expr::Block(_) => vec![IrStmt::Flow {
-                expr: lower_expr(expr),
-                semi: semi.is_some(),
-            }],
-            _ => vec![IrStmt::Expr {
-                expr: lower_expr(expr),
-                semi: semi.is_some(),
-                is_tail,
-            }],
-        },
+        Stmt::Expr(expr, semi) => lower_stmt_expr(expr, semi.is_some(), is_tail, expected),
         // Loud by construction: anything untranslatable emits an unknown
         // call that naga rejects, instead of vanishing silently and
         // changing shader semantics. Pixel probes backstop drift.
-        _ => vec![unsupported_stmt()],
+        _ => unsupported_stmts(),
     }
+}
+
+/// One expression statement: `return`, `match` and the `if`/`block`
+/// shapes each decide their own expansion.
+fn lower_stmt_expr(
+    expr: &syn::Expr,
+    semi: bool,
+    is_tail: bool,
+    expected: Option<&IrType>,
+) -> Vec<IrStmt> {
+    match expr {
+        syn::Expr::Return(_) => lower_return_stmt(expr, semi, expected),
+        syn::Expr::Match(m) => lower_match_stmt_expr(m, semi, is_tail, expected),
+        syn::Expr::If(_) | syn::Expr::Block(_) => flow_stmts(lower_expr(expr), semi),
+        _ => expr_stmts(lower_expr_expected(expr, expected), semi, is_tail),
+    }
+}
+
+/// `return …` — a `return match scrut { .. };` statement folds into the
+/// value expansion with the `return` baked in; every other `return`
+/// lowers as an ordinary expression statement.
+fn lower_return_stmt(ret: &syn::Expr, semi: bool, expected: Option<&IrType>) -> Vec<IrStmt> {
+    let syn::Expr::Return(r) = ret else {
+        unreachable!("only reached for a `return` expression");
+    };
+    let expected = expected_or_return(expected);
+    match (r.expr.as_deref(), expected.as_ref()) {
+        (Some(syn::Expr::Match(m)), Some(expected)) => lower_match_value(m, Some(expected)),
+        _ => expr_stmts(lower_expr_expected(ret, expected.as_ref()), semi, false),
+    }
+}
+
+/// A `match` in statement position: the tail form assigns through the
+/// value temporary and returns it, everything else folds into a nested
+/// if/else chain over whole statement blocks.
+fn lower_match_stmt_expr(
+    m: &syn::ExprMatch,
+    semi: bool,
+    is_tail: bool,
+    expected: Option<&IrType>,
+) -> Vec<IrStmt> {
+    match (is_tail, expected) {
+        (true, Some(expected)) => lower_match_value(m, Some(expected)),
+        _ => flow_stmts(lower_match_stmt(m), semi),
+    }
+}
+
+/// One statement-position `if`/`block`, as the single-element list the
+/// statement dispatchers return.
+fn flow_stmts(expr: IrExpr, semi: bool) -> Vec<IrStmt> {
+    vec![IrStmt::Flow { expr, semi }]
+}
+
+/// One general expression statement, as the single-element list the
+/// statement dispatchers return.
+fn expr_stmts(expr: IrExpr, semi: bool, is_tail: bool) -> Vec<IrStmt> {
+    vec![IrStmt::Expr {
+        expr,
+        semi,
+        is_tail,
+    }]
+}
+
+/// The loud placeholder statement, as the single-element list the
+/// statement dispatchers return.
+fn unsupported_stmts() -> Vec<IrStmt> {
+    vec![unsupported_stmt()]
+}
+
+/// Name of the temporary a value-position `match` assigns into. Leading
+/// underscores keep it out of the way of user bindings.
+const MATCH_RESULT: &str = "ornis_match_result";
+
+/// A value-position `match` expanded to
+/// `var __match_result: T; if (c) { … __match_result = …; } return __match_result;`.
+fn lower_match_value(m: &syn::ExprMatch, expected: Option<&IrType>) -> Vec<IrStmt> {
+    let decl_ty = expected.map(print_ty);
+    let mut stmts = lower_match_assign(MATCH_RESULT, decl_ty, m);
+    stmts.push(IrStmt::Tail(IrExpr::Path(vec![MATCH_RESULT.to_string()])));
+    stmts
 }
 
 fn unsupported_stmt() -> IrStmt {
@@ -276,7 +581,105 @@ fn lower_binary(b: &syn::ExprBinary) -> IrExpr {
     }
 }
 
-fn lower_call(c: &syn::ExprCall) -> IrExpr {
+/// A path expression, with the expected type carried into `Some`/`None`.
+fn lower_path(p: &syn::ExprPath, expected: Option<&IrType>) -> IrExpr {
+    if p.qself.is_none() && p.path.segments.len() == 1 {
+        let ident = &p.path.segments[0].ident;
+        if ident == "None" {
+            return lower_none(expected, p.span());
+        }
+        if ident == "Some" {
+            return loud("`Some` needs one payload: `Some(x)`", p.span());
+        }
+    }
+    IrExpr::Path(path_segments(p))
+}
+
+/// The generated struct name for `Some`/`None` at `expected`. Returns
+/// the message to surface when the expected type is not an `Option`.
+fn option_name_of(expected: Option<&IrType>) -> Result<String, String> {
+    match expected {
+        Some(IrType::Optional(inner)) => Ok(option_struct_name(&print_ty(inner))),
+        _ => Err(
+            "`Some`/`None` need a static `Option<T>` type context: annotate the binding \
+             (`let x: Option<T> = …`) or the function's return type"
+                .to_string(),
+        ),
+    }
+}
+
+/// The generated struct name and payload type for `Some`/`None` at a
+/// known `Option<T>` context; the message to surface when the expected
+/// type is not an `Option` comes back as `Err`.
+fn option_target(
+    expected: Option<&IrType>,
+    span: proc_macro2::Span,
+) -> Result<(String, Box<IrType>), IrExpr> {
+    let expected = expected_or_return(expected);
+    let expected = expected.as_ref();
+    let name = match option_name_of(expected) {
+        Ok(name) => name,
+        Err(msg) => return Err(loud(&msg, span)),
+    };
+    let Some(IrType::Optional(inner)) = expected else {
+        unreachable!("option_name_of only succeeds for IrType::Optional");
+    };
+    Ok((name, inner.clone()))
+}
+
+/// `None` at a known `Option<T>` context: the generated struct with a
+/// zero payload (WGSL has no union, so the payload always exists).
+fn lower_none(expected: Option<&IrType>, span: proc_macro2::Span) -> IrExpr {
+    let (name, inner) = match option_target(expected, span) {
+        Ok(target) => target,
+        Err(msg) => return msg,
+    };
+    IrExpr::Call {
+        target: IrCallee::Expr(Box::new(IrExpr::Path(vec![name]))),
+        args: vec![IrExpr::Int("0u".to_string()), inner.zero_expr()],
+    }
+}
+
+/// `Some(x)` at a known `Option<T>` context.
+fn lower_some(c: &syn::ExprCall, expected: Option<&IrType>) -> IrExpr {
+    let span = c.span();
+    let (name, _) = match option_target(expected, span) {
+        Ok(target) => target,
+        Err(msg) => return msg,
+    };
+    if c.args.len() != 1 {
+        return loud("`Some` takes exactly one payload", span);
+    }
+    IrExpr::Call {
+        target: IrCallee::Expr(Box::new(IrExpr::Path(vec![name]))),
+        args: vec![IrExpr::Int("1u".to_string()), lower_expr(&c.args[0])],
+    }
+}
+
+/// A bare `None(...)`-shaped call is not valid Rust; kept for symmetry
+/// with the value form so an accidental `None` constructor fails loudly.
+fn lower_none_call(
+    _c: &syn::ExprCall,
+    expected: Option<&IrType>,
+    span: proc_macro2::Span,
+) -> IrExpr {
+    lower_none(expected, span)
+}
+
+fn lower_call(c: &syn::ExprCall, expected: Option<&IrType>) -> IrExpr {
+    if let syn::Expr::Path(p) = c.func.as_ref()
+        && p.qself.is_none()
+        && p.path.segments.len() == 1
+    {
+        let ident = &p.path.segments[0].ident;
+        if ident == "Some" {
+            return lower_some(c, expected);
+        }
+        if ident == "None" {
+            return lower_none_call(c, expected, c.span());
+        }
+    }
+
     let args: Vec<IrExpr> = c.args.iter().map(lower_expr).collect();
     if let syn::Expr::Path(p) = c.func.as_ref() {
         let segs: Vec<_> = p.path.segments.iter().collect();
@@ -412,22 +815,92 @@ fn lower_struct_lit(s: &syn::ExprStruct) -> IrExpr {
     IrExpr::Struct { name, fields }
 }
 
-fn lower_if(i: &syn::ExprIf) -> IrExpr {
+fn lower_if(i: &syn::ExprIf, expected: Option<&IrType>) -> IrExpr {
+    // `if let Some(v) = e` / `if let None = e` / `if let _ = e` lower to
+    // the same discriminant test `match` uses. The scrutinee is named
+    // twice (`e.has`, `e.value`), so it must be side-effect free.
+    if let syn::Expr::Let(lt) = i.cond.as_ref() {
+        return lower_if_let(lt, i, expected);
+    }
     let cond = Box::new(lower_expr(&i.cond));
-    let then = lower_block(&i.then_branch);
+    let then = lower_block_expected(&i.then_branch, expected);
     let els = i
         .else_branch
         .as_ref()
         .map(|(_, else_expr)| match else_expr.as_ref() {
-            syn::Expr::Block(blk) => IrElse::Block(lower_block(&blk.block)),
-            syn::Expr::If(inner_if) => IrElse::If(Box::new(lower_if(inner_if))),
+            syn::Expr::Block(blk) => IrElse::Block(lower_block_expected(&blk.block, expected)),
+            syn::Expr::If(inner_if) => IrElse::If(Box::new(lower_if(inner_if, expected))),
             _ => IrElse::Block(vec![]),
         });
     IrExpr::If { cond, then, els }
 }
 
+/// `if let PAT = scrutinee { .. } else { .. }`.
+fn lower_if_let(lt: &syn::ExprLet, i: &syn::ExprIf, expected: Option<&IrType>) -> IrExpr {
+    let scrutinee = lower_expr(&lt.expr);
+    let pattern = match classify_pattern(&lt.pat) {
+        Ok(p) => p,
+        Err(msg) => return loud(&msg, lt.pat.span()),
+    };
+    let cond = match &pattern {
+        ArmPattern::Wild | ArmPattern::Bind(_) => IrExpr::Bool(true),
+        ArmPattern::Lit => {
+            let Pat::Lit(l) = lt.pat.as_ref() else {
+                unreachable!("classify_pattern only reports Lit for Pat::Lit");
+            };
+            IrExpr::Binary {
+                op: IrBinOp::Eq,
+                left: Box::new(scrutinee.clone()),
+                right: Box::new(lower_expr(&syn::Expr::Lit(l.clone()))),
+            }
+        }
+        ArmPattern::Some(_) => has_test(&scrutinee, IrBinOp::Ne),
+        ArmPattern::None => has_test(&scrutinee, IrBinOp::Eq),
+    };
+    let mut then = lower_block_expected(&i.then_branch, expected);
+    if let Some(name) = pattern_binding(&pattern) {
+        then.insert(
+            0,
+            IrStmt::Let {
+                name,
+                mutable: false,
+                init: Some(IrExpr::Field {
+                    base: Box::new(scrutinee),
+                    member: "value".to_string(),
+                }),
+                decl_ty: None,
+            },
+        );
+    }
+    let els = i
+        .else_branch
+        .as_ref()
+        .map(|(_, else_expr)| match else_expr.as_ref() {
+            syn::Expr::Block(blk) => IrElse::Block(lower_block_expected(&blk.block, expected)),
+            syn::Expr::If(inner_if) => IrElse::If(Box::new(lower_if(inner_if, expected))),
+            _ => IrElse::Block(vec![]),
+        });
+    IrExpr::If {
+        cond: Box::new(cond),
+        then,
+        els,
+    }
+}
+
+/// The binding name an `Option` pattern introduces, if any.
+fn pattern_binding(pattern: &ArmPattern) -> Option<String> {
+    match pattern {
+        ArmPattern::Bind(name) | ArmPattern::Some(name) => Some(name.clone()),
+        ArmPattern::Wild | ArmPattern::Lit | ArmPattern::None => None,
+    }
+}
+
 fn lower_block(block: &Block) -> IrBlock {
     lower_body(&block.stmts)
+}
+
+fn lower_block_expected(block: &Block, expected: Option<&IrType>) -> IrBlock {
+    lower_body_typed(&block.stmts, expected)
 }
 
 /// Expansion cap for `[e; N]` repeats (solver scratch needs ≤ 81; 1024
@@ -660,6 +1133,18 @@ fn lower_local(local: &Local) -> Vec<IrStmt> {
             },
         ];
     }
+    // `let x = match scrut { .. };`: the value form expands to
+    // `var x = <last arm>; if (c) { x = <arm>; } …`.
+    if let Some(init) = &local.init
+        && let syn::Expr::Match(m) = init.expr.as_ref()
+    {
+        let decl_ty = match &local.pat {
+            syn::Pat::Type(pt) => Some(crate::wgsl::var_type(&pt.ty)),
+            _ => None,
+        };
+        let name = pat_name(&local.pat);
+        return lower_match_assign(&name, decl_ty, m);
+    }
     let (name, is_mut) = match &local.pat {
         syn::Pat::Ident(pi) => (pi.ident.to_string(), pi.mutability.is_some()),
         syn::Pat::Type(pt) => match pt.pat.as_ref() {
@@ -688,6 +1173,22 @@ fn lower_local(local: &Local) -> Vec<IrStmt> {
             mutable: is_mut,
             init: Some(array),
             decl_ty,
+        }];
+    }
+    // `let x: Option<T> = Some(v) | None;` — the annotation is the
+    // type context that names the generated struct.
+    if let syn::Pat::Type(pt) = &local.pat
+        && let Some(opt_ty) = crate::wgsl_options::option_struct_ty(&pt.ty)
+    {
+        let init = local
+            .init
+            .as_ref()
+            .map(|init| lower_expr_expected(&init.expr, Some(&opt_ty)));
+        return vec![IrStmt::Let {
+            name,
+            mutable: is_mut,
+            init,
+            decl_ty: Some(print_ty(&opt_ty)),
         }];
     }
     let init = local.init.as_ref().map(|init| lower_expr(&init.expr));
@@ -725,6 +1226,299 @@ fn last_expr_in_block(block: &Block) -> IrExpr {
             }
         })
         .unwrap_or(IrExpr::Verbatim(String::new()))
+}
+
+/// `scrutinee.has != 0u` (`op_ne`) or `scrutinee.has == 0u` (`op_eq`).
+fn has_test(scrutinee: &IrExpr, op: IrBinOp) -> IrExpr {
+    IrExpr::Binary {
+        op,
+        left: Box::new(IrExpr::Field {
+            base: Box::new(scrutinee.clone()),
+            member: "has".to_string(),
+        }),
+        right: Box::new(IrExpr::Int("0u".to_string())),
+    }
+}
+
+/// One `match` arm: the discriminant test (absent for `_` / a bare
+/// binding) plus the statements its body contributes.
+struct MatchArm {
+    cond: Option<IrExpr>,
+    then: Vec<IrStmt>,
+}
+
+/// Classify every arm of a `match` over an already-lowered scrutinee.
+fn match_arm_conds(m: &syn::ExprMatch, scrutinee: &IrExpr) -> Vec<MatchArm> {
+    let mut out = Vec::new();
+    for arm in &m.arms {
+        let pattern = match classify_pattern(&arm.pat) {
+            Ok(p) => p,
+            Err(msg) => {
+                out.push(MatchArm {
+                    cond: Some(loud(&msg, arm.pat.span())),
+                    then: arm_body_block(&arm.body),
+                });
+                continue;
+            }
+        };
+        let cond = arm_cond(&pattern, &arm.pat, scrutinee);
+        let mut then = arm_body_block(&arm.body);
+        if let Some(name) = pattern_binding(&pattern) {
+            then.insert(0, payload_binding(&name, scrutinee));
+        }
+        out.push(MatchArm { cond, then });
+    }
+    out
+}
+
+/// The discriminant test for one pattern, or `None` when the arm is the
+/// unconditional remainder.
+fn arm_cond(pattern: &ArmPattern, pat: &Pat, scrutinee: &IrExpr) -> Option<IrExpr> {
+    match pattern {
+        ArmPattern::Wild | ArmPattern::Bind(_) => None,
+        ArmPattern::Lit => {
+            let Pat::Lit(l) = pat else {
+                unreachable!("classify_pattern only reports Lit for Pat::Lit");
+            };
+            Some(IrExpr::Binary {
+                op: IrBinOp::Eq,
+                left: Box::new(scrutinee.clone()),
+                right: Box::new(lower_expr(&syn::Expr::Lit(l.clone()))),
+            })
+        }
+        ArmPattern::Some(_) => Some(has_test(scrutinee, IrBinOp::Ne)),
+        ArmPattern::None => Some(has_test(scrutinee, IrBinOp::Eq)),
+    }
+}
+
+/// `let <name> = <scrutinee>.value;`
+fn payload_binding(name: &str, scrutinee: &IrExpr) -> IrStmt {
+    IrStmt::Let {
+        name: name.to_string(),
+        mutable: false,
+        init: Some(IrExpr::Field {
+            base: Box::new(scrutinee.clone()),
+            member: "value".to_string(),
+        }),
+        decl_ty: None,
+    }
+}
+
+/// Statement-position `match`: every arm contributes a full statement
+/// block, so the arms fold right-to-left into a nested if/else chain
+/// with no artificial "last arm is unconditional" rule.
+fn lower_match_stmt(m: &syn::ExprMatch) -> IrExpr {
+    let scrutinee = lower_expr(&m.expr);
+    fold_match_arms(match_arm_conds(m, &scrutinee))
+}
+
+/// Right-fold the classified arms into `IrExpr::If` / `IrElse` nodes.
+/// An arm with no condition is the unconditional remainder.
+fn fold_match_arms(arms: Vec<MatchArm>) -> IrExpr {
+    // Folded right-to-left: the accumulator is the else-branch of the
+    // next `if`, so an unconditional arm simply becomes that else.
+    let mut acc: Option<IrElse> = None;
+    for arm in arms {
+        match arm.cond {
+            None => acc = Some(IrElse::Block(arm.then)),
+            Some(cond) => {
+                let els = acc.take();
+                acc = Some(IrElse::If(Box::new(IrExpr::If {
+                    cond: Box::new(cond),
+                    then: arm.then,
+                    els,
+                })));
+            }
+        }
+    }
+    match acc {
+        Some(IrElse::Block(stmts)) => IrExpr::Block(stmts),
+        Some(IrElse::If(e)) => *e,
+        None => IrExpr::Unsupported,
+    }
+}
+
+/// A value-position `match` is not a statement chain: it assigns into
+/// one temporary. Each arm therefore contributes a value, not a block.
+struct MatchValueArm {
+    cond: Option<IrExpr>,
+    /// `let <payload> = <scrutinee>.value;` before the arm body runs.
+    prelude: Vec<IrStmt>,
+    value: IrExpr,
+}
+
+fn match_arm_values(m: &syn::ExprMatch, scrutinee: &IrExpr) -> Vec<MatchValueArm> {
+    m.arms
+        .iter()
+        .map(|arm| {
+            let pattern = match classify_pattern(&arm.pat) {
+                Ok(p) => p,
+                Err(msg) => {
+                    return MatchValueArm {
+                        cond: Some(loud(&msg, arm.pat.span())),
+                        prelude: Vec::new(),
+                        value: IrExpr::Unsupported,
+                    };
+                }
+            };
+            let mut prelude = Vec::new();
+            if let Some(name) = pattern_binding(&pattern) {
+                prelude.push(payload_binding(&name, scrutinee));
+            }
+            MatchValueArm {
+                cond: arm_cond(&pattern, &arm.pat, scrutinee),
+                prelude,
+                value: arm_value_expr(&arm.body),
+            }
+        })
+        .collect()
+}
+
+/// The value of one value-position arm: a bare expression, or a block
+/// holding exactly one trailing expression.
+fn arm_value_expr(body: &syn::Expr) -> IrExpr {
+    if let syn::Expr::Block(b) = body {
+        return match b.block.stmts.as_slice() {
+            [syn::Stmt::Expr(e, None)] => lower_expr(e),
+            _ => loud(
+                "arms of a value `match` must be a single expression; bind intermediate \
+                 results with `let` and keep the arm to one trailing expression",
+                body.span(),
+            ),
+        };
+    }
+    lower_expr(body)
+}
+
+/// The statements one statement-position arm contributes. A block body
+/// is spliced verbatim; a bare expression becomes a lone statement.
+fn arm_body_block(body: &syn::Expr) -> Vec<IrStmt> {
+    if let syn::Expr::Block(b) = body {
+        return b
+            .block
+            .stmts
+            .iter()
+            .flat_map(|st| lower_stmt_expected(st, false, None))
+            .collect();
+    }
+    vec![IrStmt::Expr {
+        expr: lower_expr(body),
+        semi: false,
+        is_tail: false,
+    }]
+}
+
+/// `let x: Option<T> = match …` / `let x = match …` (and the tail and
+/// `return` hosts) lower to
+/// `var x = <last arm>; if (c) { x = <arm>; } else …`.
+fn lower_match_assign(name: &str, decl_ty: Option<String>, m: &syn::ExprMatch) -> Vec<IrStmt> {
+    let scrutinee = lower_expr(&m.expr);
+    let arms = match_arm_values(m, &scrutinee);
+    if arms.is_empty() {
+        return vec![unsupported_stmt()];
+    }
+    if let Some(decl_ty) = decl_ty {
+        return assigned_chain(name, decl_ty, arms);
+    }
+    seeded_chain(name, arms)
+}
+
+/// One arm of the chain: its prelude, then the assignment into `name`.
+fn assign_arm(name: &str, arm: &MatchValueArm) -> Vec<IrStmt> {
+    let mut then = arm.prelude.clone();
+    then.push(IrStmt::Expr {
+        expr: IrExpr::Assign {
+            left: Box::new(IrExpr::Path(vec![name.to_string()])),
+            right: Box::new(arm.value.clone()),
+        },
+        semi: true,
+        is_tail: false,
+    });
+    then
+}
+
+/// A known type: declare the temporary uninitialized and let the full
+/// if/else chain — including the last arm — fill it in. This is the
+/// only shape that can express an arm which binds a payload.
+fn assigned_chain(name: &str, decl_ty: String, arms: Vec<MatchValueArm>) -> Vec<IrStmt> {
+    let mut stmts = vec![IrStmt::Let {
+        name: name.to_string(),
+        mutable: true,
+        init: None,
+        decl_ty: Some(decl_ty),
+    }];
+    let mut acc: Option<IrElse> = None;
+    for arm in arms.into_iter().rev() {
+        match arm.cond.clone() {
+            None => acc = Some(IrElse::Block(assign_arm(name, &arm))),
+            Some(cond) => {
+                let els = acc.take();
+                acc = Some(IrElse::If(Box::new(IrExpr::If {
+                    cond: Box::new(cond),
+                    then: assign_arm(name, &arm),
+                    els,
+                })));
+            }
+        }
+    }
+    match acc {
+        Some(IrElse::Block(stmts_tail)) => stmts.extend(stmts_tail),
+        Some(IrElse::If(e)) => stmts.push(IrStmt::Flow {
+            expr: *e,
+            semi: false,
+        }),
+        None => {}
+    }
+    stmts
+}
+
+/// No annotation: seed the temporary from the last arm, then let the
+/// remaining conditional arms overwrite it.
+fn seeded_chain(name: &str, mut arms: Vec<MatchValueArm>) -> Vec<IrStmt> {
+    let Some(last) = arms.pop() else {
+        return vec![unsupported_stmt()];
+    };
+    if !last.prelude.is_empty() {
+        return vec![unsupported_stmt()];
+    }
+    let mut stmts = vec![IrStmt::Let {
+        name: name.to_string(),
+        mutable: true,
+        init: Some(last.value.clone()),
+        decl_ty: None,
+    }];
+    let mut chain: Option<Box<IrExpr>> = None;
+    for arm in arms.into_iter().rev() {
+        let Some(cond) = arm.cond.clone() else {
+            // An unconditional arm before the last one is dead code;
+            // keep it out of the chain so the writer stays honest.
+            continue;
+        };
+        let node = IrExpr::If {
+            cond: Box::new(cond),
+            then: assign_arm(name, &arm),
+            els: chain.take().map(IrElse::If),
+        };
+        chain = Some(Box::new(node));
+    }
+    if let Some(node) = chain {
+        stmts.push(IrStmt::Flow {
+            expr: *node,
+            semi: false,
+        });
+    }
+    stmts
+}
+
+/// Value-position `match` in an expression position with no known type:
+/// loud, rather than a silent `Unsupported` that naga would only catch
+/// much later.
+fn lower_match_expr(m: &syn::ExprMatch) -> IrExpr {
+    loud(
+        "`match` only lowers as a statement or as a value with a known type \
+         (a `let` initializer, a tail expression, or `return match …`)",
+        m.span(),
+    )
 }
 
 fn pat_name(p: &Pat) -> String {

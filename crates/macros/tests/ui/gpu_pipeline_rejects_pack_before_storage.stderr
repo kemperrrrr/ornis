@@ -1,0 +1,5 @@
+error: `pack(...)` must come after all `storage`/`uniform`/`texture`/`sampler` options: pack lanes bind at `base..`, after the explicit bindings; move `pack(...)` last
+ --> tests/ui/gpu_pipeline_rejects_pack_before_storage.rs:7:32
+  |
+7 | #[gpu_pipeline(pack(Anything), storage(buf: [f32; 8], read_write))]
+  |                                ^^^^^^^

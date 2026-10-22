@@ -1,0 +1,9 @@
+error: arms of a value `match` in GPU kernel `multi_stmt` must be a single expression; bind intermediate results with `let` and keep the arm to one trailing expression
+  --> tests/ui/kernel_rejects_match_value_multi_stmt.rs:13:17
+   |
+13 |           1u32 => {
+   |  _________________^
+14 | |             let doubled = 2u32;
+15 | |             doubled + 1u32
+16 | |         }
+   | |_________^

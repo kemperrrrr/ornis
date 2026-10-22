@@ -1,0 +1,5 @@
+error: `t.alive` gathers as `bool`, which has no WGSL storage-array spelling in GPU kernel `bool_lane`; use `u32`
+  --> tests/ui/kernel_rejects_bool_lane.rs:10:16
+   |
+10 |     let alive: bool = t.alive;
+   |                ^^^^

@@ -1,0 +1,78 @@
+error[E0277]: the trait bound `NotPod: Pod` is not satisfied
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:15:8
+   |
+15 |     v: NotPod,
+   |        ^^^^^^ unsatisfied trait bound
+   |
+help: the trait `Pod` is not implemented for `NotPod`
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:8:1
+   |
+ 8 | struct NotPod {
+   | ^^^^^^^^^^^^^
+   = help: the following other types implement trait `Pod`:
+             ()
+             BaseGroup
+             CoatGroup
+             EmissionGroup
+             FuzzGroup
+             GeometryGroup
+             GpuBool
+             ManuallyDrop<T>
+           and $N others
+note: required by a bound in `__ornis_pack_column_pod`
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:15:8
+   |
+15 |     v: NotPod,
+   |        ^^^^^^ required by this bound in `__ornis_pack_column_pod`
+
+error[E0277]: the trait bound `NotPod: Zeroable` is not satisfied
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:12:17
+   |
+12 | #[derive(Clone, Pack)]
+   |                 ^^^^ unsatisfied trait bound
+   |
+help: the trait `Zeroable` is not implemented for `NotPod`
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:8:1
+   |
+ 8 | struct NotPod {
+   | ^^^^^^^^^^^^^
+   = help: the following other types implement trait `Zeroable`:
+             ()
+             (A, B)
+             (A, B, C)
+             (A, B, C, D)
+             (A, B, C, D, E)
+             (A, B, C, D, E, F)
+             (A, B, C, D, E, F, G)
+             (A, B, C, D, E, F, G, H)
+           and $N others
+   = note: this error originates in the derive macro `Pack` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `NotPod: NoUninit` is not satisfied
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:12:17
+   |
+12 | #[derive(Clone, Pack)]
+   |                 ^^^^ unsatisfied trait bound
+   |
+help: the trait `Pod` is not implemented for `NotPod`
+  --> tests/ui/pack_gpu_rejects_non_pod_lane.rs:8:1
+   |
+ 8 | struct NotPod {
+   | ^^^^^^^^^^^^^
+   = help: the following other types implement trait `Pod`:
+             ()
+             BaseGroup
+             CoatGroup
+             EmissionGroup
+             FuzzGroup
+             GeometryGroup
+             GpuBool
+             ManuallyDrop<T>
+           and $N others
+   = note: required for `NotPod` to implement `NoUninit`
+note: required by a bound in `bytes_of`
+  --> $CARGO/bytemuck-$VERSION/src/lib.rs
+   |
+   | pub fn bytes_of<T: NoUninit>(t: &T) -> &[u8] {
+   |                    ^^^^^^^^ required by this bound in `bytes_of`
+   = note: this error originates in the derive macro `Pack` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -4,6 +4,13 @@
 //! `SmartStore` and routes it to the CPU lane. With `#[pack]`, each named
 //! field becomes its own component lane via generated `pack_register` /
 //! `pack_insert` helpers. Only structs with named fields are supported.
+//!
+//! `#[pack]` is payload-free on this derive: a `pack(...)` list is
+//! `#[derive(Pack)]`'s GPU opt-in spelling, and one attribute cannot
+//! serve both derives — this derive rejects any payload with a spanned
+//! error (Pack rejects the bare form in turn), so
+//! `#[derive(AutoPipeline, Pack)]` cannot silently swap which
+//! `pack_register` a call resolves to.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -12,7 +19,10 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input};
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-    let has_pack = input.attrs.iter().any(|a| a.path().is_ident("pack"));
+    let has_pack = match pack_opt_in(&input) {
+        Ok(has_pack) => has_pack,
+        Err(err) => return err.to_compile_error().into(),
+    };
 
     if has_pack {
         let fields = match &input.data {
@@ -70,4 +80,29 @@ pub fn derive(input: TokenStream) -> TokenStream {
         };
         expanded.into()
     }
+}
+
+/// `#[pack]` presence, payload checked: this derive's pack mode is the
+/// bare attribute only — a `pack(...)` list is `#[derive(Pack)]`'s
+/// spelling (`#[pack(gpu)]`), and accepting it here would let one
+/// attribute expand two different `pack_register`/`pack_insert`
+/// pairs, where the inherent one silently shadows `Pack`'s.
+fn pack_opt_in(input: &DeriveInput) -> Result<bool, syn::Error> {
+    let mut has_pack = false;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("pack") {
+            continue;
+        }
+        has_pack = true;
+        if !matches!(attr.meta, syn::Meta::Path(_)) {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "`#[derive(AutoPipeline)]` reads only bare `#[pack]` (its field-type pack \
+                 mode); a `pack(...)` payload is `#[derive(Pack)]`'s GPU opt-in. On a struct \
+                 deriving both, the attribute cannot do both jobs: keep bare `#[pack]` and \
+                 drop Pack, or `#[pack(gpu)]` and drop AutoPipeline",
+            ));
+        }
+    }
+    Ok(has_pack)
 }

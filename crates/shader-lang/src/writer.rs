@@ -26,7 +26,80 @@ pub fn print_ty(t: &IrType) -> String {
         IrType::Custom(name) => name.as_str().to_owned(),
         IrType::Array { elem, len } => format!("array<{}, {len}>", print_ty(elem)),
         IrType::RuntimeArray(elem) => format!("array<{}>", print_ty(elem)),
+        IrType::Optional(inner) => format!("Option_{}", option_payload_name(&print_ty(inner))),
+        IrType::Entity => "Entity".to_string(),
     }
+}
+
+/// WGSL identifier fragment for an `Option<T>` payload: every
+/// non-alphanumeric character of the payload spelling collapses to `_`,
+/// so the result is always a valid identifier piece.
+///
+/// `vec3<f32>` becomes `vec3_f32` — trailing separators are dropped so
+/// the piece never ends in `_`.
+pub fn option_payload_name(inner_wgsl: &str) -> String {
+    let mut sanitized = String::new();
+    for c in inner_wgsl.chars() {
+        if c.is_ascii_alphanumeric() {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    while sanitized.ends_with('_') {
+        sanitized.pop();
+    }
+    sanitized
+}
+
+/// WGSL identifier spelling of the generated `Option<T>` struct:
+/// [`option_payload_name`] behind the `Option_` prefix.
+/// `vec3<f32>` becomes `Option_vec3_f32`.
+pub fn option_struct_name(inner_wgsl: &str) -> String {
+    format!("Option_{}", option_payload_name(inner_wgsl))
+}
+
+/// Module-scope struct declaration backing `Option<T>`: a discriminant
+/// tag plus a payload slot. `None` carries a zero payload so the struct
+/// stays a fixed layout (WGSL has no union).
+pub fn option_struct_decl(inner_wgsl: &str) -> String {
+    format!(
+        "struct {} {{\n    has: u32,\n    value: {},\n}};",
+        option_struct_name(inner_wgsl),
+        inner_wgsl
+    )
+}
+
+/// Module-scope struct declaration backing the DSL `Entity` handle:
+/// a slot index plus a generation stamp, in that order (the CPU mirror
+/// the macro emits declares the same fields).
+pub fn entity_struct_decl() -> String {
+    "struct Entity {\n    index: u32,\n    generation: u32,\n};".to_string()
+}
+
+/// Module-scope read-only storage declaration for one gather lane: the
+/// SoA column a foreign field is read from, indexed by
+/// [`IrType::Entity`]'s `index`.
+pub fn lane_var_decl(binding: u32, lane: &str, elem: &IrType) -> String {
+    format!(
+        "@group(0) @binding({binding}) var<storage, read> {lane}: array<{}>;",
+        print_ty(elem)
+    )
+}
+
+/// Module-scope gather helper for one lane: an early-return bounds
+/// check (never `select` — both `select` arms evaluate, so an
+/// out-of-bounds load would still fire) yielding the element zero when
+/// the handle is out of range, else the lane element at `e.index`.
+/// `generation` is identity data for the CPU side; lanes carry no
+/// generation table, so only the index is checked — the CPU mirror in
+/// the kernel macro checks exactly the same condition.
+pub fn entity_gather_decl(helper: &str, lane: &str, elem: &IrType) -> String {
+    format!(
+        "fn {helper}(e: Entity) -> {} {{\n    if (e.index >= arrayLength(&{lane})) {{\n        return {};\n    }}\n    return {lane}[e.index];\n}}",
+        print_ty(elem),
+        print_expr(&elem.zero_expr()),
+    )
 }
 
 /// Render one entry-point parameter. The type follows the semantic:
@@ -492,5 +565,42 @@ mod tests {
     #[test]
     fn unsupported_is_loud() {
         assert!(print_expr(&IrExpr::Unsupported).contains("__wgsl_dsl_unsupported_statement__"));
+    }
+
+    #[test]
+    fn entity_ty_and_decls_spell_structurally() {
+        assert_eq!(print_ty(&IrType::Entity), "Entity");
+        assert_eq!(print_expr(&IrType::Entity.zero_expr()), "Entity(0u, 0u)");
+        assert_eq!(
+            entity_struct_decl(),
+            "struct Entity {\n    index: u32,\n    generation: u32,\n};"
+        );
+    }
+
+    #[test]
+    fn lane_and_gather_decls_shape() {
+        let elem = IrType::Scalar(ShaderType::Vec3);
+        assert_eq!(
+            lane_var_decl(0, "_ornis_lane_t__position", &elem),
+            "@group(0) @binding(0) var<storage, read> _ornis_lane_t__position: array<vec3<f32>>;"
+        );
+        let decl = entity_gather_decl(
+            "_ornis_gather_t__position",
+            "_ornis_lane_t__position",
+            &elem,
+        );
+        assert!(
+            decl.contains("fn _ornis_gather_t__position(e: Entity) -> vec3<f32>"),
+            "{decl}"
+        );
+        assert!(
+            decl.contains("if (e.index >= arrayLength(&_ornis_lane_t__position))"),
+            "{decl}"
+        );
+        assert!(decl.contains("return vec3<f32>(0.0, 0.0, 0.0);"), "{decl}");
+        assert!(
+            decl.contains("return _ornis_lane_t__position[e.index];"),
+            "{decl}"
+        );
     }
 }

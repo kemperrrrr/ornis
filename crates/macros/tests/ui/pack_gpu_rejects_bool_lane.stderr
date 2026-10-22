@@ -1,0 +1,5 @@
+error: `bool` has no storage-buffer representation; use a u32 flag column (see ornis_core::GpuBool for the mirror newtype)
+ --> tests/ui/pack_gpu_rejects_bool_lane.rs:9:11
+  |
+9 |     flag: bool,
+  |           ^^^^

@@ -76,15 +76,23 @@ const BINDING_ACCESS_MODE: usize = 4;
 
 /// Parsed `#[gpu_pipeline(...)]` options (`syn::Path` has no `Debug`, so
 /// neither does this — format fields individually when debugging).
-struct ShaderConfig {
-    workgroup_size: u32,
-    items: Vec<IrItem>,
-    builtins: Vec<(String, String)>,
-    vertex_entry: Option<String>,
-    fragment_entry: Option<String>,
+pub(crate) struct ShaderConfig {
+    pub(crate) workgroup_size: u32,
+    pub(crate) items: Vec<IrItem>,
+    pub(crate) builtins: Vec<(String, String)>,
+    pub(crate) vertex_entry: Option<String>,
+    pub(crate) fragment_entry: Option<String>,
     /// Helper modules (from `#[wgsl_fn]` / `#[kernel]`) whose
     /// `wgsl_source()` is stitched ahead of the entry body, in order.
-    helpers: Vec<syn::Path>,
+    pub(crate) helpers: Vec<syn::Path>,
+    /// `pack(T, ...)` bundles: each contributes one read-only storage
+    /// lane per field, after the explicit bindings (docs/rendering/
+    /// shader-lang-pack-lanes.md).
+    pub(crate) packs: Vec<syn::Path>,
+    /// First bind index of the pack lanes: the explicit binding count,
+    /// pinned when the first `pack(...)` appears (later explicit
+    /// bindings are rejected, so it stays the base).
+    pub(crate) packs_base_binding: u32,
 }
 
 fn is_punct(tt: &TokenTree, ch: char) -> bool {
@@ -330,6 +338,8 @@ fn parse_config(args: TokenStream2) -> syn::Result<Option<ShaderConfig>> {
         vertex_entry: None,
         fragment_entry: None,
         helpers: Vec::new(),
+        packs: Vec::new(),
+        packs_base_binding: 0,
     };
     let mut binding_index = 0usize;
     for item in split_top_level(args) {
@@ -368,29 +378,34 @@ fn apply_option(
     let TokenTree::Ident(kw) = &first else {
         return Err(syn::Error::new(
             first.span(),
-            "expected an option: `workgroup_size`, `storage`, `uniform`, `texture`, `sampler`, `vertex`, `fragment`, `builtin` or `helpers`",
+            "expected an option: `workgroup_size`, `storage`, `uniform`, `texture`, `sampler`, `pack`, `vertex`, `fragment`, `builtin` or `helpers`",
         ));
     };
     match kw.to_string().as_str() {
         "workgroup_size" => parse_workgroup_size(item, config),
         "storage" | "uniform" => {
+            reject_pack_before_binding(&first, config)?;
             let global = parse_binding_option(kw.to_string(), item, *binding_index)?;
             *binding_index += 1;
             config.items.push(global);
             Ok(())
         }
         "texture" | "sampler" => {
+            reject_pack_before_binding(&first, config)?;
             let global = parse_texture_sampler_option(kw.to_string(), item, *binding_index)?;
             *binding_index += 1;
             config.items.push(global);
             Ok(())
         }
+        "pack" => parse_pack_option(item, config, *binding_index),
         "vertex" => {
+            reject_pack_on_render(&first, config)?;
             let entry = parse_stage_entry("vertex", item)?;
             config.vertex_entry = Some(entry);
             Ok(())
         }
         "fragment" => {
+            reject_pack_on_render(&first, config)?;
             let entry = parse_stage_entry("fragment", item)?;
             config.fragment_entry = Some(entry);
             Ok(())
@@ -408,10 +423,81 @@ fn apply_option(
         other => Err(syn::Error::new(
             first.span(),
             format!(
-                "unknown gpu_pipeline option `{other}`; expected `workgroup_size`, `storage`, `uniform`, `texture`, `sampler`, `vertex`, `fragment`, `builtin` or `helpers`"
+                "unknown gpu_pipeline option `{other}`; expected `workgroup_size`, `storage`, `uniform`, `texture`, `sampler`, `pack`, `vertex`, `fragment`, `builtin` or `helpers`"
             ),
         )),
     }
+}
+
+/// Pack lanes bind after every explicit binding, so a `storage` /
+/// `uniform` / `texture` / `sampler` option after `pack(...)` would
+/// collide with the lane range — rejected here, at the offending
+/// option, instead of at a runtime layout mismatch.
+fn reject_pack_before_binding(kw_tt: &TokenTree, config: &ShaderConfig) -> syn::Result<()> {
+    if config.packs.is_empty() {
+        return Ok(());
+    }
+    Err(syn::Error::new(
+        kw_tt.span(),
+        "`pack(...)` must come after all `storage`/`uniform`/`texture`/`sampler` \
+         options: pack lanes bind at `base..`, after the explicit bindings; \
+         move `pack(...)` last",
+    ))
+}
+
+/// Pack lanes are storage declarations for the compute entry; the
+/// render (vertex/fragment) path has no lane upload today.
+fn reject_pack_on_render(kw_tt: &TokenTree, config: &ShaderConfig) -> syn::Result<()> {
+    if config.packs.is_empty() {
+        return Ok(());
+    }
+    Err(syn::Error::new(
+        kw_tt.span(),
+        "`pack(...)` is compute-only; a `#[gpu_pipeline]` with `vertex`/`fragment` \
+         entries cannot declare pack lanes",
+    ))
+}
+
+/// `pack(T, U, ...)` — bundles whose `#[derive(Pack)]` emitted
+/// `#[pack(gpu)]` columns; lanes append after the explicit bindings.
+fn parse_pack_option(
+    item: &[TokenTree],
+    config: &mut ShaderConfig,
+    binding_index: usize,
+) -> syn::Result<()> {
+    if config.vertex_entry.is_some() || config.fragment_entry.is_some() {
+        return Err(syn::Error::new(
+            item[0].span(),
+            "`pack(...)` is compute-only; a `#[gpu_pipeline]` with `vertex`/`fragment` \
+             entries cannot declare pack lanes",
+        ));
+    }
+    let group = option_group("pack(T, ...)", item)?;
+    let mut paths = Vec::new();
+    for seg in split_top_level(group) {
+        if seg.is_empty() {
+            continue; // trailing comma
+        }
+        let ts = TokenStream2::from_iter(seg.iter().cloned());
+        let path: syn::Path = syn::parse2(ts).map_err(|e| {
+            syn::Error::new(
+                e.span(),
+                "expected a pack bundle type path, e.g. `pack(Position)`",
+            )
+        })?;
+        paths.push(path);
+    }
+    if paths.is_empty() {
+        return Err(syn::Error::new(
+            item[0].span(),
+            "expected at least one pack bundle: `pack(T)`",
+        ));
+    }
+    if config.packs.is_empty() {
+        config.packs_base_binding = binding_index as u32;
+    }
+    config.packs.extend(paths);
+    Ok(())
 }
 
 /// `workgroup_size = <integer>`
@@ -778,6 +864,64 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     let body_wgsl = crate::wgsl::wgsl_main_body(&func);
+
+    // Helper inclusion (the compute-path analog of `#[wgsl_fn]` reuse on
+    // the stage path): `helpers(a, b)` stitches `a::wgsl_source()` ahead
+    // of the entry body at *runtime* — the macro cannot evaluate another
+    // item's expansion, so it emits the concatenation instead. Declaration
+    // before use, always valid WGSL. Without helpers the source stays a
+    // `&'static str` literal (existing callers unaffected); with helpers
+    // it becomes an owned `String`.
+    let helper_sources: Vec<TokenStream2> = config
+        .helpers
+        .iter()
+        .map(|path| quote!(#path::wgsl_source()))
+        .collect();
+    // Resolve helper paths in the attribute's caller module, not inside
+    // the generated pipeline module (where a bare sibling path is wrong).
+    let helper_loader = quote::format_ident!("__ornis_{}_helper_sources", fn_name);
+    let helper_loader_fn = if helper_sources.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            fn #helper_loader() -> String {
+                let mut source = String::new();
+                #(source.push_str(&#helper_sources); source.push('\n');)*
+                source
+            }
+        }
+    };
+    let helper_loader_opt = if helper_sources.is_empty() {
+        None
+    } else {
+        Some(helper_loader.clone())
+    };
+
+    // Pack-lane mode (`pack(T, ...)`): the generated module stitches
+    // items + pack lanes + entry at *runtime* (the lanes come from the
+    // `PackGpu` impls the `#[derive(Pack)]` emits) and grows the layout
+    // half — `create_bind_group_layout` / `create_pipeline` /
+    // `create_pack_buffers` (docs/rendering/shader-lang-pack-lanes.md).
+    if !config.packs.is_empty() {
+        let items_wgsl = config
+            .items
+            .iter()
+            .map(print_item)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let module = crate::gpu_pipeline_pack::expand(
+            fn_name,
+            &config,
+            &items_wgsl,
+            &body_wgsl,
+            helper_loader_opt,
+        );
+        return TokenStream::from(quote! {
+            #helper_loader_fn
+            #module
+        });
+    }
+
     let mut items = config.items;
     let builtins_wgsl = config
         .builtins
@@ -827,32 +971,6 @@ pub fn gpu_pipeline(args: TokenStream, input: TokenStream) -> TokenStream {
     };
     let wgsl_lit = proc_macro2::Literal::string(&wgsl_source);
 
-    // Helper inclusion (the compute-path analog of `#[wgsl_fn]` reuse on
-    // the stage path): `helpers(a, b)` stitches `a::wgsl_source()` ahead
-    // of the entry body at *runtime* — the macro cannot evaluate another
-    // item's expansion, so it emits the concatenation instead. Declaration
-    // before use, always valid WGSL. Without helpers the source stays a
-    // `&'static str` literal (existing callers unaffected); with helpers
-    // it becomes an owned `String`.
-    let helper_sources: Vec<TokenStream2> = config
-        .helpers
-        .iter()
-        .map(|path| quote!(#path::wgsl_source()))
-        .collect();
-    // Resolve helper paths in the attribute's caller module, not inside
-    // the generated pipeline module (where a bare sibling path is wrong).
-    let helper_loader = quote::format_ident!("__ornis_{}_helper_sources", fn_name);
-    let helper_loader_fn = if helper_sources.is_empty() {
-        quote! {}
-    } else {
-        quote! {
-            fn #helper_loader() -> String {
-                let mut source = String::new();
-                #(source.push_str(&#helper_sources); source.push('\n');)*
-                source
-            }
-        }
-    };
     let wgsl_source_fn = if helper_sources.is_empty() {
         quote! {
             #[allow(dead_code)]

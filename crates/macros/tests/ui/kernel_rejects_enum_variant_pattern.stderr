@@ -1,0 +1,5 @@
+error: enum-variant paths have no WGSL spelling in `#[kernel]`; fieldless enums lower to a `u32` tag — match on the integer tag with literal arms instead
+  --> tests/ui/kernel_rejects_enum_variant_pattern.rs:12:9
+   |
+12 |         State::Idle => 1u32,
+   |         ^^^^^^^^^^^

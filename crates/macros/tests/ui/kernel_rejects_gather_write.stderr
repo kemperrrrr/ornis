@@ -1,0 +1,5 @@
+error: `t.position` is read-only in GPU kernel `write_field` (Entity gather); foreign fields have no WGSL write spelling — mutate through a system on the CPU side
+  --> tests/ui/kernel_rejects_gather_write.rs:10:5
+   |
+10 |     t.position = glam::Vec3::ZERO;
+   |     ^

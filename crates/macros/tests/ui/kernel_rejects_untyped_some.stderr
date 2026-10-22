@@ -1,0 +1,7 @@
+error: `Some(...)`/`None` need an `Option<T>` type context in GPU kernel `untyped`; annotate the `let` binding (`let x: Option<f32> = Some(1.0);`) or the function return type
+ --> tests/ui/kernel_rejects_untyped_some.rs:9:1
+  |
+9 | #[kernel]
+  | ^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `kernel` (in Nightly builds, run with -Z macro-backtrace for more info)
