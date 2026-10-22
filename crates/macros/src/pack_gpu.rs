@@ -241,37 +241,46 @@ fn index_space_tokens(fields: &[FieldInfo]) -> TokenStream2 {
 /// bind). Bytes are written straight into one `Vec<u8>` column — no
 /// intermediate `Vec<T>`.
 ///
-/// The `Pod` bound is asserted on the field's own span, so a column
-/// type that is not plain-old-data fails with the field highlighted
-/// instead of only with a `bytes_of` note inside generated code.
+/// Serialization runs in a local helper generic over `T: Pod`, and the
+/// column call is spanned on the field's type: a non-Pod column type
+/// fails as exactly one trait-bound error on the field, not a pile of
+/// `bytes_of`/`Zeroable` errors on the derive (the helper body is
+/// checked generically, so the bound is the only place `T`'s Pod-ness
+/// is required).
 fn upload_field(field: &FieldInfo) -> TokenStream2 {
     let wrapper = &field.wrapper_name;
     let ty = &field.lane_ty;
-    let pod_assert = quote_spanned! { ty.span()=>
-        {
-            fn __ornis_pack_column_pod<T: ornis_core::bytemuck::Pod>() {}
-            let _ = __ornis_pack_column_pod::<#ty>;
-        }
+    let column = quote_spanned! { ty.span()=>
+        __ornis_pack_column_bytes::<#ty>
     };
     quote! {
         {
-            #pod_assert
             let __lane = store.read_lane::<#wrapper>()?;
-            let mut __col: Vec<u8> =
-                Vec::with_capacity(__entities.len().max(1) * core::mem::size_of::<#ty>());
-            for __e in &__entities {
-                let __value: #ty = match __lane.get(*__e) {
-                    Some(__w) => __w.0.clone(),
-                    None => ornis_core::bytemuck::Zeroable::zeroed(),
-                };
-                __col.extend_from_slice(ornis_core::bytemuck::bytes_of(&__value));
+            fn __ornis_pack_column_bytes<T: ornis_core::bytemuck::Pod>(
+                __entities: &[ornis_core::Entity],
+                __lookup: impl Fn(ornis_core::Entity) -> Option<T>,
+            ) -> Vec<u8> {
+                let mut __col: Vec<u8> = Vec::with_capacity(
+                    __entities.len().max(1) * core::mem::size_of::<T>(),
+                );
+                for __e in __entities {
+                    let __value: T = match __lookup(*__e) {
+                        Some(__v) => __v,
+                        None => ornis_core::bytemuck::Zeroable::zeroed(),
+                    };
+                    __col.extend_from_slice(ornis_core::bytemuck::bytes_of(&__value));
+                }
+                if __col.is_empty() {
+                    __col.extend_from_slice(ornis_core::bytemuck::bytes_of(
+                        &<T as ornis_core::bytemuck::Zeroable>::zeroed(),
+                    ));
+                }
+                __col
             }
-            if __col.is_empty() {
-                __col.extend_from_slice(ornis_core::bytemuck::bytes_of(
-                    &<#ty as ornis_core::bytemuck::Zeroable>::zeroed(),
-                ));
-            }
-            __columns.push(__col);
+            __columns.push(#column(
+                &__entities,
+                |__e| __lane.get(__e).map(|__w| __w.0.clone()),
+            ));
         }
     }
 }
