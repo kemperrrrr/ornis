@@ -21,7 +21,8 @@
 //!
 //! A field name becomes the lane's WGSL variable name, so spellings the
 //! WGSL grammar reserves (`ornis_shader_lang::WGSL_RESERVED_WORDS` —
-//! `ref`, `type`, `loop`, …) are rejected here, on the field's span.
+//! `ref`, `type`, `loop`, …) or the `__` identifier prefix are rejected
+//! here, on the field's span.
 
 use ornis_shader_lang::WGSL_RESERVED_WORDS;
 use proc_macro2::TokenStream as TokenStream2;
@@ -175,7 +176,8 @@ pub(crate) fn generate_pack_gpu(
 }
 
 /// The lane's WGSL variable name: the field ident minus a raw-ident
-/// prefix, rejected when the WGSL grammar reserves that spelling.
+/// prefix, rejected when the WGSL grammar reserves that spelling or
+/// the `__` identifier prefix.
 fn wgsl_field_name(field: &FieldInfo) -> Result<String, syn::Error> {
     let raw = field.name.to_string();
     let name = raw.strip_prefix("r#").unwrap_or(&raw);
@@ -185,6 +187,16 @@ fn wgsl_field_name(field: &FieldInfo) -> Result<String, syn::Error> {
             format!(
                 "field name `{name}` is reserved in WGSL; a pack lane reuses its field name \
                  as the storage-variable name, so rename the field"
+            ),
+        ));
+    }
+    if name.starts_with("__") {
+        return Err(syn::Error::new(
+            field.name.span(),
+            format!(
+                "field name `{name}` starts with `__`, which WGSL reserves for its own \
+                 identifiers; a pack lane reuses its field name as the storage-variable name, \
+                 so rename the field"
             ),
         ));
     }
