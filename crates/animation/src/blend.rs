@@ -34,18 +34,35 @@ pub struct JointMask {
     pub weights: Vec<Clamped01>,
 }
 
-/// Overlay layer on a skeleton root: a second clip blended over the base
-/// pose through a [`JointMask`].
+/// Overlay layer on a skeleton root: one clip blended over the base pose
+/// through a [`JointMask`].
 ///
-/// Hot lane, at most one layer per root. The embedded [`SkelPlayer`] is
-/// the layer cursor: its `weight` is the layer strength before the mask,
-/// and it advances exactly like a base player.
+/// The embedded [`SkelPlayer`] is the layer cursor: its `weight` is the
+/// layer strength before the mask, and it advances exactly like a base
+/// player. The only layer type (objects have none); per root the layers
+/// stack in [`SkelLayerStack`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkelLayer {
     /// Clip cursor and layer strength (`player.weight`).
     pub player: SkelPlayer,
     /// Playlist entity holding the [`JointMask`] that scales the layer.
     pub mask: MaskId,
+}
+
+/// Overlay layers on one skeleton root, blended over the base pose
+/// bottom-up.
+///
+/// `layers[0]` (the bottom) lerps over the base pose first, each next
+/// layer blends over that result, so the last element ends topmost — where
+/// full-weight masks overlap, the top layer wins. Upper-body over
+/// locomotion is the stack `[locomotion_overlay, upper_body]` with the
+/// matching masks. Stacks install whole (set semantics: the new stack
+/// replaces the old one, an empty one clears every layer) and, like the
+/// rest of the blend model, hold no state but cursor clocks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkelLayerStack {
+    /// Layers from bottom to top.
+    pub layers: Vec<SkelLayer>,
 }
 
 /// Crossfade in progress on a skeleton root.

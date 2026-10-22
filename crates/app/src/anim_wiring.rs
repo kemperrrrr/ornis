@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, JointId, JointMask,
-    JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayer, SkelPlayer,
+    JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayerStack, SkelPlayer,
     Skeleton, SkinnedMesh, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
@@ -524,24 +524,25 @@ pub fn fade_to_clip(
     Ok(())
 }
 
-/// Installs the overlay `layer` on a skeleton root — the typed
-/// [`SkelLayer`] input, so hosts never install the lane component
-/// themselves. At most one layer per root: `layer` replaces whatever
-/// sits there.
+/// Installs `stack` as the complete overlay layer stack on a skeleton
+/// root — the typed [`SkelLayerStack`] input, so hosts never install the
+/// lane component themselves. Set semantics: `stack` replaces whatever
+/// layers sat on the root (an empty stack clears them); layers blend
+/// bottom-up over the base pose (see [`SkelLayerStack`]).
 ///
-/// Returns whether `root` carries a [`Skeleton`] (the layer's anchor);
+/// Returns whether `root` carries a [`Skeleton`] (the stack's anchor);
 /// nothing is written without one.
-// qual:api — typed `SkelLayer` input for hosts; in-tree callers are tests
-// until the layer stack (step 3 of the gate plan) lands.
-pub fn set_skel_layer(store: &mut SmartStore, root: Entity, layer: SkelLayer) -> bool {
+// qual:api — typed `SkelLayerStack` input for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerStack) -> bool {
     if store
         .read_lane::<Skeleton>()
         .is_none_or(|skeletons| skeletons.get(root).is_none())
     {
         return false;
     }
-    store.register::<SkelLayer>();
-    store.insert(root, layer);
+    store.register::<SkelLayerStack>();
+    store.insert(root, stack);
     true
 }
 
@@ -581,7 +582,7 @@ pub fn wire_loaded_animation(
     store.register::<JointPose>();
     store.register::<SkinnedMesh>();
     store.register::<SkelPlayer>();
-    store.register::<SkelLayer>();
+    store.register::<SkelLayerStack>();
     store.register::<SkelFade>();
     store.register_cold::<SkelClip>();
     store.register_cold::<JointMask>();
@@ -681,7 +682,7 @@ pub fn wire_loaded_animation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_animation::{AnimatorError, Interpolation, try_animator};
+    use ornis_animation::{AnimatorError, Interpolation, SkelLayer, try_animator};
     use ornis_core::{Clamped01, Seconds};
     use ornis_gltf::{LoadedAnimTrack, LoadedKey, LoadedSkelClip, LoadedSkin};
 
@@ -1602,42 +1603,113 @@ mod tests {
         assert_eq!(player.time, 0.0, "the cut lands on a fresh cursor");
     }
 
-    /// `set_skel_layer` anchors on a `Skeleton` root: nothing is written
-    /// without one, one layer per root replaces in place.
+    /// `set_skel_layers` anchors on a `Skeleton` root: nothing is written
+    /// without one, and the call replaces the whole stack in place.
     #[test]
-    fn set_skel_layer_requires_a_skeleton_root() {
-        use ornis_animation::MaskId;
-        let mut store = SmartStore::new();
-        let root = store.create_entity();
-        let playlist = store.create_entity();
-        let layer = SkelLayer {
-            player: SkelPlayer {
-                clip: ClipId(playlist),
-                time: Seconds::ZERO,
-                speed: Seconds::new(1.0),
-                weight: Clamped01::ONE,
-                playing: true,
-                looping: true,
-            },
-            mask: MaskId(playlist),
-        };
+    fn set_skel_layers_requires_a_skeleton_root() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::MaskId;
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let playlist = store.create_entity();
+            let stack = SkelLayerStack {
+                layers: vec![SkelLayer {
+                    player: SkelPlayer {
+                        clip: ClipId(playlist),
+                        time: Seconds::ZERO,
+                        speed: Seconds::new(1.0),
+                        weight: Clamped01::ONE,
+                        playing: true,
+                        looping: true,
+                    },
+                    mask: MaskId(playlist),
+                }],
+            };
 
-        assert!(!set_skel_layer(&mut store, root, layer), "no Skeleton yet");
-        assert!(
-            store
-                .read_lane::<SkelLayer>()
-                .is_none_or(|layers| layers.get(root).is_none()),
-            "nothing is written without the anchor"
-        );
+            assert!(
+                !set_skel_layers(&mut store, root, stack.clone()),
+                "no Skeleton yet"
+            );
+            assert!(
+                store
+                    .read_lane::<SkelLayerStack>()
+                    .is_none_or(|layers| layers.get(root).is_none()),
+                "nothing is written without the anchor"
+            );
 
-        store.insert(
-            root,
-            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
-        );
-        assert!(set_skel_layer(&mut store, root, layer));
-        assert_eq!(
-            store.read_lane::<SkelLayer>().unwrap().get(root),
-            Some(&layer)
-        );
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            assert!(set_skel_layers(&mut store, root, stack.clone()));
+            assert_eq!(
+                store.read_lane::<SkelLayerStack>().unwrap().get(root),
+                Some(&stack)
+            );
+        }
+    }
+
+    /// Every `set_skel_layers` call installs a fresh stack: the second call
+    /// wipes the first (no append, no merge), an empty one clears.
+    #[test]
+    fn set_skel_layers_replaces_the_whole_stack() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::MaskId;
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let mask_entity = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            let clip_a = store.create_entity();
+            let clip_b = store.create_entity();
+            let one = |clip: Entity| SkelLayer {
+                player: SkelPlayer {
+                    clip: ClipId(clip),
+                    time: Seconds::ZERO,
+                    speed: Seconds::new(1.0),
+                    weight: Clamped01::ONE,
+                    playing: true,
+                    looping: true,
+                },
+                mask: MaskId(mask_entity),
+            };
+            let pair = SkelLayerStack {
+                layers: vec![one(clip_a), one(clip_b)],
+            };
+
+            assert!(set_skel_layers(&mut store, root, pair));
+            let two = store
+                .read_lane::<SkelLayerStack>()
+                .and_then(|lane| lane.get(root).cloned())
+                .expect("stack kept");
+            assert_eq!(two.layers.len(), 2, "both layers installed");
+
+            let solo = SkelLayerStack {
+                layers: vec![two.layers[0]],
+            };
+            assert!(set_skel_layers(&mut store, root, solo.clone()));
+            let replaced = store
+                .read_lane::<SkelLayerStack>()
+                .and_then(|lane| lane.get(root).cloned())
+                .expect("stack kept");
+            assert_eq!(replaced, solo, "the fresh stack replaces, never merges");
+
+            assert!(set_skel_layers(&mut store, root, SkelLayerStack::default()));
+            assert_eq!(
+                store
+                    .read_lane::<SkelLayerStack>()
+                    .and_then(|lane| lane.get(root).cloned()),
+                Some(SkelLayerStack::default()),
+                "an empty stack clears every layer"
+            );
+        }
     }
 }

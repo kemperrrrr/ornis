@@ -261,11 +261,18 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 скелета и объектных треков; `duration = 0` — мгновенный рез, как и
 повторный старт в полёте фейда — фейд один на сущность) или через
 `entity_mut(root).animator()?.play(name)`; пауза/стоп/резюме —
-`pause_animation`/`stop_animation`/`resume_animation`. Ломающее изменение
+`pause_animation`/`stop_animation`/`resume_animation`. Слои поверх базового
+клипа — стек `SkelLayerStack`: `set_skel_layers(root, stack)` (типизированный
+вход фасада) ставит весь стек сразу — замена, не добавление, — а слои
+смешиваются снизу вверх по маске `JointMask` (upper-body поверх locomotion
+и любые комбинации). Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
 `InvalidClip` (больше не `Copy`; `InvalidClip` — `fade_to_clip` отклоняет
-чужой или выдуманный `ClipId` до любой записи), а `compose_model_matrices`
+чужой или выдуманный `ClipId` до любой записи), `set_skel_layers`
+(бывш. `set_skel_layer`) принимает весь стек `SkelLayerStack` — прямые
+вставки `SkelLayer` в лейн сэмплер больше не читает, слой молча перестаёт
+работать, — а `compose_model_matrices`
 теперь пишет матрицы в caller-owned буфер:
 `compose_model_matrices(.., out: &mut Vec<Mat4>) -> Option<usize>`. Окно открывает `ornis::run`
 с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет

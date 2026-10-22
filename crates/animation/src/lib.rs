@@ -30,7 +30,8 @@
 //! Phase E (§5 E) blends both sides against authored rest poses: a player's
 //! `weight` lerps each channel toward its rest ([`AnimTrack::rest`],
 //! [`Skeleton::rest`]), and [`AnimFade`] / [`SkelFade`] crossfade two clips
-//! over time. Per-joint layers use [`SkelLayer`] with a [`JointMask`].
+//! over time. Per-joint layers ([`SkelLayer`] + [`JointMask`]) stack per
+//! root in [`SkelLayerStack`], bottom-up over the base pose.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -65,7 +66,7 @@ pub mod skinning;
 
 mod blend;
 use blend::{BlendedPose, JointSample, fade_progress, sample_joints};
-pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer};
+pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack};
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
@@ -558,6 +559,7 @@ struct AnimScratch {
     pose_b: BlendedPose,
     samples: Vec<JointSample>,
     painted: Vec<bool>,
+    contributors: Vec<ClipId>,
     skel_locals: Vec<Mat4>,
     matrices: Vec<Mat4>,
     nodes: Vec<LocalWrite>,
@@ -2044,7 +2046,7 @@ impl System for SkelSampleSystem {
             .reads_lane::<ChildOf>()
             .reads_lane::<JointMask>()
             .writes_lane::<SkelPlayer>()
-            .writes_lane::<SkelLayer>()
+            .writes_lane::<SkelLayerStack>()
             .writes_lane::<SkelFade>()
             .writes_lane::<JointPose>()
             .writes_lane::<Transform>()
@@ -2119,16 +2121,19 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
     }
 }
 
-/// Advances playing [`SkelLayer`] cursors against their clip duration.
+/// Advances playing [`SkelLayer`] cursors (every stack element) against
+/// their clip duration.
 fn advance_layers(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
-    let Some(mut layers) = store.write_lane::<SkelLayer>() else {
+    let Some(mut layers) = store.write_lane::<SkelLayerStack>() else {
         return;
     };
-    for layer in layers.data.iter_mut() {
-        step_player(&mut layer.player, &clips, dt);
+    for stack in layers.data.iter_mut() {
+        for layer in &mut stack.layers {
+            step_player(&mut layer.player, &clips, dt);
+        }
     }
 }
 
@@ -2219,7 +2224,7 @@ struct SampleLanes<'a> {
     skeletons: &'a ComponentStore<Skeleton>,
     transforms: Option<&'a ComponentStore<TransformDesc>>,
     fades: Option<&'a ComponentStore<SkelFade>>,
-    layers: Option<&'a ComponentStore<SkelLayer>>,
+    layers: Option<&'a ComponentStore<SkelLayerStack>>,
     masks: Option<&'a ColdComponentStore<JointMask>>,
 }
 
@@ -2239,7 +2244,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     };
     let transforms = store.read_lane::<TransformDesc>();
     let fades = store.read_lane::<SkelFade>();
-    let layers = store.read_lane::<SkelLayer>();
+    let layers = store.read_lane::<SkelLayerStack>();
     let masks = store.read_cold_lane::<JointMask>();
     let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
@@ -2261,14 +2266,15 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     }
 }
 
-/// Samples one playing cursor: base clip, optional crossfade, optional
-/// overlay layer, then model matrices into `poses` and node writes into
-/// `scratch`.
+/// Samples one playing cursor: base clip, optional crossfade, the overlay
+/// layer stack (bottom-up), then model matrices into `poses` and node
+/// writes into `scratch`.
 ///
-/// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid topology,
-/// or a layer whose mask does not match the joint count. The caller counts
-/// it. A missing outgoing clip reads as rest. Absent [`TransformDesc`] roots
-/// at identity (lenient); everything else is strict.
+/// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid
+/// topology, or a layer whose mask or clip is missing or whose mask does
+/// not match the joint count. The caller counts it. A missing outgoing
+/// clip reads as rest. Absent [`TransformDesc`] roots at identity
+/// (lenient); everything else is strict.
 fn sample_entity(
     entity: Entity,
     player: &SkelPlayer,
@@ -2284,8 +2290,7 @@ fn sample_entity(
     }
     // Absent `JointPose` is bad skin: verdict before any blending work.
     let pose = poses?.get_mut(entity)?;
-    let contributors =
-        blend_skel_pose(entity, player, lanes, clip, count, &skeleton.rest, scratch)?;
+    blend_skel_pose(entity, player, lanes, clip, count, &skeleton.rest, scratch)?;
     scratch.skel_locals.clear();
     scratch
         .skel_locals
@@ -2293,7 +2298,8 @@ fn sample_entity(
     let root = root_matrix(lanes.transforms, entity);
     compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
     node_poses(
-        &contributors,
+        lanes.clips,
+        &scratch.contributors,
         &scratch.pose_a,
         &mut scratch.nodes,
         &mut scratch.node_painted,
@@ -2303,18 +2309,18 @@ fn sample_entity(
     Some(())
 }
 
-/// Blends one root's base clip, optional crossfade and overlay layer into
-/// `scratch.pose_a`, returning the clips that shaped the pose (base,
-/// outgoing fade, layer — unused slots `None`).
+/// Blends one root's base clip, optional crossfade and the overlay layer
+/// stack into `scratch.pose_a`, recording the clips that shaped the pose
+/// (base, outgoing fade, each layer) in `scratch.contributors`.
 ///
-/// [`None`] when a layer's mask does not match the joint count — the same
-/// bad-skin verdict as a missing clip. A vanished outgoing clip reads as
-/// rest, as on object tracks.
+/// [`None`] when a layer's mask does not match the joint count or its
+/// mask/clip is missing — the same bad-skin verdict as a missing clip. A
+/// vanished outgoing clip reads as rest, as on object tracks. Layers blend
+/// bottom-up ([`SkelLayerStack`]): each overlays the pose below it.
 ///
 /// `contributors` carries every clip that shapes the pose, so a joint
 /// driven only by a layer or by the outgoing side of a fade still moves
-/// its bound node. At most three (base, outgoing, layer) — fixed slots,
-/// no per-entity Vec.
+/// its bound node. It is the scratch id buffer, reused across entities.
 fn blend_skel_pose<'a>(
     entity: Entity,
     player: &SkelPlayer,
@@ -2323,8 +2329,9 @@ fn blend_skel_pose<'a>(
     count: usize,
     rest: &[JointTrs],
     scratch: &mut AnimScratch,
-) -> Option<[Option<&'a SkelClip>; 3]> {
-    let mut contributors = [Some(clip), None, None];
+) -> Option<()> {
+    scratch.contributors.clear();
+    scratch.contributors.push(player.clip);
     sample_joints(
         clip,
         count,
@@ -2338,7 +2345,7 @@ fn blend_skel_pose<'a>(
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
         match lanes.clips.get(fade.from.clip.0) {
             Some(from_clip) => {
-                contributors[1] = Some(from_clip);
+                scratch.contributors.push(fade.from.clip);
                 sample_joints(
                     from_clip,
                     count,
@@ -2358,36 +2365,41 @@ fn blend_skel_pose<'a>(
             .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
         std::mem::swap(&mut scratch.pose_a, &mut scratch.pose_b);
     }
-    if let Some(layer) = lanes.layers.and_then(|lane| lane.get(entity)) {
-        let mask = lanes.masks?.get(layer.mask.0)?;
-        if mask.weights.len() != count {
-            return None;
+    if let Some(stack) = lanes.layers.and_then(|lane| lane.get(entity)) {
+        for layer in &stack.layers {
+            let mask = lanes.masks?.get(layer.mask.0)?;
+            if mask.weights.len() != count {
+                return None;
+            }
+            let layer_clip = lanes.clips.get(layer.player.clip.0)?;
+            scratch.contributors.push(layer.player.clip);
+            sample_joints(
+                layer_clip,
+                count,
+                layer.player.time.get(),
+                &mut scratch.samples,
+                &mut scratch.painted,
+            );
+            scratch
+                .pose_a
+                .overlay(&scratch.samples, rest, &mask.weights, layer.player.weight);
         }
-        let layer_clip = lanes.clips.get(layer.player.clip.0)?;
-        contributors[2] = Some(layer_clip);
-        sample_joints(
-            layer_clip,
-            count,
-            layer.player.time.get(),
-            &mut scratch.samples,
-            &mut scratch.painted,
-        );
-        scratch
-            .pose_a
-            .overlay(&scratch.samples, rest, &mask.weights, layer.player.weight);
     }
-    Some(contributors)
+    Some(())
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.
 ///
-/// `clips` lists every clip that shapes `pose` (base, outgoing fade, layer).
-/// First track per joint wins across them, matching [`sample_joints`]. Channels
-/// no contributor provided stay [`None`] so the node's bind pose survives; the
-/// blended values of the others come from the final pose. `out` accumulates
-/// across entities (deduplicated per call) and `painted` is reusable scratch.
+/// `contributors` lists every clip that shapes `pose` (base, outgoing
+/// fade, layers) as playlist ids; a vanished one reads as nothing. First
+/// track per joint wins across them, matching [`sample_joints`]. Channels
+/// no contributor provided stay [`None`] so the node's bind pose survives;
+/// the blended values of the others come from the final pose. `out`
+/// accumulates across entities (deduplicated per call) and `painted` is
+/// reusable scratch.
 fn node_poses(
-    clips: &[Option<&SkelClip>],
+    clips: &ColdComponentStore<SkelClip>,
+    contributors: &[ClipId],
     pose: &BlendedPose,
     out: &mut Vec<LocalWrite>,
     painted: &mut Vec<bool>,
@@ -2395,7 +2407,11 @@ fn node_poses(
     let start = out.len();
     painted.clear();
     painted.resize(pose.trs.len(), false);
-    for track in clips.iter().flatten().flat_map(|clip| clip.tracks.iter()) {
+    let tracks = contributors
+        .iter()
+        .filter_map(|id| clips.get(id.0))
+        .flat_map(|clip| clip.tracks.iter());
+    for track in tracks {
         let joint = track.joint.index();
         if joint >= painted.len() || painted[joint] {
             continue;

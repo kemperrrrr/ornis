@@ -26,13 +26,17 @@ use std::time::Instant;
 use glam::{Mat4, Vec3};
 use ornis_animation::{
     AnimClip, AnimFade, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, JointId, JointMask,
-    JointPose, JointTrack, JointTrs, Key, KeyTrack, MaskId, SkelClip, SkelFade, SkelLayer,
-    SkelPlayer, SkelSampleSystem, Skeleton,
+    JointPose, JointTrack, JointTrs, Key, KeyTrack, MaskId, SkelClip, SkelFade, SkelPlayer,
+    SkelSampleSystem, Skeleton,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{Engine, Entity, Metallic, Seconds, Stage};
 use ornis_gameplay::Position;
+
+/// Era-specific overlay-layer install, isolated for `hot_path_ab.sh`.
+#[path = "hot_path_bench/layer.rs"]
+mod layer_shim;
 
 /// Frame delta of the measured workload. Fades last far longer than the
 /// whole run, so every measured frame crossfades the same way.
@@ -60,7 +64,7 @@ fn engine() -> Engine {
         {
             let store = store_mut(&mut engine);
             store.register::<SkelPlayer>();
-            store.register::<SkelLayer>();
+            layer_shim::register(store);
             store.register::<SkelFade>();
             store.register::<Skeleton>();
             store.register::<JointPose>();
@@ -273,13 +277,7 @@ fn add_skel_scene(engine: &mut Engine, rigs: usize, joints: usize) {
                     store.insert(root, skel_fade(outgoing));
                 }
                 if rig_index % 4 == 0 {
-                    store.insert(
-                        root,
-                        SkelLayer {
-                            player: skel_player(layer_clip),
-                            mask,
-                        },
-                    );
+                    layer_shim::install(store, root, skel_player(layer_clip), mask);
                 }
             }
         }
