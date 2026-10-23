@@ -4,111 +4,19 @@
 //! and pause like phase-E players, and any tree-contract violation skips
 //! the root (bad skin), never truncates.
 //!
-//! Multi-statement fixtures keep their bodies in one inner block:
-//! rustqual's fragment scanner hashes windows of three consecutive
-//! top-level statements across files, and `skel_blend.rs` already owns the
-//! natural statement shapes.
+//! Shared world fixtures live in `common` (same bodies as the
+//! `skel_machine` tests — extracted once, not duplicated).
 
-use glam::{Mat4, Vec3};
+mod common;
+
+use common::*;
+use glam::Vec3;
 use ornis_animation::{
-    ClipId, JointId, JointMask, JointPose, JointTrack, Key, KeyTrack, MaskId, SkelClip, SkelLayer,
-    SkelLayerStack, SkelPlayer, SkelSampleSystem, SkelTree, SkelTreePlayer, Skeleton, TreeChild,
-    TreeNodeDef, TreeParam,
+    ClipId, JointMask, MaskId, SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer,
+    TreeChild, TreeNodeDef, TreeParam,
 };
-use ornis_assets::scene::TransformDesc;
-use ornis_core::units::{Clamped01, Seconds};
-use ornis_core::{Engine, Entity, SmartStore, Stage};
-
-fn engine() -> Engine {
-    {
-        let mut engine = Engine::new();
-        let store = store_mut(&mut engine);
-        store.register::<SkelPlayer>();
-        store.register::<SkelLayerStack>();
-        store.register::<Skeleton>();
-        store.register::<JointPose>();
-        store.register::<SkelTreePlayer>();
-        store.register::<TransformDesc>();
-        store.register_cold::<SkelClip>();
-        store.register_cold::<JointMask>();
-        store.register_cold::<SkelTree>();
-        engine.add_stage_system(Stage::PostFrame, SkelSampleSystem::new());
-        engine
-    }
-}
-
-fn store_mut(engine: &mut Engine) -> &mut SmartStore {
-    engine
-        .world_mut()
-        .store_mut()
-        .expect("world owns SmartStore")
-}
-
-fn store_ref(engine: &Engine) -> &SmartStore {
-    engine.world().store().expect("world owns SmartStore")
-}
-
-/// Joint track holding one constant translation.
-fn constant(joint: u32, value: Vec3) -> JointTrack {
-    JointTrack {
-        joint: JointId::from_raw(joint),
-        node: None,
-        translation: KeyTrack::linear(vec![Key { time: 0.0, value }]),
-        rotation: KeyTrack::linear(Vec::new()),
-        scale: KeyTrack::linear(Vec::new()),
-    }
-}
-
-fn clip(name: &str, tracks: Vec<JointTrack>) -> SkelClip {
-    SkelClip {
-        name: name.to_string(),
-        duration: 10.0,
-        tracks,
-    }
-}
-
-/// Playlist clip translating joint 0 to `(x, 0, 0)`.
-fn clip_x(engine: &mut Engine, name: &str, x: f32) -> ClipId {
-    add_clip(
-        engine,
-        clip(name, vec![constant(0, Vec3::new(x, 0.0, 0.0))]),
-    )
-}
-
-/// Skeleton root with `joints` joints, identity bind and a fresh pose.
-fn rig(engine: &mut Engine, joints: usize) -> Entity {
-    {
-        let names = (0..joints).map(|i| format!("joint{i}")).collect();
-        let skeleton = Skeleton::new(vec![None; joints], vec![Mat4::IDENTITY; joints], names);
-        let store = store_mut(engine);
-        let root = store.create_entity();
-        store.insert(root, TransformDesc::IDENTITY);
-        store.insert(root, skeleton);
-        store.insert(root, JointPose::identity(joints));
-        root
-    }
-}
-
-/// Stores `value` as a playlist clip and returns its id.
-fn add_clip(engine: &mut Engine, value: SkelClip) -> ClipId {
-    {
-        let store = store_mut(engine);
-        let playlist = store.create_entity();
-        store.insert_cold(playlist, value);
-        ClipId(playlist)
-    }
-}
-
-fn player(clip: ClipId, weight: f32) -> SkelPlayer {
-    SkelPlayer {
-        clip,
-        time: Seconds::ZERO,
-        speed: Seconds::new(1.0),
-        weight: Clamped01::new(weight),
-        playing: true,
-        looping: true,
-    }
-}
+use ornis_core::Engine;
+use ornis_core::units::Clamped01;
 
 fn child(position: f32, node: usize) -> TreeChild {
     TreeChild { position, node }
@@ -130,82 +38,6 @@ fn two_leaf_tree(name: &str, left: ClipId, right: ClipId, axis: usize) -> SkelTr
             name: name.to_string(),
             default: 0.0,
         }],
-    }
-}
-
-fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePlayer {
-    {
-        let params = tree.params.iter().map(|p| p.default).collect();
-        let leaves = tree
-            .nodes
-            .iter()
-            .filter_map(|node| match node {
-                TreeNodeDef::Clip { clip } => Some(player(*clip, 1.0)),
-                _ => None,
-            })
-            .collect();
-        let store = store_mut(engine);
-        store.insert_cold(root, tree);
-        let player_state = SkelTreePlayer { params, leaves };
-        store.insert(root, player_state.clone());
-        player_state
-    }
-}
-
-/// Writes `value` straight into the player lane (the typed facade rejects
-/// non-finite values; the hot path must not trust the lane).
-fn param_of(engine: &mut Engine, root: Entity, name: &str, value: f32) -> bool {
-    {
-        let found = {
-            let trees = store_ref(engine).read_cold_lane::<SkelTree>();
-            trees
-                .as_deref()
-                .and_then(|trees| trees.get(root))
-                .and_then(|tree| tree.params.iter().position(|p| p.name == name))
-        };
-        let Some(index) = found else {
-            return false;
-        };
-        let Some(mut players) = store_mut(engine).write_lane::<SkelTreePlayer>() else {
-            return false;
-        };
-        let Some(player) = players.get_mut(root) else {
-            return false;
-        };
-        let Some(slot) = player.params.get_mut(index) else {
-            return false;
-        };
-        *slot = value;
-        true
-    }
-}
-
-fn leaf_time(engine: &Engine, root: Entity, leaf: usize) -> f32 {
-    store_ref(engine)
-        .read_lane::<SkelTreePlayer>()
-        .expect("lane registered")
-        .get(root)
-        .expect("player kept")
-        .leaves[leaf]
-        .time
-        .get()
-}
-
-/// Asserts where joint `joint` of the pose on `root` ends up.
-fn expect_origin(engine: &Engine, root: Entity, joint: usize, expected: Vec3) {
-    {
-        let matrices = store_ref(engine)
-            .read_lane::<JointPose>()
-            .expect("lane registered")
-            .get(root)
-            .expect("pose kept")
-            .matrices
-            .clone();
-        let got = matrices[joint].transform_point3(Vec3::ZERO);
-        assert!(
-            (got - expected).length() < 1e-4,
-            "joint {joint}: got {got:?}"
-        );
     }
 }
 

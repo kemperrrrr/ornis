@@ -16,9 +16,9 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, JointId, JointMask,
-    JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayerStack, SkelPlayer,
-    SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, TreeNodeDef, TreeParam, fade_in_flight,
-    try_animator,
+    JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, SkelClip, SkelFade,
+    SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, TreeNodeDef,
+    TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
@@ -619,6 +619,22 @@ fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
                             .iter()
                             .all(|child| child.node < index && child.position.is_finite())
                 }
+                TreeNodeDef::Machine {
+                    states,
+                    initial,
+                    transitions,
+                } => {
+                    !states.is_empty()
+                        && *initial < states.len()
+                        && states.iter().all(|state| *state < index)
+                        && transitions.iter().all(|transition| {
+                            transition.from < states.len()
+                                && transition.to < states.len()
+                                && transition.when.param < tree.params.len()
+                                && transition.when.value.is_finite()
+                                && transition.fade.get().is_finite()
+                        })
+                }
                 _ => false,
             })
 }
@@ -665,6 +681,19 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
                     weight: Clamped01::ONE,
                     playing: true,
                     looping: true,
+                }),
+                _ => None,
+            })
+            .collect(),
+        machines: tree
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                TreeNodeDef::Machine { initial, .. } => Some(MachineCursor {
+                    state: *initial,
+                    from: None,
+                    elapsed: Seconds::ZERO,
+                    duration: Seconds::ZERO,
                 }),
                 _ => None,
             })

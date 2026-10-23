@@ -70,7 +70,10 @@ pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack
 
 mod tree;
 use tree::eval_tree;
-pub use tree::{SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam};
+pub use tree::{
+    MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeCmp, TreeCond, TreeNodeDef, TreeParam,
+    TreeTransition,
+};
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
@@ -2155,18 +2158,74 @@ fn advance_layers(store: &SmartStore, dt: f32) {
     }
 }
 
-/// Advances every [`SkelTreePlayer`] leaf cursor against its clip
-/// duration — tree leaves step exactly like phase-E players.
+/// Advances every [`SkelTreePlayer`]: leaf cursors step against their
+/// clip duration like phase-E players, machine cursors complete their
+/// in-flight crossfades and then fire the first matching
+/// [`TreeTransition`](crate::TreeTransition) of each idle machine — a
+/// crossfade is never interrupted, guards are re-checked only once it
+/// completes.
 fn advance_tree_players(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
-    let Some(mut trees) = store.write_lane::<SkelTreePlayer>() else {
+    let defs = store.read_cold_lane::<SkelTree>();
+    let Some(mut players) = store.write_lane::<SkelTreePlayer>() else {
         return;
     };
-    for player in trees.data.iter_mut() {
+    let players = &mut *players;
+    for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         for leaf in &mut player.leaves {
             step_player(leaf, &clips, dt);
+        }
+        step_machines(
+            player,
+            defs.as_deref().and_then(|defs| defs.get(*entity)),
+            dt,
+        );
+    }
+}
+
+/// Completes or advances in-flight machine crossfades, then fires
+/// transitions on the live parameters (`from` must stand, first match in
+/// list order wins; the outgoing state's cursors keep stepping — the
+/// [`SkelFade`](crate::SkelFade) mechanics).
+fn step_machines(player: &mut SkelTreePlayer, tree: Option<&SkelTree>, dt: f32) {
+    for cursor in &mut player.machines {
+        if cursor.from.is_some() {
+            cursor.elapsed = Seconds::new(cursor.elapsed.get() + dt);
+            if fade_progress(cursor.duration, cursor.elapsed) >= 1.0 {
+                cursor.from = None;
+            }
+        }
+    }
+    let Some(tree) = tree else {
+        return;
+    };
+    let mut cursors = 0;
+    for node in &tree.nodes {
+        let tree::TreeNodeDef::Machine {
+            states: _,
+            initial: _,
+            transitions,
+        } = node
+        else {
+            continue;
+        };
+        let Some(cursor) = player.machines.get_mut(cursors) else {
+            break;
+        };
+        cursors += 1;
+        if cursor.from.is_some() {
+            continue;
+        }
+        for transition in transitions {
+            if transition.from == cursor.state && transition.when.holds(&player.params) {
+                cursor.from = Some(transition.from);
+                cursor.state = transition.to;
+                cursor.elapsed = Seconds::ZERO;
+                cursor.duration = transition.fade;
+                break;
+            }
         }
     }
 }

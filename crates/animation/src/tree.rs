@@ -11,8 +11,8 @@
 
 use ornis_core::ColdComponentStore;
 
-use crate::blend::{BlendedPose, JointSample, sample_joints};
-use crate::{ClipId, JointTrs, SkelClip, SkelPlayer};
+use crate::blend::{BlendedPose, JointSample, fade_progress, sample_joints};
+use crate::{ClipId, JointTrs, Seconds, SkelClip, SkelPlayer};
 
 /// One named parameter of an [`SkelTree`], addressed by index.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +34,59 @@ pub struct TreeChild {
     pub node: usize,
 }
 
+/// Comparison of a tree parameter against [`TreeCond::value`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeCmp {
+    /// The parameter's live value is greater than the threshold.
+    Greater,
+    /// The parameter's live value is less than the threshold.
+    Less,
+}
+
+/// Guard of a [`TreeTransition`]: one comparison of a live parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TreeCond {
+    /// Index into [`SkelTree::params`] the guard reads.
+    pub param: usize,
+    /// Comparison applied to the parameter's live value.
+    pub op: TreeCmp,
+    /// Finite threshold the value is compared against.
+    pub value: f32,
+}
+
+impl TreeCond {
+    /// Whether `params` satisfy the condition. A missing or non-finite
+    /// parameter (or threshold) never fires.
+    pub(crate) fn holds(&self, params: &[f32]) -> bool {
+        let Some(value) = params.get(self.param).copied() else {
+            return false;
+        };
+        if !value.is_finite() || !self.value.is_finite() {
+            return false;
+        }
+        match self.op {
+            TreeCmp::Greater => value > self.value,
+            TreeCmp::Less => value < self.value,
+        }
+    }
+}
+
+/// One transition of a [`TreeNodeDef::Machine`]: crossfades the machine
+/// between two of its states while its `when` guard holds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TreeTransition {
+    /// State index (into the machine's `states`) the machine stands on.
+    pub from: usize,
+    /// State index to crossfade into.
+    pub to: usize,
+    /// Guard on the tree parameters.
+    pub when: TreeCond,
+    /// Crossfade length in seconds, [`SkelFade`](crate::SkelFade)
+    /// mechanics: linear progress, the outgoing state's cursors keep
+    /// stepping; non-positive cuts at once. Must be finite.
+    pub fade: Seconds,
+}
+
 /// One node of an [`SkelTree`] (authoring data, cold).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -53,6 +106,21 @@ pub enum TreeNodeDef {
         /// Inputs at strictly ascending `position`s; empty reads as rest.
         children: Vec<TreeChild>,
     },
+    /// State machine over earlier nodes: stands on `initial` and
+    /// crossfades between `states` entries as [`TreeTransition`]s fire on
+    /// the live parameter values (first match in `transitions` order
+    /// wins; an in-flight crossfade is never interrupted — guards are
+    /// re-checked once it completes). A crossfade mixes the two state
+    /// poses with [`SkelFade`](crate::SkelFade) mechanics.
+    Machine {
+        /// Indices into [`SkelTree::nodes`], all strictly smaller than
+        /// this node's index.
+        states: Vec<usize>,
+        /// Initial state index into `states`.
+        initial: usize,
+        /// Transition candidates, in evaluation order.
+        transitions: Vec<TreeTransition>,
+    },
 }
 
 /// Authoring catalog of one animation tree (cold lane, on the skeleton
@@ -64,8 +132,24 @@ pub enum TreeNodeDef {
 pub struct SkelTree {
     /// Nodes in evaluation order; the last one is the root.
     pub nodes: Vec<TreeNodeDef>,
-    /// Parameters referenced by index from [`TreeNodeDef::Blend1d`].
+    /// Parameters referenced by index from [`TreeNodeDef::Blend1d`] and
+    /// [`TreeTransition`]-guards.
     pub params: Vec<TreeParam>,
+}
+
+/// Runtime state of one [`TreeNodeDef::Machine`] — one entry of
+/// [`SkelTreePlayer::machines`], in machine-node order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MachineCursor {
+    /// Index into the machine's `states`: where the machine stands, or
+    /// where an in-flight crossfade is heading.
+    pub state: usize,
+    /// State being left while a crossfade flies; `None` at rest.
+    pub from: Option<usize>,
+    /// Time spent in the in-flight crossfade.
+    pub elapsed: Seconds,
+    /// Length of the in-flight crossfade; non-positive cuts at once.
+    pub duration: Seconds,
 }
 
 /// Runtime state of one [`SkelTree`] (hot lane, on the skeleton root).
@@ -85,6 +169,8 @@ pub struct SkelTreePlayer {
     pub params: Vec<f32>,
     /// Cursors of the [`TreeNodeDef::Clip`] leaves, in node order.
     pub leaves: Vec<SkelPlayer>,
+    /// Cursors of the [`TreeNodeDef::Machine`] nodes, in node order.
+    pub machines: Vec<MachineCursor>,
 }
 
 /// Weights of a 1-D blend at `value` over `children` (strictly ascending
@@ -173,6 +259,7 @@ pub(crate) fn eval_tree(
         return None;
     }
     let mut leaves = 0;
+    let mut machines = 0;
     for (index, node) in tree.nodes.iter().enumerate() {
         match node {
             TreeNodeDef::Clip { clip } => {
@@ -206,7 +293,69 @@ pub(crate) fn eval_tree(
                     tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
                 }
             }
+            TreeNodeDef::Machine {
+                states,
+                initial: _,
+                transitions,
+            } => {
+                let cursor = player.machines.get(machines)?;
+                machines += 1;
+                eval_machine(states, transitions, cursor, &player.params, index, poses)?;
+            }
         }
+    }
+    Some(())
+}
+
+/// Evaluates one [`TreeNodeDef::Machine`] node into `poses[index]`: the
+/// whole machine contract is validated every frame — non-empty `states`
+/// among the earlier nodes, in-range cursors and transitions, finite
+/// guards — so a broken machine must not answer differently after a
+/// transition. The output is a pure state pose or a
+/// [`SkelFade`](crate::SkelFade)-progress mix of the leaving and heading
+/// states; `None` = bad skin.
+fn eval_machine(
+    states: &[usize],
+    transitions: &[TreeTransition],
+    cursor: &MachineCursor,
+    params: &[f32],
+    index: usize,
+    poses: &mut [BlendedPose],
+) -> Option<()> {
+    if states.is_empty() || cursor.state >= states.len() {
+        return None;
+    }
+    if cursor.from.is_some_and(|from| from >= states.len()) {
+        return None;
+    }
+    for state in states {
+        if *state >= index {
+            return None;
+        }
+    }
+    for transition in transitions {
+        if transition.from >= states.len()
+            || transition.to >= states.len()
+            || !transition.fade.get().is_finite()
+        {
+            return None;
+        }
+        let value = params.get(transition.when.param).copied()?;
+        if !value.is_finite() {
+            return None;
+        }
+    }
+    let (earlier, tail) = poses.split_at_mut(index);
+    match cursor.from {
+        Some(from) => {
+            let progress = fade_progress(cursor.duration, cursor.elapsed);
+            if !progress.is_finite() {
+                return None;
+            }
+            tail[0].clone_from(&earlier[states[from]]);
+            tail[0].mix_towards(&earlier[states[cursor.state]], progress);
+        }
+        None => tail[0].clone_from(&earlier[states[cursor.state]]),
     }
     Some(())
 }
