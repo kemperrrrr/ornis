@@ -127,12 +127,12 @@ pub fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePla
             .collect();
         let store = store_mut(engine);
         store.insert_cold(root, tree);
-        let player_state = SkelTreePlayer {
-            params,
-            leaves,
-            machines,
-            ..SkelTreePlayer::default()
-        };
+        let mut player_state = SkelTreePlayer::default();
+        (
+            player_state.params,
+            player_state.leaves,
+            player_state.machines,
+        ) = (params, leaves, machines);
         store.insert(root, player_state.clone());
         player_state
     }
