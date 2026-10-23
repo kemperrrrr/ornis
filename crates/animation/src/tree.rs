@@ -73,6 +73,12 @@ pub struct SkelTree {
 /// The only mutable state of the tree, and it is all cursor clocks plus
 /// host-set parameter values — no pose ever feeds back into the next
 /// frame, matching the phase-E contract.
+///
+/// `set_skel_tree` pairs `leaves[i]` with the i-th [`TreeNodeDef::Clip`]
+/// and mirrors that node's id in `leaves[i].clip`; the sampler reads the
+/// node's clip def on the cursor's clock. A hand-inserted player that lets
+/// the two diverge still samples correctly, but its cursor metadata lies —
+/// install through the facade or keep them aligned.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SkelTreePlayer {
     /// Live parameter values, aligned with [`SkelTree::params`].

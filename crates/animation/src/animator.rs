@@ -115,6 +115,11 @@ impl AnimatorMut<'_> {
     /// in flight cuts to the new clip at once (the in-flight [`SkelFade`]
     /// is dropped) instead of stacking fades.
     ///
+    /// On a root carrying a `SkelTree` this direct animator path writes
+    /// the ignored `SkelPlayer`/`SkelFade` lanes (the tree drives the
+    /// root); the typed `GameWorld` playback entries answer
+    /// `PlaybackError::TreeDriven` instead.
+    ///
     /// # Errors
     ///
     /// Same as [`Self::play`].

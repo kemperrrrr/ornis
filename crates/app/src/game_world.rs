@@ -161,10 +161,15 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError::Missing`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root (the tree drives it, not a player).
     // qual:api — host playback control; in-tree callers are tests.
     pub fn resume_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
         let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         if crate::anim_wiring::set_playing(store, entity, true) {
             Ok(())
         } else {
@@ -176,9 +181,14 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError::Missing`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root.
     pub fn pause_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
         let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         if crate::anim_wiring::set_playing(store, entity, false) {
             Ok(())
         } else {
@@ -190,9 +200,14 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError::Missing`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root.
     pub fn stop_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
         let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         let found = crate::anim_wiring::set_playing(store, entity, false);
         let rewound = crate::anim_wiring::rewind_player(store, entity);
         if found || rewound {
@@ -1919,6 +1934,50 @@ mod tests {
         assert_eq!(fade.from.clip, ClipId(playlist));
         assert_eq!(fade.duration, Seconds::new(0.25));
         assert_eq!(fade.elapsed, Seconds::ZERO);
+    }
+
+    /// Every `GameWorld` playback entry answers `TreeDriven` on a root
+    /// carrying a `SkelTree` — the tree drives it, not a player.
+    #[test]
+    fn game_world_entries_error_on_tree_root() {
+        use glam::Mat4;
+        use ornis_animation::{Animator, ClipId, SkelTree, Skeleton, TreeNodeDef, TreeParam};
+        use ornis_core::Seconds;
+        use std::collections::HashMap;
+
+        let mut world = GameWorld::new();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let hero = store.create_entity();
+        let root = store.create_entity();
+        store.insert(
+            root,
+            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+        );
+        let mut clips = HashMap::new();
+        clips.insert("Walk_Loop".to_string(), ClipId(store.create_entity()));
+        store.insert(hero, Animator::new(clips, vec![root]));
+        assert!(crate::anim_wiring::set_skel_tree(
+            store,
+            root,
+            SkelTree {
+                nodes: vec![TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: Vec::new(),
+                }],
+                params: vec![TreeParam {
+                    name: "walk".to_string(),
+                    default: 0.0,
+                }],
+            }
+        ));
+        let driven = Err(crate::anim_wiring::PlaybackError::TreeDriven);
+        assert_eq!(
+            world.play_animation(hero, "Walk_Loop", Seconds::new(0.25)),
+            driven
+        );
+        assert_eq!(world.resume_animation(root), driven);
+        assert_eq!(world.pause_animation(root), driven);
+        assert_eq!(world.stop_animation(root), driven);
     }
 
     #[test]

@@ -268,16 +268,19 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 и любые комбинации). Дерево анимаций поверх слоёв — `SkelTree`
 (ноды `Clip`/`Blend1d`, порядок нод = порядок вычисления): ставится
 `set_skel_tree(root, tree)` (отклоняет битые деревья — неизвестные
-`ClipId` листьев, оси без параметров, неубывающие позиции, не-конечные
-числа), параметры задаются `set_tree_param(root, имя, значение)`, веса
+`ClipId` листьев, оси без параметров, не строго возрастающие позиции,
+не-конечные числа), параметры задаются `set_tree_param(root, имя, значение)`, веса
 blend1d детерминированы (не более двух соседних нод) и дерево целиком
 вытесняет `SkelPlayer` на этом корне: playback-входы отвечают
 `PlaybackError::TreeDriven`, пока корень не снят с дерева
 `clear_skel_tree(root)`. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
-`InvalidClip` (больше не `Copy`; `InvalidClip` — `fade_to_clip` отклоняет
-чужой или выдуманный `ClipId` до любой записи), `set_skel_layers`
+`InvalidClip`/`TreeDriven` (больше не `Copy`; `InvalidClip` — `fade_to_clip`
+отклоняет чужой или выдуманный `ClipId` до любой записи; `TreeDriven` —
+playback-входы отказывают на корне с деревом, снять дерево —
+`clear_skel_tree(root)`), `set_skel_tree` отклоняет битые деревья,
+`set_skel_layers`
 (бывш. `set_skel_layer`) принимает весь стек `SkelLayerStack` — прямые
 вставки `SkelLayer` в лейн сэмплер больше не читает, слой молча перестаёт
 работать, — а `compose_model_matrices`

@@ -2344,8 +2344,14 @@ fn strict_skeleton<'a>(
 /// no-op, so every `refill`/`refill_rest` reuses the inner joint buffers
 /// and the sample pass stays allocation-free. `resize_with` truncates only
 /// when a tree shrinks.
+/// Grows `poses` to `nodes`, keeping every already-allocated [`BlendedPose`]
+/// buffer: the scratch is shared across roots, so a smaller tree must not
+/// truncate and drop buffers a larger one just filled. Callers evaluate
+/// into `&mut poses[..nodes]` and take the root from `poses[nodes - 1]`.
 fn fit_tree_poses(poses: &mut Vec<BlendedPose>, nodes: usize) {
-    poses.resize_with(nodes, BlendedPose::default);
+    if poses.len() < nodes {
+        poses.resize_with(nodes, BlendedPose::default);
+    }
 }
 
 /// Composes the entity's model matrices from the blended pose and routes
@@ -2515,7 +2521,8 @@ fn sample_tree_entity(
     // Absent `JointPose` is bad skin: verdict before any blending work.
     let pose = poses?.get_mut(entity)?;
     scratch.contributors.clear();
-    fit_tree_poses(&mut scratch.tree_poses, tree.nodes.len());
+    let nodes = tree.nodes.len();
+    fit_tree_poses(&mut scratch.tree_poses, nodes);
     eval_tree(
         tree,
         player,
@@ -2523,13 +2530,15 @@ fn sample_tree_entity(
         count,
         &skeleton.rest,
         tree::EvalBuf {
-            poses: &mut scratch.tree_poses,
+            poses: &mut scratch.tree_poses[..nodes],
             samples: &mut scratch.samples,
             painted: &mut scratch.painted,
             contributors: &mut scratch.contributors,
         },
     )?;
-    scratch.pose_a.clone_from(scratch.tree_poses.last()?);
+    scratch
+        .pose_a
+        .clone_from(scratch.tree_poses.get(nodes.checked_sub(1)?)?);
     overlay_layers(entity, lanes, count, &skeleton.rest, scratch)?;
     finish_pose(entity, lanes, skeleton, scratch, pose)
 }
@@ -3158,24 +3167,25 @@ mod import_tests {
 
     #[test]
     fn tree_pose_scratch_keeps_buffers_across_frames() {
-        // One inner block: rustqual's fragment scanner hashes windows of
-        // three consecutive top-level statements.
-        {
-            let mut poses: Vec<BlendedPose> = Vec::new();
-            fit_tree_poses(&mut poses, 2);
-            for pose in &mut poses {
-                pose.refill_rest(&[JointTrs::IDENTITY; 3]);
-            }
-            let before: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
-            fit_tree_poses(&mut poses, 2);
-            let after: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
-            assert_eq!(
-                before, after,
-                "a same-size fit must not drop the pose buffers"
-            );
-            fit_tree_poses(&mut poses, 3);
-            assert_eq!(poses.len(), 3);
-            assert_eq!(before, [poses[0].trs.capacity(), poses[1].trs.capacity()]);
+        let mut poses: Vec<BlendedPose> = Vec::new();
+        fit_tree_poses(&mut poses, 5);
+        for pose in &mut poses {
+            pose.refill_rest(&[JointTrs::IDENTITY; 3]);
         }
+        let before: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+        fit_tree_poses(&mut poses, 3);
+        assert_eq!(
+            poses.len(),
+            5,
+            "a smaller root keeps the allocation — the tail buffers stay for the next larger tree"
+        );
+        let after_shrink: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+        assert_eq!(before, after_shrink, "shrink must not drop buffers");
+        fit_tree_poses(&mut poses, 5);
+        let after_regrow: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+        assert_eq!(
+            before, after_regrow,
+            "an N -> M < N -> N cycle must not reallocate the pose buffers"
+        );
     }
 }

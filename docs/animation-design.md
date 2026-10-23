@@ -383,7 +383,8 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   — тул/скрипт-шов, не hot-loop; сэмплер пишет лейны напрямую типизированно.
 - Свой `Transform` (`render/src/transform.rs:7-14`) как лейн: рендер читает
   `TransformDesc`, второй placement-источник = рассинхрон.
-- Бленд-дерево/IK/ретаргет в фазах A–D; морфы (blend shapes) — только после E.
+- IK/ретаргет в фазах A–D; бленд-дерево/state machine — §7 (поверх E);
+  морфы (blend shapes) — только после E.
   Дерево анимаций поверх стека слоёв начинаем после E — модель в §7;
   IK/ретаргет, события по ключам, motion matching и distance matching /
   motion warping остаются отложенными до прод-доступности общего
@@ -436,12 +437,14 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
 изменений `compose_model_matrices` + `node_poses` (контрибьюторы — клипы
 всех листьев). Управление — типизированный фасад `set_skel_tree` /
 `set_tree_param` / `clear_skel_tree`; корень с деревом игнорирует
-`SkelPlayer` на той же сущности (его часы даже не шагают), а playback-входы
-(`fade_to_clip`/`play_crossfade`/`play_animation`) отвечают
+`SkelPlayer` на той же сущности (его часы даже не шагают), снимает
+летящий `SkelFade` при установке, а playback-входы
+(`fade_to_clip`/`play_crossfade`/`play_animation` и статусы
+`resume_animation`/`pause_animation`/`stop_animation`) отвечают
 `PlaybackError::TreeDriven`, пока `clear_skel_tree` не вернёт корень
 проигрывателю. `set_skel_tree` отклоняет битое дерево сразу (неизвестный
 `ClipId` листья — проверка как у `fade_to_clip`, ось без параметра,
-неубывающие или не-конечные позиции, не-конечные default'ы); то же
+не строго возрастающие или не-конечные позиции, не-конечные default'ы); то же
 нарушение, найденное в горячем пути (включая не-конечный параметр),
 читается как bad skin: корень не публикуется, счётчик растёт — никаких
 усечённых смесей и отравленных NaN-весов. Контракт детей проверяется
