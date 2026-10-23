@@ -103,4 +103,28 @@ mod tests {
         assert!(out.triangle_count() > 0);
         assert!(out.vertex_count() > 0);
     }
+
+    #[test]
+    fn offset_box_booleans_have_analytic_volumes() {
+        let a = crate::MeshData::unit_box();
+        let mut b = crate::MeshData::unit_box();
+        for p in &mut b.positions {
+            for c in p.iter_mut() {
+                *c += 0.5;
+            }
+        }
+        // Overlap is a 0.5^3 = 0.125 cube.
+        for (kind, expected) in [
+            (crate::BooleanKind::Union, 1.875),
+            (crate::BooleanKind::Subtract, 0.875),
+            (crate::BooleanKind::Intersect, 0.125),
+        ] {
+            let out = boolean(&a, &b, kind).expect("boolean works");
+            let vol = to_manifold(&out).expect("result valid").volume();
+            assert!(
+                (vol - expected).abs() < 1e-6,
+                "{kind:?}: volume {vol}, want {expected}"
+            );
+        }
+    }
 }
