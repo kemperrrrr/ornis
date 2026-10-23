@@ -265,7 +265,11 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 клипа — стек `SkelLayerStack`: `set_skel_layers(root, stack)` (типизированный
 вход фасада) ставит весь стек сразу — замена, не добавление, — а слои
 смешиваются снизу вверх по маске `JointMask` (upper-body поверх locomotion
-и любые комбинации). Ломающее изменение
+и любые комбинации). Дерево анимаций поверх слоёв — `SkelTree`
+(ноды `Clip`/`Blend1d`, порядок нод = порядок вычисления): ставится
+`set_skel_tree(root, tree)`, параметры задаются `set_tree_param(root, имя,
+значение)`, веса blend1d детерминированы (не более двух соседних нод) и
+дерево целиком вытесняет `SkelPlayer` на этом корне. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
 `InvalidClip` (больше не `Copy`; `InvalidClip` — `fade_to_clip` отклоняет

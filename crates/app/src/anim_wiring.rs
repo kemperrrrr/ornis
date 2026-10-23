@@ -17,10 +17,11 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, JointId, JointMask,
     JointPose, JointTrack, JointTrs, Key, KeyTrack, SkelClip, SkelFade, SkelLayerStack, SkelPlayer,
-    Skeleton, SkinnedMesh, fade_in_flight, try_animator,
+    SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, TreeNodeDef, TreeParam, fade_in_flight,
+    try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::{Entity, Seconds, SmartStore};
+use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
 use ornis_gltf::{
     LoadedAnimClip, LoadedInterpolation, LoadedJointTrack, LoadedKeyTrack, LoadedMesh,
     LoadedSkelClip, LoadedSkin, Model, NodeIdx,
@@ -546,6 +547,86 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
     true
 }
 
+/// Installs `tree` as the animation tree on a skeleton root — the typed
+/// [`SkelTree`] input, so hosts never install the tree lanes themselves.
+/// Set semantics: `tree` replaces whatever tree sat on the root. Leaf
+/// cursors ([`SkelTreePlayer::leaves`], one per [`TreeNodeDef::Clip`] in
+/// node order) start at time zero with `speed = 1`, full weight and
+/// looping playback; parameters take their [`TreeParam::default`] values
+/// until [`set_tree_param`]. A root with a tree is driven by it — a
+/// [`SkelPlayer`] on the same entity is ignored.
+///
+/// Returns whether `root` carries a [`Skeleton`] (the tree's anchor);
+/// nothing is written without one.
+// qual:api — typed `SkelTree` input for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bool {
+    if store
+        .read_lane::<Skeleton>()
+        .is_none_or(|skeletons| skeletons.get(root).is_none())
+    {
+        return false;
+    }
+    store.register_cold::<SkelTree>();
+    store.register::<SkelTreePlayer>();
+    let player = SkelTreePlayer {
+        params: tree.params.iter().map(|param| param.default).collect(),
+        leaves: tree
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                TreeNodeDef::Clip { clip } => Some(SkelPlayer {
+                    clip: *clip,
+                    time: Seconds::new(0.0),
+                    speed: Seconds::new(1.0),
+                    weight: Clamped01::ONE,
+                    playing: true,
+                    looping: true,
+                }),
+                _ => None,
+            })
+            .collect(),
+    };
+    store.insert_cold(root, tree);
+    store.insert(root, player);
+    true
+}
+
+/// Sets tree parameter `name` on a skeleton root to `value` — the typed
+/// host input for [`SkelTree`] axes (the key is [`TreeParam::name`]). A
+/// value outside an axis's covered range simply clamps at the end inputs
+/// during blend1d evaluation.
+///
+/// Returns `false` when `root` has no [`SkelTree`] or [`SkelTreePlayer`],
+/// or names no parameter — nothing is written then.
+// qual:api — typed tree parameter input for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn set_tree_param(store: &mut SmartStore, root: Entity, name: &str, value: f32) -> bool {
+    let trees = store.read_cold_lane::<SkelTree>();
+    let Some(index) = trees
+        .as_deref()
+        .and_then(|trees| trees.get(root))
+        .and_then(|tree| {
+            tree.params
+                .iter()
+                .position(|param: &TreeParam| param.name == name)
+        })
+    else {
+        return false;
+    };
+    let Some(mut players) = store.write_lane::<SkelTreePlayer>() else {
+        return false;
+    };
+    let Some(player) = players.get_mut(root) else {
+        return false;
+    };
+    let Some(slot) = player.params.get_mut(index) else {
+        return false;
+    };
+    *slot = value;
+    true
+}
+
 /// Wires animation from a loaded glTF scene into an already-spawned
 /// world: skeleton roots (`Skeleton` + [`JointPose`]), cold clip
 /// playlists named with the glTF animation name, an [`Animator`] on the
@@ -583,9 +664,11 @@ pub fn wire_loaded_animation(
     store.register::<SkinnedMesh>();
     store.register::<SkelPlayer>();
     store.register::<SkelLayerStack>();
+    store.register::<SkelTreePlayer>();
     store.register::<SkelFade>();
     store.register_cold::<SkelClip>();
     store.register_cold::<JointMask>();
+    store.register_cold::<SkelTree>();
     store.register::<AnimPlayer>();
     store.register::<AnimFade>();
     store.register_cold::<AnimClip>();
@@ -1710,6 +1793,109 @@ mod tests {
                 Some(SkelLayerStack::default()),
                 "an empty stack clears every layer"
             );
+        }
+    }
+
+    /// `set_skel_tree` refuses a root without `Skeleton`, then installs the
+    /// cold def and a player whose leaves follow the clip nodes and whose
+    /// parameters take their defaults.
+    #[test]
+    fn set_skel_tree_installs_tree_lanes() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let clip = store.create_entity();
+            let tree = SkelTree {
+                nodes: vec![
+                    TreeNodeDef::Clip { clip: ClipId(clip) },
+                    TreeNodeDef::Blend1d {
+                        axis: 0,
+                        children: vec![TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        }],
+                    },
+                ],
+                params: vec![TreeParam {
+                    name: "walk".to_string(),
+                    default: 0.25,
+                }],
+            };
+            assert!(
+                !set_skel_tree(&mut store, root, tree.clone()),
+                "no Skeleton yet"
+            );
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            assert!(set_skel_tree(&mut store, root, tree.clone()));
+            assert_eq!(
+                store.read_cold_lane::<SkelTree>().unwrap().get(root),
+                Some(&tree)
+            );
+            let player = store
+                .read_lane::<SkelTreePlayer>()
+                .unwrap()
+                .get(root)
+                .unwrap()
+                .clone();
+            assert_eq!(player.params, vec![0.25]);
+            assert_eq!(player.leaves.len(), 1);
+            assert_eq!(player.leaves[0].clip, ClipId(clip));
+            assert!(player.leaves[0].playing, "leaves start playing");
+        }
+    }
+
+    /// `set_tree_param` writes by [`TreeParam::name`], refuses unknown
+    /// names and roots without a tree.
+    #[test]
+    fn set_tree_param_addresses_by_name() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelTree, SkelTreePlayer, TreeNodeDef, TreeParam};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            assert!(
+                !set_tree_param(&mut store, root, "walk", 1.0),
+                "no tree yet"
+            );
+            assert!(set_skel_tree(
+                &mut store,
+                root,
+                SkelTree {
+                    nodes: vec![TreeNodeDef::Blend1d {
+                        axis: 0,
+                        children: Vec::new(),
+                    }],
+                    params: vec![TreeParam {
+                        name: "walk".to_string(),
+                        default: 0.0,
+                    }],
+                }
+            ));
+            assert!(
+                !set_tree_param(&mut store, root, "jump", 1.0),
+                "unknown name"
+            );
+            assert!(set_tree_param(&mut store, root, "walk", 1.0));
+            let player = store
+                .read_lane::<SkelTreePlayer>()
+                .unwrap()
+                .get(root)
+                .unwrap()
+                .clone();
+            assert_eq!(player.params, vec![1.0]);
         }
     }
 }

@@ -68,6 +68,10 @@ mod blend;
 use blend::{BlendedPose, JointSample, fade_progress, sample_joints};
 pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack};
 
+mod tree;
+use tree::eval_tree;
+pub use tree::{SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam};
+
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
     blend_vertex_reference, canonical_staged_weights, joint_normal_matrix,
@@ -557,6 +561,7 @@ struct AnimScratch {
     obj_locals: Vec<LocalWrite>,
     pose_a: BlendedPose,
     pose_b: BlendedPose,
+    tree_poses: Vec<BlendedPose>,
     samples: Vec<JointSample>,
     painted: Vec<bool>,
     contributors: Vec<ClipId>,
@@ -2045,8 +2050,10 @@ impl System for SkelSampleSystem {
             .reads_lane::<TransformDesc>()
             .reads_lane::<ChildOf>()
             .reads_lane::<JointMask>()
+            .reads_lane::<SkelTree>()
             .writes_lane::<SkelPlayer>()
             .writes_lane::<SkelLayerStack>()
+            .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
             .writes_lane::<JointPose>()
             .writes_lane::<Transform>()
@@ -2087,6 +2094,7 @@ pub fn run_skel_sample(resources: &Resources) -> SkelSampleStats {
 fn advance_skel_players(store: &SmartStore, dt: f32) {
     advance_base_players(store, dt);
     advance_layers(store, dt);
+    advance_tree_players(store, dt);
     advance_fades(store, dt);
 }
 
@@ -2133,6 +2141,22 @@ fn advance_layers(store: &SmartStore, dt: f32) {
     for stack in layers.data.iter_mut() {
         for layer in &mut stack.layers {
             step_player(&mut layer.player, &clips, dt);
+        }
+    }
+}
+
+/// Advances every [`SkelTreePlayer`] leaf cursor against its clip
+/// duration — tree leaves step exactly like phase-E players.
+fn advance_tree_players(store: &SmartStore, dt: f32) {
+    let Some(clips) = store.read_cold_lane::<SkelClip>() else {
+        return;
+    };
+    let Some(mut trees) = store.write_lane::<SkelTreePlayer>() else {
+        return;
+    };
+    for player in trees.data.iter_mut() {
+        for leaf in &mut player.leaves {
+            step_player(leaf, &clips, dt);
         }
     }
 }
@@ -2226,6 +2250,8 @@ struct SampleLanes<'a> {
     fades: Option<&'a ComponentStore<SkelFade>>,
     layers: Option<&'a ComponentStore<SkelLayerStack>>,
     masks: Option<&'a ColdComponentStore<JointMask>>,
+    trees: Option<&'a ColdComponentStore<SkelTree>>,
+    tree_players: Option<&'a ComponentStore<SkelTreePlayer>>,
 }
 
 /// Samples every playing cursor into the scratch buffers: model matrices
@@ -2246,6 +2272,8 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     let fades = store.read_lane::<SkelFade>();
     let layers = store.read_lane::<SkelLayerStack>();
     let masks = store.read_cold_lane::<JointMask>();
+    let trees = store.read_cold_lane::<SkelTree>();
+    let tree_players = store.read_lane::<SkelTreePlayer>();
     let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
         clips: &clips,
@@ -2254,9 +2282,19 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         fades: fades.as_deref(),
         layers: layers.as_deref(),
         masks: masks.as_deref(),
+        trees: trees.as_deref(),
+        tree_players: tree_players.as_deref(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
+            continue;
+        }
+        // A tree-driven root samples from its `SkelTree`; the `SkelPlayer`
+        // on the same entity is ignored (`set_skel_tree` docs).
+        if lanes
+            .tree_players
+            .is_some_and(|lane| lane.contains(*entity))
+        {
             continue;
         }
         match sample_entity(*entity, player, &lanes, poses.as_deref_mut(), scratch) {
@@ -2264,6 +2302,59 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
             None => stats.skipped_bad_skin += 1,
         }
     }
+    // Tree-driven roots evaluate their tree, then run the same layer and
+    // node-write tail as player-driven ones.
+    if let Some(tree_players) = lanes.tree_players {
+        for (entity, player) in tree_players.entities.iter().zip(tree_players.data.iter()) {
+            match sample_tree_entity(*entity, player, &lanes, poses.as_deref_mut(), scratch) {
+                Some(()) => stats.sampled += 1,
+                None => stats.skipped_bad_skin += 1,
+            }
+        }
+    }
+}
+
+/// Skeleton and joint count of `entity`, strict: the rest table must match
+/// the joint count. Shared start of [`sample_entity`] and
+/// [`sample_tree_entity`].
+fn strict_skeleton<'a>(
+    lanes: &'a SampleLanes<'_>,
+    entity: Entity,
+) -> Option<(&'a Skeleton, usize)> {
+    let skeleton = lanes.skeletons.get(entity)?;
+    let count = skeleton.joint_count();
+    if skeleton.rest.len() != count {
+        return None;
+    }
+    Some((skeleton, count))
+}
+
+/// Composes the entity's model matrices from the blended pose and routes
+/// node writes, committing the pose. Shared tail of [`sample_entity`] and
+/// [`sample_tree_entity`].
+fn finish_pose(
+    entity: Entity,
+    lanes: &SampleLanes<'_>,
+    skeleton: &Skeleton,
+    scratch: &mut AnimScratch,
+    pose: &mut JointPose,
+) -> Option<()> {
+    scratch.skel_locals.clear();
+    scratch
+        .skel_locals
+        .extend(scratch.pose_a.trs.iter().map(|trs| trs.matrix()));
+    let root = root_matrix(lanes.transforms, entity);
+    compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
+    node_poses(
+        lanes.clips,
+        &scratch.contributors,
+        &scratch.pose_a,
+        &mut scratch.nodes,
+        &mut scratch.node_painted,
+    );
+    pose.matrices.clear();
+    pose.matrices.extend_from_slice(&scratch.matrices);
+    Some(())
 }
 
 /// Samples one playing cursor: base clip, optional crossfade, the overlay
@@ -2283,30 +2374,11 @@ fn sample_entity(
     scratch: &mut AnimScratch,
 ) -> Option<()> {
     let clip = lanes.clips.get(player.clip.0)?;
-    let skeleton = lanes.skeletons.get(entity)?;
-    let count = skeleton.joint_count();
-    if skeleton.rest.len() != count {
-        return None;
-    }
+    let (skeleton, count) = strict_skeleton(lanes, entity)?;
     // Absent `JointPose` is bad skin: verdict before any blending work.
     let pose = poses?.get_mut(entity)?;
     blend_skel_pose(entity, player, lanes, clip, count, &skeleton.rest, scratch)?;
-    scratch.skel_locals.clear();
-    scratch
-        .skel_locals
-        .extend(scratch.pose_a.trs.iter().map(|trs| trs.matrix()));
-    let root = root_matrix(lanes.transforms, entity);
-    compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
-    node_poses(
-        lanes.clips,
-        &scratch.contributors,
-        &scratch.pose_a,
-        &mut scratch.nodes,
-        &mut scratch.node_painted,
-    );
-    pose.matrices.clear();
-    pose.matrices.extend_from_slice(&scratch.matrices);
-    Some(())
+    finish_pose(entity, lanes, skeleton, scratch, pose)
 }
 
 /// Blends one root's base clip, optional crossfade and the overlay layer
@@ -2365,6 +2437,22 @@ fn blend_skel_pose<'a>(
             .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
         std::mem::swap(&mut scratch.pose_a, &mut scratch.pose_b);
     }
+    overlay_layers(entity, lanes, count, rest, scratch)
+}
+
+/// Overlays the entity's [`SkelLayerStack`] bottom-up onto the base pose
+/// already blended in `scratch.pose_a`, recording each layer's clip in
+/// `scratch.contributors`. Shared by player-driven and tree-driven roots.
+///
+/// [`None`] when a layer's mask does not match the joint count or its
+/// mask/clip is missing — the same bad-skin verdict as a missing clip.
+fn overlay_layers(
+    entity: Entity,
+    lanes: &SampleLanes<'_>,
+    count: usize,
+    rest: &[JointTrs],
+    scratch: &mut AnimScratch,
+) -> Option<()> {
     if let Some(stack) = lanes.layers.and_then(|lane| lane.get(entity)) {
         for layer in &stack.layers {
             let mask = lanes.masks?.get(layer.mask.0)?;
@@ -2386,6 +2474,48 @@ fn blend_skel_pose<'a>(
         }
     }
     Some(())
+}
+
+/// Samples one tree-driven root: evaluates its [`SkelTree`] into
+/// `scratch.tree_poses`, takes the root (last) pose as the base, overlays
+/// the layer stack and finishes with the same model matrices and node
+/// writes as [`sample_entity`]. A `SkelPlayer` on the same entity is
+/// ignored — the tree drives the root.
+///
+/// [`None`] (bad skin) on the same strict conditions as [`sample_entity`],
+/// plus any tree-contract violation (see [`eval_tree`]).
+fn sample_tree_entity(
+    entity: Entity,
+    player: &SkelTreePlayer,
+    lanes: &SampleLanes<'_>,
+    poses: Option<&mut ComponentStore<JointPose>>,
+    scratch: &mut AnimScratch,
+) -> Option<()> {
+    let tree = lanes.trees?.get(entity)?;
+    let (skeleton, count) = strict_skeleton(lanes, entity)?;
+    // Absent `JointPose` is bad skin: verdict before any blending work.
+    let pose = poses?.get_mut(entity)?;
+    scratch.contributors.clear();
+    scratch.tree_poses.clear();
+    scratch
+        .tree_poses
+        .resize(tree.nodes.len(), BlendedPose::default());
+    eval_tree(
+        tree,
+        player,
+        lanes.clips,
+        count,
+        &skeleton.rest,
+        tree::EvalBuf {
+            poses: &mut scratch.tree_poses,
+            samples: &mut scratch.samples,
+            painted: &mut scratch.painted,
+            contributors: &mut scratch.contributors,
+        },
+    )?;
+    scratch.pose_a.clone_from(scratch.tree_poses.last()?);
+    overlay_layers(entity, lanes, count, &skeleton.rest, scratch)?;
+    finish_pose(entity, lanes, skeleton, scratch, pose)
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.

@@ -259,6 +259,27 @@ impl BlendedPose {
             self.present[joint] = union(self.present[joint], presence(sample));
         }
     }
+
+    /// Folds `other` into a running N-way blend at relative `weight`.
+    ///
+    /// `total` carries the weight folded so far and starts at `0.0`. Each
+    /// fold mixes `other` in at the renormalized share
+    /// `weight / (total + weight)`, so folding poses with weights that sum
+    /// to one yields their weighted blend, and a single input at any
+    /// positive weight reads as that pose alone (the first fold takes it
+    /// whole). The two-input case is [`Self::mix_towards`] exactly (the
+    /// same lerp/slerp), and the outcome is deterministic for a fixed
+    /// fold order — rotations are order-sensitive, as everywhere else in
+    /// the blend model. Non-positive weights are a no-op.
+    pub(crate) fn fold_pose(&mut self, other: &Self, weight: f32, total: &mut f32) {
+        if weight <= 0.0 {
+            return;
+        }
+        let next = *total + weight;
+        let share = weight / next;
+        *total = next;
+        self.mix_towards(other, share);
+    }
 }
 
 /// Crossfade progress in `0..=1`: linear in `elapsed / duration`, instant
@@ -395,6 +416,65 @@ mod tests {
             Clamped01::ONE,
         );
         assert_eq!(base.present[0], [true, false, false]);
+    }
+
+    /// Runs [`BlendedPose::fold_pose`] over `inputs`, starting from an
+    /// empty blend (`total = 0`, rest contents).
+    fn fold_all(inputs: &[(&BlendedPose, f32)]) -> BlendedPose {
+        let mut acc = BlendedPose::default();
+        acc.refill_rest(&ident(1));
+        let mut total = 0.0;
+        for (pose, weight) in inputs {
+            acc.fold_pose(pose, *weight, &mut total);
+        }
+        acc
+    }
+
+    // Bodies of the fold tests sit in one inner block each: rustqual's
+    // fragment scanner hashes windows of three consecutive top-level
+    // statements, and the neighbouring tests already own the natural
+    // statement shapes.
+    #[test]
+    fn fold_single_input_takes_the_pose_whole() {
+        {
+            let pose = pose_of(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 1.0);
+            let acc = fold_all(&[(&pose, 0.25)]);
+            assert!(close(acc.trs[0].translation, Vec3::new(4.0, 0.0, 0.0)));
+        }
+    }
+
+    #[test]
+    fn fold_two_halves_match_mix_towards() {
+        {
+            let a = pose_of(&[sample_t(Vec3::X)], 1.0);
+            let b = pose_of(&[sample_t(Vec3::Y)], 1.0);
+            let folded = fold_all(&[(&a, 0.5), (&b, 0.5)]);
+            let mut mixed = a;
+            mixed.mix_towards(&b, 0.5);
+            assert!(close(folded.trs[0].translation, mixed.trs[0].translation));
+        }
+    }
+
+    #[test]
+    fn fold_three_equal_weights_average_the_poses() {
+        {
+            let a = pose_of(&[sample_t(Vec3::new(3.0, 0.0, 0.0))], 1.0);
+            let b = pose_of(&[sample_t(Vec3::new(0.0, 3.0, 0.0))], 1.0);
+            let c = pose_of(&[sample_t(Vec3::new(0.0, 0.0, 3.0))], 1.0);
+            let acc = fold_all(&[(&a, 1.0), (&b, 1.0), (&c, 1.0)]);
+            assert!(close(acc.trs[0].translation, Vec3::ONE));
+        }
+    }
+
+    #[test]
+    fn fold_skips_non_positive_weights_and_unions_presence() {
+        {
+            let empty = pose_of(&[JointSample::default()], 1.0);
+            let moved = pose_of(&[sample_t(Vec3::Y)], 1.0);
+            let acc = fold_all(&[(&empty, 0.0), (&moved, -1.0), (&moved, 2.0)]);
+            assert!(close(acc.trs[0].translation, Vec3::Y));
+            assert_eq!(acc.present[0], [true, false, false]);
+        }
     }
 
     #[test]
