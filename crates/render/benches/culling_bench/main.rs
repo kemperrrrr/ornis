@@ -33,6 +33,9 @@ use ornis_render::{
     MaterialIdx, compact_visible_indices,
 };
 
+mod probe;
+mod profile;
+
 /// Sphere mesh index count placeholder: the cull pass only compacts, the
 /// count is carried through into the indirect args untouched.
 const INDEX_COUNT: u32 = 42;
@@ -64,6 +67,16 @@ const VISIBLE_PART_DENOM: usize = 10;
 /// which panics instead of skipping when [`gpu_required`] holds.
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
     ornis_render::try_headless_device()
+}
+
+// qual:allow(test_quality, untested) reason: "bench camera runs only under the criterion harness, never under libtest"
+/// The bench camera's view-projection — the shared frame of the RAT-35
+/// culling groups and the RAT-48 stage profile below.
+fn camera_view_proj() -> Mat4 {
+    let view =
+        glam::camera::rh::view::look_at_mat4(Vec3::from_array(CAMERA_EYE), Vec3::ZERO, Vec3::Y);
+    let proj = glam::camera::rh::proj::directx::perspective(FOV_RAD, ASPECT, NEAR, FAR);
+    proj.mul_mat4(&view)
 }
 
 // qual:allow(test_quality, untested) reason: "bench scene builder runs only under the criterion harness, never under libtest"
@@ -226,10 +239,7 @@ fn run_gpu_bench(
 /// [`run_gpu_bench`], so a headless machine degrades to the CPU column
 /// instead of failing the bench.
 fn bench_culling(c: &mut Criterion) {
-    let view =
-        glam::camera::rh::view::look_at_mat4(Vec3::from_array(CAMERA_EYE), Vec3::ZERO, Vec3::Y);
-    let proj = glam::camera::rh::proj::directx::perspective(FOV_RAD, ASPECT, NEAR, FAR);
-    let view_proj = proj.mul_mat4(&view);
+    let view_proj = camera_view_proj();
     let gpu = device();
 
     let mut group = c.benchmark_group("culling");
@@ -263,6 +273,11 @@ fn bench_culling(c: &mut Criterion) {
     }
     eprintln!("culling premises:\n{premise}");
     group.finish();
+
+    // The RAT-48 stage profile runs inside this entry (one cluster root
+    // for the whole bench): it opens its own criterion group after the
+    // `culling` group above is finished and dropped.
+    profile::bench_culling_profile(c);
 }
 
 criterion_group!(benches, bench_culling);

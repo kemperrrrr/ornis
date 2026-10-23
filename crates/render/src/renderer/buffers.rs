@@ -3,6 +3,7 @@
 use super::*;
 use crate::antialias::MotionValidity;
 use ornis_core::Entity;
+mod instance_records;
 /// GPU per-instance record mirroring CPU [`InstanceData`] with padding to 16 bytes.
 ///
 /// The WGSL `PerObject` declaration is generated from this layout
@@ -382,8 +383,11 @@ impl Renderer3D {
     ///
     /// The converted records come back next to the upload, so the caller
     /// can stage the very same records for the GPU culler instead of
-    /// converting the frame a second time.
-    // qual:allow(iosp) reason: "Keep instance identities, previous transforms, and GPU staging aligned in one frame transition"
+    /// converting the frame a second time. The two halves
+    /// (`stage_instance_records`, `write_instance_records`, the sibling
+    /// `instance_records` module) stay separate methods so the culling
+    /// profile bench can time them apart while the frame runs the same
+    /// composition.
     pub(crate) fn upload_instances_with_motion_flags(
         &self,
         device: &wgpu::Device,
@@ -392,56 +396,36 @@ impl Renderer3D {
         motion_valid: &[MotionValidity],
         entities: &[Entity],
     ) -> Vec<PerObjectGpu> {
-        self.ensure_instance_capacity(device, instances.len());
-        let count = instances
-            .len()
-            .min(self.max_objects.load(std::sync::atomic::Ordering::Relaxed) as usize);
-        let identity_complete = entities.len() >= count;
-        let previous_by_entity = read_lock(&self.previous_instance_models);
-        let mut next_by_entity = std::collections::HashMap::with_capacity(count);
-        let mut gpu_objects: Vec<PerObjectGpu> =
-            Vec::with_capacity(staging_capacity_for_instances(count));
-        for (index, inst) in instances.iter().take(count).enumerate() {
-            let model_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
-                inst.model_matrix.to_cols_array_2d();
-            let normal_arr: [[f32; VEC4_COMPONENTS]; VEC4_COMPONENTS] =
-                inst.normal_matrix.to_cols_array_2d();
-            let entity = entities.get(index).copied();
-            let requested = motion_valid
-                .get(index)
-                .copied()
-                .unwrap_or(MotionValidity::Valid);
-            let (previous, validity) = previous_instance_state(
-                inst,
-                entity,
-                &previous_by_entity,
-                requested,
-                identity_complete,
-            );
-            if identity_complete && let Some(entity) = entity {
-                next_by_entity.insert(entity, inst.model_matrix);
-            }
-            gpu_objects.push(PerObjectGpu {
-                model: model_arr,
-                normal_matrix: normal_arr,
-                previous_model: previous.to_cols_array_2d(),
-                material_index: inst.material_index,
-                motion_valid: validity.shader_flag(),
-                _padding: [0; 2],
-            });
-        }
-        drop(previous_by_entity);
-        *write_lock(&self.previous_instance_models) = if identity_complete {
-            next_by_entity
-        } else {
-            std::collections::HashMap::new()
-        };
-        queue.write_buffer(
-            &read_lock(&self.per_object_buffer),
-            0,
-            bytemuck::cast_slice(&gpu_objects),
-        );
-        gpu_objects
+        let records = self.stage_instance_records(device, instances, motion_valid, entities);
+        self.write_instance_records(queue, &records);
+        records
+    }
+
+    /// Test-only profiling hook: the record-building half of the upload
+    /// (`stage_instance_records`) without the queue write, so the
+    /// culling bench times the conversion on its own. Production frames
+    /// go through `upload_instances_with_motion_flags`.
+    // qual:api — external consumer is the culling criterion bench (separate crate root), invisible to the in-crate call graph.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn profile_stage_records(
+        &self,
+        device: &wgpu::Device,
+        instances: &[InstanceData],
+        motion_valid: &[MotionValidity],
+        entities: &[Entity],
+    ) -> Vec<PerObjectGpu> {
+        self.stage_instance_records(device, instances, motion_valid, entities)
+    }
+
+    /// Test-only profiling hook: the full-frame instance write
+    /// (`write_instance_records`) timed on its own by the culling bench
+    /// — this is the `upload_per_objects` stage of the profile report.
+    // qual:api — external consumer is the culling criterion bench (separate crate root), invisible to the in-crate call graph.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn profile_write_records(&self, queue: &wgpu::Queue, records: &[PerObjectGpu]) {
+        self.write_instance_records(queue, records);
     }
 
     /// Ensure the palette buffer fits `needed` slots, growing it (and only

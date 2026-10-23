@@ -2,10 +2,13 @@
 //! ([`Culler`]); the parent module holds the shared layout and the CPU
 //! reference.
 
+use std::sync::PoisonError;
+
 use glam::Mat4;
 
 use super::CULL_COMPUTE_WGSL;
 use super::CULL_PARAMS_BYTE_SIZE;
+use super::DirtyRange;
 use super::DrawIndexedIndirectArgs;
 use super::INDIRECT_ARGS_WORD_BYTES;
 use super::INDIRECT_ARGS_WORD_COUNT;
@@ -238,6 +241,39 @@ impl Culler {
         })
     }
 
+    /// One write of the resident staging's dirty runs into the source
+    /// buffer — the single dirty-fill implementation
+    /// [`Culler::compact`], [`Culler::compact_records`] and the profile
+    /// hook all share (one copy of the offset/size/write loop).
+    fn write_dirty(&self, queue: &wgpu::Queue, records: &[PerObjectGpu], ranges: &[DirtyRange]) {
+        for range in ranges {
+            let start = range.start as usize;
+            queue.write_buffer(
+                &self.src_buffer,
+                start as u64 * std::mem::size_of::<PerObjectGpu>() as u64,
+                bytemuck::cast_slice(&records[start..start + range.count as usize]),
+            );
+        }
+    }
+
+    /// One staging transition under the resident lock: `build` fills the
+    /// frame's records and returns their dirty runs against the previous
+    /// frame, those runs are written into the source buffer, and the
+    /// staging roles swap. [`Culler::compact`] and
+    /// [`Culler::compact_records`] differ only in `build`, so the diff
+    /// and the dirty fill each exist exactly once.
+    fn stage_frame(
+        &self,
+        queue: &wgpu::Queue,
+        build: impl FnOnce(&[PerObjectGpu], &mut Vec<PerObjectGpu>) -> Vec<DirtyRange>,
+    ) {
+        let mut staging = self.staging.lock().unwrap_or_else(PoisonError::into_inner);
+        let CullerStaging { prev, next } = &mut *staging;
+        let ranges = build(prev, next);
+        self.write_dirty(queue, next, &ranges);
+        std::mem::swap(prev, next);
+    }
+
     /// Stages one culling frame: converts `instances` into records,
     /// diffs them against the previously staged frame to track dirty
     /// runs (a static scene uploads nothing), writes only those runs
@@ -266,26 +302,48 @@ impl Culler {
                 capacity: self.capacity,
             });
         }
-        let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
-        {
-            let mut staging = self
-                .staging
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let CullerStaging { prev, next } = &mut *staging;
-            let staged = stage_next_instances(prev, next, instances);
-            for range in staged {
-                let start = range.start as usize;
-                queue.write_buffer(
-                    &self.src_buffer,
-                    start as u64 * record_bytes,
-                    bytemuck::cast_slice(&next[start..start + range.count as usize]),
-                );
-            }
-            std::mem::swap(prev, next);
-        }
+        self.stage_frame(queue, |prev, next| {
+            stage_next_instances(prev, next, instances)
+        });
         self.prewrite_frame(queue, view_proj, index_count, instances.len() as u32);
         Ok(())
+    }
+
+    // qual:allow(test_quality, untested) reason: "test-util profiling hook reached only by the criterion culling bench (a separate crate), never under libtest"
+    /// Test-only profiling hook: the per-frame uniform and indirect-args
+    /// pre-write of [`Culler::prewrite_frame`], timed on its own by the
+    /// culling bench (the production entry points still call the private
+    /// method inline).
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn profile_prewrite(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: &Mat4,
+        index_count: u32,
+        count: u32,
+    ) {
+        self.prewrite_frame(queue, view_proj, index_count, count);
+    }
+
+    // qual:allow(test_quality, untested) reason: "test-util profiling hook reached only by the criterion culling bench (a separate crate), never under libtest"
+    /// Test-only profiling hook: the dirty-fill writes of one frame over
+    /// bench-owned records and `(start, count)` runs — the same
+    /// [`Culler::write_dirty`] the staging entry points use, so the
+    /// bench times production write code against its own diff history.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn profile_write_dirty(
+        &self,
+        queue: &wgpu::Queue,
+        records: &[PerObjectGpu],
+        ranges: &[(u32, u32)],
+    ) {
+        let runs: Vec<DirtyRange> = ranges
+            .iter()
+            .map(|&(start, count)| DirtyRange { start, count })
+            .collect();
+        self.write_dirty(queue, records, &runs);
     }
 
     /// Pre-writes the per-frame uniform, the indirect args (with a zero
@@ -319,30 +377,17 @@ impl Culler {
         records: &[PerObjectGpu],
     ) -> Result<(), CullerError> {
         if records.len() > self.capacity as usize {
+            let count = records.len() as u32;
             return Err(CullerError::CapacityExceeded {
-                count: records.len() as u32,
+                count,
                 capacity: self.capacity,
             });
         }
-        let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
-        {
-            let mut staging = self
-                .staging
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let CullerStaging { prev, next } = &mut *staging;
+        self.stage_frame(queue, |prev, next| {
             next.clear();
             next.extend_from_slice(records);
-            for range in diff_staged_records(prev, next) {
-                let start = range.start as usize;
-                queue.write_buffer(
-                    &self.src_buffer,
-                    start as u64 * record_bytes,
-                    bytemuck::cast_slice(&next[start..start + range.count as usize]),
-                );
-            }
-            std::mem::swap(prev, next);
-        }
+            diff_staged_records(prev, next)
+        });
         self.prewrite_frame(queue, view_proj, index_count, records.len() as u32);
         Ok(())
     }
@@ -355,16 +400,38 @@ impl Culler {
     /// `compact` are ordered before any later submit, so recording here
     /// always sees the staged frame.
     pub fn record_compact(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.record_pass(encoder, None);
+    }
+
+    // qual:allow(test_quality, untested) reason: "test-util profiling hook reached only by the criterion culling bench (a separate crate), never under libtest"
+    /// Test-only profiling hook: [`Culler::record_compact`] with pass
+    /// timestamp writes, so the bench measures the dispatch inside the
+    /// caller's encoder exactly where the production frame records it.
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn record_compact_timed(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamp_writes: wgpu::ComputePassTimestampWrites<'_>,
+    ) {
+        self.record_pass(encoder, Some(timestamp_writes));
+    }
+
+    /// The one compaction pass: one compute dispatch over the staged
+    /// frame, with optional timestamp writes at the pass boundary
+    /// (`None` for the production entry point).
+    fn record_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("culler pass"),
-            timestamp_writes: None,
+            timestamp_writes,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.dispatch_workgroups(
-            cull_workgroup_count(self.staged_count.load(std::sync::atomic::Ordering::Relaxed)),
-            1,
-            1,
-        );
+        let staged = self.staged_count.load(std::sync::atomic::Ordering::Relaxed);
+        pass.dispatch_workgroups(cull_workgroup_count(staged), 1, 1);
     }
 }
