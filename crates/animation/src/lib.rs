@@ -2117,14 +2117,24 @@ fn step_player(player: &mut SkelPlayer, clips: &ColdComponentStore<SkelClip>, dt
 }
 
 /// Advances playing [`SkelPlayer`] cursors against their clip duration.
+/// A cursor on a tree-driven root ([`SkelTreePlayer`]) is skipped: the
+/// tree ignores it, so its clock must not drift while it is ignored.
 fn advance_base_players(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
+    let tree_players = store.read_lane::<SkelTreePlayer>();
     let Some(mut players) = store.write_lane::<SkelPlayer>() else {
         return;
     };
-    for player in players.data.iter_mut() {
+    let players = &mut *players;
+    for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
+        if tree_players
+            .as_deref()
+            .is_some_and(|lane| lane.contains(*entity))
+        {
+            continue;
+        }
         step_player(player, &clips, dt);
     }
 }
@@ -2329,6 +2339,15 @@ fn strict_skeleton<'a>(
     Some((skeleton, count))
 }
 
+/// Fits the per-node pose scratch to `nodes` without dropping live
+/// [`BlendedPose`] elements: the steady state (unchanged node count) is a
+/// no-op, so every `refill`/`refill_rest` reuses the inner joint buffers
+/// and the sample pass stays allocation-free. `resize_with` truncates only
+/// when a tree shrinks.
+fn fit_tree_poses(poses: &mut Vec<BlendedPose>, nodes: usize) {
+    poses.resize_with(nodes, BlendedPose::default);
+}
+
 /// Composes the entity's model matrices from the blended pose and routes
 /// node writes, committing the pose. Shared tail of [`sample_entity`] and
 /// [`sample_tree_entity`].
@@ -2496,10 +2515,7 @@ fn sample_tree_entity(
     // Absent `JointPose` is bad skin: verdict before any blending work.
     let pose = poses?.get_mut(entity)?;
     scratch.contributors.clear();
-    scratch.tree_poses.clear();
-    scratch
-        .tree_poses
-        .resize(tree.nodes.len(), BlendedPose::default());
+    fit_tree_poses(&mut scratch.tree_poses, tree.nodes.len());
     eval_tree(
         tree,
         player,
@@ -3138,5 +3154,28 @@ mod import_tests {
         bake_bind_transform(&mut positions, &mut normals, matrix);
         assert!((Vec3::from_array(positions[0]) - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-6);
         assert!((Vec3::from_array(normals[0]) - Vec3::Y).length() < 1e-6);
+    }
+
+    #[test]
+    fn tree_pose_scratch_keeps_buffers_across_frames() {
+        // One inner block: rustqual's fragment scanner hashes windows of
+        // three consecutive top-level statements.
+        {
+            let mut poses: Vec<BlendedPose> = Vec::new();
+            fit_tree_poses(&mut poses, 2);
+            for pose in &mut poses {
+                pose.refill_rest(&[JointTrs::IDENTITY; 3]);
+            }
+            let before: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+            fit_tree_poses(&mut poses, 2);
+            let after: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+            assert_eq!(
+                before, after,
+                "a same-size fit must not drop the pose buffers"
+            );
+            fit_tree_poses(&mut poses, 3);
+            assert_eq!(poses.len(), 3);
+            assert_eq!(before, [poses[0].trs.capacity(), poses[1].trs.capacity()]);
+        }
     }
 }

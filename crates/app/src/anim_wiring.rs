@@ -379,6 +379,12 @@ pub enum PlaybackError {
         /// Rejected clip handle.
         clip: ClipId,
     },
+    /// The root is driven by an [`SkelTree`]: the single-player playback
+    /// entries do not apply while the tree owns the root. Drive the tree
+    /// through [`set_tree_param`], or take the root back for the player
+    /// with [`clear_skel_tree`] first.
+    #[error("entity is driven by an animation tree")]
+    TreeDriven,
 }
 
 /// Starts `name` on `entity`, fading from whatever plays there now.
@@ -402,17 +408,23 @@ pub enum PlaybackError {
 ///
 /// # Errors
 ///
-/// [`PlaybackError::Missing`] when `entity` carries neither catalog nor
-/// cursor (hand-built skeletal cursors without an [`Animator`] start
-/// through [`set_playing`] instead). [`PlaybackError::UnknownClip`] when
-/// `name` is not indexed. [`PlaybackError::InvalidClip`] is unreachable
-/// here: object names resolve only to playlists that track `entity`.
+/// [`PlaybackError::TreeDriven`] when `entity` is tree-driven
+/// ([`set_skel_tree`]): the tree owns the root's playback, and no fade or
+/// cursor is written. [`PlaybackError::Missing`] when `entity` carries
+/// neither catalog nor cursor (hand-built skeletal cursors without an
+/// [`Animator`] start through [`set_playing`] instead).
+/// [`PlaybackError::UnknownClip`] when `name` is not indexed.
+/// [`PlaybackError::InvalidClip`] is unreachable here: object names
+/// resolve only to playlists that track `entity`.
 pub fn play_crossfade(
     store: &mut SmartStore,
     entity: Entity,
     name: &str,
     duration: Seconds,
 ) -> Result<(), PlaybackError> {
+    if tree_driven(store, entity) {
+        return Err(PlaybackError::TreeDriven);
+    }
     if let Ok(mut animator) = try_animator(store, entity) {
         return animator
             .play_crossfade(name, duration)
@@ -432,6 +444,14 @@ pub fn play_crossfade(
             name: name.to_owned(),
         })?;
     fade_to_clip(store, entity, clip, duration)
+}
+
+/// Whether `entity` is driven by an [`SkelTree`] ([`set_skel_tree`]): the
+/// tree owns the root's playback until [`clear_skel_tree`].
+fn tree_driven(store: &SmartStore, entity: Entity) -> bool {
+    store
+        .read_lane::<SkelTreePlayer>()
+        .is_some_and(|players| players.contains(entity))
 }
 
 /// Object playlist holding an [`AnimClip`] that tracks `entity`, indexed
@@ -475,15 +495,20 @@ fn object_clip_named(store: &SmartStore, entity: Entity, name: &str) -> Option<C
 ///
 /// # Errors
 ///
-/// [`PlaybackError::Missing`] when `entity` has no [`AnimPlayer`].
-/// [`PlaybackError::InvalidClip`] when `clip` is not a live playlist
-/// with a track for `entity`.
+/// [`PlaybackError::TreeDriven`] when `entity` is tree-driven
+/// ([`set_skel_tree`]): the tree owns the root's playback, and no cursor
+/// is written. [`PlaybackError::Missing`] when `entity` has no
+/// [`AnimPlayer`]. [`PlaybackError::InvalidClip`] when `clip` is not a
+/// live playlist with a track for `entity`.
 pub fn fade_to_clip(
     store: &mut SmartStore,
     entity: Entity,
     clip: ClipId,
     duration: Seconds,
 ) -> Result<(), PlaybackError> {
+    if tree_driven(store, entity) {
+        return Err(PlaybackError::TreeDriven);
+    }
     let outgoing = store
         .read_lane::<AnimPlayer>()
         .and_then(|players| players.get(entity).copied())
@@ -547,6 +572,39 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
     true
 }
 
+/// Whether `tree` is structurally sound and installable: non-empty
+/// nodes, finite parameter defaults, blend axes that name a parameter,
+/// children at strictly ascending finite positions pointing at earlier
+/// nodes, and leaf [`ClipId`]s that name a live [`SkelClip`] playlist —
+/// the same handle check [`fade_to_clip`] applies to its `clip`. An
+/// unknown handle is refused here instead of bad-skinning the root every
+/// frame.
+fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
+    let clips = store.read_cold_lane::<SkelClip>();
+    !tree.nodes.is_empty()
+        && tree.params.iter().all(|param| param.default.is_finite())
+        && tree
+            .nodes
+            .iter()
+            .enumerate()
+            .all(|(index, node)| match node {
+                TreeNodeDef::Clip { clip } => clips
+                    .as_deref()
+                    .and_then(|clips| clips.get(clip.0))
+                    .is_some(),
+                TreeNodeDef::Blend1d { axis, children } => {
+                    *axis < tree.params.len()
+                        && children
+                            .windows(2)
+                            .all(|pair| pair[0].position < pair[1].position)
+                        && children
+                            .iter()
+                            .all(|child| child.node < index && child.position.is_finite())
+                }
+                _ => false,
+            })
+}
+
 /// Installs `tree` as the animation tree on a skeleton root — the typed
 /// [`SkelTree`] input, so hosts never install the tree lanes themselves.
 /// Set semantics: `tree` replaces whatever tree sat on the root. Leaf
@@ -554,10 +612,12 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
 /// node order) start at time zero with `speed = 1`, full weight and
 /// looping playback; parameters take their [`TreeParam::default`] values
 /// until [`set_tree_param`]. A root with a tree is driven by it — a
-/// [`SkelPlayer`] on the same entity is ignored.
+/// [`SkelPlayer`] on the same entity is ignored, and the playback entries
+/// report [`PlaybackError::TreeDriven`] until [`clear_skel_tree`] takes
+/// the root back.
 ///
-/// Returns whether `root` carries a [`Skeleton`] (the tree's anchor);
-/// nothing is written without one.
+/// Returns whether `root` carries a [`Skeleton`] (the tree's anchor) and
+/// `tree` passes `tree_is_valid`; nothing is written otherwise.
 // qual:api — typed `SkelTree` input for hosts; in-tree callers are
 // tests until a production host entry lands.
 pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bool {
@@ -565,6 +625,9 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
         .read_lane::<Skeleton>()
         .is_none_or(|skeletons| skeletons.get(root).is_none())
     {
+        return false;
+    }
+    if !tree_is_valid(store, &tree) {
         return false;
     }
     store.register_cold::<SkelTree>();
@@ -597,11 +660,15 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
 /// value outside an axis's covered range simply clamps at the end inputs
 /// during blend1d evaluation.
 ///
-/// Returns `false` when `root` has no [`SkelTree`] or [`SkelTreePlayer`],
-/// or names no parameter — nothing is written then.
+/// Returns `false` — and writes nothing — when `root` has no [`SkelTree`]
+/// or [`SkelTreePlayer`], names no parameter, or `value` is not finite
+/// (NaN/±inf would poison the blended pose silently).
 // qual:api — typed tree parameter input for hosts; in-tree callers are
 // tests until a production host entry lands.
 pub fn set_tree_param(store: &mut SmartStore, root: Entity, name: &str, value: f32) -> bool {
+    if !value.is_finite() {
+        return false;
+    }
     let trees = store.read_cold_lane::<SkelTree>();
     let Some(index) = trees
         .as_deref()
@@ -625,6 +692,31 @@ pub fn set_tree_param(store: &mut SmartStore, root: Entity, name: &str, value: f
     };
     *slot = value;
     true
+}
+
+/// Removes the [`SkelTree`] and its [`SkelTreePlayer`] from a skeleton
+/// root — the way back to single-player playback. Set semantics: after
+/// the call the root is no longer tree-driven, whatever tree was on it.
+/// The playback entries accept the root again
+/// ([`PlaybackError::TreeDriven`] is gone).
+///
+/// Returns whether `root` carried a tree to remove.
+// qual:api — typed tree removal for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn clear_skel_tree(store: &mut SmartStore, root: Entity) -> bool {
+    let had_tree = store
+        .read_cold_lane::<SkelTree>()
+        .is_some_and(|trees| trees.contains(root))
+        || store
+            .read_lane::<SkelTreePlayer>()
+            .is_some_and(|players| players.contains(root));
+    if let Some(mut trees) = store.write_cold_lane::<SkelTree>() {
+        trees.remove(root);
+    }
+    if let Some(mut players) = store.write_lane::<SkelTreePlayer>() {
+        players.remove(root);
+    }
+    had_tree
 }
 
 /// Wires animation from a loaded glTF scene into an already-spawned
@@ -1805,10 +1897,21 @@ mod tests {
         // scanner hashes windows of three consecutive top-level statements,
         // and neighbouring tests already own the natural statement shapes.
         {
-            use ornis_animation::{SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam};
+            use ornis_animation::{
+                SkelClip, SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam,
+            };
             let mut store = SmartStore::new();
             let root = store.create_entity();
             let clip = store.create_entity();
+            store.register_cold::<SkelClip>();
+            store.insert_cold(
+                clip,
+                SkelClip {
+                    name: "walk".to_string(),
+                    duration: 1.0,
+                    tracks: Vec::new(),
+                },
+            );
             let tree = SkelTree {
                 nodes: vec![
                     TreeNodeDef::Clip { clip: ClipId(clip) },
@@ -1896,6 +1999,326 @@ mod tests {
                 .unwrap()
                 .clone();
             assert_eq!(player.params, vec![1.0]);
+        }
+    }
+
+    /// [`set_skel_tree`] refuses uninstallable trees instead of
+    /// bad-skinning the root every frame: an unknown leaf handle (the
+    /// check [`fade_to_clip`] applies), no root node, and a non-finite
+    /// parameter default.
+    #[test]
+    fn set_skel_tree_rejects_uninstallable_trees() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelClip, SkelTree, TreeNodeDef, TreeParam};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let clip = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            let leaf = || TreeNodeDef::Clip { clip: ClipId(clip) };
+            {
+                let tree = SkelTree {
+                    nodes: vec![leaf()],
+                    params: Vec::new(),
+                };
+                assert!(
+                    !set_skel_tree(&mut store, root, tree),
+                    "unknown leaf handle"
+                );
+            }
+            store.register_cold::<SkelClip>();
+            store.insert_cold(
+                clip,
+                SkelClip {
+                    name: "walk".to_string(),
+                    duration: 1.0,
+                    tracks: Vec::new(),
+                },
+            );
+            {
+                let tree = SkelTree {
+                    nodes: Vec::new(),
+                    params: Vec::new(),
+                };
+                assert!(!set_skel_tree(&mut store, root, tree), "no root node");
+            }
+            {
+                let tree = SkelTree {
+                    nodes: vec![leaf()],
+                    params: vec![TreeParam {
+                        name: "walk".to_string(),
+                        default: f32::NAN,
+                    }],
+                };
+                assert!(!set_skel_tree(&mut store, root, tree), "non-finite default");
+            }
+            {
+                let tree = SkelTree {
+                    nodes: vec![leaf()],
+                    params: Vec::new(),
+                };
+                assert!(
+                    set_skel_tree(&mut store, root, tree),
+                    "the sound tree installs"
+                );
+            }
+        }
+    }
+
+    /// [`set_skel_tree`] refuses broken blend nodes: an axis that names no
+    /// parameter, a child not earlier than its parent, positions not
+    /// strictly ascending, and a non-finite position.
+    #[test]
+    fn set_skel_tree_rejects_broken_blends() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelClip, SkelTree, TreeChild, TreeNodeDef, TreeParam};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let clip = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            store.register_cold::<SkelClip>();
+            store.insert_cold(
+                clip,
+                SkelClip {
+                    name: "walk".to_string(),
+                    duration: 1.0,
+                    tracks: Vec::new(),
+                },
+            );
+            let leaf = || TreeNodeDef::Clip { clip: ClipId(clip) };
+            let blend = |axis, children| TreeNodeDef::Blend1d { axis, children };
+            let param = TreeParam {
+                name: "walk".to_string(),
+                default: 0.0,
+            };
+            {
+                let tree = SkelTree {
+                    nodes: vec![
+                        leaf(),
+                        blend(
+                            1,
+                            vec![TreeChild {
+                                position: 0.0,
+                                node: 0,
+                            }],
+                        ),
+                    ],
+                    params: vec![param.clone()],
+                };
+                assert!(!set_skel_tree(&mut store, root, tree), "axis names nothing");
+            }
+            {
+                let tree = SkelTree {
+                    nodes: vec![
+                        leaf(),
+                        blend(
+                            0,
+                            vec![TreeChild {
+                                position: 0.0,
+                                node: 1,
+                            }],
+                        ),
+                    ],
+                    params: vec![param.clone()],
+                };
+                assert!(!set_skel_tree(&mut store, root, tree), "child not earlier");
+            }
+            {
+                let tree = SkelTree {
+                    nodes: vec![
+                        leaf(),
+                        leaf(),
+                        blend(
+                            0,
+                            vec![
+                                TreeChild {
+                                    position: 1.0,
+                                    node: 0,
+                                },
+                                TreeChild {
+                                    position: 1.0,
+                                    node: 1,
+                                },
+                            ],
+                        ),
+                    ],
+                    params: vec![param.clone()],
+                };
+                assert!(
+                    !set_skel_tree(&mut store, root, tree),
+                    "positions not strictly ascending"
+                );
+            }
+            {
+                let tree = SkelTree {
+                    nodes: vec![
+                        leaf(),
+                        blend(
+                            0,
+                            vec![TreeChild {
+                                position: f32::INFINITY,
+                                node: 0,
+                            }],
+                        ),
+                    ],
+                    params: vec![param],
+                };
+                assert!(
+                    !set_skel_tree(&mut store, root, tree),
+                    "non-finite position"
+                );
+            }
+        }
+    }
+
+    /// [`set_tree_param`] refuses non-finite values — NaN/±inf would
+    /// poison the blended pose silently — and writes nothing on refusal.
+    #[test]
+    fn set_tree_param_rejects_non_finite_values() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelTree, SkelTreePlayer, TreeNodeDef, TreeParam};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            assert!(set_skel_tree(
+                &mut store,
+                root,
+                SkelTree {
+                    nodes: vec![TreeNodeDef::Blend1d {
+                        axis: 0,
+                        children: Vec::new(),
+                    }],
+                    params: vec![TreeParam {
+                        name: "walk".to_string(),
+                        default: 0.5,
+                    }],
+                }
+            ));
+            assert!(!set_tree_param(&mut store, root, "walk", f32::NAN));
+            assert!(!set_tree_param(&mut store, root, "walk", f32::INFINITY));
+            let player = store
+                .read_lane::<SkelTreePlayer>()
+                .unwrap()
+                .get(root)
+                .unwrap()
+                .clone();
+            assert_eq!(player.params, vec![0.5], "nothing is written on refusal");
+        }
+    }
+
+    /// [`clear_skel_tree`] takes the root back for single-player
+    /// playback: both tree lanes are gone, and a second clear finds
+    /// nothing.
+    #[test]
+    fn clear_skel_tree_takes_the_root_back() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelClip, SkelTree, SkelTreePlayer, TreeNodeDef};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let clip = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            assert!(!clear_skel_tree(&mut store, root), "no tree to remove");
+            store.register_cold::<SkelClip>();
+            store.insert_cold(
+                clip,
+                SkelClip {
+                    name: "walk".to_string(),
+                    duration: 1.0,
+                    tracks: Vec::new(),
+                },
+            );
+            assert!(set_skel_tree(
+                &mut store,
+                root,
+                SkelTree {
+                    nodes: vec![TreeNodeDef::Clip { clip: ClipId(clip) }],
+                    params: Vec::new(),
+                }
+            ));
+            assert!(clear_skel_tree(&mut store, root));
+            assert!(
+                store
+                    .read_cold_lane::<SkelTree>()
+                    .is_none_or(|trees| trees.get(root).is_none())
+            );
+            assert!(
+                store
+                    .read_lane::<SkelTreePlayer>()
+                    .is_none_or(|players| players.get(root).is_none())
+            );
+            assert!(!clear_skel_tree(&mut store, root), "already clear");
+        }
+    }
+
+    /// The playback entries refuse a tree-driven root with
+    /// [`PlaybackError::TreeDriven`] — no silent no-op — and
+    /// [`clear_skel_tree`] hands the root back to them.
+    #[test]
+    fn playback_entries_error_on_tree_root() {
+        // One inner block, as in hot_path_bench.rs: rustqual's fragment
+        // scanner hashes windows of three consecutive top-level statements,
+        // and neighbouring tests already own the natural statement shapes.
+        {
+            use ornis_animation::{SkelTree, TreeNodeDef, TreeParam};
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            let playlist = store.create_entity();
+            store.insert(
+                root,
+                Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+            );
+            assert!(set_skel_tree(
+                &mut store,
+                root,
+                SkelTree {
+                    nodes: vec![TreeNodeDef::Blend1d {
+                        axis: 0,
+                        children: Vec::new(),
+                    }],
+                    params: vec![TreeParam {
+                        name: "walk".to_string(),
+                        default: 0.0,
+                    }],
+                }
+            ));
+            let fade = fade_to_clip(&mut store, root, ClipId(playlist), Seconds::new(0.1));
+            assert_eq!(fade, Err(PlaybackError::TreeDriven), "fade_to_clip refuses");
+            let play = play_crossfade(&mut store, root, "walk", Seconds::new(0.1));
+            assert_eq!(
+                play,
+                Err(PlaybackError::TreeDriven),
+                "play_crossfade refuses"
+            );
+            assert!(clear_skel_tree(&mut store, root));
+            let after = fade_to_clip(&mut store, root, ClipId(playlist), Seconds::new(0.1));
+            assert_eq!(
+                after,
+                Err(PlaybackError::Missing),
+                "the player verdict is back"
+            );
         }
     }
 }

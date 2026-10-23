@@ -136,6 +136,9 @@ impl GameWorld {
     ///
     /// # Errors
     ///
+    /// [`PlaybackError::TreeDriven`] when `entity` is driven by an
+    /// animation tree ([`clear_skel_tree`](crate::anim_wiring::clear_skel_tree)
+    /// takes the root back for the player).
     /// [`PlaybackError::Missing`] when `entity` has no animator catalog
     /// and no player. [`PlaybackError::UnknownClip`] when `name` is not
     /// indexed.

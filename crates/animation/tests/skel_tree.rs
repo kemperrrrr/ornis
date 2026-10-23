@@ -4,9 +4,10 @@
 //! and pause like phase-E players, and any tree-contract violation skips
 //! the root (bad skin), never truncates.
 //!
-//! Every fixture body sits in one inner block: rustqual's fragment scanner
-//! hashes windows of three consecutive top-level statements across files,
-//! and `skel_blend.rs` already owns the natural statement shapes.
+//! Multi-statement fixtures keep their bodies in one inner block:
+//! rustqual's fragment scanner hashes windows of three consecutive
+//! top-level statements across files, and `skel_blend.rs` already owns the
+//! natural statement shapes.
 
 use glam::{Mat4, Vec3};
 use ornis_animation::{
@@ -37,12 +38,10 @@ fn engine() -> Engine {
 }
 
 fn store_mut(engine: &mut Engine) -> &mut SmartStore {
-    {
-        engine
-            .world_mut()
-            .store_mut()
-            .expect("world owns SmartStore")
-    }
+    engine
+        .world_mut()
+        .store_mut()
+        .expect("world owns SmartStore")
 }
 
 fn store_ref(engine: &Engine) -> &SmartStore {
@@ -51,25 +50,29 @@ fn store_ref(engine: &Engine) -> &SmartStore {
 
 /// Joint track holding one constant translation.
 fn constant(joint: u32, value: Vec3) -> JointTrack {
-    {
-        JointTrack {
-            joint: JointId::from_raw(joint),
-            node: None,
-            translation: KeyTrack::linear(vec![Key { time: 0.0, value }]),
-            rotation: KeyTrack::linear(Vec::new()),
-            scale: KeyTrack::linear(Vec::new()),
-        }
+    JointTrack {
+        joint: JointId::from_raw(joint),
+        node: None,
+        translation: KeyTrack::linear(vec![Key { time: 0.0, value }]),
+        rotation: KeyTrack::linear(Vec::new()),
+        scale: KeyTrack::linear(Vec::new()),
     }
 }
 
 fn clip(name: &str, tracks: Vec<JointTrack>) -> SkelClip {
-    {
-        SkelClip {
-            name: name.to_string(),
-            duration: 10.0,
-            tracks,
-        }
+    SkelClip {
+        name: name.to_string(),
+        duration: 10.0,
+        tracks,
     }
+}
+
+/// Playlist clip translating joint 0 to `(x, 0, 0)`.
+fn clip_x(engine: &mut Engine, name: &str, x: f32) -> ClipId {
+    add_clip(
+        engine,
+        clip(name, vec![constant(0, Vec3::new(x, 0.0, 0.0))]),
+    )
 }
 
 /// Skeleton root with `joints` joints, identity bind and a fresh pose.
@@ -96,74 +99,51 @@ fn add_clip(engine: &mut Engine, value: SkelClip) -> ClipId {
     }
 }
 
-/// Stores a per-joint mask as a playlist entity and returns its id.
-fn add_mask(engine: &mut Engine, name: &str, weights: Vec<Clamped01>) -> MaskId {
-    {
-        let store = store_mut(engine);
-        let entity = store.create_entity();
-        store.insert_cold(
-            entity,
-            JointMask {
-                name: name.to_string(),
-                weights,
-            },
-        );
-        MaskId(entity)
+fn player(clip: ClipId, weight: f32) -> SkelPlayer {
+    SkelPlayer {
+        clip,
+        time: Seconds::ZERO,
+        speed: Seconds::new(1.0),
+        weight: Clamped01::new(weight),
+        playing: true,
+        looping: true,
     }
 }
 
-fn player(clip: ClipId, weight: f32) -> SkelPlayer {
-    {
-        SkelPlayer {
-            clip,
-            time: Seconds::ZERO,
-            speed: Seconds::new(1.0),
-            weight: Clamped01::new(weight),
-            playing: true,
-            looping: true,
-        }
-    }
+fn child(position: f32, node: usize) -> TreeChild {
+    TreeChild { position, node }
 }
 
 /// Two-leaf blend1d over `axis` — `left` at `0.0`, `right` at `1.0` —
 /// with one parameter named `name`.
 fn two_leaf_tree(name: &str, left: ClipId, right: ClipId, axis: usize) -> SkelTree {
-    {
-        SkelTree {
-            nodes: vec![
-                TreeNodeDef::Clip { clip: left },
-                TreeNodeDef::Clip { clip: right },
-                TreeNodeDef::Blend1d {
-                    axis,
-                    children: vec![
-                        TreeChild {
-                            position: 0.0,
-                            node: 0,
-                        },
-                        TreeChild {
-                            position: 1.0,
-                            node: 1,
-                        },
-                    ],
-                },
-            ],
-            params: vec![TreeParam {
-                name: name.to_string(),
-                default: 0.0,
-            }],
-        }
+    SkelTree {
+        nodes: vec![
+            TreeNodeDef::Clip { clip: left },
+            TreeNodeDef::Clip { clip: right },
+            TreeNodeDef::Blend1d {
+                axis,
+                children: vec![child(0.0, 0), child(1.0, 1)],
+            },
+        ],
+        params: vec![TreeParam {
+            name: name.to_string(),
+            default: 0.0,
+        }],
     }
 }
 
 fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePlayer {
     {
         let params = tree.params.iter().map(|p| p.default).collect();
-        let mut leaves = Vec::new();
-        for node in &tree.nodes {
-            if let TreeNodeDef::Clip { clip } = node {
-                leaves.push(player(*clip, 1.0));
-            }
-        }
+        let leaves = tree
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                TreeNodeDef::Clip { clip } => Some(player(*clip, 1.0)),
+                _ => None,
+            })
+            .collect();
         let store = store_mut(engine);
         store.insert_cold(root, tree);
         let player_state = SkelTreePlayer { params, leaves };
@@ -172,6 +152,8 @@ fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePlayer 
     }
 }
 
+/// Writes `value` straight into the player lane (the typed facade rejects
+/// non-finite values; the hot path must not trust the lane).
 fn param_of(engine: &mut Engine, root: Entity, name: &str, value: f32) -> bool {
     {
         let found = {
@@ -199,24 +181,14 @@ fn param_of(engine: &mut Engine, root: Entity, name: &str, value: f32) -> bool {
 }
 
 fn leaf_time(engine: &Engine, root: Entity, leaf: usize) -> f32 {
-    {
-        store_ref(engine)
-            .read_lane::<SkelTreePlayer>()
-            .expect("lane registered")
-            .get(root)
-            .expect("player kept")
-            .leaves[leaf]
-            .time
-            .get()
-    }
-}
-
-fn origin(matrix: Mat4) -> Vec3 {
-    matrix.transform_point3(Vec3::ZERO)
-}
-
-fn close(a: Vec3, b: Vec3) -> bool {
-    (a - b).length() < 1e-4
+    store_ref(engine)
+        .read_lane::<SkelTreePlayer>()
+        .expect("lane registered")
+        .get(root)
+        .expect("player kept")
+        .leaves[leaf]
+        .time
+        .get()
 }
 
 /// Asserts where joint `joint` of the pose on `root` ends up.
@@ -229,8 +201,11 @@ fn expect_origin(engine: &Engine, root: Entity, joint: usize, expected: Vec3) {
             .expect("pose kept")
             .matrices
             .clone();
-        let got = origin(matrices[joint]);
-        assert!(close(got, expected), "joint {joint}: got {got:?}");
+        let got = matrices[joint].transform_point3(Vec3::ZERO);
+        assert!(
+            (got - expected).length() < 1e-4,
+            "joint {joint}: got {got:?}"
+        );
     }
 }
 
@@ -238,14 +213,8 @@ fn expect_origin(engine: &Engine, root: Entity, joint: usize, expected: Vec3) {
 fn blend1d_endpoints_own_their_pose() {
     {
         let mut engine = engine();
-        let left = add_clip(
-            &mut engine,
-            clip("left", vec![constant(0, Vec3::new(2.0, 0.0, 0.0))]),
-        );
-        let right = add_clip(
-            &mut engine,
-            clip("right", vec![constant(0, Vec3::new(6.0, 0.0, 0.0))]),
-        );
+        let left = clip_x(&mut engine, "left", 2.0);
+        let right = clip_x(&mut engine, "right", 6.0);
         let root = rig(&mut engine, 1);
         let tree = two_leaf_tree("walk", left, right, 0);
         assert!(install(&mut engine, root, tree).params == vec![0.0]);
@@ -261,17 +230,10 @@ fn blend1d_endpoints_own_their_pose() {
 fn blend1d_midpoint_mixes_the_neighbours() {
     {
         let mut engine = engine();
-        let left = add_clip(
-            &mut engine,
-            clip("left", vec![constant(0, Vec3::new(2.0, 0.0, 0.0))]),
-        );
-        let right = add_clip(
-            &mut engine,
-            clip("right", vec![constant(0, Vec3::new(6.0, 0.0, 0.0))]),
-        );
+        let left = clip_x(&mut engine, "left", 2.0);
+        let right = clip_x(&mut engine, "right", 6.0);
         let root = rig(&mut engine, 1);
-        let tree = two_leaf_tree("walk", left, right, 0);
-        install(&mut engine, root, tree);
+        install(&mut engine, root, two_leaf_tree("walk", left, right, 0));
         assert!(param_of(&mut engine, root, "walk", 0.5));
         engine.run_frame(0.1);
         expect_origin(&engine, root, 0, Vec3::new(4.0, 0.0, 0.0));
@@ -282,18 +244,9 @@ fn blend1d_midpoint_mixes_the_neighbours() {
 fn blend1d_neighbours_only_contribute() {
     {
         let mut engine = engine();
-        let first = add_clip(
-            &mut engine,
-            clip("first", vec![constant(0, Vec3::new(1.0, 0.0, 0.0))]),
-        );
-        let middle = add_clip(
-            &mut engine,
-            clip("middle", vec![constant(0, Vec3::new(5.0, 0.0, 0.0))]),
-        );
-        let last = add_clip(
-            &mut engine,
-            clip("last", vec![constant(0, Vec3::new(9.0, 0.0, 0.0))]),
-        );
+        let first = clip_x(&mut engine, "first", 1.0);
+        let middle = clip_x(&mut engine, "middle", 5.0);
+        let last = clip_x(&mut engine, "last", 9.0);
         let root = rig(&mut engine, 1);
         let tree = SkelTree {
             nodes: vec![
@@ -302,20 +255,7 @@ fn blend1d_neighbours_only_contribute() {
                 TreeNodeDef::Clip { clip: last },
                 TreeNodeDef::Blend1d {
                     axis: 0,
-                    children: vec![
-                        TreeChild {
-                            position: 0.0,
-                            node: 0,
-                        },
-                        TreeChild {
-                            position: 1.0,
-                            node: 1,
-                        },
-                        TreeChild {
-                            position: 2.0,
-                            node: 2,
-                        },
-                    ],
+                    children: vec![child(0.0, 0), child(1.0, 1), child(2.0, 2)],
                 },
             ],
             params: vec![TreeParam {
@@ -347,20 +287,36 @@ fn layers_overlay_the_tree_root() {
             &mut engine,
             clip("over", vec![constant(0, Vec3::new(0.0, 8.0, 0.0))]),
         );
-        let mask = add_mask(&mut engine, "upper", vec![Clamped01::ONE, Clamped01::ZERO]);
+        let mask = {
+            let store = store_mut(&mut engine);
+            let entity = store.create_entity();
+            store.insert_cold(
+                entity,
+                JointMask {
+                    name: "upper".to_string(),
+                    weights: vec![Clamped01::ONE, Clamped01::ZERO],
+                },
+            );
+            MaskId(entity)
+        };
         let root = rig(&mut engine, 2);
-        let tree = SkelTree {
-            nodes: vec![TreeNodeDef::Clip { clip: base }],
-            params: Vec::new(),
-        };
-        install(&mut engine, root, tree);
-        let stack = SkelLayerStack {
-            layers: vec![SkelLayer {
-                player: player(over, 1.0),
-                mask,
-            }],
-        };
-        store_mut(&mut engine).insert(root, stack);
+        install(
+            &mut engine,
+            root,
+            SkelTree {
+                nodes: vec![TreeNodeDef::Clip { clip: base }],
+                params: Vec::new(),
+            },
+        );
+        store_mut(&mut engine).insert(
+            root,
+            SkelLayerStack {
+                layers: vec![SkelLayer {
+                    player: player(over, 1.0),
+                    mask,
+                }],
+            },
+        );
         engine.run_frame(0.1);
         expect_origin(&engine, root, 0, Vec3::new(0.0, 8.0, 0.0));
         expect_origin(&engine, root, 1, Vec3::new(4.0, 0.0, 0.0));
@@ -371,11 +327,10 @@ fn layers_overlay_the_tree_root() {
 fn leaf_cursors_step_and_pause() {
     {
         let mut engine = engine();
-        let left = add_clip(&mut engine, clip("left", vec![constant(0, Vec3::X)]));
-        let right = add_clip(&mut engine, clip("right", vec![constant(0, Vec3::Y)]));
+        let left = clip_x(&mut engine, "left", 1.0);
+        let right = clip_x(&mut engine, "right", 2.0);
         let root = rig(&mut engine, 1);
-        let tree = two_leaf_tree("walk", left, right, 0);
-        install(&mut engine, root, tree);
+        install(&mut engine, root, two_leaf_tree("walk", left, right, 0));
         engine.run_frame(0.1);
         assert!(leaf_time(&engine, root, 0) > 0.0);
         let mut players = store_mut(&mut engine)
@@ -394,17 +349,14 @@ fn leaf_cursors_step_and_pause() {
 fn bad_tree_leaves_the_pose_unpublished() {
     {
         let mut engine = engine();
-        let left = add_clip(&mut engine, clip("left", vec![constant(0, Vec3::X)]));
+        let left = clip_x(&mut engine, "left", 1.0);
         let root = rig(&mut engine, 1);
         let tree = SkelTree {
             nodes: vec![
                 TreeNodeDef::Clip { clip: left },
                 TreeNodeDef::Blend1d {
                     axis: 0,
-                    children: vec![TreeChild {
-                        position: 0.0,
-                        node: 1,
-                    }],
+                    children: vec![child(0.0, 1)],
                 },
             ],
             params: vec![TreeParam {
@@ -422,8 +374,8 @@ fn bad_tree_leaves_the_pose_unpublished() {
 fn missing_axis_skips_the_root() {
     {
         let mut engine = engine();
-        let left = add_clip(&mut engine, clip("left", vec![constant(0, Vec3::X)]));
-        let right = add_clip(&mut engine, clip("right", vec![constant(0, Vec3::Y)]));
+        let left = clip_x(&mut engine, "left", 1.0);
+        let right = clip_x(&mut engine, "right", 2.0);
         let root = rig(&mut engine, 1);
         let mut tree = two_leaf_tree("walk", left, right, 3);
         tree.params.pop();
@@ -458,31 +410,21 @@ fn empty_blend_reads_rest() {
 fn a_tree_replaces_the_previous_one() {
     {
         let mut engine = engine();
-        let first = add_clip(
-            &mut engine,
-            clip("first", vec![constant(0, Vec3::new(1.0, 0.0, 0.0))]),
-        );
-        let second = add_clip(
-            &mut engine,
-            clip("second", vec![constant(0, Vec3::new(5.0, 0.0, 0.0))]),
-        );
+        let first = clip_x(&mut engine, "first", 1.0);
+        let second = clip_x(&mut engine, "second", 5.0);
         let root = rig(&mut engine, 1);
-        install(
-            &mut engine,
-            root,
-            SkelTree {
-                nodes: vec![TreeNodeDef::Clip { clip: first }],
-                params: Vec::new(),
-            },
-        );
-        install(
-            &mut engine,
-            root,
-            SkelTree {
-                nodes: vec![TreeNodeDef::Clip { clip: second }],
-                params: Vec::new(),
-            },
-        );
+        let replace = |engine: &mut Engine, clip| {
+            install(
+                engine,
+                root,
+                SkelTree {
+                    nodes: vec![TreeNodeDef::Clip { clip }],
+                    params: Vec::new(),
+                },
+            )
+        };
+        replace(&mut engine, first);
+        replace(&mut engine, second);
         engine.run_frame(0.1);
         expect_origin(&engine, root, 0, Vec3::new(5.0, 0.0, 0.0));
         let leaves = store_ref(&engine)
@@ -494,5 +436,82 @@ fn a_tree_replaces_the_previous_one() {
             .clone();
         assert_eq!(leaves.len(), 1);
         assert_eq!(leaves[0].clip, second);
+    }
+}
+
+#[test]
+fn bad_child_outside_the_active_segment_still_skips() {
+    {
+        let mut engine = engine();
+        let left = clip_x(&mut engine, "left", 2.0);
+        let right = clip_x(&mut engine, "right", 6.0);
+        let root = rig(&mut engine, 1);
+        // The broken child sits outside the weighted segment at param 0 —
+        // the whole tree is validated every frame, so the verdict must not
+        // depend on the parameter value.
+        let tree = SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: left },
+                TreeNodeDef::Clip { clip: right },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![child(0.0, 0), child(1.0, 5)],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "walk".to_string(),
+                default: 0.0,
+            }],
+        };
+        install(&mut engine, root, tree);
+        engine.run_frame(0.1);
+        expect_origin(&engine, root, 0, Vec3::ZERO);
+    }
+}
+
+#[test]
+fn non_finite_param_skips_the_root() {
+    {
+        let mut engine = engine();
+        let left = clip_x(&mut engine, "left", 2.0);
+        let right = clip_x(&mut engine, "right", 6.0);
+        let root = rig(&mut engine, 1);
+        install(&mut engine, root, two_leaf_tree("walk", left, right, 0));
+        // A NaN written straight into the lane (bypassing the typed
+        // facade) must read as bad skin — never poison the pose.
+        assert!(param_of(&mut engine, root, "walk", f32::NAN));
+        engine.run_frame(0.1);
+        expect_origin(&engine, root, 0, Vec3::ZERO);
+    }
+}
+
+#[test]
+fn ignored_skel_player_holds_its_clock() {
+    {
+        let mut engine = engine();
+        let tree_clip = clip_x(&mut engine, "tree", 2.0);
+        let player_clip = clip_x(&mut engine, "player", 6.0);
+        let root = rig(&mut engine, 1);
+        install(
+            &mut engine,
+            root,
+            SkelTree {
+                nodes: vec![TreeNodeDef::Clip { clip: tree_clip }],
+                params: Vec::new(),
+            },
+        );
+        // A `SkelPlayer` on a tree-driven root is ignored — and its clock
+        // must not drift while it is.
+        store_mut(&mut engine).insert(root, player(player_clip, 1.0));
+        engine.run_frame(0.1);
+        expect_origin(&engine, root, 0, Vec3::new(2.0, 0.0, 0.0));
+        let time = store_ref(&engine)
+            .read_lane::<SkelPlayer>()
+            .expect("lane registered")
+            .get(root)
+            .expect("player kept")
+            .time
+            .get();
+        assert_eq!(time, 0.0, "the ignored cursor must not advance");
     }
 }

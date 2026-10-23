@@ -144,8 +144,11 @@ pub(crate) struct EvalBuf<'a> {
 /// cursors apply their own `weight` as in phase E (pull toward rest);
 /// `Blend1d` nodes fold their weighted children the same way a crossfade
 /// mixes poses. A violation of the tree contract (missing cursor or clip,
-/// bad `axis`, a child not earlier than its parent, missing joint counts)
-/// returns `None` and the caller publishes nothing — the "bad skin" rule.
+/// bad `axis`, a non-finite parameter or child position, a child not
+/// earlier than its parent, missing joint counts) returns `None` and the
+/// caller publishes nothing — the "bad skin" rule. The child-order check
+/// covers **all** children of a blend node, not just the weighted ones, so
+/// one broken tree reads the same way at every parameter value.
 pub(crate) fn eval_tree(
     tree: &SkelTree,
     player: &SkelTreePlayer,
@@ -176,15 +179,23 @@ pub(crate) fn eval_tree(
             }
             TreeNodeDef::Blend1d { axis, children } => {
                 let value = player.params.get(*axis).copied()?;
+                if !value.is_finite() {
+                    return None;
+                }
+                // Every child is validated, not just the weighted ones —
+                // the same broken tree must not answer differently at
+                // different parameter values.
+                for child in children {
+                    if child.node >= index || !child.position.is_finite() {
+                        return None;
+                    }
+                }
                 poses[index].refill_rest(rest);
                 let mut weights = [(0, 0.0f32); 2];
                 let filled = blend1d_weights(children, value, &mut weights);
                 let mut total = 0.0;
                 for (child, weight) in weights.iter().take(filled) {
-                    let node_index = children.get(*child)?.node;
-                    if node_index >= index {
-                        return None;
-                    }
+                    let node_index = children[*child].node;
                     let (earlier, tail) = poses.split_at_mut(index);
                     tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
                 }
