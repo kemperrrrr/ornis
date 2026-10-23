@@ -277,6 +277,36 @@ pub(crate) fn convert_instances(out: &mut Vec<PerObjectGpu>, instances: &[Instan
     }));
 }
 
+/// Test-only timing hooks over the production staging passes: the
+/// culling bench calls the real [`convert_instances`] and
+/// [`diff_staged_records`] instead of a parallel copy, so its stage
+/// numbers are the numbers the frame pays. Compiled only under the
+/// `test-util` feature (the bench builds with it), never in the
+/// wasm/production graph; the crate-private [`DirtyRange`] stays private,
+/// the hook returns plain `(start, count)` runs.
+#[cfg(feature = "test-util")]
+#[doc(hidden)]
+pub mod profile {
+    use super::{DirtyRange, convert_instances, diff_staged_records};
+    use crate::renderer::{InstanceData, PerObjectGpu};
+
+    /// One production conversion pass: appends the frame's records to
+    /// `out` (the caller owns reuse and allocation, like the caller of
+    /// [`convert_instances`]).
+    pub fn convert(out: &mut Vec<PerObjectGpu>, instances: &[InstanceData]) {
+        convert_instances(out, instances);
+    }
+
+    /// One production dirty-run diff: the contiguous record runs where
+    /// `next` differs from `prev`, as `(start, count)` pairs.
+    pub fn diff(prev: &[PerObjectGpu], next: &[PerObjectGpu]) -> Vec<(u32, u32)> {
+        diff_staged_records(prev, next)
+            .into_iter()
+            .map(|DirtyRange { start, count }| (start, count))
+            .collect()
+    }
+}
+
 /// Zeroes the `instance_count` word ([`INSTANCE_COUNT_WORD`]) of an
 /// indirect-args buffer before a culling dispatch. The compute pass only
 /// ever `atomicAdd`s to that word, so every frame must restart it at

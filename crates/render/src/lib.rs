@@ -111,6 +111,37 @@ pub fn gpu_required() -> bool {
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    headless_device("try_headless_device", wgpu::Features::empty())
+}
+
+/// Headless adapter/device pair requesting [`wgpu::Features::TIMESTAMP_QUERY`],
+/// or `None` on a host with no wgpu adapter.
+///
+/// The culling profile bench reads the pass-boundary timestamps of the
+/// cull and indirect-draw passes through that feature; the request is
+/// intersected with the adapter's features first, so a host without it
+/// still gets a device and the bench marks its GPU stages unmeasured
+/// instead of failing. Same skip contract as [`try_headless_device`]
+/// (`ORNIS_REQUIRE_GPU` panics on a missing adapter or device).
+/// `#[doc(hidden)]`: public only so the criterion bench reaches it, like
+/// [`gpu_required`] and [`try_headless_device`]. Not a stable API.
+// qual:api — external consumer is the culling criterion bench (separate crate root), invisible to the in-crate call graph.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub fn try_profile_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    headless_device(
+        "try_profile_headless_device",
+        wgpu::Features::TIMESTAMP_QUERY,
+    )
+}
+
+/// Single headless request behind [`try_headless_device`] and
+/// [`try_profile_headless_device`]: `wanted` is intersected with what the
+/// adapter offers, so the device request never asks for a feature the
+/// host cannot give, and `label` names the calling bootstrap in the skip
+/// and assert messages (one skip path, reported for every caller).
+#[cfg(any(test, feature = "test-util"))]
+fn headless_device(label: &str, wanted: wgpu::Features) -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -129,21 +160,27 @@ pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
                     !gpu_required(),
                     "ORNIS_REQUIRE_GPU is set but no wgpu adapter: {err}"
                 );
-                eprintln!("SKIPPED (try_headless_device): no wgpu adapter — GPU gate skipped");
+                eprintln!("SKIPPED ({label}): no wgpu adapter — GPU gate skipped");
                 return None;
             }
         };
-        match adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-        {
+        let adapter_limits = adapter.limits();
+        let descriptor = wgpu::DeviceDescriptor {
+            required_features: wanted & adapter.features(),
+            required_limits: wgpu::Limits {
+                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+                ..wgpu::Limits::default()
+            },
+            ..Default::default()
+        };
+        match adapter.request_device(&descriptor).await {
             Ok(pair) => Some(pair),
             Err(err) => {
                 assert!(
                     !gpu_required(),
                     "ORNIS_REQUIRE_GPU is set but no wgpu device: {err}"
                 );
-                eprintln!("SKIPPED (try_headless_device): no wgpu device — GPU gate skipped");
+                eprintln!("SKIPPED ({label}): no wgpu device — GPU gate skipped");
                 None
             }
         }
