@@ -15,7 +15,7 @@ thiserror = "2.0"
 # Minimal surface: OS webview + custom protocol + IPC only.
 # `os-webview` is mandatory (without it the crate does nothing);
 # devtools stay on the debug-build default (macOS), no release flag.
-wry = { version = "0.57", default-features = false, features = ["os-webview"] }
+wry = { version = "0.57.1", default-features = false, features = ["os-webview"] }
 winit = "0.30"
 
 [lints]
