@@ -111,7 +111,7 @@ pub fn gpu_required() -> bool {
 #[cfg(any(test, feature = "test-util"))]
 #[doc(hidden)]
 pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    headless_device("try_headless_device", wgpu::Features::empty())
+    headless_device("try_headless_device", wgpu::Features::empty(), false)
 }
 
 /// Headless adapter/device pair requesting [`wgpu::Features::TIMESTAMP_QUERY`],
@@ -123,6 +123,13 @@ pub fn try_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
 /// still gets a device and the bench marks its GPU stages unmeasured
 /// instead of failing. Same skip contract as [`try_headless_device`]
 /// (`ORNIS_REQUIRE_GPU` panics on a missing adapter or device).
+///
+/// Unlike [`try_headless_device`], this bootstrap raises
+/// `max_storage_buffer_binding_size` to the adapter's own maximum: the
+/// 1M-capacity culler binds a 208 MB storage range, past
+/// `Limits::default()`. The test bootstrap keeps the production defaults
+/// so GPU tests still catch a buffer outgrowing what examples and wasm
+/// can bind; only the profile bench opts into the wider binding.
 /// `#[doc(hidden)]`: public only so the criterion bench reaches it, like
 /// [`gpu_required`] and [`try_headless_device`]. Not a stable API.
 // qual:api — external consumer is the culling criterion bench (separate crate root), invisible to the in-crate call graph.
@@ -132,16 +139,24 @@ pub fn try_profile_headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     headless_device(
         "try_profile_headless_device",
         wgpu::Features::TIMESTAMP_QUERY,
+        true,
     )
 }
 
 /// Single headless request behind [`try_headless_device`] and
 /// [`try_profile_headless_device`]: `wanted` is intersected with what the
 /// adapter offers, so the device request never asks for a feature the
-/// host cannot give, and `label` names the calling bootstrap in the skip
-/// and assert messages (one skip path, reported for every caller).
+/// host cannot give, `raise_storage_limit` widens only
+/// `max_storage_buffer_binding_size` to the adapter maximum (see
+/// [`try_profile_headless_device`]), and `label` names the calling
+/// bootstrap in the skip and assert messages (one skip path, reported for
+/// every caller).
 #[cfg(any(test, feature = "test-util"))]
-fn headless_device(label: &str, wanted: wgpu::Features) -> Option<(wgpu::Device, wgpu::Queue)> {
+fn headless_device(
+    label: &str,
+    wanted: wgpu::Features,
+    raise_storage_limit: bool,
+) -> Option<(wgpu::Device, wgpu::Queue)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -165,12 +180,17 @@ fn headless_device(label: &str, wanted: wgpu::Features) -> Option<(wgpu::Device,
             }
         };
         let adapter_limits = adapter.limits();
-        let descriptor = wgpu::DeviceDescriptor {
-            required_features: wanted & adapter.features(),
-            required_limits: wgpu::Limits {
+        let required_limits = if raise_storage_limit {
+            wgpu::Limits {
                 max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
                 ..wgpu::Limits::default()
-            },
+            }
+        } else {
+            wgpu::Limits::default()
+        };
+        let descriptor = wgpu::DeviceDescriptor {
+            required_features: wanted & adapter.features(),
+            required_limits,
             ..Default::default()
         };
         match adapter.request_device(&descriptor).await {

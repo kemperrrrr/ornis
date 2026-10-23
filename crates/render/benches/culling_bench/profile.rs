@@ -22,13 +22,13 @@ use std::time::{Duration, Instant};
 use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
 use glam::{Mat4, Vec3};
 use ornis_core::Entity;
-use ornis_render::{Culler, InstanceData, Renderer3D, gpu_culling::profile};
+use ornis_render::{Culler, InstanceData, PerObjectGpu, gpu_culling::profile};
 
 use super::probe::{PROBE_HEIGHT, PROBE_WIDTH, Probe};
 use super::{INDEX_COUNT, SIZE_10K, SIZE_100K, camera_view_proj, scene_line};
 use model::{
-    BenchPath, DRIFT_STEP, Frame, MOVE_STRIDE, PROFILE_FRAMES, PROFILE_SAMPLE_SIZE, Scenario,
-    Setup, Stages,
+    BenchPath, DRIFT_STEP, Frame, MOVE_STRIDE, PROFILE_FRAMES, PROFILE_SAMPLE_SIZE,
+    PROFILE_WARM_FRAMES, Scenario, Setup, Stages,
 };
 
 mod model;
@@ -82,7 +82,7 @@ fn profile_frame(frame: &mut Frame) -> Stages {
             profile::convert(&mut frame.next, &frame.instances);
         }
         BenchPath::Records => {
-            frame.records = frame.setup.renderer.profile_stage_records(
+            frame.records = frame.renderer.profile_stage_records(
                 frame.setup.device,
                 &frame.instances,
                 &[],
@@ -95,7 +95,6 @@ fn profile_frame(frame: &mut Frame) -> Stages {
     if frame.path == BenchPath::Records {
         let clock = Instant::now();
         frame
-            .setup
             .renderer
             .profile_write_records(frame.setup.queue, &frame.records);
         stages.upload = clock.elapsed();
@@ -141,12 +140,14 @@ fn profile_frame(frame: &mut Frame) -> Stages {
 }
 
 // qual:allow(test_quality, untested) reason: "bench-only cell runner, driven by the criterion harness, never under libtest"
-/// One (scenario, path) cell: a discarded warm-up frame, then
-/// `PROFILE_FRAMES` frames averaged into the returned row, then one
-/// criterion bench (a full frame per iteration) for the cell's wall
-/// time under the harness's own statistics.
+/// One (scenario, path) cell: `PROFILE_WARM_FRAMES` discarded warm-up
+/// frames, then `PROFILE_FRAMES` frames averaged into the returned row,
+/// then one criterion bench (a full frame per iteration) for the cell's
+/// wall time under the harness's own statistics.
 fn profile_cell(group: &mut BenchmarkGroup<WallTime>, frame: &mut Frame) -> Stages {
-    let _warm = profile_frame(frame);
+    for _ in 0..PROFILE_WARM_FRAMES {
+        let _ = profile_frame(frame);
+    }
     let mut row = Stages::default();
     for _ in 0..PROFILE_FRAMES {
         row.accumulate(&profile_frame(frame));
@@ -189,8 +190,11 @@ fn profile_size(
 // qual:allow(test_quality, untested) reason: "bench-only criterion entry, driven by the criterion harness, never under libtest"
 /// The RAT-48 profile entry: one shared GPU setup, then every
 /// size x scenario x path cell with its markdown row. A host without an
-/// adapter (or without 1M culler capacity) prints a skip note instead of
-/// failing the bench, like the GPU groups of the bench above.
+/// adapter prints a skip note instead of failing the bench, like the GPU
+/// groups of the bench above; a host whose
+/// `max_storage_buffer_binding_size` cannot bind a scene's records
+/// drops that size (the drop is printed) instead of tripping a wgpu
+/// validation error — see the size filter below.
 pub(super) fn bench_culling_profile(c: &mut Criterion) {
     let (device, queue) = match ornis_render::try_profile_headless_device() {
         Some(pair) => pair,
@@ -199,10 +203,37 @@ pub(super) fn bench_culling_profile(c: &mut Criterion) {
             return;
         }
     };
-    let culler = match Culler::try_new(&device, SIZE_1M as u32) {
+    // The binding limit governs both GPU objects of a cell: the culler
+    // binds `size * size_of::<PerObjectGpu>()` exactly, and the
+    // renderer's per-object buffer grows by doubling from 256, i.e. to
+    // `size.next_power_of_two()`. A size whose binding would exceed the
+    // device limit is dropped with a printed note rather than failing
+    // the bench at `create_bind_group` (e.g. a 128 MiB GL adapter
+    // cannot bind the 1M scene: 208 MB > 134 MB).
+    let binding_limit = device.limits().max_storage_buffer_binding_size;
+    let record_bytes = std::mem::size_of::<PerObjectGpu>() as u64;
+    let fits = |size: usize| (size.next_power_of_two() as u64) * record_bytes <= binding_limit;
+    let all_sizes = [SIZE_10K, SIZE_100K, SIZE_1M];
+    let sizes: Vec<usize> = all_sizes.into_iter().filter(|&size| fits(size)).collect();
+    if sizes.is_empty() {
+        eprintln!(
+            "SKIP culling_profile: no scene fits max_storage_buffer_binding_size \
+             {binding_limit} B ({record_bytes} B per record)"
+        );
+        return;
+    }
+    let dropped: Vec<usize> = all_sizes.into_iter().filter(|&size| !fits(size)).collect();
+    if !dropped.is_empty() {
+        eprintln!(
+            "culling_profile: adapter max_storage_buffer_binding_size {binding_limit} B \
+             drops sizes {dropped:?}"
+        );
+    }
+    let largest = *sizes.last().expect("sizes is non-empty");
+    let culler = match Culler::try_new(&device, largest as u32) {
         Ok(culler) => culler,
         Err(err) => {
-            eprintln!("SKIP culling_profile: 1M-capacity culler unavailable ({err})");
+            eprintln!("SKIP culling_profile: {largest}-capacity culler unavailable ({err})");
             return;
         }
     };
@@ -217,12 +248,11 @@ pub(super) fn bench_culling_profile(c: &mut Criterion) {
         desired_maximum_frame_latency: 1,
         color_space: wgpu::SurfaceColorSpace::Auto,
     };
-    let renderer = Renderer3D::new(&device, &surface_config, 1);
     let probe = Probe::new(&device, &queue);
     let setup = Setup {
         device: &device,
         queue: &queue,
-        renderer: &renderer,
+        surface_config: &surface_config,
         culler: &culler,
         probe: &probe,
         view_proj: camera_view_proj(),
@@ -230,12 +260,15 @@ pub(super) fn bench_culling_profile(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("culling_profile");
     group.sample_size(PROFILE_SAMPLE_SIZE);
-    eprintln!("culling profile — ms per frame, mean of {PROFILE_FRAMES} frames (— = not measured)");
+    eprintln!(
+        "culling profile — ms per frame, mean of {PROFILE_FRAMES} frames after \
+         {PROFILE_WARM_FRAMES} warm-ups (— = not measured)"
+    );
     eprintln!(
         "| scenario | size | path | build | diff | fill | upload_per_objects | prewrite | compute | draw | wall |"
     );
     eprintln!("|---|---|---|---|---|---|---|---|---|---|---|");
-    for size in [SIZE_10K, SIZE_100K, SIZE_1M] {
+    for size in sizes {
         let base = scene_line(size);
         let entities: Vec<Entity> = (0..size).map(|i| Entity::new(i as u32)).collect();
         profile_size(&mut group, &setup, &base, &entities);

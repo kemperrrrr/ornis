@@ -11,8 +11,13 @@ use super::super::probe::Probe;
 
 /// Criterion samples per cell (the group minimum).
 pub(super) const PROFILE_SAMPLE_SIZE: usize = 10;
-/// Frames averaged into each table row, after one discarded warm-up.
+/// Frames averaged into each table row, after two discarded warm-ups.
 pub(super) const PROFILE_FRAMES: usize = 10;
+/// Discarded frames before the measurement: the first aligns the fresh
+/// renderer's previous-frame history, the second runs in the aligned
+/// state, so measured frames start from a steady state (static cells
+/// then fill nothing).
+pub(super) const PROFILE_WARM_FRAMES: usize = 2;
 /// Distance between the movers of the 1% scenario (one in a hundred).
 pub(super) const MOVE_STRIDE: usize = 100;
 /// Per-frame X drift of every mover; the sign alternates with the step.
@@ -84,10 +89,18 @@ pub(super) struct Stages {
     pub(super) gpu_measured: bool,
     /// False on the compact path: there is no renderer upload.
     pub(super) upload_measured: bool,
+    /// Frames whose stamp readback succeeded (average divisor for GPU).
+    pub(super) gpu_frames: u32,
+    /// Frames with a renderer upload (average divisor for upload).
+    pub(super) upload_frames: u32,
 }
 
 impl Stages {
-    /// Fold one measured frame into this accumulating row.
+    /// Fold one measured frame into this accumulating row. GPU and upload
+    /// stages carry their own measured-frame counts: a failed readback
+    /// contributes nothing, and the average divides by the frames that
+    /// actually measured — a mid-run failure can no longer slip zeros
+    /// into the mean.
     pub(super) fn accumulate(&mut self, frame: &Self) {
         self.build += frame.build;
         self.diff += frame.diff;
@@ -97,25 +110,33 @@ impl Stages {
         self.compute += frame.compute;
         self.draw += frame.draw;
         self.wall += frame.wall;
-        self.gpu_measured = frame.gpu_measured;
-        self.upload_measured = frame.upload_measured;
+        self.gpu_measured |= frame.gpu_measured;
+        self.upload_measured |= frame.upload_measured;
+        self.gpu_frames += u32::from(frame.gpu_measured);
+        self.upload_frames += u32::from(frame.upload_measured);
     }
 
     // qual:allow(test_quality, untested) reason: "bench-only formatting helper, driven by the criterion harness, never under libtest"
-    /// The row average: the accumulated total over `frames`.
+    /// The row average: the accumulated total over `frames`; the GPU and
+    /// upload stages over their own measured-frame counts (flag false
+    /// when nothing measured, so the cell prints "—").
     pub(super) fn averaged(self, frames: usize) -> Self {
         let frames = frames.max(1) as u32;
+        let gpu_frames = self.gpu_frames.max(1);
+        let upload_frames = self.upload_frames.max(1);
         Self {
             build: self.build / frames,
             diff: self.diff / frames,
             fill: self.fill / frames,
-            upload: self.upload / frames,
+            upload: self.upload / upload_frames,
             prewrite: self.prewrite / frames,
-            compute: self.compute / frames,
-            draw: self.draw / frames,
+            compute: self.compute / gpu_frames,
+            draw: self.draw / gpu_frames,
             wall: self.wall / frames,
-            gpu_measured: self.gpu_measured,
-            upload_measured: self.upload_measured,
+            gpu_measured: self.gpu_frames > 0,
+            upload_measured: self.upload_frames > 0,
+            gpu_frames: self.gpu_frames,
+            upload_frames: self.upload_frames,
         }
     }
 
@@ -151,21 +172,27 @@ fn cell(duration: Duration, measured: bool) -> String {
 }
 
 /// The shared GPU objects of the profile: built once, every cell reuses
-/// them — one renderer (records grow it), one 1M-capacity culler.
+/// them — one culler sized to the largest profiled scene, one probe.
+/// The renderer is deliberately NOT shared: its `previous_instance_models`
+/// history would leak from cell to cell and corrupt the records path's
+/// diff, so each [`Frame`] builds its own (see [`Frame::new`]).
 pub(super) struct Setup<'a> {
     pub(super) device: &'a wgpu::Device,
     pub(super) queue: &'a wgpu::Queue,
-    pub(super) renderer: &'a Renderer3D,
+    pub(super) surface_config: &'a wgpu::SurfaceConfiguration,
     pub(super) culler: &'a Culler,
     pub(super) probe: &'a Probe,
     pub(super) view_proj: Mat4,
 }
 
-/// One cell's frame state: the scene motion drives plus the two staging
-/// histories the diff needs — the bench owns them on both paths, exactly
-/// the runs [`Culler`] staging would own internally.
+/// One cell's frame state: the scene motion drive, the cell's own
+/// renderer (fresh per cell — its previous-frame history must not leak
+/// into the next cell), and the two staging histories the diff needs —
+/// the bench owns them on both paths, exactly the runs [`Culler`]
+/// staging would own internally.
 pub(super) struct Frame<'a> {
     pub(super) setup: &'a Setup<'a>,
+    pub(super) renderer: Renderer3D,
     pub(super) instances: Vec<InstanceData>,
     pub(super) entities: Vec<Entity>,
     /// Renderer records: uploaded, then handed to the staging diff.
@@ -178,10 +205,10 @@ pub(super) struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    /// A fresh cell: a private copy of the base scene and empty
-    /// histories — the warm-up frame fills them before the first
-    /// measurement, so no row pays for a cold pipeline or a full first
-    /// diff.
+    /// A fresh cell: a private copy of the base scene, a fresh renderer
+    /// (clean previous-frame history) and empty histories — the warm-up
+    /// frame fills them before the first measurement, so no row pays for
+    /// a cold pipeline, a full first diff, or a previous cell's motion.
     pub(super) fn new(
         setup: &'a Setup<'a>,
         base: &[InstanceData],
@@ -191,6 +218,7 @@ impl<'a> Frame<'a> {
     ) -> Self {
         Self {
             setup,
+            renderer: Renderer3D::new(setup.device, setup.surface_config, 1),
             instances: base.to_vec(),
             entities: entities.to_vec(),
             records: Vec::new(),
