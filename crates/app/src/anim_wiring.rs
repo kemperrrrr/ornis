@@ -698,6 +698,7 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
                 _ => None,
             })
             .collect(),
+        ..SkelTreePlayer::default()
     };
     store.insert_cold(root, tree);
     store.insert(root, player);
@@ -2221,6 +2222,200 @@ mod tests {
                 "non-finite position"
             );
         }
+    }
+
+    /// [`set_skel_tree`] refuses broken machines at install: empty
+    /// states, `initial` out of range, a state not earlier than its node,
+    /// `from`/`to` out of range, a guard naming no parameter, and
+    /// non-finite guard value or fade. A sound machine installs.
+    #[test]
+    fn set_skel_tree_rejects_broken_machines() {
+        use ornis_animation::{SkelTree, TreeCmp, TreeCond, TreeNodeDef, TreeTransition};
+        let mut store = SmartStore::new();
+        let (root, clip) = tree_hero(&mut store);
+        let leaf = TreeNodeDef::Clip { clip };
+        let param = TreeParam {
+            name: "walk".to_string(),
+            default: 0.0,
+        };
+        let handoff = |from, to, param, value, fade: f32| TreeTransition {
+            from,
+            to,
+            when: TreeCond {
+                param,
+                op: TreeCmp::Greater,
+                value,
+            },
+            fade: Seconds::new(fade),
+        };
+        let machine = |states, initial, transitions| TreeNodeDef::Machine {
+            states,
+            initial,
+            transitions,
+        };
+        {
+            let tree = SkelTree {
+                nodes: vec![leaf.clone(), machine(Vec::new(), 0, Vec::new())],
+                params: Vec::new(),
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "empty states");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![leaf.clone(), machine(vec![0, 0], 5, Vec::new())],
+                params: Vec::new(),
+            };
+            assert!(
+                !set_skel_tree(&mut store, root, tree),
+                "initial out of range"
+            );
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![leaf.clone(), machine(vec![1], 0, Vec::new())],
+                params: Vec::new(),
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "state not earlier");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![
+                    leaf.clone(),
+                    machine(vec![0], 0, vec![handoff(2, 0, 0, 0.0, 0.0)]),
+                ],
+                params: vec![param.clone()],
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "from out of range");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![
+                    leaf.clone(),
+                    machine(
+                        vec![0],
+                        0,
+                        vec![handoff(0, 0, 0, 0.0, 0.0), handoff(0, 2, 0, 0.0, 0.0)],
+                    ),
+                ],
+                params: vec![param.clone()],
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "to out of range");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![
+                    leaf.clone(),
+                    machine(vec![0], 0, vec![handoff(0, 0, 3, 0.0, 0.0)]),
+                ],
+                params: Vec::new(),
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "unknown guard");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![
+                    leaf.clone(),
+                    machine(vec![0], 0, vec![handoff(0, 0, 0, f32::NAN, 0.0)]),
+                ],
+                params: vec![param.clone()],
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "non-finite value");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![
+                    leaf.clone(),
+                    machine(vec![0], 0, vec![handoff(0, 0, 0, 0.0, f32::NAN)]),
+                ],
+                params: vec![param.clone()],
+            };
+            assert!(!set_skel_tree(&mut store, root, tree), "non-finite fade");
+        }
+        {
+            let tree = SkelTree {
+                nodes: vec![
+                    leaf.clone(),
+                    machine(vec![0], 0, vec![handoff(0, 0, 0, 0.0, 0.0)]),
+                ],
+                params: vec![param],
+            };
+            assert!(
+                set_skel_tree(&mut store, root, tree),
+                "the machine installs"
+            );
+        }
+    }
+
+    /// [`set_skel_tree`] seeds one `MachineCursor` per machine node at
+    /// `initial` — and a re-install mid-transition resets `state`/`from`,
+    /// not just the parameter values.
+    #[test]
+    fn set_skel_tree_seeds_and_resets_machine_cursors() {
+        use ornis_animation::{
+            MachineCursor, SkelTree, TreeCmp, TreeCond, TreeNodeDef, TreeTransition,
+        };
+        let mut store = SmartStore::new();
+        let (root, clip) = tree_hero(&mut store);
+        let tree = || SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip },
+                TreeNodeDef::Machine {
+                    states: vec![0, 1],
+                    initial: 0,
+                    transitions: vec![TreeTransition {
+                        from: 0,
+                        to: 1,
+                        when: TreeCond {
+                            param: 0,
+                            op: TreeCmp::Greater,
+                            value: 0.5,
+                        },
+                        fade: Seconds::new(1.0),
+                    }],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "walk".to_string(),
+                default: 0.0,
+            }],
+        };
+        assert!(
+            set_skel_tree(&mut store, root, tree()),
+            "the machine installs"
+        );
+        let seeded = store
+            .read_lane::<SkelTreePlayer>()
+            .unwrap()
+            .get(root)
+            .unwrap()
+            .machines[0];
+        assert_eq!(
+            seeded,
+            MachineCursor {
+                state: 0,
+                from: None,
+                elapsed: Seconds::ZERO,
+                duration: Seconds::ZERO,
+            }
+        );
+        let Some(mut players) = store.write_lane::<SkelTreePlayer>() else {
+            panic!("lane registered");
+        };
+        let flying = &mut players.get_mut(root).expect("player kept").machines[0];
+        flying.state = 1;
+        flying.from = Some(0);
+        flying.elapsed = Seconds::new(0.25);
+        flying.duration = Seconds::new(1.0);
+        drop(players);
+        assert!(set_skel_tree(&mut store, root, tree()), "re-installs");
+        let settled = store
+            .read_lane::<SkelTreePlayer>()
+            .unwrap()
+            .get(root)
+            .unwrap()
+            .machines[0];
+        assert_eq!(settled.state, 0, "back on initial");
+        assert_eq!(settled.from, None, "no fade in flight");
     }
 
     /// [`set_tree_param`] refuses non-finite values — NaN/±inf would

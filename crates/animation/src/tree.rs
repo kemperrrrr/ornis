@@ -72,7 +72,9 @@ impl TreeCond {
 }
 
 /// One transition of a [`TreeNodeDef::Machine`]: crossfades the machine
-/// between two of its states while its `when` guard holds.
+/// between two of its states while its `when` guard holds. `from == to`
+/// is a legal self-loop — it restarts the state's crossfade into itself
+/// after each completion, a harmless way to keep a guard live.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TreeTransition {
     /// State index (into the machine's `states`) the machine stands on.
@@ -162,8 +164,12 @@ pub struct MachineCursor {
 /// and mirrors that node's id in `leaves[i].clip`; the sampler reads the
 /// node's clip def on the cursor's clock. A hand-inserted player that lets
 /// the two diverge still samples correctly, but its cursor metadata lies —
-/// install through the facade or keep them aligned.
+/// install through the facade or keep them aligned. The same pairing holds
+/// for `machines[i]` and the i-th [`TreeNodeDef::Machine`]: a lane whose
+/// counts diverge steps the matching prefix and reads as bad skin
+/// (`eval_tree` demands one cursor per machine node).
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct SkelTreePlayer {
     /// Live parameter values, aligned with [`SkelTree::params`].
     pub params: Vec<f32>,
@@ -336,6 +342,7 @@ fn eval_machine(
     for transition in transitions {
         if transition.from >= states.len()
             || transition.to >= states.len()
+            || !transition.when.value.is_finite()
             || !transition.fade.get().is_finite()
         {
             return None;

@@ -1,6 +1,11 @@
 //! Shared fixtures for the animation-tree integration tests: one small
 //! world builder (`engine`), root/clip constructors and the pose probes.
 //! Each test binary uses a subset; the module is test-only.
+//!
+//! Multi-statement fixtures keep their bodies in one inner block, as they
+//! did in `skel_tree.rs`: rustqual's fragment scanner hashes windows of
+//! three consecutive top-level statements across files, and the fixture
+//! statement shapes are already owned by the tree scenario tests.
 #![allow(dead_code)]
 
 use glam::{Mat4, Vec3};
@@ -126,6 +131,7 @@ pub fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePla
             params,
             leaves,
             machines,
+            ..SkelTreePlayer::default()
         };
         store.insert(root, player_state.clone());
         player_state
