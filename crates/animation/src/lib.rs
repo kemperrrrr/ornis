@@ -70,10 +70,11 @@ pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack
 
 mod tree;
 mod tree_sync;
+mod tree_weights;
 use tree::eval_tree;
 pub use tree::{
-    MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeCmp, TreeCond, TreeNodeDef, TreeParam,
-    TreeTransition,
+    MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeChild2d, TreeCmp, TreeCond,
+    TreeNodeDef, TreeParam, TreeTransition,
 };
 use tree_sync::sync_transition_leaves;
 pub use tree_sync::{ClipSyncMarks, SyncMark};

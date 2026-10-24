@@ -79,6 +79,9 @@ fn node_references(tree: &SkelTree, parent: usize, child: usize) -> bool {
         Some(TreeNodeDef::Blend1d { children, .. }) => {
             children.iter().any(|input| input.node == child)
         }
+        Some(TreeNodeDef::Blend2d { children, .. }) => {
+            children.iter().any(|input| input.node == child)
+        }
         Some(TreeNodeDef::Machine { states, .. }) => {
             for state in states {
                 if *state == child {

@@ -18,7 +18,7 @@ use ornis_animation::{
     AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, ClipSyncMarks,
     JointId, JointMask, JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, SkelClip,
     SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh,
-    SyncMark, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
+    SyncMark, TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
@@ -590,6 +590,29 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
     true
 }
 
+/// Whether `children` form a complete row-major lattice for
+/// [`TreeNodeDef::Blend2d`]: rows of one `position[1]` with the same
+/// strictly ascending `position[0]` x positions, rows themselves
+/// strictly ascending in `position[1]`. Empty reads as rest and passes.
+fn blend2d_lattice_ok(children: &[TreeChild2d]) -> bool {
+    let Some(first) = children.first() else {
+        return true;
+    };
+    let cols = children
+        .iter()
+        .take_while(|child| child.position[1] == first.position[1])
+        .count();
+    children.len().is_multiple_of(cols)
+        && children.chunks(cols).enumerate().all(|(row, line)| {
+            line.iter().enumerate().all(|(col, child)| {
+                child.position[1] == line[0].position[1]
+                    && child.position[0] == children[col].position[0]
+                    && (col == 0 || children[col - 1].position[0] < child.position[0])
+                    && (row == 0 || children[(row - 1) * cols].position[1] < line[0].position[1])
+            })
+        })
+}
+
 /// Whether `tree` is structurally sound and installable: non-empty
 /// nodes, finite parameter defaults, blend axes that name a parameter,
 /// children at strictly ascending finite positions pointing at earlier
@@ -618,6 +641,13 @@ fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
                         && children
                             .iter()
                             .all(|child| child.node < index && child.position.is_finite())
+                }
+                TreeNodeDef::Blend2d { axes, children } => {
+                    axes.iter().all(|axis| *axis < tree.params.len())
+                        && children.iter().all(|child| {
+                            child.node < index && child.position.iter().all(|axis| axis.is_finite())
+                        })
+                        && blend2d_lattice_ok(children)
                 }
                 TreeNodeDef::Machine {
                     states,
@@ -2643,6 +2673,96 @@ mod tests {
                 .is_none_or(|players| players.get(root).is_none())
         );
         assert!(!clear_skel_tree(&mut store, root), "already clear");
+    }
+
+    /// [`set_skel_tree`] refuses broken blend2d lattices — rows of
+    /// different width, ragged x positions across rows, x not strictly
+    /// ascending, y not strictly ascending — and accepts the complete
+    /// one.
+    #[test]
+    fn set_skel_tree_rejects_broken_blend2d_lattices() {
+        use ornis_animation::{SkelTree, TreeChild2d, TreeNodeDef, TreeParam};
+        let mut store = SmartStore::new();
+        let (root, clip) = tree_hero(&mut store);
+        let leaf = || TreeNodeDef::Clip { clip };
+        let cell = |x: f32, y: f32, node: usize| TreeChild2d {
+            position: [x, y],
+            node,
+        };
+        let blend = |children| TreeNodeDef::Blend2d {
+            axes: [0, 1],
+            children,
+        };
+        let params = vec![
+            TreeParam {
+                name: "x".to_string(),
+                default: 0.0,
+            },
+            TreeParam {
+                name: "y".to_string(),
+                default: 0.0,
+            },
+        ];
+        let tree = |children| SkelTree {
+            nodes: vec![leaf(), leaf(), blend(children)],
+            params: params.clone(),
+        };
+        {
+            let ragged = tree(vec![
+                cell(0.0, 0.0, 0),
+                cell(1.0, 0.0, 1),
+                cell(0.0, 1.0, 1),
+            ]);
+            assert!(!set_skel_tree(&mut store, root, ragged), "ragged rows");
+        }
+        {
+            let mismatched = tree(vec![
+                cell(0.0, 0.0, 0),
+                cell(1.0, 0.0, 1),
+                cell(0.5, 1.0, 1),
+                cell(1.5, 1.0, 1),
+            ]);
+            assert!(
+                !set_skel_tree(&mut store, root, mismatched),
+                "x positions differ across rows"
+            );
+        }
+        {
+            let flat_x = tree(vec![
+                cell(1.0, 0.0, 0),
+                cell(1.0, 0.0, 1),
+                cell(1.0, 1.0, 1),
+                cell(1.0, 1.0, 1),
+            ]);
+            assert!(
+                !set_skel_tree(&mut store, root, flat_x),
+                "x not strictly ascending"
+            );
+        }
+        {
+            let flat_y = tree(vec![
+                cell(0.0, 1.0, 0),
+                cell(1.0, 1.0, 1),
+                cell(0.0, 1.0, 1),
+                cell(1.0, 1.0, 1),
+            ]);
+            assert!(
+                !set_skel_tree(&mut store, root, flat_y),
+                "y not strictly ascending"
+            );
+        }
+        {
+            let sound = tree(vec![
+                cell(0.0, 0.0, 0),
+                cell(1.0, 0.0, 1),
+                cell(0.0, 1.0, 1),
+                cell(1.0, 1.0, 1),
+            ]);
+            assert!(
+                set_skel_tree(&mut store, root, sound),
+                "the lattice installs"
+            );
+        }
     }
 
     /// The playback entries refuse a tree-driven root with

@@ -12,6 +12,7 @@
 use ornis_core::ColdComponentStore;
 
 use crate::blend::{BlendedPose, JointSample, fade_progress, sample_joints};
+use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
 use crate::{ClipId, JointTrs, Seconds, SkelClip, SkelPlayer};
 
 /// One named parameter of an [`SkelTree`], addressed by index.
@@ -29,6 +30,19 @@ pub struct TreeChild {
     /// Position of the input on the node's parameter axis; `children`
     /// carry strictly ascending positions.
     pub position: f32,
+    /// Index of the child node in [`SkelTree::nodes`], strictly smaller
+    /// than the index of the blend node itself.
+    pub node: usize,
+}
+
+/// One input of a [`TreeNodeDef::Blend2d`] node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TreeChild2d {
+    /// Position of the input on the node's two parameter axes. The
+    /// `children` form a complete row-major lattice: rows share
+    /// `position[1]`, columns share `position[0]`, and both ascend
+    /// strictly along the lattice.
+    pub position: [f32; 2],
     /// Index of the child node in [`SkelTree::nodes`], strictly smaller
     /// than the index of the blend node itself.
     pub node: usize,
@@ -108,6 +122,17 @@ pub enum TreeNodeDef {
         /// Inputs at strictly ascending `position`s; empty reads as rest.
         children: Vec<TreeChild>,
     },
+    /// 2-D blend of `children` over parameters `axes` (x, y): the
+    /// corners of the containing lattice cell carry bilinear weights
+    /// summing to one; outside the covered lattice the nearest edge or
+    /// corner owns the pose (`blend2d_weights`).
+    Blend2d {
+        /// Indices into [`SkelTree::params`] (x, y) that drive this node.
+        axes: [usize; 2],
+        /// Inputs on a complete row-major lattice ([`TreeChild2d`]);
+        /// empty reads as rest.
+        children: Vec<TreeChild2d>,
+    },
     /// State machine over earlier nodes: stands on `initial` and
     /// crossfades between `states` entries as [`TreeTransition`]s fire on
     /// the live parameter values (first match in `transitions` order
@@ -177,48 +202,6 @@ pub struct SkelTreePlayer {
     pub leaves: Vec<SkelPlayer>,
     /// Cursors of the [`TreeNodeDef::Machine`] nodes, in node order.
     pub machines: Vec<MachineCursor>,
-}
-
-/// Weights of a 1-D blend at `value` over `children` (strictly ascending
-/// `TreeChild::position`s).
-///
-/// Writes up to two `(child, weight)` slots into `out` and returns how
-/// many are live; `child` is an index into `children` and the weights sum
-/// to one. Outside the covered range the nearest end child gets the whole
-/// pose, a single child always owns it, and empty `children` yields `0`
-/// (the caller reads rest). Exactly on an interior position the matching
-/// child owns the pose; on a tie (equal neighbouring positions) the later
-/// child wins.
-///
-/// Deterministic and allocation-free — evaluated every frame per blend
-/// node.
-pub(crate) fn blend1d_weights(
-    children: &[TreeChild],
-    value: f32,
-    out: &mut [(usize, f32); 2],
-) -> usize {
-    if children.is_empty() {
-        return 0;
-    }
-    let last = children.len() - 1;
-    let mut segment = 0;
-    while segment < last && children[segment + 1].position <= value {
-        segment += 1;
-    }
-    let next = segment + 1;
-    if next > last || value <= children[segment].position {
-        out[0] = (segment, 1.0);
-        return 1;
-    }
-    let span = children[next].position - children[segment].position;
-    if span <= 0.0 {
-        out[0] = (next, 1.0);
-        return 1;
-    }
-    let t = (value - children[segment].position) / span;
-    out[0] = (segment, 1.0 - t);
-    out[1] = (next, t);
-    2
 }
 
 /// Scratch buffers of [`eval_tree`], grouped to stay inside clippy's
@@ -299,6 +282,9 @@ pub(crate) fn eval_tree(
                     tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
                 }
             }
+            TreeNodeDef::Blend2d { axes, children } => {
+                eval_blend2d(*axes, children, &player.params, rest, index, poses)?;
+            }
             TreeNodeDef::Machine {
                 states,
                 initial: _,
@@ -309,6 +295,44 @@ pub(crate) fn eval_tree(
                 eval_machine(states, transitions, cursor, &player.params, index, poses)?;
             }
         }
+    }
+    Some(())
+}
+
+/// Evaluates one [`TreeNodeDef::Blend2d`] node into `poses[index]`: the
+/// whole node contract is validated every frame — both axes in range,
+/// finite positions, children among the earlier nodes — so a broken
+/// lattice must not answer differently at different parameter values.
+/// The output is the bilinear fold of the weighted cell corners;
+/// `None` = bad skin.
+pub(crate) fn eval_blend2d(
+    axes: [usize; 2],
+    children: &[TreeChild2d],
+    params: &[f32],
+    rest: &[JointTrs],
+    index: usize,
+    poses: &mut [BlendedPose],
+) -> Option<()> {
+    let value = [params.get(axes[0]).copied()?, params.get(axes[1]).copied()?];
+    if !value[0].is_finite() || !value[1].is_finite() {
+        return None;
+    }
+    // Every child is validated, not just the weighted ones — the same
+    // broken tree must not answer differently at different parameter
+    // values.
+    for child in children {
+        if child.node >= index || !child.position[0].is_finite() || !child.position[1].is_finite() {
+            return None;
+        }
+    }
+    poses[index].refill_rest(rest);
+    let mut weights = [(0, 0.0f32); BLEND2D_CORNERS];
+    let filled = blend2d_weights(children, value, &mut weights);
+    let mut total = 0.0;
+    for (child, weight) in weights.iter().take(filled) {
+        let node_index = children[*child].node;
+        let (earlier, tail) = poses.split_at_mut(index);
+        tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
     }
     Some(())
 }
@@ -365,78 +389,4 @@ fn eval_machine(
         None => tail[0].clone_from(&earlier[states[cursor.state]]),
     }
     Some(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Children at `positions`, node indices matching the child index.
-    fn axis(positions: &[f32]) -> Vec<TreeChild> {
-        positions
-            .iter()
-            .enumerate()
-            .map(|(node, &position)| TreeChild { position, node })
-            .collect()
-    }
-
-    // Bodies sit in one inner block each: rustqual's fragment scanner
-    // hashes windows of three consecutive top-level statements, and the
-    // neighbouring test files already own the natural statement shapes.
-    #[test]
-    fn empty_children_read_as_rest() {
-        {
-            let mut out = [(0, 0.0); 2];
-            assert_eq!(blend1d_weights(&[], 0.5, &mut out), 0);
-        }
-    }
-
-    #[test]
-    fn single_child_owns_every_value() {
-        {
-            let mut out = [(0, 0.0); 2];
-            let filled = blend1d_weights(&axis(&[0.25]), 7.0, &mut out);
-            assert_eq!((filled, out[0]), (1, (0, 1.0)));
-        }
-    }
-
-    #[test]
-    fn value_outside_the_range_clamps_to_the_ends() {
-        {
-            let mut out = [(0, 0.0); 2];
-            let below = blend1d_weights(&axis(&[1.0, 2.0]), -5.0, &mut out);
-            assert_eq!((below, out[0]), (1, (0, 1.0)));
-            let above = blend1d_weights(&axis(&[1.0, 2.0]), 9.0, &mut out);
-            assert_eq!((above, out[0]), (1, (1, 1.0)));
-        }
-    }
-
-    #[test]
-    fn interior_value_splits_between_neighbours() {
-        {
-            let mut out = [(0, 0.0); 2];
-            let filled = blend1d_weights(&axis(&[0.0, 2.0, 4.0]), 1.5, &mut out);
-            assert_eq!(filled, 2);
-            assert_eq!(out[0], (0, 0.25));
-            assert_eq!(out[1], (1, 0.75));
-        }
-    }
-
-    #[test]
-    fn exact_axis_point_owns_the_pose() {
-        {
-            let mut out = [(0, 0.0); 2];
-            let filled = blend1d_weights(&axis(&[0.0, 1.0, 2.0]), 1.0, &mut out);
-            assert_eq!((filled, out[0]), (1, (1, 1.0)));
-        }
-    }
-
-    #[test]
-    fn tied_positions_fall_to_the_later_child() {
-        {
-            let mut out = [(0, 0.0); 2];
-            let filled = blend1d_weights(&axis(&[1.0, 1.0]), 1.0, &mut out);
-            assert_eq!((filled, out[0]), (1, (1, 1.0)));
-        }
-    }
 }

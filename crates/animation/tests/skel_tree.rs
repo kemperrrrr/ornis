@@ -13,13 +13,88 @@ use common::*;
 use glam::Vec3;
 use ornis_animation::{
     ClipId, JointMask, MaskId, SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer,
-    TreeChild, TreeNodeDef, TreeParam,
+    TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
 };
 use ornis_core::Engine;
 use ornis_core::units::Clamped01;
 
 fn child(position: f32, node: usize) -> TreeChild {
     TreeChild { position, node }
+}
+
+fn child2d(x: f32, y: f32, node: usize) -> TreeChild2d {
+    TreeChild2d {
+        position: [x, y],
+        node,
+    }
+}
+
+/// 2×2 blend2d over parameters `x`/`y` — the four `clips` at the lattice
+/// corners (0,0), (1,0), (0,1), (1,1) — with `defaults` on the axes.
+fn quad_tree(clips: [ClipId; 4], defaults: [f32; 2]) -> SkelTree {
+    SkelTree {
+        nodes: vec![
+            TreeNodeDef::Clip { clip: clips[0] },
+            TreeNodeDef::Clip { clip: clips[1] },
+            TreeNodeDef::Clip { clip: clips[2] },
+            TreeNodeDef::Clip { clip: clips[3] },
+            TreeNodeDef::Blend2d {
+                axes: [0, 1],
+                children: vec![
+                    child2d(0.0, 0.0, 0),
+                    child2d(1.0, 0.0, 1),
+                    child2d(0.0, 1.0, 2),
+                    child2d(1.0, 1.0, 3),
+                ],
+            },
+        ],
+        params: vec![
+            TreeParam {
+                name: "x".to_string(),
+                default: defaults[0],
+            },
+            TreeParam {
+                name: "y".to_string(),
+                default: defaults[1],
+            },
+        ],
+    }
+}
+
+/// The four corner clips of a [`quad_tree`] with x poses 2, 6, 4, 8.
+fn quad_clips(engine: &mut Engine) -> [ClipId; 4] {
+    [
+        clip_x(engine, "a", 2.0),
+        clip_x(engine, "b", 6.0),
+        clip_x(engine, "c", 4.0),
+        clip_x(engine, "d", 8.0),
+    ]
+}
+
+/// Runs one frame of a [`quad_tree`] at `defaults` and expects the root
+/// joint origin at `want`.
+fn blend2d_at(defaults: [f32; 2], want: Vec3) {
+    let mut engine = engine();
+    let clips = quad_clips(&mut engine);
+    let root = rig(&mut engine, 1);
+    install(&mut engine, root, quad_tree(clips, defaults));
+    engine.run_frame(0.1);
+    expect_origin(&engine, root, 0, want);
+}
+
+#[test]
+fn blend2d_cell_midpoint_mixes_all_four() {
+    blend2d_at([0.5, 0.5], Vec3::new(5.0, 0.0, 0.0));
+}
+
+#[test]
+fn blend2d_lattice_lines_mix_two() {
+    blend2d_at([0.5, 0.0], Vec3::new(4.0, 0.0, 0.0));
+}
+
+#[test]
+fn blend2d_outside_the_lattice_clamps_to_the_corner() {
+    blend2d_at([2.0, -1.0], Vec3::new(6.0, 0.0, 0.0));
 }
 
 /// Two-leaf blend1d over `axis` — `left` at `0.0`, `right` at `1.0` —
