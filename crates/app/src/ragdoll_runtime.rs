@@ -38,7 +38,9 @@ pub struct RagdollRuntime {
     /// Bind-pose frame of each bone's joint: world position, world
     /// rotation and the accumulated world scale — the factor the inverse
     /// seam of [`RagdollRuntime::sample_local`] undoes (bodies are rigid
-    /// and carry no scale).
+    /// and carry no scale). Indexed by bone (description order), not by
+    /// skeleton joint slot — on sparse chains the two differ, and the
+    /// seam must read the parent *bone's* fold.
     bind: Vec<(Vec3, Quat, Vec3)>,
     /// Parent bone index per bone; `None` on the chain root.
     parents: Vec<Option<usize>>,
@@ -108,10 +110,10 @@ impl RagdollRuntime {
     /// `GlobalTransform` enters later, in `compose_model_matrices`, as on
     /// the animation side. A bone local is taken against its parent bone's
     /// body: rotation `R_p⁻¹·R_c`, translation divided per axis by the
-    /// parent's accumulated bind scale (the very factor `bind_worlds`
-    /// folded in — rigid bodies carry no scale, so the seam undoes it to
-    /// land back in the skeleton's scaled local frames). The output scale
-    /// is left at one: the blend keeps the animated scale. Fails on a
+    /// parent bone's accumulated bind scale (the very factor `bind_worlds`
+    /// folded in for its joint — rigid bodies carry no scale, so the seam
+    /// undoes it to land back in the skeleton's scaled local frames). The
+    /// output scale is left at one: the blend keeps the animated scale. Fails on a
     /// poisoned lock, a missing body or a non-finite pose, writing nothing
     /// further. Hot path: no allocations.
     pub fn sample_local(&self, desc: &RagdollDesc, out: &mut [JointTrs]) -> bool {
@@ -177,7 +179,7 @@ pub fn build_ragdoll(
     gravity: Vec3,
 ) -> Result<RagdollRuntime, RagdollError> {
     desc.validate(skeleton)?;
-    let bind = bind_worlds(skeleton);
+    let joint_bind = bind_worlds(skeleton);
     let mut engine = FeatherstoneEngine::new(gravity);
     let mut handles = Vec::with_capacity(desc.bones.len());
     let root_bone = chain_root(&desc.bones);
@@ -186,7 +188,7 @@ pub fn build_ragdoll(
         RagdollBase::Floating => BaseJoint::Floating,
     };
     for (index, bone) in desc.bones.iter().enumerate() {
-        let (position, orientation, _) = bind[bone.joint.index()];
+        let (position, orientation, _) = joint_bind[bone.joint.index()];
         let mut body = bone_body(bone, position);
         body.orientation = orientation;
         handles.push(if index == root_bone {
@@ -201,7 +203,7 @@ pub fn build_ragdoll(
             joints.push(None);
             continue;
         };
-        let hinge = hinge_joint(bone, &bind, &desc.bones[parent])?;
+        let hinge = hinge_joint(bone, &joint_bind, &desc.bones[parent])?;
         let handle = engine
             .add_joint(handles[parent], handles[index], hinge)
             .map_err(|_| RagdollError::Assemble)?;
@@ -211,6 +213,14 @@ pub fn build_ragdoll(
     }
     let parents = (0..desc.bones.len())
         .map(|index| chain_parent(index, &desc.bones))
+        .collect();
+    // Bind frames ride per bone, not per joint slot: on sparse chains a
+    // bone's slot in the description differs from its skeleton joint, and
+    // the inverse seam indexes the parent by bone (§4.1).
+    let bind = desc
+        .bones
+        .iter()
+        .map(|bone| joint_bind[bone.joint.index()])
         .collect();
     Ok(RagdollRuntime {
         engine: Arc::new(Mutex::new(engine)),

@@ -467,9 +467,20 @@ mod tests {
             Some(vec![Clamped01::ONE; 3])
         );
         let physical = blend.get(root).map(|b| b.physical.clone()).unwrap();
-        assert_eq!(physical[0], JointTrs::IDENTITY);
-        assert_eq!(physical[1].translation, Vec3::Y);
-        assert_eq!(physical[2].translation, Vec3::Y);
+        // Pose checks ride the seam tolerance, not exact f32 equality —
+        // float noise in the fixtures must not break the verdict.
+        assert!(near(
+            (physical[0].translation, physical[0].rotation),
+            (Vec3::ZERO, Quat::IDENTITY)
+        ));
+        assert!(near(
+            (physical[1].translation, physical[1].rotation),
+            (Vec3::Y, Quat::IDENTITY)
+        ));
+        assert!(near(
+            (physical[2].translation, physical[2].rotation),
+            (Vec3::Y, Quat::IDENTITY)
+        ));
         drop(blend);
 
         // Blend: mask x weight per joint (0.25·0.5, 1·0.5, 0.5·0.5).
@@ -599,6 +610,95 @@ mod tests {
         // scale.
         let rest = &rig.rest;
         for (joint, sampled) in blend.physical.iter().enumerate() {
+            assert!(
+                (sampled.translation - rest[joint].translation).length() < 1e-5,
+                "joint {joint} translation {:?} vs {:?}",
+                sampled.translation,
+                rest[joint].translation
+            );
+            assert!(
+                sampled.rotation.dot(rest[joint].rotation).abs() > 0.9999,
+                "joint {joint} rotation"
+            );
+            assert_eq!(sampled.scale, Vec3::ONE);
+        }
+    }
+
+    /// A rig whose chain skips a joint: the path `0 <- 2 <- 3` runs past
+    /// the scaled decoy sibling `1`, so the chain's bone slots (`0, 1, 2`)
+    /// differ from their skeleton joint indices (`0, 2, 3`). The decoy
+    /// folds a 6× accumulated bind scale — reading the bind table by bone
+    /// slot instead of the bone's joint would divide by it.
+    fn sparse_rig() -> Skeleton {
+        use std::f32::consts::FRAC_PI_2;
+        Skeleton::new(
+            vec![
+                None,
+                Some(JointId::from_raw(0)),
+                Some(JointId::from_raw(0)),
+                Some(JointId::from_raw(2)),
+            ],
+            vec![Default::default(); 4],
+            vec![
+                "hips".to_string(),
+                "leaf".to_string(),
+                "spine".to_string(),
+                "head".to_string(),
+            ],
+        )
+        .with_rest(vec![
+            JointTrs {
+                translation: Vec3::ZERO,
+                rotation: Quat::from_rotation_z(FRAC_PI_2),
+                scale: Vec3::splat(FULL_EDGE),
+            },
+            JointTrs {
+                translation: Vec3::X,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::splat(3.0),
+            },
+            JointTrs {
+                translation: Vec3::X,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            JointTrs {
+                translation: Vec3::X,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        ])
+    }
+
+    /// The chain `0 <- 2 <- 3` of [`sparse_rig`] — bone `1`'s joint is
+    /// `2`, bone `2`'s joint is `3`.
+    fn sparse_desc() -> RagdollDesc {
+        RagdollDesc {
+            bones: vec![bone(0, None), bone(2, Some(0)), bone(3, Some(2))],
+            base: RagdollBase::Floating,
+        }
+    }
+
+    #[test]
+    fn sparse_sample_restores_the_rest_pose() {
+        let rig = sparse_rig();
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, rig.clone());
+        set_ragdoll(&mut store, root, sparse_desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+        set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
+        assert!(update_ragdoll(&store, root));
+        let blend = store.write_lane::<RagdollBlend>().unwrap();
+        let blend = blend.get(root).unwrap();
+
+        // At rest the sample lands back in the skeleton's rest on every
+        // chain joint. The inverse seam must divide by the parent *bone's*
+        // accumulated bind scale (joint 2's fold), not the bind of the
+        // same-numbered skeleton slot (the decoy joint 1 folds 6×).
+        let rest = &rig.rest;
+        for &joint in &[0usize, 2, 3] {
+            let sampled = &blend.physical[joint];
             assert!(
                 (sampled.translation - rest[joint].translation).length() < 1e-5,
                 "joint {joint} translation {:?} vs {:?}",
