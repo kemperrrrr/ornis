@@ -13,8 +13,8 @@ mod common;
 use common::*;
 use glam::Vec3;
 use ornis_animation::{
-    ClipId, ClipSyncMarks, SkelClip, SkelTree, SkelTreePlayer, SyncMark, TreeChild, TreeCmp,
-    TreeCond, TreeNodeDef, TreeParam, TreeTransition,
+    ClipId, ClipSyncMarks, SkelClip, SkelTree, SkelTreePlayer, SyncMark, TreeChild, TreeChild2d,
+    TreeCmp, TreeCond, TreeNodeDef, TreeParam, TreeTransition,
 };
 use ornis_core::units::Seconds;
 use ornis_core::{Engine, Entity};
@@ -284,6 +284,60 @@ fn blend_state_leaves_align_on_arrival() {
                 name: "speed".to_string(),
                 default: 0.0,
             }],
+        },
+    );
+    assert_eq!(
+        (fired(&mut engine, root), leaf_time(&engine, root, 2)),
+        (0.75, 0.125)
+    );
+}
+
+/// The same handoff as [`blend_state_leaves_align_on_arrival`] with the
+/// arriving state a `Blend2d` lattice: the subtree leaves re-phase by the
+/// shared mark exactly like the blend1d ones (`node_references` knows
+/// `Blend2d`).
+#[test]
+fn blend2d_state_leaves_align_on_arrival() {
+    let (mut engine, root) = tree_scene(
+        vec![
+            ("idle", 1.0, 1.0, marks("foot", 0.5)),
+            ("walk", 1.0, 2.0, marks("foot", 0.75)),
+            ("run", 0.5, 4.0, marks("foot", 0.25)),
+        ],
+        |ids| SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: ids[0] },
+                TreeNodeDef::Clip { clip: ids[1] },
+                TreeNodeDef::Clip { clip: ids[2] },
+                TreeNodeDef::Blend2d {
+                    axes: [0, 1],
+                    children: vec![
+                        TreeChild2d {
+                            position: [0.0, 0.0],
+                            node: 1,
+                        },
+                        TreeChild2d {
+                            position: [1.0, 0.0],
+                            node: 2,
+                        },
+                    ],
+                },
+                TreeNodeDef::Machine {
+                    states: vec![0, 3],
+                    initial: 0,
+                    transitions: vec![transition(0, 1, TreeCmp::Greater, 0.5, 1.0)],
+                },
+            ],
+            params: vec![
+                TreeParam {
+                    name: "speed".to_string(),
+                    default: 0.0,
+                },
+                TreeParam {
+                    name: "blend".to_string(),
+                    default: 0.5,
+                },
+            ],
         },
     );
     assert_eq!(

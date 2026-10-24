@@ -643,7 +643,8 @@ fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
                             .all(|child| child.node < index && child.position.is_finite())
                 }
                 TreeNodeDef::Blend2d { axes, children } => {
-                    axes.iter().all(|axis| *axis < tree.params.len())
+                    axes[0] != axes[1]
+                        && axes.iter().all(|axis| *axis < tree.params.len())
                         && children.iter().all(|child| {
                             child.node < index && child.position.iter().all(|axis| axis.is_finite())
                         })
@@ -2689,10 +2690,7 @@ mod tests {
             position: [x, y],
             node,
         };
-        let blend = |children| TreeNodeDef::Blend2d {
-            axes: [0, 1],
-            children,
-        };
+        let blend = |axes: [usize; 2], children| TreeNodeDef::Blend2d { axes, children };
         let params = vec![
             TreeParam {
                 name: "x".to_string(),
@@ -2703,61 +2701,82 @@ mod tests {
                 default: 0.0,
             },
         ];
-        let tree = |children| SkelTree {
-            nodes: vec![leaf(), leaf(), blend(children)],
+        let tree = |axes: [usize; 2], children| SkelTree {
+            nodes: vec![leaf(), leaf(), blend(axes, children)],
             params: params.clone(),
         };
         {
-            let ragged = tree(vec![
-                cell(0.0, 0.0, 0),
-                cell(1.0, 0.0, 1),
-                cell(0.0, 1.0, 1),
-            ]);
+            let ragged = tree(
+                [0, 1],
+                vec![cell(0.0, 0.0, 0), cell(1.0, 0.0, 1), cell(0.0, 1.0, 1)],
+            );
             assert!(!set_skel_tree(&mut store, root, ragged), "ragged rows");
         }
         {
-            let mismatched = tree(vec![
-                cell(0.0, 0.0, 0),
-                cell(1.0, 0.0, 1),
-                cell(0.5, 1.0, 1),
-                cell(1.5, 1.0, 1),
-            ]);
+            let mismatched = tree(
+                [0, 1],
+                vec![
+                    cell(0.0, 0.0, 0),
+                    cell(1.0, 0.0, 1),
+                    cell(0.5, 1.0, 1),
+                    cell(1.5, 1.0, 1),
+                ],
+            );
             assert!(
                 !set_skel_tree(&mut store, root, mismatched),
                 "x positions differ across rows"
             );
         }
         {
-            let flat_x = tree(vec![
-                cell(1.0, 0.0, 0),
-                cell(1.0, 0.0, 1),
-                cell(1.0, 1.0, 1),
-                cell(1.0, 1.0, 1),
-            ]);
+            let flat_x = tree(
+                [0, 1],
+                vec![
+                    cell(1.0, 0.0, 0),
+                    cell(1.0, 0.0, 1),
+                    cell(1.0, 1.0, 1),
+                    cell(1.0, 1.0, 1),
+                ],
+            );
             assert!(
                 !set_skel_tree(&mut store, root, flat_x),
                 "x not strictly ascending"
             );
         }
         {
-            let flat_y = tree(vec![
-                cell(0.0, 1.0, 0),
-                cell(1.0, 1.0, 1),
-                cell(0.0, 1.0, 1),
-                cell(1.0, 1.0, 1),
-            ]);
+            // Two full rows, y descending: the refusal must fire on the
+            // per-row y check, not on x (an all-equal-y shape collapses
+            // into one wide row and would refuse on x instead).
+            let descending_y = tree(
+                [0, 1],
+                vec![
+                    cell(0.0, 1.0, 0),
+                    cell(1.0, 1.0, 1),
+                    cell(0.0, 0.0, 1),
+                    cell(1.0, 0.0, 1),
+                ],
+            );
             assert!(
-                !set_skel_tree(&mut store, root, flat_y),
+                !set_skel_tree(&mut store, root, descending_y),
                 "y not strictly ascending"
             );
         }
         {
-            let sound = tree(vec![
-                cell(0.0, 0.0, 0),
-                cell(1.0, 0.0, 1),
-                cell(0.0, 1.0, 1),
-                cell(1.0, 1.0, 1),
-            ]);
+            let same_axis = tree([0, 0], vec![cell(0.0, 0.0, 0), cell(1.0, 0.0, 1)]);
+            assert!(
+                !set_skel_tree(&mut store, root, same_axis),
+                "both axes on one parameter"
+            );
+        }
+        {
+            let sound = tree(
+                [0, 1],
+                vec![
+                    cell(0.0, 0.0, 0),
+                    cell(1.0, 0.0, 1),
+                    cell(0.0, 1.0, 1),
+                    cell(1.0, 1.0, 1),
+                ],
+            );
             assert!(
                 set_skel_tree(&mut store, root, sound),
                 "the lattice installs"

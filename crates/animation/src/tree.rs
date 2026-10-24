@@ -127,7 +127,8 @@ pub enum TreeNodeDef {
     /// summing to one; outside the covered lattice the nearest edge or
     /// corner owns the pose (`blend2d_weights`).
     Blend2d {
-        /// Indices into [`SkelTree::params`] (x, y) that drive this node.
+        /// Two distinct indices into [`SkelTree::params`] (x, y) that
+        /// drive this node.
         axes: [usize; 2],
         /// Inputs on a complete row-major lattice ([`TreeChild2d`]);
         /// empty reads as rest.
@@ -299,12 +300,15 @@ pub(crate) fn eval_tree(
     Some(())
 }
 
-/// Evaluates one [`TreeNodeDef::Blend2d`] node into `poses[index]`: the
-/// whole node contract is validated every frame — both axes in range,
-/// finite positions, children among the earlier nodes — so a broken
-/// lattice must not answer differently at different parameter values.
-/// The output is the bilinear fold of the weighted cell corners;
-/// `None` = bad skin.
+/// Evaluates one [`TreeNodeDef::Blend2d`] node into `poses[index]`. The
+/// hot path re-checks the fold-poisoning part of the contract every frame
+/// — both axes in range, finite parameter values and positions, children
+/// among the earlier nodes — so the same broken tree never answers
+/// differently at different parameter values; the lattice *shape* is
+/// validated once at install (`set_skel_tree` rejects a broken grid),
+/// and a torn tail just falls off deterministically
+/// ([`blend2d_weights`]). The output is the bilinear fold of the weighted
+/// cell corners; `None` = bad skin.
 pub(crate) fn eval_blend2d(
     axes: [usize; 2],
     children: &[TreeChild2d],
