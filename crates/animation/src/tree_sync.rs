@@ -29,7 +29,9 @@ pub struct SyncMark {
 /// Sync marks of one clip — cold authoring data keyed by [`ClipId`](crate::ClipId) in
 /// the [`ColdComponentStore`] lane. Marks are optional: a clip without
 /// marks (or without a name shared with the other side) never re-phases
-/// anyone.
+/// anyone. The lane is written through `set_clip_sync_marks`; marks with
+/// a non-finite `at` slipped in any other way are ignored at re-phasing
+/// time.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ClipSyncMarks {
     /// Marks in author order; several marks per name are legal (the
@@ -42,7 +44,13 @@ pub struct ClipSyncMarks {
 /// `None` = no shared name, nothing to align.
 pub(crate) fn shared_mark_at(incoming: &[SyncMark], outgoing: &[SyncMark]) -> Option<(f32, f32)> {
     for mark in incoming {
-        if let Some(other) = outgoing.iter().find(|other| other.name == mark.name) {
+        if !mark.at.is_finite() {
+            continue;
+        }
+        if let Some(other) = outgoing
+            .iter()
+            .find(|other| other.name == mark.name && other.at.is_finite())
+        {
             return Some((mark.at, other.at));
         }
     }
@@ -119,13 +127,37 @@ fn leaf_cursor_of(tree: &SkelTree, node: usize) -> Option<usize> {
     )
 }
 
+/// Clocks of the leaving state's clip leaves, read up front: re-phasing
+/// must not depend on node order (`docs/animation-design.md` §7.5).
+fn leaving_clocks(tree: &SkelTree, from_node: usize, leaves: &[SkelPlayer]) -> Vec<(usize, f32)> {
+    subtree_leaves(tree, from_node)
+        .into_iter()
+        .filter_map(|node| {
+            let cursor = leaves.get(leaf_cursor_of(tree, node)?)?;
+            Some((node, cursor.time.get()))
+        })
+        .collect()
+}
+
+/// Whether `leaf` is one of the leaving state's clip leaves.
+fn leaf_listed(from_leaves: &[(usize, f32)], leaf: usize) -> bool {
+    for &(node, _) in from_leaves {
+        if node == leaf {
+            return true;
+        }
+    }
+    false
+}
+
 /// Re-phases the incoming state's clip cursors when a machine transition
 /// fires (`docs/animation-design.md` §7.5): each looping incoming leaf
 /// takes its phase from the first leaving-state leaf (node order) whose
 /// clip shares a mark name — the clips' next same-named marks land on the
 /// same wall-clock hit. Leaves without a partner (no shared name, no
 /// marks, missing clip, non-positive cycle, not looping) keep their
-/// clocks, and a leaf present in both states is left alone.
+/// clocks. A leaf living in both states is skipped whole — the same
+/// cursors serve both sides, so self-loops and shared subtrees never
+/// re-phase — and the leaving clocks are read before any write.
 pub(crate) fn sync_transition_leaves(
     leaves: &mut [SkelPlayer],
     tree: &SkelTree,
@@ -134,11 +166,14 @@ pub(crate) fn sync_transition_leaves(
     clips: &ColdComponentStore<SkelClip>,
     marks: &ColdComponentStore<ClipSyncMarks>,
 ) {
-    let from_leaves = subtree_leaves(tree, from_node);
+    let from_leaves = leaving_clocks(tree, from_node, leaves);
     for incoming in subtree_leaves(tree, to_node) {
         let Some(slot) = leaf_cursor_of(tree, incoming) else {
             continue;
         };
+        if leaf_listed(&from_leaves, incoming) {
+            continue;
+        }
         if !leaves.get(slot).is_some_and(|cursor| cursor.looping) {
             continue;
         }
@@ -155,10 +190,7 @@ pub(crate) fn sync_transition_leaves(
             continue;
         }
         let mut aligned = None;
-        for &outgoing in &from_leaves {
-            if outgoing == incoming {
-                continue;
-            }
+        for &(outgoing, out_time) in &from_leaves {
             let Some(TreeNodeDef::Clip { clip: out_id }) = tree.nodes.get(outgoing) else {
                 continue;
             };
@@ -172,12 +204,6 @@ pub(crate) fn sync_transition_leaves(
                 continue;
             }
             let Some((in_at, out_at)) = shared_mark_at(&in_marks.marks, &out_marks.marks) else {
-                continue;
-            };
-            let Some(out_time) = leaf_cursor_of(tree, outgoing)
-                .and_then(|out_slot| leaves.get(out_slot))
-                .map(|out_cursor| out_cursor.time.get())
-            else {
                 continue;
             };
             aligned = Some(sync_cursor_time(
@@ -226,6 +252,34 @@ mod tests {
                 },
             ];
             assert_eq!(shared_mark_at(&incoming, &outgoing), Some((0.3, 0.4)));
+        }
+    }
+
+    #[test]
+    fn shared_mark_skips_non_finite_at() {
+        {
+            let nan = f32::NAN;
+            let incoming = vec![
+                SyncMark {
+                    name: "foot".to_string(),
+                    at: nan,
+                },
+                SyncMark {
+                    name: "hand".to_string(),
+                    at: 0.3,
+                },
+            ];
+            let outgoing = vec![
+                SyncMark {
+                    name: "foot".to_string(),
+                    at: 0.4,
+                },
+                SyncMark {
+                    name: "hand".to_string(),
+                    at: nan,
+                },
+            ];
+            assert_eq!(shared_mark_at(&incoming, &outgoing), None);
         }
     }
 

@@ -2535,6 +2535,47 @@ mod tests {
         assert_eq!(marks_verdict(vec![sync_mark("foot", 1.5)]), (false, false));
     }
 
+    /// Marks of `clip` in the cold lane — `None` when the lane holds
+    /// none.
+    fn lane_marks(store: &SmartStore, clip: ClipId) -> Option<Vec<SyncMark>> {
+        store
+            .read_cold_lane::<ClipSyncMarks>()
+            .as_deref()
+            .and_then(|lane| lane.get(clip.0))
+            .map(|entry| entry.marks.clone())
+            .filter(|marks| !marks.is_empty())
+    }
+
+    /// The `set_clip_sync_marks` verdict on `marks` and what the lane
+    /// holds for the live clip afterwards.
+    fn lane_after(marks: Vec<SyncMark>) -> (bool, Option<Vec<SyncMark>>) {
+        let mut store = SmartStore::new();
+        let (_root, clip) = tree_hero(&mut store);
+        let set = set_clip_sync_marks(&mut store, clip, marks);
+        (set, lane_marks(&store, clip))
+    }
+
+    /// The clear verdict of an empty list after `marks` were set, and
+    /// the lane afterwards.
+    fn lane_after_clear(marks: Vec<SyncMark>) -> (bool, Option<Vec<SyncMark>>) {
+        let mut store = SmartStore::new();
+        let (_root, clip) = tree_hero(&mut store);
+        set_clip_sync_marks(&mut store, clip, marks);
+        let cleared = set_clip_sync_marks(&mut store, clip, Vec::new());
+        (cleared, lane_marks(&store, clip))
+    }
+
+    #[test]
+    fn set_clip_sync_marks_stores_marks_in_the_lane() {
+        let marks = vec![sync_mark("foot", 0.5)];
+        assert_eq!(lane_after(marks.clone()), (true, Some(marks)));
+    }
+
+    #[test]
+    fn an_empty_list_clears_the_lane() {
+        assert_eq!(lane_after_clear(vec![sync_mark("foot", 0.5)]), (true, None));
+    }
+
     #[test]
     fn set_clip_sync_marks_rejects_a_non_finite_at() {
         assert_eq!(

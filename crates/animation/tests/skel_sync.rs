@@ -13,8 +13,8 @@ mod common;
 use common::*;
 use glam::Vec3;
 use ornis_animation::{
-    ClipId, ClipSyncMarks, SkelClip, SkelTree, SkelTreePlayer, SyncMark, TreeCmp, TreeCond,
-    TreeNodeDef, TreeParam, TreeTransition,
+    ClipId, ClipSyncMarks, SkelClip, SkelTree, SkelTreePlayer, SyncMark, TreeChild, TreeCmp,
+    TreeCond, TreeNodeDef, TreeParam, TreeTransition,
 };
 use ornis_core::units::Seconds;
 use ornis_core::{Engine, Entity};
@@ -89,13 +89,10 @@ fn scene(
     run_marks: Vec<SyncMark>,
     transitions: Vec<TreeTransition>,
 ) -> (Engine, Entity) {
-    let mut engine = engine();
-    let walk = marked_clip(&mut engine, "walk", 1.0, 2.0, walk_marks);
-    let run = marked_clip(&mut engine, "run", 0.5, 4.0, run_marks);
-    let root = rig(&mut engine, 1);
-    install(&mut engine, root, machine(walk, run, transitions));
-    engine.run_frame(0.25);
-    (engine, root)
+    tree_scene(
+        vec![("walk", 1.0, 2.0, walk_marks), ("run", 0.5, 4.0, run_marks)],
+        |ids| machine(ids[0], ids[1], transitions),
+    )
 }
 
 /// Sets `speed = 1.0` and steps the 0.25 s frame the handoff fires on;
@@ -128,6 +125,171 @@ fn set_looping(engine: &mut Engine, root: Entity, slot: usize, looping: bool) {
         .expect("player kept")
         .leaves[slot]
         .looping = looping;
+}
+
+/// Clips (`name`, duration, x, marks) under `tree(ids)`, after the
+/// settling 0.25 s frame — the `scene` fixture for trees the two-clip
+/// `machine` cannot express.
+fn tree_scene(
+    clips: Vec<(&str, f32, f32, Vec<SyncMark>)>,
+    tree: impl FnOnce(&[ClipId]) -> SkelTree,
+) -> (Engine, Entity) {
+    let mut engine = engine();
+    let ids: Vec<ClipId> = clips
+        .into_iter()
+        .map(|(name, duration, x, marks)| marked_clip(&mut engine, name, duration, x, marks))
+        .collect();
+    let root = rig(&mut engine, 1);
+    install(&mut engine, root, tree(&ids));
+    engine.run_frame(0.25);
+    (engine, root)
+}
+
+#[test]
+fn a_self_loop_never_rephases_the_blend_leaves() {
+    let (mut engine, root) = tree_scene(
+        vec![
+            ("walk", 1.0, 2.0, marks("foot", 0.75)),
+            ("run", 0.5, 4.0, marks("foot", 0.25)),
+        ],
+        |ids| SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: ids[0] },
+                TreeNodeDef::Clip { clip: ids[1] },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 1,
+                        },
+                    ],
+                },
+                TreeNodeDef::Machine {
+                    states: vec![2],
+                    initial: 0,
+                    transitions: vec![transition(0, 0, TreeCmp::Greater, 0.5, 1.0)],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "speed".to_string(),
+                default: 0.0,
+            }],
+        },
+    );
+    assert_eq!(
+        (fired(&mut engine, root), leaf_time(&engine, root, 0)),
+        (0.0, 0.5)
+    );
+}
+
+#[test]
+fn a_leaf_shared_by_both_states_keeps_its_clock() {
+    let (mut engine, root) = tree_scene(
+        vec![
+            ("a", 1.0, 2.0, marks("foot", 0.25)),
+            ("b", 0.5, 4.0, marks("foot", 0.75)),
+            ("c", 0.5, 6.0, marks("foot", 0.25)),
+        ],
+        |ids| SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: ids[0] },
+                TreeNodeDef::Clip { clip: ids[1] },
+                TreeNodeDef::Clip { clip: ids[2] },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 1,
+                        },
+                    ],
+                },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 2,
+                        },
+                    ],
+                },
+                TreeNodeDef::Machine {
+                    states: vec![3, 4],
+                    initial: 0,
+                    transitions: vec![transition(0, 1, TreeCmp::Greater, 0.5, 1.0)],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "speed".to_string(),
+                default: 0.0,
+            }],
+        },
+    );
+    assert_eq!(
+        (
+            fired(&mut engine, root),
+            leaf_time(&engine, root, 0),
+            leaf_time(&engine, root, 2)
+        ),
+        (0.0, 0.5, 0.375)
+    );
+}
+
+#[test]
+fn blend_state_leaves_align_on_arrival() {
+    let (mut engine, root) = tree_scene(
+        vec![
+            ("idle", 1.0, 1.0, marks("foot", 0.5)),
+            ("walk", 1.0, 2.0, marks("foot", 0.75)),
+            ("run", 0.5, 4.0, marks("foot", 0.25)),
+        ],
+        |ids| SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: ids[0] },
+                TreeNodeDef::Clip { clip: ids[1] },
+                TreeNodeDef::Clip { clip: ids[2] },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 1,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 2,
+                        },
+                    ],
+                },
+                TreeNodeDef::Machine {
+                    states: vec![0, 3],
+                    initial: 0,
+                    transitions: vec![transition(0, 1, TreeCmp::Greater, 0.5, 1.0)],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "speed".to_string(),
+                default: 0.0,
+            }],
+        },
+    );
+    assert_eq!(
+        (fired(&mut engine, root), leaf_time(&engine, root, 2)),
+        (0.75, 0.125)
+    );
 }
 
 #[test]
