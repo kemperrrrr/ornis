@@ -181,14 +181,16 @@
      замеры base↔head и отсутствие регресса на empty/small — в PR #180.
      Эквивалентность старого и нового ядер — обычные тесты без таймингов.
   6. **Ragdoll — в работе (PR #180, коммиты слоями). Срез 1 ✅ (модель +
-     привязка), срез 2 ✅ (физика → анимация).**
+     привязка), срез 2 ✅ (физика → анимация), срез 3 ✅ (анимация →
+     физика: фикс-тик ABA, приводы `w < 1`, переходы весов, точечный
+     вес).**
      Дизайн: `docs/ragdoll-design.md` (модель `RagdollDesc`/`RagdollBone`/
      `RagdollMode` в `ornis-animation`, шов `ragdoll_wiring` в `ornis-app`:
      ABA-цепь `FeatherstoneEngine` на корень, world→local чтение позы
      (`sample_local`) и бленд «физика → анимация» в `finish_pose` по
      `RagdollBlend` (режим `Physical`/`Blend` c маской `JointMask`,
-     битый кадр пропускается со счётчиком `skipped_frames`); приводы
-     следят за анимацией — в срезе 3, контакты — отдельным срезом, §9).
+     битый кадр пропускается со счётчиком `skipped_frames`); контакты —
+     отдельным срезом, §9).
      Слои поставки — там же, §8. База в
      физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
      (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,

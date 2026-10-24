@@ -65,16 +65,16 @@ pub use animator::{Animator, AnimatorAccess, AnimatorError, AnimatorMut, try_ani
 pub mod skinning;
 
 mod blend;
-use blend::{BlendedPose, JointSample, fade_progress, sample_joints};
-pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack};
+use blend::{BlendedPose, JointSample, sample_joints};
+pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack, fade_progress};
 
 mod ragdoll;
 mod tree;
 mod tree_sync;
 mod tree_weights;
 pub use ragdoll::{
-    RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollError, RagdollLimit, RagdollMode,
-    RagdollMotor, RagdollShape, ragdoll_blend,
+    RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollError, RagdollFade, RagdollLimit,
+    RagdollMode, RagdollMotor, RagdollShape, ragdoll_blend,
 };
 use tree::eval_tree;
 pub use tree::{
@@ -2068,7 +2068,7 @@ impl System for SkelSampleSystem {
             .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
             .writes_lane::<JointPose>()
-            .reads_lane::<RagdollBlend>()
+            .writes_lane::<RagdollBlend>()
             .writes_lane::<Transform>()
             .writes_lane::<Children>()
             .writes_lane::<GlobalTransform>()
@@ -2356,7 +2356,6 @@ struct SampleLanes<'a> {
     masks: Option<&'a ColdComponentStore<JointMask>>,
     trees: Option<&'a ColdComponentStore<SkelTree>>,
     tree_players: Option<&'a ComponentStore<SkelTreePlayer>>,
-    ragdolls: Option<&'a ComponentStore<RagdollBlend>>,
 }
 
 /// Samples every playing cursor into the scratch buffers: model matrices
@@ -2379,7 +2378,9 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     let masks = store.read_cold_lane::<JointMask>();
     let trees = store.read_cold_lane::<SkelTree>();
     let tree_players = store.read_lane::<SkelTreePlayer>();
-    let ragdolls = store.read_lane::<RagdollBlend>();
+    // The blend lane is written per entity (drive targets of §4.2); a
+    // second lane guard on another type never nests on the same lock.
+    let mut ragdolls = store.write_lane::<RagdollBlend>();
     let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
         clips: &clips,
@@ -2390,7 +2391,6 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         masks: masks.as_deref(),
         trees: trees.as_deref(),
         tree_players: tree_players.as_deref(),
-        ragdolls: ragdolls.as_deref(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
@@ -2404,7 +2404,17 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         {
             continue;
         }
-        match sample_entity(*entity, player, &lanes, poses.as_deref_mut(), scratch) {
+        let blend = ragdolls
+            .as_deref_mut()
+            .and_then(|lane| lane.get_mut(*entity));
+        match sample_entity(
+            *entity,
+            player,
+            &lanes,
+            poses.as_deref_mut(),
+            scratch,
+            blend,
+        ) {
             Some(()) => stats.sampled += 1,
             None => stats.skipped_bad_skin += 1,
         }
@@ -2413,7 +2423,17 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     // node-write tail as player-driven ones.
     if let Some(tree_players) = lanes.tree_players {
         for (entity, player) in tree_players.entities.iter().zip(tree_players.data.iter()) {
-            match sample_tree_entity(*entity, player, &lanes, poses.as_deref_mut(), scratch) {
+            let blend = ragdolls
+                .as_deref_mut()
+                .and_then(|lane| lane.get_mut(*entity));
+            match sample_tree_entity(
+                *entity,
+                player,
+                &lanes,
+                poses.as_deref_mut(),
+                scratch,
+                blend,
+            ) {
                 Some(()) => stats.sampled += 1,
                 None => stats.skipped_bad_skin += 1,
             }
@@ -2455,12 +2475,19 @@ fn fit_tree_poses(poses: &mut Vec<BlendedPose>, nodes: usize) {
 /// (`docs/ragdoll-design.md` §2.3: after the layer overlays, before the
 /// model-matrix compose). A non-finite physical frame or a length
 /// mismatch skips the blend for the frame — the animated pose wins (the
-/// fill counts it in [`RagdollBlend::skipped_frames`]). Leaf.
-fn apply_ragdoll(lanes: &SampleLanes<'_>, entity: Entity, pose: &mut BlendedPose) {
-    let Some(blend) = lanes.ragdolls.and_then(|lane| lane.get(entity)) else {
+/// fill counts it in [`RagdollBlend::skipped_frames`]). Before any of
+/// that the animated local rotations land in
+/// [`RagdollBlend::anim_rotations`] — the drive targets of §4.2, kept
+/// fresh even when the frame below is skipped. Leaf.
+fn apply_ragdoll(blend: Option<&mut RagdollBlend>, pose: &mut BlendedPose) {
+    let Some(blend) = blend else {
         return;
     };
     let count = pose.trs.len();
+    blend.anim_rotations.resize(count, Quat::IDENTITY);
+    for (recorded, trs) in blend.anim_rotations.iter_mut().zip(pose.trs.iter()) {
+        *recorded = trs.rotation;
+    }
     if blend.physical.len() != count || blend.weights.len() != count {
         return;
     }
@@ -2483,8 +2510,9 @@ fn finish_pose(
     skeleton: &Skeleton,
     scratch: &mut AnimScratch,
     pose: &mut JointPose,
+    blend: Option<&mut RagdollBlend>,
 ) -> Option<()> {
-    apply_ragdoll(lanes, entity, &mut scratch.pose_a);
+    apply_ragdoll(blend, &mut scratch.pose_a);
     scratch.skel_locals.clear();
     scratch
         .skel_locals
@@ -2518,13 +2546,14 @@ fn sample_entity(
     lanes: &SampleLanes<'_>,
     poses: Option<&mut ComponentStore<JointPose>>,
     scratch: &mut AnimScratch,
+    blend: Option<&mut RagdollBlend>,
 ) -> Option<()> {
     let clip = lanes.clips.get(player.clip.0)?;
     let (skeleton, count) = strict_skeleton(lanes, entity)?;
     // Absent `JointPose` is bad skin: verdict before any blending work.
     let pose = poses?.get_mut(entity)?;
     blend_skel_pose(entity, player, lanes, clip, count, &skeleton.rest, scratch)?;
-    finish_pose(entity, lanes, skeleton, scratch, pose)
+    finish_pose(entity, lanes, skeleton, scratch, pose, blend)
 }
 
 /// Blends one root's base clip, optional crossfade and the overlay layer
@@ -2636,6 +2665,7 @@ fn sample_tree_entity(
     lanes: &SampleLanes<'_>,
     poses: Option<&mut ComponentStore<JointPose>>,
     scratch: &mut AnimScratch,
+    blend: Option<&mut RagdollBlend>,
 ) -> Option<()> {
     let tree = lanes.trees?.get(entity)?;
     let (skeleton, count) = strict_skeleton(lanes, entity)?;
@@ -2661,7 +2691,7 @@ fn sample_tree_entity(
         .pose_a
         .clone_from(scratch.tree_poses.get(nodes.checked_sub(1)?)?);
     overlay_layers(entity, lanes, count, &skeleton.rest, scratch)?;
-    finish_pose(entity, lanes, skeleton, scratch, pose)
+    finish_pose(entity, lanes, skeleton, scratch, pose, blend)
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.

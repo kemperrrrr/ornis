@@ -1,40 +1,46 @@
-//! Per-frame ragdoll sync: fills the [`RagdollBlend`] lane of every
-//! ragdoll root from the physical chain before the sample pass reads it
-//! (`docs/ragdoll-design.md` §2.3, §4.1).
+//! Per-tick ragdoll sync: one fixed chain tick plus the fill of the
+//! [`RagdollBlend`] lane of every ragdoll root before the sample pass
+//! reads it (`docs/ragdoll-design.md` §2.3, §4, §5).
 
-use ornis_animation::{JointMask, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollMode};
+use glam::Vec3;
+use ornis_animation::{
+    JointMask, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollFade, RagdollMode, Skeleton,
+    fade_progress,
+};
 use ornis_core::units::Clamped01;
-use ornis_core::{Entity, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Entity, FixedTime, Resources, Seconds, SmartStore, System, SystemAccess};
+use ornis_physics::engine::PhysicsEngine;
+use ornis_physics::joint::JointMotor;
 
 use crate::ragdoll_runtime::RagdollRuntime;
 
-/// Per-frame fill of the [`RagdollBlend`] lane (§2.3, before sampling):
-/// the mode's weights over the bone joints and the chain's model→local
-/// sample. A broken sample (poisoned lock, missing body, non-finite
-/// pose) zeroes the weights — animation wins the frame — and bumps
-/// [`RagdollBlend::skipped_frames`]. Borrow-based: the lane guards live
-/// for the fill — nothing is cloned, nothing is allocated (per-lane
-/// locks never nest on the same type).
-pub fn update_ragdoll(store: &SmartStore, root: Entity) -> bool {
-    let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
-        return false;
-    };
-    let Some(runtime) = runtimes.get(root) else {
-        return false;
-    };
-    fill_ragdoll(store, root, runtime)
-}
+/// Follow-servo stiffness of a driven hinge (1/s²; `AccelerationBased`,
+/// so it scales with mass by construction). Damping and the torque budget
+/// ride the bone's [`ornis_animation::RagdollMotor`] (§4.2).
+const DRIVE_STIFFNESS: f32 = 100.0;
+/// Quaternion half-angle factor: `2·atan2` reads the rad angle out of a
+/// unit quaternion's twist.
+const TWIST_FACTOR: f32 = 2.0;
 
-/// The fill itself with the borrowed runtime in hand — the system passes
-/// the lane value straight from its iteration. Worker of
-/// [`update_ragdoll`].
-fn fill_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime) -> bool {
+/// Per-tick ragdoll work of one root (§5): weight-transition clock →
+/// live weights (mode, then the transition lerp, then the live pins) →
+/// drive motors and one fixed ABA step (both skipped in `Animated` —
+/// ABA has no sleeping) → the model→local sample into `blend.physical`.
+/// A broken sample zeroes the weights — animation wins the frame — and
+/// bumps [`RagdollBlend::skipped_frames`]. Borrow-based: the lane guards
+/// live for the fill and the buffers ride the lanes; the only copy is the
+/// transition snapshot of [`step_weight_fade`] (once per tick per root
+/// with a fade in flight). Worker of [`update_ragdoll`] and
+/// [`RagdollSyncSystem`].
+fn tick_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime, dt: Seconds) -> bool {
     let Some(descs) = store.read_cold_lane::<RagdollDesc>() else {
         return false;
     };
     let Some(desc) = descs.get(root) else {
         return false;
     };
+    let skeletons = store.read_lane::<Skeleton>();
+    let skeleton = skeletons.as_ref().and_then(|lane| lane.get(root));
     let mode = store
         .read_lane::<RagdollMode>()
         .and_then(|modes| modes.get(root).copied())
@@ -47,14 +53,18 @@ fn fill_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime) -> b
     };
     let masks = store.read_cold_lane::<JointMask>();
     let mask = mask_entity.and_then(|entity| masks.as_ref().and_then(|masks| masks.get(entity)));
-    let Some(mut blend) = store.write_lane::<RagdollBlend>() else {
+    let Some(mut blend_lane) = store.write_lane::<RagdollBlend>() else {
         return false;
     };
-    let Some(blend) = blend.get_mut(root) else {
+    let Some(blend) = blend_lane.get_mut(root) else {
         return false;
     };
+    let (progress, from) = step_weight_fade(store, root, dt);
+    fill_weights(mode, mask, &desc.bones, blend, progress, from.as_deref());
+    if !matches!(mode, RagdollMode::Animated) {
+        step_chain(runtime, desc, skeleton, blend, dt);
+    }
     let sampled = runtime.sample_local(desc, &mut blend.physical);
-    fill_weights(mode, mask, &desc.bones, &mut blend.weights);
     if !sampled {
         for weight in &mut blend.weights {
             *weight = Clamped01::ZERO;
@@ -64,20 +74,119 @@ fn fill_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime) -> b
     sampled
 }
 
-/// Mode weights of the bone joints (§2.3): `weights` is zeroed, then each
-/// bone's joint takes its mode weight — joints outside the chain stay at
-/// zero. O(joints + bones) per root and frame. Leaf.
+/// One chain tick of §5: every hinge below weight 1 gets a follow servo
+/// aimed at the animated local rotation ([`RagdollBlend::anim_rotations`],
+/// §4.2: the anim local against the bind local, projected on the hinge
+/// axis — the twist angle in rad from the assembly pose; without a
+/// recorded rotation or on non-finite data the servo stays as it was),
+/// weight 1 clears the servo (physics owns the joint), and the chain
+/// takes one fixed ABA step of `dt`. Fails closed on a poisoned chain
+/// lock. The projection lives in the drive loop on purpose (§4.2): a
+/// free helper would open duplicate-fragment windows (rustqual
+/// `min_statements = 3`). Leaf.
+fn step_chain(
+    runtime: &RagdollRuntime,
+    desc: &RagdollDesc,
+    skeleton: Option<&Skeleton>,
+    blend: &RagdollBlend,
+    dt: Seconds,
+) -> bool {
+    runtime
+        .with_engine(|engine| {
+            if let Some(skeleton) = skeleton {
+                for (index, bone) in desc.bones.iter().enumerate() {
+                    let Some(hinge) = runtime.bone(index).and_then(|view| view.hinge) else {
+                        continue;
+                    };
+                    let weight = blend
+                        .weights
+                        .get(usize::from(bone.joint))
+                        .map(|weight| weight.get())
+                        .unwrap_or(0.0);
+                    if weight >= 1.0 {
+                        let _ = engine.set_joint_motor(hinge, None);
+                        continue;
+                    }
+                    let target = {
+                        let joint = usize::from(bone.joint);
+                        let Some(&anim) = blend.anim_rotations.get(joint) else {
+                            continue;
+                        };
+                        let Some(rest) = skeleton.rest.get(joint) else {
+                            continue;
+                        };
+                        let axis = bone.axis.normalize_or_zero();
+                        if axis == Vec3::ZERO {
+                            continue;
+                        }
+                        let delta = rest.rotation.inverse() * anim;
+                        TWIST_FACTOR
+                            * Vec3::new(delta.x, delta.y, delta.z)
+                                .dot(axis)
+                                .atan2(delta.w)
+                    };
+                    if !target.is_finite() {
+                        continue;
+                    }
+                    if let Some(motor) = JointMotor::position(
+                        target,
+                        DRIVE_STIFFNESS,
+                        bone.motor.damping,
+                        bone.motor.max_torque,
+                    ) {
+                        let _ = engine.set_joint_motor(hinge, Some(motor));
+                    }
+                }
+            }
+            engine.step(dt.get());
+            true
+        })
+        .unwrap_or(false)
+}
+
+/// Ticks the weight transition of `root` (§4.2) and snapshots its `from`
+/// side for [`fill_weights`]: the lerp `progress` of the in-flight fade
+/// (1.0 without one) plus the snapshot, with a finished component dropped
+/// inside the same lane open. Leaf.
+fn step_weight_fade(
+    store: &SmartStore,
+    root: Entity,
+    dt: Seconds,
+) -> (f32, Option<Vec<Clamped01>>) {
+    let Some(mut fades) = store.write_lane::<RagdollFade>() else {
+        return (1.0, None);
+    };
+    let Some(fade) = fades.get_mut(root) else {
+        return (1.0, None);
+    };
+    fade.elapsed = Seconds::new(fade.elapsed.get() + dt.get());
+    let done = fade.elapsed.get() >= fade.duration.get();
+    let progress = fade_progress(fade.duration, fade.elapsed);
+    let from = fade.from.clone();
+    if done {
+        fades.remove(root);
+    }
+    (progress, Some(from))
+}
+
+/// Mode weights of the bone joints (§2.3): the target weights of `mode`
+/// over the bone joints (joints outside the chain stay at zero), lerped
+/// from the transition snapshot `from` at `progress` (§4.2), then the
+/// live pins of `set_ragdoll_weight` overwrite their joints. O(joints +
+/// bones). Leaf.
 fn fill_weights(
     mode: RagdollMode,
     mask: Option<&JointMask>,
     bones: &[RagdollBone],
-    weights: &mut [Clamped01],
+    blend: &mut RagdollBlend,
+    progress: f32,
+    from: Option<&[Clamped01]>,
 ) {
-    for weight in weights.iter_mut() {
+    for weight in blend.weights.iter_mut() {
         *weight = Clamped01::ZERO;
     }
     for bone in bones {
-        let Some(weight) = weights.get_mut(usize::from(bone.joint)) else {
+        let Some(weight) = blend.weights.get_mut(usize::from(bone.joint)) else {
             continue;
         };
         *weight = match mode {
@@ -94,21 +203,49 @@ fn fill_weights(
             }
         };
     }
+    if let Some(from) = from {
+        for (weight, source) in blend.weights.iter_mut().zip(from) {
+            let target = weight.get();
+            *weight = Clamped01::new(source.get() + (target - source.get()) * progress);
+        }
+    }
+    for (weight, pin) in blend.weights.iter_mut().zip(&blend.pinned) {
+        if let Some(pin) = pin {
+            *weight = *pin;
+        }
+    }
 }
 
-/// Fills the [`RagdollBlend`] lanes of every ragdoll root before the
-/// sample pass (§2.3). Registered before `skel_sample`.
+/// One ragdoll tick of `root` (§5): the fixed chain step plus the
+/// [`RagdollBlend`] fill before sampling. `dt` is the fixed step the host
+/// ticks at ([`RagdollSyncSystem`] passes `FixedTime`; tests advance one
+/// tick per call). Borrow-based: the lane value is passed straight from
+/// its iteration, nothing is cloned.
+pub fn update_ragdoll(store: &SmartStore, root: Entity, dt: Seconds) -> bool {
+    let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
+        return false;
+    };
+    let Some(runtime) = runtimes.get(root) else {
+        return false;
+    };
+    tick_ragdoll(store, root, runtime, dt)
+}
+
+/// Ticks the chain and fills the [`RagdollBlend`] lanes of every ragdoll
+/// root (§5). Registered on the **fixed** plan: one fixed ABA step per
+/// fixed tick, and the fixed loop runs before the frame schedule
+/// engine-wide, so the sample pass always reads the last fill (§2.3).
 pub struct RagdollSyncSystem;
 
 impl RagdollSyncSystem {
-    /// Creates the fill system.
+    /// Creates the tick-and-fill system.
     pub fn new() -> Self {
         Self
     }
 }
 
 impl Default for RagdollSyncSystem {
-    /// Creates the fill system (see [`RagdollSyncSystem::new`]).
+    /// Creates the tick-and-fill system (see [`RagdollSyncSystem::new`]).
     fn default() -> Self {
         Self::new()
     }
@@ -123,22 +260,29 @@ impl System for RagdollSyncSystem {
         // Hot lanes only — cold `RagdollDesc`/`JointMask` have no
         // declaration slot in `SystemAccess`.
         SystemAccess::new()
+            .reads::<FixedTime>()
             .reads::<SmartStore>()
             .reads_lane::<RagdollMode>()
             .reads_lane::<RagdollRuntime>()
+            .reads_lane::<Skeleton>()
             .writes_lane::<RagdollBlend>()
+            .writes_lane::<RagdollFade>()
     }
 
     fn run(&self, resources: &Resources) {
         let Some(store) = resources.get::<SmartStore>() else {
             return;
         };
+        let Some(time) = resources.get::<FixedTime>() else {
+            return;
+        };
+        let dt = Seconds::new(time.delta_seconds());
         let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
             return;
         };
         for &root in &runtimes.entities {
             if let Some(runtime) = runtimes.get(root) {
-                fill_ragdoll(store, root, runtime);
+                tick_ragdoll(store, root, runtime, dt);
             }
         }
     }

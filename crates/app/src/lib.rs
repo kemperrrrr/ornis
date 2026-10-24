@@ -134,15 +134,14 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
     if engine.schedule().mermaid().contains("skel_sample") {
         return;
     }
-    // RagdollBlend fills before the sample pass reads it (§2.3).
+    // Ragdoll ticks on the fixed plan (§5: one fixed ABA step + fill per
+    // fixed tick); the fixed loop runs before the frame schedule
+    // engine-wide, so `skel_sample` always reads the last fill (§2.3).
     engine
-        .schedule_mut()
+        .fixed_schedule_mut()
         .add_system(crate::ragdoll_wiring::RagdollSyncSystem::new());
     engine.schedule_mut().add_system(SkelSampleSystem::new());
     engine.schedule_mut().add_system(SkelSkinSystem::new());
-    let _ = engine
-        .schedule_mut()
-        .try_order_before("ragdoll_sync", "skel_sample");
     let _ = engine
         .schedule_mut()
         .try_order_before("anim_sample", "skel_sample");
