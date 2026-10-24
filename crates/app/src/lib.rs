@@ -23,6 +23,7 @@ pub mod anim_wiring;
 pub mod game_world;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
+pub mod ragdoll_wiring;
 /// Headless editor session: commands in, snapshots/events out.
 pub mod session;
 pub mod sync_harness;

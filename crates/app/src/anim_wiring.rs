@@ -823,19 +823,28 @@ pub fn set_clip_sync_marks(store: &mut SmartStore, clip: ClipId, marks: Vec<Sync
 // qual:api — typed tree removal for hosts; in-tree callers are
 // tests until a production host entry lands.
 pub fn clear_skel_tree(store: &mut SmartStore, root: Entity) -> bool {
-    let had_tree = store
-        .read_cold_lane::<SkelTree>()
-        .is_some_and(|trees| trees.contains(root))
+    clear_root_lanes::<SkelTree, SkelTreePlayer>(store, root)
+}
+
+/// Shared clear shape of the typed facades: removes `root` from the cold
+/// lane `C` and the hot lane `H`, reporting whether either held it.
+pub(crate) fn clear_root_lanes<C: 'static + Send + Sync, H: 'static + Send + Sync>(
+    store: &mut SmartStore,
+    root: Entity,
+) -> bool {
+    let had = store
+        .read_cold_lane::<C>()
+        .is_some_and(|lane| lane.contains(root))
         || store
-            .read_lane::<SkelTreePlayer>()
-            .is_some_and(|players| players.contains(root));
-    if let Some(mut trees) = store.write_cold_lane::<SkelTree>() {
-        trees.remove(root);
+            .read_lane::<H>()
+            .is_some_and(|lane| lane.contains(root));
+    if let Some(mut lane) = store.write_cold_lane::<C>() {
+        lane.remove(root);
     }
-    if let Some(mut players) = store.write_lane::<SkelTreePlayer>() {
-        players.remove(root);
+    if let Some(mut lane) = store.write_lane::<H>() {
+        lane.remove(root);
     }
-    had_tree
+    had
 }
 
 /// Wires animation from a loaded glTF scene into an already-spawned

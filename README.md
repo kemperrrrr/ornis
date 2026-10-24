@@ -283,7 +283,11 @@ blend1d детерминированы (не более двух соседни�
 времени, лист без пары не трогается), и дерево целиком
 вытесняет `SkelPlayer` на этом корне: playback-входы отвечают
 `PlaybackError::TreeDriven`, пока корень не снят с дерева
-`clear_skel_tree(root)`. Ломающее изменение
+`clear_skel_tree(root)`. Ragdoll (шов «физика ↔ скелет») — модель
+`RagdollDesc`/`RagdollBone`/`RagdollMode` в `ornis-animation` и фасад
+`set_ragdoll`/`clear_ragdoll` (`crates/app/src/ragdoll_wiring.rs`):
+цепь `FeatherstoneEngine` на корень, бленд «физика ↔ анимация» по маске —
+дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
 `InvalidClip`/`TreeDriven` (больше не `Copy`; `InvalidClip` — `fade_to_clip`

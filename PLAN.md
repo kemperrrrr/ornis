@@ -180,7 +180,8 @@
      `tests/hot_path_ab.sh` (merge-base↔head, раздельные target-каталоги);
      замеры base↔head и отсутствие регресса на empty/small — в PR #180.
      Эквивалентность старого и нового ядер — обычные тесты без таймингов.
-  6. **Ragdoll — дизайн ✅, в работе (PR #180, коммиты слоями).**
+  6. **Ragdoll — в работе (PR #180, коммиты слоями). Срез 1 ✅ (модель +
+     привязка).**
      Дизайн: `docs/ragdoll-design.md` (модель `RagdollDesc`/`RagdollBone`/
      `RagdollMode` в `ornis-animation`, шов `ragdoll_wiring` в `ornis-app`:
      ABA-цепь `FeatherstoneEngine` на корень, world→local чтение позы,

@@ -68,9 +68,14 @@ mod blend;
 use blend::{BlendedPose, JointSample, fade_progress, sample_joints};
 pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack};
 
+mod ragdoll;
 mod tree;
 mod tree_sync;
 mod tree_weights;
+pub use ragdoll::{
+    RagdollBase, RagdollBone, RagdollDesc, RagdollError, RagdollLimit, RagdollMode, RagdollMotor,
+    RagdollShape,
+};
 use tree::eval_tree;
 pub use tree::{
     MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeChild2d, TreeCmp, TreeCond,
