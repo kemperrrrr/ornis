@@ -35,8 +35,11 @@ pub struct RagdollRuntime {
     bodies: Vec<BodyHandle>,
     /// Hinge per bone; `None` on the chain root.
     joints: Vec<Option<JointHandle>>,
-    /// Bind-pose world transform of each bone's joint frame.
-    bind: Vec<(Vec3, Quat)>,
+    /// Bind-pose frame of each bone's joint: world position, world
+    /// rotation and the accumulated world scale — the factor the inverse
+    /// seam of [`RagdollRuntime::sample_local`] undoes (bodies are rigid
+    /// and carry no scale).
+    bind: Vec<(Vec3, Quat, Vec3)>,
     /// Parent bone index per bone; `None` on the chain root.
     parents: Vec<Option<usize>>,
 }
@@ -72,7 +75,7 @@ impl RagdollRuntime {
     // qual:api — per-bone seam data for hosts; the world→local read
     // (slice 2) is its first in-tree caller.
     pub fn bone(&self, bone: usize) -> Option<RagdollBoneView> {
-        let (position, rotation) = self.bind.get(bone).copied()?;
+        let (position, rotation, _) = self.bind.get(bone).copied()?;
         Some(RagdollBoneView {
             position,
             rotation,
@@ -91,24 +94,27 @@ impl RagdollRuntime {
 
     /// Runs `f` over the articulated chain (the stepping seam of §4);
     /// `None` means the chain lock is poisoned (bad skin downstream).
-    // qual:api — stepping seam for hosts; the fixed-step bridge (slice 2)
-    // is its first in-tree caller.
+    // qual:api — stepping seam for hosts; the fixed-step bridge lands in
+    // slice 3 (the chain does not step yet — see design §5).
     pub fn with_engine<R>(&self, f: impl FnOnce(&mut FeatherstoneEngine) -> R) -> Option<R> {
         self.engine.lock().ok().map(|mut engine| f(&mut engine))
     }
 
-    /// World→local sample of §4.1: writes each bone's physical local pose
-    /// into `out[bone.joint]` (the skeleton slot the blend mixes). A bone
-    /// local is taken against its parent bone's body — the chain root
-    /// against `entity_world` (the skeleton root matrix). Fails on a
-    /// poisoned lock, a missing body or a non-finite pose, writing
-    /// nothing further. Hot path: no allocations.
-    pub fn sample_local(
-        &self,
-        desc: &RagdollDesc,
-        entity_world: Mat4,
-        out: &mut [JointTrs],
-    ) -> bool {
+    /// Model→local sample of §4.1: writes each bone's physical local pose
+    /// into `out[bone.joint]` (the skeleton slot the blend mixes). The
+    /// chain and the sample live in the skeleton's **model space** — the
+    /// bodies sit at the bind fold of [`Skeleton::rest`] and the chain
+    /// root is taken against the identity matrix; the entity's
+    /// `GlobalTransform` enters later, in `compose_model_matrices`, as on
+    /// the animation side. A bone local is taken against its parent bone's
+    /// body: rotation `R_p⁻¹·R_c`, translation divided per axis by the
+    /// parent's accumulated bind scale (the very factor `bind_worlds`
+    /// folded in — rigid bodies carry no scale, so the seam undoes it to
+    /// land back in the skeleton's scaled local frames). The output scale
+    /// is left at one: the blend keeps the animated scale. Fails on a
+    /// poisoned lock, a missing body or a non-finite pose, writing nothing
+    /// further. Hot path: no allocations.
+    pub fn sample_local(&self, desc: &RagdollDesc, out: &mut [JointTrs]) -> bool {
         let Ok(engine) = self.engine.lock() else {
             return false;
         };
@@ -122,33 +128,37 @@ impl RagdollRuntime {
             if !body.position.is_finite() || !body.orientation.is_finite() {
                 return false;
             }
-            let world =
-                Mat4::from_scale_rotation_translation(Vec3::ONE, body.orientation, body.position);
-            let parent = match self.parents.get(index).copied().flatten() {
+            let (translation, rotation) = match self.parents.get(index).copied().flatten() {
                 Some(parent) => {
+                    let Some((_, _, parent_scale)) = self.bind.get(parent).copied() else {
+                        return false;
+                    };
                     let Some(handle) = self.bodies.get(parent).copied() else {
                         return false;
                     };
-                    let Some(body) = engine.get_body(handle) else {
+                    let Some(parent_body) = engine.get_body(handle) else {
                         return false;
                     };
-                    Mat4::from_scale_rotation_translation(
-                        Vec3::ONE,
-                        body.orientation,
-                        body.position,
-                    )
+                    if !parent_body.position.is_finite() || !parent_body.orientation.is_finite() {
+                        return false;
+                    }
+                    let inverse = parent_body.orientation.inverse();
+                    let rotation = inverse * body.orientation;
+                    let offset = inverse * (body.position - parent_body.position);
+                    if parent_scale.min_element() == 0.0 || !parent_scale.is_finite() {
+                        return false;
+                    }
+                    (offset / parent_scale, rotation)
                 }
-                None => entity_world,
+                None => (body.position, body.orientation),
             };
-            let local = parent.inverse() * world;
-            let (scale, rotation, translation) = local.to_scale_rotation_translation();
             let Some(slot) = out.get_mut(usize::from(bone.joint)) else {
                 return false;
             };
             *slot = JointTrs {
                 translation,
                 rotation,
-                scale,
+                scale: Vec3::ONE,
             };
         }
         true
@@ -176,7 +186,7 @@ pub fn build_ragdoll(
         RagdollBase::Floating => BaseJoint::Floating,
     };
     for (index, bone) in desc.bones.iter().enumerate() {
-        let (position, orientation) = bind[bone.joint.index()];
+        let (position, orientation, _) = bind[bone.joint.index()];
         let mut body = bone_body(bone, position);
         body.orientation = orientation;
         handles.push(if index == root_bone {
@@ -211,13 +221,14 @@ pub fn build_ragdoll(
     })
 }
 
-/// Bind-pose world transforms (position, rotation) per joint, folded from
-/// [`Skeleton::rest`] along the parents in depth order as full T·R·S
-/// matrices — the same composition the skin's `compose_model_matrices`
-/// uses, so parent scale lands in the world positions (typical glTF rigs
-/// scale the root by 0.01). Only position and rotation enter physics.
-/// Leaf.
-fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat)> {
+/// Bind-pose frames (world position, world rotation, accumulated world
+/// scale) per joint, folded from [`Skeleton::rest`] along the parents in
+/// depth order as full T·R·S matrices — the same composition the skin's
+/// `compose_model_matrices` uses, so parent scale lands in the world
+/// positions (typical glTF rigs scale the root by 0.01). Only position and
+/// rotation enter physics; the scale rides along for the inverse seam of
+/// [`RagdollRuntime::sample_local`]. Leaf.
+fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat, Vec3)> {
     let count = skeleton.parents.len();
     let mut depths = Vec::with_capacity(count);
     for parent_of in skeleton.parents.iter() {
@@ -232,7 +243,7 @@ fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat)> {
     let mut order: Vec<usize> = (0..count).collect();
     order.sort_by_key(|&joint| depths[joint]);
     let mut matrices = vec![Mat4::IDENTITY; count];
-    let mut out = vec![(Vec3::ZERO, Quat::IDENTITY); count];
+    let mut out = vec![(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE); count];
     for &joint in &order {
         let local = skeleton.rest[joint];
         let local =
@@ -242,8 +253,8 @@ fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat)> {
             None => local,
         };
         matrices[joint] = world;
-        let (_, rotation, position) = world.to_scale_rotation_translation();
-        out[joint] = (position, rotation);
+        let (scale, rotation, position) = world.to_scale_rotation_translation();
+        out[joint] = (position, rotation, scale);
     }
     out
 }
@@ -280,11 +291,11 @@ fn bone_body(bone: &RagdollBone, position: Vec3) -> RigidBody {
 /// both axes are the same world axis. Leaf.
 pub(crate) fn hinge_joint(
     bone: &RagdollBone,
-    bind: &[(Vec3, Quat)],
+    bind: &[(Vec3, Quat, Vec3)],
     parent: &RagdollBone,
 ) -> Result<JointKind, RagdollError> {
-    let (joint_position, joint_rotation) = bind[bone.joint.index()];
-    let (parent_position, parent_rotation) = bind[parent.joint.index()];
+    let (joint_position, joint_rotation, _) = bind[bone.joint.index()];
+    let (parent_position, parent_rotation, _) = bind[parent.joint.index()];
     // `RevoluteLimit::try_new` checks exactly the window rule of
     // `RagdollDesc::validate`, so this failure is unreachable for
     // validated descriptions — it maps instead of swallowing.

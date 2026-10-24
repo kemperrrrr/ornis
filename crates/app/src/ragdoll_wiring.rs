@@ -59,7 +59,9 @@ pub fn set_ragdoll(
 /// Removes the ragdoll chain from `root`, returning whether one was
 /// installed (the second call finds nothing).
 pub fn clear_ragdoll(store: &mut SmartStore, root: Entity) -> bool {
-    crate::anim_wiring::clear_root_lanes::<RagdollDesc, RagdollRuntime>(store, root)
+    let had = crate::anim_wiring::clear_root_lanes::<RagdollDesc, RagdollRuntime>(store, root);
+    crate::anim_wiring::clear_root_hot_lanes::<RagdollBlend, RagdollMode>(store, root);
+    had
 }
 
 // qual:api — typed mode switch for hosts; in-tree callers land with the
@@ -224,13 +226,18 @@ mod tests {
     /// The expected bind landmarks of [`scaled_rig`]: the root frame is
     /// the 90°-Z turn at the origin; the child sits `2 × (1,0,0)` rotated
     /// into `(0,2,0)` — the 2× rest scale lengthens the lever arm.
-    fn scaled_landmarks() -> Vec<(Vec3, Quat)> {
+    fn scaled_landmarks() -> Vec<(Vec3, Quat, Vec3)> {
         use std::f32::consts::FRAC_PI_2;
         vec![
-            (Vec3::ZERO, Quat::from_rotation_z(FRAC_PI_2)),
+            (
+                Vec3::ZERO,
+                Quat::from_rotation_z(FRAC_PI_2),
+                Vec3::splat(FULL_EDGE),
+            ),
             (
                 Vec3::new(0.0, FULL_EDGE, 0.0),
                 Quat::from_rotation_z(FRAC_PI_2),
+                Vec3::splat(FULL_EDGE),
             ),
         ]
     }
@@ -252,7 +259,10 @@ mod tests {
                 .expect("the scaled rig assembles");
             for (bone, landmark) in expected.iter().enumerate() {
                 let view = runtime.bone(bone).expect("bone");
-                assert!(near((view.position, view.rotation), *landmark));
+                assert!(near(
+                    (view.position, view.rotation),
+                    (landmark.0, landmark.1)
+                ));
                 let in_engine = runtime
                     .with_engine(|engine| {
                         engine
@@ -261,7 +271,10 @@ mod tests {
                     })
                     .flatten()
                     .expect("body in the engine");
-                assert!(near(in_engine, *landmark), "engine body {bone}");
+                assert!(
+                    near(in_engine, (landmark.0, landmark.1)),
+                    "engine body {bone}"
+                );
             }
             // The hinge lands on the scaled lever arm: in the parent frame
             // the anchor is the 2 m offset, and the shared axis is x.
@@ -436,14 +449,16 @@ mod tests {
         store.insert(
             root,
             GlobalTransform {
-                translation: Vec3::ZERO,
-                rotation: UnitQuat::IDENTITY,
-                scale: Vec3::ONE,
+                translation: Vec3::new(5.0, -2.0, 1.0),
+                rotation: UnitQuat::try_from_quat(Quat::from_rotation_z(1.0)).unwrap(),
+                scale: Vec3::splat(2.0),
             },
         );
         set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
 
-        // Physical: every bone joint owns the pose.
+        // Physical: every bone joint owns the pose. The entity transform
+        // above must not leak into the sample — the chain and the seam
+        // live in the skeleton's model space (§4.1).
         set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
         assert!(update_ragdoll(&store, root));
         let blend = store.write_lane::<RagdollBlend>().unwrap();
@@ -451,6 +466,10 @@ mod tests {
             blend.get(root).map(|b| b.weights.clone()),
             Some(vec![Clamped01::ONE; 3])
         );
+        let physical = blend.get(root).map(|b| b.physical.clone()).unwrap();
+        assert_eq!(physical[0], JointTrs::IDENTITY);
+        assert_eq!(physical[1].translation, Vec3::Y);
+        assert_eq!(physical[2].translation, Vec3::Y);
         drop(blend);
 
         // Blend: mask x weight per joint (0.25·0.5, 1·0.5, 0.5·0.5).
@@ -490,15 +509,6 @@ mod tests {
         let root = store.create_entity();
         store.register::<Skeleton>();
         store.insert(root, chain());
-        store.register::<GlobalTransform>();
-        store.insert(
-            root,
-            GlobalTransform {
-                translation: Vec3::ZERO,
-                rotation: UnitQuat::IDENTITY,
-                scale: Vec3::ONE,
-            },
-        );
         set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
         set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
         assert!(update_ragdoll(&store, root));
@@ -531,9 +541,9 @@ mod tests {
             .and_then(|runtimes| runtimes.get(root).cloned())
             .unwrap();
 
-        // Identity entity: the sampled locals are the chain's rest locals.
+        // Model space: the sampled locals are the chain's rest locals.
         let mut out = vec![JointTrs::IDENTITY; 3];
-        assert!(runtime.sample_local(&desc(), Mat4::IDENTITY, &mut out));
+        assert!(runtime.sample_local(&desc(), &mut out));
         assert_eq!(out[0], JointTrs::IDENTITY);
         assert_eq!(out[1].translation, Vec3::Y);
         assert_eq!(out[1].rotation, Quat::IDENTITY);
@@ -571,6 +581,65 @@ mod tests {
     }
 
     #[test]
+    fn scaled_sample_restores_the_rest_pose() {
+        let rig = scaled_rig();
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, rig.clone());
+        set_ragdoll(&mut store, root, scaled_desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+        set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
+        assert!(update_ragdoll(&store, root));
+        let blend = store.write_lane::<RagdollBlend>().unwrap();
+        let blend = blend.get(root).unwrap();
+
+        // At rest the sample lands back in the skeleton's rest — the
+        // inverse seam undoes the accumulated bind scale (§4.1). The
+        // physical scale field stays one; the blend keeps the animated
+        // scale.
+        let rest = &rig.rest;
+        for (joint, sampled) in blend.physical.iter().enumerate() {
+            assert!(
+                (sampled.translation - rest[joint].translation).length() < 1e-5,
+                "joint {joint} translation {:?} vs {:?}",
+                sampled.translation,
+                rest[joint].translation
+            );
+            assert!(
+                sampled.rotation.dot(rest[joint].rotation).abs() > 0.9999,
+                "joint {joint} rotation"
+            );
+            assert_eq!(sampled.scale, Vec3::ONE);
+        }
+    }
+
+    #[test]
+    fn clear_ragdoll_returns_the_pose_to_animation() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+        set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
+        assert!(update_ragdoll(&store, root));
+
+        // Clearing removes the blend and mode lanes too — `apply_ragdoll`
+        // finds nothing and the pose is animated again (§7).
+        assert!(clear_ragdoll(&mut store, root));
+        assert!(
+            !store
+                .read_lane::<RagdollBlend>()
+                .is_some_and(|lane| lane.contains(root))
+        );
+        assert!(
+            !store
+                .read_lane::<RagdollMode>()
+                .is_some_and(|lane| lane.contains(root))
+        );
+        assert!(set_ragdoll_mode(&mut store, root, RagdollMode::Physical).is_err());
+    }
+
+    #[test]
     fn clear_ragdoll_removes_the_chain() {
         {
             let mut store = SmartStore::new();
@@ -579,6 +648,16 @@ mod tests {
             store.insert(root, chain());
             assert!(set_ragdoll(&mut store, root, desc(), Vec3::ZERO).is_ok());
             assert!(clear_ragdoll(&mut store, root));
+            assert!(
+                !store
+                    .read_lane::<RagdollBlend>()
+                    .is_some_and(|lane| lane.contains(root))
+            );
+            assert!(
+                !store
+                    .read_lane::<RagdollMode>()
+                    .is_some_and(|lane| lane.contains(root))
+            );
             assert!(!clear_ragdoll(&mut store, root), "already clear");
         }
     }

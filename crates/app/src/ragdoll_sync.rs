@@ -2,66 +2,59 @@
 //! ragdoll root from the physical chain before the sample pass reads it
 //! (`docs/ragdoll-design.md` §2.3, §4.1).
 
-use glam::Mat4;
-use ornis_animation::{
-    JointMask, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollMode, Skeleton,
-};
+use ornis_animation::{JointMask, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollMode};
 use ornis_core::units::Clamped01;
-use ornis_core::{Entity, GlobalTransform, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{Entity, Resources, SmartStore, System, SystemAccess};
 
 use crate::ragdoll_runtime::RagdollRuntime;
 
 /// Per-frame fill of the [`RagdollBlend`] lane (§2.3, before sampling):
-/// the mode's weights over the bone joints and the chain's world→local
+/// the mode's weights over the bone joints and the chain's model→local
 /// sample. A broken sample (poisoned lock, missing body, non-finite
 /// pose) zeroes the weights — animation wins the frame — and bumps
-/// [`RagdollBlend::skipped_frames`].
+/// [`RagdollBlend::skipped_frames`]. Borrow-based: the lane guards live
+/// for the fill — nothing is cloned, nothing is allocated (per-lane
+/// locks never nest on the same type).
 pub fn update_ragdoll(store: &SmartStore, root: Entity) -> bool {
-    let Some(desc) = store
-        .read_cold_lane::<RagdollDesc>()
-        .and_then(|descs| descs.get(root).cloned())
-    else {
+    let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
         return false;
     };
-    let Some(runtime) = store
-        .read_lane::<RagdollRuntime>()
-        .and_then(|runtimes| runtimes.get(root).cloned())
-    else {
+    let Some(runtime) = runtimes.get(root) else {
         return false;
     };
-    let Some(entity_world) = store.read_lane::<GlobalTransform>().and_then(|transforms| {
-        transforms.get(root).map(|global| {
-            Mat4::from_scale_rotation_translation(
-                global.scale,
-                global.rotation.get(),
-                global.translation,
-            )
-        })
-    }) else {
+    fill_ragdoll(store, root, runtime)
+}
+
+/// The fill itself with the borrowed runtime in hand — the system passes
+/// the lane value straight from its iteration. Worker of
+/// [`update_ragdoll`].
+fn fill_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime) -> bool {
+    let Some(descs) = store.read_cold_lane::<RagdollDesc>() else {
+        return false;
+    };
+    let Some(desc) = descs.get(root) else {
         return false;
     };
     let mode = store
         .read_lane::<RagdollMode>()
         .and_then(|modes| modes.get(root).copied())
         .unwrap_or(RagdollMode::Animated);
-    let mask = match mode {
+    let mask_entity = match mode {
         RagdollMode::Blend {
             mask: MaskId(mask), ..
-        } => store
-            .read_cold_lane::<JointMask>()
-            .and_then(|masks| masks.get(mask).cloned()),
+        } => Some(mask),
         _ => None,
     };
+    let masks = store.read_cold_lane::<JointMask>();
+    let mask = mask_entity.and_then(|entity| masks.as_ref().and_then(|masks| masks.get(entity)));
     let Some(mut blend) = store.write_lane::<RagdollBlend>() else {
         return false;
     };
     let Some(blend) = blend.get_mut(root) else {
         return false;
     };
-    let sampled = runtime.sample_local(&desc, entity_world, &mut blend.physical);
-    for (joint, weight) in blend.weights.iter_mut().enumerate() {
-        *weight = sampled_weight(mode, mask.as_ref(), desc.bones.as_slice(), joint);
-    }
+    let sampled = runtime.sample_local(desc, &mut blend.physical);
+    fill_weights(mode, mask, &desc.bones, &mut blend.weights);
     if !sampled {
         for weight in &mut blend.weights {
             *weight = Clamped01::ZERO;
@@ -71,33 +64,35 @@ pub fn update_ragdoll(store: &SmartStore, root: Entity) -> bool {
     sampled
 }
 
-/// Weight of skeleton `joint` under `mode` (zero outside the chain).
-/// Leaf.
-fn sampled_weight(
+/// Mode weights of the bone joints (§2.3): `weights` is zeroed, then each
+/// bone's joint takes its mode weight — joints outside the chain stay at
+/// zero. O(joints + bones) per root and frame. Leaf.
+fn fill_weights(
     mode: RagdollMode,
     mask: Option<&JointMask>,
     bones: &[RagdollBone],
-    joint: usize,
-) -> Clamped01 {
-    let mut on_bone = false;
+    weights: &mut [Clamped01],
+) {
+    for weight in weights.iter_mut() {
+        *weight = Clamped01::ZERO;
+    }
     for bone in bones {
-        if usize::from(bone.joint) == joint {
-            on_bone = true;
-        }
-    }
-    if !on_bone {
-        return Clamped01::ZERO;
-    }
-    match mode {
-        RagdollMode::Animated => Clamped01::ZERO,
-        RagdollMode::Physical => Clamped01::ONE,
-        RagdollMode::Blend { weight, .. } => {
-            let entry = mask
-                .and_then(|mask| mask.weights.get(joint))
-                .copied()
-                .unwrap_or(Clamped01::ZERO);
-            Clamped01::new(entry.get() * weight.get())
-        }
+        let Some(weight) = weights.get_mut(usize::from(bone.joint)) else {
+            continue;
+        };
+        *weight = match mode {
+            RagdollMode::Animated => Clamped01::ZERO,
+            RagdollMode::Physical => Clamped01::ONE,
+            RagdollMode::Blend {
+                weight: strength, ..
+            } => {
+                let entry = mask
+                    .and_then(|mask| mask.weights.get(usize::from(bone.joint)))
+                    .copied()
+                    .unwrap_or(Clamped01::ZERO);
+                Clamped01::new(entry.get() * strength.get())
+            }
+        };
     }
 }
 
@@ -125,12 +120,12 @@ impl System for RagdollSyncSystem {
     }
 
     fn access(&self) -> SystemAccess {
+        // Hot lanes only — cold `RagdollDesc`/`JointMask` have no
+        // declaration slot in `SystemAccess`.
         SystemAccess::new()
             .reads::<SmartStore>()
-            .reads_lane::<GlobalTransform>()
             .reads_lane::<RagdollMode>()
             .reads_lane::<RagdollRuntime>()
-            .reads_lane::<Skeleton>()
             .writes_lane::<RagdollBlend>()
     }
 
@@ -141,10 +136,10 @@ impl System for RagdollSyncSystem {
         let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
             return;
         };
-        let roots: Vec<Entity> = runtimes.entities.to_vec();
-        drop(runtimes);
-        for root in roots {
-            update_ragdoll(store, root);
+        for &root in &runtimes.entities {
+            if let Some(runtime) = runtimes.get(root) {
+                fill_ragdoll(store, root, runtime);
+            }
         }
     }
 }

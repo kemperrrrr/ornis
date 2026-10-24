@@ -117,9 +117,10 @@ pub enum RagdollMode {
 /// Joints outside the ragdoll chain keep zero weights.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RagdollBlend {
-    /// Physical local pose per skeleton joint. The fill keeps the last
-    /// good sample and zeroes the weights on a bad frame, so this stays
-    /// finite.
+    /// Physical local pose per skeleton joint (model space, §4.1; the
+    /// scale field is unused — the blend keeps the animated scale). On a
+    /// bad frame the fill may leave a partially written buffer behind,
+    /// but it zeroes the weights first, so nothing of it blends.
     pub physical: Vec<JointTrs>,
     /// Blend weight per skeleton joint (`1.0` takes the physical pose).
     pub weights: Vec<Clamped01>,
@@ -128,12 +129,22 @@ pub struct RagdollBlend {
 }
 
 /// Blends the physical pose over `animated` joint by joint (§4.1):
-/// `pose[joint] = lerp(animated, physical, weight)`. Truncates at the
-/// shortest of the three slices — the fill sizes them all to the joint
-/// count. Pure: no allocations, no state.
+/// translation and rotation mix (`lerp`/`slerp`) toward the physical
+/// joint at the joint's weight; the **scale stays animated** — physics
+/// carries none, and the inverse seam lands in the skeleton's scaled
+/// local frames, so even weight 1 keeps the authored scale. Weight `0`
+/// leaves the joint untouched. Truncates at the shortest of the three
+/// slices — the fill sizes them all to the joint count. Pure: no
+/// allocations, no state.
 pub fn ragdoll_blend(animated: &mut [JointTrs], physical: &[JointTrs], weights: &[Clamped01]) {
     for ((pose, source), weight) in animated.iter_mut().zip(physical).zip(weights) {
-        *pose = pose.lerp(*source, weight.get());
+        let strength = weight.get();
+        if strength <= 0.0 {
+            continue;
+        }
+        let scale = pose.scale;
+        *pose = pose.lerp(*source, strength);
+        pose.scale = scale;
     }
 }
 

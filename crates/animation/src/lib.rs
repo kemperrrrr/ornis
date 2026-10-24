@@ -2467,7 +2467,7 @@ fn apply_ragdoll(lanes: &SampleLanes<'_>, entity: Entity, pose: &mut BlendedPose
     if !blend
         .physical
         .iter()
-        .all(|trs| trs.translation.is_finite() && trs.rotation.is_finite())
+        .all(|trs| trs.translation.is_finite() && trs.rotation.is_finite() && trs.scale.is_finite())
     {
         return;
     }

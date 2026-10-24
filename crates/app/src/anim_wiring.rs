@@ -826,6 +826,27 @@ pub fn clear_skel_tree(store: &mut SmartStore, root: Entity) -> bool {
     clear_root_lanes::<SkelTree, SkelTreePlayer>(store, root)
 }
 
+/// Hot-lane twin of [`clear_root_lanes`]: removes `root` from the hot
+/// lanes `A` and `B`, reporting whether either held it.
+pub(crate) fn clear_root_hot_lanes<A: 'static + Send + Sync, B: 'static + Send + Sync>(
+    store: &mut SmartStore,
+    root: Entity,
+) -> bool {
+    let had = store
+        .read_lane::<A>()
+        .is_some_and(|lane| lane.contains(root))
+        || store
+            .read_lane::<B>()
+            .is_some_and(|lane| lane.contains(root));
+    if let Some(mut lane) = store.write_lane::<A>() {
+        lane.remove(root);
+    }
+    if let Some(mut lane) = store.write_lane::<B>() {
+        lane.remove(root);
+    }
+    had
+}
+
 /// Shared clear shape of the typed facades: removes `root` from the cold
 /// lane `C` and the hot lane `H`, reporting whether either held it.
 pub(crate) fn clear_root_lanes<C: 'static + Send + Sync, H: 'static + Send + Sync>(
