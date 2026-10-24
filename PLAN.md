@@ -180,8 +180,12 @@
      `tests/hot_path_ab.sh` (merge-base↔head, раздельные target-каталоги);
      замеры base↔head и отсутствие регресса на empty/small — в PR #180.
      Эквивалентность старого и нового ядер — обычные тесты без таймингов.
-  6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
-     стороны анимации). Упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет. База в
+  6. **Ragdoll — дизайн ✅, в работе (PR #180, коммиты слоями).**
+     Дизайн: `docs/ragdoll-design.md` (модель `RagdollDesc`/`RagdollBone`/
+     `RagdollMode` в `ornis-animation`, шов `ragdoll_wiring` в `ornis-app`:
+     ABA-цепь `FeatherstoneEngine` на корень, world→local чтение позы,
+     бленд «физика ↔ анимация» по маске, приводы следят за анимацией).
+     Слои поставки — там же, §8. База в
      физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
      (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,
      `set_joint_motor`/`set_joint_damping`/`set_joint_friction`) и
