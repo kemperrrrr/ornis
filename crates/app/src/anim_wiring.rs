@@ -15,10 +15,10 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, JointId, JointMask,
-    JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, SkelClip, SkelFade,
-    SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, TreeNodeDef,
-    TreeParam, fade_in_flight, try_animator,
+    AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, ClipSyncMarks,
+    JointId, JointMask, JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, SkelClip,
+    SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh,
+    SyncMark, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
@@ -744,6 +744,41 @@ pub fn set_tree_param(store: &mut SmartStore, root: Entity, name: &str, value: f
         return false;
     };
     *slot = value;
+    true
+}
+
+/// Installs sync marks for `clip` — the typed [`ClipSyncMarks`] input,
+/// so hosts never install the lane component themselves. Set semantics:
+/// `marks` replaces whatever marks sat on the clip; empty `marks` clears
+/// them. Marks are authoring data: when a
+/// [`SkelTree`] machine transition fires, the
+/// incoming state's looping leaf cursors re-phase so that same-named
+/// marks of the leaving and arriving clips land on the same wall-clock
+/// hit (`docs/animation-design.md` §7.5).
+///
+/// Returns `false` — and writes nothing — when `clip` is not a live
+/// [`SkelClip`] playlist or any mark is malformed: an empty name, or an
+/// `at` outside `[0, 1)` / non-finite.
+// qual:api — typed sync-mark input for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn set_clip_sync_marks(store: &mut SmartStore, clip: ClipId, marks: Vec<SyncMark>) -> bool {
+    let clips = store.read_cold_lane::<SkelClip>();
+    let known = clips
+        .as_deref()
+        .and_then(|clips| clips.get(clip.0))
+        .is_some();
+    drop(clips);
+    if !known {
+        return false;
+    }
+    if !marks
+        .iter()
+        .all(|mark| !mark.name.is_empty() && mark.at.is_finite() && (0.0..1.0).contains(&mark.at))
+    {
+        return false;
+    }
+    store.register_cold::<ClipSyncMarks>();
+    store.insert_cold(clip.0, ClipSyncMarks { marks });
     true
 }
 
@@ -2463,6 +2498,48 @@ mod tests {
                 elapsed: Seconds::ZERO,
                 duration: Seconds::ZERO,
             }
+        );
+    }
+
+    /// One sync mark for [`set_clip_sync_marks`] fixtures.
+    fn sync_mark(name: &str, at: f32) -> SyncMark {
+        SyncMark {
+            name: name.to_string(),
+            at,
+        }
+    }
+
+    /// The `set_clip_sync_marks` verdict on `marks`: for the live clip of
+    /// a tree fixture, and for a made-up clip id.
+    fn marks_verdict(marks: Vec<SyncMark>) -> (bool, bool) {
+        let mut store = SmartStore::new();
+        let (_root, clip) = tree_hero(&mut store);
+        (
+            set_clip_sync_marks(&mut store, clip, marks.clone()),
+            set_clip_sync_marks(&mut store, ClipId(Entity::new(999)), marks),
+        )
+    }
+
+    #[test]
+    fn set_clip_sync_marks_accepts_valid_marks() {
+        assert_eq!(marks_verdict(vec![sync_mark("foot", 0.5)]), (true, false));
+    }
+
+    #[test]
+    fn set_clip_sync_marks_rejects_an_empty_name() {
+        assert_eq!(marks_verdict(vec![sync_mark("", 0.5)]), (false, false));
+    }
+
+    #[test]
+    fn set_clip_sync_marks_rejects_an_out_of_range_at() {
+        assert_eq!(marks_verdict(vec![sync_mark("foot", 1.5)]), (false, false));
+    }
+
+    #[test]
+    fn set_clip_sync_marks_rejects_a_non_finite_at() {
+        assert_eq!(
+            marks_verdict(vec![sync_mark("foot", f32::NAN)]),
+            (false, false)
         );
     }
 

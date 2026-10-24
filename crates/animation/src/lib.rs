@@ -69,11 +69,14 @@ use blend::{BlendedPose, JointSample, fade_progress, sample_joints};
 pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack};
 
 mod tree;
+mod tree_sync;
 use tree::eval_tree;
 pub use tree::{
     MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeCmp, TreeCond, TreeNodeDef, TreeParam,
     TreeTransition,
 };
+use tree_sync::sync_transition_leaves;
+pub use tree_sync::{ClipSyncMarks, SyncMark};
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
@@ -2163,12 +2166,15 @@ fn advance_layers(store: &SmartStore, dt: f32) {
 /// in-flight crossfades and then fire the first matching
 /// [`TreeTransition`](crate::TreeTransition) of each idle machine — a
 /// crossfade is never interrupted, guards are re-checked only once it
-/// completes.
+/// completes. A fired transition re-phases the incoming state's leaves
+/// through the [`ClipSyncMarks`] of both sides
+/// (`docs/animation-design.md` §7.5).
 fn advance_tree_players(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
     let defs = store.read_cold_lane::<SkelTree>();
+    let marks = store.read_cold_lane::<ClipSyncMarks>();
     let Some(mut players) = store.write_lane::<SkelTreePlayer>() else {
         return;
     };
@@ -2180,6 +2186,8 @@ fn advance_tree_players(store: &SmartStore, dt: f32) {
         step_machines(
             player,
             defs.as_deref().and_then(|defs| defs.get(*entity)),
+            &clips,
+            marks.as_deref(),
             dt,
         );
     }
@@ -2188,8 +2196,16 @@ fn advance_tree_players(store: &SmartStore, dt: f32) {
 /// Completes or advances in-flight machine crossfades, then fires
 /// transitions on the live parameters (`from` must stand, first match in
 /// list order wins; the outgoing state's cursors keep stepping — the
-/// [`SkelFade`](crate::SkelFade) mechanics).
-fn step_machines(player: &mut SkelTreePlayer, tree: Option<&SkelTree>, dt: f32) {
+/// [`SkelFade`](crate::SkelFade) mechanics). A fired transition
+/// re-phases the incoming state's leaves through their [`ClipSyncMarks`]
+/// — unless the lane is missing, which leaves every cursor alone.
+fn step_machines(
+    player: &mut SkelTreePlayer,
+    tree: Option<&SkelTree>,
+    clips: &ColdComponentStore<SkelClip>,
+    marks: Option<&ColdComponentStore<ClipSyncMarks>>,
+    dt: f32,
+) {
     for cursor in &mut player.machines {
         if cursor.from.is_some() {
             cursor.elapsed = Seconds::new(cursor.elapsed.get() + dt);
@@ -2204,29 +2220,41 @@ fn step_machines(player: &mut SkelTreePlayer, tree: Option<&SkelTree>, dt: f32) 
     let mut cursors = 0;
     for node in &tree.nodes {
         let tree::TreeNodeDef::Machine {
-            states: _,
+            states,
             initial: _,
             transitions,
         } = node
         else {
             continue;
         };
-        let Some(cursor) = player.machines.get_mut(cursors) else {
+        let slot = cursors;
+        cursors += 1;
+        let Some(cursor) = player.machines.get(slot) else {
             break;
         };
-        cursors += 1;
         if cursor.from.is_some() {
             continue;
         }
-        for transition in transitions {
-            if transition.from == cursor.state && transition.when.holds(&player.params) {
-                cursor.from = Some(transition.from);
-                cursor.state = transition.to;
-                cursor.elapsed = Seconds::ZERO;
-                cursor.duration = transition.fade;
-                break;
-            }
+        let Some(transition) = transitions.iter().find(|transition| {
+            transition.from == cursor.state && transition.when.holds(&player.params)
+        }) else {
+            continue;
+        };
+        let (Some(&from_node), Some(&to_node)) =
+            (states.get(transition.from), states.get(transition.to))
+        else {
+            continue;
+        };
+        if let Some(marks) = marks {
+            sync_transition_leaves(&mut player.leaves, tree, from_node, to_node, clips, marks);
         }
+        let Some(cursor) = player.machines.get_mut(slot) else {
+            break;
+        };
+        cursor.from = Some(transition.from);
+        cursor.state = transition.to;
+        cursor.elapsed = Seconds::ZERO;
+        cursor.duration = transition.fade;
     }
 }
 
