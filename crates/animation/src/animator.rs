@@ -111,12 +111,18 @@ impl AnimatorMut<'_> {
     /// The previous playing cursor keeps advancing for `duration` while the
     /// new clip blends in ([`SkelFade`], linear). A non-positive duration
     /// behaves like [`Self::play`]. Targets with no playing cursor start
-    /// without a fade.
+    /// without a fade. One fade per target: a start over a crossfade still
+    /// in flight cuts to the new clip at once (the in-flight [`SkelFade`]
+    /// is dropped) instead of stacking fades.
+    ///
+    /// On a root carrying a `SkelTree` this direct animator path writes
+    /// the ignored `SkelPlayer`/`SkelFade` lanes (the tree drives the
+    /// root); the typed `GameWorld` playback entries answer
+    /// `PlaybackError::TreeDriven` instead.
     ///
     /// # Errors
     ///
     /// Same as [`Self::play`].
-    // qual:api — public crossfade entry; in-tree callers are tests for now.
     pub fn play_crossfade(&mut self, name: &str, duration: Seconds) -> Result<(), AnimatorError> {
         self.start(name, Some(duration))
     }
@@ -157,22 +163,37 @@ impl AnimatorMut<'_> {
                 .iter()
                 .find(|(entity, _)| *entity == target)
                 .map(|(_, old)| *old);
-            match (fade, outgoing) {
-                (Some(duration), Some(old)) if old.playing && duration.get() > 0.0 => {
-                    self.store.insert(
-                        target,
-                        SkelFade {
-                            from: old,
-                            duration,
-                            elapsed: Seconds::ZERO,
-                        },
-                    );
-                }
-                _ => self.drop_fade(target),
-            }
-            self.store.insert(target, player);
+            self.start_target(target, fade, outgoing, player);
         }
         Ok(())
+    }
+
+    /// Writes one target's start: fade from `outgoing` only when the call
+    /// fades, the cursor plays, and no crossfade is in flight — otherwise
+    /// the in-flight [`SkelFade`] is cut and the fresh player takes over
+    /// at once (one fade per target, never stacked).
+    fn start_target(
+        &mut self,
+        target: Entity,
+        fade: Option<Seconds>,
+        outgoing: Option<SkelPlayer>,
+        player: SkelPlayer,
+    ) {
+        let fading = crate::fade_in_flight::<SkelFade>(self.store, target);
+        match (fade, outgoing) {
+            (Some(duration), Some(old)) if old.playing && duration.get() > 0.0 && !fading => {
+                self.store.insert(
+                    target,
+                    SkelFade {
+                        from: old,
+                        duration,
+                        elapsed: Seconds::ZERO,
+                    },
+                );
+            }
+            _ => self.drop_fade(target),
+        }
+        self.store.insert(target, player);
     }
 
     /// Removes an in-progress crossfade on `target`, if any.

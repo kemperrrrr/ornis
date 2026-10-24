@@ -257,7 +257,58 @@ ambient как `Color`, а множители `ambient_intensity` и `exposure` 
 пишет явный вес IBL в `RenderLights` (куб не создаёт); пока его не звали, вес
 по-прежнему 0 без куба и 1 с кубом.
 `spawn_scene` — корень RON-сцены. Клип запускается через
-`entity_mut(root).animator()?.play(name)`, окно открывает `ornis::run`
+`play_animation(root, name, duration)` (именной старт с кроссфейдом для
+скелета и объектных треков; `duration = 0` — мгновенный рез, как и
+повторный старт в полёте фейда — фейд один на сущность) или через
+`entity_mut(root).animator()?.play(name)`; пауза/стоп/резюме —
+`pause_animation`/`stop_animation`/`resume_animation`. Слои поверх базового
+клипа — стек `SkelLayerStack`: `set_skel_layers(root, stack)` (типизированный
+вход фасада) ставит весь стек сразу — замена, не добавление, — а слои
+смешиваются снизу вверх по маске `JointMask` (upper-body поверх locomotion
+и любые комбинации). Дерево анимаций поверх слоёв — `SkelTree`
+(ноды `Clip`/`Blend1d`/`Blend2d`/`Machine`, порядок нод = порядок вычисления):
+ставится `set_skel_tree(root, tree)` (отклоняет битые деревья — неизвестные
+`ClipId` листьев, оси без параметров, не строго возрастающие позиции,
+неполные решётки или совпадающие оси blend2d, не-конечные числа, пустые
+состояния машин,
+переходы машин вне диапазона
+или с не-конечными порогом/фейдом), параметры задаются `set_tree_param(root, имя, значение)`, веса
+blend1d детерминированы (не более двух соседних нод), blend2d берёт
+билинейные веса до четырёх углов ячейки решётки, state machine
+(`Machine`-нода) переходит между состояниями-нодами по условиям на
+параметрах и кроссфейдит их по семантике `SkelFade` (летящий фейд не
+прерывается), а фаза листьев при переходах выравнивается по меткам
+`set_clip_sync_marks(clip, метки)` (именованные позиции в цикле клипа:
+одноимённые метки уходящего и входящего клипа попадают в один момент
+времени, лист без пары не трогается), и дерево целиком
+вытесняет `SkelPlayer` на этом корне: playback-входы отвечают
+`PlaybackError::TreeDriven`, пока корень не снят с дерева
+`clear_skel_tree(root)`. Ragdoll (шов «физика ↔ скелет») — модель
+`RagdollDesc`/`RagdollBone`/`RagdollMode` в `ornis-animation` и фасад
+`set_ragdoll`/`clear_ragdoll`/`set_ragdoll_mode`/`set_ragdoll_mode_fade`/
+`set_ragdoll_weight`/`update_ragdoll`
+(`crates/app/src/ragdoll_wiring.rs`): срезы 1–3 готовы — привязка
+ABA-цепи на bind-кадре, бленд «физика → анимация» (физическая поза
+в model space скелета смешивается с анимационной в `finish_pose` по
+`RagdollBlend`: режим `Physical`/`Blend` c маской `JointMask`, битый
+кадр пропускается со счётчиком `skipped_frames`, масштаб остаётся
+анимационным) и «анимация → физика» (фикс-тик ABA на фикс-плане,
+приводы при `w < 1` держат анимацию, переходы весов с прогрессом по
+`Seconds`, точечный вес); контакты с
+миром — отдельным срезом (бесконтактная база, `docs/ragdoll-design.md`
+§9) — дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
+API (PR #180): старое `play_animation(entity)` (резюм) теперь
+`resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
+`InvalidClip`/`TreeDriven` (больше не `Copy`; `InvalidClip` — `fade_to_clip`
+отклоняет чужой или выдуманный `ClipId` до любой записи; `TreeDriven` —
+playback-входы отказывают на корне с деревом, снять дерево —
+`clear_skel_tree(root)`), `set_skel_tree` отклоняет битые деревья,
+`set_skel_layers`
+(бывш. `set_skel_layer`) принимает весь стек `SkelLayerStack` — прямые
+вставки `SkelLayer` в лейн сэмплер больше не читает, слой молча перестаёт
+работать, — а `compose_model_matrices`
+теперь пишет матрицы в caller-owned буфер:
+`compose_model_matrices(.., out: &mut Vec<Mat4>) -> Option<usize>`. Окно открывает `ornis::run`
 с заголовком мира (`set_title`, по умолчанию `Ornis Engine`). Сэмплинг пишет
 локальный `Transform` целевого узла (object-треки и суставы, отображённые
 через `node_to_entity`), поэтому дети двигаются распространением позы.

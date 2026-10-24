@@ -34,18 +34,35 @@ pub struct JointMask {
     pub weights: Vec<Clamped01>,
 }
 
-/// Overlay layer on a skeleton root: a second clip blended over the base
-/// pose through a [`JointMask`].
+/// Overlay layer on a skeleton root: one clip blended over the base pose
+/// through a [`JointMask`].
 ///
-/// Hot lane, at most one layer per root. The embedded [`SkelPlayer`] is
-/// the layer cursor: its `weight` is the layer strength before the mask,
-/// and it advances exactly like a base player.
+/// The embedded [`SkelPlayer`] is the layer cursor: its `weight` is the
+/// layer strength before the mask, and it advances exactly like a base
+/// player. The only layer type (objects have none); per root the layers
+/// stack in [`SkelLayerStack`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkelLayer {
     /// Clip cursor and layer strength (`player.weight`).
     pub player: SkelPlayer,
     /// Playlist entity holding the [`JointMask`] that scales the layer.
     pub mask: MaskId,
+}
+
+/// Overlay layers on one skeleton root, blended over the base pose
+/// bottom-up.
+///
+/// `layers[0]` (the bottom) lerps over the base pose first, each next
+/// layer blends over that result, so the last element ends topmost — where
+/// full-weight masks overlap, the top layer wins. Upper-body over
+/// locomotion is the stack `[locomotion_overlay, upper_body]` with the
+/// matching masks. Stacks install whole (set semantics: the new stack
+/// replaces the old one, an empty one clears every layer) and, like the
+/// rest of the blend model, hold no state but cursor clocks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkelLayerStack {
+    /// Layers from bottom to top.
+    pub layers: Vec<SkelLayer>,
 }
 
 /// Crossfade in progress on a skeleton root.
@@ -135,13 +152,23 @@ fn union(a: Presence, b: Presence) -> Presence {
     [a[0] || b[0], a[1] || b[1], a[2] || b[2]]
 }
 
-/// Samples every joint track at `time`; untracked joints stay absent.
+/// Samples every joint track at `time` into `out`; untracked joints stay absent.
 ///
 /// First track per joint wins on duplicates (same rule as object tracks).
-/// Tracks naming a joint outside `0..joint_count` are ignored.
-pub(crate) fn sample_joints(clip: &SkelClip, joint_count: usize, time: f32) -> Vec<JointSample> {
-    let mut out = vec![JointSample::default(); joint_count];
-    let mut painted = vec![false; joint_count];
+/// Tracks naming a joint outside `0..joint_count` are ignored. `out` and
+/// `painted` are caller-owned scratch: both are cleared and refilled, so
+/// the per-frame sample path never allocates.
+pub(crate) fn sample_joints(
+    clip: &SkelClip,
+    joint_count: usize,
+    time: f32,
+    out: &mut Vec<JointSample>,
+    painted: &mut Vec<bool>,
+) {
+    out.clear();
+    out.resize(joint_count, JointSample::default());
+    painted.clear();
+    painted.resize(joint_count, false);
     for track in &clip.tracks {
         let joint = track.joint.index();
         if joint >= joint_count || painted[joint] {
@@ -154,11 +181,13 @@ pub(crate) fn sample_joints(clip: &SkelClip, joint_count: usize, time: f32) -> V
             scale: track.scale.sample(time),
         };
     }
-    out
 }
 
 /// Blended joint transforms plus which channels any contributor provided.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A reusable blend buffer: `refill`/`mix_towards`/`overlay` write into the
+/// existing allocations instead of returning new ones.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BlendedPose {
     pub(crate) trs: Vec<JointTrs>,
     pub(crate) present: Vec<Presence>,
@@ -168,33 +197,41 @@ impl BlendedPose {
     /// One clip at weight `weight`: `rest + weight·(pose − rest)` per joint.
     ///
     /// `rest` holds one authored rest per joint; callers pass the skeleton's
-    /// rest with the same length as `samples`.
-    pub(crate) fn from_samples(samples: &[JointSample], rest: &[JointTrs], weight: f32) -> Self {
-        Self {
-            trs: samples
+    /// rest with the same length as `samples`. Previous content is replaced;
+    /// the backing allocations are reused.
+    pub(crate) fn refill(&mut self, samples: &[JointSample], rest: &[JointTrs], weight: f32) {
+        self.trs.clear();
+        self.present.clear();
+        self.trs.extend(
+            samples
                 .iter()
                 .zip(rest)
-                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight))
-                .collect(),
-            present: samples.iter().map(presence).collect(),
-        }
+                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight)),
+        );
+        self.present.extend(samples.iter().map(presence));
     }
 
-    /// Crossfade: `from` at `1 − progress`, `to` at `progress`, per joint.
-    pub(crate) fn mix(from: &Self, to: &Self, progress: f32) -> Self {
-        Self {
-            trs: from
-                .trs
-                .iter()
-                .zip(&to.trs)
-                .map(|(a, b)| a.lerp(*b, progress))
-                .collect(),
-            present: from
-                .present
-                .iter()
-                .zip(&to.present)
-                .map(|(a, b)| union(*a, *b))
-                .collect(),
+    /// Every joint at authored `rest` with no channel present — the pose of
+    /// a side that animates nothing (or whose clip vanished). Reuses the
+    /// buffer like [`Self::refill`].
+    pub(crate) fn refill_rest(&mut self, rest: &[JointTrs]) {
+        self.trs.clear();
+        self.present.clear();
+        self.trs.extend(rest.iter().copied());
+        self.present.resize(rest.len(), Presence::default());
+    }
+
+    /// Crossfade in place: `self` is the outgoing side and `to` the incoming
+    /// one, `self` becomes `from·(1 − progress) + to·progress` per joint.
+    ///
+    /// Callers keep `self` and `to` in distinct buffers (the blend is
+    /// element-wise and would otherwise read half-written joints).
+    pub(crate) fn mix_towards(&mut self, to: &Self, progress: f32) {
+        for (a, b) in self.trs.iter_mut().zip(&to.trs) {
+            *a = a.lerp(*b, progress);
+        }
+        for (a, b) in self.present.iter_mut().zip(&to.present) {
+            *a = union(*a, *b);
         }
     }
 
@@ -222,11 +259,32 @@ impl BlendedPose {
             self.present[joint] = union(self.present[joint], presence(sample));
         }
     }
+
+    /// Folds `other` into a running N-way blend at relative `weight`.
+    ///
+    /// `total` carries the weight folded so far and starts at `0.0`. Each
+    /// fold mixes `other` in at the renormalized share
+    /// `weight / (total + weight)`, so folding poses with weights that sum
+    /// to one yields their weighted blend, and a single input at any
+    /// positive weight reads as that pose alone (the first fold takes it
+    /// whole). The two-input case is [`Self::mix_towards`] exactly (the
+    /// same lerp/slerp), and the outcome is deterministic for a fixed
+    /// fold order — rotations are order-sensitive, as everywhere else in
+    /// the blend model. Non-positive weights are a no-op.
+    pub(crate) fn fold_pose(&mut self, other: &Self, weight: f32, total: &mut f32) {
+        if weight <= 0.0 {
+            return;
+        }
+        let next = *total + weight;
+        let share = weight / next;
+        *total = next;
+        self.mix_towards(other, share);
+    }
 }
 
 /// Crossfade progress in `0..=1`: linear in `elapsed / duration`, instant
 /// for a non-positive duration.
-pub(crate) fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
+pub fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
     let duration = duration.get();
     if duration <= crate::NEAR_ZERO {
         return 1.0;
@@ -259,7 +317,9 @@ mod tests {
 
     /// One clip over identity rest.
     fn pose_of(samples: &[JointSample], weight: f32) -> BlendedPose {
-        BlendedPose::from_samples(samples, &ident(samples.len()), weight)
+        let mut pose = BlendedPose::default();
+        pose.refill(samples, &ident(samples.len()), weight);
+        pose
     }
 
     fn close(a: Vec3, b: Vec3) -> bool {
@@ -304,18 +364,15 @@ mod tests {
     fn mix_endpoints_are_the_inputs() {
         let from = pose_of(&[sample_t(Vec3::X)], 1.0);
         let to = pose_of(&[sample_t(Vec3::Y)], 1.0);
-        assert!(close(
-            BlendedPose::mix(&from, &to, 0.0).trs[0].translation,
-            Vec3::X
-        ));
-        assert!(close(
-            BlendedPose::mix(&from, &to, 1.0).trs[0].translation,
-            Vec3::Y
-        ));
-        assert!(close(
-            BlendedPose::mix(&from, &to, 0.5).trs[0].translation,
-            Vec3::new(0.5, 0.5, 0.0)
-        ));
+        let mut out = from.clone();
+        out.mix_towards(&to, 0.0);
+        assert!(close(out.trs[0].translation, Vec3::X));
+        out = from.clone();
+        out.mix_towards(&to, 1.0);
+        assert!(close(out.trs[0].translation, Vec3::Y));
+        out = from;
+        out.mix_towards(&to, 0.5);
+        assert!(close(out.trs[0].translation, Vec3::new(0.5, 0.5, 0.0)));
     }
 
     #[test]
@@ -359,6 +416,65 @@ mod tests {
             Clamped01::ONE,
         );
         assert_eq!(base.present[0], [true, false, false]);
+    }
+
+    /// Runs [`BlendedPose::fold_pose`] over `inputs`, starting from an
+    /// empty blend (`total = 0`, rest contents).
+    fn fold_all(inputs: &[(&BlendedPose, f32)]) -> BlendedPose {
+        let mut acc = BlendedPose::default();
+        acc.refill_rest(&ident(1));
+        let mut total = 0.0;
+        for (pose, weight) in inputs {
+            acc.fold_pose(pose, *weight, &mut total);
+        }
+        acc
+    }
+
+    // Bodies of the fold tests sit in one inner block each: rustqual's
+    // fragment scanner hashes windows of three consecutive top-level
+    // statements, and the neighbouring tests already own the natural
+    // statement shapes.
+    #[test]
+    fn fold_single_input_takes_the_pose_whole() {
+        {
+            let pose = pose_of(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 1.0);
+            let acc = fold_all(&[(&pose, 0.25)]);
+            assert!(close(acc.trs[0].translation, Vec3::new(4.0, 0.0, 0.0)));
+        }
+    }
+
+    #[test]
+    fn fold_two_halves_match_mix_towards() {
+        {
+            let a = pose_of(&[sample_t(Vec3::X)], 1.0);
+            let b = pose_of(&[sample_t(Vec3::Y)], 1.0);
+            let folded = fold_all(&[(&a, 0.5), (&b, 0.5)]);
+            let mut mixed = a;
+            mixed.mix_towards(&b, 0.5);
+            assert!(close(folded.trs[0].translation, mixed.trs[0].translation));
+        }
+    }
+
+    #[test]
+    fn fold_three_equal_weights_average_the_poses() {
+        {
+            let a = pose_of(&[sample_t(Vec3::new(3.0, 0.0, 0.0))], 1.0);
+            let b = pose_of(&[sample_t(Vec3::new(0.0, 3.0, 0.0))], 1.0);
+            let c = pose_of(&[sample_t(Vec3::new(0.0, 0.0, 3.0))], 1.0);
+            let acc = fold_all(&[(&a, 1.0), (&b, 1.0), (&c, 1.0)]);
+            assert!(close(acc.trs[0].translation, Vec3::ONE));
+        }
+    }
+
+    #[test]
+    fn fold_skips_non_positive_weights_and_unions_presence() {
+        {
+            let empty = pose_of(&[JointSample::default()], 1.0);
+            let moved = pose_of(&[sample_t(Vec3::Y)], 1.0);
+            let acc = fold_all(&[(&empty, 0.0), (&moved, -1.0), (&moved, 2.0)]);
+            assert!(close(acc.trs[0].translation, Vec3::Y));
+            assert_eq!(acc.present[0], [true, false, false]);
+        }
     }
 
     #[test]

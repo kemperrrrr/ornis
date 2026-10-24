@@ -23,6 +23,9 @@ pub mod anim_wiring;
 pub mod game_world;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
+pub mod ragdoll_runtime;
+pub mod ragdoll_sync;
+pub mod ragdoll_wiring;
 /// Headless editor session: commands in, snapshots/events out.
 pub mod session;
 pub mod sync_harness;
@@ -131,6 +134,12 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
     if engine.schedule().mermaid().contains("skel_sample") {
         return;
     }
+    // Ragdoll ticks on the fixed plan (§5: one fixed ABA step + fill per
+    // fixed tick); the fixed loop runs before the frame schedule
+    // engine-wide, so `skel_sample` always reads the last fill (§2.3).
+    engine
+        .fixed_schedule_mut()
+        .add_system(crate::ragdoll_wiring::RagdollSyncSystem::new());
     engine.schedule_mut().add_system(SkelSampleSystem::new());
     engine.schedule_mut().add_system(SkelSkinSystem::new());
     let _ = engine

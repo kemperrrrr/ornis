@@ -131,6 +131,14 @@
      `JointMask` и `AnimFade` нет ни одного нетестового вызывателя — только
      регистрация лейнов (`crates/app/src/anim_wiring.rs:395-400`). Поэтому
      `qual:api` на `Animator::play_crossfade` стоит до первого прод-вызывателя.
+     **Шаги 1–2 сделаны (2026-10-21, #179):** `play_crossfade` и `AnimFade`
+     получили прод-вызов (`GameWorld::play_animation` → фасад
+     `anim_wiring::play_crossfade`), `qual:api` с `Animator::play_crossfade`
+     снят; `SkelLayer`/`JointMask` прод-вызывателя пока не имеют (ждут шага 3).
+     **Шаг 3 (2026-10-22, #180):** стек `SkelLayerStack` сделан (п. 3),
+     `set_skel_layers` ставит весь стек через типизированный вход фасада;
+     прод-вызыватель у слоёв по-прежнему не появился — `set_skel_layers`
+     остаётся хост-API с `qual:api`.
   2. **Общий `Animator`-фасад для объектов.** `Animator`
      (`crates/animation/src/animator.rs:105-223`) работает только со скелетным
      плейлистом (`play`/`play_crossfade`/`pause`/`stop`/`set_looping`); у
@@ -139,19 +147,51 @@
      `AnimPlayer` и типизированный вход для `SkelLayer`/`AnimFade` (сегодня —
      прямая вставка в лейн). Решение (2026-10-19): фасад в `anim_wiring`,
      не расширение `Animator` — порядок работ в п. 10.
-  3. **Стек слоёв.** `SkelLayer` — один на корень: upper-body поверх locomotion
-     и любая комбинация из нескольких слоёв сейчас невозможна.
+     **Сделано (2026-10-21, #179):** фасад `anim_wiring::play_crossfade`
+     (обе топологии; имена объектных клипов — по `Name` плейлиста),
+     `fade_to_clip` (типизированный `AnimFade`), `set_skel_layers`
+     (типизированный вход слоёв; с шага 3 — стек `SkelLayerStack`); `GameWorld::play_animation(entity, name,
+     duration)` — прод-точка входа (первый нетестовый вызыватель
+     `AnimatorMut::play_crossfade`; у самой цепочки внутридеревных
+     вызывателей пока нет), резюме/пауза/стоп — `resume_animation`/
+     `pause_animation`/`stop_animation`.
+  3. **Стек слоёв. ✅ Сделано (2026-10-22, #180).** `SkelLayerStack` — стек
+     `SkelLayer` на корень: смешивается снизу вверх, upper-body поверх
+     locomotion и любые комбинации из нескольких слоёв; `set_skel_layers`
+     ставит весь стек сразу (замена, не добавление), вход типизированный
+     через фасад (`anim_wiring`).
   4. **Осознанно отложено** (`docs/animation-design.md` §6): бленд-дерево, IK,
      ретаргет, анимационный state machine, события/уведомления по ключам,
      root motion (кроме `Velocity`). Морфы — #153.
-  5. **Перф-бэклог горячего пути.** `tick_fades` — `frozen.contains` на каждую
-     запись, O(fades × physics bodies) на кадр
+  5. **Перф-бэклог горячего пути. ✅ Сделано (2026-10-21).** `tick_fades` —
+     `frozen.contains` на каждую запись, O(fades × physics bodies) на кадр
      (`crates/animation/src/lib.rs:1891`); скелетный путь даёт ~5–7 пер-кадровых
      `Vec`, объектный — 2 `Vec` на сущность (`track_of`, `side_pose`,
      `crates/animation/src/lib.rs:672-684`). Нужны битовая маска/`HashSet` для
      frozen и переиспользование буферов.
-  6. **Ragdoll — не начато** (в основном физический трек, но шов нужен и со
-     стороны анимации). Упоминаний в `PLAN.md`/`IDEAS.md`/`docs/` нет. База в
+     Битовая маска `FrozenBits` (O(1) skip-тест) вместо линейного `contains`
+     (снимок переиспользуется через `FrozenBits::rebuild`, как и `finished` в
+     `tick_fades`); пер-кадровые буферы путей переиспользуются через
+     `AnimScratch` (`BlendedPose::refill`/`mix_towards`, `sample_joints` с
+     scratch, `compose_model_matrices` в caller-буфер, `model_via_chain` без
+     аллокаций). Замеры до/после — кадровый бенч
+     `crates/animation/tests/hot_path_bench.rs` (`#[ignore]`, сценарии
+     empty/small/skel_heavy/object_heavy/full_mix) и A/B-скрипт
+     `tests/hot_path_ab.sh` (merge-base↔head, раздельные target-каталоги);
+     замеры base↔head и отсутствие регресса на empty/small — в PR #180.
+     Эквивалентность старого и нового ядер — обычные тесты без таймингов.
+  6. **Ragdoll — в работе (PR #180, коммиты слоями). Срез 1 ✅ (модель +
+     привязка), срез 2 ✅ (физика → анимация), срез 3 ✅ (анимация →
+     физика: фикс-тик ABA, приводы `w < 1`, переходы весов, точечный
+     вес).**
+     Дизайн: `docs/ragdoll-design.md` (модель `RagdollDesc`/`RagdollBone`/
+     `RagdollMode` в `ornis-animation`, шов `ragdoll_wiring` в `ornis-app`:
+     ABA-цепь `FeatherstoneEngine` на корень, world→local чтение позы
+     (`sample_local`) и бленд «физика → анимация» в `finish_pose` по
+     `RagdollBlend` (режим `Physical`/`Blend` c маской `JointMask`,
+     битый кадр пропускается со счётчиком `skipped_frames`); контакты —
+     отдельным срезом, §9).
+     Слои поставки — там же, §8. База в
      физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
      (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,
      `set_joint_motor`/`set_joint_damping`/`set_joint_friction`) и
@@ -160,15 +200,22 @@
      `Skeleton`/`JointPose`, анимация про физику — только пропуск
      `RigidBody`-сущностей в `anim_sample`. Ragdoll = скин + суставы физики +
      blending «физика ↔ анимация» по образцу `SkinningMode::Cpu/Gpu`.
-  7. **Animation tree (бленд-дерево / граф переходов) — отложено осознанно**
-     (`docs/animation-design.md` §6: «бленд-дерево/IK/ретаргет в фазах A–D»).
-     Реализации нет, как отдельного пункта в планах он тоже не стоял — есть
-     только эта строка «не делаем». Текущая модель уже покрывает простые случаи:
-     база + один слой (`SkelLayer`) + один кроссфейд на корень (`SkelFade`).
-     Дерево — это произвольный граф нод (blend1d/2d, state machine с переходами
-     по условию, синхронизация по меткам). Гейт — сначала фоллоу-апы 1–3
-     (прод-доступность, общий `Animator`-фасад, стек слоёв): иначе дерево
-     строится поверх API, которого нет.
+  7. **Animation tree (бленд-дерево / граф переходов) — в работе (PR #180,
+     коммиты слоями).** Модель: `docs/animation-design.md` §7. Граф нод
+     (`TreeNodeDef`: `Clip`/`Blend1d`/`Blend2d`/`Machine`, порядок нод =
+     порядок вычисления, последняя нода — корень), горячее состояние на
+     корне (`SkelTreePlayer`: параметры + курсоры листьев + курсоры машин),
+     детерминированные веса blend1d (не более двух соседей) и blend2d
+     (билинейные веса углов ячейки решётки), N-way фолд поз
+     (`BlendedPose::fold_pose`, случай двух входов = `mix_towards`) и state
+     machine (`TreeTransition` по условиям на параметрах, кроссфейд
+     состояний — `SkelFade`-семантика, летящий фейд не прерывается);
+     поверх корневой позы — обычный стек `SkelLayerStack`. Управление —
+     типизированный фасад `set_skel_tree`/`set_tree_param`; нарушение
+     контракта дерева = bad skin (корень не публикуется). Метки/синхронизация ✅
+     (фаза клипа по меткам при переходах машин, `set_clip_sync_marks` —
+     `docs/animation-design.md` §7.5). blend2d ✅ (`TreeChild2d` +
+     `Blend2d` на полной решётке row-major, §7.1/7.2).
   8. **Motion matching — не начато.** Упоминаний в коде, `PLAN.md`, `IDEAS.md`
      и `docs/` нет. Состав: база движений (клипы + метки контактов),
      feature-выборка позы/скоростей, детерминированный поиск/выбор кадра по
@@ -183,7 +230,8 @@
      (доступ к позам по времени + коррекция/IK), то есть логично после
       слоёв/общего API и — для warping — после IK, который тоже отложен (§6).
   10. **Шаги разблокировки гейта (порядок; решение 2026-10-19).**
-     - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`**, рядом с
+     - **Шаг 1 — фасад в `crates/app/src/anim_wiring.rs`** ✅ (2026-10-21,
+       #179), рядом с
        `set_playing`/`rewind_player` (`:325,343`): `play_crossfade(store,
        entity, name, duration)` плюс типизированный вход для `SkelLayer`/`AnimFade`.
        Скелетная ветка делегирует в `AnimatorMut::play_crossfade` через
@@ -194,16 +242,18 @@
        объединяем, а ставим драйвер поверх каталога, как Godot `AnimationTree`
        над `AnimationPlayer` (общий базовый `AnimationMixer`) или Bevy
        `AnimationTransitions` отдельным компонентом от `AnimationPlayer`.
-     - **Шаг 2 — первый прод-вызывающий:** `GameWorld::play_animation`
+     - **Шаг 2 — первый прод-вызывающий:** ✅ (2026-10-21, #179)
+       `GameWorld::play_animation`
        (`crates/app/src/game_world.rs:131`) сейчас зовёт только `set_playing`
        (без имени и без фейда); после шага 1 он же снимает `qual:api`
        с `Animator::play_crossfade` (`crates/animation/src/animator.rs:119`).
        Точка входа `EntityMut::animator()` уже есть
        (`crates/app/src/game_world.rs:831`).
      - **Шаг 3 — стек слоёв** (п. 3) тем же типизированным входом фасада.
-       Слои остаются только скелетными: `SkelLayer`
-       (`crates/animation/src/blend.rs:44`) — единственный тип слоя,
-       объектного в модели нет.
+       ✅ Сделано (2026-10-22, #180): `SkelLayerStack` (`crates/animation/src/blend.rs`)
+       — стек `SkelLayer` на корень, снизу вверх, `set_skel_layers` заменяет
+       стек целиком. Слои остаются только скелетными: `SkelLayer` —
+       единственный тип слоя, объектного в модели нет.
 
 ## Дорожная карта (по приоритетам)
 

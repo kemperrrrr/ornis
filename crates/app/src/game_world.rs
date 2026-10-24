@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
     Authoritative, Color, Engine, Entity, EnvironmentWeight, Position, Replica, SceneEntities,
-    SceneRole, SceneVersion, Seconds, Surface, UnitQuat,
+    SceneRole, SceneVersion, Seconds, SmartStore, Surface, UnitQuat,
 };
 use ornis_render::extraction::{RenderLights, extract_render_data};
 use ornis_render::{
@@ -120,24 +120,60 @@ impl GameWorld {
         Ok(root)
     }
 
-    /// Starts the entity's animation player (skeletal or object).
+    /// Starts `name` on `entity`, fading from whatever plays there now.
     ///
-    /// Loading never autoplays. Named skeletal clips start through
-    /// [`EntityMut`] and [`AnimatorAccess::animator`](ornis_animation::AnimatorAccess::animator).
+    /// The named playback entry for both player kinds: a character root
+    /// carrying an [`Animator`](ornis_animation::Animator) catalog starts
+    /// the clip on every skeletal target (the first production caller of
+    /// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)),
+    /// an object entity crossfades its [`AnimPlayer`](ornis_animation::AnimPlayer)
+    /// to the named clip. Loading never autoplays. A non-positive
+    /// `duration` cuts without a fade, as does a start over a fade still
+    /// in flight (one fade per entity); the fresh cursor resets `speed`
+    /// and `weight` to `1.0`. Paused clocks and stop/replay semantics
+    /// stay with [`Self::resume_animation`],
+    /// [`Self::pause_animation`] and [`Self::stop_animation`].
     ///
     /// # Errors
     ///
-    /// [`PlaybackError`] when `entity` has no player.
-    pub fn play_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+    /// [`PlaybackError::TreeDriven`] when `entity` is driven by an
+    /// animation tree ([`clear_skel_tree`](crate::anim_wiring::clear_skel_tree)
+    /// takes the root back for the player).
+    /// [`PlaybackError::Missing`] when `entity` has no animator catalog
+    /// and no player. [`PlaybackError::UnknownClip`] when `name` is not
+    /// indexed.
+    pub fn play_animation(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        duration: Seconds,
+    ) -> Result<(), PlaybackError> {
+        let store = self.anim_store()?;
+        crate::anim_wiring::play_crossfade(store, entity, name, duration)
+    }
+
+    /// Resumes the entity's animation player at its held clock (skeletal
+    /// or object).
+    ///
+    /// Does not restart: a paused clock continues where it stopped, as
+    /// between [`Self::pause_animation`] and [`Self::stop_animation`].
+    /// Named starts go through [`Self::play_animation`].
+    ///
+    /// # Errors
+    ///
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root (the tree drives it, not a player).
+    // qual:api — host playback control; in-tree callers are tests.
+    pub fn resume_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
+        let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         if crate::anim_wiring::set_playing(store, entity, true) {
             Ok(())
         } else {
-            Err(PlaybackError)
+            Err(PlaybackError::Missing)
         }
     }
 
@@ -145,17 +181,18 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root.
     pub fn pause_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         if crate::anim_wiring::set_playing(store, entity, false) {
             Ok(())
         } else {
-            Err(PlaybackError)
+            Err(PlaybackError::Missing)
         }
     }
 
@@ -163,27 +200,35 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root.
     pub fn stop_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         let found = crate::anim_wiring::set_playing(store, entity, false);
         let rewound = crate::anim_wiring::rewind_player(store, entity);
         if found || rewound {
             Ok(())
         } else {
-            Err(PlaybackError)
+            Err(PlaybackError::Missing)
         }
+    }
+
+    /// Store the playback entries write through. The engine always
+    /// carries one; without it a playback call reports
+    /// [`PlaybackError::Missing`] instead of panicking.
+    fn anim_store(&mut self) -> Result<&mut SmartStore, PlaybackError> {
+        self.engine_mut()
+            .world_mut()
+            .store_mut()
+            .ok_or(PlaybackError::Missing)
     }
 }
 
-/// The entity has no skeletal or object animation player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("entity has no animation player")]
-pub struct PlaybackError;
+pub use crate::anim_wiring::PlaybackError;
 
 impl GameWorld<Replica> {
     /// Creates an empty replica world with no scene entities.
@@ -407,7 +452,7 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// Parents `child` under `parent`, updating [`ChildOf`](ornis_core::ChildOf)
     /// and the parent's [`Children`](ornis_core::Children) together.
     ///
-    /// This is the world entry point for parenting. [`SmartStore`](ornis_core::SmartStore)
+    /// This is the world entry point for parenting. [`SmartStore`]
     /// has no insert hook, so a raw `insert(ChildOf)` leaves the cache stale
     /// until [`reconcile_children`](ornis_core::reconcile_children).
     ///
@@ -1703,7 +1748,7 @@ mod tests {
     /// character root, not the first mesh.
     #[test]
     fn walk_loop_moves_joints_over_time() {
-        use ornis_animation::{Animator, AnimatorAccess, AnimatorError, JointPose, SkelPlayer};
+        use ornis_animation::{Animator, AnimatorError, JointPose, SkelPlayer};
         let mut world = GameWorld::new();
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
@@ -1752,10 +1797,7 @@ mod tests {
             ));
         }
         world
-            .entity_mut(hero)
-            .animator()
-            .expect("animator")
-            .play("Walk_Loop")
+            .play_animation(hero, "Walk_Loop", ornis_core::Seconds::new(0.25))
             .expect("Walk_Loop");
 
         let store = world.engine().world().store().expect("store");
@@ -1790,10 +1832,11 @@ mod tests {
         assert!(seen.len() > 1, "joints must travel, TPose would repeat");
     }
 
-    /// Playback controls behave like a video player: play starts a
+    /// Playback controls behave like a video player: resume starts a
     /// paused player, pause holds the clock, stop pauses and rewinds.
+    /// Named starts go through `play_animation` and need a catalog.
     #[test]
-    fn playback_controls_play_pause_stop() {
+    fn playback_controls_resume_pause_stop() {
         use ornis_animation::{ClipId, SkelPlayer};
         use ornis_core::{Clamped01, Seconds};
         let mut world = GameWorld::new();
@@ -1810,11 +1853,11 @@ mod tests {
                 looping: true,
             },
         );
-        assert!(world.play_animation(entity).is_ok());
+        assert!(world.resume_animation(entity).is_ok());
         assert!(world.pause_animation(Entity::new(999)).is_err());
         assert!(world.pause_animation(entity).is_ok());
         assert!(world.stop_animation(entity).is_ok());
-        assert!(world.play_animation(Entity::new(999)).is_err());
+        assert!(world.resume_animation(Entity::new(999)).is_err());
 
         let store = world.engine().world().store().expect("store");
         let player = *store
@@ -1824,6 +1867,117 @@ mod tests {
             .expect("player");
         assert!(!player.playing);
         assert_eq!(player.time, Seconds::ZERO);
+    }
+
+    /// `play_animation` is the named crossfade entry: a character-root
+    /// catalog starts the clip on every target (with a fade on replay),
+    /// unknown names and catalog-less entities fail with typed errors.
+    #[test]
+    fn play_animation_starts_named_clips_and_reports_typed_errors() {
+        use ornis_animation::{Animator, ClipId, SkelFade, SkelPlayer};
+        use ornis_core::{Clamped01, Seconds};
+        use std::collections::HashMap;
+
+        let mut world = GameWorld::new();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let hero = store.create_entity();
+        let playlist = store.create_entity();
+        let root = store.create_entity();
+        let mut clips = HashMap::new();
+        clips.insert("Walk_Loop".to_string(), ClipId(playlist));
+        store.insert(hero, Animator::new(clips, vec![root]));
+
+        assert_eq!(
+            world.play_animation(hero, "Nope", Seconds::new(0.25)),
+            Err(crate::anim_wiring::PlaybackError::UnknownClip {
+                name: "Nope".into()
+            })
+        );
+        assert!(matches!(
+            world.play_animation(Entity::new(999), "Walk_Loop", Seconds::new(0.25)),
+            Err(crate::anim_wiring::PlaybackError::Missing)
+        ));
+        assert!(
+            world
+                .play_animation(hero, "Walk_Loop", Seconds::new(0.25))
+                .is_ok()
+        );
+        {
+            let store = world.engine().world().store().expect("store");
+            let player = *store
+                .read_lane::<SkelPlayer>()
+                .expect("players")
+                .get(root)
+                .expect("cursor on the target");
+            assert!(player.playing);
+            assert_eq!(player.clip, ClipId(playlist));
+            assert_eq!(player.time, Seconds::ZERO);
+            assert_eq!(player.weight, Clamped01::ONE);
+            assert!(
+                store
+                    .read_lane::<SkelFade>()
+                    .is_none_or(|fades| fades.get(root).is_none()),
+                "a first start has nothing to fade from"
+            );
+        }
+
+        // A replay of the playing clip fades from the outgoing cursor.
+        world
+            .play_animation(hero, "Walk_Loop", Seconds::new(0.25))
+            .expect("replay");
+        let store = world.engine().world().store().expect("store");
+        let fade = *store
+            .read_lane::<SkelFade>()
+            .expect("fades")
+            .get(root)
+            .expect("fade on replay");
+        assert_eq!(fade.from.clip, ClipId(playlist));
+        assert_eq!(fade.duration, Seconds::new(0.25));
+        assert_eq!(fade.elapsed, Seconds::ZERO);
+    }
+
+    /// Every `GameWorld` playback entry answers `TreeDriven` on a root
+    /// carrying a `SkelTree` — the tree drives it, not a player.
+    #[test]
+    fn game_world_entries_error_on_tree_root() {
+        use glam::Mat4;
+        use ornis_animation::{Animator, ClipId, SkelTree, Skeleton, TreeNodeDef, TreeParam};
+        use ornis_core::Seconds;
+        use std::collections::HashMap;
+
+        let mut world = GameWorld::new();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let hero = store.create_entity();
+        let root = store.create_entity();
+        store.insert(
+            root,
+            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+        );
+        let mut clips = HashMap::new();
+        clips.insert("Walk_Loop".to_string(), ClipId(store.create_entity()));
+        store.insert(hero, Animator::new(clips, vec![root]));
+        assert!(crate::anim_wiring::set_skel_tree(
+            store,
+            root,
+            SkelTree {
+                nodes: vec![TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: Vec::new(),
+                }],
+                params: vec![TreeParam {
+                    name: "walk".to_string(),
+                    default: 0.0,
+                }],
+            }
+        ));
+        let driven = Err(crate::anim_wiring::PlaybackError::TreeDriven);
+        assert_eq!(
+            world.play_animation(hero, "Walk_Loop", Seconds::new(0.25)),
+            driven
+        );
+        assert_eq!(world.resume_animation(root), driven);
+        assert_eq!(world.pause_animation(root), driven);
+        assert_eq!(world.stop_animation(root), driven);
     }
 
     #[test]
