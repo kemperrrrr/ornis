@@ -73,8 +73,8 @@ mod tree;
 mod tree_sync;
 mod tree_weights;
 pub use ragdoll::{
-    RagdollBase, RagdollBone, RagdollDesc, RagdollError, RagdollLimit, RagdollMode, RagdollMotor,
-    RagdollShape,
+    RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollError, RagdollLimit, RagdollMode,
+    RagdollMotor, RagdollShape, ragdoll_blend,
 };
 use tree::eval_tree;
 pub use tree::{
@@ -2068,6 +2068,7 @@ impl System for SkelSampleSystem {
             .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
             .writes_lane::<JointPose>()
+            .reads_lane::<RagdollBlend>()
             .writes_lane::<Transform>()
             .writes_lane::<Children>()
             .writes_lane::<GlobalTransform>()
@@ -2355,6 +2356,7 @@ struct SampleLanes<'a> {
     masks: Option<&'a ColdComponentStore<JointMask>>,
     trees: Option<&'a ColdComponentStore<SkelTree>>,
     tree_players: Option<&'a ComponentStore<SkelTreePlayer>>,
+    ragdolls: Option<&'a ComponentStore<RagdollBlend>>,
 }
 
 /// Samples every playing cursor into the scratch buffers: model matrices
@@ -2377,6 +2379,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     let masks = store.read_cold_lane::<JointMask>();
     let trees = store.read_cold_lane::<SkelTree>();
     let tree_players = store.read_lane::<SkelTreePlayer>();
+    let ragdolls = store.read_lane::<RagdollBlend>();
     let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
         clips: &clips,
@@ -2387,6 +2390,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         masks: masks.as_deref(),
         trees: trees.as_deref(),
         tree_players: tree_players.as_deref(),
+        ragdolls: ragdolls.as_deref(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
@@ -2447,6 +2451,29 @@ fn fit_tree_poses(poses: &mut Vec<BlendedPose>, nodes: usize) {
     }
 }
 
+/// Applies the root's ragdoll blend over the finished animated pose
+/// (`docs/ragdoll-design.md` §2.3: after the layer overlays, before the
+/// model-matrix compose). A non-finite physical frame or a length
+/// mismatch skips the blend for the frame — the animated pose wins (the
+/// fill counts it in [`RagdollBlend::skipped_frames`]). Leaf.
+fn apply_ragdoll(lanes: &SampleLanes<'_>, entity: Entity, pose: &mut BlendedPose) {
+    let Some(blend) = lanes.ragdolls.and_then(|lane| lane.get(entity)) else {
+        return;
+    };
+    let count = pose.trs.len();
+    if blend.physical.len() != count || blend.weights.len() != count {
+        return;
+    }
+    if !blend
+        .physical
+        .iter()
+        .all(|trs| trs.translation.is_finite() && trs.rotation.is_finite())
+    {
+        return;
+    }
+    ragdoll_blend(&mut pose.trs, &blend.physical, &blend.weights);
+}
+
 /// Composes the entity's model matrices from the blended pose and routes
 /// node writes, committing the pose. Shared tail of [`sample_entity`] and
 /// [`sample_tree_entity`].
@@ -2457,6 +2484,7 @@ fn finish_pose(
     scratch: &mut AnimScratch,
     pose: &mut JointPose,
 ) -> Option<()> {
+    apply_ragdoll(lanes, entity, &mut scratch.pose_a);
     scratch.skel_locals.clear();
     scratch
         .skel_locals

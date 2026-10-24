@@ -1,151 +1,19 @@
 //! Typed ragdoll facade: binds a skeleton root to a Featherstone chain
 //! (`docs/ragdoll-design.md` §3, §7). The physics-free model lives in
-//! [`ornis_animation::RagdollDesc`]; this module owns the seam — chain
-//! assembly from the bind pose and the install/remove inputs the host
-//! talks to.
+//! [`ornis_animation::RagdollDesc`]; this module owns the install seam —
+//! the chain assembles in [`crate::ragdoll_runtime`], the per-frame fill
+//! runs in [`crate::ragdoll_sync`], and the facade re-exports the §4
+//! seams the host talks to.
 
-use std::sync::{Arc, Mutex};
-
-use glam::{Mat4, Quat, Vec3};
+use glam::Vec3;
 use ornis_animation::{
-    RagdollBase, RagdollBone, RagdollDesc, RagdollError, RagdollShape, Skeleton,
+    JointMask, JointTrs, MaskId, RagdollBlend, RagdollDesc, RagdollError, RagdollMode, Skeleton,
 };
-use ornis_core::units::Radians;
+use ornis_core::units::Clamped01;
 use ornis_core::{Entity, SmartStore};
-use ornis_physics::articulated::{BaseJoint, FeatherstoneEngine};
-use ornis_physics::body::{BodyHandle, RigidBody};
-use ornis_physics::engine::PhysicsEngine;
-use ornis_physics::joint::{JointHandle, JointKind, RevoluteLimit};
 
-/// Full edge from a half-extent (shape volumes below).
-const FULL_EDGE: f32 = 2.0;
-/// Hemispherical caps share of a capsule volume (`4/3`).
-const CAPSULE_CAPS_SHARE: f32 = 4.0 / 3.0;
-
-/// Hot state of one ragdoll root: its own articulated chain plus the
-/// bind-pose frames the world→local seam reads against (§4.1). Registered
-/// as a hot lane on the skeleton root (the lane's `Clone` bound is why the
-/// chain rides behind an `Arc` — cloning the runtime shares the chain, it
-/// never copies it); the chain holds no state but the physics bodies
-/// themselves.
-#[derive(Clone)]
-pub struct RagdollRuntime {
-    /// The articulated chain (one per ragdoll root).
-    engine: Arc<Mutex<FeatherstoneEngine>>,
-    /// Physical link per bone (description order).
-    bodies: Vec<BodyHandle>,
-    /// Hinge per bone; `None` on the chain root.
-    joints: Vec<Option<JointHandle>>,
-    /// Bind-pose world transform of each bone's joint frame.
-    bind: Vec<(Vec3, Quat)>,
-    /// Parent bone index per bone; `None` on the chain root.
-    parents: Vec<Option<usize>>,
-}
-
-/// World→local seam data of one bone (`docs/ragdoll-design.md` §4.1):
-/// the bind frame the physical pose is read against and the chain handles
-/// behind it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RagdollBoneView {
-    /// Bind-pose world position of the bone's joint frame.
-    pub position: Vec3,
-    /// Bind-pose world rotation of the bone's joint frame.
-    pub rotation: Quat,
-    /// Physical link of the bone.
-    pub body: BodyHandle,
-    /// Hinge handle (`None` on the chain root).
-    pub hinge: Option<JointHandle>,
-    /// Parent bone index (`None` on the chain root).
-    pub parent: Option<usize>,
-}
-
-impl RagdollRuntime {
-    /// Number of bones in the chain: the chain's own link count, falling
-    /// back to the handle table if the lock is poisoned.
-    // qual:api — per-bone seam data for hosts; the world→local read
-    // (slice 2) is its first in-tree caller.
-    pub fn bone_count(&self) -> usize {
-        self.with_engine(|engine| engine.body_count())
-            .unwrap_or(self.bodies.len())
-    }
-
-    /// Seam data of bone `bone` ([`RagdollBoneView`]).
-    // qual:api — per-bone seam data for hosts; the world→local read
-    // (slice 2) is its first in-tree caller.
-    pub fn bone(&self, bone: usize) -> Option<RagdollBoneView> {
-        let (position, rotation) = self.bind.get(bone).copied()?;
-        Some(RagdollBoneView {
-            position,
-            rotation,
-            body: self.bodies.get(bone).copied()?,
-            hinge: self.joints.get(bone).copied().flatten(),
-            parent: self.parents.get(bone).copied().flatten(),
-        })
-    }
-
-    /// Runs `f` over the articulated chain (the stepping seam of §4);
-    /// `None` means the chain lock is poisoned (bad skin downstream).
-    // qual:api — stepping seam for hosts; the fixed-step bridge (slice 2)
-    // is its first in-tree caller.
-    pub fn with_engine<R>(&self, f: impl FnOnce(&mut FeatherstoneEngine) -> R) -> Option<R> {
-        self.engine.lock().ok().map(|mut engine| f(&mut engine))
-    }
-}
-
-/// Assembles the physical chain of `desc` under `skeleton` at the bind
-/// pose (§3): every bone becomes a dynamic link whose frame is its joint
-/// bind frame, hinges sit on the bind anchors, and the root link takes
-/// `desc.base`. Returns `None` when [`RagdollDesc::validate`] refuses the
-/// description or physics cannot assemble a hinge.
-pub fn build_ragdoll(
-    skeleton: &Skeleton,
-    desc: &RagdollDesc,
-    gravity: Vec3,
-) -> Result<RagdollRuntime, RagdollError> {
-    desc.validate(skeleton)?;
-    let bind = bind_worlds(skeleton);
-    let mut engine = FeatherstoneEngine::new(gravity);
-    let mut handles = Vec::with_capacity(desc.bones.len());
-    let root_bone = chain_root(&desc.bones);
-    let base = match desc.base {
-        RagdollBase::Fixed => BaseJoint::Fixed,
-        RagdollBase::Floating => BaseJoint::Floating,
-    };
-    for (index, bone) in desc.bones.iter().enumerate() {
-        let (position, orientation) = bind[bone.joint.index()];
-        let mut body = bone_body(bone, position);
-        body.orientation = orientation;
-        handles.push(if index == root_bone {
-            engine.add_root(body, base)
-        } else {
-            engine.add_body(body)
-        });
-    }
-    let mut joints = Vec::with_capacity(desc.bones.len());
-    for (index, bone) in desc.bones.iter().enumerate() {
-        let Some(parent) = chain_parent(index, &desc.bones) else {
-            joints.push(None);
-            continue;
-        };
-        let hinge = hinge_joint(bone, &bind, &desc.bones[parent])?;
-        let handle = engine
-            .add_joint(handles[parent], handles[index], hinge)
-            .map_err(|_| RagdollError::Assemble)?;
-        engine.set_joint_damping(handle, bone.motor.damping);
-        engine.set_joint_friction(handle, bone.motor.friction);
-        joints.push(Some(handle));
-    }
-    let parents = (0..desc.bones.len())
-        .map(|index| chain_parent(index, &desc.bones))
-        .collect();
-    Ok(RagdollRuntime {
-        engine: Arc::new(Mutex::new(engine)),
-        bodies: handles,
-        joints,
-        bind,
-        parents,
-    })
-}
+pub use crate::ragdoll_runtime::{RagdollBoneView, RagdollRuntime, build_ragdoll};
+pub use crate::ragdoll_sync::{RagdollSyncSystem, update_ragdoll};
 
 // qual:api — typed ragdoll input for hosts; in-tree callers land with
 // the load wiring, hosts own the install decision.
@@ -167,10 +35,22 @@ pub fn set_ragdoll(
         return Err(RagdollError::NoSkeleton);
     };
     let runtime = build_ragdoll(&skeleton, &desc, gravity)?;
+    let joints = skeleton.parents.len();
     store.register_cold::<RagdollDesc>();
     store.register::<RagdollRuntime>();
+    store.register::<RagdollBlend>();
+    store.register::<RagdollMode>();
     store.insert_cold(root, desc);
     store.insert(root, runtime);
+    store.insert(
+        root,
+        RagdollBlend {
+            physical: vec![JointTrs::IDENTITY; joints],
+            weights: vec![Clamped01::ZERO; joints],
+            skipped_frames: 0,
+        },
+    );
+    store.insert(root, RagdollMode::Animated);
     Ok(())
 }
 
@@ -182,128 +62,56 @@ pub fn clear_ragdoll(store: &mut SmartStore, root: Entity) -> bool {
     crate::anim_wiring::clear_root_lanes::<RagdollDesc, RagdollRuntime>(store, root)
 }
 
-/// Bind-pose world transforms (position, rotation) per joint, folded from
-/// [`Skeleton::rest`] along the parents in depth order as full T·R·S
-/// matrices — the same composition the skin's `compose_model_matrices`
-/// uses, so parent scale lands in the world positions (typical glTF rigs
-/// scale the root by 0.01). Only position and rotation enter physics.
-/// Leaf.
-fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat)> {
-    let count = skeleton.parents.len();
-    let mut depths = Vec::with_capacity(count);
-    for parent_of in skeleton.parents.iter() {
-        let mut depth = 0;
-        let mut cursor = *parent_of;
-        while let Some(parent) = cursor {
-            depth += 1;
-            cursor = skeleton.parents[parent.index()];
-        }
-        depths.push(depth);
-    }
-    let mut order: Vec<usize> = (0..count).collect();
-    order.sort_by_key(|&joint| depths[joint]);
-    let mut matrices = vec![Mat4::IDENTITY; count];
-    let mut out = vec![(Vec3::ZERO, Quat::IDENTITY); count];
-    for &joint in &order {
-        let local = skeleton.rest[joint];
-        let local =
-            Mat4::from_scale_rotation_translation(local.scale, local.rotation, local.translation);
-        let world = match skeleton.parents[joint] {
-            Some(parent) => matrices[parent.index()] * local,
-            None => local,
-        };
-        matrices[joint] = world;
-        let (_, rotation, position) = world.to_scale_rotation_translation();
-        out[joint] = (position, rotation);
-    }
-    out
-}
-
-/// Dynamic body of `bone` centred on its joint frame (§3.1: the link
-/// frame is the joint frame in the first slices). Leaf.
-fn bone_body(bone: &RagdollBone, position: Vec3) -> RigidBody {
-    let mass = match bone.shape {
-        RagdollShape::Capsule {
-            radius,
-            half_height,
-        } => {
-            let disc = std::f32::consts::PI * radius * radius;
-            bone.density * (disc * (FULL_EDGE * half_height) + CAPSULE_CAPS_SHARE * disc * radius)
-        }
-        RagdollShape::Box { half_extents } => {
-            bone.density
-                * (FULL_EDGE * half_extents.x)
-                * (FULL_EDGE * half_extents.y)
-                * (FULL_EDGE * half_extents.z)
-        }
+// qual:api — typed mode switch for hosts; in-tree callers land with the
+// gameplay bindings, hosts own the impact/getup policy.
+/// Switches the pose owner of `root` (§2.1): `Animated`, `Physical` or
+/// `Blend { mask, weight }`. Refuses (writing nothing) without an
+/// installed chain ([`RagdollError::Missing`]) or with a mask that is
+/// missing or sized differently from the skeleton ([`RagdollError::Mask`]).
+pub fn set_ragdoll_mode(
+    store: &mut SmartStore,
+    root: Entity,
+    mode: RagdollMode,
+) -> Result<(), RagdollError> {
+    let Some(joints) = store
+        .read_lane::<Skeleton>()
+        .and_then(|skeletons| skeletons.get(root).map(|skeleton| skeleton.parents.len()))
+    else {
+        return Err(RagdollError::NoSkeleton);
     };
-    match bone.shape {
-        RagdollShape::Capsule {
-            radius,
-            half_height,
-        } => RigidBody::new_capsule(position, radius, half_height, mass),
-        RagdollShape::Box { half_extents } => RigidBody::new_box(position, half_extents, mass),
+    if !store
+        .read_lane::<RagdollRuntime>()
+        .is_some_and(|runtimes| runtimes.contains(root))
+    {
+        return Err(RagdollError::Missing);
     }
-}
-
-/// Revolute hinge of `bone` under `parent`, anchored on the bind frames
-/// of §3.2: `local_anchor_b` is zero (the child frame *is* the joint) and
-/// both axes are the same world axis. Leaf.
-fn hinge_joint(
-    bone: &RagdollBone,
-    bind: &[(Vec3, Quat)],
-    parent: &RagdollBone,
-) -> Result<JointKind, RagdollError> {
-    let (joint_position, joint_rotation) = bind[bone.joint.index()];
-    let (parent_position, parent_rotation) = bind[parent.joint.index()];
-    // `RevoluteLimit::try_new` checks exactly the window rule of
-    // `RagdollDesc::validate`, so this failure is unreachable for
-    // validated descriptions — it maps instead of swallowing.
-    let limit = match bone.limit {
-        Some(window) => Some(
-            RevoluteLimit::try_new(Radians::new(window.min), Radians::new(window.max))
-                .ok_or(RagdollError::Limit)?,
-        ),
-        None => None,
-    };
-    Ok(JointKind::Revolute {
-        local_anchor_a: parent_rotation.inverse() * (joint_position - parent_position),
-        local_anchor_b: Vec3::ZERO,
-        local_axis_a: parent_rotation.inverse() * (joint_rotation * bone.axis),
-        local_axis_b: bone.axis,
-        limit,
-        motor: None,
-    })
-}
-
-/// Index of the chain root bone (the one with `parent: None`); the
-/// description validates to exactly one. Leaf.
-fn chain_root(bones: &[RagdollBone]) -> usize {
-    let mut root = 0;
-    for (index, bone) in bones.iter().enumerate() {
-        if bone.parent.is_none() {
-            root = index;
+    if let RagdollMode::Blend {
+        mask: MaskId(mask), ..
+    } = mode
+    {
+        let sized = store
+            .read_cold_lane::<JointMask>()
+            .and_then(|masks| masks.get(mask).cloned())
+            .is_some_and(|mask| mask.weights.len() == joints);
+        if !sized {
+            return Err(RagdollError::Mask);
         }
     }
-    root
-}
-
-/// Bone index of `bones[index]`'s parent bone. Leaf.
-fn chain_parent(index: usize, bones: &[RagdollBone]) -> Option<usize> {
-    let parent = bones[index].parent?;
-    let mut found = None;
-    for (candidate, bone) in bones.iter().enumerate() {
-        if bone.joint == parent {
-            found = Some(candidate);
-        }
-    }
-    found
+    store.register::<RagdollMode>();
+    store.insert(root, mode);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ornis_animation::{JointId, JointTrs, RagdollMotor};
+    use glam::{Mat4, Quat};
+    use ornis_animation::{JointId, RagdollBase, RagdollBone, RagdollMotor, RagdollShape};
+    use ornis_core::{GlobalTransform, UnitQuat};
+    use ornis_physics::engine::PhysicsEngine;
+    use ornis_physics::joint::JointKind;
+
+    use crate::ragdoll_runtime::{FULL_EDGE, hinge_joint};
 
     /// Three-joint chain `0 <- 1 <- 2`, one metre apart at rest.
     fn chain() -> Skeleton {
@@ -536,6 +344,229 @@ mod tests {
                 (false, false, false),
                 "a broken description writes nothing"
             );
+        }
+    }
+
+    #[test]
+    fn set_ragdoll_installs_the_blend_lanes() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+        let blend = store.write_lane::<RagdollBlend>().unwrap();
+        let blend = blend.get(root).unwrap();
+        assert_eq!(blend.weights, vec![Clamped01::ZERO; 3]);
+        assert_eq!(blend.physical, vec![JointTrs::IDENTITY; 3]);
+        assert_eq!(blend.skipped_frames, 0);
+        assert_eq!(
+            store
+                .read_lane::<RagdollMode>()
+                .and_then(|m| m.get(root).copied()),
+            Some(RagdollMode::Animated)
+        );
+    }
+
+    #[test]
+    fn set_ragdoll_mode_checks_the_mask() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+
+        // A mask sized for another skeleton is refused.
+        let wrong = store.create_entity();
+        store.register_cold::<JointMask>();
+        store.insert_cold(
+            wrong,
+            JointMask {
+                name: "wrong".to_string(),
+                weights: vec![Clamped01::ONE; 2],
+            },
+        );
+        assert_eq!(
+            set_ragdoll_mode(
+                &mut store,
+                root,
+                RagdollMode::Blend {
+                    mask: MaskId(wrong),
+                    weight: Clamped01::new(0.5),
+                }
+            ),
+            Err(RagdollError::Mask)
+        );
+        assert_eq!(
+            store
+                .read_lane::<RagdollMode>()
+                .and_then(|m| m.get(root).copied()),
+            Some(RagdollMode::Animated),
+            "a refused switch writes nothing"
+        );
+
+        // A mask of the joint count is accepted.
+        let right = store.create_entity();
+        store.insert_cold(
+            right,
+            JointMask {
+                name: "right".to_string(),
+                weights: vec![Clamped01::ONE; 3],
+            },
+        );
+        let mode = RagdollMode::Blend {
+            mask: MaskId(right),
+            weight: Clamped01::new(0.5),
+        };
+        assert_eq!(set_ragdoll_mode(&mut store, root, mode), Ok(()));
+        assert_eq!(
+            store
+                .read_lane::<RagdollMode>()
+                .and_then(|m| m.get(root).copied()),
+            Some(mode)
+        );
+    }
+
+    #[test]
+    fn update_ragdoll_weights_follow_the_mode() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        store.register::<GlobalTransform>();
+        store.insert(
+            root,
+            GlobalTransform {
+                translation: Vec3::ZERO,
+                rotation: UnitQuat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        );
+        set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+
+        // Physical: every bone joint owns the pose.
+        set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
+        assert!(update_ragdoll(&store, root));
+        let blend = store.write_lane::<RagdollBlend>().unwrap();
+        assert_eq!(
+            blend.get(root).map(|b| b.weights.clone()),
+            Some(vec![Clamped01::ONE; 3])
+        );
+        drop(blend);
+
+        // Blend: mask x weight per joint (0.25·0.5, 1·0.5, 0.5·0.5).
+        let mask = store.create_entity();
+        store.register_cold::<JointMask>();
+        store.insert_cold(
+            mask,
+            JointMask {
+                name: "blend".to_string(),
+                weights: vec![Clamped01::new(0.25), Clamped01::ONE, Clamped01::new(0.5)],
+            },
+        );
+        set_ragdoll_mode(
+            &mut store,
+            root,
+            RagdollMode::Blend {
+                mask: MaskId(mask),
+                weight: Clamped01::new(0.5),
+            },
+        )
+        .unwrap();
+        assert!(update_ragdoll(&store, root));
+        let blend = store.write_lane::<RagdollBlend>().unwrap();
+        assert_eq!(
+            blend.get(root).map(|b| b.weights.clone()),
+            Some(vec![
+                Clamped01::new(0.125),
+                Clamped01::new(0.5),
+                Clamped01::new(0.25)
+            ])
+        );
+    }
+
+    #[test]
+    fn update_ragdoll_zeroes_weights_on_a_broken_frame() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        store.register::<GlobalTransform>();
+        store.insert(
+            root,
+            GlobalTransform {
+                translation: Vec3::ZERO,
+                rotation: UnitQuat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+        );
+        set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+        set_ragdoll_mode(&mut store, root, RagdollMode::Physical).unwrap();
+        assert!(update_ragdoll(&store, root));
+
+        // A non-finite body pose zeroes the frame and counts it.
+        let runtime = store
+            .read_lane::<RagdollRuntime>()
+            .and_then(|runtimes| runtimes.get(root).cloned())
+            .unwrap();
+        let handle = runtime.body_handle(0).unwrap();
+        runtime.with_engine(|engine| {
+            engine.get_body_mut(handle).unwrap().position = Vec3::NAN;
+        });
+        assert!(!update_ragdoll(&store, root));
+        let blend = store.write_lane::<RagdollBlend>().unwrap();
+        let blend = blend.get(root).unwrap();
+        assert_eq!(blend.weights, vec![Clamped01::ZERO; 3]);
+        assert_eq!(blend.skipped_frames, 1);
+    }
+
+    #[test]
+    fn sample_local_round_trips_the_chain_pose() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        set_ragdoll(&mut store, root, desc(), Vec3::new(0.0, -9.8, 0.0)).unwrap();
+        let runtime = store
+            .read_lane::<RagdollRuntime>()
+            .and_then(|runtimes| runtimes.get(root).cloned())
+            .unwrap();
+
+        // Identity entity: the sampled locals are the chain's rest locals.
+        let mut out = vec![JointTrs::IDENTITY; 3];
+        assert!(runtime.sample_local(&desc(), Mat4::IDENTITY, &mut out));
+        assert_eq!(out[0], JointTrs::IDENTITY);
+        assert_eq!(out[1].translation, Vec3::Y);
+        assert_eq!(out[1].rotation, Quat::IDENTITY);
+        assert_eq!(out[2].translation, Vec3::Y);
+
+        // Folding the sampled locals reproduces the body world poses —
+        // the physical pose = world transforms of the chain (§4.1).
+        let mut world = Mat4::IDENTITY;
+        let mut folded = Vec::new();
+        for local in &out {
+            let local = Mat4::from_scale_rotation_translation(
+                local.scale,
+                local.rotation,
+                local.translation,
+            );
+            world *= local;
+            folded.push(world);
+        }
+        let bodies = runtime.with_engine(|engine| {
+            (0..3)
+                .map(|index| {
+                    let handle = runtime.body_handle(index).unwrap();
+                    let body = engine.get_body(handle).unwrap();
+                    Mat4::from_scale_rotation_translation(
+                        Vec3::ONE,
+                        body.orientation,
+                        body.position,
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        for (folded, body) in folded.iter().zip(bodies.unwrap()) {
+            assert_eq!(*folded, body);
         }
     }
 

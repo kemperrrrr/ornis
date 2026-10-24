@@ -23,6 +23,8 @@ pub mod anim_wiring;
 pub mod game_world;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
+pub mod ragdoll_runtime;
+pub mod ragdoll_sync;
 pub mod ragdoll_wiring;
 /// Headless editor session: commands in, snapshots/events out.
 pub mod session;
@@ -132,8 +134,15 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
     if engine.schedule().mermaid().contains("skel_sample") {
         return;
     }
+    // RagdollBlend fills before the sample pass reads it (§2.3).
+    engine
+        .schedule_mut()
+        .add_system(crate::ragdoll_wiring::RagdollSyncSystem::new());
     engine.schedule_mut().add_system(SkelSampleSystem::new());
     engine.schedule_mut().add_system(SkelSkinSystem::new());
+    let _ = engine
+        .schedule_mut()
+        .try_order_before("ragdoll_sync", "skel_sample");
     let _ = engine
         .schedule_mut()
         .try_order_before("anim_sample", "skel_sample");

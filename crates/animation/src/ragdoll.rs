@@ -5,7 +5,7 @@
 
 use glam::Vec3;
 
-use crate::blend::MaskId;
+use crate::blend::{JointTrs, MaskId};
 use crate::{JointId, Skeleton};
 use ornis_core::units::Clamped01;
 
@@ -111,6 +111,32 @@ pub enum RagdollMode {
     },
 }
 
+/// Per-frame ragdoll input of one skeleton root (hot lane, filled by the
+/// app's ragdoll seam before sampling — `docs/ragdoll-design.md` §2.3):
+/// physical local poses and per-joint blend weights (`1` = physics).
+/// Joints outside the ragdoll chain keep zero weights.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RagdollBlend {
+    /// Physical local pose per skeleton joint. The fill keeps the last
+    /// good sample and zeroes the weights on a bad frame, so this stays
+    /// finite.
+    pub physical: Vec<JointTrs>,
+    /// Blend weight per skeleton joint (`1.0` takes the physical pose).
+    pub weights: Vec<Clamped01>,
+    /// Frames where the physical sample was unusable (animation won).
+    pub skipped_frames: u32,
+}
+
+/// Blends the physical pose over `animated` joint by joint (§4.1):
+/// `pose[joint] = lerp(animated, physical, weight)`. Truncates at the
+/// shortest of the three slices — the fill sizes them all to the joint
+/// count. Pure: no allocations, no state.
+pub fn ragdoll_blend(animated: &mut [JointTrs], physical: &[JointTrs], weights: &[Clamped01]) {
+    for ((pose, source), weight) in animated.iter_mut().zip(physical).zip(weights) {
+        *pose = pose.lerp(*source, weight.get());
+    }
+}
+
 /// Why [`RagdollDesc::validate`] refused a description. The facade writes
 /// nothing on any of these (`docs/ragdoll-design.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -143,15 +169,20 @@ pub enum RagdollError {
     /// A density is not positive or not finite.
     #[error("density must be finite and positive")]
     Density,
-    /// A parent names a joint that is not a bone of this description.
-    #[error("bone parent must name another bone of the description")]
+    /// A parent is not the skeleton parent's bone of the description
+    /// (the chain must mirror the skeleton — §4.1 needs it so every local
+    /// blend lands in its own skeleton slot).
+    #[error("bone parent must be the skeleton parent's bone of the description")]
     Parent,
-    /// A parent is not a skeleton ancestor of its bone joint.
-    #[error("bone parent must be a skeleton ancestor of the bone joint")]
-    ParentNotAncestor,
-    /// The bones do not form one chain rooted at exactly one bone.
-    #[error("the bones must form one chain with exactly one root")]
+    /// The bones do not form one chain rooted at the skeleton root.
+    #[error("the bones must form one chain rooted at the skeleton root")]
     Roots,
+    /// A blend mask is missing or does not match the joint count.
+    #[error("blend mask missing or sized differently from the skeleton")]
+    Mask,
+    /// No ragdoll chain is installed on the root.
+    #[error("no ragdoll chain installed on the root")]
+    Missing,
 }
 
 impl RagdollDesc {
@@ -250,42 +281,32 @@ fn motor_ok(motor: &RagdollMotor) -> Result<(), RagdollError> {
     Ok(())
 }
 
-/// Parent link of `bone`: a named bone of the description and a skeleton
-/// ancestor of the bone's joint. Leaf over [`is_ancestor`].
+/// Parent link of `bone`: `parent` must be the bone of the joint's direct
+/// skeleton parent, and a root bone must sit on the skeleton root — the
+/// chain mirrors the skeleton so every local blend lands in its own
+/// skeleton slot (§4.1). Leaf.
 fn parent_ok(
     bone: &RagdollBone,
     bones: &[RagdollBone],
     parents: &[Option<JointId>],
 ) -> Result<(), RagdollError> {
-    let Some(parent) = bone.parent else {
-        return Ok(());
-    };
-    let mut named = false;
-    for candidate in bones {
-        if candidate.joint == parent {
-            named = true;
+    let skeleton_parent = parents[usize::from(bone.joint)];
+    match bone.parent {
+        None => {
+            if skeleton_parent.is_some() {
+                return Err(RagdollError::Parent);
+            }
         }
-    }
-    if !named || usize::from(parent) >= parents.len() {
-        return Err(RagdollError::Parent);
-    }
-    if !is_ancestor(parents, parent, bone.joint) {
-        return Err(RagdollError::ParentNotAncestor);
+        Some(parent) => {
+            if skeleton_parent != Some(parent) {
+                return Err(RagdollError::Parent);
+            }
+            if !bones.iter().any(|candidate| candidate.joint == parent) {
+                return Err(RagdollError::Parent);
+            }
+        }
     }
     Ok(())
-}
-
-/// Whether `ancestor` lies on the skeleton parent chain of `joint`.
-/// Leaf: a pure walk over `parents`.
-fn is_ancestor(parents: &[Option<JointId>], ancestor: JointId, joint: JointId) -> bool {
-    let mut cursor = parents[usize::from(joint)];
-    while let Some(current) = cursor {
-        if current == ancestor {
-            return true;
-        }
-        cursor = parents[usize::from(current)];
-    }
-    false
 }
 
 /// Whether every shape size is finite and positive. Leaf.
@@ -307,6 +328,7 @@ fn shape_ok(shape: &RagdollShape) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Quat;
 
     /// Skeleton `0 <- 1 <- 2` (a three-joint chain).
     fn chain() -> Skeleton {
@@ -353,6 +375,15 @@ mod tests {
         }
     }
 
+    /// Two skeleton roots side by side.
+    fn pair() -> Skeleton {
+        Skeleton::new(
+            vec![None, None],
+            vec![Default::default(); 2],
+            vec!["hips".to_string(), "tail".to_string()],
+        )
+    }
+
     #[test]
     fn empty_and_multi_root_chains_refuse() {
         {
@@ -361,12 +392,9 @@ mod tests {
                 Err(RagdollError::EmptyChain)
             );
             let two_roots = desc(vec![bone(0, None), bone(1, None)]);
-            assert_eq!(two_roots.validate(&chain()), Err(RagdollError::Roots));
+            assert_eq!(two_roots.validate(&pair()), Err(RagdollError::Roots));
             let no_root = desc(vec![bone(0, Some(1)), bone(1, Some(0))]);
-            assert_eq!(
-                no_root.validate(&chain()),
-                Err(RagdollError::ParentNotAncestor)
-            );
+            assert_eq!(no_root.validate(&chain()), Err(RagdollError::Parent));
         }
     }
 
@@ -381,17 +409,16 @@ mod tests {
     }
 
     #[test]
-    fn parents_must_name_bone_ancestors() {
+    fn parents_must_mirror_the_skeleton() {
         {
-            let stranger = desc(vec![bone(0, None), bone(2, Some(0)), bone(1, Some(0))]);
-            assert_eq!(stranger.validate(&chain()), Ok(()));
+            // Bone 2 under bone 0 would skip bone 1 — its local blend slot
+            // would not line up with the physical frame (§4.1).
+            let skipped = desc(vec![bone(0, None), bone(1, Some(0)), bone(2, Some(0))]);
+            assert_eq!(skipped.validate(&chain()), Err(RagdollError::Parent));
             let not_a_bone = desc(vec![bone(0, None), bone(2, Some(1))]);
             assert_eq!(not_a_bone.validate(&chain()), Err(RagdollError::Parent));
-            let descendant = desc(vec![bone(0, Some(1)), bone(1, None)]);
-            assert_eq!(
-                descendant.validate(&chain()),
-                Err(RagdollError::ParentNotAncestor)
-            );
+            let detached_root = desc(vec![bone(1, None), bone(2, Some(1))]);
+            assert_eq!(detached_root.validate(&chain()), Err(RagdollError::Parent));
         }
     }
 
@@ -424,6 +451,30 @@ mod tests {
                 half_height: 0.0,
             };
             assert_eq!(sphere.validate(&chain()), Ok(()), "zero height = sphere");
+        }
+    }
+
+    /// A one-joint pose at `translation`.
+    fn pose(translation: f32) -> JointTrs {
+        JointTrs {
+            translation: Vec3::splat(translation),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
+    }
+
+    #[test]
+    fn ragdoll_blend_mixes_by_exact_weights() {
+        {
+            let mut animated = [pose(0.0)];
+            ragdoll_blend(&mut animated, &[pose(1.0)], &[Clamped01::new(0.5)]);
+            assert_eq!(animated[0].translation, Vec3::splat(0.5));
+            let mut animated = [pose(0.0)];
+            ragdoll_blend(&mut animated, &[pose(1.0)], &[Clamped01::ONE]);
+            assert_eq!(animated[0].translation, Vec3::splat(1.0));
+            let mut animated = [pose(0.0)];
+            ragdoll_blend(&mut animated, &[pose(1.0)], &[Clamped01::ZERO]);
+            assert_eq!(animated[0].translation, Vec3::splat(0.0));
         }
     }
 }

@@ -285,11 +285,15 @@ blend1d детерминированы (не более двух соседни�
 `PlaybackError::TreeDriven`, пока корень не снят с дерева
 `clear_skel_tree(root)`. Ragdoll (шов «физика ↔ скелет») — модель
 `RagdollDesc`/`RagdollBone`/`RagdollMode` в `ornis-animation` и фасад
-`set_ragdoll`/`clear_ragdoll` (`crates/app/src/ragdoll_wiring.rs`):
-срез 1 (модель + привязка ABA-цепи на bind-кадре) готов; бленд
-«физика ↔ анимация» по маске и приводы — срезы 2–3, контакты с миром —
-отдельным срезом (бесконтактная база, `docs/ragdoll-design.md` §9) —
-дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
+`set_ragdoll`/`clear_ragdoll`/`set_ragdoll_mode`/`update_ragdoll`
+(`crates/app/src/ragdoll_wiring.rs`): срезы 1–2 готовы — привязка
+ABA-цепи на bind-кадре и бленд «физика → анимация» (физическая поза
+смешивается с анимационной в `finish_pose` по `RagdollBlend`: режим
+`Physical`/`Blend` c маской `JointMask`, битый кадр пропускается со
+счётчиком `skipped_frames`); приводы (анимация → физика) — срез 3,
+контакты с миром — отдельным срезом (бесконтактная база,
+`docs/ragdoll-design.md` §9) — дизайн `docs/ragdoll-design.md`,
+срезы — `PLAN.md` п. 6. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
 `InvalidClip`/`TreeDriven` (больше не `Copy`; `InvalidClip` — `fade_to_clip`
