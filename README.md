@@ -286,7 +286,9 @@ blend1d детерминированы (не более двух соседни�
 `clear_skel_tree(root)`. Ragdoll (шов «физика ↔ скелет») — модель
 `RagdollDesc`/`RagdollBone`/`RagdollMode` в `ornis-animation` и фасад
 `set_ragdoll`/`clear_ragdoll` (`crates/app/src/ragdoll_wiring.rs`):
-цепь `FeatherstoneEngine` на корень, бленд «физика ↔ анимация» по маске —
+срез 1 (модель + привязка ABA-цепи на bind-кадре) готов; бленд
+«физика ↔ анимация» по маске и приводы — срезы 2–3, контакты с миром —
+отдельным срезом (бесконтактная база, `docs/ragdoll-design.md` §9) —
 дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/

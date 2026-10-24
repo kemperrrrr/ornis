@@ -185,7 +185,8 @@
      Дизайн: `docs/ragdoll-design.md` (модель `RagdollDesc`/`RagdollBone`/
      `RagdollMode` в `ornis-animation`, шов `ragdoll_wiring` в `ornis-app`:
      ABA-цепь `FeatherstoneEngine` на корень, world→local чтение позы,
-     бленд «физика ↔ анимация» по маске, приводы следят за анимацией).
+     бленд «физика ↔ анимация» по маске, приводы следят за анимацией —
+     бленд/приводы в срезах 2–3, контакты — отдельным срезом, §9).
      Слои поставки — там же, §8. База в
      физике уже есть: `crates/physics/src/articulated.rs` — Featherstone ABA
      (R6, reduced coordinates; `FeatherstoneEngine`, `BaseJoint`,

@@ -14,11 +14,12 @@ use ornis_core::units::Clamped01;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RagdollShape {
     /// Capsule standing along the hinge-perpendicular bone frame: `radius`
-    /// and `half_height` of the cylindrical part, meters, both positive.
+    /// positive, `half_height` of the cylindrical part non-negative (m) —
+    /// zero gives a sphere.
     Capsule {
         /// Capsule radius (m).
         radius: f32,
-        /// Half-height of the cylindrical part (m).
+        /// Half-height of the cylindrical part (m), zero = sphere.
         half_height: f32,
     },
     /// Box in the joint frame: `half_extents` in meters, each positive.
@@ -129,9 +130,16 @@ pub enum RagdollError {
     /// A motor parameter is negative or not finite.
     #[error("motor parameters must be finite and non-negative")]
     Motor,
-    /// A shape size is not positive or not finite.
-    #[error("shape sizes must be finite and positive")]
+    /// A shape size is negative or not finite.
+    #[error("shape sizes must be finite and non-negative")]
     Shape,
+    /// Physics refused to assemble a hinge of an otherwise valid
+    /// description (unreachable in practice; the reason stays typed).
+    #[error("physics could not assemble the chain")]
+    Assemble,
+    /// The root has no [`Skeleton`] lane to bind against.
+    #[error("the root has no Skeleton lane")]
+    NoSkeleton,
     /// A density is not positive or not finite.
     #[error("density must be finite and positive")]
     Density,
@@ -410,6 +418,12 @@ mod tests {
                 half_extents: Vec3::ZERO,
             };
             assert_eq!(bad_shape.validate(&chain()), Err(RagdollError::Shape));
+            let mut sphere = desc(vec![bone(0, None)]);
+            sphere.bones[0].shape = RagdollShape::Capsule {
+                radius: 0.1,
+                half_height: 0.0,
+            };
+            assert_eq!(sphere.validate(&chain()), Ok(()), "zero height = sphere");
         }
     }
 }
