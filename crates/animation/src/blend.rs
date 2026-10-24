@@ -284,7 +284,7 @@ impl BlendedPose {
 
 /// Crossfade progress in `0..=1`: linear in `elapsed / duration`, instant
 /// for a non-positive duration.
-pub(crate) fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
+pub fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
     let duration = duration.get();
     if duration <= crate::NEAR_ZERO {
         return 1.0;

@@ -3,10 +3,11 @@
 //! `docs/ragdoll-design.md` §2.1. The seam that talks to
 //! `ornis-physics` lives in the app crate (`ragdoll_wiring`).
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::blend::{JointTrs, MaskId};
 use crate::{JointId, Skeleton};
+use ornis_core::Seconds;
 use ornis_core::units::Clamped01;
 
 /// Shape of one ragdoll bone body (explicit sizes — `docs/ragdoll-design.md`
@@ -124,8 +125,35 @@ pub struct RagdollBlend {
     pub physical: Vec<JointTrs>,
     /// Blend weight per skeleton joint (`1.0` takes the physical pose).
     pub weights: Vec<Clamped01>,
+    /// Animated local rotation per skeleton joint, recorded by the sample
+    /// before the blend (§4.2): the drive targets of the chain — its next
+    /// tick projects each onto the hinge axis. Stays at the last good
+    /// sample when a frame is skipped.
+    pub anim_rotations: Vec<Quat>,
+    /// Live weight pin per skeleton joint (`Some` wins over the mode and
+    /// any in-flight transition — §7 `set_ragdoll_weight`). A mode set
+    /// clears every pin.
+    pub pinned: Vec<Option<Clamped01>>,
     /// Frames where the physical sample was unusable (animation won).
     pub skipped_frames: u32,
+}
+
+/// Weight transition in flight on a ragdoll root (hot lane,
+/// [`crate::SkelFade`] mechanics — `docs/ragdoll-design.md` §4.2): the
+/// live weights lerp from
+/// the snapshot `from` to the current mode's weights, linear in
+/// `elapsed / duration`; a non-positive duration cuts at once. The fill
+/// drops the component once `elapsed` reaches `duration`. An in-flight
+/// transition is never interrupted (`RagdollError::Busy` on a fading
+/// mode set).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RagdollFade {
+    /// Snapshot of the live weights taken by the mode set.
+    pub from: Vec<Clamped01>,
+    /// Transition length; non-positive cuts at once.
+    pub duration: Seconds,
+    /// Time since the transition started.
+    pub elapsed: Seconds,
 }
 
 /// Blends the physical pose over `animated` joint by joint (§4.1):
@@ -194,6 +222,13 @@ pub enum RagdollError {
     /// No ragdoll chain is installed on the root.
     #[error("no ragdoll chain installed on the root")]
     Missing,
+    /// A weight transition is already in flight — it runs to completion
+    /// and is never interrupted (`docs/ragdoll-design.md` §4.2).
+    #[error("a weight transition is already in flight")]
+    Busy,
+    /// A weight-transition parameter is not finite.
+    #[error("weight transition parameters must be finite")]
+    Fade,
 }
 
 impl RagdollDesc {
