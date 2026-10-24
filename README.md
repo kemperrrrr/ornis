@@ -287,14 +287,16 @@ blend1d детерминированы (не более двух соседни�
 `RagdollDesc`/`RagdollBone`/`RagdollMode` в `ornis-animation` и фасад
 `set_ragdoll`/`clear_ragdoll`/`set_ragdoll_mode`/`set_ragdoll_mode_fade`/
 `set_ragdoll_weight`/`update_ragdoll`
-(`crates/app/src/ragdoll_wiring.rs`): срезы 1–3 готовы — привязка
+(`crates/app/src/ragdoll_wiring.rs`): срезы 1–4 готовы — привязка
 ABA-цепи на bind-кадре, бленд «физика → анимация» (физическая поза
 в model space скелета смешивается с анимационной в `finish_pose` по
 `RagdollBlend`: режим `Physical`/`Blend` c маской `JointMask`, битый
 кадр пропускается со счётчиком `skipped_frames`, масштаб остаётся
 анимационным) и «анимация → физика» (фикс-тик ABA на фикс-плане,
 приводы при `w < 1` держат анимацию, переходы весов с прогрессом по
-`Seconds`, точечный вес); контакты с
+`Seconds`, точечный вес) плюс контракт — полный набор типизированных
+отказов фасада (каждый пишет ничего) и детерминизм фикс-тика
+(повтор кадра = повтор позы); контакты с
 миром — отдельным срезом (бесконтактная база, `docs/ragdoll-design.md`
 §9) — дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь

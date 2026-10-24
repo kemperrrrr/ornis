@@ -219,7 +219,7 @@ mod tests {
     use super::*;
     use glam::{Mat4, Quat};
     use ornis_animation::{
-        JointId, RagdollBase, RagdollBone, RagdollMotor, RagdollShape, ragdoll_blend,
+        JointId, RagdollBase, RagdollBone, RagdollLimit, RagdollMotor, RagdollShape, ragdoll_blend,
     };
     use ornis_core::{GlobalTransform, UnitQuat};
     use ornis_physics::engine::PhysicsEngine;
@@ -692,6 +692,158 @@ mod tests {
                 .read_lane::<RagdollFade>()
                 .is_some_and(|fades| fades.contains(root))
         );
+    }
+
+    /// One broken variant of the sound [`desc`]/[`chain`] and the refusal
+    /// it must map to.
+    type BreakCase = (fn(&mut Skeleton, &mut RagdollDesc), RagdollError);
+
+    /// Every refusal of [`set_ragdoll`] is typed and writes nothing (§6):
+    /// one broken field per case over the sound [`desc`]/[`chain`].
+    #[test]
+    fn set_ragdoll_maps_the_full_error_set_writing_nothing() {
+        let cases: [BreakCase; 9] = [
+            (
+                |_, broken| {
+                    broken.bones.clear();
+                },
+                RagdollError::EmptyChain,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[2].joint = broken.bones[1].joint;
+                },
+                RagdollError::Joint,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[1].axis = Vec3::ZERO;
+                },
+                RagdollError::Axis,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[1].density = 0.0;
+                },
+                RagdollError::Density,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[1].limit = Some(RagdollLimit {
+                        min: 1.0,
+                        max: -1.0,
+                    });
+                },
+                RagdollError::Limit,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[1].motor.damping = -1.0;
+                },
+                RagdollError::Motor,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[1].shape = RagdollShape::Capsule {
+                        radius: -1.0,
+                        half_height: 0.0,
+                    };
+                },
+                RagdollError::Shape,
+            ),
+            (
+                |_, broken| {
+                    broken.bones[1].parent = None;
+                },
+                RagdollError::Parent,
+            ),
+            (
+                |skeleton, broken| {
+                    skeleton.parents = vec![None, None, Some(JointId::from_raw(1))].into();
+                    broken.bones[1].parent = None;
+                },
+                RagdollError::Roots,
+            ),
+        ];
+        for (break_it, want) in cases {
+            let mut skeleton = chain();
+            let mut broken = desc();
+            break_it(&mut skeleton, &mut broken);
+            let mut store = SmartStore::new();
+            let root = store.create_entity();
+            store.register::<Skeleton>();
+            store.insert(root, skeleton);
+            assert_eq!(
+                set_ragdoll(&mut store, root, broken, Vec3::ZERO),
+                Err(want),
+                "{want:?}"
+            );
+            assert_eq!(
+                (
+                    store
+                        .read_cold_lane::<RagdollDesc>()
+                        .is_some_and(|descs| descs.contains(root)),
+                    store
+                        .read_lane::<RagdollRuntime>()
+                        .is_some_and(|runtimes| runtimes.contains(root)),
+                ),
+                (false, false),
+                "{want:?} writes nothing"
+            );
+        }
+    }
+
+    /// The mode facades refuse an uninstalled root ([`RagdollError::Missing`])
+    /// and a non-finite transition duration ([`RagdollError::Fade`]); the
+    /// `bool` entries answer `false` without a chain (§7).
+    #[test]
+    fn mode_facades_refuse_uninstalled_roots_and_bad_transitions() {
+        let mut store = SmartStore::new();
+        let root = store.create_entity();
+        store.register::<Skeleton>();
+        store.insert(root, chain());
+        assert_eq!(
+            set_ragdoll_mode(&mut store, root, RagdollMode::Physical),
+            Err(RagdollError::Missing)
+        );
+        assert_eq!(
+            set_ragdoll_mode_fade(&mut store, root, RagdollMode::Physical, Seconds::new(1.0)),
+            Err(RagdollError::Missing)
+        );
+        assert!(!update_ragdoll(&store, root, tick()));
+        assert!(!set_ragdoll_weight(&mut store, root, 0, 1.0));
+        set_ragdoll(&mut store, root, desc(), Vec3::ZERO).unwrap();
+        assert_eq!(
+            set_ragdoll_mode_fade(
+                &mut store,
+                root,
+                RagdollMode::Physical,
+                Seconds::new(f32::NAN)
+            ),
+            Err(RagdollError::Fade)
+        );
+    }
+
+    /// The frame repeats the pose (§8.4): two identical chains stepped in
+    /// lockstep land bit-equal — the fixed tick is deterministic.
+    #[test]
+    fn identical_chains_land_bit_identical_poses() {
+        let dt = tick();
+        let (mut first_store, first_root, _first) = runtime_rig(Vec3::new(0.0, -9.8, 0.0));
+        let (mut second_store, second_root, _second) = runtime_rig(Vec3::new(0.0, -9.8, 0.0));
+        set_ragdoll_mode(&mut first_store, first_root, RagdollMode::Physical).unwrap();
+        set_ragdoll_mode(&mut second_store, second_root, RagdollMode::Physical).unwrap();
+        for _ in 0..32 {
+            assert!(update_ragdoll(&first_store, first_root, dt));
+            assert!(update_ragdoll(&second_store, second_root, dt));
+        }
+        let first = first_store.read_lane::<RagdollBlend>().unwrap();
+        let second = second_store.read_lane::<RagdollBlend>().unwrap();
+        let first = first.get(first_root).unwrap();
+        let second = second.get(second_root).unwrap();
+        assert_eq!(first.physical, second.physical, "bit-equal chain poses");
+        assert_eq!(first.weights, second.weights);
+        assert_eq!(first.skipped_frames, second.skipped_frames);
     }
 
     #[test]
