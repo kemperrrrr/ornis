@@ -28,10 +28,9 @@ const TWIST_FACTOR: f32 = 2.0;
 /// ABA has no sleeping) → the model→local sample into `blend.physical`.
 /// A broken sample zeroes the weights — animation wins the frame — and
 /// bumps [`RagdollBlend::skipped_frames`]. Borrow-based: the lane guards
-/// live for the fill and the buffers ride the lanes; the only copy is the
-/// transition snapshot of [`step_weight_fade`] (once per tick per root
-/// with a fade in flight). Worker of [`update_ragdoll`] and
-/// [`RagdollSyncSystem`].
+/// live for the fill, nothing is cloned and nothing is allocated per
+/// tick (buffers and the transition snapshot ride the lanes, §6). Worker
+/// of [`update_ragdoll`] and [`RagdollSyncSystem`].
 fn tick_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime, dt: Seconds) -> bool {
     let Some(descs) = store.read_cold_lane::<RagdollDesc>() else {
         return false;
@@ -59,8 +58,26 @@ fn tick_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime, dt: 
     let Some(blend) = blend_lane.get_mut(root) else {
         return false;
     };
-    let (progress, from) = step_weight_fade(store, root, dt);
-    fill_weights(mode, mask, &desc.bones, blend, progress, from.as_deref());
+    // Weight-transition clock (§4.2): the `from` snapshot is lerped by
+    // borrow straight from its lane — no copy per tick (§6) — and a
+    // finished transition dies in the same lane open.
+    let mut fade_lane = store.write_lane::<RagdollFade>();
+    let mut fade_done = false;
+    let (progress, from) = match fade_lane.as_mut().and_then(|fades| fades.get_mut(root)) {
+        Some(fade) => {
+            fade.elapsed = Seconds::new(fade.elapsed.get() + dt.get());
+            fade_done = fade.elapsed.get() >= fade.duration.get();
+            (
+                fade_progress(fade.duration, fade.elapsed),
+                Some(fade.from.as_slice()),
+            )
+        }
+        None => (1.0, None),
+    };
+    fill_weights(mode, mask, &desc.bones, blend, progress, from);
+    if fade_done && let Some(fades) = fade_lane.as_mut() {
+        fades.remove(root);
+    }
     if !matches!(mode, RagdollMode::Animated) {
         step_chain(runtime, desc, skeleton, blend, dt);
     }
@@ -142,31 +159,6 @@ fn step_chain(
             true
         })
         .unwrap_or(false)
-}
-
-/// Ticks the weight transition of `root` (§4.2) and snapshots its `from`
-/// side for [`fill_weights`]: the lerp `progress` of the in-flight fade
-/// (1.0 without one) plus the snapshot, with a finished component dropped
-/// inside the same lane open. Leaf.
-fn step_weight_fade(
-    store: &SmartStore,
-    root: Entity,
-    dt: Seconds,
-) -> (f32, Option<Vec<Clamped01>>) {
-    let Some(mut fades) = store.write_lane::<RagdollFade>() else {
-        return (1.0, None);
-    };
-    let Some(fade) = fades.get_mut(root) else {
-        return (1.0, None);
-    };
-    fade.elapsed = Seconds::new(fade.elapsed.get() + dt.get());
-    let done = fade.elapsed.get() >= fade.duration.get();
-    let progress = fade_progress(fade.duration, fade.elapsed);
-    let from = fade.from.clone();
-    if done {
-        fades.remove(root);
-    }
-    (progress, Some(from))
 }
 
 /// Mode weights of the bone joints (§2.3): the target weights of `mode`

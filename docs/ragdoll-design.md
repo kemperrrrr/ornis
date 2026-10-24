@@ -251,7 +251,9 @@ Hot path: без пер-кадровых аллокаций (scratch и буфе
 - `set_ragdoll(store, root, desc, gravity) -> Result<(), RagdollError>` —
   сборка цепи + лейны (`RagdollDesc` холодный, `RagdollRuntime`/
   `RagdollBlend`/`RagdollMode` горячие; гравитацию берёт вызывающий из
-  мира); повторный вызов пересобирает (описание заменяется целиком);
+  мира); повторный вызов пересобирает (описание заменяется целиком,
+  летящий переход весов умирает с заменённым состоянием — как при
+  `clear_ragdoll`);
 - `clear_ragdoll(store, root) -> bool` — сносит цепь, тела уходят из
   физики, поза снова анимационная;
 - `set_ragdoll_mode(store, root, mode) -> Result<(), RagdollError>` —

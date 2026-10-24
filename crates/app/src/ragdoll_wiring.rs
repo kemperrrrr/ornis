@@ -22,7 +22,9 @@ pub use crate::ragdoll_sync::{RagdollSyncSystem, update_ragdoll};
 /// binds against the root's [`Skeleton`] lane and registers the cold
 /// description plus the hot runtime. Refuses (writing nothing) without a
 /// skeleton on the root or on a description [`RagdollDesc::validate`]
-/// otherwise.
+/// otherwise. A reinstall replaces the chain outright — an in-flight
+/// weight transition dies with the replaced state, like on
+/// [`clear_ragdoll`].
 pub fn set_ragdoll(
     store: &mut SmartStore,
     root: Entity,
@@ -37,6 +39,12 @@ pub fn set_ragdoll(
     };
     let runtime = build_ragdoll(&skeleton, &desc, gravity)?;
     let joints = skeleton.parents.len();
+    // A reinstall owns the root anew: an in-flight weight transition (§4.2)
+    // belongs to the replaced chain and dies with it, like on
+    // [`clear_ragdoll`].
+    if let Some(mut fades) = store.write_lane::<RagdollFade>() {
+        fades.remove(root);
+    }
     store.register_cold::<RagdollDesc>();
     store.register::<RagdollRuntime>();
     store.register::<RagdollBlend>();
@@ -667,6 +675,23 @@ mod tests {
             .and_then(|runtimes| runtimes.get(root).cloned())
             .unwrap();
         (store, root, runtime)
+    }
+
+    #[test]
+    fn set_ragdoll_reinstall_drops_a_flying_fade() {
+        let (mut store, root, _runtime) = runtime_rig(Vec3::ZERO);
+        set_ragdoll_mode_fade(&mut store, root, RagdollMode::Physical, Seconds::new(0.5)).unwrap();
+        assert!(
+            store
+                .read_lane::<RagdollFade>()
+                .is_some_and(|fades| fades.contains(root))
+        );
+        set_ragdoll(&mut store, root, desc(), Vec3::ZERO).unwrap();
+        assert!(
+            !store
+                .read_lane::<RagdollFade>()
+                .is_some_and(|fades| fades.contains(root))
+        );
     }
 
     #[test]
