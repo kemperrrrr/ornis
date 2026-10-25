@@ -12,8 +12,10 @@ use ornis_animation::{
 };
 use ornis_core::units::Clamped01;
 use ornis_core::{Entity, Seconds, SmartStore};
+use ornis_physics::RigidBody;
 
-pub use crate::ragdoll_runtime::{RagdollBoneView, RagdollRuntime, build_ragdoll};
+pub use crate::ragdoll_proxy::RagdollProxySync;
+pub use crate::ragdoll_runtime::{RagdollBoneView, RagdollProxy, RagdollRuntime, build_ragdoll};
 pub use crate::ragdoll_sync::{RagdollSyncSystem, update_ragdoll};
 
 // qual:api — typed ragdoll input for hosts; in-tree callers land with
@@ -39,6 +41,7 @@ pub fn set_ragdoll(
     };
     let runtime = build_ragdoll(&skeleton, &desc, gravity)?;
     let joints = skeleton.parents.len();
+    let links = desc.bones.len();
     // A reinstall owns the root anew: an in-flight weight transition (§4.2)
     // belongs to the replaced chain and dies with it, like on
     // [`clear_ragdoll`].
@@ -62,7 +65,53 @@ pub fn set_ragdoll(
         },
     );
     store.insert(root, RagdollMode::Animated);
+    spawn_proxies(store, root, links);
     Ok(())
+}
+
+/// World proxies of `root`'s chain (§8.5): one [`RagdollProxy`] entity per
+/// bone — [`RagdollProxySync`](crate::ragdoll_proxy::RagdollProxySync) owns
+/// their [`ornis_physics::RigidBody`] binding and drive. Replaces any
+/// previous proxies of the root (reinstall owns the root anew).
+fn spawn_proxies(store: &mut SmartStore, root: Entity, links: usize) {
+    clear_proxies(store, root);
+    store.register::<RagdollProxy>();
+    for link in 0..links {
+        let proxy = store.create_entity();
+        store.insert(proxy, RagdollProxy { root, link });
+    }
+}
+
+/// Destroys the world proxies of `root` (§8.5), dropping their solver
+/// bodies first so nothing keeps simulating on a dead entity. Returns the
+/// number of proxies removed.
+fn clear_proxies(store: &mut SmartStore, root: Entity) -> usize {
+    let doomed: Vec<Entity> = store
+        .read_lane::<RagdollProxy>()
+        .map(|proxies| {
+            proxies
+                .entities
+                .iter()
+                .zip(&proxies.data)
+                .filter(|(_, proxy)| proxy.root == root)
+                .map(|(&entity, _)| entity)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(mut bodies) = store.write_lane::<RigidBody>() {
+        for &entity in &doomed {
+            bodies.remove(entity);
+        }
+    }
+    if let Some(mut proxies) = store.write_lane::<RagdollProxy>() {
+        for &entity in &doomed {
+            proxies.remove(entity);
+        }
+    }
+    for entity in doomed.iter().copied() {
+        store.destroy_entity(entity);
+    }
+    doomed.len()
 }
 
 // qual:api — typed ragdoll removal for hosts; in-tree callers land with
@@ -72,6 +121,7 @@ pub fn set_ragdoll(
 pub fn clear_ragdoll(store: &mut SmartStore, root: Entity) -> bool {
     let had = crate::anim_wiring::clear_root_lanes::<RagdollDesc, RagdollRuntime>(store, root);
     crate::anim_wiring::clear_root_hot_lanes::<RagdollBlend, RagdollMode>(store, root);
+    clear_proxies(store, root);
     if let Some(mut fades) = store.write_lane::<RagdollFade>() {
         fades.remove(root);
     }
@@ -221,10 +271,11 @@ mod tests {
     use ornis_animation::{
         JointId, RagdollBase, RagdollBone, RagdollLimit, RagdollMotor, RagdollShape, ragdoll_blend,
     };
-    use ornis_core::{GlobalTransform, UnitQuat};
+    use ornis_core::{Engine, FixedTime, GlobalTransform, UnitQuat};
     use ornis_physics::engine::PhysicsEngine;
     use ornis_physics::joint::JointKind;
 
+    use crate::physics_runtime::install_physics;
     use crate::ragdoll_runtime::{FULL_EDGE, hinge_joint};
 
     /// Three-joint chain `0 <- 1 <- 2`, one metre apart at rest.
@@ -1370,5 +1421,103 @@ mod tests {
         short.truncate(1);
         let skipped = sampled_joint_one(vec![Clamped01::ONE; 3], short);
         assert!((skipped - Vec3::Y).length() < 1e-4, "{skipped:?}");
+    }
+
+    /// Gravity of the §8.5 coupling drop tests.
+    const DROP_GRAVITY_Y: f32 = -9.81;
+    /// The world floor's top surface in the drop tests.
+    const FLOOR_TOP_Y: f32 = -3.5;
+    /// A settled one-metre-half-extent link cannot sink below the floor
+    /// top — anything under this line fell through.
+    const SINK_LINE_Y: f32 = -3.0;
+    /// Fixed frames of the landing test: two seconds of dropping.
+    const LANDING_TICKS: usize = 120;
+    /// Fixed frames of the determinism test: contact-rich mid-bounce.
+    const COUPLE_TICKS: usize = 64;
+
+    /// World floor of the §8.5 coupling tests: a wide static box whose
+    /// top sits at [`FLOOR_TOP_Y`].
+    fn floor_body() -> RigidBody {
+        let half = FULL_EDGE * 0.5;
+        RigidBody::new_box(
+            Vec3::new(0.0, FLOOR_TOP_Y - half, 0.0),
+            Vec3::new(20.0, half, 20.0),
+            0.0,
+        )
+    }
+
+    /// Engine-level rig of the §8.5 coupling tests: a world floor plus a
+    /// physical three-bone chain dropped onto it, stepped `ticks` fixed
+    /// frames through the full installed plan (proxy drive → world step →
+    /// drain/fold → ABA step).
+    fn coupled_drop(ticks: usize) -> (Engine, Entity) {
+        let gravity = Vec3::new(0.0, DROP_GRAVITY_Y, 0.0);
+        let mut engine = Engine::new();
+        let root = {
+            let store = engine.world_mut().store_mut().expect("world store");
+            let floor = store.create_entity();
+            store.insert(floor, floor_body());
+            let root = store.create_entity();
+            store.register::<Skeleton>();
+            store.insert(root, chain());
+            set_ragdoll(store, root, desc(), gravity).unwrap();
+            set_ragdoll_mode(store, root, RagdollMode::Physical).unwrap();
+            root
+        };
+        install_physics(&mut engine, gravity);
+        crate::install_skeletal_animation(&mut engine);
+        let dt = FixedTime::default().delta_seconds();
+        for _ in 0..ticks {
+            engine.run_frame(dt);
+        }
+        (engine, root)
+    }
+
+    /// Chain link positions (model space = world here: the root sits at
+    /// the identity) of the §8.5 coupling runs.
+    fn chain_positions(engine: &Engine, root: Entity) -> Vec<Vec3> {
+        let store = engine.world().store().expect("world store");
+        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
+        let runtime = runtimes.get(root).expect("chain");
+        let mut positions = Vec::new();
+        for link in 0..runtime.bone_count() {
+            let handle = runtime.body_handle(link).expect("link body");
+            let position = runtime
+                .with_engine(|aba| aba.get_body(handle).map(|body| body.position))
+                .flatten()
+                .expect("link pose");
+            positions.push(position);
+        }
+        positions
+    }
+
+    /// §8.5 end-to-end: a physical chain dropped onto a world floor must
+    /// land on it. Without the proxy coupling the ABA chain knows no
+    /// world collision and falls straight through — the floor's catch is
+    /// the drained-impulse channel working (proxies → `apply_impulse`).
+    #[test]
+    fn world_floor_catches_a_falling_chain() {
+        let (engine, root) = coupled_drop(LANDING_TICKS);
+        for (link, position) in chain_positions(&engine, root).iter().enumerate() {
+            assert!(
+                position.y > SINK_LINE_Y,
+                "bone {link} fell through the floor: y={}",
+                position.y
+            );
+        }
+    }
+
+    /// §8.5 end-to-end determinism: two identical coupled runs land
+    /// bit-identical chain poses — the drain is order-stable (sorted
+    /// pair/point) and the fold applies the very same impulses.
+    #[test]
+    fn coupled_impulses_land_bit_identical_poses() {
+        let (first_engine, first_root) = coupled_drop(COUPLE_TICKS);
+        let (second_engine, second_root) = coupled_drop(COUPLE_TICKS);
+        assert_eq!(
+            chain_positions(&first_engine, first_root),
+            chain_positions(&second_engine, second_root),
+            "bit-identical coupled chain poses"
+        );
     }
 }

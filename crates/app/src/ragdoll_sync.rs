@@ -2,17 +2,22 @@
 //! [`RagdollBlend`] lane of every ragdoll root before the sample pass
 //! reads it (`docs/ragdoll-design.md` §2.3, §4, §5).
 
+use std::sync::Mutex;
+
 use glam::Vec3;
 use ornis_animation::{
     JointMask, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollFade, RagdollMode, Skeleton,
     fade_progress,
 };
 use ornis_core::units::Clamped01;
-use ornis_core::{Entity, FixedTime, Resources, Seconds, SmartStore, System, SystemAccess};
+use ornis_core::{
+    Entity, FixedTime, GlobalTransform, Resources, Seconds, SmartStore, System, SystemAccess,
+};
 use ornis_physics::engine::PhysicsEngine;
 use ornis_physics::joint::JointMotor;
 
-use crate::ragdoll_runtime::RagdollRuntime;
+use crate::physics_runtime::PhysicsRuntime;
+use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
 
 /// Follow-servo stiffness of a driven hinge (1/s²; `AccelerationBased`,
 /// so it scales with mass by construction). Damping and the torque budget
@@ -254,9 +259,12 @@ impl System for RagdollSyncSystem {
         SystemAccess::new()
             .reads::<FixedTime>()
             .reads::<SmartStore>()
+            .reads_lane::<GlobalTransform>()
             .reads_lane::<RagdollMode>()
+            .reads_lane::<RagdollProxy>()
             .reads_lane::<RagdollRuntime>()
             .reads_lane::<Skeleton>()
+            .writes::<Mutex<PhysicsRuntime>>()
             .writes_lane::<RagdollBlend>()
             .writes_lane::<RagdollFade>()
     }
@@ -269,6 +277,10 @@ impl System for RagdollSyncSystem {
             return;
         };
         let dt = Seconds::new(time.delta_seconds());
+        // §8.5 explicit coupling: fold the drained world contacts into the
+        // chains first — `apply_impulse` feeds the very next ABA step (one
+        // tick of latency is the coupling contract, not a bug).
+        crate::ragdoll_proxy::fold_world_contacts(resources, store);
         let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
             return;
         };

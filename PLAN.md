@@ -185,12 +185,12 @@
      физика: фикс-тик ABA, приводы `w < 1`, переходы весов, точечный
      вес), срез 4 ✅ (контракт: полный набор типизированных отказов
      фасада — каждый пишет ничего, детерминизм-тесты фикс-тика
-     (повтор кадра = повтор позы), доки синхронизированы), срез 5
-     (контакты) в работе: архитектура §10.4 (связка ABA с SI-миром,
-     explicit coupling) ратифицирована, контракт §8.5 и канал
-     `FeatherstoneEngine::apply_impulse` готовы; прокси-связка,
-     readback `drain_contact_impulses` и интеграционные тесты —
-     следующим коммитом.**
+     (повтор кадра = повтор позы), доки синхронизированы), срез 5 ✅
+     (контакты: архитектура §10.4 — связка ABA с SI-миром, explicit
+     coupling; контракт §8.5, канал `FeatherstoneEngine::apply_impulse`,
+     readback `drain_contact_impulses`, прокси-связка
+     `ragdoll_proxy_sync` → `ragdoll_sync`, интеграционные тесты —
+     приземление на тело мира и бит-детерминизм).**
      Дизайн: `docs/ragdoll-design.md` (модель `RagdollDesc`/`RagdollBone`/
      `RagdollMode` в `ornis-animation`, шов `ragdoll_wiring` в `ornis-app`:
      ABA-цепь `FeatherstoneEngine` на корень, world→local чтение позы

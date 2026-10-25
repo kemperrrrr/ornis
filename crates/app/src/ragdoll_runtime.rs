@@ -10,6 +10,7 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     JointTrs, RagdollBase, RagdollBone, RagdollDesc, RagdollError, RagdollShape, Skeleton,
 };
+use ornis_core::Entity;
 use ornis_core::units::Radians;
 use ornis_physics::articulated::{BaseJoint, FeatherstoneEngine};
 use ornis_physics::body::{BodyHandle, RigidBody};
@@ -63,6 +64,22 @@ pub struct RagdollBoneView {
     pub parent: Option<usize>,
 }
 
+/// Marker of one world-proxy entity of the contact coupling
+/// (`docs/ragdoll-design.md` §8.5): the proxy mirrors chain bone `link` of
+/// the ragdoll `root` into the world solver. [`RagdollProxySync`]
+/// (crate::ragdoll_proxy) owns its `RigidBody` component — present while
+/// the bone is physical, removed while animation owns the pose. Hot lane
+/// (the coupling reads it every tick).
+///
+/// [`RagdollProxySync`]: crate::ragdoll_proxy::RagdollProxySync
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RagdollProxy {
+    /// Ragdoll root the proxied chain belongs to.
+    pub root: Entity,
+    /// Chain bone index (description order).
+    pub link: usize,
+}
+
 impl RagdollRuntime {
     /// Number of bones in the chain: the chain's own link count, falling
     /// back to the handle table if the lock is poisoned.
@@ -92,6 +109,36 @@ impl RagdollRuntime {
     // qual:api — host seam; None without the chain or the bone.
     pub fn body_handle(&self, index: usize) -> Option<BodyHandle> {
         self.bodies.get(index).copied()
+    }
+
+    /// Body template of chain bone `index` (§8.5): a clone of the link's
+    /// rigid body — shape, mass and inertia of the bone at its live pose —
+    /// for hosts mirroring the link into another solver (the world proxies
+    /// of the contact coupling). Callers re-aim the pose/velocities and
+    /// own the collision filter.
+    // qual:api — §8.5 proxy seam; the world coupling is its first caller.
+    pub fn body_template(&self, index: usize) -> Option<RigidBody> {
+        let handle = self.bodies.get(index).copied()?;
+        self.with_engine(|engine| engine.get_body(handle).cloned())
+            .flatten()
+    }
+
+    /// Applies one world impulse `impulse` at `point` to chain bone `link`
+    /// (`docs/ragdoll-design.md` §8.5): velocity-level,
+    /// momentum-conserving — the impulse rides `f_ext` for exactly one
+    /// chain step. Coordinates are the chain's **model space** (hosts
+    /// transform in and out). `false` without the bone or on a poisoned
+    /// lock.
+    // qual:api — §8.5 contact readback worker; RagdollSyncSystem is the
+    // first caller.
+    pub fn apply_contact_impulse(&self, link: usize, point: Vec3, impulse: Vec3) -> bool {
+        let Some(handle) = self.bodies.get(link).copied() else {
+            return false;
+        };
+        self.with_engine(|engine| {
+            engine.apply_impulse(handle, point, impulse);
+        })
+        .is_some()
     }
 
     /// Runs `f` over the articulated chain (the stepping seam of §4);

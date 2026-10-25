@@ -23,6 +23,7 @@ pub mod anim_wiring;
 pub mod game_world;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
+pub mod ragdoll_proxy;
 pub mod ragdoll_runtime;
 pub mod ragdoll_sync;
 pub mod ragdoll_wiring;
@@ -140,6 +141,22 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
     engine
         .fixed_schedule_mut()
         .add_system(crate::ragdoll_wiring::RagdollSyncSystem::new());
+    // §8.5 explicit coupling, fixed plan: `ragdoll_proxy_sync →
+    // physics_sync_in → physics_step → physics_sync_out → ragdoll_sync`.
+    // Registration order IS the plan order (explicit edges only split
+    // levels forward), so hosts install physics first (as `ornis`'s
+    // main does); `prepend` lands the proxy drive ahead of the world
+    // step and the best-effort edges pin the contract where both sides
+    // exist.
+    engine
+        .fixed_schedule_mut()
+        .prepend_system(crate::ragdoll_wiring::RagdollProxySync::new());
+    let _ = engine
+        .fixed_schedule_mut()
+        .try_order_before("ragdoll_proxy_sync", "physics_sync_in");
+    let _ = engine
+        .fixed_schedule_mut()
+        .try_order_before("physics_sync_out", "ragdoll_sync");
     engine.schedule_mut().add_system(SkelSampleSystem::new());
     engine.schedule_mut().add_system(SkelSkinSystem::new());
     let _ = engine
