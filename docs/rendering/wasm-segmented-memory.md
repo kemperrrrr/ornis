@@ -200,3 +200,100 @@ provenance + offset-only pointers + imports для texture, а не с наре�
 
 Следующий шаг при зелёном свете: toy ABI (§4) + минимальный `wasm2gpu`
 на один проход с uniform + sample, без bindless.
+
+Предпочтительная форма SDK — `GpuRef` + явный `read` (§7).
+
+## 7. Safe Abstractions: с сырого unsafe на type-driven SDK
+
+Статус дополнения: 2026-10-25. Уточняет §3–4: как именно должен
+выглядеть SDK, чтобы provenance и layout держались в Safe Rust, а
+`unsafe` был сжат в один модуль `gpu_abi`.
+
+### 7.1. Зачем сдвиг
+
+Когда SDK строится на сырых `*const T` / `*mut T` и «магических»
+адресах, для LLVM это классическая плоская CPU-память: TBAA, слияние и
+перестановка load/store легко ломают инварианты шейдера. Перенос модели
+на **безопасные абстракции** (typed descriptors / ref-tokens) решает
+три задачи сразу:
+
+1. **Provenance** — `const GROUP` / `const BINDING` протаскиваются через
+   `.field()` / `.index()` и не «испаряются» из типа.
+2. **Предсказуемость LLVM** — нет пользовательских pointer casts и
+   произвольной арифметики; оптимизатор не видит «обычную» кучу.
+3. **Layout в compile-time** — маркер вроде `GpuSafeLayout` + derive
+   запрещают передать в Uniform/Storage тип без std140/std430.
+
+Это не альтернатива сегментированной памяти, а **форма SDK** поверх
+модели «binding в типе, offset в значении» (§3.2).
+
+### 7.2. Zero-cost токены вместо указателей
+
+Конечный автор шейдера не трогает `unsafe`. SDK отдаёт структуры,
+которые в wasm становятся простым `i32` (offset), а в Rust несут
+жёсткие generic-ограничения:
+
+```rust
+/// Привязка к буферу зашита в const-generics. В wasm — только offset.
+pub struct GpuRef<'a, const GROUP: u32, const BINDING: u32, T: ?Sized> {
+    offset: u32,
+    _marker: core::marker::PhantomData<&'a T>,
+}
+
+impl<'a, const G: u32, const B: u32, T> GpuRef<'a, G, B, T> {
+    /// Доступ к полю: новый типизированный токен, без чтения GPU-памяти.
+    /// Offsets — через `offset_of!` / derive, не через пользовательские
+    /// замыкания на `*const T` (хрупкий `f(null)` не использовать).
+    pub fn field<U>(&self, field_offset: u32) -> GpuRef<'a, G, B, U> {
+        GpuRef {
+            offset: self.offset + field_offset,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+```
+
+`field` / `index` на этапе вызова не делают load: только считают offset.
+Фактическое чтение — отдельный I/O-барьер (§7.3).
+
+### 7.3. Явный I/O вместо `Deref`
+
+В шейдерах нельзя отдавать `&T` через `Deref`: обычная ссылка Rust
+обязана указывать на объект в linear memory CPU; GPU-буфер так не
+работает. Чтение/запись — явные методы:
+
+```rust
+impl<'a, const G: u32, const B: u32, T: Copy> GpuRef<'a, G, B, T> {
+    pub fn read(&self) -> T {
+        // Непрозрачный импорт / intrinsic: wasm2gpu узнаёт вызов в SSA
+        // и не разворачивает его в «обычный» i32.load по куче до GPU-pass.
+        unsafe { gpu_abi::raw_read::<G, B, T>(self.offset) }
+    }
+}
+```
+
+Контракт с транслятором: `raw_read` / `raw_write` — импорты или
+жёстко узнаваемые символы, не inline-load, который LLVM/TBAA могут
+переставить как CPU-память.
+
+### 7.4. Три плюса для `wasm2gpu`
+
+| Плюс | Механика |
+|------|----------|
+| Неразрывный provenance | `G`/`B` в типе на всей цепочке методов → binding из типа/SSA, не demask адреса |
+| Меньше фокусов LLVM | Нет кастов и нелегальной арифметики снаружи `gpu_abi` |
+| Layout compile-time | `T: GpuSafeLayout` (+ макрос padding) — неверный тип не собирается |
+
+### 7.5. Что Safe API не снимает
+
+- `unsafe` остаётся **внутри** `gpu_abi`; обход SDK снова открывает TBAA.
+- Рамки GPU (нет кучи, нет `dyn`, текстуры ≠ load) те же, что в §3.4.
+- Тело `raw_read` должно оставаться непрозрачным для CPU-семантики до
+  GPU-lowering.
+
+### 7.6. Связь с вердиктом
+
+Рабочий прототип SDK (§4) следует писать сразу в этом стиле:
+`GpuRef<G,B,T>` + `read`/`write` + `GpuSafeLayout`, а не с
+`GpuPointer { encoded_address }` и сырым `read_volatile`. Packing
+space/id/offset в каждый `i32` (§2) остаётся отклонённым default ABI.
