@@ -297,8 +297,9 @@ ABA-цепи на bind-кадре, бленд «физика → анимаци�
 `Seconds`, точечный вес) плюс контракт — полный набор типизированных
 отказов фасада (каждый пишет ничего) и детерминизм фикс-тика
 (повтор кадра = повтор позы); контакты с
-миром — отдельным срезом (бесконтактная база, `docs/ragdoll-design.md`
-§9) — дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
+миром — срез 5 в работе (бесконтактная база срезов 1–3; архитектура
+связки ABA с SI-миром ратифицирована — `docs/ragdoll-design.md` §10.4,
+контракт explicit coupling — §8.5) — дизайн `docs/ragdoll-design.md`, срезы — `PLAN.md` п. 6. Ломающее изменение
 API (PR #180): старое `play_animation(entity)` (резюм) теперь
 `resume_animation`; `PlaybackError` — enum `Missing`/`UnknownClip`/
 `InvalidClip`/`TreeDriven` (больше не `Copy`; `InvalidClip` — `fade_to_clip`
