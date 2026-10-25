@@ -278,8 +278,9 @@ impl System for RagdollSyncSystem {
         };
         let dt = Seconds::new(time.delta_seconds());
         // §8.5 explicit coupling: fold the drained world contacts into the
-        // chains first — `apply_impulse` feeds the very next ABA step (one
-        // tick of latency is the coupling contract, not a bug).
+        // chains first — `apply_impulse` feeds this tick's ABA step; the
+        // one-tick latency lives in the proxy pose (proxies follow the
+        // chain pose of the previous tick), not in the delivery.
         crate::ragdoll_proxy::fold_world_contacts(resources, store);
         let Some(runtimes) = store.read_lane::<RagdollRuntime>() else {
             return;

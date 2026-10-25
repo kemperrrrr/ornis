@@ -1447,10 +1447,10 @@ mod tests {
     }
 
     /// Engine-level rig of the §8.5 coupling tests: a world floor plus a
-    /// physical three-bone chain dropped onto it, stepped `ticks` fixed
-    /// frames through the full installed plan (proxy drive → world step →
-    /// drain/fold → ABA step).
-    fn coupled_drop(ticks: usize) -> (Engine, Entity) {
+    /// physical three-bone chain dropped onto it, the root riding
+    /// `root_pose`. The full installed plan couples them (proxy drive →
+    /// world step → drain/fold → ABA step).
+    fn coupled_rig_at(root_pose: GlobalTransform) -> (Engine, Entity) {
         let gravity = Vec3::new(0.0, DROP_GRAVITY_Y, 0.0);
         let mut engine = Engine::new();
         let root = {
@@ -1460,21 +1460,39 @@ mod tests {
             let root = store.create_entity();
             store.register::<Skeleton>();
             store.insert(root, chain());
+            store.insert(root, root_pose);
             set_ragdoll(store, root, desc(), gravity).unwrap();
             set_ragdoll_mode(store, root, RagdollMode::Physical).unwrap();
             root
         };
         install_physics(&mut engine, gravity);
         crate::install_skeletal_animation(&mut engine);
+        (engine, root)
+    }
+
+    /// [`coupled_rig_at`] with the identity root (the common case).
+    fn coupled_rig() -> (Engine, Entity) {
+        coupled_rig_at(GlobalTransform::IDENTITY)
+    }
+
+    /// Steps `engine` `ticks` fixed frames through the installed plan.
+    fn run_fixed(engine: &mut Engine, ticks: usize) {
         let dt = FixedTime::default().delta_seconds();
         for _ in 0..ticks {
             engine.run_frame(dt);
         }
+    }
+
+    /// Rig plus `ticks` fixed frames of the §8.5 coupling runs.
+    fn coupled_drop(ticks: usize) -> (Engine, Entity) {
+        let (mut engine, root) = coupled_rig();
+        run_fixed(&mut engine, ticks);
         (engine, root)
     }
 
-    /// Chain link positions (model space = world here: the root sits at
-    /// the identity) of the §8.5 coupling runs.
+    /// Chain link positions in the root's model space of the §8.5
+    /// coupling runs (the chain runs model-space; the root pose folds it
+    /// to the world, see [`world_positions`]).
     fn chain_positions(engine: &Engine, root: Entity) -> Vec<Vec3> {
         let store = engine.world().store().expect("world store");
         let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
@@ -1491,6 +1509,20 @@ mod tests {
         positions
     }
 
+    /// [`chain_positions`] folded to the world through the root's
+    /// [`GlobalTransform`] (`world = rotation · model + translation`).
+    fn world_positions(engine: &Engine, root: Entity) -> Vec<Vec3> {
+        let store = engine.world().store().expect("world store");
+        let pose = store
+            .read_lane::<GlobalTransform>()
+            .and_then(|globals| globals.get(root).copied())
+            .unwrap_or(GlobalTransform::IDENTITY);
+        chain_positions(engine, root)
+            .into_iter()
+            .map(|position| pose.rotation.get() * position + pose.translation)
+            .collect()
+    }
+
     /// §8.5 end-to-end: a physical chain dropped onto a world floor must
     /// land on it. Without the proxy coupling the ABA chain knows no
     /// world collision and falls straight through — the floor's catch is
@@ -1505,6 +1537,50 @@ mod tests {
                 position.y
             );
         }
+    }
+
+    /// §8.5 end-to-end under a non-identity root: the fold's `R⁻¹(p−t)`
+    /// and the drive's `R·v` must land the chain on the world floor the
+    /// same way as the identity root — the coupling is world-correct,
+    /// not model-silent.
+    #[test]
+    fn world_floor_catches_a_shifted_yawed_root() {
+        let yaw = UnitQuat::normalize(Quat::from_rotation_y(0.7)).expect("unit yaw");
+        let (mut engine, root) = coupled_rig_at(GlobalTransform {
+            translation: Vec3::new(2.5, 6.0, -1.5),
+            rotation: yaw,
+            scale: Vec3::ONE,
+        });
+        run_fixed(&mut engine, LANDING_TICKS);
+        for (link, position) in world_positions(&engine, root).iter().enumerate() {
+            assert!(
+                position.y > SINK_LINE_Y,
+                "bone {link} fell through the floor: y={}",
+                position.y
+            );
+        }
+    }
+
+    /// §8.5 negative control: without the proxy channel the ABA chain
+    /// knows no world collision and falls through the floor — the catch
+    /// above is the coupling working, not a fixture fluke.
+    #[test]
+    fn world_floor_needs_the_coupling() {
+        let (mut engine, root) = coupled_rig();
+        {
+            let store = engine.world_mut().store_mut().expect("world store");
+            let mut proxies = store.write_lane::<RagdollProxy>().expect("proxies");
+            let unbound: Vec<Entity> = proxies.entities.clone();
+            for entity in unbound {
+                proxies.remove(entity);
+            }
+        }
+        run_fixed(&mut engine, LANDING_TICKS);
+        let positions = chain_positions(&engine, root);
+        assert!(
+            positions.iter().any(|position| position.y < SINK_LINE_Y),
+            "chain must fall through without the coupling: {positions:?}"
+        );
     }
 
     /// §8.5 end-to-end determinism: two identical coupled runs land
