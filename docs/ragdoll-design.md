@@ -330,21 +330,27 @@ ragdoll совместимы: дерево считает позу, ragdoll см
      momentum-conserving (`impulse/dt` в `f_ext` ровно на один шаг);
      explicit coupling даёт один тик задержки. Знак: импульс,
      полученный телом прокси от партнёра.
-   - **Readback API** (physics-follow-up, следующий коммит среза):
-     `SequentialImpulseEngine::drain_contact_impulses() ->
-     Vec<ContactImpulse { a, b, point, normal, impulse }>` —
-     observation-only накопитель манифолд-импульсов (нормаль +
-     касательные) по подшагам, в духе force-peak: солвер буфер не
-     читает, базовый путь бит-в-бит не меняется; оркестратор
-     `ornis_physics::Engine` прокидывает метод.
+   - **Readback API** (этот коммит среза): opt-in
+     `set_contact_impulse_tracking(true)` +
+     `drain_contact_impulses() -> Vec<ContactImpulse { a, b, point, impulse }>`
+     — observation-only накопитель по подшагам в духе force-peak: один
+     рекорд на точку манифолда на подшаг; `impulse` — мировой импульс
+     накопленного solve (нормаль + обе касательные; одноразовый
+     restitution-стейдж не входит), доставленный телу `a` (меньший хэндл
+     пары; `b` получает противоположный); записи детерминированно
+     отсортированы (пара, точка) — итерация hash-кэша не в контракте
+     детерминизма. Солвер буфер не читает, базовый путь бит-в-бит не
+     меняется (тест `…never_touches_the_solve`); Multi-роутинг
+     переприводит локальные хэндлы к глобальным; restore снапшота
+     обнуляет поля наблюдения (формат снапшота не менялся).
    - **ABA-канал готов** (этот коммит среза):
      `FeatherstoneEngine::apply_impulse(handle, point_world,
      impulse_world)` + тесты (kick в COM, одноразовость, вращение от
      внецентренного, импульс через шарнир сохраняет импульс цепи,
      NaN/чужие ручки игнорируются).
-   Статус: контракт + ABA-канал ✅; прокси-связка в `ornis-app`,
-   readback и интеграционные тесты (приземление на тело мира, отсутствие
-   проваливания, детерминизм) — следующий коммит.
+   Статус: контракт + ABA-канал + readback ✅; прокси-связка в
+   `ornis-app` и интеграционные тесты (приземление на тело мира,
+   отсутствие проваливания, детерминизм) — следующий коммит.
 
 ## 9. Вне скоупа
 
@@ -383,8 +389,8 @@ ragdoll совместимы: дерево считает позу, ragdoll см
    maximal-coordinate солвером — для нас это отложенный путь G5.
    Полный контракт explicit coupling (порядок фикс-тика, прокси,
    Animated, self-collision, знак/точка/накопление импульсов) — §8.5.
-   Physics-follow-up (кодит этот PR, срез 5): `FeatherstoneEngine::
-   apply_impulse` (готов, внешний импульс в точке → `f_ext` шага) и
-   `SequentialImpulseEngine::drain_contact_impulses` (observation-only
-   readback манифолд-импульсов, оркестратор прокидывает) — следующим
-   коммитом вслед за контрактом.
+   Physics-follow-up (кодит этот PR, срез 5): оба канала готовы —
+   `FeatherstoneEngine::apply_impulse` (внешний импульс в точке →
+   `f_ext` шага) и `SequentialImpulseEngine::drain_contact_impulses`
+   (observation-only readback манифолд-импульсов, opt-in трекинг,
+   оркестратор прокидывает).

@@ -476,19 +476,9 @@ impl SequentialImpulseEngine {
                         m.body_a.index().min(m.body_b.index()),
                         m.body_a.index().max(m.body_b.index()),
                     );
-                    let mut pts = [WarmPoint {
-                        la: Vec3::ZERO,
-                        lb: Vec3::ZERO,
-                        normal: Vec3::ZERO,
-                        impulse: 0.0,
-                    }; MAX_MANIFOLD_POINTS];
+                    let mut pts = [WarmPoint::empty(); MAX_MANIFOLD_POINTS];
                     for k in 0..st.count {
-                        pts[k] = WarmPoint {
-                            la: st.la[k],
-                            lb: st.lb[k],
-                            normal: m.normal,
-                            impulse: st.acc[k],
-                        };
+                        pts[k] = WarmPoint::observed(st, m, k, key);
                     }
                     gpu_warm.insert(key, (pts, st.count));
                 }
@@ -1287,19 +1277,9 @@ fn persist_warm_cache(
     let mut next: WarmCache = FxHashMap::default();
     for st in states {
         let m = &manifolds[st.mi];
-        let mut pts = [WarmPoint {
-            la: Vec3::ZERO,
-            lb: Vec3::ZERO,
-            normal: Vec3::ZERO,
-            impulse: 0.0,
-        }; MAX_MANIFOLD_POINTS];
+        let mut pts = [WarmPoint::empty(); MAX_MANIFOLD_POINTS];
         for k in 0..st.count {
-            pts[k] = WarmPoint {
-                la: st.la[k],
-                lb: st.lb[k],
-                normal: m.normal,
-                impulse: st.acc[k],
-            };
+            pts[k] = WarmPoint::observed(st, m, k, keys[st.mi]);
         }
         next.insert(keys[st.mi], (pts, st.count));
     }
@@ -1482,19 +1462,9 @@ impl SequentialImpulseEngine {
             }
             for st in states.iter() {
                 let m = &manifolds[st.mi];
-                let mut pts = [WarmPoint {
-                    la: Vec3::ZERO,
-                    lb: Vec3::ZERO,
-                    normal: Vec3::ZERO,
-                    impulse: 0.0,
-                }; MAX_MANIFOLD_POINTS];
+                let mut pts = [WarmPoint::empty(); MAX_MANIFOLD_POINTS];
                 for k in 0..st.count {
-                    pts[k] = WarmPoint {
-                        la: st.la[k],
-                        lb: st.lb[k],
-                        normal: m.normal,
-                        impulse: st.acc[k],
-                    };
+                    pts[k] = WarmPoint::observed(st, m, k, shard.keys[st.mi]);
                 }
                 shard.warm.insert(shard.keys[st.mi], (pts, st.count));
             }
@@ -1564,6 +1534,21 @@ impl SequentialImpulseEngine {
 mod tests {
     use super::*;
 
+    /// Approach speed of each test sphere (m/s).
+    const SPHERE_SPEED: f32 = 2.0;
+    /// Half the initial distance between the test sphere centres.
+    const SPHERE_SPACING: f32 = 1.0;
+    /// Radius of a test sphere.
+    const SPHERE_RADIUS: f32 = 0.5;
+    /// Mass of a test sphere (kg).
+    const SPHERE_MASS: f32 = 1.0;
+    /// Fixed steps of a §10.4 readback run.
+    const IMPULSE_TICKS: usize = 24;
+    /// Fixed step of a §10.4 readback run (s).
+    const STEP_SECONDS: f32 = 1.0 / 60.0;
+    /// Solver residual the momentum identity may drift by.
+    const MOMENTUM_EPSILON: f32 = 0.05;
+
     /// One Gauss-Seidel sweep, inertia rotated 45° about Y so an impulse
     /// about the contact tangent X also changes ω·Z. Capturing `wrel` once
     /// leaves |ω_z| ≈ 0.98; re-reading it after the first axis cancels Z
@@ -1623,5 +1608,83 @@ mod tests {
             w.x.abs() > 0.5,
             "second axis must put the residual back on X, ω={w:?}"
         );
+    }
+
+    /// Scenario of the §10.4 readback tests: two one-kilogram spheres
+    /// drive at each other in zero g at [`SPHERE_SPEED`] with dead-stop
+    /// restitution (the restitution one-shot is never accumulated in the
+    /// warm cache — zero keeps the readback's momentum identity exact).
+    fn opposing_spheres(physics: &mut SequentialImpulseEngine) -> (BodyHandle, BodyHandle) {
+        let a = physics.add_body(RigidBody::new_sphere(
+            Vec3::new(-SPHERE_SPACING, 0.0, 0.0),
+            SPHERE_RADIUS,
+            SPHERE_MASS,
+        ));
+        let b = physics.add_body(RigidBody::new_sphere(
+            Vec3::new(SPHERE_SPACING, 0.0, 0.0),
+            SPHERE_RADIUS,
+            SPHERE_MASS,
+        ));
+        physics.get_body_mut(a).unwrap().velocity = Vec3::new(SPHERE_SPEED, 0.0, 0.0);
+        physics.get_body_mut(b).unwrap().velocity = Vec3::new(-SPHERE_SPEED, 0.0, 0.0);
+        physics.get_body_mut(a).unwrap().restitution = 0.0;
+        physics.get_body_mut(b).unwrap().restitution = 0.0;
+        (a, b)
+    }
+
+    /// Runs [`opposing_spheres`] for [`IMPULSE_TICKS`] fixed steps and
+    /// reports both final velocities, the impulse drained on `a` (folded
+    /// with the record's sign convention) and the raw record count.
+    fn run_opposing_spheres(tracked: bool) -> (Vec3, Vec3, Vec3, usize) {
+        let mut physics = SequentialImpulseEngine::new(Vec3::ZERO);
+        let (a, b) = opposing_spheres(&mut physics);
+        physics.set_contact_impulse_tracking(tracked);
+        let mut on_a = Vec3::ZERO;
+        let mut drained = 0;
+        for _ in 0..IMPULSE_TICKS {
+            physics.step(STEP_SECONDS);
+            for rec in physics.drain_contact_impulses() {
+                assert!(rec.a == a || rec.a == b, "records name the tracked pair");
+                if rec.a == a {
+                    on_a += rec.impulse;
+                } else {
+                    on_a -= rec.impulse;
+                }
+                drained += 1;
+            }
+        }
+        (
+            physics.get_body(a).unwrap().velocity,
+            physics.get_body(b).unwrap().velocity,
+            on_a,
+            drained,
+        )
+    }
+
+    /// §10.4 readback: a tracked zero-g head-on collision drains one record
+    /// per solved point, and the accumulated `impulse` equals the momentum
+    /// each sphere actually received — the coupling contract for feeding
+    /// impulse into an ABA chain.
+    #[test]
+    fn contact_impulse_readback_matches_momentum_delta() {
+        let (va, _vb, on_a, _drained) = run_opposing_spheres(true);
+        let expected = va - Vec3::new(SPHERE_SPEED * SPHERE_MASS, 0.0, 0.0);
+        assert!(
+            on_a.distance(expected) < MOMENTUM_EPSILON,
+            "drained impulse {on_a:?} must equal the momentum delta {expected:?}"
+        );
+    }
+
+    /// The readback is observation-only (`docs/ragdoll-design.md` §10.4):
+    /// the same collision tracked and untracked must land bit-identically,
+    /// and the untracked run must drain nothing.
+    #[test]
+    fn contact_impulse_tracking_never_touches_the_solve() {
+        let (va_tracked, vb_tracked, _, drained) = run_opposing_spheres(true);
+        let (va_plain, vb_plain, _, drained_plain) = run_opposing_spheres(false);
+        assert_eq!(va_tracked, va_plain, "tracking must not move a solve bit");
+        assert_eq!(vb_tracked, vb_plain, "tracking must not move a solve bit");
+        assert!(drained > 0, "the tracked run must produce records");
+        assert_eq!(drained_plain, 0, "untracked runs accumulate nothing");
     }
 }

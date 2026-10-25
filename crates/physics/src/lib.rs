@@ -116,8 +116,8 @@ pub use avbd::AvbdEngine;
 pub use body::{BodyHandle, BodyType, LocalAvbdBody, LocalSiBody, RigidBody};
 pub use collision::broadphase::{BroadPhaseKind, BroadPhaseStats, StepBudget, StepTiming};
 pub use engine::{
-    KinematicMover, MAX_SUBSTEP_COUNT, MIN_SUBSTEP_COUNT, MoverHandle, PhysicsEngine,
-    SequentialImpulseEngine,
+    ContactImpulse, KinematicMover, MAX_SUBSTEP_COUNT, MIN_SUBSTEP_COUNT, MoverHandle,
+    PhysicsEngine, SequentialImpulseEngine,
 };
 pub use errors::{
     ColliderError, JointError, MeshError, MoverError, PlanarError, QueryError, ShapeError,
@@ -1611,6 +1611,53 @@ impl PhysicsEngine for Engine {
             });
         }
         events
+    }
+
+    fn set_contact_impulse_tracking(&mut self, on: bool) {
+        if let Some(s) = &mut self.split {
+            s.si.set_contact_impulse_tracking(on);
+            s.avbd.set_contact_impulse_tracking(on);
+            s.xpbd.set_contact_impulse_tracking(on);
+            return;
+        }
+        match &mut self.inner {
+            EngineInner::SequentialImpulse(e) => e.set_contact_impulse_tracking(on),
+            EngineInner::Avbd(e) => e.set_contact_impulse_tracking(on),
+            EngineInner::Xpbd(e) => e.set_contact_impulse_tracking(on),
+        }
+    }
+
+    fn drain_contact_impulses(&mut self) -> Vec<ContactImpulse> {
+        if let Some(s) = &mut self.split {
+            // Multi routing: the split solver holds LOCAL handles; the
+            // host binds global ones, so re-express the records on the
+            // global side before leaving the orchestrator.
+            let mut local_to_global: Vec<Option<BodyHandle>> = Vec::new();
+            for (global, b) in s.bodies.iter().enumerate() {
+                if let Some(local) = b.local_si {
+                    let local = local.index();
+                    if local_to_global.len() <= local {
+                        local_to_global.resize(local + 1, None);
+                    }
+                    local_to_global[local] = Some(BodyHandle::from(global));
+                }
+            }
+            let mut records = s.si.drain_contact_impulses();
+            for r in &mut records {
+                if let Some(Some(g)) = local_to_global.get(r.a.index()) {
+                    r.a = *g;
+                }
+                if let Some(Some(g)) = local_to_global.get(r.b.index()) {
+                    r.b = *g;
+                }
+            }
+            return records;
+        }
+        match &mut self.inner {
+            EngineInner::SequentialImpulse(e) => e.drain_contact_impulses(),
+            EngineInner::Avbd(e) => e.drain_contact_impulses(),
+            EngineInner::Xpbd(e) => e.drain_contact_impulses(),
+        }
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {
