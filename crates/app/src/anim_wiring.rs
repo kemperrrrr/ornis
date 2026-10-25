@@ -15,10 +15,11 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipId, ClipSyncMarks,
-    JointId, JointMask, JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, SkelClip,
-    SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh,
-    SyncMark, TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
+    AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipEvents,
+    ClipId, ClipSyncMarks, JointId, JointMask, JointPose, JointTrack, JointTrs, Key, KeyTrack,
+    MachineCursor, SkelClip, SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer,
+    Skeleton, SkinnedMesh, SyncMark, TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight,
+    try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
@@ -811,6 +812,39 @@ pub fn set_clip_sync_marks(store: &mut SmartStore, clip: ClipId, marks: Vec<Sync
     store.register_cold::<ClipSyncMarks>();
     store.insert_cold(clip.0, ClipSyncMarks { marks });
     true
+}
+
+/// Whether every authored mark-like entry is legal: non-empty name and
+/// a finite `at` in `0..1` — the validation contract of clip mark data.
+fn marks_authorable<'a>(mut entries: impl Iterator<Item = (&'a str, f32)>) -> bool {
+    entries.all(|(name, at)| !name.is_empty() && at.is_finite() && (0.0..1.0).contains(&at))
+}
+
+/// Installs clip events for `clip` — the typed [`ClipEvents`] input, the
+/// counterpart of [`set_clip_sync_marks`] for the events lane (design
+/// §8.1). `clip` must be a live playlist entity ([`SkelClip`] or
+/// [`AnimClip`]); `events` replaces any previous set (an empty list
+/// clears the lane). Returns `false` — changing nothing — for an unknown
+/// clip or an invalid event (empty name, `at` outside `0..1` or
+/// non-finite).
+// qual:api — typed event authoring for hosts; the runtime consumers
+// are the cursor advances of `anim_sample`/`skel_sample`.
+pub fn set_clip_events(store: &mut SmartStore, clip: ClipId, events: Vec<AnimEvent>) -> bool {
+    let known = {
+        let skel = store.read_cold_lane::<SkelClip>();
+        let obj = store.read_cold_lane::<AnimClip>();
+        skel.as_deref()
+            .is_some_and(|clips| clips.get(clip.0).is_some())
+            || obj
+                .as_deref()
+                .is_some_and(|clips| clips.get(clip.0).is_some())
+    };
+    let pairs = events.iter().map(|event| (event.name.as_str(), event.at));
+    let ok = known && marks_authorable(pairs);
+    if ok {
+        store.insert_cold(clip.0, ClipEvents { events });
+    }
+    ok
 }
 
 /// Removes the [`SkelTree`] and its [`SkelTreePlayer`] from a skeleton
@@ -2635,6 +2669,78 @@ mod tests {
     #[test]
     fn an_empty_list_clears_the_lane() {
         assert_eq!(lane_after_clear(vec![sync_mark("foot", 0.5)]), (true, None));
+    }
+
+    /// One clip event for [`set_clip_events`] fixtures.
+    fn clip_event(name: &str, at: f32) -> AnimEvent {
+        AnimEvent {
+            name: name.to_string(),
+            at,
+        }
+    }
+
+    /// The `set_clip_events` verdict on `events`: for the live clip of a
+    /// tree fixture, and for a made-up clip id.
+    fn events_verdict(events: Vec<AnimEvent>) -> (bool, bool) {
+        let mut store = SmartStore::new();
+        let (_root, clip) = tree_hero(&mut store);
+        (
+            set_clip_events(&mut store, clip, events.clone()),
+            set_clip_events(&mut store, ClipId(Entity::new(999)), events),
+        )
+    }
+
+    #[test]
+    fn set_clip_events_accepts_valid_events() {
+        assert_eq!(events_verdict(vec![clip_event("foot", 0.5)]), (true, false));
+    }
+
+    #[test]
+    fn set_clip_events_rejects_an_empty_name() {
+        assert_eq!(events_verdict(vec![clip_event("", 0.5)]), (false, false));
+    }
+
+    #[test]
+    fn set_clip_events_rejects_an_out_of_range_at() {
+        assert_eq!(
+            events_verdict(vec![clip_event("foot", 1.5)]),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn set_clip_events_stores_events_in_the_lane() {
+        let mut store = SmartStore::new();
+        let (_root, clip) = tree_hero(&mut store);
+        let events = vec![clip_event("foot", 0.5)];
+        assert!(set_clip_events(&mut store, clip, events.clone()));
+        let lane = store
+            .read_cold_lane::<ClipEvents>()
+            .expect("events lane exists");
+        assert_eq!(
+            lane.get(clip.0).map(|entry| entry.events.clone()),
+            Some(events)
+        );
+    }
+
+    #[test]
+    fn set_clip_events_also_accepts_object_clips() {
+        let mut store = SmartStore::new();
+        let clip_entity = store.create_entity();
+        store.insert_cold(
+            clip_entity,
+            AnimClip {
+                name: "spin".to_string(),
+                duration: 1.0,
+                looping: true,
+                tracks: Vec::new(),
+            },
+        );
+        let clip = ClipId(clip_entity);
+        let tick = vec![clip_event("tick", 0.5)];
+        assert!(set_clip_events(&mut store, clip, tick));
+        let bad_tick = vec![clip_event("tick", 2.0)];
+        assert!(!set_clip_events(&mut store, clip, bad_tick));
     }
 
     #[test]

@@ -68,6 +68,10 @@ mod blend;
 use blend::{BlendedPose, JointSample, sample_joints};
 pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack, fade_progress};
 
+mod events;
+pub use events::{AnimEvent, AnimEventOut, AnimEventQueue, ClipEvents};
+use events::{CursorStep, emit_step};
+
 mod ragdoll;
 mod tree;
 mod tree_sync;
@@ -478,11 +482,13 @@ impl<P: 'static + Send + Sync> System for AnimSampleSystem<P> {
             .reads::<Time>()
             .reads::<SmartStore>()
             .reads_lane::<AnimClip>()
+            .reads_lane::<ClipEvents>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<P>()
             .reads_lane::<ChildOf>()
             .writes_lane::<AnimPlayer>()
             .writes_lane::<AnimFade>()
+            .writes_lane::<AnimEventQueue>()
             .writes_lane::<Transform>()
             .writes_lane::<TransformDesc>()
             .writes_lane::<Position>()
@@ -636,9 +642,11 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
             let Some(clips) = store.read_cold_lane::<AnimClip>() else {
                 return;
             };
+            let events = store.read_cold_lane::<ClipEvents>();
             let Some(mut players) = store.write_lane::<AnimPlayer>() else {
                 return;
             };
+            let mut queues = store.write_lane::<AnimEventQueue>();
             for index in 0..players.data.len() {
                 let entity = players.entities[index];
                 let player = &mut players.data[index];
@@ -648,21 +656,49 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                 let Some(clip) = clips.get(player.clip.0) else {
                     continue;
                 };
+                let prev = player.time;
+                let step = dt * player.speed;
                 player.time =
                     advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
+                emit_step(
+                    queues.as_deref_mut(),
+                    events.as_deref(),
+                    entity,
+                    player.clip,
+                    CursorStep {
+                        prev,
+                        step,
+                        duration: clip.duration,
+                        looping: clip.looping,
+                    },
+                );
             }
             if let Some(mut fades) = store.write_lane::<AnimFade>() {
                 let (frozen, finished) = (&scratch.frozen, &mut scratch.finished);
-                tick_fades(&mut fades, dt, frozen, finished, |fade, step| {
+                tick_fades(&mut fades, dt, frozen, finished, |fade, step, entity| {
                     if fade.from.playing
                         && let Some(clip) = clips.get(fade.from.clip.0)
                     {
+                        let prev = fade.from.time;
+                        let cursor_step = step * fade.from.speed;
                         fade.from.time = advance_player_time(
                             fade.from.time,
                             step,
                             fade.from.speed,
                             clip.duration,
                             clip.looping,
+                        );
+                        emit_step(
+                            queues.as_deref_mut(),
+                            events.as_deref(),
+                            entity,
+                            fade.from.clip,
+                            CursorStep {
+                                prev,
+                                step: cursor_step,
+                                duration: clip.duration,
+                                looping: clip.looping,
+                            },
                         );
                     }
                 });
@@ -918,6 +954,8 @@ mod tests {
         for lane in [
             TypeId::of::<AnimPlayer>(),
             TypeId::of::<AnimClip>(),
+            TypeId::of::<AnimEventQueue>(),
+            TypeId::of::<ClipEvents>(),
             TypeId::of::<MeshDesc>(),
             TypeId::of::<NoPhysics>(),
             TypeId::of::<Transform>(),
@@ -933,6 +971,11 @@ mod tests {
         }
         // Cursor advance writes the player lane; poses and propagation are outputs.
         assert!(access.writes_lanes.contains(&TypeId::of::<AnimPlayer>()));
+        assert!(
+            access
+                .writes_lanes
+                .contains(&TypeId::of::<AnimEventQueue>())
+        );
         assert!(access.writes_lanes.contains(&TypeId::of::<Transform>()));
         assert!(access.writes_lanes.contains(&TypeId::of::<TransformDesc>()));
         assert!(access.writes_lanes.contains(&TypeId::of::<Position>()));
@@ -2058,6 +2101,7 @@ impl System for SkelSampleSystem {
             .reads::<Time>()
             .reads::<SmartStore>()
             .reads_lane::<SkelClip>()
+            .reads_lane::<ClipEvents>()
             .reads_lane::<Skeleton>()
             .reads_lane::<TransformDesc>()
             .reads_lane::<ChildOf>()
@@ -2067,6 +2111,7 @@ impl System for SkelSampleSystem {
             .writes_lane::<SkelLayerStack>()
             .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
+            .writes_lane::<AnimEventQueue>()
             .writes_lane::<JointPose>()
             .writes_lane::<RagdollBlend>()
             .writes_lane::<Transform>()
@@ -2112,21 +2157,50 @@ fn advance_skel_players(store: &SmartStore, dt: f32) {
 }
 
 /// Advances a playing cursor against its clip duration. Paused or
-/// clip-less cursors hold their time.
-fn step_player(player: &mut SkelPlayer, clips: &ColdComponentStore<SkelClip>, dt: f32) {
+/// clip-less cursors hold their time. Returns the step's `(prev, step,
+/// duration, looping)` when the cursor moved — the caller's event-emit
+/// hook ([`emit_step`]).
+fn step_player(
+    player: &mut SkelPlayer,
+    clips: &ColdComponentStore<SkelClip>,
+    dt: f32,
+) -> Option<CursorStep> {
     if !player.playing {
-        return;
+        return None;
     }
-    let Some(clip) = clips.get(player.clip.0) else {
-        return;
-    };
+    let clip = clips.get(player.clip.0)?;
+    let prev = player.time.get();
+    let step = dt * player.speed.get();
     player.time = Seconds::new(advance_player_time(
-        player.time.get(),
+        prev,
         dt,
         player.speed.get(),
         clip.duration,
         player.looping,
     ));
+    Some(CursorStep {
+        prev,
+        step,
+        duration: clip.duration,
+        looping: player.looping,
+    })
+}
+
+/// [`step_player`] plus the [`AnimEventQueue`] emit of the crossed marks:
+/// the one cursor hook for flat players, overlay layers and tree leaves
+/// (leaves and machine states aggregate into their root's queue).
+fn step_player_emit(
+    player: &mut SkelPlayer,
+    clips: &ColdComponentStore<SkelClip>,
+    events: Option<&ColdComponentStore<ClipEvents>>,
+    queues: Option<&mut ComponentStore<AnimEventQueue>>,
+    owner: Entity,
+    dt: f32,
+) {
+    let Some(cursor) = step_player(player, clips, dt) else {
+        return;
+    };
+    emit_step(queues, events, owner, player.clip, cursor);
 }
 
 /// Advances playing [`SkelPlayer`] cursors against their clip duration.
@@ -2136,10 +2210,12 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
+    let events = store.read_cold_lane::<ClipEvents>();
     let tree_players = store.read_lane::<SkelTreePlayer>();
     let Some(mut players) = store.write_lane::<SkelPlayer>() else {
         return;
     };
+    let mut queues = store.write_lane::<AnimEventQueue>();
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         if tree_players
@@ -2148,7 +2224,14 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
         {
             continue;
         }
-        step_player(player, &clips, dt);
+        step_player_emit(
+            player,
+            &clips,
+            events.as_deref(),
+            queues.as_deref_mut(),
+            *entity,
+            dt,
+        );
     }
 }
 
@@ -2158,12 +2241,22 @@ fn advance_layers(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
+    let events = store.read_cold_lane::<ClipEvents>();
+    let mut queues = store.write_lane::<AnimEventQueue>();
     let Some(mut layers) = store.write_lane::<SkelLayerStack>() else {
         return;
     };
-    for stack in layers.data.iter_mut() {
+    let layers = &mut *layers;
+    for (entity, stack) in layers.entities.iter().zip(layers.data.iter_mut()) {
         for layer in &mut stack.layers {
-            step_player(&mut layer.player, &clips, dt);
+            step_player_emit(
+                &mut layer.player,
+                &clips,
+                events.as_deref(),
+                queues.as_deref_mut(),
+                *entity,
+                dt,
+            );
         }
     }
 }
@@ -2182,13 +2275,22 @@ fn advance_tree_players(store: &SmartStore, dt: f32) {
     };
     let defs = store.read_cold_lane::<SkelTree>();
     let marks = store.read_cold_lane::<ClipSyncMarks>();
+    let events = store.read_cold_lane::<ClipEvents>();
     let Some(mut players) = store.write_lane::<SkelTreePlayer>() else {
         return;
     };
+    let mut queues = store.write_lane::<AnimEventQueue>();
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         for leaf in &mut player.leaves {
-            step_player(leaf, &clips, dt);
+            step_player_emit(
+                leaf,
+                &clips,
+                events.as_deref(),
+                queues.as_deref_mut(),
+                *entity,
+                dt,
+            );
         }
         step_machines(
             player,
@@ -2293,7 +2395,7 @@ fn tick_fades<F: FadeClock>(
     dt: f32,
     frozen: &FrozenBits,
     finished: &mut Vec<Entity>,
-    mut advance_from: impl FnMut(&mut F, f32),
+    mut advance_from: impl FnMut(&mut F, f32, Entity),
 ) {
     finished.clear();
     for index in 0..fades.data.len() {
@@ -2302,7 +2404,7 @@ fn tick_fades<F: FadeClock>(
             continue;
         }
         let fade = &mut fades.data[index];
-        advance_from(fade, dt);
+        advance_from(fade, dt, entity);
         if fade.tick(dt) {
             finished.push(entity);
         }
@@ -2317,6 +2419,8 @@ fn advance_fades(store: &SmartStore, dt: f32) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
+    let events = store.read_cold_lane::<ClipEvents>();
+    let mut queues = store.write_lane::<AnimEventQueue>();
     let Some(mut fades) = store.write_lane::<SkelFade>() else {
         return;
     };
@@ -2326,7 +2430,16 @@ fn advance_fades(store: &SmartStore, dt: f32) {
             dt,
             &FrozenBits::default(),
             &mut scratch.finished,
-            |fade, step| step_player(&mut fade.from, &clips, step),
+            |fade, step, entity| {
+                step_player_emit(
+                    &mut fade.from,
+                    &clips,
+                    events.as_deref(),
+                    queues.as_deref_mut(),
+                    entity,
+                    step,
+                );
+            },
         );
     });
 }
