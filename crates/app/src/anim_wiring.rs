@@ -17,7 +17,7 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipEvents,
     ClipId, ClipSyncMarks, IkStack, JointId, JointMask, JointPose, JointTrack, JointTrs, Key,
-    KeyTrack, MachineCursor, SkelClip, SkelFade, SkelLayerStack, SkelPlayer, SkelTree,
+    KeyTrack, MachineCursor, RetargetMap, SkelClip, SkelFade, SkelLayerStack, SkelPlayer, SkelTree,
     SkelTreePlayer, Skeleton, SkinnedMesh, SyncMark, TreeChild2d, TreeNodeDef, TreeParam,
     TwoBoneIk, fade_in_flight, try_animator,
 };
@@ -626,6 +626,43 @@ pub fn set_skel_ik(store: &mut SmartStore, root: Entity, constraints: Vec<TwoBon
         store.insert(root, IkStack { constraints });
     }
     valid
+}
+
+/// Installs the [`RetargetMap`] of `target` — the explicit «source joint →
+/// target joint» correspondence for playing `source`-authored clips on the
+/// target skeleton (design §8.3). Set semantics: `joints` replaces whatever
+/// map sat on the target (all-`None` transfers nothing and holds every
+/// joint at rest); sampled channels land on the mapped target joints with
+/// the translation scaled by the rest-bone length ratio.
+///
+/// Returns whether anything is written: both roots must carry a
+/// [`Skeleton`], `joints` must name exactly one entry per source joint and
+/// every `Some` must be in range of the target (one bad entry rejects the
+/// whole map).
+// qual:api — typed `RetargetMap` input for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn set_retarget_map(
+    store: &mut SmartStore,
+    target: Entity,
+    source: Entity,
+    joints: Vec<Option<JointId>>,
+) -> bool {
+    let Some(skeletons) = store.read_lane::<Skeleton>() else {
+        return false;
+    };
+    let Some(source_skeleton) = skeletons.get(source) else {
+        return false;
+    };
+    let Some(target_skeleton) = skeletons.get(target) else {
+        return false;
+    };
+    let Some(map) = RetargetMap::bake(source_skeleton, target_skeleton, joints) else {
+        return false;
+    };
+    drop(skeletons);
+    store.register_cold::<RetargetMap>();
+    store.insert_cold(target, map);
+    true
 }
 
 /// Whether `children` form a complete row-major lattice for
@@ -2167,6 +2204,63 @@ mod tests {
         assert!(set_skel_ik(&mut store, root, Vec::new()));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
         assert!(lane.get(root).expect("stack kept").constraints.is_empty());
+    }
+
+    fn retarget_skeleton(store: &mut SmartStore, rest: Vec3) -> Entity {
+        let root = store.create_entity();
+        store.insert(
+            root,
+            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec![String::new()]).with_rest(vec![
+                JointTrs {
+                    translation: rest,
+                    ..JointTrs::IDENTITY
+                },
+            ]),
+        );
+        root
+    }
+
+    /// `set_retarget_map` requires both skeleton anchors, validates the
+    /// mapping against them (one bad entry rejects the map), bakes the
+    /// rest-length scale and replaces the map wholesale.
+    #[test]
+    fn set_retarget_map_validates_and_bakes() {
+        let mut store = SmartStore::new();
+        let target = retarget_skeleton(&mut store, Vec3::X * 2.0);
+        let source = retarget_skeleton(&mut store, Vec3::X);
+        let bare = store.create_entity();
+        assert!(!set_retarget_map(
+            &mut store,
+            target,
+            bare,
+            vec![Some(JointId::from_raw(0))]
+        ));
+        assert!(!set_retarget_map(
+            &mut store,
+            bare,
+            source,
+            vec![Some(JointId::from_raw(0))]
+        ));
+        assert!(!set_retarget_map(&mut store, target, source, Vec::new()));
+        assert!(!set_retarget_map(
+            &mut store,
+            target,
+            source,
+            vec![Some(JointId::from_raw(2))]
+        ));
+        assert!(store.read_cold_lane::<RetargetMap>().is_none());
+        assert!(set_retarget_map(
+            &mut store,
+            target,
+            source,
+            vec![Some(JointId::from_raw(0))]
+        ));
+        let lane = store
+            .read_cold_lane::<RetargetMap>()
+            .expect("retarget lane");
+        let map = lane.get(target).expect("map kept");
+        assert_eq!(map.joints, vec![Some(JointId::from_raw(0))]);
+        assert_eq!(map.scales, vec![2.0]);
     }
 
     /// `set_skel_tree` refuses a root without `Skeleton`, then installs the

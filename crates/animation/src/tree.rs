@@ -11,7 +11,7 @@
 
 use ornis_core::ColdComponentStore;
 
-use crate::blend::{BlendedPose, JointSample, fade_progress, sample_joints};
+use crate::blend::{BlendedPose, SampleBuf, fade_progress, sample_joints};
 use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
 use crate::{ClipId, JointTrs, Seconds, SkelClip, SkelPlayer};
 
@@ -210,10 +210,8 @@ pub struct SkelTreePlayer {
 pub(crate) struct EvalBuf<'a> {
     /// One scratch pose per node, in node order.
     pub poses: &'a mut [BlendedPose],
-    /// Reusable sampled-joints buffer.
-    pub samples: &'a mut Vec<JointSample>,
-    /// Reusable painted-channel buffer.
-    pub painted: &'a mut Vec<bool>,
+    /// Reusable sample scratch (channels plus paint marks).
+    pub joints: &'a mut SampleBuf,
     /// Clip ids of the evaluated leaves, appended in node order.
     pub contributors: &'a mut Vec<ClipId>,
 }
@@ -241,8 +239,7 @@ pub(crate) fn eval_tree(
 ) -> Option<()> {
     let EvalBuf {
         poses,
-        samples,
-        painted,
+        joints,
         contributors,
     } = buf;
     if tree.nodes.is_empty() {
@@ -256,8 +253,8 @@ pub(crate) fn eval_tree(
                 let cursor = player.leaves.get(leaves)?;
                 leaves += 1;
                 let def = clips.get(clip.0)?;
-                sample_joints(def, count, cursor.time.get(), samples, painted);
-                poses[index].refill(samples, rest, cursor.weight.get());
+                sample_joints(def, count, cursor.time.get(), joints, None);
+                poses[index].refill(&joints.samples, rest, cursor.weight.get());
                 contributors.push(*clip);
             }
             TreeNodeDef::Blend1d { axis, children } => {

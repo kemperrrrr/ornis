@@ -14,7 +14,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::{Clamped01, Entity, Seconds};
 
-use crate::{SkelClip, SkelPlayer};
+use crate::{RetargetMap, SkelClip, SkelPlayer};
 
 /// Handle of the playlist entity holding a [`JointMask`] in the cold lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -152,31 +152,53 @@ fn union(a: Presence, b: Presence) -> Presence {
     [a[0] || b[0], a[1] || b[1], a[2] || b[2]]
 }
 
-/// Samples every joint track at `time` into `out`; untracked joints stay absent.
+/// Caller-owned sample scratch: the per-joint channels plus the paint
+/// marks of the first-track-per-joint rule. Cleared and refilled by
+/// [`sample_joints`], so the per-frame sample path never allocates.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SampleBuf {
+    pub(crate) samples: Vec<JointSample>,
+    pub(crate) painted: Vec<bool>,
+}
+
+/// Samples every joint track at `time` into `buf`; untracked joints stay
+/// absent.
 ///
 /// First track per joint wins on duplicates (same rule as object tracks).
-/// Tracks naming a joint outside `0..joint_count` are ignored. `out` and
-/// `painted` are caller-owned scratch: both are cleared and refilled, so
-/// the per-frame sample path never allocates.
+/// Tracks naming a joint outside `0..joint_count` are ignored. With `map`
+/// (§8.3) each track resolves through the retarget: `map.joints` re-indexes
+/// the source joint onto its target and `map.scales` scales the sampled
+/// translation; tracks whose source bone is not transferred are skipped and
+/// leave their target joint absent (rest).
 pub(crate) fn sample_joints(
     clip: &SkelClip,
     joint_count: usize,
     time: f32,
-    out: &mut Vec<JointSample>,
-    painted: &mut Vec<bool>,
+    buf: &mut SampleBuf,
+    map: Option<&RetargetMap>,
 ) {
-    out.clear();
-    out.resize(joint_count, JointSample::default());
-    painted.clear();
-    painted.resize(joint_count, false);
+    buf.samples.clear();
+    buf.samples.resize(joint_count, JointSample::default());
+    buf.painted.clear();
+    buf.painted.resize(joint_count, false);
     for track in &clip.tracks {
-        let joint = track.joint.index();
-        if joint >= joint_count || painted[joint] {
+        let source = track.joint.index();
+        let (joint, scale) = match map {
+            Some(map) => match map.joints.get(source).copied().flatten() {
+                Some(target) => (
+                    target.index(),
+                    map.scales.get(source).copied().unwrap_or(1.0),
+                ),
+                None => continue,
+            },
+            None => (source, 1.0),
+        };
+        if joint >= joint_count || buf.painted[joint] {
             continue;
         }
-        painted[joint] = true;
-        out[joint] = JointSample {
-            translation: track.translation.sample(time),
+        buf.painted[joint] = true;
+        buf.samples[joint] = JointSample {
+            translation: track.translation.sample(time).map(|value| value * scale),
             rotation: track.rotation.sample(time),
             scale: track.scale.sample(time),
         };
@@ -295,6 +317,7 @@ pub fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{JointId, JointTrack, Key, KeyTrack};
 
     fn sample_t(value: Vec3) -> JointSample {
         JointSample {
@@ -483,5 +506,77 @@ mod tests {
         assert!((fade_progress(two, Seconds::new(0.5)) - 0.25).abs() < 1e-6);
         assert!((fade_progress(two, Seconds::new(9.0)) - 1.0).abs() < 1e-6);
         assert!((fade_progress(Seconds::ZERO, Seconds::ZERO) - 1.0).abs() < 1e-6);
+    }
+
+    fn clip_over(tracks: Vec<JointTrack>) -> SkelClip {
+        SkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks,
+        }
+    }
+
+    fn track_of(joint: u32, translation: Vec3) -> JointTrack {
+        JointTrack {
+            joint: JointId::from(joint),
+            node: None,
+            translation: KeyTrack::linear(vec![Key {
+                time: 0.0,
+                value: translation,
+            }]),
+            rotation: KeyTrack::linear(vec![]),
+            scale: KeyTrack::linear(vec![]),
+        }
+    }
+
+    #[test]
+    fn sample_reindexes_and_scales_through_the_map() {
+        let clip = clip_over(vec![
+            track_of(0, Vec3::new(1.0, 2.0, 3.0)),
+            track_of(1, Vec3::new(4.0, 5.0, 6.0)),
+        ]);
+        let map = RetargetMap {
+            joints: vec![Some(JointId::from_raw(1)), None],
+            scales: vec![2.0, 1.0],
+        };
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 2, 0.0, &mut buf, Some(&map));
+        assert_eq!(buf.samples[1].translation, Some(Vec3::new(2.0, 4.0, 6.0)));
+        assert_eq!(buf.samples[0], JointSample::default());
+        assert_eq!(buf.painted, vec![false, true]);
+    }
+
+    #[test]
+    fn sample_skips_untransferred_source_bones() {
+        let clip = clip_over(vec![track_of(0, Vec3::X)]);
+        let map = RetargetMap {
+            joints: vec![None],
+            scales: vec![1.0],
+        };
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 1, 0.0, &mut buf, Some(&map));
+        assert_eq!(buf.samples[0], JointSample::default());
+        assert_eq!(buf.painted, vec![false]);
+    }
+
+    #[test]
+    fn sample_first_track_per_mapped_joint_wins() {
+        let clip = clip_over(vec![track_of(0, Vec3::X), track_of(1, Vec3::Y * 2.0)]);
+        let map = RetargetMap {
+            joints: vec![Some(JointId::from_raw(0)), Some(JointId::from_raw(0))],
+            scales: vec![1.0, 1.0],
+        };
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 1, 0.0, &mut buf, Some(&map));
+        assert_eq!(buf.samples[0].translation, Some(Vec3::X));
+    }
+
+    #[test]
+    fn sample_without_map_reads_tracks_as_authored() {
+        let clip = clip_over(vec![track_of(0, Vec3::X * 3.0), track_of(2, Vec3::Y)]);
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 2, 0.0, &mut buf, None);
+        assert_eq!(buf.samples[0].translation, Some(Vec3::X * 3.0));
+        assert_eq!(buf.samples[1], JointSample::default());
     }
 }

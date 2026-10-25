@@ -65,7 +65,7 @@ pub use animator::{Animator, AnimatorAccess, AnimatorError, AnimatorMut, try_ani
 pub mod skinning;
 
 mod blend;
-use blend::{BlendedPose, JointSample, sample_joints};
+use blend::{BlendedPose, JointSample, SampleBuf, sample_joints};
 pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack, fade_progress};
 
 mod events;
@@ -75,6 +75,9 @@ use events::{CursorStep, emit_step};
 mod ik;
 use ik::apply_ik_stack;
 pub use ik::{IkStack, TwoBoneIk, solve_two_bone_ik};
+
+mod retarget;
+pub use retarget::RetargetMap;
 
 mod ragdoll;
 mod tree;
@@ -584,8 +587,7 @@ struct AnimScratch {
     pose_a: BlendedPose,
     pose_b: BlendedPose,
     tree_poses: Vec<BlendedPose>,
-    samples: Vec<JointSample>,
-    painted: Vec<bool>,
+    joints: SampleBuf,
     contributors: Vec<ClipId>,
     skel_locals: Vec<Mat4>,
     matrices: Vec<Mat4>,
@@ -2112,6 +2114,7 @@ impl System for SkelSampleSystem {
             .reads_lane::<JointMask>()
             .reads_lane::<SkelTree>()
             .reads_lane::<IkStack>()
+            .reads_lane::<RetargetMap>()
             .writes_lane::<SkelPlayer>()
             .writes_lane::<SkelLayerStack>()
             .writes_lane::<SkelTreePlayer>()
@@ -2475,6 +2478,7 @@ struct SampleLanes<'a> {
     trees: Option<&'a ColdComponentStore<SkelTree>>,
     tree_players: Option<&'a ComponentStore<SkelTreePlayer>>,
     ik: Option<&'a ComponentStore<IkStack>>,
+    retarget: Option<&'a ColdComponentStore<RetargetMap>>,
 }
 
 /// Samples every playing cursor into the scratch buffers: model matrices
@@ -2498,6 +2502,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     let trees = store.read_cold_lane::<SkelTree>();
     let tree_players = store.read_lane::<SkelTreePlayer>();
     let ik = store.read_lane::<IkStack>();
+    let retarget = store.read_cold_lane::<RetargetMap>();
     // Blend lane: per-entity writes (drive targets of §4.2); a second lane guard never nests on the same lock.
     let mut ragdolls = store.write_lane::<RagdollBlend>();
     let mut poses = store.write_lane::<JointPose>();
@@ -2511,13 +2516,12 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         trees: trees.as_deref(),
         tree_players: tree_players.as_deref(),
         ik: ik.as_deref(),
+        retarget: retarget.as_deref(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
             continue;
         }
-        // A tree-driven root samples from its `SkelTree`; the `SkelPlayer`
-        // on the same entity is ignored (`set_skel_tree` docs).
         if lanes
             .tree_players
             .is_some_and(|lane| lane.contains(*entity))
@@ -2645,13 +2649,20 @@ fn finish_pose(
         .extend(scratch.pose_a.trs.iter().map(|trs| trs.matrix()));
     let root = root_matrix(lanes.transforms, entity);
     compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
-    node_poses(
-        lanes.clips,
-        &scratch.contributors,
-        &scratch.pose_a,
-        &mut scratch.nodes,
-        &mut scratch.node_painted,
-    );
+    // §8.3: a retargeted root drives its `JointPose` only — slice 1 keeps
+    // the hierarchy still (no node re-binds through the map).
+    if !lanes
+        .retarget
+        .is_some_and(|lane| lane.get(entity).is_some())
+    {
+        node_poses(
+            lanes.clips,
+            &scratch.contributors,
+            &scratch.pose_a,
+            &mut scratch.nodes,
+            &mut scratch.node_painted,
+        );
+    }
     pose.matrices.clear();
     pose.matrices.extend_from_slice(&scratch.matrices);
     Some(())
@@ -2705,16 +2716,11 @@ fn blend_skel_pose<'a>(
 ) -> Option<()> {
     scratch.contributors.clear();
     scratch.contributors.push(player.clip);
-    sample_joints(
-        clip,
-        count,
-        player.time.get(),
-        &mut scratch.samples,
-        &mut scratch.painted,
-    );
+    let map = lanes.retarget.and_then(|lane| lane.get(entity));
+    sample_joints(clip, count, player.time.get(), &mut scratch.joints, map);
     scratch
         .pose_a
-        .refill(&scratch.samples, rest, player.weight.get());
+        .refill(&scratch.joints.samples, rest, player.weight.get());
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
         match lanes.clips.get(fade.from.clip.0) {
             Some(from_clip) => {
@@ -2723,12 +2729,12 @@ fn blend_skel_pose<'a>(
                     from_clip,
                     count,
                     fade.from.time.get(),
-                    &mut scratch.samples,
-                    &mut scratch.painted,
+                    &mut scratch.joints,
+                    map,
                 );
                 scratch
                     .pose_b
-                    .refill(&scratch.samples, rest, fade.from.weight.get());
+                    .refill(&scratch.joints.samples, rest, fade.from.weight.get());
             }
             // A vanished outgoing clip reads as rest, as on object tracks.
             None => scratch.pose_b.refill_rest(rest),
@@ -2754,6 +2760,7 @@ fn overlay_layers(
     rest: &[JointTrs],
     scratch: &mut AnimScratch,
 ) -> Option<()> {
+    let map = lanes.retarget.and_then(|lane| lane.get(entity));
     if let Some(stack) = lanes.layers.and_then(|lane| lane.get(entity)) {
         for layer in &stack.layers {
             let mask = lanes.masks?.get(layer.mask.0)?;
@@ -2766,12 +2773,15 @@ fn overlay_layers(
                 layer_clip,
                 count,
                 layer.player.time.get(),
-                &mut scratch.samples,
-                &mut scratch.painted,
+                &mut scratch.joints,
+                map,
             );
-            scratch
-                .pose_a
-                .overlay(&scratch.samples, rest, &mask.weights, layer.player.weight);
+            scratch.pose_a.overlay(
+                &scratch.joints.samples,
+                rest,
+                &mask.weights,
+                layer.player.weight,
+            );
         }
     }
     Some(())
@@ -2808,8 +2818,7 @@ fn sample_tree_entity(
         &skeleton.rest,
         tree::EvalBuf {
             poses: &mut scratch.tree_poses[..nodes],
-            samples: &mut scratch.samples,
-            painted: &mut scratch.painted,
+            joints: &mut scratch.joints,
             contributors: &mut scratch.contributors,
         },
     )?;
