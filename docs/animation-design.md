@@ -585,9 +585,11 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   кадрами (детерминизм = детерминизм входа). CCD/FABRIK — только если
   two-bone не закрывает сценарии.
 - **Модель.** `TwoBoneIk { root, mid, end: JointId, target: Vec3,
-  weight: Clamped01 }` — hot-лейн на корне (несколько констрейнтов,
+  weight: Clamped01 }` в hot-лейне `IkStack` на корне (`Vec<TwoBoneIk>`,
   применяются в порядке записи); `target` — в **модельном** пространстве
-  корня (шов с GlobalTransform — зона хоста, как у ragdoll §8.5).
+  корня (шов с GlobalTransform — зона хоста, как у ragdoll §8.5). Поле
+  (bend plane) не авторится: решатель держит собственную плоскость сгиба
+  позы (вырожденные цепи — no-op).
 
 ### 8.3 Ретаргет
 

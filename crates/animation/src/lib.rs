@@ -72,6 +72,10 @@ mod events;
 pub use events::{AnimEvent, AnimEventOut, AnimEventQueue, ClipEvents};
 use events::{CursorStep, emit_step};
 
+mod ik;
+use ik::apply_ik_stack;
+pub use ik::{IkStack, TwoBoneIk, solve_two_bone_ik};
+
 mod ragdoll;
 mod tree;
 mod tree_sync;
@@ -2107,6 +2111,7 @@ impl System for SkelSampleSystem {
             .reads_lane::<ChildOf>()
             .reads_lane::<JointMask>()
             .reads_lane::<SkelTree>()
+            .reads_lane::<IkStack>()
             .writes_lane::<SkelPlayer>()
             .writes_lane::<SkelLayerStack>()
             .writes_lane::<SkelTreePlayer>()
@@ -2469,6 +2474,7 @@ struct SampleLanes<'a> {
     masks: Option<&'a ColdComponentStore<JointMask>>,
     trees: Option<&'a ColdComponentStore<SkelTree>>,
     tree_players: Option<&'a ComponentStore<SkelTreePlayer>>,
+    ik: Option<&'a ComponentStore<IkStack>>,
 }
 
 /// Samples every playing cursor into the scratch buffers: model matrices
@@ -2491,8 +2497,8 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     let masks = store.read_cold_lane::<JointMask>();
     let trees = store.read_cold_lane::<SkelTree>();
     let tree_players = store.read_lane::<SkelTreePlayer>();
-    // The blend lane is written per entity (drive targets of §4.2); a
-    // second lane guard on another type never nests on the same lock.
+    let ik = store.read_lane::<IkStack>();
+    // Blend lane: per-entity writes (drive targets of §4.2); a second lane guard never nests on the same lock.
     let mut ragdolls = store.write_lane::<RagdollBlend>();
     let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
@@ -2504,6 +2510,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         masks: masks.as_deref(),
         trees: trees.as_deref(),
         tree_players: tree_players.as_deref(),
+        ik: ik.as_deref(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
@@ -2625,6 +2632,12 @@ fn finish_pose(
     pose: &mut JointPose,
     blend: Option<&mut RagdollBlend>,
 ) -> Option<()> {
+    // Design §8.2: IK corrects the animated pose after the tree/layer
+    // stack and before the ragdoll blend — where physics weights are up,
+    // physics wins.
+    if let Some(stack) = lanes.ik.and_then(|lane| lane.get(entity)) {
+        apply_ik_stack(&mut scratch.pose_a.trs, &skeleton.parents, stack);
+    }
     apply_ragdoll(blend, &mut scratch.pose_a);
     scratch.skel_locals.clear();
     scratch
