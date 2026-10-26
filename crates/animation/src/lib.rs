@@ -83,6 +83,12 @@ mod root_motion;
 pub use root_motion::RootMotionDelta;
 use root_motion::{RootMotionPart, root_joint, root_motion};
 
+mod motion_match;
+pub use motion_match::{
+    MotionHit, MotionQuery, MotionSample, MotionSearch, WarpWindow, match_motion, time_at_distance,
+    warp_weight,
+};
+
 mod ragdoll;
 mod tree;
 mod tree_eff;

@@ -311,7 +311,11 @@ ragdoll-бленда (физика с весами побеждает; §8.2). �
 эффективным весам, слои снизу вверх по `weight · mask[корень]`; битое
 дерево оставляет identity. Трек корня резолвится через `RetargetMap`
 (позиция × `scales`). Применяет хост — в трансформацию, в симуляцию
-или копит на фикс-тик (§8.4). Ragdoll (шов «физика ↔ скелет») — модель
+или копит на фикс-тик (§8.4). Motion matching —
+`match_motion` (ближайший кадр по позе и скорости корня),
+`time_at_distance` (фаза по пройденной дистанции) и `warp_weight`
+(сила two-bone IK в окне контакта) — запросы хоста, не стадия
+сэмплера (§8.5). Ragdoll (шов «физика ↔ скелет») — модель
 `RagdollDesc`/`RagdollBone`/`RagdollMode` в `ornis-animation` и фасад
 `set_ragdoll`/`clear_ragdoll`/`set_ragdoll_mode`/`set_ragdoll_mode_fade`/
 `set_ragdoll_weight`/`update_ragdoll`
