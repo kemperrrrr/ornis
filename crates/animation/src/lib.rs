@@ -79,6 +79,10 @@ pub use ik::{IkStack, TwoBoneIk, solve_two_bone_ik};
 mod retarget;
 pub use retarget::RetargetMap;
 
+mod root_motion;
+pub use root_motion::RootMotionDelta;
+use root_motion::{root_joint, root_motion};
+
 mod ragdoll;
 mod tree;
 mod tree_sync;
@@ -2120,6 +2124,7 @@ impl System for SkelSampleSystem {
             .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
             .writes_lane::<AnimEventQueue>()
+            .writes_lane::<RootMotionDelta>()
             .writes_lane::<JointPose>()
             .writes_lane::<RagdollBlend>()
             .writes_lane::<Transform>()
@@ -2220,10 +2225,12 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
     };
     let events = store.read_cold_lane::<ClipEvents>();
     let tree_players = store.read_lane::<SkelTreePlayer>();
+    let skeletons = store.read_lane::<Skeleton>();
     let Some(mut players) = store.write_lane::<SkelPlayer>() else {
         return;
     };
     let mut queues = store.write_lane::<AnimEventQueue>();
+    let mut motion = store.write_lane::<RootMotionDelta>();
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         if tree_players
@@ -2232,14 +2239,29 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
         {
             continue;
         }
-        step_player_emit(
-            player,
-            &clips,
-            events.as_deref(),
+        let Some(cursor) = step_player(player, &clips, dt) else {
+            continue;
+        };
+        emit_step(
             queues.as_deref_mut(),
+            events.as_deref(),
             *entity,
-            dt,
+            player.clip,
+            cursor,
         );
+        let root = skeletons
+            .as_deref()
+            .and_then(|lane| lane.get(*entity))
+            .and_then(root_joint);
+        let delta = root_motion(
+            clips.get(player.clip.0),
+            Some(cursor),
+            root,
+            player.weight.get(),
+        );
+        if let Some(motion) = motion.as_deref_mut() {
+            motion.insert(*entity, delta);
+        }
     }
 }
 
