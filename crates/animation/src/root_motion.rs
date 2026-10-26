@@ -154,8 +154,11 @@ pub(crate) fn root_joint(skeleton: &Skeleton) -> Option<JointId> {
 
 #[cfg(test)]
 mod tests {
+    use glam::Mat4;
+    use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
+
     use super::*;
-    use crate::{Key, KeyTrack};
+    use crate::{ClipId, Key, KeyTrack, SkelPlayer, advance_skel_players};
 
     fn clip_over(translation: KeyTrack<Vec3>, rotation: KeyTrack<Quat>) -> SkelClip {
         SkelClip {
@@ -193,6 +196,7 @@ mod tests {
             step,
             duration: 1.0,
             looping,
+            weight: 1.0,
         })
     }
 
@@ -276,5 +280,61 @@ mod tests {
             root_motion(Some(&empty), cursor, root, 1.0),
             RootMotionDelta::IDENTITY
         );
+    }
+
+    #[test]
+    fn advance_records_root_motion_and_resets_it_when_the_cursor_stops() {
+        let mut store = SmartStore::new();
+        let playlist = store.create_entity();
+        store.insert_cold(playlist, walking());
+        let root = store.create_entity();
+        store.insert(
+            root,
+            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec![String::new()]),
+        );
+        store.insert(
+            root,
+            SkelPlayer {
+                clip: ClipId(playlist),
+                time: Seconds::new(0.0),
+                speed: Seconds::new(1.0),
+                weight: Clamped01::ONE,
+                playing: true,
+                looping: false,
+            },
+        );
+        // The lane is installed explicitly (like `AnimEventQueue`): the host
+        // records identity on the root, the sampler overwrites it per frame.
+        store.insert(root, RootMotionDelta::IDENTITY);
+        advance_skel_players(&store, 0.5);
+        let delta = store
+            .read_lane::<RootMotionDelta>()
+            .and_then(|lane| lane.get(root).copied())
+            .expect("a playing cursor records its root motion");
+        assert!((delta.translation - Vec3::X * 0.5).length() < 1e-5);
+        // Paused: the record resets to identity instead of holding the
+        // last frame's motion (design §8.4).
+        store
+            .write_lane::<SkelPlayer>()
+            .expect("player lane")
+            .get_mut(root)
+            .expect("player")
+            .playing = false;
+        advance_skel_players(&store, 0.5);
+        let paused = store
+            .read_lane::<RootMotionDelta>()
+            .and_then(|lane| lane.get(root).copied());
+        assert_eq!(paused, Some(RootMotionDelta::IDENTITY));
+        // Clip-less cursors reset the same way.
+        let mut players = store.write_lane::<SkelPlayer>().expect("player lane");
+        let player = players.get_mut(root).expect("player");
+        player.playing = true;
+        player.clip = ClipId(Entity::new(99));
+        drop(players);
+        advance_skel_players(&store, 0.5);
+        let clipless = store
+            .read_lane::<RootMotionDelta>()
+            .and_then(|lane| lane.get(root).copied());
+        assert_eq!(clipless, Some(RootMotionDelta::IDENTITY));
     }
 }

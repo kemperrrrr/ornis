@@ -680,6 +680,7 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                         step,
                         duration: clip.duration,
                         looping: clip.looping,
+                        weight: player.weight,
                     },
                 );
             }
@@ -708,6 +709,7 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                                 step: cursor_step,
                                 duration: clip.duration,
                                 looping: clip.looping,
+                                weight: fade.from.weight,
                             },
                         );
                     }
@@ -2196,6 +2198,7 @@ fn step_player(
         step,
         duration: clip.duration,
         looping: player.looping,
+        weight: player.weight.get(),
     })
 }
 
@@ -2231,6 +2234,12 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
     };
     let mut queues = store.write_lane::<AnimEventQueue>();
     let mut motion = store.write_lane::<RootMotionDelta>();
+    // Every frame starts every recorded delta at identity (design §8.4): a
+    // paused, clip-less or tree-driven root must not keep applying the last
+    // frame's motion; live cursors overwrite their entry below.
+    if let Some(motion) = motion.as_deref_mut() {
+        motion.data.fill(RootMotionDelta::IDENTITY);
+    }
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         if tree_players

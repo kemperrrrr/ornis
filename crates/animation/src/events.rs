@@ -46,6 +46,12 @@ pub struct AnimEventOut {
     pub clip: ClipId,
     /// The [`AnimEvent::name`] that fired.
     pub event: String,
+    /// Blend weight of the stepping cursor ([`crate::SkelPlayer::weight`]
+    /// / [`crate::AnimPlayer::weight`], `1.0` where the topology has no
+    /// weight of its own). Every stepping cursor fires — zero weight
+    /// included — so the host, not the sampler, filters "audible enough"
+    /// (design §8.1).
+    pub weight: f32,
 }
 
 /// Per-frame queue of fired events on the cursor owner entity (hot lane:
@@ -84,6 +90,10 @@ pub(crate) struct CursorStep {
     pub duration: f32,
     /// Whether the cursor wraps past the duration.
     pub looping: bool,
+    /// Blend weight of the stepping cursor, carried into
+    /// [`AnimEventOut::weight`] (design §8.1: every stepping cursor fires,
+    /// the host filters on the weight).
+    pub weight: f32,
 }
 
 /// The unwrapped time of `pos`' first crossing of the oriented cursor
@@ -123,6 +133,7 @@ fn fire_step(out: &mut Vec<AnimEventOut>, events: &ClipEvents, clip: ClipId, cur
         step,
         duration,
         looping,
+        weight,
     } = cursor;
     if duration <= 0.0 || step == 0.0 || !prev.is_finite() || !step.is_finite() {
         return;
@@ -140,6 +151,7 @@ fn fire_step(out: &mut Vec<AnimEventOut>, events: &ClipEvents, clip: ClipId, cur
     out.extend(hits.into_iter().map(|(_, index)| AnimEventOut {
         clip,
         event: events.events[index].name.clone(),
+        weight,
     }));
 }
 
@@ -203,9 +215,32 @@ mod tests {
                 step,
                 duration,
                 looping,
+                weight: 1.0,
             },
         );
         out.into_iter().map(|item| item.event).collect()
+    }
+
+    #[test]
+    fn event_carries_the_cursor_blend_weight() {
+        let events = marks(&[("foot", 0.5)]);
+        let mut out = Vec::new();
+        fire_step(
+            &mut out,
+            &events,
+            ClipId(Entity::new(0)),
+            CursorStep {
+                prev: 0.25,
+                step: 0.25,
+                duration: 1.0,
+                looping: false,
+                weight: 0.0,
+            },
+        );
+        // Every stepping cursor fires — zero weight included; the host
+        // filters on `weight` (design §8.1).
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].weight, 0.0);
     }
 
     #[test]
