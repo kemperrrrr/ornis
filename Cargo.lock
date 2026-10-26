@@ -2086,9 +2086,9 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "manifold-rust"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc2d33d596adc3bdfa6a82f10b6f3ecd6228214d71382cd23a1cdfab6c1ad625"
+checksum = "a60322b26d00d2868b7adde93b823900b0ff5320fd9107498947a913b986b977"
 dependencies = [
  "clipper2-rust",
  "dashu-int",
