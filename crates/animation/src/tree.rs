@@ -338,6 +338,30 @@ pub(crate) fn eval_blend2d(
     Some(())
 }
 
+/// The [`eval_tree`] machine contract, checked every frame by both the
+/// pose fold ([`eval_machine`]) and the event-weight walk
+/// ([`crate::tree_eff::fold_machine_eff`]): non-empty states among the
+/// earlier nodes, in-range cursors — the same broken machine must not
+/// answer differently after a transition.
+pub(crate) fn machine_states_valid(
+    index: usize,
+    states: &[usize],
+    cursor: &MachineCursor,
+) -> Option<()> {
+    if states.is_empty() || cursor.state >= states.len() {
+        return None;
+    }
+    if cursor.from.is_some_and(|from| from >= states.len()) {
+        return None;
+    }
+    for state in states {
+        if *state >= index {
+            return None;
+        }
+    }
+    Some(())
+}
+
 /// Evaluates one [`TreeNodeDef::Machine`] node into `poses[index]`: the
 /// whole machine contract is validated every frame — non-empty `states`
 /// among the earlier nodes, in-range cursors and transitions, finite
@@ -353,17 +377,7 @@ fn eval_machine(
     index: usize,
     poses: &mut [BlendedPose],
 ) -> Option<()> {
-    if states.is_empty() || cursor.state >= states.len() {
-        return None;
-    }
-    if cursor.from.is_some_and(|from| from >= states.len()) {
-        return None;
-    }
-    for state in states {
-        if *state >= index {
-            return None;
-        }
-    }
+    machine_states_valid(index, states, cursor)?;
     for transition in transitions {
         if transition.from >= states.len()
             || transition.to >= states.len()

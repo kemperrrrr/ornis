@@ -85,6 +85,7 @@ use root_motion::{root_joint, root_motion};
 
 mod ragdoll;
 mod tree;
+mod tree_eff;
 mod tree_sync;
 mod tree_weights;
 pub use ragdoll::{
@@ -657,6 +658,7 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                 return;
             };
             let mut queues = store.write_lane::<AnimEventQueue>();
+            let shares = fade_shares::<AnimFade>(store);
             for index in 0..players.data.len() {
                 let entity = players.entities[index];
                 let player = &mut players.data[index];
@@ -680,7 +682,7 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                         step,
                         duration: clip.duration,
                         looping: clip.looping,
-                        weight: player.weight,
+                        weight: player.weight * share_at(&shares, entity),
                     },
                 );
             }
@@ -709,7 +711,7 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                                 step: cursor_step,
                                 duration: clip.duration,
                                 looping: clip.looping,
-                                weight: fade.from.weight,
+                                weight: fade.from.weight * (1.0 - fade.progress()),
                             },
                         );
                     }
@@ -2223,6 +2225,15 @@ fn step_player_emit(
 /// A cursor on a tree-driven root ([`SkelTreePlayer`]) is skipped: the
 /// tree ignores it, so its clock must not drift while it is ignored.
 fn advance_base_players(store: &SmartStore, dt: f32) {
+    let mut motion = store.write_lane::<RootMotionDelta>();
+    // Every frame starts every recorded delta at identity (design §8.4): a
+    // paused, clip-less or tree-driven root must not keep applying the last
+    // frame's motion; live cursors overwrite their entry below. The reset
+    // runs before every early return so a missing lane can never leave a
+    // stale delta behind.
+    if let Some(motion) = motion.as_deref_mut() {
+        motion.data.fill(RootMotionDelta::IDENTITY);
+    }
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
@@ -2233,13 +2244,7 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
         return;
     };
     let mut queues = store.write_lane::<AnimEventQueue>();
-    let mut motion = store.write_lane::<RootMotionDelta>();
-    // Every frame starts every recorded delta at identity (design §8.4): a
-    // paused, clip-less or tree-driven root must not keep applying the last
-    // frame's motion; live cursors overwrite their entry below.
-    if let Some(motion) = motion.as_deref_mut() {
-        motion.data.fill(RootMotionDelta::IDENTITY);
-    }
+    let shares = fade_shares::<SkelFade>(store);
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         if tree_players
@@ -2256,7 +2261,7 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
             events.as_deref(),
             *entity,
             player.clip,
-            cursor,
+            cursor.scaled(share_at(&shares, *entity)),
         );
         let root = skeletons
             .as_deref()
@@ -2321,14 +2326,20 @@ fn advance_tree_players(store: &SmartStore, dt: f32) {
     let mut queues = store.write_lane::<AnimEventQueue>();
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
-        for leaf in &mut player.leaves {
-            step_player_emit(
-                leaf,
-                &clips,
-                events.as_deref(),
+        let weights = tree_eff::leaf_effective_weights(
+            defs.as_deref().and_then(|defs| defs.get(*entity)),
+            player,
+        );
+        for (index, leaf) in player.leaves.iter_mut().enumerate() {
+            let Some(cursor) = step_player(leaf, &clips, dt) else {
+                continue;
+            };
+            emit_step(
                 queues.as_deref_mut(),
+                events.as_deref(),
                 *entity,
-                dt,
+                leaf.clip,
+                cursor.scaled(weights[index]),
             );
         }
         step_machines(
@@ -2407,15 +2418,23 @@ fn step_machines(
 }
 
 /// Clock of a crossfade component, shared by [`AnimFade`] and [`SkelFade`].
-trait FadeClock {
+trait FadeClock: 'static + Send + Sync {
     /// Adds `dt` seconds to the clock; `true` once the fade is over.
     fn tick(&mut self, dt: f32) -> bool;
+
+    /// Linear crossfade progress in `0..=1`
+    /// ([`crate::blend::fade_progress`] of the component's clock).
+    fn progress(&self) -> f32;
 }
 
 impl FadeClock for AnimFade {
     fn tick(&mut self, dt: f32) -> bool {
         self.elapsed = Seconds::new(self.elapsed.get() + dt);
         self.elapsed.get() >= self.duration.get()
+    }
+
+    fn progress(&self) -> f32 {
+        fade_progress(self.duration, self.elapsed)
     }
 }
 
@@ -2424,6 +2443,34 @@ impl FadeClock for SkelFade {
         self.elapsed = Seconds::new(self.elapsed.get() + dt);
         self.elapsed.get() >= self.duration.get()
     }
+
+    fn progress(&self) -> f32 {
+        fade_progress(self.duration, self.elapsed)
+    }
+}
+
+/// Linear progress of every in-flight crossfade `F`, lane order — the
+/// incoming share of one [`AnimEventOut::weight`] (the outgoing share is
+/// `1 - progress`; design §8.1).
+fn fade_shares<F: FadeClock>(store: &SmartStore) -> Vec<(Entity, f32)> {
+    let Some(fades) = store.read_lane::<F>() else {
+        return Vec::new();
+    };
+    fades
+        .entities
+        .iter()
+        .zip(fades.data.iter())
+        .map(|(entity, fade)| (*entity, fade.progress()))
+        .collect()
+}
+
+/// The crossfade share of `entity` in `shares` ([`fade_shares`]); `1.0`
+/// when no fade flies on it.
+fn share_at(shares: &[(Entity, f32)], entity: Entity) -> f32 {
+    shares
+        .iter()
+        .find(|(id, _)| *id == entity)
+        .map_or(1.0, |(_, progress)| *progress)
 }
 
 /// Steps every crossfade by `dt`: `advance_from` moves the outgoing cursor,
@@ -2470,13 +2517,15 @@ fn advance_fades(store: &SmartStore, dt: f32) {
             &FrozenBits::default(),
             &mut scratch.finished,
             |fade, step, entity| {
-                step_player_emit(
-                    &mut fade.from,
-                    &clips,
-                    events.as_deref(),
+                let Some(cursor) = step_player(&mut fade.from, &clips, step) else {
+                    return;
+                };
+                emit_step(
                     queues.as_deref_mut(),
+                    events.as_deref(),
                     entity,
-                    step,
+                    fade.from.clip,
+                    cursor.scaled(1.0 - fade.progress()),
                 );
             },
         );

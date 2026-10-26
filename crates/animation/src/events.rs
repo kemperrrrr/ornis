@@ -46,11 +46,13 @@ pub struct AnimEventOut {
     pub clip: ClipId,
     /// The [`AnimEvent::name`] that fired.
     pub event: String,
-    /// Blend weight of the stepping cursor ([`crate::SkelPlayer::weight`]
-    /// / [`crate::AnimPlayer::weight`], `1.0` where the topology has no
-    /// weight of its own). Every stepping cursor fires — zero weight
-    /// included — so the host, not the sampler, filters "audible enough"
-    /// (design §8.1).
+    /// Effective pose contribution of the stepping cursor: its own blend
+    /// weight ([`crate::SkelPlayer::weight`] / [`crate::AnimPlayer::weight`])
+    /// times the tree path weights and machine-state activity of a tree
+    /// leaf, times the crossfade share of an incoming (`progress`) or
+    /// outgoing (`1 - progress`) cursor ([`crate::blend::fade_progress`]).
+    /// Every stepping cursor fires — zero weight included — so the host,
+    /// not the sampler, filters "audible enough" (design §8.1).
     pub weight: f32,
 }
 
@@ -90,10 +92,21 @@ pub(crate) struct CursorStep {
     pub duration: f32,
     /// Whether the cursor wraps past the duration.
     pub looping: bool,
-    /// Blend weight of the stepping cursor, carried into
-    /// [`AnimEventOut::weight`] (design §8.1: every stepping cursor fires,
-    /// the host filters on the weight).
+    /// Effective blend weight of the stepping cursor (the cursor's own
+    /// weight times any tree/fade share the caller scales in via
+    /// [`CursorStep::scaled`]), carried into [`AnimEventOut::weight`]
+    /// (design §8.1: every stepping cursor fires, the host filters).
     pub weight: f32,
+}
+
+impl CursorStep {
+    /// The same step with its blend weight scaled by `scale` — the
+    /// effective pose contribution of this cursor (tree path weights,
+    /// machine state activity, crossfade share; design §8.1).
+    pub(crate) fn scaled(mut self, scale: f32) -> Self {
+        self.weight *= scale;
+        self
+    }
 }
 
 /// The unwrapped time of `pos`' first crossing of the oriented cursor
@@ -184,7 +197,10 @@ mod tests {
     use super::*;
     use ornis_core::{Clamped01, Seconds, SmartStore};
 
-    use crate::{SkelClip, SkelPlayer, advance_skel_players};
+    use crate::{
+        MachineCursor, SkelClip, SkelFade, SkelPlayer, SkelTree, SkelTreePlayer, TreeChild,
+        TreeNodeDef, TreeParam, advance_skel_players,
+    };
 
     fn marks(pairs: &[(&str, f32)]) -> ClipEvents {
         ClipEvents {
@@ -241,6 +257,170 @@ mod tests {
         // filters on `weight` (design §8.1).
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].weight, 0.0);
+    }
+
+    fn clip_firing() -> SkelClip {
+        SkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks: Vec::new(),
+        }
+    }
+
+    fn stepping(clip: ClipId) -> SkelPlayer {
+        SkelPlayer {
+            clip,
+            time: Seconds::new(0.0),
+            speed: Seconds::new(1.0),
+            weight: Clamped01::ONE,
+            playing: true,
+            looping: false,
+        }
+    }
+
+    fn mark(store: &mut SmartStore, name: &str, at: f32) -> ClipId {
+        let playlist = store.create_entity();
+        store.insert_cold(playlist, clip_firing());
+        store.insert_cold(
+            playlist,
+            ClipEvents {
+                events: vec![AnimEvent {
+                    name: name.to_owned(),
+                    at,
+                }],
+            },
+        );
+        ClipId(playlist)
+    }
+
+    fn fired_weights(store: &SmartStore, root: Entity) -> Vec<(String, f32)> {
+        let queue = store.read_lane::<AnimEventQueue>().expect("queue lane");
+        queue
+            .get(root)
+            .expect("root queue")
+            .fired
+            .iter()
+            .map(|event| (event.event.clone(), event.weight))
+            .collect()
+    }
+
+    #[test]
+    fn tree_blend_weight_scales_the_leaf_event() {
+        let mut store = SmartStore::new();
+        let clip_a = mark(&mut store, "a", 0.5);
+        let clip_b = mark(&mut store, "b", 0.5);
+        let root = store.create_entity();
+        store.insert_cold(
+            root,
+            SkelTree {
+                nodes: vec![
+                    TreeNodeDef::Clip { clip: clip_a },
+                    TreeNodeDef::Clip { clip: clip_b },
+                    TreeNodeDef::Blend1d {
+                        axis: 0,
+                        children: vec![
+                            TreeChild {
+                                position: 0.0,
+                                node: 0,
+                            },
+                            TreeChild {
+                                position: 1.0,
+                                node: 1,
+                            },
+                        ],
+                    },
+                ],
+                params: vec![TreeParam {
+                    name: "x".to_owned(),
+                    default: 0.0,
+                }],
+            },
+        );
+        store.insert(
+            root,
+            SkelTreePlayer {
+                params: vec![0.0],
+                leaves: vec![stepping(clip_a), stepping(clip_b)],
+                machines: Vec::new(),
+            },
+        );
+        store.insert(root, AnimEventQueue::default());
+        advance_skel_players(&store, 0.5);
+        // Both leaves step and fire, but the parameter puts blend weight
+        // only on the first leaf — the host filters on the event weight
+        // (design §8.1).
+        assert_eq!(
+            fired_weights(&store, root),
+            vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
+        );
+    }
+
+    #[test]
+    fn machine_inactive_state_event_is_zero() {
+        let mut store = SmartStore::new();
+        let clip_a = mark(&mut store, "a", 0.5);
+        let clip_b = mark(&mut store, "b", 0.5);
+        let root = store.create_entity();
+        store.insert_cold(
+            root,
+            SkelTree {
+                nodes: vec![
+                    TreeNodeDef::Clip { clip: clip_a },
+                    TreeNodeDef::Clip { clip: clip_b },
+                    TreeNodeDef::Machine {
+                        states: vec![0, 1],
+                        initial: 0,
+                        transitions: Vec::new(),
+                    },
+                ],
+                params: Vec::new(),
+            },
+        );
+        store.insert(
+            root,
+            SkelTreePlayer {
+                params: Vec::new(),
+                leaves: vec![stepping(clip_a), stepping(clip_b)],
+                machines: vec![MachineCursor {
+                    state: 0,
+                    from: None,
+                    elapsed: Seconds::new(0.0),
+                    duration: Seconds::new(0.0),
+                }],
+            },
+        );
+        store.insert(root, AnimEventQueue::default());
+        advance_skel_players(&store, 0.5);
+        // Only the standing state contributes to the pose.
+        assert_eq!(
+            fired_weights(&store, root),
+            vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
+        );
+    }
+
+    #[test]
+    fn crossfade_share_scales_incoming_and_outgoing_events() {
+        let mut store = SmartStore::new();
+        let clip_in = mark(&mut store, "in", 0.5);
+        let clip_out = mark(&mut store, "out", 0.5);
+        let root = store.create_entity();
+        store.insert(root, stepping(clip_in));
+        store.insert(
+            root,
+            SkelFade {
+                from: stepping(clip_out),
+                duration: Seconds::new(1.0),
+                elapsed: Seconds::new(0.5),
+            },
+        );
+        store.insert(root, AnimEventQueue::default());
+        advance_skel_players(&store, 0.5);
+        // Mid-fade: the incoming cursor carries its progress share and the
+        // outgoing one the complement (design §8.1).
+        assert_eq!(
+            fired_weights(&store, root),
+            vec![("in".to_owned(), 0.5), ("out".to_owned(), 0.5)]
+        );
     }
 
     #[test]
