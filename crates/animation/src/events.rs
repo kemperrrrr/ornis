@@ -199,7 +199,7 @@ mod tests {
 
     use crate::{
         MachineCursor, SkelClip, SkelFade, SkelPlayer, SkelTree, SkelTreePlayer, TreeChild,
-        TreeNodeDef, TreeParam, advance_skel_players,
+        TreeChild2d, TreeNodeDef, TreeParam, advance_skel_players,
     };
 
     fn marks(pairs: &[(&str, f32)]) -> ClipEvents {
@@ -304,96 +304,93 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn tree_blend_weight_scales_the_leaf_event() {
+    /// Runs one §8.1 tree case end to end: clips "a"/"b" firing at `0.5`,
+    /// `tree` + `player` on the root, one 0.5 s advance — then answers the
+    /// fired `(event, weight)` pairs. `build` receives both playlist ids so
+    /// the tree can cite them.
+    fn tree_fired(
+        build: impl FnOnce(ClipId, ClipId) -> (SkelTree, SkelTreePlayer),
+    ) -> Vec<(String, f32)> {
         let mut store = SmartStore::new();
         let clip_a = mark(&mut store, "a", 0.5);
         let clip_b = mark(&mut store, "b", 0.5);
+        let (tree, player) = build(clip_a, clip_b);
         let root = store.create_entity();
-        store.insert_cold(
-            root,
-            SkelTree {
-                nodes: vec![
-                    TreeNodeDef::Clip { clip: clip_a },
-                    TreeNodeDef::Clip { clip: clip_b },
-                    TreeNodeDef::Blend1d {
-                        axis: 0,
-                        children: vec![
-                            TreeChild {
-                                position: 0.0,
-                                node: 0,
-                            },
-                            TreeChild {
-                                position: 1.0,
-                                node: 1,
-                            },
-                        ],
-                    },
-                ],
-                params: vec![TreeParam {
-                    name: "x".to_owned(),
-                    default: 0.0,
-                }],
-            },
-        );
-        store.insert(
-            root,
-            SkelTreePlayer {
-                params: vec![0.0],
-                leaves: vec![stepping(clip_a), stepping(clip_b)],
-                machines: Vec::new(),
-            },
-        );
+        store.insert_cold(root, tree);
+        store.insert(root, player);
         store.insert(root, AnimEventQueue::default());
         advance_skel_players(&store, 0.5);
+        fired_weights(&store, root)
+    }
+
+    #[test]
+    fn tree_blend_weight_scales_the_leaf_event() {
         // Both leaves step and fire, but the parameter puts blend weight
         // only on the first leaf — the host filters on the event weight
         // (design §8.1).
         assert_eq!(
-            fired_weights(&store, root),
+            tree_fired(|clip_a, clip_b| (
+                SkelTree {
+                    nodes: vec![
+                        TreeNodeDef::Clip { clip: clip_a },
+                        TreeNodeDef::Clip { clip: clip_b },
+                        TreeNodeDef::Blend1d {
+                            axis: 0,
+                            children: vec![
+                                TreeChild {
+                                    position: 0.0,
+                                    node: 0,
+                                },
+                                TreeChild {
+                                    position: 1.0,
+                                    node: 1,
+                                },
+                            ],
+                        },
+                    ],
+                    params: vec![TreeParam {
+                        name: "x".to_owned(),
+                        default: 0.0,
+                    }],
+                },
+                SkelTreePlayer {
+                    params: vec![0.0],
+                    leaves: vec![stepping(clip_a), stepping(clip_b)],
+                    machines: Vec::new(),
+                },
+            )),
             vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
         );
     }
 
     #[test]
     fn machine_inactive_state_event_is_zero() {
-        let mut store = SmartStore::new();
-        let clip_a = mark(&mut store, "a", 0.5);
-        let clip_b = mark(&mut store, "b", 0.5);
-        let root = store.create_entity();
-        store.insert_cold(
-            root,
-            SkelTree {
-                nodes: vec![
-                    TreeNodeDef::Clip { clip: clip_a },
-                    TreeNodeDef::Clip { clip: clip_b },
-                    TreeNodeDef::Machine {
-                        states: vec![0, 1],
-                        initial: 0,
-                        transitions: Vec::new(),
-                    },
-                ],
-                params: Vec::new(),
-            },
-        );
-        store.insert(
-            root,
-            SkelTreePlayer {
-                params: Vec::new(),
-                leaves: vec![stepping(clip_a), stepping(clip_b)],
-                machines: vec![MachineCursor {
-                    state: 0,
-                    from: None,
-                    elapsed: Seconds::new(0.0),
-                    duration: Seconds::new(0.0),
-                }],
-            },
-        );
-        store.insert(root, AnimEventQueue::default());
-        advance_skel_players(&store, 0.5);
         // Only the standing state contributes to the pose.
         assert_eq!(
-            fired_weights(&store, root),
+            tree_fired(|clip_a, clip_b| (
+                SkelTree {
+                    nodes: vec![
+                        TreeNodeDef::Clip { clip: clip_a },
+                        TreeNodeDef::Clip { clip: clip_b },
+                        TreeNodeDef::Machine {
+                            states: vec![0, 1],
+                            initial: 0,
+                            transitions: Vec::new(),
+                        },
+                    ],
+                    params: Vec::new(),
+                },
+                SkelTreePlayer {
+                    params: Vec::new(),
+                    leaves: vec![stepping(clip_a), stepping(clip_b)],
+                    machines: vec![MachineCursor {
+                        state: 0,
+                        from: None,
+                        elapsed: Seconds::new(0.0),
+                        duration: Seconds::new(0.0),
+                    }],
+                },
+            )),
             vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
         );
     }
@@ -420,6 +417,92 @@ mod tests {
         assert_eq!(
             fired_weights(&store, root),
             vec![("in".to_owned(), 0.5), ("out".to_owned(), 0.5)]
+        );
+    }
+
+    #[test]
+    fn machine_transition_splits_the_event_weight() {
+        // Mid-transition the leaving state carries `1 − progress` and the
+        // heading one `progress` (design §8.1).
+        assert_eq!(
+            tree_fired(|clip_a, clip_b| (
+                SkelTree {
+                    nodes: vec![
+                        TreeNodeDef::Clip { clip: clip_a },
+                        TreeNodeDef::Clip { clip: clip_b },
+                        TreeNodeDef::Machine {
+                            states: vec![0, 1],
+                            initial: 0,
+                            transitions: Vec::new(),
+                        },
+                    ],
+                    params: Vec::new(),
+                },
+                SkelTreePlayer {
+                    params: Vec::new(),
+                    leaves: vec![stepping(clip_a), stepping(clip_b)],
+                    machines: vec![MachineCursor {
+                        state: 1,
+                        from: Some(0),
+                        elapsed: Seconds::new(0.5),
+                        duration: Seconds::new(1.0),
+                    }],
+                },
+            )),
+            vec![("a".to_owned(), 0.5), ("b".to_owned(), 0.5)]
+        );
+    }
+
+    #[test]
+    fn tree_blend2d_weight_scales_the_leaf_event() {
+        // The cell midpoint spreads bilinearly: one quarter to the (0,0)
+        // corner, three quarters across the rest (design §8.1).
+        assert_eq!(
+            tree_fired(|clip_a, clip_b| (
+                SkelTree {
+                    nodes: vec![
+                        TreeNodeDef::Clip { clip: clip_a },
+                        TreeNodeDef::Clip { clip: clip_b },
+                        TreeNodeDef::Blend2d {
+                            axes: [0, 1],
+                            children: vec![
+                                TreeChild2d {
+                                    position: [0.0, 0.0],
+                                    node: 0,
+                                },
+                                TreeChild2d {
+                                    position: [1.0, 0.0],
+                                    node: 1,
+                                },
+                                TreeChild2d {
+                                    position: [0.0, 1.0],
+                                    node: 1,
+                                },
+                                TreeChild2d {
+                                    position: [1.0, 1.0],
+                                    node: 1,
+                                },
+                            ],
+                        },
+                    ],
+                    params: vec![
+                        TreeParam {
+                            name: "x".to_owned(),
+                            default: 0.0,
+                        },
+                        TreeParam {
+                            name: "y".to_owned(),
+                            default: 0.0,
+                        },
+                    ],
+                },
+                SkelTreePlayer {
+                    params: vec![0.5, 0.5],
+                    leaves: vec![stepping(clip_a), stepping(clip_b)],
+                    machines: Vec::new(),
+                },
+            )),
+            vec![("a".to_owned(), 0.25), ("b".to_owned(), 0.75)]
         );
     }
 

@@ -12,10 +12,11 @@ use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use glam::{Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimPlayer, AnimSampleSystem, AnimTrack, ClipId, JointTrs, Key, KeyTrack,
+    AnimClip, AnimEvent, AnimEventQueue, AnimFade, AnimPlayer, AnimSampleSystem, AnimTrack,
+    ClipEvents, ClipId, JointTrs, Key, KeyTrack,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::units::{Clamped01, PositiveF32};
+use ornis_core::units::{Clamped01, PositiveF32, Seconds};
 use ornis_core::{Engine, Entity, Resources, Stage, System, SystemAccess};
 use ornis_gameplay::Position;
 use ornis_render::{ExtractionStats, extract_render_data_with_stats};
@@ -369,4 +370,88 @@ fn explicit_edge_orders_body_before_anim() {
     let mermaid = engine.stage_schedule(Stage::PostFrame).mermaid();
     assert!(mermaid.contains("body_to_transform"));
     assert!(mermaid.contains("anim_sample"));
+}
+
+/// Playing object cursor on `clip` — the §8.1 share fixture.
+fn object_player(clip: ClipId) -> AnimPlayer {
+    AnimPlayer {
+        clip,
+        time: 0.0,
+        speed: 1.0,
+        weight: 1.0,
+        playing: true,
+    }
+}
+
+/// Silent clip of `duration` with no tracks — the §8.1 share fixture.
+fn silent_clip(name: &str, duration: f32) -> AnimClip {
+    AnimClip {
+        name: name.to_string(),
+        duration,
+        looping: false,
+        tracks: Vec::new(),
+    }
+}
+
+#[test]
+fn crossfade_events_carry_the_fade_share() {
+    let mut engine = anim_engine();
+    let root = {
+        let store = engine
+            .world_mut()
+            .store_mut()
+            .expect("world owns SmartStore");
+        let clip_in = store.create_entity();
+        store.insert_cold(clip_in, silent_clip("in", 1.0));
+        store.insert_cold(
+            clip_in,
+            ClipEvents {
+                events: vec![AnimEvent {
+                    name: "in".to_string(),
+                    at: 0.5,
+                }],
+            },
+        );
+        let clip_out = store.create_entity();
+        store.insert_cold(clip_out, silent_clip("out", 1.0));
+        store.insert_cold(
+            clip_out,
+            ClipEvents {
+                events: vec![AnimEvent {
+                    name: "out".to_string(),
+                    at: 0.5,
+                }],
+            },
+        );
+        let root = store.create_entity();
+        store.insert(root, object_player(ClipId(clip_in)));
+        store.insert(
+            root,
+            AnimFade {
+                from: object_player(ClipId(clip_out)),
+                duration: Seconds::new(1.0),
+                elapsed: Seconds::new(0.5),
+            },
+        );
+        store.insert(root, AnimEventQueue::default());
+        root
+    };
+
+    engine.run_frame(0.5);
+
+    let store = engine.world().store().expect("world owns SmartStore");
+    let queue = store
+        .read_lane::<AnimEventQueue>()
+        .expect("queue lane kept")
+        .get(root)
+        .expect("root queue kept")
+        .fired
+        .clone();
+    // Mid-fade the incoming cursor carries the progress share and the
+    // outgoing one the complement (design §8.1).
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue[0].event, "in");
+    assert_eq!(queue[0].weight, 0.5);
+    assert_eq!(queue[1].event, "out");
+    assert_eq!(queue[1].weight, 0.5);
 }

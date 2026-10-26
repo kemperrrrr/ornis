@@ -592,6 +592,7 @@ struct AnimScratch {
     pose_a: BlendedPose,
     pose_b: BlendedPose,
     tree_poses: Vec<BlendedPose>,
+    tree_weights: tree_eff::WeightsScratch,
     joints: SampleBuf,
     contributors: Vec<ClipId>,
     skel_locals: Vec<Mat4>,
@@ -658,7 +659,7 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                 return;
             };
             let mut queues = store.write_lane::<AnimEventQueue>();
-            let shares = fade_shares::<AnimFade>(store);
+            let incoming_fades = store.read_lane::<AnimFade>();
             for index in 0..players.data.len() {
                 let entity = players.entities[index];
                 let player = &mut players.data[index];
@@ -682,10 +683,11 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
                         step,
                         duration: clip.duration,
                         looping: clip.looping,
-                        weight: player.weight * share_at(&shares, entity),
+                        weight: player.weight * share_of(incoming_fades.as_deref(), entity),
                     },
                 );
             }
+            drop(incoming_fades);
             if let Some(mut fades) = store.write_lane::<AnimFade>() {
                 let (frozen, finished) = (&scratch.frozen, &mut scratch.finished);
                 tick_fades(&mut fades, dt, frozen, finished, |fade, step, entity| {
@@ -2244,7 +2246,7 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
         return;
     };
     let mut queues = store.write_lane::<AnimEventQueue>();
-    let shares = fade_shares::<SkelFade>(store);
+    let fades = store.read_lane::<SkelFade>();
     let players = &mut *players;
     for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
         if tree_players
@@ -2261,7 +2263,7 @@ fn advance_base_players(store: &SmartStore, dt: f32) {
             events.as_deref(),
             *entity,
             player.clip,
-            cursor.scaled(share_at(&shares, *entity)),
+            cursor.scaled(share_of(fades.as_deref(), *entity)),
         );
         let root = skeletons
             .as_deref()
@@ -2325,31 +2327,34 @@ fn advance_tree_players(store: &SmartStore, dt: f32) {
     };
     let mut queues = store.write_lane::<AnimEventQueue>();
     let players = &mut *players;
-    for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
-        let weights = tree_eff::leaf_effective_weights(
-            defs.as_deref().and_then(|defs| defs.get(*entity)),
-            player,
-        );
-        for (index, leaf) in player.leaves.iter_mut().enumerate() {
-            let Some(cursor) = step_player(leaf, &clips, dt) else {
-                continue;
-            };
-            emit_step(
-                queues.as_deref_mut(),
-                events.as_deref(),
-                *entity,
-                leaf.clip,
-                cursor.scaled(weights[index]),
+    with_scratch(|scratch| {
+        for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
+            let weights = tree_eff::leaf_effective_weights(
+                &mut scratch.tree_weights,
+                defs.as_deref().and_then(|defs| defs.get(*entity)),
+                player,
+            );
+            for (index, leaf) in player.leaves.iter_mut().enumerate() {
+                let Some(cursor) = step_player(leaf, &clips, dt) else {
+                    continue;
+                };
+                emit_step(
+                    queues.as_deref_mut(),
+                    events.as_deref(),
+                    *entity,
+                    leaf.clip,
+                    cursor.scaled(weights[index]),
+                );
+            }
+            step_machines(
+                player,
+                defs.as_deref().and_then(|defs| defs.get(*entity)),
+                &clips,
+                marks.as_deref(),
+                dt,
             );
         }
-        step_machines(
-            player,
-            defs.as_deref().and_then(|defs| defs.get(*entity)),
-            &clips,
-            marks.as_deref(),
-            dt,
-        );
-    }
+    });
 }
 
 /// Completes or advances in-flight machine crossfades, then fires
@@ -2449,28 +2454,14 @@ impl FadeClock for SkelFade {
     }
 }
 
-/// Linear progress of every in-flight crossfade `F`, lane order — the
-/// incoming share of one [`AnimEventOut::weight`] (the outgoing share is
-/// `1 - progress`; design §8.1).
-fn fade_shares<F: FadeClock>(store: &SmartStore) -> Vec<(Entity, f32)> {
-    let Some(fades) = store.read_lane::<F>() else {
-        return Vec::new();
-    };
+/// The crossfade share of `entity` read straight from `fades` — the
+/// [`FadeClock::progress`] of its incoming cursor, `1.0` when no fade
+/// flies on it. Direct lane access: no per-frame collection or scan on
+/// the hot path (design §8.1).
+fn share_of<F: FadeClock>(fades: Option<&ComponentStore<F>>, entity: Entity) -> f32 {
     fades
-        .entities
-        .iter()
-        .zip(fades.data.iter())
-        .map(|(entity, fade)| (*entity, fade.progress()))
-        .collect()
-}
-
-/// The crossfade share of `entity` in `shares` ([`fade_shares`]); `1.0`
-/// when no fade flies on it.
-fn share_at(shares: &[(Entity, f32)], entity: Entity) -> f32 {
-    shares
-        .iter()
-        .find(|(id, _)| *id == entity)
-        .map_or(1.0, |(_, progress)| *progress)
+        .and_then(|fades| fades.get(entity))
+        .map_or(1.0, |fade| fade.progress())
 }
 
 /// Steps every crossfade by `dt`: `advance_from` moves the outgoing cursor,

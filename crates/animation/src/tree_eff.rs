@@ -8,7 +8,9 @@
 //! Separate from [`crate::tree`] (the pose evaluator): this walk runs at
 //! cursor-advance time and never touches poses. It reuses the blend tables
 //! of [`crate::tree_weights`] and the machine contract of [`crate::tree`],
-//! so a broken tree answers the same way in both.
+//! so a broken tree answers the same way in both. The walk allocates
+//! nothing per frame: its two buffers live in [`WeightsScratch`] and
+//! refill in place (design §8.1).
 
 use crate::blend::fade_progress;
 use crate::tree::{
@@ -16,6 +18,15 @@ use crate::tree::{
     machine_states_valid,
 };
 use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
+
+/// Reusable buffers of the [`leaf_effective_weights`] walk — node weights
+/// and the leaf result. The caller keeps one in its frame scratch (like
+/// `scratch.finished`), so the walk allocates nothing per frame.
+#[derive(Default)]
+pub(crate) struct WeightsScratch {
+    eff: Vec<f32>,
+    leaves: Vec<f32>,
+}
 
 /// Effective blend weight of every [`TreeNodeDef::Clip`] leaf, in leaf
 /// order — the product of the blend-node weights along the path from the
@@ -25,23 +36,37 @@ use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
 /// ([`SkelPlayer::weight`](crate::SkelPlayer::weight)) is not included —
 /// the cursor carries it; the product lands in
 /// [`crate::events::AnimEventOut::weight`] so the host filters on one
-/// number (design §8.1).
+/// number (design §8.1). The result reuses `scratch` and always covers
+/// `player.leaves.len()` slots.
 ///
 /// A missing tree, or one whose contract [`crate::tree::eval_tree`] would
 /// read as bad skin, answers `1.0` everywhere: the cursors' own weights
 /// stand alone.
-pub(crate) fn leaf_effective_weights(tree: Option<&SkelTree>, player: &SkelTreePlayer) -> Vec<f32> {
-    let Some(tree) = tree else {
-        return vec![1.0; player.leaves.len()];
-    };
-    eff_weights(tree, player).unwrap_or_else(|| vec![1.0; player.leaves.len()])
+pub(crate) fn leaf_effective_weights<'a>(
+    scratch: &'a mut WeightsScratch,
+    tree: Option<&SkelTree>,
+    player: &SkelTreePlayer,
+) -> &'a [f32] {
+    if let Some(tree) = tree
+        && eff_weights(scratch, tree, player).is_some()
+    {
+        return &scratch.leaves;
+    }
+    scratch.leaves.clear();
+    scratch.leaves.resize(player.leaves.len(), 1.0);
+    &scratch.leaves
 }
 
 /// The [`leaf_effective_weights`] walk over one tree; `None` = the tree
-/// contract is broken here.
-fn eff_weights(tree: &SkelTree, player: &SkelTreePlayer) -> Option<Vec<f32>> {
-    let mut eff = vec![0.0; tree.nodes.len()];
-    *eff.last_mut()? = 1.0;
+/// contract is broken here (the caller answers `1.0`).
+fn eff_weights(
+    scratch: &mut WeightsScratch,
+    tree: &SkelTree,
+    player: &SkelTreePlayer,
+) -> Option<()> {
+    scratch.eff.clear();
+    scratch.eff.resize(tree.nodes.len(), 0.0);
+    *scratch.eff.last_mut()? = 1.0;
     // Children sit strictly earlier than their parents, so one reverse
     // walk hands a node's weight to its children before it folds itself.
     let mut machine_cursor = tree
@@ -50,36 +75,35 @@ fn eff_weights(tree: &SkelTree, player: &SkelTreePlayer) -> Option<Vec<f32>> {
         .filter(|node| matches!(node, TreeNodeDef::Machine { .. }))
         .count();
     for index in (0..tree.nodes.len()).rev() {
-        let weight = eff[index];
+        let weight = scratch.eff[index];
         match &tree.nodes[index] {
             TreeNodeDef::Clip { .. } => {}
             TreeNodeDef::Blend1d { axis, children } => {
                 let value = player.params.get(*axis).copied()?;
-                fold_blend1d_eff(&mut eff, index, weight, children, value)?;
+                fold_blend1d_eff(&mut scratch.eff, index, weight, children, value)?;
             }
             TreeNodeDef::Blend2d { axes, children } => {
                 let value = [
                     player.params.get(axes[0]).copied()?,
                     player.params.get(axes[1]).copied()?,
                 ];
-                fold_blend2d_eff(&mut eff, index, weight, children, value)?;
+                fold_blend2d_eff(&mut scratch.eff, index, weight, children, value)?;
             }
             TreeNodeDef::Machine { states, .. } => {
                 machine_cursor = machine_cursor.checked_sub(1)?;
                 let cursor = player.machines.get(machine_cursor)?;
-                fold_machine_eff(&mut eff, index, weight, states, cursor)?;
+                fold_machine_eff(&mut scratch.eff, index, weight, states, cursor)?;
             }
         }
     }
-    Some(
-        tree.nodes
-            .iter()
-            .zip(&eff)
-            .filter_map(|(node, weight)| {
-                matches!(node, TreeNodeDef::Clip { .. }).then_some(*weight)
-            })
-            .collect(),
-    )
+    scratch.leaves.clear();
+    for (node, weight) in tree.nodes.iter().zip(scratch.eff.iter()) {
+        if matches!(node, TreeNodeDef::Clip { .. }) {
+            scratch.leaves.push(*weight);
+        }
+    }
+    scratch.leaves.resize(player.leaves.len(), 1.0);
+    Some(())
 }
 
 /// Folds one [`TreeNodeDef::Blend1d`] node's weight into its weighted
