@@ -140,30 +140,47 @@ fn arc_rotation(from: Vec3, to: Vec3) -> Quat {
     Quat::from_rotation_arc(from, to)
 }
 
-/// Forward kinematics: model-space rotations and positions of every
-/// joint (parents before children). Pure.
-fn fk_model(trs: &[JointTrs], parents: &[Option<JointId>]) -> (Vec<Quat>, Vec<Vec3>) {
-    let mut model_rot = vec![Quat::IDENTITY; trs.len()];
-    let mut model_pos = vec![Vec3::ZERO; trs.len()];
+/// Reusable forward-kinematics buffers of the IK solvers (design §8.2).
+///
+/// The caller keeps one across calls — hosts hold it in their own state,
+/// the sampler keeps one in its frame scratch — so [`solve_two_bone_ik`]
+/// and [`solve_look_at`] allocate nothing per solve (the same
+/// `*Scratch` contract as the fade shares and the tree weights). Filled
+/// in place: one buffer serves skeletons of any joint count back to
+/// back.
+#[derive(Debug, Default)]
+pub struct FkScratch {
+    /// Model-space rotations of every joint, parents before children.
+    model_rot: Vec<Quat>,
+    /// Model-space positions of every joint, parents before children.
+    model_pos: Vec<Vec3>,
+}
+
+/// Forward kinematics into `buf` (in place): model-space rotations and
+/// positions of every joint (parents before children). Pure.
+fn fk_model(trs: &[JointTrs], parents: &[Option<JointId>], buf: &mut FkScratch) {
+    buf.model_rot.clear();
+    buf.model_rot.resize(trs.len(), Quat::IDENTITY);
+    buf.model_pos.clear();
+    buf.model_pos.resize(trs.len(), Vec3::ZERO);
     for (index, local) in trs.iter().enumerate() {
         let (rotation, origin) = match parents.get(index).copied().flatten() {
             Some(parent) if parent.index() < index => (
-                model_rot[parent.index()] * local.rotation,
-                model_pos[parent.index()] + model_rot[parent.index()] * local.translation,
+                buf.model_rot[parent.index()] * local.rotation,
+                buf.model_pos[parent.index()] + buf.model_rot[parent.index()] * local.translation,
             ),
             _ => (local.rotation, local.translation),
         };
-        model_rot[index] = rotation;
-        model_pos[index] = origin;
+        buf.model_rot[index] = rotation;
+        buf.model_pos[index] = origin;
     }
-    (model_rot, model_pos)
 }
 
 /// The aim that puts the `root → mid → end` chain on `target` (clamped
 /// to arm reach) — or `None` for a non-chain or degenerate geometry.
 /// Pure: validation, the fold and the bend axis kept from the pose.
 fn fold_chain(
-    fk: &(Vec<Quat>, Vec<Vec3>),
+    fk: &FkScratch,
     parents: &[Option<JointId>],
     chain: (usize, usize, usize),
     target: Vec3,
@@ -171,7 +188,11 @@ fn fold_chain(
 ) -> Option<Aim> {
     let (root, mid, end) = chain;
     let bound = root.max(mid).max(end);
-    if bound >= fk.1.len() || parents.len() != fk.1.len() || !target.is_finite() || weight <= 0.0 {
+    if bound >= fk.model_pos.len()
+        || parents.len() != fk.model_pos.len()
+        || !target.is_finite()
+        || weight <= 0.0
+    {
         return None;
     }
     // Chain check: the walk from `end` upward passes `mid`, then `root`.
@@ -196,7 +217,7 @@ fn fold_chain(
     if !found_root {
         return None;
     }
-    let (model_rot, model_pos) = fk;
+    let (model_rot, model_pos) = (&fk.model_rot[..], &fk.model_pos[..]);
     let (u, v) = (
         model_pos[mid] - model_pos[root],
         model_pos[end] - model_pos[mid],
@@ -270,22 +291,24 @@ fn write_aim(trs: &mut [JointTrs], chain: (usize, usize, usize), aim: Aim) {
 /// Rotates `root` and `mid` in their local frames so `end` reaches
 /// `constraint.target` (clamped to arm reach), slerped by the
 /// constraint weight. `parents` is the skeleton parent chain (parents
-/// before children). Returns whether the pose changed; degenerate input
-/// (bad joints, non-chain, zero-length bones, zero-length target
-/// offset, weight `0`) is a strict no-op.
+/// before children); `fk` is the caller's reusable [`FkScratch`] — one
+/// scratch serves every solve of a frame. Returns whether the pose
+/// changed; degenerate input (bad joints, non-chain, zero-length
+/// bones, zero-length target offset, weight `0`) is a strict no-op.
 pub fn solve_two_bone_ik(
     trs: &mut [JointTrs],
     parents: &[Option<JointId>],
     constraint: &TwoBoneIk,
+    fk: &mut FkScratch,
 ) -> bool {
     let chain = (
         constraint.root.index(),
         constraint.mid.index(),
         constraint.end.index(),
     );
-    let fk = fk_model(trs, parents);
+    fk_model(trs, parents, fk);
     let aim = fold_chain(
-        &fk,
+        fk,
         parents,
         chain,
         constraint.target,
@@ -314,8 +337,14 @@ fn parent_model_rot(model_rot: &[Quat], parents: &[Option<JointId>], index: usiz
 }
 
 /// Local rotation that points `look.aim` at `look.target`, or `None`
-/// when the aim is degenerate.
-fn look_at_local(trs: &[JointTrs], parents: &[Option<JointId>], look: &LookAt) -> Option<Quat> {
+/// when the aim is degenerate. `fk` is the caller's [`FkScratch`],
+/// filled for this pose.
+fn look_at_local(
+    trs: &[JointTrs],
+    parents: &[Option<JointId>],
+    look: &LookAt,
+    fk: &mut FkScratch,
+) -> Option<Quat> {
     let index = look.joint.index();
     if index >= trs.len() || parents.len() != trs.len() || look.weight.get() <= 0.0 {
         return None;
@@ -323,26 +352,32 @@ fn look_at_local(trs: &[JointTrs], parents: &[Option<JointId>], look: &LookAt) -
     if !look.target.is_finite() || !axis_ok(look.aim) {
         return None;
     }
-    let (model_rot, model_pos) = fk_model(trs, parents);
+    fk_model(trs, parents, fk);
+    let (model_rot, model_pos) = (&fk.model_rot[..], &fk.model_pos[..]);
     let offset = look.target - model_pos[index];
     let current = model_rot[index] * look.aim;
     if !axis_ok(offset) || !axis_ok(current) {
         return None;
     }
     let delta = arc_rotation(current.normalize(), offset.normalize());
-    let parent = parent_model_rot(&model_rot, parents, index);
+    let parent = parent_model_rot(model_rot, parents, index);
     Some(parent.inverse() * delta * model_rot[index])
 }
 
 /// Solves one look-at against a local-TRS pose.
 ///
 /// Rotates `look.joint` in its parent frame so its local `aim` axis
-/// points at `look.target`, slerped by the weight. Returns whether the
-/// pose changed; degenerate input (joint out of range, weight `0`,
-/// non-finite or zero-length `aim`, zero-length target offset) is a
-/// strict no-op.
-pub fn solve_look_at(trs: &mut [JointTrs], parents: &[Option<JointId>], look: &LookAt) -> bool {
-    let Some(solved) = look_at_local(trs, parents, look) else {
+/// points at `look.target`, slerped by the weight. `fk` is the
+/// caller's reusable [`FkScratch`]. Returns whether the pose changed;
+/// degenerate input (joint out of range, weight `0`, non-finite or
+/// zero-length `aim`, zero-length target offset) is a strict no-op.
+pub fn solve_look_at(
+    trs: &mut [JointTrs],
+    parents: &[Option<JointId>],
+    look: &LookAt,
+    fk: &mut FkScratch,
+) -> bool {
+    let Some(solved) = look_at_local(trs, parents, look, fk) else {
         return false;
     };
     let index = look.joint.index();
@@ -356,22 +391,34 @@ pub fn solve_look_at(trs: &mut [JointTrs], parents: &[Option<JointId>], look: &L
 }
 
 /// Solves one effector against the pose the earlier effectors left.
-fn apply_effector(trs: &mut [JointTrs], parents: &[Option<JointId>], effector: &Effector) {
+fn apply_effector(
+    trs: &mut [JointTrs],
+    parents: &[Option<JointId>],
+    effector: &Effector,
+    fk: &mut FkScratch,
+) {
     match effector {
         Effector::TwoBone(constraint) => {
-            solve_two_bone_ik(trs, parents, constraint);
+            solve_two_bone_ik(trs, parents, constraint, fk);
         }
         Effector::LookAt(look) => {
-            solve_look_at(trs, parents, look);
+            solve_look_at(trs, parents, look, fk);
         }
     }
 }
 
 /// Applies `stack`'s effectors in order to the local-TRS pose — the
-/// pipeline stage (design §8.2, §8.6), shared by every skel sample path.
-pub(crate) fn apply_ik_stack(trs: &mut [JointTrs], parents: &[Option<JointId>], stack: &IkStack) {
+/// pipeline stage (design §8.2, §8.6), shared by every skel sample
+/// path. `fk` is the frame's shared [`FkScratch`]: the stack runs
+/// allocation-free.
+pub(crate) fn apply_ik_stack(
+    trs: &mut [JointTrs],
+    parents: &[Option<JointId>],
+    stack: &IkStack,
+    fk: &mut FkScratch,
+) {
     for effector in &stack.effectors {
-        apply_effector(trs, parents, effector);
+        apply_effector(trs, parents, effector, fk);
     }
 }
 
@@ -427,6 +474,7 @@ mod tests {
                 target,
                 weight: Clamped01::new(weight),
             },
+            &mut FkScratch::default(),
         );
         (trs, parents, moved)
     }
@@ -478,6 +526,8 @@ mod tests {
 
     #[test]
     fn degenerate_and_invalid_chains_never_move() {
+        // One scratch serves every solve of a test — and of a frame.
+        let mut fk = FkScratch::default();
         // Zero-length first bone.
         let (mut trs, parents) = chain(3);
         trs[1].translation = Vec3::ZERO;
@@ -491,6 +541,7 @@ mod tests {
                 target: Vec3::new(1.0, 1.0, 0.0),
                 weight: Clamped01::new(1.0),
             },
+            &mut fk,
         ));
         // End is not a descendant of mid (siblings).
         let (mut trs, mut parents) = chain(3);
@@ -505,6 +556,7 @@ mod tests {
                 target: Vec3::new(1.0, 1.0, 0.0),
                 weight: Clamped01::new(1.0),
             },
+            &mut fk,
         ));
         assert_eq!(trs[0].rotation, Quat::IDENTITY);
     }
@@ -530,7 +582,7 @@ mod tests {
                 }),
             ],
         };
-        apply_ik_stack(&mut trs, &parents, &stack);
+        apply_ik_stack(&mut trs, &parents, &stack, &mut FkScratch::default());
         // The later constraint re-solves the pose the earlier one left.
         let end = model_position(&trs, 2);
         assert!(
@@ -543,6 +595,7 @@ mod tests {
     /// child onto +Y. Weight 0 and a zero axis leave the pose alone.
     #[test]
     fn look_at_aims_the_child_and_a_zero_weight_does_not() {
+        let mut fk = FkScratch::default();
         let (mut trs, parents) = chain(2);
         let aim = LookAt {
             joint: JointId::from_raw(0),
@@ -550,7 +603,7 @@ mod tests {
             aim: Vec3::X,
             weight: Clamped01::new(1.0),
         };
-        assert!(solve_look_at(&mut trs, &parents, &aim));
+        assert!(solve_look_at(&mut trs, &parents, &aim, &mut fk));
         let child = model_position(&trs, 1);
         assert!((child - Vec3::Y).length() < 1e-4, "child at {child:?}");
 
@@ -559,7 +612,7 @@ mod tests {
             weight: Clamped01::new(0.0),
             ..aim
         };
-        assert!(!solve_look_at(&mut trs, &parents, &held));
+        assert!(!solve_look_at(&mut trs, &parents, &held, &mut fk));
         assert_eq!(trs[0].rotation, Quat::IDENTITY);
         assert!(!solve_look_at(
             &mut trs,
@@ -568,6 +621,7 @@ mod tests {
                 aim: Vec3::ZERO,
                 ..aim
             },
+            &mut fk,
         ));
         assert_eq!(trs[0].rotation, Quat::IDENTITY);
     }
@@ -587,12 +641,63 @@ mod tests {
                 aim: Vec3::X,
                 weight: Clamped01::new(1.0),
             },
+            &mut FkScratch::default(),
         );
         assert!(moved);
         let child = model_position(&trs, 2);
         assert!(
             (child - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-4,
             "child at {child:?}"
+        );
+    }
+
+    /// The scratch is filled in place: one buffer serves solves of
+    /// different skeletons back to back (§8.2, no per-frame allocs).
+    #[test]
+    fn one_fk_scratch_serves_solves_of_any_skeleton() {
+        let mut fk = FkScratch::default();
+        let constraint = TwoBoneIk {
+            root: JointId::from_raw(0),
+            mid: JointId::from_raw(1),
+            end: JointId::from_raw(2),
+            target: Vec3::new(1.0, 1.0, 0.0),
+            weight: Clamped01::new(1.0),
+        };
+        let (mut short, short_parents) = chain(3);
+        assert!(solve_two_bone_ik(
+            &mut short,
+            &short_parents,
+            &constraint,
+            &mut fk
+        ));
+        assert_eq!(fk.model_pos.len(), 3);
+        // A different skeleton refills the same buffer in place.
+        let (mut long, long_parents) = chain(6);
+        assert!(solve_look_at(
+            &mut long,
+            &long_parents,
+            &LookAt {
+                joint: JointId::from_raw(5),
+                target: Vec3::new(6.0, 1.0, 0.0),
+                aim: Vec3::X,
+                weight: Clamped01::new(1.0),
+            },
+            &mut fk,
+        ));
+        assert_eq!(fk.model_pos.len(), 6);
+        // And back down: the refill never carries stale joints.
+        let (mut short, short_parents) = chain(3);
+        assert!(solve_two_bone_ik(
+            &mut short,
+            &short_parents,
+            &constraint,
+            &mut fk
+        ));
+        assert_eq!(fk.model_pos.len(), 3);
+        let end = model_position(&short, 2);
+        assert!(
+            (end - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-4,
+            "end at {end:?}"
         );
     }
 }

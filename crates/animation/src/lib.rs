@@ -74,7 +74,7 @@ use events::{CursorStep, emit_step};
 
 mod ik;
 use ik::apply_ik_stack;
-pub use ik::{Effector, IkStack, LookAt, TwoBoneIk, solve_look_at, solve_two_bone_ik};
+pub use ik::{Effector, FkScratch, IkStack, LookAt, TwoBoneIk, solve_look_at, solve_two_bone_ik};
 
 mod retarget;
 pub use retarget::RetargetMap;
@@ -599,6 +599,8 @@ struct AnimScratch {
     pose_b: BlendedPose,
     tree_poses: Vec<BlendedPose>,
     tree_weights: tree_eff::WeightsScratch,
+    /// FK buffers of the IK solvers (§8.2): one solve allocates nothing.
+    ik_fk: ik::FkScratch,
     /// Overlay-layer root-motion parts, applied after the crossfade mix.
     layer_motion: Vec<RootMotionPart>,
     /// Tree roots whose contract failed this frame: their pose is bad skin,
@@ -2860,7 +2862,12 @@ fn finish_pose(
     // stack and before the ragdoll blend — where physics weights are up,
     // physics wins.
     if let Some(stack) = lanes.ik.and_then(|lane| lane.get(entity)) {
-        apply_ik_stack(&mut scratch.pose_a.trs, &skeleton.parents, stack);
+        apply_ik_stack(
+            &mut scratch.pose_a.trs,
+            &skeleton.parents,
+            stack,
+            &mut scratch.ik_fk,
+        );
     }
     apply_ragdoll(blend, &mut scratch.pose_a);
     scratch.skel_locals.clear();

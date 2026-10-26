@@ -345,7 +345,10 @@ playback-входы отказывают на корне с деревом, сн
 (бывш. `set_skel_layer`) принимает весь стек `SkelLayerStack` — прямые
 вставки `SkelLayer` в лейн сэмплер больше не читает, слой молча перестаёт
 работать, — `IkStack.constraints: Vec<TwoBoneIk>` стал
-`effectors: Vec<Effector>`, и `set_skel_ik` принимает этот список, а
+`effectors: Vec<Effector>`, и `set_skel_ik` принимает этот список,
+`set_skel_ik(root, [])` чинит стек (корень возвращается к «без стека»),
+а `solve_two_bone_ik`/`solve_look_at` принимают переиспользуемый
+scratch (`&mut FkScratch`) — солверы не аллоцируют, и
 `compose_model_matrices`
 теперь пишет матрицы в caller-owned буфер:
 `compose_model_matrices(.., out: &mut Vec<Mat4>) -> Option<usize>`. Окно открывает `ornis::run`
