@@ -1,7 +1,8 @@
-//! Two-bone IK (`docs/animation-design.md` §8.2): the joint-aimed
-//! constraint, its stateless solver and the ordered per-root stack. A
+//! IK effectors (`docs/animation-design.md` §8.2, §8.6): the two-bone
+//! chain, the single-joint look-at and the ordered per-root stack. A
 //! separate module from the pose pipeline because authoring data,
 //! chain geometry and the sample stage are different responsibilities.
+//! Full-body IK and a control rig are not this layer.
 
 use glam::{Quat, Vec3};
 
@@ -11,6 +12,10 @@ use crate::{JointId, JointTrs};
 
 /// Bone-length floor for the solver: degenerate chains never move.
 const ZERO_LENGTH: f32 = 1e-6;
+
+/// Squared length below which an aim axis or a target offset is not a
+/// direction. Shared by the look-at solver and [`Effector::installable`].
+const AIM_EPSILON_SQ: f32 = 1e-12;
 
 /// One two-bone IK constraint (design §8.2): aim the `root → mid → end`
 /// chain (knee/elbow chains) at `target`.
@@ -37,19 +42,84 @@ pub struct TwoBoneIk {
     pub weight: Clamped01,
 }
 
-/// Ordered IK constraints of one skeleton root — the hot lane on the
+/// One authored aim on a skeleton root (design §8.6).
+///
+/// `TwoBone` folds a knee/elbow chain; `LookAt` turns one joint so a
+/// local axis points at a target. [`IkStack`] applies them in order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Effector {
+    /// Two-bone chain (knee/elbow), design §8.2.
+    TwoBone(TwoBoneIk),
+    /// Single joint aiming a local axis at a point, design §8.6.
+    LookAt(LookAt),
+}
+
+impl Effector {
+    /// Whether installing this effector on a skeleton of `joints` bones
+    /// is well-formed: three distinct in-range chain joints and a finite
+    /// target, or an in-range look-at joint, a finite target and a finite
+    /// non-zero aim. Chain ancestry is checked when the solver runs.
+    pub fn installable(&self, joints: usize) -> bool {
+        match self {
+            Self::TwoBone(chain) => chain.installable(joints),
+            Self::LookAt(look) => look.installable(joints),
+        }
+    }
+}
+
+impl TwoBoneIk {
+    /// In-range distinct joints and a finite target (design §8.2).
+    fn installable(&self, joints: usize) -> bool {
+        let (root, mid, end) = (self.root.index(), self.mid.index(), self.end.index());
+        root < joints
+            && mid < joints
+            && end < joints
+            && root != mid
+            && mid != end
+            && root != end
+            && self.target.is_finite()
+    }
+}
+
+/// Aim `joint`'s local `aim` axis at `target` (design §8.6).
+///
+/// Pure data: [`solve_look_at`] is a stateless function of
+/// `(pose, target, aim)`. `aim` is a direction in the joint's local
+/// frame; its length does not matter past a non-zero finite vector.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LookAt {
+    /// Joint whose local rotation is aimed.
+    pub joint: JointId,
+    /// Goal position in the skeleton model space of the root (the seam
+    /// to world space is the host's, as with [`TwoBoneIk::target`]).
+    pub target: Vec3,
+    /// Local-space axis that should point at `target`.
+    pub aim: Vec3,
+    /// Blend strength in `[0, 1]`: `1` writes the solved local rotation,
+    /// `0` leaves the joint alone.
+    pub weight: Clamped01,
+}
+
+impl LookAt {
+    /// In-range joint, finite target, finite non-zero aim.
+    fn installable(&self, joints: usize) -> bool {
+        self.joint.index() < joints && self.target.is_finite() && axis_ok(self.aim)
+    }
+}
+
+/// Ordered IK effectors of one skeleton root — the hot lane on the
 /// root (`Clone + Send + Sync` per the contract).
 ///
 /// Installed explicitly (`SmartStore::insert` / `set_skel_ik`); a root
-/// without the stack is never touched. Constraints apply in vector
-/// order after the tree/layer blend and **before** the ragdoll blend
-/// (design §8.2: where physics weights are up, physics wins — IK never
-/// argues with ragdoll).
+/// without the stack is never touched. Effectors apply in vector order
+/// after the tree/layer blend and **before** the ragdoll blend (design
+/// §8.2: where physics weights are up, physics wins — IK never argues
+/// with ragdoll).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct IkStack {
-    /// Constraints applied in order; later ones solve the pose the
-    /// earlier ones produced.
-    pub constraints: Vec<TwoBoneIk>,
+    /// Effectors applied in order; later ones solve the pose the earlier
+    /// ones produced.
+    pub effectors: Vec<Effector>,
 }
 
 /// The aim of one chain: the model-space parent rotations of the base
@@ -228,11 +298,80 @@ pub fn solve_two_bone_ik(
     true
 }
 
-/// Applies `stack`'s constraints in order to the local-TRS pose — the
-/// pipeline stage (design §8.2), shared by every skel sample path.
+/// A finite direction: not NaN and longer than [`AIM_EPSILON_SQ`].
+fn axis_ok(axis: Vec3) -> bool {
+    axis.is_finite() && axis.length_squared() > AIM_EPSILON_SQ
+}
+
+/// Model-space rotation of `index`'s parent (`IDENTITY` at a root).
+fn parent_model_rot(model_rot: &[Quat], parents: &[Option<JointId>], index: usize) -> Quat {
+    match parents.get(index).copied().flatten() {
+        Some(parent) if parent.index() < index && parent.index() < model_rot.len() => {
+            model_rot[parent.index()]
+        }
+        _ => Quat::IDENTITY,
+    }
+}
+
+/// Local rotation that points `look.aim` at `look.target`, or `None`
+/// when the aim is degenerate.
+fn look_at_local(trs: &[JointTrs], parents: &[Option<JointId>], look: &LookAt) -> Option<Quat> {
+    let index = look.joint.index();
+    if index >= trs.len() || parents.len() != trs.len() || look.weight.get() <= 0.0 {
+        return None;
+    }
+    if !look.target.is_finite() || !axis_ok(look.aim) {
+        return None;
+    }
+    let (model_rot, model_pos) = fk_model(trs, parents);
+    let offset = look.target - model_pos[index];
+    let current = model_rot[index] * look.aim;
+    if !axis_ok(offset) || !axis_ok(current) {
+        return None;
+    }
+    let delta = arc_rotation(current.normalize(), offset.normalize());
+    let parent = parent_model_rot(&model_rot, parents, index);
+    Some(parent.inverse() * delta * model_rot[index])
+}
+
+/// Solves one look-at against a local-TRS pose.
+///
+/// Rotates `look.joint` in its parent frame so its local `aim` axis
+/// points at `look.target`, slerped by the weight. Returns whether the
+/// pose changed; degenerate input (joint out of range, weight `0`,
+/// non-finite or zero-length `aim`, zero-length target offset) is a
+/// strict no-op.
+pub fn solve_look_at(trs: &mut [JointTrs], parents: &[Option<JointId>], look: &LookAt) -> bool {
+    let Some(solved) = look_at_local(trs, parents, look) else {
+        return false;
+    };
+    let index = look.joint.index();
+    let weight = look.weight.get();
+    trs[index].rotation = if weight >= 1.0 {
+        solved
+    } else {
+        trs[index].rotation.slerp(solved, weight)
+    };
+    true
+}
+
+/// Solves one effector against the pose the earlier effectors left.
+fn apply_effector(trs: &mut [JointTrs], parents: &[Option<JointId>], effector: &Effector) {
+    match effector {
+        Effector::TwoBone(constraint) => {
+            solve_two_bone_ik(trs, parents, constraint);
+        }
+        Effector::LookAt(look) => {
+            solve_look_at(trs, parents, look);
+        }
+    }
+}
+
+/// Applies `stack`'s effectors in order to the local-TRS pose — the
+/// pipeline stage (design §8.2, §8.6), shared by every skel sample path.
 pub(crate) fn apply_ik_stack(trs: &mut [JointTrs], parents: &[Option<JointId>], stack: &IkStack) {
-    for constraint in &stack.constraints {
-        solve_two_bone_ik(trs, parents, constraint);
+    for effector in &stack.effectors {
+        apply_effector(trs, parents, effector);
     }
 }
 
@@ -374,21 +513,21 @@ mod tests {
     fn stacks_apply_in_order() {
         let (mut trs, parents) = chain(3);
         let stack = IkStack {
-            constraints: vec![
-                TwoBoneIk {
+            effectors: vec![
+                Effector::TwoBone(TwoBoneIk {
                     root: JointId::from_raw(0),
                     mid: JointId::from_raw(1),
                     end: JointId::from_raw(2),
                     target: Vec3::new(1.0, 1.0, 0.0),
                     weight: Clamped01::new(1.0),
-                },
-                TwoBoneIk {
+                }),
+                Effector::TwoBone(TwoBoneIk {
                     root: JointId::from_raw(0),
                     mid: JointId::from_raw(1),
                     end: JointId::from_raw(2),
                     target: Vec3::new(1.0, -1.0, 0.0),
                     weight: Clamped01::new(1.0),
-                },
+                }),
             ],
         };
         apply_ik_stack(&mut trs, &parents, &stack);
@@ -397,6 +536,63 @@ mod tests {
         assert!(
             (end - Vec3::new(1.0, -1.0, 0.0)).length() < 1e-4,
             "end at {end:?}"
+        );
+    }
+
+    /// Look-at on the chain root: local +X toward world +Y swings the
+    /// child onto +Y. Weight 0 and a zero axis leave the pose alone.
+    #[test]
+    fn look_at_aims_the_child_and_a_zero_weight_does_not() {
+        let (mut trs, parents) = chain(2);
+        let aim = LookAt {
+            joint: JointId::from_raw(0),
+            target: Vec3::Y,
+            aim: Vec3::X,
+            weight: Clamped01::new(1.0),
+        };
+        assert!(solve_look_at(&mut trs, &parents, &aim));
+        let child = model_position(&trs, 1);
+        assert!((child - Vec3::Y).length() < 1e-4, "child at {child:?}");
+
+        let (mut trs, parents) = chain(2);
+        let held = LookAt {
+            weight: Clamped01::new(0.0),
+            ..aim
+        };
+        assert!(!solve_look_at(&mut trs, &parents, &held));
+        assert_eq!(trs[0].rotation, Quat::IDENTITY);
+        assert!(!solve_look_at(
+            &mut trs,
+            &parents,
+            &LookAt {
+                aim: Vec3::ZERO,
+                ..aim
+            },
+        ));
+        assert_eq!(trs[0].rotation, Quat::IDENTITY);
+    }
+
+    /// The solved rotation is written in the parent frame: a chain
+    /// already bent onto +Y still aims the child's local +X at world +X.
+    #[test]
+    fn look_at_writes_in_the_parent_frame() {
+        let (mut trs, parents) = chain(3);
+        trs[0].rotation = Quat::from_rotation_arc(Vec3::X, Vec3::Y);
+        let moved = solve_look_at(
+            &mut trs,
+            &parents,
+            &LookAt {
+                joint: JointId::from_raw(1),
+                target: Vec3::new(1.0, 1.0, 0.0),
+                aim: Vec3::X,
+                weight: Clamped01::new(1.0),
+            },
+        );
+        assert!(moved);
+        let child = model_position(&trs, 2);
+        assert!(
+            (child - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-4,
+            "child at {child:?}"
         );
     }
 }

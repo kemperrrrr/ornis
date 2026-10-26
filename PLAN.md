@@ -166,9 +166,10 @@
      IK → ретаргет → root motion (гейт B закрыт: дельта на хоста).
      Ретаргет играет и деревья; root motion собирает кроссфейд, листья
      дерева и слои и резолвит корень через `RetargetMap`
-     (`docs/animation-design.md` §8.3–§8.4). Морфы — #153, остаются
-     отложенными. Дальше: motion matching, distance matching / warping,
-     язык эффекторов (look-at) поверх two-bone IK.
+     (`docs/animation-design.md` §8.3–§8.4). Motion matching, дистанция
+     и warp — §8.5. Язык эффекторов (`Effector::TwoBone` | `LookAt`) —
+     §8.6; full-body IK и control rig в этот слой не входят. Морфы —
+     #153, остаются отложенными.
   5. **Перф-бэклог горячего пути. ✅ Сделано (2026-10-21).** `tick_fades` —
      `frozen.contains` на каждую запись, O(fades × physics bodies) на кадр
      (`crates/animation/src/lib.rs:1891`); скелетный путь даёт ~5–7 пер-кадровых
@@ -229,12 +230,12 @@
      (фаза клипа по меткам при переходах машин, `set_clip_sync_marks` —
      `docs/animation-design.md` §7.5). blend2d ✅ (`TreeChild2d` +
      `Blend2d` на полной решётке row-major, §7.1/7.2).
-  8. **Motion matching — первый срез (§8.5).** `match_motion`:
+  8. **Motion matching — первый срез ✅ (§8.5).** `match_motion`:
      детерминированный выбор кадра по квадрату ошибки модельных позиций
      feature-суставов и скорости корня (root motion за окно `step`).
      База — список `MotionSample`, который задаёт хост; инерциализация
      перехода ещё не делается (хост кроссфейдит выбранный кадр).
-  9. **Distance matching / motion warping — первый срез (§8.5).**
+  9. **Distance matching / motion warping — первый срез ✅ (§8.5).**
      `time_at_distance` — фаза по пройденной дистанции корневого трека
      (ломаная ключей). `warp_weight` — сила two-bone IK внутри окна
      контакта (`start`/`contact`/`end`); деформация позы — существующий
@@ -264,6 +265,12 @@
        — стек `SkelLayer` на корень, снизу вверх, `set_skel_layers` заменяет
        стек целиком. Слои остаются только скелетными: `SkelLayer` —
        единственный тип слоя, объектного в модели нет.
+  11. **Язык эффекторов (look-at) — первый срез ✅ (§8.6).**
+      `IkStack.effectors: Vec<Effector>` — `TwoBone` и `LookAt` в одном
+      порядке применения. `LookAt` доворачивает локальную ось сустава на
+      цель (`solve_look_at`, запись в кадре родителя). Фасад
+      `set_skel_ik` отклоняет битый эффектор до любой записи. Full-body
+      IK (CCD/FABRIK) и control rig не входят.
 
 ## Дорожная карта (по приоритетам)
 

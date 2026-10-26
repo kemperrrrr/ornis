@@ -74,7 +74,7 @@ use events::{CursorStep, emit_step};
 
 mod ik;
 use ik::apply_ik_stack;
-pub use ik::{IkStack, TwoBoneIk, solve_two_bone_ik};
+pub use ik::{Effector, IkStack, LookAt, TwoBoneIk, solve_look_at, solve_two_bone_ik};
 
 mod retarget;
 pub use retarget::RetargetMap;
