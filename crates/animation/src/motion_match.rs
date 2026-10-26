@@ -246,7 +246,11 @@ fn sample_cost(
         0.0
     };
     let vel = velocity - search.query.velocity;
-    Some(cost + weight * vel.length_squared())
+    let total = cost + weight * vel.length_squared();
+    // A non-finite cost (NaN/inf query or clip channels) never qualifies:
+    // the first such candidate would stick as `best` — `cost < NaN` never
+    // displaces it (§8.5, the `match_motion` contract).
+    total.is_finite().then_some(total)
 }
 
 /// Root linear velocity of `sample` over `step` seconds, from the clip's
@@ -378,27 +382,35 @@ mod tests {
         (store, ids)
     }
 
-    #[test]
-    fn the_closer_pose_wins_and_ties_keep_the_earlier_sample() {
-        let (store, ids) = lane(vec![clip_at(0.0, 2.0), clip_at(10.0, 10.0)]);
+    /// The shared [`match_motion`] stage of the matcher tests (rustqual
+    /// DRY-001 keeps the fixture in one place): a lane of two clips, one
+    /// feature joint and the candidate list built from `(clip, time)`
+    /// pairs. Answers the hit with the lane ids.
+    fn search_two(
+        clips: [(f32, f32); 2],
+        candidates: [(usize, f32); 2],
+        positions: Vec<Vec3>,
+        velocity: Vec3,
+        velocity_weight: f32,
+    ) -> (Vec<Entity>, Option<MotionHit>) {
+        let (store, ids) = lane(vec![
+            clip_at(clips[0].0, clips[0].1),
+            clip_at(clips[1].0, clips[1].1),
+        ]);
         let clips = store.read_cold_lane::<SkelClip>().expect("clips");
         let skeleton = skeleton();
         let joints = [JointId::from_raw(0)];
-        let samples = [
-            MotionSample {
-                clip: ClipId(ids[0]),
-                time: 0.0,
+        let samples: Vec<MotionSample> = candidates
+            .into_iter()
+            .map(|(clip, time)| MotionSample {
+                clip: ClipId(ids[clip]),
+                time,
                 looping: false,
-            },
-            MotionSample {
-                clip: ClipId(ids[1]),
-                time: 0.0,
-                looping: false,
-            },
-        ];
+            })
+            .collect();
         let query = MotionQuery {
-            positions: vec![Vec3::new(10.0, 0.0, 0.0)],
-            velocity: Vec3::ZERO,
+            positions,
+            velocity,
         };
         let hit = match_motion(&MotionSearch {
             clips: &clips,
@@ -407,39 +419,32 @@ mod tests {
             joints: &joints,
             query: &query,
             step: 0.0,
-            velocity_weight: 1.0,
-        })
-        .expect("a candidate");
+            velocity_weight,
+        });
+        (ids, hit)
+    }
+
+    #[test]
+    fn the_closer_pose_wins_and_ties_keep_the_earlier_sample() {
+        let (ids, hit) = search_two(
+            [(0.0, 2.0), (10.0, 10.0)],
+            [(0, 0.0), (1, 0.0)],
+            vec![Vec3::new(10.0, 0.0, 0.0)],
+            Vec3::ZERO,
+            1.0,
+        );
+        let hit = hit.expect("a candidate");
         assert_eq!(hit.clip, ClipId(ids[1]));
         assert!(hit.cost < 1e-6, "cost {}", hit.cost);
 
-        let tied = [
-            MotionSample {
-                clip: ClipId(ids[1]),
-                time: 0.0,
-                looping: false,
-            },
-            MotionSample {
-                clip: ClipId(ids[1]),
-                time: 0.5,
-                looping: false,
-            },
-        ];
-        let query = MotionQuery {
-            positions: vec![Vec3::new(10.0, 0.0, 0.0)],
-            velocity: Vec3::ZERO,
-        };
-        let hit = match_motion(&MotionSearch {
-            clips: &clips,
-            skeleton: &skeleton,
-            samples: &tied,
-            joints: &joints,
-            query: &query,
-            step: 0.0,
-            velocity_weight: 0.0,
-        })
-        .expect("tie");
-        assert_eq!(hit.time, 0.0);
+        let (_, tied) = search_two(
+            [(0.0, 2.0), (10.0, 10.0)],
+            [(1, 0.0), (1, 0.5)],
+            vec![Vec3::new(10.0, 0.0, 0.0)],
+            Vec3::ZERO,
+            0.0,
+        );
+        assert_eq!(tied.expect("tie").time, 0.0);
     }
 
     #[test]
@@ -536,5 +541,33 @@ mod tests {
             end: 1.0,
         };
         assert_eq!(warp_weight(0.4, broken), 0.0);
+    }
+
+    /// A non-finite cost never qualifies (§8.5): a NaN-pose sample does
+    /// not stick as `best` (`cost < NaN` never displaces it), and an
+    /// all-NaN query answers `None` — the [`match_motion`] contract.
+    #[test]
+    fn a_non_finite_cost_never_qualifies() {
+        let (ids, hit) = search_two(
+            [(f32::NAN, f32::NAN), (10.0, 10.0)],
+            [(0, 0.0), (1, 0.0)],
+            vec![Vec3::new(10.0, 0.0, 0.0)],
+            Vec3::ZERO,
+            0.0,
+        );
+        let hit = hit.expect("the finite candidate");
+        assert_eq!(
+            hit.clip,
+            ClipId(ids[1]),
+            "the NaN-pose sample must not stick"
+        );
+        let (_, all_nan) = search_two(
+            [(f32::NAN, f32::NAN), (10.0, 10.0)],
+            [(0, 0.0), (1, 0.0)],
+            vec![Vec3::NAN],
+            Vec3::ZERO,
+            0.0,
+        );
+        assert!(all_nan.is_none());
     }
 }

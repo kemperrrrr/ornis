@@ -612,11 +612,20 @@ pub fn set_skel_ik(store: &mut SmartStore, root: Entity, effectors: Vec<Effector
     let count = skeleton.parents.len();
     drop(skeletons);
     let valid = effectors.iter().all(|effector| effector.installable(count));
-    if valid {
-        store.register::<IkStack>();
+    if !valid {
+        return false;
+    }
+    store.register::<IkStack>();
+    if effectors.is_empty() {
+        // The documented clear («an empty stack clears it»): the root
+        // goes back to "no stack, never touched" (design §8.2).
+        if let Some(mut stacks) = store.write_lane::<IkStack>() {
+            stacks.remove(root);
+        }
+    } else {
         store.insert(root, IkStack { effectors });
     }
-    valid
+    true
 }
 
 /// Installs the [`RetargetMap`] of `target` — the explicit «source joint →
@@ -2195,7 +2204,10 @@ mod tests {
         drop(lane);
         assert!(set_skel_ik(&mut store, root, Vec::new()));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
-        assert!(lane.get(root).expect("stack kept").effectors.is_empty());
+        assert!(
+            lane.get(root).is_none(),
+            "an empty set clears the stack («an empty stack clears it»)"
+        );
     }
 
     /// A zero look-at axis is not an aim: the facade writes nothing.
