@@ -41,20 +41,22 @@ pub(crate) struct WeightsScratch {
 ///
 /// A missing tree, or one whose contract [`crate::tree::eval_tree`] would
 /// read as bad skin, answers `1.0` everywhere: the cursors' own weights
-/// stand alone.
+/// stand alone. The flag is `false` in that case — event emit still uses
+/// the `1.0` weights (§8.1), while root motion treats the tree as no
+/// contribution (§8.4, a broken tree publishes no pose).
 pub(crate) fn leaf_effective_weights<'a>(
     scratch: &'a mut WeightsScratch,
     tree: Option<&SkelTree>,
     player: &SkelTreePlayer,
-) -> &'a [f32] {
+) -> (&'a [f32], bool) {
     if let Some(tree) = tree
         && eff_weights(scratch, tree, player).is_some()
     {
-        return &scratch.leaves;
+        return (&scratch.leaves, true);
     }
     scratch.leaves.clear();
     scratch.leaves.resize(player.leaves.len(), 1.0);
-    &scratch.leaves
+    (&scratch.leaves, false)
 }
 
 /// The [`leaf_effective_weights`] walk over one tree; `None` = the tree

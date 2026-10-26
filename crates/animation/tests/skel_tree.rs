@@ -12,8 +12,8 @@ mod common;
 use common::*;
 use glam::Vec3;
 use ornis_animation::{
-    ClipId, JointMask, MaskId, SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer,
-    TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
+    ClipId, JointId, JointMask, MaskId, RetargetMap, SkelLayer, SkelLayerStack, SkelPlayer,
+    SkelTree, SkelTreePlayer, TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
 };
 use ornis_core::Engine;
 use ornis_core::units::Clamped01;
@@ -421,4 +421,35 @@ fn ignored_skel_player_holds_its_clock() {
             .get();
         assert_eq!(time, 0.0, "the ignored cursor must not advance");
     }
+}
+
+/// A tree leaf authored on the source skeleton plays through the root's
+/// [`RetargetMap`]: joint 0 of the clip lands on joint 1, translation
+/// scaled by the baked rest-length ratio (§8.3).
+#[test]
+fn a_tree_leaf_samples_through_the_retarget_map() {
+    let mut engine = engine();
+    let clip = add_clip(
+        &mut engine,
+        clip("source", vec![constant(0, Vec3::new(4.0, 0.0, 0.0))]),
+    );
+    let root = rig(&mut engine, 2);
+    install(
+        &mut engine,
+        root,
+        SkelTree {
+            nodes: vec![TreeNodeDef::Clip { clip }],
+            params: Vec::new(),
+        },
+    );
+    store_mut(&mut engine).insert_cold(
+        root,
+        RetargetMap {
+            joints: vec![Some(JointId::from_raw(1))],
+            scales: vec![2.0],
+        },
+    );
+    engine.run_frame(0.1);
+    expect_origin(&engine, root, 0, Vec3::ZERO);
+    expect_origin(&engine, root, 1, Vec3::new(8.0, 0.0, 0.0));
 }

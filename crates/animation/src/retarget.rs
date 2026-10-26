@@ -6,8 +6,10 @@
 //! sampled local channels land on the mapped target joint — rotation and
 //! scale as authored, translation scaled by the rest-bone length ratio
 //! (§8.3 «Перенос»). A `None` entry leaves the target joint at rest.
-//! First slice: the skeletal [`crate::SkelPlayer`] path; hierarchical node
-//! writes stay untouched (no node re-binds).
+//! The same map drives every skeletal contributor on the target root:
+//! the base [`crate::SkelPlayer`], its crossfade, overlay layers and
+//! [`crate::SkelTree`] leaves. Hierarchical node writes stay untouched
+//! (no node re-binds).
 
 use crate::{JointId, Skeleton};
 

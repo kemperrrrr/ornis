@@ -4,9 +4,10 @@
 //! variable pass and consume on the fixed tick).
 
 use glam::{Quat, Vec3};
+use ornis_core::Entity;
 
 use crate::events::CursorStep;
-use crate::{JointId, JointTrack, SkelClip, Skeleton};
+use crate::{JointId, JointTrack, RetargetMap, SkelClip, Skeleton};
 
 /// Steps below this read as no step (float noise).
 const STEP_EPSILON: f32 = 1.0e-6;
@@ -26,6 +27,11 @@ const MAX_PIECES: u32 = 256;
 /// or C-style: accumulate in the variable pass and consume on the fixed
 /// tick (§8.4 C).
 ///
+/// The recorded delta is the pose's root contributors folded the same way
+/// the pose is: crossfade mix, then the tree's effective-weight fold, then
+/// overlay layers bottom-up (§8.4). A retarget scales the translation by
+/// the mapped root bone's rest-length ratio.
+///
 /// `Clone + Send + Sync` per the hot-lane contract.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RootMotionDelta {
@@ -42,6 +48,66 @@ impl RootMotionDelta {
         translation: Vec3::ZERO,
         rotation: Quat::IDENTITY,
     };
+
+    /// Pulls the delta toward none by `weight`: translation scales,
+    /// rotation slerps from identity. A non-positive or non-finite
+    /// `weight` is no motion — the same answer as a zero player weight.
+    pub(crate) fn scaled(self, weight: f32) -> Self {
+        if !weight.is_finite() || weight <= 0.0 {
+            return Self::IDENTITY;
+        }
+        Self {
+            translation: self.translation * weight,
+            rotation: Quat::IDENTITY.slerp(self.rotation, weight),
+        }
+    }
+
+    /// `self·(1 − progress) + to·progress`, the crossfade and the layer
+    /// overlay (a layer lerps the accumulated delta toward its own).
+    /// A non-finite or non-positive `progress` keeps `self`; `progress ≥ 1`
+    /// takes `to`.
+    pub(crate) fn mix(self, to: Self, progress: f32) -> Self {
+        if !progress.is_finite() || progress <= 0.0 {
+            return self;
+        }
+        if progress >= 1.0 {
+            return to;
+        }
+        Self {
+            translation: self.translation.lerp(to.translation, progress),
+            rotation: self.rotation.slerp(to.rotation, progress),
+        }
+    }
+
+    /// Folds `other` into a running blend at relative `weight`, the same
+    /// renormalized share as [`crate::blend::BlendedPose::fold_pose`].
+    /// `total` starts at `0.0`. Non-positive weights are a no-op, so the
+    /// first live contributor takes the accumulator whole.
+    pub(crate) fn fold(&mut self, other: Self, weight: f32, total: &mut f32) {
+        if !weight.is_finite() || weight <= 0.0 {
+            return;
+        }
+        let next = *total + weight;
+        let share = weight / next;
+        *total = next;
+        *self = self.mix(other, share);
+    }
+}
+
+/// One overlay layer's root-motion contribution, recorded while the layer
+/// cursor steps and applied after the crossfade mix (§8.4: layers sit on
+/// top of the blended base, bottom-up).
+///
+/// `delta` is the layer clip's full (weight-1) root motion; `weight` is
+/// `player.weight · mask[root]`, the same factor the pose overlay uses.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RootMotionPart {
+    /// Skeleton root the layer overlays.
+    pub(crate) entity: Entity,
+    /// Overlay factor in `0..=1` (`player.weight · mask[root]`).
+    pub(crate) weight: f32,
+    /// Full root-motion delta of the layer clip over this frame.
+    pub(crate) delta: RootMotionDelta,
 }
 
 /// Integrates `root`'s channels over `cursor`'s step — the frame's
@@ -54,10 +120,18 @@ impl RootMotionDelta {
 /// nothing). A missing clip, root joint or track reads as no motion, as
 /// does a step past [`MAX_PIECES`] clip loops after the pieces already
 /// walked.
+///
+/// `map` resolves the target root onto the source clip (§8.4): the first
+/// track whose source joint the map sends to `root` wins (the same
+/// first-track rule as [`crate::blend::sample_joints`]), and its
+/// translation delta is scaled by that pair's rest-length ratio. Without
+/// a map the track is the one authored on `root` itself. A map that names
+/// no source bone for `root` is no motion — the seam stays explicit.
 pub(crate) fn root_motion(
     clip: Option<&SkelClip>,
     cursor: Option<CursorStep>,
     root: Option<JointId>,
+    map: Option<&RetargetMap>,
     weight: f32,
 ) -> RootMotionDelta {
     let (Some(clip), Some(cursor), Some(root)) = (clip, cursor, root) else {
@@ -66,16 +140,52 @@ pub(crate) fn root_motion(
     if cursor.duration <= 0.0 {
         return RootMotionDelta::IDENTITY;
     }
-    let Some(track) = clip.tracks.iter().find(|track| track.joint == root) else {
+    let Some((track, scale)) = root_track(clip, root, map) else {
         return RootMotionDelta::IDENTITY;
     };
     let mut translation = Vec3::ZERO;
     let mut rotation = Quat::IDENTITY;
     walk(track, cursor, &mut translation, &mut rotation);
     RootMotionDelta {
-        translation: translation * weight,
-        rotation: Quat::IDENTITY.slerp(rotation, weight),
+        translation: translation * scale,
+        rotation,
     }
+    .scaled(weight)
+}
+
+/// The first clip track that drives `root`, plus the translation scale
+/// the retarget applies to it. `None` when no track does.
+fn root_track<'a>(
+    clip: &'a SkelClip,
+    root: JointId,
+    map: Option<&RetargetMap>,
+) -> Option<(&'a JointTrack, f32)> {
+    clip.tracks.iter().find_map(|track| {
+        let scale = track_scale(track, root, map)?;
+        Some((track, scale))
+    })
+}
+
+/// Translation scale of `track` when it drives the target `root`: `1.0`
+/// with no map (and only when the track is authored on `root`), the
+/// mapped pair's scale otherwise. `None` when this track does not drive
+/// `root`.
+fn track_scale(track: &JointTrack, root: JointId, map: Option<&RetargetMap>) -> Option<f32> {
+    let Some(map) = map else {
+        return (track.joint == root).then_some(1.0);
+    };
+    let source = track.joint.index();
+    let target = map.joints.get(source).copied().flatten()?;
+    if target != root {
+        return None;
+    }
+    Some(
+        map.scales
+            .get(source)
+            .copied()
+            .filter(|scale| scale.is_finite())
+            .unwrap_or(1.0),
+    )
 }
 
 /// Accumulates every piece of the cursor step into the running deltas.
@@ -158,7 +268,11 @@ mod tests {
     use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
 
     use super::*;
-    use crate::{ClipId, Key, KeyTrack, SkelPlayer, advance_skel_players};
+    use crate::{
+        ClipId, JointMask, JointTrack, Key, KeyTrack, MaskId, RetargetMap, SkelFade, SkelLayer,
+        SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam,
+        advance_skel_players,
+    };
 
     fn clip_over(translation: KeyTrack<Vec3>, rotation: KeyTrack<Quat>) -> SkelClip {
         SkelClip {
@@ -201,7 +315,7 @@ mod tests {
     }
 
     fn run(clip: &SkelClip, cursor: Option<CursorStep>, weight: f32) -> RootMotionDelta {
-        root_motion(Some(clip), cursor, Some(JointId::from_raw(0)), weight)
+        root_motion(Some(clip), cursor, Some(JointId::from_raw(0)), None, weight)
     }
 
     #[test]
@@ -264,20 +378,20 @@ mod tests {
         let root = Some(JointId::from_raw(0));
         let cursor = step_of(0.0, 0.5, false);
         assert_eq!(
-            root_motion(None, cursor, root, 1.0),
+            root_motion(None, cursor, root, None, 1.0),
             RootMotionDelta::IDENTITY
         );
         assert_eq!(
-            root_motion(Some(&walking()), None, root, 1.0),
+            root_motion(Some(&walking()), None, root, None, 1.0),
             RootMotionDelta::IDENTITY
         );
         assert_eq!(
-            root_motion(Some(&walking()), cursor, None, 1.0),
+            root_motion(Some(&walking()), cursor, None, None, 1.0),
             RootMotionDelta::IDENTITY
         );
         let empty = clip_over(KeyTrack::linear(vec![]), KeyTrack::linear(vec![]));
         assert_eq!(
-            root_motion(Some(&empty), cursor, root, 1.0),
+            root_motion(Some(&empty), cursor, root, None, 1.0),
             RootMotionDelta::IDENTITY
         );
     }
@@ -336,5 +450,345 @@ mod tests {
             .read_lane::<RootMotionDelta>()
             .and_then(|lane| lane.get(root).copied());
         assert_eq!(clipless, Some(RootMotionDelta::IDENTITY));
+    }
+
+    fn sideways() -> SkelClip {
+        clip_over(
+            KeyTrack::linear(vec![
+                Key {
+                    time: 0.0,
+                    value: Vec3::ZERO,
+                },
+                Key {
+                    time: 1.0,
+                    value: Vec3::Y,
+                },
+            ]),
+            KeyTrack::linear(vec![]),
+        )
+    }
+
+    fn one_bone() -> Skeleton {
+        Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec![String::new()])
+    }
+
+    fn player_on(clip: Entity, weight: f32) -> SkelPlayer {
+        SkelPlayer {
+            clip: ClipId(clip),
+            time: Seconds::ZERO,
+            speed: Seconds::new(1.0),
+            weight: Clamped01::new(weight),
+            playing: true,
+            looping: false,
+        }
+    }
+
+    fn motion_of(store: &SmartStore, root: Entity) -> Vec3 {
+        store
+            .read_lane::<RootMotionDelta>()
+            .and_then(|lane| lane.get(root).copied())
+            .expect("opt-in root motion")
+            .translation
+    }
+
+    fn near(got: Vec3, want: Vec3) {
+        assert!((got - want).length() < 1e-4, "got {got:?} want {want:?}");
+    }
+
+    /// Walk on +X and strafe on +Y, both opting into root motion.
+    fn two_clip_root() -> (SmartStore, Entity, Entity, Entity) {
+        let mut store = SmartStore::new();
+        let walk = store.create_entity();
+        store.insert_cold(walk, walking());
+        let side = store.create_entity();
+        store.insert_cold(side, sideways());
+        let root = store.create_entity();
+        store.insert(root, one_bone());
+        store.insert(root, RootMotionDelta::IDENTITY);
+        (store, root, walk, side)
+    }
+
+    #[test]
+    fn retarget_scales_the_source_track_mapped_onto_the_root() {
+        let clip = SkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks: vec![JointTrack {
+                joint: JointId::from_raw(1),
+                node: None,
+                translation: KeyTrack::linear(vec![
+                    Key {
+                        time: 0.0,
+                        value: Vec3::ZERO,
+                    },
+                    Key {
+                        time: 1.0,
+                        value: Vec3::X,
+                    },
+                ]),
+                rotation: KeyTrack::linear(vec![]),
+                scale: KeyTrack::linear(vec![]),
+            }],
+        };
+        let map = RetargetMap {
+            joints: vec![None, Some(JointId::from_raw(0))],
+            scales: vec![1.0, 2.0],
+        };
+        let cursor = step_of(0.0, 0.5, false);
+        let scaled = root_motion(
+            Some(&clip),
+            cursor,
+            Some(JointId::from_raw(0)),
+            Some(&map),
+            1.0,
+        );
+        near(scaled.translation, Vec3::X);
+        let unmapped = root_motion(Some(&clip), cursor, Some(JointId::from_raw(0)), None, 1.0);
+        assert_eq!(unmapped, RootMotionDelta::IDENTITY);
+    }
+
+    #[test]
+    fn crossfade_mixes_root_motion_by_the_pre_tick_share() {
+        let (mut store, root, walk, side) = two_clip_root();
+        store.insert(root, player_on(side, 1.0));
+        store.insert(
+            root,
+            SkelFade {
+                from: player_on(walk, 1.0),
+                duration: Seconds::new(1.0),
+                elapsed: Seconds::ZERO,
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        // Share 0 at the start of the step: the outgoing walk owns the delta.
+        near(motion_of(&store, root), Vec3::X * 0.5);
+        advance_skel_players(&store, 0.5);
+        // The clock is now at 0.5, so the next step mixes the two halves.
+        near(motion_of(&store, root), Vec3::X * 0.25 + Vec3::Y * 0.25);
+    }
+
+    #[test]
+    fn a_paused_outgoing_clip_holds_root_motion_at_share_zero() {
+        let (mut store, root, walk, side) = two_clip_root();
+        store.insert(root, player_on(side, 1.0));
+        let mut held = player_on(walk, 1.0);
+        held.playing = false;
+        store.insert(
+            root,
+            SkelFade {
+                from: held,
+                duration: Seconds::new(1.0),
+                elapsed: Seconds::ZERO,
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        near(motion_of(&store, root), Vec3::ZERO);
+    }
+
+    #[test]
+    fn an_overlay_layer_blends_root_motion_over_the_base() {
+        let (mut store, root, walk, side) = two_clip_root();
+        store.insert(root, player_on(walk, 1.0));
+        let mask = store.create_entity();
+        store.insert_cold(
+            mask,
+            JointMask {
+                name: String::new(),
+                weights: vec![Clamped01::ONE],
+            },
+        );
+        let mut layer = player_on(side, 0.5);
+        store.insert(
+            root,
+            SkelLayerStack {
+                layers: vec![SkelLayer {
+                    player: layer,
+                    mask: MaskId(mask),
+                }],
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        // Base walks +X by 0.5; the layer strafes +Y by 0.5 at half weight.
+        near(motion_of(&store, root), Vec3::X * 0.25 + Vec3::Y * 0.25);
+        layer.weight = Clamped01::ONE;
+        layer.playing = false;
+        store
+            .write_lane::<SkelLayerStack>()
+            .expect("layers")
+            .get_mut(root)
+            .expect("stack")
+            .layers[0]
+            .player = layer;
+        // Rewind the base cursor so the next step is another half unit.
+        store
+            .write_lane::<SkelPlayer>()
+            .expect("players")
+            .get_mut(root)
+            .expect("player")
+            .time = Seconds::ZERO;
+        advance_skel_players(&store, 0.5);
+        // A held full-mask layer pulls the delta to none: the pose is the
+        // layer's, and the layer did not move.
+        near(motion_of(&store, root), Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_full_mask_layer_sits_on_top_of_the_crossfade_mix() {
+        let (mut store, root, walk, side) = two_clip_root();
+        let idle = store.create_entity();
+        store.insert_cold(
+            idle,
+            clip_over(KeyTrack::linear(vec![]), KeyTrack::linear(vec![])),
+        );
+        store.insert(root, player_on(side, 1.0));
+        store.insert(
+            root,
+            SkelFade {
+                from: player_on(walk, 1.0),
+                duration: Seconds::new(1.0),
+                elapsed: Seconds::new(0.5),
+            },
+        );
+        let mask = store.create_entity();
+        store.insert_cold(
+            mask,
+            JointMask {
+                name: String::new(),
+                weights: vec![Clamped01::ONE],
+            },
+        );
+        store.insert(
+            root,
+            SkelLayerStack {
+                layers: vec![SkelLayer {
+                    player: player_on(idle, 1.0),
+                    mask: MaskId(mask),
+                }],
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        // The mix of walk and strafe is non-zero; the held layer replaces it.
+        near(motion_of(&store, root), Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_zero_root_mask_leaves_the_base_delta() {
+        let (mut store, root, walk, side) = two_clip_root();
+        store.insert(root, player_on(walk, 1.0));
+        let mask = store.create_entity();
+        store.insert_cold(
+            mask,
+            JointMask {
+                name: String::new(),
+                weights: vec![Clamped01::ZERO],
+            },
+        );
+        store.insert(
+            root,
+            SkelLayerStack {
+                layers: vec![SkelLayer {
+                    player: player_on(side, 1.0),
+                    mask: MaskId(mask),
+                }],
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        near(motion_of(&store, root), Vec3::X * 0.5);
+    }
+
+    #[test]
+    fn a_blend_tree_folds_leaf_root_motion_and_a_broken_tree_holds() {
+        let (mut store, root, walk, side) = two_clip_root();
+        let tree = SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: ClipId(walk) },
+                TreeNodeDef::Clip { clip: ClipId(side) },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 1,
+                        },
+                    ],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "gait".to_string(),
+                default: 0.5,
+            }],
+        };
+        store.insert_cold(root, tree);
+        store.insert(
+            root,
+            SkelTreePlayer {
+                params: vec![0.5],
+                leaves: vec![player_on(walk, 1.0), player_on(side, 1.0)],
+                machines: Vec::new(),
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        near(motion_of(&store, root), Vec3::X * 0.25 + Vec3::Y * 0.25);
+
+        // A child that is not an earlier node breaks the contract: the pose
+        // is bad skin, so the delta stays at the frame's identity reset
+        // instead of falling back to the leaves' own weights.
+        store
+            .write_cold_lane::<SkelTree>()
+            .expect("trees")
+            .get_mut(root)
+            .expect("tree")
+            .nodes[2] = TreeNodeDef::Blend1d {
+            axis: 0,
+            children: vec![TreeChild {
+                position: 0.0,
+                node: 5,
+            }],
+        };
+        advance_skel_players(&store, 0.5);
+        near(motion_of(&store, root), Vec3::ZERO);
+    }
+
+    #[test]
+    fn a_full_mask_layer_replaces_tree_root_motion() {
+        let (mut store, root, walk, side) = two_clip_root();
+        store.insert_cold(
+            root,
+            SkelTree {
+                nodes: vec![TreeNodeDef::Clip { clip: ClipId(walk) }],
+                params: Vec::new(),
+            },
+        );
+        store.insert(
+            root,
+            SkelTreePlayer {
+                params: Vec::new(),
+                leaves: vec![player_on(walk, 1.0)],
+                machines: Vec::new(),
+            },
+        );
+        let mask = store.create_entity();
+        store.insert_cold(
+            mask,
+            JointMask {
+                name: String::new(),
+                weights: vec![Clamped01::ONE],
+            },
+        );
+        store.insert(
+            root,
+            SkelLayerStack {
+                layers: vec![SkelLayer {
+                    player: player_on(side, 1.0),
+                    mask: MaskId(mask),
+                }],
+            },
+        );
+        advance_skel_players(&store, 0.5);
+        near(motion_of(&store, root), Vec3::Y * 0.5);
     }
 }

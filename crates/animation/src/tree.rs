@@ -13,7 +13,7 @@ use ornis_core::ColdComponentStore;
 
 use crate::blend::{BlendedPose, SampleBuf, fade_progress, sample_joints};
 use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
-use crate::{ClipId, JointTrs, Seconds, SkelClip, SkelPlayer};
+use crate::{ClipId, JointTrs, RetargetMap, Seconds, SkelClip, SkelPlayer};
 
 /// One named parameter of an [`SkelTree`], addressed by index.
 #[derive(Debug, Clone, PartialEq)]
@@ -214,6 +214,8 @@ pub(crate) struct EvalBuf<'a> {
     pub joints: &'a mut SampleBuf,
     /// Clip ids of the evaluated leaves, appended in node order.
     pub contributors: &'a mut Vec<ClipId>,
+    /// Retarget of the root (§8.3); every leaf samples through it.
+    pub map: Option<&'a RetargetMap>,
 }
 
 /// Evaluates `tree` into `buf.poses` — one scratch pose per node, in node
@@ -223,12 +225,15 @@ pub(crate) struct EvalBuf<'a> {
 /// The clip ids of every leaf are appended to `buf.contributors`. Leaf
 /// cursors apply their own `weight` as in phase E (pull toward rest);
 /// `Blend1d` nodes fold their weighted children the same way a crossfade
-/// mixes poses. A violation of the tree contract (missing cursor or clip,
-/// bad `axis`, a non-finite parameter or child position, a child not
-/// earlier than its parent, missing joint counts) returns `None` and the
-/// caller publishes nothing — the "bad skin" rule. The child-order check
-/// covers **all** children of a blend node, not just the weighted ones, so
-/// one broken tree reads the same way at every parameter value.
+/// mixes poses. `buf.map` is the root's retarget (§8.3): every leaf
+/// samples through it, the same boundary as the flat player, the
+/// crossfade and the overlay layers. A violation of the tree contract
+/// (missing cursor
+/// or clip, bad `axis`, a non-finite parameter or child position, a child
+/// not earlier than its parent, missing joint counts) returns `None` and
+/// the caller publishes nothing — the "bad skin" rule. The child-order
+/// check covers **all** children of a blend node, not just the weighted
+/// ones, so one broken tree reads the same way at every parameter value.
 pub(crate) fn eval_tree(
     tree: &SkelTree,
     player: &SkelTreePlayer,
@@ -241,6 +246,7 @@ pub(crate) fn eval_tree(
         poses,
         joints,
         contributors,
+        map,
     } = buf;
     if tree.nodes.is_empty() {
         return None;
@@ -253,7 +259,7 @@ pub(crate) fn eval_tree(
                 let cursor = player.leaves.get(leaves)?;
                 leaves += 1;
                 let def = clips.get(clip.0)?;
-                sample_joints(def, count, cursor.time.get(), joints, None);
+                sample_joints(def, count, cursor.time.get(), joints, map);
                 poses[index].refill(&joints.samples, rest, cursor.weight.get());
                 contributors.push(*clip);
             }
