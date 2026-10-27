@@ -13,7 +13,8 @@
 use std::marker::PhantomData;
 
 use ornis_animation::{
-    AnimEvent, ClipId, ControlRig, JointId, JointMask, MaskId, SkelLayerStack, Skeleton, SyncMark,
+    AnimEvent, ClipId, ControlRig, JointId, JointMask, MaskId, SkelLayerStack, SkelTree, Skeleton,
+    SyncMark,
 };
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
@@ -939,6 +940,34 @@ impl EntityMut<'_> {
     /// events cursors emit (`set_clip_events`).
     pub fn set_clip_events(&mut self, events: Vec<AnimEvent>) -> bool {
         crate::anim_wiring::set_clip_events(&mut *self.store, ClipId(self.entity), events)
+    }
+
+    /// Installs the §8.3 retarget map on this skeleton root (the target):
+    /// `joints` names one target [`JointId`] per `source` joint — `None`
+    /// holds that joint at rest. Set semantics; one bad entry rejects the
+    /// whole map (`set_retarget_map`).
+    pub fn set_retarget_map(&mut self, source: Entity, joints: Vec<Option<JointId>>) -> bool {
+        crate::anim_wiring::set_retarget_map(&mut *self.store, self.entity, source, joints)
+    }
+
+    /// Installs the §8.5 [`SkelTree`] on this skeleton root — set
+    /// semantics; a tree-driven root ignores its
+    /// [`SkelPlayer`](ornis_animation::SkelPlayer) until
+    /// [`clear_skel_tree`](Self::clear_skel_tree) (`set_skel_tree`).
+    pub fn set_skel_tree(&mut self, tree: SkelTree) -> bool {
+        crate::anim_wiring::set_skel_tree(&mut *self.store, self.entity, tree)
+    }
+
+    /// Sets tree parameter `name` to `value` (`set_tree_param`): `false`
+    /// for an unknown name or a non-finite value.
+    pub fn set_tree_param(&mut self, name: &str, value: f32) -> bool {
+        crate::anim_wiring::set_tree_param(&mut *self.store, self.entity, name, value)
+    }
+
+    /// Removes the [`SkelTree`] from this root — the way back to
+    /// single-player playback (`clear_skel_tree`).
+    pub fn clear_skel_tree(&mut self) -> bool {
+        crate::anim_wiring::clear_skel_tree(&mut *self.store, self.entity)
     }
 }
 
@@ -2006,6 +2035,125 @@ mod tests {
             1
         );
         assert_ne!(mask.0, skel_root, "the mask lives on its own entity");
+    }
+
+    /// Tree and retarget authoring runs end to end on two starter
+    /// mannequins: an identity-by-name §8.3 map from one skeleton to the
+    /// other (a bad-length map is refused whole and keeps the installed
+    /// one), a [`SkelTree`] blending two catalog clips on a `speed` axis,
+    /// live parameter writes with honest refusals, and the way back via
+    /// [`EntityMut::clear_skel_tree`].
+    #[test]
+    fn tree_and_retarget_author_on_the_starter() {
+        use ornis_animation::{
+            Animator, SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam,
+        };
+        let mut world = GameWorld::new();
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            world.assets_mut().load(&starter).expect("starter loads");
+        let hero = world
+            .spawn(ModelSpawn::new(mannequin))
+            .expect("starter spawns");
+        let scout = world
+            .spawn(ModelSpawn::new(mannequin))
+            .expect("starter spawns");
+
+        let (hero_root, scout_root, idle, walk) = {
+            let store = world.engine().world().store().expect("store");
+            let catalog = |entity| {
+                store
+                    .read_lane::<Animator>()
+                    .expect("animator lane")
+                    .get(entity)
+                    .expect("animator on the root")
+                    .clone()
+            };
+            let hero_anim = catalog(hero);
+            let scout_anim = catalog(scout);
+            (
+                *hero_anim.targets().first().expect("one skeleton root"),
+                *scout_anim.targets().first().expect("one skeleton root"),
+                scout_anim.clip("Idle_Loop").expect("Idle_Loop"),
+                scout_anim.clip("Walk_Loop").expect("Walk_Loop"),
+            )
+        };
+
+        // §8.3: identity-by-name map, hero's joints onto the scout's.
+        let joints = {
+            let store = world.engine().world().store().expect("store");
+            let skeletons = store
+                .read_lane::<ornis_animation::Skeleton>()
+                .expect("skeleton lane");
+            let source = skeletons.get(hero_root).expect("hero skeleton");
+            let target = skeletons.get(scout_root).expect("scout skeleton");
+            source
+                .joint_names
+                .iter()
+                .map(|name| target.joint_named(name))
+                .collect::<Vec<_>>()
+        };
+        {
+            let mut entity = world.entity_mut(scout_root);
+            assert!(entity.set_retarget_map(hero_root, joints.clone()));
+            assert!(
+                !entity.set_retarget_map(hero_root, vec![None]),
+                "a wrong-length map refuses whole"
+            );
+        }
+
+        // §8.5: two leaves on a `speed` axis; the last node is the root.
+        let tree = SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: idle },
+                TreeNodeDef::Clip { clip: walk },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 1,
+                        },
+                    ],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "speed".to_string(),
+                default: 0.0,
+            }],
+        };
+        {
+            let mut entity = world.entity_mut(scout_root);
+            assert!(entity.set_skel_tree(tree));
+            assert!(entity.set_tree_param("speed", 0.5));
+            assert!(!entity.set_tree_param("nope", 0.5));
+            assert!(!entity.set_tree_param("speed", f32::NAN));
+        }
+        {
+            let store = world.engine().world().store().expect("store");
+            let maps = store
+                .read_cold_lane::<ornis_animation::RetargetMap>()
+                .expect("retarget lane");
+            assert_eq!(
+                maps.get(scout_root).expect("map kept").joints,
+                joints,
+                "the refused map left the installed one in place"
+            );
+            let trees = store.read_cold_lane::<SkelTree>().expect("tree lane");
+            assert!(trees.get(scout_root).is_some());
+            let players = store.read_lane::<SkelTreePlayer>().expect("player lane");
+            assert!(players.get(scout_root).is_some());
+        }
+        {
+            let mut entity = world.entity_mut(scout_root);
+            assert!(entity.clear_skel_tree());
+            assert!(!entity.clear_skel_tree());
+        }
     }
 
     /// Playback controls behave like a video player: resume starts a

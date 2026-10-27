@@ -36,8 +36,9 @@ pub use game_world::{
     SpawnModelError,
 };
 pub use ornis_animation::{
-    AnimEvent, Animator, AnimatorAccess, BasePull, ControlRig, Effector, JointMask, MaskId,
-    SkelLayer, SkelLayerStack, SkelPlayer, SyncMark, TwoBoneIk, try_animator,
+    AnimEvent, Animator, AnimatorAccess, BasePull, ClipId, ControlRig, Effector, JointMask, MaskId,
+    SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SyncMark, TreeCmp, TreeCond, TreeNodeDef,
+    TreeParam, TreeTransition, TwoBoneIk, try_animator,
 };
 
 /// Inserts the flat authored pose as both local [`Transform`] and world

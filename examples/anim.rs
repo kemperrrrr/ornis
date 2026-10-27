@@ -4,24 +4,30 @@
 //! planting both feet on the floor stance while the cycle plays, an
 //! §8.6 upper-body gesture layer (`Idle_Talking_Loop` masked above the
 //! spine), and clip sync marks plus footstep events authored on the
-//! walk clip.
+//! walk clip. A second mannequin stands beside it wearing the same
+//! catalog through an §8.3 identity map, driven by an §8.5 state machine
+//! that steps idle → walk as the host raises `speed`.
 //!
 //! Run with: `cargo run --example anim` (`--frames N` exits after N
 //! frames).
 
 use glam::Vec3;
 use ornis_app::{
-    AnimEvent, Animator, AnimatorAccess, BasePull, ControlRig, Effector, GameWorld, JointMask,
-    ModelSpawn, SkelLayer, SkelLayerStack, SkelPlayer, SyncMark, TwoBoneIk,
+    AnimEvent, Animator, AnimatorAccess, BasePull, ClipId, ControlRig, Effector, GameWorld,
+    JointMask, ModelSpawn, SkelLayer, SkelLayerStack, SkelPlayer, SkelTree, SyncMark, TreeCmp,
+    TreeCond, TreeNodeDef, TreeParam, TreeTransition, TwoBoneIk,
 };
-use ornis_assets::Model;
 use ornis_assets::scene::ShadowCast;
+use ornis_assets::{Handle, Model};
 use ornis_core::{Clamped01, Color, Degrees, Entity, Lux, Position, Seconds, UnitVec3};
 use ornis_render::{DirectionalLight, OrbitCamera};
 
 /// Base-pull weight of the demo rig: the pelvis leans halfway into the
 /// foot hold.
 const PELVIS_PULL: f32 = 0.5;
+
+/// Where the tree-driven scout stands beside the walk loop, in meters.
+const SCOUT_X: f32 = 1.25;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut world = GameWorld::new();
@@ -95,7 +101,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "the demo rig installs on the mannequin"
     );
     author_gesture_layer(&mut world, hero, skel_root)?;
+    author_tree_scout(&mut world, skel_root, mannequin)?;
     ornis::run(world)
+}
+
+// qual:allow(test_quality, untested) reason: "demo-only authoring — exercised by running the anim example (cargo run --example anim), mirroring the benchmark-only kernels in core/benches"
+/// §8.5/§8.3 showcase on a second mannequin: the base rig's catalog worn
+/// through an explicit identity-by-name retarget map, driven by a state
+/// machine that steps idle → walk when the host raises `speed`. The walk
+/// root stays single-player — the closing assert pins that contract.
+fn author_tree_scout(
+    world: &mut GameWorld,
+    hero_root: Entity,
+    mannequin: Handle<Model>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut spawn = ModelSpawn::new(mannequin);
+    spawn.position = Position::new(SCOUT_X, 0.0, 0.0);
+    let scout = world.spawn(spawn)?;
+    let scout_root = world
+        .entity_mut(scout)
+        .animator()?
+        .targets()?
+        .first()
+        .copied()
+        .ok_or("the mannequin spawns one skeleton root")?;
+    let (idle, walk) = {
+        let store = world.engine().world().store().ok_or("store")?;
+        let anim = store
+            .read_lane::<Animator>()
+            .ok_or("animator lane")?
+            .get(scout)
+            .cloned()
+            .ok_or("animator on the scout root")?;
+        (
+            anim.clip("Idle_Loop").ok_or("Idle_Loop")?,
+            anim.clip("Walk_Loop").ok_or("Walk_Loop")?,
+        )
+    };
+    // §8.3: hero's joints onto the scout's, by name.
+    let joints = {
+        let source = world
+            .entity_mut(hero_root)
+            .skeleton()
+            .ok_or("hero skeleton")?;
+        let target = world
+            .entity_mut(scout_root)
+            .skeleton()
+            .ok_or("scout skeleton")?;
+        source
+            .joint_names
+            .iter()
+            .map(|name| target.joint_named(name))
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        world
+            .entity_mut(scout_root)
+            .set_retarget_map(hero_root, joints),
+        "the identity map installs on the scout"
+    );
+    install_scout_machine(world, scout_root, idle, walk);
+    assert!(
+        !world.entity_mut(hero_root).clear_skel_tree(),
+        "the walk root stays single-player"
+    );
+    Ok(())
+}
+
+// qual:allow(test_quality, untested) reason: "demo-only authoring — exercised by running the anim example (cargo run --example anim), mirroring the benchmark-only kernels in core/benches"
+/// §8.5: the machine stands on idle and crossfades into walk once the
+/// host raises `speed` past the transition guard.
+fn install_scout_machine(world: &mut GameWorld, scout_root: Entity, idle: ClipId, walk: ClipId) {
+    let tree = SkelTree {
+        nodes: vec![
+            TreeNodeDef::Clip { clip: idle },
+            TreeNodeDef::Clip { clip: walk },
+            TreeNodeDef::Machine {
+                states: vec![0, 1],
+                initial: 0,
+                transitions: vec![TreeTransition {
+                    from: 0,
+                    to: 1,
+                    when: TreeCond {
+                        param: 0,
+                        op: TreeCmp::Greater,
+                        value: 0.5,
+                    },
+                    fade: Seconds::new(0.25),
+                }],
+            },
+        ],
+        params: vec![TreeParam {
+            name: "speed".into(),
+            default: 0.0,
+        }],
+    };
+    assert!(
+        world.entity_mut(scout_root).set_skel_tree(tree),
+        "the machine tree installs on the scout"
+    );
+    assert!(
+        world.entity_mut(scout_root).set_tree_param("speed", 1.0),
+        "the speed parameter installs"
+    );
 }
 
 // qual:allow(test_quality, untested) reason: "demo-only authoring — exercised by running the anim example (cargo run --example anim), mirroring the benchmark-only kernels in core/benches"

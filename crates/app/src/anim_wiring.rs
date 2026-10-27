@@ -704,8 +704,6 @@ fn root_world_matrix(store: &SmartStore, root: Entity) -> Option<Mat4> {
 /// [`Skeleton`], `joints` must name exactly one entry per source joint and
 /// every `Some` must be in range of the target (one bad entry rejects the
 /// whole map).
-// qual:api — typed `RetargetMap` input for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn set_retarget_map(
     store: &mut SmartStore,
     target: Entity,
@@ -825,8 +823,6 @@ fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
 ///
 /// Returns whether `root` carries a [`Skeleton`] (the tree's anchor) and
 /// `tree` passes `tree_is_valid`; nothing is written otherwise.
-// qual:api — typed `SkelTree` input for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bool {
     if store
         .read_lane::<Skeleton>()
@@ -887,8 +883,6 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
 /// Returns `false` — and writes nothing — when `root` has no [`SkelTree`]
 /// or [`SkelTreePlayer`], names no parameter, or `value` is not finite
 /// (NaN/±inf would poison the blended pose silently).
-// qual:api — typed tree parameter input for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn set_tree_param(store: &mut SmartStore, root: Entity, name: &str, value: f32) -> bool {
     if !value.is_finite() {
         return false;
@@ -989,8 +983,6 @@ pub fn set_clip_events(store: &mut SmartStore, clip: ClipId, events: Vec<AnimEve
 /// ([`PlaybackError::TreeDriven`] is gone).
 ///
 /// Returns whether `root` carried a tree to remove.
-// qual:api — typed tree removal for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn clear_skel_tree(store: &mut SmartStore, root: Entity) -> bool {
     clear_root_lanes::<SkelTree, SkelTreePlayer>(store, root)
 }
