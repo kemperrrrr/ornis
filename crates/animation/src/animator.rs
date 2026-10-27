@@ -261,8 +261,9 @@ impl AnimatorMut<'_> {
         Ok(())
     }
 
-    /// Skeleton roots this handle's animator drives.
-    fn targets(&self) -> Result<Vec<Entity>, AnimatorError> {
+    /// Skeleton roots this handle's animator drives (§8.8 setup: hosts
+    /// address the skeletons under a character root).
+    pub fn targets(&self) -> Result<Vec<Entity>, AnimatorError> {
         let lane = self
             .store
             .read_lane::<Animator>()

@@ -22,7 +22,7 @@ use ornis_animation::{
     TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::{Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
+use ornis_core::{ChildOf, Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
 use ornis_gltf::{
     LoadedAnimClip, LoadedInterpolation, LoadedJointTrack, LoadedKeyTrack, LoadedMesh,
     LoadedSkelClip, LoadedSkin, Model, NodeIdx,
@@ -602,8 +602,6 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
 /// [`Skeleton`], every effector must pass [`Effector::installable`]
 /// and `base` its in-range joint (one bad entry rejects the whole
 /// set).
-// qual:api — typed `IkStack` input for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn set_skel_ik(
     store: &mut SmartStore,
     root: Entity,
@@ -638,30 +636,48 @@ pub fn set_skel_ik(
 
 /// Installs the [`IkStack`] of `root` from world-space goals (design
 /// §8.8, the control rig): `rig`'s targets are world points, mapped
-/// through the root's [`GlobalTransform`] into its model space and then
-/// installed like [`set_skel_ik`] — same set semantics and validation
-/// (one bad entry rejects the whole set; an empty goal list clears the
-/// stack).
+/// through the world matrix of `root`'s frame into its model space and
+/// then installed like [`set_skel_ik`] — same set semantics and
+/// validation (one bad entry rejects the whole set; an empty goal list
+/// clears the stack).
+///
+/// The world matrix is `root`'s own [`GlobalTransform`] or the nearest
+/// ancestor's (`ChildOf` chain): a wired skeleton root carries no local
+/// transform and lives in its parent's frame. `root` under no
+/// [`GlobalTransform`] is not written — clearing the stack in that state
+/// goes through [`set_skel_ik`] with an empty set. Non-finite mapped
+/// goals (a singular root matrix) fail [`Effector::installable`] and
+/// reject the whole set, keeping the previously installed stack.
 ///
 /// The installed goals are model-space, so they go stale as the root
 /// moves — call again from the update loop (one inverse plus one point
-/// per goal). `root` without a [`GlobalTransform`] is not written —
-/// clearing the stack in that state goes through [`set_skel_ik`] with an
-/// empty set. Non-finite mapped goals (a singular root matrix) fail
-/// [`Effector::installable`] and reject the whole set, keeping the
-/// previously installed stack.
-// qual:api — typed control-rig input for hosts; in-tree callers are
-// tests until a production host entry lands.
+/// per goal).
 pub fn set_control_rig(store: &mut SmartStore, root: Entity, rig: ControlRig) -> bool {
-    let Some(globals) = store.read_lane::<GlobalTransform>() else {
+    let Some(root_world) = root_world_matrix(store, root) else {
         return false;
     };
-    let Some(global) = globals.get(root).copied() else {
-        return false;
-    };
-    drop(globals);
-    let stack = rig.into_stack(global.to_mat4());
+    let stack = rig.into_stack(root_world);
     set_skel_ik(store, root, stack.effectors, stack.base)
+}
+
+/// The world matrix of `root`'s frame: its own `GlobalTransform`, or the
+/// nearest ancestor's along `ChildOf` (a skeleton root without a local
+/// transform lives in its parent's frame). `None` when the chain carries
+/// no [`GlobalTransform`].
+fn root_world_matrix(store: &SmartStore, root: Entity) -> Option<Mat4> {
+    let globals = store.read_lane::<GlobalTransform>()?;
+    let parents = store.read_lane::<ChildOf>();
+    let mut cursor = Some(root);
+    while let Some(entity) = cursor {
+        if let Some(global) = globals.get(entity) {
+            return Some(global.to_mat4());
+        }
+        cursor = parents
+            .as_ref()
+            .and_then(|parents| parents.get(entity))
+            .map(|parent| parent.0);
+    }
+    None
 }
 
 /// Installs the [`RetargetMap`] of `target` — the explicit «source joint →

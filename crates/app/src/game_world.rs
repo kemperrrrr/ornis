@@ -12,6 +12,7 @@
 
 use std::marker::PhantomData;
 
+use ornis_animation::{ControlRig, JointId, Skeleton};
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
     Authoritative, Color, Engine, Entity, EnvironmentWeight, Position, Replica, SceneEntities,
@@ -870,6 +871,30 @@ impl EntityMut<'_> {
     /// Detaches this entity from its parent and drops the matching cache entry.
     pub fn clear_parent(&mut self) {
         ornis_core::clear_parent(self.store, self.entity);
+    }
+
+    /// The [`Skeleton`] joint named exactly `name`, when this entity
+    /// carries a skeleton (design §8.8 setup: hosts resolve rig joints
+    /// by their glTF names). `None` for no skeleton or no match.
+    pub fn joint_named(&self, name: &str) -> Option<JointId> {
+        self.store
+            .read_lane::<Skeleton>()?
+            .get(self.entity)?
+            .joint_named(name)
+    }
+
+    /// Installs world-space IK goals on this entity's skeleton (design
+    /// §8.8, [`set_control_rig`](crate::anim_wiring::set_control_rig)):
+    /// `rig`'s targets are world points, mapped through the world matrix
+    /// of the skeleton's frame. Same set semantics as
+    /// [`set_skel_ik`](crate::anim_wiring::set_skel_ik); model-space
+    /// goals go stale as the root moves — call again from your update
+    /// loop.
+    ///
+    /// Returns whether anything is written (see the facade for the
+    /// refusal cases).
+    pub fn set_control_rig(&mut self, rig: ControlRig) -> bool {
+        crate::anim_wiring::set_control_rig(&mut *self.store, self.entity, rig)
     }
 }
 
@@ -1978,6 +2003,65 @@ mod tests {
         assert_eq!(world.resume_animation(root), driven);
         assert_eq!(world.pause_animation(root), driven);
         assert_eq!(world.stop_animation(root), driven);
+    }
+
+    /// The §8.8 host seam: `EntityMut::set_control_rig` maps world goals
+    /// through the world matrix of the skeleton's frame — the nearest
+    /// `GlobalTransform` up the `ChildOf` chain, since a wired skeleton
+    /// root carries no local transform — and `joint_named` resolves rig
+    /// joints by name.
+    #[test]
+    fn entity_mut_control_rig_maps_through_the_parent_frame() {
+        use glam::Mat4;
+        use ornis_animation::{Effector, IkStack, TwoBoneIk};
+        let mut world = GameWorld::new();
+        let skeleton = {
+            let store = world.engine_mut().world_mut().store_mut().expect("store");
+            let root = store.create_entity();
+            let mut global = ornis_core::GlobalTransform::IDENTITY;
+            global.translation = Vec3::new(10.0, 0.0, 0.0);
+            store.insert(root, global);
+            let skeleton = store.create_entity();
+            store.insert(
+                skeleton,
+                Skeleton::new(
+                    vec![None, Some(JointId::from_raw(0)), Some(JointId::from_raw(1))],
+                    vec![Mat4::IDENTITY; 3],
+                    vec!["hip".into(), "knee".into(), "foot".into()],
+                ),
+            );
+            ornis_core::set_parent(store, skeleton, root).expect("parent");
+            skeleton
+        };
+        assert_eq!(
+            world.entity_mut(skeleton).joint_named("knee"),
+            Some(JointId::from_raw(1))
+        );
+        assert_eq!(world.entity_mut(skeleton).joint_named("nope"), None);
+        let rig = ControlRig {
+            goals: vec![Effector::TwoBone(TwoBoneIk {
+                root: JointId::from_raw(0),
+                mid: JointId::from_raw(1),
+                end: JointId::from_raw(2),
+                target: Vec3::new(12.0, 1.0, 0.0),
+                weight: Clamped01::ONE,
+            })],
+            base: None,
+        };
+        assert!(world.entity_mut(skeleton).set_control_rig(rig));
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let lane = store.read_lane::<IkStack>().expect("ik lane");
+        let stack = lane.get(skeleton).expect("stack");
+        match stack.effectors[0] {
+            Effector::TwoBone(chain) => {
+                assert!(
+                    (chain.target - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-4,
+                    "target at {:?}",
+                    chain.target
+                );
+            }
+            _ => panic!("the goal stays a chain"),
+        }
     }
 
     #[test]

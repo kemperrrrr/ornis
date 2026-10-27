@@ -1617,6 +1617,17 @@ impl Skeleton {
         self.parents.len()
     }
 
+    /// The joint whose [`joint_names`](Self::joint_names) entry is exactly
+    /// `name` — the setup-time lookup for hosts (rig authoring, control-rig
+    /// goals). `None` when no joint matches: names are labels, so a
+    /// mismatched importer name simply does not resolve.
+    pub fn joint_named(&self, name: &str) -> Option<JointId> {
+        self.joint_names
+            .iter()
+            .position(|joint| joint == name)
+            .map(|at| JointId::from_raw(at as u32))
+    }
+
     /// Checks joint count, cap, array lengths, parent range and cycles.
     ///
     /// Returns the joint count on success.
@@ -3568,6 +3579,15 @@ mod import_tests {
             skeleton.joint_names.as_ref(),
             &["root".to_string(), "tip".to_string()]
         );
+    }
+
+    #[test]
+    fn joint_named_resolves_exact_names() {
+        let skeleton = skeleton_from_import(&two_bone_import()).expect("two bones build");
+        assert_eq!(skeleton.joint_named("root"), Some(JointId::from_raw(0)));
+        assert_eq!(skeleton.joint_named("tip"), Some(JointId::from_raw(1)));
+        assert_eq!(skeleton.joint_named("Tip"), None);
+        assert_eq!(skeleton.joint_named("missing"), None);
     }
 
     #[test]

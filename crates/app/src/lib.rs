@@ -35,7 +35,9 @@ pub use game_world::{
     EntityMut, GameWorld, ModelInstance, ModelSpawn, PlaybackError, ReplicaGameWorld, Spawn,
     SpawnModelError,
 };
-pub use ornis_animation::{AnimatorAccess, try_animator};
+pub use ornis_animation::{
+    AnimatorAccess, BasePull, ControlRig, Effector, TwoBoneIk, try_animator,
+};
 
 /// Inserts the flat authored pose as both local [`Transform`] and world
 /// [`GlobalTransform`].
