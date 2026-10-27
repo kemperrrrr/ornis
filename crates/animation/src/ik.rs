@@ -4,18 +4,14 @@
 //! chain geometry and the sample stage are different responsibilities.
 //! Full-body IK and a control rig are not this layer.
 
-use glam::{Quat, Vec3};
+use glam::Vec3;
 
 use ornis_core::Clamped01;
 
+use crate::ik_solve::{axis_ok, fk_model, parent_model_rot};
 use crate::{JointId, JointTrs};
 
-/// Bone-length floor for the solver: degenerate chains never move.
-const ZERO_LENGTH: f32 = 1e-6;
-
-/// Squared length below which an aim axis or a target offset is not a
-/// direction. Shared by the look-at solver and [`Effector::installable`].
-const AIM_EPSILON_SQ: f32 = 1e-12;
+pub use crate::ik_solve::{FkScratch, solve_look_at, solve_two_bone_ik};
 
 /// One two-bone IK constraint (design §8.2): aim the `root → mid → end`
 /// chain (knee/elbow chains) at `target`.
@@ -107,6 +103,27 @@ impl LookAt {
     }
 }
 
+/// Optional base pull of one [`IkStack`] (design §8.7): the base joint
+/// (pelvis) translates toward effector targets the chains cannot reach,
+/// so the body leans/ducks into the pose instead of stretching bones.
+/// Pure data; the stack stage runs the pull before the effectors.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BasePull {
+    /// Joint that carries the body; its local translation moves.
+    pub joint: JointId,
+    /// How much of the weighted shortfall reaches the base, `[0, 1]`:
+    /// `1` puts the mean shortfall into the base, `0` leaves it alone.
+    pub weight: Clamped01,
+}
+
+impl BasePull {
+    /// Whether installing this base pull on a skeleton of `joints`
+    /// bones is well-formed: an in-range base joint.
+    pub fn installable(&self, joints: usize) -> bool {
+        self.joint.index() < joints
+    }
+}
+
 /// Ordered IK effectors of one skeleton root — the hot lane on the
 /// root (`Clone + Send + Sync` per the contract).
 ///
@@ -114,280 +131,68 @@ impl LookAt {
 /// without the stack is never touched. Effectors apply in vector order
 /// after the tree/layer blend and **before** the ragdoll blend (design
 /// §8.2: where physics weights are up, physics wins — IK never argues
-/// with ragdoll).
+/// with ragdoll). With a [`BasePull`], the base joint first leans into
+/// the unreachable two-bone targets (design §8.7).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct IkStack {
     /// Effectors applied in order; later ones solve the pose the earlier
     /// ones produced.
     pub effectors: Vec<Effector>,
+    /// Optional full-body base pull, run before the effectors (§8.7).
+    pub base: Option<BasePull>,
 }
 
-/// The aim of one chain: the model-space parent rotations of the base
-/// and hinge, the model-space deltas that put the effector on the
-/// target, and how far to apply them.
-#[derive(Debug, Clone, Copy)]
-struct Aim {
-    parent_root: Quat,
-    parent_mid: Quat,
-    delta_root: Quat,
-    delta_mid: Quat,
-    weight: f32,
-}
-
-/// The rotation that takes direction `from` onto direction `to` — the
-/// solver's rotation construction, its own seam.
-fn arc_rotation(from: Vec3, to: Vec3) -> Quat {
-    Quat::from_rotation_arc(from, to)
-}
-
-/// Reusable forward-kinematics buffers of the IK solvers (design §8.2).
-///
-/// The caller keeps one across calls — hosts hold it in their own state,
-/// the sampler keeps one in its frame scratch — so [`solve_two_bone_ik`]
-/// and [`solve_look_at`] allocate nothing per solve (the same
-/// `*Scratch` contract as the fade shares and the tree weights). Filled
-/// in place: one buffer serves skeletons of any joint count back to
-/// back.
-#[derive(Debug, Default)]
-pub struct FkScratch {
-    /// Model-space rotations of every joint, parents before children.
-    model_rot: Vec<Quat>,
-    /// Model-space positions of every joint, parents before children.
-    model_pos: Vec<Vec3>,
-}
-
-/// Forward kinematics into `buf` (in place): model-space rotations and
-/// positions of every joint (parents before children). Pure.
-fn fk_model(trs: &[JointTrs], parents: &[Option<JointId>], buf: &mut FkScratch) {
-    buf.model_rot.clear();
-    buf.model_rot.resize(trs.len(), Quat::IDENTITY);
-    buf.model_pos.clear();
-    buf.model_pos.resize(trs.len(), Vec3::ZERO);
-    for (index, local) in trs.iter().enumerate() {
-        let (rotation, origin) = match parents.get(index).copied().flatten() {
-            Some(parent) if parent.index() < index => (
-                buf.model_rot[parent.index()] * local.rotation,
-                buf.model_pos[parent.index()] + buf.model_rot[parent.index()] * local.translation,
-            ),
-            _ => (local.rotation, local.translation),
+/// The model-space shift of the §8.7 base pull: the weighted mean of
+/// the two-bone shortfalls (target distance past chain reach), scaled
+/// by the pull weight — `None` when no effector pulls. Look-at
+/// effectors never pull. Pure.
+fn base_shift(fk: &FkScratch, effectors: &[Effector], weight: f32) -> Option<Vec3> {
+    let (mut total, mut weight_sum) = (Vec3::ZERO, 0.0);
+    for effector in effectors {
+        let chain = match effector {
+            Effector::TwoBone(chain) => chain,
+            Effector::LookAt(_) => continue,
         };
-        buf.model_rot[index] = rotation;
-        buf.model_pos[index] = origin;
+        let strength = chain.weight.get();
+        let (root, mid, end) = (chain.root.index(), chain.mid.index(), chain.end.index());
+        if strength <= 0.0 || root.max(mid).max(end) >= fk.model_pos.len() {
+            continue;
+        }
+        let reach = (fk.model_pos[mid] - fk.model_pos[root]).length()
+            + (fk.model_pos[end] - fk.model_pos[mid]).length();
+        let to_target = chain.target - fk.model_pos[root];
+        let distance = to_target.length();
+        if reach <= 0.0 || distance <= 0.0 {
+            continue;
+        }
+        total += to_target / distance * ((distance - reach).max(0.0) * strength);
+        weight_sum += strength;
     }
+    if weight_sum <= 0.0 {
+        return None;
+    }
+    Some(total / weight_sum * weight)
 }
 
-/// The aim that puts the `root → mid → end` chain on `target` (clamped
-/// to arm reach) — or `None` for a non-chain or degenerate geometry.
-/// Pure: validation, the fold and the bend axis kept from the pose.
-fn fold_chain(
-    fk: &FkScratch,
-    parents: &[Option<JointId>],
-    chain: (usize, usize, usize),
-    target: Vec3,
-    weight: f32,
-) -> Option<Aim> {
-    let (root, mid, end) = chain;
-    let bound = root.max(mid).max(end);
-    if bound >= fk.model_pos.len()
-        || parents.len() != fk.model_pos.len()
-        || !target.is_finite()
-        || weight <= 0.0
-    {
-        return None;
-    }
-    // Chain check: the walk from `end` upward passes `mid`, then `root`.
-    let (mut found_mid, mut found_root) = (false, false);
-    let mut cursor = parents[end];
-    for _ in 0..parents.len() {
-        let Some(id) = cursor else {
-            break;
-        };
-        let index = id.index();
-        if index == mid {
-            found_mid = true;
-        }
-        if index == root {
-            found_root = found_mid;
-        }
-        if index >= parents.len() {
-            break;
-        }
-        cursor = parents[index];
-    }
-    if !found_root {
-        return None;
-    }
-    let (model_rot, model_pos) = (&fk.model_rot[..], &fk.model_pos[..]);
-    let (u, v) = (
-        model_pos[mid] - model_pos[root],
-        model_pos[end] - model_pos[mid],
-    );
-    let (l1, l2) = (u.length(), v.length());
-    if l1 <= ZERO_LENGTH || l2 <= ZERO_LENGTH {
-        return None;
-    }
-    let to_target = target - model_pos[root];
-    let d_raw = to_target.length();
-    if d_raw <= ZERO_LENGTH {
-        return None;
-    }
-    let dir_t = to_target / d_raw;
-    // Bend axis: keep the pose's own bend plane; a straight chain on the
-    // target line bends in a deterministic arbitrary plane.
-    let mut side = u / l1 - dir_t * (u / l1).dot(dir_t);
-    if side.length_squared() <= ZERO_LENGTH * ZERO_LENGTH {
-        side = v / l2 - dir_t * (v / l2).dot(dir_t);
-    }
-    if side.length_squared() <= ZERO_LENGTH * ZERO_LENGTH {
-        side = dir_t.any_orthonormal_vector();
-    }
-    let side = side.normalize();
-    let min_reach = (l1 - l2).abs() + ZERO_LENGTH;
-    let d = d_raw.clamp(min_reach, (l1 + l2 - ZERO_LENGTH).max(min_reach));
-    let cos_root = ((l1 * l1 + d * d - l2 * l2) / (2.0 * l1 * d)).clamp(-1.0, 1.0);
-    let (sin_root, cos_root) = cos_root.acos().sin_cos();
-    let u_desired = dir_t * cos_root + side * sin_root;
-    let v_desired = (dir_t * d - u_desired * l1).normalize_or_zero();
-    if v_desired == Vec3::ZERO {
-        return None;
-    }
-    let delta_root = arc_rotation(u / l1, u_desired);
-    let delta_mid = arc_rotation(delta_root * (v / l2), v_desired);
-    Some(Aim {
-        parent_root: parents[root]
-            .filter(|id| id.index() < model_rot.len())
-            .map_or(Quat::IDENTITY, |id| model_rot[id.index()]),
-        parent_mid: parents[mid]
-            .filter(|id| id.index() < model_rot.len())
-            .map_or(Quat::IDENTITY, |id| model_rot[id.index()]),
-        delta_root,
-        delta_mid,
-        weight,
-    })
-}
-
-/// Writes `aim` back as local rotations of the chain base and hinge,
-/// slerped by the aim weight. Pure.
-fn write_aim(trs: &mut [JointTrs], chain: (usize, usize, usize), aim: Aim) {
-    let (root, mid, _) = chain;
-    let root_frame = aim.parent_root;
-    let mid_frame = aim.delta_root * aim.parent_mid;
-    let solved_root = root_frame.inverse() * aim.delta_root * root_frame * trs[root].rotation;
-    let solved_mid = mid_frame.inverse() * aim.delta_mid * mid_frame * trs[mid].rotation;
-    trs[root].rotation = if aim.weight >= 1.0 {
-        solved_root
-    } else {
-        trs[root].rotation.slerp(solved_root, aim.weight)
-    };
-    trs[mid].rotation = if aim.weight >= 1.0 {
-        solved_mid
-    } else {
-        trs[mid].rotation.slerp(solved_mid, aim.weight)
-    };
-}
-
-/// Solves one two-bone constraint against a local-TRS pose.
-///
-/// Rotates `root` and `mid` in their local frames so `end` reaches
-/// `constraint.target` (clamped to arm reach), slerped by the
-/// constraint weight. `parents` is the skeleton parent chain (parents
-/// before children); `fk` is the caller's reusable [`FkScratch`] — one
-/// scratch serves every solve of a frame. Returns whether the pose
-/// changed; degenerate input (bad joints, non-chain, zero-length
-/// bones, zero-length target offset, weight `0`) is a strict no-op.
-pub fn solve_two_bone_ik(
+/// Runs the §8.7 base pull: `base.joint`'s local translation takes the
+/// weighted shortfall of the two-bone effectors, written in the joint's
+/// parent frame. Strict no-op for an out-of-range base or weight `0`.
+fn pull_base(
     trs: &mut [JointTrs],
     parents: &[Option<JointId>],
-    constraint: &TwoBoneIk,
+    base: &BasePull,
+    effectors: &[Effector],
     fk: &mut FkScratch,
-) -> bool {
-    let chain = (
-        constraint.root.index(),
-        constraint.mid.index(),
-        constraint.end.index(),
-    );
-    fk_model(trs, parents, fk);
-    let aim = fold_chain(
-        fk,
-        parents,
-        chain,
-        constraint.target,
-        constraint.weight.get(),
-    );
-    let Some(aim) = aim else {
-        return false;
-    };
-    write_aim(trs, chain, aim);
-    true
-}
-
-/// A finite direction: not NaN and longer than [`AIM_EPSILON_SQ`].
-fn axis_ok(axis: Vec3) -> bool {
-    axis.is_finite() && axis.length_squared() > AIM_EPSILON_SQ
-}
-
-/// Model-space rotation of `index`'s parent (`IDENTITY` at a root).
-fn parent_model_rot(model_rot: &[Quat], parents: &[Option<JointId>], index: usize) -> Quat {
-    match parents.get(index).copied().flatten() {
-        Some(parent) if parent.index() < index && parent.index() < model_rot.len() => {
-            model_rot[parent.index()]
-        }
-        _ => Quat::IDENTITY,
-    }
-}
-
-/// Local rotation that points `look.aim` at `look.target`, or `None`
-/// when the aim is degenerate. `fk` is the caller's [`FkScratch`],
-/// filled for this pose.
-fn look_at_local(
-    trs: &[JointTrs],
-    parents: &[Option<JointId>],
-    look: &LookAt,
-    fk: &mut FkScratch,
-) -> Option<Quat> {
-    let index = look.joint.index();
-    if index >= trs.len() || parents.len() != trs.len() || look.weight.get() <= 0.0 {
-        return None;
-    }
-    if !look.target.is_finite() || !axis_ok(look.aim) {
-        return None;
+) {
+    let index = base.joint.index();
+    if index >= trs.len() || base.weight.get() <= 0.0 {
+        return;
     }
     fk_model(trs, parents, fk);
-    let (model_rot, model_pos) = (&fk.model_rot[..], &fk.model_pos[..]);
-    let offset = look.target - model_pos[index];
-    let current = model_rot[index] * look.aim;
-    if !axis_ok(offset) || !axis_ok(current) {
-        return None;
+    if let Some(shift) = base_shift(fk, effectors, base.weight.get()) {
+        let parent = parent_model_rot(&fk.model_rot[..], parents, index);
+        trs[index].translation += parent.inverse() * shift;
     }
-    let delta = arc_rotation(current.normalize(), offset.normalize());
-    let parent = parent_model_rot(model_rot, parents, index);
-    Some(parent.inverse() * delta * model_rot[index])
-}
-
-/// Solves one look-at against a local-TRS pose.
-///
-/// Rotates `look.joint` in its parent frame so its local `aim` axis
-/// points at `look.target`, slerped by the weight. `fk` is the
-/// caller's reusable [`FkScratch`]. Returns whether the pose changed;
-/// degenerate input (joint out of range, weight `0`, non-finite or
-/// zero-length `aim`, zero-length target offset) is a strict no-op.
-pub fn solve_look_at(
-    trs: &mut [JointTrs],
-    parents: &[Option<JointId>],
-    look: &LookAt,
-    fk: &mut FkScratch,
-) -> bool {
-    let Some(solved) = look_at_local(trs, parents, look, fk) else {
-        return false;
-    };
-    let index = look.joint.index();
-    let weight = look.weight.get();
-    trs[index].rotation = if weight >= 1.0 {
-        solved
-    } else {
-        trs[index].rotation.slerp(solved, weight)
-    };
-    true
 }
 
 /// Solves one effector against the pose the earlier effectors left.
@@ -407,16 +212,19 @@ fn apply_effector(
     }
 }
 
-/// Applies `stack`'s effectors in order to the local-TRS pose — the
-/// pipeline stage (design §8.2, §8.6), shared by every skel sample
-/// path. `fk` is the frame's shared [`FkScratch`]: the stack runs
-/// allocation-free.
+/// Applies `stack` in order to the local-TRS pose — the pipeline stage
+/// (design §8.2, §8.6), shared by every skel sample path: the §8.7 base
+/// pull first (when set), then every effector in vector order. `fk` is
+/// the frame's shared [`FkScratch`]: the stack runs allocation-free.
 pub(crate) fn apply_ik_stack(
     trs: &mut [JointTrs],
     parents: &[Option<JointId>],
     stack: &IkStack,
     fk: &mut FkScratch,
 ) {
+    if let Some(base) = &stack.base {
+        pull_base(trs, parents, base, &stack.effectors, fk);
+    }
     for effector in &stack.effectors {
         apply_effector(trs, parents, effector, fk);
     }
@@ -424,6 +232,8 @@ pub(crate) fn apply_ik_stack(
 
 #[cfg(test)]
 mod tests {
+    use glam::Quat;
+
     use super::*;
 
     /// A straight `count`-joint chain along +X with unit bones; the
@@ -581,6 +391,7 @@ mod tests {
                     weight: Clamped01::new(1.0),
                 }),
             ],
+            base: None,
         };
         apply_ik_stack(&mut trs, &parents, &stack, &mut FkScratch::default());
         // The later constraint re-solves the pose the earlier one left.
@@ -698,6 +509,103 @@ mod tests {
         assert!(
             (end - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-4,
             "end at {end:?}"
+        );
+    }
+
+    /// The §8.7 base pull: an unreachable target moves the base by the
+    /// shortfall, so the chain then reaches exactly.
+    #[test]
+    fn the_base_pull_moves_the_base_into_an_unreachable_target() {
+        let (mut trs, parents) = chain(3);
+        let stack = IkStack {
+            effectors: vec![Effector::TwoBone(TwoBoneIk {
+                root: JointId::from_raw(0),
+                mid: JointId::from_raw(1),
+                end: JointId::from_raw(2),
+                target: Vec3::new(10.0, 0.0, 0.0),
+                weight: Clamped01::new(1.0),
+            })],
+            base: Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(1.0),
+            }),
+        };
+        apply_ik_stack(&mut trs, &parents, &stack, &mut FkScratch::default());
+        // Reach 2, target at 10: the base takes the shortfall of 8.
+        assert!(
+            (trs[0].translation - Vec3::X * 8.0).length() < 1e-4,
+            "base at {:?}",
+            trs[0].translation
+        );
+        let end = model_position(&trs, 2);
+        assert!((end - Vec3::X * 10.0).length() < 1e-4, "end at {end:?}");
+    }
+
+    /// Look-at effectors never pull and a pull weight of `0` leaves the
+    /// base alone — the §8.7 base pull is a two-bone shortfall only.
+    #[test]
+    fn a_zero_pull_weight_and_look_ats_leave_the_base_alone() {
+        let mut fk = FkScratch::default();
+        let (mut trs, parents) = chain(3);
+        let look = IkStack {
+            effectors: vec![Effector::LookAt(LookAt {
+                joint: JointId::from_raw(0),
+                target: Vec3::new(10.0, 10.0, 0.0),
+                aim: Vec3::X,
+                weight: Clamped01::new(1.0),
+            })],
+            base: Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(1.0),
+            }),
+        };
+        apply_ik_stack(&mut trs, &parents, &look, &mut fk);
+        assert_eq!(trs[0].translation, Vec3::ZERO);
+        let (mut trs, parents) = chain(3);
+        let muted = IkStack {
+            effectors: vec![Effector::TwoBone(TwoBoneIk {
+                root: JointId::from_raw(0),
+                mid: JointId::from_raw(1),
+                end: JointId::from_raw(2),
+                target: Vec3::new(10.0, 0.0, 0.0),
+                weight: Clamped01::new(1.0),
+            })],
+            base: Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(0.0),
+            }),
+        };
+        apply_ik_stack(&mut trs, &parents, &muted, &mut fk);
+        assert_eq!(trs[0].translation, Vec3::ZERO);
+    }
+
+    /// The pull of several two-bone effectors is the weighted mean of
+    /// their shortfalls (§8.7).
+    #[test]
+    fn the_pull_is_the_weighted_mean_of_the_shortfalls() {
+        let (mut trs, parents) = chain(3);
+        let first = TwoBoneIk {
+            root: JointId::from_raw(0),
+            mid: JointId::from_raw(1),
+            end: JointId::from_raw(2),
+            target: Vec3::new(10.0, 0.0, 0.0),
+            weight: Clamped01::new(1.0),
+        };
+        let mut second = first;
+        second.target = Vec3::new(0.0, 10.0, 0.0);
+        let stack = IkStack {
+            effectors: vec![Effector::TwoBone(first), Effector::TwoBone(second)],
+            base: Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(1.0),
+            }),
+        };
+        apply_ik_stack(&mut trs, &parents, &stack, &mut FkScratch::default());
+        // Shortfall 8 along +X and along +Y, mean (4, 4, 0).
+        assert!(
+            (trs[0].translation - Vec3::new(4.0, 4.0, 0.0)).length() < 1e-4,
+            "base at {:?}",
+            trs[0].translation
         );
     }
 }

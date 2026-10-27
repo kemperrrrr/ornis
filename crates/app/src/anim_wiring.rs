@@ -15,11 +15,11 @@ use std::collections::HashMap;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
-    AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, ClipEvents,
-    ClipId, ClipSyncMarks, Effector, IkStack, JointId, JointMask, JointPose, JointTrack, JointTrs,
-    Key, KeyTrack, MachineCursor, RetargetMap, SkelClip, SkelFade, SkelLayerStack, SkelPlayer,
-    SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, SyncMark, TreeChild2d, TreeNodeDef, TreeParam,
-    fade_in_flight, try_animator,
+    AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, BasePull,
+    ClipEvents, ClipId, ClipSyncMarks, Effector, IkStack, JointId, JointMask, JointPose,
+    JointTrack, JointTrs, Key, KeyTrack, MachineCursor, RetargetMap, SkelClip, SkelFade,
+    SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, SyncMark,
+    TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
@@ -592,17 +592,24 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
 }
 
 /// Installs the [`IkStack`] of `root` — the typed effector input
-/// (design §8.2, §8.6). Set semantics: `effectors` replaces whatever IK
-/// sat on the root (an empty stack clears it); effectors apply in
-/// vector order after the tree/layer blend and before the ragdoll
-/// blend.
+/// (design §8.2, §8.6, §8.7). Set semantics: `effectors` and `base`
+/// replace whatever IK sat on the root (an empty set clears it);
+/// effectors apply in vector order after the tree/layer blend and
+/// before the ragdoll blend, and `base` (the §8.7 pelvis pull) leans
+/// into unreachable two-bone targets first.
 ///
 /// Returns whether anything is written: `root` must carry a
-/// [`Skeleton`], and every effector must pass [`Effector::installable`]
-/// (one bad entry rejects the whole set).
+/// [`Skeleton`], every effector must pass [`Effector::installable`]
+/// and `base` its in-range joint (one bad entry rejects the whole
+/// set).
 // qual:api — typed `IkStack` input for hosts; in-tree callers are
 // tests until a production host entry lands.
-pub fn set_skel_ik(store: &mut SmartStore, root: Entity, effectors: Vec<Effector>) -> bool {
+pub fn set_skel_ik(
+    store: &mut SmartStore,
+    root: Entity,
+    effectors: Vec<Effector>,
+    base: Option<BasePull>,
+) -> bool {
     let Some(skeletons) = store.read_lane::<Skeleton>() else {
         return false;
     };
@@ -611,7 +618,8 @@ pub fn set_skel_ik(store: &mut SmartStore, root: Entity, effectors: Vec<Effector
     };
     let count = skeleton.parents.len();
     drop(skeletons);
-    let valid = effectors.iter().all(|effector| effector.installable(count));
+    let valid = effectors.iter().all(|effector| effector.installable(count))
+        && base.is_none_or(|base| base.installable(count));
     if !valid {
         return false;
     }
@@ -623,7 +631,7 @@ pub fn set_skel_ik(store: &mut SmartStore, root: Entity, effectors: Vec<Effector
             stacks.remove(root);
         }
     } else {
-        store.insert(root, IkStack { effectors });
+        store.insert(root, IkStack { effectors, base });
     }
     true
 }
@@ -2189,20 +2197,20 @@ mod tests {
         let constraint = Effector::TwoBone(chain);
         let mut store = SmartStore::new();
         let bare = store.create_entity();
-        assert!(!set_skel_ik(&mut store, bare, vec![constraint]));
+        assert!(!set_skel_ik(&mut store, bare, vec![constraint], None));
         let root = ik_root(&mut store);
         let out_of_range = Effector::TwoBone(TwoBoneIk {
             end: JointId::from_raw(9),
             ..chain
         });
-        assert!(!set_skel_ik(&mut store, root, vec![out_of_range]));
+        assert!(!set_skel_ik(&mut store, root, vec![out_of_range], None));
         assert!(store.read_lane::<IkStack>().is_none());
-        assert!(set_skel_ik(&mut store, root, vec![constraint]));
+        assert!(set_skel_ik(&mut store, root, vec![constraint], None));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
         let effectors = lane.get(root).map(|stack| stack.effectors.clone());
         assert_eq!(effectors, Some(vec![constraint]));
         drop(lane);
-        assert!(set_skel_ik(&mut store, root, Vec::new()));
+        assert!(set_skel_ik(&mut store, root, Vec::new(), None));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
         assert!(
             lane.get(root).is_none(),
@@ -2222,18 +2230,62 @@ mod tests {
             aim: Vec3::ZERO,
             weight: Clamped01::ONE,
         };
-        assert!(!set_skel_ik(&mut store, root, vec![Effector::LookAt(look)]));
+        assert!(!set_skel_ik(
+            &mut store,
+            root,
+            vec![Effector::LookAt(look)],
+            None
+        ));
         assert!(store.read_lane::<IkStack>().is_none());
         let aimed = LookAt {
             aim: Vec3::X,
             ..look
         };
-        assert!(set_skel_ik(&mut store, root, vec![Effector::LookAt(aimed)]));
+        assert!(set_skel_ik(
+            &mut store,
+            root,
+            vec![Effector::LookAt(aimed)],
+            None
+        ));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
         assert_eq!(
             lane.get(root).map(|stack| stack.effectors.clone()),
             Some(vec![Effector::LookAt(aimed)])
         );
+    }
+
+    /// The §8.7 base pull rides the stack and validates against the
+    /// skeleton like the effectors do (an out-of-range base rejects the
+    /// whole set).
+    #[test]
+    fn set_skel_ik_validates_the_base_pull() {
+        let mut store = SmartStore::new();
+        let root = ik_root(&mut store);
+        let chain = Effector::TwoBone(TwoBoneIk {
+            root: JointId::from_raw(0),
+            mid: JointId::from_raw(1),
+            end: JointId::from_raw(2),
+            target: Vec3::new(1.0, 1.0, 0.0),
+            weight: Clamped01::ONE,
+        });
+        let out_of_range = BasePull {
+            joint: JointId::from_raw(9),
+            weight: Clamped01::ONE,
+        };
+        assert!(!set_skel_ik(
+            &mut store,
+            root,
+            vec![chain],
+            Some(out_of_range)
+        ));
+        assert!(store.read_lane::<IkStack>().is_none());
+        let pelvis = BasePull {
+            joint: JointId::from_raw(0),
+            weight: Clamped01::ONE,
+        };
+        assert!(set_skel_ik(&mut store, root, vec![chain], Some(pelvis)));
+        let lane = store.read_lane::<IkStack>().expect("ik lane");
+        assert_eq!(lane.get(root).map(|stack| stack.base), Some(Some(pelvis)));
     }
 
     fn retarget_skeleton(store: &mut SmartStore, rest: Vec3) -> Entity {
