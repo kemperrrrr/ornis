@@ -25,7 +25,7 @@ use crate::units::UnitQuat;
 const SCALE_EPSILON: f32 = 1e-8;
 
 /// Upper bound on ancestor walks. A longer chain is treated as a cycle.
-const HIERARCHY_WALK_LIMIT: usize = 4096;
+pub const HIERARCHY_WALK_LIMIT: usize = 4096;
 
 /// Display name shared by editor entities and asset/glTF nodes.
 ///

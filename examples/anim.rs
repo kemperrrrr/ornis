@@ -50,7 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // root; joints resolve by their glTF names. Goals go stale as the
     // root moves — the mannequin walks in place here, and a moving host
     // re-sets the rig from its update loop every frame.
-    let skel_root = world.entity_mut(hero).animator()?.targets()?[0];
+    let skel_root = world
+        .entity_mut(hero)
+        .animator()?
+        .targets()?
+        .first()
+        .copied()
+        .expect("the mannequin spawns one skeleton root");
     let entity = world.entity_mut(skel_root);
     let thigh_l = entity.joint_named("thigh_l").expect("thigh_l");
     let calf_l = entity.joint_named("calf_l").expect("calf_l");
@@ -78,6 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             weight: Clamped01::new(PELVIS_PULL),
         }),
     };
-    world.entity_mut(skel_root).set_control_rig(rig);
+    assert!(
+        world.entity_mut(skel_root).set_control_rig(rig),
+        "the demo rig installs on the mannequin"
+    );
     ornis::run(world)
 }

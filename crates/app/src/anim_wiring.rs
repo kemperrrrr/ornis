@@ -663,12 +663,16 @@ pub fn set_control_rig(store: &mut SmartStore, root: Entity, rig: ControlRig) ->
 /// The world matrix of `root`'s frame: its own `GlobalTransform`, or the
 /// nearest ancestor's along `ChildOf` (a skeleton root without a local
 /// transform lives in its parent's frame). `None` when the chain carries
-/// no [`GlobalTransform`].
+/// no [`GlobalTransform`]. The walk stays within
+/// [`HIERARCHY_WALK_LIMIT`](ornis_core::HIERARCHY_WALK_LIMIT):
+/// [`set_parent`](ornis_core::set_parent) keeps the hierarchy acyclic,
+/// and the bound holds even for raw `ChildOf` writes.
 fn root_world_matrix(store: &SmartStore, root: Entity) -> Option<Mat4> {
     let globals = store.read_lane::<GlobalTransform>()?;
     let parents = store.read_lane::<ChildOf>();
     let mut cursor = Some(root);
-    while let Some(entity) = cursor {
+    for _ in 0..ornis_core::HIERARCHY_WALK_LIMIT {
+        let entity = cursor?;
         if let Some(global) = globals.get(entity) {
             return Some(global.to_mat4());
         }
