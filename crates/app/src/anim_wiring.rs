@@ -17,9 +17,9 @@ use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, BasePull,
     ClipEvents, ClipId, ClipSyncMarks, ControlRig, Effector, IkStack, JointId, JointMask,
-    JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, RetargetMap, SkelClip, SkelFade,
-    SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, SyncMark,
-    TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
+    JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, MaskId, RetargetMap, SkelClip,
+    SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh,
+    SyncMark, TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{ChildOf, Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
@@ -577,8 +577,6 @@ pub fn fade_to_clip(
 ///
 /// Returns whether `root` carries a [`Skeleton`] (the stack's anchor);
 /// nothing is written without one.
-// qual:api — typed `SkelLayerStack` input for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerStack) -> bool {
     if store
         .read_lane::<Skeleton>()
@@ -589,6 +587,17 @@ pub fn set_skel_layers(store: &mut SmartStore, root: Entity, stack: SkelLayerSta
     store.register::<SkelLayerStack>();
     store.insert(root, stack);
     true
+}
+
+/// Creates the cold-lane entity holding `mask` (design §8.6): the
+/// [`MaskId`] handle [`SkelLayer`](ornis_animation::SkelLayer)s point
+/// at. The weight count meets the skeleton at sample time (a mismatch is
+/// bad skin, counted) — authoring stays permissive.
+pub fn create_skel_mask(store: &mut SmartStore, mask: JointMask) -> MaskId {
+    store.register_cold::<JointMask>();
+    let entity = store.create_entity();
+    store.insert_cold(entity, mask);
+    MaskId(entity)
 }
 
 /// Installs the [`IkStack`] of `root` — the typed effector input
@@ -921,8 +930,6 @@ pub fn set_tree_param(store: &mut SmartStore, root: Entity, name: &str, value: f
 /// Returns `false` — and writes nothing — when `clip` is not a live
 /// [`SkelClip`] playlist or any mark is malformed: an empty name, or an
 /// `at` outside `[0, 1)` / non-finite.
-// qual:api — typed sync-mark input for hosts; in-tree callers are
-// tests until a production host entry lands.
 pub fn set_clip_sync_marks(store: &mut SmartStore, clip: ClipId, marks: Vec<SyncMark>) -> bool {
     let clips = store.read_cold_lane::<SkelClip>();
     let known = clips
@@ -957,8 +964,6 @@ fn marks_authorable<'a>(mut entries: impl Iterator<Item = (&'a str, f32)>) -> bo
 /// clears the lane). Returns `false` — changing nothing — for an unknown
 /// clip or an invalid event (empty name, `at` outside `0..1` or
 /// non-finite).
-// qual:api — typed event authoring for hosts; the runtime consumers
-// are the cursor advances of `anim_sample`/`skel_sample`.
 pub fn set_clip_events(store: &mut SmartStore, clip: ClipId, events: Vec<AnimEvent>) -> bool {
     let known = {
         let skel = store.read_cold_lane::<SkelClip>();

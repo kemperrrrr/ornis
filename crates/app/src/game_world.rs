@@ -12,7 +12,9 @@
 
 use std::marker::PhantomData;
 
-use ornis_animation::{ControlRig, JointId, Skeleton};
+use ornis_animation::{
+    AnimEvent, ClipId, ControlRig, JointId, JointMask, MaskId, SkelLayerStack, Skeleton, SyncMark,
+};
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
     Authoritative, Color, Engine, Entity, EnvironmentWeight, Position, Replica, SceneEntities,
@@ -412,12 +414,26 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// Borrows `entity` for component edits, including [`Animator`](ornis_animation::Animator)
     /// playback via [`AnimatorAccess`](ornis_animation::AnimatorAccess).
     pub fn entity_mut(&mut self, entity: Entity) -> EntityMut<'_> {
-        let store = self
-            .engine
+        let store = self.store();
+        EntityMut { store, entity }
+    }
+
+    /// Creates the entity holding `mask` and answers its [`MaskId`]
+    /// handle — the [`SkelLayer`](ornis_animation::SkelLayer)s of a
+    /// stack point at it (§8.6):
+    /// [`create_skel_mask`](crate::anim_wiring::create_skel_mask).
+    pub fn create_skel_mask(&mut self, mask: JointMask) -> MaskId {
+        crate::anim_wiring::create_skel_mask(self.store(), mask)
+    }
+
+    /// The engine's component store — the invariant accessor both
+    /// [`entity_mut`](Self::entity_mut) and mask authoring go through (a
+    /// [`GameWorld`] always carries one).
+    fn store(&mut self) -> &mut SmartStore {
+        self.engine
             .world_mut()
             .store_mut()
-            .expect("engine always carries a store");
-        EntityMut { store, entity }
+            .expect("engine always carries a store")
     }
 
     /// Reads the frame payload directly from the component lanes.
@@ -895,6 +911,34 @@ impl EntityMut<'_> {
     /// refusal cases).
     pub fn set_control_rig(&mut self, rig: ControlRig) -> bool {
         crate::anim_wiring::set_control_rig(&mut *self.store, self.entity, rig)
+    }
+
+    /// The [`Skeleton`] of this entity (an `Arc` clone — cheap), when it
+    /// carries one (§8.8 setup: joint lookups, mask authoring).
+    pub fn skeleton(&self) -> Option<Skeleton> {
+        self.store
+            .read_lane::<Skeleton>()?
+            .get(self.entity)
+            .cloned()
+    }
+
+    /// Installs the overlay [`SkelLayerStack`] on this skeleton root
+    /// (set semantics — replaces; an empty stack clears):
+    /// [`set_skel_layers`](crate::anim_wiring::set_skel_layers).
+    pub fn set_skel_layers(&mut self, stack: SkelLayerStack) -> bool {
+        crate::anim_wiring::set_skel_layers(&mut *self.store, self.entity, stack)
+    }
+
+    /// Installs [`SyncMark`]s on this clip playlist — the transition
+    /// alignment grid (`set_clip_sync_marks`).
+    pub fn set_clip_sync_marks(&mut self, marks: Vec<SyncMark>) -> bool {
+        crate::anim_wiring::set_clip_sync_marks(&mut *self.store, ClipId(self.entity), marks)
+    }
+
+    /// Installs [`AnimEvent`]s on this clip playlist — the authored
+    /// events cursors emit (`set_clip_events`).
+    pub fn set_clip_events(&mut self, events: Vec<AnimEvent>) -> bool {
+        crate::anim_wiring::set_clip_events(&mut *self.store, ClipId(self.entity), events)
     }
 }
 
@@ -1855,6 +1899,113 @@ mod tests {
             seen.insert(format!("{:?}", pose.matrices));
         }
         assert!(seen.len() > 1, "joints must travel, TPose would repeat");
+    }
+
+    /// Layer authoring runs end to end on the starter mannequin: a
+    /// [`JointMask`] created through [`GameWorld::create_skel_mask`]
+    /// carries one weight per joint and reaches the lane; the stack,
+    /// sync marks and events install through [`EntityMut`] on their
+    /// roots and playlists; malformed marks are refused whole.
+    #[test]
+    fn layer_mask_marks_and_events_author_on_the_starter() {
+        use ornis_animation::{
+            AnimEvent, Animator, JointMask, SkelLayer, SkelLayerStack, SkelPlayer, SyncMark,
+        };
+        use ornis_core::{Clamped01, Seconds};
+        let mut world = GameWorld::new();
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            world.assets_mut().load(&starter).expect("starter loads");
+        let hero = world
+            .spawn(ModelSpawn::new(mannequin))
+            .expect("starter spawns");
+
+        let (walk, skel_root) = {
+            let store = world.engine().world().store().expect("store");
+            let anim = store
+                .read_lane::<Animator>()
+                .expect("animator lane")
+                .get(hero)
+                .expect("animator on the root")
+                .clone();
+            (
+                anim.clip("Walk_Loop").expect("Walk_Loop"),
+                *anim.targets().first().expect("one skeleton root"),
+            )
+        };
+
+        // Mask: one weight per joint of the real skeleton.
+        let joint_count = {
+            let store = world.engine().world().store().expect("store");
+            let skeleton = store
+                .read_lane::<ornis_animation::Skeleton>()
+                .expect("skeleton lane")
+                .get(skel_root)
+                .expect("skeleton under the root")
+                .clone();
+            skeleton.joint_count()
+        };
+        let mask = world.create_skel_mask(JointMask {
+            name: "upper_body".into(),
+            weights: vec![Clamped01::ZERO; joint_count],
+        });
+        {
+            let store = world.engine().world().store().expect("store");
+            let masks = store
+                .read_cold_lane::<JointMask>()
+                .expect("cold joint masks");
+            assert_eq!(
+                masks.get(mask.0).expect("mask stored").weights.len(),
+                joint_count
+            );
+        }
+
+        let stack = SkelLayerStack {
+            layers: vec![SkelLayer {
+                player: SkelPlayer {
+                    clip: walk,
+                    time: Seconds::ZERO,
+                    speed: Seconds::new(1.0),
+                    weight: Clamped01::ONE,
+                    playing: false,
+                    looping: true,
+                },
+                mask,
+            }],
+        };
+        assert!(world.entity_mut(skel_root).set_skel_layers(stack));
+        assert!(world.entity_mut(walk.0).set_clip_sync_marks(vec![SyncMark {
+            name: "contact".into(),
+            at: 0.25,
+        },]));
+        assert!(world.entity_mut(walk.0).set_clip_events(vec![AnimEvent {
+            name: "footstep".into(),
+            at: 0.5,
+        }]));
+        // Malformed marks/events: refused whole, nothing written.
+        assert!(
+            !world.entity_mut(walk.0).set_clip_sync_marks(vec![SyncMark {
+                name: String::new(),
+                at: 0.25,
+            },])
+        );
+        assert!(!world.entity_mut(walk.0).set_clip_events(vec![AnimEvent {
+            name: "footstep".into(),
+            at: 1.5,
+        }]));
+        let store = world.engine().world().store().expect("store");
+        assert_eq!(
+            store
+                .read_cold_lane::<ornis_animation::ClipSyncMarks>()
+                .expect("marks lane")
+                .get(walk.0)
+                .expect("marks kept")
+                .marks
+                .len(),
+            1
+        );
+        assert_ne!(mask.0, skel_root, "the mask lives on its own entity");
     }
 
     /// Playback controls behave like a video player: resume starts a
