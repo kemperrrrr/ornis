@@ -25,7 +25,7 @@ pub(crate) fn axis_ok(axis: Vec3) -> bool {
 /// and hinge, the model-space deltas that put the effector on the
 /// target, and how far to apply them.
 #[derive(Debug, Clone, Copy)]
-struct Aim {
+pub(crate) struct Aim {
     parent_root: Quat,
     parent_mid: Quat,
     delta_root: Quat,
@@ -78,7 +78,7 @@ pub(crate) fn fk_model(trs: &[JointTrs], parents: &[Option<JointId>], buf: &mut 
 /// The aim that puts the `root → mid → end` chain on `target` (clamped
 /// to arm reach) — or `None` for a non-chain or degenerate geometry.
 /// Pure: validation, the fold and the bend axis kept from the pose.
-fn fold_chain(
+pub(crate) fn fold_chain(
     fk: &FkScratch,
     parents: &[Option<JointId>],
     chain: (usize, usize, usize),

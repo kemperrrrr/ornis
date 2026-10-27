@@ -8,7 +8,7 @@ use glam::Vec3;
 
 use ornis_core::Clamped01;
 
-use crate::ik_solve::{axis_ok, fk_model, parent_model_rot};
+use crate::ik_solve::{axis_ok, fk_model, fold_chain, parent_model_rot};
 use crate::{JointId, JointTrs};
 
 pub use crate::ik_solve::{FkScratch, solve_look_at, solve_two_bone_ik};
@@ -144,9 +144,17 @@ pub struct IkStack {
 
 /// The model-space shift of the §8.7 base pull: the weighted mean of
 /// the two-bone shortfalls (target distance past chain reach), scaled
-/// by the pull weight — `None` when no effector pulls. Look-at
-/// effectors never pull. Pure.
-fn base_shift(fk: &FkScratch, effectors: &[Effector], weight: f32) -> Option<Vec3> {
+/// by the pull weight — `None` when no effector pulls. Only effectors
+/// the solver would run count: [`fold_chain`] gates non-finite targets,
+/// non-chains and degenerate geometry out (a no-op effector never moves
+/// the base). Reachable chains count with a zero shortfall and hold the
+/// base. Pure.
+fn base_shift(
+    fk: &FkScratch,
+    parents: &[Option<JointId>],
+    effectors: &[Effector],
+    weight: f32,
+) -> Option<Vec3> {
     let (mut total, mut weight_sum) = (Vec3::ZERO, 0.0);
     for effector in effectors {
         let chain = match effector {
@@ -154,10 +162,11 @@ fn base_shift(fk: &FkScratch, effectors: &[Effector], weight: f32) -> Option<Vec
             Effector::LookAt(_) => continue,
         };
         let strength = chain.weight.get();
-        let (root, mid, end) = (chain.root.index(), chain.mid.index(), chain.end.index());
-        if strength <= 0.0 || root.max(mid).max(end) >= fk.model_pos.len() {
+        let triple = (chain.root.index(), chain.mid.index(), chain.end.index());
+        if strength <= 0.0 || fold_chain(fk, parents, triple, chain.target, strength).is_none() {
             continue;
         }
+        let (root, mid, end) = triple;
         let reach = (fk.model_pos[mid] - fk.model_pos[root]).length()
             + (fk.model_pos[end] - fk.model_pos[mid]).length();
         let to_target = chain.target - fk.model_pos[root];
@@ -176,7 +185,8 @@ fn base_shift(fk: &FkScratch, effectors: &[Effector], weight: f32) -> Option<Vec
 
 /// Runs the §8.7 base pull: `base.joint`'s local translation takes the
 /// weighted shortfall of the two-bone effectors, written in the joint's
-/// parent frame. Strict no-op for an out-of-range base or weight `0`.
+/// parent frame. Strict no-op for an out-of-range base, weight `0` or a
+/// non-finite shift.
 fn pull_base(
     trs: &mut [JointTrs],
     parents: &[Option<JointId>],
@@ -189,7 +199,9 @@ fn pull_base(
         return;
     }
     fk_model(trs, parents, fk);
-    if let Some(shift) = base_shift(fk, effectors, base.weight.get()) {
+    if let Some(shift) = base_shift(fk, parents, effectors, base.weight.get())
+        && shift.is_finite()
+    {
         let parent = parent_model_rot(&fk.model_rot[..], parents, index);
         trs[index].translation += parent.inverse() * shift;
     }
@@ -604,6 +616,67 @@ mod tests {
         // Shortfall 8 along +X and along +Y, mean (4, 4, 0).
         assert!(
             (trs[0].translation - Vec3::new(4.0, 4.0, 0.0)).length() < 1e-4,
+            "base at {:?}",
+            trs[0].translation
+        );
+    }
+
+    /// One two-bone effector of the `chain(3)` shape at `target` — the
+    /// shared fixture of the base-pull tests (rustqual DRY-001).
+    fn target_at(target: Vec3) -> Effector {
+        Effector::TwoBone(TwoBoneIk {
+            root: JointId::from_raw(0),
+            mid: JointId::from_raw(1),
+            end: JointId::from_raw(2),
+            target,
+            weight: Clamped01::new(1.0),
+        })
+    }
+
+    /// The §8.7 pull of `effectors` on `chain(3)` at pull `weight`,
+    /// answered as the posed chain (rustqual DRY-001 keeps the stage in
+    /// one place).
+    fn pulled(effectors: Vec<Effector>, weight: f32) -> Vec<JointTrs> {
+        let (mut trs, parents) = chain(3);
+        apply_ik_stack(
+            &mut trs,
+            &parents,
+            &IkStack {
+                effectors,
+                base: Some(BasePull {
+                    joint: JointId::from_raw(0),
+                    weight: Clamped01::new(weight),
+                }),
+            },
+            &mut FkScratch::default(),
+        );
+        trs
+    }
+
+    /// A no-op effector never moves the base (§8.7): a non-finite
+    /// target is gated out exactly like the solver gates it — pose and
+    /// base stay untouched.
+    #[test]
+    fn a_non_finite_target_never_pulls_the_base() {
+        let trs = pulled(vec![target_at(Vec3::NAN)], 1.0);
+        assert_eq!(trs[0].translation, Vec3::ZERO);
+        assert_eq!(trs[1].rotation, Quat::IDENTITY);
+    }
+
+    /// A reachable chain counts into the §8.7 mean with a zero
+    /// shortfall — it holds the base (the far pull is halved by one
+    /// anchored chain, not applied in full).
+    #[test]
+    fn a_reachable_chain_holds_the_base_against_a_far_target() {
+        let trs = pulled(
+            vec![
+                target_at(Vec3::new(10.0, 0.0, 0.0)),
+                target_at(Vec3::new(1.0, 0.0, 0.0)),
+            ],
+            1.0,
+        );
+        assert!(
+            (trs[0].translation - Vec3::X * 4.0).length() < 1e-4,
             "base at {:?}",
             trs[0].translation
         );
