@@ -4,7 +4,7 @@
 //! chain geometry and the sample stage are different responsibilities.
 //! Full-body IK and a control rig are not this layer.
 
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use ornis_core::Clamped01;
 
@@ -142,6 +142,56 @@ pub struct IkStack {
     pub base: Option<BasePull>,
 }
 
+/// A control rig: IK goals authored in **world space** (design §8.8).
+///
+/// Goal data matches [`Effector`] and [`BasePull`], but every `target`
+/// is a world point. [`ControlRig::into_stack`] maps the goals through
+/// the root's world matrix into the model-space [`IkStack`] the sample
+/// stage solves — the same «author in world, solve in model» seam as
+/// ragdoll contact goals.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ControlRig {
+    /// Goals applied in order, as [`IkStack::effectors`]; each `target`
+    /// is a world point.
+    pub goals: Vec<Effector>,
+    /// Optional §8.7 base pull (joint identity — space-independent).
+    pub base: Option<BasePull>,
+}
+
+impl ControlRig {
+    /// The model-space [`IkStack`] for the skeleton root whose world
+    /// matrix is `root_world` (its `GlobalTransform`): every goal
+    /// `target` maps through the inverse, the base passes through.
+    /// Goals of a singular matrix land non-finite and are then skipped
+    /// by the solvers' §8.7 gate. Pure.
+    pub fn into_stack(self, root_world: Mat4) -> IkStack {
+        let to_model = root_world.inverse();
+        let effectors = self
+            .goals
+            .into_iter()
+            .map(|goal| match goal {
+                Effector::TwoBone(chain) => Effector::TwoBone(TwoBoneIk {
+                    root: chain.root,
+                    mid: chain.mid,
+                    end: chain.end,
+                    target: to_model.transform_point3(chain.target),
+                    weight: chain.weight,
+                }),
+                Effector::LookAt(look) => Effector::LookAt(LookAt {
+                    joint: look.joint,
+                    target: to_model.transform_point3(look.target),
+                    aim: look.aim,
+                    weight: look.weight,
+                }),
+            })
+            .collect();
+        IkStack {
+            effectors,
+            base: self.base,
+        }
+    }
+}
+
 /// The model-space shift of the §8.7 base pull: the weighted mean of
 /// the two-bone shortfalls (target distance past chain reach), scaled
 /// by the pull weight — `None` when no effector pulls. Only effectors
@@ -244,6 +294,8 @@ pub(crate) fn apply_ik_stack(
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
+
     use glam::Quat;
 
     use super::*;
@@ -679,6 +731,58 @@ mod tests {
             (trs[0].translation - Vec3::X * 4.0).length() < 1e-4,
             "base at {:?}",
             trs[0].translation
+        );
+    }
+
+    /// The §8.8 control rig: world goals map into the root's model
+    /// space through its world matrix (rotation included); the base
+    /// passes through unchanged.
+    #[test]
+    fn the_control_rig_maps_world_goals_into_model_space() {
+        let root_world =
+            Mat4::from_rotation_translation(Quat::from_rotation_z(FRAC_PI_2), Vec3::X * 10.0);
+        let rig = ControlRig {
+            goals: vec![
+                target_at(Vec3::new(10.0, 2.0, 0.0)),
+                Effector::LookAt(LookAt {
+                    joint: JointId::from_raw(0),
+                    target: Vec3::new(10.0, 2.0, 0.0),
+                    aim: Vec3::X,
+                    weight: Clamped01::new(1.0),
+                }),
+            ],
+            base: Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(1.0),
+            }),
+        };
+        let stack = rig.into_stack(root_world);
+        let chain = match stack.effectors[0] {
+            Effector::TwoBone(chain) => chain,
+            _ => panic!("the first goal stays a chain"),
+        };
+        let look = match stack.effectors[1] {
+            Effector::LookAt(look) => look,
+            _ => panic!("the second goal stays a look"),
+        };
+        // World (10, 2, 0) against a root at (10, 0, 0) turned 90°
+        // about Z: the model-space goal is (2, 0, 0).
+        assert!(
+            (chain.target - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4,
+            "chain at {:?}",
+            chain.target
+        );
+        assert!(
+            (look.target - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4,
+            "look at {:?}",
+            look.target
+        );
+        assert_eq!(
+            stack.base,
+            Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(1.0),
+            })
         );
     }
 }

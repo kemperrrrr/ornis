@@ -16,13 +16,13 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, BasePull,
-    ClipEvents, ClipId, ClipSyncMarks, Effector, IkStack, JointId, JointMask, JointPose,
-    JointTrack, JointTrs, Key, KeyTrack, MachineCursor, RetargetMap, SkelClip, SkelFade,
+    ClipEvents, ClipId, ClipSyncMarks, ControlRig, Effector, IkStack, JointId, JointMask,
+    JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, RetargetMap, SkelClip, SkelFade,
     SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh, SyncMark,
     TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
-use ornis_core::{Clamped01, Entity, Seconds, SmartStore};
+use ornis_core::{Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
 use ornis_gltf::{
     LoadedAnimClip, LoadedInterpolation, LoadedJointTrack, LoadedKeyTrack, LoadedMesh,
     LoadedSkelClip, LoadedSkin, Model, NodeIdx,
@@ -634,6 +634,30 @@ pub fn set_skel_ik(
         store.insert(root, IkStack { effectors, base });
     }
     true
+}
+
+/// Installs the [`IkStack`] of `root` from world-space goals (design
+/// §8.8, the control rig): `rig`'s targets are world points, mapped
+/// through the root's [`GlobalTransform`] into its model space and then
+/// installed like [`set_skel_ik`] — same set semantics and validation
+/// (one bad entry rejects the whole set; an empty goal list clears the
+/// stack).
+///
+/// The installed goals are model-space, so they go stale as the root
+/// moves — call again from the update loop (one inverse plus one point
+/// per goal). `root` without a [`GlobalTransform`] is not written.
+// qual:api — typed control-rig input for hosts; in-tree callers are
+// tests until a production host entry lands.
+pub fn set_control_rig(store: &mut SmartStore, root: Entity, rig: ControlRig) -> bool {
+    let Some(globals) = store.read_lane::<GlobalTransform>() else {
+        return false;
+    };
+    let Some(global) = globals.get(root).copied() else {
+        return false;
+    };
+    drop(globals);
+    let stack = rig.into_stack(global.to_mat4());
+    set_skel_ik(store, root, stack.effectors, stack.base)
 }
 
 /// Installs the [`RetargetMap`] of `target` — the explicit «source joint →
@@ -2286,6 +2310,44 @@ mod tests {
         assert!(set_skel_ik(&mut store, root, vec![chain], Some(pelvis)));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
         assert_eq!(lane.get(root).map(|stack| stack.base), Some(Some(pelvis)));
+    }
+
+    /// The §8.8 facade: world goals land as model-space goals through
+    /// the root's `GlobalTransform`; without one nothing is written.
+    #[test]
+    fn set_control_rig_maps_goals_through_the_root_global() {
+        let mut store = SmartStore::new();
+        let root = ik_root(&mut store);
+        let rig = ControlRig {
+            goals: vec![Effector::TwoBone(TwoBoneIk {
+                root: JointId::from_raw(0),
+                mid: JointId::from_raw(1),
+                end: JointId::from_raw(2),
+                target: Vec3::new(12.0, 1.0, 0.0),
+                weight: Clamped01::ONE,
+            })],
+            base: None,
+        };
+        // No `GlobalTransform` yet — nothing is written.
+        assert!(!set_control_rig(&mut store, root, rig.clone()));
+        assert!(store.read_lane::<IkStack>().is_none());
+        let mut global = GlobalTransform::IDENTITY;
+        global.translation = Vec3::new(10.0, 0.0, 0.0);
+        store.insert(root, global);
+        assert!(set_control_rig(&mut store, root, rig));
+        let lane = store.read_lane::<IkStack>().expect("ik lane");
+        let stack = lane.get(root).expect("stack");
+        assert_eq!(stack.base, None);
+        match stack.effectors[0] {
+            Effector::TwoBone(chain) => {
+                assert!(
+                    (chain.target - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-4,
+                    "target at {:?}",
+                    chain.target
+                );
+            }
+            _ => panic!("the goal stays a chain"),
+        }
     }
 
     fn retarget_skeleton(store: &mut SmartStore, rest: Vec3) -> Entity {

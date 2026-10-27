@@ -75,7 +75,8 @@ use events::{CursorStep, emit_step};
 mod ik;
 use ik::apply_ik_stack;
 pub use ik::{
-    BasePull, Effector, FkScratch, IkStack, LookAt, TwoBoneIk, solve_look_at, solve_two_bone_ik,
+    BasePull, ControlRig, Effector, FkScratch, IkStack, LookAt, TwoBoneIk, solve_look_at,
+    solve_two_bone_ik,
 };
 
 mod ik_solve;
