@@ -1,8 +1,8 @@
-//! IK effectors (`docs/animation-design.md` §8.2, §8.6): the two-bone
-//! chain, the single-joint look-at and the ordered per-root stack. A
-//! separate module from the pose pipeline because authoring data,
-//! chain geometry and the sample stage are different responsibilities.
-//! Full-body IK and a control rig are not this layer.
+//! IK effectors (`docs/animation-design.md` §8.2, §8.6–§8.8): the
+//! two-bone chain, the single-joint look-at, the ordered per-root stack,
+//! the §8.7 base pull and the world-space [`ControlRig`]. A separate
+//! module from the pose pipeline because authoring data, chain geometry
+//! and the sample stage are different responsibilities.
 
 use glam::{Mat4, Vec3};
 
@@ -162,8 +162,10 @@ impl ControlRig {
     /// The model-space [`IkStack`] for the skeleton root whose world
     /// matrix is `root_world` (its `GlobalTransform`): every goal
     /// `target` maps through the inverse, the base passes through.
-    /// Goals of a singular matrix land non-finite and are then skipped
-    /// by the solvers' §8.7 gate. Pure.
+    /// A singular matrix yields non-finite targets: inserted directly,
+    /// the solvers' §8.7 gate skips them (no panic without `glam-assert`);
+    /// through the typed facade the validation rejects the whole set.
+    /// Pure.
     pub fn into_stack(self, root_world: Mat4) -> IkStack {
         let to_model = root_world.inverse();
         let effectors = self
@@ -784,5 +786,24 @@ mod tests {
                 weight: Clamped01::new(1.0),
             })
         );
+    }
+
+    /// A singular root matrix yields non-finite goals: the §8.7 gate
+    /// drops them, the pose stays untouched, and `into_stack` does not
+    /// panic (without `glam-assert`).
+    #[test]
+    fn a_singular_root_matrix_never_moves_the_pose() {
+        let rig = ControlRig {
+            goals: vec![target_at(Vec3::new(10.0, 2.0, 0.0))],
+            base: Some(BasePull {
+                joint: JointId::from_raw(0),
+                weight: Clamped01::new(1.0),
+            }),
+        };
+        let stack = rig.into_stack(Mat4::from_scale(Vec3::ZERO));
+        let (mut trs, parents) = chain(3);
+        apply_ik_stack(&mut trs, &parents, &stack, &mut FkScratch::default());
+        assert_eq!(trs[0].translation, Vec3::ZERO);
+        assert_eq!(trs[1].rotation, Quat::IDENTITY);
     }
 }

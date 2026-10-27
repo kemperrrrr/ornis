@@ -645,7 +645,11 @@ pub fn set_skel_ik(
 ///
 /// The installed goals are model-space, so they go stale as the root
 /// moves — call again from the update loop (one inverse plus one point
-/// per goal). `root` without a [`GlobalTransform`] is not written.
+/// per goal). `root` without a [`GlobalTransform`] is not written —
+/// clearing the stack in that state goes through [`set_skel_ik`] with an
+/// empty set. Non-finite mapped goals (a singular root matrix) fail
+/// [`Effector::installable`] and reject the whole set, keeping the
+/// previously installed stack.
 // qual:api — typed control-rig input for hosts; in-tree callers are
 // tests until a production host entry lands.
 pub fn set_control_rig(store: &mut SmartStore, root: Entity, rig: ControlRig) -> bool {
@@ -2334,6 +2338,9 @@ mod tests {
         let mut global = GlobalTransform::IDENTITY;
         global.translation = Vec3::new(10.0, 0.0, 0.0);
         store.insert(root, global);
+        // The lane exists, but this root has no entry — nothing is written.
+        let bare = store.create_entity();
+        assert!(!set_control_rig(&mut store, bare, ControlRig::default()));
         assert!(set_control_rig(&mut store, root, rig));
         let lane = store.read_lane::<IkStack>().expect("ik lane");
         let stack = lane.get(root).expect("stack");
