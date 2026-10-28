@@ -6,6 +6,7 @@ use super::PerObjectGpu;
 use super::Renderer3D;
 use super::read_lock;
 use super::write_lock;
+use crate::gpu_culling::ranges_from_sorted_indices;
 use glam::Mat4;
 
 impl Renderer3D {
@@ -89,7 +90,7 @@ impl Renderer3D {
             return;
         }
         let staged = write_lock(&self.staged_batch).take();
-        let Some((view_proj, records)) = staged else {
+        let Some((view_proj, records, dirty)) = staged else {
             self.indirect_ready
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             return;
@@ -97,7 +98,7 @@ impl Renderer3D {
         self.ensure_culler_capacity(device, records.len());
         let ready = read_lock(&self.culler).as_ref().is_some_and(|culler| {
             culler
-                .compact_records(queue, &view_proj, index_count, &records)
+                .compact_changed(queue, &view_proj, index_count, &records, &dirty)
                 .is_ok()
         });
         self.indirect_ready
@@ -109,8 +110,31 @@ impl Renderer3D {
     /// take in [`prepare_indirect_batch`](Self::prepare_indirect_batch).
     /// Unconditional — without the opt-in flag the staged batch is
     /// simply never consumed.
+    #[cfg(test)]
     pub(crate) fn stage_batch_inputs(&self, view_proj: Mat4, records: Vec<PerObjectGpu>) {
-        *write_lock(&self.staged_batch) = Some((view_proj, records));
+        let dirty = if records.is_empty() {
+            Vec::new()
+        } else {
+            vec![crate::gpu_culling::DirtyRange {
+                start: 0,
+                count: records.len() as u32,
+            }]
+        };
+        *write_lock(&self.staged_batch) = Some((view_proj, records, dirty));
+    }
+
+    /// Stages the shared batch with the change feed's dirty record indices:
+    /// the culler patches exactly those runs instead of diffing the frame.
+    /// `dirty` must be ascending and within `records` (the record build
+    /// yields it that way).
+    pub(crate) fn stage_batch_inputs_changed(
+        &self,
+        view_proj: Mat4,
+        records: Vec<PerObjectGpu>,
+        dirty: &[u32],
+    ) {
+        *write_lock(&self.staged_batch) =
+            Some((view_proj, records, ranges_from_sorted_indices(dirty)));
     }
 
     /// Whether the last [`prepare_indirect_batch`](Self::prepare_indirect_batch)

@@ -4,13 +4,14 @@ use super::*;
 use crate::antialias::MotionValidity;
 use ornis_core::Entity;
 mod instance_records;
+pub(crate) use instance_records::{InstanceFrame, RecordCache, StagedRecords};
 /// GPU per-instance record mirroring CPU [`InstanceData`] with padding to 16 bytes.
 ///
 /// The WGSL `PerObject` declaration is generated from this layout
 /// ([`PerObjectGpu::WGSL_SOURCE`]); the field list here is the single source
 /// of truth for the buffer layout.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable, WgslStruct)]
 #[wgsl(name = "PerObject")]
 pub struct PerObjectGpu {
     /// Local-to-world matrix.
@@ -396,9 +397,30 @@ impl Renderer3D {
         motion_valid: &[MotionValidity],
         entities: &[Entity],
     ) -> Vec<PerObjectGpu> {
-        let records = self.stage_instance_records(device, instances, motion_valid, entities);
+        let records = self.stage_instance_records(
+            device,
+            InstanceFrame::new(instances, motion_valid, entities),
+        );
         self.write_instance_records(queue, &records);
         records
+    }
+
+    /// Upload instances with an ECS change feed: the record build rebuilds
+    /// only the records the feed names (see
+    /// [`stage_instance_records_changed`](Self::stage_instance_records_changed)),
+    /// the write stays full-frame (the direct draw path reads every slot).
+    /// Returns the records and the ascending dirty record indices, which
+    /// the indirect-batch staging turns into upload runs.
+    pub(crate) fn upload_instances_with_changes(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: InstanceFrame<'_>,
+        changed: &ornis_core::ComponentChanges,
+    ) -> StagedRecords {
+        let staged = self.stage_instance_records_changed(device, frame, changed);
+        self.write_instance_records(queue, &staged.records);
+        staged
     }
 
     /// Test-only profiling hook: the record-building half of the upload
@@ -415,7 +437,34 @@ impl Renderer3D {
         motion_valid: &[MotionValidity],
         entities: &[Entity],
     ) -> Vec<PerObjectGpu> {
-        self.stage_instance_records(device, instances, motion_valid, entities)
+        self.stage_instance_records(
+            device,
+            InstanceFrame::new(instances, motion_valid, entities),
+        )
+    }
+
+    /// Test-only profiling hook: the incremental record build of
+    /// [`upload_instances_with_changes`](Self::upload_instances_with_changes)
+    /// without the queue write, so the culling bench times the changed-only
+    /// conversion against the full one. Returns the records and the dirty
+    /// record indices.
+    // qual:allow(test_quality, untested) reason: "test-util profiling hook reached only by the criterion culling bench (a separate crate), never under libtest"
+    #[cfg(feature = "test-util")]
+    #[doc(hidden)]
+    pub fn profile_stage_records_changed(
+        &self,
+        device: &wgpu::Device,
+        instances: &[InstanceData],
+        motion_valid: &[MotionValidity],
+        entities: &[Entity],
+        changed: &ornis_core::ComponentChanges,
+    ) -> (Vec<PerObjectGpu>, Vec<u32>) {
+        let staged = self.stage_instance_records_changed(
+            device,
+            InstanceFrame::new(instances, motion_valid, entities),
+            changed,
+        );
+        (staged.records, staged.dirty)
     }
 
     /// Test-only profiling hook: the full-frame instance write

@@ -133,7 +133,10 @@ impl From<DenseIndex> for usize {
 /// pair `(id, generation)` lets stores distinguish a live entity from a
 /// recycled one — when the id is reused after deallocation its
 /// generation is bumped, so old handles fail liveness checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// The derived order is by slot id, then generation: a total order over
+/// handles, so change feeds and tests can sort without a key function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Entity {
     pub(crate) id: EntityId,
     pub(crate) generation: Generation,

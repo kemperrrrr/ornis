@@ -23,6 +23,7 @@ use ornis_assets::scene::MaterialDesc;
 use ornis_assets::scene::MeshDesc;
 use ornis_assets::scene::Scene;
 use ornis_assets::scene::TransformDesc;
+use ornis_core::ComponentChanges;
 use ornis_core::Engine;
 use ornis_core::Entity;
 use ornis_core::GlobalTransform;
@@ -292,6 +293,65 @@ fn skin_motion_validity(skinning: SkinningMode) -> MotionValidity {
 /// matters. See there for the extraction canon.
 pub fn extract_render_data(store: &SmartStore) -> FrameUpload {
     extract_render_data_with_stats(store).0
+}
+
+/// Extracts the frame and returns the ECS change feed the per-object
+/// record build consumes.
+///
+/// The feed is the union of the lanes a record's bytes depend on:
+/// [`TransformDesc`] and [`GlobalTransform`] mutations name the entities
+/// whose record may be rebuilt (dense lane position is the record index),
+/// while any mutation — or the first frame after tracking was enabled —
+/// on the composition lanes ([`MeshDesc`], [`MaterialDesc`],
+/// [`Surface`](ornis_core::Surface), [`SkinnedMesh`]) escalates the whole
+/// feed to [`ComponentChanges::exhaustive`]: those lanes shift the record
+/// list, its order, or the material table every index points into, so the
+/// cheap answer there is a full rebuild.
+///
+/// Tracking is enabled lazily on each lane read here and stays on: stores
+/// that never reach a renderer pay nothing, and the first frame after the
+/// enable is exhaustive by construction (writes from before it are not
+/// logged). Call this at most once per frame — the feed drains on read.
+pub fn extract_render_data_with_changes(store: &SmartStore) -> (FrameUpload, ComponentChanges) {
+    let upload = extract_render_data(store);
+    let mut changes = ComponentChanges {
+        ids: Vec::new(),
+        exhaustive: false,
+    };
+    take_pose_changes::<TransformDesc>(store, &mut changes);
+    take_pose_changes::<GlobalTransform>(store, &mut changes);
+    for lane in [
+        content_changed::<MeshDesc>(store),
+        content_changed::<MaterialDesc>(store),
+        content_changed::<ornis_core::Surface>(store),
+        content_changed::<SkinnedMesh>(store),
+    ] {
+        changes.exhaustive |= lane;
+    }
+    (upload, changes)
+}
+
+/// Drains one pose lane's log into `merged`, keeping the entity handles
+/// (see [`ComponentChanges`]).
+fn take_pose_changes<T: 'static + Send + Sync>(store: &SmartStore, merged: &mut ComponentChanges) {
+    let Some(lane) = store.read_lane::<T>() else {
+        return;
+    };
+    lane.enable_change_tracking();
+    let changes = lane.take_changes();
+    merged.exhaustive |= changes.exhaustive;
+    merged.ids.extend(changes.ids);
+}
+
+/// Whether one composition lane changed since the previous frame, or is
+/// still reporting its enable-time exhaustive snapshot.
+fn content_changed<T: 'static + Send + Sync>(store: &SmartStore) -> bool {
+    let Some(lane) = store.read_lane::<T>() else {
+        return false;
+    };
+    lane.enable_change_tracking();
+    let changes = lane.take_changes();
+    changes.exhaustive || !changes.ids.is_empty()
 }
 /// Extracts complete renderable entities from the ECS store, counting
 /// every skip.
@@ -597,6 +657,82 @@ mod tests {
     use ornis_assets::scene::TransformDesc;
     use ornis_core::Engine;
     use ornis_core::units::Clamped01;
+
+    /// The change feed: the first call is exhaustive (tracking was just
+    /// enabled, writes from before it are not logged), a transform write
+    /// after that names exactly its entity, and an idle frame reports
+    /// nothing at all.
+    #[test]
+    fn change_feed_names_transform_writes() {
+        let mut engine = Engine::new();
+        let entity = {
+            let store = engine.world_mut().store_mut().expect("store");
+            let entity = store.create_entity();
+            store.insert(entity, TransformDesc::IDENTITY);
+            store.insert(entity, test_sphere());
+            store.insert(entity, test_material());
+            entity
+        };
+        let feed = |engine: &Engine| {
+            extract_render_data_with_changes(engine.world().store().expect("store")).1
+        };
+
+        let first = feed(&engine);
+        assert!(
+            first.exhaustive,
+            "the first feed after enabling tracking must be exhaustive"
+        );
+
+        let idle = feed(&engine);
+        assert!(
+            !idle.exhaustive && idle.ids.is_empty(),
+            "nothing was written"
+        );
+
+        engine
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(entity, TransformDesc::from_translation(glam::Vec3::X));
+        let moved = feed(&engine);
+        assert!(
+            !moved.exhaustive,
+            "a transform write is a delta, not a rebuild"
+        );
+        assert_eq!(moved.ids, vec![entity]);
+    }
+
+    /// A material write rides a composition lane: the feed goes exhaustive
+    /// even though no transform changed, because the material table the
+    /// record indices point into may have been reordered.
+    #[test]
+    fn change_feed_escalates_a_material_write() {
+        let mut engine = Engine::new();
+        let entity = {
+            let store = engine.world_mut().store_mut().expect("store");
+            let entity = store.create_entity();
+            store.insert(entity, TransformDesc::IDENTITY);
+            store.insert(entity, test_sphere());
+            store.insert(entity, test_material());
+            entity
+        };
+        let _ = extract_render_data_with_changes(engine.world().store().expect("store"));
+
+        engine.world_mut().store_mut().expect("store").insert(
+            entity,
+            MaterialDesc::Metal {
+                base_color: [0.1, 0.9, 0.3],
+                roughness: Clamped01::new(0.2),
+                emission: [0.0, 0.0, 0.0],
+                metallic: ornis_core::Metallic::new(1.0),
+            },
+        );
+        let changed = extract_render_data_with_changes(engine.world().store().expect("store")).1;
+        assert!(
+            changed.exhaustive,
+            "a composition-lane write forces a full record rebuild"
+        );
+    }
 
     #[test]
     fn skin_motion_validity_requires_gpu_history() {

@@ -177,14 +177,17 @@ pub fn indirect_args_for_visible(index_count: u32, visible: &[u32]) -> DrawIndex
 }
 
 /// One dirty run of the resident staging buffer: `count` records
-/// starting at `start` (record indices, not bytes) whose content differs
-/// from the last uploaded frame and must be re-written.
+/// starting at `start` (record indices, not bytes) that must be
+/// re-written — every producer supplies them in ascending,
+/// non-overlapping order (the byte diff by walking indices, the change
+/// detection by sorting its entity ids), and the
+/// writes merge across small clean gaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DirtyRange {
-    /// First differing record.
-    pub(crate) start: u32,
+pub struct DirtyRange {
+    /// First record of the run.
+    pub start: u32,
     /// Records in the run.
-    pub(crate) count: u32,
+    pub count: u32,
 }
 
 /// Contiguous record runs where `next` (already converted) differs
@@ -193,8 +196,8 @@ pub(crate) struct DirtyRange {
 /// stale tail is never read — `params.count` bounds the threads).
 /// Empty when the frames are identical. This is the one dirty-range
 /// implementation in the crate: [`stage_next_instances`] composes it
-/// over a fresh conversion, and [`Culler::compact_records`] feeds it
-/// caller-converted frames, so both callers share one code path.
+/// over a fresh conversion, and the benches feed it caller-converted
+/// frames, so both callers share one code path.
 pub(crate) fn diff_staged_records(prev: &[PerObjectGpu], next: &[PerObjectGpu]) -> Vec<DirtyRange> {
     let shared = prev.len().min(next.len());
     let mut ranges = Vec::new();
@@ -232,6 +235,55 @@ pub(crate) fn diff_staged_records(prev: &[PerObjectGpu], next: &[PerObjectGpu]) 
     ranges
 }
 
+/// Clean-record gap [`merge_close_ranges`] coalesces across: a run
+/// separated from the previous one by at most this many clean records
+/// joins it, trading the redundant clean bytes for one fewer
+/// `queue.write_buffer` call — a 1%-stride motion scene becomes one
+/// contiguous upload instead of thousands of single-record writes.
+const CLOSE_GAP_RECORDS: u32 = 256;
+
+/// Coalesces dirty runs whose clean gap is at most
+/// [`CLOSE_GAP_RECORDS`] records; the input must be sorted ascending
+/// and non-overlapping (both producers guarantee it, see
+/// [`DirtyRange`]). Writing the coalesced gap is redundant, never
+/// wrong: a clean record's staged value equals what the source buffer
+/// already holds.
+pub(crate) fn merge_close_ranges(ranges: &[DirtyRange]) -> Vec<DirtyRange> {
+    let mut merged: Vec<DirtyRange> = Vec::with_capacity(ranges.len());
+    for &range in ranges {
+        if let Some(last) = merged.last_mut() {
+            let gap = range.start.saturating_sub(last.start + last.count);
+            if gap <= CLOSE_GAP_RECORDS {
+                last.count = range.start + range.count - last.start;
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+    merged
+}
+
+/// Dirty runs over ascending record `indices`: consecutive indices
+/// (duplicates included) collapse into one [`DirtyRange`]. The input
+/// must be sorted ascending, the order the change detection yields
+/// entity indices in; indices must be valid record positions
+/// (`< records.len()`).
+pub(crate) fn ranges_from_sorted_indices(indices: &[u32]) -> Vec<DirtyRange> {
+    let mut ranges: Vec<DirtyRange> = Vec::new();
+    for &index in indices {
+        match ranges.last_mut() {
+            Some(last) if last.start + last.count >= index => {
+                last.count = (last.start + last.count).max(index + 1) - last.start;
+            }
+            _ => ranges.push(DirtyRange {
+                start: index,
+                count: 1,
+            }),
+        }
+    }
+    ranges
+}
+
 /// Rebuilds `next` from `instances` and returns the dirty runs against
 /// `prev` (empty when the frames are identical — a static scene uploads
 /// nothing). Indices past `prev` count as dirty (growth uploads the
@@ -239,8 +291,8 @@ pub(crate) fn diff_staged_records(prev: &[PerObjectGpu], next: &[PerObjectGpu]) 
 /// reads (`params.count` bounds the threads).
 ///
 /// This is a thin composition of [`convert_instances`] and
-/// [`diff_staged_records`] — the same two steps [`Culler::compact_records`]
-/// runs on caller-converted frames — so the staging tests cover the
+/// [`diff_staged_records`] — the same two steps the benches run on
+/// caller-converted frames — so the staging tests cover the
 /// production dirty-range path rather than a parallel implementation.
 pub(crate) fn stage_next_instances(
     prev: &[PerObjectGpu],
@@ -287,7 +339,7 @@ pub(crate) fn convert_instances(out: &mut Vec<PerObjectGpu>, instances: &[Instan
 #[cfg(feature = "test-util")]
 #[doc(hidden)]
 pub mod profile {
-    use super::{DirtyRange, convert_instances, diff_staged_records};
+    use super::{DirtyRange, convert_instances, diff_staged_records, ranges_from_sorted_indices};
     use crate::renderer::{InstanceData, PerObjectGpu};
 
     /// One production conversion pass: appends the frame's records to
@@ -301,6 +353,16 @@ pub mod profile {
     /// `next` differs from `prev`, as `(start, count)` pairs.
     pub fn diff(prev: &[PerObjectGpu], next: &[PerObjectGpu]) -> Vec<(u32, u32)> {
         diff_staged_records(prev, next)
+            .into_iter()
+            .map(|DirtyRange { start, count }| (start, count))
+            .collect()
+    }
+
+    /// One production run build over the change feed's ascending dirty
+    /// record indices, as `(start, count)` pairs — the runs
+    /// [`Culler::compact_changed`] receives in a real frame.
+    pub fn runs_from_indices(indices: &[u32]) -> Vec<(u32, u32)> {
+        ranges_from_sorted_indices(indices)
             .into_iter()
             .map(|DirtyRange { start, count }| (start, count))
             .collect()
@@ -846,8 +908,7 @@ mod tests {
         let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
         for frame in 0..2 {
             cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
-            let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
-                .expect("args readback succeeds");
+            let args = read_args(&culler, &device, &queue);
             assert_eq!(args.index_count, 42, "frame {frame}");
             assert_eq!(
                 args.instance_count,
@@ -882,6 +943,16 @@ mod tests {
                 count: instances.len() as u32,
                 capacity: 3,
             })
+        );
+        let mut records = Vec::new();
+        super::convert_instances(&mut records, &instances);
+        assert_eq!(
+            culler.compact_changed(&queue, &view_proj, 0, &records, &[]),
+            Err(CullerError::CapacityExceeded {
+                count: instances.len() as u32,
+                capacity: 3,
+            }),
+            "the runs entry enforces the same capacity"
         );
     }
 
@@ -1054,8 +1125,110 @@ mod tests {
         );
     }
 
+    /// [`merge_close_ranges`] coalesces across exactly the clean gap it
+    /// allows and not one record further (both boundaries pin the
+    /// comparison); overlap collapses into the union, and empty or
+    /// single-run inputs pass through untouched.
     #[test]
-    fn compact_records_matches_compact() {
+    fn merge_close_ranges_coalesces_across_the_allowed_gap_only() {
+        use super::{CLOSE_GAP_RECORDS, DirtyRange, merge_close_ranges};
+        assert_eq!(
+            merge_close_ranges(&[
+                DirtyRange { start: 0, count: 1 },
+                DirtyRange {
+                    start: 1 + CLOSE_GAP_RECORDS,
+                    count: 2,
+                },
+            ]),
+            vec![DirtyRange {
+                start: 0,
+                count: 3 + CLOSE_GAP_RECORDS,
+            }],
+            "a gap of exactly CLOSE_GAP_RECORDS merges"
+        );
+        assert_eq!(
+            merge_close_ranges(&[
+                DirtyRange { start: 0, count: 1 },
+                DirtyRange {
+                    start: 2 + CLOSE_GAP_RECORDS,
+                    count: 1,
+                },
+            ]),
+            vec![
+                DirtyRange { start: 0, count: 1 },
+                DirtyRange {
+                    start: 2 + CLOSE_GAP_RECORDS,
+                    count: 1,
+                },
+            ],
+            "one clean record beyond the allowed gap stays separate"
+        );
+        assert_eq!(
+            merge_close_ranges(&[
+                DirtyRange { start: 0, count: 4 },
+                DirtyRange { start: 2, count: 4 },
+            ]),
+            vec![DirtyRange { start: 0, count: 6 }],
+            "overlapping runs collapse into their union"
+        );
+        assert_eq!(merge_close_ranges(&[]), Vec::<DirtyRange>::new());
+        let one = [DirtyRange { start: 7, count: 3 }];
+        assert_eq!(merge_close_ranges(&one), one, "a single run passes through");
+    }
+
+    /// [`ranges_from_sorted_indices`] groups consecutive indices into
+    /// runs, keeps gaps as run boundaries, and ignores duplicates; the
+    /// empty and single-index inputs are the degenerate cases.
+    #[test]
+    fn ranges_from_sorted_indices_groups_ascending_indices() {
+        use super::{DirtyRange, ranges_from_sorted_indices};
+        assert_eq!(ranges_from_sorted_indices(&[]), Vec::<DirtyRange>::new());
+        assert_eq!(
+            ranges_from_sorted_indices(&[3]),
+            vec![DirtyRange { start: 3, count: 1 }]
+        );
+        assert_eq!(
+            ranges_from_sorted_indices(&[0, 1, 2, 5, 7, 8, 100]),
+            vec![
+                DirtyRange { start: 0, count: 3 },
+                DirtyRange { start: 5, count: 1 },
+                DirtyRange { start: 7, count: 2 },
+                DirtyRange {
+                    start: 100,
+                    count: 1
+                },
+            ],
+            "consecutive indices collapse; gaps stay run boundaries"
+        );
+        assert_eq!(
+            ranges_from_sorted_indices(&[4, 4, 4]),
+            vec![DirtyRange { start: 4, count: 1 }],
+            "duplicates extend nothing"
+        );
+    }
+
+    /// The bench-facing run build is the production index grouping with
+    /// the pair layout swapped back in: same runs, no `DirtyRange` type.
+    #[cfg(feature = "test-util")]
+    #[test]
+    fn runs_from_indices_reports_the_same_runs() {
+        use super::profile;
+        assert_eq!(profile::runs_from_indices(&[]), Vec::new());
+        assert_eq!(profile::runs_from_indices(&[4]), vec![(4, 1)]);
+        assert_eq!(
+            profile::runs_from_indices(&[0, 1, 2, 5, 7, 8, 100]),
+            vec![(0, 3), (5, 1), (7, 2), (100, 1)],
+            "consecutive indices collapse; gaps stay run boundaries"
+        );
+        assert_eq!(
+            profile::runs_from_indices(&[4, 4, 4]),
+            vec![(4, 1)],
+            "duplicates extend nothing"
+        );
+    }
+
+    #[test]
+    fn compact_changed_matches_compact() {
         // Caller-converted staging must compact exactly like `compact`:
         // same args record and same visible set (order unchecked —
         // atomics are nondeterministic, see module docs).
@@ -1068,16 +1241,9 @@ mod tests {
         let from_records =
             Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
         cull_test_compact(&device, &queue, &from_instances, &view_proj, &instances);
-        let mut converted = Vec::with_capacity(instances.len());
-        super::convert_instances(&mut converted, &instances);
-        from_records
-            .compact_records(&queue, &view_proj, TEST_INDEX_COUNT, &converted)
-            .expect("records fit the capacity");
-        cull_test_dispatch(&device, &queue, &from_records);
-        let args_records = cull_test_read_args(&device, &queue, &from_records.args_buffer)
-            .expect("args readback succeeds");
-        let args_compact = cull_test_read_args(&device, &queue, &from_instances.args_buffer)
-            .expect("args readback succeeds");
+        let args_records =
+            compact_records_frame(&device, &queue, &from_records, &view_proj, &instances, &[]);
+        let args_compact = read_args(&from_instances, &device, &queue);
         assert_eq!(args_records, args_compact);
         assert_eq!(args_records.instance_count, expected.len() as u32);
         assert_visible_records_match(
@@ -1090,13 +1256,13 @@ mod tests {
     }
 
     /// Capping the staged record count at one workgroup —
-    /// `records.len().min(64)` at the [`Culler::compact_records`]
+    /// `records.len().min(64)` at the [`Culler::compact_changed`]
     /// `prewrite_frame` call — would drop every instance at index ≥ 64
     /// from the cull pass: with 65 visible instances the tail vanishes
     /// from the indirect args. Sizes 63 and 64 pin the boundary from the
     /// other side.
     #[test]
-    fn compact_records_counts_visible_instances_past_workgroup_zero() {
+    fn compact_changed_counts_visible_instances_past_workgroup_zero() {
         let Some((device, queue)) = try_device() else {
             return;
         };
@@ -1125,11 +1291,10 @@ mod tests {
             let mut records = Vec::with_capacity(size as usize);
             super::convert_instances(&mut records, &instances);
             culler
-                .compact_records(&queue, &view_proj, TEST_INDEX_COUNT, &records)
+                .compact_changed(&queue, &view_proj, TEST_INDEX_COUNT, &records, &[])
                 .expect("records fit the capacity");
             cull_test_dispatch(&device, &queue, &culler);
-            let args = cull_test_read_args(&device, &queue, &culler.args_buffer)
-                .expect("args readback succeeds");
+            let args = read_args(&culler, &device, &queue);
             assert_eq!(
                 args.instance_count, size,
                 "size {size}: every visible instance must reach the cull pass"
@@ -1144,14 +1309,68 @@ mod tests {
         }
     }
 
-    /// Shared body of the two moved-visible tests: frames 1 and 2 of a
-    /// two-frame scene, one frame per staging entry the culler exposes.
+    /// Move the instances at `indices` far offscreen (out of the frustum),
+    /// the shared "these records changed" scene step of the staging tests.
+    fn hide(instances: &mut [InstanceData], indices: &[usize]) {
+        let offscreen = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
+        for &index in indices {
+            instances[index].model_matrix = offscreen;
+        }
+    }
+
+    /// The visible instances' world positions, in visible order — the
+    /// expected cull output of the frame's current instance list.
+    fn expected_visible(instances: &[InstanceData], view_proj: &Mat4) -> Vec<[f32; 4]> {
+        compact_visible_indices(instances, view_proj)
+            .iter()
+            .map(|index| instances[*index as usize].model_matrix.w_axis.to_array())
+            .collect()
+    }
+
+    /// The caller-converted staging sequence of one frame: convert
+    /// `instances`, stage the records through the changed entry with the
+    /// reported `runs`, dispatch, and return the indirect args.
+    // qual:allow(srp, max_parameters=6) reason: "test-only staging helper: the frame's queue, culler, camera and instance list are all distinct handles the caller already owns"
+    fn compact_records_frame(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        culler: &Culler,
+        view_proj: &Mat4,
+        instances: &[InstanceData],
+        runs: &[super::DirtyRange],
+    ) -> DrawIndexedIndirectArgs {
+        let records = converted_records(instances);
+        culler
+            .compact_changed(queue, view_proj, TEST_INDEX_COUNT, &records, runs)
+            .expect("records fit the capacity");
+        cull_test_dispatch(device, queue, culler);
+        read_args(culler, device, queue)
+    }
+
+    /// The frame's indirect args, read back after the dispatch.
+    fn read_args(
+        culler: &Culler,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> DrawIndexedIndirectArgs {
+        cull_test_read_args(device, queue, &culler.args_buffer).expect("args readback succeeds")
+    }
+
+    /// Caller-converted records, the way the submit path produces them.
+    fn converted_records(instances: &[InstanceData]) -> Vec<PerObjectGpu> {
+        let mut records = Vec::with_capacity(instances.len());
+        super::convert_instances(&mut records, instances);
+        records
+    }
+
+    /// Two-frame moved-visible scene: frames 1 and 2 of a still scene
+    /// with one instance moved in between, staged through `stage` and
+    /// checked for the same visible set both frames.
     ///
-    /// `stage` is [`Culler::compact`] (converts + diffs) or the
-    /// caller-converted [`Culler::compact_records`] the production
-    /// submit path takes — the review's blocker was that only the first
-    /// entry was covered, so mutants in the shared diff survived on the
-    /// path production actually uses.
+    /// The production submit path stages caller-converted records, so
+    /// the caller-converted entries must be covered by the same
+    /// moved-set check — mutants in the shared diff otherwise survive on
+    /// the path production actually uses.
     ///
     /// The moved set deliberately covers what the review flagged as
     /// uncovered on the production staging path:
@@ -1202,14 +1421,8 @@ mod tests {
         );
 
         // Frame 2: move index 0, an index above zero and an adjacent pair.
-        let offscreen = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
-        instances[0].model_matrix = offscreen;
-        instances[3].model_matrix = offscreen;
-        instances[4].model_matrix = offscreen;
-        let expected = compact_visible_indices(&instances, &view_proj)
-            .iter()
-            .map(|index| instances[*index as usize].model_matrix.w_axis.to_array())
-            .collect::<Vec<[f32; 4]>>();
+        hide(&mut instances, &[0, 3, 4]);
+        let expected = expected_visible(&instances, &view_proj);
         stage(device, queue, &culler, &view_proj, &instances);
         let args = cull_test_read_args(device, queue, &culler.args_buffer)
             .expect("args readback succeeds");
@@ -1238,26 +1451,154 @@ mod tests {
         );
     }
 
-    /// [`Culler::compact_records`] — the caller-converted entry
-    /// [`prepare_indirect_batch`](crate::renderer::Renderer3D::prepare_indirect_batch)
-    /// takes on the production submit path — must track the same move.
-    /// This is the half the review found uncovered.
+    /// [`Culler::compact_changed`] upload rules, one frame per rule:
+    /// a source buffer without a complete upload writes everything even
+    /// when the caller reports a single run (fresh culler, or one
+    /// re-created on capacity growth), a settled frame writes exactly
+    /// the reported runs, and a record-count change forces a full write
+    /// with no runs reported (the grown frame's new record exists
+    /// nowhere else on the GPU).
     #[test]
-    fn compact_records_tracks_moved_instances() {
+    fn compact_changed_full_then_patches() {
         let Some((device, queue)) = try_device() else {
             return;
         };
-        moved_visible_scene_run(
+        let (mut instances, view_proj, expected) = cull_test_scene();
+        let before = compact_visible_indices(&instances, &view_proj);
+        assert!(
+            before.contains(&0) && before.contains(&3) && before.contains(&4),
+            "premise: indices 0, 3 and 4 must be visible in frame 1"
+        );
+        let culler =
+            Culler::try_new(&device, instances.len() as u32 + 1).expect("capacity above zero");
+
+        // Frame 1: fresh source buffer, one reported run — everything
+        // must upload (the other records are uninitialized otherwise).
+        let mut records = Vec::with_capacity(instances.len() + 1);
+        super::convert_instances(&mut records, &instances);
+        culler
+            .compact_changed(
+                &queue,
+                &view_proj,
+                TEST_INDEX_COUNT,
+                &records,
+                &[super::DirtyRange { start: 2, count: 1 }],
+            )
+            .expect("records fit the capacity");
+        cull_test_dispatch(&device, &queue, &culler);
+        let args = read_args(&culler, &device, &queue);
+        assert_eq!(args.instance_count, expected.len() as u32);
+        assert_visible_records_match(
             &device,
             &queue,
-            |device, queue, culler, view_proj, instances| {
-                let mut converted = Vec::with_capacity(instances.len());
-                super::convert_instances(&mut converted, instances);
-                culler
-                    .compact_records(queue, view_proj, TEST_INDEX_COUNT, &converted)
-                    .expect("records fit the capacity");
-                cull_test_dispatch(device, queue, culler);
-            },
+            &culler.visible_buffer,
+            instances.len(),
+            &expected,
+        );
+
+        // Frame 2: move 0, 3 and 4 offscreen, report exactly those runs —
+        // the patched records must follow into the visible set.
+        hide(&mut instances, &[0, 3, 4]);
+        let expected_moved = expected_visible(&instances, &view_proj);
+        let moved = converted_records(&instances);
+        culler
+            .compact_changed(
+                &queue,
+                &view_proj,
+                TEST_INDEX_COUNT,
+                &moved,
+                &[
+                    super::DirtyRange { start: 0, count: 1 },
+                    super::DirtyRange { start: 3, count: 2 },
+                ],
+            )
+            .expect("records fit the capacity");
+        cull_test_dispatch(&device, &queue, &culler);
+        let args = read_args(&culler, &device, &queue);
+        assert_eq!(
+            args.instance_count,
+            expected_moved.len() as u32,
+            "frame 2: the patched records must reach the cull pass"
+        );
+        assert_visible_records_match(
+            &device,
+            &queue,
+            &culler.visible_buffer,
+            instances.len(),
+            &expected_moved,
+        );
+
+        // Frame 3: grow by one in-frustum instance and report no runs —
+        // the count change must upload everything, the new record
+        // included.
+        instances.push(test_instance(1.0));
+        let expected_grown = expected_visible(&instances, &view_proj);
+        assert_eq!(
+            expected_grown.len(),
+            expected_moved.len() + 1,
+            "premise: the grown instance must be visible"
+        );
+        let args = compact_records_frame(&device, &queue, &culler, &view_proj, &instances, &[]);
+        assert_eq!(
+            args.instance_count,
+            expected_grown.len() as u32,
+            "frame 3: a grown frame must upload everything, runs or not"
+        );
+        assert_visible_records_match(
+            &device,
+            &queue,
+            &culler.visible_buffer,
+            instances.len(),
+            &expected_grown,
+        );
+    }
+
+    /// The byte-diff entries keep a staging history [`Culler::compact_changed`]
+    /// never updates — so the runs entry resets it, and the byte-diff
+    /// frame that follows uploads everything. Without the reset the frame
+    /// 3 diff against the base finds nothing, writes nothing, and the
+    /// moved record stays on the GPU.
+    #[test]
+    fn compact_after_compact_changed_uploads_everything() {
+        let Some((device, queue)) = try_device() else {
+            return;
+        };
+        let (mut instances, view_proj, expected) = cull_test_scene();
+        let culler = Culler::try_new(&device, instances.len() as u32).expect("capacity above zero");
+        let base_first = instances[0];
+
+        // Frame 1 through the byte-diff entry: its history holds the base.
+        cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
+
+        // Frame 2 through the runs entry: one record moved, one run.
+        instances[0].model_matrix = Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0));
+        let mut moved = Vec::with_capacity(instances.len());
+        super::convert_instances(&mut moved, &instances);
+        culler
+            .compact_changed(
+                &queue,
+                &view_proj,
+                TEST_INDEX_COUNT,
+                &moved,
+                &[super::DirtyRange { start: 0, count: 1 }],
+            )
+            .expect("records fit the capacity");
+
+        // Frame 3 back to the base through the byte-diff entry.
+        instances[0] = base_first;
+        cull_test_compact(&device, &queue, &culler, &view_proj, &instances);
+        let args = read_args(&culler, &device, &queue);
+        assert_eq!(
+            args.instance_count,
+            expected.len() as u32,
+            "the base frame must fully re-upload after the runs entry"
+        );
+        assert_visible_records_match(
+            &device,
+            &queue,
+            &culler.visible_buffer,
+            instances.len(),
+            &expected,
         );
     }
 }

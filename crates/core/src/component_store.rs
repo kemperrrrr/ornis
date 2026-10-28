@@ -1,3 +1,4 @@
+// qual:allow(srp, file_length=390) reason: "One dense-set store: slots, sparse index and change log share the same per-entity invariants, and the log is only reachable through the store's mark_* paths"
 //! Dense sparse-set component storage.
 //!
 //! [`ComponentStore<T>`] keeps every live component of one type contiguous
@@ -6,6 +7,15 @@
 //! stale handle can never observe or delete another entity's component.
 //! Removal is O(1) swap-with-last — dense order is not stable across
 //! removals; [`ComponentStore::defrag`] restores id order.
+//!
+//! Opt-in mutation logging: [`ComponentStore::enable_change_tracking`] plus
+//! [`ComponentStore::take_changes`] record which entity ids were touched
+//! since the last take, so consumers (render culling) can skip entities
+//! that never changed. Stores that never enable tracking pay one relaxed
+//! atomic load per mutating call.
+
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
@@ -14,6 +24,38 @@ use crate::entity::{DenseIndex, Entity};
 use crate::layout_clock::next_layout;
 use crate::page_table::PageTable;
 use crate::prefetch::{PREFETCH_STRIDE, prefetch_iter};
+
+/// Upper bound on logged ids between takes: when the list would grow past
+/// it, the ids are dropped and the log goes exhaustive instead, so a hot
+/// lane cannot grow the change log without bound.
+const CHANGE_ID_CAP: usize = 16 * 1024;
+
+/// Entities mutated in one [`ComponentStore`] since the previous
+/// [`ComponentStore::take_changes`], plus a conservative fallback flag.
+///
+/// [`Self::ids`] may repeat an entity (several mutations between takes)
+/// and is meant to be consumed as a set. Whole [`Entity`] handles (id plus
+/// generation) are logged, so a recycled id never looks like the removed
+/// entity that held the slot before it. [`Self::exhaustive`] short-circuits
+/// the set: when `true`, every entity of the store counts as changed —
+/// either the id list hit its cap (16k ids) or tracking was enabled after
+/// writes that were never logged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentChanges {
+    /// Entities whose components were inserted, mutated or removed since
+    /// the previous take. Duplicates possible; empty when nothing happened
+    /// or when [`Self::exhaustive`] already covers everything.
+    pub ids: Vec<Entity>,
+    /// `true` when the id list is incomplete and *every* entity of the
+    /// store must be treated as changed (overflow, late enable, clone).
+    pub exhaustive: bool,
+}
+
+/// Bounded entity list behind the store's change-log mutex.
+struct ChangeLog {
+    ids: Vec<Entity>,
+    exhaustive: bool,
+}
 
 /// Dense single-type component storage (sparse-set style).
 ///
@@ -45,6 +87,12 @@ pub struct ComponentStore<T> {
     sparse: PageTable<usize>,
     bitset: FixedBitSet,
     layout: u64,
+    /// Mutation-logging gate: off until [`ComponentStore::enable_change_tracking`];
+    /// a relaxed load keeps untracked stores on the plain write path.
+    track: AtomicBool,
+    /// Ids changed since the last [`ComponentStore::take_changes`].
+    /// Interior mutability so enable/take work through a shared lane guard.
+    changes: Mutex<ChangeLog>,
 }
 
 impl<T> Default for ComponentStore<T> {
@@ -55,18 +103,31 @@ impl<T> Default for ComponentStore<T> {
             sparse: PageTable::default(),
             bitset: FixedBitSet::new(),
             layout: next_layout(),
+            track: AtomicBool::new(false),
+            changes: Mutex::new(ChangeLog {
+                ids: Vec::new(),
+                exhaustive: false,
+            }),
         }
     }
 }
 
 impl<T: Clone> Clone for ComponentStore<T> {
     fn clone(&self) -> Self {
+        let track = self.track.load(Ordering::Relaxed);
         Self {
             data: self.data.clone(),
             entities: self.entities.clone(),
             sparse: self.sparse.clone(),
             bitset: self.bitset.clone(),
             layout: self.layout,
+            track: AtomicBool::new(track),
+            // The clone never witnessed the source's logged writes: while
+            // tracking is on, its first take must report everything changed.
+            changes: Mutex::new(ChangeLog {
+                ids: Vec::new(),
+                exhaustive: track,
+            }),
         }
     }
 }
@@ -84,12 +145,88 @@ impl<T> ComponentStore<T> {
         self.layout
     }
 
+    /// Starts logging mutations of this store for change detection.
+    ///
+    /// Idempotent: the first call flags the log exhaustive, so writes made
+    /// before tracking began count as changes of every entity; later calls
+    /// are a single relaxed atomic swap. Render extraction enables tracking
+    /// lazily on the lanes it drains via [`take_changes`](Self::take_changes).
+    pub fn enable_change_tracking(&self) {
+        if !self.track.swap(true, Ordering::Relaxed) {
+            let mut log = self.change_log();
+            log.exhaustive = true;
+        }
+    }
+
+    /// Drains the change log accumulated since the previous call and
+    /// resets it to empty / non-exhaustive.
+    ///
+    /// [`ComponentChanges::exhaustive`] `true` means the id list hit its
+    /// cap or tracking began (or a clone was taken) late — the consumer
+    /// must treat every entity of this store as changed.
+    pub fn take_changes(&self) -> ComponentChanges {
+        let mut log = self.change_log();
+        ComponentChanges {
+            ids: std::mem::take(&mut log.ids),
+            exhaustive: std::mem::take(&mut log.exhaustive),
+        }
+    }
+
+    /// Recovers from a poisoned change-log mutex: a panic while marking
+    /// leaves the ids it already wrote, which is safe to over-report.
+    fn change_log(&self) -> std::sync::MutexGuard<'_, ChangeLog> {
+        self.changes.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records `entity` as changed while tracking is on. Over the id cap
+    /// the list is dropped and replaced by the exhaustive flag.
+    fn mark_changed(&self, entity: Entity) {
+        if !self.track.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut log = self.change_log();
+        if log.exhaustive {
+            return;
+        }
+        if log.ids.len() >= CHANGE_ID_CAP {
+            log.ids.clear();
+            log.exhaustive = true;
+            return;
+        }
+        log.ids.push(entity);
+    }
+
+    /// Records every live entity as changed — for entry points handing out
+    /// `&mut T` over the whole dense slice ([`iter_mut`](Self::iter_mut)
+    /// and friends), where any element may be written. One lock for the
+    /// loop; over the cap this becomes exhaustive exactly like
+    /// [`mark_changed`](Self::mark_changed).
+    fn mark_all(&self) {
+        if !self.track.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut log = self.change_log();
+        if log.exhaustive {
+            return;
+        }
+        for entity in &self.entities {
+            if log.ids.len() >= CHANGE_ID_CAP {
+                log.ids.clear();
+                log.exhaustive = true;
+                return;
+            }
+            log.ids.push(*entity);
+        }
+    }
+
     /// Inserts or replaces the component for `entity`.
     ///
     /// Re-insertion overwrites the existing value in place and refreshes
     /// the stored handle (a newer generation must be able to read its own
-    /// write). A first insertion appends to the dense arrays.
+    /// write). A first insertion appends to the dense arrays. Marks
+    /// `entity` changed while tracking is on.
     pub fn insert(&mut self, entity: Entity, component: T) {
+        self.mark_changed(entity);
         let id = entity.entity_id().index();
         if self.bitset.contains(id)
             && let Some(&dense_idx) = self.sparse.get(id)
@@ -118,6 +255,7 @@ impl<T> ComponentStore<T> {
     /// Uses swap-with-last, so relative order of the remaining components
     /// changes (the moved component's sparse mapping is updated). Returns
     /// `None` if the entity has no component here or the handle is stale.
+    /// A successful removal marks the entity changed while tracking is on.
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
         let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
@@ -129,6 +267,7 @@ impl<T> ComponentStore<T> {
         if entity.generation() != self.entities[dense_idx].generation() {
             return None;
         }
+        self.mark_changed(entity);
         self.bitset.set(id, false);
 
         let last = self.data.len() - 1;
@@ -160,7 +299,9 @@ impl<T> ComponentStore<T> {
     }
 
     /// Mutable variant of [`get`](ComponentStore::get) with the same
-    /// generation-checked semantics.
+    /// generation-checked semantics. Marks `entity` changed while
+    /// tracking is on, whether or not the caller writes through the
+    /// returned reference.
     pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
         let id = entity.entity_id().index();
         if !self.bitset.contains(id) {
@@ -170,6 +311,7 @@ impl<T> ComponentStore<T> {
         if entity.generation() != self.entities[dense_idx].generation() {
             return None;
         }
+        self.mark_changed(entity);
         Some(&mut self.data[dense_idx])
     }
 
@@ -192,7 +334,10 @@ impl<T> ComponentStore<T> {
     }
 
     /// Mutably iterates components in dense order with prefetch hints.
+    /// Marks every entity changed while tracking is on: the iteration
+    /// may write any element through the `&mut T` handles it yields.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.mark_all();
         prefetch_iter!(self.data.iter_mut(), PREFETCH_STRIDE)
     }
 
@@ -205,10 +350,13 @@ impl<T> ComponentStore<T> {
     }
 
     /// Parallel mutable iteration over the dense slice (rayon-backed).
+    /// Marks every entity changed while tracking is on (see
+    /// [`iter_mut`](Self::iter_mut)).
     pub fn par_iter_mut(&mut self) -> rayon::slice::IterMut<'_, T>
     where
         T: Send,
     {
+        self.mark_all();
         self.data[..].par_iter_mut()
     }
 
@@ -319,10 +467,12 @@ impl<T> ComponentStore<T> {
 
     /// Mutably iterates the dense array in chunks of exactly 4 elements
     /// (SIMD-friendly width); any remainder is reachable via
-    /// [`ChunkedIterMut::into_tail`].
+    /// [`ChunkedIterMut::into_tail`]. Marks every entity changed while
+    /// tracking is on (see [`iter_mut`](Self::iter_mut)).
     pub fn chunked_iter_mut(&mut self) -> ChunkedIterMut<'_, T> {
         /// SIMD-friendly dense-lane chunk width.
         const CHUNK_WIDTH: usize = 4;
+        self.mark_all();
         let n = self.data.len();
         let chunk_end = (n / CHUNK_WIDTH) * CHUNK_WIDTH;
         let (head, tail) = self.data.split_at_mut(chunk_end);
@@ -333,19 +483,23 @@ impl<T> ComponentStore<T> {
     }
 
     /// Parallel mutable iteration in chunks of 4 elements, flattened back
-    /// into individual items.
+    /// into individual items. Marks every entity changed while tracking
+    /// is on (see [`iter_mut`](Self::iter_mut)).
     pub fn chunked_par_iter_mut(&mut self) -> impl ParallelIterator<Item = &mut T>
     where
         T: Send,
     {
         /// SIMD-friendly dense-lane chunk width.
         const CHUNK_WIDTH: usize = 4;
+        self.mark_all();
         self.data.par_chunks_exact_mut(CHUNK_WIDTH).flatten()
     }
 
     /// Reorders the dense array by ascending entity id, restoring a
     /// canonical layout after swap-on-remove churn. O(n log n) and
     /// allocation-heavy — call at explicit maintenance points, not per frame.
+    /// Marks every entity changed while tracking is on: dense order feeds
+    /// downstream consumers that pair slots with this sequence.
     pub fn defrag(&mut self)
     where
         T: Clone,
@@ -353,6 +507,7 @@ impl<T> ComponentStore<T> {
         if self.data.len() < 2 {
             return;
         }
+        self.mark_all();
         let mut sorted: Vec<(Entity, T)> = self
             .entities
             .iter()
@@ -461,6 +616,17 @@ impl<'a, T> ChunkedIterMut<'a, T> {
 mod tests {
     use super::*;
     use crate::entity::EntityAllocator;
+
+    /// The two lines every change-tracking test opens with, in one place:
+    /// spelled out per test they read as a duplicated code fragment.
+    fn tracked() -> (EntityAllocator, ComponentStore<i32>) {
+        (EntityAllocator::new(), ComponentStore::new())
+    }
+
+    /// `n` freshly allocated entities, in allocation order.
+    fn entities(alloc: &mut EntityAllocator, n: usize) -> Vec<Entity> {
+        (0..n).map(|_| alloc.allocate()).collect()
+    }
 
     #[test]
     fn insert_get_remove() {
@@ -864,5 +1030,207 @@ mod tests {
 
         assert!(iter.next().is_some());
         assert_eq!(iter.size_hint(), (2, Some(2)));
+    }
+
+    #[test]
+    fn change_tracking_stays_off_until_enabled() {
+        let (mut alloc, mut store) = tracked();
+        let [e1, e2] = entities(&mut alloc, 2)[..] else {
+            unreachable!("two entities")
+        };
+
+        store.insert(e1, 1);
+        *store.get_mut(e1).unwrap() = 2;
+        store.remove(e1);
+        store.insert(e2, 3);
+        store.iter_mut().for_each(|value| *value += 1);
+        store.par_iter_mut().for_each(|value| *value += 1);
+        store.defrag();
+
+        // Without enable the log stays silent — the gate is the atomic flag.
+        assert_eq!(
+            store.take_changes(),
+            ComponentChanges {
+                ids: Vec::new(),
+                exhaustive: false
+            }
+        );
+    }
+
+    #[test]
+    fn first_enable_is_exhaustive_then_muts_logged() {
+        let (mut alloc, mut store) = tracked();
+        let before = alloc.allocate();
+        store.insert(before, 1); // written before tracking: never logged
+
+        store.enable_change_tracking();
+        let changes = store.take_changes();
+        assert!(changes.exhaustive, "pre-enable writes must count as all");
+        assert!(changes.ids.is_empty());
+
+        // A second enable is a no-op: no fresh exhaustive snapshot.
+        store.enable_change_tracking();
+        assert!(!store.take_changes().exhaustive);
+
+        // From here only real mutations appear, non-exhaustively.
+        let after = alloc.allocate();
+        store.insert(after, 2);
+        let changes = store.take_changes();
+        assert!(!changes.exhaustive);
+        assert_eq!(changes.ids, vec![after]);
+    }
+
+    #[test]
+    fn take_drains_and_resets() {
+        let (mut alloc, mut store) = tracked();
+        store.enable_change_tracking();
+        let _ = store.take_changes(); // consume the first-enable snapshot
+
+        let e = alloc.allocate();
+        store.insert(e, 1);
+        assert_eq!(store.take_changes().ids, vec![e]);
+
+        // Nothing new: the log comes back empty, not stale, not exhaustive.
+        let changes = store.take_changes();
+        assert!(changes.ids.is_empty());
+        assert!(!changes.exhaustive);
+    }
+
+    #[test]
+    fn get_mut_remove_and_stale_handles_mark() {
+        let (mut alloc, mut store) = tracked();
+        let [e1, e2] = entities(&mut alloc, 2)[..] else {
+            unreachable!("two entities")
+        };
+        store.insert(e1, 1);
+        store.insert(e2, 2);
+        store.enable_change_tracking();
+        let _ = store.take_changes();
+
+        // get_mut marks even when the caller never writes.
+        let _ = store.get_mut(e1);
+        assert_eq!(store.take_changes().ids, vec![e1]);
+
+        // A stale generation neither removes nor marks.
+        let stale = Entity::new_with_gen(e1.id(), e1.generation() + 1);
+        assert_eq!(store.remove(stale), None);
+        assert!(store.take_changes().ids.is_empty());
+
+        // A successful removal marks the removed id.
+        assert_eq!(store.remove(e1), Some(1));
+        assert_eq!(store.take_changes().ids, vec![e1]);
+    }
+
+    #[test]
+    fn iter_mut_family_marks_all_entities() {
+        let (mut alloc, mut store) = tracked();
+        let expected = entities(&mut alloc, 5);
+        for (i, &e) in expected.iter().enumerate() {
+            store.insert(e, i as i32);
+        }
+        store.enable_change_tracking();
+        let _ = store.take_changes();
+
+        // No element is written: the entry points still mark everything.
+        store.iter_mut().for_each(|_| {});
+        let mut ids = store.take_changes().ids;
+        ids.sort_unstable();
+        assert_eq!(ids, expected);
+
+        store.par_iter_mut().for_each(|_| {});
+        assert_eq!(store.take_changes().ids, expected);
+
+        let mut iter = store.chunked_iter_mut();
+        for chunk in &mut iter {
+            let _ = chunk;
+        }
+        let _ = iter.into_tail();
+        ids = store.take_changes().ids;
+        ids.sort_unstable();
+        assert_eq!(ids, expected);
+
+        store.chunked_par_iter_mut().for_each(|_| {});
+        ids = store.take_changes().ids;
+        ids.sort_unstable();
+        assert_eq!(ids, expected);
+
+        store.defrag();
+        ids = store.take_changes().ids;
+        ids.sort_unstable();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn id_overflow_becomes_exhaustive() {
+        let (mut alloc, mut store) = tracked();
+        store.enable_change_tracking();
+        let _ = store.take_changes();
+
+        // CAP distinct ids fill the list; the next mark overflows it.
+        for i in 0..=CHANGE_ID_CAP {
+            store.insert(alloc.allocate(), i as i32);
+        }
+        let changes = store.take_changes();
+        assert!(changes.exhaustive, "cap overflow must go exhaustive");
+        assert!(changes.ids.is_empty());
+
+        // Resets like everything else once drained.
+        store.insert(alloc.allocate(), 1);
+        assert!(!store.take_changes().exhaustive);
+    }
+
+    #[test]
+    fn bulk_iter_overflows_to_exhaustive() {
+        let (mut alloc, mut store) = tracked();
+        // Built while tracking is off, so the log is still empty below.
+        for i in 0..=CHANGE_ID_CAP {
+            store.insert(alloc.allocate(), i as i32);
+        }
+        store.enable_change_tracking();
+        let _ = store.take_changes();
+
+        // One bulk iteration over the oversized store exhausts the list.
+        store.iter_mut().for_each(|_| {});
+        let changes = store.take_changes();
+        assert!(changes.exhaustive);
+        assert!(changes.ids.is_empty());
+    }
+
+    #[test]
+    fn marks_skip_while_exhaustive() {
+        let (mut alloc, mut store) = tracked();
+        let e1 = alloc.allocate();
+        store.insert(e1, 1);
+
+        // The first-enable snapshot already says "everything changed":
+        // neither a per-id mark nor a bulk mark may refill the id list.
+        store.enable_change_tracking();
+        store.insert(alloc.allocate(), 2);
+        store.iter_mut().for_each(|_| {});
+        let changes = store.take_changes();
+        assert!(changes.exhaustive);
+        assert!(
+            changes.ids.is_empty(),
+            "marks while exhaustive must not refill ids"
+        );
+    }
+
+    #[test]
+    fn clone_reports_exhaustive_while_tracking() {
+        let (mut alloc, mut store) = tracked();
+        store.enable_change_tracking();
+        let _ = store.take_changes();
+        let e = alloc.allocate();
+        store.insert(e, 1);
+
+        // The clone missed the source's pending write.
+        assert!(store.clone().take_changes().exhaustive);
+
+        // An untracked clone still goes exhaustive on its first enable.
+        let mut plain: ComponentStore<i32> = ComponentStore::new();
+        plain.insert(e, 2);
+        let plain_clone = plain.clone();
+        plain_clone.enable_change_tracking();
+        assert!(plain_clone.take_changes().exhaustive);
     }
 }

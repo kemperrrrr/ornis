@@ -455,7 +455,7 @@ fn submit_stages_spheres_only_for_indirect() {
     // lock below (same-thread RwLock read+write deadlocks).
     {
         let staged = super::read_lock(&fs.renderer.staged_batch);
-        let (_, staged_instances) = staged.as_ref().expect("batch staged while armed");
+        let (_, staged_instances, _) = staged.as_ref().expect("batch staged while armed");
         assert_eq!(staged_instances.len(), 2);
     }
     // Premise pin: the custom center is truly visible, so staging it

@@ -50,19 +50,27 @@ impl Scenario {
 /// The two staging paths of the issue.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BenchPath {
-    /// The culler path: the frame converts its own records.
+    /// The culler path: the frame converts its own records and byte-diffs
+    /// them against the previous frame.
     Compact,
-    /// `compact_records`, fed by the renderer's conversion and upload.
+    /// The pre-#185 record path, kept as the table's reference row: the
+    /// renderer rebuilds every record, uploads them, then the staging
+    /// hand-off copies them again before a full byte diff.
     Records,
+    /// `compact_changed`, fed by the renderer's incremental record build
+    /// and the ECS change feed: only mutated records are rebuilt and
+    /// uploaded, so there is no full-frame diff and no hand-off copy.
+    Changed,
 }
 
 impl BenchPath {
+    /// The markdown labels, indexed by variant: the paths and their names
+    /// are one list, so a new path cannot ship without its row label.
+    const LABELS: [&'static str; 3] = ["compact", "compact_records", "compact_changed"];
+
     /// The markdown label of this path.
     pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Compact => "compact",
-            Self::Records => "compact_records",
-        }
+        Self::LABELS[self as usize]
     }
 }
 
@@ -71,7 +79,8 @@ impl BenchPath {
 pub(super) struct Stages {
     /// CPU build: record conversion (renderer on the records path).
     pub(super) build: Duration,
-    /// CPU diff (records path: incl. the staging hand-off copy).
+    /// CPU diff (compact path only: the changed path has no full-frame
+    /// scan — the ECS feed names the dirty records).
     pub(super) diff: Duration,
     /// CPU fill: the dirty-run `queue.write_buffer`.
     pub(super) fill: Duration,
@@ -89,6 +98,8 @@ pub(super) struct Stages {
     pub(super) gpu_measured: bool,
     /// False on the compact path: there is no renderer upload.
     pub(super) upload_measured: bool,
+    /// False on the changed path: no byte diff runs.
+    pub(super) diff_measured: bool,
     /// Frames whose stamp readback succeeded (average divisor for GPU).
     pub(super) gpu_frames: u32,
     /// Frames with a renderer upload (average divisor for upload).
@@ -112,6 +123,7 @@ impl Stages {
         self.wall += frame.wall;
         self.gpu_measured |= frame.gpu_measured;
         self.upload_measured |= frame.upload_measured;
+        self.diff_measured |= frame.diff_measured;
         self.gpu_frames += u32::from(frame.gpu_measured);
         self.upload_frames += u32::from(frame.upload_measured);
     }
@@ -135,6 +147,7 @@ impl Stages {
             wall: self.wall / frames,
             gpu_measured: self.gpu_frames > 0,
             upload_measured: self.upload_frames > 0,
+            diff_measured: self.diff_measured,
             gpu_frames: self.gpu_frames,
             upload_frames: self.upload_frames,
         }
@@ -146,7 +159,7 @@ impl Stages {
         format!(
             "| {scenario} | {size} | {path} | {} | {} | {} | {} | {} | {} | {} | {} |",
             ms(self.build),
-            ms(self.diff),
+            cell(self.diff, self.diff_measured),
             ms(self.fill),
             cell(self.upload, self.upload_measured),
             ms(self.prewrite),
@@ -197,6 +210,9 @@ pub(super) struct Frame<'a> {
     pub(super) entities: Vec<Entity>,
     /// Renderer records: uploaded, then handed to the staging diff.
     pub(super) records: Vec<PerObjectGpu>,
+
+    /// Dirty record indices the incremental build reported this frame.
+    pub(super) dirty: Vec<u32>,
     pub(super) prev: Vec<PerObjectGpu>,
     pub(super) next: Vec<PerObjectGpu>,
     pub(super) scenario: Scenario,
@@ -205,6 +221,15 @@ pub(super) struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
+    /// The records this path stages into the culler: the changed path
+    /// writes them straight from the incremental build, the other two from
+    /// the staging copy the diff produced.
+    pub(super) fn staged_records(&self) -> &[PerObjectGpu] {
+        match self.path {
+            BenchPath::Changed => &self.records,
+            BenchPath::Compact | BenchPath::Records => &self.next,
+        }
+    }
     /// A fresh cell: a private copy of the base scene, a fresh renderer
     /// (clean previous-frame history) and empty histories — the warm-up
     /// frame fills them before the first measurement, so no row pays for
@@ -222,6 +247,7 @@ impl<'a> Frame<'a> {
             instances: base.to_vec(),
             entities: entities.to_vec(),
             records: Vec::new(),
+            dirty: Vec::new(),
             prev: Vec::new(),
             next: Vec::new(),
             scenario,
