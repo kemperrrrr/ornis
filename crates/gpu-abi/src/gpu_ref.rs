@@ -1,0 +1,181 @@
+//! Typed buffer tokens. Group and binding stay in the type; the value is an offset.
+//!
+//! [`GpuRef`] does not implement [`Deref`](core::ops::Deref). A Rust reference
+//! would have to point at host linear memory, and a GPU buffer is not that.
+//! Call [`GpuRef::read`] or [`GpuRef::write`].
+
+use core::marker::PhantomData;
+
+use crate::gpu_abi;
+use crate::layout::GpuSafeLayout;
+
+/// Marker for a uniform binding. Shader code can read it and cannot write it.
+#[derive(Clone, Copy, Debug)]
+pub enum UniformSpace {}
+
+/// Marker for a storage binding. Shader code can read and write it.
+#[derive(Clone, Copy, Debug)]
+pub enum StorageSpace {}
+
+/// Offset token for the value `T` inside binding `(GROUP, BINDING)`.
+///
+/// The token is four bytes: the byte offset. `GROUP` and `BINDING` are not
+/// stored in those bits. `'a` ties the token to the [`Uniform`] or [`Storage`]
+/// value it was derived from; it does not borrow host shadow memory.
+pub struct GpuRef<'a, const GROUP: u32, const BINDING: u32, T: GpuSafeLayout, S> {
+    offset: u32,
+    _marker: PhantomData<(&'a T, S)>,
+}
+
+impl<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout, S> Clone
+    for GpuRef<'_, GROUP, BINDING, T, S>
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout, S> Copy
+    for GpuRef<'_, GROUP, BINDING, T, S>
+{
+}
+
+impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S> {
+    /// Read `T` at this offset. On the host this copies out of the shadow
+    /// binding installed by [`gpu_abi::with_host`](crate::gpu_abi::with_host).
+    ///
+    /// # Panics
+    ///
+    /// On the host, panics if no shadow is installed, the binding is missing,
+    /// the offset is misaligned for `T`, or the read would pass the end of the
+    /// binding. Those checks run before the byte copy.
+    pub fn read(&self) -> T {
+        let _ = self;
+        gpu_abi::read_at::<T>(G, B, self.offset)
+    }
+
+    /// Token for a field at `field_offset` bytes past this token.
+    ///
+    /// Does not load GPU memory. Offsets come from [`gpu_struct!`](crate::gpu_struct)
+    /// / `offset_of!`, not from a caller-supplied raw pointer.
+    pub fn field<U: GpuSafeLayout>(&self, field_offset: u32) -> GpuRef<'a, G, B, U, S> {
+        GpuRef {
+            offset: add_offset(self.offset, field_offset),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Token for element `element` given an explicit byte `stride`.
+    ///
+    /// The stride is not inferred: uniform and storage arrays disagree for
+    /// some types. Prefer [`index_uniform`](Self::index_uniform) or
+    /// [`index_storage`](Self::index_storage).
+    pub fn index(&self, element: u32, stride: u32) -> Self {
+        GpuRef {
+            offset: add_offset(self.offset, mul_offset(element, stride)),
+            _marker: PhantomData,
+        }
+    }
+
+    /// [`index`](Self::index) with [`T::UNIFORM_STRIDE`](GpuSafeLayout::UNIFORM_STRIDE).
+    // qual:api — shader-facing index; in-tree callers are the unit tests.
+    pub fn index_uniform(&self, element: u32) -> Self {
+        self.index(element, T::UNIFORM_STRIDE)
+    }
+
+    /// [`index`](Self::index) with [`T::STORAGE_STRIDE`](GpuSafeLayout::STORAGE_STRIDE).
+    // qual:api — shader-facing index; in-tree callers are the unit tests.
+    pub fn index_storage(&self, element: u32) -> Self {
+        self.index(element, T::STORAGE_STRIDE)
+    }
+}
+
+impl<'a, const G: u32, const B: u32, T: GpuSafeLayout> GpuRef<'a, G, B, T, StorageSpace> {
+    /// Write `value` at this offset. Uniform tokens do not have this method.
+    ///
+    /// # Panics
+    ///
+    /// On the host, panics if the binding was not registered as storage, or
+    /// the same bounds and alignment checks as [`read`](GpuRef::read) fail.
+    pub fn write(&self, value: T) {
+        let _ = self;
+        gpu_abi::write_at::<T>(G, B, self.offset, &value);
+    }
+}
+
+/// Uniform binding `(GROUP, BINDING)` of `T`.
+#[derive(Clone, Copy, Debug)]
+pub struct Uniform<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout> {
+    _marker: PhantomData<T>,
+}
+
+impl<const G: u32, const B: u32, T: GpuSafeLayout> Uniform<G, B, T> {
+    /// Bind this uniform. The handle carries no address.
+    pub const fn bind() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+
+    /// Token at offset 0.
+    pub fn as_ref(&self) -> GpuRef<'_, G, B, T, UniformSpace> {
+        let _ = self;
+        GpuRef {
+            offset: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Read the whole uniform.
+    pub fn read(&self) -> T {
+        self.as_ref().read()
+    }
+}
+
+/// Storage binding `(GROUP, BINDING)` of `T`.
+#[derive(Clone, Copy, Debug)]
+pub struct Storage<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout> {
+    _marker: PhantomData<T>,
+}
+
+impl<const G: u32, const B: u32, T: GpuSafeLayout> Storage<G, B, T> {
+    /// Bind this storage buffer. The handle carries no address.
+    pub const fn bind() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+
+    /// Token at offset 0.
+    pub fn as_ref(&self) -> GpuRef<'_, G, B, T, StorageSpace> {
+        let _ = self;
+        GpuRef {
+            offset: 0,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Read the whole storage value.
+    pub fn read(&self) -> T {
+        self.as_ref().read()
+    }
+
+    /// Write the whole storage value.
+    pub fn write(&self, value: T) {
+        self.as_ref().write(value);
+    }
+}
+
+fn add_offset(base: u32, delta: u32) -> u32 {
+    match base.checked_add(delta) {
+        Some(offset) => offset,
+        None => gpu_abi::contract_breach("GpuRef offset overflow"),
+    }
+}
+
+fn mul_offset(element: u32, stride: u32) -> u32 {
+    match element.checked_mul(stride) {
+        Some(offset) => offset,
+        None => gpu_abi::contract_breach("GpuRef index overflow"),
+    }
+}

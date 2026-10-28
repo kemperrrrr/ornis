@@ -74,7 +74,15 @@ order = ["foundation", "domain", "application", "adapters"]
 unmatched_behavior = "strict_error"
 
 [architecture.layers.foundation]
-paths = ["crates/schedule/**", "crates/input/**", "crates/shader-lang/**", "crates/gltf/**", "crates/texture/**"]
+paths = [
+    "crates/schedule/**",
+    "crates/input/**",
+    "crates/shader-lang/**",
+    "crates/gpu-abi/**",
+    "crates/wasm2gpu/**",
+    "crates/gltf/**",
+    "crates/texture/**",
+]
 
 [architecture.layers.domain]
 paths = [
@@ -107,6 +115,8 @@ paths = [
 ornis_schedule = "foundation"
 ornis_input = "foundation"
 ornis_shader_lang = "foundation"
+ornis_gpu_abi = "foundation"
+ornis_wasm2gpu = "foundation"
 ornis_gltf = "foundation"
 ornis_texture = "foundation"
 ornis_core = "domain"
@@ -179,6 +189,8 @@ forbidden_in = [
     "crates/audio/**",
     "crates/input/**",
     "crates/shader-lang/**",
+    "crates/gpu-abi/**",
+    "crates/wasm2gpu/**",
     "crates/gltf/**",
     "crates/texture/**",
 ]
@@ -234,6 +246,8 @@ forbidden_in = [
     "crates/render/src/**",
     "crates/schedule/src/**",
     "crates/shader-lang/src/**",
+    "crates/gpu-abi/src/**",
+    "crates/wasm2gpu/src/**",
     "crates/wasm/src/**",
     "crates/wgpu_backend/src/**",
 ]

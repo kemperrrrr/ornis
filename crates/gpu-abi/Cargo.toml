@@ -1,0 +1,10 @@
+[package]
+name = "ornis-gpu-abi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Toy GPU ABI for the Wasm-to-GPU research path (not the production shader DSL)"
+
+[lints]
+workspace = true

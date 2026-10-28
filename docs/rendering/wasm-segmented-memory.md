@@ -4,7 +4,11 @@
 пути Rust → Shader IR → WGSL (`rust-to-wgsl-architecture.md`).
 Фиксирует идею «Virtual Memory Space Translation / Software-Managed
 Memory Paging» поверх Wasm linear memory и предложения по ABI
-надстройки.
+надстройки. Toy-прототип этого контракта (не production path) —
+`crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`, `unsafe` только в
+`gpu_abi`) и offline `crates/wasm2gpu` (один vertex+fragment, uniform
+и `texture_sample`, WGSL/SPIR-V через naga). Упаковка
+space+binding+offset в каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
 Kongruent как носителей типов для шейдерного бэкенда.
