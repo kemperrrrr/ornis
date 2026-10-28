@@ -81,6 +81,76 @@ pub struct SkelFade {
     pub elapsed: Seconds,
 }
 
+/// Inertialized switch to a matched frame (`docs/animation-design.md`
+/// §8.5): the host sets the player to the matched frame and inserts this
+/// with the outgoing cursor snapshot. The first sample pass captures the
+/// per-joint offsets that map the new base onto the outgoing one; the
+/// base keeps them until they decay to nothing over `duration` — a
+/// transition without the double silhouette of a crossfade (the outgoing
+/// pose is frozen in the offsets, it does not keep playing).
+///
+/// Offsets live in the joint-local frame: translation and scale are
+/// additive deltas, rotation is the composed delta in the parent frame.
+/// The clock runs like [`SkelFade`] (linear [`fade_progress`], instant
+/// for a non-positive duration) and the component retires itself when the
+/// falloff ends. A vanished outgoing clip captures against `rest` (the
+/// same rule as [`SkelFade::from`]). Tree-driven roots ignore it.
+///
+/// `Clone + Send + Sync` per the hot-lane contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkelInertia {
+    /// Outgoing base snapshot at the switch; its clock never advances —
+    /// the offsets freeze the pose.
+    pub from: SkelPlayer,
+    /// Falloff length in seconds; non-positive cuts the offset at once.
+    pub duration: Seconds,
+    /// Time since the capture.
+    pub elapsed: Seconds,
+    /// Per-joint offsets of the captured transition ([`JointTrs`]
+    /// deltas); empty until the first sample pass captures them.
+    pub offsets: Vec<JointTrs>,
+}
+
+impl SkelInertia {
+    /// A fresh transition awaiting the sample pass's capture.
+    pub fn new(from: SkelPlayer, duration: Seconds) -> Self {
+        Self {
+            from,
+            duration,
+            elapsed: Seconds::ZERO,
+            offsets: Vec::new(),
+        }
+    }
+
+    /// Whether the sample pass still has to capture the offsets.
+    pub fn pending(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    /// Captures the offsets that map `to` onto `from`, joint for joint.
+    pub(crate) fn capture(&mut self, from: &[JointTrs], to: &[JointTrs]) {
+        self.offsets.clear();
+        self.offsets
+            .extend(from.iter().zip(to).map(|(from, to)| JointTrs {
+                translation: from.translation - to.translation,
+                rotation: from.rotation * to.rotation.inverse(),
+                scale: from.scale - to.scale,
+            }));
+    }
+
+    /// Adds the decaying offsets over `pose`: each joint keeps the pose
+    /// plus its offset scaled by `1 − progress`, so the first frame reads
+    /// as the outgoing pose and the last as the untouched new one.
+    pub(crate) fn apply(&self, pose: &mut [JointTrs]) {
+        let weight = 1.0 - fade_progress(self.duration, self.elapsed);
+        for (joint, offset) in pose.iter_mut().zip(&self.offsets) {
+            joint.translation += offset.translation * weight;
+            joint.rotation = Quat::IDENTITY.slerp(offset.rotation, weight) * joint.rotation;
+            joint.scale += offset.scale * weight;
+        }
+    }
+}
+
 /// One joint's sampled channels: `None` marks an absent channel (no track).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct JointSample {

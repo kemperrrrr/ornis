@@ -66,7 +66,9 @@ pub mod skinning;
 
 mod blend;
 use blend::{BlendedPose, JointSample, SampleBuf, sample_joints};
-pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer, SkelLayerStack, fade_progress};
+pub use blend::{
+    JointMask, JointTrs, MaskId, SkelFade, SkelInertia, SkelLayer, SkelLayerStack, fade_progress,
+};
 
 mod events;
 pub use events::{AnimEvent, AnimEventOut, AnimEventQueue, ClipEvents};
@@ -2159,6 +2161,7 @@ impl System for SkelSampleSystem {
             .writes_lane::<SkelLayerStack>()
             .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
+            .writes_lane::<SkelInertia>()
             .writes_lane::<AnimEventQueue>()
             .writes_lane::<RootMotionDelta>()
             .writes_lane::<JointPose>()
@@ -2206,6 +2209,7 @@ fn advance_skel_players(store: &SmartStore, dt: f32) {
         advance_layers(store, dt, scratch);
         advance_tree_players(store, dt, scratch);
         advance_fades(store, dt, scratch);
+        advance_inertias(store, dt, scratch);
         apply_layer_root_motion(store, scratch);
     });
 }
@@ -2666,6 +2670,22 @@ impl FadeClock for SkelFade {
     }
 }
 
+impl FadeClock for SkelInertia {
+    fn tick(&mut self, dt: f32) -> bool {
+        // A pending transition waits for its capture — its clock starts
+        // only with the captured offsets (§8.5).
+        if self.pending() {
+            return false;
+        }
+        self.elapsed = Seconds::new(self.elapsed.get() + dt);
+        self.elapsed.get() >= self.duration.get()
+    }
+
+    fn progress(&self) -> f32 {
+        fade_progress(self.duration, self.elapsed)
+    }
+}
+
 /// The crossfade share of `entity` read straight from `fades` — the
 /// [`FadeClock::progress`] of its incoming cursor, `1.0` when no fade
 /// flies on it. Direct lane access: no per-frame collection or scan on
@@ -2701,6 +2721,22 @@ fn tick_fades<F: FadeClock>(
     for &entity in finished.iter() {
         fades.remove(entity);
     }
+}
+
+/// Advances [`SkelInertia`] falloff clocks and retires finished ones
+/// (design §8.5). A pending transition is left untouched — its clock
+/// starts with the capture in the sample pass.
+fn advance_inertias(store: &SmartStore, dt: f32, scratch: &mut AnimScratch) {
+    let Some(mut inertias) = store.write_lane::<SkelInertia>() else {
+        return;
+    };
+    tick_fades(
+        &mut inertias,
+        dt,
+        &FrozenBits::default(),
+        &mut scratch.finished,
+        |_, _, _| {},
+    );
 }
 
 /// Advances outgoing crossfade clocks and retires finished fades.
@@ -2827,6 +2863,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     let retarget = store.read_cold_lane::<RetargetMap>();
     // Blend lane: per-entity writes (drive targets of §4.2); a second lane guard never nests on the same lock.
     let mut ragdolls = store.write_lane::<RagdollBlend>();
+    let mut inertias = store.write_lane::<SkelInertia>();
     let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
         clips: &clips,
@@ -2853,6 +2890,9 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         let blend = ragdolls
             .as_deref_mut()
             .and_then(|lane| lane.get_mut(*entity));
+        let inertia = inertias
+            .as_deref_mut()
+            .and_then(|lane| lane.get_mut(*entity));
         match sample_entity(
             *entity,
             player,
@@ -2860,6 +2900,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
             poses.as_deref_mut(),
             scratch,
             blend,
+            inertia,
         ) {
             Some(()) => stats.sampled += 1,
             None => stats.skipped_bad_skin += 1,
@@ -2868,23 +2909,41 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
     // Tree-driven roots evaluate their tree, then run the same layer and
     // node-write tail as player-driven ones.
     if let Some(tree_players) = lanes.tree_players {
-        for (entity, player) in tree_players.entities.iter().zip(tree_players.data.iter()) {
-            let blend = ragdolls
-                .as_deref_mut()
-                .and_then(|lane| lane.get_mut(*entity));
-            match sample_tree_entity(
-                *entity,
-                player,
-                &lanes,
-                poses.as_deref_mut(),
-                scratch,
-                blend,
-            ) {
-                Some(()) => stats.sampled += 1,
-                None => stats.skipped_bad_skin += 1,
-            }
+        let (sampled, skipped) = sample_tree_roots(
+            tree_players,
+            &lanes,
+            poses.as_deref_mut(),
+            scratch,
+            ragdolls.as_deref_mut(),
+        );
+        stats.sampled += sampled;
+        stats.skipped_bad_skin += skipped;
+    }
+}
+
+/// Tree-driven roots of one sample pass: evaluates each tree, then runs
+/// the same layer and node-write tail as player-driven ones. Returns the
+/// `(sampled, skipped_bad_skin)` counts for the caller's stats — the
+/// tree roots take no [`SkelInertia`](crate::SkelInertia) (§8.5).
+fn sample_tree_roots(
+    tree_players: &ComponentStore<SkelTreePlayer>,
+    lanes: &SampleLanes<'_>,
+    mut poses: Option<&mut ComponentStore<JointPose>>,
+    scratch: &mut AnimScratch,
+    mut ragdolls: Option<&mut ComponentStore<RagdollBlend>>,
+) -> (u32, u32) {
+    let mut sampled = 0;
+    let mut skipped = 0;
+    for (entity, player) in tree_players.entities.iter().zip(tree_players.data.iter()) {
+        let blend = ragdolls
+            .as_deref_mut()
+            .and_then(|lane| lane.get_mut(*entity));
+        match sample_tree_entity(*entity, player, lanes, poses.as_deref_mut(), scratch, blend) {
+            Some(()) => sampled += 1,
+            None => skipped += 1,
         }
     }
+    (sampled, skipped)
 }
 
 /// Skeleton and joint count of `entity`, strict: the rest table must match
@@ -3011,12 +3070,21 @@ fn sample_entity(
     poses: Option<&mut ComponentStore<JointPose>>,
     scratch: &mut AnimScratch,
     blend: Option<&mut RagdollBlend>,
+    inertia: Option<&mut SkelInertia>,
 ) -> Option<()> {
     let clip = lanes.clips.get(player.clip.0)?;
-    let (skeleton, count) = strict_skeleton(lanes, entity)?;
+    let (skeleton, _) = strict_skeleton(lanes, entity)?;
     // Absent `JointPose` is bad skin: verdict before any blending work.
     let pose = poses?.get_mut(entity)?;
-    blend_skel_pose(entity, player, lanes, clip, count, &skeleton.rest, scratch)?;
+    blend_skel_pose(
+        entity,
+        player,
+        lanes,
+        clip,
+        &skeleton.rest,
+        scratch,
+        inertia,
+    )?;
     finish_pose(entity, lanes, skeleton, scratch, pose, blend)
 }
 
@@ -3037,10 +3105,13 @@ fn blend_skel_pose<'a>(
     player: &SkelPlayer,
     lanes: &SampleLanes<'a>,
     clip: &'a SkelClip,
-    count: usize,
     rest: &[JointTrs],
     scratch: &mut AnimScratch,
+    inertia: Option<&mut SkelInertia>,
 ) -> Option<()> {
+    // `rest.len()` is the joint count: `strict_skeleton` guarantees the
+    // rest table matches it before any caller reaches this far.
+    let count = rest.len();
     scratch.contributors.clear();
     scratch.contributors.push(player.clip);
     let map = lanes.retarget.and_then(|lane| lane.get(entity));
@@ -3048,6 +3119,31 @@ fn blend_skel_pose<'a>(
     scratch
         .pose_a
         .refill(&scratch.joints.samples, rest, player.weight.get());
+    let mut inertia = inertia;
+    // §8.5: capture a pending inertialized switch against this base
+    // before the crossfade/layer mix. The outgoing snapshot is frozen —
+    // its clock never moves; a vanished clip reads as rest, as on object
+    // tracks.
+    if let Some(inertia) = &mut inertia
+        && inertia.pending()
+    {
+        match lanes.clips.get(inertia.from.clip.0) {
+            Some(from_clip) => {
+                sample_joints(
+                    from_clip,
+                    count,
+                    inertia.from.time.get(),
+                    &mut scratch.joints,
+                    map,
+                );
+                scratch
+                    .pose_b
+                    .refill(&scratch.joints.samples, rest, inertia.from.weight.get());
+            }
+            None => scratch.pose_b.refill_rest(rest),
+        }
+        inertia.capture(&scratch.pose_b.trs, &scratch.pose_a.trs);
+    }
     if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
         match lanes.clips.get(fade.from.clip.0) {
             Some(from_clip) => {
@@ -3070,6 +3166,11 @@ fn blend_skel_pose<'a>(
             .pose_b
             .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
         std::mem::swap(&mut scratch.pose_a, &mut scratch.pose_b);
+    }
+    // §8.5: the inertialized base keeps its decaying captured offsets;
+    // the layers overlay it afterwards, live over the transition.
+    if let Some(inertia) = &inertia {
+        inertia.apply(&mut scratch.pose_a.trs);
     }
     overlay_layers(entity, lanes, count, rest, scratch)
 }

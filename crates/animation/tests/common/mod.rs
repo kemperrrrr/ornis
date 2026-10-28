@@ -11,8 +11,8 @@
 use glam::{Mat4, Vec3};
 use ornis_animation::{
     ClipId, JointId, JointMask, JointPose, JointTrack, Key, KeyTrack, MachineCursor, SkelClip,
-    SkelLayerStack, SkelPlayer, SkelSampleSystem, SkelTree, SkelTreePlayer, Skeleton, SwitchCursor,
-    TreeNodeDef, switch_selection,
+    SkelInertia, SkelLayerStack, SkelPlayer, SkelSampleSystem, SkelTree, SkelTreePlayer, Skeleton,
+    SwitchCursor, TreeNodeDef, switch_selection,
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::{Clamped01, Seconds};
@@ -29,6 +29,7 @@ pub fn engine() -> Engine {
         store.register::<Skeleton>();
         store.register::<JointPose>();
         store.register::<SkelTreePlayer>();
+        store.register::<SkelInertia>();
         store.register::<TransformDesc>();
         store.register_cold::<SkelClip>();
         store.register_cold::<JointMask>();

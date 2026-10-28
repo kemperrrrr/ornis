@@ -18,9 +18,9 @@ use ornis_animation::{
     AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, BasePull,
     ClipEvents, ClipId, ClipSyncMarks, ControlRig, Effector, IkStack, JointId, JointMask,
     JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, MaskId, RetargetMap, SkelClip,
-    SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh,
-    SwitchCursor, SyncMark, TreeChild, TreeChild2d, TreeNodeDef, TreeParam, TreeTransition,
-    fade_in_flight, switch_selection, try_animator,
+    SkelFade, SkelInertia, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton,
+    SkinnedMesh, SwitchCursor, SyncMark, TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
+    TreeTransition, fade_in_flight, switch_selection, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{ChildOf, Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
@@ -1136,6 +1136,7 @@ pub fn wire_loaded_animation(
     store.register::<SkelLayerStack>();
     store.register::<SkelTreePlayer>();
     store.register::<SkelFade>();
+    store.register::<SkelInertia>();
     store.register_cold::<SkelClip>();
     store.register_cold::<JointMask>();
     store.register_cold::<SkelTree>();
