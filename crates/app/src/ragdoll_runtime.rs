@@ -218,14 +218,14 @@ impl RagdollRuntime {
     /// [`crate::ragdoll_g5::sample_local_into`] for the seam itself. Fails on a poisoned lock, a missing body or a
     /// non-finite pose, writing nothing further. Hot path: no allocations.
     pub fn sample_local(&self, desc: &RagdollDesc, out: &mut [JointTrs]) -> bool {
-        let Ok(engine) = self.engine.lock() else {
-            return false;
-        };
-        crate::ragdoll_g5::sample_local_into(desc, out, &self.bind, &self.parents, |index| {
-            let handle = self.bodies.get(index).copied()?;
-            let body = engine.get_body(handle)?;
-            Some((body.position, body.orientation))
+        self.with_engine(|engine| {
+            crate::ragdoll_g5::sample_local_into(desc, out, &self.bind, &self.parents, |index| {
+                let handle = self.bodies.get(index).copied()?;
+                let body = engine.get_body(handle)?;
+                Some((body.position, body.orientation))
+            })
         })
+        .unwrap_or(false)
     }
 }
 

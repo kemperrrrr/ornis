@@ -18,7 +18,8 @@ use ornis_physics::engine::PhysicsEngine;
 use ornis_physics::joint::JointMotor;
 
 use crate::physics_runtime::PhysicsRuntime;
-use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime, sample_local_into};
+use crate::ragdoll_g5::sample_local_into;
+use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
 
 /// Follow-servo stiffness of a driven hinge (1/s²; `AccelerationBased`,
 /// so it scales with mass by construction). Damping and the torque budget

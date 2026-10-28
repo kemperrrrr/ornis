@@ -11,8 +11,10 @@ use ornis_core::{ComponentStore, Entity, SmartStore};
 use ornis_physics::body::RigidBody;
 
 use crate::physics_runtime::PhysicsRuntime;
+use crate::ragdoll_proxy::{proxy_layer, proxy_mask};
 use crate::ragdoll_runtime::{
-    RagdollProxy, RagdollRuntime, bind_worlds, bone_body, chain_parent, hinge_joint,
+    RagdollBoneView, RagdollProxy, RagdollRuntime, bind_worlds, bone_body, chain_parent,
+    hinge_joint,
 };
 
 /// Model→local seam core of §4.1 (shared by the ABA and G5 seams): writes
@@ -206,4 +208,49 @@ fn g5_link_pair(
         }
     }
     Some((child?, parent?))
+}
+
+/// First bind of a proxy (§8.5/§11, worker of `drive_proxies`):
+/// inserts its bind-pose template body with the collision filter of
+/// its layer bit. Leaf.
+pub(crate) fn bind_proxy_body(
+    runtime: &RagdollRuntime,
+    proxy: &RagdollProxy,
+    entity: Entity,
+    bodies: &mut ComponentStore<RigidBody>,
+    bone_count: usize,
+) {
+    if bodies.contains(entity) {
+        return;
+    }
+    let Some(mut body) = runtime.body_template(proxy.link) else {
+        return;
+    };
+    body.set_collision_filter(proxy_layer(proxy.link), proxy_mask(bone_count, proxy.link));
+    bodies.insert(entity, body);
+}
+
+/// §11 Fixed-base root (worker of `drive_proxies`): pins the root link
+/// to the entity's bind frame (`drive_pose`, kinematic anchor) — the
+/// world owns the rest. Leaf.
+pub(crate) fn pin_g5_fixed_root(
+    view: RagdollBoneView,
+    root_pose: (Vec3, Quat),
+    entity: Entity,
+    bodies: &mut ComponentStore<RigidBody>,
+    physics: &mut PhysicsRuntime,
+) {
+    let (root_position, root_rotation) = root_pose;
+    let position = root_rotation * view.position + root_position;
+    let rotation = root_rotation * view.rotation;
+    let Some(body) = bodies.get_mut(entity) else {
+        return;
+    };
+    body.position = position;
+    body.orientation = rotation;
+    body.velocity = Vec3::ZERO;
+    body.angular_velocity = Vec3::ZERO;
+    if let Some(handle) = physics.handle_of(entity) {
+        physics.drive_pose(handle, position, rotation);
+    }
 }
