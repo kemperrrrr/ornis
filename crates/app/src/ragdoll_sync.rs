@@ -179,39 +179,6 @@ fn step_chain(
 /// from the transition snapshot `from` at `progress` (§4.2), then the
 /// live pins of `set_ragdoll_weight` overwrite their joints. O(joints +
 /// bones). Leaf.
-/// G5 readback of §11: the §4.1 model→local sample taken from the world
-/// bodies — the proxies' live [`RigidBody`] poses after
-/// `physics_sync_out` — against the same seam as the ABA chain. A missing
-/// proxy or body fails the sample like a missing chain body. Leaf.
-fn sample_local_g5(
-    store: &SmartStore,
-    root: Entity,
-    runtime: &RagdollRuntime,
-    desc: &RagdollDesc,
-    out: &mut [JointTrs],
-) -> bool {
-    let (Some(proxies), Some(bodies)) = (
-        store.read_lane::<RagdollProxy>(),
-        store.read_lane::<RigidBody>(),
-    ) else {
-        return false;
-    };
-    sample_local_into(
-        desc,
-        out,
-        runtime.bind_frames(),
-        runtime.parents(),
-        |link| {
-            let (entity, _) = proxies
-                .entities
-                .iter()
-                .zip(&proxies.data)
-                .find(|(_, proxy)| proxy.root == root && proxy.link == link)?;
-            let body = bodies.get(*entity)?;
-            Some((body.position, body.orientation))
-        },
-    )
-}
 
 fn fill_weights(
     mode: RagdollMode,
@@ -253,6 +220,43 @@ fn fill_weights(
             *weight = *pin;
         }
     }
+}
+
+/// G5 readback of §11: the §4.1 model→local sample taken from the world
+/// bodies — the proxies' live [`RigidBody`] poses after
+/// `physics_sync_out` — against the same seam as the ABA chain. A missing
+/// proxy or body fails the sample like a missing chain body. Leaf.
+fn sample_local_g5(
+    store: &SmartStore,
+    root: Entity,
+    runtime: &RagdollRuntime,
+    desc: &RagdollDesc,
+    out: &mut [JointTrs],
+) -> bool {
+    let (Some(proxies), Some(bodies)) = (
+        store.read_lane::<RagdollProxy>(),
+        store.read_lane::<RigidBody>(),
+    ) else {
+        return false;
+    };
+    sample_local_into(
+        desc,
+        out,
+        runtime.bind_frames(),
+        runtime.parents(),
+        |link| {
+            let entity = proxies
+                .entities
+                .iter()
+                .zip(&proxies.data)
+                .filter(|(_, proxy)| proxy.root == root && proxy.link == link)
+                .map(|(&entity, _)| entity)
+                .next()?;
+            bodies
+                .get(entity)
+                .map(|body| (body.position, body.orientation))
+        },
+    )
 }
 
 /// One ragdoll tick of `root` (§5): the fixed chain step plus the
