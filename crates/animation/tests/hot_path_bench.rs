@@ -481,6 +481,6 @@ fn frame_hot_path() {
             );
             measured += 1;
         }
-        assert_eq!(measured, 5, "every scenario reports a measurement");
+        assert_eq!(measured, 7, "every scenario reports a measurement");
     }
 }
