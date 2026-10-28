@@ -19,7 +19,8 @@ use ornis_animation::{
     ClipEvents, ClipId, ClipSyncMarks, ControlRig, Effector, IkStack, JointId, JointMask,
     JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, MaskId, RetargetMap, SkelClip,
     SkelFade, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton, SkinnedMesh,
-    SyncMark, TreeChild2d, TreeNodeDef, TreeParam, fade_in_flight, try_animator,
+    SwitchCursor, SyncMark, TreeChild, TreeChild2d, TreeNodeDef, TreeParam, TreeTransition,
+    fade_in_flight, switch_selection, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{ChildOf, Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
@@ -758,6 +759,73 @@ fn blend2d_lattice_ok(children: &[TreeChild2d]) -> bool {
 /// the same handle check [`fade_to_clip`] applies to its `clip`. An
 /// unknown handle is refused here instead of bad-skinning the root every
 /// frame.
+/// [`TreeNodeDef::Blend1d`] arm of [`tree_is_valid`]: the axis in range,
+/// strictly ascending finite positions and children among the earlier
+/// nodes.
+fn blend1d_node_valid(tree: &SkelTree, axis: usize, children: &[TreeChild], index: usize) -> bool {
+    axis < tree.params.len()
+        && children
+            .windows(2)
+            .all(|pair| pair[0].position < pair[1].position)
+        && children
+            .iter()
+            .all(|child| child.node < index && child.position.is_finite())
+}
+
+/// [`TreeNodeDef::Blend2d`] arm of [`tree_is_valid`]: distinct axes in
+/// range, finite positions, children among the earlier nodes and an
+/// installable lattice.
+fn blend2d_node_valid(
+    tree: &SkelTree,
+    axes: [usize; 2],
+    children: &[TreeChild2d],
+    index: usize,
+) -> bool {
+    axes[0] != axes[1]
+        && axes.iter().all(|axis| *axis < tree.params.len())
+        && children
+            .iter()
+            .all(|child| child.node < index && child.position.iter().all(|axis| axis.is_finite()))
+        && blend2d_lattice_ok(children)
+}
+
+/// [`TreeNodeDef::Machine`] arm of [`tree_is_valid`]: non-empty states
+/// among the earlier nodes, an in-range initial state and in-range finite
+/// transitions.
+fn machine_node_valid(
+    tree: &SkelTree,
+    states: &[usize],
+    initial: usize,
+    transitions: &[TreeTransition],
+    index: usize,
+) -> bool {
+    !states.is_empty()
+        && initial < states.len()
+        && states.iter().all(|state| *state < index)
+        && transitions.iter().all(|transition| {
+            transition.from < states.len()
+                && transition.to < states.len()
+                && transition.when.param < tree.params.len()
+                && transition.when.value.is_finite()
+                && transition.fade.get().is_finite()
+        })
+}
+
+/// [`TreeNodeDef::Switch`] arm of [`tree_is_valid`]: a finite fade, the
+/// parameter in range and non-empty children among the earlier nodes.
+fn switch_node_valid(
+    tree: &SkelTree,
+    param: usize,
+    children: &[usize],
+    fade: Seconds,
+    index: usize,
+) -> bool {
+    param < tree.params.len()
+        && !children.is_empty()
+        && children.iter().all(|child| *child < index)
+        && fade.get().is_finite()
+}
+
 fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
     let clips = store.read_cold_lane::<SkelClip>();
     !tree.nodes.is_empty()
@@ -772,38 +840,21 @@ fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
                     .and_then(|clips| clips.get(clip.0))
                     .is_some(),
                 TreeNodeDef::Blend1d { axis, children } => {
-                    *axis < tree.params.len()
-                        && children
-                            .windows(2)
-                            .all(|pair| pair[0].position < pair[1].position)
-                        && children
-                            .iter()
-                            .all(|child| child.node < index && child.position.is_finite())
+                    blend1d_node_valid(tree, *axis, children, index)
                 }
                 TreeNodeDef::Blend2d { axes, children } => {
-                    axes[0] != axes[1]
-                        && axes.iter().all(|axis| *axis < tree.params.len())
-                        && children.iter().all(|child| {
-                            child.node < index && child.position.iter().all(|axis| axis.is_finite())
-                        })
-                        && blend2d_lattice_ok(children)
+                    blend2d_node_valid(tree, *axes, children, index)
                 }
                 TreeNodeDef::Machine {
                     states,
                     initial,
                     transitions,
-                } => {
-                    !states.is_empty()
-                        && *initial < states.len()
-                        && states.iter().all(|state| *state < index)
-                        && transitions.iter().all(|transition| {
-                            transition.from < states.len()
-                                && transition.to < states.len()
-                                && transition.when.param < tree.params.len()
-                                && transition.when.value.is_finite()
-                                && transition.fade.get().is_finite()
-                        })
-                }
+                } => machine_node_valid(tree, states, *initial, transitions, index),
+                TreeNodeDef::Switch {
+                    param,
+                    children,
+                    fade,
+                } => switch_node_valid(tree, *param, children, *fade, index),
                 _ => false,
             })
 }
@@ -858,6 +909,23 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
         .filter_map(|node| match node {
             TreeNodeDef::Machine { initial, .. } => Some(MachineCursor {
                 state: *initial,
+                from: None,
+                elapsed: Seconds::ZERO,
+                duration: Seconds::ZERO,
+            }),
+            _ => None,
+        })
+        .collect();
+    player.switches = tree
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            TreeNodeDef::Switch {
+                param,
+                children,
+                fade: _,
+            } => Some(SwitchCursor {
+                child: switch_selection(tree.params[*param].default, children.len()),
                 from: None,
                 elapsed: Seconds::ZERO,
                 duration: Seconds::ZERO,
@@ -2934,6 +3002,48 @@ mod tests {
             machine_cursor_after(true),
             MachineCursor {
                 state: 0,
+                from: None,
+                elapsed: Seconds::ZERO,
+                duration: Seconds::ZERO,
+            }
+        );
+    }
+
+    /// The `SwitchCursor` `set_skel_tree` seeds on a switch root: the
+    /// standing child is the rounded default-parameter selection (§7.7).
+    #[test]
+    fn set_skel_tree_seeds_switch_cursors_at_default_selection() {
+        let mut store = SmartStore::new();
+        let (root, clip) = tree_hero(&mut store);
+        assert!(set_skel_tree(
+            &mut store,
+            root,
+            ornis_animation::SkelTree {
+                nodes: vec![
+                    ornis_animation::TreeNodeDef::Clip { clip },
+                    ornis_animation::TreeNodeDef::Clip { clip },
+                    ornis_animation::TreeNodeDef::Switch {
+                        param: 0,
+                        children: vec![0, 1],
+                        fade: Seconds::new(1.0),
+                    },
+                ],
+                params: vec![TreeParam {
+                    name: "pick".to_string(),
+                    default: 0.6,
+                }],
+            },
+        ));
+        let cursor = {
+            let players = store
+                .read_lane::<SkelTreePlayer>()
+                .expect("lane registered");
+            players.get(root).expect("player kept").switches[0]
+        };
+        assert_eq!(
+            cursor,
+            SwitchCursor {
+                child: 1,
                 from: None,
                 elapsed: Seconds::ZERO,
                 duration: Seconds::ZERO,

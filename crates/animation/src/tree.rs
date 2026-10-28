@@ -1,19 +1,12 @@
-//! Animation trees (`docs/animation-design.md` §7): cold authoring
-//! graphs ([`SkelTree`]), hot cursor state ([`SkelTreePlayer`]) and the
-//! deterministic blend1d weights that evaluate them into the phase-E pose
-//! pipeline.
+//! Animation-tree model (`docs/animation-design.md` §7): cold authoring
+//! graphs ([`SkelTree`]) and hot cursor state ([`SkelTreePlayer`]).
 //!
 //! The model keeps the phase-E rules: deterministic and stateless per
-//! frame (only cursor clocks mutate), evaluation order is the node order
-//! (`Blend1d` children reference earlier nodes, the last node is the
-//! root), and a weighted fold (`BlendedPose::fold_pose`) builds the
-//! result the same way `mix_towards` blends a crossfade.
+//! frame (only cursor clocks mutate), and evaluation order is the node
+//! order (`Blend1d` children reference earlier nodes, the last node is
+//! the root). The per-frame fold itself lives in [`crate::tree_eval`].
 
-use ornis_core::ColdComponentStore;
-
-use crate::blend::{BlendedPose, SampleBuf, fade_progress, sample_joints};
-use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
-use crate::{ClipId, JointTrs, RetargetMap, Seconds, SkelClip, SkelPlayer};
+use crate::{ClipId, Seconds, SkelPlayer};
 
 /// One named parameter of an [`SkelTree`], addressed by index.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +142,25 @@ pub enum TreeNodeDef {
         /// Transition candidates, in evaluation order.
         transitions: Vec<TreeTransition>,
     },
+    /// Selector over earlier nodes: stands on the child chosen by
+    /// rounding parameter `param` to the nearest integer (halves away
+    /// from zero, clamped to the covered range — [`switch_selection`]),
+    /// and crossfades between selections with
+    /// [`SkelFade`](crate::SkelFade) mechanics (an in-flight crossfade is
+    /// never interrupted — a new selection re-checks once it completes).
+    /// Empty `children` is a broken tree (bad skin): the node owns a
+    /// cursor, like [`TreeNodeDef::Machine`].
+    Switch {
+        /// Index into [`SkelTree::params`] that drives this node.
+        param: usize,
+        /// Candidate indices into [`SkelTree::nodes`], all strictly
+        /// smaller than this node's index; non-empty.
+        children: Vec<usize>,
+        /// Crossfade length in seconds, [`SkelFade`](crate::SkelFade)
+        /// mechanics: linear progress, the outgoing child's cursors keep
+        /// stepping; non-positive cuts at once. Must be finite.
+        fade: Seconds,
+    },
 }
 
 /// Authoring catalog of one animation tree (cold lane, on the skeleton
@@ -180,6 +192,36 @@ pub struct MachineCursor {
     pub duration: Seconds,
 }
 
+/// Runtime state of one [`TreeNodeDef::Switch`] — one entry of
+/// [`SkelTreePlayer::switches`], in switch-node order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SwitchCursor {
+    /// Index into the node's `children`: where the switch stands, or
+    /// where an in-flight crossfade is heading.
+    pub child: usize,
+    /// Child being left while a crossfade flies; `None` at rest.
+    pub from: Option<usize>,
+    /// Time spent in the in-flight crossfade.
+    pub elapsed: Seconds,
+    /// Length of the in-flight crossfade; non-positive cuts at once.
+    pub duration: Seconds,
+}
+
+/// Child selection of a [`TreeNodeDef::Switch`]: `value` rounded to the
+/// nearest integer (halves away from zero), clamped to `0..len`.
+/// `len == 0` reads as `0` — the eval contract rejects empty `children`
+/// before the index is ever used.
+pub fn switch_selection(value: f32, len: usize) -> usize {
+    let rounded = value.round();
+    if rounded <= 0.0 || len == 0 {
+        0
+    } else if rounded >= len as f32 {
+        len - 1
+    } else {
+        rounded as usize
+    }
+}
+
 /// Runtime state of one [`SkelTree`] (hot lane, on the skeleton root).
 ///
 /// The only mutable state of the tree, and it is all cursor clocks plus
@@ -191,9 +233,10 @@ pub struct MachineCursor {
 /// node's clip def on the cursor's clock. A hand-inserted player that lets
 /// the two diverge still samples correctly, but its cursor metadata lies —
 /// install through the facade or keep them aligned. The same pairing holds
-/// for `machines[i]` and the i-th [`TreeNodeDef::Machine`]: a lane whose
-/// counts diverge steps the matching prefix and reads as bad skin
-/// (`eval_tree` demands one cursor per machine node).
+/// for `machines[i]` and the i-th [`TreeNodeDef::Machine`], and for
+/// `switches[i]` and the i-th [`TreeNodeDef::Switch`]: a lane whose counts
+/// diverge steps the matching prefix and reads as bad skin (`eval_tree`
+/// demands one cursor per machine or switch node).
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SkelTreePlayer {
@@ -203,211 +246,6 @@ pub struct SkelTreePlayer {
     pub leaves: Vec<SkelPlayer>,
     /// Cursors of the [`TreeNodeDef::Machine`] nodes, in node order.
     pub machines: Vec<MachineCursor>,
-}
-
-/// Scratch buffers of [`eval_tree`], grouped to stay inside clippy's
-/// argument budget (same pattern as the type aliases).
-pub(crate) struct EvalBuf<'a> {
-    /// One scratch pose per node, in node order.
-    pub poses: &'a mut [BlendedPose],
-    /// Reusable sample scratch (channels plus paint marks).
-    pub joints: &'a mut SampleBuf,
-    /// Clip ids of the evaluated leaves, appended in node order.
-    pub contributors: &'a mut Vec<ClipId>,
-    /// Retarget of the root (§8.3); every leaf samples through it.
-    pub map: Option<&'a RetargetMap>,
-}
-
-/// Evaluates `tree` into `buf.poses` — one scratch pose per node, in node
-/// order (the root is the last one) — sampling the [`SkelClip`] leaves at
-/// their cursors in `player`.
-///
-/// The clip ids of every leaf are appended to `buf.contributors`. Leaf
-/// cursors apply their own `weight` as in phase E (pull toward rest);
-/// `Blend1d` nodes fold their weighted children the same way a crossfade
-/// mixes poses. `buf.map` is the root's retarget (§8.3): every leaf
-/// samples through it, the same boundary as the flat player, the
-/// crossfade and the overlay layers. A violation of the tree contract
-/// (missing cursor
-/// or clip, bad `axis`, a non-finite parameter or child position, a child
-/// not earlier than its parent, missing joint counts) returns `None` and
-/// the caller publishes nothing — the "bad skin" rule. The child-order
-/// check covers **all** children of a blend node, not just the weighted
-/// ones, so one broken tree reads the same way at every parameter value.
-pub(crate) fn eval_tree(
-    tree: &SkelTree,
-    player: &SkelTreePlayer,
-    clips: &ColdComponentStore<SkelClip>,
-    count: usize,
-    rest: &[JointTrs],
-    buf: EvalBuf<'_>,
-) -> Option<()> {
-    let EvalBuf {
-        poses,
-        joints,
-        contributors,
-        map,
-    } = buf;
-    if tree.nodes.is_empty() {
-        return None;
-    }
-    let mut leaves = 0;
-    let mut machines = 0;
-    for (index, node) in tree.nodes.iter().enumerate() {
-        match node {
-            TreeNodeDef::Clip { clip } => {
-                let cursor = player.leaves.get(leaves)?;
-                leaves += 1;
-                let def = clips.get(clip.0)?;
-                sample_joints(def, count, cursor.time.get(), joints, map);
-                poses[index].refill(&joints.samples, rest, cursor.weight.get());
-                contributors.push(*clip);
-            }
-            TreeNodeDef::Blend1d { axis, children } => {
-                let value = player.params.get(*axis).copied()?;
-                if !value.is_finite() {
-                    return None;
-                }
-                // Every child is validated, not just the weighted ones —
-                // the same broken tree must not answer differently at
-                // different parameter values.
-                for child in children {
-                    if child.node >= index || !child.position.is_finite() {
-                        return None;
-                    }
-                }
-                poses[index].refill_rest(rest);
-                let mut weights = [(0, 0.0f32); 2];
-                let filled = blend1d_weights(children, value, &mut weights);
-                let mut total = 0.0;
-                for (child, weight) in weights.iter().take(filled) {
-                    let node_index = children[*child].node;
-                    let (earlier, tail) = poses.split_at_mut(index);
-                    tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
-                }
-            }
-            TreeNodeDef::Blend2d { axes, children } => {
-                eval_blend2d(*axes, children, &player.params, rest, index, poses)?;
-            }
-            TreeNodeDef::Machine {
-                states,
-                initial: _,
-                transitions,
-            } => {
-                let cursor = player.machines.get(machines)?;
-                machines += 1;
-                eval_machine(states, transitions, cursor, &player.params, index, poses)?;
-            }
-        }
-    }
-    Some(())
-}
-
-/// Evaluates one [`TreeNodeDef::Blend2d`] node into `poses[index]`. The
-/// hot path re-checks the fold-poisoning part of the contract every frame
-/// — both axes in range, finite parameter values and positions, children
-/// among the earlier nodes — so the same broken tree never answers
-/// differently at different parameter values; the lattice *shape* is
-/// validated once at install (`set_skel_tree` rejects a broken grid),
-/// and a torn tail just falls off deterministically
-/// ([`blend2d_weights`]). The output is the bilinear fold of the weighted
-/// cell corners; `None` = bad skin.
-pub(crate) fn eval_blend2d(
-    axes: [usize; 2],
-    children: &[TreeChild2d],
-    params: &[f32],
-    rest: &[JointTrs],
-    index: usize,
-    poses: &mut [BlendedPose],
-) -> Option<()> {
-    let value = [params.get(axes[0]).copied()?, params.get(axes[1]).copied()?];
-    if !value[0].is_finite() || !value[1].is_finite() {
-        return None;
-    }
-    // Every child is validated, not just the weighted ones — the same
-    // broken tree must not answer differently at different parameter
-    // values.
-    for child in children {
-        if child.node >= index || !child.position[0].is_finite() || !child.position[1].is_finite() {
-            return None;
-        }
-    }
-    poses[index].refill_rest(rest);
-    let mut weights = [(0, 0.0f32); BLEND2D_CORNERS];
-    let filled = blend2d_weights(children, value, &mut weights);
-    let mut total = 0.0;
-    for (child, weight) in weights.iter().take(filled) {
-        let node_index = children[*child].node;
-        let (earlier, tail) = poses.split_at_mut(index);
-        tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
-    }
-    Some(())
-}
-
-/// The [`eval_tree`] machine contract, checked every frame by both the
-/// pose fold ([`eval_machine`]) and the event-weight walk
-/// ([`crate::tree_eff::fold_machine_eff`]): non-empty states among the
-/// earlier nodes, in-range cursors — the same broken machine must not
-/// answer differently after a transition.
-pub(crate) fn machine_states_valid(
-    index: usize,
-    states: &[usize],
-    cursor: &MachineCursor,
-) -> Option<()> {
-    if states.is_empty() || cursor.state >= states.len() {
-        return None;
-    }
-    if cursor.from.is_some_and(|from| from >= states.len()) {
-        return None;
-    }
-    for state in states {
-        if *state >= index {
-            return None;
-        }
-    }
-    Some(())
-}
-
-/// Evaluates one [`TreeNodeDef::Machine`] node into `poses[index]`: the
-/// whole machine contract is validated every frame — non-empty `states`
-/// among the earlier nodes, in-range cursors and transitions, finite
-/// guards — so a broken machine must not answer differently after a
-/// transition. The output is a pure state pose or a
-/// [`SkelFade`](crate::SkelFade)-progress mix of the leaving and heading
-/// states; `None` = bad skin.
-fn eval_machine(
-    states: &[usize],
-    transitions: &[TreeTransition],
-    cursor: &MachineCursor,
-    params: &[f32],
-    index: usize,
-    poses: &mut [BlendedPose],
-) -> Option<()> {
-    machine_states_valid(index, states, cursor)?;
-    for transition in transitions {
-        if transition.from >= states.len()
-            || transition.to >= states.len()
-            || !transition.when.value.is_finite()
-            || !transition.fade.get().is_finite()
-        {
-            return None;
-        }
-        let value = params.get(transition.when.param).copied()?;
-        if !value.is_finite() {
-            return None;
-        }
-    }
-    let (earlier, tail) = poses.split_at_mut(index);
-    match cursor.from {
-        Some(from) => {
-            let progress = fade_progress(cursor.duration, cursor.elapsed);
-            if !progress.is_finite() {
-                return None;
-            }
-            tail[0].clone_from(&earlier[states[from]]);
-            tail[0].mix_towards(&earlier[states[cursor.state]], progress);
-        }
-        None => tail[0].clone_from(&earlier[states[cursor.state]]),
-    }
-    Some(())
+    /// Cursors of the [`TreeNodeDef::Switch`] nodes, in node order.
+    pub switches: Vec<SwitchCursor>,
 }

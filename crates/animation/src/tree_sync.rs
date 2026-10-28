@@ -90,6 +90,7 @@ fn node_references(tree: &SkelTree, parent: usize, child: usize) -> bool {
             }
             false
         }
+        Some(TreeNodeDef::Switch { children, .. }) => children.contains(&child),
         _ => false,
     }
 }

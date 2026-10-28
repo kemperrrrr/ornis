@@ -198,8 +198,8 @@ mod tests {
     use ornis_core::{Clamped01, Seconds, SmartStore};
 
     use crate::{
-        MachineCursor, SkelClip, SkelFade, SkelPlayer, SkelTree, SkelTreePlayer, TreeChild,
-        TreeChild2d, TreeNodeDef, TreeParam, advance_skel_players,
+        MachineCursor, SkelClip, SkelFade, SkelPlayer, SkelTree, SkelTreePlayer, SwitchCursor,
+        TreeChild, TreeChild2d, TreeNodeDef, TreeParam, advance_skel_players,
     };
 
     fn marks(pairs: &[(&str, f32)]) -> ClipEvents {
@@ -357,6 +357,7 @@ mod tests {
                     params: vec![0.0],
                     leaves: vec![stepping(clip_a), stepping(clip_b)],
                     machines: Vec::new(),
+                    switches: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
@@ -389,6 +390,7 @@ mod tests {
                         elapsed: Seconds::new(0.0),
                         duration: Seconds::new(0.0),
                     }],
+                    switches: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
@@ -447,6 +449,80 @@ mod tests {
                         elapsed: Seconds::new(0.5),
                         duration: Seconds::new(1.0),
                     }],
+                    switches: Vec::new(),
+                },
+            )),
+            vec![("a".to_owned(), 0.5), ("b".to_owned(), 0.5)]
+        );
+    }
+
+    #[test]
+    fn switch_inactive_child_event_is_zero() {
+        // Only the standing selection contributes to the pose.
+        assert_eq!(
+            tree_fired(|clip_a, clip_b| (
+                SkelTree {
+                    nodes: vec![
+                        TreeNodeDef::Clip { clip: clip_a },
+                        TreeNodeDef::Clip { clip: clip_b },
+                        TreeNodeDef::Switch {
+                            param: 0,
+                            children: vec![0, 1],
+                            fade: Seconds::new(1.0),
+                        },
+                    ],
+                    params: vec![TreeParam {
+                        name: "pick".to_owned(),
+                        default: 0.0,
+                    }],
+                },
+                SkelTreePlayer {
+                    params: vec![0.0],
+                    leaves: vec![stepping(clip_a), stepping(clip_b)],
+                    machines: Vec::new(),
+                    switches: vec![SwitchCursor {
+                        child: 1,
+                        from: None,
+                        elapsed: Seconds::new(0.0),
+                        duration: Seconds::new(0.0),
+                    }],
+                },
+            )),
+            vec![("a".to_owned(), 0.0), ("b".to_owned(), 1.0)]
+        );
+    }
+
+    #[test]
+    fn switch_transition_splits_the_event_weight() {
+        // Mid-crossfade the leaving child carries `1 − progress` and the
+        // heading one `progress` (design §8.1, §7.7).
+        assert_eq!(
+            tree_fired(|clip_a, clip_b| (
+                SkelTree {
+                    nodes: vec![
+                        TreeNodeDef::Clip { clip: clip_a },
+                        TreeNodeDef::Clip { clip: clip_b },
+                        TreeNodeDef::Switch {
+                            param: 0,
+                            children: vec![0, 1],
+                            fade: Seconds::new(1.0),
+                        },
+                    ],
+                    params: vec![TreeParam {
+                        name: "pick".to_owned(),
+                        default: 0.0,
+                    }],
+                },
+                SkelTreePlayer {
+                    params: vec![0.0],
+                    leaves: vec![stepping(clip_a), stepping(clip_b)],
+                    machines: Vec::new(),
+                    switches: vec![SwitchCursor {
+                        child: 1,
+                        from: Some(0),
+                        elapsed: Seconds::new(0.5),
+                        duration: Seconds::new(1.0),
+                    }],
                 },
             )),
             vec![("a".to_owned(), 0.5), ("b".to_owned(), 0.5)]
@@ -500,6 +576,7 @@ mod tests {
                     params: vec![0.5, 0.5],
                     leaves: vec![stepping(clip_a), stepping(clip_b)],
                     machines: Vec::new(),
+                    switches: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 0.25), ("b".to_owned(), 0.75)]

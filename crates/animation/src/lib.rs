@@ -97,17 +97,18 @@ pub use motion_match::{
 mod ragdoll;
 mod tree;
 mod tree_eff;
+mod tree_eval;
 mod tree_sync;
 mod tree_weights;
 pub use ragdoll::{
     RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollError, RagdollFade, RagdollLimit,
     RagdollMode, RagdollMotor, RagdollShape, ragdoll_blend,
 };
-use tree::eval_tree;
 pub use tree::{
-    MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeChild2d, TreeCmp, TreeCond,
-    TreeNodeDef, TreeParam, TreeTransition,
+    MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeCmp,
+    TreeCond, TreeNodeDef, TreeParam, TreeTransition, switch_selection,
 };
+use tree_eval::eval_tree;
 use tree_sync::sync_transition_leaves;
 pub use tree_sync::{ClipSyncMarks, SyncMark};
 
@@ -2482,6 +2483,13 @@ fn advance_tree_players(store: &SmartStore, dt: f32, scratch: &mut AnimScratch) 
             marks.as_deref(),
             dt,
         );
+        step_switches(
+            player,
+            defs.as_deref().and_then(|defs| defs.get(*entity)),
+            &clips,
+            marks.as_deref(),
+            dt,
+        );
     }
 }
 
@@ -2499,12 +2507,7 @@ fn step_machines(
     dt: f32,
 ) {
     for cursor in &mut player.machines {
-        if cursor.from.is_some() {
-            cursor.elapsed = Seconds::new(cursor.elapsed.get() + dt);
-            if fade_progress(cursor.duration, cursor.elapsed) >= 1.0 {
-                cursor.from = None;
-            }
-        }
+        tick_crossfade(&mut cursor.elapsed, cursor.duration, &mut cursor.from, dt);
     }
     let Some(tree) = tree else {
         return;
@@ -2547,6 +2550,87 @@ fn step_machines(
         cursor.state = transition.to;
         cursor.elapsed = Seconds::ZERO;
         cursor.duration = transition.fade;
+    }
+}
+
+/// Completes or advances in-flight switch crossfades, then starts a new
+/// one whenever the live parameter's rounded selection ([`tree::switch_selection`])
+/// no longer matches the standing child (an in-flight crossfade is never
+/// interrupted — a new selection re-checks once it completes, the
+/// [`SkelFade`](crate::SkelFade) mechanics). A started crossfade
+/// re-phases the leaving and arriving children's leaves through their
+/// [`ClipSyncMarks`] — unless the lane is missing, which leaves every
+/// cursor alone.
+fn step_switches(
+    player: &mut SkelTreePlayer,
+    tree: Option<&SkelTree>,
+    clips: &ColdComponentStore<SkelClip>,
+    marks: Option<&ColdComponentStore<ClipSyncMarks>>,
+    dt: f32,
+) {
+    for cursor in &mut player.switches {
+        tick_crossfade(&mut cursor.elapsed, cursor.duration, &mut cursor.from, dt);
+    }
+    let Some(tree) = tree else {
+        return;
+    };
+    let mut cursors = 0;
+    for node in &tree.nodes {
+        let tree::TreeNodeDef::Switch {
+            param,
+            children,
+            fade,
+        } = node
+        else {
+            continue;
+        };
+        let slot = cursors;
+        cursors += 1;
+        let Some(cursor) = player.switches.get(slot) else {
+            break;
+        };
+        if cursor.from.is_some() {
+            continue;
+        }
+        let Some(&value) = player.params.get(*param) else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        let selection = tree::switch_selection(value, children.len());
+        if selection == cursor.child {
+            continue;
+        }
+        let (Some(&from_node), Some(&to_node)) =
+            (children.get(cursor.child), children.get(selection))
+        else {
+            continue;
+        };
+        if let Some(marks) = marks {
+            sync_transition_leaves(&mut player.leaves, tree, from_node, to_node, clips, marks);
+        }
+        let Some(cursor) = player.switches.get_mut(slot) else {
+            break;
+        };
+        cursor.from = Some(cursor.child);
+        cursor.child = selection;
+        cursor.elapsed = Seconds::ZERO;
+        cursor.duration = *fade;
+    }
+}
+
+/// Advances one in-flight crossfade clock by `dt`, clearing `from` once
+/// the fade completes ([`SkelFade`](crate::SkelFade) mechanics: a
+/// non-positive duration completes at once). Shared by the machine and
+/// switch steppers.
+fn tick_crossfade(elapsed: &mut Seconds, duration: Seconds, from: &mut Option<usize>, dt: f32) {
+    if from.is_none() {
+        return;
+    }
+    *elapsed = Seconds::new(elapsed.get() + dt);
+    if fade_progress(duration, *elapsed) >= 1.0 {
+        *from = None;
     }
 }
 
@@ -3060,7 +3144,7 @@ fn sample_tree_entity(
         lanes.clips,
         count,
         &skeleton.rest,
-        tree::EvalBuf {
+        tree_eval::EvalBuf {
             poses: &mut scratch.tree_poses[..nodes],
             joints: &mut scratch.joints,
             contributors: &mut scratch.contributors,

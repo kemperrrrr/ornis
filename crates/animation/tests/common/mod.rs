@@ -11,7 +11,8 @@
 use glam::{Mat4, Vec3};
 use ornis_animation::{
     ClipId, JointId, JointMask, JointPose, JointTrack, Key, KeyTrack, MachineCursor, SkelClip,
-    SkelLayerStack, SkelPlayer, SkelSampleSystem, SkelTree, SkelTreePlayer, Skeleton, TreeNodeDef,
+    SkelLayerStack, SkelPlayer, SkelSampleSystem, SkelTree, SkelTreePlayer, Skeleton, SwitchCursor,
+    TreeNodeDef, switch_selection,
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::{Clamped01, Seconds};
@@ -125,6 +126,23 @@ pub fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePla
                 _ => None,
             })
             .collect();
+        let switches = tree
+            .nodes
+            .iter()
+            .filter_map(|node| match node {
+                TreeNodeDef::Switch {
+                    param,
+                    children,
+                    fade: _,
+                } => Some(SwitchCursor {
+                    child: switch_selection(tree.params[*param].default, children.len()),
+                    from: None,
+                    elapsed: Seconds::ZERO,
+                    duration: Seconds::ZERO,
+                }),
+                _ => None,
+            })
+            .collect();
         let store = store_mut(engine);
         store.insert_cold(root, tree);
         let mut player_state = SkelTreePlayer::default();
@@ -132,7 +150,8 @@ pub fn install(engine: &mut Engine, root: Entity, tree: SkelTree) -> SkelTreePla
             player_state.params,
             player_state.leaves,
             player_state.machines,
-        ) = (params, leaves, machines);
+            player_state.switches,
+        ) = (params, leaves, machines, switches);
         store.insert(root, player_state.clone());
         player_state
     }

@@ -216,7 +216,7 @@
      blending «физика ↔ анимация» по образцу `SkinningMode::Cpu/Gpu`.
   7. **Animation tree (бленд-дерево / граф переходов) — в работе (PR #180,
      коммиты слоями).** Модель: `docs/animation-design.md` §7. Граф нод
-     (`TreeNodeDef`: `Clip`/`Blend1d`/`Blend2d`/`Machine`, порядок нод =
+     (`TreeNodeDef`: `Clip`/`Blend1d`/`Blend2d`/`Machine`/`Switch`, порядок нод =
      порядок вычисления, последняя нода — корень), горячее состояние на
      корне (`SkelTreePlayer`: параметры + курсоры листьев + курсоры машин),
      детерминированные веса blend1d (не более двух соседей) и blend2d
@@ -230,6 +230,9 @@
      (фаза клипа по меткам при переходах машин, `set_clip_sync_marks` —
      `docs/animation-design.md` §7.5). blend2d ✅ (`TreeChild2d` +
      `Blend2d` на полной решётке row-major, §7.1/7.2).
+     Switch ✅ (`TreeNodeDef::Switch` + `SwitchCursor` — селектор
+     по целочисленному параметру с кроссфейдом переходов, метки на
+     переходах, играет и на ретаргете — §7.7).
   8. **Motion matching — первый срез ✅ (§8.5).** `match_motion`:
      детерминированный выбор кадра по квадрату ошибки модельных позиций
      feature-суставов и скорости корня (root motion за окно `step`).

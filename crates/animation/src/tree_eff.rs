@@ -14,9 +14,9 @@
 
 use crate::blend::fade_progress;
 use crate::tree::{
-    MachineCursor, SkelTree, SkelTreePlayer, TreeChild, TreeChild2d, TreeNodeDef,
-    machine_states_valid,
+    MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeNodeDef,
 };
+use crate::tree_eval::{machine_states_valid, switch_children_valid};
 use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
 
 /// Reusable buffers of the [`leaf_effective_weights`] walk — node weights
@@ -39,7 +39,7 @@ pub(crate) struct WeightsScratch {
 /// number (design §8.1). The result reuses `scratch` and always covers
 /// `player.leaves.len()` slots.
 ///
-/// A missing tree, or one whose contract [`crate::tree::eval_tree`] would
+/// A missing tree, or one whose contract [`crate::tree_eval::eval_tree`] would
 /// read as bad skin, answers `1.0` everywhere: the cursors' own weights
 /// stand alone. The flag is `false` in that case — event emit still uses
 /// the `1.0` weights (§8.1), while root motion treats the tree as no
@@ -76,6 +76,11 @@ fn eff_weights(
         .iter()
         .filter(|node| matches!(node, TreeNodeDef::Machine { .. }))
         .count();
+    let mut switch_cursor = tree
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, TreeNodeDef::Switch { .. }))
+        .count();
     for index in (0..tree.nodes.len()).rev() {
         let weight = scratch.eff[index];
         match &tree.nodes[index] {
@@ -96,6 +101,18 @@ fn eff_weights(
                 let cursor = player.machines.get(machine_cursor)?;
                 fold_machine_eff(&mut scratch.eff, index, weight, states, cursor)?;
             }
+            TreeNodeDef::Switch {
+                param, children, ..
+            } => {
+                switch_cursor = switch_cursor.checked_sub(1)?;
+                let cursor = player.switches.get(switch_cursor)?;
+                player
+                    .params
+                    .get(*param)
+                    .copied()
+                    .filter(|value| value.is_finite())?;
+                fold_switch_eff(&mut scratch.eff, index, weight, children, cursor)?;
+            }
         }
     }
     scratch.leaves.clear();
@@ -109,7 +126,7 @@ fn eff_weights(
 }
 
 /// Folds one [`TreeNodeDef::Blend1d`] node's weight into its weighted
-/// children; `None` on the [`crate::tree::eval_tree`] contract violations
+/// children; `None` on the [`crate::tree_eval::eval_tree`] contract violations
 /// (non-finite value/position, a child not earlier than the node).
 fn fold_blend1d_eff(
     eff: &mut [f32],
@@ -141,7 +158,7 @@ fn spread_blend1d(eff: &mut [f32], weight: f32, children: &[TreeChild], value: f
 }
 
 /// Folds one [`TreeNodeDef::Blend2d`] node's weight into its weighted
-/// cell corners; `None` on the [`crate::tree::eval_tree`] contract
+/// cell corners; `None` on the [`crate::tree_eval::eval_tree`] contract
 /// violations.
 fn fold_blend2d_eff(
     eff: &mut [f32],
@@ -191,10 +208,50 @@ fn fold_machine_eff(
             if !progress.is_finite() {
                 return None;
             }
-            eff[states[from]] += weight * (1.0 - progress);
-            eff[states[cursor.state]] += weight * progress;
+            fade_split(eff, weight, states[from], states[cursor.state], progress);
         }
         None => eff[states[cursor.state]] += weight,
     }
     Some(())
+}
+
+/// Folds one [`TreeNodeDef::Switch`] node's weight into its children: the
+/// standing selection owns the pure share, an in-flight crossfade splits
+/// it with [`crate::blend::fade_progress`], every other child stays at
+/// `0`; `None` on the switch contract violations of
+/// [`switch_children_valid`] or a non-finite crossfade clock. The walk
+/// itself rejects a missing or non-finite parameter before the fold runs.
+pub(crate) fn fold_switch_eff(
+    eff: &mut [f32],
+    index: usize,
+    weight: f32,
+    children: &[usize],
+    cursor: &SwitchCursor,
+) -> Option<()> {
+    switch_children_valid(index, children, cursor)?;
+    match cursor.from {
+        Some(from) => {
+            let progress = fade_progress(cursor.duration, cursor.elapsed);
+            if !progress.is_finite() {
+                return None;
+            }
+            fade_split(
+                eff,
+                weight,
+                children[from],
+                children[cursor.child],
+                progress,
+            );
+        }
+        None => eff[children[cursor.child]] += weight,
+    }
+    Some(())
+}
+
+/// The shared crossfade split of a machine or switch node: the leaving
+/// node takes `weight · (1 − progress)`, the heading one `weight ·
+/// progress`.
+fn fade_split(eff: &mut [f32], weight: f32, from_node: usize, to_node: usize, progress: f32) {
+    eff[from_node] += weight * (1.0 - progress);
+    eff[to_node] += weight * progress;
 }
