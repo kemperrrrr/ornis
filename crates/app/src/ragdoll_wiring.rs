@@ -1670,6 +1670,19 @@ mod tests {
         slots.into_iter().map(|(_, position)| position).collect()
     }
 
+    /// Proxies of `root` carrying a bound world body (§11 bind tests).
+    fn g5_bound_count(engine: &Engine, root: Entity) -> usize {
+        let store = engine.world().store().expect("world store");
+        let bodies = store.read_lane::<RigidBody>().expect("bodies");
+        let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
+        proxies
+            .entities
+            .iter()
+            .zip(&proxies.data)
+            .filter(|(entity, proxy)| proxy.root == root && bodies.contains(**entity))
+            .count()
+    }
+
     /// §11 install: the G5 root carries the world seam — the runtime has
     /// no chain engine, the proxies and the blend are sized from the
     /// description, and the joint slots wait for the bind.
@@ -1705,15 +1718,11 @@ mod tests {
         assert_eq!(runtime.g5_joint(0), None, "the root bone has no hinge");
         assert!(runtime.g5_joint(1).is_some(), "child hinge bound");
         assert!(runtime.g5_joint(2).is_some(), "grandchild hinge bound");
-        let bodies = store.read_lane::<RigidBody>().expect("bodies");
-        let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
-        let bound = proxies
-            .entities
-            .iter()
-            .zip(&proxies.data)
-            .filter(|(entity, _)| bodies.contains(**entity))
-            .count();
-        assert_eq!(bound, 3, "all three proxies carry world bodies");
+        assert_eq!(
+            g5_bound_count(&engine, root),
+            3,
+            "all three proxies carry world bodies"
+        );
     }
 
     /// §11 end-to-end: the G5 ragdoll lands on the world floor **and
@@ -1756,16 +1765,12 @@ mod tests {
             let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
             let runtime = runtimes.get(root).expect("runtime");
             assert_eq!(runtime.g5_joint(1), None, "unbind clears the table");
-            let bodies = store.read_lane::<RigidBody>().expect("bodies");
-            let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
-            let bound = proxies
-                .entities
-                .iter()
-                .zip(&proxies.data)
-                .filter(|(entity, _)| bodies.contains(**entity))
-                .count();
-            assert_eq!(bound, 0, "nothing bound while animated");
         }
+        assert_eq!(
+            g5_bound_count(&engine, root),
+            0,
+            "nothing bound while animated"
+        );
         {
             let store = engine.world_mut().store_mut().expect("world store");
             set_ragdoll_mode(store, root, RagdollMode::Physical).expect("physical");
