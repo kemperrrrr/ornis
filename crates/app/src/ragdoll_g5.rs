@@ -127,14 +127,23 @@ pub fn build_g5_ragdoll(
         .iter()
         .map(|bone| joint_bind[bone.joint.index()])
         .collect();
-    Ok(RagdollRuntime::from_parts(
-        crate::ragdoll_runtime::RagdollChain::G5,
-        Vec::new(),
+    Ok(RagdollRuntime {
+        chain: crate::ragdoll_runtime::RagdollChain::G5,
+        bodies: Vec::new(),
         templates,
         joints,
         bind,
         parents,
-    ))
+    })
+}
+
+/// The world handles a G5 bind works with (§11): the entity store of the
+/// bound bodies and the solver that owns the joints.
+pub(crate) struct G5World<'a> {
+    /// The lane the proxy bodies live in.
+    pub(crate) bodies: &'a mut ComponentStore<RigidBody>,
+    /// The world solver the joints are created in.
+    pub(crate) physics: &'a mut PhysicsRuntime,
 }
 
 /// G5 joint bind (§11): gives every bound bone whose parent bone is bound
@@ -142,14 +151,14 @@ pub fn build_g5_ragdoll(
 /// ([`hinge_joint`], one vocabulary with the ABA chain). The solver drops
 /// joints with their bodies and the unbind path clears the table, so a
 /// recreated bind recreates the joint. Worker of `drive_proxies`.
-pub fn bind_g5_joints(
+pub(crate) fn bind_g5_joints(
     store: &SmartStore,
     root: Entity,
     runtime: &mut RagdollRuntime,
     desc: &RagdollDesc,
-    bodies: &mut ComponentStore<RigidBody>,
-    physics: &mut PhysicsRuntime,
+    world: &mut G5World<'_>,
 ) {
+    let G5World { bodies, physics } = world;
     let Some(proxies) = store.read_lane::<RagdollProxy>() else {
         return;
     };

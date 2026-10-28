@@ -46,26 +46,26 @@ pub struct RagdollRuntime {
     /// The simulated chain behind the root (§11): the ABA engine, or
     /// nothing — the G5 path rides world bodies and `JointKind` joints of
     /// the world solver (`PhysicsRuntime`), contacts and ropes native.
-    chain: RagdollChain,
+    pub(crate) chain: RagdollChain,
     /// Physical link per bone (description order). Empty on the G5 path —
     /// the links are world bodies (`templates` below), not chain handles.
-    bodies: Vec<BodyHandle>,
+    pub(crate) bodies: Vec<BodyHandle>,
     /// Bind-pose body templates per bone (G5 path only, §11): the proxies
     /// insert them as [`RigidBody`] components and the world solver binds
     /// them as its own bodies. Empty on the ABA path — its template comes
     /// from the live chain body ([`RagdollRuntime::body_template`]).
-    templates: Vec<RigidBody>,
+    pub(crate) templates: Vec<RigidBody>,
     /// Hinge per bone; `None` on the chain root.
-    joints: Vec<Option<JointHandle>>,
+    pub(crate) joints: Vec<Option<JointHandle>>,
     /// Bind-pose frame of each bone's joint: world position, world
     /// rotation and the accumulated world scale — the factor the inverse
     /// seam of [`RagdollRuntime::sample_local`] undoes (bodies are rigid
     /// and carry no scale). Indexed by bone (description order), not by
     /// skeleton joint slot — on sparse chains the two differ, and the
     /// seam must read the parent *bone's* fold.
-    bind: Vec<(Vec3, Quat, Vec3)>,
+    pub(crate) bind: Vec<(Vec3, Quat, Vec3)>,
     /// Parent bone index per bone; `None` on the chain root.
-    parents: Vec<Option<usize>>,
+    pub(crate) parents: Vec<Option<usize>>,
 }
 
 /// World→local seam data of one bone (`docs/ragdoll-design.md` §4.1):
@@ -226,27 +226,6 @@ impl RagdollRuntime {
             let body = engine.get_body(handle)?;
             Some((body.position, body.orientation))
         })
-    }
-
-    /// Assembles a bare runtime from its seam tables (both chain
-    /// variants; the assemblers live beside their chain — `build_ragdoll`
-    /// here, [`crate::ragdoll_g5::build_g5_ragdoll`] on the G5 side).
-    pub(crate) fn from_parts(
-        chain: RagdollChain,
-        bodies: Vec<BodyHandle>,
-        templates: Vec<RigidBody>,
-        joints: Vec<Option<JointHandle>>,
-        bind: Vec<(Vec3, Quat, Vec3)>,
-        parents: Vec<Option<usize>>,
-    ) -> Self {
-        Self {
-            chain,
-            bodies,
-            templates,
-            joints,
-            bind,
-            parents,
-        }
     }
 }
 

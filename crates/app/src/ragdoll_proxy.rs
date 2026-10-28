@@ -13,12 +13,14 @@ use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
 use ornis_animation::{RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollMode};
-use ornis_core::{Entity, FixedTime, GlobalTransform, Resources, SmartStore, System, SystemAccess};
+use ornis_core::{
+    ComponentStore, Entity, FixedTime, GlobalTransform, Resources, SmartStore, System, SystemAccess,
+};
 use ornis_physics::PhysicsEngine;
 use ornis_physics::body::{BodyHandle, RigidBody};
 
 use crate::physics_runtime::PhysicsRuntime;
-use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
+use crate::ragdoll_runtime::{RagdollBoneView, RagdollProxy, RagdollRuntime};
 
 /// The world's default collision layer bit (§8.5 proxy filters): bit 0
 /// stays the world's, bone `i` takes bit `i + 1`.
@@ -104,7 +106,49 @@ fn proxy_world_state(
 /// `sync_in` binds new proxies and drops stale ones), the bound solver
 /// body gets an explicit [`PhysicsRuntime::drive_pose`] teleport
 /// (dynamic bodies are solver-authoritative for pose sync). Returns
-/// whether any proxy is bound this tick — the caller gates the opt-in
+/// whether any proxy is bound this tick — the caller gates the opt-in/// First bind of a proxy (§8.5/§11): inserts its bind-pose template
+/// body with the collision filter of its layer bit. Leaf.
+fn insert_proxy_body(
+    runtime: &RagdollRuntime,
+    proxy: &RagdollProxy,
+    entity: Entity,
+    bodies: &mut ComponentStore<RigidBody>,
+    bone_count: usize,
+) {
+    if bodies.contains(entity) {
+        return;
+    }
+    let Some(mut body) = runtime.body_template(proxy.link) else {
+        return;
+    };
+    body.set_collision_filter(proxy_layer(proxy.link), proxy_mask(bone_count, proxy.link));
+    bodies.insert(entity, body);
+}
+
+/// §11 Fixed-base root: pins the root link to the entity's bind frame
+/// (`drive_pose`, kinematic anchor) — the world owns the rest. Leaf.
+fn g5_pin_fixed_root(
+    view: RagdollBoneView,
+    root_pose: (Vec3, Quat),
+    entity: Entity,
+    bodies: &mut ComponentStore<RigidBody>,
+    physics: &mut PhysicsRuntime,
+) {
+    let (root_position, root_rotation) = root_pose;
+    let position = root_rotation * view.position + root_position;
+    let rotation = root_rotation * view.rotation;
+    let Some(body) = bodies.get_mut(entity) else {
+        return;
+    };
+    body.position = position;
+    body.orientation = rotation;
+    body.velocity = Vec3::ZERO;
+    body.angular_velocity = Vec3::ZERO;
+    if let Some(handle) = physics.handle_of(entity) {
+        physics.drive_pose(handle, position, rotation);
+    }
+}
+
 /// impulse readback on it.
 fn drive_proxies(
     store: &SmartStore,
@@ -155,16 +199,7 @@ fn drive_proxies(
             continue;
         }
         bound_any = true;
-        if !bodies.contains(*entity) {
-            let Some(mut body) = runtime.body_template(proxy.link) else {
-                continue;
-            };
-            body.set_collision_filter(
-                proxy_layer(proxy.link),
-                proxy_mask(desc.bones.len(), proxy.link),
-            );
-            bodies.insert(*entity, body);
-        }
+        insert_proxy_body(runtime, proxy, *entity, bodies, desc.bones.len());
         if g5 {
             // §11: the world owns the bound body (contacts and joints are
             // native) — only a Fixed-base root link stays pinned to the
@@ -173,19 +208,7 @@ fn drive_proxies(
                 let Some(view) = runtime.bone(proxy.link) else {
                     continue;
                 };
-                let (root_position, root_rotation) = root_pose;
-                let position = root_rotation * view.position + root_position;
-                let rotation = root_rotation * view.rotation;
-                let Some(body) = bodies.get_mut(*entity) else {
-                    continue;
-                };
-                body.position = position;
-                body.orientation = rotation;
-                body.velocity = Vec3::ZERO;
-                body.angular_velocity = Vec3::ZERO;
-                if let Some(handle) = physics.handle_of(*entity) {
-                    physics.drive_pose(handle, position, rotation);
-                }
+                g5_pin_fixed_root(view, root_pose, *entity, bodies, physics);
             }
             continue;
         }
@@ -206,7 +229,13 @@ fn drive_proxies(
         }
     }
     if g5 && let Some(bodies) = bodies_lane.as_mut() {
-        crate::ragdoll_g5::bind_g5_joints(store, root, runtime, desc, bodies, physics);
+        crate::ragdoll_g5::bind_g5_joints(
+            store,
+            root,
+            runtime,
+            desc,
+            &mut crate::ragdoll_g5::G5World { bodies, physics },
+        );
     }
     bound_any
 }
