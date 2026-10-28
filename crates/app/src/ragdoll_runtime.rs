@@ -211,6 +211,41 @@ impl RagdollRuntime {
         true
     }
 
+    /// Independent deep copy of the runtime (`docs/ragdoll-design.md`
+    /// §2.2): the ABA chain state is **copied** into a fresh engine, so
+    /// mutating the copy never touches this runtime's chain and vice
+    /// versa — the snapshot seam for editor undo and multiplayer
+    /// rollback (keep the copy, swap it back in later). Body and joint
+    /// handles are dense engine indices and stay valid in the copy.
+    ///
+    /// The G5 path (§11) owns no simulated state of its own — its bodies
+    /// and joints live in the world solver, and `deep_clone` copies only
+    /// the runtime's own tables (bind frames, templates, handles); the
+    /// world snapshot is `PhysicsRuntime`'s domain. A poisoned chain
+    /// lock still deep-clones (the data behind the poison is readable).
+    // qual:api — snapshot/undo seam for hosts; the clone-isolation tests
+    // are its first in-tree callers.
+    pub fn deep_clone(&self) -> Self {
+        let chain = match &self.chain {
+            RagdollChain::Aba(engine) => {
+                let fresh = match engine.lock() {
+                    Ok(live) => (*live).clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                RagdollChain::Aba(Arc::new(Mutex::new(fresh)))
+            }
+            RagdollChain::G5 => RagdollChain::G5,
+        };
+        Self {
+            chain,
+            bodies: self.bodies.clone(),
+            templates: self.templates.clone(),
+            joints: self.joints.clone(),
+            bind: self.bind.clone(),
+            parents: self.parents.clone(),
+        }
+    }
+
     /// Model→local sample of §4.1 (ABA seam): writes each bone's physical
     /// local pose into `out[bone.joint]` from the chain bodies. The sample
     /// lives in the skeleton's **model space** — see `sample_local_into`

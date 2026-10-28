@@ -1822,4 +1822,57 @@ mod tests {
             assert_eq!(a, &b, "bone {index} diverged");
         }
     }
+    /// Live world position of chain bone `bone`.
+    fn body_position(runtime: &RagdollRuntime, bone: usize) -> Option<Vec3> {
+        runtime.body_template(bone).map(|body| body.position)
+    }
+
+    /// Moves chain bone `bone` by `delta` through the chain lock.
+    fn move_bone(runtime: &RagdollRuntime, bone: usize, delta: Vec3) {
+        let handle = runtime.body_handle(bone).expect("the bone is linked");
+        runtime.with_engine(|engine| {
+            let body = engine.get_body_mut(handle).expect("the link exists");
+            body.position += delta;
+        });
+    }
+
+    #[test]
+    fn deep_clone_isolates_mutation_both_ways() {
+        let runtime = build_ragdoll(&chain(), &desc(), Vec3::new(0.0, -1.0, 0.0))
+            .expect("the sound chain assembles");
+        let snapshot = runtime.deep_clone();
+        let rest = body_position(&runtime, 0).expect("the root is linked");
+
+        // Mutating the copy never touches the original.
+        move_bone(&snapshot, 0, Vec3::X);
+        assert_eq!(body_position(&snapshot, 0), Some(rest + Vec3::X));
+        assert_eq!(body_position(&runtime, 0), Some(rest));
+
+        // Mutating the original never touches the copy.
+        move_bone(&runtime, 0, Vec3::Y);
+        assert_eq!(body_position(&runtime, 0), Some(rest + Vec3::Y));
+        assert_eq!(body_position(&snapshot, 0), Some(rest + Vec3::X));
+    }
+
+    #[test]
+    fn deep_clone_snapshot_restores_the_undo_pose() {
+        let mut runtime = build_ragdoll(&chain(), &desc(), Vec3::new(0.0, -1.0, 0.0))
+            .expect("the sound chain assembles");
+        let poses = |runtime: &RagdollRuntime| {
+            (0..3)
+                .map(|bone| body_position(runtime, bone))
+                .collect::<Vec<_>>()
+        };
+        let snapshot = runtime.deep_clone();
+        let before = poses(&snapshot);
+
+        // The host keeps working: the ragdoll drifts.
+        move_bone(&runtime, 1, Vec3::splat(3.0));
+        assert_ne!(poses(&runtime), before);
+
+        // Undo = swap the snapshot back in (hot-lane write); the copy is
+        // independent, so it still holds the saved pose.
+        runtime = snapshot;
+        assert_eq!(poses(&runtime), before);
+    }
 }

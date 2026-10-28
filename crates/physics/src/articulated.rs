@@ -431,7 +431,12 @@ const ANGULAR_SPEED_FLOOR: f32 = 1e-12;
 /// link under another link through a revolute/fixed joint (snapping the
 /// child's subtree so the anchors coincide), or use
 /// [`FeatherstoneEngine::add_root`] for an explicit fixed/floating base.
-#[derive(Debug)]
+///
+/// `Clone` is a full state copy (links, topology, gravity and pending
+/// impulses) — the deep-clone seam behind
+/// [`RagdollRuntime::deep_clone`](https://docs.rs/ornis-app) snapshots;
+/// handles are dense indices and stay valid in the copy.
+#[derive(Debug, Clone)]
 pub struct FeatherstoneEngine {
     /// Links in handle order (`BodyHandle(i)` is link `i`).
     links: Vec<Link>,
