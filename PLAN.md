@@ -217,6 +217,11 @@
      `Skeleton`/`JointPose`, анимация про физику — только пропуск
      `RigidBody`-сущностей в `anim_sample`. Ragdoll = скин + суставы физики +
      blending «физика ↔ анимация» по образцу `SkinningMode::Cpu/Gpu`.
+     Срез 6 ✅ (р-35): G5-путь — ragdoll на maximal-coordinate цепях
+     `joint.rs` (`set_ragdoll_g5`, `RagdollChain::G5`, `hinge_joint` →
+     `JointKind::Revolute`, `PhysicsRuntime::add_joint_between`, общий
+     шов `sample_local_into`); контакты/верёвки — на G5, skinned-pose —
+     на ABA (ragdoll-design §11).
   7. **Animation tree (бленд-дерево / граф переходов) — в работе (PR #180,
      коммиты слоями).** Модель: `docs/animation-design.md` §7. Граф нод
      (`TreeNodeDef`: `Clip`/`Blend1d`/`Blend2d`/`Machine`/`Switch`, порядок нод =

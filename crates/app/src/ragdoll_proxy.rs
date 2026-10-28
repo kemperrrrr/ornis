@@ -12,13 +12,15 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
-use ornis_animation::{RagdollBlend, RagdollBone, RagdollDesc, RagdollMode};
-use ornis_core::{Entity, FixedTime, GlobalTransform, Resources, SmartStore, System, SystemAccess};
+use ornis_animation::{RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollMode};
+use ornis_core::{
+    ComponentStore, Entity, FixedTime, GlobalTransform, Resources, SmartStore, System, SystemAccess,
+};
 use ornis_physics::PhysicsEngine;
 use ornis_physics::body::{BodyHandle, RigidBody};
 
 use crate::physics_runtime::PhysicsRuntime;
-use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
+use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime, chain_parent, hinge_joint};
 
 /// The world's default collision layer bit (§8.5 proxy filters): bit 0
 /// stays the world's, bone `i` takes bit `i + 1`.
@@ -109,7 +111,7 @@ fn proxy_world_state(
 fn drive_proxies(
     store: &SmartStore,
     root: Entity,
-    runtime: &RagdollRuntime,
+    runtime: &mut RagdollRuntime,
     physics: &mut PhysicsRuntime,
     dt: f32,
 ) -> bool {
@@ -134,6 +136,7 @@ fn drive_proxies(
         .map(|global| (global.translation, global.rotation.get()))
         .unwrap_or((Vec3::ZERO, Quat::IDENTITY));
     let gravity = physics.gravity();
+    let g5 = runtime.is_g5();
     let mut bodies_lane = store.write_lane::<RigidBody>();
     let mut bound_any = false;
     for (entity, proxy) in proxies.entities.iter().zip(&proxies.data) {
@@ -148,14 +151,12 @@ fn drive_proxies(
         };
         if !proxy_bound(mode, blend, bone) {
             bodies.remove(*entity);
+            if g5 {
+                runtime.set_g5_joint(proxy.link, None);
+            }
             continue;
         }
         bound_any = true;
-        let Some((position, rotation, velocity, angular)) =
-            proxy_world_state(runtime, proxy.link, root_pose, gravity, dt)
-        else {
-            continue;
-        };
         if !bodies.contains(*entity) {
             let Some(mut body) = runtime.body_template(proxy.link) else {
                 continue;
@@ -166,6 +167,35 @@ fn drive_proxies(
             );
             bodies.insert(*entity, body);
         }
+        if g5 {
+            // §11: the world owns the bound body (contacts and joints are
+            // native) — only a Fixed-base root link stays pinned to the
+            // entity's bind frame below.
+            if desc.base == RagdollBase::Fixed && bone.parent.is_none() {
+                let Some(view) = runtime.bone(proxy.link) else {
+                    continue;
+                };
+                let (root_position, root_rotation) = root_pose;
+                let position = root_rotation * view.position + root_position;
+                let rotation = root_rotation * view.rotation;
+                let Some(body) = bodies.get_mut(*entity) else {
+                    continue;
+                };
+                body.position = position;
+                body.orientation = rotation;
+                body.velocity = Vec3::ZERO;
+                body.angular_velocity = Vec3::ZERO;
+                if let Some(handle) = physics.handle_of(*entity) {
+                    physics.drive_pose(handle, position, rotation);
+                }
+            }
+            continue;
+        }
+        let Some((position, rotation, velocity, angular)) =
+            proxy_world_state(runtime, proxy.link, root_pose, gravity, dt)
+        else {
+            continue;
+        };
         let Some(body) = bodies.get_mut(*entity) else {
             continue;
         };
@@ -177,7 +207,61 @@ fn drive_proxies(
             physics.drive_pose(handle, position, rotation);
         }
     }
+    if g5 && let Some(bodies) = bodies_lane.as_mut() {
+        bind_g5_joints(store, root, runtime, desc, bodies, physics);
+    }
     bound_any
+}
+
+/// G5 joint bind (§11): gives every bound bone whose parent bone is bound
+/// too its world joint once — the description's own hinge geometry
+/// ([`hinge_joint`], one vocabulary with the ABA chain). The solver drops
+/// joints with their bodies and the unbind path clears the table, so a
+/// recreated bind recreates the joint. Leaf.
+fn bind_g5_joints(
+    store: &SmartStore,
+    root: Entity,
+    runtime: &mut RagdollRuntime,
+    desc: &RagdollDesc,
+    bodies: &mut ComponentStore<RigidBody>,
+    physics: &mut PhysicsRuntime,
+) {
+    let Some(proxies) = store.read_lane::<RagdollProxy>() else {
+        return;
+    };
+    for (index, bone) in desc.bones.iter().enumerate() {
+        let Some(parent_index) = chain_parent(index, &desc.bones) else {
+            continue;
+        };
+        if runtime.g5_joint(index).is_some() {
+            continue;
+        }
+        let mut child_entity = None;
+        let mut parent_entity = None;
+        for (&entity, proxy) in proxies.entities.iter().zip(&proxies.data) {
+            if proxy.root != root {
+                continue;
+            }
+            if proxy.link == index {
+                child_entity = Some(entity);
+            }
+            if proxy.link == parent_index {
+                parent_entity = Some(entity);
+            }
+        }
+        let (Some(child), Some(parent)) = (child_entity, parent_entity) else {
+            continue;
+        };
+        if !bodies.contains(child) || !bodies.contains(parent) {
+            continue;
+        }
+        let Ok(hinge) = hinge_joint(bone, runtime.bind_frames(), &desc.bones[parent_index]) else {
+            continue;
+        };
+        if let Some(handle) = physics.add_joint_between(bodies, parent, child, hinge) {
+            runtime.set_g5_joint(index, Some(handle));
+        }
+    }
 }
 
 /// Fold scratch: proxy `BodyHandle` → chain bone (`root`, `link`).
@@ -283,7 +367,7 @@ impl System for RagdollProxySync {
             .reads_lane::<RagdollBlend>()
             .reads_lane::<RagdollMode>()
             .reads_lane::<RagdollProxy>()
-            .reads_lane::<RagdollRuntime>()
+            .writes_lane::<RagdollRuntime>()
             .writes::<Mutex<PhysicsRuntime>>()
             .writes_lane::<RigidBody>()
     }
@@ -305,10 +389,18 @@ impl System for RagdollProxySync {
         // §8.5 opt-in readback: the orchestrator pays for the impulse
         // accumulation exactly while bound proxies may collide.
         let mut tracked = false;
-        if let Some(runtimes) = store.read_lane::<RagdollRuntime>() {
-            for &root in &runtimes.entities {
-                if let Some(runtime) = runtimes.get(root) {
-                    tracked |= drive_proxies(store, root, runtime, &mut physics, dt);
+        if let Some(mut runtimes) = store.write_lane::<RagdollRuntime>() {
+            let roots = runtimes.entities.len();
+            for slot in 0..roots {
+                let root = runtimes.entities[slot];
+                if let Some(runtime) = runtimes.get_mut(root) {
+                    // §11: G5 roots own their contacts in the world — no
+                    // impulse readback, no tracking.
+                    if runtime.is_g5() {
+                        drive_proxies(store, root, runtime, &mut physics, dt);
+                    } else {
+                        tracked |= drive_proxies(store, root, runtime, &mut physics, dt);
+                    }
                 }
             }
         }

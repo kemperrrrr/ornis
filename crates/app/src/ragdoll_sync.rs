@@ -6,18 +6,19 @@ use std::sync::Mutex;
 
 use glam::Vec3;
 use ornis_animation::{
-    JointMask, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollFade, RagdollMode, Skeleton,
-    fade_progress,
+    JointMask, JointTrs, MaskId, RagdollBlend, RagdollBone, RagdollDesc, RagdollFade, RagdollMode,
+    Skeleton, fade_progress,
 };
 use ornis_core::units::Clamped01;
 use ornis_core::{
     Entity, FixedTime, GlobalTransform, Resources, Seconds, SmartStore, System, SystemAccess,
 };
+use ornis_physics::body::RigidBody;
 use ornis_physics::engine::PhysicsEngine;
 use ornis_physics::joint::JointMotor;
 
 use crate::physics_runtime::PhysicsRuntime;
-use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
+use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime, sample_local_into};
 
 /// Follow-servo stiffness of a driven hinge (1/s²; `AccelerationBased`,
 /// so it scales with mass by construction). Damping and the torque budget
@@ -83,10 +84,16 @@ fn tick_ragdoll(store: &SmartStore, root: Entity, runtime: &RagdollRuntime, dt: 
     if fade_done && let Some(fades) = fade_lane.as_mut() {
         fades.remove(root);
     }
-    if !matches!(mode, RagdollMode::Animated) {
+    // G5 (§11) has no chain to step — the world step is the physics; the
+    // ABA path drives its servos and takes one fixed chain step (§5).
+    if !runtime.is_g5() && !matches!(mode, RagdollMode::Animated) {
         step_chain(runtime, desc, skeleton, blend, dt);
     }
-    let sampled = runtime.sample_local(desc, &mut blend.physical);
+    let sampled = if runtime.is_g5() {
+        sample_local_g5(store, root, runtime, desc, &mut blend.physical)
+    } else {
+        runtime.sample_local(desc, &mut blend.physical)
+    };
     if !sampled {
         for weight in &mut blend.weights {
             *weight = Clamped01::ZERO;
@@ -171,6 +178,40 @@ fn step_chain(
 /// from the transition snapshot `from` at `progress` (§4.2), then the
 /// live pins of `set_ragdoll_weight` overwrite their joints. O(joints +
 /// bones). Leaf.
+/// G5 readback of §11: the §4.1 model→local sample taken from the world
+/// bodies — the proxies' live [`RigidBody`] poses after
+/// `physics_sync_out` — against the same seam as the ABA chain. A missing
+/// proxy or body fails the sample like a missing chain body. Leaf.
+fn sample_local_g5(
+    store: &SmartStore,
+    root: Entity,
+    runtime: &RagdollRuntime,
+    desc: &RagdollDesc,
+    out: &mut [JointTrs],
+) -> bool {
+    let (Some(proxies), Some(bodies)) = (
+        store.read_lane::<RagdollProxy>(),
+        store.read_lane::<RigidBody>(),
+    ) else {
+        return false;
+    };
+    sample_local_into(
+        desc,
+        out,
+        runtime.bind_frames(),
+        runtime.parents(),
+        |link| {
+            let (entity, _) = proxies
+                .entities
+                .iter()
+                .zip(&proxies.data)
+                .find(|(_, proxy)| proxy.root == root && proxy.link == link)?;
+            let body = bodies.get(*entity)?;
+            Some((body.position, body.orientation))
+        },
+    )
+}
+
 fn fill_weights(
     mode: RagdollMode,
     mask: Option<&JointMask>,
@@ -263,6 +304,8 @@ impl System for RagdollSyncSystem {
             .reads_lane::<RagdollMode>()
             .reads_lane::<RagdollProxy>()
             .reads_lane::<RagdollRuntime>()
+            .reads_lane::<RagdollProxy>()
+            .reads_lane::<RigidBody>()
             .reads_lane::<Skeleton>()
             .writes::<Mutex<PhysicsRuntime>>()
             .writes_lane::<RagdollBlend>()

@@ -15,7 +15,9 @@ use ornis_core::{Entity, Seconds, SmartStore};
 use ornis_physics::RigidBody;
 
 pub use crate::ragdoll_proxy::RagdollProxySync;
-pub use crate::ragdoll_runtime::{RagdollBoneView, RagdollProxy, RagdollRuntime, build_ragdoll};
+pub use crate::ragdoll_runtime::{
+    RagdollBoneView, RagdollProxy, RagdollRuntime, build_g5_ragdoll, build_ragdoll,
+};
 pub use crate::ragdoll_sync::{RagdollSyncSystem, update_ragdoll};
 
 // qual:api — typed ragdoll input for hosts; in-tree callers land with
@@ -41,10 +43,47 @@ pub fn set_ragdoll(
     };
     let runtime = build_ragdoll(&skeleton, &desc, gravity)?;
     let joints = skeleton.parents.len();
+    install_ragdoll(store, root, desc, runtime, joints)
+}
+
+// qual:api — typed G5 ragdoll install for hosts (contact/rope scenes,
+// §11); in-tree callers land with the load wiring.
+/// Installs the G5 ragdoll of `root` from `desc` (§11): the bones ride
+/// world bodies and `JointKind` joints of the world solver — contacts and
+/// ropes are native, no chain engine and no §8.5 proxy coupling. The
+/// seam, modes and blend are the ABA ones (skinned-pose ragdoll stays on
+/// [`set_ragdoll`]). Refuses with the typed [`RagdollError`] of
+/// [`build_g5_ragdoll`] — a root without a skeleton, an invalid
+/// description or an unassemblable hinge writes nothing.
+pub fn set_ragdoll_g5(
+    store: &mut SmartStore,
+    root: Entity,
+    desc: RagdollDesc,
+) -> Result<(), RagdollError> {
+    let Some(skeleton) = store
+        .read_lane::<Skeleton>()
+        .and_then(|skeletons| skeletons.get(root).cloned())
+    else {
+        return Err(RagdollError::NoSkeleton);
+    };
+    let runtime = build_g5_ragdoll(&skeleton, &desc)?;
+    let joints = skeleton.parents.len();
+    install_ragdoll(store, root, desc, runtime, joints)
+}
+
+/// Shared install of a built runtime on `root` (ABA and G5, §8/§11):
+/// the description, blend and mode lanes plus the world proxies. A
+/// reinstall owns the root anew: an in-flight weight transition (§4.2)
+/// belongs to the replaced chain and dies with it, like on
+/// [`clear_ragdoll`].
+fn install_ragdoll(
+    store: &mut SmartStore,
+    root: Entity,
+    desc: RagdollDesc,
+    runtime: RagdollRuntime,
+    joints: usize,
+) -> Result<(), RagdollError> {
     let links = desc.bones.len();
-    // A reinstall owns the root anew: an in-flight weight transition (§4.2)
-    // belongs to the replaced chain and dies with it, like on
-    // [`clear_ragdoll`].
     if let Some(mut fades) = store.write_lane::<RagdollFade>() {
         fades.remove(root);
     }
@@ -1446,11 +1485,15 @@ mod tests {
         )
     }
 
-    /// Engine-level rig of the §8.5 coupling tests: a world floor plus a
-    /// physical three-bone chain dropped onto it, the root riding
-    /// `root_pose`. The full installed plan couples them (proxy drive →
-    /// world step → drain/fold → ABA step).
-    fn coupled_rig_at(root_pose: GlobalTransform) -> (Engine, Entity) {
+    /// Engine-level rig of the drop tests (§8.5/§11): a world floor plus
+    /// a three-bone ragdoll dropped onto it, the root riding `root_pose`,
+    /// with `install` wiring the ragdoll — ABA chain (§8.5) or G5 world
+    /// ragdoll (§11). The full installed plan runs the fixed clock
+    /// (rustqual DRY-001 keeps the rig in one place).
+    fn rigged_rig_at(
+        root_pose: GlobalTransform,
+        install: impl FnOnce(&mut SmartStore, Entity),
+    ) -> (Engine, Entity) {
         let gravity = Vec3::new(0.0, DROP_GRAVITY_Y, 0.0);
         let mut engine = Engine::new();
         let root = {
@@ -1461,13 +1504,27 @@ mod tests {
             store.register::<Skeleton>();
             store.insert(root, chain());
             store.insert(root, root_pose);
-            set_ragdoll(store, root, desc(), gravity).unwrap();
+            install(store, root);
             set_ragdoll_mode(store, root, RagdollMode::Physical).unwrap();
             root
         };
         install_physics(&mut engine, gravity);
         crate::install_skeletal_animation(&mut engine);
         (engine, root)
+    }
+
+    /// [`rigged_rig_at`] with the ABA chain (§8.5, the coupling tests).
+    fn coupled_rig_at(root_pose: GlobalTransform) -> (Engine, Entity) {
+        rigged_rig_at(root_pose, |store, root| {
+            set_ragdoll(store, root, desc(), Vec3::new(0.0, DROP_GRAVITY_Y, 0.0)).unwrap();
+        })
+    }
+
+    /// [`rigged_rig_at`] with the G5 world ragdoll (§11).
+    fn g5_rig_at(root_pose: GlobalTransform) -> (Engine, Entity) {
+        rigged_rig_at(root_pose, |store, root| {
+            set_ragdoll_g5(store, root, desc()).unwrap();
+        })
     }
 
     /// [`coupled_rig_at`] with the identity root (the common case).
@@ -1595,5 +1652,147 @@ mod tests {
             chain_positions(&second_engine, second_root),
             "bit-identical coupled chain poses"
         );
+    }
+
+    /// World positions of the G5 proxies of `root` (§11), bone order —
+    /// the readback source of the G5 tests (the world bodies).
+    fn g5_positions(engine: &Engine, root: Entity) -> Vec<Vec3> {
+        let store = engine.world().store().expect("world store");
+        let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
+        let bodies = store.read_lane::<RigidBody>().expect("bodies");
+        let mut slots: Vec<(usize, Vec3)> = Vec::new();
+        for (&entity, proxy) in proxies.entities.iter().zip(&proxies.data) {
+            if proxy.root == root {
+                let body = bodies.get(entity).expect("bound proxy");
+                slots.push((proxy.link, body.position));
+            }
+        }
+        slots.sort_unstable_by_key(|(link, _)| *link);
+        slots.into_iter().map(|(_, position)| position).collect()
+    }
+
+    /// §11 install: the G5 root carries the world seam — the runtime has
+    /// no chain engine, the proxies and the blend are sized from the
+    /// description, and the joint slots wait for the bind.
+    #[test]
+    fn g5_install_builds_the_world_seam() {
+        let mut engine = Engine::new();
+        let store = engine.world_mut().store_mut().expect("world store");
+        store.register::<Skeleton>();
+        let root = store.create_entity();
+        store.insert(root, chain());
+        set_ragdoll_g5(store, root, desc()).expect("g5 install");
+        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
+        let runtime = runtimes.get(root).expect("runtime");
+        assert!(runtime.is_g5(), "the root rides the G5 path");
+        assert_eq!(runtime.bone_count(), 3);
+        assert!(runtime.with_engine(|_| ()).is_none(), "no chain engine");
+        assert_eq!(runtime.g5_joint(1), None, "joints fill at bind");
+        let blends = store.read_lane::<RagdollBlend>().expect("blends");
+        assert_eq!(blends.get(root).expect("blend").weights.len(), 3);
+        let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
+        assert_eq!(proxies.entities.len(), 3, "one proxy per bone");
+    }
+
+    /// §11 bind: physical mode binds the world bodies and gives the child
+    /// bones their world joints — the root bone has none.
+    #[test]
+    fn g5_physical_binds_bodies_and_world_joints() {
+        let (mut engine, root) = g5_rig_at(GlobalTransform::IDENTITY);
+        run_fixed(&mut engine, 2);
+        let store = engine.world().store().expect("world store");
+        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
+        let runtime = runtimes.get(root).expect("runtime");
+        assert_eq!(runtime.g5_joint(0), None, "the root bone has no hinge");
+        assert!(runtime.g5_joint(1).is_some(), "child hinge bound");
+        assert!(runtime.g5_joint(2).is_some(), "grandchild hinge bound");
+        let bodies = store.read_lane::<RigidBody>().expect("bodies");
+        let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
+        let bound = proxies
+            .entities
+            .iter()
+            .zip(&proxies.data)
+            .filter(|(entity, _)| bodies.contains(**entity))
+            .count();
+        assert_eq!(bound, 3, "all three proxies carry world bodies");
+    }
+
+    /// §11 end-to-end: the G5 ragdoll lands on the world floor **and
+    /// stays jointed** — the linked bone pairs hold their one-metre
+    /// anchor distance while the chain settles (the joints are the
+    /// world's own constraints, contacts are native).
+    #[test]
+    fn g5_world_floor_keeps_the_chain_jointed() {
+        let (mut engine, root) = g5_rig_at(GlobalTransform::IDENTITY);
+        run_fixed(&mut engine, LANDING_TICKS);
+        let landed = g5_positions(&engine, root);
+        let lowest = landed.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        assert!(
+            lowest > SINK_LINE_Y,
+            "fell through: y={lowest} in {landed:?}"
+        );
+        for pair in [(0, 1), (1, 2)] {
+            let gap = (landed[pair.0] - landed[pair.1]).length();
+            assert!(
+                (gap - 1.0).abs() < 0.05,
+                "joint {pair:?} stretched to {gap}"
+            );
+        }
+    }
+
+    /// §11 lifecycle: `Animated` unbinds the bodies and the solver drops
+    /// the joints with them — the table follows — and a new `Physical`
+    /// bind rebuilds the joints.
+    #[test]
+    fn g5_animated_unbinds_and_rebind_rebuilds_joints() {
+        let (mut engine, root) = g5_rig_at(GlobalTransform::IDENTITY);
+        run_fixed(&mut engine, 2);
+        {
+            let store = engine.world_mut().store_mut().expect("world store");
+            set_ragdoll_mode(store, root, RagdollMode::Animated).expect("animated");
+        }
+        run_fixed(&mut engine, 2);
+        {
+            let store = engine.world().store().expect("world store");
+            let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
+            let runtime = runtimes.get(root).expect("runtime");
+            assert_eq!(runtime.g5_joint(1), None, "unbind clears the table");
+            let bodies = store.read_lane::<RigidBody>().expect("bodies");
+            let proxies = store.read_lane::<RagdollProxy>().expect("proxies");
+            let bound = proxies
+                .entities
+                .iter()
+                .zip(&proxies.data)
+                .filter(|(entity, _)| bodies.contains(**entity))
+                .count();
+            assert_eq!(bound, 0, "nothing bound while animated");
+        }
+        {
+            let store = engine.world_mut().store_mut().expect("world store");
+            set_ragdoll_mode(store, root, RagdollMode::Physical).expect("physical");
+        }
+        run_fixed(&mut engine, 2);
+        let store = engine.world().store().expect("world store");
+        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
+        assert!(
+            runtimes.get(root).expect("runtime").g5_joint(1).is_some(),
+            "the rebind rebuilds the world joints"
+        );
+    }
+
+    /// §11 determinism: two identical G5 drops land bit-identical world
+    /// poses — the solver's own order is the contract here (no drain, no
+    /// fold on this path).
+    #[test]
+    fn g5_drop_lands_bit_identical_poses() {
+        let (mut first, first_root) = g5_rig_at(GlobalTransform::IDENTITY);
+        run_fixed(&mut first, COUPLE_TICKS);
+        let (mut second, second_root) = g5_rig_at(GlobalTransform::IDENTITY);
+        run_fixed(&mut second, COUPLE_TICKS);
+        let landed = g5_positions(&first, first_root);
+        let again = g5_positions(&second, second_root);
+        for (index, (a, b)) in landed.iter().zip(again).enumerate() {
+            assert_eq!(a, &b, "bone {index} diverged");
+        }
     }
 }

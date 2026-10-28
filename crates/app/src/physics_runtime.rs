@@ -29,6 +29,7 @@ use ornis_core::{
     System, SystemAccess, Transform, UnitQuat,
 };
 use ornis_editor::EditorOnly;
+use ornis_physics::joint::{JointHandle, JointKind};
 use ornis_physics::soft_render::{MIN_TUBE_SIDES, tube_indices, tube_positions};
 use ornis_physics::{
     BodyHandle, BodyType, ContactImpulse, PhysicsEngine, RigidBody, SoftBody, SoftHandle,
@@ -93,6 +94,44 @@ impl PhysicsRuntime {
     // first caller.
     pub fn handle_of(&self, entity: Entity) -> Option<BodyHandle> {
         self.bindings.get(&entity).copied()
+    }
+
+    /// Creates the G5 joint `kind` between the [`RigidBody`] components
+    /// of entities `a` and `b` (§11 ragdoll path): binds both bodies
+    /// immediately — the eager twin of `sync_in`'s bind — and returns the
+    /// world joint handle. The component pose is taken as world (the
+    /// ragdoll proxies carry no `GlobalTransform`, so `sync_in`'s
+    /// world-pose fold leaves it alone). `None` without either component
+    /// or when the solver refuses the joint — the caller records no
+    /// handle and the world simply has no joint. Joints die with their
+    /// bodies: dropping either side destroys the joint (§11 lifecycle).
+    // qual:api — §11 G5 ragdoll seam; ragdoll_proxy is the first caller.
+    pub fn add_joint_between(
+        &mut self,
+        bodies: &ComponentStore<RigidBody>,
+        a: Entity,
+        b: Entity,
+        kind: JointKind,
+    ) -> Option<JointHandle> {
+        let handle_a = self.ensure_bound(bodies, a)?;
+        let handle_b = self.ensure_bound(bodies, b)?;
+        self.solver.add_joint(handle_a, handle_b, kind).ok()
+    }
+
+    /// The solver handle of `entity`, binding its [`RigidBody`] component
+    /// on the spot when it has none yet. `None` without the component.
+    fn ensure_bound(
+        &mut self,
+        bodies: &ComponentStore<RigidBody>,
+        entity: Entity,
+    ) -> Option<BodyHandle> {
+        if let Some(&handle) = self.bindings.get(&entity) {
+            return Some(handle);
+        }
+        let source = bodies.get(entity)?;
+        let handle = self.solver.add_body(source.clone());
+        self.bindings.insert(entity, handle);
+        Some(handle)
     }
 
     /// World gravity the solver integrates with (the §8.5 proxy
