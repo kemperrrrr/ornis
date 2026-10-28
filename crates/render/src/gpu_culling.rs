@@ -179,8 +179,8 @@ pub fn indirect_args_for_visible(index_count: u32, visible: &[u32]) -> DrawIndex
 /// One dirty run of the resident staging buffer: `count` records
 /// starting at `start` (record indices, not bytes) that must be
 /// re-written — every producer supplies them in ascending,
-/// non-overlapping order ([`diff_staged_records`] by walking indices,
-/// [`ranges_from_sorted_indices`] from the change detection), and the
+/// non-overlapping order (the byte diff by walking indices, the change
+/// detection by sorting its entity ids), and the
 /// writes merge across small clean gaps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyRange {
