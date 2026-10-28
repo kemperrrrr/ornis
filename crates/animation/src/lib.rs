@@ -96,6 +96,9 @@ pub use motion_match::{
     warp_weight,
 };
 
+mod motion_warp;
+pub use motion_warp::warp_root_delta;
+
 mod ragdoll;
 mod tree;
 mod tree_eff;
