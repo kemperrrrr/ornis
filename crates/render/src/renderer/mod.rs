@@ -66,7 +66,7 @@ pub(crate) use clusters::{
 // Path-stability re-export: `crate::renderer::staging_capacity_for_instances`
 // before the split; no in-crate users outside its module right now.
 #[allow(unused_imports)]
-pub(crate) use buffers::staging_capacity_for_instances;
+pub(crate) use buffers::{InstanceFrame, staging_capacity_for_instances};
 pub use deferred::LightingPass;
 pub use forward::{
     BlendMode, ForwardPass, TexturedForwardPass, TransparencyError, TransparencyOptions,
@@ -322,6 +322,15 @@ struct CoreBuffers {
     lighting: wgpu::Buffer,
 }
 
+/// One frame's staged indirect-batch inputs: the projection, the
+/// pre-converted records in instance order, and the dirty record runs
+/// [`prepare_indirect_batch`](Renderer3D::prepare_indirect_batch) uploads.
+pub(crate) type StagedBatch = (
+    glam::Mat4,
+    Vec<PerObjectGpu>,
+    Vec<crate::gpu_culling::DirtyRange>,
+);
+
 /// The deferred 3D renderer: owns GPU buffers, pipelines and persistent
 /// targets; drives the hybrid deferred+forward+bloom frame via its
 /// `render_*` methods or the all-in-one [`Renderer3D::render_scene`].
@@ -338,6 +347,11 @@ pub struct Renderer3D {
     /// Model transforms from the preceding frame, keyed by stable entity
     /// identity so dense-lane reordering cannot transfer motion to another object.
     previous_instance_models: std::sync::RwLock<HashMap<Entity, glam::Mat4>>,
+    /// Records staged by the preceding frame plus the entity list they were
+    /// built for: lets an ECS change feed rebuild only the records an entity
+    /// mutation invalidated (see
+    /// [`stage_instance_records_changed`](Self::stage_instance_records_changed)).
+    record_cache: std::sync::RwLock<buffers::RecordCache>,
     material_buffer: std::sync::RwLock<wgpu::Buffer>,
     lighting_buffer: wgpu::Buffer,
     _bind_group_layout: wgpu::BindGroupLayout,
@@ -425,10 +439,11 @@ pub struct Renderer3D {
     /// fallback to the direct path.
     indirect_ready: std::sync::atomic::AtomicBool,
     /// Staged shared-batch inputs for a possible indirect submit:
-    /// `(view_proj, pre-converted records)` moved here by `RenderSubmit`
-    /// and taken by [`prepare_indirect_batch`](Self::prepare_indirect_batch)
-    /// on the record path. Never consumed without the opt-in flag.
-    staged_batch: std::sync::RwLock<Option<(glam::Mat4, Vec<PerObjectGpu>)>>,
+    /// `(view_proj, pre-converted records, dirty record runs)` moved here
+    /// by `RenderSubmit` and taken by
+    /// [`prepare_indirect_batch`](Self::prepare_indirect_batch) on the
+    /// record path. Never consumed without the opt-in flag.
+    staged_batch: std::sync::RwLock<Option<StagedBatch>>,
     lighting_pass: LightingPass,
     forward_pass: ForwardPass,
     /// Textured-forward pipeline plus fallbacks, built on demand by

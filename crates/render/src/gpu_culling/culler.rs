@@ -1,3 +1,4 @@
+// qual:allow(srp, file_length=335) reason: "One culler: pipeline, resident staging and the staging entries share the buffer layout and the staging lock, so the frame stages stay in one module until the pinned budget is exceeded"
 //! Owned GPU buffers and the dispatch entry point of the culling pass
 //! ([`Culler`]); the parent module holds the shared layout and the CPU
 //! reference.
@@ -14,7 +15,7 @@ use super::INDIRECT_ARGS_WORD_BYTES;
 use super::INDIRECT_ARGS_WORD_COUNT;
 use super::cull_params;
 use super::cull_workgroup_count;
-use super::diff_staged_records;
+use super::merge_close_ranges;
 use super::stage_next_instances;
 use crate::renderer::InstanceData;
 use crate::renderer::PerObjectGpu;
@@ -82,6 +83,17 @@ pub struct Culler {
     /// Instances staged by the last [`Culler::compact`] (drives the
     /// [`Culler::record_compact`] dispatch width).
     staged_count: std::sync::atomic::AtomicU32,
+    /// Whether the source buffer holds a complete upload of
+    /// [`Self::upload_count`] records — false until the first
+    /// [`Culler::compact_changed`], whose fresh culler (or one
+    /// re-created by a capacity growth, with the renderer's change
+    /// history still intact) must upload everything before any run can
+    /// patch.
+    upload_valid: std::sync::atomic::AtomicBool,
+    /// Record count of the last upload: a [`Culler::compact_changed`]
+    /// handed a different count (growth or shrinkage) uploads every
+    /// record, whatever runs it reports.
+    upload_count: std::sync::atomic::AtomicU32,
 }
 
 /// Double-buffered reusable staging of [`Culler`]: both vectors keep
@@ -238,14 +250,24 @@ impl Culler {
             src_buffer,
             staging: std::sync::Mutex::new(CullerStaging::default()),
             staged_count: std::sync::atomic::AtomicU32::new(0),
+            upload_valid: std::sync::atomic::AtomicBool::new(false),
+            upload_count: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
-    /// One write of the resident staging's dirty runs into the source
+    /// One write of the staged records' dirty runs into the source
     /// buffer — the single dirty-fill implementation
-    /// [`Culler::compact`], [`Culler::compact_records`] and the profile
-    /// hook all share (one copy of the offset/size/write loop).
+    /// [`Culler::compact`], [`Culler::compact_changed`] and the profile
+    /// hook all share (one copy of the offset/size/write loop). Runs whose clean gap is
+    /// small merge into one write first (see [`merge_close_ranges`]).
     fn write_dirty(&self, queue: &wgpu::Queue, records: &[PerObjectGpu], ranges: &[DirtyRange]) {
+        let merged;
+        let ranges = if ranges.len() > 1 {
+            merged = merge_close_ranges(ranges);
+            &merged
+        } else {
+            ranges
+        };
         for range in ranges {
             let start = range.start as usize;
             queue.write_buffer(
@@ -259,9 +281,8 @@ impl Culler {
     /// One staging transition under the resident lock: `build` fills the
     /// frame's records and returns their dirty runs against the previous
     /// frame, those runs are written into the source buffer, and the
-    /// staging roles swap. [`Culler::compact`] and
-    /// [`Culler::compact_records`] differ only in `build`, so the diff
-    /// and the dirty fill each exist exactly once.
+    /// staging roles swap. [`Culler::compact`] is its only production
+    /// caller, so the diff and the dirty fill each exist exactly once.
     fn stage_frame(
         &self,
         queue: &wgpu::Queue,
@@ -348,8 +369,7 @@ impl Culler {
 
     /// Pre-writes the per-frame uniform, the indirect args (with a zero
     /// instance counter, so consecutive frames never accumulate) and the
-    /// staged count shared by [`Culler::compact`] and
-    /// [`Culler::compact_records`].
+    /// staged count shared by every staging entry point.
     fn prewrite_frame(&self, queue: &wgpu::Queue, view_proj: &Mat4, index_count: u32, count: u32) {
         let params = cull_params(view_proj, count);
         queue.write_buffer(&self.params_buffer, 0, bytemuck::bytes_of(&params));
@@ -359,22 +379,35 @@ impl Culler {
             .store(count, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Stages one culling frame from caller-converted `records`: diffs
-    /// them against the last uploaded frame and writes only the dirty
-    /// runs — like [`Culler::compact`], but without converting. The
-    /// submit path converts once and shares the records between the
-    /// direct upload and this staging, so a frame converts exactly once.
+    /// Stages one culling frame from caller-converted `records` and the
+    /// caller's own change detection: `changed` are the ascending dirty
+    /// runs (from `ranges_from_sorted_indices` or a byte diff), and no
+    /// diff against any history happens here — a static frame reports no
+    /// runs and uploads nothing. The source buffer instead receives a write when it holds no complete
+    /// upload yet (a fresh culler, or one re-created by a capacity
+    /// growth while the renderer's history lives on), when
+    /// `records.len()` differs from the last upload (growth or
+    /// shrinkage), or when `changed` itself spans the whole frame.
+    ///
+    /// The byte-diff entry [`Culler::compact`] keeps a staging history
+    /// this entry
+    /// never updates, so this entry resets it: the next byte-diff frame
+    /// re-uploads everything instead of diffing against a frame the
+    /// runs did not track. Mixing the entries the other way (byte-diff
+    /// after runs) is safe — the byte-diff writes what it finds and
+    /// keeps the buffer complete for the runs that follow.
     ///
     /// # Errors
     ///
     /// Returns [`CullerError::CapacityExceeded`] when `records.len()`
     /// exceeds [`Self::capacity`].
-    pub fn compact_records(
+    pub fn compact_changed(
         &self,
         queue: &wgpu::Queue,
         view_proj: &Mat4,
         index_count: u32,
         records: &[PerObjectGpu],
+        changed: &[DirtyRange],
     ) -> Result<(), CullerError> {
         if records.len() > self.capacity as usize {
             let count = records.len() as u32;
@@ -383,12 +416,27 @@ impl Culler {
                 capacity: self.capacity,
             });
         }
-        self.stage_frame(queue, |prev, next| {
-            next.clear();
-            next.extend_from_slice(records);
-            diff_staged_records(prev, next)
-        });
-        self.prewrite_frame(queue, view_proj, index_count, records.len() as u32);
+        let count = records.len() as u32;
+        let complete = self.upload_valid.load(std::sync::atomic::Ordering::Relaxed)
+            && self.upload_count.load(std::sync::atomic::Ordering::Relaxed) == count;
+        {
+            let mut staging = self.staging.lock().unwrap_or_else(PoisonError::into_inner);
+            staging.prev.clear();
+        }
+        let full = [DirtyRange { start: 0, count }];
+        let ranges: &[DirtyRange] = if complete {
+            changed
+        } else if count == 0 {
+            &[]
+        } else {
+            &full
+        };
+        self.write_dirty(queue, records, ranges);
+        self.upload_valid
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.upload_count
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+        self.prewrite_frame(queue, view_proj, index_count, count);
         Ok(())
     }
 

@@ -56,10 +56,14 @@ use ornis_core::{Resources, SmartStore, System, SystemAccess};
 
 use crate::antialias::MotionValidity;
 use crate::camera::camera_view_projection;
-use crate::extraction::{RenderLights, extract_render_data, max_mesh_params};
+use crate::extraction::{
+    RenderLights, extract_render_data, extract_render_data_with_changes, max_mesh_params,
+};
 use crate::frame_exec::{BufferRenderContext, RenderFrame3D};
 use crate::mesh::Mesh;
-use crate::renderer::{CustomGbufferDraw, Renderer3D, StagedCustomMesh, custom_draw_items};
+use crate::renderer::{
+    CustomGbufferDraw, InstanceFrame, Renderer3D, StagedCustomMesh, custom_draw_items,
+};
 use ornis_animation::{JointPose, Skeleton, SkinnedMesh};
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 
@@ -425,7 +429,9 @@ impl System for RenderSubmit {
         let fs = frame_state.lock().unwrap_or_else(|e| e.into_inner());
 
         // X1/X4: direct lane read through the shared canon — no snapshot.
-        let extracted = extract_render_data(store);
+        // The change feed rides along: the record build rebuilds only the
+        // entities the ECS touched (static frames rebuild nothing).
+        let (extracted, changes) = extract_render_data_with_changes(store);
         // S7: the camera math lives in `camera_view_projection` — `run`
         // stays pure orchestration (IOSP).
         let view = orbit.view_parameters();
@@ -467,16 +473,22 @@ impl System for RenderSubmit {
         instance_entities.extend(staged.iter().map(|entry| entry.entity));
         // Convert once: the merged records feed the direct upload, and the
         // sphere prefix (customs never indirect) stages the shared batch.
-        let mut converted = fs.renderer.upload_instances_with_motion_flags(
+        let staged_records = fs.renderer.upload_instances_with_changes(
             &device.0,
             &queue.0,
-            &instances,
-            &motion_valid,
-            &instance_entities,
+            InstanceFrame::new(&instances, &motion_valid, &instance_entities),
+            &changes,
         );
         if fs.renderer.indirect_draw() {
-            converted.truncate(extracted.instances.len());
-            fs.renderer.stage_batch_inputs(view_proj, converted);
+            // The shared batch is the sphere prefix; custom meshes follow
+            // it and never indirect, so their dirty indices are dropped.
+            let record_count = extracted.instances.len();
+            let mut converted = staged_records.records;
+            converted.truncate(record_count);
+            let mut dirty = staged_records.dirty;
+            dirty.truncate(dirty.partition_point(|&index| (index as usize) < record_count));
+            fs.renderer
+                .stage_batch_inputs_changed(view_proj, converted, &dirty);
         }
         *custom_meshes
             .0
