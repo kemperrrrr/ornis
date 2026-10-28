@@ -17,6 +17,20 @@ pub const RAW_READ_F32: &str = "raw_read_f32";
 /// `(param i32 i32 i32 f32 f32 f32 f32)` — group, binding, offset, four lanes.
 pub const RAW_WRITE: &str = "raw_write";
 
+/// `(param i32 i32 i32) (result f32 f32 f32 f32)` — group, binding, element index.
+///
+/// Group and binding are constant immediates: that pair is the binding's
+/// provenance. The index may be a runtime value and lowers to an access
+/// chain on that one storage global. A runtime group or binding is rejected;
+/// bindless descriptor indexing is not this opcode.
+pub const STORAGE_READ: &str = "storage_read";
+
+/// `(param i32 i32 i32 f32 f32 f32 f32)` — group, binding, element index, xyzw.
+///
+/// Same provenance rule as [`STORAGE_READ`]. The store lands on
+/// `array<vec4<f32>>[index]`, not on a bit-packed pointer.
+pub const STORAGE_WRITE: &str = "storage_write";
+
 /// `(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)`.
 ///
 /// Operands are texture group, texture binding, sampler group, sampler
@@ -36,6 +50,6 @@ pub const FS_MAIN: &str = "fs_main";
 pub fn is_toy_import(name: &str) -> bool {
     matches!(
         name,
-        RAW_READ | RAW_READ_F32 | RAW_WRITE | TEXTURE_SAMPLE_2D
+        RAW_READ | RAW_READ_F32 | RAW_WRITE | STORAGE_READ | STORAGE_WRITE | TEXTURE_SAMPLE_2D
     )
 }
