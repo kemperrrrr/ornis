@@ -13,14 +13,12 @@ use std::sync::Mutex;
 
 use glam::{Quat, Vec3};
 use ornis_animation::{RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollMode};
-use ornis_core::{
-    ComponentStore, Entity, FixedTime, GlobalTransform, Resources, SmartStore, System, SystemAccess,
-};
+use ornis_core::{Entity, FixedTime, GlobalTransform, Resources, SmartStore, System, SystemAccess};
 use ornis_physics::PhysicsEngine;
 use ornis_physics::body::{BodyHandle, RigidBody};
 
 use crate::physics_runtime::PhysicsRuntime;
-use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime, chain_parent, hinge_joint};
+use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
 
 /// The world's default collision layer bit (§8.5 proxy filters): bit 0
 /// stays the world's, bone `i` takes bit `i + 1`.
@@ -208,60 +206,9 @@ fn drive_proxies(
         }
     }
     if g5 && let Some(bodies) = bodies_lane.as_mut() {
-        bind_g5_joints(store, root, runtime, desc, bodies, physics);
+        crate::ragdoll_g5::bind_g5_joints(store, root, runtime, desc, bodies, physics);
     }
     bound_any
-}
-
-/// G5 joint bind (§11): gives every bound bone whose parent bone is bound
-/// too its world joint once — the description's own hinge geometry
-/// ([`hinge_joint`], one vocabulary with the ABA chain). The solver drops
-/// joints with their bodies and the unbind path clears the table, so a
-/// recreated bind recreates the joint. Leaf.
-fn bind_g5_joints(
-    store: &SmartStore,
-    root: Entity,
-    runtime: &mut RagdollRuntime,
-    desc: &RagdollDesc,
-    bodies: &mut ComponentStore<RigidBody>,
-    physics: &mut PhysicsRuntime,
-) {
-    let Some(proxies) = store.read_lane::<RagdollProxy>() else {
-        return;
-    };
-    for (index, bone) in desc.bones.iter().enumerate() {
-        let Some(parent_index) = chain_parent(index, &desc.bones) else {
-            continue;
-        };
-        if runtime.g5_joint(index).is_some() {
-            continue;
-        }
-        let mut child_entity = None;
-        let mut parent_entity = None;
-        for (&entity, proxy) in proxies.entities.iter().zip(&proxies.data) {
-            if proxy.root != root {
-                continue;
-            }
-            if proxy.link == index {
-                child_entity = Some(entity);
-            }
-            if proxy.link == parent_index {
-                parent_entity = Some(entity);
-            }
-        }
-        let (Some(child), Some(parent)) = (child_entity, parent_entity) else {
-            continue;
-        };
-        if !bodies.contains(child) || !bodies.contains(parent) {
-            continue;
-        }
-        let Ok(hinge) = hinge_joint(bone, runtime.bind_frames(), &desc.bones[parent_index]) else {
-            continue;
-        };
-        if let Some(handle) = physics.add_joint_between(bodies, parent, child, hinge) {
-            runtime.set_g5_joint(index, Some(handle));
-        }
-    }
 }
 
 /// Fold scratch: proxy `BodyHandle` → chain bone (`root`, `link`).

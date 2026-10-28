@@ -14,10 +14,9 @@ use ornis_core::units::Clamped01;
 use ornis_core::{Entity, Seconds, SmartStore};
 use ornis_physics::RigidBody;
 
+pub use crate::ragdoll_g5::build_g5_ragdoll;
 pub use crate::ragdoll_proxy::RagdollProxySync;
-pub use crate::ragdoll_runtime::{
-    RagdollBoneView, RagdollProxy, RagdollRuntime, build_g5_ragdoll, build_ragdoll,
-};
+pub use crate::ragdoll_runtime::{RagdollBoneView, RagdollProxy, RagdollRuntime, build_ragdoll};
 pub use crate::ragdoll_sync::{RagdollSyncSystem, update_ragdoll};
 
 // qual:api — typed ragdoll input for hosts; in-tree callers land with

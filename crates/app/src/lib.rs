@@ -23,6 +23,7 @@ pub mod anim_wiring;
 pub mod game_world;
 /// Sequential-impulse/XPBD physics runtime over the unified world.
 pub mod physics_runtime;
+pub mod ragdoll_g5;
 pub mod ragdoll_proxy;
 pub mod ragdoll_runtime;
 pub mod ragdoll_sync;

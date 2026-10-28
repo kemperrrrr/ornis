@@ -214,81 +214,40 @@ impl RagdollRuntime {
 
     /// Model→local sample of §4.1 (ABA seam): writes each bone's physical
     /// local pose into `out[bone.joint]` from the chain bodies. The sample
-    /// lives in the skeleton's **model space** — see [`sample_local_into`]
-    /// for the seam itself. Fails on a poisoned lock, a missing body or a
+    /// lives in the skeleton's **model space** — see
+    /// [`crate::ragdoll_g5::sample_local_into`] for the seam itself. Fails on a poisoned lock, a missing body or a
     /// non-finite pose, writing nothing further. Hot path: no allocations.
     pub fn sample_local(&self, desc: &RagdollDesc, out: &mut [JointTrs]) -> bool {
         let Ok(engine) = self.engine.lock() else {
             return false;
         };
-        sample_local_into(desc, out, &self.bind, &self.parents, |index| {
+        crate::ragdoll_g5::sample_local_into(desc, out, &self.bind, &self.parents, |index| {
             let handle = self.bodies.get(index).copied()?;
             let body = engine.get_body(handle)?;
             Some((body.position, body.orientation))
         })
     }
-}
 
-/// Model→local seam core of §4.1 (shared by the ABA and G5 seams): writes
-/// each bone's physical local pose into `out[bone.joint]` (the skeleton
-/// slot the blend mixes) from the per-bone world poses `body_at` serves
-/// (bone index in description order). The chain and the sample live in
-/// the skeleton's **model space** — the bodies sit at the bind fold of
-/// [`Skeleton::rest`] and the chain root is taken against the identity
-/// matrix; the entity's `GlobalTransform` enters later, in
-/// `compose_model_matrices`, as on the animation side. A bone local is
-/// taken against its parent bone's body: rotation `R_p⁻¹·R_c`, translation
-/// divided per axis by the parent bone's accumulated bind scale (the very
-/// factor `bind_worlds` folded in for its joint — rigid bodies carry no
-/// scale, so the seam undoes it to land back in the skeleton's scaled
-/// local frames). The output scale is left at one: the blend keeps the
-/// animated scale. A missing body or a non-finite pose fails the sample,
-/// writing nothing further. Hot path: no allocations.
-pub(crate) fn sample_local_into(
-    desc: &RagdollDesc,
-    out: &mut [JointTrs],
-    bind: &[(Vec3, Quat, Vec3)],
-    parents: &[Option<usize>],
-    mut body_at: impl FnMut(usize) -> Option<(Vec3, Quat)>,
-) -> bool {
-    for (index, bone) in desc.bones.iter().enumerate() {
-        let Some((position, orientation)) = body_at(index) else {
-            return false;
-        };
-        if !position.is_finite() || !orientation.is_finite() {
-            return false;
+    /// Assembles a bare runtime from its seam tables (both chain
+    /// variants; the assemblers live beside their chain — `build_ragdoll`
+    /// here, [`crate::ragdoll_g5::build_g5_ragdoll`] on the G5 side).
+    pub(crate) fn from_parts(
+        chain: RagdollChain,
+        bodies: Vec<BodyHandle>,
+        templates: Vec<RigidBody>,
+        joints: Vec<Option<JointHandle>>,
+        bind: Vec<(Vec3, Quat, Vec3)>,
+        parents: Vec<Option<usize>>,
+    ) -> Self {
+        Self {
+            chain,
+            bodies,
+            templates,
+            joints,
+            bind,
+            parents,
         }
-        let (translation, rotation) = match parents.get(index).copied().flatten() {
-            Some(parent) => {
-                let Some((_, _, parent_scale)) = bind.get(parent).copied() else {
-                    return false;
-                };
-                let Some((parent_position, parent_orientation)) = body_at(parent) else {
-                    return false;
-                };
-                if !parent_position.is_finite() || !parent_orientation.is_finite() {
-                    return false;
-                }
-                let inverse = parent_orientation.inverse();
-                let rotation = inverse * orientation;
-                let offset = inverse * (position - parent_position);
-                if parent_scale.min_element() == 0.0 || !parent_scale.is_finite() {
-                    return false;
-                }
-                (offset / parent_scale, rotation)
-            }
-            None => (position, orientation),
-        };
-        let Some(slot) = out.get_mut(usize::from(bone.joint)) else {
-            return false;
-        };
-        *slot = JointTrs {
-            translation,
-            rotation,
-            scale: Vec3::ONE,
-        };
     }
-    true
 }
 
 /// Assembles the physical chain of `desc` under `skeleton` at the bind
@@ -356,57 +315,6 @@ pub fn build_ragdoll(
     })
 }
 
-/// Assembles the G5 ragdoll of `desc` under `skeleton` at the bind pose
-/// (§11): no chain engine — the bones ride world bodies and `JointKind`
-/// joints of the world solver (`PhysicsRuntime`), so contacts and ropes
-/// are native and the §8.5 proxy coupling does not apply. The seam
-/// (`bind`, `parents`) matches [`build_ragdoll`] and the body templates
-/// carry the bind-pose links the proxies insert; the joint handles fill
-/// in at bind time (the world owns the joints and drops them with the
-/// bodies). Refuses (writing nothing) when [`RagdollDesc::validate`]
-/// does, or [`RagdollError::Assemble`] when the hinge of an otherwise
-/// valid description cannot be assembled — the geometry is probed here
-/// so install fails, not the first bind. `desc.base` selects the root
-/// behaviour on bind: `Fixed` pins the root link to the entity's bind
-/// frame, `Floating` leaves it to the world (§11).
-pub fn build_g5_ragdoll(
-    skeleton: &Skeleton,
-    desc: &RagdollDesc,
-) -> Result<RagdollRuntime, RagdollError> {
-    desc.validate(skeleton)?;
-    let joint_bind = bind_worlds(skeleton);
-    let mut templates = Vec::with_capacity(desc.bones.len());
-    let mut joints = Vec::with_capacity(desc.bones.len());
-    for (index, bone) in desc.bones.iter().enumerate() {
-        let (position, orientation, _) = joint_bind[bone.joint.index()];
-        let mut body = bone_body(bone, position);
-        body.orientation = orientation;
-        templates.push(body);
-        // Probe the hinge geometry now so install fails, not the first
-        // bind; the world joints fill the slots at bind time (§11).
-        if let Some(parent) = chain_parent(index, &desc.bones) {
-            hinge_joint(bone, &joint_bind, &desc.bones[parent])?;
-        }
-        joints.push(None);
-    }
-    let parents = (0..desc.bones.len())
-        .map(|index| chain_parent(index, &desc.bones))
-        .collect();
-    let bind = desc
-        .bones
-        .iter()
-        .map(|bone| joint_bind[bone.joint.index()])
-        .collect();
-    Ok(RagdollRuntime {
-        chain: RagdollChain::G5,
-        bodies: Vec::new(),
-        templates,
-        joints,
-        bind,
-        parents,
-    })
-}
-
 /// Bind-pose frames (world position, world rotation, accumulated world
 /// scale) per joint, folded from [`Skeleton::rest`] along the parents in
 /// depth order as full T·R·S matrices — the same composition the skin's
@@ -414,7 +322,7 @@ pub fn build_g5_ragdoll(
 /// positions (typical glTF rigs scale the root by 0.01). Only position and
 /// rotation enter physics; the scale rides along for the inverse seam of
 /// [`RagdollRuntime::sample_local`]. Leaf.
-fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat, Vec3)> {
+pub(crate) fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat, Vec3)> {
     let count = skeleton.parents.len();
     let mut depths = Vec::with_capacity(count);
     for parent_of in skeleton.parents.iter() {
@@ -447,7 +355,7 @@ fn bind_worlds(skeleton: &Skeleton) -> Vec<(Vec3, Quat, Vec3)> {
 
 /// Dynamic body of `bone` centred on its joint frame (§3.1: the link
 /// frame is the joint frame in the first slices). Leaf.
-fn bone_body(bone: &RagdollBone, position: Vec3) -> RigidBody {
+pub(crate) fn bone_body(bone: &RagdollBone, position: Vec3) -> RigidBody {
     let mass = match bone.shape {
         RagdollShape::Capsule {
             radius,
