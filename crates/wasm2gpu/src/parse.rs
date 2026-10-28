@@ -8,6 +8,8 @@ use wasmparser::ValType;
 use crate::error::TranslateError;
 use crate::ir::Func;
 use crate::ir::Import;
+use crate::ir::Kind;
+use crate::ir::MAX_PARAMS;
 use crate::ir::Module;
 use crate::ir::Op;
 use crate::ir::Sig;
@@ -73,10 +75,33 @@ fn func_sig(ty: &wasmparser::SubType) -> Result<Sig, TranslateError> {
     let wasmparser::CompositeInnerType::Func(func) = &ty.composite_type.inner else {
         return Err(TranslateError::Unsupported);
     };
+    let (param_kind, params) = param_kinds(func.params())?;
     Ok(Sig {
-        params: count_vals(func.params())?,
+        params,
         results: count_vals(func.results())?,
+        param_kind,
     })
+}
+
+fn param_kinds(vals: &[ValType]) -> Result<([Kind; MAX_PARAMS], u32), TranslateError> {
+    let mut kinds = [Kind::F32; MAX_PARAMS];
+    let mut index = 0usize;
+    while index < vals.len() {
+        if index >= MAX_PARAMS {
+            return Err(TranslateError::Unsupported);
+        }
+        kinds[index] = one_kind(&vals[index])?;
+        index += 1;
+    }
+    Ok((kinds, index as u32))
+}
+
+fn one_kind(val: &ValType) -> Result<Kind, TranslateError> {
+    match val {
+        ValType::I32 => Ok(Kind::I32),
+        ValType::F32 => Ok(Kind::F32),
+        _ => Err(TranslateError::Unsupported),
+    }
 }
 
 fn count_vals(vals: &[ValType]) -> Result<u32, TranslateError> {
@@ -160,13 +185,14 @@ fn read_funcs(
 }
 
 fn read_body(raw: &mut Raw, body: wasmparser::FunctionBody<'_>) -> Result<(), TranslateError> {
+    let func_slot = raw.bodies.len();
     let reader = body
         .get_operators_reader()
         .map_err(|err| TranslateError::Wasm(err.to_string()))?;
     let mut ops = Vec::new();
     for op in reader {
         let op = op.map_err(|err| TranslateError::Wasm(err.to_string()))?;
-        if let Some(decoded) = decode_op(&op)? {
+        if let Some(decoded) = decode_op(raw, func_slot, &op)? {
             ops.push(decoded);
         }
     }
@@ -174,7 +200,31 @@ fn read_body(raw: &mut Raw, body: wasmparser::FunctionBody<'_>) -> Result<(), Tr
     Ok(())
 }
 
-fn decode_op(op: &Operator<'_>) -> Result<Option<Op>, TranslateError> {
+fn local_op(raw: &Raw, func_slot: usize, local_index: u32) -> Op {
+    let kind = param_kind(raw, func_slot, local_index);
+    if kind == Kind::I32 {
+        Op::LocalI32(local_index)
+    } else {
+        Op::Local(local_index)
+    }
+}
+
+fn param_kind(raw: &Raw, func_slot: usize, local_index: u32) -> Kind {
+    let Some(ty) = raw.func_types.get(func_slot) else {
+        return Kind::F32;
+    };
+    let Some(sig) = raw.types.get(*ty as usize) else {
+        return Kind::F32;
+    };
+    let slot = local_index as usize;
+    if slot < sig.params as usize {
+        sig.param_kind[slot]
+    } else {
+        Kind::F32
+    }
+}
+
+fn decode_op(raw: &Raw, func_slot: usize, op: &Operator<'_>) -> Result<Option<Op>, TranslateError> {
     if is_memory(op) {
         return Err(TranslateError::LinearMemory);
     }
@@ -183,7 +233,7 @@ fn decode_op(op: &Operator<'_>) -> Result<Option<Op>, TranslateError> {
             u32::try_from(*value).map_err(|_| TranslateError::Unsupported)?,
         )),
         Operator::F32Const { value } => Some(Op::F32(value.bits())),
-        Operator::LocalGet { local_index } => Some(Op::Local(*local_index)),
+        Operator::LocalGet { local_index } => Some(local_op(raw, func_slot, *local_index)),
         Operator::Call { function_index } => Some(Op::Call(*function_index)),
         Operator::F32Mul => Some(Op::Mul),
         Operator::F32Add => Some(Op::Add),

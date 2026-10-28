@@ -1,9 +1,12 @@
 //! Offline translator from the toy `ornis_gpu` wasm ABI to WGSL and SPIR-V.
 //!
 //! This is not the production shader DSL. It accepts one straight-line vertex
-//! function and one straight-line fragment function, lowers `raw_read` and
-//! `texture_sample_2d` imports to naga, and rejects linear-memory loads and
-//! non-constant bindings. See `docs/rendering/wasm-segmented-memory.md`.
+//! function and one straight-line fragment function. `raw_read` and
+//! `texture_sample_2d` lower as before. `storage_read` / `storage_write` lower
+//! to an access chain on one `array<vec4<f32>>` storage global: group and
+//! binding stay immediate operands, and the element index may be runtime.
+//! Linear-memory loads and non-constant bindings are rejected. See
+//! `docs/rendering/wasm-segmented-memory.md`.
 
 #![warn(missing_docs)]
 
@@ -16,6 +19,7 @@ mod lower;
 mod ops;
 mod parse;
 mod ret;
+mod storage;
 
 pub use emit::Translated;
 pub use error::TranslateError;
