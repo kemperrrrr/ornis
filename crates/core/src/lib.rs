@@ -48,7 +48,7 @@ pub use cold_store::ColdComponentStore;
 pub use command_sync::{
     CommandQueue, CommandSync, CommandSyncable, DataResidency, GpuCommand, ResidencyTracker,
 };
-pub use component_store::{ChunkedIterMut, ComponentStore, ZipIter};
+pub use component_store::{ChunkedIterMut, ComponentChanges, ComponentStore, ZipIter};
 pub use dispatcher::{CpuExecutor, Dispatchable, Dispatcher, ExecutionTarget, SmartDispatcher};
 pub use engine::{
     DEFAULT_FIXED_DELTA_SECONDS, DEFAULT_MAX_FIXED_STEPS_PER_FRAME, Engine, EngineBuilder,
