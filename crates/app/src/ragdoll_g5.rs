@@ -193,20 +193,15 @@ fn g5_link_pair(
     index: usize,
     parent_index: usize,
 ) -> Option<(Entity, Entity)> {
-    let mut child = None;
-    let mut parent = None;
-    for (&entity, proxy) in proxies.entities.iter().zip(&proxies.data) {
-        if proxy.root != root {
-            continue;
-        }
-        if proxy.link == index {
-            child = Some(entity);
-        }
-        if proxy.link == parent_index {
-            parent = Some(entity);
-        }
-    }
-    Some((child?, parent?))
+    let bone_entity = |link: usize| {
+        proxies
+            .entities
+            .iter()
+            .zip(&proxies.data)
+            .find(|(_, proxy)| proxy.root == root && proxy.link == link)
+            .map(|(&entity, _)| entity)
+    };
+    Some((bone_entity(index)?, bone_entity(parent_index)?))
 }
 
 /// First bind of a proxy (§8.5/§11, worker of `drive_proxies`):
