@@ -45,6 +45,8 @@ pub fn set_ragdoll(
     install_ragdoll(store, root, desc, runtime, joints)
 }
 
+// qual:api — typed G5 ragdoll install for hosts (contact/rope scenes,
+// §11); in-tree callers land with the load wiring.
 /// Installs the G5 ragdoll of `root` from `desc` (§11): the bones ride
 /// world bodies and `JointKind` joints of the world solver — contacts and
 /// ropes are native, no chain engine and no §8.5 proxy coupling. The
@@ -1668,6 +1670,16 @@ mod tests {
         slots.into_iter().map(|(_, position)| position).collect()
     }
 
+    /// Fill flags of the G5 joint table of `root` (§11 bind/unbind tests).
+    fn g5_joint_filled(engine: &Engine, root: Entity) -> Vec<bool> {
+        let store = engine.world().store().expect("world store");
+        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
+        let runtime = runtimes.get(root).expect("runtime");
+        (0..runtime.bone_count())
+            .map(|link| runtime.g5_joint(link).is_some())
+            .collect()
+    }
+
     /// Proxies of `root` carrying a bound world body (§11 bind tests).
     fn g5_bound_count(engine: &Engine, root: Entity) -> usize {
         let store = engine.world().store().expect("world store");
@@ -1710,12 +1722,11 @@ mod tests {
     fn g5_physical_binds_bodies_and_world_joints() {
         let (mut engine, root) = g5_rig_at(GlobalTransform::IDENTITY);
         run_fixed(&mut engine, 2);
-        let store = engine.world().store().expect("world store");
-        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
-        let runtime = runtimes.get(root).expect("runtime");
-        assert_eq!(runtime.g5_joint(0), None, "the root bone has no hinge");
-        assert!(runtime.g5_joint(1).is_some(), "child hinge bound");
-        assert!(runtime.g5_joint(2).is_some(), "grandchild hinge bound");
+        assert_eq!(
+            g5_joint_filled(&engine, root),
+            vec![false, true, true],
+            "only the child bones carry hinges"
+        );
         assert_eq!(
             g5_bound_count(&engine, root),
             3,
@@ -1758,12 +1769,11 @@ mod tests {
             set_ragdoll_mode(store, root, RagdollMode::Animated).expect("animated");
         }
         run_fixed(&mut engine, 2);
-        {
-            let store = engine.world().store().expect("world store");
-            let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
-            let runtime = runtimes.get(root).expect("runtime");
-            assert_eq!(runtime.g5_joint(1), None, "unbind clears the table");
-        }
+        assert_eq!(
+            g5_joint_filled(&engine, root),
+            vec![false, false, false],
+            "unbind clears the table"
+        );
         assert_eq!(
             g5_bound_count(&engine, root),
             0,
@@ -1774,10 +1784,8 @@ mod tests {
             set_ragdoll_mode(store, root, RagdollMode::Physical).expect("physical");
         }
         run_fixed(&mut engine, 2);
-        let store = engine.world().store().expect("world store");
-        let runtimes = store.read_lane::<RagdollRuntime>().expect("runtimes");
         assert!(
-            runtimes.get(root).expect("runtime").g5_joint(1).is_some(),
+            g5_joint_filled(&engine, root)[1],
             "the rebind rebuilds the world joints"
         );
     }
