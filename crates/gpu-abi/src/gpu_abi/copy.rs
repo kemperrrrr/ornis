@@ -1,0 +1,212 @@
+//! Byte copies and wasm32 import calls.
+//!
+//! This file is the only place the SDK spells `unsafe`. Callers have already
+//! checked that the byte region is in-bounds and aligned for `T`, and that
+//! `T: GpuSafeLayout` (every bit pattern is a valid value).
+
+#[cfg(target_arch = "wasm32")]
+use crate::layout::F32_SIZE;
+#[cfg(target_arch = "wasm32")]
+use crate::layout::GpuSafeLayout;
+#[cfg(target_arch = "wasm32")]
+use crate::layout::GpuVec2;
+#[cfg(target_arch = "wasm32")]
+use crate::layout::GpuVec4;
+#[cfg(target_arch = "wasm32")]
+use crate::layout::VEC4_SIZE;
+
+/// Lane count of a `vec4<f32>`.
+#[cfg(target_arch = "wasm32")]
+const LANE_COUNT: usize = (VEC4_SIZE / F32_SIZE) as usize;
+
+macro_rules! pod_load {
+    ($ty:ty, $region:expr) => {{
+        let region: &[u8] = $region;
+        assert!(region.len() == ::core::mem::size_of::<$ty>());
+        assert!(
+            region
+                .as_ptr()
+                .addr()
+                .is_multiple_of(::core::mem::align_of::<$ty>())
+        );
+        // SAFETY: `region` is exactly `size_of::<T>()` initialized bytes and
+        // is aligned for `T`. `T: GpuSafeLayout`, so those bytes are a valid
+        // `T`. The pointer is not retained.
+        unsafe { region.as_ptr().cast::<$ty>().read() }
+    }};
+}
+
+macro_rules! pod_store {
+    ($ty:ty, $region:expr, $value:expr) => {{
+        let region: &mut [u8] = $region;
+        assert!(region.len() == ::core::mem::size_of::<$ty>());
+        assert!(
+            region
+                .as_mut_ptr()
+                .addr()
+                .is_multiple_of(::core::mem::align_of::<$ty>())
+        );
+        let value: &$ty = $value;
+        // SAFETY: `region` is in-bounds and aligned for `T`, and it does not
+        // alias `value` (the slot allocation is distinct from the caller's
+        // local). `T: GpuSafeLayout`. The write covers every byte of `region`.
+        unsafe { region.as_mut_ptr().cast::<$ty>().write(*value) }
+    }};
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) use pod_load;
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) use pod_store;
+
+/// Four `f32` lanes returned by the vec4 wasm import.
+#[cfg(target_arch = "wasm32")]
+#[repr(C)]
+struct Word4 {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_read_f32 {
+    ($group:expr, $binding:expr, $offset:expr) => {{
+        // SAFETY: `raw_read_f32` is the ornis_gpu import. It returns one
+        // initialized f32 and does not expose linear memory.
+        unsafe { raw_read_f32($group, $binding, $offset) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_read_vec4 {
+    ($group:expr, $binding:expr, $offset:expr) => {{
+        // SAFETY: `raw_read` is the ornis_gpu vec4 import. It returns four
+        // initialized lanes. The caller copies them only into a 16-byte
+        // `GpuSafeLayout` value.
+        unsafe { raw_read($group, $binding, $offset) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_write {
+    ($group:expr, $binding:expr, $offset:expr, $x:expr, $y:expr, $z:expr, $w:expr) => {{
+        // SAFETY: `raw_write` is the ornis_gpu import. The four lanes are the
+        // bytes of a valid `GpuSafeLayout` value. The import does not expose
+        // linear memory.
+        unsafe { raw_write($group, $binding, $offset, $x, $y, $z, $w) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_sample {
+    ($tg:expr, $tb:expr, $sg:expr, $sb:expr, $u:expr, $v:expr) => {{
+        // SAFETY: `texture_sample_2d` is the ornis_gpu import. It returns four
+        // initialized lanes and does not load from linear memory.
+        unsafe { texture_sample_2d($tg, $tb, $sg, $sb, $u, $v) }
+    }};
+}
+
+// SAFETY: these symbols are the ornis_gpu import ABI. Calling them is sound
+// only through the macros above; they do not dereference a guest pointer.
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "ornis_gpu")]
+unsafe extern "C" {
+    fn raw_read_f32(group: u32, binding: u32, offset: u32) -> f32;
+    fn raw_read(group: u32, binding: u32, offset: u32) -> Word4;
+    fn raw_write(group: u32, binding: u32, offset: u32, x: f32, y: f32, z: f32, w: f32);
+    fn texture_sample_2d(
+        tex_group: u32,
+        tex_binding: u32,
+        samp_group: u32,
+        samp_binding: u32,
+        u: f32,
+        v: f32,
+    ) -> Word4;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn wasm_read<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32) -> T {
+    let size = core::mem::size_of::<T>();
+    if size == F32_SIZE as usize {
+        wasm_read_f32::<T>(group, binding, offset)
+    } else if size == VEC4_SIZE as usize {
+        wasm_read_vec4::<T>(group, binding, offset)
+    } else {
+        crate::gpu_abi::contract_breach("wasm32 raw_read supports 4-byte and 16-byte values")
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_read_f32<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32) -> T {
+    let word = import_read_f32!(group, binding, offset);
+    pod_load!(T, &word.to_le_bytes())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_read_vec4<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32) -> T {
+    let word = import_read_vec4!(group, binding, offset);
+    pod_load!(T, &pack_word(word))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn wasm_write<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32, value: &T) {
+    let size = core::mem::size_of::<T>();
+    assert!(
+        size == VEC4_SIZE as usize,
+        "wasm32 raw_write supports 16-byte values"
+    );
+    let mut bytes = [0u8; VEC4_SIZE as usize];
+    pod_store!(T, &mut bytes[..], value);
+    let lanes = lanes_from_bytes(&bytes);
+    wasm_raw_write(group, binding, offset, lanes);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn wasm_sample<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
+    uv: GpuVec2,
+) -> GpuVec4 {
+    let word = import_sample!(TG, TB, SG, SB, uv.x, uv.y);
+    GpuVec4 {
+        x: word.x,
+        y: word.y,
+        z: word.z,
+        w: word.w,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn pack_word(word: Word4) -> [u8; VEC4_SIZE as usize] {
+    let mut bytes = [0u8; VEC4_SIZE as usize];
+    let lanes = [word.x, word.y, word.z, word.w];
+    let mut index = 0usize;
+    while index < lanes.len() {
+        let chunk = lanes[index].to_le_bytes();
+        let start = index * core::mem::size_of::<f32>();
+        bytes[start..start + chunk.len()].copy_from_slice(&chunk);
+        index += 1;
+    }
+    bytes
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_raw_write(group: u32, binding: u32, offset: u32, lanes: [f32; LANE_COUNT]) {
+    import_write!(
+        group, binding, offset, lanes[0], lanes[1], lanes[2], lanes[3]
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn lanes_from_bytes(bytes: &[u8; VEC4_SIZE as usize]) -> [f32; LANE_COUNT] {
+    let mut lanes = [0.0f32; LANE_COUNT];
+    let mut index = 0usize;
+    while index < lanes.len() {
+        let start = index * core::mem::size_of::<f32>();
+        let mut chunk = [0u8; F32_SIZE as usize];
+        let len = chunk.len();
+        chunk.copy_from_slice(&bytes[start..start + len]);
+        lanes[index] = f32::from_le_bytes(chunk);
+        index += 1;
+    }
+    lanes
+}

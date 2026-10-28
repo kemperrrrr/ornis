@@ -40,7 +40,11 @@ name: Miri Nightly
 # - `-Zmiri-permissive-provenance`: crossbeam-epoch exposes pointers as
 #   integers internally, which is noisy `integer-to-pointer cast`
 #   warnings under strict provenance; permissive mode keeps the log
-#   readable without hiding real UB.
+#   readable without hiding real UB. This flag is only on the
+#   `ornis-core` step. `ornis-gpu-abi` runs a separate step with
+#   `-Zmiri-strict-provenance`: its host shadow never casts integers to
+#   pointers (the offset stays a `u32` until it is added to an
+#   allocation). The wasm32 import shim is not part of that job.
 
 on:
   schedule:
@@ -97,6 +101,14 @@ jobs:
           set -o pipefail
           mkdir -p target
           cargo +"$NIGHTLY_TOOLCHAIN" miri test -p ornis-core --features lock-free --lib --no-fail-fast 2>&1 | tee target/miri-nightly.log
+
+      - name: Miri test (ornis-gpu-abi lib, strict provenance)
+        shell: bash
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: |
+          set -o pipefail
+          cargo +"$NIGHTLY_TOOLCHAIN" miri test -p ornis-gpu-abi --lib --no-fail-fast 2>&1 | tee -a target/miri-nightly.log
 
       - name: Upload Miri log
         if: always()
