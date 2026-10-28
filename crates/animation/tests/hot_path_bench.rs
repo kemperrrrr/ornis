@@ -15,7 +15,8 @@
 //! always real base-branch code, not a rewritten legacy kernel. Scenarios
 //! cover the reviewer checklist: empty and small scenes (fixed overhead of
 //! the scratch/`RefCell` plumbing) and heavy scenes with 50–100-joint
-//! skeletons, crossfades, overlay layers and frozen bodies.
+//! skeletons, crossfades, overlay layers, animation trees and state
+//! machines, and frozen bodies.
 //!
 //! Builders keep their bodies in one inner block: rustqual's fragment
 //! scanner hashes windows of three consecutive statements, and the
@@ -38,6 +39,10 @@ use ornis_gameplay::Position;
 #[path = "hot_path_bench/layer.rs"]
 mod layer_shim;
 
+/// Era-specific animation-tree install, isolated for `hot_path_ab.sh`.
+#[path = "hot_path_bench/tree.rs"]
+mod tree_shim;
+
 /// Frame delta of the measured workload. Fades last far longer than the
 /// whole run, so every measured frame crossfades the same way.
 const DT: f32 = 1.0 / 60.0;
@@ -47,6 +52,8 @@ const WARMUP: u32 = 32;
 const FRAMES: u32 = 128;
 /// Fade duration: never completes within `WARMUP + FRAMES` frames.
 const FADE_SECONDS: f32 = 1000.0;
+/// Blend axis value of the tree scenes: two leaves at equal weight.
+const MID_BLEND: f32 = 0.5;
 
 /// Named scene builder of the report table.
 type Scene = (&'static str, fn() -> Engine);
@@ -65,6 +72,7 @@ fn engine() -> Engine {
             let store = store_mut(&mut engine);
             store.register::<SkelPlayer>();
             layer_shim::register(store);
+            tree_shim::register(store);
             store.register::<SkelFade>();
             store.register::<Skeleton>();
             store.register::<JointPose>();
@@ -260,14 +268,25 @@ fn obj_fade(clip: ClipId) -> AnimFade {
     }
 }
 
+/// Shared clips and mask of the skeletal scenes (fixture for the skel and
+/// tree builders, one call keeps their heads statement-identical only in
+/// the call, not in four lets).
+fn skel_scene_assets(engine: &mut Engine, joints: usize) -> (ClipId, ClipId, ClipId, MaskId) {
+    {
+        (
+            add_skel_clip(engine, skel_clip(joints)),
+            add_skel_clip(engine, skel_clip(joints)),
+            add_skel_clip(engine, skel_clip(joints)),
+            add_mask(engine, joints),
+        )
+    }
+}
+
 /// Adds `rigs` skeletons of `joints` chain links: player on every rig,
 /// crossfade on every second, overlay layer (half-weight mask) on quarters.
 fn add_skel_scene(engine: &mut Engine, rigs: usize, joints: usize) {
     {
-        let shared = add_skel_clip(engine, skel_clip(joints));
-        let outgoing = add_skel_clip(engine, skel_clip(joints));
-        let layer_clip = add_skel_clip(engine, skel_clip(joints));
-        let mask = add_mask(engine, joints);
+        let (shared, outgoing, layer_clip, mask) = skel_scene_assets(engine, joints);
         for rig_index in 0..rigs {
             let root = spawn_rig(engine, joints);
             {
@@ -305,6 +324,46 @@ fn add_obj_scene(engine: &mut Engine, targets: usize, frozen: usize) {
     }
 }
 
+/// Adds `rigs` skeletons driven by a two-leaf blend tree at mid weight,
+/// overlay layer on quarters — the tree analogue of `add_skel_scene`.
+fn add_tree_scene(engine: &mut Engine, rigs: usize, joints: usize) {
+    {
+        let (shared, outgoing, layer_clip, mask) = skel_scene_assets(engine, joints);
+        for rig_index in 0..rigs {
+            let root = spawn_rig(engine, joints);
+            tree_shim::install_blend(
+                store_mut(engine),
+                root,
+                [skel_player(shared), skel_player(outgoing)],
+                MID_BLEND,
+            );
+            if rig_index % 4 == 0 {
+                layer_shim::install(store_mut(engine), root, skel_player(layer_clip), mask);
+            }
+        }
+    }
+}
+
+/// Adds `rigs` skeletons driven by a state machine stuck mid-crossfade,
+/// overlay layer on quarters — the machine analogue of `add_tree_scene`.
+fn add_machine_scene(engine: &mut Engine, rigs: usize, joints: usize) {
+    {
+        let (shared, outgoing, layer_clip, mask) = skel_scene_assets(engine, joints);
+        for rig_index in 0..rigs {
+            let root = spawn_rig(engine, joints);
+            tree_shim::install_machine(
+                store_mut(engine),
+                root,
+                [skel_player(shared), skel_player(outgoing)],
+                1.0,
+            );
+            if rig_index % 4 == 0 {
+                layer_shim::install(store_mut(engine), root, skel_player(layer_clip), mask);
+            }
+        }
+    }
+}
+
 /// Store with all lanes registered and nothing in them: fixed plumbing cost.
 fn build_empty() -> Engine {
     engine()
@@ -325,6 +384,24 @@ fn build_skel_heavy() -> Engine {
     {
         let mut engine = engine();
         add_skel_scene(&mut engine, 64, 64);
+        engine
+    }
+}
+
+/// Tree heavy: 64 rigs × 64 joints, every root driven by a blend tree.
+fn build_tree_heavy() -> Engine {
+    {
+        let mut engine = engine();
+        add_tree_scene(&mut engine, 64, 64);
+        engine
+    }
+}
+
+/// Machine heavy: 64 rigs × 64 joints, every root driven by a machine.
+fn build_machine_heavy() -> Engine {
+    {
+        let mut engine = engine();
+        add_machine_scene(&mut engine, 64, 64);
         engine
     }
 }
@@ -382,10 +459,12 @@ fn stats(times: &[f64]) -> (f64, f64, f64, f64) {
 #[ignore = "frame-level benchmark — run with --ignored --nocapture"]
 fn frame_hot_path() {
     {
-        let scenes: [Scene; 5] = [
+        let scenes: [Scene; 7] = [
             ("empty", build_empty),
             ("small", build_small),
             ("skel_heavy", build_skel_heavy),
+            ("tree_heavy", build_tree_heavy),
+            ("machine_heavy", build_machine_heavy),
             ("object_heavy", build_object_heavy),
             ("full_mix", build_full_mix),
         ];

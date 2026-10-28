@@ -183,7 +183,7 @@
      scratch, `compose_model_matrices` в caller-буфер, `model_via_chain` без
      аллокаций). Замеры до/после — кадровый бенч
      `crates/animation/tests/hot_path_bench.rs` (`#[ignore]`, сценарии
-     empty/small/skel_heavy/object_heavy/full_mix) и A/B-скрипт
+     empty/small/skel_heavy/tree_heavy/machine_heavy/object_heavy/full_mix) и A/B-скрипт
      `tests/hot_path_ab.sh` (merge-base↔head, раздельные target-каталоги);
      замеры base↔head и отсутствие регресса на empty/small — в PR #180.
      Эквивалентность старого и нового ядер — обычные тесты без таймингов.
