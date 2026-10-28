@@ -1,6 +1,6 @@
 //! The only module in the SDK that contains `unsafe`.
 //!
-//! [`copy`] holds the byte copies (and, on `wasm32`, the import calls).
+//! `copy` holds the byte copies (and, on `wasm32`, the import calls).
 //! Everything else in this module checks bounds and alignment first, then
 //! asks `copy` to move plain bytes. Shader code outside this module is safe
 //! Rust: it never sees a raw pointer.

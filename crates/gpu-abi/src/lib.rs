@@ -8,7 +8,7 @@
 //! On the host, [`gpu_abi::with_host`] installs a shadow of those bindings so
 //! [`GpuRef::read`] / [`GpuRef::write`] can be executed and checked under Miri.
 //! On `wasm32` the same methods lower to `ornis_gpu` imports
-//! ([`symbols`]). Every `unsafe` block in this crate lives in [`gpu_abi::copy`].
+//! ([`symbols`]). Every `unsafe` block in this crate lives in `gpu_abi::copy`.
 
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
