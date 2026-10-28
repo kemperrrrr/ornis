@@ -179,7 +179,6 @@ fn step_chain(
 /// from the transition snapshot `from` at `progress` (§4.2), then the
 /// live pins of `set_ragdoll_weight` overwrite their joints. O(joints +
 /// bones). Leaf.
-
 fn fill_weights(
     mode: RagdollMode,
     mask: Option<&JointMask>,
