@@ -1,13 +1,16 @@
-//! RAT-48 culling stage profile: three scenes (stands, moves 1%, moves
-//! all) x three sizes (10k, 100k, 1M) x the two staging paths of the
-//! issue — `compact`, and `compact_records` fed by the renderer — as one
-//! markdown row per cell.
+//! RAT-48/RAT-52 culling stage profile: three scenes (stands, moves 1%,
+//! moves all) x three sizes (10k, 100k, 1M) x the three staging paths of
+//! the issue — `compact`, `compact_records` (the pre-#185 reference) and
+//! `compact_changed` (the incremental record build fed by the ECS change
+//! feed) — as one markdown row per cell.
 //!
 //! Each frame splits into the issue's stages. CPU: build (record
-//! conversion — the renderer's on the records path), `upload_per_objects`
-//! (the renderer's full-frame write, records path only), diff against the
-//! previous frame (records path: incl. the staging hand-off copy), the
-//! dirty-run `write_buffer` fill, and the uniform/args pre-write. GPU: the
+//! conversion — the renderer's on the record paths; on `compact_changed`
+//! only the changed entities are rebuilt), `upload_per_objects` (the
+//! renderer's per-object write), diff against the previous frame (the two
+//! full-frame paths; incl. the staging hand-off copy on
+//! `compact_records`), the dirty-run `write_buffer` fill, and the
+//! uniform/args pre-write. GPU: the
 //! culling compute pass and the indirect draw, read back through
 //! `wgpu::Features::TIMESTAMP_QUERY` pass timestamps — cells print "—"
 //! when the adapter lacks the feature or the readback fails. The stages
@@ -17,12 +20,12 @@
 //! Output: the table on stderr (copied into
 //! `crates/render/docs/culling-profile.md`), plus one criterion bench per
 //! cell so the wall time carries the harness statistics too.
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
 use glam::{Mat4, Vec3};
 use ornis_core::Entity;
-use ornis_render::{Culler, InstanceData, PerObjectGpu, gpu_culling::profile};
+use ornis_render::{Culler, InstanceData, PerObjectGpu};
 
 use super::probe::{PROBE_HEIGHT, PROBE_WIDTH, Probe};
 use super::{INDEX_COUNT, SIZE_10K, SIZE_100K, camera_view_proj, scene_line};
@@ -32,6 +35,9 @@ use model::{
 };
 
 mod model;
+mod stages;
+
+use stages::{build_records, fill_culling, prewrite};
 
 /// Instances in the largest profiled scene (one culler covers them all).
 const SIZE_1M: usize = 1_000_000;
@@ -40,9 +46,13 @@ const SIZE_1M: usize = 1_000_000;
 /// `MOVE_STRIDE`-th instance at 1%, all of them otherwise. The sign
 /// alternates with the step, so the scene drifts in place instead of
 /// walking out of the camera frame.
-fn apply_motion(instances: &mut [InstanceData], scenario: Scenario, step: usize) {
+///
+/// Returns the mover indices — exactly the change feed an ECS transform
+/// lane would report, which the changed path consumes instead of
+/// byte-diffing the whole frame.
+fn apply_motion(instances: &mut [InstanceData], scenario: Scenario, step: usize) -> Vec<u32> {
     let stride = match scenario {
-        Scenario::Static => return,
+        Scenario::Static => return Vec::new(),
         Scenario::MoveOnePercent => MOVE_STRIDE,
         Scenario::MoveAll => 1,
     };
@@ -56,11 +66,14 @@ fn apply_motion(instances: &mut [InstanceData], scenario: Scenario, step: usize)
         y: 0.0,
         z: 0.0,
     });
-    for chunk in instances.chunks_mut(stride) {
-        if let Some(instance) = chunk.first_mut() {
+    let mut moved = Vec::with_capacity(instances.len().div_ceil(stride));
+    for (index, instance) in instances.iter_mut().enumerate() {
+        if index.is_multiple_of(stride) {
             instance.model_matrix = shift * instance.model_matrix;
+            moved.push(index as u32);
         }
     }
+    moved
 }
 
 // qual:allow(test_quality, untested) reason: "bench-only frame pipeline, driven by the criterion harness, never under libtest"
@@ -72,27 +85,12 @@ fn apply_motion(instances: &mut [InstanceData], scenario: Scenario, step: usize)
 fn profile_frame(frame: &mut Frame) -> Stages {
     let mut stages = Stages::default();
     let wall = Instant::now();
-    apply_motion(&mut frame.instances, frame.scenario, frame.step);
+    let first_frame = frame.step == 0;
+    let moved = apply_motion(&mut frame.instances, frame.scenario, frame.step);
     frame.step += 1;
 
-    let clock = Instant::now();
-    match frame.path {
-        BenchPath::Compact => {
-            frame.next.clear();
-            profile::convert(&mut frame.next, &frame.instances);
-        }
-        BenchPath::Records => {
-            frame.records = frame.renderer.profile_stage_records(
-                frame.setup.device,
-                &frame.instances,
-                &[],
-                &frame.entities,
-            );
-        }
-    }
-    stages.build = clock.elapsed();
-
-    if frame.path == BenchPath::Records {
+    stages.build = build_records(frame, &moved, first_frame);
+    if frame.path != BenchPath::Compact {
         let clock = Instant::now();
         frame
             .renderer
@@ -101,40 +99,23 @@ fn profile_frame(frame: &mut Frame) -> Stages {
         stages.upload_measured = true;
     }
 
-    let clock = Instant::now();
-    if frame.path == BenchPath::Records {
-        frame.next.clear();
-        frame.next.extend_from_slice(&frame.records);
+    let (diff, staged) = fill_culling(frame);
+    if frame.path != BenchPath::Changed {
+        stages.diff = diff;
+        stages.diff_measured = true;
     }
-    let ranges = profile::diff(&frame.prev, &frame.next);
-    stages.diff = clock.elapsed();
-    let staged = frame.next.len();
-
-    let clock = Instant::now();
-    frame
-        .setup
-        .culler
-        .profile_write_dirty(frame.setup.queue, &frame.next, &ranges);
-    stages.fill = clock.elapsed();
-    std::mem::swap(&mut frame.prev, &mut frame.next);
-
-    let clock = Instant::now();
-    frame.setup.culler.profile_prewrite(
-        frame.setup.queue,
-        &frame.setup.view_proj,
-        INDEX_COUNT,
-        staged as u32,
-    );
-    stages.prewrite = clock.elapsed();
-
+    stages.fill = diff;
+    stages.prewrite = prewrite(frame, staged);
     let (compute, draw) =
         frame
             .setup
             .probe
             .timed_passes(frame.setup.device, frame.setup.queue, frame.setup.culler);
-    stages.compute = compute.unwrap_or(Duration::ZERO);
-    stages.draw = draw.unwrap_or(Duration::ZERO);
-    stages.gpu_measured = compute.is_some() && draw.is_some();
+    if let (Some(compute), Some(draw)) = (compute, draw) {
+        stages.compute = compute;
+        stages.draw = draw;
+        stages.gpu_measured = true;
+    }
     stages.wall = wall.elapsed();
     stages
 }
@@ -178,7 +159,7 @@ fn profile_size(
         Scenario::MoveOnePercent,
         Scenario::MoveAll,
     ] {
-        for path in [BenchPath::Compact, BenchPath::Records] {
+        for path in [BenchPath::Compact, BenchPath::Records, BenchPath::Changed] {
             let mut frame = Frame::new(setup, base, entities, scenario, path);
             let row = profile_cell(group, &mut frame);
             eprintln!("{}", row.row(scenario.label(), base.len(), path.label()));
