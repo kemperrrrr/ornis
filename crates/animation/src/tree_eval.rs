@@ -12,7 +12,7 @@ use crate::blend::{BlendedPose, SampleBuf, fade_progress, sample_joints};
 use crate::tree::{
     MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild2d, TreeNodeDef, TreeTransition,
 };
-use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
+use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights, freeform2d_weights};
 use crate::{ClipId, JointTrs, RetargetMap, SkelClip};
 
 /// Scratch buffers of [`eval_tree`], grouped to stay inside clippy's
@@ -100,6 +100,9 @@ pub(crate) fn eval_tree(
             TreeNodeDef::Blend2d { axes, children } => {
                 eval_blend2d(*axes, children, &player.params, rest, index, poses)?;
             }
+            TreeNodeDef::Freeform2d { axes, children } => {
+                eval_freeform2d(*axes, children, &player.params, rest, index, poses)?;
+            }
             TreeNodeDef::Machine {
                 states,
                 initial: _,
@@ -161,6 +164,62 @@ pub(crate) fn eval_blend2d(
         let node_index = children[*child].node;
         let (earlier, tail) = poses.split_at_mut(index);
         tail[0].fold_pose(&earlier[node_index], *weight, &mut total);
+    }
+    Some(())
+}
+
+/// The [`eval_tree`] freeform contract, checked every frame by both the
+/// pose fold ([`eval_freeform2d`]) and the event-weight walk
+/// ([`crate::tree_eff::fold_freeform2d_eff`]): children among the
+/// earlier nodes at finite positions, pairwise distinct (the
+/// triangulation needs them), and no more than
+/// [`FREEFORM_MAX_POINTS`](crate::tree::FREEFORM_MAX_POINTS) of them —
+/// the same broken tree must not answer differently at different
+/// parameter values.
+pub(crate) fn freeform2d_children_valid(index: usize, children: &[TreeChild2d]) -> Option<()> {
+    if children.len() > crate::tree::FREEFORM_MAX_POINTS {
+        return None;
+    }
+    for (slot, child) in children.iter().enumerate() {
+        if child.node >= index
+            || !child.position[0].is_finite()
+            || !child.position[1].is_finite()
+            || children[..slot]
+                .iter()
+                .any(|other| other.position == child.position)
+        {
+            return None;
+        }
+    }
+    Some(())
+}
+
+/// Evaluates one [`TreeNodeDef::Freeform2d`] node into `poses[index]`.
+/// The hot path re-checks the fold-poisoning part of the contract every
+/// frame ([`freeform2d_children_valid`], finite parameter values) — the
+/// triangulation itself is recomputed deterministically from the points
+/// ([`freeform2d_weights`]). The output is the barycentric fold of the
+/// containing triangle's corners (or the nearest hull edge outside the
+/// convex hull); `None` = bad skin.
+pub(crate) fn eval_freeform2d(
+    axes: [usize; 2],
+    children: &[TreeChild2d],
+    params: &[f32],
+    rest: &[JointTrs],
+    index: usize,
+    poses: &mut [BlendedPose],
+) -> Option<()> {
+    freeform2d_children_valid(index, children)?;
+    let value = [params.get(axes[0]).copied()?, params.get(axes[1]).copied()?];
+    if !value[0].is_finite() || !value[1].is_finite() {
+        return None;
+    }
+    let slots = freeform2d_weights(children, value);
+    poses[index].refill_rest(rest);
+    let mut total = 0.0;
+    for (node_index, weight) in slots.as_slice() {
+        let (earlier, tail) = poses.split_at_mut(index);
+        tail[0].fold_pose(&earlier[*node_index], *weight, &mut total);
     }
     Some(())
 }

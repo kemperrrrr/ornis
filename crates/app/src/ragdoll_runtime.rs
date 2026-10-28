@@ -226,24 +226,15 @@ impl RagdollRuntime {
     // qual:api — snapshot/undo seam for hosts; the clone-isolation tests
     // are its first in-tree callers.
     pub fn deep_clone(&self) -> Self {
-        let chain = match &self.chain {
-            RagdollChain::Aba(engine) => {
-                let fresh = match engine.lock() {
-                    Ok(live) => (*live).clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                RagdollChain::Aba(Arc::new(Mutex::new(fresh)))
-            }
-            RagdollChain::G5 => RagdollChain::G5,
-        };
-        Self {
-            chain,
-            bodies: self.bodies.clone(),
-            templates: self.templates.clone(),
-            joints: self.joints.clone(),
-            bind: self.bind.clone(),
-            parents: self.parents.clone(),
+        let mut copy = self.clone();
+        if let RagdollChain::Aba(engine) = &self.chain {
+            let fresh = match engine.lock() {
+                Ok(live) => (*live).clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            copy.chain = RagdollChain::Aba(Arc::new(Mutex::new(fresh)));
         }
+        copy
     }
 
     /// Model→local sample of §4.1 (ABA seam): writes each bone's physical

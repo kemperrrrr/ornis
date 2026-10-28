@@ -28,18 +28,27 @@ pub struct TreeChild {
     pub node: usize,
 }
 
-/// One input of a [`TreeNodeDef::Blend2d`] node.
+/// One input of a [`TreeNodeDef::Blend2d`] or [`TreeNodeDef::Freeform2d`]
+/// node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TreeChild2d {
-    /// Position of the input on the node's two parameter axes. The
-    /// `children` form a complete row-major lattice: rows share
-    /// `position[1]`, columns share `position[0]`, and both ascend
-    /// strictly along the lattice.
+    /// Position of the input on the node's two parameter axes. For
+    /// [`TreeNodeDef::Blend2d`] the `children` form a complete row-major
+    /// lattice: rows share `position[1]`, columns share `position[0]`,
+    /// and both ascend strictly along the lattice. For
+    /// [`TreeNodeDef::Freeform2d`] the positions are arbitrary distinct
+    /// points — no lattice, at most [`FREEFORM_MAX_POINTS`] of them.
     pub position: [f32; 2],
     /// Index of the child node in [`SkelTree::nodes`], strictly smaller
     /// than the index of the blend node itself.
     pub node: usize,
 }
+
+/// Cap of one [`TreeNodeDef::Freeform2d`] input set: the triangulation
+/// folds in fixed buffers on the hot path, and authored blend spaces
+/// (speed × direction and friends) stay far below this. More points —
+/// the tree is refused at install and reads as bad skin at eval.
+pub const FREEFORM_MAX_POINTS: usize = 16;
 
 /// Comparison of a tree parameter against [`TreeCond::value`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +133,28 @@ pub enum TreeNodeDef {
         /// drive this node.
         axes: [usize; 2],
         /// Inputs on a complete row-major lattice ([`TreeChild2d`]);
+        /// empty reads as rest.
+        children: Vec<TreeChild2d>,
+    },
+    /// 2-D **freeform** blend of `children` over parameters `axes`
+    /// (x, y): the inputs sit at arbitrary distinct points of the plane
+    /// (e.g. speed × direction) — no lattice. The points are
+    /// triangulated (deterministic empty-circumcircle set, no
+    /// allocations) and the containing triangle's corners carry
+    /// barycentric weights summing to one (`freeform2d_weights`); the
+    /// weights are continuous across shared triangle edges. Exactly on
+    /// a hull edge or corner the edge or corner owns the pose; outside
+    /// the convex hull the value clamps to its nearest hull segment
+    /// (the nearest edge carries the pose — the same «outside = nearest
+    /// owns» rule as [`TreeNodeDef::Blend2d`]); a collinear set
+    /// degenerates to its hull segment and a one-point set is that
+    /// point. Empty reads as rest. At most [`FREEFORM_MAX_POINTS`]
+    /// distinct points.
+    Freeform2d {
+        /// Two distinct indices into [`SkelTree::params`] (x, y) that
+        /// drive this node.
+        axes: [usize; 2],
+        /// Inputs at arbitrary distinct positions ([`TreeChild2d`]);
         /// empty reads as rest.
         children: Vec<TreeChild2d>,
     },

@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     AnimClip, AnimEvent, AnimFade, AnimPlayer, AnimTrack, Animator, AnimatorError, BasePull,
-    ClipEvents, ClipId, ClipSyncMarks, ControlRig, Effector, IkStack, JointId, JointMask,
-    JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, MaskId, RetargetMap, SkelClip,
-    SkelFade, SkelInertia, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer, Skeleton,
-    SkinnedMesh, SwitchCursor, SyncMark, TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
+    ClipEvents, ClipId, ClipSyncMarks, ControlRig, Effector, FREEFORM_MAX_POINTS, IkStack, JointId,
+    JointMask, JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, MaskId, RetargetMap,
+    SkelClip, SkelFade, SkelInertia, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer,
+    Skeleton, SkinnedMesh, SwitchCursor, SyncMark, TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
     TreeTransition, fade_in_flight, switch_selection, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
@@ -789,6 +789,28 @@ fn blend2d_node_valid(
         && blend2d_lattice_ok(children)
 }
 
+/// [`TreeNodeDef::Freeform2d`] arm of [`tree_is_valid`]: distinct axes
+/// in range, children among the earlier nodes at finite **distinct**
+/// positions (the triangulation needs them) and no more than
+/// [`FREEFORM_MAX_POINTS`] of them.
+fn freeform2d_node_valid(
+    tree: &SkelTree,
+    axes: [usize; 2],
+    children: &[TreeChild2d],
+    index: usize,
+) -> bool {
+    axes[0] != axes[1]
+        && axes.iter().all(|axis| *axis < tree.params.len())
+        && children.len() <= FREEFORM_MAX_POINTS
+        && children.iter().enumerate().all(|(slot, child)| {
+            child.node < index
+                && child.position.iter().all(|axis| axis.is_finite())
+                && children[..slot]
+                    .iter()
+                    .all(|other| other.position != child.position)
+        })
+}
+
 /// [`TreeNodeDef::Machine`] arm of [`tree_is_valid`]: non-empty states
 /// among the earlier nodes, an in-range initial state and in-range finite
 /// transitions.
@@ -844,6 +866,9 @@ fn tree_is_valid(store: &SmartStore, tree: &SkelTree) -> bool {
                 }
                 TreeNodeDef::Blend2d { axes, children } => {
                     blend2d_node_valid(tree, *axes, children, index)
+                }
+                TreeNodeDef::Freeform2d { axes, children } => {
+                    freeform2d_node_valid(tree, *axes, children, index)
                 }
                 TreeNodeDef::Machine {
                     states,

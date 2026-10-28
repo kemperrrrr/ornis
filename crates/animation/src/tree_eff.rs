@@ -16,8 +16,8 @@ use crate::blend::fade_progress;
 use crate::tree::{
     MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeNodeDef,
 };
-use crate::tree_eval::{machine_states_valid, switch_children_valid};
-use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
+use crate::tree_eval::{freeform2d_children_valid, machine_states_valid, switch_children_valid};
+use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights, freeform2d_weights};
 
 /// Reusable buffers of the [`leaf_effective_weights`] walk — node weights
 /// and the leaf result. The caller keeps one in its frame scratch (like
@@ -95,6 +95,13 @@ fn eff_weights(
                     player.params.get(axes[1]).copied()?,
                 ];
                 fold_blend2d_eff(&mut scratch.eff, index, weight, children, value)?;
+            }
+            TreeNodeDef::Freeform2d { axes, children } => {
+                let value = [
+                    player.params.get(axes[0]).copied()?,
+                    player.params.get(axes[1]).copied()?,
+                ];
+                fold_freeform2d_eff(&mut scratch.eff, index, weight, children, value)?;
             }
             TreeNodeDef::Machine { states, .. } => {
                 machine_cursor = machine_cursor.checked_sub(1)?;
@@ -187,6 +194,27 @@ fn spread_blend2d(eff: &mut [f32], weight: f32, children: &[TreeChild2d], value:
     for (child, child_weight) in weights.iter().take(filled) {
         eff[children[*child].node] += weight * child_weight;
     }
+}
+
+/// Folds one [`TreeNodeDef::Freeform2d`] node's weight into its
+/// triangulation weights ([`freeform2d_weights`] carries node indices);
+/// `None` on the [`crate::tree_eval::eval_tree`] contract violations.
+fn fold_freeform2d_eff(
+    eff: &mut [f32],
+    index: usize,
+    weight: f32,
+    children: &[TreeChild2d],
+    value: [f32; 2],
+) -> Option<()> {
+    if !value[0].is_finite() || !value[1].is_finite() {
+        return None;
+    }
+    freeform2d_children_valid(index, children)?;
+    let slots = freeform2d_weights(children, value);
+    for (node, child_weight) in slots.as_slice() {
+        eff[*node] += weight * child_weight;
+    }
+    Some(())
 }
 
 /// Folds one [`TreeNodeDef::Machine`] node's weight into its states: the

@@ -111,8 +111,8 @@ pub use ragdoll::{
     RagdollMode, RagdollMotor, RagdollShape, ragdoll_blend,
 };
 pub use tree::{
-    MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeCmp,
-    TreeCond, TreeNodeDef, TreeParam, TreeTransition, switch_selection,
+    FREEFORM_MAX_POINTS, MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild,
+    TreeChild2d, TreeCmp, TreeCond, TreeNodeDef, TreeParam, TreeTransition, switch_selection,
 };
 use tree_eval::eval_tree;
 use tree_sync::sync_transition_leaves;
