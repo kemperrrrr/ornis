@@ -11,6 +11,7 @@ use ornis_core::Clamped01;
 use crate::ik_solve::{axis_ok, fk_model, fold_chain, parent_model_rot};
 use crate::{JointId, JointTrs};
 
+pub use crate::ik_ccd::solve_ccd_ik;
 pub use crate::ik_solve::{FkScratch, solve_look_at, solve_two_bone_ik};
 
 /// One two-bone IK constraint (design §8.2): aim the `root → mid → end`
@@ -38,16 +39,50 @@ pub struct TwoBoneIk {
     pub weight: Clamped01,
 }
 
+/// Tail-chain CCD, design §8.6 (`Effector::Ccd`).
+///
+/// The chain `root..=end` is any length — the tail case two-bone
+/// cannot fold. Pure data: [`crate::solve_ccd_ik`] is a stateless
+/// function of `(pose, target)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CcdIk {
+    /// Chain base joint; the first the solver may rotate.
+    pub root: JointId,
+    /// Tip joint the target is reached with; the solver never rotates it.
+    pub end: JointId,
+    /// Goal position of `end`, in the skeleton model space of the root
+    /// (the seam to world space is the host's, as with
+    /// [`TwoBoneIk::target`]).
+    pub target: Vec3,
+    /// Blend strength in `[0, 1]`: `1` writes the solved local
+    /// rotations, `0.5` lands every chain joint halfway between its
+    /// input and solved rotation (the tip then falls short of the
+    /// target by exactly that much).
+    pub weight: Clamped01,
+}
+
+impl CcdIk {
+    /// In-range distinct joints and a finite target (design §8.6).
+    /// Chain ancestry is checked when the solver runs.
+    fn installable(&self, joints: usize) -> bool {
+        let (root, end) = (self.root.index(), self.end.index());
+        root < joints && end < joints && root != end && self.target.is_finite()
+    }
+}
+
 /// One authored aim on a skeleton root (design §8.6).
 ///
 /// `TwoBone` folds a knee/elbow chain; `LookAt` turns one joint so a
-/// local axis points at a target. [`IkStack`] applies them in order.
+/// local axis points at a target; `Ccd` reaches a tail chain of any
+/// length at a point. [`IkStack`] applies them in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Effector {
     /// Two-bone chain (knee/elbow), design §8.2.
     TwoBone(TwoBoneIk),
     /// Single joint aiming a local axis at a point, design §8.6.
     LookAt(LookAt),
+    /// Tail chain of any length reaching a point, design §8.6.
+    Ccd(CcdIk),
 }
 
 impl Effector {
@@ -59,6 +94,7 @@ impl Effector {
         match self {
             Self::TwoBone(chain) => chain.installable(joints),
             Self::LookAt(look) => look.installable(joints),
+            Self::Ccd(chain) => chain.installable(joints),
         }
     }
 }
@@ -185,6 +221,12 @@ impl ControlRig {
                     aim: look.aim,
                     weight: look.weight,
                 }),
+                Effector::Ccd(chain) => Effector::Ccd(CcdIk {
+                    root: chain.root,
+                    end: chain.end,
+                    target: to_model.transform_point3(chain.target),
+                    weight: chain.weight,
+                }),
             })
             .collect();
         IkStack {
@@ -211,7 +253,7 @@ fn base_shift(
     for effector in effectors {
         let chain = match effector {
             Effector::TwoBone(chain) => chain,
-            Effector::LookAt(_) => continue,
+            Effector::LookAt(_) | Effector::Ccd(_) => continue,
         };
         let strength = chain.weight.get();
         let triple = (chain.root.index(), chain.mid.index(), chain.end.index());
@@ -272,6 +314,9 @@ fn apply_effector(
         }
         Effector::LookAt(look) => {
             solve_look_at(trs, parents, look, fk);
+        }
+        Effector::Ccd(chain) => {
+            solve_ccd_ik(trs, parents, chain, fk);
         }
     }
 }
@@ -398,6 +443,91 @@ mod tests {
         assert!(moved);
         let halfway = Quat::IDENTITY.slerp(full[0].rotation, 0.5);
         assert!(half[0].rotation.abs_diff_eq(halfway, 1e-4));
+    }
+
+    /// A 5-joint tail (4 unit bones) solved to `target` at `weight`.
+    fn solve_tail(target: Vec3, weight: f32) -> (Vec<JointTrs>, Vec<Option<JointId>>, bool) {
+        let (mut trs, parents) = chain(5);
+        let moved = solve_ccd_ik(
+            &mut trs,
+            &parents,
+            &CcdIk {
+                root: JointId::from_raw(0),
+                end: JointId::from_raw(4),
+                target,
+                weight: Clamped01::new(weight),
+            },
+            &mut FkScratch::default(),
+        );
+        (trs, parents, moved)
+    }
+
+    #[test]
+    fn a_tail_reaches_a_reachable_target() {
+        let (trs, _parents, moved) = solve_tail(Vec3::new(1.5, 1.5, 0.2), 1.0);
+        assert!(moved);
+        let end = model_position(&trs, 4);
+        assert!(
+            (end - Vec3::new(1.5, 1.5, 0.2)).length() < 1e-3,
+            "end at {end:?}"
+        );
+    }
+
+    #[test]
+    fn a_tail_reaches_around_a_bend() {
+        // Behind the base: two-bone cannot fold this, the tail curls.
+        let (trs, _parents, moved) = solve_tail(Vec3::new(-1.0, 1.5, 0.0), 1.0);
+        assert!(moved);
+        let end = model_position(&trs, 4);
+        assert!(
+            (end - Vec3::new(-1.0, 1.5, 0.0)).length() < 1e-3,
+            "end at {end:?}"
+        );
+    }
+
+    #[test]
+    fn tail_bone_lengths_survive_the_solver() {
+        let (trs, _parents, _) = solve_tail(Vec3::new(1.5, 1.5, 0.2), 1.0);
+        for joint in 1..5 {
+            let length = (model_position(&trs, joint) - model_position(&trs, joint - 1)).length();
+            assert!((length - 1.0).abs() < 1e-4, "bone {joint} at {length}");
+        }
+    }
+
+    #[test]
+    fn tail_zero_weight_is_a_noop() {
+        let (trs, _parents, moved) = solve_tail(Vec3::new(1.5, 1.5, 0.2), 0.0);
+        assert!(!moved);
+        assert_eq!(trs[1].rotation, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn tail_half_weight_lands_halfway() {
+        let (full, _parents, _) = solve_tail(Vec3::new(1.5, 1.5, 0.2), 1.0);
+        let (half, _parents_half, moved) = solve_tail(Vec3::new(1.5, 1.5, 0.2), 0.5);
+        assert!(moved);
+        let halfway = Quat::IDENTITY.slerp(full[1].rotation, 0.5);
+        assert!(half[1].rotation.abs_diff_eq(halfway, 1e-4));
+    }
+
+    #[test]
+    fn a_tail_off_the_chain_never_moves() {
+        // `root` not on the parent walk from `end` (a fork).
+        let (mut trs, mut parents) = chain(5);
+        parents[4] = Some(JointId::from_raw(1));
+        let moved = solve_ccd_ik(
+            &mut trs,
+            &parents,
+            &CcdIk {
+                root: JointId::from_raw(3),
+                end: JointId::from_raw(4),
+                target: Vec3::new(1.5, 1.5, 0.2),
+                weight: Clamped01::new(1.0),
+            },
+            &mut FkScratch::default(),
+        );
+        assert!(!moved);
+        assert_eq!(trs[3].rotation, Quat::IDENTITY);
     }
 
     #[test]

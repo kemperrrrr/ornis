@@ -35,7 +35,7 @@ pub(crate) struct Aim {
 
 /// The rotation that takes direction `from` onto direction `to` — the
 /// solver's rotation construction, its own seam.
-fn arc_rotation(from: Vec3, to: Vec3) -> Quat {
+pub(crate) fn arc_rotation(from: Vec3, to: Vec3) -> Quat {
     Quat::from_rotation_arc(from, to)
 }
 
@@ -53,6 +53,9 @@ pub struct FkScratch {
     pub(crate) model_rot: Vec<Quat>,
     /// Model-space positions of every joint, parents before children.
     pub(crate) model_pos: Vec<Vec3>,
+    /// Input local rotations saved by the CCD solve (`solve_ccd_ik`)
+    /// before its iterations, for the one weight blend at the end.
+    pub(crate) orig_rot: Vec<Quat>,
 }
 
 /// Forward kinematics into `buf` (in place): model-space rotations and
