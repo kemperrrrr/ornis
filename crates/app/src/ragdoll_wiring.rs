@@ -1680,8 +1680,8 @@ mod tests {
             base: RagdollBase::Floating,
         };
         let bind = vec![
-            (Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
-            (Vec3::Y, Quat::IDENTITY, Vec3::splat(2.0)),
+            (Vec3::ZERO, Quat::IDENTITY, Vec3::splat(2.0)),
+            (Vec3::Y, Quat::IDENTITY, Vec3::ONE),
         ];
         let parents = vec![None, Some(0)];
         let mut out = vec![JointTrs::IDENTITY; 2];
