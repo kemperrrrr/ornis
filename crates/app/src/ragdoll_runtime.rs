@@ -196,7 +196,6 @@ impl RagdollRuntime {
 
     /// The G5 world joint handle of bone `link` (`None` on the root, on
     /// the ABA path, or while the bone is unbound).
-    // qual:api — §11 seam; hosts probing the G5 joints read it.
     pub fn g5_joint(&self, link: usize) -> Option<JointHandle> {
         self.joints.get(link).copied().flatten()
     }

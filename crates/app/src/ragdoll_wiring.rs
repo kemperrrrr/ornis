@@ -45,8 +45,6 @@ pub fn set_ragdoll(
     install_ragdoll(store, root, desc, runtime, joints)
 }
 
-// qual:api — typed G5 ragdoll install for hosts (contact/rope scenes,
-// §11); in-tree callers land with the load wiring.
 /// Installs the G5 ragdoll of `root` from `desc` (§11): the bones ride
 /// world bodies and `JointKind` joints of the world solver — contacts and
 /// ropes are native, no chain engine and no §8.5 proxy coupling. The

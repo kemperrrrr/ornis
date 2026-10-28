@@ -105,7 +105,6 @@ impl PhysicsRuntime {
     /// or when the solver refuses the joint — the caller records no
     /// handle and the world simply has no joint. Joints die with their
     /// bodies: dropping either side destroys the joint (§11 lifecycle).
-    // qual:api — §11 G5 ragdoll seam; ragdoll_proxy is the first caller.
     pub fn add_joint_between(
         &mut self,
         bodies: &ComponentStore<RigidBody>,
