@@ -1670,6 +1670,38 @@ mod tests {
         slots.into_iter().map(|(_, position)| position).collect()
     }
 
+    /// §4.1 seam core straight: [`crate::ragdoll_g5::sample_local_into`]
+    /// folds served world poses into locals and divides the offset by the
+    /// parent's accumulated bind scale (rigid bodies carry none).
+    #[test]
+    fn seam_core_folds_locals_against_the_parent_body() {
+        let desc = RagdollDesc {
+            bones: vec![bone(0, None), bone(1, Some(0))],
+            base: RagdollBase::Floating,
+        };
+        let bind = vec![
+            (Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
+            (Vec3::Y, Quat::IDENTITY, Vec3::splat(2.0)),
+        ];
+        let parents = vec![None, Some(0)];
+        let mut out = vec![JointTrs::IDENTITY; 2];
+        let served = [
+            (Vec3::ZERO, Quat::IDENTITY),
+            (Vec3::new(0.0, 4.0, 0.0), Quat::IDENTITY),
+        ];
+        let ok = crate::ragdoll_g5::sample_local_into(&desc, &mut out, &bind, &parents, |index| {
+            served.get(index).copied()
+        });
+        assert!(ok, "both bodies served");
+        let child = out[1];
+        assert!(
+            (child.translation - Vec3::new(0.0, 2.0, 0.0)).length() < 1e-5,
+            "offset divided by the parent scale: {:?}",
+            child.translation
+        );
+        assert_eq!(out[0].translation, Vec3::ZERO, "the root rides its body");
+    }
+
     /// Fill flags of the G5 joint table of `root` (§11 bind/unbind tests).
     fn g5_joint_filled(engine: &Engine, root: Entity) -> Vec<bool> {
         let store = engine.world().store().expect("world store");
