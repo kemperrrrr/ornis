@@ -21,36 +21,6 @@ use crate::physics_runtime::PhysicsRuntime;
 use crate::ragdoll_g5::{G5World, bind_g5_joints, bind_proxy_body, pin_g5_fixed_root};
 use crate::ragdoll_runtime::{RagdollProxy, RagdollRuntime};
 
-/// The world's default collision layer bit (§8.5 proxy filters): bit 0
-/// stays the world's, bone `i` takes bit `i + 1`.
-const WORLD_LAYER_BIT: u32 = 1;
-/// Top layer bit a proxy bone can own (§8.5): u32 bit 31 — longer chains
-/// share it (their direct neighbours stay masked out).
-const MAX_PROXY_CHAIN_BITS: usize = 31;
-/// Adjacency half-width of the §8.5 self-collision mask: the bone and its
-/// direct neighbours never collide.
-const ADJACENT_BONES: usize = 1;
-
-/// Layer bit of bone `link` (§8.5): bit 0 is the world's default layer,
-/// bone `i` takes bit `i + 1` — chains past [`MAX_PROXY_CHAIN_BITS`]
-/// bones share the top bit.
-pub(crate) fn proxy_layer(link: usize) -> u32 {
-    1u32 << ((link + 1).min(MAX_PROXY_CHAIN_BITS) as u32)
-}
-
-/// Collision mask of bone `link` (§8.5): the world's bit plus every chain
-/// bone except the bone itself and its direct neighbours — parent/child
-/// pairs cannot collide (the hinge keeps them together), cousins can.
-pub(crate) fn proxy_mask(links: usize, link: usize) -> u32 {
-    let mut mask = WORLD_LAYER_BIT;
-    for other in 0..links {
-        if other.abs_diff(link) > ADJACENT_BONES {
-            mask |= proxy_layer(other);
-        }
-    }
-    mask
-}
-
 /// Whether the world proxy of `bone` is bound this tick (§8.5): physical
 /// mode binds always, `Blend` binds at a non-zero live weight, `Animated`
 /// never binds — an unbound proxy manufactures no false impulses.

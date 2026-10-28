@@ -108,7 +108,7 @@ impl RagdollRuntime {
     // (slice 2) is its first in-tree caller.
     pub fn bone_count(&self) -> usize {
         self.with_engine(|engine| engine.body_count())
-            .unwrap_or(self.bodies.len())
+            .unwrap_or(self.bind.len())
     }
 
     /// Seam data of bone `bone` ([`RagdollBoneView`]).
@@ -214,9 +214,10 @@ impl RagdollRuntime {
 
     /// Model→local sample of §4.1 (ABA seam): writes each bone's physical
     /// local pose into `out[bone.joint]` from the chain bodies. The sample
-    /// lives in the skeleton's **model space** — see
-    /// [`crate::ragdoll_g5::sample_local_into`] for the seam itself. Fails on a poisoned lock, a missing body or a
-    /// non-finite pose, writing nothing further. Hot path: no allocations.
+    /// lives in the skeleton's **model space** — see `sample_local_into`
+    /// (the seam core, `ragdoll_g5`) for the seam itself. Fails on a
+    /// poisoned lock, a missing body or a non-finite pose, writing
+    /// nothing further. Hot path: no allocations.
     pub fn sample_local(&self, desc: &RagdollDesc, out: &mut [JointTrs]) -> bool {
         self.with_engine(|engine| {
             crate::ragdoll_g5::sample_local_into(desc, out, &self.bind, &self.parents, |index| {
