@@ -1,4 +1,5 @@
-//! One vertex+fragment pass: uniform `raw_read` and `texture_sample_2d`.
+//! Vertex+fragment passes: uniform `raw_read`, `texture_sample_2d`, and
+//! storage read/write with an element index.
 
 use ornis_gpu_abi::FieldLayout;
 use ornis_gpu_abi::GpuSafeLayout;
@@ -56,6 +57,80 @@ fn uniform_and_texture_round_trip() {
     assert!(!translated.wgsl.contains("binding_array"));
     assert!(!translated.vertex_spirv.is_empty());
     assert!(!translated.fragment_spirv.is_empty());
+}
+
+#[test]
+fn storage_index_is_an_access_chain() {
+    let wasm = wat::parse_str(format!(
+        r#"(module
+            (import "{module}" "{read}" (func $read (param i32 i32 i32) (result f32 f32 f32 f32)))
+            (import "{module}" "{write}" (func $write (param i32 i32 i32 f32 f32 f32 f32)))
+            (func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
+                local.get 0
+                local.get 1
+                f32.const 0
+                f32.const 1
+                local.get 2
+                local.get 3)
+            (func (export "{fs}") (param f32 f32 i32) (result f32 f32 f32 f32)
+                i32.const 0
+                i32.const 1
+                local.get 2
+                call $read
+                i32.const 0
+                i32.const 1
+                local.get 2
+                local.get 0
+                local.get 1
+                f32.const 0
+                f32.const 1
+                call $write))
+        "#,
+        module = symbols::MODULE,
+        read = symbols::STORAGE_READ,
+        write = symbols::STORAGE_WRITE,
+        vs = symbols::VS_MAIN,
+        fs = symbols::FS_MAIN,
+    ))
+    .expect("wat");
+    let translated = translate(&wasm).expect("storage");
+    assert!(translated.wgsl.contains("var<storage, read_write>"));
+    assert!(translated.wgsl.contains("array<vec4<f32>>"));
+    assert!(translated.wgsl.contains("@group(0)"));
+    assert!(translated.wgsl.contains("@binding(1)"));
+    assert!(translated.wgsl.contains("storage_0_1_"));
+    assert!(translated.wgsl.contains("storage_0_1_["));
+    assert!(!translated.wgsl.contains("binding_array"));
+    assert!(!translated.vertex_spirv.is_empty());
+    assert!(!translated.fragment_spirv.is_empty());
+}
+
+#[test]
+fn storage_dynamic_binding_is_rejected() {
+    let wasm = wat::parse_str(format!(
+        r#"(module
+            (import "{module}" "{read}" (func $read (param i32 i32 i32) (result f32 f32 f32 f32)))
+            (func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
+                local.get 0
+                local.get 1
+                f32.const 0
+                f32.const 1
+                local.get 2
+                local.get 3)
+            (func (export "{fs}") (param f32 f32 i32) (result f32 f32 f32 f32)
+                local.get 2
+                i32.const 1
+                i32.const 0
+                call $read))
+        "#,
+        module = symbols::MODULE,
+        read = symbols::STORAGE_READ,
+        vs = symbols::VS_MAIN,
+        fs = symbols::FS_MAIN,
+    ))
+    .expect("wat");
+    let err = translate(&wasm).expect_err("bindless");
+    assert!(matches!(err, TranslateError::DynamicBinding));
 }
 
 #[test]

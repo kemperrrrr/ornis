@@ -146,6 +146,27 @@ fn uniform_roundtrip_and_field_read() {
     assert!(mem.read_uniform::<0, 1, FrameTint>() == tint);
 }
 
+// The signature is the proof: `field` / `index_storage` must keep these consts.
+fn indexed<const G: u32, const B: u32>(
+    reference: crate::GpuRef<G, B, f32, crate::StorageSpace>,
+) -> crate::GpuRef<G, B, f32, crate::StorageSpace> {
+    reference.index_storage(1)
+}
+
+#[test]
+fn field_and_index_keep_group_and_binding() {
+    let mut mem = HostMemory::new();
+    mem.bind_storage::<3, 5, [f32; 2]>();
+    mem.write_storage::<3, 5, [f32; 2]>(&[1.0, 9.0]);
+    let got = with_host(&mut mem, || {
+        let storage = Storage::<3, 5, [f32; 2]>::bind();
+        let base = storage.as_ref();
+        indexed::<3, 5>(base.field::<f32>(0)).read()
+    });
+    assert!(got == 9.0);
+    assert!(size_of::<crate::GpuRef<3, 5, f32, crate::StorageSpace>>() == size_of::<u32>());
+}
+
 #[test]
 fn storage_index_write_does_not_touch_the_neighbor() {
     let mut mem = HostMemory::new();
@@ -234,6 +255,8 @@ fn import_names_stay_unpacked() {
     assert!(symbols::is_toy_import(symbols::RAW_READ));
     assert!(symbols::is_toy_import(symbols::RAW_READ_F32));
     assert!(symbols::is_toy_import(symbols::RAW_WRITE));
+    assert!(symbols::is_toy_import(symbols::STORAGE_READ));
+    assert!(symbols::is_toy_import(symbols::STORAGE_WRITE));
     assert!(symbols::is_toy_import(symbols::TEXTURE_SAMPLE_2D));
     assert!(!symbols::is_toy_import("i32.load"));
     assert!(symbols::MODULE == "ornis_gpu");

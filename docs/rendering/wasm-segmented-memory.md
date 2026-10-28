@@ -4,11 +4,15 @@
 пути Rust → Shader IR → WGSL (`rust-to-wgsl-architecture.md`).
 Фиксирует идею «Virtual Memory Space Translation / Software-Managed
 Memory Paging» поверх Wasm linear memory и предложения по ABI
-надстройки. Toy-прототип этого контракта (не production path) —
+надстройки. Research-прототип (не production path) —
 `crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`, `unsafe` только в
-`gpu_abi`) и offline `crates/wasm2gpu` (один vertex+fragment, uniform
-и `texture_sample`, WGSL/SPIR-V через naga). Упаковка
-space+binding+offset в каждый `i32` по-прежнему не default ABI.
+`gpu_abi`) и offline `crates/wasm2gpu`. Toy-проход: vertex+fragment,
+uniform и `texture_sample`. Срез stage-2: `storage_read` /
+`storage_write` в `array<vec4<f32>>` — group и binding остаются
+immediate-операндами импорта, индекс элемента может быть динамическим
+и опускается в access chain (`OpAccessChain` / WGSL `array[index]`).
+WGSL/SPIR-V через naga. Bindless и descriptor indexing не default.
+Упаковка space+binding+offset в каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
 Kongruent как носителей типов для шейдерного бэкенда.
@@ -179,6 +183,13 @@ impl Texture2d {
 `Uniform` + `texture_sample`, round-trip в валидный WGSL/SPIR-V через
 naga, без descriptor indexing.
 
+Срез после toy (тот же транслятор, не новый ABI): `storage_read` /
+`storage_write` читают и пишут элемент `array<vec4<f32>>`. Индекс —
+отдельный операнд (`i32.const` или runtime `i32`), group и binding —
+только `i32.const`. Динамический индекс становится access chain к уже
+выбранному global. Динамический group/binding по-прежнему ошибка
+(`DynamicBinding`): это bindless, он вне default.
+
 ## 5. Отношение к текущему пути ornis
 
 Текущий принятый путь: Rust declarations → naga IR, тела → Shader IR →
@@ -202,8 +213,9 @@ provenance + offset-only pointers + imports для texture, а не с наре�
 | Provenance в типе/SSA, offset в указателе, texture-импорты | Рабочая форма надстройки для прототипа |
 | Замена текущего DSL-пути | Не сейчас; research note до явного решения |
 
-Следующий шаг при зелёном свете: toy ABI (§4) + минимальный `wasm2gpu`
-на один проход с uniform + sample, без bindless.
+Сделано как research-прототип, не как замена DSL: toy ABI (§4) и
+срез stage-2 (storage read/write, индекс элемента — access chain).
+Bindless по-прежнему не default.
 
 Предпочтительная форма SDK — `GpuRef` + явный `read` (§7).
 

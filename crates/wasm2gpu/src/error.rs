@@ -11,6 +11,10 @@ pub enum TranslateError {
     /// are imports, not `i32.load`.
     LinearMemory,
     /// A group or binding operand was not an `i32.const`.
+    ///
+    /// The element index of a storage access may be dynamic. A dynamic
+    /// group or binding would be bindless descriptor indexing, which this
+    /// translator rejects.
     DynamicBinding,
     /// An operator, import, or result shape outside the straight-line subset.
     Unsupported,

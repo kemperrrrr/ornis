@@ -9,6 +9,7 @@ use crate::cx::Cx;
 use crate::cx::LANES;
 use crate::cx::READ_PARAMS;
 use crate::cx::SAMPLE_PARAMS;
+use crate::cx::STORAGE_WRITE_PARAMS;
 use crate::cx::Val;
 use crate::cx::expr;
 use crate::cx::import;
@@ -16,6 +17,7 @@ use crate::error::TranslateError;
 use crate::globals;
 use crate::ir::Import;
 use crate::ir::Op;
+use crate::storage;
 use ornis_gpu_abi::symbols;
 
 pub(super) fn step(
@@ -29,6 +31,7 @@ pub(super) fn step(
         Op::I32(value) => stack.push(Val::Imm(value)),
         Op::F32(bits) => stack.push(Val::Scalar(lit(body, f32::from_bits(bits)))),
         Op::Local(index) => stack.push(Val::Scalar(arg(body, index))),
+        Op::LocalI32(index) => stack.push(Val::Index(arg(body, index))),
         Op::Call(index) => call(cx, imports, body, stack, index)?,
         Op::Mul => bin(body, stack, BinaryOperator::Multiply)?,
         Op::Add => bin(body, stack, BinaryOperator::Add)?,
@@ -62,6 +65,16 @@ fn call(
         && import.sig.results == LANES
     {
         sample(cx, body, stack)
+    } else if import.name == symbols::STORAGE_READ
+        && import.sig.params == READ_PARAMS
+        && import.sig.results == LANES
+    {
+        storage::storage_load(cx, body, stack)
+    } else if import.name == symbols::STORAGE_WRITE
+        && import.sig.params == STORAGE_WRITE_PARAMS
+        && import.sig.results == 0
+    {
+        storage::storage_store(cx, body, stack)
     } else {
         Err(TranslateError::Unsupported)
     }
@@ -127,7 +140,7 @@ fn sample(
     Ok(())
 }
 
-fn pop_imm(stack: &mut Vec<Val>) -> Result<u32, TranslateError> {
+pub(super) fn pop_imm(stack: &mut Vec<Val>) -> Result<u32, TranslateError> {
     match stack.pop() {
         Some(Val::Imm(value)) => Ok(value),
         Some(_) => Err(TranslateError::DynamicBinding),
@@ -135,7 +148,7 @@ fn pop_imm(stack: &mut Vec<Val>) -> Result<u32, TranslateError> {
     }
 }
 
-fn pop_scalar(stack: &mut Vec<Val>) -> Result<naga::Handle<Expression>, TranslateError> {
+pub(super) fn pop_scalar(stack: &mut Vec<Val>) -> Result<naga::Handle<Expression>, TranslateError> {
     match stack.pop() {
         Some(Val::Scalar(handle)) => Ok(handle),
         _ => Err(TranslateError::Unsupported),

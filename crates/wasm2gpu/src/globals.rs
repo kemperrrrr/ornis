@@ -3,6 +3,7 @@
 use naga::AddressSpace;
 use naga::ScalarKind;
 use naga::Span;
+use naga::StorageAccess;
 use naga::Type;
 use naga::TypeInner;
 
@@ -26,6 +27,32 @@ pub(super) fn uniform(
         point(group, binding),
     );
     cx.uniforms.push(Slot {
+        group,
+        binding,
+        var,
+    });
+    var
+}
+
+pub(super) fn storage(
+    cx: &mut Cx<'_>,
+    group: u32,
+    binding: u32,
+) -> naga::Handle<naga::GlobalVariable> {
+    if let Some(var) = cached(&cx.storages, group, binding) {
+        return var;
+    }
+    let ty = cx.vec4_array;
+    let var = append(
+        cx,
+        format!("storage_{group}_{binding}"),
+        AddressSpace::Storage {
+            access: StorageAccess::LOAD | StorageAccess::STORE,
+        },
+        ty,
+        point(group, binding),
+    );
+    cx.storages.push(Slot {
         group,
         binding,
         var,

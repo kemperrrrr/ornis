@@ -1,5 +1,6 @@
 //! Straight-line IR to a naga module: one vertex entry and one fragment entry.
 
+use naga::ArraySize;
 use naga::Function;
 use naga::FunctionArgument;
 use naga::Scalar;
@@ -15,12 +16,15 @@ use crate::cx::F32_WIDTH;
 use crate::cx::FS_PARAMS;
 use crate::cx::FS_RESULTS;
 use crate::cx::Stage;
+use crate::cx::VEC4_STRIDE;
 use crate::cx::VS_PARAMS;
 use crate::cx::VS_RESULTS;
 use crate::cx::location;
 use crate::error::TranslateError;
 use crate::ir::Func;
+use crate::ir::Kind;
 use crate::ir::Module;
+use crate::ir::Sig;
 use crate::ops;
 use crate::ret;
 use ornis_gpu_abi::symbols;
@@ -28,15 +32,20 @@ use ornis_gpu_abi::symbols;
 /// Lower `module` to naga IR. Group and binding come from `i32.const` operands.
 pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
     let mut out = naga::Module::default();
-    let scalar = scalar_ty(&mut out);
+    let scalar = scalar_ty(&mut out, ScalarKind::Float);
+    let uint = scalar_ty(&mut out, ScalarKind::Uint);
     let vec2 = vector_ty(&mut out, VectorSize::Bi);
     let vec4 = vector_ty(&mut out, VectorSize::Quad);
+    let vec4_array = array_ty(&mut out, vec4);
     let mut cx = Cx {
         module: &mut out,
         scalar,
+        uint,
         vec2,
         vec4,
+        vec4_array,
         uniforms: Vec::new(),
+        storages: Vec::new(),
         textures: Vec::new(),
         samplers: Vec::new(),
     };
@@ -62,11 +71,22 @@ fn stage(name: &'static str, params: u32, results: u32, vertex: bool) -> Stage {
     }
 }
 
-fn scalar_ty(module: &mut naga::Module) -> naga::Handle<Type> {
+fn scalar_ty(module: &mut naga::Module, kind: ScalarKind) -> naga::Handle<Type> {
     let inner = TypeInner::Scalar(Scalar {
-        kind: ScalarKind::Float,
+        kind,
         width: F32_WIDTH,
     });
+    module
+        .types
+        .insert(Type { name: None, inner }, Span::default())
+}
+
+fn array_ty(module: &mut naga::Module, base: naga::Handle<Type>) -> naga::Handle<Type> {
+    let inner = TypeInner::Array {
+        base,
+        size: ArraySize::Dynamic,
+        stride: VEC4_STRIDE,
+    };
     module
         .types
         .insert(Type { name: None, inner }, Span::default())
@@ -87,12 +107,12 @@ fn vector_ty(module: &mut naga::Module, size: VectorSize) -> naga::Handle<Type> 
 
 fn shader(cx: &mut Cx<'_>, module: &Module, stage: &Stage) -> Result<Function, TranslateError> {
     let func = find(module, stage.name)?;
-    if func.sig.params != stage.params || func.sig.results != stage.results {
+    if !signature_ok(stage, &func.sig) {
         return Err(TranslateError::Unsupported);
     }
     let mut body = Function {
         name: Some(stage.name.to_string()),
-        arguments: args(cx.scalar, stage.params),
+        arguments: args(cx, &func.sig),
         ..Function::default()
     };
     let stack = run(cx, module, func, &mut body)?;
@@ -130,18 +150,59 @@ fn entry(name: &str, stage: ShaderStage, function: Function) -> naga::EntryPoint
     }
 }
 
-fn args(ty: naga::Handle<Type>, count: u32) -> Vec<FunctionArgument> {
+fn signature_ok(stage: &Stage, sig: &Sig) -> bool {
+    if sig.results != stage.results {
+        return false;
+    }
+    if stage.vertex {
+        return sig.params == stage.params && f32_params(sig);
+    }
+    true
+}
+
+fn f32_params(sig: &Sig) -> bool {
+    let mut index = 0usize;
+    while index < sig.params as usize {
+        if sig.param_kind[index] != Kind::F32 {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+fn args(cx: &Cx<'_>, sig: &Sig) -> Vec<FunctionArgument> {
     let mut out = Vec::new();
     let mut index = 0u32;
-    while index < count {
+    while index < sig.params {
+        let kind = sig.param_kind[index as usize];
+        let ty = if kind == Kind::I32 {
+            cx.uint
+        } else {
+            cx.scalar
+        };
         out.push(FunctionArgument {
             name: None,
             ty,
-            binding: Some(location(index)),
+            binding: Some(arg_location(index, kind)),
         });
         index += 1;
     }
     out
+}
+
+fn arg_location(index: u32, kind: Kind) -> naga::Binding {
+    if kind == Kind::F32 {
+        return location(index);
+    }
+    // Integer fragment inputs have no default interpolation. Flat is required.
+    naga::Binding::Location {
+        location: index,
+        interpolation: Some(naga::Interpolation::Flat),
+        sampling: None,
+        blend_src: None,
+        per_primitive: false,
+    }
 }
 
 fn run(
