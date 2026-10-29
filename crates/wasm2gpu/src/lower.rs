@@ -21,6 +21,7 @@ use crate::cx::Stage;
 use crate::cx::VS_PARAMS;
 use crate::cx::VS_RESULTS;
 use crate::cx::location;
+use crate::env::Code;
 use crate::env::ExecIn;
 use crate::error::TranslateError;
 use crate::flow;
@@ -158,11 +159,14 @@ fn shader(
         ..Function::default()
     };
     cx.active.push(index);
+    let code = Code {
+        imports: &module.imports,
+        structs: &module.structs,
+        funcs: &module.funcs,
+    };
     let stack = flow::exec(
         cx,
-        &module.imports,
-        &module.structs,
-        &module.funcs,
+        &code,
         &mut body,
         &ExecIn {
             func_index: index,

@@ -50,6 +50,16 @@ pub(super) struct Emit<'a, 'b> {
     pub(super) halted: bool,
 }
 
+/// Imports and defined functions visible to one lowering.
+pub(super) struct Code<'a> {
+    /// Wasm imports, in index order.
+    pub imports: &'a [Import],
+    /// Struct layouts named by the imports.
+    pub structs: &'a [StructDef],
+    /// Defined functions. Index 0 is the first function after the imports.
+    pub funcs: &'a [crate::ir::Func],
+}
+
 /// How [`crate::flow::exec`] binds one function.
 pub(super) struct ExecIn {
     /// Index into the module's defined functions.

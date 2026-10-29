@@ -18,16 +18,14 @@ use crate::cx::Cx;
 use crate::cx::MAX_SPECS;
 use crate::cx::Spec;
 use crate::cx::Val;
+use crate::env::Code;
 use crate::env::Emit;
 use crate::env::ExecIn;
 use crate::error::TranslateError;
 use crate::flow;
-use crate::ir::Func;
-use crate::ir::Import;
 use crate::ir::Kind;
 use crate::ir::MAX_PARAMS;
 use crate::ir::Sig;
-use crate::ty::StructDef;
 
 mod invoke;
 mod ret;
@@ -46,7 +44,12 @@ pub(super) fn call_defined(em: &mut Emit<'_, '_>, index: u32) -> Result<(), Tran
         .sig;
     let args = em.take(sig.params as usize)?;
     let baked = bake(&args, &sig)?;
-    let spec = ensure(em.cx, em.funcs, em.imports, em.structs, func_index, &baked)?;
+    let code = Code {
+        imports: em.imports,
+        structs: em.structs,
+        funcs: em.funcs,
+    };
+    let spec = ensure(em.cx, &code, func_index, &baked)?;
     invoke::invoke(em, &spec, &args)
 }
 
@@ -71,9 +74,7 @@ fn one_baked(kind: Kind, val: Val) -> Result<Option<u32>, TranslateError> {
 
 fn ensure(
     cx: &mut Cx<'_>,
-    funcs: &[Func],
-    imports: &[Import],
-    structs: &[StructDef],
+    code: &Code<'_>,
     func_index: u32,
     baked: &[Option<u32>],
 ) -> Result<Spec, TranslateError> {
@@ -88,7 +89,7 @@ fn ensure(
         return Err(TranslateError::Budget);
     }
     cx.active.push(func_index);
-    let lowered = lower_one(cx, funcs, imports, structs, func_index, baked, &key);
+    let lowered = lower_one(cx, code, func_index, baked, &key);
     cx.active.pop();
     let spec = lowered?;
     cx.specs.push(spec);
@@ -109,14 +110,13 @@ fn find(cx: &Cx<'_>, func: u32, nparams: usize, key: &[Option<u32>; MAX_PARAMS])
 
 fn lower_one(
     cx: &mut Cx<'_>,
-    funcs: &[Func],
-    imports: &[Import],
-    structs: &[StructDef],
+    code: &Code<'_>,
     func_index: u32,
     baked: &[Option<u32>],
     key: &[Option<u32>; MAX_PARAMS],
 ) -> Result<Spec, TranslateError> {
-    let sig = funcs
+    let sig = code
+        .funcs
         .get(func_index as usize)
         .ok_or(TranslateError::Unsupported)?
         .sig;
@@ -131,7 +131,7 @@ fn lower_one(
         baked: baked.to_vec(),
         id_param: None,
     };
-    let stack = flow::exec(cx, imports, structs, funcs, &mut body, &input)?;
+    let stack = flow::exec(cx, code, &mut body, &input)?;
     let (result_imm, nresults) = ret::finish(&mut body, cx, &stack, &sig)?;
     let handle = cx.module.functions.append(body, Span::default());
     Ok(Spec {

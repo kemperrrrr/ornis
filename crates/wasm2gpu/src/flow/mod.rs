@@ -11,6 +11,7 @@ use naga::Expression;
 
 use crate::cx::Val;
 use crate::cx::sp;
+use crate::env::Code;
 use crate::env::Emit;
 use crate::env::ExecIn;
 use crate::env::Region;
@@ -20,20 +21,18 @@ use crate::ir::Func;
 use crate::ir::Kind;
 use crate::ir::Stmt;
 use crate::ops;
-use crate::ty::StructDef;
 
 pub(super) fn exec(
     cx: &mut crate::cx::Cx<'_>,
-    imports: &[crate::ir::Import],
-    structs: &[StructDef],
-    funcs: &[Func],
+    code: &Code<'_>,
     body: &mut naga::Function,
     input: &ExecIn,
 ) -> Result<Vec<Val>, TranslateError> {
     let baked = input.baked.clone();
     let id_param = input.id_param;
     let (shadowed, args_at, locals, stmts, params, results) = {
-        let func = funcs
+        let func = code
+            .funcs
             .get(input.func_index as usize)
             .ok_or(TranslateError::Unsupported)?;
         let shadowed = needs_shadow(&func.body);
@@ -50,9 +49,6 @@ pub(super) fn exec(
         func: body,
         block,
         stack: Vec::new(),
-        imports,
-        structs,
-        funcs,
         locals,
         labels: Vec::new(),
         baked,
@@ -60,6 +56,9 @@ pub(super) fn exec(
         id_param,
         results,
         halted: false,
+        imports: code.imports,
+        structs: code.structs,
+        funcs: code.funcs,
     };
     if shadowed {
         copy_params(&mut em, params)?;
