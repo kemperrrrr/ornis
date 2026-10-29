@@ -273,3 +273,14 @@ fn struct_id_out_of_range_is_rejected() {
         other => panic!("unexpected {other}"),
     }
 }
+
+#[test]
+fn br_table_is_rejected() {
+    let fs = format!(
+        "(param f32 f32) (result f32 f32 f32 f32)
+         (block (br_table 0 (i32.const 0)))
+         {ret}",
+        ret = rgba(),
+    );
+    assert!(matches!(err("", "", &fs), TranslateError::BrTable));
+}

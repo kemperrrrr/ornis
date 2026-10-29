@@ -59,6 +59,7 @@ pub(super) fn call(ai: &Ai<'_>, st: &mut St, index: u32) -> Result<(), Translate
         Imp::Sample => sample(st, import),
         Imp::Read(spec) => read_storage(ai, st, import, spec),
         Imp::Write(spec) => write_storage(ai, st, import, spec),
+        Imp::Uniform(uni) => super::uniform::on_uniform(st, import, ai.structs, uni),
     }
 }
 

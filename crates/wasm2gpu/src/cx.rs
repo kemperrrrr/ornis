@@ -8,12 +8,35 @@ pub(super) const VS_RESULTS: u32 = 6;
 pub(super) const FS_PARAMS: u32 = 2;
 pub(super) const FS_RESULTS: u32 = 4;
 pub(super) const LANES: u32 = 4;
+/// Largest uniform binding this translator will emit. WebGPU's limit is 64 KiB.
+pub(super) const UNIFORM_BYTES: u32 = 1 << 16;
 pub(super) const F32_WIDTH: u8 = 4;
 pub(super) const VEC3_LANES: u32 = 3;
 
 pub(super) struct Slot {
     pub(super) group: u32,
     pub(super) binding: u32,
+    pub(super) var: naga::Handle<naga::GlobalVariable>,
+}
+
+/// Shape of one uniform binding. Two shapes cannot share a group and binding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum UniformShape {
+    /// The binding is the element itself (a `vec4`, or one struct).
+    Bare(crate::ty::Elem),
+    /// Fixed-size `array<elem, len>` in the uniform address space.
+    Array {
+        /// Element type.
+        elem: crate::ty::Elem,
+        /// Constant length. Never zero.
+        len: u32,
+    },
+}
+
+pub(super) struct UniformSlot {
+    pub(super) group: u32,
+    pub(super) binding: u32,
+    pub(super) shape: UniformShape,
     pub(super) var: naga::Handle<naga::GlobalVariable>,
 }
 
@@ -33,7 +56,7 @@ pub(super) struct Cx<'a> {
     pub(super) vec2: naga::Handle<Type>,
     pub(super) vec3: naga::Handle<Type>,
     pub(super) vec4: naga::Handle<Type>,
-    pub(super) uniforms: Vec<Slot>,
+    pub(super) uniforms: Vec<UniformSlot>,
     pub(super) storages: Vec<StorageSlot>,
     pub(super) textures: Vec<Slot>,
     pub(super) samplers: Vec<Slot>,

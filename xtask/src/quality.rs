@@ -52,10 +52,11 @@ struct StageResult {
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
 /// sharding; the default (no `--only`) runs everything implied by the
 /// level flags, exactly as before.
-const LEVEL1_IDS: [&str; 14] = [
+const LEVEL1_IDS: [&str; 15] = [
     "fmt",
     "clippy-physics",
     "test-physics",
+    "test-wasm2gpu",
     "clippy",
     "rustqual",
     "smoke",
@@ -1399,6 +1400,28 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // Wasm→GPU end-to-end: a Rust shader is compiled to wasm32, lowered by
+    // ornis-wasm2gpu, and run on lavapipe. ORNIS_REQUIRE_GPU makes a missing
+    // adapter a failure. The child cargo build clears RUSTFLAGS itself so
+    // mold does not leak into the wasm32 link.
+    let mut wasm2gpu = stages.cargo(&[
+        "test",
+        "-p",
+        "ornis-wasm2gpu-shader",
+        "--test",
+        "gpu_e2e",
+        "--",
+        "--test-threads=1",
+    ]);
+    wasm2gpu.env("ORNIS_REQUIRE_GPU", "1");
+    stages.run(
+        "test-wasm2gpu",
+        "test (wasm2gpu gpu)",
+        "cargo test -p ornis-wasm2gpu-shader --test gpu_e2e (ORNIS_REQUIRE_GPU=1)",
+        wasm2gpu,
+        false,
+    );
+
     // No `determinism-fast` stage (removed, RAT-26): it re-ran the
     // default-suite determinism filters (`solver_is_deterministic`,
     // `determinism_snapshot`, `avbd_determinism`) that `test-physics`
@@ -2192,7 +2215,7 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
+          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, test-wasm2gpu, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage ratchet (llvm-cov --workspace vs coverage-baseline.json), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \

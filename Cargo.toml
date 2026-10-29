@@ -7,6 +7,7 @@ members = [
     "crates/shader-lang",
     "crates/gpu-abi",
     "crates/wasm2gpu",
+    "crates/wasm2gpu-shader",
     "crates/physics",
     "crates/wgpu_backend",
     "crates/audio",

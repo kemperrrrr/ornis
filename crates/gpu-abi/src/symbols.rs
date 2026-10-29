@@ -78,6 +78,66 @@ pub const STORAGE_WRITE_STRUCT: &str = "storage_write_struct";
 /// Custom section that lists struct fields for [`STORAGE_READ_STRUCT`].
 pub const TYPES_SECTION: &str = "ornis_gpu.types";
 
+/// `(param i32 i32 i32) (result …)` — one uniform struct, not an array.
+///
+/// Operands are group, binding, and the struct id from [`TYPES_SECTION`].
+/// The binding is the struct itself. Field offsets follow `place_fields`
+/// in uniform mode, the same layout as host `gpu_struct!`.
+pub const UNIFORM_READ_STRUCT: &str = "uniform_read_struct";
+
+/// `(param i32 i32 i32 i32 i32) (result …)` — `array<Struct, len>[index]`.
+///
+/// Operands are group, binding, array length, element index, struct id.
+/// Length is an `i32.const`. The index may be a runtime value when WGSL
+/// allows a dynamic index of that fixed-size uniform array. A runtime
+/// length, a zero length, or a binding larger than 64 KiB is rejected.
+pub const UNIFORM_INDEX_STRUCT: &str = "uniform_index_struct";
+
+/// `(param i32 i32 i32 i32) (result f32)` — one `f32` field of a uniform struct.
+///
+/// Operands are group, binding, struct id, and a constant field index.
+/// A runtime field index is rejected: WGSL struct fields are not dynamically
+/// indexed.
+pub const UNIFORM_FIELD_F32: &str = "uniform_field_f32";
+
+/// `(param i32 i32 i32 i32) (result i32)` — one `u32` field.
+///
+/// The wasm result is `i32` bits. The lowerer treats them as `u32`.
+pub const UNIFORM_FIELD_U32: &str = "uniform_field_u32";
+
+/// `(param i32 i32 i32 i32) (result i32)` — one `i32` field.
+pub const UNIFORM_FIELD_I32: &str = "uniform_field_i32";
+
+/// `(param i32 i32 i32 i32) (result f32 f32)` — one `vec2<f32>` field.
+pub const UNIFORM_FIELD_VEC2: &str = "uniform_field_vec2";
+
+/// `(param i32 i32 i32 i32) (result f32 f32 f32)` — one `vec3<f32>` field.
+pub const UNIFORM_FIELD_VEC3: &str = "uniform_field_vec3";
+
+/// `(param i32 i32 i32 i32) (result f32 f32 f32 f32)` — one `vec4<f32>` field.
+pub const UNIFORM_FIELD_VEC4: &str = "uniform_field_vec4";
+
+/// `(param i32 i32 i32 i32) (result f32)` — `array<f32, len>[index]`.
+///
+/// The element stride is the uniform stride of `f32` (16 bytes), not the
+/// packed storage stride.
+pub const UNIFORM_READ_F32: &str = "uniform_read_f32";
+
+/// `(param i32 i32 i32 i32) (result i32)` — `array<u32, len>`.
+pub const UNIFORM_READ_U32: &str = "uniform_read_u32";
+
+/// `(param i32 i32 i32 i32) (result i32)` — `array<i32, len>`.
+pub const UNIFORM_READ_I32: &str = "uniform_read_i32";
+
+/// `(param i32 i32 i32 i32) (result f32 f32)` — `array<vec2<f32>, len>`.
+pub const UNIFORM_READ_VEC2: &str = "uniform_read_vec2";
+
+/// `(param i32 i32 i32 i32) (result f32 f32 f32)` — `array<vec3<f32>, len>`.
+pub const UNIFORM_READ_VEC3: &str = "uniform_read_vec3";
+
+/// `(param i32 i32 i32 i32) (result f32 f32 f32 f32)` — `array<vec4<f32>, len>`.
+pub const UNIFORM_READ_VEC4: &str = "uniform_read_vec4";
+
 /// `(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)`.
 ///
 /// Operands are texture group, texture binding, sampler group, sampler
@@ -114,6 +174,20 @@ pub fn is_toy_import(name: &str) -> bool {
             | STORAGE_WRITE_VEC3
             | STORAGE_READ_STRUCT
             | STORAGE_WRITE_STRUCT
+            | UNIFORM_READ_STRUCT
+            | UNIFORM_INDEX_STRUCT
+            | UNIFORM_FIELD_F32
+            | UNIFORM_FIELD_U32
+            | UNIFORM_FIELD_I32
+            | UNIFORM_FIELD_VEC2
+            | UNIFORM_FIELD_VEC3
+            | UNIFORM_FIELD_VEC4
+            | UNIFORM_READ_F32
+            | UNIFORM_READ_U32
+            | UNIFORM_READ_I32
+            | UNIFORM_READ_VEC2
+            | UNIFORM_READ_VEC3
+            | UNIFORM_READ_VEC4
             | TEXTURE_SAMPLE_2D
     )
 }

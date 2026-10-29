@@ -20,29 +20,8 @@ use crate::ty::Elem;
 use crate::ty::FieldKind;
 use crate::ty::StructDef;
 
-pub(super) fn uniform(
-    cx: &mut Cx<'_>,
-    group: u32,
-    binding: u32,
-) -> naga::Handle<naga::GlobalVariable> {
-    if let Some(var) = cached(&cx.uniforms, group, binding) {
-        return var;
-    }
-    let ty = cx.vec4;
-    let var = append(
-        cx,
-        format!("uniform_{group}_{binding}"),
-        AddressSpace::Uniform,
-        ty,
-        point(group, binding),
-    );
-    cx.uniforms.push(Slot {
-        group,
-        binding,
-        var,
-    });
-    var
-}
+pub(super) use crate::uniform_global::uniform;
+pub(super) use crate::uniform_global::uniform_global;
 
 pub(super) fn storage(
     cx: &mut Cx<'_>,
@@ -51,6 +30,11 @@ pub(super) fn storage(
     elem: Elem,
     structs: &[StructDef],
 ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
+    if crate::uniform_global::uniform_taken(&cx.uniforms, group, binding) {
+        return Err(TranslateError::UnsupportedType(
+            "binding is used as both uniform and storage".to_string(),
+        ));
+    }
     if let Some((found, var)) = find_storage(&cx.storages, group, binding) {
         if found != elem {
             return Err(TranslateError::UnsupportedType(
@@ -178,6 +162,10 @@ fn cached_struct(cx: &Cx<'_>, id: u16) -> Option<naga::Handle<Type>> {
     None
 }
 
+pub(super) fn storage_taken(slots: &[StorageSlot], group: u32, binding: u32) -> bool {
+    find_storage(slots, group, binding).is_some()
+}
+
 fn array_ty(cx: &mut Cx<'_>, base: naga::Handle<Type>, stride: u32) -> naga::Handle<Type> {
     cx.module.types.insert(
         Type {
@@ -192,7 +180,7 @@ fn array_ty(cx: &mut Cx<'_>, base: naga::Handle<Type>, stride: u32) -> naga::Han
     )
 }
 
-fn base_ty(
+pub(super) fn base_ty(
     cx: &mut Cx<'_>,
     elem: Elem,
     structs: &[StructDef],
@@ -251,11 +239,11 @@ fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga:
     None
 }
 
-fn point(group: u32, binding: u32) -> naga::ResourceBinding {
+pub(super) fn point(group: u32, binding: u32) -> naga::ResourceBinding {
     naga::ResourceBinding { group, binding }
 }
 
-fn append(
+pub(super) fn append(
     cx: &mut Cx<'_>,
     name: String,
     space: AddressSpace,

@@ -123,6 +123,11 @@ unsafe extern "C" {
         u: f32,
         v: f32,
     ) -> Word4;
+    fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
+    fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
+    fn uniform_read_f32(group: u32, binding: u32, len: u32, index: u32) -> f32;
+    fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32;
+    fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -194,6 +199,81 @@ fn wasm_raw_write(group: u32, binding: u32, offset: u32, lanes: [f32; LANE_COUNT
     import_write!(
         group, binding, offset, lanes[0], lanes[1], lanes[2], lanes[3]
     );
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_uniform_field_f32 {
+    ($group:expr, $binding:expr, $sid:expr, $field:expr) => {{
+        // SAFETY: `uniform_field_f32` is the ornis_gpu import. It returns one
+        // initialized f32 and does not expose linear memory.
+        unsafe { uniform_field_f32($group, $binding, $sid, $field) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_uniform_field_u32 {
+    ($group:expr, $binding:expr, $sid:expr, $field:expr) => {{
+        // SAFETY: `uniform_field_u32` is the ornis_gpu import. It returns one
+        // initialized u32 and does not expose linear memory.
+        unsafe { uniform_field_u32($group, $binding, $sid, $field) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_uniform_read_f32 {
+    ($group:expr, $binding:expr, $len:expr, $index:expr) => {{
+        // SAFETY: `uniform_read_f32` is the ornis_gpu import. It returns one
+        // initialized f32 and does not expose linear memory.
+        unsafe { uniform_read_f32($group, $binding, $len, $index) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_storage_read_f32 {
+    ($group:expr, $binding:expr, $index:expr) => {{
+        // SAFETY: `storage_read_f32` is the ornis_gpu import. It returns one
+        // initialized f32 and does not expose linear memory.
+        unsafe { storage_read_f32($group, $binding, $index) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_storage_write_f32 {
+    ($group:expr, $binding:expr, $index:expr, $value:expr) => {{
+        // SAFETY: `storage_write_f32` is the ornis_gpu import. The lane is one
+        // f32. The import does not expose linear memory.
+        unsafe { storage_write_f32($group, $binding, $index, $value) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32 {
+    import_uniform_field_f32!(group, binding, sid, field)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
+    import_uniform_field_u32!(group, binding, sid, field)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_uniform_read_f32(group: u32, binding: u32, len: u32, index: u32) -> f32 {
+    import_uniform_read_f32!(group, binding, len, index)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_storage_read_f32(group: u32, binding: u32, index: u32) -> f32 {
+    import_storage_read_f32!(group, binding, index)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_storage_write_f32(group: u32, binding: u32, index: u32, value: f32) {
+    import_storage_write_f32!(group, binding, index, value)
 }
 
 #[cfg(target_arch = "wasm32")]

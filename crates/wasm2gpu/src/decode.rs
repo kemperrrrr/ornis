@@ -16,6 +16,9 @@ pub(super) fn op(
     locals: &[Kind],
     op: &Operator<'_>,
 ) -> Result<Flat, TranslateError> {
+    if matches!(op, Operator::BrTable { .. }) {
+        return Err(TranslateError::BrTable);
+    }
     if let Some(flat) = control(types, op)? {
         return Ok(flat);
     }

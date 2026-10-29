@@ -20,14 +20,14 @@ macro_rules! gpu_struct {
     (
         $(#[$meta:meta])*
         $vis:vis struct $name:ident {
-            $( $fvis:vis $field:ident : $ty:ty ),* $(,)?
+            $( $(#[$fmeta:meta])* $fvis:vis $field:ident : $ty:ty ),* $(,)?
         }
     ) => {
         #[repr(C, align(16))]
         #[derive(Clone, Copy, Debug, PartialEq)]
         $(#[$meta])*
         $vis struct $name {
-            $( $fvis $field : $ty, )*
+            $( $(#[$fmeta])* $fvis $field : $ty, )*
         }
 
         // SAFETY: the struct is `repr(C)` and every field is `GpuSafeLayout`,

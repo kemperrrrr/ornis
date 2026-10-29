@@ -14,6 +14,7 @@ use crate::ir::Stmt;
 use crate::ty::StructDef;
 
 mod join;
+mod uniform;
 mod value;
 
 use join::entry;

@@ -105,9 +105,10 @@ jobs:
   #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos (no compilation)
   #   clippy — clippy-physics, clippy
   #   test   — test, test-lockfree (workspace + ornis-core lock-free lanes)
-  #   gpu    — test-physics, smoke (both need lavapipe; the
+  #   gpu    — test-physics, test-wasm2gpu, smoke (all need lavapipe; the
   #            default-suite determinism gates run inside test-physics,
-  #            the ignored ones stay in Determinism Nightly)
+  #            the ignored ones stay in Determinism Nightly).
+  #            test-wasm2gpu also needs the wasm32 target.
   #   docs   — doc, wasm-check
   fast:
     runs-on: ubuntu-latest
@@ -323,6 +324,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # The wasm2gpu end-to-end test compiles a shader with this target.
+      # dtolnay/rust-toolchain may ignore rust-toolchain.toml targets.
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -389,6 +395,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # wasm2gpu's GPU test compiles the Rust shader to wasm32 in-process.
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -404,7 +414,7 @@ jobs:
           RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only test-physics,smoke 2>&1 | tee target/quality-gpu.log
+          cargo xtask quality --ci --only test-physics,test-wasm2gpu,smoke 2>&1 | tee target/quality-gpu.log
 
       - name: Upload shard log
         if: always()

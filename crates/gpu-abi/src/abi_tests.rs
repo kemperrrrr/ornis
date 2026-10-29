@@ -19,7 +19,12 @@ use crate::layout::GpuVec4;
 use crate::layout::VEC3_ALIGN;
 use crate::layout::VEC3_SIZE;
 use crate::layout::place_fields;
+use crate::storage_at_f32;
+use crate::storage_store_f32;
 use crate::symbols;
+use crate::uniform_array_f32;
+use crate::uniform_field_f32;
+use crate::uniform_field_u32;
 use crate::with_host;
 
 gpu_struct! {
@@ -34,6 +39,24 @@ gpu_struct! {
         a: GpuVec3,
         pad: [u8; 4],
         b: GpuVec3,
+    }
+}
+
+gpu_struct! {
+    struct ScalarParams {
+        index: u32,
+        intensity: f32,
+        pad0: u32,
+        pad1: u32,
+    }
+}
+
+gpu_struct! {
+    struct UniformLane {
+        value: f32,
+        pad0: u32,
+        pad1: u32,
+        pad2: u32,
     }
 }
 
@@ -359,4 +382,44 @@ fn sample_without_sampler_panics() {
 fn empty_binding_panics() {
     let mut mem = HostMemory::new();
     mem.bind_uniform::<0, 0, [f32; 0]>();
+}
+
+#[test]
+fn scalar_imports_round_trip_on_the_host_shadow() {
+    let mut mem = HostMemory::new();
+    mem.bind_uniform::<0, 0, ScalarParams>();
+    mem.write_uniform::<0, 0, ScalarParams>(&ScalarParams {
+        index: 1,
+        intensity: 0.5,
+        pad0: 0,
+        pad1: 0,
+    });
+    mem.bind_storage::<0, 1, [f32; 4]>();
+    mem.write_storage::<0, 1, [f32; 4]>(&[0.0, 0.25, 0.0, 0.0]);
+    mem.bind_uniform::<0, 2, [UniformLane; 4]>();
+    mem.write_uniform::<0, 2, [UniformLane; 4]>(&[lane(0.0), lane(0.25), lane(0.0), lane(0.0)]);
+    mem.bind_storage::<0, 3, [f32; 4]>();
+    mem.write_storage::<0, 3, [f32; 4]>(&[0.0; 4]);
+    let got = with_host(&mut mem, shade_once);
+    let stored = mem.read_storage::<0, 3, [f32; 4]>();
+    assert!(got.to_bits() == 0.375f32.to_bits());
+    assert!(stored[1].to_bits() == 0.375f32.to_bits());
+}
+
+fn lane(value: f32) -> UniformLane {
+    UniformLane {
+        value,
+        pad0: 0,
+        pad1: 0,
+        pad2: 0,
+    }
+}
+
+fn shade_once() -> f32 {
+    let slot = uniform_field_u32::<0, 0, 0, 0, { ScalarParams::FIELD_OFFSETS[0] }>();
+    let sample = storage_at_f32::<0, 1>(slot);
+    let scale = uniform_field_f32::<0, 0, 0, 1, { ScalarParams::FIELD_OFFSETS[1] }>();
+    let written = sample.mul_add(scale, uniform_array_f32::<0, 2, 4>(slot));
+    storage_store_f32::<0, 3>(slot, written);
+    written
 }
