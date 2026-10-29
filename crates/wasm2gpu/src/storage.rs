@@ -7,6 +7,7 @@
 
 use naga::Expression;
 
+use crate::cx::PtrOff;
 use crate::cx::VEC3_LANES;
 use crate::cx::Val;
 use crate::cx::sp;
@@ -30,6 +31,8 @@ use parts::sint;
 use parts::uint_bits;
 
 const STRUCT_HEADER: u32 = 4;
+/// Byte alignment of a scalar `i32.load` / `f32.load` address.
+const ADDR_ALIGN: u32 = ornis_gpu_abi::F32_SIZE;
 
 enum Ix {
     Const(u32),
@@ -54,6 +57,90 @@ pub(super) fn store(em: &mut Emit<'_, '_>, spec: Spec, import: u32) -> Result<()
     em.block
         .push(naga::Statement::Store { pointer, value }, sp());
     Ok(())
+}
+
+/// `i32.load` / `f32.load` through a storage-provenance address.
+pub(super) fn load_ptr(
+    em: &mut Emit<'_, '_>,
+    memarg: u32,
+    elem: Elem,
+) -> Result<(), TranslateError> {
+    let (group, binding, index) = ptr_access(em, memarg)?;
+    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
+    let pointer = element_ptr(em, var, index);
+    push_elem(em, elem, pointer)
+}
+
+/// `i32.store` / `f32.store` through a storage-provenance address.
+pub(super) fn store_ptr(
+    em: &mut Emit<'_, '_>,
+    memarg: u32,
+    elem: Elem,
+) -> Result<(), TranslateError> {
+    let value = pop_fixed(em, elem)?;
+    let (group, binding, index) = ptr_access(em, memarg)?;
+    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
+    let pointer = element_ptr(em, var, index);
+    em.block
+        .push(naga::Statement::Store { pointer, value }, sp());
+    Ok(())
+}
+
+/// Pop a storage pointer and turn `offset + memarg` into an element index.
+fn ptr_access(em: &mut Emit<'_, '_>, memarg: u32) -> Result<(u32, u32, Ix), TranslateError> {
+    let (group, binding, off) = pop_ptr(em)?;
+    let byte = add_memarg(em, off, memarg)?;
+    Ok((group, binding, byte_index(em, byte)))
+}
+
+fn pop_ptr(em: &mut Emit<'_, '_>) -> Result<(u32, u32, PtrOff), TranslateError> {
+    match em.pop()? {
+        Val::Ptr { group, binding, off } => Ok((group, binding, off)),
+        _ => Err(TranslateError::LinearMemory),
+    }
+}
+
+/// Add the load/store immediate to a byte offset, checking a constant
+/// address's alignment. A dynamic address is the SDK's contract to keep.
+fn add_memarg(em: &mut Emit<'_, '_>, off: PtrOff, memarg: u32) -> Result<PtrOff, TranslateError> {
+    match off {
+        PtrOff::Imm(value) => {
+            let total = value.wrapping_add(memarg);
+            if !total.is_multiple_of(ADDR_ALIGN) {
+                return Err(TranslateError::UnsupportedType(
+                    "storage access is not 4-byte aligned".to_string(),
+                ));
+            }
+            Ok(PtrOff::Imm(total))
+        }
+        PtrOff::Dyn(handle) if memarg == 0 => Ok(PtrOff::Dyn(handle)),
+        PtrOff::Dyn(handle) => {
+            let delta = em.u32(memarg);
+            let sum = em.ex(Expression::Binary {
+                op: naga::BinaryOperator::Add,
+                left: handle,
+                right: delta,
+            });
+            Ok(PtrOff::Dyn(sum))
+        }
+    }
+}
+
+/// Element index of a byte address. Scalars are four bytes, so a constant
+/// divides and a dynamic address shifts right by two.
+fn byte_index(em: &mut Emit<'_, '_>, byte: PtrOff) -> Ix {
+    match byte {
+        PtrOff::Imm(value) => Ix::Const(value / ADDR_ALIGN),
+        PtrOff::Dyn(handle) => {
+            let shift = em.u32(2);
+            let index = em.ex(Expression::Binary {
+                op: naga::BinaryOperator::ShiftRight,
+                left: handle,
+                right: shift,
+            });
+            Ix::Dyn(index)
+        }
+    }
 }
 
 fn read_elem(em: &mut Emit<'_, '_>, spec: Spec) -> Result<Elem, TranslateError> {

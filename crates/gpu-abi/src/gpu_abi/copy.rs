@@ -108,10 +108,12 @@ macro_rules! import_sample {
 }
 
 // SAFETY: these symbols are the ornis_gpu import ABI. Calling them is sound
-// only through the macros above; they do not dereference a guest pointer.
+// only through the wrappers in this file; they do not dereference a guest
+// pointer. `storage_base` only returns the translator's base tag.
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "ornis_gpu")]
 unsafe extern "C" {
+    fn storage_base(group: u32, binding: u32) -> u32;
     fn raw_read_f32(group: u32, binding: u32, offset: u32) -> f32;
     fn raw_read(group: u32, binding: u32, offset: u32) -> Word4;
     fn raw_write(group: u32, binding: u32, offset: u32, x: f32, y: f32, z: f32, w: f32);
@@ -128,6 +130,37 @@ unsafe extern "C" {
     fn uniform_read_f32(group: u32, binding: u32, len: u32, index: u32) -> f32;
     fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32;
     fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn wasm_storage_base<const G: u32, const B: u32>() -> u32 {
+    // SAFETY: `storage_base` is the ornis_gpu import. It returns the
+    // translator's base tag for the provenance pair and touches no memory.
+    unsafe { storage_base(G, B) }
+}
+
+/// Pointer-path read at a `storage_base` address.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn ptr_load<T: GpuSafeLayout>(addr: u32) -> T {
+    if core::mem::size_of::<T>() != F32_SIZE as usize {
+        return crate::gpu_abi::contract_breach("pointer load supports 4-byte values");
+    }
+    // SAFETY: `addr` is `storage_base(G, B)` plus a `GpuRef` offset, so it
+    // names four bytes of that storage binding at a `GpuSafeLayout`
+    // alignment. Every bit pattern of `size_of::<T>()` is a valid `T`, and
+    // the pointer is not retained.
+    unsafe { (addr as *const T).read_volatile() }
+}
+
+/// Pointer-path write at a `storage_base` address.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn ptr_store<T: GpuSafeLayout>(addr: u32, value: T) {
+    if core::mem::size_of::<T>() != F32_SIZE as usize {
+        crate::gpu_abi::contract_breach("pointer store supports 4-byte values");
+    }
+    // SAFETY: same address contract as `ptr_load`; the write covers exactly
+    // the four bytes of `addr`, which belongs to this binding's storage.
+    unsafe { (addr as *mut T).write_volatile(value) }
 }
 
 #[cfg(target_arch = "wasm32")]

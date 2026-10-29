@@ -60,6 +60,23 @@ pub(super) fn join_abs(left: Abs, right: Abs) -> Result<Abs, TranslateError> {
         (Abs::F32, Abs::F32) => Ok(Abs::F32),
         (Abs::Vec, Abs::Vec) => Ok(Abs::Vec),
         (Abs::I32(left), Abs::I32(right)) => Ok(Abs::I32(join_num(left, right))),
+        (
+            Abs::Ptr {
+                group: left_group,
+                binding: left_binding,
+                offset: left_offset,
+            },
+            Abs::Ptr {
+                group: right_group,
+                binding: right_binding,
+                offset: right_offset,
+            },
+        ) if left_group == right_group && left_binding == right_binding => Ok(Abs::Ptr {
+            group: left_group,
+            binding: left_binding,
+            offset: join_num(left_offset, right_offset),
+        }),
+        (Abs::Ptr { .. }, Abs::Ptr { .. }) => Err(TranslateError::AmbiguousProvenance),
         _ => Err(TranslateError::Unsupported),
     }
 }

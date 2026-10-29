@@ -45,6 +45,7 @@ ABD = "ABD" # Affine Body Dynamics (PLAN.md)
 iy = "iy" # loop var in `editor-v2/tools/gen_sphere_svg.py`
 lins = "lins" # contour-lines shorthand in `gen_sphere_svg.py`
 rin = "rin" # rim-inner radius in `gen_sphere_svg.py`
+memarg = "memarg" # wasm load/store address immediate (wasmparser `MemArg` field)
 
 [files]
 extend-exclude = [

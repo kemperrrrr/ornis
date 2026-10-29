@@ -25,17 +25,13 @@ pub(super) fn op(
 pub(super) fn memory(op: &Operator<'_>) -> bool {
     matches!(
         op,
-        Operator::I32Load { .. }
-            | Operator::I64Load { .. }
-            | Operator::F32Load { .. }
+        Operator::I64Load { .. }
             | Operator::F64Load { .. }
             | Operator::I32Load8S { .. }
             | Operator::I32Load8U { .. }
             | Operator::I32Load16S { .. }
             | Operator::I32Load16U { .. }
-            | Operator::I32Store { .. }
             | Operator::I64Store { .. }
-            | Operator::F32Store { .. }
             | Operator::F64Store { .. }
             | Operator::I32Store8 { .. }
             | Operator::I32Store16 { .. }
@@ -80,6 +76,13 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::I32Ne => Ok(Op::I32Ne),
         Operator::I32LtU => Ok(Op::I32LtU),
         Operator::I32GtU => Ok(Op::I32GtU),
+        Operator::I32Shl => Ok(Op::I32Shl),
+        Operator::I32ShrU => Ok(Op::I32ShrU),
+        Operator::I32Load { memarg } => Ok(Op::LoadI32(memarg.offset)),
+        Operator::F32Load { memarg } => Ok(Op::LoadF32(memarg.offset)),
+        Operator::I32Store { memarg } => Ok(Op::StoreI32(memarg.offset)),
+        Operator::F32Store { memarg } => Ok(Op::StoreF32(memarg.offset)),
+        Operator::F32Lt => Ok(Op::F32Lt),
         Operator::Select => Ok(Op::Select),
         _ => Err(TranslateError::Unsupported),
     }

@@ -120,6 +120,27 @@ pub(super) enum Val {
     Index(naga::Handle<Expression>),
     /// One `vec4<f32>` from `raw_read`, `texture_sample_2d`, or `storage_read`.
     Vec(naga::Handle<Expression>),
+    /// A storage address: provenance (group, binding) plus a byte offset.
+    ///
+    /// The offset counts from the binding's base tag, so only it is added
+    /// or loaded; the provenance names the global the access lands on.
+    Ptr {
+        /// Binding group, an immediate.
+        group: u32,
+        /// Binding index, an immediate.
+        binding: u32,
+        /// Byte offset from the binding base.
+        off: PtrOff,
+    },
+}
+
+/// Byte offset carried by a [`Val::Ptr`].
+#[derive(Clone, Copy)]
+pub(super) enum PtrOff {
+    /// A folded constant. The alignment check runs when the pointer is used.
+    Imm(u32),
+    /// A lowered expression holding the byte offset.
+    Dyn(naga::Handle<Expression>),
 }
 
 pub(super) struct Stage {

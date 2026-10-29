@@ -49,6 +49,7 @@ pub(super) fn exec(
         func: body,
         block,
         stack: Vec::new(),
+        ptr_slots: vec![None; locals.len()],
         locals,
         labels: Vec::new(),
         baked,
@@ -203,6 +204,9 @@ impl Emit<'_, '_> {
         accept: Val,
         reject: Val,
     ) -> Result<Val, TranslateError> {
+        if let Some(merged) = self.merge_ptr(cond, accept, reject) {
+            return Ok(merged);
+        }
         match (accept, reject) {
             (Val::Scalar(left), Val::Scalar(right)) => {
                 Ok(Val::Scalar(self.pick(cond, left, right)))
@@ -249,10 +253,16 @@ impl Emit<'_, '_> {
             self.labels.push(flag);
         }
         let saved = self.stack.clone();
+        let saved_ptrs = self.ptr_slots.clone();
         let accept = self.sub(|em| em.arm(then_body, &temps, &ty.results))?;
+        let then_ptrs = self.ptr_slots.clone();
+        let then_stopped = self.halted;
         self.stack = saved.clone();
+        self.ptr_slots = saved_ptrs;
         let reject = self.sub(|em| em.arm(else_body, &temps, &ty.results))?;
+        let else_ptrs = self.ptr_slots.clone();
         self.stack = saved;
+        self.ptr_slots = final_ptrs(cond_val, then_stopped, then_ptrs, else_ptrs);
         self.block.push(
             naga::Statement::If {
                 condition: cond,
@@ -276,6 +286,27 @@ impl Emit<'_, '_> {
     ) -> Result<(), TranslateError> {
         self.run(body)?;
         self.store_temps(temps, kinds)
+    }
+}
+
+/// Storage provenance each shadow slot holds after an `if`.
+///
+/// A constant condition folds in the analysis, so only the live arm's
+/// slots describe the state after the branch. With a dynamic condition
+/// both arms are live and the analysis has already forced them onto one
+/// binding per slot; a then-arm that returned leaves only the else path,
+/// so the else slots win there.
+fn final_ptrs(
+    cond: Val,
+    then_stopped: bool,
+    then_slots: Vec<Option<(u32, u32)>>,
+    else_slots: Vec<Option<(u32, u32)>>,
+) -> Vec<Option<(u32, u32)>> {
+    match cond {
+        Val::Imm(0) => else_slots,
+        Val::Imm(_) => then_slots,
+        _ if then_stopped => else_slots,
+        _ => then_slots,
     }
 }
 

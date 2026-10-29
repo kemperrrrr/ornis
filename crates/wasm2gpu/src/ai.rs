@@ -36,6 +36,19 @@ enum Abs {
     F32,
     Vec,
     I32(Num),
+    /// A storage address: provenance plus a byte offset from the base.
+    ///
+    /// The offset is a [`Num`] and may be a phi. Group and binding must
+    /// agree at every join, or the value is an
+    /// [`AmbiguousProvenance`](TranslateError::AmbiguousProvenance).
+    Ptr {
+        /// Binding group, an immediate.
+        group: u32,
+        /// Binding index, an immediate.
+        binding: u32,
+        /// Byte offset from the binding base.
+        offset: Num,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

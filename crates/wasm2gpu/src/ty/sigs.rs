@@ -28,6 +28,7 @@ pub(crate) fn sig_ok(
     struct_id: Option<u16>,
 ) -> Result<(), TranslateError> {
     match imp {
+        Imp::Base => fixed_sig(sig, 2, &[Kind::I32], "storage_base"),
         Imp::ReadUniform => fixed_sig(sig, PROV_PARAMS, &FLOAT4, "raw_read"),
         Imp::Sample => count_only(sig, SAMPLE_PARAMS, SAMPLE_RESULTS, "texture_sample_2d"),
         Imp::Read(Spec::Fixed(elem)) => {

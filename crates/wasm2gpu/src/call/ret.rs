@@ -38,6 +38,9 @@ pub(super) fn finish(
             Val::Imm(value) => result_imm[index] = Some(value),
             Val::Scalar(handle) => dynamic.push((cx.scalar, handle)),
             Val::Index(handle) => dynamic.push((cx.uint, handle)),
+            // A pointer result would leave the callee; the analysis
+            // rejects it before emission reaches here.
+            Val::Ptr { .. } => return Err(TranslateError::Unsupported),
             Val::Vec(_) => return Err(TranslateError::Unsupported),
         }
         index += 1;

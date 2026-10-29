@@ -53,6 +53,9 @@ fn arg_expr(em: &mut Emit<'_, '_>, val: Val) -> Result<naga::Handle<Expression>,
     match val {
         Val::Index(handle) | Val::Scalar(handle) => Ok(handle),
         Val::Imm(value) => Ok(em.u32(value)),
+        // A pointer argument would cross a function boundary, which this
+        // subset rejects before emission; the analysis rejects it first.
+        Val::Ptr { .. } => Err(TranslateError::Unsupported),
         Val::Vec(_) => Err(TranslateError::Unsupported),
     }
 }

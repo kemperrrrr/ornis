@@ -71,6 +71,24 @@ pub(crate) fn write_at<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32, 
 
 #[cfg(target_arch = "wasm32")]
 #[inline(always)]
+pub(crate) fn storage_base<const G: u32, const B: u32>() -> u32 {
+    copy::wasm_storage_base::<G, B>()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn ptr_load<T: GpuSafeLayout>(addr: u32) -> T {
+    copy::ptr_load::<T>(addr)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn ptr_store<T: GpuSafeLayout>(addr: u32, value: T) {
+    copy::ptr_store::<T>(addr, value)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
 pub(crate) fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32 {
     copy::call_uniform_field_f32(group, binding, sid, field)
 }

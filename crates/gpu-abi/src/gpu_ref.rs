@@ -54,6 +54,30 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S>
         gpu_abi::read_at::<T>(G, B, self.offset)
     }
 
+    /// Byte address of this token in shader code: the `storage_base` tag
+    /// for `(G, B)` plus the offset.
+    ///
+    /// The wasm lowering keeps that provenance through `i32.add` and turns
+    /// `i32.load` / `i32.store` at the result into an access chain on the
+    /// binding — the pointer path of
+    /// `docs/rendering/wasm-segmented-memory.md` §4. The method exists only
+    /// where the shader ABI does (`wasm32`).
+    #[cfg(target_arch = "wasm32")]
+    pub fn addr(&self) -> u32 {
+        gpu_abi::storage_base::<G, B>().wrapping_add(self.offset)
+    }
+
+    /// Pointer-path read at `addr()`: one `i32.load` through
+    /// the storage provenance, lowered to that binding's access chain.
+    ///
+    /// Only 4-byte values; a wider type is a contract breach. The import
+    /// path with the same result is [`read`](Self::read), which the host
+    /// uses too.
+    #[cfg(target_arch = "wasm32")]
+    pub fn load(&self) -> T {
+        gpu_abi::ptr_load::<T>(self.addr())
+    }
+
     /// Token for a field at `field_offset` bytes past this token.
     ///
     /// Does not load GPU memory. Offsets come from [`gpu_struct!`](crate::gpu_struct)
@@ -100,6 +124,15 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout> GpuRef<'a, G, B, T, Stora
     pub fn write(&self, value: T) {
         let _ = self;
         gpu_abi::write_at::<T>(G, B, self.offset, &value);
+    }
+
+    /// Pointer-path write at `addr()`: one `i32.store` through
+    /// the storage provenance, lowered to that binding's access chain.
+    ///
+    /// Only 4-byte values; a wider type is a contract breach.
+    #[cfg(target_arch = "wasm32")]
+    pub fn store(&self, value: T) {
+        gpu_abi::ptr_store::<T>(self.addr(), value);
     }
 }
 

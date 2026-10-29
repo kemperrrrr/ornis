@@ -3,6 +3,7 @@
 use naga::BinaryOperator;
 use naga::Expression;
 
+use crate::cx::PtrOff;
 use crate::cx::Val;
 use crate::env::Emit;
 use crate::error::TranslateError;
@@ -10,6 +11,7 @@ use crate::globals;
 use crate::ir::Op;
 use crate::storage;
 use crate::ty;
+use crate::ty::Elem;
 use crate::ty::Imp;
 use crate::uniform;
 
@@ -28,14 +30,21 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::Call(index) => call(em, index),
         Op::Mul => bin(em, BinaryOperator::Multiply),
         Op::Add => bin(em, BinaryOperator::Add),
-        Op::I32Add => i32_bin(em, u32::wrapping_add, BinaryOperator::Add),
+        Op::I32Add => ptr_bin(em, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),
-        Op::I32Sub => i32_bin(em, u32::wrapping_sub, BinaryOperator::Subtract),
+        Op::I32Sub => ptr_bin(em, false, u32::wrapping_sub),
+        Op::I32Shl => i32_bin(em, u32::wrapping_shl, BinaryOperator::ShiftLeft),
+        Op::I32ShrU => i32_bin(em, u32::wrapping_shr, BinaryOperator::ShiftRight),
         Op::I32Eqz => i32_eqz(em),
         Op::I32Eq => i32_cmp(em, |a, b| a == b, BinaryOperator::Equal),
         Op::I32Ne => i32_cmp(em, |a, b| a != b, BinaryOperator::NotEqual),
         Op::I32LtU => i32_cmp(em, |a, b| a < b, BinaryOperator::Less),
         Op::I32GtU => i32_cmp(em, |a, b| a > b, BinaryOperator::Greater),
+        Op::F32Lt => f32_lt(em),
+        Op::LoadI32(offset) => storage::load_ptr(em, offset, Elem::U32),
+        Op::LoadF32(offset) => storage::load_ptr(em, offset, Elem::F32),
+        Op::StoreI32(offset) => storage::store_ptr(em, offset, Elem::U32),
+        Op::StoreF32(offset) => storage::store_ptr(em, offset, Elem::F32),
         Op::Select => wasm_select(em),
     }
 }
@@ -49,12 +58,27 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         return crate::call::call_defined(em, index);
     };
     match imp {
+        Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
         Imp::Sample => sample(em),
         Imp::Read(spec) => storage::load(em, spec),
         Imp::Write(spec) => storage::store(em, spec, index),
         Imp::Uniform(uni) => uniform::load(em, uni),
     }
+}
+
+/// Fold `storage_base`'s provenance pair into an address.
+///
+/// The binding's base tag is the binding itself: only byte offsets are
+/// ever added, and the access names the global through group and binding.
+fn storage_base(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let binding = em.pop_imm()?;
+    let group = em.pop_imm()?;
+    em.push(Val::Ptr {
+        group,
+        binding,
+        off: PtrOff::Imm(0),
+    })
 }
 
 fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
@@ -105,6 +129,20 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
 
 fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
     let slot = index as usize;
+    if let Some((group, binding)) = em.ptr_slots.get(slot).copied().flatten() {
+        let var = em
+            .locals
+            .get(slot)
+            .copied()
+            .flatten()
+            .ok_or(TranslateError::Unsupported)?;
+        let loaded = em.load_var(var);
+        return em.push(Val::Ptr {
+            group,
+            binding,
+            off: PtrOff::Dyn(loaded),
+        });
+    }
     if let Some(bits) = em.baked.get(slot).copied().flatten() {
         return em.push(Val::Imm(bits));
     }
@@ -151,6 +189,13 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     if let Some(slot) = em.baked.get_mut(index as usize) {
         *slot = None;
     }
+    let provenance = match val {
+        Val::Ptr { group, binding, .. } => Some((group, binding)),
+        _ => None,
+    };
+    if let Some(slot) = em.ptr_slots.get_mut(index as usize) {
+        *slot = provenance;
+    }
     if tee {
         em.stack.push(val);
     }
@@ -163,6 +208,7 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     let bits = match val {
         Val::Imm(value) => em.u32(value),
         Val::Index(handle) | Val::Scalar(handle) => handle,
+        Val::Ptr { off, .. } => em.off_expr(off),
         Val::Vec(_) => return Err(TranslateError::Unsupported),
     };
     em.store_var(var, bits);
@@ -202,16 +248,25 @@ enum Ready {
     Expr(naga::Handle<Expression>, naga::Handle<Expression>),
 }
 
+fn ready_of(
+    em: &mut Emit<'_, '_>,
+    left: Val,
+    right: Val,
+    fold: impl Fn(u32, u32) -> u32,
+) -> Result<Ready, TranslateError> {
+    if let (Val::Imm(a), Val::Imm(b)) = (left, right) {
+        return Ok(Ready::Imm(fold(a, b)));
+    }
+    Ok(Ready::Expr(em.as_uint(left)?, em.as_uint(right)?))
+}
+
 fn i32_ready(
     em: &mut Emit<'_, '_>,
     fold: impl Fn(u32, u32) -> u32,
 ) -> Result<Ready, TranslateError> {
     let right = em.pop()?;
     let left = em.pop()?;
-    if let (Val::Imm(a), Val::Imm(b)) = (left, right) {
-        return Ok(Ready::Imm(fold(a, b)));
-    }
-    Ok(Ready::Expr(em.as_uint(left)?, em.as_uint(right)?))
+    ready_of(em, left, right, fold)
 }
 
 fn i32_bin(
@@ -219,13 +274,94 @@ fn i32_bin(
     fold: fn(u32, u32) -> u32,
     op: BinaryOperator,
 ) -> Result<(), TranslateError> {
-    match i32_ready(em, fold)? {
+    let right = em.pop()?;
+    let left = em.pop()?;
+    i32_pair(em, left, right, fold, op)
+}
+
+fn i32_pair(
+    em: &mut Emit<'_, '_>,
+    left: Val,
+    right: Val,
+    fold: fn(u32, u32) -> u32,
+    op: BinaryOperator,
+) -> Result<(), TranslateError> {
+    match ready_of(em, left, right, fold)? {
         Ready::Imm(value) => em.push(Val::Imm(value)),
         Ready::Expr(left, right) => {
             let value = arith(em, op, left, right);
             em.push(Val::Index(value))
         }
     }
+}
+
+/// `i32.add` / `i32.sub` that keep a storage pointer's provenance.
+///
+/// A pointer plus or minus an offset stays a pointer; anything else falls
+/// back to plain integer arithmetic, where a pointer operand is rejected.
+fn ptr_bin(
+    em: &mut Emit<'_, '_>,
+    add: bool,
+    fold: fn(u32, u32) -> u32,
+) -> Result<(), TranslateError> {
+    let op = if add {
+        BinaryOperator::Add
+    } else {
+        BinaryOperator::Subtract
+    };
+    let right = em.pop()?;
+    let left = em.pop()?;
+    match (left, right) {
+        (Val::Ptr { .. }, Val::Ptr { .. }) => Err(TranslateError::Unsupported),
+        (Val::Ptr { group, binding, off }, operand) => {
+            let off = off_math(em, off, operand, add, fold)?;
+            em.push(Val::Ptr {
+                group,
+                binding,
+                off,
+            })
+        }
+        (operand, Val::Ptr { group, binding, off }) if add => {
+            let off = off_math(em, off, operand, add, fold)?;
+            em.push(Val::Ptr {
+                group,
+                binding,
+                off,
+            })
+        }
+        (left, right) => i32_pair(em, left, right, fold, op),
+    }
+}
+
+/// Fold or emit `off ± operand` as a pointer's new byte offset.
+fn off_math(
+    em: &mut Emit<'_, '_>,
+    off: PtrOff,
+    operand: Val,
+    add: bool,
+    fold: fn(u32, u32) -> u32,
+) -> Result<PtrOff, TranslateError> {
+    let op = if add {
+        BinaryOperator::Add
+    } else {
+        BinaryOperator::Subtract
+    };
+    match (off, operand) {
+        (PtrOff::Imm(value), Val::Imm(delta)) => Ok(PtrOff::Imm(fold(value, delta))),
+        (off, operand) => {
+            let left = em.off_expr(off);
+            let right = em.as_uint(operand)?;
+            Ok(PtrOff::Dyn(arith(em, op, left, right)))
+        }
+    }
+}
+
+fn f32_lt(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let right = crate::env::float_of(em.pop()?)?;
+    let left = crate::env::float_of(em.pop()?)?;
+    let cond = arith(em, BinaryOperator::Less, left, right);
+    let value = zero_one(em, cond);
+    em.push(Val::Index(value))
 }
 
 fn i32_cmp(
@@ -268,6 +404,9 @@ fn wasm_select(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let cond = em.as_bool(cond_val)?;
     let reject = em.pop()?;
     let accept = em.pop()?;
+    if let Some(merged) = em.merge_ptr(cond, accept, reject) {
+        return em.push(merged);
+    }
     let value = match (accept, reject) {
         (Val::Scalar(left), Val::Scalar(right)) => Val::Scalar(em.pick(cond, left, right)),
         (Val::Vec(left), Val::Vec(right)) => Val::Vec(em.pick(cond, left, right)),

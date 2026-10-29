@@ -17,7 +17,9 @@
 //! bindings use that same provenance and the same `place_fields` layout: a
 //! struct field index is constant, and a fixed-size array index may be
 //! dynamic where WGSL allows it. Group and binding stay immediate operands.
-//! A join that names two bindings is rejected. Linear memory is rejected.
+//! A join that names two bindings is rejected. `storage_base` plus
+//! `i32.load` / `f32.load` / the matching stores addresses one storage
+//! binding through its provenance; any other linear memory is rejected.
 //! See `docs/rendering/wasm-segmented-memory.md`.
 
 #![warn(missing_docs)]
