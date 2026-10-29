@@ -37,7 +37,8 @@ pub use layout::{
     uniform_stride,
 };
 pub use shader_io::{
-    storage_at_f32, storage_store_f32, uniform_array_f32, uniform_field_f32, uniform_field_u32,
+    storage_at_f32, storage_at_u32, storage_store_f32, storage_store_u32, uniform_array_f32,
+    uniform_field_f32, uniform_field_u32,
 };
 pub use texture::{Sampler, Texture2d};
 

@@ -13,6 +13,9 @@ mod compute_lift;
 #[path = "gpu_e2e/compute.rs"]
 mod compute;
 
+#[path = "gpu_e2e/cull.rs"]
+mod cull;
+
 use std::process::Command;
 
 use ornis_gpu_abi::HostMemory;

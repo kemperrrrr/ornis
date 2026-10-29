@@ -117,6 +117,18 @@ pub(crate) fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32
     copy::call_storage_write_f32(group, binding, index, value);
 }
 
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32 {
+    copy::call_storage_read_u32(group, binding, index)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32) {
+    copy::call_storage_write_u32(group, binding, index, value);
+}
+
 pub(crate) fn texture_sample_2d<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
 ) -> GpuVec4 {
