@@ -20,7 +20,7 @@ use ornis_animation::{
     JointMask, JointPose, JointTrack, JointTrs, Key, KeyTrack, MachineCursor, MaskId, RetargetMap,
     SkelClip, SkelFade, SkelInertia, SkelLayerStack, SkelPlayer, SkelTree, SkelTreePlayer,
     Skeleton, SkinnedMesh, SwitchCursor, SyncMark, TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
-    TreeTransition, fade_in_flight, switch_selection, try_animator,
+    TreeTransition, fade_in_flight, freeform_cache, switch_selection, try_animator,
 };
 use ornis_assets::scene::{MaterialDesc, MeshDesc, TransformDesc};
 use ornis_core::{ChildOf, Clamped01, Entity, GlobalTransform, Seconds, SmartStore};
@@ -955,6 +955,14 @@ pub fn set_skel_tree(store: &mut SmartStore, root: Entity, tree: SkelTree) -> bo
                 elapsed: Seconds::ZERO,
                 duration: Seconds::ZERO,
             }),
+            _ => None,
+        })
+        .collect();
+    player.freeforms = tree
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            TreeNodeDef::Freeform2d { children, .. } => Some(freeform_cache(children)),
             _ => None,
         })
         .collect();

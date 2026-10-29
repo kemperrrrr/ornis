@@ -6,9 +6,9 @@
 //! scaled tolerances) and the barycentric fold over the containing
 //! triangle — allocation-free and deterministic for the hot path.
 
-use crate::tree::{FREEFORM_MAX_POINTS, TreeChild2d};
+use crate::tree::{FREEFORM_MAX_POINTS, FREEFORM_MAX_TRIANGLES, FreeformCache, TreeChild2d};
 
-/// The live `(node, weight)` slots of one [`freeform2d_weights`] fold —
+/// The live `(node, weight)` slots of one [`freeform2d_weights_cached`] fold —
 /// up to three triangle corners (the outside-hull clamp needs at most
 /// two). The slots carry the child's **node index** (the freeform folds
 /// consume nodes directly) and their weights sum to one.
@@ -162,7 +162,7 @@ fn sos_side(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2], eps: f64) -> f64
         (c, orient(a, b, d)),
         (d, -orient(a, b, c)),
     ];
-    terms.sort_by(|x, y| x.0[0].total_cmp(&y.0[0]).then(x.0[1].total_cmp(&y.0[1])));
+    terms.sort_unstable_by(|x, y| x.0[0].total_cmp(&y.0[0]).then(x.0[1].total_cmp(&y.0[1])));
     for (_, cofactor) in terms {
         if cofactor.abs() > eps {
             return cofactor.signum() * orient(a, b, c).signum();
@@ -199,28 +199,6 @@ fn passes_delaunay(children: &[TreeChild2d], triple: [usize; 3], eps: (f64, f64)
         }
     }
     true
-}
-
-/// Barycentric weights of `value` in the candidate triangle
-/// `children[triple]`, `None` when the triple is degenerate, fails the
-/// Delaunay filter (a fourth point strictly inside its circumcircle),
-/// or leaves the value outside. `eps` carries the set's [`tolerances`].
-fn triangulated_at(
-    children: &[TreeChild2d],
-    triple: [usize; 3],
-    value: [f32; 2],
-    eps: (f64, f64),
-) -> Option<[f32; 3]> {
-    if !passes_delaunay(children, triple, eps) {
-        return None;
-    }
-    triangle_weights(
-        children[triple[0]].position,
-        children[triple[1]].position,
-        children[triple[2]].position,
-        value,
-        eps.1,
-    )
 }
 
 /// `children` indices in ascending (x, y) order — the fixed point order
@@ -349,8 +327,31 @@ fn compact(slots: [(usize, f32); FREEFORM_SLOTS]) -> FreeformSlots {
     fold
 }
 
+/// The surviving Delaunay triples of `children` — every triple with an
+/// empty circumcircle, cocircular sets folded to one geometric diagonal
+/// by the SoS tie-break. Built once per install; fixed arrays only, no
+/// allocations. The scan order matches the fold's, so the cached fold
+/// is bit-for-bit the on-the-fly one.
+pub fn freeform_cache(children: &[TreeChild2d]) -> FreeformCache {
+    let mut cache = FreeformCache::default();
+    let eps = tolerances(children);
+    for i in 0..children.len() {
+        for j in (i + 1)..children.len() {
+            for k in (j + 1)..children.len() {
+                if passes_delaunay(children, [i, j, k], eps) && cache.count < FREEFORM_MAX_TRIANGLES
+                {
+                    cache.kept[cache.count] = [i, j, k];
+                    cache.count += 1;
+                }
+            }
+        }
+    }
+    cache
+}
+
 /// Weights of a 2-D **freeform** blend at `value` (x, y) over `children`
-/// — arbitrary distinct points ([`TreeNodeDef::Freeform2d`]).
+/// — arbitrary distinct points ([`TreeNodeDef::Freeform2d`]) — against
+/// the node's install-time [`FreeformCache`].
 ///
 /// Returns up to three live `(node, weight)` slots — the child's node
 /// index and its weight, summing to one. The value inside a
@@ -366,29 +367,33 @@ fn compact(slots: [(usize, f32); FREEFORM_SLOTS]) -> FreeformSlots {
 /// layer reads it as bad skin first).
 ///
 /// Deterministic and allocation-free — evaluated every frame per blend
-/// node.
-pub(crate) fn freeform2d_weights(children: &[TreeChild2d], value: [f32; 2]) -> FreeformSlots {
+/// node: a containment scan over the cached triangles, no incircle
+/// tests.
+pub(crate) fn freeform2d_weights_cached(
+    cache: &FreeformCache,
+    children: &[TreeChild2d],
+    value: [f32; 2],
+) -> FreeformSlots {
     match children.len() {
         0 => return FreeformSlots::EMPTY,
         1 => return compact([(children[0].node, 1.0), (0, 0.0), (0, 0.0)]),
         count if count > FREEFORM_MAX_POINTS => return FreeformSlots::EMPTY,
         _ => {}
     }
-    // First containing triangle of the deterministic triangulation:
-    // every triple with an empty circumcircle, cocircular sets folded
-    // to one diagonal by [`sos_side`] (no overlapping triangles).
-    let eps = tolerances(children);
-    for i in 0..children.len() {
-        for j in (i + 1)..children.len() {
-            for k in (j + 1)..children.len() {
-                if let Some(weights) = triangulated_at(children, [i, j, k], value, eps) {
-                    return compact([
-                        (children[i].node, weights[0]),
-                        (children[j].node, weights[1]),
-                        (children[k].node, weights[2]),
-                    ]);
-                }
-            }
+    let (_, area_eps) = tolerances(children);
+    for triple in cache.triples() {
+        if let Some(weights) = triangle_weights(
+            children[triple[0]].position,
+            children[triple[1]].position,
+            children[triple[2]].position,
+            value,
+            area_eps,
+        ) {
+            return compact([
+                (children[triple[0]].node, weights[0]),
+                (children[triple[1]].node, weights[1]),
+                (children[triple[2]].node, weights[2]),
+            ]);
         }
     }
     compact(clamp_to_hull(children, value))
@@ -408,7 +413,31 @@ mod tests {
     }
 
     fn weights_of(children: &[TreeChild2d], value: [f32; 2]) -> Vec<(usize, f32)> {
-        freeform2d_weights(children, value).as_slice().to_vec()
+        freeform2d_weights_cached(&freeform_cache(children), children, value)
+            .as_slice()
+            .to_vec()
+    }
+
+    /// Barycentric weights of `value` in the candidate triangle
+    /// `children[triple]`, `None` when the triple is degenerate, fails
+    /// the Delaunay filter (a fourth point strictly inside its
+    /// circumcircle), or leaves the value outside.
+    fn triangulated_at(
+        children: &[TreeChild2d],
+        triple: [usize; 3],
+        value: [f32; 2],
+        eps: (f64, f64),
+    ) -> Option<[f32; 3]> {
+        if !passes_delaunay(children, triple, eps) {
+            return None;
+        }
+        triangle_weights(
+            children[triple[0]].position,
+            children[triple[1]].position,
+            children[triple[2]].position,
+            value,
+            eps.1,
+        )
     }
 
     /// Barycentric weights of `value` in triangle (0, 0) (2, 0) (0, 2).
@@ -848,14 +877,14 @@ mod tests {
         [3, 2, 1, 0],
     ];
 
-    /// Eight directions (`cos`/`sin` of `k·π/4`, f32) at `radius` —
-    /// the speed × direction blend space — optionally with the centre
-    /// point; the f32 rounding keeps the ring only *nearly*
+    /// `n` directions (`cos`/`sin` of `2πk/n`, f32) at `radius` — the
+    /// speed × direction blend spaces — optionally with the centre
+    /// point; the f32 rounding keeps the rings only *nearly*
     /// cocircular.
-    fn octagon(radius: f32, centre: bool) -> Vec<TreeChild2d> {
-        let mut points: Vec<[f32; 2]> = (0..8)
+    fn ngon(n: usize, radius: f32, centre: bool) -> Vec<TreeChild2d> {
+        let mut points: Vec<[f32; 2]> = (0..n)
             .map(|k| {
-                let angle = k as f32 * core::f32::consts::FRAC_PI_4;
+                let angle = k as f32 * core::f32::consts::TAU / n as f32;
                 [angle.cos() * radius, angle.sin() * radius]
             })
             .collect();
@@ -910,7 +939,7 @@ mod tests {
     fn octagons_partition_the_hull_at_every_scale() {
         for radius in [1.0f32, 3.0, 300.0] {
             for centre in [false, true] {
-                assert_partition(&octagon(radius, centre));
+                assert_partition(&ngon(8, radius, centre));
             }
         }
     }
@@ -935,5 +964,155 @@ mod tests {
         assert_eq!(weights_of(&two, [1.0, 0.0]), vec![(0, 0.75), (1, 0.25)]);
         assert_eq!(weights_of(&two, [-2.0, 0.0]), vec![(0, 1.0)]);
         assert_eq!(weights_of(&[], [0.0, 0.0]).len(), 0);
+    }
+
+    /// The on-the-fly fold of r-38 — the reference the cached hot path
+    /// must match bit for bit (r-39 acceptance).
+    fn freeform2d_weights_uncached(children: &[TreeChild2d], value: [f32; 2]) -> FreeformSlots {
+        match children.len() {
+            0 => return FreeformSlots::EMPTY,
+            1 => return compact([(children[0].node, 1.0), (0, 0.0), (0, 0.0)]),
+            count if count > FREEFORM_MAX_POINTS => return FreeformSlots::EMPTY,
+            _ => {}
+        }
+        let eps = tolerances(children);
+        for i in 0..children.len() {
+            for j in (i + 1)..children.len() {
+                for k in (j + 1)..children.len() {
+                    if let Some(weights) = triangulated_at(children, [i, j, k], value, eps) {
+                        return compact([
+                            (children[i].node, weights[0]),
+                            (children[j].node, weights[1]),
+                            (children[k].node, weights[2]),
+                        ]);
+                    }
+                }
+            }
+        }
+        compact(clamp_to_hull(children, value))
+    }
+
+    /// Probe values over the `children` bounding box plus four outside
+    /// offsets — the comparison must cover the clamp path too.
+    fn probes(children: &[TreeChild2d]) -> Vec<[f32; 2]> {
+        let lo = bounds(children);
+        let extent = set_span(children) as f32;
+        let step = extent / 6.0;
+        let mut out = Vec::new();
+        for gx in 0..7 {
+            for gy in 0..7 {
+                out.push([lo[0] + step * gx as f32, lo[1] + step * gy as f32]);
+            }
+        }
+        out.push([lo[0] - extent, lo[1] - extent]);
+        out.push([lo[0] + 2.0 * extent, lo[1] + 0.5 * extent]);
+        out.push([lo[0] + 0.5 * extent, lo[1] + 2.0 * extent]);
+        out.push([lo[0] + 2.0 * extent, lo[1] + 2.0 * extent]);
+        out
+    }
+
+    /// Deterministic xorshift noise in `[0, 1)` — no rand dependency.
+    fn noise(seed: &mut u32) -> f32 {
+        let mut x = *seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        *seed = x;
+        (x >> 8) as f32 / 16_777_216.0
+    }
+
+    /// The cached hot fold is bit-for-bit the on-the-fly fold on every
+    /// reviewed set: same survivors, same scan order, same arithmetic
+    /// (r-39 acceptance — «веса с кэшем совпадают со старым путём»).
+    #[test]
+    fn cached_weights_match_the_uncached_fold_bit_for_bit() {
+        let base = [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        let mut sets: Vec<(String, Vec<TreeChild2d>)> = Vec::new();
+        for perm in PERMUTATIONS_4 {
+            sets.push((
+                format!("square {perm:?}"),
+                freeform_n(&perm.map(|i| base[i])),
+            ));
+        }
+        sets.push((
+            "square + centre".to_string(),
+            freeform_n(&[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [1.0, 1.0]]),
+        ));
+        sets.push((
+            "rhombus".to_string(),
+            freeform_n(&[[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]]),
+        ));
+        for radius in [1.0f32, 3.0, 300.0, 1e-3] {
+            for centre in [false, true] {
+                sets.push((
+                    format!("octagon {radius}/{centre}"),
+                    ngon(8, radius, centre),
+                ));
+            }
+        }
+        for sides in [5usize, 6, 12] {
+            sets.push((format!("{sides}-gon"), ngon(sides, 5.0, true)));
+        }
+        sets.push(("irregular".to_string(), irregular()));
+        for (name, children) in &sets {
+            let cache = freeform_cache(children);
+            for value in probes(children) {
+                assert_eq!(
+                    freeform2d_weights_cached(&cache, children, value).as_slice(),
+                    freeform2d_weights_uncached(children, value).as_slice(),
+                    "{name} at {value:?}"
+                );
+            }
+        }
+    }
+
+    /// The hot fold trusts the cache, not the points: forced to the
+    /// other diagonal of the square, the fold keeps its triangles — no
+    /// incircle pass runs per frame («триангуляция не пересчитывается»).
+    #[test]
+    fn the_cache_decides_without_retriangulating() {
+        let children = freeform_n(&[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]);
+        let mut forced = FreeformCache::default();
+        forced.kept[0] = [0, 1, 2];
+        forced.kept[1] = [0, 2, 3];
+        forced.count = 2;
+        let value = [1.7, 0.2];
+        let cached = freeform2d_weights_cached(&forced, &children, value);
+        let support =
+            |slots: &[(usize, f32)]| slots.iter().map(|(node, _)| *node).collect::<Vec<_>>();
+        assert_eq!(
+            support(cached.as_slice()),
+            vec![0, 1, 2],
+            "the forced cache's triangle decides"
+        );
+        let on_the_fly = freeform2d_weights_uncached(&children, value);
+        assert_eq!(support(on_the_fly.as_slice()), vec![0, 1, 3]);
+        assert_ne!(cached.as_slice(), on_the_fly.as_slice());
+    }
+
+    /// Near-cocircular rings with f32-scale jitter stay a partition —
+    /// the `span⁴` band folds the whole ring consistently (Grok's
+    /// property-test request): no holes, no overlaps, no weight jumps.
+    #[test]
+    fn jittered_circles_partition_cleanly() {
+        let mut seed = 0x9E37_79B9u32;
+        for round in 0..12 {
+            for sides in [8usize, 12] {
+                let mut points: Vec<[f32; 2]> = (0..sides)
+                    .map(|k| {
+                        let angle = k as f32 * core::f32::consts::TAU / sides as f32;
+                        let wobble = 4e-7;
+                        [
+                            angle.cos() + (noise(&mut seed) - 0.5) * wobble,
+                            angle.sin() + (noise(&mut seed) - 0.5) * wobble,
+                        ]
+                    })
+                    .collect();
+                if round % 2 == 0 {
+                    points.push([noise(&mut seed) * 0.4 - 0.2, noise(&mut seed) * 0.4 - 0.2]);
+                }
+                assert_partition(&freeform_n(&points));
+            }
+        }
     }
 }

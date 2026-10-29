@@ -358,6 +358,7 @@ mod tests {
                     leaves: vec![stepping(clip_a), stepping(clip_b)],
                     machines: Vec::new(),
                     switches: Vec::new(),
+                    freeforms: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
@@ -391,6 +392,7 @@ mod tests {
                         duration: Seconds::new(0.0),
                     }],
                     switches: Vec::new(),
+                    freeforms: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 1.0), ("b".to_owned(), 0.0)]
@@ -450,6 +452,7 @@ mod tests {
                         duration: Seconds::new(1.0),
                     }],
                     switches: Vec::new(),
+                    freeforms: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 0.5), ("b".to_owned(), 0.5)]
@@ -486,6 +489,7 @@ mod tests {
                         elapsed: Seconds::new(0.0),
                         duration: Seconds::new(0.0),
                     }],
+                    freeforms: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 0.0), ("b".to_owned(), 1.0)]
@@ -523,6 +527,7 @@ mod tests {
                         elapsed: Seconds::new(0.5),
                         duration: Seconds::new(1.0),
                     }],
+                    freeforms: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 0.5), ("b".to_owned(), 0.5)]
@@ -577,6 +582,7 @@ mod tests {
                     leaves: vec![stepping(clip_a), stepping(clip_b)],
                     machines: Vec::new(),
                     switches: Vec::new(),
+                    freeforms: Vec::new(),
                 },
             )),
             vec![("a".to_owned(), 0.25), ("b".to_owned(), 0.75)]

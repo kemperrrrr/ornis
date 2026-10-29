@@ -107,13 +107,15 @@ mod tree_eff;
 mod tree_eval;
 mod tree_sync;
 mod tree_weights;
+pub use freeform::freeform_cache;
 pub use ragdoll::{
     RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollError, RagdollFade, RagdollLimit,
     RagdollMode, RagdollMotor, RagdollShape, ragdoll_blend,
 };
 pub use tree::{
-    FREEFORM_MAX_POINTS, MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild,
-    TreeChild2d, TreeCmp, TreeCond, TreeNodeDef, TreeParam, TreeTransition, switch_selection,
+    FREEFORM_MAX_POINTS, FREEFORM_MAX_TRIANGLES, FreeformCache, MachineCursor, SkelTree,
+    SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeCmp, TreeCond, TreeNodeDef,
+    TreeParam, TreeTransition, switch_selection,
 };
 use tree_eval::eval_tree;
 use tree_sync::sync_transition_leaves;

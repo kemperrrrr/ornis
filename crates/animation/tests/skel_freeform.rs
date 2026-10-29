@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use glam::Vec3;
-use ornis_animation::{ClipId, SkelTree, TreeNodeDef, TreeParam};
+use ornis_animation::{ClipId, SkelTree, TreeChild2d, TreeNodeDef, TreeParam};
 use ornis_core::Engine;
 
 /// 3-point freeform over parameters `x`/`y` — the `clips` at the
@@ -155,4 +155,74 @@ fn freeform2d_events_carry_the_fold_weights() {
             fired.weight
         );
     }
+}
+
+/// Four clip nodes at x poses `100, 0, 0, 0` — the marker at node 0 —
+/// under a freeform square over `points`, query at `defaults`.
+fn square_tree(clips: [ClipId; 4], points: [[f32; 2]; 4], defaults: [f32; 2]) -> SkelTree {
+    SkelTree {
+        nodes: vec![
+            TreeNodeDef::Clip { clip: clips[0] },
+            TreeNodeDef::Clip { clip: clips[1] },
+            TreeNodeDef::Clip { clip: clips[2] },
+            TreeNodeDef::Clip { clip: clips[3] },
+            TreeNodeDef::Freeform2d {
+                axes: [0, 1],
+                children: points
+                    .into_iter()
+                    .enumerate()
+                    .map(|(node, position)| TreeChild2d { position, node })
+                    .collect(),
+            },
+        ],
+        params: vec![
+            TreeParam {
+                name: "x".to_string(),
+                default: defaults[0],
+            },
+            TreeParam {
+                name: "y".to_string(),
+                default: defaults[1],
+            },
+        ],
+    }
+}
+
+/// The triangulation is built at install and never recomputed on the
+/// frame (r-39): swapping the tree for points whose own triangulation
+/// would fold the marker in must not move the pose — the cached
+/// triangles still decide.
+#[test]
+fn freeform_cache_is_not_rebuilt_per_frame() {
+    let mut engine = engine();
+    let root = rig(&mut engine, 1);
+    let clips = [
+        clip_x(&mut engine, "marker", 100.0),
+        clip_x(&mut engine, "b", 0.0),
+        clip_x(&mut engine, "c", 0.0),
+        clip_x(&mut engine, "d", 0.0),
+    ];
+    install(
+        &mut engine,
+        root,
+        square_tree(
+            clips,
+            [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
+            [1.5, 1.0],
+        ),
+    );
+    // The query folds inside the cached triangle (2,0)(2,2)(0,2), so the
+    // marker at (0, 0) stays out. The swapped quad — (0, 2.1) instead of
+    // (0, 2) — re-triangulates across the other diagonal and would pull
+    // the marker in; the frame must not see that triangulation.
+    store_mut(&mut engine).insert_cold(
+        root,
+        square_tree(
+            clips,
+            [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.1]],
+            [1.5, 1.0],
+        ),
+    );
+    engine.run_frame(0.1);
+    expect_origin(&engine, root, 0, Vec3::ZERO);
 }

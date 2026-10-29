@@ -730,6 +730,7 @@ mod tests {
                 leaves: vec![player_on(walk, 1.0), player_on(side, 1.0)],
                 machines: Vec::new(),
                 switches: Vec::new(),
+                freeforms: Vec::new(),
             },
         );
         advance_skel_players(&store, 0.5);
@@ -771,6 +772,7 @@ mod tests {
                 leaves: vec![player_on(walk, 1.0)],
                 machines: Vec::new(),
                 switches: Vec::new(),
+                freeforms: Vec::new(),
             },
         );
         let mask = store.create_entity();

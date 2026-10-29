@@ -139,11 +139,12 @@ pub enum TreeNodeDef {
     /// 2-D **freeform** blend of `children` over parameters `axes`
     /// (x, y): the inputs sit at arbitrary distinct points of the plane
     /// (e.g. speed × direction) — no lattice. The points are
-    /// triangulated (deterministic empty-circumcircle set, no
-    /// allocations; cocircular sets tie-break to one fixed diagonal by
-    /// a symbolic lexicographic perturbation — a geometric SoS rule,
-    /// independent of the arrival order — so the triangles partition
-    /// the hull) and the containing triangle's corners carry
+    /// triangulated once at install into a [`FreeformCache`]
+    /// (deterministic empty-circumcircle set, no allocations;
+    /// cocircular sets tie-break to one fixed diagonal by a symbolic
+    /// lexicographic perturbation — a geometric SoS rule, independent
+    /// of the arrival order — so the triangles partition the hull) and
+    /// the containing triangle's corners carry
     /// barycentric weights summing to one (`freeform2d_weights`); the
     /// weights are continuous across shared triangle edges. Exactly on
     /// a hull edge or corner the edge or corner owns the pose; outside
@@ -271,6 +272,32 @@ pub fn switch_selection(value: f32, len: usize) -> usize {
 /// `switches[i]` and the i-th [`TreeNodeDef::Switch`]: a lane whose counts
 /// diverge steps the matching prefix and reads as bad skin (`eval_tree`
 /// demands one cursor per machine or switch node).
+/// Triangle capacity of one [`FreeformCache`] — the Delaunay
+/// triangulation of `n` points has at most `2n − 5` triangles, so
+/// [`FREEFORM_MAX_POINTS`] points never need more.
+pub const FREEFORM_MAX_TRIANGLES: usize = 2 * FREEFORM_MAX_POINTS - 5;
+
+/// The surviving Delaunay triangles of one [`TreeNodeDef::Freeform2d`]
+/// node — the install-time triangulation of its points
+/// ([`freeform_cache`](crate::freeform::freeform_cache)) that the hot
+/// fold reads triangle by triangle. The hot path never re-triangulates:
+/// the node's points
+/// are fixed at install, and every reinstall ([`SkelTree`] write)
+/// rebuilds the cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FreeformCache {
+    pub(crate) kept: [[usize; 3]; FREEFORM_MAX_TRIANGLES],
+    pub(crate) count: usize,
+}
+
+impl FreeformCache {
+    /// The surviving `(child, child, child)` triples, in the
+    /// triangulation's deterministic scan order.
+    pub fn triples(&self) -> &[[usize; 3]] {
+        &self.kept[..self.count]
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SkelTreePlayer {
@@ -282,4 +309,10 @@ pub struct SkelTreePlayer {
     pub machines: Vec<MachineCursor>,
     /// Cursors of the [`TreeNodeDef::Switch`] nodes, in node order.
     pub switches: Vec<SwitchCursor>,
+    /// Install-time triangulations of the [`TreeNodeDef::Freeform2d`]
+    /// nodes, in node order — one [`FreeformCache`] per freeform node;
+    /// a lane whose count diverges reads as bad skin like the cursors
+    /// above. Rebuilt on every [`SkelTree`] install — the points of an
+    /// installed node never change.
+    pub freeforms: Vec<FreeformCache>,
 }

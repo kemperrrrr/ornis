@@ -13,7 +13,8 @@
 //! refill in place (design §8.1).
 
 use crate::blend::fade_progress;
-use crate::freeform::freeform2d_weights;
+use crate::freeform::freeform2d_weights_cached;
+use crate::tree::FreeformCache;
 use crate::tree::{
     MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeNodeDef,
 };
@@ -82,6 +83,11 @@ fn eff_weights(
         .iter()
         .filter(|node| matches!(node, TreeNodeDef::Switch { .. }))
         .count();
+    let mut freeform_cursor = tree
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, TreeNodeDef::Freeform2d { .. }))
+        .count();
     for index in (0..tree.nodes.len()).rev() {
         let weight = scratch.eff[index];
         match &tree.nodes[index] {
@@ -98,11 +104,13 @@ fn eff_weights(
                 fold_blend2d_eff(&mut scratch.eff, index, weight, children, value)?;
             }
             TreeNodeDef::Freeform2d { axes, children } => {
+                freeform_cursor = freeform_cursor.checked_sub(1)?;
+                let cache = player.freeforms.get(freeform_cursor)?;
                 let value = [
                     player.params.get(axes[0]).copied()?,
                     player.params.get(axes[1]).copied()?,
                 ];
-                fold_freeform2d_eff(&mut scratch.eff, index, weight, children, value)?;
+                fold_freeform2d_eff(&mut scratch.eff, index, weight, (children, cache), value)?;
             }
             TreeNodeDef::Machine { states, .. } => {
                 machine_cursor = machine_cursor.checked_sub(1)?;
@@ -198,20 +206,20 @@ fn spread_blend2d(eff: &mut [f32], weight: f32, children: &[TreeChild2d], value:
 }
 
 /// Folds one [`TreeNodeDef::Freeform2d`] node's weight into its
-/// triangulation weights ([`freeform2d_weights`] carries node indices);
+/// triangulation weights ([`freeform2d_weights_cached`] carries node indices);
 /// `None` on the [`crate::tree_eval::eval_tree`] contract violations.
 fn fold_freeform2d_eff(
     eff: &mut [f32],
     index: usize,
     weight: f32,
-    children: &[TreeChild2d],
+    (children, cache): (&[TreeChild2d], &FreeformCache),
     value: [f32; 2],
 ) -> Option<()> {
     if !value[0].is_finite() || !value[1].is_finite() {
         return None;
     }
     freeform2d_children_valid(index, children)?;
-    let slots = freeform2d_weights(children, value);
+    let slots = freeform2d_weights_cached(cache, children, value);
     for (node, child_weight) in slots.as_slice() {
         eff[*node] += weight * child_weight;
     }

@@ -9,7 +9,8 @@
 use ornis_core::ColdComponentStore;
 
 use crate::blend::{BlendedPose, SampleBuf, fade_progress, sample_joints};
-use crate::freeform::freeform2d_weights;
+use crate::freeform::freeform2d_weights_cached;
+use crate::tree::FreeformCache;
 use crate::tree::{
     MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild2d, TreeNodeDef, TreeTransition,
 };
@@ -65,6 +66,7 @@ pub(crate) fn eval_tree(
     let mut leaves = 0;
     let mut machines = 0;
     let mut switches = 0;
+    let mut freeforms = 0;
     for (index, node) in tree.nodes.iter().enumerate() {
         match node {
             TreeNodeDef::Clip { clip } => {
@@ -102,7 +104,9 @@ pub(crate) fn eval_tree(
                 eval_blend2d(*axes, children, &player.params, rest, index, poses)?;
             }
             TreeNodeDef::Freeform2d { axes, children } => {
-                eval_freeform2d(*axes, children, &player.params, rest, index, poses)?;
+                let cache = player.freeforms.get(freeforms)?;
+                freeforms += 1;
+                eval_freeform2d(*axes, children, cache, &player.params, rest, index, poses)?;
             }
             TreeNodeDef::Machine {
                 states,
@@ -198,13 +202,14 @@ pub(crate) fn freeform2d_children_valid(index: usize, children: &[TreeChild2d]) 
 /// Evaluates one [`TreeNodeDef::Freeform2d`] node into `poses[index]`.
 /// The hot path re-checks the fold-poisoning part of the contract every
 /// frame ([`freeform2d_children_valid`], finite parameter values) — the
-/// triangulation itself is recomputed deterministically from the points
-/// ([`freeform2d_weights`]). The output is the barycentric fold of the
-/// containing triangle's corners (or the nearest hull edge outside the
-/// convex hull); `None` = bad skin.
+/// triangulation itself comes from the node's install-time
+/// [`FreeformCache`] (never recomputed per frame). The output is the
+/// barycentric fold of the containing triangle's corners (or the
+/// nearest hull edge outside the convex hull); `None` = bad skin.
 pub(crate) fn eval_freeform2d(
     axes: [usize; 2],
     children: &[TreeChild2d],
+    cache: &FreeformCache,
     params: &[f32],
     rest: &[JointTrs],
     index: usize,
@@ -215,7 +220,7 @@ pub(crate) fn eval_freeform2d(
     if !value[0].is_finite() || !value[1].is_finite() {
         return None;
     }
-    let slots = freeform2d_weights(children, value);
+    let slots = freeform2d_weights_cached(cache, children, value);
     poses[index].refill_rest(rest);
     let mut total = 0.0;
     for (node_index, weight) in slots.as_slice() {
