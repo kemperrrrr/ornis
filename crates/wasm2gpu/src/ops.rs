@@ -46,7 +46,7 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::I32ShrU => i32_bin(em, u32::wrapping_shr, BinaryOperator::ShiftRight),
         Op::I32ShrS => i32_bin(em, shr_s, BinaryOperator::ShiftRight),
         Op::I32And => i32_bin(em, |a, b| a & b, BinaryOperator::And),
-        Op::I32Or => i32_bin(em, |a, b| a | b, BinaryOperator::Or),
+        Op::I32Or => i32_bin(em, |a, b| a | b, BinaryOperator::InclusiveOr),
         Op::I32Xor => i32_bin(em, |a, b| a ^ b, BinaryOperator::ExclusiveOr),
         Op::I32Eqz => i32_eqz(em),
         Op::I32Eq => i32_cmp(em, |a, b| a == b, BinaryOperator::Equal),
