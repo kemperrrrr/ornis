@@ -38,7 +38,7 @@ const EXPECTED: [u32; 4] = [1, 0, 1, SENTINEL];
 /// The hand twin runs the same guard, the same `dot + w + radius < 0.0`
 /// order, and the same workgroup, so bitwise agreement is the contract.
 const TWIN_WGSL: &str = r#"
-@group(0) @binding(0) var<uniform> planes: array<f32, 24>;
+@group(0) @binding(0) var<uniform> planes: array<vec4<f32>, 24>;
 @group(0) @binding(1) var<storage, read_write> spheres: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> flags: array<u32>;
 @group(0) @binding(3) var<storage, read_write> sphere_count: array<u32, 4>;
@@ -52,10 +52,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         var plane = 0u;
         while (plane < 6u) {
             let at = plane * 4u;
-            let px = planes[at];
-            let py = planes[at + 1u];
-            let pz = planes[at + 2u];
-            let pw = planes[at + 3u];
+            let px = planes[at].x;
+            let py = planes[at + 1u].x;
+            let pz = planes[at + 2u].x;
+            let pw = planes[at + 3u].x;
             if (px * center.x + py * center.y + pz * center.z + pw + center.w < 0.0) {
                 visible = 0u;
             }
