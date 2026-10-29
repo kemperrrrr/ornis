@@ -65,7 +65,7 @@ const REST: f32 = 4.0;
 #[cfg(target_arch = "wasm32")]
 const REST_ID: u32 = 3;
 
-/// Value [`compute`] stores at invocation `id`.
+/// Value the wasm `compute` export stores at invocation `id`.
 ///
 /// The `match` is what wasm32 lowers with `br_table`. The host gpu test
 /// compares the same function with the buffer the GPU wrote.

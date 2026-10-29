@@ -7,16 +7,13 @@
 //! caller, so a returned binding can feed the next import. Recursion and
 //! `call_indirect` are rejected before a function is emitted.
 
-use naga::Expression;
 use naga::Function;
 use naga::FunctionArgument;
 use naga::Span;
-use naga::Statement;
 
 use crate::cx::Cx;
 use crate::cx::Spec;
 use crate::cx::Val;
-use crate::cx::sp;
 use crate::env::Emit;
 use crate::env::ExecIn;
 use crate::error::TranslateError;
@@ -28,6 +25,7 @@ use crate::ir::MAX_PARAMS;
 use crate::ir::Sig;
 use crate::ty::StructDef;
 
+mod invoke;
 mod ret;
 
 /// Lower `index` (a wasm function index) and emit the call.
@@ -45,7 +43,7 @@ pub(super) fn call_defined(em: &mut Emit<'_, '_>, index: u32) -> Result<(), Tran
     let args = em.take(sig.params as usize)?;
     let baked = bake(&args, &sig)?;
     let spec = ensure(em.cx, em.funcs, em.imports, em.structs, func_index, &baked)?;
-    invoke(em, &spec, &args)
+    invoke::invoke(em, &spec, &args)
 }
 
 fn bake(args: &[Val], sig: &Sig) -> Result<Vec<Option<u32>>, TranslateError> {
@@ -164,90 +162,6 @@ fn naga_args(
         index += 1;
     }
     Ok(out)
-}
-
-fn invoke(em: &mut Emit<'_, '_>, spec: &Spec, args: &[Val]) -> Result<(), TranslateError> {
-    let mut arguments = Vec::new();
-    let mut index = 0usize;
-    while index < spec.nparams as usize {
-        if spec.baked[index].is_none() {
-            arguments.push(arg_expr(em, args[index])?);
-        }
-        index += 1;
-    }
-    let dyn_count = count_dynamic(spec);
-    let result = if dyn_count == 0 {
-        None
-    } else {
-        Some(
-            em.func
-                .expressions
-                .append(Expression::CallResult(spec.handle), Span::default()),
-        )
-    };
-    em.block.push(
-        Statement::Call {
-            function: spec.handle,
-            arguments,
-            result,
-        },
-        sp(),
-    );
-    push_results(em, spec, result, dyn_count)
-}
-
-fn arg_expr(em: &mut Emit<'_, '_>, val: Val) -> Result<naga::Handle<Expression>, TranslateError> {
-    match val {
-        Val::Index(handle) | Val::Scalar(handle) => Ok(handle),
-        Val::Imm(value) => Ok(em.u32(value)),
-        Val::Vec(_) => Err(TranslateError::Unsupported),
-    }
-}
-
-fn count_dynamic(spec: &Spec) -> u32 {
-    let mut count = 0u32;
-    let mut index = 0usize;
-    while index < spec.nresults as usize {
-        if spec.result_imm[index].is_none() {
-            count += 1;
-        }
-        index += 1;
-    }
-    count
-}
-
-fn push_results(
-    em: &mut Emit<'_, '_>,
-    spec: &Spec,
-    result: Option<naga::Handle<Expression>>,
-    dyn_count: u32,
-) -> Result<(), TranslateError> {
-    let mut dyn_at = 0u32;
-    let mut index = 0usize;
-    while index < spec.nresults as usize {
-        if let Some(value) = spec.result_imm[index] {
-            em.push(Val::Imm(value))?;
-        } else {
-            let base = result.ok_or(TranslateError::Unsupported)?;
-            let handle = if dyn_count == 1 {
-                base
-            } else {
-                em.ex(Expression::AccessIndex {
-                    base,
-                    index: dyn_at,
-                })
-            };
-            let val = if spec.result_kind[index] == Kind::F32 {
-                Val::Scalar(handle)
-            } else {
-                Val::Index(handle)
-            };
-            em.push(val)?;
-            dyn_at += 1;
-        }
-        index += 1;
-    }
-    Ok(())
 }
 
 fn baked_key(baked: &[Option<u32>]) -> [Option<u32>; MAX_PARAMS] {

@@ -120,11 +120,13 @@ fn on_stmt(ai: &mut Ai<'_>, st: &mut St, stmt: &Stmt) -> Result<(), TranslateErr
         Stmt::Br(depth) => branch(ai, st, *depth, true),
         Stmt::BrIf(depth) => br_if(ai, st, *depth),
         Stmt::BrTable { targets, default } => table::br_table(ai, st, targets, *default),
-        Stmt::Return => {
-            st.stop = true;
-            Ok(())
-        }
+        Stmt::Return => ret_stop(st),
     }
+}
+
+fn ret_stop(st: &mut St) -> Result<(), TranslateError> {
+    st.stop = true;
+    Ok(())
 }
 
 fn region(ai: &mut Ai<'_>, st: &mut St, body: &[Stmt]) -> Result<(), TranslateError> {
