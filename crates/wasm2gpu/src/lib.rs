@@ -4,7 +4,11 @@
 //! structured `block` / `loop` / `if` / `br` / `br_if`. `br_table` lowers to
 //! a WGSL `switch`. A direct `call` of a defined function becomes a naga
 //! function specialized by immediate group and binding; the offset passes as
-//! an argument or a result. Recursion and `call_indirect` are rejected.
+//! an argument or a result. The same constant arguments reuse one function.
+//! An `f32` argument is not specialized. Recursion, `call_indirect`, and a
+//! specialization past the budget are rejected. A `br_table` that continues
+//! a loop is a `continue`. A `br_table` aimed at a region this translator
+//! did not wrap in a naga loop is rejected.
 //! `cs_main`, when exported, is a compute entry with `@workgroup_size` and
 //! `global_invocation_id`. `raw_read` and `texture_sample_2d` lower as before.
 //! Storage imports lower to an access chain on one array global: scalars,

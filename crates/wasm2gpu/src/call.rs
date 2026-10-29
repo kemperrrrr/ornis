@@ -3,15 +3,19 @@
 //! A constant `i32` argument is not a naga parameter. The callee reads it
 //! back as an immediate, so `storage_read`'s group and binding stay
 //! `i32.const` inside the specialization. A dynamic index and every `f32`
-//! are real arguments. A constant result is pushed as an immediate on the
-//! caller, so a returned binding can feed the next import. Recursion and
-//! `call_indirect` are rejected before a function is emitted.
+//! are real arguments: an `f32`, even `f32.const`, is not baked, so two
+//! calls that differ only in a float share one function. A constant result
+//! is pushed as an immediate on the caller, so a returned binding can feed
+//! the next import. The same `(function, constants)` pair is emitted once.
+//! Recursion, `call_indirect`, and a specialization past the budget are
+//! rejected before a function is emitted.
 
 use naga::Function;
 use naga::FunctionArgument;
 use naga::Span;
 
 use crate::cx::Cx;
+use crate::cx::MAX_SPECS;
 use crate::cx::Spec;
 use crate::cx::Val;
 use crate::env::Emit;
@@ -73,12 +77,15 @@ fn ensure(
     func_index: u32,
     baked: &[Option<u32>],
 ) -> Result<Spec, TranslateError> {
-    let key = baked_key(baked);
+    let key = baked_key(baked)?;
     if let Some(found) = find(cx, func_index, baked.len(), &key) {
         return Ok(found);
     }
     if cx.active.contains(&func_index) {
         return Err(TranslateError::Recursion);
+    }
+    if cx.specs.len() >= MAX_SPECS {
+        return Err(TranslateError::Budget);
     }
     cx.active.push(func_index);
     let lowered = lower_one(cx, funcs, imports, structs, func_index, baked, &key);
@@ -164,12 +171,23 @@ fn naga_args(
     Ok(out)
 }
 
-fn baked_key(baked: &[Option<u32>]) -> [Option<u32>; MAX_PARAMS] {
+fn baked_key(baked: &[Option<u32>]) -> Result<[Option<u32>; MAX_PARAMS], TranslateError> {
     let mut key = [None; MAX_PARAMS];
+    copy_key(&mut key, baked)?;
+    Ok(key)
+}
+
+fn copy_key(
+    key: &mut [Option<u32>; MAX_PARAMS],
+    baked: &[Option<u32>],
+) -> Result<(), TranslateError> {
+    if baked.len() > MAX_PARAMS {
+        return Err(TranslateError::Unsupported);
+    }
     let mut index = 0usize;
-    while index < baked.len() && index < MAX_PARAMS {
+    while index < baked.len() {
         key[index] = baked[index];
         index += 1;
     }
-    key
+    Ok(())
 }

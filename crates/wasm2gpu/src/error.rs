@@ -38,6 +38,12 @@ pub enum TranslateError {
     /// The callee would not be a concrete function, so provenance could not
     /// be specialized.
     IndirectCall,
+    /// Too many specialized functions, or too many abstract-interpretation steps.
+    ///
+    /// Each distinct tuple of constant `i32` arguments is one naga function.
+    /// The same tuple is cached. A tree of different tuples is rejected
+    /// instead of growing without a bound.
+    Budget,
     /// A storage element the lowerer will not emit, or a struct whose lanes
     /// do not match the host layout rules.
     UnsupportedType(String),
@@ -58,6 +64,7 @@ impl fmt::Display for TranslateError {
             Self::FunctionBranch => f.write_str("branch to the function is not lowered"),
             Self::Recursion => f.write_str("recursive call is not lowered"),
             Self::IndirectCall => f.write_str("indirect call is not lowered"),
+            Self::Budget => f.write_str("specialization budget exceeded"),
             Self::UnsupportedType(msg) => f.write_str(msg),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
         }

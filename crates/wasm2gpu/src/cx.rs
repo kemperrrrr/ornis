@@ -15,6 +15,22 @@ pub(super) const LANES: u32 = 4;
 pub(super) const UNIFORM_BYTES: u32 = 1 << 16;
 pub(super) const F32_WIDTH: u8 = 4;
 pub(super) const VEC3_LANES: u32 = 3;
+/// Specialized naga functions one module may emit.
+///
+/// A second call with the same function and the same constant arguments
+/// reuses the first function. Distinct tuples count toward this cap.
+pub(super) const MAX_SPECS: usize = {
+    const LIMIT: usize = 64;
+    LIMIT
+};
+/// Statements abstract interpretation may visit while checking one entry.
+///
+/// A cached call does not visit the callee again. A tree of distinct
+/// constant arguments stops here instead of walking every path.
+pub(super) const MAX_AI_STEPS: u32 = {
+    const LIMIT: u32 = 8192;
+    LIMIT
+};
 
 pub(super) struct Slot {
     pub(super) group: u32,

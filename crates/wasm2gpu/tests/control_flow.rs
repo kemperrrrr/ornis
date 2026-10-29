@@ -283,15 +283,15 @@ fn br_table_lowers_to_switch() {
              (block
                (br_table 0 1 2 (local.get 2))
              )
-             i32.const 0 i32.const 1 i32.const 0 f32.const 0x3f800000
+             i32.const 0 i32.const 1 i32.const 0 f32.const 1
              call ${write}
              br 1
            )
-           i32.const 0 i32.const 1 i32.const 0 f32.const 0x40000000
+           i32.const 0 i32.const 1 i32.const 0 f32.const 2
            call ${write}
            br 0
          )
-         i32.const 0 i32.const 1 i32.const 0 f32.const 0x40400000
+         i32.const 0 i32.const 1 i32.const 0 f32.const 3
          call ${write}
          {ret}",
         write = symbols::STORAGE_WRITE_F32,
@@ -299,10 +299,44 @@ fn br_table_lowers_to_switch() {
     );
     let got = wgsl("", &write_f32(), &fs);
     assert!(got.contains("switch "), "{got}");
-    assert!(got.contains("case 0u"), "{got}");
-    assert!(got.contains("case 1u"), "{got}");
-    assert!(got.contains("default"), "{got}");
+    // Depth 0 sets one leave flag, depth 1 sets two, default (depth 2) sets three.
+    assert_eq!(trues(arm(&got, "case 0u:", "case 1u:")), 1, "{got}");
+    assert_eq!(trues(arm(&got, "case 1u:", "default:")), 2, "{got}");
+    assert_eq!(trues(arm(&got, "default:", "}")), 3, "{got}");
+    let tail = got.split("switch ").nth(1).expect("switch");
+    let first = tail.find("= 1f").expect("store 1");
+    let second = tail.find("= 2f").expect("store 2");
+    let third = tail.find("= 3f").expect("store 3");
+    assert!(first < second && second < third, "{got}");
     let _ = parsed_switch(&got);
+}
+
+#[test]
+fn br_table_continue_inside_a_loop() {
+    let fs = format!(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (loop
+           (br_table 0 (local.get 2)))
+         {ret}",
+        ret = rgba(),
+    );
+    let got = wgsl("", "", &fs);
+    assert!(got.contains("switch "), "{got}");
+    assert!(got.contains("continue;"), "{got}");
+    let _ = parsed_switch(&got);
+}
+
+fn arm<'a>(wgsl: &'a str, start: &str, end: &str) -> &'a str {
+    wgsl.split(start)
+        .nth(1)
+        .unwrap_or_else(|| panic!("{start} missing"))
+        .split(end)
+        .next()
+        .unwrap_or_else(|| panic!("{end} missing"))
+}
+
+fn trues(body: &str) -> usize {
+    body.matches("= true").count()
 }
 
 fn parsed_switch(wgsl: &str) -> naga::Module {

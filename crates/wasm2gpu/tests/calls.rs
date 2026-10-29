@@ -161,5 +161,138 @@ fn compute_entry_has_workgroup_and_invocation_id() {
         translated.wgsl
     );
     assert!(!translated.compute_spirv.is_empty());
-    naga::front::wgsl::parse_str(&translated.wgsl).expect("wgsl");
+    let parsed = naga::front::wgsl::parse_str(&translated.wgsl).expect("wgsl");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&parsed)
+    .unwrap_or_else(|err| panic!("naga: {err}\n{}", translated.wgsl));
+}
+
+const DEPTH: usize = {
+    const LEVELS: usize = 20;
+    LEVELS
+};
+
+const FORK: usize = {
+    const LEVELS: usize = 18;
+    LEVELS
+};
+
+const FAN: usize = {
+    const CALLS: usize = 80;
+    CALLS
+};
+
+const WIDE: usize = {
+    const PARAMS: usize = 12;
+    PARAMS
+};
+
+#[test]
+fn deep_call_chain_reuses_one_specialization_per_function() {
+    let funcs = chain(DEPTH, false);
+    let fs = fragment("i32.const 1 call $f0 drop f32.const 0 f32.const 0 f32.const 0 f32.const 1");
+    let started = std::time::Instant::now();
+    let got = wgsl("", &format!("{funcs} {fs}"));
+    assert!(started.elapsed().as_secs() < 2, "chain took too long");
+    assert_eq!(got.matches("fn fn").count(), DEPTH, "{got}");
+}
+
+#[test]
+fn distinct_constant_tree_hits_the_specialization_budget() {
+    let funcs = chain(FORK, true);
+    let fs = fragment("i32.const 1 call $f0 drop f32.const 0 f32.const 0 f32.const 0 f32.const 1");
+    let started = std::time::Instant::now();
+    let got = err("", &format!("{funcs} {fs}"));
+    assert!(started.elapsed().as_secs() < 2, "budget took too long");
+    assert!(matches!(got, TranslateError::Budget), "{got}");
+}
+
+#[test]
+fn many_distinct_calls_of_one_function_hit_the_budget() {
+    let id = "(func $id (param i32) (result i32) local.get 0)";
+    let mut body = String::new();
+    let mut index = 0u32;
+    while (index as usize) < FAN {
+        body.push_str(&format!("i32.const {index} call $id drop "));
+        index += 1;
+    }
+    body.push_str("f32.const 0 f32.const 0 f32.const 0 f32.const 1");
+    let started = std::time::Instant::now();
+    let got = err("", &format!("{id} {}", fragment(&body)));
+    assert!(started.elapsed().as_secs() < 2, "fan-out took too long");
+    assert!(matches!(got, TranslateError::Budget), "{got}");
+}
+
+#[test]
+fn f32_argument_is_shared_across_constants() {
+    let scale = "(func $scale (param f32) (result f32) local.get 0 f32.const 2 f32.mul)";
+    let fs = fragment(
+        "f32.const 1 call $scale f32.const 3 call $scale f32.add f32.const 0 f32.const 0 f32.const 1",
+    );
+    let got = wgsl("", &format!("{scale} {fs}"));
+    assert_eq!(got.matches("fn fn0_").count(), 1, "{got}");
+    assert!(got.contains("fn fn0_0_("), "{got}");
+    assert!(got.contains("1f"), "{got}");
+    assert!(got.contains("3f"), "{got}");
+}
+
+#[test]
+fn tail_constant_does_not_collide_in_the_specialization_key() {
+    let mut params = String::new();
+    let mut index = 0usize;
+    while index < WIDE {
+        params.push_str("i32 ");
+        index += 1;
+    }
+    let id = format!(
+        "(func $id (param {params}) (result i32) local.get {})",
+        WIDE - 1
+    );
+    let ones = wide_consts(1);
+    let mut twos = wide_consts(1);
+    // The last immediate differs. Truncating the key would merge the two calls.
+    let needle = "i32.const 1";
+    let end = twos.rfind(&needle).expect("tail");
+    twos.replace_range(end..end + needle.len(), "i32.const 2");
+    let fs = fragment(&format!(
+        "{ones} call $id drop {twos} call $id drop {ones} call $id drop f32.const 0 f32.const 0 f32.const 0 f32.const 1"
+    ));
+    let got = wgsl("", &format!("{id} {fs}"));
+    assert_eq!(got.matches("fn fn0_").count(), 2, "{got}");
+}
+
+fn chain(depth: usize, fork: bool) -> String {
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < depth {
+        let body = if index + 1 == depth {
+            "local.get 0".to_string()
+        } else if fork {
+            format!(
+                "local.get 0 i32.const 2 i32.mul call $f{next} drop local.get 0 i32.const 2 i32.mul i32.const 1 i32.add call $f{next}",
+                next = index + 1,
+            )
+        } else {
+            format!(
+                "local.get 0 call $f{next} drop local.get 0 call $f{next}",
+                next = index + 1,
+            )
+        };
+        out.push_str(&format!("(func $f{index} (param i32) (result i32) {body})"));
+        index += 1;
+    }
+    out
+}
+
+fn wide_consts(value: u32) -> String {
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < WIDE {
+        out.push_str(&format!("i32.const {value} "));
+        index += 1;
+    }
+    out
 }

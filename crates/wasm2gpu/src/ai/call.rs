@@ -2,7 +2,8 @@
 //!
 //! Constant `i32` arguments stay constant in the callee, so a group or
 //! binding passed as an immediate is still an immediate at the import.
-//! A dynamic index stays dynamic and may come back as a result.
+//! A dynamic index stays dynamic and may come back as a result. The same
+//! function and the same abstract arguments are interpreted once.
 
 use super::Abs;
 use super::Ai;
@@ -15,6 +16,36 @@ use super::push;
 use crate::error::TranslateError;
 use crate::ir::Kind;
 
+/// One entry's memo of defined calls, and how many statements it has visited.
+pub(super) struct Seen {
+    steps: u32,
+    hits: Vec<Hit>,
+}
+
+struct Hit {
+    func: u32,
+    args: Vec<Abs>,
+    out: Vec<Abs>,
+}
+
+impl Seen {
+    pub(super) fn new() -> Self {
+        Self {
+            steps: 0,
+            hits: Vec::new(),
+        }
+    }
+}
+
+/// Count one statement. The same `(function, arguments)` pair is not visited again.
+pub(super) fn charge(ai: &mut Ai<'_>) -> Result<(), TranslateError> {
+    ai.seen.steps += 1;
+    if ai.seen.steps > crate::cx::MAX_AI_STEPS {
+        return Err(TranslateError::Budget);
+    }
+    Ok(())
+}
+
 pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), TranslateError> {
     if ai.active.contains(&index) {
         return Err(TranslateError::Recursion);
@@ -26,6 +57,9 @@ pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Tr
     let params = func.sig.params;
     let results = func.sig.results;
     let args = take_args(st, params)?;
+    if let Some(out) = recall(ai, index, &args) {
+        return give(st, &out);
+    }
     let body = func.body.clone();
     let mut callee = entry(func);
     seed(&mut callee, func, &args)?;
@@ -38,8 +72,38 @@ pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Tr
     if callee.stop || callee.stack.len() != results as usize {
         return Err(TranslateError::Unsupported);
     }
-    for value in callee.stack {
-        push(st, value)?;
+    remember(ai, index, &args, &callee.stack);
+    give(st, &callee.stack)
+}
+
+pub(super) fn recall(ai: &Ai<'_>, func: u32, args: &[Abs]) -> Option<Vec<Abs>> {
+    let index = find_hit(ai, func, args)?;
+    Some(ai.seen.hits[index].out.clone())
+}
+
+pub(super) fn find_hit(ai: &Ai<'_>, func: u32, args: &[Abs]) -> Option<usize> {
+    let mut index = 0usize;
+    while index < ai.seen.hits.len() {
+        let hit = &ai.seen.hits[index];
+        if hit.func == func && hit.args == args {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+pub(super) fn remember(ai: &mut Ai<'_>, func: u32, args: &[Abs], out: &[Abs]) {
+    ai.seen.hits.push(Hit {
+        func,
+        args: args.to_vec(),
+        out: out.to_vec(),
+    });
+}
+
+pub(super) fn give(st: &mut St, values: &[Abs]) -> Result<(), TranslateError> {
+    for value in values {
+        push(st, value.clone())?;
     }
     Ok(())
 }

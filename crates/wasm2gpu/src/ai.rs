@@ -68,6 +68,7 @@ struct Ai<'a> {
     labels: Vec<Lab>,
     /// Defined-function indices on the call stack. A repeat is recursion.
     active: Vec<u32>,
+    seen: call::Seen,
 }
 
 pub(super) fn check(
@@ -82,6 +83,7 @@ pub(super) fn check(
         funcs,
         labels: Vec::new(),
         active: Vec::new(),
+        seen: call::Seen::new(),
     };
     let mut pushed = false;
     if let Some(index) = funcs.iter().position(|item| std::ptr::eq(item, func)) {
@@ -102,6 +104,7 @@ fn interpret(ai: &mut Ai<'_>, st: &mut St, stmts: &[Stmt]) -> Result<(), Transla
         if st.stop {
             return Ok(());
         }
+        call::charge(ai)?;
         on_stmt(ai, st, stmt)?;
     }
     Ok(())
