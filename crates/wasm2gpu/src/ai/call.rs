@@ -88,9 +88,7 @@ pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Tr
 /// A pointer result would leave the callee with provenance this subset
 /// does not carry across calls; the arguments reject it first too.
 fn returns_ptr(values: &[Abs]) -> bool {
-    values
-        .iter()
-        .any(|value| matches!(value, Abs::Ptr { .. }))
+    values.iter().any(|value| matches!(value, Abs::Ptr { .. }))
 }
 
 pub(super) fn recall(ai: &Ai<'_>, func: u32, args: &[Abs]) -> Option<Vec<Abs>> {

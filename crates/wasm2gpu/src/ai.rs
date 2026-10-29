@@ -15,6 +15,7 @@ use crate::ty::StructDef;
 
 mod call;
 mod join;
+mod mem;
 mod table;
 mod uniform;
 mod value;

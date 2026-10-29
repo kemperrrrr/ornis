@@ -10,6 +10,16 @@ use super::fold;
 use super::join::join_abs;
 use super::local_get;
 use super::local_set;
+use super::mem::f32_lt;
+use super::mem::i32_offset;
+use super::mem::load_f32;
+use super::mem::load_i32;
+use super::mem::num_fold;
+use super::mem::pop_prov;
+use super::mem::pop_sid;
+use super::mem::storage_base;
+use super::mem::store_f32;
+use super::mem::store_i32;
 use super::pop;
 use super::pop_num;
 use super::push;
@@ -45,22 +55,10 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::I32LtU => i32_cmp(st, |a, b| a < b),
         Op::I32GtU => i32_cmp(st, |a, b| a > b),
         Op::F32Lt => f32_lt(st),
-        Op::LoadI32(_) => {
-            ptr_operand(st)?;
-            push(st, Abs::I32(Num::Dyn { joined: false }))
-        }
-        Op::LoadF32(_) => {
-            ptr_operand(st)?;
-            push(st, Abs::F32)
-        }
-        Op::StoreI32(_) => {
-            pop_i32(st)?;
-            ptr_operand(st)
-        }
-        Op::StoreF32(_) => {
-            pop_f32(st)?;
-            ptr_operand(st)
-        }
+        Op::LoadI32(_) => load_i32(st),
+        Op::LoadF32(_) => load_f32(st),
+        Op::StoreI32(_) => store_i32(st),
+        Op::StoreF32(_) => store_f32(st),
         Op::Select => select(st),
     }
 }
@@ -84,19 +82,6 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         Imp::Write(spec) => write_storage(ai, st, import, spec),
         Imp::Uniform(uni) => super::uniform::on_uniform(st, import, ai.structs, uni),
     }
-}
-
-/// Fold `storage_base`'s provenance pair into an address.
-pub(super) fn storage_base(st: &mut St, import: &Import) -> Result<(), TranslateError> {
-    ty::sig_ok(&import.sig, Imp::Base, &[], None)?;
-    let binding = pop_imm(st)?;
-    let group = pop_imm(st)?;
-    let address = Abs::Ptr {
-        group,
-        binding,
-        offset: Num::Const(0),
-    };
-    push(st, address)
 }
 
 pub(super) fn read_uniform(st: &mut St) -> Result<(), TranslateError> {
@@ -270,33 +255,6 @@ pub(super) fn pop_n(st: &mut St, n: u32) -> Result<(), TranslateError> {
     Ok(())
 }
 
-pub(super) fn pop_sid(st: &mut St) -> Result<u16, TranslateError> {
-    match st.stack.pop() {
-        Some(Abs::I32(Num::Const(value))) => {
-            u16::try_from(value).map_err(|_| type_msg("struct type id is out of range"))
-        }
-        Some(Abs::I32(Num::Dyn { joined: true })) => Err(TranslateError::AmbiguousProvenance),
-        Some(_) => Err(type_msg("struct type id is not a constant")),
-        None => Err(TranslateError::Unsupported),
-    }
-}
-
-pub(super) fn pop_prov(st: &mut St) -> Result<(), TranslateError> {
-    pop_imm(st)?;
-    Ok(())
-}
-
-/// Pop a group or binding operand: the value must be an `i32.const`.
-pub(super) fn pop_imm(st: &mut St) -> Result<u32, TranslateError> {
-    match st.stack.pop() {
-        Some(Abs::I32(Num::Const(value))) => Ok(value),
-        Some(Abs::I32(Num::Dyn { joined: true })) => Err(TranslateError::AmbiguousProvenance),
-        Some(Abs::I32(Num::Dyn { joined: false })) => Err(TranslateError::DynamicBinding),
-        Some(_) => Err(TranslateError::DynamicBinding),
-        None => Err(TranslateError::Unsupported),
-    }
-}
-
 pub(super) fn pop_index(st: &mut St) -> Result<(), TranslateError> {
     match st.stack.pop() {
         Some(Abs::I32(_)) => Ok(()),
@@ -326,83 +284,6 @@ pub(super) fn i32_bin(st: &mut St, op: impl Fn(u32, u32) -> u32) -> Result<(), T
     let right = pop_num(st)?;
     let left = pop_num(st)?;
     push(st, Abs::I32(num_fold(left, right, op)))
-}
-
-/// Fold two abstract integers, keeping `joined` when either side is a phi.
-pub(super) fn num_fold(left: Num, right: Num, op: impl Fn(u32, u32) -> u32) -> Num {
-    match (left, right) {
-        (Num::Const(a), Num::Const(b)) => Num::Const(op(a, b)),
-        _ => Num::Dyn {
-            joined: num_joined(left) || num_joined(right),
-        },
-    }
-}
-
-fn num_joined(num: Num) -> bool {
-    match num {
-        Num::Const(_) => false,
-        Num::Dyn { joined } => joined,
-    }
-}
-
-/// `i32.add` / `i32.sub`, keeping a storage pointer's provenance.
-///
-/// A pointer plus or minus an integer stays a pointer with the folded
-/// offset; a pointer on both sides is meaningless and rejected, and any
-/// other pairing is plain integer arithmetic, where a pointer operand
-/// fails the pop.
-fn i32_offset(
-    st: &mut St,
-    add: bool,
-    op: impl Fn(u32, u32) -> u32,
-) -> Result<(), TranslateError> {
-    let right = pop(st)?;
-    let left = pop(st)?;
-    match (left, right) {
-        (Abs::Ptr { .. }, Abs::Ptr { .. }) => Err(TranslateError::Unsupported),
-        (Abs::Ptr { group, binding, offset }, Abs::I32(num)) => {
-            let address = Abs::Ptr {
-                group,
-                binding,
-                offset: num_fold(offset, num, op),
-            };
-            push(st, address)
-        }
-        (Abs::I32(num), Abs::Ptr { group, binding, offset }) if add => {
-            let address = Abs::Ptr {
-                group,
-                binding,
-                offset: num_fold(num, offset, op),
-            };
-            push(st, address)
-        }
-        (Abs::I32(left_num), Abs::I32(right_num)) => {
-            push(st, Abs::I32(num_fold(left_num, right_num, op)))
-        }
-        _ => Err(TranslateError::Unsupported),
-    }
-}
-
-/// Pop a load or store address: only a storage pointer names a buffer.
-fn ptr_operand(st: &mut St) -> Result<(), TranslateError> {
-    match pop(st)? {
-        Abs::Ptr { .. } => Ok(()),
-        Abs::I32(_) => Err(TranslateError::LinearMemory),
-        _ => Err(TranslateError::Unsupported),
-    }
-}
-
-fn pop_i32(st: &mut St) -> Result<(), TranslateError> {
-    match pop(st)? {
-        Abs::I32(_) => Ok(()),
-        _ => Err(TranslateError::Unsupported),
-    }
-}
-
-fn f32_lt(st: &mut St) -> Result<(), TranslateError> {
-    pop_f32(st)?;
-    pop_f32(st)?;
-    push(st, Abs::I32(Num::Dyn { joined: false }))
 }
 
 pub(super) fn i32_cmp(st: &mut St, pred: fn(u32, u32) -> bool) -> Result<(), TranslateError> {

@@ -39,24 +39,19 @@ enum Ix {
     Dyn(naga::Handle<Expression>),
 }
 
+/// Group, binding, and element index of one storage access.
+type Site = (u32, u32, Ix);
+
 pub(super) fn load(em: &mut Emit<'_, '_>, spec: Spec) -> Result<(), TranslateError> {
     let elem = read_elem(em, spec)?;
-    let index = pop_index(em)?;
-    let (group, binding) = pop_prov(em)?;
-    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
-    let pointer = element_ptr(em, var, index);
-    push_elem(em, elem, pointer)
+    let site = pop_site(em)?;
+    load_elem(em, elem, site)
 }
 
 pub(super) fn store(em: &mut Emit<'_, '_>, spec: Spec, import: u32) -> Result<(), TranslateError> {
     let (elem, value) = pop_stored(em, spec, import)?;
-    let index = pop_index(em)?;
-    let (group, binding) = pop_prov(em)?;
-    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
-    let pointer = element_ptr(em, var, index);
-    em.block
-        .push(naga::Statement::Store { pointer, value }, sp());
-    Ok(())
+    let site = pop_site(em)?;
+    store_elem(em, elem, site, value)
 }
 
 /// `i32.load` / `f32.load` through a storage-provenance address.
@@ -65,10 +60,8 @@ pub(super) fn load_ptr(
     memarg: u32,
     elem: Elem,
 ) -> Result<(), TranslateError> {
-    let (group, binding, index) = ptr_access(em, memarg)?;
-    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
-    let pointer = element_ptr(em, var, index);
-    push_elem(em, elem, pointer)
+    let site = ptr_access(em, memarg)?;
+    load_elem(em, elem, site)
 }
 
 /// `i32.store` / `f32.store` through a storage-provenance address.
@@ -78,24 +71,61 @@ pub(super) fn store_ptr(
     elem: Elem,
 ) -> Result<(), TranslateError> {
     let value = pop_fixed(em, elem)?;
-    let (group, binding, index) = ptr_access(em, memarg)?;
-    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
-    let pointer = element_ptr(em, var, index);
-    em.block
-        .push(naga::Statement::Store { pointer, value }, sp());
-    Ok(())
+    let site = ptr_access(em, memarg)?;
+    store_elem(em, elem, site, value)
 }
 
 /// Pop a storage pointer and turn `offset + memarg` into an element index.
-fn ptr_access(em: &mut Emit<'_, '_>, memarg: u32) -> Result<(u32, u32, Ix), TranslateError> {
+fn ptr_access(em: &mut Emit<'_, '_>, memarg: u32) -> Result<Site, TranslateError> {
     let (group, binding, off) = pop_ptr(em)?;
     let byte = add_memarg(em, off, memarg)?;
     Ok((group, binding, byte_index(em, byte)))
 }
 
+/// Pops for a direct element: the index first, then the provenance.
+fn pop_site(em: &mut Emit<'_, '_>) -> Result<Site, TranslateError> {
+    let index = pop_index(em)?;
+    let (group, binding) = pop_prov(em)?;
+    Ok((group, binding, index))
+}
+
+/// The storage global and its access chain for one address.
+fn site_ptr(
+    em: &mut Emit<'_, '_>,
+    elem: Elem,
+    site: Site,
+) -> Result<naga::Handle<Expression>, TranslateError> {
+    let (group, binding, index) = site;
+    let var = globals::storage(em.cx, group, binding, elem, em.structs)?;
+    Ok(element_ptr(em, var, index))
+}
+
+/// Load through an address: resolve the global, then push the element.
+fn load_elem(em: &mut Emit<'_, '_>, elem: Elem, site: Site) -> Result<(), TranslateError> {
+    let pointer = site_ptr(em, elem, site)?;
+    push_elem(em, elem, pointer)
+}
+
+/// Store through an address: resolve the global, then write the value.
+fn store_elem(
+    em: &mut Emit<'_, '_>,
+    elem: Elem,
+    site: Site,
+    value: naga::Handle<Expression>,
+) -> Result<(), TranslateError> {
+    let pointer = site_ptr(em, elem, site)?;
+    em.block
+        .push(naga::Statement::Store { pointer, value }, sp());
+    Ok(())
+}
+
 fn pop_ptr(em: &mut Emit<'_, '_>) -> Result<(u32, u32, PtrOff), TranslateError> {
     match em.pop()? {
-        Val::Ptr { group, binding, off } => Ok((group, binding, off)),
+        Val::Ptr {
+            group,
+            binding,
+            off,
+        } => Ok((group, binding, off)),
         _ => Err(TranslateError::LinearMemory),
     }
 }

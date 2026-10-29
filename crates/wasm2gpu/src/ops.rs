@@ -3,7 +3,6 @@
 use naga::BinaryOperator;
 use naga::Expression;
 
-use crate::cx::PtrOff;
 use crate::cx::Val;
 use crate::env::Emit;
 use crate::error::TranslateError;
@@ -14,6 +13,16 @@ use crate::ty;
 use crate::ty::Elem;
 use crate::ty::Imp;
 use crate::uniform;
+
+mod ptr;
+
+use ptr::f32_lt;
+use ptr::i32_pair;
+use ptr::i32_ready;
+use ptr::local_ptr;
+use ptr::provenance;
+use ptr::ptr_bin;
+use ptr::storage_base;
 
 pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> {
     match op {
@@ -67,20 +76,6 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
     }
 }
 
-/// Fold `storage_base`'s provenance pair into an address.
-///
-/// The binding's base tag is the binding itself: only byte offsets are
-/// ever added, and the access names the global through group and binding.
-fn storage_base(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let binding = em.pop_imm()?;
-    let group = em.pop_imm()?;
-    em.push(Val::Ptr {
-        group,
-        binding,
-        off: PtrOff::Imm(0),
-    })
-}
-
 fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let offset = em.pop_imm()?;
     let binding = em.pop_imm()?;
@@ -129,19 +124,8 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
 
 fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
     let slot = index as usize;
-    if let Some((group, binding)) = em.ptr_slots.get(slot).copied().flatten() {
-        let var = em
-            .locals
-            .get(slot)
-            .copied()
-            .flatten()
-            .ok_or(TranslateError::Unsupported)?;
-        let loaded = em.load_var(var);
-        return em.push(Val::Ptr {
-            group,
-            binding,
-            off: PtrOff::Dyn(loaded),
-        });
+    if let Some(value) = local_ptr(em, slot)? {
+        return em.push(value);
     }
     if let Some(bits) = em.baked.get(slot).copied().flatten() {
         return em.push(Val::Imm(bits));
@@ -189,12 +173,8 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     if let Some(slot) = em.baked.get_mut(index as usize) {
         *slot = None;
     }
-    let provenance = match val {
-        Val::Ptr { group, binding, .. } => Some((group, binding)),
-        _ => None,
-    };
     if let Some(slot) = em.ptr_slots.get_mut(index as usize) {
-        *slot = provenance;
+        *slot = provenance(&val);
     }
     if tee {
         em.stack.push(val);
@@ -248,27 +228,6 @@ enum Ready {
     Expr(naga::Handle<Expression>, naga::Handle<Expression>),
 }
 
-fn ready_of(
-    em: &mut Emit<'_, '_>,
-    left: Val,
-    right: Val,
-    fold: impl Fn(u32, u32) -> u32,
-) -> Result<Ready, TranslateError> {
-    if let (Val::Imm(a), Val::Imm(b)) = (left, right) {
-        return Ok(Ready::Imm(fold(a, b)));
-    }
-    Ok(Ready::Expr(em.as_uint(left)?, em.as_uint(right)?))
-}
-
-fn i32_ready(
-    em: &mut Emit<'_, '_>,
-    fold: impl Fn(u32, u32) -> u32,
-) -> Result<Ready, TranslateError> {
-    let right = em.pop()?;
-    let left = em.pop()?;
-    ready_of(em, left, right, fold)
-}
-
 fn i32_bin(
     em: &mut Emit<'_, '_>,
     fold: fn(u32, u32) -> u32,
@@ -277,91 +236,6 @@ fn i32_bin(
     let right = em.pop()?;
     let left = em.pop()?;
     i32_pair(em, left, right, fold, op)
-}
-
-fn i32_pair(
-    em: &mut Emit<'_, '_>,
-    left: Val,
-    right: Val,
-    fold: fn(u32, u32) -> u32,
-    op: BinaryOperator,
-) -> Result<(), TranslateError> {
-    match ready_of(em, left, right, fold)? {
-        Ready::Imm(value) => em.push(Val::Imm(value)),
-        Ready::Expr(left, right) => {
-            let value = arith(em, op, left, right);
-            em.push(Val::Index(value))
-        }
-    }
-}
-
-/// `i32.add` / `i32.sub` that keep a storage pointer's provenance.
-///
-/// A pointer plus or minus an offset stays a pointer; anything else falls
-/// back to plain integer arithmetic, where a pointer operand is rejected.
-fn ptr_bin(
-    em: &mut Emit<'_, '_>,
-    add: bool,
-    fold: fn(u32, u32) -> u32,
-) -> Result<(), TranslateError> {
-    let op = if add {
-        BinaryOperator::Add
-    } else {
-        BinaryOperator::Subtract
-    };
-    let right = em.pop()?;
-    let left = em.pop()?;
-    match (left, right) {
-        (Val::Ptr { .. }, Val::Ptr { .. }) => Err(TranslateError::Unsupported),
-        (Val::Ptr { group, binding, off }, operand) => {
-            let off = off_math(em, off, operand, add, fold)?;
-            em.push(Val::Ptr {
-                group,
-                binding,
-                off,
-            })
-        }
-        (operand, Val::Ptr { group, binding, off }) if add => {
-            let off = off_math(em, off, operand, add, fold)?;
-            em.push(Val::Ptr {
-                group,
-                binding,
-                off,
-            })
-        }
-        (left, right) => i32_pair(em, left, right, fold, op),
-    }
-}
-
-/// Fold or emit `off ± operand` as a pointer's new byte offset.
-fn off_math(
-    em: &mut Emit<'_, '_>,
-    off: PtrOff,
-    operand: Val,
-    add: bool,
-    fold: fn(u32, u32) -> u32,
-) -> Result<PtrOff, TranslateError> {
-    let op = if add {
-        BinaryOperator::Add
-    } else {
-        BinaryOperator::Subtract
-    };
-    match (off, operand) {
-        (PtrOff::Imm(value), Val::Imm(delta)) => Ok(PtrOff::Imm(fold(value, delta))),
-        (off, operand) => {
-            let left = em.off_expr(off);
-            let right = em.as_uint(operand)?;
-            Ok(PtrOff::Dyn(arith(em, op, left, right)))
-        }
-    }
-}
-
-fn f32_lt(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let right = crate::env::float_of(em.pop()?)?;
-    let left = crate::env::float_of(em.pop()?)?;
-    let cond = arith(em, BinaryOperator::Less, left, right);
-    let value = zero_one(em, cond);
-    em.push(Val::Index(value))
 }
 
 fn i32_cmp(

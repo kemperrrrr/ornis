@@ -163,7 +163,8 @@ impl Emit<'_, '_> {
                 binding: reject_binding,
                 off: reject_off,
             },
-        ) = (accept, reject) else {
+        ) = (accept, reject)
+        else {
             return None;
         };
         if accept_group != reject_group || accept_binding != reject_binding {

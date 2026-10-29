@@ -47,9 +47,7 @@ fn rgba() -> &'static str {
 }
 
 fn wgsl(imports: &str, fs: &str) -> String {
-    translate(&wasm(imports, fs))
-        .expect("translate")
-        .wgsl
+    translate(&wasm(imports, fs)).expect("translate").wgsl
 }
 
 fn err(imports: &str, fs: &str) -> TranslateError {
@@ -161,7 +159,10 @@ fn import_and_pointer_share_one_binding() {
     let imports = format!(
         "{} {}",
         storage_base_import(),
-        import(symbols::STORAGE_READ_U32, "(param i32 i32 i32) (result i32)"),
+        import(
+            symbols::STORAGE_READ_U32,
+            "(param i32 i32 i32) (result i32)"
+        ),
     );
     let fs = fs_func(
         "(param f32 f32 i32) (result f32 f32 f32 f32)",
