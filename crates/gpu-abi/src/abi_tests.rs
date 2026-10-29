@@ -429,3 +429,66 @@ fn shade_once() -> f32 {
     storage_store_f32::<0, 3>(slot, written);
     written
 }
+
+#[test]
+fn sdk_types_match_wgsl_placement() {
+    use crate::layout::storage_layout_mismatch;
+    use crate::layout::uniform_layout_mismatch;
+    assert_eq!(uniform_layout_mismatch::<f32>(), None);
+    assert_eq!(uniform_layout_mismatch::<u32>(), None);
+    assert_eq!(uniform_layout_mismatch::<i32>(), None);
+    assert_eq!(uniform_layout_mismatch::<u8>(), None);
+    assert_eq!(uniform_layout_mismatch::<GpuVec2>(), None);
+    assert_eq!(uniform_layout_mismatch::<GpuVec3>(), None);
+    assert_eq!(uniform_layout_mismatch::<GpuVec4>(), None);
+    assert_eq!(uniform_layout_mismatch::<FrameTint>(), None);
+    assert_eq!(uniform_layout_mismatch::<TwoVec>(), None);
+    assert_eq!(uniform_layout_mismatch::<ScalarParams>(), None);
+    assert_eq!(uniform_layout_mismatch::<UniformLane>(), None);
+    assert_eq!(uniform_layout_mismatch::<[f32; 4]>(), None);
+    assert_eq!(uniform_layout_mismatch::<[u8; 3]>(), None);
+    assert_eq!(storage_layout_mismatch::<FrameTint>(), None);
+    assert_eq!(storage_layout_mismatch::<TwoVec>(), None);
+    assert_eq!(storage_layout_mismatch::<[f32; 4]>(), None);
+}
+
+#[test]
+fn bind_checks_layout_for_both_spaces() {
+    let _uniform = Uniform::<0, 0, FrameTint>::bind();
+    let _storage = Storage::<0, 1, [f32; 4]>::bind();
+}
+
+#[test]
+fn layout_mismatch_names_the_rule() {
+    use crate::layout::LayoutMismatch;
+    use crate::layout::storage_layout_mismatch_raw;
+    use crate::layout::uniform_layout_mismatch_raw;
+    // Size, align, and the std430 stride are checked for storage.
+    assert_eq!(
+        storage_layout_mismatch_raw(0, 4, 0, 4, 0),
+        Some(LayoutMismatch::ZeroSize)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 4, 4, 4, 8),
+        Some(LayoutMismatch::Size)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 3, 8, 1, 8),
+        Some(LayoutMismatch::Align)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 4, 8, 8, 8),
+        Some(LayoutMismatch::Align)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 8, 8, 8, 12),
+        Some(LayoutMismatch::StorageStride)
+    );
+    assert_eq!(storage_layout_mismatch_raw(8, 8, 8, 8, 8), None);
+    // Uniform adds the 16-byte std140 stride on top.
+    assert_eq!(
+        uniform_layout_mismatch_raw(4, 4, 4, 4, 4, 8),
+        Some(LayoutMismatch::UniformStride)
+    );
+    assert_eq!(uniform_layout_mismatch_raw(4, 4, 4, 4, 4, 16), None);
+}

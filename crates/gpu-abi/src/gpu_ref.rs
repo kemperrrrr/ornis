@@ -110,8 +110,24 @@ pub struct Uniform<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout> {
 }
 
 impl<const G: u32, const B: u32, T: GpuSafeLayout> Uniform<G, B, T> {
+    /// Compile-time proof that `T` matches WGSL uniform (`std140`) placement.
+    ///
+    /// Evaluated when [`bind`](Self::bind) is monomorphized, so a mismatched
+    /// `T` fails the build with the [`LayoutMismatch`](crate::LayoutMismatch)
+    /// message.
+    const LAYOUT: () = match crate::layout::uniform_layout_mismatch::<T>() {
+        None => {}
+        Some(mismatch) => mismatch.panic_bind(),
+    };
+
     /// Bind this uniform. The handle carries no address.
+    ///
+    /// # Panics
+    ///
+    /// At compile time, when `T`'s size, alignment, or strides disagree with
+    /// the WGSL `std140` rules (see [`uniform_layout_mismatch`](crate::uniform_layout_mismatch)).
     pub const fn bind() -> Self {
+        let () = Self::LAYOUT;
         Self {
             _marker: PhantomData,
         }
@@ -139,8 +155,24 @@ pub struct Storage<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout> {
 }
 
 impl<const G: u32, const B: u32, T: GpuSafeLayout> Storage<G, B, T> {
+    /// Compile-time proof that `T` matches WGSL storage (`std430`) placement.
+    ///
+    /// Evaluated when [`bind`](Self::bind) is monomorphized, so a mismatched
+    /// `T` fails the build with the [`LayoutMismatch`](crate::LayoutMismatch)
+    /// message.
+    const LAYOUT: () = match crate::layout::storage_layout_mismatch::<T>() {
+        None => {}
+        Some(mismatch) => mismatch.panic_bind(),
+    };
+
     /// Bind this storage buffer. The handle carries no address.
+    ///
+    /// # Panics
+    ///
+    /// At compile time, when `T`'s size, alignment, or strides disagree with
+    /// the WGSL `std430` rules (see [`storage_layout_mismatch`](crate::storage_layout_mismatch)).
     pub const fn bind() -> Self {
+        let () = Self::LAYOUT;
         Self {
             _marker: PhantomData,
         }

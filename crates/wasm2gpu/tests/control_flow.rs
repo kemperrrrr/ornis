@@ -326,6 +326,143 @@ fn br_table_continue_inside_a_loop() {
     let _ = parsed_switch(&got);
 }
 
+#[test]
+fn br_table_arms_span_three_nested_labels() {
+    // Arm 0 leaves the inner block, arm 1 continues the loop, default
+    // leaves the loop and the outer block. Every arm crosses at least one
+    // label, so each one runs through the leave/again flags, not the
+    // depth-0 `continue` fast path.
+    let fs = format!(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (block
+           (loop
+             (block
+               (br_table 0 1 2 (local.get 2)))
+             i32.const 0 i32.const 1 i32.const 0 f32.const 1
+             call ${write}
+             br 0)
+           i32.const 0 i32.const 1 i32.const 0 f32.const 2
+           call ${write})
+         i32.const 0 i32.const 1 i32.const 0 f32.const 3
+         call ${write}
+         {ret}",
+        write = symbols::STORAGE_WRITE_F32,
+        ret = rgba(),
+    );
+    let got = wgsl("", &write_f32(), &fs);
+    assert!(got.contains("switch "), "{got}");
+    // Depth 0 sets the inner leave, depth 1 the inner leave plus the loop
+    // again flag, default three flags up to the outermost block.
+    assert_eq!(trues(arm(&got, "case 0u:", "case 1u:")), 1, "{got}");
+    assert_eq!(trues(arm(&got, "case 1u:", "default:")), 2, "{got}");
+    assert_eq!(trues(arm(&got, "default:", "}")), 3, "{got}");
+    let _ = parsed_switch(&got);
+}
+
+#[test]
+fn br_table_continues_a_loop_nested_in_a_block() {
+    // The loop sits at depth 1 relative to the function. Arm 1 continues
+    // it from inside an inner block (two labels up), which is the shape
+    // that used to be rejected as unsupported.
+    let fs = format!(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (block
+           (loop
+             (block
+               (br_table 1 (local.get 2)))
+             {write}
+             br 0))
+         {ret}",
+        write = write_call(),
+        ret = rgba(),
+    );
+    let got = wgsl("", &write_f32(), &fs);
+    assert!(got.contains("switch "), "{got}");
+    assert!(got.contains("continue;"), "{got}");
+    // The continue arm sets the inner block's leave flag so the write
+    // after the block is skipped.
+    assert_eq!(trues(arm(&got, "default:", "}")), 2, "{got}");
+    let _ = parsed_switch(&got);
+}
+
+#[test]
+fn br_table_leaves_a_loop_and_its_outer_block() {
+    let fs = format!(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (block
+           (loop
+             (br_table 1 0 (local.get 2))))
+         {ret}",
+        ret = rgba(),
+    );
+    let got = wgsl("", "", &fs);
+    assert!(got.contains("switch "), "{got}");
+    assert!(got.contains("continue;"), "{got}");
+    // Case 0 leaves both the loop and the block (two flags); the default
+    // arm continues the loop with a direct `continue` and no flags.
+    assert_eq!(trues(arm(&got, "case 0u:", "default:")), 2, "{got}");
+    assert_eq!(trues(arm(&got, "default:", "}")), 0, "{got}");
+    let _ = parsed_switch(&got);
+}
+
+#[test]
+fn br_table_in_an_if_arm_continues_the_loop() {
+    let fs = format!(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (loop
+           (if (local.get 2)
+             (then
+               (br_table 1 (local.get 2)))
+             (else)))
+         {ret}",
+        ret = rgba(),
+    );
+    let got = wgsl("", "", &fs);
+    assert!(got.contains("switch "), "{got}");
+    assert!(got.contains("continue;"), "{got}");
+    let _ = parsed_switch(&got);
+}
+
+#[test]
+fn br_if_through_three_blocks_skips_the_write() {
+    let fs = format!(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (block
+           (block
+             (block
+               (local.get 2)
+               (br_if 2))
+             {write}))
+         {ret}",
+        write = write_call(),
+        ret = rgba(),
+    );
+    let got = wgsl("", &write_f32(), &fs);
+    // All three blocks get a leave flag so the branch exits the outermost
+    // one and skips the write in the middle.
+    assert_eq!(trues(&got), 3, "{got}");
+    let _ = parsed_switch(&got);
+}
+
+#[test]
+fn br_from_an_inner_loop_continues_the_outer_loop() {
+    let fs = format!(
+        "(param f32 f32) (result f32 f32 f32 f32)
+         (loop
+           (loop
+             (br 1))
+           {write})
+         {ret}",
+        write = write_call(),
+        ret = rgba(),
+    );
+    let got = wgsl("", &write_f32(), &fs);
+    // The inner loop leaves its own flag and sets the outer again flag, so
+    // the write between the loops never runs.
+    assert_eq!(trues(&got), 2, "{got}");
+    let _ = parsed_switch(&got);
+}
+
 fn arm<'a>(wgsl: &'a str, start: &str, end: &str) -> &'a str {
     wgsl.split(start)
         .nth(1)
