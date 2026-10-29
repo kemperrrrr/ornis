@@ -1,9 +1,12 @@
 //! Shader body compiled to wasm32 and lowered by `ornis-wasm2gpu`.
 //!
 //! The host build of [`shade`] is the CPU reference. On `wasm32` the same
-//! function is an `extern "C"` export whose body is scalar `ornis_gpu`
-//! imports. Returning a struct would spill through linear memory, which the
-//! translator rejects. This crate is not the production shader DSL.
+//! function is an `extern "C"` export named `shade`. `#[unsafe(no_mangle)]`
+//! keeps that export name: the gpu-test lifter looks it up, and Rust 2024
+//! makes `no_mangle` an unsafe attribute. It is an export attribute, not a
+//! memory-unsafe block; the only `unsafe` code stays in `gpu-abi`. Returning
+//! a struct would spill through linear memory, which the translator rejects.
+//! This crate is not the production shader DSL.
 
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
@@ -66,7 +69,11 @@ pub fn shade(u: f32, v: f32) -> f32 {
     shade_body(u, v)
 }
 
-/// Wasm export. The lifter copies this body into the toy `fs_main`.
+/// Wasm export named `shade`.
+///
+/// `#[unsafe(no_mangle)]` is the Rust 2024 spelling of the export attribute.
+/// The lifter copies this body into the toy `fs_main` only when the export
+/// name is `shade`.
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn shade(u: f32, v: f32) -> f32 {

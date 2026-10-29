@@ -61,6 +61,12 @@ git add baseline.json
 cargo xtask quality            # регресс-гейт: падает только если Score/находки ухудшились
 ```
 
+- Стадия `test-wasm2gpu` (уровень 1 и gpu-шард CI) компилирует шейдер
+  `crates/wasm2gpu-shader` в `wasm32-unknown-unknown` и прогоняет его через
+  `wasm2gpu`. Сравнение с GPU нужно, когда есть адаптер. Gpu-шард CI
+  выставляет `ORNIS_REQUIRE_GPU=1`, и тогда отсутствие адаптера — ошибка.
+  Локальный `cargo xtask quality` эту переменную не ставит: GPU-половина
+  пропускается, таргет wasm32 всё равно нужен.
 - Каждая стадия печатает PASS/FAIL/SKIP/INFO; команда не прерывается на первом
   падении, в конце — сводная таблица, exit code по худшей стадии.
 - Отсутствующие инструменты (cargo-audit, cargo-deny, cargo-outdated,
@@ -126,7 +132,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | `crates/wasm` | WASM-обёртка для рендера сцены в браузере | Активен |
 | `crates/gpu-abi` | Toy SDK ABI Wasm→GPU: `GpuRef`/`GpuSafeLayout`, текстуры как вызовы, `unsafe` только в `gpu_abi` | Прототип (не замена shader DSL) |
 | `crates/wasm2gpu` | Offline research-транслятор vertex+fragment (uniform-поля и индексы, `texture_sample`, storage скаляры/векторы/структуры, CFG `if`/`loop`) в WGSL/SPIR-V через naga | Прототип (не замена shader DSL) |
-| `crates/wasm2gpu-shader` | Маленький Rust-шейдер, который тот же транслятор гоняет на wgpu против CPU-`shade` | Прототип (тест gpu-шарда, не shader DSL) |
+| `crates/wasm2gpu-shader` | Маленький Rust-шейдер, который тот же транслятор гоняет на wgpu против CPU-`shade`. Wasm-экспорт `shade` помечен `#[unsafe(no_mangle)]`: лифтер ищет это имя, в Rust 2024 атрибут unsafe, это не второй `unsafe`-блок | Прототип (тест gpu-шарда, не shader DSL). `test-wasm2gpu` требует таргет wasm32 и GPU-адаптер при `ORNIS_REQUIRE_GPU` |
 | `crates/audio` | Аудио: `AudioSource`/`AudioListener`, бэкенды cpal / Web Audio | Активен |
 | `assets/` | Сцены (`scene.ron`, `demo_scene.ron`) | Служебное |
 

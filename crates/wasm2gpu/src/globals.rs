@@ -8,7 +8,6 @@ use naga::ArraySize;
 use naga::ScalarKind;
 use naga::Span;
 use naga::StorageAccess;
-use naga::StructMember;
 use naga::Type;
 use naga::TypeInner;
 
@@ -17,9 +16,9 @@ use crate::cx::Slot;
 use crate::cx::StorageSlot;
 use crate::error::TranslateError;
 use crate::ty::Elem;
-use crate::ty::FieldKind;
 use crate::ty::StructDef;
 
+pub(super) use crate::struct_members::struct_ty;
 pub(super) use crate::uniform_global::uniform;
 pub(super) use crate::uniform_global::uniform_global;
 
@@ -62,30 +61,6 @@ pub(super) fn storage(
         var,
     });
     Ok(var)
-}
-
-pub(super) fn struct_ty(
-    cx: &mut Cx<'_>,
-    id: u16,
-    fields: &[FieldKind],
-) -> Result<naga::Handle<Type>, TranslateError> {
-    if let Some(handle) = cached_struct(cx, id) {
-        return Ok(handle);
-    }
-    let layout = crate::ty::struct_layout(fields)?;
-    let members = members(cx, fields, &layout.offsets);
-    let handle = cx.module.types.insert(
-        Type {
-            name: Some(format!("S{id}")),
-            inner: TypeInner::Struct {
-                members,
-                span: layout.size,
-            },
-        },
-        Span::default(),
-    );
-    cx.struct_tys.push((id, handle));
-    Ok(handle)
 }
 
 pub(super) fn texture(
@@ -151,17 +126,6 @@ fn find_storage(
     None
 }
 
-fn cached_struct(cx: &Cx<'_>, id: u16) -> Option<naga::Handle<Type>> {
-    let mut index = 0usize;
-    while index < cx.struct_tys.len() {
-        if cx.struct_tys[index].0 == id {
-            return Some(cx.struct_tys[index].1);
-        }
-        index += 1;
-    }
-    None
-}
-
 pub(super) fn storage_taken(slots: &[StorageSlot], group: u32, binding: u32) -> bool {
     find_storage(slots, group, binding).is_some()
 }
@@ -199,32 +163,6 @@ pub(super) fn base_ty(
             let fields = def.fields.clone();
             struct_ty(cx, id, &fields)
         }
-    }
-}
-
-fn members(cx: &Cx<'_>, fields: &[FieldKind], offsets: &[u32]) -> Vec<StructMember> {
-    let mut out = Vec::new();
-    let mut index = 0usize;
-    while index < fields.len() {
-        out.push(StructMember {
-            name: Some(format!("f{index}")),
-            ty: field_ty(cx, fields[index]),
-            binding: None,
-            offset: offsets[index],
-        });
-        index += 1;
-    }
-    out
-}
-
-fn field_ty(cx: &Cx<'_>, kind: FieldKind) -> naga::Handle<Type> {
-    match kind {
-        FieldKind::F32 => cx.scalar,
-        FieldKind::U32 => cx.uint,
-        FieldKind::I32 => cx.sint,
-        FieldKind::Vec2 => cx.vec2,
-        FieldKind::Vec3 => cx.vec3,
-        FieldKind::Vec4 => cx.vec4,
     }
 }
 

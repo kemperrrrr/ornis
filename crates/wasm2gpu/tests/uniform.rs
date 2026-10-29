@@ -7,8 +7,10 @@ use ornis_gpu_abi::GpuSafeLayout;
 use ornis_gpu_abi::GpuVec3;
 use ornis_gpu_abi::gpu_struct;
 use ornis_gpu_abi::symbols;
-use ornis_wasm2gpu::TranslateError;
-use ornis_wasm2gpu::translate;
+
+#[path = "support/uniform.rs"]
+mod support;
+use support::*;
 
 gpu_struct! {
     struct FrameTint {
@@ -25,78 +27,12 @@ gpu_struct! {
     }
 }
 
-fn vertex() -> String {
-    format!(
-        r#"(func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
-            local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)"#,
-        vs = symbols::VS_MAIN,
-    )
-}
-
-fn wasm(custom: &str, imports: &str, fs: &str) -> Vec<u8> {
-    wat::parse_str(format!(
-        "(module {custom} {imports} {vs} (func (export \"{name}\") {fs}))",
-        vs = vertex(),
-        name = symbols::FS_MAIN,
-    ))
-    .expect("wat")
-}
-
-fn import(name: &str, sig: &str) -> String {
-    format!(
-        "(import \"{m}\" \"{name}\" (func ${name} {sig}))",
-        m = symbols::MODULE,
-    )
-}
-
-fn wgsl(custom: &str, imports: &str, fs: &str) -> String {
-    translate(&wasm(custom, imports, fs))
-        .expect("translate")
-        .wgsl
-}
-
-fn err(custom: &str, imports: &str, fs: &str) -> TranslateError {
-    translate(&wasm(custom, imports, fs)).expect_err("reject")
-}
-
-fn types(body: &str) -> String {
-    format!(
-        "(@custom \"{name}\" \"{body}\")",
-        name = symbols::TYPES_SECTION,
-    )
-}
-
 fn tint_custom() -> String {
     types("\\4f\\47\\54\\31\\01\\00\\02\\00\\05\\01")
 }
 
 fn two_vec_custom() -> String {
     types("\\4f\\47\\54\\31\\01\\00\\02\\00\\05\\05")
-}
-
-fn rgba() -> &'static str {
-    "f32.const 0 f32.const 0 f32.const 0 f32.const 1"
-}
-
-fn type_msg(err: TranslateError) -> String {
-    match err {
-        TranslateError::UnsupportedType(msg) => msg,
-        other => panic!("unexpected {other}"),
-    }
-}
-
-fn struct_layout(wgsl: &str, fields: usize) -> (Vec<u32>, u32) {
-    let module = naga::front::wgsl::parse_str(wgsl).expect("parse lowered wgsl");
-    for (_, ty) in module.types.iter() {
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            continue;
-        };
-        if members.len() == fields {
-            let offsets = members.iter().map(|member| member.offset).collect();
-            return (offsets, *span);
-        }
-    }
-    panic!("no struct with {fields} fields in {wgsl}");
 }
 
 #[test]

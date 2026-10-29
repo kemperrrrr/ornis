@@ -28,6 +28,7 @@ mod ops;
 mod parse;
 mod ret;
 mod storage;
+mod struct_members;
 mod structure;
 mod ty;
 mod uniform;

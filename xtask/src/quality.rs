@@ -1401,24 +1401,25 @@ fn level1(stages: &mut StageList<'_>) {
     );
 
     // Wasm→GPU end-to-end: a Rust shader is compiled to wasm32, lowered by
-    // ornis-wasm2gpu, and run on lavapipe. ORNIS_REQUIRE_GPU makes a missing
-    // adapter a failure. The child cargo build clears RUSTFLAGS itself so
-    // mold does not leak into the wasm32 link.
-    let mut wasm2gpu = stages.cargo(&[
-        "test",
-        "-p",
-        "ornis-wasm2gpu-shader",
-        "--test",
-        "gpu_e2e",
-        "--",
-        "--test-threads=1",
-    ]);
-    wasm2gpu.env("ORNIS_REQUIRE_GPU", "1");
+    // ornis-wasm2gpu, and compared on a GPU when an adapter exists. This
+    // stage does not set ORNIS_REQUIRE_GPU. The gpu CI job sets it, so a
+    // missing adapter fails there. Locally the GPU half is skipped unless
+    // the variable is set. wasm32-unknown-unknown is still required: the
+    // shader is compiled before the device request. The child cargo build
+    // clears RUSTFLAGS itself so mold does not leak into the wasm32 link.
     stages.run(
         "test-wasm2gpu",
         "test (wasm2gpu gpu)",
-        "cargo test -p ornis-wasm2gpu-shader --test gpu_e2e (ORNIS_REQUIRE_GPU=1)",
-        wasm2gpu,
+        "cargo test -p ornis-wasm2gpu-shader --test gpu_e2e",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-wasm2gpu-shader",
+            "--test",
+            "gpu_e2e",
+            "--",
+            "--test-threads=1",
+        ]),
         false,
     );
 

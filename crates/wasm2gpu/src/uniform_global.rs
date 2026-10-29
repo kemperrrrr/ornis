@@ -1,9 +1,10 @@
 //! Uniform globals. One variable per group and binding.
 //!
 //! A bare binding is the value itself. An array is wrapped in a struct
-//! because a WGSL uniform variable must be a structure. An element whose
-//! natural stride is tighter than the uniform stride sits in a lane struct,
-//! so byte 0 is still the value the host wrote.
+//! because a WGSL uniform variable must be a structure. A scalar or `vec2`
+//! whose natural stride is tighter than the uniform stride sits in a lane
+//! struct, so byte 0 is still the value the host wrote. A struct element is
+//! not wrapped: trailing `u32` members inside the struct keep the host span.
 
 use naga::ArraySize;
 use naga::Span;

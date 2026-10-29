@@ -24,7 +24,10 @@ immediate-операндами импорта; индекс элемента м�
 binding на одном join — отказ. `br_table` не опускается. Прямой `if`
 без побочных эффектов опускается в WGSL `select`, остальной — в `if`
 / `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V через
-naga. Bindless и descriptor indexing не default. Упаковка
+naga. Bindless и descriptor indexing не default. Экспорт `shade`
+в `crates/wasm2gpu-shader` помечен `#[unsafe(no_mangle)]`: лифтер
+gpu-теста ищет это имя, а в Rust 2024 атрибут unsafe. Это не блок
+`unsafe` и не код `gpu-abi`. Упаковка
 space+binding+offset в каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
@@ -224,11 +227,15 @@ index must be a constant`. `uniform_read_*` и `uniform_index_struct`
 элемента может быть runtime и становится `Access`. Длина 0,
 неконстантная длина и binding больше 64 KiB отвергаются. Stride
 элемента — `uniform_stride` (`f32` — 16 байт, не storage stride 4).
-WGSL-писатель naga не сохраняет явный `@stride`, поэтому скаляр,
-чей естественный stride уже 16, кладётся в массив как есть, а `f32` /
-`u32` / `i32` / `vec2` дополняются lane-структурой до 16 байт: значение
-остаётся в поле 0, байт 0 элемента совпадает с хостовым
-`index(i, UNIFORM_STRIDE)`. Глобал uniform — структура (WGSL не
+WGSL-писатель naga не сохраняет `@align`, `@size` и `@stride`. Скаляр
+и `vec2` дополняются lane-структурой до 16 байт: значение остаётся в
+поле 0, байт 0 элемента совпадает с хостовым `index(i, UNIFORM_STRIDE)`.
+Элемент-структура получает хвост из скалярных `u32` внутри самой
+структуры, пока записанный размер не равен span хоста. У
+`struct { f32 }`, `struct { f32, f32 }` и `struct { vec2 }` этот span
+и stride равны 16, как у `gpu_struct!`. `vec3` уже выровнен на 16;
+хвост дописывается, когда конец последнего поля короче span. Глобал
+uniform — структура (WGSL не
 принимает голый массив в этом адресном пространстве); массив — её
 единственное поле со смещением 0. Один `(group, binding)` как два
 uniform-типа или сразу как uniform и storage — ошибка. `br_table` не

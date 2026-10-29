@@ -415,6 +415,12 @@ fn lane(value: f32) -> UniformLane {
     }
 }
 
+#[test]
+fn types_section_encodes_one_f32_field() {
+    let bytes = crate::encode_types_section(&[&[crate::TYPE_TAG_F32]]).expect("section");
+    assert!(bytes == *b"OGT1\x01\x00\x01\x00\x01");
+}
+
 fn shade_once() -> f32 {
     let slot = uniform_field_u32::<0, 0, 0, 0, { ScalarParams::FIELD_OFFSETS[0] }>();
     let sample = storage_at_f32::<0, 1>(slot);

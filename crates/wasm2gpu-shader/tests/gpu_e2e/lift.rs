@@ -5,6 +5,8 @@
 //! must be scalar imports, and wraps it as `fs_main`.
 
 use ornis_gpu_abi::symbols;
+use ornis_wasm2gpu_shader::ShadeParams;
+use ornis_wasm2gpu_shader::UniformF32Lane;
 use wasmparser::Operator;
 use wasmparser::Parser;
 use wasmparser::Payload;
@@ -143,6 +145,47 @@ fn import_sig(name: &str) -> &'static str {
     }
 }
 
+const fn shade_offsets(offsets: [u32; 4]) -> bool {
+    offsets[0] == 0 && offsets[1] == 4 && offsets[2] == 8 && offsets[3] == 12
+}
+
+const fn shade_tags(tags: [u8; 4]) -> bool {
+    tags[0] == ornis_gpu_abi::TYPE_TAG_U32
+        && tags[1] == ornis_gpu_abi::TYPE_TAG_F32
+        && tags[2] == ornis_gpu_abi::TYPE_TAG_U32
+        && tags[3] == ornis_gpu_abi::TYPE_TAG_U32
+}
+
+fn types_body() -> String {
+    // The section is ShadeParams' field tags. UniformF32Lane is the host
+    // stride of the f32 array, not a wasm struct, so it stays out of the
+    // section. A field-type change fails this assert before the bytes drift.
+    const _: () = {
+        assert!(shade_offsets(ShadeParams::FIELD_OFFSETS));
+        assert!(shade_tags(ShadeParams::FIELD_TAGS));
+        assert!(
+            <ShadeParams as ornis_gpu_abi::GpuSafeLayout>::SIZE
+                == ornis_gpu_abi::UNIFORM_STRUCT_ALIGN
+        );
+        assert!(shade_offsets(UniformF32Lane::FIELD_OFFSETS));
+        assert!(
+            <UniformF32Lane as ornis_gpu_abi::GpuSafeLayout>::SIZE
+                == ornis_gpu_abi::UNIFORM_STRUCT_ALIGN
+        );
+        assert!(
+            <UniformF32Lane as ornis_gpu_abi::GpuSafeLayout>::UNIFORM_STRIDE
+                == ornis_gpu_abi::UNIFORM_STRUCT_ALIGN
+        );
+    };
+    let bytes = ornis_gpu_abi::encode_types_section(&[&ShadeParams::FIELD_TAGS])
+        .expect("shade types section");
+    let mut body = String::new();
+    for byte in &bytes {
+        body.push_str(&format!("\\{byte:02x}"));
+    }
+    body
+}
+
 fn wrap(module: &Read) -> String {
     let index = module.shade.expect("missing shade export") as usize;
     let body = module
@@ -159,7 +202,7 @@ fn wrap(module: &Read) -> String {
     }
     format!(
         r#"(module
-            (@custom "{types}" "\4f\47\54\31\01\00\04\00\02\01\02\02")
+            (@custom "{types}" "{section}")
             {imports}
             (func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
                 local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)
@@ -168,6 +211,7 @@ fn wrap(module: &Read) -> String {
                 {ops}
                 f32.const 0 f32.const 0 f32.const 1))"#,
         types = symbols::TYPES_SECTION,
+        section = types_body(),
         vs = symbols::VS_MAIN,
         fs = symbols::FS_MAIN,
         locals = body.locals,

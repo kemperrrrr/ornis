@@ -49,7 +49,7 @@ fn field(
         structs,
         None,
     )?;
-    let index = pop_const(st, "uniform field index must be a constant")?;
+    let index = pop_const(st, ConstKind::Field)?;
     let id = pop_sid(st)?;
     let kind = field_at(structs, id, index)?;
     if kind != expect {
@@ -73,7 +73,7 @@ fn array(
         None,
     )?;
     pop_index(st)?;
-    let len = pop_const(st, "uniform array length must be a constant")?;
+    let len = pop_const(st, ConstKind::Len)?;
     check_len(elem, len, structs)?;
     pop_prov(st)?;
     pop_prov(st)?;
@@ -102,7 +102,7 @@ fn indexed(st: &mut St, import: &Import, structs: &[StructDef]) -> Result<(), Tr
         Some(id),
     )?;
     pop_index(st)?;
-    let len = pop_const(st, "uniform array length must be a constant")?;
+    let len = pop_const(st, ConstKind::Len)?;
     check_len(Elem::Struct(id), len, structs)?;
     pop_prov(st)?;
     pop_prov(st)?;
@@ -135,9 +135,18 @@ fn field_at(structs: &[StructDef], id: u16, index: u32) -> Result<FieldKind, Tra
         .ok_or_else(|| type_msg("uniform field index is out of range"))
 }
 
-fn pop_const(st: &mut St, dynamic: &str) -> Result<u32, TranslateError> {
+enum ConstKind {
+    Field,
+    Len,
+}
+
+fn pop_const(st: &mut St, kind: ConstKind) -> Result<u32, TranslateError> {
+    let dynamic = match kind {
+        ConstKind::Field => "uniform field index must be a constant",
+        ConstKind::Len => "uniform array length must be a constant",
+    };
     match st.stack.pop() {
-        Some(Abs::I32(Num::Const(0))) if dynamic.contains("length") => {
+        Some(Abs::I32(Num::Const(0))) if matches!(kind, ConstKind::Len) => {
             Err(type_msg("uniform array length must be positive"))
         }
         Some(Abs::I32(Num::Const(value))) => Ok(value),

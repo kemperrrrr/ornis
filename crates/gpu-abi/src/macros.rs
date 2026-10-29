@@ -45,6 +45,7 @@ macro_rules! gpu_struct {
             };
             const STORAGE_STRIDE: u32 = $crate::storage_stride(Self::SIZE, Self::ALIGN);
             const UNIFORM_STRIDE: u32 = $crate::uniform_stride(Self::SIZE, Self::ALIGN);
+            const TYPE_TAG: u8 = 0;
         }
 
         impl $name {
@@ -59,9 +60,18 @@ macro_rules! gpu_struct {
                 let _ = index;
                 offsets
             };
+
+            /// `ornis_gpu.types` tag of each field, in declaration order.
+            ///
+            /// [`GpuSafeLayout::TYPE_TAG`](crate::GpuSafeLayout::TYPE_TAG) `0`
+            /// is host padding (`[u8; N]`), not a wasm field.
+            pub const FIELD_TAGS: [u8; 0 $(+ $crate::gpu_repeat_one!($field))*] = [
+                $( <$ty as $crate::GpuSafeLayout>::TYPE_TAG, )*
+            ];
         }
 
         const _: () = {
+            let _ = $name::FIELD_TAGS;
             let mut gpu = $name::FIELD_OFFSETS;
             let span = $crate::place_fields(
                 &[

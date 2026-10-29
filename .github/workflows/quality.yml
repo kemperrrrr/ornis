@@ -108,7 +108,9 @@ jobs:
   #   gpu    — test-physics, test-wasm2gpu, smoke (all need lavapipe; the
   #            default-suite determinism gates run inside test-physics,
   #            the ignored ones stay in Determinism Nightly).
-  #            test-wasm2gpu also needs the wasm32 target.
+  #            test-wasm2gpu also needs the wasm32 target. This job sets
+  #            ORNIS_REQUIRE_GPU so a missing adapter fails the wasm2gpu
+  #            GPU half; the xtask stage itself does not force that variable.
   #   docs   — doc, wasm-check
   fast:
     runs-on: ubuntu-latest
@@ -364,6 +366,9 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
+      # test-wasm2gpu skips its GPU half unless this is set. Lavapipe is
+      # installed below, so a missing adapter must fail the shard.
+      ORNIS_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

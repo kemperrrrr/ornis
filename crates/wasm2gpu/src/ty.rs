@@ -16,12 +16,12 @@ use ornis_gpu_abi::symbols;
 use crate::error::TranslateError;
 use crate::ir::Kind;
 
-const TAG_F32: u8 = 1;
-const TAG_U32: u8 = 2;
-const TAG_I32: u8 = 3;
-const TAG_VEC2: u8 = 4;
-const TAG_VEC3: u8 = 5;
-const TAG_VEC4: u8 = 6;
+const TAG_F32: u8 = ornis_gpu_abi::TYPE_TAG_F32;
+const TAG_U32: u8 = ornis_gpu_abi::TYPE_TAG_U32;
+const TAG_I32: u8 = ornis_gpu_abi::TYPE_TAG_I32;
+const TAG_VEC2: u8 = ornis_gpu_abi::TYPE_TAG_VEC2;
+const TAG_VEC3: u8 = ornis_gpu_abi::TYPE_TAG_VEC3;
+const TAG_VEC4: u8 = ornis_gpu_abi::TYPE_TAG_VEC4;
 const MAX_FIELDS: usize = 8;
 const STRUCT_HEADER: u32 = 4;
 const PROV_PARAMS: u32 = 3;

@@ -1,8 +1,9 @@
 //! Uniform import names and the stride they share with host `gpu_struct!`.
 //!
 //! An `f32` element is 16 bytes in a uniform array and 4 bytes in storage.
-//! The WGSL writer omits `@stride`, so a tighter natural stride is padded
-//! with a lane struct rather than a raw array.
+//! The WGSL writer omits `@stride` and `@size`. A scalar or `vec2` is padded
+//! with a lane struct. A struct is padded with trailing `u32` members out to
+//! the host span, so `struct { f32 }` keeps stride 16.
 
 use ornis_gpu_abi::symbols;
 
@@ -56,7 +57,10 @@ pub(crate) fn uniform_elem_stride(
 ///
 /// The writer does not emit `@align` / `@size`, so a scalar `f32` would come
 /// back from the WGSL round-trip with stride 4. A lane struct of copies of
-/// the element pads that stride out to 16 without changing byte 0.
+/// the element pads that stride out to 16 without changing byte 0. Structs
+/// are not lanes: after a struct member the next member starts at
+/// `roundUp(16, SizeOf(S))`. Their padding is trailing scalars inside the
+/// struct type, and both strides are already 16, so this returns `false`.
 pub(crate) fn uniform_needs_lane(
     elem: Elem,
     structs: &[StructDef],
