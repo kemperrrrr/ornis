@@ -68,7 +68,7 @@ fn one_baked(kind: Kind, val: Val) -> Result<Option<u32>, TranslateError> {
         (Kind::I32, Val::Imm(value)) => Ok(Some(value)),
         (Kind::I32, Val::Index(_)) => Ok(None),
         (Kind::F32, Val::Scalar(_)) => Ok(None),
-        _ => Err(TranslateError::Unsupported),
+        _ => Err(TranslateError::UnsupportedType("ctx one_baked".into())),
     }
 }
 

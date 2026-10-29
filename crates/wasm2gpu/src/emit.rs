@@ -17,7 +17,7 @@ pub struct Translated {
 
 pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> {
     if binding_array(module) {
-        return Err(TranslateError::Unsupported);
+        return Err(TranslateError::UnsupportedType("ctx binding array".into()));
     }
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),

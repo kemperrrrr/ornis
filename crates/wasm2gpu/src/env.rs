@@ -183,7 +183,7 @@ impl Emit<'_, '_> {
         match val {
             Val::Imm(value) => Ok(self.u32(value)),
             Val::Index(handle) => Ok(handle),
-            _ => Err(TranslateError::Unsupported),
+            _ => Err(TranslateError::UnsupportedType("ctx as_uint".into())),
         }
     }
 
@@ -199,7 +199,7 @@ impl Emit<'_, '_> {
                     right: zero,
                 }))
             }
-            _ => Err(TranslateError::Unsupported),
+            _ => Err(TranslateError::UnsupportedType("ctx as_bool".into())),
         }
     }
 
@@ -274,7 +274,7 @@ impl Emit<'_, '_> {
 pub(super) fn float_of(val: Val) -> Result<naga::Handle<Expression>, TranslateError> {
     match val {
         Val::Scalar(handle) => Ok(handle),
-        _ => Err(TranslateError::Unsupported),
+        _ => Err(TranslateError::UnsupportedType("ctx float_of".into())),
     }
 }
 

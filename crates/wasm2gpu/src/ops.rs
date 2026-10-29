@@ -150,7 +150,7 @@ fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), Transla
     if slot < em.locals.len() {
         return zero_local(em, i32);
     }
-    Err(TranslateError::Unsupported)
+    Err(TranslateError::UnsupportedType("ctx local slot missing".into()))
 }
 
 fn push_loaded(

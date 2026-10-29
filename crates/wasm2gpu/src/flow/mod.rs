@@ -142,7 +142,7 @@ impl Emit<'_, '_> {
         body: &[Stmt],
     ) -> Result<(), TranslateError> {
         if !ty.params.is_empty() || !ty.results.is_empty() {
-            return Err(TranslateError::Unsupported);
+            return Err(TranslateError::UnsupportedType("ctx plain block ty".into()));
         }
         self.region(kind, body)
     }
@@ -154,7 +154,7 @@ impl Emit<'_, '_> {
         else_body: &[Stmt],
     ) -> Result<(), TranslateError> {
         match if_kind(ty, then_body, else_body) {
-            IfKind::Bad => Err(TranslateError::Unsupported),
+            IfKind::Bad => Err(TranslateError::UnsupportedType("ctx if kind bad".into())),
             IfKind::Pure => self.pure_if(ty, then_body, else_body),
             IfKind::Target => self.targeted_if(ty, then_body, else_body),
             IfKind::Stmt => self.stmt_if(ty, then_body, else_body, true),
