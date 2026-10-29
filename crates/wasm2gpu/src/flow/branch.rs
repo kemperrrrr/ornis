@@ -72,9 +72,9 @@ impl Emit<'_, '_> {
             .labels
             .get(index)
             .copied()
-            .ok_or(TranslateError::UnsupportedType("ctx exit_one label".into()))?;
+            .ok_or(TranslateError::Unsupported)?;
         if !target.naga_loop {
-            return Err(TranslateError::UnsupportedType("ctx exit_one naga_loop".into()));
+            return Err(TranslateError::Unsupported);
         }
         let stmt = if target.kind == Region::Loop {
             naga::Statement::Continue

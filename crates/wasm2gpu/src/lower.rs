@@ -178,7 +178,7 @@ fn shader(
     let stack = stack?;
     if compute.is_some() {
         if !stack.is_empty() {
-            return Err(TranslateError::UnsupportedType("ctx cs stack nonempty".into()));
+            return Err(TranslateError::Unsupported);
         }
         return Ok(body);
     }

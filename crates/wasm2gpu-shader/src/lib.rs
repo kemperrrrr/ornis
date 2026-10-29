@@ -198,44 +198,36 @@ fn arm_rest(index: u32) {
 /// Wasm compute export: one visible flag per sphere against six planes.
 ///
 /// The count guard wraps the whole body, so no work happens at `id >=
-/// count`; [`cull_one`] stays a call under the `if`. The lifter copies
-/// this body into the toy `cs_main` only when the export name is `cull`.
+/// count`. The body stays inline — the analysis rejects a callee that
+/// returns mid-function, and LLVM's loop-exit rotation is happy to grow
+/// one. `dot + w + radius < 0.0` is the production `sphere_visible` test
+/// rearranged onto one comparison; IEEE `<` fails open on NaN, like the
+/// CPU path. The flag is `1` for visible and `0` for culled.
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn cull(id: u32) {
     let count = storage_at_u32::<CULL_GROUP, COUNT_BINDING>(0);
     if id < count {
-        cull_one(id);
-    }
-}
-
-/// Sphere-versus-planes flag for one sphere.
-///
-/// `dot + w + radius < 0.0` is the production `sphere_visible` test
-/// rearranged onto one comparison; IEEE `<` fails open on NaN, like the
-/// CPU path. The flag is `1` for visible and `0` for culled.
-#[cfg(target_arch = "wasm32")]
-#[inline(never)]
-fn cull_one(id: u32) {
-    let base = id * LANES;
-    let cx = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
-    let cy = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
-    let cz = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
-    let radius = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + LAST_LANE);
-    let mut visible = 1u32;
-    let mut plane = 0u32;
-    while plane < PLANE_COUNT {
-        let at = plane * LANES;
-        let px = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at);
-        let py = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 1);
-        let pz = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 2);
-        let pw = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + LAST_LANE);
-        if px * cx + py * cy + pz * cz + pw + radius < 0.0 {
-            visible = 0;
+        let base = id * LANES;
+        let cx = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
+        let cy = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
+        let cz = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
+        let radius = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + LAST_LANE);
+        let mut visible = 1u32;
+        let mut plane = 0u32;
+        while plane < PLANE_COUNT {
+            let at = plane * LANES;
+            let px = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at);
+            let py = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 1);
+            let pz = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 2);
+            let pw = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + LAST_LANE);
+            if px * cx + py * cy + pz * cz + pw + radius < 0.0 {
+                visible = 0;
+            }
+            plane += 1;
         }
-        plane += 1;
+        storage_store_u32::<CULL_GROUP, FLAG_BINDING>(id, visible);
     }
-    storage_store_u32::<CULL_GROUP, FLAG_BINDING>(id, visible);
 }
 
 #[cfg(target_arch = "wasm32")]

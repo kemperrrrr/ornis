@@ -213,7 +213,7 @@ fn loop_region(ai: &mut Ai<'_>, st: &mut St, body: &[Stmt]) -> Result<(), Transl
     let mut guard = 0u32;
     let exit = loop {
         if guard >= MAX_ITER {
-            return Err(TranslateError::UnsupportedType("ctx ai loop fixed-point".into()));
+            return Err(TranslateError::Unsupported);
         }
         guard += 1;
         ai.labels.push(Lab { jumps: Vec::new() });
@@ -283,7 +283,7 @@ fn local_set(st: &mut St, index: u32, tee: bool) -> Result<(), TranslateError> {
 fn pop_num(st: &mut St) -> Result<Num, TranslateError> {
     match pop(st)? {
         Abs::I32(num) => Ok(num),
-        _ => Err(TranslateError::UnsupportedType("ctx pop_num".into())),
+        _ => Err(TranslateError::Unsupported),
     }
 }
 

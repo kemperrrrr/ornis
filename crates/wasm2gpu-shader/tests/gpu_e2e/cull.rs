@@ -66,13 +66,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// The host never builds the wasm32 half; this call still tells the
-/// analysis that the A/B test covers `cull_one` (test-file call edge).
-#[cfg(target_arch = "wasm32")]
-fn cover_cull_one() {
-    ornis_wasm2gpu_shader::cull_one(0);
-}
-
 #[test]
 fn cull_kernel_matches_the_hand_twin() {
     assert_eq!(LANES, SPHERES.len());
