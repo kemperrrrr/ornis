@@ -49,12 +49,17 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::I32Sub => i32_offset(st, false, u32::wrapping_sub),
         Op::I32Shl => i32_bin(st, u32::wrapping_shl),
         Op::I32ShrU => i32_bin(st, u32::wrapping_shr),
+        Op::I32ShrS => i32_bin(st, shr_s),
+        Op::I32And => i32_bin(st, |a, b| a & b),
+        Op::I32Or => i32_bin(st, |a, b| a | b),
+        Op::I32Xor => i32_bin(st, |a, b| a ^ b),
         Op::I32Eqz => i32_eqz(st),
         Op::I32Eq => i32_cmp(st, |a, b| a == b),
         Op::I32Ne => i32_cmp(st, |a, b| a != b),
         Op::I32LtU => i32_cmp(st, |a, b| a < b),
         Op::I32GtU => i32_cmp(st, |a, b| a > b),
         Op::I32GeU => i32_cmp(st, |a, b| a >= b),
+        Op::I32LeU => i32_cmp(st, |a, b| a <= b),
         Op::F32Lt => f32_lt(st),
         Op::LoadI32(_) => load_i32(st),
         Op::LoadF32(_) => load_f32(st),
@@ -279,6 +284,11 @@ pub(super) fn f32_bin(st: &mut St) -> Result<(), TranslateError> {
         (Abs::Vec, Abs::Vec) => push(st, Abs::Vec),
         _ => Err(TranslateError::Unsupported),
     }
+}
+
+/// Arithmetic right shift on the `i32` value of a `u32` bit pattern.
+fn shr_s(a: u32, b: u32) -> u32 {
+    (a as i32).wrapping_shr(b) as u32
 }
 
 pub(super) fn i32_bin(st: &mut St, op: impl Fn(u32, u32) -> u32) -> Result<(), TranslateError> {

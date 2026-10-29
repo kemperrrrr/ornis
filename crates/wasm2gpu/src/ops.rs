@@ -44,12 +44,17 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::I32Sub => ptr_bin(em, false, u32::wrapping_sub),
         Op::I32Shl => i32_bin(em, u32::wrapping_shl, BinaryOperator::ShiftLeft),
         Op::I32ShrU => i32_bin(em, u32::wrapping_shr, BinaryOperator::ShiftRight),
+        Op::I32ShrS => i32_bin(em, shr_s, BinaryOperator::ShiftRight),
+        Op::I32And => i32_bin(em, |a, b| a & b, BinaryOperator::And),
+        Op::I32Or => i32_bin(em, |a, b| a | b, BinaryOperator::Or),
+        Op::I32Xor => i32_bin(em, |a, b| a ^ b, BinaryOperator::ExclusiveOr),
         Op::I32Eqz => i32_eqz(em),
         Op::I32Eq => i32_cmp(em, |a, b| a == b, BinaryOperator::Equal),
         Op::I32Ne => i32_cmp(em, |a, b| a != b, BinaryOperator::NotEqual),
         Op::I32LtU => i32_cmp(em, |a, b| a < b, BinaryOperator::Less),
         Op::I32GtU => i32_cmp(em, |a, b| a > b, BinaryOperator::Greater),
         Op::I32GeU => i32_cmp(em, |a, b| a >= b, BinaryOperator::GreaterEqual),
+        Op::I32LeU => i32_cmp(em, |a, b| a <= b, BinaryOperator::LessEqual),
         Op::F32Lt => f32_lt(em),
         Op::LoadI32(offset) => storage::load_ptr(em, offset, Elem::U32),
         Op::LoadF32(offset) => storage::load_ptr(em, offset, Elem::F32),
@@ -266,6 +271,11 @@ fn i32_eqz(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let value = zero_one(em, cond);
     em.stack.push(Val::Index(value));
     Ok(())
+}
+
+/// Arithmetic right shift on the `i32` value of a `u32` bit pattern.
+fn shr_s(a: u32, b: u32) -> u32 {
+    (a as i32).wrapping_shr(b) as u32
 }
 
 fn zero_one(em: &mut Emit<'_, '_>, cond: naga::Handle<Expression>) -> naga::Handle<Expression> {

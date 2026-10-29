@@ -101,6 +101,11 @@ pub enum Op {
     /// Unsigned `i32.gt_u`.
     I32GtU,
     I32GeU,
+    I32LeU,
+    I32And,
+    I32Or,
+    I32Xor,
+    I32ShrS,
     /// Shift the top `i32` left by the next value's amount (mod 32).
     I32Shl,
     /// Unsigned shift of the top `i32` right by the next value's amount (mod 32).

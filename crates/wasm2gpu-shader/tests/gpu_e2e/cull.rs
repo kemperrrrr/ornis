@@ -96,11 +96,11 @@ fn cull_kernel_matches_the_hand_twin() {
 }
 
 fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; LANES], Duration) {
+    let bgl = bind_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("wasm2gpu cull"),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
-    let bgl = bind_layout(device);
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wasm2gpu cull"),
         bind_group_layouts: &[Some(&bgl)],
