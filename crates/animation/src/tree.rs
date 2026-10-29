@@ -282,14 +282,16 @@ pub const FREEFORM_MAX_TRIANGLES: usize = 2 * FREEFORM_MAX_POINTS - 5;
 /// node — the install-time triangulation of its points
 /// ([`freeform_cache`](crate::freeform::freeform_cache)) that the hot
 /// fold reads triangle by triangle. The hot path never re-triangulates:
-/// the node's points
-/// are fixed at install, and every reinstall ([`SkelTree`] write)
-/// rebuilds the cache.
+/// the node's points are fixed at install, and every `set_skel_tree`
+/// install rebuilds the cache — a raw [`SkelTree`] lane write leaves it
+/// untouched.
 ///
-/// Build it only from the node's own children: the frame trusts the
-/// stored triples completely. A cache whose point count disagrees with
-/// the node's current children reads as bad skin (`None` in both folds)
-/// instead of indexing past them.
+/// Contract: replace a tree only through `set_skel_tree` (the typed
+/// facade). A raw [`SkelTree`] lane write does not rebuild the cache —
+/// with another point count the frame reads as bad skin (`None` in both
+/// folds), with the same count it answers from the stale triangulation,
+/// which is the caller's bug. Build the cache only from the node's own
+/// children: the frame trusts the stored triples completely.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FreeformCache {
     pub(crate) kept: [[usize; 3]; FREEFORM_MAX_TRIANGLES],
@@ -321,10 +323,11 @@ pub struct SkelTreePlayer {
     /// Install-time triangulations of the [`TreeNodeDef::Freeform2d`]
     /// nodes, in node order — one [`FreeformCache`] per freeform node;
     /// a lane whose count diverges reads as bad skin like the cursors
-    /// above. Rebuilt on every [`SkelTree`] install — the points of an
-    /// installed node never change. Each cache is built from the same
-    /// `children` the node carries; a cache seeded from other points
-    /// answers from a stale triangulation, and one whose point count
-    /// disagrees with the node's children reads as bad skin.
+    /// above. Rebuilt by every `set_skel_tree` install — the points of
+    /// an installed node never change, and a raw [`SkelTree`] lane
+    /// write leaves the caches stale (the [`FreeformCache`] contract:
+    /// the same point count answers from the stale triangulation — the
+    /// caller's bug; another count reads as bad skin). Each cache is
+    /// built from the same `children` the node carries.
     pub freeforms: Vec<FreeformCache>,
 }

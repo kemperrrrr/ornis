@@ -3105,13 +3105,19 @@ mod tests {
                     TreeNodeDef::Clip { clip },
                     TreeNodeDef::Clip { clip },
                     TreeNodeDef::Clip { clip },
+                    TreeNodeDef::Clip { clip },
                     TreeNodeDef::Freeform2d {
                         axes: [0, 1],
                         children: vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(0.0, 2.0, 2)],
                     },
                     TreeNodeDef::Freeform2d {
                         axes: [0, 1],
-                        children: vec![cell(0.0, 0.0, 0), cell(4.0, 0.0, 1), cell(0.0, 4.0, 2)],
+                        children: vec![
+                            cell(0.0, 0.0, 0),
+                            cell(4.0, 0.0, 1),
+                            cell(4.0, 4.0, 2),
+                            cell(0.0, 4.0, 3),
+                        ],
                     },
                 ],
                 params: vec![
@@ -3133,9 +3139,11 @@ mod tests {
             players.get(root).expect("player kept").freeforms.clone()
         };
         assert_eq!(freeforms.len(), 2, "one cache per freeform node");
-        for cache in &freeforms {
-            assert!(!cache.triples().is_empty(), "a triangle survived");
-        }
+        // Node order is observable: the 3-point node triangulates to one
+        // triangle, the 4-point square to two — swapped seeding would
+        // flip the counts.
+        assert_eq!(freeforms[0].triples().len(), 1, "the triangle node first");
+        assert_eq!(freeforms[1].triples().len(), 2, "the square node second");
     }
 
     /// One sync mark for [`set_clip_sync_marks`] fixtures.
