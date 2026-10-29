@@ -18,7 +18,7 @@
   "srp_struct_warnings": 23,
   "structural_coupling_warnings": 23,
   "structural_srp_warnings": 40,
-  "total": 9928,
+  "total": 9945,
   "total_findings": 2831,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 7,
