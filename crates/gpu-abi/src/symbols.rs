@@ -150,6 +150,15 @@ pub const VS_MAIN: &str = "vs_main";
 /// Fragment entry the toy translator expects.
 pub const FS_MAIN: &str = "fs_main";
 
+/// Compute entry. Optional: a module without this export still lowers.
+///
+/// The translator binds the function's single `i32` parameter to
+/// `global_invocation_id.x` and sets [`CS_WORKGROUP`].
+pub const CS_MAIN: &str = "cs_main";
+
+/// `@workgroup_size` of [`CS_MAIN`]. `x` is the width the gpu test dispatches.
+pub const CS_WORKGROUP: [u32; 3] = [4, 1, 1];
+
 /// Whether `name` is a toy GPU import the offline translator may see.
 ///
 /// Group and binding stay separate operands; this predicate only names the

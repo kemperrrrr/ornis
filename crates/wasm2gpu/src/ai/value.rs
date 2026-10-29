@@ -46,11 +46,14 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
     }
 }
 
-pub(super) fn call(ai: &Ai<'_>, st: &mut St, index: u32) -> Result<(), TranslateError> {
-    let import = ai
-        .imports
-        .get(index as usize)
-        .ok_or(TranslateError::Unsupported)?;
+pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), TranslateError> {
+    let Some(import) = ai.imports.get(index as usize) else {
+        let base = ai.imports.len() as u32;
+        if index < base {
+            return Err(TranslateError::Unsupported);
+        }
+        return super::call::defined(ai, st, index - base);
+    };
     let Some(imp) = ty::classify(&import.name) else {
         return Err(TranslateError::Unsupported);
     };

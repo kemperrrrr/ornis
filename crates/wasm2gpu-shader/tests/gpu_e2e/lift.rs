@@ -41,7 +41,20 @@ fn read(wasm: &[u8]) -> Read {
         match payload {
             Payload::ImportSection(reader) => read_imports(&mut out, reader),
             Payload::ExportSection(reader) => read_export(&mut out, reader),
-            Payload::CodeSectionEntry(body) => out.bodies.push(body_of(&out.imports, &body)),
+            Payload::CodeSectionEntry(body) => {
+                // Only `shade` is rewritten. `compute` uses `br_table`, which
+                // this lifter does not keep; its body is lifted separately.
+                let wasm_index = (out.imports.len() + out.bodies.len()) as u32;
+                let parsed = if out.shade == Some(wasm_index) {
+                    body_of(&out.imports, &body)
+                } else {
+                    FuncBody {
+                        locals: String::new(),
+                        ops: String::new(),
+                    }
+                };
+                out.bodies.push(parsed);
+            }
             _ => {}
         }
     }

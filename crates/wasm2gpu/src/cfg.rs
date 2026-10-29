@@ -49,10 +49,11 @@ pub(super) fn check(
     func: &Func,
     imports: &[Import],
     structs: &[StructDef],
+    funcs: &[Func],
 ) -> Result<(), TranslateError> {
     let cfg = build(&func.body);
     let _ = edge_count(&cfg);
-    ai::check(func, imports, structs)
+    ai::check(func, imports, structs, funcs)
 }
 
 fn edge_count(cfg: &Cfg) -> usize {
@@ -103,6 +104,18 @@ fn one(bld: &mut Bld, labels: &mut Vec<Label>, stmt: &Stmt, incoming: Vec<u32>) 
             let node = link_in(bld, incoming);
             jump(bld, labels, node, *depth);
             vec![node]
+        }
+        Stmt::Return => {
+            let _ = link_in(bld, incoming);
+            Vec::new()
+        }
+        Stmt::BrTable { targets, default } => {
+            let node = link_in(bld, incoming);
+            for depth in targets {
+                jump(bld, labels, node, *depth);
+            }
+            jump(bld, labels, node, *default);
+            Vec::new()
         }
         Stmt::Block { body, .. } => nest(bld, labels, body, incoming, LabelKind::Block),
         Stmt::Loop { body, .. } => nest(bld, labels, body, incoming, LabelKind::Loop),
@@ -318,7 +331,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&func(body), &[storage()], &[]).expect_err("phi");
+        let err = check(&func(body), &[storage()], &[], &[]).expect_err("phi");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -338,7 +351,7 @@ mod tests {
             },
             Stmt::Op(Op::Call(0)),
         ];
-        check(&func(body), &[storage()], &[]).expect("index phi");
+        check(&func(body), &[storage()], &[], &[]).expect("index phi");
     }
 
     fn with_local(body: Vec<Stmt>) -> Func {
@@ -361,7 +374,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&with_local(body), &[storage()], &[]).expect_err("zero");
+        let err = check(&with_local(body), &[storage()], &[], &[]).expect_err("zero");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -383,7 +396,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&func(body), &[storage()], &[]).expect_err("add");
+        let err = check(&func(body), &[storage()], &[], &[]).expect_err("add");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -404,7 +417,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&func(body), &[storage()], &[]).expect_err("eqz");
+        let err = check(&func(body), &[storage()], &[], &[]).expect_err("eqz");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -414,7 +427,7 @@ mod tests {
             ty: empty(),
             body: vec![Stmt::Br(1)],
         }];
-        let err = check(&func(body), &[], &[]).expect_err("return");
+        let err = check(&func(body), &[], &[], &[]).expect_err("return");
         assert!(matches!(err, TranslateError::FunctionBranch));
     }
 }

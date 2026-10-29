@@ -20,12 +20,20 @@ impl Emit<'_, '_> {
             em.clear_flag(flag)?;
             em.labels.push(flag);
             em.run(body)?;
-            em.labels.pop();
-            em.block.push(naga::Statement::Break, sp());
+            em.close_region();
             Ok(())
         })?;
         self.push_loop(block);
         Ok(())
+    }
+
+    pub(crate) fn close_region(&mut self) {
+        self.labels.pop();
+        if self.halted {
+            self.halted = false;
+            return;
+        }
+        self.block.push(naga::Statement::Break, sp());
     }
 
     pub(crate) fn br_if(&mut self, depth: u32) -> Result<(), TranslateError> {

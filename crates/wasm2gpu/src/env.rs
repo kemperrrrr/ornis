@@ -34,8 +34,40 @@ pub(super) struct Emit<'a, 'b> {
     pub(super) stack: Vec<Val>,
     pub(super) imports: &'b [Import],
     pub(super) structs: &'b [StructDef],
+    pub(super) funcs: &'b [crate::ir::Func],
     pub(super) locals: Vec<Option<naga::Handle<naga::LocalVariable>>>,
     pub(super) labels: Vec<Flag>,
+    /// Immediate values of specialized parameters. Empty for an entry.
+    pub(super) baked: Vec<Option<u32>>,
+    /// Wasm local index to naga argument index. `None` is not a parameter.
+    pub(super) args_at: Vec<Option<u32>>,
+    /// Wasm parameter that reads `global_invocation_id.x`, if this is `cs_main`.
+    pub(super) id_param: Option<u32>,
+    /// Wasm result count. A `return` is emitted only when this is zero.
+    pub(super) results: u32,
+    /// A `return` already left this function. The enclosing loop must not
+    /// also `break`, or naga sees that break as unreachable.
+    pub(super) halted: bool,
+}
+
+/// Imports and defined functions visible to one lowering.
+pub(super) struct Code<'a> {
+    /// Wasm imports, in index order.
+    pub imports: &'a [Import],
+    /// Struct layouts named by the imports.
+    pub structs: &'a [StructDef],
+    /// Defined functions. Index 0 is the first function after the imports.
+    pub funcs: &'a [crate::ir::Func],
+}
+
+/// How [`crate::flow::exec`] binds one function.
+pub(super) struct ExecIn {
+    /// Index into the module's defined functions.
+    pub func_index: u32,
+    /// Immediate `i32` parameters. Empty when every parameter is dynamic.
+    pub baked: Vec<Option<u32>>,
+    /// See [`Emit::id_param`].
+    pub id_param: Option<u32>,
 }
 
 impl Emit<'_, '_> {
@@ -166,6 +198,27 @@ impl Emit<'_, '_> {
             accept,
             reject,
         })
+    }
+
+    /// Value of wasm parameter `index`.
+    ///
+    /// A compute entry's parameter is `global_invocation_id.x`, not the
+    /// `vec3` argument itself.
+    pub(super) fn param_expr(
+        &mut self,
+        index: u32,
+    ) -> Result<naga::Handle<Expression>, TranslateError> {
+        let slot = self
+            .args_at
+            .get(index as usize)
+            .copied()
+            .flatten()
+            .ok_or(TranslateError::Unsupported)?;
+        let base = self.ex(Expression::FunctionArgument(slot));
+        if self.id_param == Some(index) {
+            return Ok(self.ex(Expression::AccessIndex { base, index: 0 }));
+        }
+        Ok(base)
     }
 }
 

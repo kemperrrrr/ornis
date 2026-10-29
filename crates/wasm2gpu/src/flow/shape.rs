@@ -27,7 +27,7 @@ pub(super) fn shadow_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Op(Op::LocalSet(_) | Op::LocalTee(_)) => true,
         Stmt::Op(_) => false,
-        Stmt::Br(_) | Stmt::BrIf(_) => true,
+        Stmt::Br(_) | Stmt::BrIf(_) | Stmt::BrTable { .. } | Stmt::Return => true,
         Stmt::Block { .. } | Stmt::Loop { .. } | Stmt::If { .. } => true,
     }
 }
@@ -99,6 +99,8 @@ pub(super) fn targeted(stmts: &[Stmt], depth: u32) -> bool {
     while index < stmts.len() {
         let hit = match &stmts[index] {
             Stmt::Br(found) | Stmt::BrIf(found) => *found == depth,
+            Stmt::BrTable { targets, default } => targets.contains(&depth) || *default == depth,
+            Stmt::Return => false,
             Stmt::Block { body, .. } | Stmt::Loop { body, .. } => targeted(body, depth + 1),
             Stmt::If {
                 then_body,
@@ -169,7 +171,11 @@ pub(super) fn copy_params(em: &mut Emit<'_, '_>, params: u32) -> Result<(), Tran
             .copied()
             .flatten()
             .ok_or(TranslateError::Unsupported)?;
-        let value = em.ex(Expression::FunctionArgument(index));
+        if em.baked.get(index as usize).copied().flatten().is_some() {
+            index += 1;
+            continue;
+        }
+        let value = em.param_expr(index)?;
         em.store_var(var, value);
         index += 1;
     }

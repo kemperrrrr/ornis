@@ -46,7 +46,7 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         .get(index as usize)
         .and_then(|import| ty::classify(&import.name));
     let Some(imp) = imp else {
-        return Err(TranslateError::Unsupported);
+        return crate::call::call_defined(em, index);
     };
     match imp {
         Imp::ReadUniform => read_uniform(em),
@@ -105,13 +105,16 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
 
 fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
     let slot = index as usize;
+    if let Some(bits) = em.baked.get(slot).copied().flatten() {
+        return em.push(Val::Imm(bits));
+    }
     let var = em.locals.get(slot).copied().flatten();
     if let Some(var) = var {
         let loaded = em.load_var(var);
         return push_loaded(em, loaded, i32);
     }
-    if slot < em.func.arguments.len() {
-        let loaded = em.ex(Expression::FunctionArgument(index));
+    if em.args_at.get(slot).copied().flatten().is_some() {
+        let loaded = em.param_expr(index)?;
         return push_loaded(em, loaded, i32);
     }
     // Wasm zeros locals that are not parameters. A slot with no shadow was
@@ -145,6 +148,9 @@ fn zero_local(em: &mut Emit<'_, '_>, i32: bool) -> Result<(), TranslateError> {
 
 fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), TranslateError> {
     let val = em.pop()?;
+    if let Some(slot) = em.baked.get_mut(index as usize) {
+        *slot = None;
+    }
     if tee {
         em.stack.push(val);
     }

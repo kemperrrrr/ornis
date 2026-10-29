@@ -3,6 +3,9 @@
 use naga::Expression;
 use naga::Type;
 
+use crate::ir::Kind;
+use crate::ir::MAX_PARAMS;
+
 pub(super) const VS_PARAMS: u32 = 4;
 pub(super) const VS_RESULTS: u32 = 6;
 pub(super) const FS_PARAMS: u32 = 2;
@@ -12,6 +15,24 @@ pub(super) const LANES: u32 = 4;
 pub(super) const UNIFORM_BYTES: u32 = 1 << 16;
 pub(super) const F32_WIDTH: u8 = 4;
 pub(super) const VEC3_LANES: u32 = 3;
+/// Specialized naga functions one module may emit.
+///
+/// A second call with the same function and the same constant arguments
+/// reuses the first function. Distinct tuples count toward this cap.
+pub(super) const MAX_SPECS: usize = {
+    const LIMIT: usize = 64;
+    LIMIT
+};
+/// Distinct `(function, abstract arguments)` pairs one entry may interpret.
+///
+/// A straight-line body and a loop spend nothing here. Only a call that
+/// has not been seen enters the budget, and that pair is not counted again.
+/// A tree of distinct constant arguments stops here instead of walking
+/// every path.
+pub(super) const MAX_AI_ENTRIES: u32 = {
+    const LIMIT: u32 = 8192;
+    LIMIT
+};
 
 pub(super) struct Slot {
     pub(super) group: u32,
@@ -61,6 +82,34 @@ pub(super) struct Cx<'a> {
     pub(super) textures: Vec<Slot>,
     pub(super) samplers: Vec<Slot>,
     pub(super) struct_tys: Vec<(u16, naga::Handle<Type>)>,
+    /// Specialized naga functions already emitted for defined wasm calls.
+    pub(super) specs: Vec<Spec>,
+    /// Defined-function indices currently being lowered. A repeat is recursion.
+    pub(super) active: Vec<u32>,
+}
+
+/// One specialization of a defined wasm function.
+///
+/// `baked[i]` is `Some` when parameter `i` was an `i32` immediate at the
+/// call. Those immediates are not naga parameters: the callee sees them as
+/// constants, so a group or binding stays an immediate. A `None` slot is a
+/// real argument (a dynamic index, or any `f32`).
+#[derive(Clone, Copy)]
+pub(super) struct Spec {
+    /// Index into [`crate::ir::Module::funcs`].
+    pub func: u32,
+    /// Immediate parameters. The tail past `nparams` is unused.
+    pub baked: [Option<u32>; MAX_PARAMS],
+    /// Wasm parameter count.
+    pub nparams: u8,
+    /// Lowered naga function.
+    pub handle: naga::Handle<naga::Function>,
+    /// `Some` when result `i` folded to an immediate. `None` is a runtime value.
+    pub result_imm: [Option<u32>; MAX_PARAMS],
+    /// Result count.
+    pub nresults: u8,
+    /// Result kinds, so the caller can push `f32` and `i32` back.
+    pub result_kind: [Kind; MAX_PARAMS],
 }
 
 #[derive(Clone, Copy)]

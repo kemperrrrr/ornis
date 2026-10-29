@@ -16,9 +16,6 @@ pub(super) fn op(
     locals: &[Kind],
     op: &Operator<'_>,
 ) -> Result<Flat, TranslateError> {
-    if matches!(op, Operator::BrTable { .. }) {
-        return Err(TranslateError::BrTable);
-    }
     if let Some(flat) = control(types, op)? {
         return Ok(flat);
     }
@@ -56,6 +53,8 @@ fn control(types: &[Sig], op: &Operator<'_>) -> Result<Option<Flat>, TranslateEr
         Operator::End => Flat::End,
         Operator::Br { relative_depth } => Flat::Br(*relative_depth),
         Operator::BrIf { relative_depth } => Flat::BrIf(*relative_depth),
+        Operator::Return => Flat::Return,
+        Operator::BrTable { targets } => return br_table(targets),
         _ => return Ok(None),
     };
     Ok(Some(flat))
@@ -70,6 +69,7 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::LocalTee { local_index } => Ok(Op::LocalTee(*local_index)),
         Operator::Drop => Ok(Op::Drop),
         Operator::Call { function_index } => Ok(Op::Call(*function_index)),
+        Operator::CallIndirect { .. } => Err(TranslateError::IndirectCall),
         Operator::F32Mul => Ok(Op::Mul),
         Operator::F32Add => Ok(Op::Add),
         Operator::I32Add => Ok(Op::I32Add),
@@ -83,6 +83,17 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::Select => Ok(Op::Select),
         _ => Err(TranslateError::Unsupported),
     }
+}
+
+fn br_table(targets: &wasmparser::BrTable<'_>) -> Result<Option<Flat>, TranslateError> {
+    let mut labels = Vec::new();
+    for target in targets.targets() {
+        labels.push(target.map_err(|err| TranslateError::Wasm(err.to_string()))?);
+    }
+    Ok(Some(Flat::BrTable {
+        targets: labels,
+        default: targets.default(),
+    }))
 }
 
 fn i32_const(value: i32) -> Result<Op, TranslateError> {
