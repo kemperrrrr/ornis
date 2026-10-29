@@ -1024,14 +1024,14 @@ function fillLearn(root) {
     } catch (e) { /* corrupted entry: fall back to mock data */ }
     return PROJECTS;
   }
-  var FILE_ICO = '<svg class="wl-ico" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12.5h6M9 15.5h6M9 18h3.5"/></svg>';
+  var FILE_ICO = '<svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg>';
   var list = document.getElementById("wl5-list"), listEmpty = document.getElementById("wl5-empty");
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function renderRecents() {
     var items = loadRecents();
     list.innerHTML = items.map(function (p, i) {
       return '<div class="wl5-item' + (i === 0 ? " wl5-sel" : "") + '" role="option" tabindex="0" data-wl5-recent="' + esc(p.id) + '" title="' + esc(p.path) + '">' +
-        FILE_ICO + '<div class="wl5-tx"><div class="wl5-n">' + esc(p.name) + '</div><div class="wl5-p">' + esc(p.path) + "</div></div></div>";
+        FILE_ICO + '<div class="wl5-tx"><div class="wl5-n">' + esc(p.name) + '</div><div class="wl5-p">' + esc(p.path) + '</div></div><span class="wl5-dt">' + esc(p.date || "") + "</span></div>";
     }).join("");
     listEmpty.hidden = items.length > 0;
   }
@@ -1062,21 +1062,21 @@ function fillLearn(root) {
 
   // Template picker ("New Project"). Icons are stroke-only; parts with class wl5-a use the accent.
   var TEMPLATES = [
-    { id: "empty", name: "Empty Project", sec: "games", cat: ["3d", "2d"], ico: '<rect x="8" y="8" width="32" height="32" rx="4"/><path class="wl5-a" d="M24 18v12M18 24h12"/>' },
-    { id: "first-person", name: "First-Person", sec: "games", cat: ["3d"], ico: '<circle cx="24" cy="24" r="13"/><path class="wl5-a" d="M24 7v8M24 33v8M7 24h8M33 24h8"/><circle class="wl5-a" cx="24" cy="24" r="2"/>' },
-    { id: "third-person", name: "Third-Person", sec: "games", cat: ["3d"], ico: '<circle cx="24" cy="13" r="5"/><path d="M15 38v-9a9 9 0 0 1 18 0v9"/><path class="wl5-a" d="M8 42h32"/><path class="wl5-a" d="M6 8l5 3M42 8l-5 3"/>' },
-    { id: "top-down", name: "Top-Down", sec: "games", cat: ["3d", "2d"], ico: '<rect x="7" y="7" width="34" height="34" rx="3"/><path d="M7 19h34M7 30h34M19 7v34M30 7v34"/><circle class="wl5-a" cx="24.5" cy="24.5" r="3.5"/>' },
-    { id: "platformer-2d", name: "Platformer 2D", sec: "games", cat: ["2d"], ico: '<path d="M5 40h14M27 30h16M12 22h12"/><rect class="wl5-a" x="15" y="11" width="6" height="8" rx="1.5"/><path class="wl5-a" d="M26 20q5-6 9 4"/>' },
-    { id: "racing", name: "Racing", sec: "games", cat: ["3d"], ico: '<path d="M8 30l3-9a4 4 0 0 1 4-3h18a4 4 0 0 1 4 3l3 9v6H8z"/><circle cx="15" cy="36" r="3"/><circle cx="33" cy="36" r="3"/><path class="wl5-a" d="M4 12h10M2 17h8"/>' },
-    { id: "open-world", name: "Open World", sec: "games", cat: ["3d"], ico: '<path d="M4 38l11-16 7 9 6-8 16 15z"/><path class="wl5-a" d="M4 43c6-3 10 0 14-2s8-3 12-1 9 1 14-1"/><circle cx="36" cy="11" r="4"/>' },
-    { id: "puzzle", name: "Puzzle", sec: "games", cat: ["2d", "3d"], ico: '<path d="M10 10h10a4 4 0 1 1 8 0h10v10a4 4 0 1 0 0 8v10H28a4 4 0 1 0-8 0H10V28a4 4 0 1 1 0-8z"/><circle class="wl5-a" cx="24" cy="24" r="3"/>' },
-    { id: "multiplayer-arena", name: "Multiplayer Arena", sec: "games", cat: ["multiplayer", "3d"], ico: '<ellipse cx="24" cy="30" rx="18" ry="8"/><circle class="wl5-a" cx="15" cy="15" r="4"/><circle class="wl5-a" cx="33" cy="15" r="4"/><path d="M19 15h10"/><path class="wl5-a" d="M24 11v8"/>' },
-    { id: "coop-survival", name: "Co-op Survival", sec: "games", cat: ["multiplayer", "3d"], ico: '<path d="M24 6l14 5v11c0 9-6 16-14 20-8-4-14-11-14-20V11z"/><path class="wl5-a" d="M17 24l5 5 9-10"/>' },
-    { id: "physics-playground", name: "Physics Playground", sec: "tools", cat: ["3d", "other"], ico: '<rect x="8" y="28" width="12" height="12" rx="1.5"/><rect x="20" y="28" width="12" height="12" rx="1.5"/><rect x="14" y="16" width="12" height="12" rx="1.5"/><circle class="wl5-a" cx="36" cy="12" r="5"/><path class="wl5-a" d="M36 20v5M33 23l3 3 3-3"/>' },
-    { id: "mesh-editing", name: "Mesh Editing Sample", sec: "tools", cat: ["3d", "other"], ico: '<path d="M24 5l17 10v18L24 43 7 33V15z"/><path d="M7 15l17 10 17-10M24 25v18"/><circle class="wl5-a" cx="24" cy="5" r="2.5"/><circle class="wl5-a" cx="41" cy="15" r="2.5"/><circle class="wl5-a" cx="24" cy="25" r="2.5"/>' },
-    { id: "terrain-sample", name: "Procedural Terrain", sec: "tools", cat: ["3d", "other"], ico: '<path d="M4 34l8-6 6 4 8-10 8 6 10-8"/><path d="M4 42l8-6 6 4 8-10 8 6 10-8" opacity=".5"/><path class="wl5-a" d="M24 6v8M20 10h8"/>' },
-    { id: "ui-sample", name: "UI & Menus", sec: "tools", cat: ["2d", "other"], ico: '<rect x="7" y="9" width="34" height="30" rx="3"/><path d="M7 16h34"/><path class="wl5-a" d="M13 24h14M13 30h22"/>' },
-    { id: "netcode-sample", name: "Netcode Sample", sec: "tools", cat: ["multiplayer", "other"], ico: '<rect x="6" y="8" width="14" height="10" rx="2"/><rect x="28" y="30" width="14" height="10" rx="2"/><path class="wl5-a" d="M13 18v8h22v4"/><path class="wl5-a" d="M31 27l4 3 4-3"/>' }
+    { id: "empty", name: "Empty Project", desc: "Blank scene with a camera and light", sec: "games", cat: ["3d", "2d"], ico: '<rect x="8" y="8" width="32" height="32" rx="4"/><path class="wl5-a" d="M24 18v12M18 24h12"/>' },
+    { id: "first-person", name: "First-Person", desc: "FPS controller, mouse look, crosshair", sec: "games", cat: ["3d"], ico: '<circle cx="24" cy="24" r="13"/><path class="wl5-a" d="M24 7v8M24 33v8M7 24h8M33 24h8"/><circle class="wl5-a" cx="24" cy="24" r="2"/>' },
+    { id: "third-person", name: "Third-Person", desc: "Orbit camera and character movement", sec: "games", cat: ["3d"], ico: '<circle cx="24" cy="13" r="5"/><path d="M15 38v-9a9 9 0 0 1 18 0v9"/><path class="wl5-a" d="M8 42h32"/><path class="wl5-a" d="M6 8l5 3M42 8l-5 3"/>' },
+    { id: "top-down", name: "Top-Down", desc: "Isometric camera with click-to-move", sec: "games", cat: ["3d", "2d"], ico: '<rect x="7" y="7" width="34" height="34" rx="3"/><path d="M7 19h34M7 30h34M19 7v34M30 7v34"/><circle class="wl5-a" cx="24.5" cy="24.5" r="3.5"/>' },
+    { id: "platformer-2d", name: "Platformer 2D", desc: "Side-scroller with tight jump physics", sec: "games", cat: ["2d"], ico: '<path d="M5 40h14M27 30h16M12 22h12"/><rect class="wl5-a" x="15" y="11" width="6" height="8" rx="1.5"/><path class="wl5-a" d="M26 20q5-6 9 4"/>' },
+    { id: "racing", name: "Racing", desc: "Vehicle physics and a lap track", sec: "games", cat: ["3d"], ico: '<path d="M8 30l3-9a4 4 0 0 1 4-3h18a4 4 0 0 1 4 3l3 9v6H8z"/><circle cx="15" cy="36" r="3"/><circle cx="33" cy="36" r="3"/><path class="wl5-a" d="M4 12h10M2 17h8"/>' },
+    { id: "open-world", name: "Open World", desc: "Streaming procedural terrain", sec: "games", cat: ["3d"], ico: '<path d="M4 38l11-16 7 9 6-8 16 15z"/><path class="wl5-a" d="M4 43c6-3 10 0 14-2s8-3 12-1 9 1 14-1"/><circle cx="36" cy="11" r="4"/>' },
+    { id: "puzzle", name: "Puzzle", desc: "Grid logic and level progression", sec: "games", cat: ["2d", "3d"], ico: '<path d="M10 10h10a4 4 0 1 1 8 0h10v10a4 4 0 1 0 0 8v10H28a4 4 0 1 0-8 0H10V28a4 4 0 1 1 0-8z"/><circle class="wl5-a" cx="24" cy="24" r="3"/>' },
+    { id: "multiplayer-arena", name: "Multiplayer Arena", desc: "Server-authoritative arena match", sec: "games", cat: ["multiplayer", "3d"], ico: '<ellipse cx="24" cy="30" rx="18" ry="8"/><circle class="wl5-a" cx="15" cy="15" r="4"/><circle class="wl5-a" cx="33" cy="15" r="4"/><path d="M19 15h10"/><path class="wl5-a" d="M24 11v8"/>' },
+    { id: "coop-survival", name: "Co-op Survival", desc: "Shared world for 2–4 players", sec: "games", cat: ["multiplayer", "3d"], ico: '<path d="M24 6l14 5v11c0 9-6 16-14 20-8-4-14-11-14-20V11z"/><path class="wl5-a" d="M17 24l5 5 9-10"/>' },
+    { id: "physics-playground", name: "Physics Playground", desc: "Rigid bodies, joints and forces", sec: "tools", cat: ["3d", "other"], ico: '<rect x="8" y="28" width="12" height="12" rx="1.5"/><rect x="20" y="28" width="12" height="12" rx="1.5"/><rect x="14" y="16" width="12" height="12" rx="1.5"/><circle class="wl5-a" cx="36" cy="12" r="5"/><path class="wl5-a" d="M36 20v5M33 23l3 3 3-3"/>' },
+    { id: "mesh-editing", name: "Mesh Editing Sample", desc: "Edit vertices and faces in-scene", sec: "tools", cat: ["3d", "other"], ico: '<path d="M24 5l17 10v18L24 43 7 33V15z"/><path d="M7 15l17 10 17-10M24 25v18"/><circle class="wl5-a" cx="24" cy="5" r="2.5"/><circle class="wl5-a" cx="41" cy="15" r="2.5"/><circle class="wl5-a" cx="24" cy="25" r="2.5"/>' },
+    { id: "terrain-sample", name: "Procedural Terrain", desc: "Heightmap noise and erosion", sec: "tools", cat: ["3d", "other"], ico: '<path d="M4 34l8-6 6 4 8-10 8 6 10-8"/><path d="M4 42l8-6 6 4 8-10 8 6 10-8" opacity=".5"/><path class="wl5-a" d="M24 6v8M20 10h8"/>' },
+    { id: "ui-sample", name: "UI & Menus", desc: "Menus, HUD and settings screens", sec: "tools", cat: ["2d", "other"], ico: '<rect x="7" y="9" width="34" height="30" rx="3"/><path d="M7 16h34"/><path class="wl5-a" d="M13 24h14M13 30h22"/>' },
+    { id: "netcode-sample", name: "Netcode Sample", desc: "Replication and client prediction", sec: "tools", cat: ["multiplayer", "other"], ico: '<rect x="6" y="8" width="14" height="10" rx="2"/><rect x="28" y="30" width="14" height="10" rx="2"/><path class="wl5-a" d="M13 18v8h22v4"/><path class="wl5-a" d="M31 27l4 3 4-3"/>' }
   ];
   var SECTIONS = [["games", "Games"], ["tools", "Tools & Samples"]];
   var pick = { cat: "all", q: "", sel: "empty" };
@@ -1089,10 +1089,12 @@ function fillLearn(root) {
       });
       if (!ts.length) return;
       html += '<section class="wl5-sec"><h3>' + s[1] + '</h3><div class="wl5-grid">' + ts.map(function (t) {
-        return '<button class="wl5-tpl' + (t.id === pick.sel ? " wl5-sel" : "") + '" data-wl5-tpl="' + t.id + '"><span class="wl5-ti"><svg class="wl-ico" viewBox="0 0 48 48">' +
-          t.ico + '</svg></span><span class="wl5-l">' + t.name + "</span></button>";
+        return '<button class="wl5-tpl' + (t.id === pick.sel ? " wl5-sel" : "") + '" data-wl5-tpl="' + t.id + '"><svg class="wl-ico" viewBox="0 0 48 48">' +
+          t.ico + '</svg><span><b>' + t.name + "</b><small>" + t.desc + "</small></span></button>";
       }).join("") + "</div></section>";
     });
+    var cur = TEMPLATES.filter(function (t) { return t.id === pick.sel; })[0];
+    document.getElementById("wl5-chosen").textContent = cur ? "Selected: " + cur.name : "";
     body.innerHTML = html || '<div class="wl5-none">No templates match the filter.</div>';
   }
   function openPicker() {

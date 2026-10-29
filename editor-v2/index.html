@@ -137,36 +137,41 @@
 <div id="wl-start" class="wl-root wl-screen wl-on" tabindex="-1" role="dialog" aria-modal="true" aria-label="Welcome to Ornis">
   <div class="wl5-win">
     <div class="wl5-main">
-      <div class="wl5-tile"><span class="wl5-bird" aria-hidden="true"></span></div>
-      <h1 class="wl5-title">Ornis</h1>
-      <p class="wl5-ver" id="wl5-ver">Version 0.1</p>
+      <div class="wl5-brand">
+        <span class="wl5-bird" aria-hidden="true"></span>
+        <div><h1 class="wl5-title">ornis</h1><p class="wl5-ver" id="wl5-ver">Version 0.1</p></div>
+      </div>
+      <p class="wl5-tag">Build worlds, one feather at a time.</p>
       <div class="wl5-actions">
-        <button class="wl5-btn" data-wl-action="new"><svg class="wl-ico" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg>New Project</button>
-        <button class="wl5-btn" data-wl-action="open"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Existing Project</button>
+        <button class="wl5-btn" data-wl-action="new"><span class="wl5-bi"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span><span><b>New Project</b><small>Start from a game template</small></span></button>
+        <button class="wl5-btn" data-wl-action="open"><span class="wl5-bi"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></span><span><b>Open Existing Project</b><small>Pick a project folder on disk</small></span></button>
       </div>
       <input type="file" id="wl5-open-input" webkitdirectory hidden />
     </div>
-    <aside class="wl5-recents" aria-label="Recent projects">
+    <section class="wl5-recents" aria-label="Recent projects">
+      <div class="wl5-rh"><h2>Recent projects</h2><span>Last opened</span></div>
       <div class="wl5-list" id="wl5-list" role="listbox"></div>
-      <div class="wl5-empty" id="wl5-empty" hidden>No Recent Projects</div>
-    </aside>
+      <div class="wl5-empty" id="wl5-empty" hidden>No recent projects yet</div>
+    </section>
   </div>
 </div>
-<div id="wl-new" class="wl-root wl-screen wl5-modal" tabindex="-1" role="dialog" aria-modal="true" aria-label="Choose a template">
+<div id="wl-new" class="wl-root wl-screen wl5-modal" tabindex="-1" role="dialog" aria-modal="true" aria-label="New project">
   <div class="wl5-sheet">
-    <div class="wl5-head">
-      <div class="wl5-seg" role="tablist" id="wl5-seg">
-        <button class="wl5-on" data-wl5-cat="all" role="tab">All</button><button data-wl5-cat="3d" role="tab">3D</button><button data-wl5-cat="2d" role="tab">2D</button><button data-wl5-cat="multiplayer" role="tab">Multiplayer</button><button data-wl5-cat="other" role="tab">Other</button>
+    <nav class="wl5-cats" id="wl5-seg" role="tablist">
+      <h2>New project</h2>
+      <button class="wl5-on" data-wl5-cat="all" role="tab">All templates</button><button data-wl5-cat="3d" role="tab">3D</button><button data-wl5-cat="2d" role="tab">2D</button><button data-wl5-cat="multiplayer" role="tab">Multiplayer</button><button data-wl5-cat="other" role="tab">Other</button>
+    </nav>
+    <div class="wl5-pane">
+      <div class="wl5-head">
+        <label class="wl5-filter"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg><input id="wl5-q" placeholder="Filter templates" autocomplete="off" spellcheck="false" /></label>
       </div>
-      <label class="wl5-filter"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg><input id="wl5-q" placeholder="Filter" autocomplete="off" spellcheck="false" /></label>
-    </div>
-    <h2 class="wl5-prompt">Choose a template for your new project:</h2>
-    <div class="wl5-body" id="wl5-body"></div>
-    <div class="wl5-foot">
-      <button class="wl5-fb" data-wl5="cancel">Cancel</button>
-      <span class="wl5-sp"></span>
-      <button class="wl5-fb" disabled>Previous</button>
-      <button class="wl5-fb wl5-primary" data-wl5="next">Next</button>
+      <div class="wl5-body" id="wl5-body"></div>
+      <div class="wl5-foot">
+        <button class="wl5-fb" data-wl5="cancel">Cancel</button>
+        <span class="wl5-sp" id="wl5-chosen"></span>
+        <button class="wl5-fb" disabled>Previous</button>
+        <button class="wl5-fb wl5-primary" data-wl5="next">Next</button>
+      </div>
     </div>
   </div>
 </div>
