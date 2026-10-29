@@ -1,18 +1,28 @@
 # Wasm → GPU: сегментированная виртуальная память
 
-Статус: research note (2026-10-25). Не принято как замена текущему
-пути Rust → Shader IR → WGSL (`rust-to-wgsl-architecture.md`).
-Фиксирует идею «Virtual Memory Space Translation / Software-Managed
-Memory Paging» поверх Wasm linear memory и предложения по ABI
-надстройки. Research-прототип (не production path) —
-`crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`, `unsafe` только в
-`gpu_abi`) и offline `crates/wasm2gpu`. Toy-проход: vertex+fragment,
-uniform и `texture_sample`. Срез stage-2: `storage_read` /
-`storage_write` в `array<vec4<f32>>` — group и binding остаются
-immediate-операндами импорта, индекс элемента может быть динамическим
-и опускается в access chain (`OpAccessChain` / WGSL `array[index]`).
-WGSL/SPIR-V через naga. Bindless и descriptor indexing не default.
-Упаковка space+binding+offset в каждый `i32` по-прежнему не default ABI.
+Статус: research note (2026-10-25; срез типов и CFG — 2026-10-29).
+Не принято как замена текущему пути Rust → Shader IR → WGSL
+(`rust-to-wgsl-architecture.md`). Фиксирует идею «Virtual Memory
+Space Translation / Software-Managed Memory Paging» поверх Wasm linear
+memory и предложения по ABI надстройки. Research-прототип (не
+production path) — `crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`,
+`unsafe` только в `gpu_abi`) и offline `crates/wasm2gpu`.
+Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
+`storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` /
+`i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Раскладка
+структуры — `place_fields` с выравниванием uniform (16), та же, что у
+хостового `GpuRef` / `gpu_struct!`. Поля задаёт custom section
+`ornis_gpu.types`. Group и binding остаются immediate-операндами
+импорта; индекс элемента может быть динамическим и опускается в
+access chain (`OpAccessChain` / WGSL `array[index]`). Структурный
+control flow (`block` / `loop` / `if` / `br` / `br_if`) строится в
+CFG; абстрактная интерпретация несёт provenance указателя и offset
+через ветки и join (`phi` / `select`, §3.4). Два разных binding на
+одном join — отказ. Прямой `if` без побочных эффектов опускается в
+WGSL `select`, остальной — в `if` / `loop`. Неподдерживаемый тип —
+явная ошибка. WGSL/SPIR-V через naga. Bindless и descriptor indexing
+не default. Упаковка space+binding+offset в каждый `i32` по-прежнему
+не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
 Kongruent как носителей типов для шейдерного бэкенда.
@@ -184,11 +194,44 @@ impl Texture2d {
 naga, без descriptor indexing.
 
 Срез после toy (тот же транслятор, не новый ABI): `storage_read` /
-`storage_write` читают и пишут элемент `array<vec4<f32>>`. Индекс —
-отдельный операнд (`i32.const` или runtime `i32`), group и binding —
-только `i32.const`. Динамический индекс становится access chain к уже
-выбранному global. Динамический group/binding по-прежнему ошибка
-(`DynamicBinding`): это bindless, он вне default.
+`storage_write` читают и пишут элемент массива. Элемент — скаляр
+(`f32`, `u32`, `i32`), `vec2` / `vec3` / `vec4<f32>` или простая
+структура из этих полей. Индекс — отдельный операнд (`i32.const` или
+runtime `i32`), group и binding — только `i32.const`. Динамический
+индекс становится access chain к уже выбранному global. Динамический
+group/binding по-прежнему ошибка (`DynamicBinding`): это bindless, он
+вне default. Один и тот же `(group, binding)` как два разных типа
+storage — ошибка.
+
+Структуры объявляются в custom section `ornis_gpu.types` (magic
+`OGT1`, затем число структур и теги полей). Идентификатор структуры —
+четвёртый immediate импорта `storage_read_struct` /
+`storage_write_struct`. Lowerer кладёт поля через `place_fields(...,
+uniform: true)` и `storage_stride` с выравниванием 16, так что
+смещения совпадают с хостовым `gpu_struct!` (`vec3` затем `f32`:
+смещения 0 и 12, stride 16; два `vec3` — через 16). Вложенные
+структуры, незнакомый тег поля и ширина вне 1..=8 полей отвергаются.
+
+Control flow шире прямой линии `vs_main` / `fs_main`. Парсер строит
+CFG из Wasm structured control flow (`block` / `loop` / `if` / `br` /
+`br_if`). Абстрактная интерпретация ведёт provenance (group, binding)
+и offset/индекс через ветки; на join одинаковые константы остаются
+константой, разные константы provenance становятся phi. Если этот phi
+затем читается как group или binding — отказ (`ambiguous provenance
+at a join`). `i32.add` / `i32.eqz` сохраняют флаг joined, поэтому
+`(select c 0 1) + 0` в роли binding — та же ошибка, а не
+`DynamicBinding`. Phi индекса разрешён и опускается в WGSL `select`
+либо в присваивание внутри `if`. Непараметрические локалы в анализе и
+в lowering начинаются с нуля, как в Wasm.
+
+Цикл с динамическим индексом остаётся `loop`. `br` глубже одного
+уровня несётся флагами `break` / `continue`, потому что у WGSL нет
+многоуровневого `br`. После вложенного `block` флаги проверяются у
+ближайшего naga-`loop`, в том числе когда этот `block` стоит внутри
+statement-`if`: хвост ветки после `br` (например `storage_write`) не
+выполняется. `br` / `br_if` на неявный блок функции (это `return`) не
+опускается: ошибка `branch to the function is not lowered`. `if` без
+результатов и без побочных эффектов выбрасывается целиком.
 
 ## 5. Отношение к текущему пути ornis
 
@@ -213,9 +256,10 @@ provenance + offset-only pointers + imports для texture, а не с наре�
 | Provenance в типе/SSA, offset в указателе, texture-импорты | Рабочая форма надстройки для прототипа |
 | Замена текущего DSL-пути | Не сейчас; research note до явного решения |
 
-Сделано как research-прототип, не как замена DSL: toy ABI (§4) и
-срез stage-2 (storage read/write, индекс элемента — access chain).
-Bindless по-прежнему не default.
+Сделано как research-прототип, не как замена DSL: toy ABI (§4),
+storage read/write (скаляры, векторы, простые структуры, индекс
+элемента — access chain) и CFG с абстрактной интерпретацией
+provenance. Bindless по-прежнему не default.
 
 Предпочтительная форма SDK — `GpuRef` + явный `read` (§7).
 

@@ -1,185 +1,274 @@
-//! Stack steps for the straight-line subset.
+//! Stack steps for arithmetic, locals, and gpu imports.
 
 use naga::BinaryOperator;
 use naga::Expression;
-use naga::Function;
-use naga::SampleLevel;
 
-use crate::cx::Cx;
-use crate::cx::LANES;
-use crate::cx::READ_PARAMS;
-use crate::cx::SAMPLE_PARAMS;
-use crate::cx::STORAGE_WRITE_PARAMS;
 use crate::cx::Val;
-use crate::cx::expr;
-use crate::cx::import;
+use crate::env::Emit;
 use crate::error::TranslateError;
 use crate::globals;
-use crate::ir::Import;
 use crate::ir::Op;
 use crate::storage;
-use ornis_gpu_abi::symbols;
+use crate::ty;
+use crate::ty::Imp;
 
-pub(super) fn step(
-    cx: &mut Cx<'_>,
-    imports: &[Import],
-    body: &mut Function,
-    stack: &mut Vec<Val>,
-    op: Op,
-) -> Result<(), TranslateError> {
+pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> {
     match op {
-        Op::I32(value) => stack.push(Val::Imm(value)),
-        Op::F32(bits) => stack.push(Val::Scalar(lit(body, f32::from_bits(bits)))),
-        Op::Local(index) => stack.push(Val::Scalar(arg(body, index))),
-        Op::LocalI32(index) => stack.push(Val::Index(arg(body, index))),
-        Op::Call(index) => call(cx, imports, body, stack, index)?,
-        Op::Mul => bin(body, stack, BinaryOperator::Multiply)?,
-        Op::Add => bin(body, stack, BinaryOperator::Add)?,
-    }
-    Ok(())
-}
-
-fn lit(body: &mut Function, value: f32) -> naga::Handle<Expression> {
-    expr(body, Expression::Literal(naga::Literal::F32(value)))
-}
-
-fn arg(body: &mut Function, index: u32) -> naga::Handle<Expression> {
-    expr(body, Expression::FunctionArgument(index))
-}
-
-fn call(
-    cx: &mut Cx<'_>,
-    imports: &[Import],
-    body: &mut Function,
-    stack: &mut Vec<Val>,
-    index: u32,
-) -> Result<(), TranslateError> {
-    let import = import(imports, index)?;
-    if import.name == symbols::RAW_READ
-        && import.sig.params == READ_PARAMS
-        && import.sig.results == LANES
-    {
-        read_uniform(cx, body, stack)
-    } else if import.name == symbols::TEXTURE_SAMPLE_2D
-        && import.sig.params == SAMPLE_PARAMS
-        && import.sig.results == LANES
-    {
-        sample(cx, body, stack)
-    } else if import.name == symbols::STORAGE_READ
-        && import.sig.params == READ_PARAMS
-        && import.sig.results == LANES
-    {
-        storage::storage_load(cx, body, stack)
-    } else if import.name == symbols::STORAGE_WRITE
-        && import.sig.params == STORAGE_WRITE_PARAMS
-        && import.sig.results == 0
-    {
-        storage::storage_store(cx, body, stack)
-    } else {
-        Err(TranslateError::Unsupported)
+        Op::I32(value) => em.push(Val::Imm(value)),
+        Op::F32(bits) => {
+            let lit = em.f32(f32::from_bits(bits));
+            em.push(Val::Scalar(lit))
+        }
+        Op::Local(index) => local_get(em, index, false),
+        Op::LocalI32(index) => local_get(em, index, true),
+        Op::LocalSet(index) => local_set(em, index, false),
+        Op::LocalTee(index) => local_set(em, index, true),
+        Op::Drop => em.pop().map(|_| ()),
+        Op::Call(index) => call(em, index),
+        Op::Mul => bin(em, BinaryOperator::Multiply),
+        Op::Add => bin(em, BinaryOperator::Add),
+        Op::I32Add => i32_bin(em, u32::wrapping_add, BinaryOperator::Add),
+        Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),
+        Op::I32Sub => i32_bin(em, u32::wrapping_sub, BinaryOperator::Subtract),
+        Op::I32Eqz => i32_eqz(em),
+        Op::I32Eq => i32_cmp(em, |a, b| a == b, BinaryOperator::Equal),
+        Op::I32Ne => i32_cmp(em, |a, b| a != b, BinaryOperator::NotEqual),
+        Op::I32LtU => i32_cmp(em, |a, b| a < b, BinaryOperator::Less),
+        Op::I32GtU => i32_cmp(em, |a, b| a > b, BinaryOperator::Greater),
+        Op::Select => wasm_select(em),
     }
 }
 
-fn read_uniform(
-    cx: &mut Cx<'_>,
-    body: &mut Function,
-    stack: &mut Vec<Val>,
-) -> Result<(), TranslateError> {
-    let offset = pop_imm(stack)?;
-    let binding = pop_imm(stack)?;
-    let group = pop_imm(stack)?;
+fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
+    let imp = em
+        .imports
+        .get(index as usize)
+        .and_then(|import| ty::classify(&import.name));
+    let Some(imp) = imp else {
+        return Err(TranslateError::Unsupported);
+    };
+    match imp {
+        Imp::ReadUniform => read_uniform(em),
+        Imp::Sample => sample(em),
+        Imp::Read(spec) => storage::load(em, spec),
+        Imp::Write(spec) => storage::store(em, spec, index),
+    }
+}
+
+fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let offset = em.pop_imm()?;
+    let binding = em.pop_imm()?;
+    let group = em.pop_imm()?;
     if offset != 0 {
         return Err(TranslateError::Unsupported);
     }
-    let var = globals::uniform(cx, group, binding);
-    let pointer = expr(body, Expression::GlobalVariable(var));
-    stack.push(Val::Vec(expr(body, Expression::Load { pointer })));
+    let var = globals::uniform(em.cx, group, binding);
+    let pointer = em.ex(Expression::GlobalVariable(var));
+    let loaded = em.ex(Expression::Load { pointer });
+    em.stack.push(Val::Vec(loaded));
     Ok(())
 }
 
-fn sample(
-    cx: &mut Cx<'_>,
-    body: &mut Function,
-    stack: &mut Vec<Val>,
-) -> Result<(), TranslateError> {
-    let v = pop_scalar(stack)?;
-    let u = pop_scalar(stack)?;
-    let samp_binding = pop_imm(stack)?;
-    let samp_group = pop_imm(stack)?;
-    let tex_binding = pop_imm(stack)?;
-    let tex_group = pop_imm(stack)?;
-    let image = expr(
-        body,
-        Expression::GlobalVariable(globals::texture(cx, tex_group, tex_binding)),
-    );
-    let sampler = expr(
-        body,
-        Expression::GlobalVariable(globals::sampler(cx, samp_group, samp_binding)),
-    );
-    let coordinate = expr(
-        body,
-        Expression::Compose {
-            ty: cx.vec2,
-            components: vec![u, v],
-        },
-    );
-    stack.push(Val::Vec(expr(
-        body,
-        Expression::ImageSample {
-            image,
-            sampler,
-            gather: None,
-            coordinate,
-            array_index: None,
-            offset: None,
-            level: SampleLevel::Auto,
-            depth_ref: None,
-            clamp_to_edge: false,
-        },
-    )));
+fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let v_val = em.pop()?;
+    let u_val = em.pop()?;
+    let v = crate::env::float_of(v_val)?;
+    let u = crate::env::float_of(u_val)?;
+    let samp_binding = em.pop_imm()?;
+    let samp_group = em.pop_imm()?;
+    let tex_binding = em.pop_imm()?;
+    let tex_group = em.pop_imm()?;
+    let tex = globals::texture(em.cx, tex_group, tex_binding);
+    let samp = globals::sampler(em.cx, samp_group, samp_binding);
+    let image = em.ex(Expression::GlobalVariable(tex));
+    let sampler = em.ex(Expression::GlobalVariable(samp));
+    let coordinate = em.ex(Expression::Compose {
+        ty: em.cx.vec2,
+        components: vec![u, v],
+    });
+    let sampled = em.ex(Expression::ImageSample {
+        image,
+        sampler,
+        gather: None,
+        coordinate,
+        array_index: None,
+        offset: None,
+        level: naga::SampleLevel::Auto,
+        depth_ref: None,
+        clamp_to_edge: false,
+    });
+    em.stack.push(Val::Vec(sampled));
     Ok(())
 }
 
-pub(super) fn pop_imm(stack: &mut Vec<Val>) -> Result<u32, TranslateError> {
-    match stack.pop() {
-        Some(Val::Imm(value)) => Ok(value),
-        Some(_) => Err(TranslateError::DynamicBinding),
-        None => Err(TranslateError::Unsupported),
+fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
+    let slot = index as usize;
+    let var = em.locals.get(slot).copied().flatten();
+    if let Some(var) = var {
+        let loaded = em.load_var(var);
+        return push_loaded(em, loaded, i32);
     }
+    if slot < em.func.arguments.len() {
+        let loaded = em.ex(Expression::FunctionArgument(index));
+        return push_loaded(em, loaded, i32);
+    }
+    // Wasm zeros locals that are not parameters. A slot with no shadow was
+    // never written, so the value is the constant zero the analysis recorded.
+    if slot < em.locals.len() {
+        return zero_local(em, i32);
+    }
+    Err(TranslateError::Unsupported)
 }
 
-pub(super) fn pop_scalar(stack: &mut Vec<Val>) -> Result<naga::Handle<Expression>, TranslateError> {
-    match stack.pop() {
-        Some(Val::Scalar(handle)) => Ok(handle),
+fn push_loaded(
+    em: &mut Emit<'_, '_>,
+    loaded: naga::Handle<Expression>,
+    i32: bool,
+) -> Result<(), TranslateError> {
+    let val = if i32 {
+        Val::Index(loaded)
+    } else {
+        Val::Scalar(loaded)
+    };
+    em.push(val)
+}
+
+fn zero_local(em: &mut Emit<'_, '_>, i32: bool) -> Result<(), TranslateError> {
+    if i32 {
+        return em.push(Val::Imm(0));
+    }
+    let lit = em.f32(0.0);
+    em.push(Val::Scalar(lit))
+}
+
+fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), TranslateError> {
+    let val = em.pop()?;
+    if tee {
+        em.stack.push(val);
+    }
+    let var = em
+        .locals
+        .get(index as usize)
+        .copied()
+        .flatten()
+        .ok_or(TranslateError::Unsupported)?;
+    let bits = match val {
+        Val::Imm(value) => em.u32(value),
+        Val::Index(handle) | Val::Scalar(handle) => handle,
+        Val::Vec(_) => return Err(TranslateError::Unsupported),
+    };
+    em.store_var(var, bits);
+    Ok(())
+}
+
+fn bin(em: &mut Emit<'_, '_>, op: BinaryOperator) -> Result<(), TranslateError> {
+    let right = em.pop()?;
+    let left = em.pop()?;
+    match (left, right) {
+        (Val::Vec(left), Val::Vec(right)) => {
+            let value = arith(em, op, left, right);
+            em.stack.push(Val::Vec(value));
+            Ok(())
+        }
+        (Val::Scalar(left), Val::Scalar(right)) => {
+            let value = arith(em, op, left, right);
+            em.stack.push(Val::Scalar(value));
+            Ok(())
+        }
         _ => Err(TranslateError::Unsupported),
     }
 }
 
-fn binary(
-    body: &mut Function,
+fn arith(
+    em: &mut Emit<'_, '_>,
     op: BinaryOperator,
     left: naga::Handle<Expression>,
     right: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
-    expr(body, Expression::Binary { op, left, right })
+    em.ex(Expression::Binary { op, left, right })
 }
 
-fn bin(
-    body: &mut Function,
-    stack: &mut Vec<Val>,
+/// Immediate bits, or the two operands already lowered to `u32`.
+enum Ready {
+    Imm(u32),
+    Expr(naga::Handle<Expression>, naga::Handle<Expression>),
+}
+
+fn i32_ready(
+    em: &mut Emit<'_, '_>,
+    fold: impl Fn(u32, u32) -> u32,
+) -> Result<Ready, TranslateError> {
+    let right = em.pop()?;
+    let left = em.pop()?;
+    if let (Val::Imm(a), Val::Imm(b)) = (left, right) {
+        return Ok(Ready::Imm(fold(a, b)));
+    }
+    Ok(Ready::Expr(em.as_uint(left)?, em.as_uint(right)?))
+}
+
+fn i32_bin(
+    em: &mut Emit<'_, '_>,
+    fold: fn(u32, u32) -> u32,
     op: BinaryOperator,
 ) -> Result<(), TranslateError> {
-    let right = stack.pop().ok_or(TranslateError::Unsupported)?;
-    let left = stack.pop().ok_or(TranslateError::Unsupported)?;
-    match (left, right) {
-        (Val::Vec(left), Val::Vec(right)) => {
-            stack.push(Val::Vec(binary(body, op, left, right)));
-            Ok(())
+    match i32_ready(em, fold)? {
+        Ready::Imm(value) => em.push(Val::Imm(value)),
+        Ready::Expr(left, right) => {
+            let value = arith(em, op, left, right);
+            em.push(Val::Index(value))
         }
-        (Val::Scalar(left), Val::Scalar(right)) => {
-            stack.push(Val::Scalar(binary(body, op, left, right)));
-            Ok(())
-        }
-        _ => Err(TranslateError::Unsupported),
     }
+}
+
+fn i32_cmp(
+    em: &mut Emit<'_, '_>,
+    fold: fn(u32, u32) -> bool,
+    op: BinaryOperator,
+) -> Result<(), TranslateError> {
+    match i32_ready(em, |a, b| u32::from(fold(a, b)))? {
+        Ready::Imm(value) => em.push(Val::Imm(value)),
+        Ready::Expr(left, right) => {
+            let cond = arith(em, op, left, right);
+            let value = zero_one(em, cond);
+            em.push(Val::Index(value))
+        }
+    }
+}
+
+fn i32_eqz(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let val = em.pop()?;
+    if let Val::Imm(value) = val {
+        em.stack.push(Val::Imm(u32::from(value == 0)));
+        return Ok(());
+    }
+    let bits = em.as_uint(val)?;
+    let zero = em.u32(0);
+    let cond = arith(em, BinaryOperator::Equal, bits, zero);
+    let value = zero_one(em, cond);
+    em.stack.push(Val::Index(value));
+    Ok(())
+}
+
+fn zero_one(em: &mut Emit<'_, '_>, cond: naga::Handle<Expression>) -> naga::Handle<Expression> {
+    let accept = em.u32(1);
+    let reject = em.u32(0);
+    em.pick(cond, accept, reject)
+}
+
+fn wasm_select(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let cond_val = em.pop()?;
+    let cond = em.as_bool(cond_val)?;
+    let reject = em.pop()?;
+    let accept = em.pop()?;
+    let value = match (accept, reject) {
+        (Val::Scalar(left), Val::Scalar(right)) => Val::Scalar(em.pick(cond, left, right)),
+        (Val::Vec(left), Val::Vec(right)) => Val::Vec(em.pick(cond, left, right)),
+        (left, right) => {
+            let accept = em.as_uint(left)?;
+            let reject = em.as_uint(right)?;
+            Val::Index(em.pick(cond, accept, reject))
+        }
+    };
+    em.stack.push(value);
+    Ok(())
 }

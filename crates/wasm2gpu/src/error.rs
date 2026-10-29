@@ -16,8 +16,21 @@ pub enum TranslateError {
     /// group or binding would be bindless descriptor indexing, which this
     /// translator rejects.
     DynamicBinding,
-    /// An operator, import, or result shape outside the straight-line subset.
+    /// An operator, import, or result shape outside the supported subset.
     Unsupported,
+    /// Two predecessors disagree on the binding a pointer names.
+    ///
+    /// The offset may be a phi. The group and binding may not.
+    AmbiguousProvenance,
+    /// `br` or `br_if` targets the function body.
+    ///
+    /// Wasm treats the function as an implicit block, so that branch is a
+    /// `return`. This translator does not lower it: a return from inside a
+    /// nested `if` would have to compose the shader outputs on the way out.
+    FunctionBranch,
+    /// A storage element the lowerer will not emit, or a struct whose lanes
+    /// do not match the host layout rules.
+    UnsupportedType(String),
     /// `vs_main` or `fs_main` was not exported.
     MissingEntry(&'static str),
     /// naga rejected the lowered module or a round-trip.
@@ -31,6 +44,9 @@ impl fmt::Display for TranslateError {
             Self::LinearMemory => f.write_str("linear memory is not the gpu abi"),
             Self::DynamicBinding => f.write_str("binding is not a constant immediate"),
             Self::Unsupported => f.write_str("operator is outside the toy subset"),
+            Self::AmbiguousProvenance => f.write_str("ambiguous provenance at a join"),
+            Self::FunctionBranch => f.write_str("branch to the function is not lowered"),
+            Self::UnsupportedType(msg) => f.write_str(msg),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
         }
     }

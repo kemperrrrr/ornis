@@ -172,8 +172,7 @@ fn dynamic_binding_is_rejected() {
                 f32.const 1
                 local.get 2
                 local.get 3)
-            (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
-                (local i32)
+            (func (export "{fs}") (param f32 f32 i32) (result f32 f32 f32 f32)
                 i32.const 0
                 local.get 2
                 i32.const 0

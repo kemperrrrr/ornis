@@ -1,25 +1,30 @@
-//! Wasm bytes to the straight-line [`crate::ir::Module`].
+//! Wasm bytes to a structured [`crate::ir::Module`].
 
-use wasmparser::Operator;
 use wasmparser::Parser;
 use wasmparser::Payload;
 use wasmparser::ValType;
 
+use crate::decode;
 use crate::error::TranslateError;
 use crate::ir::Func;
 use crate::ir::Import;
 use crate::ir::Kind;
 use crate::ir::MAX_PARAMS;
 use crate::ir::Module;
-use crate::ir::Op;
 use crate::ir::Sig;
+use crate::structure;
+use crate::structure::Flat;
+use crate::ty::StructDef;
 
-struct Raw {
+pub(crate) struct Raw {
     types: Vec<Sig>,
     imports: Vec<Import>,
     func_types: Vec<u32>,
-    bodies: Vec<Vec<Op>>,
+    locals: Vec<Vec<Kind>>,
+    bodies: Vec<Vec<Flat>>,
     exports: Vec<(String, u32)>,
+    structs: Vec<StructDef>,
+    saw_types: bool,
 }
 
 /// Parse `bytes`, rejecting linear memory and anything but the toy operators.
@@ -28,8 +33,11 @@ pub fn parse(bytes: &[u8]) -> Result<Module, TranslateError> {
         types: Vec::new(),
         imports: Vec::new(),
         func_types: Vec::new(),
+        locals: Vec::new(),
         bodies: Vec::new(),
         exports: Vec::new(),
+        structs: Vec::new(),
+        saw_types: false,
     };
     for payload in Parser::new(0).parse_all(bytes) {
         feed(
@@ -47,15 +55,30 @@ fn feed(raw: &mut Raw, payload: Payload<'_>) -> Result<(), TranslateError> {
         Payload::FunctionSection(section) => read_funcs(raw, section),
         Payload::CodeSectionEntry(body) => read_body(raw, body),
         Payload::ExportSection(section) => read_exports(raw, section),
+        Payload::CustomSection(section) => read_custom(raw, &section),
         Payload::MemorySection(_) | Payload::DataSection(_) | Payload::DataCountSection { .. } => {
             Err(TranslateError::LinearMemory)
         }
-        Payload::CodeSectionStart { .. }
-        | Payload::End(_)
-        | Payload::Version { .. }
-        | Payload::CustomSection(_) => Ok(()),
+        Payload::CodeSectionStart { .. } | Payload::End(_) | Payload::Version { .. } => Ok(()),
         _ => Err(TranslateError::Unsupported),
     }
+}
+
+pub(crate) fn read_custom(
+    raw: &mut Raw,
+    section: &wasmparser::CustomSectionReader<'_>,
+) -> Result<(), TranslateError> {
+    if section.name() != ornis_gpu_abi::symbols::TYPES_SECTION {
+        return Ok(());
+    }
+    if raw.saw_types {
+        return Err(TranslateError::UnsupportedType(
+            "duplicate ornis_gpu.types".to_string(),
+        ));
+    }
+    raw.saw_types = true;
+    raw.structs = crate::ty::parse_types(section.data())?;
+    Ok(())
 }
 
 fn read_types(
@@ -75,44 +98,27 @@ fn func_sig(ty: &wasmparser::SubType) -> Result<Sig, TranslateError> {
     let wasmparser::CompositeInnerType::Func(func) = &ty.composite_type.inner else {
         return Err(TranslateError::Unsupported);
     };
-    let (param_kind, params) = param_kinds(func.params())?;
+    let (param_kind, params) = kinds(func.params())?;
+    let (result_kind, results) = kinds(func.results())?;
     Ok(Sig {
         params,
-        results: count_vals(func.results())?,
+        results,
         param_kind,
+        result_kind,
     })
 }
 
-fn param_kinds(vals: &[ValType]) -> Result<([Kind; MAX_PARAMS], u32), TranslateError> {
-    let mut kinds = [Kind::F32; MAX_PARAMS];
+fn kinds(vals: &[ValType]) -> Result<([Kind; MAX_PARAMS], u32), TranslateError> {
+    let mut out = [Kind::F32; MAX_PARAMS];
     let mut index = 0usize;
     while index < vals.len() {
         if index >= MAX_PARAMS {
             return Err(TranslateError::Unsupported);
         }
-        kinds[index] = one_kind(&vals[index])?;
+        out[index] = decode::one_kind(&vals[index])?;
         index += 1;
     }
-    Ok((kinds, index as u32))
-}
-
-fn one_kind(val: &ValType) -> Result<Kind, TranslateError> {
-    match val {
-        ValType::I32 => Ok(Kind::I32),
-        ValType::F32 => Ok(Kind::F32),
-        _ => Err(TranslateError::Unsupported),
-    }
-}
-
-fn count_vals(vals: &[ValType]) -> Result<u32, TranslateError> {
-    let mut count = 0u32;
-    for val in vals {
-        match val {
-            ValType::I32 | ValType::F32 => count += 1,
-            _ => return Err(TranslateError::Unsupported),
-        }
-    }
-    Ok(count)
+    Ok((out, index as u32))
 }
 
 fn read_imports(
@@ -184,84 +190,68 @@ fn read_funcs(
     Ok(())
 }
 
-fn read_body(raw: &mut Raw, body: wasmparser::FunctionBody<'_>) -> Result<(), TranslateError> {
+pub(crate) fn read_body(
+    raw: &mut Raw,
+    body: wasmparser::FunctionBody<'_>,
+) -> Result<(), TranslateError> {
     let func_slot = raw.bodies.len();
+    let sig = func_sig_at(raw, func_slot)?;
+    let locals = read_locals(&body, &sig)?;
     let reader = body
         .get_operators_reader()
         .map_err(|err| TranslateError::Wasm(err.to_string()))?;
-    let mut ops = Vec::new();
+    let mut flats = Vec::new();
     for op in reader {
         let op = op.map_err(|err| TranslateError::Wasm(err.to_string()))?;
-        if let Some(decoded) = decode_op(raw, func_slot, &op)? {
-            ops.push(decoded);
+        if decode::memory(&op) {
+            return Err(TranslateError::LinearMemory);
         }
+        flats.push(decode::op(&raw.types, &locals, &op)?);
     }
-    raw.bodies.push(ops);
+    raw.locals.push(locals);
+    raw.bodies.push(flats);
     Ok(())
 }
 
-fn local_op(raw: &Raw, func_slot: usize, local_index: u32) -> Op {
-    let kind = param_kind(raw, func_slot, local_index);
-    if kind == Kind::I32 {
-        Op::LocalI32(local_index)
-    } else {
-        Op::Local(local_index)
-    }
+fn func_sig_at(raw: &Raw, func_slot: usize) -> Result<Sig, TranslateError> {
+    let ty = *raw
+        .func_types
+        .get(func_slot)
+        .ok_or(TranslateError::Unsupported)?;
+    raw.types
+        .get(ty as usize)
+        .copied()
+        .ok_or(TranslateError::Unsupported)
 }
 
-fn param_kind(raw: &Raw, func_slot: usize, local_index: u32) -> Kind {
-    let Some(ty) = raw.func_types.get(func_slot) else {
-        return Kind::F32;
-    };
-    let Some(sig) = raw.types.get(*ty as usize) else {
-        return Kind::F32;
-    };
-    let slot = local_index as usize;
-    if slot < sig.params as usize {
-        sig.param_kind[slot]
-    } else {
-        Kind::F32
+pub(crate) fn read_locals(
+    body: &wasmparser::FunctionBody<'_>,
+    sig: &Sig,
+) -> Result<Vec<Kind>, TranslateError> {
+    let mut locals = Vec::new();
+    let mut index = 0u32;
+    while index < sig.params {
+        locals.push(sig.param_kind[index as usize]);
+        index += 1;
     }
-}
-
-fn decode_op(raw: &Raw, func_slot: usize, op: &Operator<'_>) -> Result<Option<Op>, TranslateError> {
-    if is_memory(op) {
-        return Err(TranslateError::LinearMemory);
+    let mut reader = body
+        .get_locals_reader()
+        .map_err(|err| TranslateError::Wasm(err.to_string()))?;
+    let count = reader.get_count();
+    let mut group = 0u32;
+    while group < count {
+        let (n, val) = reader
+            .read()
+            .map_err(|err| TranslateError::Wasm(err.to_string()))?;
+        let kind = decode::one_kind(&val)?;
+        let mut item = 0u32;
+        while item < n {
+            locals.push(kind);
+            item += 1;
+        }
+        group += 1;
     }
-    Ok(match op {
-        Operator::I32Const { value } => Some(Op::I32(
-            u32::try_from(*value).map_err(|_| TranslateError::Unsupported)?,
-        )),
-        Operator::F32Const { value } => Some(Op::F32(value.bits())),
-        Operator::LocalGet { local_index } => Some(local_op(raw, func_slot, *local_index)),
-        Operator::Call { function_index } => Some(Op::Call(*function_index)),
-        Operator::F32Mul => Some(Op::Mul),
-        Operator::F32Add => Some(Op::Add),
-        Operator::End => None,
-        _ => return Err(TranslateError::Unsupported),
-    })
-}
-
-fn is_memory(op: &Operator<'_>) -> bool {
-    matches!(
-        op,
-        Operator::I32Load { .. }
-            | Operator::I64Load { .. }
-            | Operator::F32Load { .. }
-            | Operator::F64Load { .. }
-            | Operator::I32Load8S { .. }
-            | Operator::I32Load8U { .. }
-            | Operator::I32Load16S { .. }
-            | Operator::I32Load16U { .. }
-            | Operator::I32Store { .. }
-            | Operator::I64Store { .. }
-            | Operator::F32Store { .. }
-            | Operator::F64Store { .. }
-            | Operator::I32Store8 { .. }
-            | Operator::I32Store16 { .. }
-            | Operator::MemorySize { .. }
-            | Operator::MemoryGrow { .. }
-    )
+    Ok(locals)
 }
 
 fn read_exports(
@@ -278,31 +268,27 @@ fn read_exports(
     Ok(())
 }
 
-fn assemble(raw: Raw) -> Result<Module, TranslateError> {
+pub(crate) fn assemble(raw: Raw) -> Result<Module, TranslateError> {
     if raw.bodies.len() != raw.func_types.len() {
         return Err(TranslateError::Unsupported);
     }
     let mut funcs = Vec::new();
     let mut index = 0usize;
     while index < raw.bodies.len() {
-        let ty = *raw
-            .func_types
-            .get(index)
-            .ok_or(TranslateError::Unsupported)?;
-        let sig = *raw
-            .types
-            .get(ty as usize)
-            .ok_or(TranslateError::Unsupported)?;
+        let sig = func_sig_at(&raw, index)?;
         let func_index = raw.imports.len() + index;
+        let body = structure::build(raw.bodies[index].clone())?;
         funcs.push(Func {
             export: export_name(&raw.exports, func_index as u32),
             sig,
-            ops: raw.bodies[index].clone(),
+            locals: raw.locals[index].clone(),
+            body,
         });
         index += 1;
     }
     Ok(Module {
         imports: raw.imports,
+        structs: raw.structs,
         funcs,
     })
 }

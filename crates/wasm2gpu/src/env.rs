@@ -1,0 +1,181 @@
+//! Mutable lowering state: naga function, current block, and value stack.
+
+use naga::Expression;
+use naga::Literal;
+use naga::Span;
+
+use crate::cx::Cx;
+use crate::cx::Val;
+use crate::cx::expr_in;
+use crate::cx::sp;
+use crate::error::TranslateError;
+use crate::ir::Import;
+use crate::ty::StructDef;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Region {
+    Block,
+    Loop,
+    If,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct Flag {
+    pub(super) kind: Region,
+    pub(super) naga_loop: bool,
+    pub(super) leave: naga::Handle<naga::LocalVariable>,
+    pub(super) again: naga::Handle<naga::LocalVariable>,
+}
+
+pub(super) struct Emit<'a, 'b> {
+    pub(super) cx: &'b mut Cx<'a>,
+    pub(super) func: &'b mut naga::Function,
+    pub(super) block: naga::Block,
+    pub(super) stack: Vec<Val>,
+    pub(super) imports: &'b [Import],
+    pub(super) structs: &'b [StructDef],
+    pub(super) locals: Vec<Option<naga::Handle<naga::LocalVariable>>>,
+    pub(super) labels: Vec<Flag>,
+}
+
+impl Emit<'_, '_> {
+    pub(super) fn ex(&mut self, value: Expression) -> naga::Handle<Expression> {
+        expr_in(self.func, &mut self.block, value)
+    }
+
+    pub(super) fn sub(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<(), TranslateError>,
+    ) -> Result<naga::Block, TranslateError> {
+        let parent = std::mem::replace(&mut self.block, naga::Block::new());
+        let result = f(self);
+        let child = std::mem::replace(&mut self.block, parent);
+        result?;
+        Ok(child)
+    }
+
+    pub(super) fn pop(&mut self) -> Result<Val, TranslateError> {
+        self.stack.pop().ok_or(TranslateError::Unsupported)
+    }
+
+    pub(super) fn push(&mut self, val: Val) -> Result<(), TranslateError> {
+        self.stack.push(val);
+        Ok(())
+    }
+
+    pub(super) fn take(&mut self, n: usize) -> Result<Vec<Val>, TranslateError> {
+        let mut vals = Vec::new();
+        let mut index = 0usize;
+        while index < n {
+            vals.push(self.pop()?);
+            index += 1;
+        }
+        vals.reverse();
+        Ok(vals)
+    }
+
+    pub(super) fn pop_uint(&mut self) -> Result<naga::Handle<Expression>, TranslateError> {
+        let val = self.pop()?;
+        self.as_uint(val)
+    }
+
+    pub(super) fn pop_imm(&mut self) -> Result<u32, TranslateError> {
+        match self.pop()? {
+            Val::Imm(value) => Ok(value),
+            _ => Err(TranslateError::DynamicBinding),
+        }
+    }
+
+    pub(super) fn u32(&mut self, value: u32) -> naga::Handle<Expression> {
+        self.ex(Expression::Literal(Literal::U32(value)))
+    }
+
+    pub(super) fn f32(&mut self, value: f32) -> naga::Handle<Expression> {
+        self.ex(Expression::Literal(Literal::F32(value)))
+    }
+
+    pub(super) fn bool(&mut self, value: bool) -> naga::Handle<Expression> {
+        self.ex(Expression::Literal(Literal::Bool(value)))
+    }
+
+    pub(super) fn as_uint(&mut self, val: Val) -> Result<naga::Handle<Expression>, TranslateError> {
+        match val {
+            Val::Imm(value) => Ok(self.u32(value)),
+            Val::Index(handle) => Ok(handle),
+            _ => Err(TranslateError::Unsupported),
+        }
+    }
+
+    pub(super) fn as_bool(&mut self, val: Val) -> Result<naga::Handle<Expression>, TranslateError> {
+        match val {
+            Val::Imm(0) => Ok(self.bool(false)),
+            Val::Imm(_) => Ok(self.bool(true)),
+            Val::Index(handle) => {
+                let zero = self.u32(0);
+                Ok(self.ex(Expression::Binary {
+                    op: naga::BinaryOperator::NotEqual,
+                    left: handle,
+                    right: zero,
+                }))
+            }
+            _ => Err(TranslateError::Unsupported),
+        }
+    }
+
+    pub(super) fn var(
+        &mut self,
+        ty: naga::Handle<naga::Type>,
+        init: naga::Handle<Expression>,
+    ) -> naga::Handle<naga::LocalVariable> {
+        self.func.local_variables.append(
+            naga::LocalVariable {
+                name: None,
+                ty,
+                init: Some(init),
+            },
+            sp(),
+        )
+    }
+
+    pub(super) fn load_var(
+        &mut self,
+        var: naga::Handle<naga::LocalVariable>,
+    ) -> naga::Handle<Expression> {
+        let pointer = self.ex(Expression::LocalVariable(var));
+        self.ex(Expression::Load { pointer })
+    }
+
+    pub(super) fn store_var(
+        &mut self,
+        var: naga::Handle<naga::LocalVariable>,
+        value: naga::Handle<Expression>,
+    ) {
+        let pointer = self.ex(Expression::LocalVariable(var));
+        self.block
+            .push(naga::Statement::Store { pointer, value }, sp());
+    }
+
+    pub(super) fn pick(
+        &mut self,
+        cond: naga::Handle<Expression>,
+        accept: naga::Handle<Expression>,
+        reject: naga::Handle<Expression>,
+    ) -> naga::Handle<Expression> {
+        self.ex(Expression::Select {
+            condition: cond,
+            accept,
+            reject,
+        })
+    }
+}
+
+pub(super) fn float_of(val: Val) -> Result<naga::Handle<Expression>, TranslateError> {
+    match val {
+        Val::Scalar(handle) => Ok(handle),
+        _ => Err(TranslateError::Unsupported),
+    }
+}
+
+pub(super) fn const_expr(func: &mut naga::Function, value: Expression) -> naga::Handle<Expression> {
+    func.expressions.append(value, Span::default())
+}

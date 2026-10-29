@@ -1,18 +1,23 @@
 //! Offline translator from the toy `ornis_gpu` wasm ABI to WGSL and SPIR-V.
 //!
-//! This is not the production shader DSL. It accepts one straight-line vertex
-//! function and one straight-line fragment function. `raw_read` and
-//! `texture_sample_2d` lower as before. `storage_read` / `storage_write` lower
-//! to an access chain on one `array<vec4<f32>>` storage global: group and
-//! binding stay immediate operands, and the element index may be runtime.
-//! Linear-memory loads and non-constant bindings are rejected. See
-//! `docs/rendering/wasm-segmented-memory.md`.
+//! This is not the production shader DSL. Vertex and fragment entries may use
+//! structured `block` / `loop` / `if` / `br` / `br_if`. `raw_read` and
+//! `texture_sample_2d` lower as before. Storage imports lower to an access
+//! chain on one array global: scalars, vectors, and simple structs use the
+//! host `GpuSafeLayout` stride. Group and binding stay immediate operands.
+//! A join that names two bindings is rejected. Linear memory is rejected.
+//! See `docs/rendering/wasm-segmented-memory.md`.
 
 #![warn(missing_docs)]
 
+mod ai;
+mod cfg;
 mod cx;
+mod decode;
 mod emit;
+mod env;
 mod error;
+mod flow;
 mod globals;
 mod ir;
 mod lower;
@@ -20,6 +25,8 @@ mod ops;
 mod parse;
 mod ret;
 mod storage;
+mod structure;
+mod ty;
 
 pub use emit::Translated;
 pub use error::TranslateError;
