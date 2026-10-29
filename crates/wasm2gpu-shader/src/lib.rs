@@ -76,8 +76,11 @@ pub const PLANE_COUNT: u32 = 6;
 /// Plane components as one uniform `f32` array (stride 16 bytes).
 pub const PLANE_LEN: u32 = PLANE_COUNT * 4;
 
-/// Spheres the `cull` kernel flags: center xyz plus radius.
-pub const SPHERE_COUNT: u32 = 4;
+/// Lanes of one sphere: center xyz plus the radius.
+const LANES: u32 = 4;
+
+/// Index of the last lane: a sphere's radius, a plane's `w`.
+const LAST_LANE: u32 = LANES - 1;
 
 /// Group of every binding the `cull` kernel touches.
 pub const CULL_GROUP: u32 = 0;
@@ -211,20 +214,21 @@ pub extern "C" fn cull(id: u32) {
 /// CPU path. The flag is `1` for visible and `0` for culled.
 #[cfg(target_arch = "wasm32")]
 #[inline(never)]
+// qual:api — the gpu e2e A/B test exercises this kernel through `cull`.
 fn cull_one(id: u32) {
-    let base = id * 4;
+    let base = id * LANES;
     let cx = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
     let cy = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
     let cz = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
-    let radius = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 3);
+    let radius = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + LAST_LANE);
     let mut visible = 1u32;
     let mut plane = 0u32;
     while plane < PLANE_COUNT {
-        let at = plane * 4;
+        let at = plane * LANES;
         let px = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at);
         let py = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 1);
         let pz = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 2);
-        let pw = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 3);
+        let pw = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + LAST_LANE);
         if px * cx + py * cy + pz * cz + pw + radius < 0.0 {
             visible = 0;
         }

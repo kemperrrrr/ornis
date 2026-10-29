@@ -20,7 +20,9 @@ use crate::layout::VEC3_ALIGN;
 use crate::layout::VEC3_SIZE;
 use crate::layout::place_fields;
 use crate::storage_at_f32;
+use crate::storage_at_u32;
 use crate::storage_store_f32;
+use crate::storage_store_u32;
 use crate::symbols;
 use crate::uniform_array_f32;
 use crate::uniform_field_f32;
@@ -413,6 +415,22 @@ fn lane(value: f32) -> UniformLane {
         pad1: 0,
         pad2: 0,
     }
+}
+
+#[test]
+fn storage_u32_helpers_round_trip_on_the_host_shadow() {
+    let mut mem = HostMemory::new();
+    mem.bind_storage::<0, 1, [u32; 4]>();
+    mem.write_storage::<0, 1, [u32; 4]>(&[0, 1, 2, 3]);
+    mem.bind_storage::<0, 3, [u32; 4]>();
+    mem.write_storage::<0, 3, [u32; 4]>(&[0; 4]);
+    with_host(&mut mem, || {
+        let sample = storage_at_u32::<0, 1>(2);
+        storage_store_u32::<0, 3>(2, sample + 7);
+    });
+    let stored = mem.read_storage::<0, 3, [u32; 4]>();
+    assert!(stored[2] == 9);
+    assert!(stored[0] == 0);
 }
 
 #[test]

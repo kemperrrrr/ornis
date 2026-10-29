@@ -18,7 +18,6 @@ use ornis_wasm2gpu_shader::PLANE_BINDING;
 use ornis_wasm2gpu_shader::PLANE_COUNT;
 use ornis_wasm2gpu_shader::PLANE_LEN;
 use ornis_wasm2gpu_shader::SPHERE_BINDING;
-use ornis_wasm2gpu_shader::SPHERE_COUNT;
 
 const LANES: usize = symbols::CS_WORKGROUP[0] as usize;
 /// Sphere 3 is past `count` and must keep this value.
@@ -26,7 +25,7 @@ const SENTINEL: u32 = 7;
 const RUNS: u32 = 64;
 
 /// Sphere centers and radii: four lanes each, packed storage order.
-const SPHERES: [[f32; 4]; SPHERE_COUNT as usize] = [
+const SPHERES: [[f32; 4]; 4] = [
     [0.5, 0.0, 0.0, 0.25],
     [-1.0, 0.0, 0.0, 0.25],
     [2.0, 0.0, 0.0, 0.1],
@@ -69,13 +68,16 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 #[test]
 fn cull_kernel_matches_the_hand_twin() {
-    assert_eq!(LANES, SPHERE_COUNT as usize);
+    assert_eq!(LANES, SPHERES.len());
     let wasm = super::compile_wasm();
     let lowered = translate(&super::compute_lift::lift(&wasm, "cull")).expect("wasm2gpu");
     let wgsl = &lowered.wgsl;
     assert!(wgsl.contains("@compute"), "{wgsl}");
     assert!(wgsl.contains("@builtin(global_invocation_id)"), "{wgsl}");
-    assert!(wgsl.contains(&format!("storage_0_{FLAG_BINDING}_")), "{wgsl}");
+    assert!(
+        wgsl.contains(&format!("storage_0_{FLAG_BINDING}_")),
+        "{wgsl}"
+    );
     assert!(!lowered.compute_spirv.is_empty());
     match super::device() {
         Some((device, queue)) => {
@@ -99,12 +101,12 @@ fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; LANES],
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
     let layout = bind_layout(device);
-    let pipeline_layout = device.create_pipeline_layout(wgpu::PipelineLayoutDescriptor {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wasm2gpu cull"),
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
-    let pipeline = device.create_compute_pipeline(wgpu::ComputePipelineDescriptor {
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("wasm2gpu cull"),
         layout: Some(&pipeline_layout),
         module: &shader,
@@ -113,12 +115,12 @@ fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; LANES],
         cache: None,
     });
     let (flags, bind) = upload(device, queue, &layout);
-    let mut encoder = device.create_command_encoder(wgpu::CommandEncoderDescriptor {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wasm2gpu cull"),
     });
     let start = Instant::now();
     for _ in 0..RUNS {
-        let mut pass = encoder.begin_compute_pass(wgpu::ComputePassDescriptor {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("wasm2gpu cull"),
             timestamp_writes: None,
         });
@@ -177,7 +179,7 @@ fn upload(
     queue.write_buffer(&spheres, 0, &pack_spheres());
     queue.write_buffer(&flags, 0, &[0u8; 16]);
     queue.write_buffer(&count, 0, &pack_count());
-    let bind = device.create_bind_group(wgpu::BindGroupDescriptor {
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wasm2gpu cull"),
         layout,
         entries: &[
@@ -204,7 +206,7 @@ fn pack_planes() -> Vec<u8> {
 }
 
 fn pack_spheres() -> Vec<u8> {
-    let mut bytes = vec![0u8; (SPHERE_COUNT * 16) as usize];
+    let mut bytes = vec![0u8; SPHERES.len() * 16];
     let mut sphere = 0usize;
     while sphere < SPHERES.len() {
         let mut lane = 0usize;
@@ -220,30 +222,26 @@ fn pack_spheres() -> Vec<u8> {
 
 fn pack_count() -> Vec<u8> {
     let mut bytes = vec![0u8; 16];
-    super::put_u32(&mut bytes, 0, SPHERE_COUNT - 1);
+    super::put_u32(&mut bytes, 0, SPHERES.len() as u32 - 1);
     bytes
 }
 
 fn map_u32s(device: &wgpu::Device, queue: &wgpu::Queue, storage: &wgpu::Buffer) -> [u32; LANES] {
-    let read = device.create_buffer(wgpu::BufferDescriptor {
+    let read = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cull-flags-read"),
         size: 16,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut encoder = device.create_command_encoder(wgpu::CommandEncoderDescriptor {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("cull-flags-read"),
     });
     encoder.copy_buffer_to_buffer(storage, 0, &read, 0, 16);
     queue.submit([encoder.finish()]);
     let bytes = super::map_bytes(device, &read);
     let mut values = [0u32; LANES];
-    let mut index = 0usize;
-    while index < values.len() {
-        let mut chunk = [0u8; 4];
-        chunk.copy_from_slice(&bytes[index * 4..index * 4 + 4]);
-        values[index] = u32::from_le_bytes(chunk);
-        index += 1;
+    for (slot, word) in bytes.chunks_exact(4).take(LANES).enumerate() {
+        values[slot] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
     }
     values
 }
