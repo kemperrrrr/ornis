@@ -45,6 +45,9 @@ impl Emit<'_, '_> {
 
     pub(crate) fn write_branch(&mut self, depth: u32) -> Result<(), TranslateError> {
         let n = self.labels.len();
+        if depth as usize == n {
+            return Err(TranslateError::FunctionBranch);
+        }
         let index = n
             .checked_sub(depth as usize + 1)
             .ok_or(TranslateError::Unsupported)?;
@@ -92,12 +95,20 @@ impl Emit<'_, '_> {
         }
     }
 
+    /// Stop the arm when a multi-level `br` already left an outer naga loop.
+    ///
+    /// A statement `if` is not itself a naga loop, so [`Self::labels`]`.last()`
+    /// is that `if` after an inner `block`. The `leave` / `again` flags live on
+    /// the nearest real loop; checking only the `if` would run the rest of the
+    /// arm (`storage_write` after `br 2`).
     pub(crate) fn flush_top(&mut self) -> Result<(), TranslateError> {
-        let Some(flag) = self.labels.last().copied() else {
-            return Ok(());
-        };
-        if flag.naga_loop {
-            self.flush(flag)?;
+        let mut index = self.labels.len();
+        while index > 0 {
+            index -= 1;
+            let flag = self.labels[index];
+            if flag.naga_loop {
+                return self.flush(flag);
+            }
         }
         Ok(())
     }

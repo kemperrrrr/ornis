@@ -3,8 +3,9 @@
 //! A constant group or binding stays constant when every predecessor agrees.
 //! Two different constants become [`Num::Dyn`] `{ joined: true }` and are
 //! rejected only when that value is *used* as a group or binding. An index may
-//! be that phi. Arithmetic on a dynamic value clears the joined bit so a
-//! loop counter is not mistaken for a binding phi.
+//! be that phi. `i32` arithmetic keeps `joined`, so a binding phi stays
+//! ambiguous after `i32.add`. A loop counter that is not a phi stays
+//! `joined: false`. Non-parameter locals start at zero, matching Wasm.
 
 use crate::error::TranslateError;
 use crate::ir::Func;
@@ -29,7 +30,6 @@ const STRUCT_HEADER: u32 = 4;
 
 #[derive(Clone, PartialEq, Eq)]
 enum Abs {
-    Bot,
     F32,
     Vec,
     I32(Num),
@@ -193,6 +193,9 @@ fn loop_region(ai: &mut Ai<'_>, st: &mut St, body: &[Stmt]) -> Result<(), Transl
 
 fn branch(ai: &mut Ai<'_>, st: &mut St, depth: u32, stop: bool) -> Result<(), TranslateError> {
     let n = ai.labels.len();
+    if depth as usize == n {
+        return Err(TranslateError::FunctionBranch);
+    }
     let index = n
         .checked_sub(depth as usize + 1)
         .ok_or(TranslateError::Unsupported)?;
@@ -239,7 +242,6 @@ fn local_set(st: &mut St, index: u32, tee: bool) -> Result<(), TranslateError> {
 fn pop_num(st: &mut St) -> Result<Num, TranslateError> {
     match pop(st)? {
         Abs::I32(num) => Ok(num),
-        Abs::Bot => Ok(Num::Dyn { joined: false }),
         _ => Err(TranslateError::Unsupported),
     }
 }

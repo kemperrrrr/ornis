@@ -277,8 +277,8 @@ fn loop_with_a_dynamic_index_lowers_to_loop() {
            i32.const 0
            i32.const 1
            local.get 3
-           call ${read}
-           drop
+           f32.const 1
+           call ${write}
            local.get 3
            i32.const 1
            i32.add
@@ -288,19 +288,17 @@ fn loop_with_a_dynamic_index_lowers_to_loop() {
            i32.lt_u
            br_if 0)
          f32.const 0 f32.const 0 f32.const 0 f32.const 1",
-        read = symbols::STORAGE_READ_F32,
+        write = symbols::STORAGE_WRITE_F32,
     );
     let got = wgsl(
         "",
-        &import(
-            symbols::STORAGE_READ_F32,
-            "(param i32 i32 i32) (result f32)",
-        ),
+        &import(symbols::STORAGE_WRITE_F32, "(param i32 i32 i32 f32)"),
         &fs,
     );
-    assert!(got.contains("loop"), "{got}");
-    assert!(got.contains("storage_0_1_"), "{got}");
-    assert!(got.contains("array<f32>"), "{got}");
+    assert!(
+        got.contains(include_str!("snapshots/dyn_index.wgsl").trim()),
+        "{got}"
+    );
 }
 
 #[test]
@@ -310,21 +308,19 @@ fn block_br_if_breaks_the_lowered_loop() {
          (block
            local.get 2
            br_if 0
-           i32.const 0 i32.const 1 i32.const 0 call ${read}
-           drop)
+           i32.const 0 i32.const 1 i32.const 0 f32.const 1 call ${write})
          f32.const 0 f32.const 0 f32.const 0 f32.const 1",
-        read = symbols::STORAGE_READ_F32,
+        write = symbols::STORAGE_WRITE_F32,
     );
     let got = wgsl(
         "",
-        &import(
-            symbols::STORAGE_READ_F32,
-            "(param i32 i32 i32) (result f32)",
-        ),
+        &import(symbols::STORAGE_WRITE_F32, "(param i32 i32 i32 f32)"),
         &fs,
     );
-    assert!(got.contains("loop"), "{got}");
-    assert!(got.contains("break"), "{got}");
+    assert!(
+        got.contains(include_str!("snapshots/block_br_if.wgsl").trim()),
+        "{got}"
+    );
 }
 
 #[test]
@@ -337,7 +333,8 @@ fn br_to_an_outer_block_sets_a_flag() {
              br 0))
          f32.const 0 f32.const 0 f32.const 0 f32.const 1";
     let got = wgsl("", "", fs);
-    assert!(got.contains("loop"), "{got}");
-    assert!(got.contains("continue"), "{got}");
-    assert!(got.contains("break"), "{got}");
+    assert!(
+        got.contains(include_str!("snapshots/outer_flag.wgsl").trim()),
+        "{got}"
+    );
 }

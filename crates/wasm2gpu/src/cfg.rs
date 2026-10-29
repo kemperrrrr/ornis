@@ -340,4 +340,81 @@ mod tests {
         ];
         check(&func(body), &[storage()], &[]).expect("index phi");
     }
+
+    fn with_local(body: Vec<Stmt>) -> Func {
+        let mut func = func(body);
+        func.locals.push(Kind::I32);
+        func
+    }
+
+    #[test]
+    fn unset_local_joined_with_a_store_is_ambiguous() {
+        let body = vec![
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::LocalI32(0)),
+            Stmt::If {
+                ty: empty(),
+                then_body: vec![Stmt::Op(Op::I32(1)), Stmt::Op(Op::LocalSet(1))],
+                else_body: Vec::new(),
+            },
+            Stmt::Op(Op::LocalI32(1)),
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::Call(0)),
+        ];
+        let err = check(&with_local(body), &[storage()], &[]).expect_err("zero");
+        assert!(matches!(err, TranslateError::AmbiguousProvenance));
+    }
+
+    #[test]
+    fn i32_add_keeps_joined_provenance() {
+        let body = vec![
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::LocalI32(0)),
+            Stmt::If {
+                ty: BlockTy {
+                    params: Vec::new(),
+                    results: vec![Kind::I32],
+                },
+                then_body: vec![Stmt::Op(Op::I32(0))],
+                else_body: vec![Stmt::Op(Op::I32(1))],
+            },
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::I32Add),
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::Call(0)),
+        ];
+        let err = check(&func(body), &[storage()], &[]).expect_err("add");
+        assert!(matches!(err, TranslateError::AmbiguousProvenance));
+    }
+
+    #[test]
+    fn i32_eqz_keeps_joined_provenance() {
+        let body = vec![
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::LocalI32(0)),
+            Stmt::If {
+                ty: BlockTy {
+                    params: Vec::new(),
+                    results: vec![Kind::I32],
+                },
+                then_body: vec![Stmt::Op(Op::I32(0))],
+                else_body: vec![Stmt::Op(Op::I32(1))],
+            },
+            Stmt::Op(Op::I32Eqz),
+            Stmt::Op(Op::I32(0)),
+            Stmt::Op(Op::Call(0)),
+        ];
+        let err = check(&func(body), &[storage()], &[]).expect_err("eqz");
+        assert!(matches!(err, TranslateError::AmbiguousProvenance));
+    }
+
+    #[test]
+    fn branch_to_the_function_is_rejected() {
+        let body = vec![Stmt::Block {
+            ty: empty(),
+            body: vec![Stmt::Br(1)],
+        }];
+        let err = check(&func(body), &[], &[]).expect_err("return");
+        assert!(matches!(err, TranslateError::FunctionBranch));
+    }
 }

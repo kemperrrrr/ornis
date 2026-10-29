@@ -248,9 +248,7 @@ pub(super) fn pop_prov(st: &mut St) -> Result<(), TranslateError> {
     match st.stack.pop() {
         Some(Abs::I32(Num::Const(_))) => Ok(()),
         Some(Abs::I32(Num::Dyn { joined: true })) => Err(TranslateError::AmbiguousProvenance),
-        Some(Abs::I32(Num::Dyn { joined: false }) | Abs::Bot) => {
-            Err(TranslateError::DynamicBinding)
-        }
+        Some(Abs::I32(Num::Dyn { joined: false })) => Err(TranslateError::DynamicBinding),
         Some(_) => Err(TranslateError::DynamicBinding),
         None => Err(TranslateError::Unsupported),
     }
@@ -258,7 +256,7 @@ pub(super) fn pop_prov(st: &mut St) -> Result<(), TranslateError> {
 
 pub(super) fn pop_index(st: &mut St) -> Result<(), TranslateError> {
     match st.stack.pop() {
-        Some(Abs::I32(_) | Abs::Bot) => Ok(()),
+        Some(Abs::I32(_)) => Ok(()),
         Some(_) => Err(TranslateError::Unsupported),
         None => Err(TranslateError::Unsupported),
     }
@@ -286,9 +284,18 @@ pub(super) fn i32_bin(st: &mut St, op: impl Fn(u32, u32) -> u32) -> Result<(), T
     let left = pop_num(st)?;
     let num = match (left, right) {
         (Num::Const(a), Num::Const(b)) => Num::Const(op(a, b)),
-        _ => Num::Dyn { joined: false },
+        _ => Num::Dyn {
+            joined: num_joined(left) || num_joined(right),
+        },
     };
     push(st, Abs::I32(num))
+}
+
+fn num_joined(num: Num) -> bool {
+    match num {
+        Num::Const(_) => false,
+        Num::Dyn { joined } => joined,
+    }
 }
 
 pub(super) fn i32_cmp(st: &mut St, pred: fn(u32, u32) -> bool) -> Result<(), TranslateError> {
@@ -298,7 +305,7 @@ pub(super) fn i32_cmp(st: &mut St, pred: fn(u32, u32) -> bool) -> Result<(), Tra
 pub(super) fn i32_eqz(st: &mut St) -> Result<(), TranslateError> {
     let num = match pop_num(st)? {
         Num::Const(value) => Num::Const(u32::from(value == 0)),
-        Num::Dyn { .. } => Num::Dyn { joined: false },
+        Num::Dyn { joined } => Num::Dyn { joined },
     };
     push(st, Abs::I32(num))
 }

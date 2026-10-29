@@ -22,6 +22,12 @@ pub enum TranslateError {
     ///
     /// The offset may be a phi. The group and binding may not.
     AmbiguousProvenance,
+    /// `br` or `br_if` targets the function body.
+    ///
+    /// Wasm treats the function as an implicit block, so that branch is a
+    /// `return`. This translator does not lower it: a return from inside a
+    /// nested `if` would have to compose the shader outputs on the way out.
+    FunctionBranch,
     /// A storage element the lowerer will not emit, or a struct whose lanes
     /// do not match the host layout rules.
     UnsupportedType(String),
@@ -39,6 +45,7 @@ impl fmt::Display for TranslateError {
             Self::DynamicBinding => f.write_str("binding is not a constant immediate"),
             Self::Unsupported => f.write_str("operator is outside the toy subset"),
             Self::AmbiguousProvenance => f.write_str("ambiguous provenance at a join"),
+            Self::FunctionBranch => f.write_str("branch to the function is not lowered"),
             Self::UnsupportedType(msg) => f.write_str(msg),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
         }

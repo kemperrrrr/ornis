@@ -3,7 +3,8 @@
 //! A pure `if` (no calls, stores, or branches) becomes `select`. Anything with
 //! a side effect becomes a statement. `loop` and `block` are naga loops so
 //! `br` can `break` or `continue`. A branch that skips a loop sets a `leave`
-//! or `again` flag and breaks the inner loop; the outer loop checks the flag.
+//! or `again` flag and breaks the inner loop. The following statement checks
+//! the nearest enclosing naga loop, including inside a statement `if`.
 
 use naga::Expression;
 
@@ -110,6 +111,8 @@ impl Emit<'_, '_> {
     ) -> Result<(), TranslateError> {
         let cond_val = self.pop()?;
         let cond = self.as_bool(cond_val)?;
+        // No results and no side effects: nothing to select. Both arms are
+        // dropped and only the condition is consumed.
         if ty.results.is_empty() {
             return Ok(());
         }

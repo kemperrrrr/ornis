@@ -57,7 +57,6 @@ pub(super) fn join_vec(left: Vec<Abs>, right: Vec<Abs>) -> Result<Vec<Abs>, Tran
 
 pub(super) fn join_abs(left: Abs, right: Abs) -> Result<Abs, TranslateError> {
     match (left, right) {
-        (Abs::Bot, other) | (other, Abs::Bot) => Ok(other),
         (Abs::F32, Abs::F32) => Ok(Abs::F32),
         (Abs::Vec, Abs::Vec) => Ok(Abs::Vec),
         (Abs::I32(left), Abs::I32(right)) => Ok(Abs::I32(join_num(left, right))),
@@ -95,11 +94,10 @@ pub(super) fn entry(func: &Func) -> St {
 }
 
 pub(super) fn local_abs(func: &Func, index: usize) -> Abs {
-    if (index as u32) >= func.sig.params {
-        return Abs::Bot;
-    }
+    let param = (index as u32) < func.sig.params;
     match func.locals[index] {
-        Kind::I32 => Abs::I32(Num::Dyn { joined: false }),
+        Kind::I32 if param => Abs::I32(Num::Dyn { joined: false }),
+        Kind::I32 => Abs::I32(Num::Const(0)),
         Kind::F32 => Abs::F32,
     }
 }

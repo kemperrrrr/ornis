@@ -102,20 +102,43 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
 }
 
 fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
-    let loaded = if let Some(var) = em.locals.get(index as usize).copied().flatten() {
-        em.load_var(var)
-    } else if (index as usize) < em.func.arguments.len() {
-        em.ex(Expression::FunctionArgument(index))
-    } else {
-        return Err(TranslateError::Unsupported);
-    };
+    let slot = index as usize;
+    let var = em.locals.get(slot).copied().flatten();
+    if let Some(var) = var {
+        let loaded = em.load_var(var);
+        return push_loaded(em, loaded, i32);
+    }
+    if slot < em.func.arguments.len() {
+        let loaded = em.ex(Expression::FunctionArgument(index));
+        return push_loaded(em, loaded, i32);
+    }
+    // Wasm zeros locals that are not parameters. A slot with no shadow was
+    // never written, so the value is the constant zero the analysis recorded.
+    if slot < em.locals.len() {
+        return zero_local(em, i32);
+    }
+    Err(TranslateError::Unsupported)
+}
+
+fn push_loaded(
+    em: &mut Emit<'_, '_>,
+    loaded: naga::Handle<Expression>,
+    i32: bool,
+) -> Result<(), TranslateError> {
     let val = if i32 {
         Val::Index(loaded)
     } else {
         Val::Scalar(loaded)
     };
-    em.stack.push(val);
-    Ok(())
+    em.push(val)
+}
+
+fn zero_local(em: &mut Emit<'_, '_>, i32: bool) -> Result<(), TranslateError> {
+    if i32 {
+        return em.push(Val::Imm(0));
+    }
+    let lit = em.f32(0.0);
+    em.push(Val::Scalar(lit))
 }
 
 fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), TranslateError> {
