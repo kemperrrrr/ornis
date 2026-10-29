@@ -31,6 +31,53 @@ pub const STORAGE_READ: &str = "storage_read";
 /// `array<vec4<f32>>[index]`, not on a bit-packed pointer.
 pub const STORAGE_WRITE: &str = "storage_write";
 
+/// `(param i32 i32 i32) (result f32)` — storage `array<f32>`.
+pub const STORAGE_READ_F32: &str = "storage_read_f32";
+
+/// `(param i32 i32 i32 f32)` — store one `f32` element.
+pub const STORAGE_WRITE_F32: &str = "storage_write_f32";
+
+/// `(param i32 i32 i32) (result i32)` — storage `array<u32>`.
+///
+/// The wasm result is `i32` bits. The lowerer treats them as `u32`.
+pub const STORAGE_READ_U32: &str = "storage_read_u32";
+
+/// `(param i32 i32 i32 i32)` — store one `u32` element.
+pub const STORAGE_WRITE_U32: &str = "storage_write_u32";
+
+/// `(param i32 i32 i32) (result i32)` — storage `array<i32>`.
+pub const STORAGE_READ_I32: &str = "storage_read_i32";
+
+/// `(param i32 i32 i32 i32)` — store one `i32` element.
+pub const STORAGE_WRITE_I32: &str = "storage_write_i32";
+
+/// `(param i32 i32 i32) (result f32 f32)` — storage `array<vec2<f32>>`.
+pub const STORAGE_READ_VEC2: &str = "storage_read_vec2";
+
+/// `(param i32 i32 i32 f32 f32)` — store one `vec2<f32>` element.
+pub const STORAGE_WRITE_VEC2: &str = "storage_write_vec2";
+
+/// `(param i32 i32 i32) (result f32 f32 f32)` — storage `array<vec3<f32>>`.
+pub const STORAGE_READ_VEC3: &str = "storage_read_vec3";
+
+/// `(param i32 i32 i32 f32 f32 f32)` — store one `vec3<f32>` element.
+pub const STORAGE_WRITE_VEC3: &str = "storage_write_vec3";
+
+/// `(param i32 i32 i32 i32) (result …)` — storage array of a struct.
+///
+/// The fourth immediate is the struct id from the `ornis_gpu.types` custom
+/// section. Result lanes are the struct's fields, flattened in order.
+pub const STORAGE_READ_STRUCT: &str = "storage_read_struct";
+
+/// `(param i32 i32 i32 i32 …)` — store one struct element.
+///
+/// The fourth immediate is the struct id. The lanes that follow are the
+/// flattened fields, in declaration order.
+pub const STORAGE_WRITE_STRUCT: &str = "storage_write_struct";
+
+/// Custom section that lists struct fields for [`STORAGE_READ_STRUCT`].
+pub const TYPES_SECTION: &str = "ornis_gpu.types";
+
 /// `(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)`.
 ///
 /// Operands are texture group, texture binding, sampler group, sampler
@@ -50,6 +97,23 @@ pub const FS_MAIN: &str = "fs_main";
 pub fn is_toy_import(name: &str) -> bool {
     matches!(
         name,
-        RAW_READ | RAW_READ_F32 | RAW_WRITE | STORAGE_READ | STORAGE_WRITE | TEXTURE_SAMPLE_2D
+        RAW_READ
+            | RAW_READ_F32
+            | RAW_WRITE
+            | STORAGE_READ
+            | STORAGE_WRITE
+            | STORAGE_READ_F32
+            | STORAGE_WRITE_F32
+            | STORAGE_READ_U32
+            | STORAGE_WRITE_U32
+            | STORAGE_READ_I32
+            | STORAGE_WRITE_I32
+            | STORAGE_READ_VEC2
+            | STORAGE_WRITE_VEC2
+            | STORAGE_READ_VEC3
+            | STORAGE_WRITE_VEC3
+            | STORAGE_READ_STRUCT
+            | STORAGE_WRITE_STRUCT
+            | TEXTURE_SAMPLE_2D
     )
 }

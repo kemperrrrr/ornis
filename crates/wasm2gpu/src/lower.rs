@@ -1,6 +1,5 @@
 //! Straight-line IR to a naga module: one vertex entry and one fragment entry.
 
-use naga::ArraySize;
 use naga::Function;
 use naga::FunctionArgument;
 use naga::Scalar;
@@ -11,21 +10,21 @@ use naga::Type;
 use naga::TypeInner;
 use naga::VectorSize;
 
+use crate::cfg;
 use crate::cx::Cx;
 use crate::cx::F32_WIDTH;
 use crate::cx::FS_PARAMS;
 use crate::cx::FS_RESULTS;
 use crate::cx::Stage;
-use crate::cx::VEC4_STRIDE;
 use crate::cx::VS_PARAMS;
 use crate::cx::VS_RESULTS;
 use crate::cx::location;
 use crate::error::TranslateError;
+use crate::flow;
 use crate::ir::Func;
 use crate::ir::Kind;
 use crate::ir::Module;
 use crate::ir::Sig;
-use crate::ops;
 use crate::ret;
 use ornis_gpu_abi::symbols;
 
@@ -34,20 +33,25 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
     let mut out = naga::Module::default();
     let scalar = scalar_ty(&mut out, ScalarKind::Float);
     let uint = scalar_ty(&mut out, ScalarKind::Uint);
+    let sint = scalar_ty(&mut out, ScalarKind::Sint);
+    let bool_ty = bool_ty(&mut out);
     let vec2 = vector_ty(&mut out, VectorSize::Bi);
+    let vec3 = vector_ty(&mut out, VectorSize::Tri);
     let vec4 = vector_ty(&mut out, VectorSize::Quad);
-    let vec4_array = array_ty(&mut out, vec4);
     let mut cx = Cx {
         module: &mut out,
         scalar,
         uint,
+        sint,
+        bool_ty,
         vec2,
+        vec3,
         vec4,
-        vec4_array,
         uniforms: Vec::new(),
         storages: Vec::new(),
         textures: Vec::new(),
         samplers: Vec::new(),
+        struct_tys: Vec::new(),
     };
     let vertex = stage(symbols::VS_MAIN, VS_PARAMS, VS_RESULTS, true);
     let fragment = stage(symbols::FS_MAIN, FS_PARAMS, FS_RESULTS, false);
@@ -81,12 +85,8 @@ fn scalar_ty(module: &mut naga::Module, kind: ScalarKind) -> naga::Handle<Type> 
         .insert(Type { name: None, inner }, Span::default())
 }
 
-fn array_ty(module: &mut naga::Module, base: naga::Handle<Type>) -> naga::Handle<Type> {
-    let inner = TypeInner::Array {
-        base,
-        size: ArraySize::Dynamic,
-        stride: VEC4_STRIDE,
-    };
+fn bool_ty(module: &mut naga::Module) -> naga::Handle<Type> {
+    let inner = TypeInner::Scalar(Scalar::BOOL);
     module
         .types
         .insert(Type { name: None, inner }, Span::default())
@@ -110,12 +110,13 @@ fn shader(cx: &mut Cx<'_>, module: &Module, stage: &Stage) -> Result<Function, T
     if !signature_ok(stage, &func.sig) {
         return Err(TranslateError::Unsupported);
     }
+    cfg::check(func, &module.imports, &module.structs)?;
     let mut body = Function {
         name: Some(stage.name.to_string()),
         arguments: args(cx, &func.sig),
         ..Function::default()
     };
-    let stack = run(cx, module, func, &mut body)?;
+    let stack = flow::exec(cx, module, func, &mut body)?;
     let value = if stage.vertex {
         ret::vertex(cx, &mut body, &stack)?
     } else {
@@ -203,19 +204,4 @@ fn arg_location(index: u32, kind: Kind) -> naga::Binding {
         blend_src: None,
         per_primitive: false,
     }
-}
-
-fn run(
-    cx: &mut Cx<'_>,
-    module: &Module,
-    func: &Func,
-    body: &mut Function,
-) -> Result<Vec<crate::cx::Val>, TranslateError> {
-    let mut stack = Vec::new();
-    let mut index = 0usize;
-    while index < func.ops.len() {
-        ops::step(cx, &module.imports, body, &mut stack, func.ops[index])?;
-        index += 1;
-    }
-    Ok(stack)
 }

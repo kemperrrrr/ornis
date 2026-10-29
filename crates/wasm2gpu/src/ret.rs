@@ -63,6 +63,13 @@ pub(super) fn fragment(
     });
     match stack {
         [Val::Vec(handle)] => Ok(*handle),
+        _ if stack.len() == LANES as usize => Ok(expr(
+            body,
+            Expression::Compose {
+                ty: cx.vec4,
+                components: lanes(stack)?,
+            },
+        )),
         _ => Err(TranslateError::Unsupported),
     }
 }
