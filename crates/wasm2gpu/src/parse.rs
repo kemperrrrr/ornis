@@ -59,6 +59,7 @@ fn feed(raw: &mut Raw, payload: Payload<'_>) -> Result<(), TranslateError> {
         Payload::MemorySection(_) | Payload::DataSection(_) | Payload::DataCountSection { .. } => {
             Err(TranslateError::LinearMemory)
         }
+        Payload::TableSection(_) | Payload::ElementSection(_) => Err(TranslateError::IndirectCall),
         Payload::CodeSectionStart { .. } | Payload::End(_) | Payload::Version { .. } => Ok(()),
         _ => Err(TranslateError::Unsupported),
     }

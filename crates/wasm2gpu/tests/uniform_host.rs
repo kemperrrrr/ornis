@@ -93,6 +93,33 @@ fn vec2_and_vec3_uniform_arrays_keep_stride_16() {
 }
 
 #[test]
+fn storage_array_of_a_short_struct_uses_the_host_stride() {
+    let got = wgsl(
+        &section(&OneF32::FIELD_TAGS),
+        &import(
+            symbols::STORAGE_READ_STRUCT,
+            "(param i32 i32 i32 i32) (result f32)",
+        ),
+        &format!(
+            "(param f32 f32) (result f32 f32 f32 f32)
+             i32.const 0 i32.const 1 i32.const 0 i32.const 0 call ${read}
+             f32.const 0 f32.const 0 f32.const 1",
+            read = symbols::STORAGE_READ_STRUCT,
+        ),
+    );
+    let module = parsed(&got);
+    let want = wasm_offsets(&OneF32::FIELD_TAGS, &OneF32::FIELD_OFFSETS);
+    let handle = find_struct(&module, &want);
+    let (size, elem_stride) = laid(&module, handle);
+    assert!(size == OneF32::SIZE, "{got}");
+    assert!(elem_stride == OneF32::STORAGE_STRIDE, "{got}");
+    let (base, stride) = storage_array(&module);
+    assert!(base == handle, "{got}");
+    assert!(stride == OneF32::STORAGE_STRIDE, "{got}");
+    assert!(stride == ornis_gpu_abi::UNIFORM_STRUCT_ALIGN, "{got}");
+}
+
+#[test]
 fn storage_write_of_a_short_struct_composes_the_tail() {
     let got = wgsl(
         &section(&OneF32::FIELD_TAGS),
@@ -303,6 +330,19 @@ fn laid(module: &naga::Module, handle: naga::Handle<naga::Type>) -> (u32, u32) {
     layouter.update(module.to_ctx()).expect("layout");
     let layout = &layouter[handle];
     (layout.size, layout.to_stride())
+}
+
+fn storage_array(module: &naga::Module) -> (naga::Handle<naga::Type>, u32) {
+    for (_, global) in module.global_variables.iter() {
+        let naga::AddressSpace::Storage { .. } = global.space else {
+            continue;
+        };
+        let naga::TypeInner::Array { base, stride, .. } = &module.types[global.ty].inner else {
+            continue;
+        };
+        return (*base, *stride);
+    }
+    panic!("no storage array");
 }
 
 fn uniform_array(module: &naga::Module) -> (naga::Handle<naga::Type>, u32, u32) {

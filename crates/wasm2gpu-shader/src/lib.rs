@@ -57,6 +57,27 @@ pub const STORAGE_LEN: u32 = 4;
 
 const OUT_BINDING: u32 = 3;
 
+/// Storage binding the compute kernel writes. Group 0, binding 0.
+pub const COMPUTE_BINDING: u32 = 0;
+
+const THIRD: f32 = 3.0;
+const REST: f32 = 4.0;
+#[cfg(target_arch = "wasm32")]
+const REST_ID: u32 = 3;
+
+/// Value [`compute`] stores at invocation `id`.
+///
+/// The `match` is what wasm32 lowers with `br_table`. The host gpu test
+/// compares the same function with the buffer the GPU wrote.
+pub fn compute_value(id: u32) -> f32 {
+    match id {
+        0 => 1.0,
+        1 => 2.0,
+        2 => THIRD,
+        _ => REST,
+    }
+}
+
 /// Fragment body.
 ///
 /// `u` and `v` match the vertex outputs and are not read. The dynamic index
@@ -89,6 +110,55 @@ fn shade_body(_u: f32, _v: f32) -> f32 {
     let out = src * intensity + extra;
     storage_store_f32::<0, OUT_BINDING>(index, out);
     out
+}
+
+/// Wasm compute export. The lifter renames it to `cs_main`.
+///
+/// Each `match` arm calls its own `#[inline(never)]` function so wasm32 keeps
+/// a multi-way branch (`br_table`) instead of a rodata load. The index is an
+/// argument of that function: provenance stays in the const generics, and the
+/// offset crosses the call. `#[unsafe(no_mangle)]` is the Rust 2024 export
+/// attribute, same as [`shade`].
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn compute(id: u32) {
+    let index = slot(id);
+    match id {
+        0 => arm0(index),
+        1 => arm1(index),
+        2 => arm2(index),
+        _ => arm_rest(index),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+fn slot(index: u32) -> u32 {
+    index
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+fn arm0(index: u32) {
+    storage_store_f32::<0, COMPUTE_BINDING>(index, compute_value(0));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+fn arm1(index: u32) {
+    storage_store_f32::<0, COMPUTE_BINDING>(index, compute_value(1));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+fn arm2(index: u32) {
+    storage_store_f32::<0, COMPUTE_BINDING>(index, compute_value(2));
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(never)]
+fn arm_rest(index: u32) {
+    storage_store_f32::<0, COMPUTE_BINDING>(index, compute_value(REST_ID));
 }
 
 #[cfg(target_arch = "wasm32")]

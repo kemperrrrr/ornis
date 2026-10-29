@@ -77,7 +77,8 @@ pub enum Op {
     LocalTee(u32),
     /// Pop one value.
     Drop,
-    /// Call import `index`.
+    /// Call function `index`. Imports occupy the low indices; a defined
+    /// function is `imports.len() + position`.
     Call(u32),
     /// Multiply the top two `f32` values.
     Mul,
@@ -135,6 +136,19 @@ pub enum Stmt {
     Br(u32),
     /// Branch to relative label `depth` when the top `i32` is non-zero.
     BrIf(u32),
+    /// `return`. Void entries become a naga `return`. A value-returning
+    /// `return` is rejected: it would have to compose shader outputs.
+    Return,
+    /// `br_table`. `targets[i]` is the relative depth for index `i`.
+    ///
+    /// The index is the top `i32`. An index past `targets` uses `default`.
+    /// Both are relative wasm label depths, same as [`Stmt::Br`].
+    BrTable {
+        /// Arm depths, in index order. May be empty.
+        targets: Vec<u32>,
+        /// Depth used when the index is outside `targets`.
+        default: u32,
+    },
 }
 
 /// Imports, struct layouts, and defined functions.

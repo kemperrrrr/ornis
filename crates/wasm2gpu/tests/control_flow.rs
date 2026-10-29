@@ -275,12 +275,43 @@ fn struct_id_out_of_range_is_rejected() {
 }
 
 #[test]
-fn br_table_is_rejected() {
+fn br_table_lowers_to_switch() {
     let fs = format!(
-        "(param f32 f32) (result f32 f32 f32 f32)
-         (block (br_table 0 (i32.const 0)))
+        "(param f32 f32 i32) (result f32 f32 f32 f32)
+         (block
+           (block
+             (block
+               (br_table 0 1 2 (local.get 2))
+             )
+             i32.const 0 i32.const 1 i32.const 0 f32.const 0x3f800000
+             call ${write}
+             br 1
+           )
+           i32.const 0 i32.const 1 i32.const 0 f32.const 0x40000000
+           call ${write}
+           br 0
+         )
+         i32.const 0 i32.const 1 i32.const 0 f32.const 0x40400000
+         call ${write}
          {ret}",
+        write = symbols::STORAGE_WRITE_F32,
         ret = rgba(),
     );
-    assert!(matches!(err("", "", &fs), TranslateError::BrTable));
+    let got = wgsl("", &write_f32(), &fs);
+    assert!(got.contains("switch "), "{got}");
+    assert!(got.contains("case 0u"), "{got}");
+    assert!(got.contains("case 1u"), "{got}");
+    assert!(got.contains("default"), "{got}");
+    let _ = parsed_switch(&got);
+}
+
+fn parsed_switch(wgsl: &str) -> naga::Module {
+    let module = naga::front::wgsl::parse_str(wgsl).expect("wgsl");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|err| panic!("naga: {err}\n{wgsl}"));
+    module
 }

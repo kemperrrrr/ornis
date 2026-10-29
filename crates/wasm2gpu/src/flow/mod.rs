@@ -1,48 +1,70 @@
-//! Structured wasm statements to naga `if`, `loop`, and `select`.
+//! Structured wasm statements to naga `if`, `loop`, `switch`, and `select`.
 //!
 //! A pure `if` (no calls, stores, or branches) becomes `select`. Anything with
 //! a side effect becomes a statement. `loop` and `block` are naga loops so
 //! `br` can `break` or `continue`. A branch that skips a loop sets a `leave`
-//! or `again` flag and breaks the inner loop. The following statement checks
-//! the nearest enclosing naga loop, including inside a statement `if`.
+//! or `again` flag and breaks the inner loop. `br_table` is a `switch` whose
+//! arms set those same flags. The following statement checks the nearest
+//! enclosing naga loop, including inside a statement `if`.
 
 use naga::Expression;
 
 use crate::cx::Val;
 use crate::cx::sp;
 use crate::env::Emit;
+use crate::env::ExecIn;
 use crate::env::Region;
 use crate::error::TranslateError;
 use crate::ir::BlockTy;
 use crate::ir::Func;
 use crate::ir::Kind;
-use crate::ir::Module;
 use crate::ir::Stmt;
 use crate::ops;
+use crate::ty::StructDef;
 
 pub(super) fn exec(
     cx: &mut crate::cx::Cx<'_>,
-    module: &Module,
-    func: &Func,
+    imports: &[crate::ir::Import],
+    structs: &[StructDef],
+    funcs: &[Func],
     body: &mut naga::Function,
+    input: &ExecIn,
 ) -> Result<Vec<Val>, TranslateError> {
-    let shadowed = needs_shadow(&func.body);
-    let locals = bind_locals(body, func, cx, shadowed)?;
+    let baked = input.baked.clone();
+    let id_param = input.id_param;
+    let (shadowed, args_at, locals, stmts, params, results) = {
+        let func = funcs
+            .get(input.func_index as usize)
+            .ok_or(TranslateError::Unsupported)?;
+        let shadowed = needs_shadow(&func.body);
+        let args_at = arg_map(func, &input.baked, input.id_param);
+        let locals = bind_locals(body, func, cx, shadowed)?;
+        let stmts = func.body.clone();
+        let params = func.sig.params;
+        let results = func.sig.results;
+        (shadowed, args_at, locals, stmts, params, results)
+    };
     let block = std::mem::take(&mut body.body);
     let mut em = Emit {
         cx,
         func: body,
         block,
         stack: Vec::new(),
-        imports: &module.imports,
-        structs: &module.structs,
+        imports,
+        structs,
+        funcs,
         locals,
         labels: Vec::new(),
+        baked,
+        args_at,
+        id_param,
+        results,
+        halted: false,
     };
     if shadowed {
-        copy_params(&mut em, func.sig.params)?;
+        copy_params(&mut em, params)?;
     }
-    em.run(&func.body)?;
+    em.run(&stmts)?;
     let Emit {
         block, stack, func, ..
     } = em;
@@ -50,9 +72,33 @@ pub(super) fn exec(
     Ok(stack)
 }
 
+fn arg_map(func: &Func, baked: &[Option<u32>], id_param: Option<u32>) -> Vec<Option<u32>> {
+    let mut out = vec![None; func.locals.len()];
+    if id_param.is_some() {
+        if func.sig.params > 0 {
+            out[0] = Some(0);
+        }
+        return out;
+    }
+    let mut slot = 0u32;
+    let mut index = 0u32;
+    while index < func.sig.params {
+        let immediate = baked.get(index as usize).copied().flatten();
+        if immediate.is_none() {
+            out[index as usize] = Some(slot);
+            slot += 1;
+        }
+        index += 1;
+    }
+    out
+}
+
 impl Emit<'_, '_> {
     pub(crate) fn run(&mut self, stmts: &[Stmt]) -> Result<(), TranslateError> {
         for stmt in stmts {
+            if self.halted {
+                break;
+            }
             let nested = is_nested(stmt);
             self.one(stmt)?;
             if nested {
@@ -74,7 +120,19 @@ impl Emit<'_, '_> {
             } => self.emit_if(ty, then_body, else_body),
             Stmt::Br(depth) => self.write_branch(*depth),
             Stmt::BrIf(depth) => self.br_if(*depth),
+            Stmt::BrTable { targets, default } => self.br_table(targets, *default),
+            Stmt::Return => self.fn_return(),
         }
+    }
+
+    fn fn_return(&mut self) -> Result<(), TranslateError> {
+        if self.results != 0 {
+            return Err(TranslateError::FunctionBranch);
+        }
+        self.block
+            .push(naga::Statement::Return { value: None }, sp());
+        self.halted = true;
+        Ok(())
     }
 
     pub(crate) fn plain(
@@ -170,8 +228,7 @@ impl Emit<'_, '_> {
             em.clear_flag(flag)?;
             em.labels.push(flag);
             em.stmt_if(ty, then_body, else_body, false)?;
-            em.labels.pop();
-            em.block.push(naga::Statement::Break, sp());
+            em.close_region();
             Ok(())
         })?;
         self.push_loop(body);
@@ -225,6 +282,7 @@ impl Emit<'_, '_> {
 
 mod branch;
 mod shape;
+mod switch;
 
 use shape::IfKind;
 use shape::bind_locals;

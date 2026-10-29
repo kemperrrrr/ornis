@@ -11,6 +11,8 @@ pub struct Translated {
     pub vertex_spirv: Vec<u32>,
     /// SPIR-V words for `fs_main`.
     pub fragment_spirv: Vec<u32>,
+    /// SPIR-V words for `cs_main`. Empty when the module has no compute entry.
+    pub compute_spirv: Vec<u32>,
 }
 
 pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> {
@@ -48,11 +50,29 @@ pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> 
     )?;
     reparse_spirv(&vertex_spirv)?;
     reparse_spirv(&fragment_spirv)?;
+    let compute_spirv = compute_spirv(module, &info)?;
     Ok(Translated {
         wgsl,
         vertex_spirv,
         fragment_spirv,
+        compute_spirv,
     })
+}
+
+fn compute_spirv(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+) -> Result<Vec<u32>, TranslateError> {
+    let Some(entry) = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.stage == naga::ShaderStage::Compute)
+    else {
+        return Ok(Vec::new());
+    };
+    let words = spirv(module, info, naga::ShaderStage::Compute, &entry.name)?;
+    reparse_spirv(&words)?;
+    Ok(words)
 }
 
 fn binding_map(module: &naga::Module) -> naga::back::spv::BindingMap {

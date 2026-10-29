@@ -1,6 +1,6 @@
 # Wasm → GPU: сегментированная виртуальная память
 
-Статус: research note (2026-10-25; срез типов, CFG и uniform-полей — 2026-10-29).
+Статус: research note (2026-10-25; срез вызовов, `switch` и compute — 2026-10-29).
 Не принято как замена текущему пути Rust → Shader IR → WGSL
 (`rust-to-wgsl-architecture.md`). Фиксирует идею «Virtual Memory
 Space Translation / Software-Managed Memory Paging» поверх Wasm linear
@@ -18,16 +18,22 @@ uniform (16), та же, что у хостового `GpuRef` / `gpu_struct!`. 
 задаёт custom section `ornis_gpu.types`. Group и binding остаются
 immediate-операндами импорта; индекс элемента может быть динамическим
 и опускается в access chain (`OpAccessChain` / WGSL `array[index]`).
-Структурный control flow (`block` / `loop` / `if` / `br` / `br_if`)
-строится в CFG; абстрактная интерпретация несёт provenance указателя
-и offset через ветки и join (`phi` / `select`, §3.4). Два разных
-binding на одном join — отказ. `br_table` не опускается. Прямой `if`
-без побочных эффектов опускается в WGSL `select`, остальной — в `if`
-/ `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V через
-naga. Bindless и descriptor indexing не default. Экспорт `shade`
-в `crates/wasm2gpu-shader` помечен `#[unsafe(no_mangle)]`: лифтер
-gpu-теста ищет это имя, а в Rust 2024 атрибут unsafe. Это не блок
-`unsafe` и не код `gpu-abi`. Упаковка
+Структурный control flow (`block` / `loop` / `if` / `br` / `br_if` /
+`br_table`) строится в CFG; абстрактная интерпретация несёт provenance
+указателя и offset через ветки и join (`phi` / `select`, §3.4). Два
+разных binding на одном join — отказ. `br_table` опускается в WGSL
+`switch`, поэтому Rust `match` доходит до GPU. Прямой `call`
+определённой функции модуля становится функцией naga: константный
+group/binding запекается в специализацию, динамический offset проходит
+аргументом или результатом. Рекурсия и `call_indirect` — явная ошибка.
+Прямой `if` без побочных эффектов опускается в WGSL `select`, остальной
+— в `if` / `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V
+через naga. Bindless и descriptor indexing не default. Экспорт `shade`
+и, если он есть, `compute` в `crates/wasm2gpu-shader` помечены
+`#[unsafe(no_mangle)]`: лифтер gpu-теста ищет эти имена, а в Rust 2024
+атрибут unsafe. Это не блок `unsafe` и не код `gpu-abi`. `compute`
+лифтер переименовывает в `cs_main`: `@workgroup_size(4, 1, 1)`, builtin
+`global_invocation_id`, запись в storage. Упаковка
 space+binding+offset в каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
@@ -238,12 +244,32 @@ WGSL-писатель naga не сохраняет `@align`, `@size` и `@stride
 uniform — структура (WGSL не
 принимает голый массив в этом адресном пространстве); массив — её
 единственное поле со смещением 0. Один `(group, binding)` как два
-uniform-типа или сразу как uniform и storage — ошибка. `br_table` не
-входит в структурное подмножество: ошибка `br_table is not lowered`.
+uniform-типа или сразу как uniform и storage — ошибка. `br_table`
+опускается в WGSL `switch` (`case` / `default`, без fall-through).
+`return` из функции без результатов — naga `return`. `return` со
+значением и `br` на неявный блок функции по-прежнему ошибка `branch
+to the function is not lowered`.
+
+Прямой `call` функции модуля — отдельная функция naga, не инлайн.
+Константный `i32` (group и binding) не становится параметром: каллея
+читает его как immediate, поэтому provenance остаётся константой внутри
+специализации. Динамический индекс и любой `f32` — аргументы. Константный
+результат кладётся на стек вызывающего как immediate (им может быть
+binding следующего импорта); динамический результат — значение вызова,
+а несколько таких результатов — анонимная структура. Рекурсия, в том
+числе взаимная, — ошибка `recursive call is not lowered`. `call_indirect`
+и секции table/element — `indirect call is not lowered`.
+
+Экспорт `cs_main` необязателен: модуль только с `vs_main` и `fs_main`
+по-прежнему опускается. Сигнатура compute — ровно один `i32` и ноль
+результатов. Аргумент naga — `vec3<u32>` с builtin
+`global_invocation_id`; wasm-параметр 0 читает компоненту `x`.
+`@workgroup_size` — 4, 1, 1. Запись в storage — тот же
+`storage_write_*`, что у фрагмента.
 
 Control flow шире прямой линии `vs_main` / `fs_main`. Парсер строит
 CFG из Wasm structured control flow (`block` / `loop` / `if` / `br` /
-`br_if`). Абстрактная интерпретация ведёт provenance (group, binding)
+`br_if` / `br_table`). Абстрактная интерпретация ведёт provenance (group, binding)
 и offset/индекс через ветки; на join одинаковые константы остаются
 константой, разные константы provenance становятся phi. Если этот phi
 затем читается как group или binding — отказ (`ambiguous provenance
@@ -259,7 +285,8 @@ at a join`). `i32.add` / `i32.eqz` сохраняют флаг joined, поэт�
 ближайшего naga-`loop`, в том числе когда этот `block` стоит внутри
 statement-`if`: хвост ветки после `br` (например `storage_write`) не
 выполняется. `br` / `br_if` на неявный блок функции (это `return`) не
-опускается: ошибка `branch to the function is not lowered`. `if` без
+опускается: ошибка `branch to the function is not lowered`. Явный
+`return` без результатов опускается. `if` без
 результатов и без побочных эффектов выбрасывается целиком.
 
 ## 5. Отношение к текущему пути ornis
@@ -382,7 +409,8 @@ impl<'a, const G: u32, const B: u32, T: Copy> GpuRef<'a, G, B, T> {
 
 ### 7.6. Связь с вердиктом
 
-Рабочий прототип SDK (§4) следует писать сразу в этом стиле:
-`GpuRef<G,B,T>` + `read`/`write` + `GpuSafeLayout`, а не с
-`GpuPointer { encoded_address }` и сырым `read_volatile`. Packing
-space/id/offset в каждый `i32` (§2) остаётся отклонённым default ABI.
+Рабочий прототип SDK уже в этом стиле: `GpuRef<G, B, T>` плюс явные
+`read` / `write` / `field` / `index` и `GpuSafeLayout`. Токены binding'ов
+нулевой стоимости, сырые импорты остаются под ними, `unsafe` только в
+`gpu_abi` (`copy.rs`). Packing space/id/offset в каждый `i32` (§2)
+остаётся отклонённым default ABI.

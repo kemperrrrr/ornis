@@ -1407,10 +1407,12 @@ fn level1(stages: &mut StageList<'_>) {
     // the variable is set. wasm32-unknown-unknown is still required: the
     // shader is compiled before the device request. The child cargo build
     // clears RUSTFLAGS itself so mold does not leak into the wasm32 link.
+    // `--nocapture` keeps the compute readback line in the CI log when the
+    // GPU half passes.
     stages.run(
         "test-wasm2gpu",
         "test (wasm2gpu gpu)",
-        "cargo test -p ornis-wasm2gpu-shader --test gpu_e2e",
+        "cargo test -p ornis-wasm2gpu-shader --test gpu_e2e -- --nocapture",
         stages.cargo(&[
             "test",
             "-p",
@@ -1419,6 +1421,7 @@ fn level1(stages: &mut StageList<'_>) {
             "gpu_e2e",
             "--",
             "--test-threads=1",
+            "--nocapture",
         ]),
         false,
     );

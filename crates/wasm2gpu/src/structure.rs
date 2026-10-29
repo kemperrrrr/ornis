@@ -24,6 +24,15 @@ pub(super) enum Flat {
     Br(u32),
     /// `br_if`.
     BrIf(u32),
+    /// `return`.
+    Return,
+    /// `br_table`.
+    BrTable {
+        /// Arm depths.
+        targets: Vec<u32>,
+        /// Default depth.
+        default: u32,
+    },
 }
 
 enum FrameKind {
@@ -57,6 +66,8 @@ fn step(stack: &mut Vec<Frame>, op: Flat) -> Result<(), TranslateError> {
         Flat::Op(op) => push_stmt(stack, Stmt::Op(op)),
         Flat::Br(depth) => push_stmt(stack, Stmt::Br(depth)),
         Flat::BrIf(depth) => push_stmt(stack, Stmt::BrIf(depth)),
+        Flat::Return => push_stmt(stack, Stmt::Return),
+        Flat::BrTable { targets, default } => push_stmt(stack, Stmt::BrTable { targets, default }),
         Flat::Block(ty) => push_frame(stack, open(FrameKind::Block, ty)),
         Flat::Loop(ty) => push_frame(stack, open(FrameKind::Loop, ty)),
         Flat::If(ty) => push_frame(stack, open(FrameKind::If, ty)),

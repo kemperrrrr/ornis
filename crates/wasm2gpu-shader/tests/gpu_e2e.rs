@@ -7,6 +7,12 @@
 #[path = "gpu_e2e/lift.rs"]
 mod lift;
 
+#[path = "gpu_e2e/compute_lift.rs"]
+mod compute_lift;
+
+#[path = "gpu_e2e/compute.rs"]
+mod compute;
+
 use std::process::Command;
 
 use ornis_gpu_abi::HostMemory;

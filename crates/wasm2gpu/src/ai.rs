@@ -13,7 +13,9 @@ use crate::ir::Import;
 use crate::ir::Stmt;
 use crate::ty::StructDef;
 
+mod call;
 mod join;
+mod table;
 mod uniform;
 mod value;
 
@@ -62,21 +64,36 @@ struct Lab {
 struct Ai<'a> {
     imports: &'a [Import],
     structs: &'a [StructDef],
+    funcs: &'a [Func],
     labels: Vec<Lab>,
+    /// Defined-function indices on the call stack. A repeat is recursion.
+    active: Vec<u32>,
 }
 
 pub(super) fn check(
     func: &Func,
     imports: &[Import],
     structs: &[StructDef],
+    funcs: &[Func],
 ) -> Result<(), TranslateError> {
     let mut ai = Ai {
         imports,
         structs,
+        funcs,
         labels: Vec::new(),
+        active: Vec::new(),
     };
+    let mut pushed = false;
+    if let Some(index) = funcs.iter().position(|item| std::ptr::eq(item, func)) {
+        ai.active.push(index as u32);
+        pushed = true;
+    }
     let mut st = entry(func);
-    interpret(&mut ai, &mut st, &func.body)
+    let result = interpret(&mut ai, &mut st, &func.body);
+    if pushed {
+        ai.active.pop();
+    }
+    result
 }
 
 // qual:recursive
@@ -102,6 +119,11 @@ fn on_stmt(ai: &mut Ai<'_>, st: &mut St, stmt: &Stmt) -> Result<(), TranslateErr
         } => if_region(ai, st, then_body, else_body),
         Stmt::Br(depth) => branch(ai, st, *depth, true),
         Stmt::BrIf(depth) => br_if(ai, st, *depth),
+        Stmt::BrTable { targets, default } => table::br_table(ai, st, targets, *default),
+        Stmt::Return => {
+            st.stop = true;
+            Ok(())
+        }
     }
 }
 

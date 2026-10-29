@@ -1,19 +1,24 @@
 //! Offline translator from the toy `ornis_gpu` wasm ABI to WGSL and SPIR-V.
 //!
 //! This is not the production shader DSL. Vertex and fragment entries may use
-//! structured `block` / `loop` / `if` / `br` / `br_if`. `raw_read` and
-//! `texture_sample_2d` lower as before. Storage imports lower to an access
-//! chain on one array global: scalars, vectors, and simple structs use the
-//! host `GpuSafeLayout` stride. Uniform bindings use that same provenance
-//! and the same `place_fields` layout: a struct field index is constant, and
-//! a fixed-size array index may be dynamic where WGSL allows it. Group and
-//! binding stay immediate operands. A join that names two bindings is
-//! rejected. `br_table` and linear memory are rejected.
+//! structured `block` / `loop` / `if` / `br` / `br_if`. `br_table` lowers to
+//! a WGSL `switch`. A direct `call` of a defined function becomes a naga
+//! function specialized by immediate group and binding; the offset passes as
+//! an argument or a result. Recursion and `call_indirect` are rejected.
+//! `cs_main`, when exported, is a compute entry with `@workgroup_size` and
+//! `global_invocation_id`. `raw_read` and `texture_sample_2d` lower as before.
+//! Storage imports lower to an access chain on one array global: scalars,
+//! vectors, and simple structs use the host `GpuSafeLayout` stride. Uniform
+//! bindings use that same provenance and the same `place_fields` layout: a
+//! struct field index is constant, and a fixed-size array index may be
+//! dynamic where WGSL allows it. Group and binding stay immediate operands.
+//! A join that names two bindings is rejected. Linear memory is rejected.
 //! See `docs/rendering/wasm-segmented-memory.md`.
 
 #![warn(missing_docs)]
 
 mod ai;
+mod call;
 mod cfg;
 mod cx;
 mod decode;
@@ -38,6 +43,9 @@ pub use emit::Translated;
 pub use error::TranslateError;
 
 /// Parse `wasm` and lower the toy vertex and fragment entries.
+///
+/// A `cs_main` export is lowered as well. Its SPIR-V words are
+/// [`Translated::compute_spirv`].
 ///
 /// The result has already been validated by naga, reprinted as WGSL, parsed
 /// back, and round-tripped through SPIR-V. Bindless `binding_array` types are
