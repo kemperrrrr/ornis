@@ -129,19 +129,20 @@ pub enum LayoutMismatch {
 
 impl LayoutMismatch {
     /// Compile-time failure text for a buffer binding check.
+    // qual:allow(complexity, error_handling) reason: "const layout gate for bind(): the rule that broke must name the panic, and const evaluation has no other reporting path"
     pub(crate) const fn panic_bind(self) {
         match self {
             Self::ZeroSize => panic!("gpu layout mismatch: value is zero-sized"),
             Self::Size => panic!("gpu layout mismatch: SIZE is not size_of"),
-            Self::Align => panic!(
-                "gpu layout mismatch: ALIGN is not a power-of-two multiple of align_of"
-            ),
+            Self::Align => {
+                panic!("gpu layout mismatch: ALIGN is not a power-of-two multiple of align_of")
+            }
             Self::StorageStride => panic!(
                 "gpu layout mismatch: STORAGE_STRIDE is not the std430 stride round_up(SIZE, ALIGN)"
             ),
-            Self::UniformStride => panic!(
-                "gpu layout mismatch: UNIFORM_STRIDE is not the std140 stride of 16 bytes"
-            ),
+            Self::UniformStride => {
+                panic!("gpu layout mismatch: UNIFORM_STRIDE is not the std140 stride of 16 bytes")
+            }
         }
     }
 }
@@ -160,7 +161,10 @@ pub(crate) const fn storage_layout_mismatch_raw(
     if rust_size != size {
         return Some(LayoutMismatch::Size);
     }
-    if align == 0 || !align.is_power_of_two() || rust_align == 0 || align % rust_align != 0 {
+    if align == 0 || !align.is_power_of_two() || rust_align == 0 {
+        return Some(LayoutMismatch::Align);
+    }
+    if !align.is_multiple_of(rust_align) {
         return Some(LayoutMismatch::Align);
     }
     if storage_stride_bytes != round_up(size, align) {

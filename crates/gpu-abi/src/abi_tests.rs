@@ -492,3 +492,9 @@ fn layout_mismatch_names_the_rule() {
     );
     assert_eq!(uniform_layout_mismatch_raw(4, 4, 4, 4, 4, 16), None);
 }
+
+#[test]
+#[should_panic(expected = "gpu layout mismatch: SIZE is not size_of")]
+fn layout_mismatch_panics_with_the_named_rule() {
+    crate::layout::LayoutMismatch::Size.panic_bind();
+}
