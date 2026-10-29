@@ -182,7 +182,7 @@ fn upload(
     let count = super::storage_buffer(device, "cull-count", 16);
     queue.write_buffer(&planes, 0, &pack_planes());
     queue.write_buffer(&spheres, 0, &pack_spheres());
-    queue.write_buffer(&flags, 0, &[0u8; 16]);
+    queue.write_buffer(&flags, 0, &pack_flags());
     queue.write_buffer(&count, 0, &pack_count());
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wasm2gpu cull"),
@@ -221,6 +221,18 @@ fn pack_spheres() -> Vec<u8> {
             lane += 1;
         }
         sphere += 1;
+    }
+    bytes
+}
+
+/// Every flag starts at [`SENTINEL`]: an untouched slot keeps it, which
+/// is how the test sees that the count guard wrote nothing.
+fn pack_flags() -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    let mut slot = 0usize;
+    while slot < LANES {
+        super::put_u32(&mut bytes, (slot as u32) * 4, SENTINEL);
+        slot += 1;
     }
     bytes
 }
