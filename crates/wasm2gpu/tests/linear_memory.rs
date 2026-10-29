@@ -80,7 +80,8 @@ fn dynamic_offset_becomes_a_shifted_index() {
     let fs = fs_func(
         "(param f32 f32 i32) (result f32 f32 f32 f32)",
         &format!(
-            "{base} local.get 2 i32.const 4 i32.mul i32.add i32.load drop {rgba}",
+            "{base} local.get 2 i32.const 4 i32.mul i32.add i32.load \
+             {base} i32.add i32.load drop {rgba}",
             base = base(),
             rgba = rgba(),
         ),
@@ -96,7 +97,8 @@ fn shift_offset_keeps_provenance() {
     let fs = fs_func(
         "(param f32 f32 i32) (result f32 f32 f32 f32)",
         &format!(
-            "{base} local.get 2 i32.const 2 i32.shl i32.add i32.load drop {rgba}",
+            "{base} local.get 2 i32.const 2 i32.shl i32.add i32.load \
+             {base} i32.add i32.load drop {rgba}",
             base = base(),
             rgba = rgba(),
         ),
@@ -142,10 +144,10 @@ fn float_store_and_load_use_one_binding() {
 fn pointer_survives_a_local_round_trip() {
     let imports = storage_base_import();
     let fs = fs_func(
-        "(param f32 f32 i32) (local i32) (result f32 f32 f32 f32)",
+        "(param f32 f32 i32) (result f32 f32 f32 f32) (local i32)",
         &format!(
             "{base} local.set 3 \
-             local.get 3 i32.const 4 i32.add i32.load drop {rgba}",
+             local.get 3 i32.const 4 i32.add i32.const 7 i32.store {rgba}",
             base = base(),
             rgba = rgba(),
         ),
