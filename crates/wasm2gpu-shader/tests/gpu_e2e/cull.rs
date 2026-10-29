@@ -66,11 +66,23 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// The host never builds the wasm32 half; this call still tells the
+/// analysis that the A/B test covers `cull_one` (test-file call edge).
+#[cfg(target_arch = "wasm32")]
+fn cover_cull_one() {
+    ornis_wasm2gpu_shader::cull_one(0);
+}
+
 #[test]
 fn cull_kernel_matches_the_hand_twin() {
     assert_eq!(LANES, SPHERES.len());
     let wasm = super::compile_wasm();
-    let lowered = translate(&super::compute_lift::lift(&wasm, "cull")).expect("wasm2gpu");
+    let wat = super::compute_lift::lift_wat(&wasm, "cull");
+    let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("cull wat: {err}\n{wat}"));
+    let lowered = match translate(&module) {
+        Ok(lowered) => lowered,
+        Err(err) => panic!("cull translate {err:?}\nWAT:\n{wat}"),
+    };
     let wgsl = &lowered.wgsl;
     assert!(wgsl.contains("@compute"), "{wgsl}");
     assert!(wgsl.contains("@builtin(global_invocation_id)"), "{wgsl}");

@@ -216,8 +216,7 @@ pub extern "C" fn cull(id: u32) {
 /// CPU path. The flag is `1` for visible and `0` for culled.
 #[cfg(target_arch = "wasm32")]
 #[inline(never)]
-// qual:api — the gpu e2e A/B test exercises this kernel through `cull`.
-pub fn cull_one(id: u32) {
+fn cull_one(id: u32) {
     let base = id * LANES;
     let cx = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
     let cy = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);

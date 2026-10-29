@@ -14,9 +14,15 @@ use wasmparser::TypeRef;
 use wasmparser::ValType;
 
 pub(super) fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
-    let module = read(wasm, export);
-    let wat = wrap(&module);
+    let wat = lift_wat(wasm, export);
     wat::parse_str(&wat).unwrap_or_else(|err| panic!("compute wat: {err}\n{wat}"))
+}
+
+/// The toy-module text `lift` parses: exposed so a translate failure can
+/// print exactly what the translator saw.
+pub(super) fn lift_wat(wasm: &[u8], export: &str) -> String {
+    let module = read(wasm, export);
+    wrap(&module)
 }
 
 struct Func {
