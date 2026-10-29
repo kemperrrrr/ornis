@@ -28,6 +28,11 @@ pub enum TranslateError {
     /// `return`. This translator does not lower it: a return from inside a
     /// nested `if` would have to compose the shader outputs on the way out.
     FunctionBranch,
+    /// `br_table` is not part of the structured subset.
+    ///
+    /// WGSL has no jump table. A multi-way branch would have to become a
+    /// chain of `if`s; this translator rejects the opcode instead of guessing.
+    BrTable,
     /// A storage element the lowerer will not emit, or a struct whose lanes
     /// do not match the host layout rules.
     UnsupportedType(String),
@@ -46,6 +51,7 @@ impl fmt::Display for TranslateError {
             Self::Unsupported => f.write_str("operator is outside the toy subset"),
             Self::AmbiguousProvenance => f.write_str("ambiguous provenance at a join"),
             Self::FunctionBranch => f.write_str("branch to the function is not lowered"),
+            Self::BrTable => f.write_str("br_table is not lowered"),
             Self::UnsupportedType(msg) => f.write_str(msg),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
         }

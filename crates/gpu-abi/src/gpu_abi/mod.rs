@@ -69,6 +69,36 @@ pub(crate) fn write_at<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32, 
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32 {
+    copy::call_uniform_field_f32(group, binding, sid, field)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
+    copy::call_uniform_field_u32(group, binding, sid, field)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn uniform_read_f32(group: u32, binding: u32, len: u32, index: u32) -> f32 {
+    copy::call_uniform_read_f32(group, binding, len, index)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32 {
+    copy::call_storage_read_f32(group, binding, index)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(crate) fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32) {
+    copy::call_storage_write_f32(group, binding, index, value);
+}
+
 pub(crate) fn texture_sample_2d<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
 ) -> GpuVec4 {

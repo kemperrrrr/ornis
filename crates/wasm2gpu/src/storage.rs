@@ -122,7 +122,7 @@ fn pop_fixed(
     }
 }
 
-fn push_elem(
+pub(super) fn push_elem(
     em: &mut Emit<'_, '_>,
     elem: Elem,
     pointer: naga::Handle<Expression>,
@@ -142,7 +142,7 @@ fn push_elem(
     }
 }
 
-fn push_struct(
+pub(super) fn push_struct(
     em: &mut Emit<'_, '_>,
     loaded: naga::Handle<Expression>,
     id: u16,
@@ -164,7 +164,7 @@ fn push_struct(
     Ok(())
 }
 
-fn push_field(
+pub(super) fn push_field(
     em: &mut Emit<'_, '_>,
     field: naga::Handle<Expression>,
     kind: FieldKind,

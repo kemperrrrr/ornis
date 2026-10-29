@@ -8,7 +8,6 @@ use naga::ArraySize;
 use naga::ScalarKind;
 use naga::Span;
 use naga::StorageAccess;
-use naga::StructMember;
 use naga::Type;
 use naga::TypeInner;
 
@@ -17,32 +16,11 @@ use crate::cx::Slot;
 use crate::cx::StorageSlot;
 use crate::error::TranslateError;
 use crate::ty::Elem;
-use crate::ty::FieldKind;
 use crate::ty::StructDef;
 
-pub(super) fn uniform(
-    cx: &mut Cx<'_>,
-    group: u32,
-    binding: u32,
-) -> naga::Handle<naga::GlobalVariable> {
-    if let Some(var) = cached(&cx.uniforms, group, binding) {
-        return var;
-    }
-    let ty = cx.vec4;
-    let var = append(
-        cx,
-        format!("uniform_{group}_{binding}"),
-        AddressSpace::Uniform,
-        ty,
-        point(group, binding),
-    );
-    cx.uniforms.push(Slot {
-        group,
-        binding,
-        var,
-    });
-    var
-}
+pub(super) use crate::struct_members::struct_ty;
+pub(super) use crate::uniform_global::uniform;
+pub(super) use crate::uniform_global::uniform_global;
 
 pub(super) fn storage(
     cx: &mut Cx<'_>,
@@ -51,6 +29,11 @@ pub(super) fn storage(
     elem: Elem,
     structs: &[StructDef],
 ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
+    if crate::uniform_global::uniform_taken(&cx.uniforms, group, binding) {
+        return Err(TranslateError::UnsupportedType(
+            "binding is used as both uniform and storage".to_string(),
+        ));
+    }
     if let Some((found, var)) = find_storage(&cx.storages, group, binding) {
         if found != elem {
             return Err(TranslateError::UnsupportedType(
@@ -78,30 +61,6 @@ pub(super) fn storage(
         var,
     });
     Ok(var)
-}
-
-pub(super) fn struct_ty(
-    cx: &mut Cx<'_>,
-    id: u16,
-    fields: &[FieldKind],
-) -> Result<naga::Handle<Type>, TranslateError> {
-    if let Some(handle) = cached_struct(cx, id) {
-        return Ok(handle);
-    }
-    let layout = crate::ty::struct_layout(fields)?;
-    let members = members(cx, fields, &layout.offsets);
-    let handle = cx.module.types.insert(
-        Type {
-            name: Some(format!("S{id}")),
-            inner: TypeInner::Struct {
-                members,
-                span: layout.size,
-            },
-        },
-        Span::default(),
-    );
-    cx.struct_tys.push((id, handle));
-    Ok(handle)
 }
 
 pub(super) fn texture(
@@ -167,15 +126,8 @@ fn find_storage(
     None
 }
 
-fn cached_struct(cx: &Cx<'_>, id: u16) -> Option<naga::Handle<Type>> {
-    let mut index = 0usize;
-    while index < cx.struct_tys.len() {
-        if cx.struct_tys[index].0 == id {
-            return Some(cx.struct_tys[index].1);
-        }
-        index += 1;
-    }
-    None
+pub(super) fn storage_taken(slots: &[StorageSlot], group: u32, binding: u32) -> bool {
+    find_storage(slots, group, binding).is_some()
 }
 
 fn array_ty(cx: &mut Cx<'_>, base: naga::Handle<Type>, stride: u32) -> naga::Handle<Type> {
@@ -192,7 +144,7 @@ fn array_ty(cx: &mut Cx<'_>, base: naga::Handle<Type>, stride: u32) -> naga::Han
     )
 }
 
-fn base_ty(
+pub(super) fn base_ty(
     cx: &mut Cx<'_>,
     elem: Elem,
     structs: &[StructDef],
@@ -214,32 +166,6 @@ fn base_ty(
     }
 }
 
-fn members(cx: &Cx<'_>, fields: &[FieldKind], offsets: &[u32]) -> Vec<StructMember> {
-    let mut out = Vec::new();
-    let mut index = 0usize;
-    while index < fields.len() {
-        out.push(StructMember {
-            name: Some(format!("f{index}")),
-            ty: field_ty(cx, fields[index]),
-            binding: None,
-            offset: offsets[index],
-        });
-        index += 1;
-    }
-    out
-}
-
-fn field_ty(cx: &Cx<'_>, kind: FieldKind) -> naga::Handle<Type> {
-    match kind {
-        FieldKind::F32 => cx.scalar,
-        FieldKind::U32 => cx.uint,
-        FieldKind::I32 => cx.sint,
-        FieldKind::Vec2 => cx.vec2,
-        FieldKind::Vec3 => cx.vec3,
-        FieldKind::Vec4 => cx.vec4,
-    }
-}
-
 fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga::GlobalVariable>> {
     let mut index = 0usize;
     while index < slots.len() {
@@ -251,11 +177,11 @@ fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga:
     None
 }
 
-fn point(group: u32, binding: u32) -> naga::ResourceBinding {
+pub(super) fn point(group: u32, binding: u32) -> naga::ResourceBinding {
     naga::ResourceBinding { group, binding }
 }
 
-fn append(
+pub(super) fn append(
     cx: &mut Cx<'_>,
     name: String,
     space: AddressSpace,

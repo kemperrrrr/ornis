@@ -30,6 +30,18 @@ pub const VEC4_SIZE: u32 = 16;
 pub const VEC4_ALIGN: u32 = 16;
 /// Minimum alignment of a struct in the uniform address space.
 pub const UNIFORM_STRUCT_ALIGN: u32 = 16;
+/// `ornis_gpu.types` tag for an `f32` field.
+pub const TYPE_TAG_F32: u8 = 1;
+/// `ornis_gpu.types` tag for a `u32` field.
+pub const TYPE_TAG_U32: u8 = 2;
+/// `ornis_gpu.types` tag for an `i32` field.
+pub const TYPE_TAG_I32: u8 = 3;
+/// `ornis_gpu.types` tag for a `vec2<f32>` field.
+pub const TYPE_TAG_VEC2: u8 = 4;
+/// `ornis_gpu.types` tag for a `vec3<f32>` field.
+pub const TYPE_TAG_VEC3: u8 = 5;
+/// `ornis_gpu.types` tag for a `vec4<f32>` field.
+pub const TYPE_TAG_VEC4: u8 = 6;
 
 /// One struct field's size and alignment, in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,10 +124,15 @@ pub unsafe trait GpuSafeLayout: Copy + Send + Sync + 'static {
     const UNIFORM_STRIDE: u32;
     /// Stride when this type is an element of a storage array.
     const STORAGE_STRIDE: u32;
+    /// Tag written into `ornis_gpu.types` when this type is a struct field.
+    ///
+    /// `0` is not a field. `u8` and arrays are host padding, and a struct's
+    /// own tag is `0` because the section lists its fields, not the struct.
+    const TYPE_TAG: u8;
 }
 
 macro_rules! impl_word {
-    ($ty:ty) => {
+    ($ty:ty, $tag:expr) => {
         // SAFETY: `$ty` is a 32-bit primitive with no niches. `SIZE` is
         // `size_of`; `ALIGN` is the GPU alignment of a scalar.
         unsafe impl GpuSafeLayout for $ty {
@@ -123,13 +140,14 @@ macro_rules! impl_word {
             const ALIGN: u32 = F32_ALIGN;
             const STORAGE_STRIDE: u32 = F32_SIZE;
             const UNIFORM_STRIDE: u32 = UNIFORM_STRUCT_ALIGN;
+            const TYPE_TAG: u8 = $tag;
         }
     };
 }
 
-impl_word!(f32);
-impl_word!(u32);
-impl_word!(i32);
+impl_word!(f32, TYPE_TAG_F32);
+impl_word!(u32, TYPE_TAG_U32);
+impl_word!(i32, TYPE_TAG_I32);
 
 // SAFETY: `u8` has no niches. `SIZE` and `ALIGN` are 1, matching `size_of`.
 unsafe impl GpuSafeLayout for u8 {
@@ -137,6 +155,7 @@ unsafe impl GpuSafeLayout for u8 {
     const ALIGN: u32 = 1;
     const STORAGE_STRIDE: u32 = 1;
     const UNIFORM_STRIDE: u32 = UNIFORM_STRUCT_ALIGN;
+    const TYPE_TAG: u8 = 0;
 }
 
 /// Two-lane `f32` vector. Size 8. GPU alignment is 8; Rust alignment is 4.
@@ -186,6 +205,7 @@ unsafe impl GpuSafeLayout for GpuVec2 {
     const ALIGN: u32 = VEC2_ALIGN;
     const STORAGE_STRIDE: u32 = storage_stride(VEC2_SIZE, VEC2_ALIGN);
     const UNIFORM_STRIDE: u32 = uniform_stride(VEC2_SIZE, VEC2_ALIGN);
+    const TYPE_TAG: u8 = TYPE_TAG_VEC2;
 }
 
 // SAFETY: `repr(C)` of three `f32`s. `SIZE` is 12 (`size_of`). `ALIGN` is 16,
@@ -195,6 +215,7 @@ unsafe impl GpuSafeLayout for GpuVec3 {
     const ALIGN: u32 = VEC3_ALIGN;
     const STORAGE_STRIDE: u32 = storage_stride(VEC3_SIZE, VEC3_ALIGN);
     const UNIFORM_STRIDE: u32 = uniform_stride(VEC3_SIZE, VEC3_ALIGN);
+    const TYPE_TAG: u8 = TYPE_TAG_VEC3;
 }
 
 // SAFETY: `repr(C)` of four `f32`s. `SIZE` is `size_of`. `ALIGN` is the GPU
@@ -204,6 +225,7 @@ unsafe impl GpuSafeLayout for GpuVec4 {
     const ALIGN: u32 = VEC4_ALIGN;
     const STORAGE_STRIDE: u32 = storage_stride(VEC4_SIZE, VEC4_ALIGN);
     const UNIFORM_STRIDE: u32 = uniform_stride(VEC4_SIZE, VEC4_ALIGN);
+    const TYPE_TAG: u8 = TYPE_TAG_VEC4;
 }
 
 // SAFETY: an array of plain data is plain data. `SIZE` is `size_of`. `ALIGN`
@@ -220,6 +242,31 @@ unsafe impl<T: GpuSafeLayout, const N: usize> GpuSafeLayout for [T; N] {
     };
     const STORAGE_STRIDE: u32 = storage_stride(Self::SIZE, Self::ALIGN);
     const UNIFORM_STRIDE: u32 = uniform_stride(Self::SIZE, Self::ALIGN);
+    const TYPE_TAG: u8 = 0;
+}
+
+/// Bytes of one `ornis_gpu.types` payload (magic `OGT1`).
+///
+/// Each slice is one struct's [`GpuSafeLayout::TYPE_TAG`] list, in id order.
+/// A tag of `0` is host padding and is not a wasm field; callers drop those
+/// before encoding. `None` means a count does not fit in `u16`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn encode_types_section(structs: &[&[u8]]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"OGT1");
+    write_u16(&mut out, structs.len())?;
+    for fields in structs {
+        write_u16(&mut out, fields.len())?;
+        out.extend_from_slice(fields);
+    }
+    Some(out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_u16(out: &mut Vec<u8>, value: usize) -> Option<()> {
+    let value = u16::try_from(value).ok()?;
+    out.extend_from_slice(&value.to_le_bytes());
+    Some(())
 }
 
 const _: () = {

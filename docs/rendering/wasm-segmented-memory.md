@@ -1,6 +1,6 @@
 # Wasm → GPU: сегментированная виртуальная память
 
-Статус: research note (2026-10-25; срез типов и CFG — 2026-10-29).
+Статус: research note (2026-10-25; срез типов, CFG и uniform-полей — 2026-10-29).
 Не принято как замена текущему пути Rust → Shader IR → WGSL
 (`rust-to-wgsl-architecture.md`). Фиксирует идею «Virtual Memory
 Space Translation / Software-Managed Memory Paging» поверх Wasm linear
@@ -9,20 +9,26 @@ production path) — `crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`,
 `unsafe` только в `gpu_abi`) и offline `crates/wasm2gpu`.
 Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
 `storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` /
-`i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Раскладка
-структуры — `place_fields` с выравниванием uniform (16), та же, что у
-хостового `GpuRef` / `gpu_struct!`. Поля задаёт custom section
-`ornis_gpu.types`. Group и binding остаются immediate-операндами
-импорта; индекс элемента может быть динамическим и опускается в
-access chain (`OpAccessChain` / WGSL `array[index]`). Структурный
-control flow (`block` / `loop` / `if` / `br` / `br_if`) строится в
-CFG; абстрактная интерпретация несёт provenance указателя и offset
-через ветки и join (`phi` / `select`, §3.4). Два разных binding на
-одном join — отказ. Прямой `if` без побочных эффектов опускается в
-WGSL `select`, остальной — в `if` / `loop`. Неподдерживаемый тип —
-явная ошибка. WGSL/SPIR-V через naga. Bindless и descriptor indexing
-не default. Упаковка space+binding+offset в каждый `i32` по-прежнему
-не default ABI.
+`i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Uniform
+на том же контракте: `uniform_read_struct`, `uniform_field_*` (индекс
+поля только константа) и `uniform_read_*` / `uniform_index_struct`
+(длина константа, индекс элемента может быть динамическим, если WGSL
+это принимает). Раскладка структуры — `place_fields` с выравниванием
+uniform (16), та же, что у хостового `GpuRef` / `gpu_struct!`. Поля
+задаёт custom section `ornis_gpu.types`. Group и binding остаются
+immediate-операндами импорта; индекс элемента может быть динамическим
+и опускается в access chain (`OpAccessChain` / WGSL `array[index]`).
+Структурный control flow (`block` / `loop` / `if` / `br` / `br_if`)
+строится в CFG; абстрактная интерпретация несёт provenance указателя
+и offset через ветки и join (`phi` / `select`, §3.4). Два разных
+binding на одном join — отказ. `br_table` не опускается. Прямой `if`
+без побочных эффектов опускается в WGSL `select`, остальной — в `if`
+/ `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V через
+naga. Bindless и descriptor indexing не default. Экспорт `shade`
+в `crates/wasm2gpu-shader` помечен `#[unsafe(no_mangle)]`: лифтер
+gpu-теста ищет это имя, а в Rust 2024 атрибут unsafe. Это не блок
+`unsafe` и не код `gpu-abi`. Упаковка
+space+binding+offset в каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
 Kongruent как носителей типов для шейдерного бэкенда.
@@ -211,6 +217,29 @@ uniform: true)` и `storage_stride` с выравниванием 16, так ч�
 смещения совпадают с хостовым `gpu_struct!` (`vec3` затем `f32`:
 смещения 0 и 12, stride 16; два `vec3` — через 16). Вложенные
 структуры, незнакомый тег поля и ширина вне 1..=8 полей отвергаются.
+
+Uniform использует ту же раскладку и ту же custom section. Импорты:
+`uniform_read_struct` (group, binding, struct id) читает структуру
+целиком; `uniform_field_*` читает одно поле, индекс поля — `i32.const`
+(`AccessIndex`); динамический индекс поля — ошибка `uniform field
+index must be a constant`. `uniform_read_*` и `uniform_index_struct`
+читают элемент фиксированного массива: длина — `i32.const`, индекс
+элемента может быть runtime и становится `Access`. Длина 0,
+неконстантная длина и binding больше 64 KiB отвергаются. Stride
+элемента — `uniform_stride` (`f32` — 16 байт, не storage stride 4).
+WGSL-писатель naga не сохраняет `@align`, `@size` и `@stride`. Скаляр
+и `vec2` дополняются lane-структурой до 16 байт: значение остаётся в
+поле 0, байт 0 элемента совпадает с хостовым `index(i, UNIFORM_STRIDE)`.
+Элемент-структура получает хвост из скалярных `u32` внутри самой
+структуры, пока записанный размер не равен span хоста. У
+`struct { f32 }`, `struct { f32, f32 }` и `struct { vec2 }` этот span
+и stride равны 16, как у `gpu_struct!`. `vec3` уже выровнен на 16;
+хвост дописывается, когда конец последнего поля короче span. Глобал
+uniform — структура (WGSL не
+принимает голый массив в этом адресном пространстве); массив — её
+единственное поле со смещением 0. Один `(group, binding)` как два
+uniform-типа или сразу как uniform и storage — ошибка. `br_table` не
+входит в структурное подмножество: ошибка `br_table is not lowered`.
 
 Control flow шире прямой линии `vs_main` / `fs_main`. Парсер строит
 CFG из Wasm structured control flow (`block` / `loop` / `if` / `br` /

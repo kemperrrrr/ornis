@@ -4,8 +4,11 @@
 //! structured `block` / `loop` / `if` / `br` / `br_if`. `raw_read` and
 //! `texture_sample_2d` lower as before. Storage imports lower to an access
 //! chain on one array global: scalars, vectors, and simple structs use the
-//! host `GpuSafeLayout` stride. Group and binding stay immediate operands.
-//! A join that names two bindings is rejected. Linear memory is rejected.
+//! host `GpuSafeLayout` stride. Uniform bindings use that same provenance
+//! and the same `place_fields` layout: a struct field index is constant, and
+//! a fixed-size array index may be dynamic where WGSL allows it. Group and
+//! binding stay immediate operands. A join that names two bindings is
+//! rejected. `br_table` and linear memory are rejected.
 //! See `docs/rendering/wasm-segmented-memory.md`.
 
 #![warn(missing_docs)]
@@ -25,8 +28,11 @@ mod ops;
 mod parse;
 mod ret;
 mod storage;
+mod struct_members;
 mod structure;
 mod ty;
+mod uniform;
+mod uniform_global;
 
 pub use emit::Translated;
 pub use error::TranslateError;

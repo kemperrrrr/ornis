@@ -3071,6 +3071,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-wasm2gpu-shader"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-abi",
+ "ornis-wasm2gpu",
+ "pollster",
+ "wasmparser",
+ "wat",
+ "wgpu",
+]
+
+[[package]]
 name = "ornis-wgpu-backend"
 version = "0.1.0"
 dependencies = [

@@ -22,7 +22,7 @@ pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> 
         naga::valid::Capabilities::empty(),
     )
     .validate(module)
-    .map_err(|err| TranslateError::Naga(format!("{err:?}")))?;
+    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     let wgsl =
         naga::back::wgsl::write_string(module, &info, naga::back::wgsl::WriterFlags::empty())
             .map_err(|err| TranslateError::Naga(err.to_string()))?;
@@ -33,7 +33,7 @@ pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> 
         naga::valid::Capabilities::empty(),
     )
     .validate(&parsed)
-    .map_err(|err| TranslateError::Naga(err.to_string()))?;
+    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     let vertex_spirv = spirv(
         module,
         &info,
@@ -102,6 +102,17 @@ fn spirv(
     let words = naga::back::spv::write_vec(module, info, &options, Some(&pipeline))
         .map_err(|err| TranslateError::Naga(err.to_string()))?;
     Ok(words)
+}
+
+fn naga_chain(err: &impl std::error::Error) -> String {
+    let mut msg = err.to_string();
+    let mut src = std::error::Error::source(err);
+    while let Some(inner) = src {
+        msg.push_str(": ");
+        msg.push_str(&inner.to_string());
+        src = std::error::Error::source(inner);
+    }
+    msg
 }
 
 fn reparse_spirv(words: &[u32]) -> Result<(), TranslateError> {

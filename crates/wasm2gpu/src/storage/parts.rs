@@ -23,7 +23,28 @@ pub(super) fn compose_struct(
         cursor = next;
         parts.push(expr);
     }
+    let pads = pad_count(em, ty, fields.len())?;
+    let mut index = 0u32;
+    while index < pads {
+        parts.push(em.u32(0));
+        index += 1;
+    }
     compose(em, ty, &parts)
+}
+
+fn pad_count(
+    em: &Emit<'_, '_>,
+    ty: naga::Handle<naga::Type>,
+    fields: usize,
+) -> Result<u32, TranslateError> {
+    let naga::TypeInner::Struct { members, .. } = &em.cx.module.types[ty].inner else {
+        return Err(TranslateError::Unsupported);
+    };
+    let extra = members
+        .len()
+        .checked_sub(fields)
+        .ok_or(TranslateError::Unsupported)?;
+    u32::try_from(extra).map_err(|_| TranslateError::Unsupported)
 }
 
 pub(super) fn take_field(

@@ -11,6 +11,7 @@ use crate::ir::Op;
 use crate::storage;
 use crate::ty;
 use crate::ty::Imp;
+use crate::uniform;
 
 pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> {
     match op {
@@ -52,6 +53,7 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         Imp::Sample => sample(em),
         Imp::Read(spec) => storage::load(em, spec),
         Imp::Write(spec) => storage::store(em, spec, index),
+        Imp::Uniform(uni) => uniform::load(em, uni),
     }
 }
 
@@ -62,7 +64,7 @@ fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     if offset != 0 {
         return Err(TranslateError::Unsupported);
     }
-    let var = globals::uniform(em.cx, group, binding);
+    let var = globals::uniform(em.cx, group, binding)?;
     let pointer = em.ex(Expression::GlobalVariable(var));
     let loaded = em.ex(Expression::Load { pointer });
     em.stack.push(Val::Vec(loaded));

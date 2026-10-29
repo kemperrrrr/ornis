@@ -7,6 +7,7 @@ use super::PROV_PARAMS;
 use super::STRUCT_HEADER;
 use super::Spec;
 use super::StructDef;
+use super::Uni;
 use super::field_is_float;
 use super::field_lanes;
 use super::struct_lanes;
@@ -42,7 +43,42 @@ pub(crate) fn sig_ok(
         }
         Imp::Read(Spec::Struct) => struct_read_sig(sig, structs, struct_id),
         Imp::Write(Spec::Struct) => struct_write_sig(sig, structs, struct_id),
+        Imp::Uniform(uni) => uniform_sig(sig, uni, structs, struct_id),
     }
+}
+
+const FIELD_PARAMS: u32 = 4;
+const ARRAY_PARAMS: u32 = 4;
+const INDEX_STRUCT_PARAMS: u32 = 5;
+
+fn uniform_sig(
+    sig: &Sig,
+    uni: Uni,
+    structs: &[StructDef],
+    struct_id: Option<u16>,
+) -> Result<(), TranslateError> {
+    match uni {
+        Uni::Field(kind) => field_sig(sig, kind),
+        Uni::Array(elem) => array_sig(sig, elem),
+        Uni::Struct => struct_at(sig, structs, struct_id, PROV_PARAMS, "uniform_read_struct"),
+        Uni::IndexStruct => struct_at(
+            sig,
+            structs,
+            struct_id,
+            INDEX_STRUCT_PARAMS,
+            "uniform_index_struct",
+        ),
+    }
+}
+
+fn field_sig(sig: &Sig, kind: FieldKind) -> Result<(), TranslateError> {
+    let mut lanes = Vec::new();
+    push_lanes(&mut lanes, kind)?;
+    fixed_sig(sig, FIELD_PARAMS, &lanes, "uniform field")
+}
+
+fn array_sig(sig: &Sig, elem: Elem) -> Result<(), TranslateError> {
+    fixed_sig(sig, ARRAY_PARAMS, &lanes_of(elem)?, "uniform array")
 }
 
 pub(super) fn lanes_of(elem: Elem) -> Result<Vec<Kind>, TranslateError> {
@@ -141,12 +177,22 @@ pub(super) fn struct_read_sig(
     structs: &[StructDef],
     id: Option<u16>,
 ) -> Result<(), TranslateError> {
+    struct_at(sig, structs, id, STRUCT_HEADER, "storage_read_struct")
+}
+
+fn struct_at(
+    sig: &Sig,
+    structs: &[StructDef],
+    id: Option<u16>,
+    params: u32,
+    what: &str,
+) -> Result<(), TranslateError> {
     let id = id.ok_or_else(|| type_err("struct type id is not a constant"))?;
     let def = structs
         .get(id as usize)
         .ok_or_else(|| type_err("struct type id is out of range"))?;
     let lanes = struct_lanes(&def.fields)?;
-    fixed_sig(sig, STRUCT_HEADER, &lanes, "storage_read_struct")
+    fixed_sig(sig, params, &lanes, what)
 }
 
 pub(super) fn struct_write_sig(
