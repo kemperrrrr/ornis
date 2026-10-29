@@ -30,7 +30,8 @@
 //! Phase E (§5 E) blends both sides against authored rest poses: a player's
 //! `weight` lerps each channel toward its rest ([`AnimTrack::rest`],
 //! [`Skeleton::rest`]), and [`AnimFade`] / [`SkelFade`] crossfade two clips
-//! over time. Per-joint layers use [`SkelLayer`] with a [`JointMask`].
+//! over time. Per-joint layers ([`SkelLayer`] + [`JointMask`]) stack per
+//! root in [`SkelLayerStack`], bottom-up over the base pose.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -64,8 +65,61 @@ pub use animator::{Animator, AnimatorAccess, AnimatorError, AnimatorMut, try_ani
 pub mod skinning;
 
 mod blend;
-use blend::{BlendedPose, JointSample, fade_progress, sample_joints};
-pub use blend::{JointMask, JointTrs, MaskId, SkelFade, SkelLayer};
+use blend::{BlendedPose, JointSample, SampleBuf, sample_joints};
+pub use blend::{
+    JointMask, JointTrs, MaskId, SkelFade, SkelInertia, SkelLayer, SkelLayerStack, fade_progress,
+};
+
+mod events;
+pub use events::{AnimEvent, AnimEventOut, AnimEventQueue, ClipEvents};
+use events::{CursorStep, emit_step};
+
+mod ik;
+use ik::apply_ik_stack;
+pub use ik::{
+    BasePull, CcdIk, ControlRig, Effector, FkScratch, IkStack, LookAt, TwoBoneIk, solve_ccd_ik,
+    solve_look_at, solve_two_bone_ik,
+};
+
+mod ik_ccd;
+mod ik_solve;
+
+mod retarget;
+pub use retarget::RetargetMap;
+
+mod root_motion;
+pub use root_motion::RootMotionDelta;
+use root_motion::{RootMotionPart, root_joint, root_motion};
+
+mod motion_match;
+pub use motion_match::{
+    MotionHit, MotionQuery, MotionSample, MotionSearch, WarpWindow, match_motion, time_at_distance,
+    warp_weight,
+};
+
+mod motion_warp;
+pub use motion_warp::warp_root_delta;
+
+mod freeform;
+mod ragdoll;
+mod tree;
+mod tree_eff;
+mod tree_eval;
+mod tree_sync;
+mod tree_weights;
+pub use freeform::freeform_cache;
+pub use ragdoll::{
+    RagdollBase, RagdollBlend, RagdollBone, RagdollDesc, RagdollError, RagdollFade, RagdollLimit,
+    RagdollMode, RagdollMotor, RagdollShape, ragdoll_blend,
+};
+pub use tree::{
+    FREEFORM_MAX_POINTS, FREEFORM_MAX_TRIANGLES, FreeformCache, MachineCursor, SkelTree,
+    SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeCmp, TreeCond, TreeNodeDef,
+    TreeParam, TreeTransition, switch_selection,
+};
+use tree_eval::eval_tree;
+use tree_sync::sync_transition_leaves;
+pub use tree_sync::{ClipSyncMarks, SyncMark};
 
 pub use skinning::{
     CPU_GPU_TOLERANCE, JointCount, JointLimit, SkinError, SkinningMode, SkinningResources,
@@ -377,6 +431,18 @@ pub struct AnimFade {
     pub elapsed: Seconds,
 }
 
+/// Whether `entity` already carries a crossfade of type `F` in flight.
+///
+/// The one in-flight check behind the "one fade per entity" rule: the
+/// skeletal ([`SkelFade`]) and object ([`AnimFade`]) topologies both ask
+/// this before installing a fade, and a start over a running fade cuts
+/// instead of stacking.
+pub fn fade_in_flight<F: 'static + Send + Sync>(store: &SmartStore, entity: Entity) -> bool {
+    store
+        .read_lane::<F>()
+        .is_some_and(|fades| fades.get(entity).is_some())
+}
+
 /// Default physics-authority lane for [`AnimSampleSystem`]: a lane that is
 /// never populated, so nothing is ever skipped.
 ///
@@ -449,11 +515,13 @@ impl<P: 'static + Send + Sync> System for AnimSampleSystem<P> {
             .reads::<Time>()
             .reads::<SmartStore>()
             .reads_lane::<AnimClip>()
+            .reads_lane::<ClipEvents>()
             .reads_lane::<MeshDesc>()
             .reads_lane::<P>()
             .reads_lane::<ChildOf>()
             .writes_lane::<AnimPlayer>()
             .writes_lane::<AnimFade>()
+            .writes_lane::<AnimEventQueue>()
             .writes_lane::<Transform>()
             .writes_lane::<TransformDesc>()
             .writes_lane::<Position>()
@@ -480,22 +548,103 @@ struct LocalWrite {
     pose: SampledPose,
 }
 
-/// Model-space joint matrices plus the hierarchy nodes that clip writes.
-struct SampledClip {
-    matrices: Vec<Mat4>,
-    nodes: Vec<LocalWrite>,
-}
-
-/// Joint matrices and node writes collected before output lanes are locked.
-struct PoseBatch {
-    joints: Vec<JointMatrices>,
-    nodes: Vec<LocalWrite>,
-}
-
-/// Model matrices for one skeleton root.
-struct JointMatrices {
+/// One object entity's routed result before output lanes are locked.
+struct ObjWork {
     entity: Entity,
+    pose: SampledPose,
+    renderable: bool,
+}
+
+/// Bitset word width of [`FrozenBits`] (bits per `u64` slot).
+const FROZEN_WORD_BITS: usize = 64;
+
+/// Snapshot of physics-driven entities to skip this frame.
+///
+/// Bitset over live [`Entity::id`] slots: the per-cursor and per-fade skip
+/// tests are O(1), where the old `frozen.contains` scan cost
+/// O(entries × bodies) per frame. Live entities never share a slot, so the
+/// id alone is a sound key here (no `generation` — sound for a one-frame
+/// snapshot). The bitset spans `0..=max id`: its size tracks the largest
+/// live [`Entity::id`], not the body count.
+#[derive(Default)]
+struct FrozenBits {
+    bits: Vec<u64>,
+}
+
+impl FrozenBits {
+    /// Rebuilds the snapshot in place, reusing the bitset's allocation.
+    fn rebuild(&mut self, entities: &[Entity]) {
+        self.bits.clear();
+        for entity in entities {
+            self.insert(*entity);
+        }
+    }
+
+    /// Adds one entity to the snapshot.
+    fn insert(&mut self, entity: Entity) {
+        let id = entity.id() as usize;
+        let word = id / FROZEN_WORD_BITS;
+        if self.bits.len() <= word {
+            self.bits.resize(word + 1, 0);
+        }
+        self.bits[word] |= 1 << (id % FROZEN_WORD_BITS);
+    }
+
+    /// Whether the snapshot contains `entity`.
+    fn contains(&self, entity: Entity) -> bool {
+        let id = entity.id() as usize;
+        self.bits
+            .get(id / FROZEN_WORD_BITS)
+            .is_some_and(|word| word & (1 << (id % FROZEN_WORD_BITS)) != 0)
+    }
+}
+
+/// Scratch buffers of one animation sample pass, reused across frames.
+///
+/// The pass allocates nothing once the scene settles: pose buffers,
+/// sampled joints, model matrices, routed writes and the per-frame bookkeeping
+/// (frozen snapshot, retired fades) all refill in place.
+#[derive(Default)]
+struct AnimScratch {
+    frozen: FrozenBits,
+    finished: Vec<Entity>,
+    obj_work: Vec<ObjWork>,
+    obj_locals: Vec<LocalWrite>,
+    pose_a: BlendedPose,
+    pose_b: BlendedPose,
+    tree_poses: Vec<BlendedPose>,
+    tree_weights: tree_eff::WeightsScratch,
+    /// FK buffers of the IK solvers (§8.2): one solve allocates nothing.
+    ik_fk: ik::FkScratch,
+    /// Overlay-layer root-motion parts, applied after the crossfade mix.
+    layer_motion: Vec<RootMotionPart>,
+    /// Tree roots whose contract failed this frame: their pose is bad skin,
+    /// so layer root motion must not move them either (§8.4).
+    motion_hold: Vec<Entity>,
+    joints: SampleBuf,
+    contributors: Vec<ClipId>,
+    skel_locals: Vec<Mat4>,
     matrices: Vec<Mat4>,
+    nodes: Vec<LocalWrite>,
+    node_painted: Vec<bool>,
+}
+
+thread_local! {
+    /// Per-thread scratch for the sample passes (one pass runs at a time
+    /// on a thread; nested use falls back to a temporary). The buffers live
+    /// as long as their worker thread: a parallel scheduler keeps one
+    /// scratch per worker, released only when the thread exits.
+    static SCRATCH: std::cell::RefCell<AnimScratch> = std::cell::RefCell::new(AnimScratch::default());
+}
+
+/// Runs `f` with the thread's [`AnimScratch`], reusing its buffers.
+fn with_scratch<R>(f: impl FnOnce(&mut AnimScratch) -> R) -> R {
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut scratch) => f(&mut scratch),
+        // Reentrant sample (never in the shipped schedule): keep the
+        // function total instead of panicking on the borrow.
+        Err(_) => f(&mut AnimScratch::default()),
+    })
 }
 
 /// Advances a playback cursor; pure function of `(clip, time)` for determinism.
@@ -519,69 +668,98 @@ fn run_anim_sample<P: 'static + Send + Sync>(resources: &Resources) {
     let Some(store) = resources.get::<SmartStore>() else {
         return;
     };
+    with_scratch(|scratch| {
+        // Snapshot of physics-driven entities (empty when the authority lane
+        // is not registered): both passes below skip them, cursor included.
+        match store.read_lane::<P>() {
+            Some(lane) => scratch.frozen.rebuild(&lane.entities),
+            None => scratch.frozen.rebuild(&[]),
+        }
 
-    // Snapshot of physics-driven entities (empty when the authority lane is
-    // not registered): both passes below skip them, cursor included.
-    let driven: Vec<Entity> = store
-        .read_lane::<P>()
-        .map(|lane| lane.entities.clone())
-        .unwrap_or_default();
-
-    // Pass 1 — advance playing cursors against their clip duration, and the
-    // outgoing cursor plus clock of every crossfade in progress.
-    {
-        let Some(clips) = store.read_cold_lane::<AnimClip>() else {
-            return;
-        };
-        let Some(mut players) = store.write_lane::<AnimPlayer>() else {
-            return;
-        };
-        for index in 0..players.data.len() {
-            let entity = players.entities[index];
-            let player = &mut players.data[index];
-            if !player.playing || driven.contains(&entity) {
-                continue;
-            }
-            let Some(clip) = clips.get(player.clip.0) else {
-                continue;
+        // Pass 1 — advance playing cursors against their clip duration, and the
+        // outgoing cursor plus clock of every crossfade in progress.
+        {
+            let Some(clips) = store.read_cold_lane::<AnimClip>() else {
+                return;
             };
-            player.time =
-                advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
-        }
-        if let Some(mut fades) = store.write_lane::<AnimFade>() {
-            tick_fades(&mut fades, dt, &driven, |fade, step| {
-                if fade.from.playing
-                    && let Some(clip) = clips.get(fade.from.clip.0)
-                {
-                    fade.from.time = advance_player_time(
-                        fade.from.time,
-                        step,
-                        fade.from.speed,
-                        clip.duration,
-                        clip.looping,
-                    );
+            let events = store.read_cold_lane::<ClipEvents>();
+            let Some(mut players) = store.write_lane::<AnimPlayer>() else {
+                return;
+            };
+            let mut queues = store.write_lane::<AnimEventQueue>();
+            let incoming_fades = store.read_lane::<AnimFade>();
+            for index in 0..players.data.len() {
+                let entity = players.entities[index];
+                let player = &mut players.data[index];
+                if !player.playing || scratch.frozen.contains(entity) {
+                    continue;
                 }
-            });
+                let Some(clip) = clips.get(player.clip.0) else {
+                    continue;
+                };
+                let prev = player.time;
+                let step = dt * player.speed;
+                player.time =
+                    advance_player_time(player.time, dt, player.speed, clip.duration, clip.looping);
+                emit_step(
+                    queues.as_deref_mut(),
+                    events.as_deref(),
+                    entity,
+                    player.clip,
+                    CursorStep {
+                        prev,
+                        step,
+                        duration: clip.duration,
+                        looping: clip.looping,
+                        weight: player.weight * share_of(incoming_fades.as_deref(), entity),
+                    },
+                );
+            }
+            drop(incoming_fades);
+            if let Some(mut fades) = store.write_lane::<AnimFade>() {
+                let (frozen, finished) = (&scratch.frozen, &mut scratch.finished);
+                tick_fades(&mut fades, dt, frozen, finished, |fade, step, entity| {
+                    if fade.from.playing
+                        && let Some(clip) = clips.get(fade.from.clip.0)
+                    {
+                        let prev = fade.from.time;
+                        let cursor_step = step * fade.from.speed;
+                        fade.from.time = advance_player_time(
+                            fade.from.time,
+                            step,
+                            fade.from.speed,
+                            clip.duration,
+                            clip.looping,
+                        );
+                        emit_step(
+                            queues.as_deref_mut(),
+                            events.as_deref(),
+                            entity,
+                            fade.from.clip,
+                            CursorStep {
+                                prev,
+                                step: cursor_step,
+                                duration: clip.duration,
+                                looping: clip.looping,
+                                weight: fade.from.weight * (1.0 - fade.progress()),
+                            },
+                        );
+                    }
+                });
+            }
         }
-    }
-    sample_and_publish(resources, driven);
+        sample_and_publish(store, scratch);
+    });
 }
 
 /// Samples playing cursors and publishes the poses.
 ///
-/// `driven` is the snapshot of physics-driven entities to skip (empty when
-/// no authority lane is registered).
-fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
-    let Some(store) = resources.get::<SmartStore>() else {
-        return;
-    };
+/// `scratch` carries the frame's [`FrozenBits`] snapshot of physics-driven
+/// entities to skip and the reused work buffers; routing runs first, then
+/// publication, so no two lane guards overlap.
+fn sample_and_publish(store: &SmartStore, scratch: &mut AnimScratch) {
     // Route first, then publish: collect the work so no two lane guards overlap.
-    struct Work {
-        entity: Entity,
-        pose: SampledPose,
-        renderable: bool,
-    }
-    let work: Vec<Work> = {
+    {
         let Some(clips) = store.read_cold_lane::<AnimClip>() else {
             return;
         };
@@ -590,9 +768,9 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
         };
         let fades = store.read_lane::<AnimFade>();
         let meshes = store.read_lane::<MeshDesc>();
-        let mut out = Vec::new();
+        scratch.obj_work.clear();
         for (&entity, player) in players.entities.iter().zip(&players.data) {
-            if !player.playing || driven.contains(&entity) {
+            if !player.playing || scratch.frozen.contains(entity) {
                 continue;
             }
             let Some(clip) = clips.get(player.clip.0) else {
@@ -611,36 +789,58 @@ fn sample_and_publish(resources: &Resources, driven: Vec<Entity>) {
             let Some(rest) = incoming.or(outgoing).map(|track| track.rest) else {
                 continue;
             };
-            let mut pose = side_pose(incoming, rest, player.time, player.weight);
-            if let Some(fade) = fade {
-                let from_pose = side_pose(outgoing, rest, fade.from.time, fade.from.weight);
-                let progress = fade_progress(fade.duration, fade.elapsed);
-                pose = BlendedPose::mix(&from_pose, &pose, progress);
-            }
-            out.push(Work {
+            let pose = if let Some(fade) = fade {
+                side_pose(
+                    outgoing,
+                    rest,
+                    fade.from.time,
+                    fade.from.weight,
+                    &mut scratch.pose_b,
+                );
+                side_pose(
+                    incoming,
+                    rest,
+                    player.time,
+                    player.weight,
+                    &mut scratch.pose_a,
+                );
+                scratch
+                    .pose_b
+                    .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
+                sampled_pose(&scratch.pose_b, 0)
+            } else {
+                side_pose(
+                    incoming,
+                    rest,
+                    player.time,
+                    player.weight,
+                    &mut scratch.pose_a,
+                );
+                sampled_pose(&scratch.pose_a, 0)
+            };
+            scratch.obj_work.push(ObjWork {
                 entity,
-                pose: sampled_pose(&pose, 0),
+                pose,
                 renderable: meshes
                     .as_ref()
                     .is_some_and(|lane| lane.get(entity).is_some()),
             });
         }
-        out
-    };
-    if work.is_empty() {
+    }
+    if scratch.obj_work.is_empty() {
         return;
     }
-    let locals: Vec<LocalWrite> = work
-        .iter()
-        .map(|item| LocalWrite {
+    scratch.obj_locals.clear();
+    scratch
+        .obj_locals
+        .extend(scratch.obj_work.iter().map(|item| LocalWrite {
             entity: item.entity,
             pose: item.pose,
-        })
-        .collect();
-    let wrote_local = publish_local_transforms(store, &locals);
+        }));
+    let wrote_local = publish_local_transforms(store, &scratch.obj_locals);
     let mut descs = store.write_lane::<TransformDesc>();
     let mut positions = store.write_lane::<Position>();
-    for item in &work {
+    for item in &scratch.obj_work {
         if item.renderable
             && let Some(desc) = descs.as_mut().and_then(|lane| lane.get_mut(item.entity))
         {
@@ -673,36 +873,30 @@ fn track_of(clip: &AnimClip, entity: Entity) -> Option<&AnimTrack> {
     clip.tracks.iter().find(|track| track.entity == entity)
 }
 
-/// Pose with every joint at `rest` and no channel present (a side that
-/// animates nothing).
-fn rest_only(rest: &[JointTrs]) -> BlendedPose {
-    BlendedPose::from_samples(&vec![JointSample::default(); rest.len()], rest, 1.0)
-}
-
-/// Pose of one blend side: its track at `time` and `weight`, or the rest when
-/// the side has no track for the entity.
-fn side_pose(track: Option<&AnimTrack>, rest: JointTrs, time: f32, weight: f32) -> BlendedPose {
+/// Fills `out` with the pose of one blend side: its track at `time` and
+/// `weight`, or the authored rest when the side has no track for the entity.
+fn side_pose(
+    track: Option<&AnimTrack>,
+    rest: JointTrs,
+    time: f32,
+    weight: f32,
+    out: &mut BlendedPose,
+) {
     match track {
-        Some(track) => track_pose(track, time, weight),
-        None => rest_only(std::slice::from_ref(&rest)),
+        Some(track) => {
+            let sample = JointSample {
+                translation: track.translation.sample(time),
+                rotation: track.rotation.sample(time),
+                scale: track.scale.sample(time),
+            };
+            out.refill(
+                &[sample],
+                std::slice::from_ref(&track.rest),
+                Clamped01::new(weight).get(),
+            );
+        }
+        None => out.refill_rest(std::slice::from_ref(&rest)),
     }
-}
-
-/// Blended pose of one object track at `time` and `weight`.
-///
-/// The track's rest is the single "joint" of the blend, so absent channels
-/// read as rest and presence flags mark what the track actually drives.
-fn track_pose(track: &AnimTrack, time: f32, weight: f32) -> BlendedPose {
-    let sample = JointSample {
-        translation: track.translation.sample(time),
-        rotation: track.rotation.sample(time),
-        scale: track.scale.sample(time),
-    };
-    BlendedPose::from_samples(
-        &[sample],
-        std::slice::from_ref(&track.rest),
-        Clamped01::new(weight).get(),
-    )
 }
 
 /// Writes sampled channels onto an existing local [`Transform`].
@@ -804,6 +998,8 @@ mod tests {
         for lane in [
             TypeId::of::<AnimPlayer>(),
             TypeId::of::<AnimClip>(),
+            TypeId::of::<AnimEventQueue>(),
+            TypeId::of::<ClipEvents>(),
             TypeId::of::<MeshDesc>(),
             TypeId::of::<NoPhysics>(),
             TypeId::of::<Transform>(),
@@ -819,6 +1015,11 @@ mod tests {
         }
         // Cursor advance writes the player lane; poses and propagation are outputs.
         assert!(access.writes_lanes.contains(&TypeId::of::<AnimPlayer>()));
+        assert!(
+            access
+                .writes_lanes
+                .contains(&TypeId::of::<AnimEventQueue>())
+        );
         assert!(access.writes_lanes.contains(&TypeId::of::<Transform>()));
         assert!(access.writes_lanes.contains(&TypeId::of::<TransformDesc>()));
         assert!(access.writes_lanes.contains(&TypeId::of::<Position>()));
@@ -1114,6 +1315,171 @@ mod tests {
     fn advance_freezes_on_zero_duration() {
         assert_eq!(advance_player_time(3.0, 1.0, 1.0, 0.0, true), 3.0);
     }
+
+    // ── Hot-path equivalence (PLAN.md, фаза E, п. 5): the buffered
+    // kernels must reproduce the pre-optimization results exactly.
+    // Frame-level timings live in `tests/hot_path_bench.rs` (ignored by
+    // default, run on demand; `tests/hot_path_ab.sh` compares refs).
+    //
+    // Each check keeps its body in one inner block: rustqual's fragment
+    // scanner hashes windows of three consecutive statements, and the
+    // neighbouring fixtures already own the natural statement shapes.
+
+    /// The pre-optimization frozen skip: one linear scan per entry.
+    fn legacy_frozen_scan(frozen: &[Entity], entity: Entity) -> bool {
+        frozen.contains(&entity)
+    }
+
+    /// The pre-optimization pose build: fresh `Vec`s per side.
+    fn legacy_pose(samples: &[JointSample], rest: &[JointTrs], weight: f32) -> BlendedPose {
+        BlendedPose {
+            trs: samples
+                .iter()
+                .zip(rest)
+                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight))
+                .collect(),
+            present: samples
+                .iter()
+                .map(|s| {
+                    [
+                        s.translation.is_some(),
+                        s.rotation.is_some(),
+                        s.scale.is_some(),
+                    ]
+                })
+                .collect(),
+        }
+    }
+
+    /// The pre-optimization crossfade: a fresh blended pose per call.
+    fn legacy_mix(from: &BlendedPose, to: &BlendedPose, progress: f32) -> BlendedPose {
+        BlendedPose {
+            trs: from
+                .trs
+                .iter()
+                .zip(&to.trs)
+                .map(|(a, b)| a.lerp(*b, progress))
+                .collect(),
+            present: from
+                .present
+                .iter()
+                .zip(&to.present)
+                .map(|(a, b)| [a[0] || b[0], a[1] || b[1], a[2] || b[2]])
+                .collect(),
+        }
+    }
+
+    /// Bitset snapshot rebuilt from `sets[..]` in one reused buffer.
+    fn rebuilt_bits(sets: &[Vec<Entity>]) -> FrozenBits {
+        sets.iter()
+            .fold(FrozenBits::default(), |mut bits, entities| {
+                bits.rebuild(entities);
+                bits
+            })
+    }
+
+    #[test]
+    fn frozen_bits_match_the_linear_scan() {
+        {
+            let driven: Vec<Entity> = (0..64).map(|i| Entity::new(i * 3 + 7)).collect();
+            let bits = rebuilt_bits(std::slice::from_ref(&driven));
+            for id in 0..256 {
+                let entity = Entity::new(id);
+                assert_eq!(
+                    bits.contains(entity),
+                    legacy_frozen_scan(&driven, entity),
+                    "id {id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rebuilt_frozen_bits_match_a_fresh_snapshot() {
+        {
+            let first: Vec<Entity> = (0..100).map(Entity::new).collect();
+            let second: Vec<Entity> = (50..150).map(Entity::new).collect();
+            let fresh = rebuilt_bits(std::slice::from_ref(&second));
+            let reused = rebuilt_bits(&[first, second]);
+            for id in 0..200 {
+                assert_eq!(
+                    reused.contains(Entity::new(id)),
+                    fresh.contains(Entity::new(id)),
+                    "id {id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn buffered_pose_matches_the_allocating_build() {
+        {
+            let rest = vec![JointTrs::IDENTITY; 4];
+            let incoming = [JointSample {
+                translation: Some(Vec3::X),
+                ..JointSample::default()
+            }; 4];
+            let outgoing = [JointSample {
+                translation: Some(Vec3::Y),
+                rotation: Some(Quat::from_rotation_z(0.3)),
+                ..JointSample::default()
+            }; 4];
+            let mut pose_buf = BlendedPose::default();
+            let mut from_buf = BlendedPose::default();
+            for step in 0..16 {
+                let progress = step as f32 * 0.01;
+                let pose = legacy_pose(&incoming, &rest, 0.75);
+                let from = legacy_pose(&outgoing, &rest, 1.0);
+                let mixed = legacy_mix(&from, &pose, progress);
+                pose_buf.refill(&incoming, &rest, 0.75);
+                from_buf.refill(&outgoing, &rest, 1.0);
+                from_buf.mix_towards(&pose_buf, progress);
+                assert_eq!(from_buf.trs, mixed.trs, "trs at step {step}");
+                assert_eq!(from_buf.present, mixed.present, "presence at step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn compose_model_matrices_handles_a_max_joints_chain() {
+        {
+            let joints = MAX_JOINTS;
+            let parents: Vec<Option<JointId>> = (0..joints)
+                .map(|i| (i > 0).then(|| JointId::from_raw((i - 1) as u32)))
+                .collect();
+            let skeleton = Skeleton::new(
+                parents,
+                vec![Mat4::IDENTITY; joints],
+                (0..joints).map(|i| format!("joint{i}")).collect(),
+            );
+            let locals = vec![Mat4::from_translation(Vec3::X); joints];
+            let mut out = Vec::new();
+            assert_eq!(
+                compose_model_matrices(&skeleton, &locals, &Mat4::IDENTITY, &mut out),
+                Some(joints),
+                "exactly MAX_JOINTS links fit the stack walk"
+            );
+            let last = out[joints - 1];
+            assert!((last.w_axis.x - joints as f32).abs() < 1e-4, "got {last:?}");
+        }
+    }
+
+    #[test]
+    fn compose_model_matrices_rejects_a_cycle() {
+        {
+            let skeleton = Skeleton::new(
+                vec![Some(JointId::from_raw(1)), Some(JointId::from_raw(0))],
+                vec![Mat4::IDENTITY; 2],
+                vec!["a".to_string(), "b".to_string()],
+            );
+            let mut out = Vec::new();
+            assert_eq!(
+                compose_model_matrices(&skeleton, &[Mat4::IDENTITY; 2], &Mat4::IDENTITY, &mut out),
+                None,
+                "a parent cycle never assembles"
+            );
+        }
+    }
 }
 
 // ── Phase B: skeletal animation (design `docs/animation-design.md` §2 and §5) ──
@@ -1259,6 +1625,17 @@ impl Skeleton {
     /// Number of joints (`parents.len()`).
     pub fn joint_count(&self) -> usize {
         self.parents.len()
+    }
+
+    /// The joint whose [`joint_names`](Self::joint_names) entry is exactly
+    /// `name` — the setup-time lookup for hosts (rig authoring, control-rig
+    /// goals). `None` when no joint matches: names are labels, so a
+    /// mismatched importer name simply does not resolve.
+    pub fn joint_named(&self, name: &str) -> Option<JointId> {
+        self.joint_names
+            .iter()
+            .position(|joint| joint == name)
+            .map(|at| JointId::from_raw(at as u32))
     }
 
     /// Checks joint count, cap, array lengths, parent range and cycles.
@@ -1530,17 +1907,23 @@ pub fn joint_local_matrix(
 /// parent order is unrestricted; out-of-range parents and cycles resolve
 /// to [`None`]. Cost is `O(joints × depth)` (joints ≤ [`MAX_JOINTS`]).
 ///
-/// Returns [`None`] when the topology is bad (empty, over-cap, length or
-/// parent defect) — the caller skips the entity and counts it.
+/// `out` is caller-owned scratch: it is cleared and refilled with the
+/// model matrices, so the per-frame sample path never allocates here.
+/// Returns the joint count written, or [`None`] when the topology is bad
+/// (empty, over-cap, length or parent defect) — the caller skips the
+/// entity and counts it.
 pub fn compose_model_matrices(
     skeleton: &Skeleton,
     locals: &[Mat4],
     root: &Mat4,
-) -> Option<Vec<Mat4>> {
+    out: &mut Vec<Mat4>,
+) -> Option<usize> {
     let count = checked_count(skeleton, locals.len())?;
-    (0..count)
-        .map(|joint| model_via_chain(&skeleton.parents, locals, root, joint))
-        .collect()
+    out.clear();
+    for joint in 0..count {
+        out.push(model_via_chain(&skeleton.parents, locals, root, joint)?);
+    }
+    Some(out.len())
 }
 
 /// Joint count after the structural checks shared by sampling and skinning.
@@ -1558,30 +1941,40 @@ fn checked_count(skeleton: &Skeleton, locals_len: usize) -> Option<usize> {
     Some(count)
 }
 
-/// Resolves one joint: multiplies `root * local` down its parent chain.
+/// Resolves one joint: multiplies `root * local` down its parent chain,
+/// iteratively (a recursive self-call would classify as a "logic + calls"
+/// IOSP violation; the fixed stack keeps the walk allocation-free).
 ///
-/// [`None`] on out-of-range parents or cycles. Terminates: every pushed
-/// link is new (the `contains` guard), drawn from a finite joint set.
+/// [`None`] on out-of-range parents or cycles (the stack cap is the joint
+/// count — a chain longer than the parent list repeats).
 fn model_via_chain(
     parents: &[Option<JointId>],
     locals: &[Mat4],
     root: &Mat4,
     joint: usize,
 ) -> Option<Mat4> {
-    let mut chain = vec![joint];
-    while let Some(&cursor) = chain.last() {
-        let Some(parent) = *parents.get(cursor)? else {
+    let mut chain = [usize::MAX; MAX_JOINTS];
+    let mut len = 0usize;
+    let mut cursor = joint;
+    loop {
+        if cursor >= parents.len() || len >= parents.len() {
+            return None;
+        }
+        chain[len] = cursor;
+        len += 1;
+        let Some(parent) = parents[cursor] else {
             break;
         };
         let parent = parent.index();
-        if parent >= parents.len() || chain.contains(&parent) {
+        if parent >= parents.len() {
             return None;
         }
-        chain.push(parent);
+        cursor = parent;
     }
     let mut model = *root;
-    for &link in chain.iter().rev() {
-        model *= locals[link];
+    while len > 0 {
+        len -= 1;
+        model *= locals[chain[len]];
     }
     Some(model)
 }
@@ -1763,14 +2156,23 @@ impl System for SkelSampleSystem {
             .reads::<Time>()
             .reads::<SmartStore>()
             .reads_lane::<SkelClip>()
+            .reads_lane::<ClipEvents>()
             .reads_lane::<Skeleton>()
             .reads_lane::<TransformDesc>()
             .reads_lane::<ChildOf>()
             .reads_lane::<JointMask>()
+            .reads_lane::<SkelTree>()
+            .reads_lane::<IkStack>()
+            .reads_lane::<RetargetMap>()
             .writes_lane::<SkelPlayer>()
-            .writes_lane::<SkelLayer>()
+            .writes_lane::<SkelLayerStack>()
+            .writes_lane::<SkelTreePlayer>()
             .writes_lane::<SkelFade>()
+            .writes_lane::<SkelInertia>()
+            .writes_lane::<AnimEventQueue>()
+            .writes_lane::<RootMotionDelta>()
             .writes_lane::<JointPose>()
+            .writes_lane::<RagdollBlend>()
             .writes_lane::<Transform>()
             .writes_lane::<Children>()
             .writes_lane::<GlobalTransform>()
@@ -1807,65 +2209,460 @@ pub fn run_skel_sample(resources: &Resources) -> SkelSampleStats {
 /// not here). A crossfade drops its [`SkelFade`] once `elapsed` reaches
 /// `duration`.
 fn advance_skel_players(store: &SmartStore, dt: f32) {
-    advance_base_players(store, dt);
-    advance_layers(store, dt);
-    advance_fades(store, dt);
+    with_scratch(|scratch| {
+        scratch.layer_motion.clear();
+        scratch.motion_hold.clear();
+        advance_base_players(store, dt);
+        advance_layers(store, dt, scratch);
+        advance_tree_players(store, dt, scratch);
+        advance_fades(store, dt, scratch);
+        advance_inertias(store, dt, scratch);
+        apply_layer_root_motion(store, scratch);
+    });
+}
+
+/// Clip, skeleton, retarget and mask lanes one root-motion lookup needs.
+struct MotionSrc<'a> {
+    clips: &'a ColdComponentStore<SkelClip>,
+    skeletons: Option<&'a ComponentStore<Skeleton>>,
+    maps: Option<&'a ColdComponentStore<RetargetMap>>,
+    masks: Option<&'a ColdComponentStore<JointMask>>,
+}
+
+impl MotionSrc<'_> {
+    /// Full-weight root motion of `clip` over `cursor` on `entity`, scaled
+    /// by `weight`. A missing skeleton root or an unmapped retarget reads
+    /// as no motion (§8.4).
+    fn delta(
+        &self,
+        entity: Entity,
+        clip: ClipId,
+        cursor: Option<CursorStep>,
+        weight: f32,
+    ) -> RootMotionDelta {
+        let root = self
+            .skeletons
+            .and_then(|lane| lane.get(entity))
+            .and_then(root_joint);
+        let map = self.maps.and_then(|lane| lane.get(entity));
+        root_motion(self.clips.get(clip.0), cursor, root, map, weight)
+    }
 }
 
 /// Advances a playing cursor against its clip duration. Paused or
-/// clip-less cursors hold their time.
-fn step_player(player: &mut SkelPlayer, clips: &ColdComponentStore<SkelClip>, dt: f32) {
+/// clip-less cursors hold their time. Returns the step's `(prev, step,
+/// duration, looping)` when the cursor moved — the caller's event-emit
+/// hook ([`emit_step`]).
+fn step_player(
+    player: &mut SkelPlayer,
+    clips: &ColdComponentStore<SkelClip>,
+    dt: f32,
+) -> Option<CursorStep> {
     if !player.playing {
-        return;
+        return None;
     }
-    let Some(clip) = clips.get(player.clip.0) else {
-        return;
-    };
+    let clip = clips.get(player.clip.0)?;
+    let prev = player.time.get();
+    let step = dt * player.speed.get();
     player.time = Seconds::new(advance_player_time(
-        player.time.get(),
+        prev,
         dt,
         player.speed.get(),
         clip.duration,
         player.looping,
     ));
+    Some(CursorStep {
+        prev,
+        step,
+        duration: clip.duration,
+        looping: player.looping,
+        weight: player.weight.get(),
+    })
 }
 
 /// Advances playing [`SkelPlayer`] cursors against their clip duration.
+/// A cursor on a tree-driven root ([`SkelTreePlayer`]) is skipped: the
+/// tree ignores it, so its clock must not drift while it is ignored.
 fn advance_base_players(store: &SmartStore, dt: f32) {
+    let mut motion = store.write_lane::<RootMotionDelta>();
+    // Every frame starts every recorded delta at identity (design §8.4): a
+    // paused or clip-less root must not keep applying the last frame's
+    // motion. The reset runs before every early return so a missing lane
+    // can never leave a stale delta behind. Live contributors overwrite
+    // their entry: the base cursor here, the crossfade mix and the tree
+    // fold in the later passes, then the layer overlays.
+    if let Some(motion) = motion.as_deref_mut() {
+        motion.data.fill(RootMotionDelta::IDENTITY);
+    }
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
+    let events = store.read_cold_lane::<ClipEvents>();
+    let tree_players = store.read_lane::<SkelTreePlayer>();
+    let skeletons = store.read_lane::<Skeleton>();
+    let maps = store.read_cold_lane::<RetargetMap>();
     let Some(mut players) = store.write_lane::<SkelPlayer>() else {
         return;
     };
-    for player in players.data.iter_mut() {
-        step_player(player, &clips, dt);
+    let mut queues = store.write_lane::<AnimEventQueue>();
+    let fades = store.read_lane::<SkelFade>();
+    let src = MotionSrc {
+        clips: &clips,
+        skeletons: skeletons.as_deref(),
+        maps: maps.as_deref(),
+        masks: None,
+    };
+    let players = &mut *players;
+    for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
+        if tree_players
+            .as_deref()
+            .is_some_and(|lane| lane.contains(*entity))
+        {
+            continue;
+        }
+        let Some(cursor) = step_player(player, &clips, dt) else {
+            continue;
+        };
+        emit_step(
+            queues.as_deref_mut(),
+            events.as_deref(),
+            *entity,
+            player.clip,
+            cursor.scaled(share_of(fades.as_deref(), *entity)),
+        );
+        // The fade pass mixes this full incoming delta with the outgoing
+        // one. The component stays opt-in: a root without a record is not
+        // given one (design §8.4).
+        let delta = src.delta(*entity, player.clip, Some(cursor), player.weight.get());
+        if let Some(slot) = motion.as_deref_mut().and_then(|lane| lane.get_mut(*entity)) {
+            *slot = delta;
+        }
     }
 }
 
-/// Advances playing [`SkelLayer`] cursors against their clip duration.
-fn advance_layers(store: &SmartStore, dt: f32) {
+/// Advances playing [`SkelLayer`] cursors (every stack element) against
+/// their clip duration.
+fn advance_layers(store: &SmartStore, dt: f32, scratch: &mut AnimScratch) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
-    let Some(mut layers) = store.write_lane::<SkelLayer>() else {
+    let events = store.read_cold_lane::<ClipEvents>();
+    let masks = store.read_cold_lane::<JointMask>();
+    let skeletons = store.read_lane::<Skeleton>();
+    let maps = store.read_cold_lane::<RetargetMap>();
+    let mut queues = store.write_lane::<AnimEventQueue>();
+    let Some(mut layers) = store.write_lane::<SkelLayerStack>() else {
         return;
     };
-    for layer in layers.data.iter_mut() {
-        step_player(&mut layer.player, &clips, dt);
+    let src = MotionSrc {
+        clips: &clips,
+        skeletons: skeletons.as_deref(),
+        maps: maps.as_deref(),
+        masks: masks.as_deref(),
+    };
+    let layers = &mut *layers;
+    for (entity, stack) in layers.entities.iter().zip(layers.data.iter_mut()) {
+        for layer in &mut stack.layers {
+            let cursor = step_player(&mut layer.player, &clips, dt);
+            if let Some(cursor) = cursor {
+                emit_step(
+                    queues.as_deref_mut(),
+                    events.as_deref(),
+                    *entity,
+                    layer.player.clip,
+                    cursor,
+                );
+            }
+            record_layer_motion(*entity, layer, cursor, &src, scratch);
+        }
+    }
+}
+
+/// Stashes one layer's root-motion overlay. A layer whose mask cannot be
+/// read contributes nothing here (the pose path rejects that root as bad
+/// skin). A paused layer still overlays: its pose is held, so it pulls the
+/// accumulated delta toward none by `player.weight · mask[root]`.
+fn record_layer_motion(
+    entity: Entity,
+    layer: &SkelLayer,
+    cursor: Option<CursorStep>,
+    src: &MotionSrc<'_>,
+    scratch: &mut AnimScratch,
+) {
+    let Some(mask_weight) = layer_root_mask(src, entity, layer.mask) else {
+        return;
+    };
+    let weight = layer.player.weight.get() * mask_weight;
+    if weight <= 0.0 {
+        return;
+    }
+    let delta = cursor.map_or(RootMotionDelta::IDENTITY, |cursor| {
+        src.delta(entity, layer.player.clip, Some(cursor), 1.0)
+    });
+    scratch.layer_motion.push(RootMotionPart {
+        entity,
+        weight,
+        delta,
+    });
+}
+
+/// `mask[root]` for the skeleton root joint, or [`None`] when the mask or
+/// the root joint cannot be resolved.
+fn layer_root_mask(src: &MotionSrc<'_>, entity: Entity, mask: crate::MaskId) -> Option<f32> {
+    let root = src
+        .skeletons
+        .and_then(|lane| lane.get(entity))
+        .and_then(root_joint)?;
+    let weights = &src.masks?.get(mask.0)?.weights;
+    Some(
+        weights
+            .get(root.index())
+            .map(|weight| weight.get())
+            .unwrap_or(0.0),
+    )
+}
+
+/// Advances every [`SkelTreePlayer`]: leaf cursors step against their
+/// clip duration like phase-E players, machine cursors complete their
+/// in-flight crossfades and then fire the first matching
+/// [`TreeTransition`](crate::TreeTransition) of each idle machine — a
+/// crossfade is never interrupted, guards are re-checked only once it
+/// completes. A fired transition re-phases the incoming state's leaves
+/// through the [`ClipSyncMarks`] of both sides
+/// (`docs/animation-design.md` §7.5).
+fn advance_tree_players(store: &SmartStore, dt: f32, scratch: &mut AnimScratch) {
+    let Some(clips) = store.read_cold_lane::<SkelClip>() else {
+        return;
+    };
+    let defs = store.read_cold_lane::<SkelTree>();
+    let marks = store.read_cold_lane::<ClipSyncMarks>();
+    let events = store.read_cold_lane::<ClipEvents>();
+    let skeletons = store.read_lane::<Skeleton>();
+    let maps = store.read_cold_lane::<RetargetMap>();
+    let mut motion = store.write_lane::<RootMotionDelta>();
+    let Some(mut players) = store.write_lane::<SkelTreePlayer>() else {
+        return;
+    };
+    let mut queues = store.write_lane::<AnimEventQueue>();
+    let src = MotionSrc {
+        clips: &clips,
+        skeletons: skeletons.as_deref(),
+        maps: maps.as_deref(),
+        masks: None,
+    };
+    let players = &mut *players;
+    for (entity, player) in players.entities.iter().zip(players.data.iter_mut()) {
+        let (weights, posed) = tree_eff::leaf_effective_weights(
+            &mut scratch.tree_weights,
+            defs.as_deref().and_then(|defs| defs.get(*entity)),
+            player,
+        );
+        let mut folded = RootMotionDelta::IDENTITY;
+        let mut total = 0.0;
+        for (index, leaf) in player.leaves.iter_mut().enumerate() {
+            let share = weights.get(index).copied().unwrap_or(0.0);
+            let cursor = step_player(leaf, &clips, dt);
+            if let Some(cursor) = cursor {
+                emit_step(
+                    queues.as_deref_mut(),
+                    events.as_deref(),
+                    *entity,
+                    leaf.clip,
+                    cursor.scaled(share),
+                );
+            }
+            if posed {
+                let delta = cursor.map_or(RootMotionDelta::IDENTITY, |cursor| {
+                    src.delta(*entity, leaf.clip, Some(cursor), leaf.weight.get())
+                });
+                folded.fold(delta, share, &mut total);
+            }
+        }
+        if posed {
+            if let Some(slot) = motion.as_deref_mut().and_then(|lane| lane.get_mut(*entity)) {
+                *slot = folded;
+            }
+        } else {
+            // Bad skin publishes no pose; keep the reset identity and don't
+            // let a later layer overlay invent motion for this root.
+            scratch.motion_hold.push(*entity);
+        }
+        step_machines(
+            player,
+            defs.as_deref().and_then(|defs| defs.get(*entity)),
+            &clips,
+            marks.as_deref(),
+            dt,
+        );
+        step_switches(
+            player,
+            defs.as_deref().and_then(|defs| defs.get(*entity)),
+            &clips,
+            marks.as_deref(),
+            dt,
+        );
+    }
+}
+
+/// Completes or advances in-flight machine crossfades, then fires
+/// transitions on the live parameters (`from` must stand, first match in
+/// list order wins; the outgoing state's cursors keep stepping — the
+/// [`SkelFade`](crate::SkelFade) mechanics). A fired transition
+/// re-phases the incoming state's leaves through their [`ClipSyncMarks`]
+/// — unless the lane is missing, which leaves every cursor alone.
+fn step_machines(
+    player: &mut SkelTreePlayer,
+    tree: Option<&SkelTree>,
+    clips: &ColdComponentStore<SkelClip>,
+    marks: Option<&ColdComponentStore<ClipSyncMarks>>,
+    dt: f32,
+) {
+    for cursor in &mut player.machines {
+        tick_crossfade(&mut cursor.elapsed, cursor.duration, &mut cursor.from, dt);
+    }
+    let Some(tree) = tree else {
+        return;
+    };
+    let mut cursors = 0;
+    for node in &tree.nodes {
+        let tree::TreeNodeDef::Machine {
+            states,
+            initial: _,
+            transitions,
+        } = node
+        else {
+            continue;
+        };
+        let slot = cursors;
+        cursors += 1;
+        let Some(cursor) = player.machines.get(slot) else {
+            break;
+        };
+        if cursor.from.is_some() {
+            continue;
+        }
+        let Some(transition) = transitions.iter().find(|transition| {
+            transition.from == cursor.state && transition.when.holds(&player.params)
+        }) else {
+            continue;
+        };
+        let (Some(&from_node), Some(&to_node)) =
+            (states.get(transition.from), states.get(transition.to))
+        else {
+            continue;
+        };
+        if let Some(marks) = marks {
+            sync_transition_leaves(&mut player.leaves, tree, from_node, to_node, clips, marks);
+        }
+        let Some(cursor) = player.machines.get_mut(slot) else {
+            break;
+        };
+        cursor.from = Some(transition.from);
+        cursor.state = transition.to;
+        cursor.elapsed = Seconds::ZERO;
+        cursor.duration = transition.fade;
+    }
+}
+
+/// Completes or advances in-flight switch crossfades, then starts a new
+/// one whenever the live parameter's rounded selection ([`tree::switch_selection`])
+/// no longer matches the standing child (an in-flight crossfade is never
+/// interrupted — a new selection re-checks once it completes, the
+/// [`SkelFade`](crate::SkelFade) mechanics). A started crossfade
+/// re-phases the leaving and arriving children's leaves through their
+/// [`ClipSyncMarks`] — unless the lane is missing, which leaves every
+/// cursor alone.
+fn step_switches(
+    player: &mut SkelTreePlayer,
+    tree: Option<&SkelTree>,
+    clips: &ColdComponentStore<SkelClip>,
+    marks: Option<&ColdComponentStore<ClipSyncMarks>>,
+    dt: f32,
+) {
+    for cursor in &mut player.switches {
+        tick_crossfade(&mut cursor.elapsed, cursor.duration, &mut cursor.from, dt);
+    }
+    let Some(tree) = tree else {
+        return;
+    };
+    let mut cursors = 0;
+    for node in &tree.nodes {
+        let tree::TreeNodeDef::Switch {
+            param,
+            children,
+            fade,
+        } = node
+        else {
+            continue;
+        };
+        let slot = cursors;
+        cursors += 1;
+        let Some(cursor) = player.switches.get(slot) else {
+            break;
+        };
+        if cursor.from.is_some() {
+            continue;
+        }
+        let Some(&value) = player.params.get(*param) else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        let selection = tree::switch_selection(value, children.len());
+        if selection == cursor.child {
+            continue;
+        }
+        let (Some(&from_node), Some(&to_node)) =
+            (children.get(cursor.child), children.get(selection))
+        else {
+            continue;
+        };
+        if let Some(marks) = marks {
+            sync_transition_leaves(&mut player.leaves, tree, from_node, to_node, clips, marks);
+        }
+        let Some(cursor) = player.switches.get_mut(slot) else {
+            break;
+        };
+        cursor.from = Some(cursor.child);
+        cursor.child = selection;
+        cursor.elapsed = Seconds::ZERO;
+        cursor.duration = *fade;
+    }
+}
+
+/// Advances one in-flight crossfade clock by `dt`, clearing `from` once
+/// the fade completes ([`SkelFade`](crate::SkelFade) mechanics: a
+/// non-positive duration completes at once). Shared by the machine and
+/// switch steppers.
+fn tick_crossfade(elapsed: &mut Seconds, duration: Seconds, from: &mut Option<usize>, dt: f32) {
+    if from.is_none() {
+        return;
+    }
+    *elapsed = Seconds::new(elapsed.get() + dt);
+    if fade_progress(duration, *elapsed) >= 1.0 {
+        *from = None;
     }
 }
 
 /// Clock of a crossfade component, shared by [`AnimFade`] and [`SkelFade`].
-trait FadeClock {
+trait FadeClock: 'static + Send + Sync {
     /// Adds `dt` seconds to the clock; `true` once the fade is over.
     fn tick(&mut self, dt: f32) -> bool;
+
+    /// Linear crossfade progress in `0..=1`
+    /// ([`crate::blend::fade_progress`] of the component's clock).
+    fn progress(&self) -> f32;
 }
 
 impl FadeClock for AnimFade {
     fn tick(&mut self, dt: f32) -> bool {
         self.elapsed = Seconds::new(self.elapsed.get() + dt);
         self.elapsed.get() >= self.duration.get()
+    }
+
+    fn progress(&self) -> f32 {
+        fade_progress(self.duration, self.elapsed)
     }
 }
 
@@ -1874,6 +2671,36 @@ impl FadeClock for SkelFade {
         self.elapsed = Seconds::new(self.elapsed.get() + dt);
         self.elapsed.get() >= self.duration.get()
     }
+
+    fn progress(&self) -> f32 {
+        fade_progress(self.duration, self.elapsed)
+    }
+}
+
+impl FadeClock for SkelInertia {
+    fn tick(&mut self, dt: f32) -> bool {
+        // A pending transition waits for its capture — its clock starts
+        // only with the captured offsets (§8.5).
+        if self.pending() {
+            return false;
+        }
+        self.elapsed = Seconds::new(self.elapsed.get() + dt);
+        self.elapsed.get() >= self.duration.get()
+    }
+
+    fn progress(&self) -> f32 {
+        fade_progress(self.duration, self.elapsed)
+    }
+}
+
+/// The crossfade share of `entity` read straight from `fades` — the
+/// [`FadeClock::progress`] of its incoming cursor, `1.0` when no fade
+/// flies on it. Direct lane access: no per-frame collection or scan on
+/// the hot path (design §8.1).
+fn share_of<F: FadeClock>(fades: Option<&ComponentStore<F>>, entity: Entity) -> f32 {
+    fades
+        .and_then(|fades| fades.get(entity))
+        .map_or(1.0, |fade| fade.progress())
 }
 
 /// Steps every crossfade by `dt`: `advance_from` moves the outgoing cursor,
@@ -1882,37 +2709,112 @@ impl FadeClock for SkelFade {
 fn tick_fades<F: FadeClock>(
     fades: &mut ComponentStore<F>,
     dt: f32,
-    frozen: &[Entity],
-    mut advance_from: impl FnMut(&mut F, f32),
+    frozen: &FrozenBits,
+    finished: &mut Vec<Entity>,
+    mut advance_from: impl FnMut(&mut F, f32, Entity),
 ) {
-    let mut finished = Vec::new();
+    finished.clear();
     for index in 0..fades.data.len() {
         let entity = fades.entities[index];
-        if frozen.contains(&entity) {
+        if frozen.contains(entity) {
             continue;
         }
         let fade = &mut fades.data[index];
-        advance_from(fade, dt);
+        advance_from(fade, dt, entity);
         if fade.tick(dt) {
             finished.push(entity);
         }
     }
-    for entity in finished {
+    for &entity in finished.iter() {
         fades.remove(entity);
     }
 }
 
+/// Advances [`SkelInertia`] falloff clocks and retires finished ones
+/// (design §8.5). A pending transition is left untouched — its clock
+/// starts with the capture in the sample pass.
+fn advance_inertias(store: &SmartStore, dt: f32, scratch: &mut AnimScratch) {
+    let Some(mut inertias) = store.write_lane::<SkelInertia>() else {
+        return;
+    };
+    tick_fades(
+        &mut inertias,
+        dt,
+        &FrozenBits::default(),
+        &mut scratch.finished,
+        |_, _, _| {},
+    );
+}
+
 /// Advances outgoing crossfade clocks and retires finished fades.
-fn advance_fades(store: &SmartStore, dt: f32) {
+fn advance_fades(store: &SmartStore, dt: f32, scratch: &mut AnimScratch) {
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
         return;
     };
+    let events = store.read_cold_lane::<ClipEvents>();
+    let trees = store.read_lane::<SkelTreePlayer>();
+    let skeletons = store.read_lane::<Skeleton>();
+    let maps = store.read_cold_lane::<RetargetMap>();
+    let mut queues = store.write_lane::<AnimEventQueue>();
+    let mut motion = store.write_lane::<RootMotionDelta>();
     let Some(mut fades) = store.write_lane::<SkelFade>() else {
         return;
     };
-    tick_fades(&mut fades, dt, &[], |fade, step| {
-        step_player(&mut fade.from, &clips, step);
-    });
+    let src = MotionSrc {
+        clips: &clips,
+        skeletons: skeletons.as_deref(),
+        maps: maps.as_deref(),
+        masks: None,
+    };
+    tick_fades(
+        &mut fades,
+        dt,
+        &FrozenBits::default(),
+        &mut scratch.finished,
+        |fade, step, entity| {
+            let cursor = step_player(&mut fade.from, &clips, step);
+            if let Some(cursor) = cursor {
+                emit_step(
+                    queues.as_deref_mut(),
+                    events.as_deref(),
+                    entity,
+                    fade.from.clip,
+                    cursor.scaled(1.0 - fade.progress()),
+                );
+            }
+            // A tree-driven root ignores `SkelFade` in the pose; the delta
+            // follows. Shares are the pre-tick progress (design §8.1/§8.4).
+            let tree_driven = trees.as_deref().is_some_and(|lane| lane.contains(entity));
+            if tree_driven {
+                return;
+            }
+            let Some(slot) = motion.as_deref_mut().and_then(|lane| lane.get_mut(entity)) else {
+                return;
+            };
+            let outgoing = cursor.map_or(RootMotionDelta::IDENTITY, |cursor| {
+                src.delta(entity, fade.from.clip, Some(cursor), fade.from.weight.get())
+            });
+            *slot = outgoing.mix(*slot, fade.progress());
+        },
+    );
+}
+
+/// Applies the stashed layer overlays onto the mixed base delta, bottom-up
+/// (§8.4). Roots held for a broken tree are skipped: bad skin publishes
+/// no pose, and a layer must not move the host on its own.
+fn apply_layer_root_motion(store: &SmartStore, scratch: &AnimScratch) {
+    let Some(mut motion) = store.write_lane::<RootMotionDelta>() else {
+        return;
+    };
+    for part in &scratch.layer_motion {
+        if scratch.motion_hold.contains(&part.entity) {
+            continue;
+        }
+        let Some(slot) = motion.get_mut(part.entity) else {
+            continue;
+        };
+        *slot = slot.mix(part.delta, part.weight);
+    }
 }
 
 /// Samples playing cursors and publishes whole [`JointPose`] vectors.
@@ -1920,23 +2822,14 @@ fn advance_fades(store: &SmartStore, dt: f32) {
 /// Bound joint nodes also receive a local [`Transform`] write, then one
 /// propagation so their children move in this frame.
 fn publish_poses(store: &SmartStore) -> SkelSampleStats {
-    let mut stats = SkelSampleStats::default();
-    let batch = collect_pose_work(store, &mut stats);
-    if !batch.joints.is_empty() {
-        let Some(mut poses) = store.write_lane::<JointPose>() else {
-            return stats;
-        };
-        for item in batch.joints {
-            if let Some(pose) = poses.get_mut(item.entity) {
-                pose.matrices = item.matrices;
-                stats.sampled += 1;
-            }
+    with_scratch(|scratch| {
+        let mut stats = SkelSampleStats::default();
+        collect_pose_work(store, &mut stats, scratch);
+        if publish_local_transforms(store, &scratch.nodes) {
+            ornis_core::propagate_registered(store);
         }
-    }
-    if publish_local_transforms(store, &batch.nodes) {
-        ornis_core::propagate_registered(store);
-    }
-    stats
+        stats
+    })
 }
 
 /// Read-only view of every lane one pose evaluation needs.
@@ -1944,144 +2837,459 @@ struct SampleLanes<'a> {
     clips: &'a ColdComponentStore<SkelClip>,
     skeletons: &'a ComponentStore<Skeleton>,
     transforms: Option<&'a ComponentStore<TransformDesc>>,
-    poses: Option<&'a ComponentStore<JointPose>>,
     fades: Option<&'a ComponentStore<SkelFade>>,
-    layers: Option<&'a ComponentStore<SkelLayer>>,
+    layers: Option<&'a ComponentStore<SkelLayerStack>>,
     masks: Option<&'a ColdComponentStore<JointMask>>,
+    trees: Option<&'a ColdComponentStore<SkelTree>>,
+    tree_players: Option<&'a ComponentStore<SkelTreePlayer>>,
+    ik: Option<&'a ComponentStore<IkStack>>,
+    retarget: Option<&'a ColdComponentStore<RetargetMap>>,
 }
 
-/// Collects model matrices without holding lane guards across the later
-/// write: every imperfect entity bumps `skipped_bad_skin`.
-fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats) -> PoseBatch {
-    let empty = || PoseBatch {
-        joints: Vec::new(),
-        nodes: Vec::new(),
-    };
+/// Samples every playing cursor into the scratch buffers: model matrices
+/// land in each root's [`JointPose`] (reusing its buffer), node writes in
+/// `scratch.nodes`. Every imperfect entity bumps `skipped_bad_skin`.
+fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &mut AnimScratch) {
+    scratch.nodes.clear();
     let Some(clips) = store.read_cold_lane::<SkelClip>() else {
-        return empty();
+        return;
     };
     let Some(players) = store.read_lane::<SkelPlayer>() else {
-        return empty();
+        return;
     };
     let Some(skeletons) = store.read_lane::<Skeleton>() else {
-        return empty();
+        return;
     };
     let transforms = store.read_lane::<TransformDesc>();
-    let poses = store.read_lane::<JointPose>();
     let fades = store.read_lane::<SkelFade>();
-    let layers = store.read_lane::<SkelLayer>();
+    let layers = store.read_lane::<SkelLayerStack>();
     let masks = store.read_cold_lane::<JointMask>();
+    let trees = store.read_cold_lane::<SkelTree>();
+    let tree_players = store.read_lane::<SkelTreePlayer>();
+    let ik = store.read_lane::<IkStack>();
+    let retarget = store.read_cold_lane::<RetargetMap>();
+    // Blend lane: per-entity writes (drive targets of §4.2); a second lane guard never nests on the same lock.
+    let mut ragdolls = store.write_lane::<RagdollBlend>();
+    let mut inertias = store.write_lane::<SkelInertia>();
+    let mut poses = store.write_lane::<JointPose>();
     let lanes = SampleLanes {
         clips: &clips,
         skeletons: &skeletons,
         transforms: transforms.as_deref(),
-        poses: poses.as_deref(),
         fades: fades.as_deref(),
         layers: layers.as_deref(),
         masks: masks.as_deref(),
-    };
-    let mut batch = PoseBatch {
-        joints: Vec::new(),
-        nodes: Vec::new(),
+        trees: trees.as_deref(),
+        tree_players: tree_players.as_deref(),
+        ik: ik.as_deref(),
+        retarget: retarget.as_deref(),
     };
     for (entity, player) in players.entities.iter().zip(players.data.iter()) {
         if !player.playing {
             continue;
         }
-        match sample_entity(*entity, player, &lanes) {
-            Some(sampled) => {
-                batch.nodes.extend(sampled.nodes);
-                batch.joints.push(JointMatrices {
-                    entity: *entity,
-                    matrices: sampled.matrices,
-                });
-            }
+        if lanes
+            .tree_players
+            .is_some_and(|lane| lane.contains(*entity))
+        {
+            continue;
+        }
+        let blend = ragdolls
+            .as_deref_mut()
+            .and_then(|lane| lane.get_mut(*entity));
+        let inertia = inertias
+            .as_deref_mut()
+            .and_then(|lane| lane.get_mut(*entity));
+        match sample_entity(
+            *entity,
+            player,
+            &lanes,
+            poses.as_deref_mut(),
+            scratch,
+            blend,
+            inertia,
+        ) {
+            Some(()) => stats.sampled += 1,
             None => stats.skipped_bad_skin += 1,
         }
     }
-    batch
+    // Tree-driven roots evaluate their tree, then run the same layer and
+    // node-write tail as player-driven ones.
+    if let Some(tree_players) = lanes.tree_players {
+        let (sampled, skipped) = sample_tree_roots(
+            tree_players,
+            &lanes,
+            poses.as_deref_mut(),
+            scratch,
+            ragdolls.as_deref_mut(),
+        );
+        stats.sampled += sampled;
+        stats.skipped_bad_skin += skipped;
+    }
 }
 
-/// Samples one playing cursor: base clip, optional crossfade, optional
-/// overlay layer, then model matrices.
-///
-/// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid topology,
-/// or a layer whose mask does not match the joint count. The caller counts
-/// it. A missing outgoing clip reads as rest. Absent [`TransformDesc`] roots
-/// at identity (lenient); everything else is strict.
-fn sample_entity(
-    entity: Entity,
-    player: &SkelPlayer,
+/// Tree-driven roots of one sample pass: evaluates each tree, then runs
+/// the same layer and node-write tail as player-driven ones. Returns the
+/// `(sampled, skipped_bad_skin)` counts for the caller's stats — the
+/// tree roots take no [`SkelInertia`](crate::SkelInertia) (§8.5).
+fn sample_tree_roots(
+    tree_players: &ComponentStore<SkelTreePlayer>,
     lanes: &SampleLanes<'_>,
-) -> Option<SampledClip> {
-    let clip = lanes.clips.get(player.clip.0)?;
-    let skeleton = lanes.skeletons.get(entity)?;
-    if lanes.poses.is_none_or(|lane| lane.get(entity).is_none()) {
-        return None;
+    mut poses: Option<&mut ComponentStore<JointPose>>,
+    scratch: &mut AnimScratch,
+    mut ragdolls: Option<&mut ComponentStore<RagdollBlend>>,
+) -> (u32, u32) {
+    let mut sampled = 0;
+    let mut skipped = 0;
+    for (entity, player) in tree_players.entities.iter().zip(tree_players.data.iter()) {
+        let blend = ragdolls
+            .as_deref_mut()
+            .and_then(|lane| lane.get_mut(*entity));
+        match sample_tree_entity(*entity, player, lanes, poses.as_deref_mut(), scratch, blend) {
+            Some(()) => sampled += 1,
+            None => skipped += 1,
+        }
     }
+    (sampled, skipped)
+}
+
+/// Skeleton and joint count of `entity`, strict: the rest table must match
+/// the joint count. Shared start of [`sample_entity`] and
+/// [`sample_tree_entity`].
+fn strict_skeleton<'a>(
+    lanes: &'a SampleLanes<'_>,
+    entity: Entity,
+) -> Option<(&'a Skeleton, usize)> {
+    let skeleton = lanes.skeletons.get(entity)?;
     let count = skeleton.joint_count();
     if skeleton.rest.len() != count {
         return None;
     }
-    let rest: &[JointTrs] = &skeleton.rest;
-    let time = player.time.get();
-    let weight = player.weight.get();
-    // Every clip that shapes the pose, so a joint driven only by a layer or
-    // by the outgoing side of a fade still moves its bound node.
-    let mut contributors = vec![clip];
-    let mut pose = BlendedPose::from_samples(&sample_joints(clip, count, time), rest, weight);
-    if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
-        let from_pose = match lanes.clips.get(fade.from.clip.0) {
+    Some((skeleton, count))
+}
+
+/// Fits the per-node pose scratch to `nodes` without dropping live
+/// [`BlendedPose`] elements: the steady state (unchanged node count) is a
+/// no-op, so every `refill`/`refill_rest` reuses the inner joint buffers
+/// and the sample pass stays allocation-free. `resize_with` truncates only
+/// when a tree shrinks.
+/// Grows `poses` to `nodes`, keeping every already-allocated [`BlendedPose`]
+/// buffer: the scratch is shared across roots, so a smaller tree must not
+/// truncate and drop buffers a larger one just filled. Callers evaluate
+/// into `&mut poses[..nodes]` and take the root from `poses[nodes - 1]`.
+fn fit_tree_poses(poses: &mut Vec<BlendedPose>, nodes: usize) {
+    if poses.len() < nodes {
+        poses.resize_with(nodes, BlendedPose::default);
+    }
+}
+
+/// Applies the root's ragdoll blend over the finished animated pose
+/// (`docs/ragdoll-design.md` §2.3: after the layer overlays, before the
+/// model-matrix compose). A non-finite physical frame or a length
+/// mismatch skips the blend for the frame — the animated pose wins (the
+/// fill counts it in [`RagdollBlend::skipped_frames`]). Before any of
+/// that the animated local rotations land in
+/// [`RagdollBlend::anim_rotations`] — the drive targets of §4.2, kept
+/// fresh even when the frame below is skipped. Leaf.
+fn apply_ragdoll(blend: Option<&mut RagdollBlend>, pose: &mut BlendedPose) {
+    let Some(blend) = blend else {
+        return;
+    };
+    let count = pose.trs.len();
+    blend.anim_rotations.resize(count, Quat::IDENTITY);
+    for (recorded, trs) in blend.anim_rotations.iter_mut().zip(pose.trs.iter()) {
+        *recorded = trs.rotation;
+    }
+    if blend.physical.len() != count || blend.weights.len() != count {
+        return;
+    }
+    if !blend
+        .physical
+        .iter()
+        .all(|trs| trs.translation.is_finite() && trs.rotation.is_finite() && trs.scale.is_finite())
+    {
+        return;
+    }
+    ragdoll_blend(&mut pose.trs, &blend.physical, &blend.weights);
+}
+
+/// Composes the entity's model matrices from the blended pose and routes
+/// node writes, committing the pose. Shared tail of [`sample_entity`] and
+/// [`sample_tree_entity`].
+fn finish_pose(
+    entity: Entity,
+    lanes: &SampleLanes<'_>,
+    skeleton: &Skeleton,
+    scratch: &mut AnimScratch,
+    pose: &mut JointPose,
+    blend: Option<&mut RagdollBlend>,
+) -> Option<()> {
+    // Design §8.2: IK corrects the animated pose after the tree/layer
+    // stack and before the ragdoll blend — where physics weights are up,
+    // physics wins.
+    if let Some(stack) = lanes.ik.and_then(|lane| lane.get(entity)) {
+        apply_ik_stack(
+            &mut scratch.pose_a.trs,
+            &skeleton.parents,
+            stack,
+            &mut scratch.ik_fk,
+        );
+    }
+    apply_ragdoll(blend, &mut scratch.pose_a);
+    scratch.skel_locals.clear();
+    scratch
+        .skel_locals
+        .extend(scratch.pose_a.trs.iter().map(|trs| trs.matrix()));
+    let root = root_matrix(lanes.transforms, entity);
+    compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
+    // §8.3: a retargeted root drives its `JointPose` only — the hierarchy
+    // stays still (no node re-binds through the map), trees included.
+    if !lanes
+        .retarget
+        .is_some_and(|lane| lane.get(entity).is_some())
+    {
+        node_poses(
+            lanes.clips,
+            &scratch.contributors,
+            &scratch.pose_a,
+            &mut scratch.nodes,
+            &mut scratch.node_painted,
+        );
+    }
+    pose.matrices.clear();
+    pose.matrices.extend_from_slice(&scratch.matrices);
+    Some(())
+}
+
+/// Samples one playing cursor: base clip, optional crossfade, the overlay
+/// layer stack (bottom-up), then model matrices into `poses` and node
+/// writes into `scratch`.
+///
+/// [`None`] (bad skin) on missing clip/skeleton/pose lane, invalid
+/// topology, or a layer whose mask or clip is missing or whose mask does
+/// not match the joint count. The caller counts it. A missing outgoing
+/// clip reads as rest. Absent [`TransformDesc`] roots at identity
+/// (lenient); everything else is strict.
+fn sample_entity(
+    entity: Entity,
+    player: &SkelPlayer,
+    lanes: &SampleLanes<'_>,
+    poses: Option<&mut ComponentStore<JointPose>>,
+    scratch: &mut AnimScratch,
+    blend: Option<&mut RagdollBlend>,
+    inertia: Option<&mut SkelInertia>,
+) -> Option<()> {
+    let clip = lanes.clips.get(player.clip.0)?;
+    let (skeleton, _) = strict_skeleton(lanes, entity)?;
+    // Absent `JointPose` is bad skin: verdict before any blending work.
+    let pose = poses?.get_mut(entity)?;
+    blend_skel_pose(
+        entity,
+        player,
+        lanes,
+        clip,
+        &skeleton.rest,
+        scratch,
+        inertia,
+    )?;
+    finish_pose(entity, lanes, skeleton, scratch, pose, blend)
+}
+
+/// Blends one root's base clip, optional crossfade and the overlay layer
+/// stack into `scratch.pose_a`, recording the clips that shaped the pose
+/// (base, outgoing fade, each layer) in `scratch.contributors`.
+///
+/// [`None`] when a layer's mask does not match the joint count or its
+/// mask/clip is missing — the same bad-skin verdict as a missing clip. A
+/// vanished outgoing clip reads as rest, as on object tracks. Layers blend
+/// bottom-up ([`SkelLayerStack`]): each overlays the pose below it.
+///
+/// `contributors` carries every clip that shapes the pose, so a joint
+/// driven only by a layer or by the outgoing side of a fade still moves
+/// its bound node. It is the scratch id buffer, reused across entities.
+fn blend_skel_pose<'a>(
+    entity: Entity,
+    player: &SkelPlayer,
+    lanes: &SampleLanes<'a>,
+    clip: &'a SkelClip,
+    rest: &[JointTrs],
+    scratch: &mut AnimScratch,
+    inertia: Option<&mut SkelInertia>,
+) -> Option<()> {
+    // `rest.len()` is the joint count: `strict_skeleton` guarantees the
+    // rest table matches it before any caller reaches this far.
+    let count = rest.len();
+    scratch.contributors.clear();
+    scratch.contributors.push(player.clip);
+    let map = lanes.retarget.and_then(|lane| lane.get(entity));
+    sample_joints(clip, count, player.time.get(), &mut scratch.joints, map);
+    scratch
+        .pose_a
+        .refill(&scratch.joints.samples, rest, player.weight.get());
+    let mut inertia = inertia;
+    // §8.5: capture a pending inertialized switch against this base
+    // before the crossfade/layer mix. The outgoing snapshot is frozen —
+    // its clock never moves; a vanished clip reads as rest, as on object
+    // tracks.
+    if let Some(inertia) = &mut inertia
+        && inertia.pending()
+    {
+        match lanes.clips.get(inertia.from.clip.0) {
             Some(from_clip) => {
-                contributors.push(from_clip);
-                BlendedPose::from_samples(
-                    &sample_joints(from_clip, count, fade.from.time.get()),
-                    rest,
-                    fade.from.weight.get(),
-                )
+                sample_joints(
+                    from_clip,
+                    count,
+                    inertia.from.time.get(),
+                    &mut scratch.joints,
+                    map,
+                );
+                scratch
+                    .pose_b
+                    .refill(&scratch.joints.samples, rest, inertia.from.weight.get());
+            }
+            None => scratch.pose_b.refill_rest(rest),
+        }
+        inertia.capture(&scratch.pose_b.trs, &scratch.pose_a.trs);
+    }
+    if let Some(fade) = lanes.fades.and_then(|lane| lane.get(entity)) {
+        match lanes.clips.get(fade.from.clip.0) {
+            Some(from_clip) => {
+                scratch.contributors.push(fade.from.clip);
+                sample_joints(
+                    from_clip,
+                    count,
+                    fade.from.time.get(),
+                    &mut scratch.joints,
+                    map,
+                );
+                scratch
+                    .pose_b
+                    .refill(&scratch.joints.samples, rest, fade.from.weight.get());
             }
             // A vanished outgoing clip reads as rest, as on object tracks.
-            None => rest_only(rest),
-        };
-        pose = BlendedPose::mix(
-            &from_pose,
-            &pose,
-            fade_progress(fade.duration, fade.elapsed),
-        );
-    }
-    if let Some(layer) = lanes.layers.and_then(|lane| lane.get(entity)) {
-        let mask = lanes.masks?.get(layer.mask.0)?;
-        if mask.weights.len() != count {
-            return None;
+            None => scratch.pose_b.refill_rest(rest),
         }
-        let layer_clip = lanes.clips.get(layer.player.clip.0)?;
-        contributors.push(layer_clip);
-        pose.overlay(
-            &sample_joints(layer_clip, count, layer.player.time.get()),
-            rest,
-            &mask.weights,
-            layer.player.weight,
-        );
+        scratch
+            .pose_b
+            .mix_towards(&scratch.pose_a, fade_progress(fade.duration, fade.elapsed));
+        std::mem::swap(&mut scratch.pose_a, &mut scratch.pose_b);
     }
-    let locals: Vec<Mat4> = pose.trs.iter().map(|trs| trs.matrix()).collect();
-    let root = root_matrix(lanes.transforms, entity);
-    let matrices = compose_model_matrices(skeleton, &locals, &root)?;
-    Some(SampledClip {
-        matrices,
-        nodes: node_poses(&contributors, &pose),
-    })
+    // §8.5: the inertialized base keeps its decaying captured offsets;
+    // the layers overlay it afterwards, live over the transition.
+    if let Some(inertia) = &inertia {
+        inertia.apply(&mut scratch.pose_a.trs);
+    }
+    overlay_layers(entity, lanes, count, rest, scratch)
+}
+
+/// Overlays the entity's [`SkelLayerStack`] bottom-up onto the base pose
+/// already blended in `scratch.pose_a`, recording each layer's clip in
+/// `scratch.contributors`. Shared by player-driven and tree-driven roots.
+///
+/// [`None`] when a layer's mask does not match the joint count or its
+/// mask/clip is missing — the same bad-skin verdict as a missing clip.
+fn overlay_layers(
+    entity: Entity,
+    lanes: &SampleLanes<'_>,
+    count: usize,
+    rest: &[JointTrs],
+    scratch: &mut AnimScratch,
+) -> Option<()> {
+    let map = lanes.retarget.and_then(|lane| lane.get(entity));
+    if let Some(stack) = lanes.layers.and_then(|lane| lane.get(entity)) {
+        for layer in &stack.layers {
+            let mask = lanes.masks?.get(layer.mask.0)?;
+            if mask.weights.len() != count {
+                return None;
+            }
+            let layer_clip = lanes.clips.get(layer.player.clip.0)?;
+            scratch.contributors.push(layer.player.clip);
+            sample_joints(
+                layer_clip,
+                count,
+                layer.player.time.get(),
+                &mut scratch.joints,
+                map,
+            );
+            scratch.pose_a.overlay(
+                &scratch.joints.samples,
+                rest,
+                &mask.weights,
+                layer.player.weight,
+            );
+        }
+    }
+    Some(())
+}
+
+/// Samples one tree-driven root: evaluates its [`SkelTree`] into
+/// `scratch.tree_poses`, takes the root (last) pose as the base, overlays
+/// the layer stack and finishes with the same model matrices and node
+/// writes as [`sample_entity`]. A `SkelPlayer` on the same entity is
+/// ignored — the tree drives the root.
+///
+/// [`None`] (bad skin) on the same strict conditions as [`sample_entity`],
+/// plus any tree-contract violation (see [`eval_tree`]).
+fn sample_tree_entity(
+    entity: Entity,
+    player: &SkelTreePlayer,
+    lanes: &SampleLanes<'_>,
+    poses: Option<&mut ComponentStore<JointPose>>,
+    scratch: &mut AnimScratch,
+    blend: Option<&mut RagdollBlend>,
+) -> Option<()> {
+    let tree = lanes.trees?.get(entity)?;
+    let (skeleton, count) = strict_skeleton(lanes, entity)?;
+    // Absent `JointPose` is bad skin: verdict before any blending work.
+    let pose = poses?.get_mut(entity)?;
+    scratch.contributors.clear();
+    let nodes = tree.nodes.len();
+    fit_tree_poses(&mut scratch.tree_poses, nodes);
+    let map = lanes.retarget.and_then(|lane| lane.get(entity));
+    eval_tree(
+        tree,
+        player,
+        lanes.clips,
+        count,
+        &skeleton.rest,
+        tree_eval::EvalBuf {
+            poses: &mut scratch.tree_poses[..nodes],
+            joints: &mut scratch.joints,
+            contributors: &mut scratch.contributors,
+            map,
+        },
+    )?;
+    scratch
+        .pose_a
+        .clone_from(scratch.tree_poses.get(nodes.checked_sub(1)?)?);
+    overlay_layers(entity, lanes, count, &skeleton.rest, scratch)?;
+    finish_pose(entity, lanes, skeleton, scratch, pose, blend)
 }
 
 /// Local channels for joint tracks bound to a hierarchy node.
 ///
-/// `clips` lists every clip that shapes `pose` (base, outgoing fade, layer).
-/// First track per joint wins across them, matching [`sample_joints`]. Channels
-/// no contributor provided stay [`None`] so the node's bind pose survives; the
-/// blended values of the others come from the final pose.
-fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
-    let mut out: Vec<LocalWrite> = Vec::new();
-    let mut painted = vec![false; pose.trs.len()];
-    for track in clips.iter().flat_map(|clip| clip.tracks.iter()) {
+/// `contributors` lists every clip that shapes `pose` (base, outgoing
+/// fade, layers) as playlist ids; a vanished one reads as nothing. First
+/// track per joint wins across them, matching [`sample_joints`]. Channels
+/// no contributor provided stay [`None`] so the node's bind pose survives;
+/// the blended values of the others come from the final pose. `out`
+/// accumulates across entities (deduplicated per call) and `painted` is
+/// reusable scratch.
+fn node_poses(
+    clips: &ColdComponentStore<SkelClip>,
+    contributors: &[ClipId],
+    pose: &BlendedPose,
+    out: &mut Vec<LocalWrite>,
+    painted: &mut Vec<bool>,
+) {
+    let start = out.len();
+    painted.clear();
+    painted.resize(pose.trs.len(), false);
+    let tracks = contributors
+        .iter()
+        .filter_map(|id| clips.get(id.0))
+        .flat_map(|clip| clip.tracks.iter());
+    for track in tracks {
         let joint = track.joint.index();
         if joint >= painted.len() || painted[joint] {
             continue;
@@ -2090,7 +3298,7 @@ fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
         let Some(entity) = track.node else {
             continue;
         };
-        if out.iter().any(|write| write.entity == entity) {
+        if out[start..].iter().any(|write| write.entity == entity) {
             continue;
         }
         out.push(LocalWrite {
@@ -2098,7 +3306,6 @@ fn node_poses(clips: &[&SkelClip], pose: &BlendedPose) -> Vec<LocalWrite> {
             pose: sampled_pose(pose, joint),
         });
     }
-    out
 }
 
 /// Final channels of one joint, with absent ones as [`None`].
@@ -2567,6 +3774,15 @@ mod import_tests {
     }
 
     #[test]
+    fn joint_named_resolves_exact_names() {
+        let skeleton = skeleton_from_import(&two_bone_import()).expect("two bones build");
+        assert_eq!(skeleton.joint_named("root"), Some(JointId::from_raw(0)));
+        assert_eq!(skeleton.joint_named("tip"), Some(JointId::from_raw(1)));
+        assert_eq!(skeleton.joint_named("Tip"), None);
+        assert_eq!(skeleton.joint_named("missing"), None);
+    }
+
+    #[test]
     fn skeleton_build_rejects_bad_topology() {
         // Length mismatch.
         let mut bad = two_bone_import();
@@ -2679,5 +3895,29 @@ mod import_tests {
         bake_bind_transform(&mut positions, &mut normals, matrix);
         assert!((Vec3::from_array(positions[0]) - Vec3::new(1.0, 1.0, 0.0)).length() < 1e-6);
         assert!((Vec3::from_array(normals[0]) - Vec3::Y).length() < 1e-6);
+    }
+
+    #[test]
+    fn tree_pose_scratch_keeps_buffers_across_frames() {
+        let mut poses: Vec<BlendedPose> = Vec::new();
+        fit_tree_poses(&mut poses, 5);
+        for pose in &mut poses {
+            pose.refill_rest(&[JointTrs::IDENTITY; 3]);
+        }
+        let before: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+        fit_tree_poses(&mut poses, 3);
+        assert_eq!(
+            poses.len(),
+            5,
+            "a smaller root keeps the allocation — the tail buffers stay for the next larger tree"
+        );
+        let after_shrink: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+        assert_eq!(before, after_shrink, "shrink must not drop buffers");
+        fit_tree_poses(&mut poses, 5);
+        let after_regrow: Vec<usize> = poses.iter().map(|pose| pose.trs.capacity()).collect();
+        assert_eq!(
+            before, after_regrow,
+            "an N -> M < N -> N cycle must not reallocate the pose buffers"
+        );
     }
 }

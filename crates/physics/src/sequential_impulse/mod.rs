@@ -17,7 +17,7 @@ mod queries;
 mod sleep;
 mod step;
 
-pub(crate) use crate::engine::{Manifold, ManifoldPoint, PhysicsEngine};
+pub(crate) use crate::engine::{ContactImpulse, Manifold, ManifoldPoint, PhysicsEngine};
 pub use caches::{NarrowShardPool, SatCache, SatCacheEntry};
 pub(crate) use hooks::HookOverride;
 pub use hooks::{
@@ -202,6 +202,16 @@ pub struct SequentialImpulseEngine {
     /// body enables contact-force reports. Cleared at every step start;
     /// step-end emission reads this, never the solver state directly.
     force_peak: FxHashMap<(usize, usize), f32>,
+    /// Opt-in gate for the §10.4 contact-impulse readback (see
+    /// [`PhysicsEngine::set_contact_impulse_tracking`](crate::engine::PhysicsEngine::set_contact_impulse_tracking)):
+    /// when `false` (the default) nothing accumulates and untracked scenes
+    /// pay one flag check per substep.
+    track_impulses: bool,
+    /// Per-point contact impulses accumulated since the last
+    /// [`PhysicsEngine::drain_contact_impulses`](crate::engine::PhysicsEngine::drain_contact_impulses)
+    /// (§10.4 readback): one record per manifold point per substep, folded
+    /// from the warm cache in deterministic (sorted key, point) order.
+    impulses: Vec<ContactImpulse>,
     /// Pairs that already emitted a hit this step (dedupe for sustained
     /// crushes); cleared at s==0 of every step.
     scratch_hit_pairs: FxHashSet<(usize, usize)>,
@@ -722,12 +732,7 @@ impl SequentialImpulseEngine {
             .warm
             .iter()
             .map(|w| {
-                let mut pts = [crate::sequential_impulse::WarmPoint {
-                    la: Vec3::ZERO,
-                    lb: Vec3::ZERO,
-                    normal: Vec3::ZERO,
-                    impulse: 0.0,
-                }; MAX_MANIFOLD_POINTS];
+                let mut pts = [crate::sequential_impulse::WarmPoint::empty(); MAX_MANIFOLD_POINTS];
                 for (k, p) in w.points.iter().enumerate() {
                     pts[k] = p.to_point();
                 }
@@ -964,6 +969,8 @@ impl SequentialImpulseEngine {
             contact_events: Vec::new(),
             contact_force_events: Vec::new(),
             force_peak: FxHashMap::default(),
+            track_impulses: false,
+            impulses: Vec::new(),
             scratch_hit_pairs: FxHashSet::default(),
             last_step_timing: StepTiming::default(),
             step_budget: Some(StepBudget::default()),
@@ -1210,6 +1217,41 @@ impl SequentialImpulseEngine {
                 }
             }
         }
+    }
+
+    /// Contact-impulse readback accumulation for one completed substep
+    /// (§10.4): folds every manifold point's solved impulse into the
+    /// public buffer. Called beside [`Self::track_force_peak`]; gated by
+    /// `track_impulses`, so the solver never observes this pass — tracked
+    /// and untracked scenes solve bit-identically. Records are appended in
+    /// sorted (pair key, point) order: the warm cache is a hash map and its
+    /// iteration order is NOT part of the determinism contract.
+    fn track_contact_impulses(&mut self) {
+        if !self.track_impulses {
+            return;
+        }
+        let n = self.bodies.len();
+        let mut sorted: Vec<((usize, usize), usize, ContactImpulse)> = Vec::new();
+        for (&key, (pts, count)) in self.warm_impulses.iter() {
+            if key.0 >= n || key.1 >= n {
+                continue;
+            }
+            for (k, p) in pts.iter().take(*count).enumerate() {
+                sorted.push((
+                    key,
+                    k,
+                    ContactImpulse {
+                        a: BodyHandle::from(key.0),
+                        b: BodyHandle::from(key.1),
+                        point: p.point_world,
+                        impulse: p.impulse_world,
+                    },
+                ));
+            }
+        }
+        sorted.sort_unstable_by_key(|(key, k, _)| (*key, *k));
+        self.impulses
+            .extend(sorted.into_iter().map(|(_, _, rec)| rec));
     }
 
     /// Contact-force emission for one completed step (called at the end of
@@ -1587,10 +1629,12 @@ impl PhysicsEngine for SequentialImpulseEngine {
             // Contact-force peak tracking (read-only over the merged warm
             // cache): the step peak of per-substep force, so a transient
             // impact that resolves mid-step still reports. Gated above —
-            // untracked scenes never enter this loop body.
+            // untracked scenes never enter this arm. The §10.4 impulse
+            // readback accumulates beside it under its own opt-in gate.
             if track_forces {
                 self.track_force_peak(sub_dt);
             }
+            self.track_contact_impulses();
         }
         self.scratch_narrow_shards = narrow_shards;
         self.scratch_pairs = sorted_pairs;
@@ -2100,6 +2144,12 @@ impl PhysicsEngine for SequentialImpulseEngine {
 
     fn drain_contact_force_events(&mut self) -> Vec<ContactForceEvent> {
         std::mem::take(&mut self.contact_force_events)
+    }
+    fn set_contact_impulse_tracking(&mut self, on: bool) {
+        self.track_impulses = on;
+    }
+    fn drain_contact_impulses(&mut self) -> Vec<ContactImpulse> {
+        std::mem::take(&mut self.impulses)
     }
 
     fn wake_body(&mut self, handle: BodyHandle) {

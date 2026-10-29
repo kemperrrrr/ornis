@@ -431,7 +431,12 @@ const ANGULAR_SPEED_FLOOR: f32 = 1e-12;
 /// link under another link through a revolute/fixed joint (snapping the
 /// child's subtree so the anchors coincide), or use
 /// [`FeatherstoneEngine::add_root`] for an explicit fixed/floating base.
-#[derive(Debug)]
+///
+/// `Clone` is a full state copy (links, topology, gravity and pending
+/// impulses) — the deep-clone seam behind
+/// [`RagdollRuntime::deep_clone`](https://docs.rs/ornis-app) snapshots;
+/// handles are dense indices and stay valid in the copy.
+#[derive(Debug, Clone)]
 pub struct FeatherstoneEngine {
     /// Links in handle order (`BodyHandle(i)` is link `i`).
     links: Vec<Link>,
@@ -441,6 +446,11 @@ pub struct FeatherstoneEngine {
     order: Vec<usize>,
     /// World-space gravity acceleration (m/s^2).
     gravity: Vec3,
+    /// Pending external impulses (§10.4 explicit coupling): world-frame
+    /// `(link, linear, angular-about-COM)` triples folded into the bias
+    /// force of the next [`PhysicsEngine::step`] and consumed exactly
+    /// once. Empty on the hot path without contacts.
+    ext_impulses: Vec<(usize, Vec3, Vec3)>,
 }
 
 impl FeatherstoneEngine {
@@ -456,6 +466,7 @@ impl FeatherstoneEngine {
             } else {
                 Vec3::ZERO
             },
+            ext_impulses: Vec::new(),
         }
     }
 
@@ -633,6 +644,47 @@ impl FeatherstoneEngine {
         {
             link.friction = c;
         }
+    }
+
+    /// Applies a world-frame impulse `impulse_world` at `point_world` to
+    /// `handle`'s body — the external-contact channel of the explicit
+    /// ragdoll↔world coupling (`docs/ragdoll-design.md` §10.4). The
+    /// impulse folds into the bias force of the next
+    /// [`PhysicsEngine::step`] as `impulse / dt` — a velocity-level,
+    /// momentum-conserving kick that the articulated solve distributes
+    /// through the joints — and is consumed exactly once. The linear part
+    /// acts at the body's COM; the torque about the COM follows from
+    /// `point_world`. Unknown handles and non-finite inputs are ignored
+    /// (never a NaN source downstream).
+    pub fn apply_impulse(&mut self, handle: BodyHandle, point_world: Vec3, impulse_world: Vec3) {
+        let hi = handle.index();
+        let Some(link) = self.links.get(hi) else {
+            return;
+        };
+        if !point_world.is_finite() || !impulse_world.is_finite() {
+            return;
+        }
+        let torque = (point_world - link.body.position).cross(impulse_world);
+        self.ext_impulses.push((hi, impulse_world, torque));
+    }
+
+    /// Pending external impulses of link `i` as a link-frame bias force
+    /// (`impulse / dt`, §10.4). Zero on the hot path without contacts.
+    /// Leaf.
+    fn ext_bias(&self, i: usize, rot: &Mat3, h: f32) -> S6 {
+        let mut lin = Vec3::ZERO;
+        let mut ang = Vec3::ZERO;
+        for &(hi, l, a) in &self.ext_impulses {
+            if hi == i {
+                lin += l;
+                ang += a;
+            }
+        }
+        let inv_h = 1.0 / h;
+        pack(
+            rot.transpose() * (ang * inv_h),
+            rot.transpose() * (lin * inv_h),
+        )
     }
 
     /// Rebuild children adjacency and the outward order after structural
@@ -835,13 +887,16 @@ impl FeatherstoneEngine {
             let inertia = link_inertia(link.body.inertia, link.body.mass);
             let iv = mat_vec(&inertia, &v);
             let mut p = cross_force(&v, &iv);
-            // External force: gravity at the COM plus the consumed torque.
+            // External force: gravity at the COM plus the consumed torque
+            // and the pending external impulses (§10.4), which ride the
+            // bias force as `impulse / dt` for exactly one step.
             let f_ext = pack(
                 rot.transpose() * link.body.torque,
                 rot.transpose() * (link.body.mass * self.gravity),
             );
+            let bias = self.ext_bias(i, &rot, h);
             for k in 0..SPATIAL_DOF {
-                p[k] -= f_ext[k];
+                p[k] -= f_ext[k] + bias[k];
             }
             ia[i] = inertia;
             pa[i] = p;
@@ -1094,10 +1149,12 @@ impl FeatherstoneEngine {
             self.links[i].body.angular_velocity = rot * ang(&v);
             self.links[i].body.velocity = rot * lin(&v);
         }
-        // Consumed torques clear (body-torque parity with the other engines).
+        // Consumed torques clear (body-torque parity with the other engines);
+        // the external impulse channel (§10.4) is one-shot the same way.
         for link in &mut self.links {
             link.body.torque = Vec3::ZERO;
         }
+        self.ext_impulses.clear();
     }
 
     /// Admit a revolute or fixed joint between two links: resolve frames,
@@ -2045,5 +2102,88 @@ mod tests {
             )
             .expect("second branch admits");
         assert_eq!(engine.joint_count(), 2);
+    }
+
+    /// Free-body rig of the §10.4 impulse-channel tests: zero gravity, a
+    /// unit point-mass sphere at the origin.
+    fn impulse_body() -> (FeatherstoneEngine, BodyHandle) {
+        let mut engine = FeatherstoneEngine::new(Vec3::ZERO);
+        let h = engine.add_body(point_mass(Vec3::ZERO));
+        (engine, h)
+    }
+
+    /// §10.4: a free body takes the full impulse at its COM — velocity-
+    /// level, consumed exactly once.
+    #[test]
+    fn apply_impulse_kicks_a_free_body_once() {
+        let (mut engine, h) = impulse_body();
+        engine.apply_impulse(h, Vec3::ZERO, Vec3::new(2.0, 0.0, 0.0));
+        engine.step(0.1);
+        let kicked = engine.get_body(h).expect("body").velocity;
+        engine.step(0.1);
+        let settled = engine.get_body(h).expect("body").velocity;
+        assert_eq!(kicked, settled, "one-shot");
+        assert!(
+            (kicked - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5,
+            "{kicked:?}"
+        );
+    }
+
+    /// §10.4: an off-center impulse also spins the link (the torque about
+    /// the COM rides the same channel).
+    #[test]
+    fn apply_impulse_spins_about_the_com() {
+        let (mut engine, h) = impulse_body();
+        let arm = Vec3::Y;
+        engine.apply_impulse(h, arm, Vec3::X);
+        engine.step(0.1);
+        let body = engine.get_body(h).expect("body");
+        assert!(
+            body.angular_velocity.dot(Vec3::NEG_Z) > 0.0,
+            "{:?}",
+            body.angular_velocity
+        );
+    }
+
+    /// §10.4: the articulated solve distributes the kick through the
+    /// hinge — the free chain's total linear momentum equals the applied
+    /// impulse.
+    #[test]
+    fn apply_impulse_conserves_momentum_through_the_hinge() {
+        let mut engine = FeatherstoneEngine::new(Vec3::ZERO);
+        let root = engine.add_body(point_mass(Vec3::ZERO));
+        let tip = engine.add_body(point_mass(Vec3::new(0.0, -2.0, 0.0)));
+        engine
+            .add_joint(
+                root,
+                tip,
+                revolute(Vec3::new(0.0, -1.0, 0.0), Vec3::new(0.0, 1.0, 0.0)),
+            )
+            .expect("revolute admits");
+        let impulse = Vec3::new(1.0, 0.5, 0.0);
+        engine.apply_impulse(tip, Vec3::new(0.0, -2.0, 0.0), impulse);
+        // Small step: the articulated solve conserves momentum to the
+        // O(h) discretization of the semi-implicit integration.
+        engine.step(0.01);
+        let a = engine.get_body(root).expect("root");
+        let b = engine.get_body(tip).expect("tip");
+        let momentum = a.mass * a.velocity + b.mass * b.velocity;
+        assert!(
+            (momentum - impulse).length() < 1e-2,
+            "{momentum:?} vs {impulse:?}"
+        );
+    }
+
+    /// §10.4: unknown handles and non-finite inputs never enter the
+    /// channel.
+    #[test]
+    fn apply_impulse_ignores_non_finite_inputs_and_bad_handles() {
+        let (mut engine, h) = impulse_body();
+        engine.apply_impulse(h, Vec3::new(f32::NAN, 0.0, 0.0), Vec3::X);
+        engine.apply_impulse(h, Vec3::ZERO, Vec3::new(f32::INFINITY, 0.0, 0.0));
+        engine.apply_impulse(BodyHandle::from(99_usize), Vec3::ZERO, Vec3::X);
+        engine.step(0.1);
+        let body = engine.get_body(h).expect("body");
+        assert_eq!(body.velocity, Vec3::ZERO);
     }
 }

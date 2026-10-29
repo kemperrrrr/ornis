@@ -29,9 +29,11 @@ use ornis_core::{
     System, SystemAccess, Transform, UnitQuat,
 };
 use ornis_editor::EditorOnly;
+use ornis_physics::joint::{JointHandle, JointKind};
 use ornis_physics::soft_render::{MIN_TUBE_SIDES, tube_indices, tube_positions};
 use ornis_physics::{
-    BodyHandle, BodyType, PhysicsEngine, RigidBody, SoftBody, SoftHandle, SolverKind,
+    BodyHandle, BodyType, ContactImpulse, PhysicsEngine, RigidBody, SoftBody, SoftHandle,
+    SolverKind,
 };
 #[cfg(test)]
 use ornis_render::extract_render_data;
@@ -85,6 +87,94 @@ impl PhysicsRuntime {
             gravity,
             changed: false,
         }
+    }
+
+    /// Solver handle bound to `entity`, or `None` while unbound.
+    // qual:api — §8.5 readback remap seam; the ragdoll coupling is the
+    // first caller.
+    pub fn handle_of(&self, entity: Entity) -> Option<BodyHandle> {
+        self.bindings.get(&entity).copied()
+    }
+
+    /// Creates the G5 joint `kind` between the [`RigidBody`] components
+    /// of entities `a` and `b` (§11 ragdoll path): binds both bodies
+    /// immediately — the eager twin of `sync_in`'s bind — and returns the
+    /// world joint handle. The component pose is taken as world (the
+    /// ragdoll proxies carry no `GlobalTransform`, so `sync_in`'s
+    /// world-pose fold leaves it alone). `None` without either component
+    /// or when the solver refuses the joint — the caller records no
+    /// handle and the world simply has no joint. Joints die with their
+    /// bodies: dropping either side destroys the joint (§11 lifecycle).
+    pub fn add_joint_between(
+        &mut self,
+        bodies: &ComponentStore<RigidBody>,
+        a: Entity,
+        b: Entity,
+        kind: JointKind,
+    ) -> Option<JointHandle> {
+        let handle_a = self.ensure_bound(bodies, a)?;
+        let handle_b = self.ensure_bound(bodies, b)?;
+        self.solver.add_joint(handle_a, handle_b, kind).ok()
+    }
+
+    /// The solver handle of `entity`, binding its [`RigidBody`] component
+    /// on the spot when it has none yet. `None` without the component.
+    fn ensure_bound(
+        &mut self,
+        bodies: &ComponentStore<RigidBody>,
+        entity: Entity,
+    ) -> Option<BodyHandle> {
+        if let Some(&handle) = self.bindings.get(&entity) {
+            return Some(handle);
+        }
+        let source = bodies.get(entity)?;
+        let handle = self.solver.add_body(source.clone());
+        self.bindings.insert(entity, handle);
+        Some(handle)
+    }
+
+    /// World gravity the solver integrates with (the §8.5 proxy
+    /// compensation reads it: pose-driven proxies are written `+ g·h` so
+    /// the step's own gravity integration lands them on the driven
+    /// velocity).
+    // qual:api — §8.5 coupling seam.
+    pub fn gravity(&self) -> Vec3 {
+        self.gravity
+    }
+
+    /// Teleports the bound body's world pose (`docs/ragdoll-design.md`
+    /// §8.5 proxy drive), whatever its [`BodyType`]: [`BodyType::Dynamic`]
+    /// bodies are solver-authoritative for `sync_external_pose`, so a
+    /// pose-driven proxy (its motion comes from the ragdoll chain, not
+    /// from the solver) rides this explicit teleport instead. Wakes the
+    /// body — a sleeping proxy would stop solving contacts — and marks the
+    /// runtime changed so `sync_out` re-reads. No-op on unbound handles.
+    // qual:api — §8.5 proxy drive; ragdoll_proxy_sync is the caller.
+    pub fn drive_pose(&mut self, handle: BodyHandle, position: Vec3, rotation: Quat) {
+        self.changed = true;
+        self.solver.wake_body(handle);
+        let Some(body) = self.solver.get_body_mut(handle) else {
+            return;
+        };
+        body.position = position;
+        body.orientation = rotation;
+    }
+
+    /// Opt-in gate for [`Self::drain_contact_impulses`] (§8.5 readback):
+    /// off by default — untracked worlds accumulate nothing.
+    // qual:api — §8.5 readback seam.
+    pub fn set_contact_impulse_tracking(&mut self, on: bool) {
+        self.solver.set_contact_impulse_tracking(on);
+    }
+
+    /// Drains the per-point contact impulses accumulated by completed
+    /// steps (§8.5 explicit coupling): one record per manifold point per
+    /// substep, in deterministic (sorted pair, point) order, `impulse`
+    /// delivered to the record's `a`. Observation-only — the drain never
+    /// influences the solve.
+    // qual:api — §8.5 readback seam; RagdollSyncSystem is the caller.
+    pub fn drain_contact_impulses(&mut self) -> Vec<ContactImpulse> {
+        self.solver.drain_contact_impulses()
     }
 
     /// Syncs ECS rigid bodies into the solver, skipping editor chrome.

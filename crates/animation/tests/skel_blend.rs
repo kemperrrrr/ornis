@@ -1,13 +1,13 @@
 //! Phase E acceptance for skeletal blending (`docs/animation-design.md` §5 E):
 //! player weight pulls toward the rest pose, crossfades mix two clips over
-//! time and retire, and overlay layers follow their per-joint mask. Bad
-//! masks skip the entity (bad skin), never truncate.
+//! time and retire, and overlay layer stacks follow their per-joint masks
+//! bottom-up. Bad masks skip the entity (bad skin), never truncate.
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_animation::{
     Animator, AnimatorMut, ClipId, JointId, JointMask, JointPose, JointTrack, JointTrs, Key,
-    KeyTrack, MaskId, SkelClip, SkelFade, SkelLayer, SkelPlayer, SkelSampleSystem, Skeleton,
-    try_animator,
+    KeyTrack, MaskId, SkelClip, SkelFade, SkelLayer, SkelLayerStack, SkelPlayer, SkelSampleSystem,
+    Skeleton, try_animator,
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::{Clamped01, Seconds};
@@ -18,7 +18,7 @@ fn engine() -> Engine {
     {
         let store = store_mut(&mut engine);
         store.register::<SkelPlayer>();
-        store.register::<SkelLayer>();
+        store.register::<SkelLayerStack>();
         store.register::<SkelFade>();
         store.register::<Skeleton>();
         store.register::<JointPose>();
@@ -115,6 +115,11 @@ fn layer(clip: ClipId, mask: MaskId) -> SkelLayer {
         player: player(clip, 1.0),
         mask,
     }
+}
+
+/// Installs `layers` as a root stack, bottom-up (see [`SkelLayerStack`]).
+fn stack(layers: Vec<SkelLayer>) -> SkelLayerStack {
+    SkelLayerStack { layers }
 }
 
 /// Skeleton root with one joint whose authored rest pose is `rest`.
@@ -314,7 +319,7 @@ fn layer_lerps_only_the_masked_joints() {
     let upper = vec![Clamped01::ONE, Clamped01::ZERO];
     let mask = add_mask(&mut engine, "upper", upper);
     put(&mut engine, root, player(base, 1.0));
-    put(&mut engine, root, layer(wave, mask));
+    put(&mut engine, root, stack(vec![layer(wave, mask)]));
 
     engine.run_frame(0.1);
 
@@ -335,7 +340,7 @@ fn mask_length_mismatch_skips_the_entity() {
     let wrong = vec![Clamped01::ONE, Clamped01::ONE];
     let mask = add_mask(&mut engine, "wrong", wrong);
     put(&mut engine, root, player(base, 1.0));
-    put(&mut engine, root, layer(wave, mask));
+    put(&mut engine, root, stack(vec![layer(wave, mask)]));
 
     engine.run_frame(0.1);
 
@@ -396,7 +401,7 @@ fn layer_only_joint_moves_its_bound_node() {
     let wave = add_clip(&mut engine, clip("wave", vec![wave_track]));
     let mask = add_mask(&mut engine, "all", vec![Clamped01::ONE, Clamped01::ONE]);
     put(&mut engine, root, player(base, 1.0));
-    put(&mut engine, root, layer(wave, mask));
+    put(&mut engine, root, stack(vec![layer(wave, mask)]));
 
     engine.run_frame(0.5);
 
@@ -408,4 +413,156 @@ fn layer_only_joint_moves_its_bound_node() {
         .translation;
     assert!(close(moved, Vec3::new(4.0, 0.0, 0.0)), "got {moved:?}");
     assert_origin(&engine, root, 1, Vec3::new(4.0, 0.0, 0.0));
+}
+
+/// Two full-mask layers over one base: the stack blends bottom-up, so the
+/// top layer owns the joint where both claim it (a top-down application
+/// would leave the bottom value).
+#[test]
+fn layers_stack_bottom_up() {
+    {
+        let mut engine = engine();
+        let root = rig(&mut engine, vec![None]);
+        let base = walk_clip(&mut engine);
+        let lower = add_clip(
+            &mut engine,
+            clip("lower", vec![constant(0, Vec3::new(0.0, 8.0, 0.0))]),
+        );
+        let upper = add_clip(
+            &mut engine,
+            clip("upper", vec![constant(0, Vec3::new(0.0, 2.0, 0.0))]),
+        );
+        let full = add_mask(&mut engine, "full", vec![Clamped01::ONE]);
+        put(&mut engine, root, player(base, 1.0));
+        put(
+            &mut engine,
+            root,
+            stack(vec![layer(lower, full), layer(upper, full)]),
+        );
+
+        engine.run_frame(0.1);
+
+        assert_origin(&engine, root, 0, Vec3::new(0.0, 2.0, 0.0));
+    }
+}
+
+/// Upper-body over locomotion: the base walk drives every joint, a bottom
+/// layer retargets the legs, the top layer raises the arms — all three at
+/// once, each where its mask says.
+#[test]
+fn upper_body_layer_rides_over_locomotion_stack() {
+    {
+        let mut engine = engine();
+        let root = rig(
+            &mut engine,
+            vec![None, Some(JointId::from_raw(0)), Some(JointId::from_raw(0))],
+        );
+        let walk = add_clip(
+            &mut engine,
+            clip(
+                "walk",
+                vec![
+                    constant(0, Vec3::new(4.0, 0.0, 0.0)),
+                    constant(1, Vec3::new(4.0, 0.0, 0.0)),
+                    constant(2, Vec3::new(4.0, 0.0, 0.0)),
+                ],
+            ),
+        );
+        let stride = add_clip(
+            &mut engine,
+            clip("stride", vec![constant(1, Vec3::new(0.0, 6.0, 0.0))]),
+        );
+        let raise = add_clip(
+            &mut engine,
+            clip("raise", vec![constant(2, Vec3::new(0.0, 0.0, 7.0))]),
+        );
+        let legs = add_mask(
+            &mut engine,
+            "legs",
+            vec![Clamped01::ZERO, Clamped01::ONE, Clamped01::ZERO],
+        );
+        let arms = add_mask(
+            &mut engine,
+            "arms",
+            vec![Clamped01::ZERO, Clamped01::ZERO, Clamped01::ONE],
+        );
+        put(&mut engine, root, player(walk, 1.0));
+        put(
+            &mut engine,
+            root,
+            stack(vec![layer(stride, legs), layer(raise, arms)]),
+        );
+
+        engine.run_frame(0.1);
+
+        assert_origin(&engine, root, 0, Vec3::new(4.0, 0.0, 0.0));
+        assert_origin(&engine, root, 1, Vec3::new(4.0, 6.0, 0.0));
+        assert_origin(&engine, root, 2, Vec3::new(4.0, 0.0, 7.0));
+    }
+}
+
+/// Stack cursors are advanced like base players: each element keeps its
+/// own clock, stepped at its own `speed`.
+#[test]
+fn stack_layer_cursors_advance_at_their_own_speeds() {
+    {
+        let mut engine = engine();
+        let root = rig(&mut engine, vec![None]);
+        let base = walk_clip(&mut engine);
+        let shared = add_clip(&mut engine, clip("shared", Vec::new()));
+        let mask = add_mask(&mut engine, "full", vec![Clamped01::ONE]);
+        let mut slow = layer(shared, mask);
+        slow.player.speed = Seconds::new(1.0);
+        let mut fast = layer(shared, mask);
+        fast.player.speed = Seconds::new(2.0);
+        put(&mut engine, root, player(base, 1.0));
+        put(&mut engine, root, stack(vec![slow, fast]));
+
+        engine.run_frame(0.1);
+
+        let lane = store_ref(&engine)
+            .read_lane::<SkelLayerStack>()
+            .expect("lane registered");
+        let times: Vec<f32> = lane
+            .get(root)
+            .expect("stack kept")
+            .layers
+            .iter()
+            .map(|layer| layer.player.time.get())
+            .collect();
+        assert_eq!(times.len(), 2);
+        assert!((times[0] - 0.1).abs() < 1e-5, "slow got {times:?}");
+        assert!((times[1] - 0.2).abs() < 1e-5, "fast got {times:?}");
+    }
+}
+
+/// A bad mask anywhere in the stack rejects the whole root (bad skin):
+/// the pose is never half-published from the layers below it.
+#[test]
+fn bad_mask_on_a_stacked_layer_skips_the_root() {
+    {
+        let mut engine = engine();
+        let root = rig(&mut engine, vec![None]);
+        let base = walk_clip(&mut engine);
+        let lower = add_clip(
+            &mut engine,
+            clip("lower", vec![constant(0, Vec3::new(0.0, 8.0, 0.0))]),
+        );
+        let upper = add_clip(
+            &mut engine,
+            clip("upper", vec![constant(0, Vec3::new(0.0, 2.0, 0.0))]),
+        );
+        let full = add_mask(&mut engine, "full", vec![Clamped01::ONE]);
+        let wrong = add_mask(&mut engine, "wrong", vec![Clamped01::ONE, Clamped01::ONE]);
+        put(&mut engine, root, player(base, 1.0));
+        put(
+            &mut engine,
+            root,
+            stack(vec![layer(lower, full), layer(upper, wrong)]),
+        );
+
+        engine.run_frame(0.1);
+
+        assert_eq!(pose(&engine, root)[0], Mat4::IDENTITY);
+    }
 }

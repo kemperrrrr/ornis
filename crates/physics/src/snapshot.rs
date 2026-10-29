@@ -1689,12 +1689,14 @@ impl WarmPointSnapshot {
     }
 
     pub(crate) fn to_point(self) -> crate::sequential_impulse::WarmPoint {
-        crate::sequential_impulse::WarmPoint {
-            la: vec3(self.la),
-            lb: vec3(self.lb),
-            normal: vec3(self.normal),
-            impulse: self.impulse,
-        }
+        let mut point = crate::sequential_impulse::WarmPoint::empty();
+        point.la = vec3(self.la);
+        point.lb = vec3(self.lb);
+        point.normal = vec3(self.normal);
+        point.impulse = self.impulse;
+        // Observation fields (§10.4 readback) stay zero: the warm input
+        // never reads them and the next substep's build rewrites them.
+        point
     }
 }
 

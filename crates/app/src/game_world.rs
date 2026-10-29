@@ -12,10 +12,14 @@
 
 use std::marker::PhantomData;
 
+use ornis_animation::{
+    AnimEvent, ClipId, ControlRig, JointId, JointMask, MaskId, SkelLayerStack, SkelTree, Skeleton,
+    SyncMark,
+};
 use ornis_assets::scene::{EntityDesc, Scene};
 use ornis_core::{
     Authoritative, Color, Engine, Entity, EnvironmentWeight, Position, Replica, SceneEntities,
-    SceneRole, SceneVersion, Seconds, Surface, UnitQuat,
+    SceneRole, SceneVersion, Seconds, SmartStore, Surface, UnitQuat,
 };
 use ornis_render::extraction::{RenderLights, extract_render_data};
 use ornis_render::{
@@ -120,24 +124,60 @@ impl GameWorld {
         Ok(root)
     }
 
-    /// Starts the entity's animation player (skeletal or object).
+    /// Starts `name` on `entity`, fading from whatever plays there now.
     ///
-    /// Loading never autoplays. Named skeletal clips start through
-    /// [`EntityMut`] and [`AnimatorAccess::animator`](ornis_animation::AnimatorAccess::animator).
+    /// The named playback entry for both player kinds: a character root
+    /// carrying an [`Animator`](ornis_animation::Animator) catalog starts
+    /// the clip on every skeletal target (the first production caller of
+    /// [`AnimatorMut::play_crossfade`](ornis_animation::AnimatorMut::play_crossfade)),
+    /// an object entity crossfades its [`AnimPlayer`](ornis_animation::AnimPlayer)
+    /// to the named clip. Loading never autoplays. A non-positive
+    /// `duration` cuts without a fade, as does a start over a fade still
+    /// in flight (one fade per entity); the fresh cursor resets `speed`
+    /// and `weight` to `1.0`. Paused clocks and stop/replay semantics
+    /// stay with [`Self::resume_animation`],
+    /// [`Self::pause_animation`] and [`Self::stop_animation`].
     ///
     /// # Errors
     ///
-    /// [`PlaybackError`] when `entity` has no player.
-    pub fn play_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+    /// [`PlaybackError::TreeDriven`] when `entity` is driven by an
+    /// animation tree ([`clear_skel_tree`](crate::anim_wiring::clear_skel_tree)
+    /// takes the root back for the player).
+    /// [`PlaybackError::Missing`] when `entity` has no animator catalog
+    /// and no player. [`PlaybackError::UnknownClip`] when `name` is not
+    /// indexed.
+    pub fn play_animation(
+        &mut self,
+        entity: Entity,
+        name: &str,
+        duration: Seconds,
+    ) -> Result<(), PlaybackError> {
+        let store = self.anim_store()?;
+        crate::anim_wiring::play_crossfade(store, entity, name, duration)
+    }
+
+    /// Resumes the entity's animation player at its held clock (skeletal
+    /// or object).
+    ///
+    /// Does not restart: a paused clock continues where it stopped, as
+    /// between [`Self::pause_animation`] and [`Self::stop_animation`].
+    /// Named starts go through [`Self::play_animation`].
+    ///
+    /// # Errors
+    ///
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root (the tree drives it, not a player).
+    // qual:api — host playback control; in-tree callers are tests.
+    pub fn resume_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
+        let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         if crate::anim_wiring::set_playing(store, entity, true) {
             Ok(())
         } else {
-            Err(PlaybackError)
+            Err(PlaybackError::Missing)
         }
     }
 
@@ -145,17 +185,18 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root.
     pub fn pause_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         if crate::anim_wiring::set_playing(store, entity, false) {
             Ok(())
         } else {
-            Err(PlaybackError)
+            Err(PlaybackError::Missing)
         }
     }
 
@@ -163,27 +204,35 @@ impl GameWorld {
     ///
     /// # Errors
     ///
-    /// [`PlaybackError`] when `entity` has no player.
+    /// [`PlaybackError::Missing`] when `entity` has no player;
+    /// [`PlaybackError::TreeDriven`] when `entity` is a `SkelTree`
+    /// root.
     pub fn stop_animation(&mut self, entity: Entity) -> Result<(), PlaybackError> {
-        let store = self
-            .engine_mut()
-            .world_mut()
-            .store_mut()
-            .expect("engine always carries a store");
+        let store = self.anim_store()?;
+        if crate::anim_wiring::tree_driven(store, entity) {
+            return Err(PlaybackError::TreeDriven);
+        }
         let found = crate::anim_wiring::set_playing(store, entity, false);
         let rewound = crate::anim_wiring::rewind_player(store, entity);
         if found || rewound {
             Ok(())
         } else {
-            Err(PlaybackError)
+            Err(PlaybackError::Missing)
         }
+    }
+
+    /// Store the playback entries write through. The engine always
+    /// carries one; without it a playback call reports
+    /// [`PlaybackError::Missing`] instead of panicking.
+    fn anim_store(&mut self) -> Result<&mut SmartStore, PlaybackError> {
+        self.engine_mut()
+            .world_mut()
+            .store_mut()
+            .ok_or(PlaybackError::Missing)
     }
 }
 
-/// The entity has no skeletal or object animation player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("entity has no animation player")]
-pub struct PlaybackError;
+pub use crate::anim_wiring::PlaybackError;
 
 impl GameWorld<Replica> {
     /// Creates an empty replica world with no scene entities.
@@ -366,12 +415,26 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// Borrows `entity` for component edits, including [`Animator`](ornis_animation::Animator)
     /// playback via [`AnimatorAccess`](ornis_animation::AnimatorAccess).
     pub fn entity_mut(&mut self, entity: Entity) -> EntityMut<'_> {
-        let store = self
-            .engine
+        let store = self.store();
+        EntityMut { store, entity }
+    }
+
+    /// Creates the entity holding `mask` and answers its [`MaskId`]
+    /// handle — the [`SkelLayer`](ornis_animation::SkelLayer)s of a
+    /// stack point at it (§8.6):
+    /// [`create_skel_mask`](crate::anim_wiring::create_skel_mask).
+    pub fn create_skel_mask(&mut self, mask: JointMask) -> MaskId {
+        crate::anim_wiring::create_skel_mask(self.store(), mask)
+    }
+
+    /// The engine's component store — the invariant accessor both
+    /// [`entity_mut`](Self::entity_mut) and mask authoring go through (a
+    /// [`GameWorld`] always carries one).
+    fn store(&mut self) -> &mut SmartStore {
+        self.engine
             .world_mut()
             .store_mut()
-            .expect("engine always carries a store");
-        EntityMut { store, entity }
+            .expect("engine always carries a store")
     }
 
     /// Reads the frame payload directly from the component lanes.
@@ -407,7 +470,7 @@ impl<Role: SceneRole> GameWorld<Role> {
     /// Parents `child` under `parent`, updating [`ChildOf`](ornis_core::ChildOf)
     /// and the parent's [`Children`](ornis_core::Children) together.
     ///
-    /// This is the world entry point for parenting. [`SmartStore`](ornis_core::SmartStore)
+    /// This is the world entry point for parenting. [`SmartStore`]
     /// has no insert hook, so a raw `insert(ChildOf)` leaves the cache stale
     /// until [`reconcile_children`](ornis_core::reconcile_children).
     ///
@@ -825,6 +888,86 @@ impl EntityMut<'_> {
     /// Detaches this entity from its parent and drops the matching cache entry.
     pub fn clear_parent(&mut self) {
         ornis_core::clear_parent(self.store, self.entity);
+    }
+
+    /// The [`Skeleton`] joint named exactly `name`, when this entity
+    /// carries a skeleton (design §8.8 setup: hosts resolve rig joints
+    /// by their glTF names). `None` for no skeleton or no match.
+    pub fn joint_named(&self, name: &str) -> Option<JointId> {
+        self.store
+            .read_lane::<Skeleton>()?
+            .get(self.entity)?
+            .joint_named(name)
+    }
+
+    /// Installs world-space IK goals on this entity's skeleton (design
+    /// §8.8, [`set_control_rig`](crate::anim_wiring::set_control_rig)):
+    /// `rig`'s targets are world points, mapped through the world matrix
+    /// of the skeleton's frame. Same set semantics as
+    /// [`set_skel_ik`](crate::anim_wiring::set_skel_ik); model-space
+    /// goals go stale as the root moves — call again from your update
+    /// loop.
+    ///
+    /// Returns whether anything is written (see the facade for the
+    /// refusal cases).
+    pub fn set_control_rig(&mut self, rig: ControlRig) -> bool {
+        crate::anim_wiring::set_control_rig(&mut *self.store, self.entity, rig)
+    }
+
+    /// The [`Skeleton`] of this entity (an `Arc` clone — cheap), when it
+    /// carries one (§8.8 setup: joint lookups, mask authoring).
+    pub fn skeleton(&self) -> Option<Skeleton> {
+        self.store
+            .read_lane::<Skeleton>()?
+            .get(self.entity)
+            .cloned()
+    }
+
+    /// Installs the overlay [`SkelLayerStack`] on this skeleton root
+    /// (set semantics — replaces; an empty stack clears):
+    /// [`set_skel_layers`](crate::anim_wiring::set_skel_layers).
+    pub fn set_skel_layers(&mut self, stack: SkelLayerStack) -> bool {
+        crate::anim_wiring::set_skel_layers(&mut *self.store, self.entity, stack)
+    }
+
+    /// Installs [`SyncMark`]s on this clip playlist — the transition
+    /// alignment grid (`set_clip_sync_marks`).
+    pub fn set_clip_sync_marks(&mut self, marks: Vec<SyncMark>) -> bool {
+        crate::anim_wiring::set_clip_sync_marks(&mut *self.store, ClipId(self.entity), marks)
+    }
+
+    /// Installs [`AnimEvent`]s on this clip playlist — the authored
+    /// events cursors emit (`set_clip_events`).
+    pub fn set_clip_events(&mut self, events: Vec<AnimEvent>) -> bool {
+        crate::anim_wiring::set_clip_events(&mut *self.store, ClipId(self.entity), events)
+    }
+
+    /// Installs the §8.3 retarget map on this skeleton root (the target):
+    /// `joints` names one target [`JointId`] per `source` joint — `None`
+    /// holds that joint at rest. Set semantics; one bad entry rejects the
+    /// whole map (`set_retarget_map`).
+    pub fn set_retarget_map(&mut self, source: Entity, joints: Vec<Option<JointId>>) -> bool {
+        crate::anim_wiring::set_retarget_map(&mut *self.store, self.entity, source, joints)
+    }
+
+    /// Installs the §8.5 [`SkelTree`] on this skeleton root — set
+    /// semantics; a tree-driven root ignores its
+    /// [`SkelPlayer`](ornis_animation::SkelPlayer) until
+    /// [`clear_skel_tree`](Self::clear_skel_tree) (`set_skel_tree`).
+    pub fn set_skel_tree(&mut self, tree: SkelTree) -> bool {
+        crate::anim_wiring::set_skel_tree(&mut *self.store, self.entity, tree)
+    }
+
+    /// Sets tree parameter `name` to `value` (`set_tree_param`): `false`
+    /// for an unknown name or a non-finite value.
+    pub fn set_tree_param(&mut self, name: &str, value: f32) -> bool {
+        crate::anim_wiring::set_tree_param(&mut *self.store, self.entity, name, value)
+    }
+
+    /// Removes the [`SkelTree`] from this root — the way back to
+    /// single-player playback (`clear_skel_tree`).
+    pub fn clear_skel_tree(&mut self) -> bool {
+        crate::anim_wiring::clear_skel_tree(&mut *self.store, self.entity)
     }
 }
 
@@ -1703,7 +1846,7 @@ mod tests {
     /// character root, not the first mesh.
     #[test]
     fn walk_loop_moves_joints_over_time() {
-        use ornis_animation::{Animator, AnimatorAccess, AnimatorError, JointPose, SkelPlayer};
+        use ornis_animation::{Animator, AnimatorError, JointPose, SkelPlayer};
         let mut world = GameWorld::new();
         let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/starter/ual1_standard.glb");
@@ -1752,10 +1895,7 @@ mod tests {
             ));
         }
         world
-            .entity_mut(hero)
-            .animator()
-            .expect("animator")
-            .play("Walk_Loop")
+            .play_animation(hero, "Walk_Loop", ornis_core::Seconds::new(0.25))
             .expect("Walk_Loop");
 
         let store = world.engine().world().store().expect("store");
@@ -1790,10 +1930,237 @@ mod tests {
         assert!(seen.len() > 1, "joints must travel, TPose would repeat");
     }
 
-    /// Playback controls behave like a video player: play starts a
-    /// paused player, pause holds the clock, stop pauses and rewinds.
+    /// Layer authoring runs end to end on the starter mannequin: a
+    /// [`JointMask`] created through [`GameWorld::create_skel_mask`]
+    /// carries one weight per joint and reaches the lane; the stack,
+    /// sync marks and events install through [`EntityMut`] on their
+    /// roots and playlists; malformed marks are refused whole.
     #[test]
-    fn playback_controls_play_pause_stop() {
+    fn layer_mask_marks_and_events_author_on_the_starter() {
+        use ornis_animation::{
+            AnimEvent, Animator, JointMask, SkelLayer, SkelLayerStack, SkelPlayer, SyncMark,
+        };
+        use ornis_core::{Clamped01, Seconds};
+        let mut world = GameWorld::new();
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            world.assets_mut().load(&starter).expect("starter loads");
+        let hero = world
+            .spawn(ModelSpawn::new(mannequin))
+            .expect("starter spawns");
+
+        let (walk, skel_root) = {
+            let store = world.engine().world().store().expect("store");
+            let anim = store
+                .read_lane::<Animator>()
+                .expect("animator lane")
+                .get(hero)
+                .expect("animator on the root")
+                .clone();
+            (
+                anim.clip("Walk_Loop").expect("Walk_Loop"),
+                *anim.targets().first().expect("one skeleton root"),
+            )
+        };
+
+        // Mask: one weight per joint of the real skeleton.
+        let joint_count = {
+            let store = world.engine().world().store().expect("store");
+            let skeleton = store
+                .read_lane::<ornis_animation::Skeleton>()
+                .expect("skeleton lane")
+                .get(skel_root)
+                .expect("skeleton under the root")
+                .clone();
+            skeleton.joint_count()
+        };
+        let mask = world.create_skel_mask(JointMask {
+            name: "upper_body".into(),
+            weights: vec![Clamped01::ZERO; joint_count],
+        });
+        {
+            let store = world.engine().world().store().expect("store");
+            let masks = store
+                .read_cold_lane::<JointMask>()
+                .expect("cold joint masks");
+            assert_eq!(
+                masks.get(mask.0).expect("mask stored").weights.len(),
+                joint_count
+            );
+        }
+
+        let stack = SkelLayerStack {
+            layers: vec![SkelLayer {
+                player: SkelPlayer {
+                    clip: walk,
+                    time: Seconds::ZERO,
+                    speed: Seconds::new(1.0),
+                    weight: Clamped01::ONE,
+                    playing: false,
+                    looping: true,
+                },
+                mask,
+            }],
+        };
+        assert!(world.entity_mut(skel_root).set_skel_layers(stack));
+        assert!(world.entity_mut(walk.0).set_clip_sync_marks(vec![SyncMark {
+            name: "contact".into(),
+            at: 0.25,
+        },]));
+        assert!(world.entity_mut(walk.0).set_clip_events(vec![AnimEvent {
+            name: "footstep".into(),
+            at: 0.5,
+        }]));
+        // Malformed marks/events: refused whole, nothing written.
+        assert!(
+            !world.entity_mut(walk.0).set_clip_sync_marks(vec![SyncMark {
+                name: String::new(),
+                at: 0.25,
+            },])
+        );
+        assert!(!world.entity_mut(walk.0).set_clip_events(vec![AnimEvent {
+            name: "footstep".into(),
+            at: 1.5,
+        }]));
+        let store = world.engine().world().store().expect("store");
+        assert_eq!(
+            store
+                .read_cold_lane::<ornis_animation::ClipSyncMarks>()
+                .expect("marks lane")
+                .get(walk.0)
+                .expect("marks kept")
+                .marks
+                .len(),
+            1
+        );
+        assert_ne!(mask.0, skel_root, "the mask lives on its own entity");
+    }
+
+    /// Tree and retarget authoring runs end to end on two starter
+    /// mannequins: an identity-by-name §8.3 map from one skeleton to the
+    /// other (a bad-length map is refused whole and keeps the installed
+    /// one), a [`SkelTree`] blending two catalog clips on a `speed` axis,
+    /// live parameter writes with honest refusals, and the way back via
+    /// [`EntityMut::clear_skel_tree`].
+    #[test]
+    fn tree_and_retarget_author_on_the_starter() {
+        use ornis_animation::{
+            Animator, SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam,
+        };
+        let mut world = GameWorld::new();
+        let starter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/starter/ual1_standard.glb");
+        let mannequin: ornis_assets::Handle<ornis_assets::Model> =
+            world.assets_mut().load(&starter).expect("starter loads");
+        let hero = world
+            .spawn(ModelSpawn::new(mannequin))
+            .expect("starter spawns");
+        let scout = world
+            .spawn(ModelSpawn::new(mannequin))
+            .expect("starter spawns");
+
+        let (hero_root, scout_root, idle, walk) = {
+            let store = world.engine().world().store().expect("store");
+            let catalog = |entity| {
+                store
+                    .read_lane::<Animator>()
+                    .expect("animator lane")
+                    .get(entity)
+                    .expect("animator on the root")
+                    .clone()
+            };
+            let hero_anim = catalog(hero);
+            let scout_anim = catalog(scout);
+            (
+                *hero_anim.targets().first().expect("one skeleton root"),
+                *scout_anim.targets().first().expect("one skeleton root"),
+                scout_anim.clip("Idle_Loop").expect("Idle_Loop"),
+                scout_anim.clip("Walk_Loop").expect("Walk_Loop"),
+            )
+        };
+
+        // §8.3: identity-by-name map, hero's joints onto the scout's.
+        let joints = {
+            let store = world.engine().world().store().expect("store");
+            let skeletons = store
+                .read_lane::<ornis_animation::Skeleton>()
+                .expect("skeleton lane");
+            let source = skeletons.get(hero_root).expect("hero skeleton");
+            let target = skeletons.get(scout_root).expect("scout skeleton");
+            source
+                .joint_names
+                .iter()
+                .map(|name| target.joint_named(name))
+                .collect::<Vec<_>>()
+        };
+        {
+            let mut entity = world.entity_mut(scout_root);
+            assert!(entity.set_retarget_map(hero_root, joints.clone()));
+            assert!(
+                !entity.set_retarget_map(hero_root, vec![None]),
+                "a wrong-length map refuses whole"
+            );
+        }
+
+        // §8.5: two leaves on a `speed` axis; the last node is the root.
+        let tree = SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: idle },
+                TreeNodeDef::Clip { clip: walk },
+                TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: vec![
+                        TreeChild {
+                            position: 0.0,
+                            node: 0,
+                        },
+                        TreeChild {
+                            position: 1.0,
+                            node: 1,
+                        },
+                    ],
+                },
+            ],
+            params: vec![TreeParam {
+                name: "speed".to_string(),
+                default: 0.0,
+            }],
+        };
+        {
+            let mut entity = world.entity_mut(scout_root);
+            assert!(entity.set_skel_tree(tree));
+            assert!(entity.set_tree_param("speed", 0.5));
+            assert!(!entity.set_tree_param("nope", 0.5));
+            assert!(!entity.set_tree_param("speed", f32::NAN));
+        }
+        {
+            let store = world.engine().world().store().expect("store");
+            let maps = store
+                .read_cold_lane::<ornis_animation::RetargetMap>()
+                .expect("retarget lane");
+            assert_eq!(
+                maps.get(scout_root).expect("map kept").joints,
+                joints,
+                "the refused map left the installed one in place"
+            );
+            let trees = store.read_cold_lane::<SkelTree>().expect("tree lane");
+            assert!(trees.get(scout_root).is_some());
+            let players = store.read_lane::<SkelTreePlayer>().expect("player lane");
+            assert!(players.get(scout_root).is_some());
+        }
+        {
+            let mut entity = world.entity_mut(scout_root);
+            assert!(entity.clear_skel_tree());
+            assert!(!entity.clear_skel_tree());
+        }
+    }
+
+    /// Playback controls behave like a video player: resume starts a
+    /// paused player, pause holds the clock, stop pauses and rewinds.
+    /// Named starts go through `play_animation` and need a catalog.
+    #[test]
+    fn playback_controls_resume_pause_stop() {
         use ornis_animation::{ClipId, SkelPlayer};
         use ornis_core::{Clamped01, Seconds};
         let mut world = GameWorld::new();
@@ -1810,11 +2177,11 @@ mod tests {
                 looping: true,
             },
         );
-        assert!(world.play_animation(entity).is_ok());
+        assert!(world.resume_animation(entity).is_ok());
         assert!(world.pause_animation(Entity::new(999)).is_err());
         assert!(world.pause_animation(entity).is_ok());
         assert!(world.stop_animation(entity).is_ok());
-        assert!(world.play_animation(Entity::new(999)).is_err());
+        assert!(world.resume_animation(Entity::new(999)).is_err());
 
         let store = world.engine().world().store().expect("store");
         let player = *store
@@ -1824,6 +2191,176 @@ mod tests {
             .expect("player");
         assert!(!player.playing);
         assert_eq!(player.time, Seconds::ZERO);
+    }
+
+    /// `play_animation` is the named crossfade entry: a character-root
+    /// catalog starts the clip on every target (with a fade on replay),
+    /// unknown names and catalog-less entities fail with typed errors.
+    #[test]
+    fn play_animation_starts_named_clips_and_reports_typed_errors() {
+        use ornis_animation::{Animator, ClipId, SkelFade, SkelPlayer};
+        use ornis_core::{Clamped01, Seconds};
+        use std::collections::HashMap;
+
+        let mut world = GameWorld::new();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let hero = store.create_entity();
+        let playlist = store.create_entity();
+        let root = store.create_entity();
+        let mut clips = HashMap::new();
+        clips.insert("Walk_Loop".to_string(), ClipId(playlist));
+        store.insert(hero, Animator::new(clips, vec![root]));
+
+        assert_eq!(
+            world.play_animation(hero, "Nope", Seconds::new(0.25)),
+            Err(crate::anim_wiring::PlaybackError::UnknownClip {
+                name: "Nope".into()
+            })
+        );
+        assert!(matches!(
+            world.play_animation(Entity::new(999), "Walk_Loop", Seconds::new(0.25)),
+            Err(crate::anim_wiring::PlaybackError::Missing)
+        ));
+        assert!(
+            world
+                .play_animation(hero, "Walk_Loop", Seconds::new(0.25))
+                .is_ok()
+        );
+        {
+            let store = world.engine().world().store().expect("store");
+            let player = *store
+                .read_lane::<SkelPlayer>()
+                .expect("players")
+                .get(root)
+                .expect("cursor on the target");
+            assert!(player.playing);
+            assert_eq!(player.clip, ClipId(playlist));
+            assert_eq!(player.time, Seconds::ZERO);
+            assert_eq!(player.weight, Clamped01::ONE);
+            assert!(
+                store
+                    .read_lane::<SkelFade>()
+                    .is_none_or(|fades| fades.get(root).is_none()),
+                "a first start has nothing to fade from"
+            );
+        }
+
+        // A replay of the playing clip fades from the outgoing cursor.
+        world
+            .play_animation(hero, "Walk_Loop", Seconds::new(0.25))
+            .expect("replay");
+        let store = world.engine().world().store().expect("store");
+        let fade = *store
+            .read_lane::<SkelFade>()
+            .expect("fades")
+            .get(root)
+            .expect("fade on replay");
+        assert_eq!(fade.from.clip, ClipId(playlist));
+        assert_eq!(fade.duration, Seconds::new(0.25));
+        assert_eq!(fade.elapsed, Seconds::ZERO);
+    }
+
+    /// Every `GameWorld` playback entry answers `TreeDriven` on a root
+    /// carrying a `SkelTree` — the tree drives it, not a player.
+    #[test]
+    fn game_world_entries_error_on_tree_root() {
+        use glam::Mat4;
+        use ornis_animation::{Animator, ClipId, SkelTree, Skeleton, TreeNodeDef, TreeParam};
+        use ornis_core::Seconds;
+        use std::collections::HashMap;
+
+        let mut world = GameWorld::new();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let hero = store.create_entity();
+        let root = store.create_entity();
+        store.insert(
+            root,
+            Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["joint".into()]),
+        );
+        let mut clips = HashMap::new();
+        clips.insert("Walk_Loop".to_string(), ClipId(store.create_entity()));
+        store.insert(hero, Animator::new(clips, vec![root]));
+        assert!(crate::anim_wiring::set_skel_tree(
+            store,
+            root,
+            SkelTree {
+                nodes: vec![TreeNodeDef::Blend1d {
+                    axis: 0,
+                    children: Vec::new(),
+                }],
+                params: vec![TreeParam {
+                    name: "walk".to_string(),
+                    default: 0.0,
+                }],
+            }
+        ));
+        let driven = Err(crate::anim_wiring::PlaybackError::TreeDriven);
+        assert_eq!(
+            world.play_animation(hero, "Walk_Loop", Seconds::new(0.25)),
+            driven
+        );
+        assert_eq!(world.resume_animation(root), driven);
+        assert_eq!(world.pause_animation(root), driven);
+        assert_eq!(world.stop_animation(root), driven);
+    }
+
+    /// The §8.8 host seam: `EntityMut::set_control_rig` maps world goals
+    /// through the world matrix of the skeleton's frame — the nearest
+    /// `GlobalTransform` up the `ChildOf` chain, since a wired skeleton
+    /// root carries no local transform — and `joint_named` resolves rig
+    /// joints by name.
+    #[test]
+    fn entity_mut_control_rig_maps_through_the_parent_frame() {
+        use glam::Mat4;
+        use ornis_animation::{Effector, IkStack, TwoBoneIk};
+        let mut world = GameWorld::new();
+        let skeleton = {
+            let store = world.engine_mut().world_mut().store_mut().expect("store");
+            let root = store.create_entity();
+            let mut global = ornis_core::GlobalTransform::IDENTITY;
+            global.translation = Vec3::new(10.0, 0.0, 0.0);
+            store.insert(root, global);
+            let skeleton = store.create_entity();
+            store.insert(
+                skeleton,
+                Skeleton::new(
+                    vec![None, Some(JointId::from_raw(0)), Some(JointId::from_raw(1))],
+                    vec![Mat4::IDENTITY; 3],
+                    vec!["hip".into(), "knee".into(), "foot".into()],
+                ),
+            );
+            ornis_core::set_parent(store, skeleton, root).expect("parent");
+            skeleton
+        };
+        assert_eq!(
+            world.entity_mut(skeleton).joint_named("knee"),
+            Some(JointId::from_raw(1))
+        );
+        assert_eq!(world.entity_mut(skeleton).joint_named("nope"), None);
+        let rig = ControlRig {
+            goals: vec![Effector::TwoBone(TwoBoneIk {
+                root: JointId::from_raw(0),
+                mid: JointId::from_raw(1),
+                end: JointId::from_raw(2),
+                target: Vec3::new(12.0, 1.0, 0.0),
+                weight: Clamped01::ONE,
+            })],
+            base: None,
+        };
+        assert!(world.entity_mut(skeleton).set_control_rig(rig));
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        let lane = store.read_lane::<IkStack>().expect("ik lane");
+        let stack = lane.get(skeleton).expect("stack");
+        match stack.effectors[0] {
+            Effector::TwoBone(chain) => {
+                assert!(
+                    (chain.target - Vec3::new(2.0, 1.0, 0.0)).length() < 1e-4,
+                    "target at {:?}",
+                    chain.target
+                );
+            }
+            _ => panic!("the goal stays a chain"),
+        }
     }
 
     #[test]

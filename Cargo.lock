@@ -3725,7 +3725,6 @@ checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
- "libc",
  "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]

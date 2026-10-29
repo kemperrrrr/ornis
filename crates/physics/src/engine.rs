@@ -110,11 +110,44 @@ pub trait PhysicsEngine: Send + Sync {
     fn drain_contact_force_events(&mut self) -> Vec<ContactForceEvent> {
         Vec::new()
     }
+    /// Opt-in gate for [`PhysicsEngine::drain_contact_impulses`]
+    /// (`docs/ragdoll-design.md` §10.4 readback). Off by default: the
+    /// solver only accumulates the buffer when someone reads it, so
+    /// untracked scenes pay nothing. No-op on engines without solved
+    /// contacts.
+    fn set_contact_impulse_tracking(&mut self, _on: bool) {}
+    /// Drain the per-point contact impulses accumulated by completed steps
+    /// (§10.4 explicit coupling). Empty by default and empty unless
+    /// tracking is on; the sequential-impulse engine reports one record
+    /// per manifold point per substep in deterministic order (sorted pair
+    /// key, then point). Observation-only — draining never influences the
+    /// solve.
+    fn drain_contact_impulses(&mut self) -> Vec<ContactImpulse> {
+        Vec::new()
+    }
     /// Wake a sleeping body/island (default: no-op). Host edits through
     /// [`PhysicsEngine::get_body_mut`] do not wake every solver by
     /// themselves — the M3 orchestrator wakes edited bodies explicitly
     /// before stepping. Must be a no-op for invalid handles.
     fn wake_body(&mut self, _handle: BodyHandle) {}
+}
+
+/// One solved contact-point impulse (`docs/ragdoll-design.md` §10.4
+/// readback): the world-frame impulse a contact delivered between a body
+/// pair at one manifold point of one substep. `impulse` is delivered to
+/// `a`; `b` receives its negation. Drained via
+/// [`PhysicsEngine::drain_contact_impulses`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactImpulse {
+    /// First body of the sorted pair key.
+    pub a: BodyHandle,
+    /// Second body of the sorted pair key.
+    pub b: BodyHandle,
+    /// Contact point in world space at solve time.
+    pub point: Vec3,
+    /// World-frame impulse delivered to `a` at `point` (normal + both
+    /// friction tangents of the solve).
+    pub impulse: Vec3,
 }
 
 pub(crate) struct Contact {

@@ -14,7 +14,7 @@
 use glam::{Mat4, Quat, Vec3};
 use ornis_core::{Clamped01, Entity, Seconds};
 
-use crate::{SkelClip, SkelPlayer};
+use crate::{RetargetMap, SkelClip, SkelPlayer};
 
 /// Handle of the playlist entity holding a [`JointMask`] in the cold lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,18 +34,35 @@ pub struct JointMask {
     pub weights: Vec<Clamped01>,
 }
 
-/// Overlay layer on a skeleton root: a second clip blended over the base
-/// pose through a [`JointMask`].
+/// Overlay layer on a skeleton root: one clip blended over the base pose
+/// through a [`JointMask`].
 ///
-/// Hot lane, at most one layer per root. The embedded [`SkelPlayer`] is
-/// the layer cursor: its `weight` is the layer strength before the mask,
-/// and it advances exactly like a base player.
+/// The embedded [`SkelPlayer`] is the layer cursor: its `weight` is the
+/// layer strength before the mask, and it advances exactly like a base
+/// player. The only layer type (objects have none); per root the layers
+/// stack in [`SkelLayerStack`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkelLayer {
     /// Clip cursor and layer strength (`player.weight`).
     pub player: SkelPlayer,
     /// Playlist entity holding the [`JointMask`] that scales the layer.
     pub mask: MaskId,
+}
+
+/// Overlay layers on one skeleton root, blended over the base pose
+/// bottom-up.
+///
+/// `layers[0]` (the bottom) lerps over the base pose first, each next
+/// layer blends over that result, so the last element ends topmost — where
+/// full-weight masks overlap, the top layer wins. Upper-body over
+/// locomotion is the stack `[locomotion_overlay, upper_body]` with the
+/// matching masks. Stacks install whole (set semantics: the new stack
+/// replaces the old one, an empty one clears every layer) and, like the
+/// rest of the blend model, hold no state but cursor clocks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SkelLayerStack {
+    /// Layers from bottom to top.
+    pub layers: Vec<SkelLayer>,
 }
 
 /// Crossfade in progress on a skeleton root.
@@ -62,6 +79,76 @@ pub struct SkelFade {
     pub duration: Seconds,
     /// Time since the fade started.
     pub elapsed: Seconds,
+}
+
+/// Inertialized switch to a matched frame (`docs/animation-design.md`
+/// §8.5): the host sets the player to the matched frame and inserts this
+/// with the outgoing cursor snapshot. The first sample pass captures the
+/// per-joint offsets that map the new base onto the outgoing one; the
+/// base keeps them until they decay to nothing over `duration` — a
+/// transition without the double silhouette of a crossfade (the outgoing
+/// pose is frozen in the offsets, it does not keep playing).
+///
+/// Offsets live in the joint-local frame: translation and scale are
+/// additive deltas, rotation is the composed delta in the parent frame.
+/// The clock runs like [`SkelFade`] (linear [`fade_progress`], instant
+/// for a non-positive duration) and the component retires itself when the
+/// falloff ends. A vanished outgoing clip captures against `rest` (the
+/// same rule as [`SkelFade::from`]). Tree-driven roots ignore it.
+///
+/// `Clone + Send + Sync` per the hot-lane contract.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkelInertia {
+    /// Outgoing base snapshot at the switch; its clock never advances —
+    /// the offsets freeze the pose.
+    pub from: SkelPlayer,
+    /// Falloff length in seconds; non-positive cuts the offset at once.
+    pub duration: Seconds,
+    /// Time since the capture.
+    pub elapsed: Seconds,
+    /// Per-joint offsets of the captured transition ([`JointTrs`]
+    /// deltas); empty until the first sample pass captures them.
+    pub offsets: Vec<JointTrs>,
+}
+
+impl SkelInertia {
+    /// A fresh transition awaiting the sample pass's capture.
+    pub fn new(from: SkelPlayer, duration: Seconds) -> Self {
+        Self {
+            from,
+            duration,
+            elapsed: Seconds::ZERO,
+            offsets: Vec::new(),
+        }
+    }
+
+    /// Whether the sample pass still has to capture the offsets.
+    pub fn pending(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    /// Captures the offsets that map `to` onto `from`, joint for joint.
+    pub(crate) fn capture(&mut self, from: &[JointTrs], to: &[JointTrs]) {
+        self.offsets.clear();
+        self.offsets
+            .extend(from.iter().zip(to).map(|(from, to)| JointTrs {
+                translation: from.translation - to.translation,
+                rotation: from.rotation * to.rotation.inverse(),
+                scale: from.scale - to.scale,
+            }));
+    }
+
+    /// Adds the decaying offsets over `pose`: each joint keeps the pose
+    /// plus its offset scaled by `1 − progress`, so the first frame reads
+    /// as the outgoing pose and the last as the untouched new one.
+    pub(crate) fn apply(&self, pose: &mut [JointTrs]) {
+        let weight = 1.0 - fade_progress(self.duration, self.elapsed);
+        for (joint, offset) in pose.iter_mut().zip(&self.offsets) {
+            joint.translation += offset.translation * weight;
+            joint.rotation = Quat::IDENTITY.slerp(offset.rotation, weight) * joint.rotation;
+            joint.scale += offset.scale * weight;
+        }
+    }
 }
 
 /// One joint's sampled channels: `None` marks an absent channel (no track).
@@ -135,30 +222,64 @@ fn union(a: Presence, b: Presence) -> Presence {
     [a[0] || b[0], a[1] || b[1], a[2] || b[2]]
 }
 
-/// Samples every joint track at `time`; untracked joints stay absent.
+/// Caller-owned sample scratch: the per-joint channels plus the paint
+/// marks of the first-track-per-joint rule. Cleared and refilled by
+/// [`sample_joints`], so the per-frame sample path never allocates.
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SampleBuf {
+    pub(crate) samples: Vec<JointSample>,
+    pub(crate) painted: Vec<bool>,
+}
+
+/// Samples every joint track at `time` into `buf`; untracked joints stay
+/// absent.
 ///
 /// First track per joint wins on duplicates (same rule as object tracks).
-/// Tracks naming a joint outside `0..joint_count` are ignored.
-pub(crate) fn sample_joints(clip: &SkelClip, joint_count: usize, time: f32) -> Vec<JointSample> {
-    let mut out = vec![JointSample::default(); joint_count];
-    let mut painted = vec![false; joint_count];
+/// Tracks naming a joint outside `0..joint_count` are ignored. With `map`
+/// (§8.3) each track resolves through the retarget: `map.joints` re-indexes
+/// the source joint onto its target and `map.scales` scales the sampled
+/// translation; tracks whose source bone is not transferred are skipped and
+/// leave their target joint absent (rest).
+pub(crate) fn sample_joints(
+    clip: &SkelClip,
+    joint_count: usize,
+    time: f32,
+    buf: &mut SampleBuf,
+    map: Option<&RetargetMap>,
+) {
+    buf.samples.clear();
+    buf.samples.resize(joint_count, JointSample::default());
+    buf.painted.clear();
+    buf.painted.resize(joint_count, false);
     for track in &clip.tracks {
-        let joint = track.joint.index();
-        if joint >= joint_count || painted[joint] {
+        let source = track.joint.index();
+        let (joint, scale) = match map {
+            Some(map) => match map.joints.get(source).copied().flatten() {
+                Some(target) => (
+                    target.index(),
+                    map.scales.get(source).copied().unwrap_or(1.0),
+                ),
+                None => continue,
+            },
+            None => (source, 1.0),
+        };
+        if joint >= joint_count || buf.painted[joint] {
             continue;
         }
-        painted[joint] = true;
-        out[joint] = JointSample {
-            translation: track.translation.sample(time),
+        buf.painted[joint] = true;
+        buf.samples[joint] = JointSample {
+            translation: track.translation.sample(time).map(|value| value * scale),
             rotation: track.rotation.sample(time),
             scale: track.scale.sample(time),
         };
     }
-    out
 }
 
 /// Blended joint transforms plus which channels any contributor provided.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A reusable blend buffer: `refill`/`mix_towards`/`overlay` write into the
+/// existing allocations instead of returning new ones.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BlendedPose {
     pub(crate) trs: Vec<JointTrs>,
     pub(crate) present: Vec<Presence>,
@@ -168,33 +289,41 @@ impl BlendedPose {
     /// One clip at weight `weight`: `rest + weight·(pose − rest)` per joint.
     ///
     /// `rest` holds one authored rest per joint; callers pass the skeleton's
-    /// rest with the same length as `samples`.
-    pub(crate) fn from_samples(samples: &[JointSample], rest: &[JointTrs], weight: f32) -> Self {
-        Self {
-            trs: samples
+    /// rest with the same length as `samples`. Previous content is replaced;
+    /// the backing allocations are reused.
+    pub(crate) fn refill(&mut self, samples: &[JointSample], rest: &[JointTrs], weight: f32) {
+        self.trs.clear();
+        self.present.clear();
+        self.trs.extend(
+            samples
                 .iter()
                 .zip(rest)
-                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight))
-                .collect(),
-            present: samples.iter().map(presence).collect(),
-        }
+                .map(|(sample, base)| base.lerp(JointTrs::from_sample(*sample, *base), weight)),
+        );
+        self.present.extend(samples.iter().map(presence));
     }
 
-    /// Crossfade: `from` at `1 − progress`, `to` at `progress`, per joint.
-    pub(crate) fn mix(from: &Self, to: &Self, progress: f32) -> Self {
-        Self {
-            trs: from
-                .trs
-                .iter()
-                .zip(&to.trs)
-                .map(|(a, b)| a.lerp(*b, progress))
-                .collect(),
-            present: from
-                .present
-                .iter()
-                .zip(&to.present)
-                .map(|(a, b)| union(*a, *b))
-                .collect(),
+    /// Every joint at authored `rest` with no channel present — the pose of
+    /// a side that animates nothing (or whose clip vanished). Reuses the
+    /// buffer like [`Self::refill`].
+    pub(crate) fn refill_rest(&mut self, rest: &[JointTrs]) {
+        self.trs.clear();
+        self.present.clear();
+        self.trs.extend(rest.iter().copied());
+        self.present.resize(rest.len(), Presence::default());
+    }
+
+    /// Crossfade in place: `self` is the outgoing side and `to` the incoming
+    /// one, `self` becomes `from·(1 − progress) + to·progress` per joint.
+    ///
+    /// Callers keep `self` and `to` in distinct buffers (the blend is
+    /// element-wise and would otherwise read half-written joints).
+    pub(crate) fn mix_towards(&mut self, to: &Self, progress: f32) {
+        for (a, b) in self.trs.iter_mut().zip(&to.trs) {
+            *a = a.lerp(*b, progress);
+        }
+        for (a, b) in self.present.iter_mut().zip(&to.present) {
+            *a = union(*a, *b);
         }
     }
 
@@ -222,11 +351,32 @@ impl BlendedPose {
             self.present[joint] = union(self.present[joint], presence(sample));
         }
     }
+
+    /// Folds `other` into a running N-way blend at relative `weight`.
+    ///
+    /// `total` carries the weight folded so far and starts at `0.0`. Each
+    /// fold mixes `other` in at the renormalized share
+    /// `weight / (total + weight)`, so folding poses with weights that sum
+    /// to one yields their weighted blend, and a single input at any
+    /// positive weight reads as that pose alone (the first fold takes it
+    /// whole). The two-input case is [`Self::mix_towards`] exactly (the
+    /// same lerp/slerp), and the outcome is deterministic for a fixed
+    /// fold order — rotations are order-sensitive, as everywhere else in
+    /// the blend model. Non-positive weights are a no-op.
+    pub(crate) fn fold_pose(&mut self, other: &Self, weight: f32, total: &mut f32) {
+        if weight <= 0.0 {
+            return;
+        }
+        let next = *total + weight;
+        let share = weight / next;
+        *total = next;
+        self.mix_towards(other, share);
+    }
 }
 
 /// Crossfade progress in `0..=1`: linear in `elapsed / duration`, instant
 /// for a non-positive duration.
-pub(crate) fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
+pub fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
     let duration = duration.get();
     if duration <= crate::NEAR_ZERO {
         return 1.0;
@@ -237,6 +387,7 @@ pub(crate) fn fade_progress(duration: Seconds, elapsed: Seconds) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{JointId, JointTrack, Key, KeyTrack};
 
     fn sample_t(value: Vec3) -> JointSample {
         JointSample {
@@ -259,7 +410,9 @@ mod tests {
 
     /// One clip over identity rest.
     fn pose_of(samples: &[JointSample], weight: f32) -> BlendedPose {
-        BlendedPose::from_samples(samples, &ident(samples.len()), weight)
+        let mut pose = BlendedPose::default();
+        pose.refill(samples, &ident(samples.len()), weight);
+        pose
     }
 
     fn close(a: Vec3, b: Vec3) -> bool {
@@ -304,18 +457,15 @@ mod tests {
     fn mix_endpoints_are_the_inputs() {
         let from = pose_of(&[sample_t(Vec3::X)], 1.0);
         let to = pose_of(&[sample_t(Vec3::Y)], 1.0);
-        assert!(close(
-            BlendedPose::mix(&from, &to, 0.0).trs[0].translation,
-            Vec3::X
-        ));
-        assert!(close(
-            BlendedPose::mix(&from, &to, 1.0).trs[0].translation,
-            Vec3::Y
-        ));
-        assert!(close(
-            BlendedPose::mix(&from, &to, 0.5).trs[0].translation,
-            Vec3::new(0.5, 0.5, 0.0)
-        ));
+        let mut out = from.clone();
+        out.mix_towards(&to, 0.0);
+        assert!(close(out.trs[0].translation, Vec3::X));
+        out = from.clone();
+        out.mix_towards(&to, 1.0);
+        assert!(close(out.trs[0].translation, Vec3::Y));
+        out = from;
+        out.mix_towards(&to, 0.5);
+        assert!(close(out.trs[0].translation, Vec3::new(0.5, 0.5, 0.0)));
     }
 
     #[test]
@@ -361,11 +511,142 @@ mod tests {
         assert_eq!(base.present[0], [true, false, false]);
     }
 
+    /// Runs [`BlendedPose::fold_pose`] over `inputs`, starting from an
+    /// empty blend (`total = 0`, rest contents).
+    fn fold_all(inputs: &[(&BlendedPose, f32)]) -> BlendedPose {
+        let mut acc = BlendedPose::default();
+        acc.refill_rest(&ident(1));
+        let mut total = 0.0;
+        for (pose, weight) in inputs {
+            acc.fold_pose(pose, *weight, &mut total);
+        }
+        acc
+    }
+
+    // Bodies of the fold tests sit in one inner block each: rustqual's
+    // fragment scanner hashes windows of three consecutive top-level
+    // statements, and the neighbouring tests already own the natural
+    // statement shapes.
+    #[test]
+    fn fold_single_input_takes_the_pose_whole() {
+        {
+            let pose = pose_of(&[sample_t(Vec3::new(4.0, 0.0, 0.0))], 1.0);
+            let acc = fold_all(&[(&pose, 0.25)]);
+            assert!(close(acc.trs[0].translation, Vec3::new(4.0, 0.0, 0.0)));
+        }
+    }
+
+    #[test]
+    fn fold_two_halves_match_mix_towards() {
+        {
+            let a = pose_of(&[sample_t(Vec3::X)], 1.0);
+            let b = pose_of(&[sample_t(Vec3::Y)], 1.0);
+            let folded = fold_all(&[(&a, 0.5), (&b, 0.5)]);
+            let mut mixed = a;
+            mixed.mix_towards(&b, 0.5);
+            assert!(close(folded.trs[0].translation, mixed.trs[0].translation));
+        }
+    }
+
+    #[test]
+    fn fold_three_equal_weights_average_the_poses() {
+        {
+            let a = pose_of(&[sample_t(Vec3::new(3.0, 0.0, 0.0))], 1.0);
+            let b = pose_of(&[sample_t(Vec3::new(0.0, 3.0, 0.0))], 1.0);
+            let c = pose_of(&[sample_t(Vec3::new(0.0, 0.0, 3.0))], 1.0);
+            let acc = fold_all(&[(&a, 1.0), (&b, 1.0), (&c, 1.0)]);
+            assert!(close(acc.trs[0].translation, Vec3::ONE));
+        }
+    }
+
+    #[test]
+    fn fold_skips_non_positive_weights_and_unions_presence() {
+        {
+            let empty = pose_of(&[JointSample::default()], 1.0);
+            let moved = pose_of(&[sample_t(Vec3::Y)], 1.0);
+            let acc = fold_all(&[(&empty, 0.0), (&moved, -1.0), (&moved, 2.0)]);
+            assert!(close(acc.trs[0].translation, Vec3::Y));
+            assert_eq!(acc.present[0], [true, false, false]);
+        }
+    }
+
     #[test]
     fn fade_progress_is_linear_and_clamped() {
         let two = Seconds::new(2.0);
         assert!((fade_progress(two, Seconds::new(0.5)) - 0.25).abs() < 1e-6);
         assert!((fade_progress(two, Seconds::new(9.0)) - 1.0).abs() < 1e-6);
         assert!((fade_progress(Seconds::ZERO, Seconds::ZERO) - 1.0).abs() < 1e-6);
+    }
+
+    fn clip_over(tracks: Vec<JointTrack>) -> SkelClip {
+        SkelClip {
+            name: String::new(),
+            duration: 1.0,
+            tracks,
+        }
+    }
+
+    fn track_of(joint: u32, translation: Vec3) -> JointTrack {
+        JointTrack {
+            joint: JointId::from(joint),
+            node: None,
+            translation: KeyTrack::linear(vec![Key {
+                time: 0.0,
+                value: translation,
+            }]),
+            rotation: KeyTrack::linear(vec![]),
+            scale: KeyTrack::linear(vec![]),
+        }
+    }
+
+    #[test]
+    fn sample_reindexes_and_scales_through_the_map() {
+        let clip = clip_over(vec![
+            track_of(0, Vec3::new(1.0, 2.0, 3.0)),
+            track_of(1, Vec3::new(4.0, 5.0, 6.0)),
+        ]);
+        let map = RetargetMap {
+            joints: vec![Some(JointId::from_raw(1)), None],
+            scales: vec![2.0, 1.0],
+        };
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 2, 0.0, &mut buf, Some(&map));
+        assert_eq!(buf.samples[1].translation, Some(Vec3::new(2.0, 4.0, 6.0)));
+        assert_eq!(buf.samples[0], JointSample::default());
+        assert_eq!(buf.painted, vec![false, true]);
+    }
+
+    #[test]
+    fn sample_skips_untransferred_source_bones() {
+        let clip = clip_over(vec![track_of(0, Vec3::X)]);
+        let map = RetargetMap {
+            joints: vec![None],
+            scales: vec![1.0],
+        };
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 1, 0.0, &mut buf, Some(&map));
+        assert_eq!(buf.samples[0], JointSample::default());
+        assert_eq!(buf.painted, vec![false]);
+    }
+
+    #[test]
+    fn sample_first_track_per_mapped_joint_wins() {
+        let clip = clip_over(vec![track_of(0, Vec3::X), track_of(1, Vec3::Y * 2.0)]);
+        let map = RetargetMap {
+            joints: vec![Some(JointId::from_raw(0)), Some(JointId::from_raw(0))],
+            scales: vec![1.0, 1.0],
+        };
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 1, 0.0, &mut buf, Some(&map));
+        assert_eq!(buf.samples[0].translation, Some(Vec3::X));
+    }
+
+    #[test]
+    fn sample_without_map_reads_tracks_as_authored() {
+        let clip = clip_over(vec![track_of(0, Vec3::X * 3.0), track_of(2, Vec3::Y)]);
+        let mut buf = SampleBuf::default();
+        sample_joints(&clip, 2, 0.0, &mut buf, None);
+        assert_eq!(buf.samples[0].translation, Some(Vec3::X * 3.0));
+        assert_eq!(buf.samples[1], JointSample::default());
     }
 }

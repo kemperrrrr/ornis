@@ -31,6 +31,59 @@ pub(crate) struct WarmPoint {
     /// next is a DIFFERENT feature and must not inherit the impulse.
     pub(crate) normal: Vec3,
     pub(crate) impulse: f32,
+    /// Observation-only (`docs/ragdoll-design.md` §10.4 readback): the
+    /// full solved impulse of the point (normal + both friction tangents)
+    /// delivered to the pair-key's first body, world frame. Written at
+    /// cache build, never read by the warm-start solve — the baseline
+    /// path stays bit-identical. Zeroed on snapshot restore (the warm
+    /// input never needs it; the next substep's build rewrites it).
+    pub(crate) impulse_world: Vec3,
+    /// Observation-only (§10.4): contact point in world space at solve
+    /// time, paired with [`Self::impulse_world`].
+    pub(crate) point_world: Vec3,
+}
+
+impl WarmPoint {
+    /// Empty cache slot filler.
+    pub(crate) fn empty() -> Self {
+        Self {
+            la: Vec3::ZERO,
+            lb: Vec3::ZERO,
+            normal: Vec3::ZERO,
+            impulse: 0.0,
+            impulse_world: Vec3::ZERO,
+            point_world: Vec3::ZERO,
+        }
+    }
+
+    /// Cache entry of manifold point `k` after one substep's solve: the
+    /// warm fields plus the observation pair (§10.4). The observed impulse
+    /// follows the [`crate::sequential_impulse::math::apply_impulse`]
+    /// convention — positive pushes the manifold's `body_b` along its
+    /// normal — re-expressed on the sorted pair key's first body so the
+    /// readback record is key-stable.
+    pub(crate) fn observed(
+        st: &ManifoldState,
+        m: &Manifold,
+        k: usize,
+        key: (usize, usize),
+    ) -> Self {
+        let pushed_b =
+            m.normal * st.acc[k] + st.t1 * st.acc_friction[k] + st.t2 * st.acc_friction2[k];
+        let on_key0 = if m.body_a.index() == key.0 {
+            -pushed_b
+        } else {
+            pushed_b
+        };
+        Self {
+            la: st.la[k],
+            lb: st.lb[k],
+            normal: m.normal,
+            impulse: st.acc[k],
+            impulse_world: on_key0,
+            point_world: m.points[k].world_point,
+        }
+    }
 }
 
 /// Warm-start cache: per body pair, up to MAX_MANIFOLD_POINTS matched contact points.
