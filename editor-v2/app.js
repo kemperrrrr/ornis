@@ -1024,7 +1024,7 @@ function fillLearn(root) {
     } catch (e) { /* corrupted entry: fall back to mock data */ }
     return PROJECTS;
   }
-  var FILE_ICO = '<svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></svg>';
+  var FILE_ICO = '<svg class="wl-ico" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12.5h6M9 15.5h6M9 18h3.5"/></svg>';
   var list = document.getElementById("wl5-list"), listEmpty = document.getElementById("wl5-empty");
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function renderRecents() {

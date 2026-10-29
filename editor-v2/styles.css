@@ -447,7 +447,7 @@ input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; appe
 .wl5-btn:hover, .wl5-btn:focus-visible { outline: none; border-left-color: var(--wl5-acc); background: var(--panel-2); }
 .wl5-btn b { display: block; font-weight: 600; font-size: 14px; }
 .wl5-btn small { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
-.wl5-bi { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border: 1px solid var(--wl5-acc); border-radius: 50%; color: var(--wl5-acc); }
+.wl5-bi { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border: 1px solid var(--wl5-acc); border-radius: 8px; color: var(--wl5-acc); }
 .wl5-bi .wl-ico { width: 18px; height: 18px; }
 .wl5-recents { flex: 1; display: flex; flex-direction: column; justify-content: center; padding: 0 80px 0 56px; position: relative; }
 .wl5-rh { display: flex; justify-content: space-between; align-items: baseline; padding: 0 14px 10px; border-bottom: 1px solid var(--line); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
