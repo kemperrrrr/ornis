@@ -108,7 +108,6 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S>
     }
 
     /// [`index`](Self::index) with [`T::STORAGE_STRIDE`](GpuSafeLayout::STORAGE_STRIDE).
-    // qual:api — shader-facing index; in-tree callers are the unit tests.
     pub fn index_storage(&self, element: u32) -> Self {
         self.index(element, T::STORAGE_STRIDE)
     }
