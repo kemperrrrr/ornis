@@ -135,39 +135,45 @@
      ?nowelcome skips the start screen. All classes are prefixed wl-. ===== -->
 <svg class="wl-sprite" width="0" height="0" aria-hidden="true" focusable="false"><defs><symbol id="wl-i-box" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/></symbol><symbol id="wl-i-template" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M4 9.5h16M9.5 9.5V20"/></symbol><symbol id="wl-i-book" viewBox="0 0 24 24"><path d="M4.5 5.5A1.5 1.5 0 0 1 6 4h5.5v15H6a1.5 1.5 0 0 0-1.5 1.5zM19.5 5.5A1.5 1.5 0 0 0 18 4h-5.5v15H18a1.5 1.5 0 0 1 1.5 1.5z"/></symbol></defs></svg>
 <div id="wl-start" class="wl-root wl-screen wl-on" tabindex="-1" role="dialog" aria-modal="true" aria-label="Welcome to Ornis">
-  <div class="wl2-col">
-    <div class="wl2-hero">
-      <div class="wl-wordmark">Ornis</div>
-      <p>Version 0.1</p>
+  <div class="wl5-win">
+    <div class="wl5-main">
+      <div class="wl5-brand">
+        <span class="wl5-bird" aria-hidden="true"></span>
+        <div><h1 class="wl5-title">ornis</h1><p class="wl5-ver" id="wl5-ver">Version 0.1</p></div>
+      </div>
+      <p class="wl5-tag">Build worlds, one feather at a time.</p>
+      <div class="wl5-actions">
+        <button class="wl5-btn" data-wl-action="new"><span class="wl5-bi"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span><span><b>New Project</b><small>Start from a game template</small></span></button>
+        <button class="wl5-btn" data-wl-action="open"><span class="wl5-bi"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg></span><span><b>Open Existing Project</b><small>Pick a project folder on disk</small></span></button>
+      </div>
+      <input type="file" id="wl5-open-input" webkitdirectory hidden />
     </div>
-    <label class="wl2-cmd"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg><input id="wl-start-q" placeholder="Search projects or type a command…" autocomplete="off" spellcheck="false" /><kbd>⌘K</kbd></label>
-    <div class="wl2-sec"><h2>Recent</h2><a data-wl-go="all" tabindex="0">View all<svg class="wl-ico" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></a></div>
-    <section class="wl2-recents" id="wl-start-recents">
-      <article class="wl2-rc wl2-current" tabindex="0" title="~/AI-Projects/ornis/demo" data-wl-project="demo" data-wl-name="demo">
-        <div class="wl-thumb" data-thumb="demo"></div>
-        <div class="wl2-t"><div class="wl2-n">demo</div><div class="wl2-d"><span>12 minutes ago</span><span class="wl2-dot"></span></div></div>
-      </article>
-      <article class="wl2-rc" tabindex="0" title="~/AI-Projects/terrain_test" data-wl-project="terrain" data-wl-name="terrain_test">
-        <div class="wl-thumb" data-thumb="terrain"></div>
-        <div class="wl2-t"><div class="wl2-n">terrain_test</div><div class="wl2-d"><span>Yesterday</span></div></div>
-      </article>
-      <article class="wl2-rc" tabindex="0" title="~/AI-Projects/ornis/examples/physics_sandbox" data-wl-project="physics" data-wl-name="physics_sandbox">
-        <div class="wl-thumb" data-thumb="physics"></div>
-        <div class="wl2-t"><div class="wl2-n">physics_sandbox</div><div class="wl2-d"><span>3 days ago</span></div></div>
-      </article>
-      <article class="wl2-rc" tabindex="0" title="~/Projects/ornis_showcase" data-wl-project="showcase" data-wl-name="ornis_showcase">
-        <div class="wl-thumb" data-thumb="showcase"></div>
-        <div class="wl2-t"><div class="wl2-n">ornis_showcase</div><div class="wl2-d"><span>Sep 18</span></div></div>
-      </article>
-      <div class="wl2-empty" hidden>No matching projects. Press Enter to run it as a command.</div>
+    <section class="wl5-recents" aria-label="Recent projects">
+      <div class="wl5-rh"><h2>Recent projects</h2><span>Last opened</span></div>
+      <div class="wl5-list" id="wl5-list" role="listbox"></div>
+      <div class="wl5-empty" id="wl5-empty" hidden>No recent projects yet</div>
     </section>
-    <div class="wl2-links">
-      <button data-wl-action="new"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New Project<kbd>⌘N</kbd></button><span class="wl2-sep"></span>
-      <button data-wl-action="open"><svg class="wl-ico" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.7l2 2h7.3a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>Open Project<kbd>⌘O</kbd></button><span class="wl2-sep"></span>
-      <button data-wl-action="clone"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="6.5" cy="5.5" r="2"/><circle cx="6.5" cy="18.5" r="2"/><circle cx="17.5" cy="8.5" r="2"/><path d="M6.5 7.5v9M17.5 10.5c0 4-5 3.5-9.6 6.6"/></svg>Clone Repository<kbd>⇧⌘C</kbd></button>
+  </div>
+</div>
+<div id="wl-new" class="wl-root wl-screen wl5-modal" tabindex="-1" role="dialog" aria-modal="true" aria-label="New project">
+  <div class="wl5-sheet">
+    <nav class="wl5-cats" id="wl5-seg" role="tablist">
+      <h2>New project</h2>
+      <button class="wl5-on" data-wl5-cat="all" role="tab">All templates</button><button data-wl5-cat="3d" role="tab">3D</button><button data-wl5-cat="2d" role="tab">2D</button><button data-wl5-cat="multiplayer" role="tab">Multiplayer</button><button data-wl5-cat="other" role="tab">Other</button>
+    </nav>
+    <div class="wl5-pane">
+      <div class="wl5-head">
+        <label class="wl5-filter"><svg class="wl-ico" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.4-4.4"/></svg><input id="wl5-q" placeholder="Filter templates" autocomplete="off" spellcheck="false" /></label>
+      </div>
+      <div class="wl5-body" id="wl5-body"></div>
+      <div class="wl5-foot">
+        <button class="wl5-fb" data-wl5="cancel">Cancel</button>
+        <span class="wl5-sp" id="wl5-chosen"></span>
+        <button class="wl5-fb" disabled>Previous</button>
+        <button class="wl5-fb wl5-primary" data-wl5="next">Next</button>
+      </div>
     </div>
   </div>
-  <div class="wl2-foot"><a data-wl-action="docs">Docs</a><a data-wl-action="changelog">Changelog</a><a data-wl-action="settings">Settings</a></div>
 </div>
 <div id="wl-all" class="wl-root wl-screen" tabindex="-1" role="dialog" aria-modal="true" aria-label="All projects">
   <div class="wl3-stage" aria-hidden="true">

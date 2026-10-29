@@ -927,10 +927,10 @@ function fillLearn(root) {
 }
 
   fillThumbs(); fillLearn();
-  var S = { start: start, all: document.getElementById("wl-all"), sheet: document.getElementById("wl-sheet"), hub: document.getElementById("wl-hub") };
-  var ORDER = ["hub", "all", "start", "sheet"];            // top-most first
+  var S = { start: start, new: document.getElementById("wl-new"), all: document.getElementById("wl-all"), sheet: document.getElementById("wl-sheet"), hub: document.getElementById("wl-hub") };
+  var ORDER = ["new", "hub", "all", "start", "sheet"];            // top-most first
   var layout = document.querySelector(".layout");
-  var startQ = document.getElementById("wl-start-q"), hubQ = document.getElementById("wl-hub-q");
+  var hubQ = document.getElementById("wl-hub-q");
   var params = new URLSearchParams(location.search);
   var lastFocus = null;
 
@@ -1000,7 +1000,7 @@ function fillLearn(root) {
     if (!t) return;
     ev.preventDefault();
     var screen = t.closest("#wl-all") ? "all" : t.closest("#wl-hub") ? "hub" : t.closest("#wl-sheet") ? "sheet" : "start";
-    if (t.hasAttribute("data-wl-action")) { ev.stopPropagation(); console.log("[welcome] " + t.getAttribute("data-wl-action") + " (stub)"); return; }
+    if (t.hasAttribute("data-wl-action")) { ev.stopPropagation(); runAction(t.getAttribute("data-wl-action")); return; }
     if (t.hasAttribute("data-wl-go")) go(t.getAttribute("data-wl-go"));
     else if (t.hasAttribute("data-wl-project")) openProject(t.getAttribute("data-wl-project"));
     else if (t.hasAttribute("data-wl-tab")) setTab(screen, t.getAttribute("data-wl-tab"));
@@ -1014,20 +1014,116 @@ function fillLearn(root) {
     c.parentNode.querySelectorAll(c.tagName).forEach(function (x) { x.classList.toggle(c.classList.contains("wl1-chip") ? "wl1-on" : "wl1-on", x === c); });
   });
 
-  // Start-screen search: filters recent cards; Enter opens the first match or logs a command.
-  var cards = Array.prototype.slice.call(start.querySelectorAll("[data-wl-project]"));
-  var empty = start.querySelector(".wl2-empty");
-  startQ.addEventListener("input", function () {
-    var q = startQ.value.trim().toLowerCase(), n = 0;
-    cards.forEach(function (c) { var m = !q || c.getAttribute("data-wl-name").toLowerCase().indexOf(q) >= 0; c.hidden = !m; if (m) n++; });
-    empty.hidden = n > 0;
+  // Start window (Xcode-style): recent projects come from localStorage ("ornis.recentProjects",
+  // [{ id, name, path }]); until the editor writes that list we show the mock PROJECTS above.
+  var RECENT_KEY = "ornis.recentProjects";
+  function loadRecents() {
+    try {
+      var saved = JSON.parse(localStorage.getItem(RECENT_KEY) || "null");
+      if (Array.isArray(saved)) return saved;
+    } catch (e) { /* corrupted entry: fall back to mock data */ }
+    return PROJECTS;
+  }
+  var FILE_ICO = '<svg class="wl-ico" viewBox="0 0 24 24"><path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4M9 12.5h6M9 15.5h6M9 18h3.5"/></svg>';
+  var list = document.getElementById("wl5-list"), listEmpty = document.getElementById("wl5-empty");
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function renderRecents() {
+    var items = loadRecents();
+    list.innerHTML = items.map(function (p, i) {
+      return '<div class="wl5-item' + (i === 0 ? " wl5-sel" : "") + '" role="option" tabindex="0" data-wl5-recent="' + esc(p.id) + '" title="' + esc(p.path) + '">' +
+        FILE_ICO + '<div class="wl5-tx"><div class="wl5-n">' + esc(p.name) + '</div><div class="wl5-p">' + esc(p.path) + '</div></div><span class="wl5-dt">' + esc(p.date || "") + "</span></div>";
+    }).join("");
+    listEmpty.hidden = items.length > 0;
+  }
+  renderRecents();
+  list.addEventListener("click", function (ev) {
+    var it = ev.target.closest("[data-wl5-recent]");
+    if (!it) return;
+    list.querySelectorAll(".wl5-sel").forEach(function (x) { x.classList.remove("wl5-sel"); });
+    it.classList.add("wl5-sel");
   });
-  startQ.addEventListener("keydown", function (ev) {
-    if (ev.key !== "Enter") return;
-    var first = cards.filter(function (c) { return !c.hidden; })[0];
-    if (first && startQ.value.trim()) openProject(first.getAttribute("data-wl-project"));
-    else if (startQ.value.trim()) console.log("[welcome] command: " + startQ.value.trim() + " (mock)");
+  list.addEventListener("dblclick", function (ev) {
+    var it = ev.target.closest("[data-wl5-recent]");
+    if (it) openProject(it.getAttribute("data-wl5-recent"));
   });
+  list.addEventListener("keydown", function (ev) {
+    var it = ev.target.closest("[data-wl5-recent]");
+    if (it && ev.key === "Enter") { ev.preventDefault(); ev.stopPropagation(); openProject(it.getAttribute("data-wl5-recent")); }
+  });
+
+  // "Open Existing Project": no native open flow in the mockup yet, so pick a folder via the browser.
+  var openInput = document.getElementById("wl5-open-input");
+  openInput.addEventListener("change", function () {
+    var f = openInput.files && openInput.files[0];
+    var name = f ? (f.webkitRelativePath || f.name).split("/")[0] : null;
+    openInput.value = "";
+    if (name) { console.log("[welcome] open existing project folder " + name); toEditor(); }
+  });
+
+  // Template picker ("New Project"). Icons are stroke-only; parts with class wl5-a use the accent.
+  var TEMPLATES = [
+    { id: "empty", name: "Empty Project", desc: "Blank scene with a camera and light", sec: "games", cat: ["3d", "2d"], ico: '<rect x="8" y="8" width="32" height="32" rx="4"/><path class="wl5-a" d="M24 18v12M18 24h12"/>' },
+    { id: "first-person", name: "First-Person", desc: "FPS controller, mouse look, crosshair", sec: "games", cat: ["3d"], ico: '<circle cx="24" cy="24" r="13"/><path class="wl5-a" d="M24 7v8M24 33v8M7 24h8M33 24h8"/><circle class="wl5-a" cx="24" cy="24" r="2"/>' },
+    { id: "third-person", name: "Third-Person", desc: "Orbit camera and character movement", sec: "games", cat: ["3d"], ico: '<circle cx="24" cy="13" r="5"/><path d="M15 38v-9a9 9 0 0 1 18 0v9"/><path class="wl5-a" d="M8 42h32"/><path class="wl5-a" d="M6 8l5 3M42 8l-5 3"/>' },
+    { id: "top-down", name: "Top-Down", desc: "Isometric camera with click-to-move", sec: "games", cat: ["3d", "2d"], ico: '<rect x="7" y="7" width="34" height="34" rx="3"/><path d="M7 19h34M7 30h34M19 7v34M30 7v34"/><circle class="wl5-a" cx="24.5" cy="24.5" r="3.5"/>' },
+    { id: "platformer-2d", name: "Platformer 2D", desc: "Side-scroller with tight jump physics", sec: "games", cat: ["2d"], ico: '<path d="M5 40h14M27 30h16M12 22h12"/><rect class="wl5-a" x="15" y="11" width="6" height="8" rx="1.5"/><path class="wl5-a" d="M26 20q5-6 9 4"/>' },
+    { id: "racing", name: "Racing", desc: "Vehicle physics and a lap track", sec: "games", cat: ["3d"], ico: '<path d="M8 30l3-9a4 4 0 0 1 4-3h18a4 4 0 0 1 4 3l3 9v6H8z"/><circle cx="15" cy="36" r="3"/><circle cx="33" cy="36" r="3"/><path class="wl5-a" d="M4 12h10M2 17h8"/>' },
+    { id: "open-world", name: "Open World", desc: "Streaming procedural terrain", sec: "games", cat: ["3d"], ico: '<path d="M4 38l11-16 7 9 6-8 16 15z"/><path class="wl5-a" d="M4 43c6-3 10 0 14-2s8-3 12-1 9 1 14-1"/><circle cx="36" cy="11" r="4"/>' },
+    { id: "puzzle", name: "Puzzle", desc: "Grid logic and level progression", sec: "games", cat: ["2d", "3d"], ico: '<path d="M10 10h10a4 4 0 1 1 8 0h10v10a4 4 0 1 0 0 8v10H28a4 4 0 1 0-8 0H10V28a4 4 0 1 1 0-8z"/><circle class="wl5-a" cx="24" cy="24" r="3"/>' },
+    { id: "multiplayer-arena", name: "Multiplayer Arena", desc: "Server-authoritative arena match", sec: "games", cat: ["multiplayer", "3d"], ico: '<ellipse cx="24" cy="30" rx="18" ry="8"/><circle class="wl5-a" cx="15" cy="15" r="4"/><circle class="wl5-a" cx="33" cy="15" r="4"/><path d="M19 15h10"/><path class="wl5-a" d="M24 11v8"/>' },
+    { id: "coop-survival", name: "Co-op Survival", desc: "Shared world for 2–4 players", sec: "games", cat: ["multiplayer", "3d"], ico: '<path d="M24 6l14 5v11c0 9-6 16-14 20-8-4-14-11-14-20V11z"/><path class="wl5-a" d="M17 24l5 5 9-10"/>' },
+    { id: "physics-playground", name: "Physics Playground", desc: "Rigid bodies, joints and forces", sec: "tools", cat: ["3d", "other"], ico: '<rect x="8" y="28" width="12" height="12" rx="1.5"/><rect x="20" y="28" width="12" height="12" rx="1.5"/><rect x="14" y="16" width="12" height="12" rx="1.5"/><circle class="wl5-a" cx="36" cy="12" r="5"/><path class="wl5-a" d="M36 20v5M33 23l3 3 3-3"/>' },
+    { id: "mesh-editing", name: "Mesh Editing Sample", desc: "Edit vertices and faces in-scene", sec: "tools", cat: ["3d", "other"], ico: '<path d="M24 5l17 10v18L24 43 7 33V15z"/><path d="M7 15l17 10 17-10M24 25v18"/><circle class="wl5-a" cx="24" cy="5" r="2.5"/><circle class="wl5-a" cx="41" cy="15" r="2.5"/><circle class="wl5-a" cx="24" cy="25" r="2.5"/>' },
+    { id: "terrain-sample", name: "Procedural Terrain", desc: "Heightmap noise and erosion", sec: "tools", cat: ["3d", "other"], ico: '<path d="M4 34l8-6 6 4 8-10 8 6 10-8"/><path d="M4 42l8-6 6 4 8-10 8 6 10-8" opacity=".5"/><path class="wl5-a" d="M24 6v8M20 10h8"/>' },
+    { id: "ui-sample", name: "UI & Menus", desc: "Menus, HUD and settings screens", sec: "tools", cat: ["2d", "other"], ico: '<rect x="7" y="9" width="34" height="30" rx="3"/><path d="M7 16h34"/><path class="wl5-a" d="M13 24h14M13 30h22"/>' },
+    { id: "netcode-sample", name: "Netcode Sample", desc: "Replication and client prediction", sec: "tools", cat: ["multiplayer", "other"], ico: '<rect x="6" y="8" width="14" height="10" rx="2"/><rect x="28" y="30" width="14" height="10" rx="2"/><path class="wl5-a" d="M13 18v8h22v4"/><path class="wl5-a" d="M31 27l4 3 4-3"/>' }
+  ];
+  var SECTIONS = [["games", "Games"], ["tools", "Tools & Samples"]];
+  var pick = { cat: "all", q: "", sel: "empty" };
+  var body = document.getElementById("wl5-body"), tq = document.getElementById("wl5-q");
+  function renderTemplates() {
+    var q = pick.q.trim().toLowerCase(), html = "";
+    SECTIONS.forEach(function (s) {
+      var ts = TEMPLATES.filter(function (t) {
+        return t.sec === s[0] && (pick.cat === "all" || t.cat.indexOf(pick.cat) >= 0) && (!q || t.name.toLowerCase().indexOf(q) >= 0);
+      });
+      if (!ts.length) return;
+      html += '<section class="wl5-sec"><h3>' + s[1] + '</h3><div class="wl5-grid">' + ts.map(function (t) {
+        return '<button class="wl5-tpl' + (t.id === pick.sel ? " wl5-sel" : "") + '" data-wl5-tpl="' + t.id + '"><svg class="wl-ico" viewBox="0 0 48 48">' +
+          t.ico + '</svg><span><b>' + t.name + "</b><small>" + t.desc + "</small></span></button>";
+      }).join("") + "</div></section>";
+    });
+    var cur = TEMPLATES.filter(function (t) { return t.id === pick.sel; })[0];
+    document.getElementById("wl5-chosen").textContent = cur ? "Selected: " + cur.name : "";
+    body.innerHTML = html || '<div class="wl5-none">No templates match the filter.</div>';
+  }
+  function openPicker() {
+    pick.q = ""; tq.value = "";
+    renderTemplates(); show("new");
+  }
+  S.new.addEventListener("click", function (ev) {
+    var c = ev.target.closest("[data-wl5-cat]"), t = ev.target.closest("[data-wl5-tpl]"), b = ev.target.closest("[data-wl5]");
+    if (c) {
+      pick.cat = c.getAttribute("data-wl5-cat");
+      S.new.querySelectorAll("[data-wl5-cat]").forEach(function (x) { x.classList.toggle("wl5-on", x === c); });
+      renderTemplates();
+    } else if (t) {
+      pick.sel = t.getAttribute("data-wl5-tpl"); renderTemplates();
+    } else if (b && b.getAttribute("data-wl5") === "cancel") {
+      hide("new"); S.start.focus({ preventScroll: true });
+    } else if (b && b.getAttribute("data-wl5") === "next") {
+      S.new.dataset.template = pick.sel;
+      console.log("[welcome] new project from template " + pick.sel);
+      toEditor();
+    }
+  });
+  body.addEventListener("dblclick", function (ev) { if (ev.target.closest("[data-wl5-tpl]")) S.new.querySelector('[data-wl5="next"]').click(); });
+  tq.addEventListener("input", function () { pick.q = tq.value; renderTemplates(); });
+  function runAction(a) {
+    if (a === "new") openPicker();
+    else if (a === "open") openInput.click();
+    else console.log("[welcome] " + a + " (stub)");
+  }
 
   // Keyboard: Enter/Space activates focused cards & rows; Esc steps back; ⌘K focuses the overlay search; ⇧⌘O toggles the sheet.
   window.addEventListener("keydown", function (ev) {
@@ -1041,13 +1137,13 @@ function fillLearn(root) {
     if (k === "Escape") {
       ev.preventDefault(); ev.stopPropagation();
       if (a && a.tagName === "INPUT" && a.value) { a.value = ""; a.dispatchEvent(new Event("input")); return; }
-      if (t === "all") go("start"); else go("editor");
+      if (t === "new") { hide("new"); S.start.focus({ preventScroll: true }); } else if (t === "all") go("start"); else go("editor");
     } else if (mod && k.toLowerCase() === "k") {
       ev.preventDefault(); ev.stopPropagation();
-      if (t === "start") startQ.focus(); else if (t === "hub") hubQ.focus();
+      if (t === "new") document.getElementById("wl5-q").focus(); else if (t === "hub") hubQ.focus();
     } else if (isO && t === "sheet") {
       ev.preventDefault(); ev.stopPropagation(); go("editor");
-    } else if ((k === "Enter" || k === " ") && a && a.closest && a.closest(".wl-root") && a.matches("[data-wl-project], [data-wl-template], [data-wl-guide], [data-wl-tab], a[data-wl-go]")) {
+    } else if ((k === "Enter" || k === " ") && a && a.closest && a.closest(".wl-root") && a.matches("[data-wl5-recent], [data-wl-project], [data-wl-template], [data-wl-guide], [data-wl-tab], a[data-wl-go]")) {
       ev.preventDefault(); ev.stopPropagation(); a.click();
     }
   }, true);
