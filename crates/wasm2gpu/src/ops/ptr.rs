@@ -47,7 +47,7 @@ pub(super) fn local_ptr(em: &mut Emit<'_, '_>, slot: usize) -> Result<Option<Val
 /// The provenance pair of a value: `Some` only for a storage pointer.
 pub(super) fn provenance(val: &Val) -> Option<(u32, u32)> {
     match val {
-        Val::Ptr { group, binding, .. } => Some((group, binding)),
+        Val::Ptr { group, binding, .. } => Some((*group, *binding)),
         _ => None,
     }
 }

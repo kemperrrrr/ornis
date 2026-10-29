@@ -48,7 +48,6 @@ pub(super) fn pop_imm(st: &mut St) -> Result<u32, TranslateError> {
     match st.stack.pop() {
         Some(Abs::I32(Num::Const(value))) => Ok(value),
         Some(Abs::I32(Num::Dyn { joined: true })) => Err(TranslateError::AmbiguousProvenance),
-        Some(Abs::I32(Num::Dyn { joined: false })) => Err(TranslateError::DynamicBinding),
         Some(_) => Err(TranslateError::DynamicBinding),
         None => Err(TranslateError::Unsupported),
     }
@@ -112,11 +111,14 @@ pub(super) fn i32_offset(
         }
         _ => return Err(TranslateError::Unsupported),
     };
-    push(st, Abs::Ptr {
-        group,
-        binding,
-        offset,
-    })
+    push(
+        st,
+        Abs::Ptr {
+            group,
+            binding,
+            offset,
+        },
+    )
 }
 
 /// Pop a load or store address: only a storage pointer names a buffer.
