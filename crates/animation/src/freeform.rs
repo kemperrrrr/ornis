@@ -1,4 +1,4 @@
-//! Deterministic **freeform** blend weights ([`freeform2d_weights`]) —
+//! Deterministic **freeform** blend weights —
 //! the pure position-to-weight math behind
 //! [`TreeNodeDef::Freeform2d`](crate::TreeNodeDef::Freeform2d): a
 //! Delaunay triangulation of the arbitrary child points (f64
@@ -31,7 +31,7 @@ impl FreeformSlots {
     }
 }
 
-/// Slots of a `freeform2d_weights` fold: one triangle's corners.
+/// Slots of a `freeform2d_weights_cached` fold: one triangle's corners.
 pub(crate) const FREEFORM_SLOTS: usize = 3;
 
 /// Dimensionless slop of the freeform fold: barycentric weights and
@@ -331,22 +331,40 @@ fn compact(slots: [(usize, f32); FREEFORM_SLOTS]) -> FreeformSlots {
 /// empty circumcircle, cocircular sets folded to one geometric diagonal
 /// by the SoS tie-break. Built once per install; fixed arrays only, no
 /// allocations. The scan order matches the fold's, so the cached fold
-/// is bit-for-bit the on-the-fly one.
+/// is bit-for-bit the on-the-fly one. The cache records the point
+/// count it was built for — a frame over children of another count
+/// reads as bad skin instead of indexing past them.
 pub fn freeform_cache(children: &[TreeChild2d]) -> FreeformCache {
-    let mut cache = FreeformCache::default();
+    let mut cache = FreeformCache {
+        n_points: children.len(),
+        ..FreeformCache::default()
+    };
     let eps = tolerances(children);
     for i in 0..children.len() {
         for j in (i + 1)..children.len() {
             for k in (j + 1)..children.len() {
-                if passes_delaunay(children, [i, j, k], eps) && cache.count < FREEFORM_MAX_TRIANGLES
-                {
-                    cache.kept[cache.count] = [i, j, k];
-                    cache.count += 1;
+                if passes_delaunay(children, [i, j, k], eps) {
+                    keep_triple(&mut cache, [i, j, k]);
                 }
             }
         }
     }
     cache
+}
+
+/// Appends one surviving triple to `cache`. An `n`-point set spans at
+/// most `2n − 5` triangles ([`FREEFORM_MAX_TRIANGLES`]), so filling
+/// the capacity means the invariant broke — a debug build panics
+/// loudly, a release build keeps the guard and drops the triple.
+fn keep_triple(cache: &mut FreeformCache, triple: [usize; 3]) {
+    debug_assert!(
+        cache.count < FREEFORM_MAX_TRIANGLES,
+        "freeform triangulation exceeded FREEFORM_MAX_TRIANGLES"
+    );
+    if cache.count < FREEFORM_MAX_TRIANGLES {
+        cache.kept[cache.count] = triple;
+        cache.count += 1;
+    }
 }
 
 /// Weights of a 2-D **freeform** blend at `value` (x, y) over `children`
@@ -369,15 +387,22 @@ pub fn freeform_cache(children: &[TreeChild2d]) -> FreeformCache {
 /// Deterministic and allocation-free — evaluated every frame per blend
 /// node: a containment scan over the cached triangles, no incircle
 /// tests.
+///
+/// `None` = bad skin: the cache was built for another point count than
+/// `children` carries (a tree replaced without reinstall), so its
+/// triples would answer from — or index into — the wrong point set.
 pub(crate) fn freeform2d_weights_cached(
     cache: &FreeformCache,
     children: &[TreeChild2d],
     value: [f32; 2],
-) -> FreeformSlots {
+) -> Option<FreeformSlots> {
+    if cache.n_points != children.len() {
+        return None;
+    }
     match children.len() {
-        0 => return FreeformSlots::EMPTY,
-        1 => return compact([(children[0].node, 1.0), (0, 0.0), (0, 0.0)]),
-        count if count > FREEFORM_MAX_POINTS => return FreeformSlots::EMPTY,
+        0 => return Some(FreeformSlots::EMPTY),
+        1 => return Some(compact([(children[0].node, 1.0), (0, 0.0), (0, 0.0)])),
+        count if count > FREEFORM_MAX_POINTS => return Some(FreeformSlots::EMPTY),
         _ => {}
     }
     let (_, area_eps) = tolerances(children);
@@ -389,14 +414,14 @@ pub(crate) fn freeform2d_weights_cached(
             value,
             area_eps,
         ) {
-            return compact([
+            return Some(compact([
                 (children[triple[0]].node, weights[0]),
                 (children[triple[1]].node, weights[1]),
                 (children[triple[2]].node, weights[2]),
-            ]);
+            ]));
         }
     }
-    compact(clamp_to_hull(children, value))
+    Some(compact(clamp_to_hull(children, value)))
 }
 
 #[cfg(test)]
@@ -414,6 +439,7 @@ mod tests {
 
     fn weights_of(children: &[TreeChild2d], value: [f32; 2]) -> Vec<(usize, f32)> {
         freeform2d_weights_cached(&freeform_cache(children), children, value)
+            .expect("a fresh cache matches its children")
             .as_slice()
             .to_vec()
     }
@@ -1058,7 +1084,9 @@ mod tests {
             let cache = freeform_cache(children);
             for value in probes(children) {
                 assert_eq!(
-                    freeform2d_weights_cached(&cache, children, value).as_slice(),
+                    freeform2d_weights_cached(&cache, children, value)
+                        .expect("cache built from these children")
+                        .as_slice(),
                     freeform2d_weights_uncached(children, value).as_slice(),
                     "{name} at {value:?}"
                 );
@@ -1072,12 +1100,15 @@ mod tests {
     #[test]
     fn the_cache_decides_without_retriangulating() {
         let children = freeform_n(&[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]);
-        let mut forced = FreeformCache::default();
+        // Built from these children, then forced onto the other
+        // diagonal — the stored triples decide, not the points.
+        let mut forced = freeform_cache(&children);
         forced.kept[0] = [0, 1, 2];
         forced.kept[1] = [0, 2, 3];
         forced.count = 2;
         let value = [1.7, 0.2];
-        let cached = freeform2d_weights_cached(&forced, &children, value);
+        let cached = freeform2d_weights_cached(&forced, &children, value)
+            .expect("forced cache built from these children");
         let support =
             |slots: &[(usize, f32)]| slots.iter().map(|(node, _)| *node).collect::<Vec<_>>();
         assert_eq!(
@@ -1088,6 +1119,28 @@ mod tests {
         let on_the_fly = freeform2d_weights_uncached(&children, value);
         assert_eq!(support(on_the_fly.as_slice()), vec![0, 1, 3]);
         assert_ne!(cached.as_slice(), on_the_fly.as_slice());
+    }
+
+    /// A cache built for another point count reads as bad skin
+    /// (`None`) — its triples never index past the children they were
+    /// built for (Grok's panic repro, r-39-fix).
+    #[test]
+    fn cache_point_count_mismatch_reads_bad_skin() {
+        let square = freeform_n(&[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]);
+        let cache = freeform_cache(&square);
+        let three = freeform_n(&[[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]]);
+        assert!(
+            freeform2d_weights_cached(&cache, &three, [0.5, 0.5]).is_none(),
+            "a stale 4-point cache over 3 children"
+        );
+        assert!(
+            freeform2d_weights_cached(&cache, &[], [0.5, 0.5]).is_none(),
+            "a stale 4-point cache over no children"
+        );
+        assert!(
+            freeform2d_weights_cached(&FreeformCache::default(), &square, [0.5, 0.5]).is_none(),
+            "an empty cache over real children"
+        );
     }
 
     /// Near-cocircular rings with f32-scale jitter stay a partition —

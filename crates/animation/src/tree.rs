@@ -145,7 +145,8 @@ pub enum TreeNodeDef {
     /// lexicographic perturbation — a geometric SoS rule, independent
     /// of the arrival order — so the triangles partition the hull) and
     /// the containing triangle's corners carry
-    /// barycentric weights summing to one (`freeform2d_weights`); the
+    /// barycentric weights summing to one (the hot fold reads the cache
+    /// triangle by triangle); the
     /// weights are continuous across shared triangle edges. Exactly on
     /// a hull edge or corner the edge or corner owns the pose; outside
     /// the convex hull the value clamps to its nearest hull segment
@@ -284,10 +285,18 @@ pub const FREEFORM_MAX_TRIANGLES: usize = 2 * FREEFORM_MAX_POINTS - 5;
 /// the node's points
 /// are fixed at install, and every reinstall ([`SkelTree`] write)
 /// rebuilds the cache.
+///
+/// Build it only from the node's own children: the frame trusts the
+/// stored triples completely. A cache whose point count disagrees with
+/// the node's current children reads as bad skin (`None` in both folds)
+/// instead of indexing past them.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FreeformCache {
     pub(crate) kept: [[usize; 3]; FREEFORM_MAX_TRIANGLES],
     pub(crate) count: usize,
+    /// The `children.len()` this cache was built for — a frame whose
+    /// children disagree reads as bad skin, never past the end.
+    pub(crate) n_points: usize,
 }
 
 impl FreeformCache {
@@ -313,6 +322,9 @@ pub struct SkelTreePlayer {
     /// nodes, in node order — one [`FreeformCache`] per freeform node;
     /// a lane whose count diverges reads as bad skin like the cursors
     /// above. Rebuilt on every [`SkelTree`] install — the points of an
-    /// installed node never change.
+    /// installed node never change. Each cache is built from the same
+    /// `children` the node carries; a cache seeded from other points
+    /// answers from a stale triangulation, and one whose point count
+    /// disagrees with the node's children reads as bad skin.
     pub freeforms: Vec<FreeformCache>,
 }

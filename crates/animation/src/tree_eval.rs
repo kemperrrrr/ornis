@@ -220,7 +220,7 @@ pub(crate) fn eval_freeform2d(
     if !value[0].is_finite() || !value[1].is_finite() {
         return None;
     }
-    let slots = freeform2d_weights_cached(cache, children, value);
+    let slots = freeform2d_weights_cached(cache, children, value)?;
     poses[index].refill_rest(rest);
     let mut total = 0.0;
     for (node_index, weight) in slots.as_slice() {

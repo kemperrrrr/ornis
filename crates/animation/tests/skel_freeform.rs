@@ -226,3 +226,61 @@ fn freeform_cache_is_not_rebuilt_per_frame() {
     engine.run_frame(0.1);
     expect_origin(&engine, root, 0, Vec3::ZERO);
 }
+
+/// A tree swapped into the lane without reinstall — its freeform now
+/// carries FEWER points than the installed cache was built for — must
+/// read as bad skin on the frame, not panic on a stale triple index
+/// (Grok's repro, r-39-fix). The stale cache's triangles still reach
+/// child index 3; the fold at (0.5, 0.5) would otherwise publish the
+/// triangle midpoint mix 3.5.
+#[test]
+fn swapped_tree_with_fewer_points_reads_bad_skin() {
+    let mut engine = engine();
+    let clips = [
+        clip_x(&mut engine, "a", 2.0),
+        clip_x(&mut engine, "b", 6.0),
+        clip_x(&mut engine, "c", 4.0),
+        clip_x(&mut engine, "d", 0.0),
+    ];
+    let root = rig(&mut engine, 1);
+    let square = square_tree(
+        clips,
+        [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
+        [0.5, 0.5],
+    );
+    install(&mut engine, root, square);
+    // Same four clip nodes; the freeform now carries only three of the
+    // four points. The stale cache — built for four — must read as bad
+    // skin, never index child 3 of a three-point children list.
+    store_mut(&mut engine).insert_cold(
+        root,
+        SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip: clips[0] },
+                TreeNodeDef::Clip { clip: clips[1] },
+                TreeNodeDef::Clip { clip: clips[2] },
+                TreeNodeDef::Clip { clip: clips[3] },
+                TreeNodeDef::Freeform2d {
+                    axes: [0, 1],
+                    children: vec![
+                        child2d(0.0, 0.0, 0),
+                        child2d(2.0, 0.0, 1),
+                        child2d(0.0, 2.0, 2),
+                    ],
+                },
+            ],
+            params: vec![
+                TreeParam {
+                    name: "x".to_string(),
+                    default: 0.5,
+                },
+                TreeParam {
+                    name: "y".to_string(),
+                    default: 0.5,
+                },
+            ],
+        },
+    );
+    engine.run_frame(0.1);
+    expect_origin(&engine, root, 0, Vec3::ZERO);
+}

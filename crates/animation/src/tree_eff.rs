@@ -219,7 +219,7 @@ fn fold_freeform2d_eff(
         return None;
     }
     freeform2d_children_valid(index, children)?;
-    let slots = freeform2d_weights_cached(cache, children, value);
+    let slots = freeform2d_weights_cached(cache, children, value)?;
     for (node, child_weight) in slots.as_slice() {
         eff[*node] += weight * child_weight;
     }

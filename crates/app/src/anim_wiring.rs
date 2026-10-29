@@ -3085,6 +3085,59 @@ mod tests {
         );
     }
 
+    /// One install-time [`FreeformCache`] per freeform node, in node
+    /// order — two freeform nodes seed two caches (Ядро's r-39-fix
+    /// request).
+    #[test]
+    fn set_skel_tree_seeds_one_cache_per_freeform_node() {
+        use ornis_animation::{SkelTree, TreeChild2d, TreeNodeDef, TreeParam};
+        let mut store = SmartStore::new();
+        let (root, clip) = tree_hero(&mut store);
+        let cell = |x: f32, y: f32, node: usize| TreeChild2d {
+            position: [x, y],
+            node,
+        };
+        assert!(set_skel_tree(
+            &mut store,
+            root,
+            SkelTree {
+                nodes: vec![
+                    TreeNodeDef::Clip { clip },
+                    TreeNodeDef::Clip { clip },
+                    TreeNodeDef::Clip { clip },
+                    TreeNodeDef::Freeform2d {
+                        axes: [0, 1],
+                        children: vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(0.0, 2.0, 2)],
+                    },
+                    TreeNodeDef::Freeform2d {
+                        axes: [0, 1],
+                        children: vec![cell(0.0, 0.0, 0), cell(4.0, 0.0, 1), cell(0.0, 4.0, 2)],
+                    },
+                ],
+                params: vec![
+                    TreeParam {
+                        name: "x".to_string(),
+                        default: 0.5,
+                    },
+                    TreeParam {
+                        name: "y".to_string(),
+                        default: 0.5,
+                    },
+                ],
+            },
+        ));
+        let freeforms = {
+            let players = store
+                .read_lane::<SkelTreePlayer>()
+                .expect("lane registered");
+            players.get(root).expect("player kept").freeforms.clone()
+        };
+        assert_eq!(freeforms.len(), 2, "one cache per freeform node");
+        for cache in &freeforms {
+            assert!(!cache.triples().is_empty(), "a triangle survived");
+        }
+    }
+
     /// One sync mark for [`set_clip_sync_marks`] fixtures.
     fn sync_mark(name: &str, at: f32) -> SyncMark {
         SyncMark {
