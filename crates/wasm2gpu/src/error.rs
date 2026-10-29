@@ -38,11 +38,11 @@ pub enum TranslateError {
     /// The callee would not be a concrete function, so provenance could not
     /// be specialized.
     IndirectCall,
-    /// Too many specialized functions, or too many abstract-interpretation steps.
+    /// Too many specialized functions, or too many distinct call interpretations.
     ///
     /// Each distinct tuple of constant `i32` arguments is one naga function.
-    /// The same tuple is cached. A tree of different tuples is rejected
-    /// instead of growing without a bound.
+    /// The same tuple is cached. Abstract interpretation counts each new
+    /// `(function, arguments)` pair, not each instruction in a body.
     Budget,
     /// A storage element the lowerer will not emit, or a struct whose lanes
     /// do not match the host layout rules.

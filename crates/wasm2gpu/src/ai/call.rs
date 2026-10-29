@@ -4,6 +4,10 @@
 //! binding passed as an immediate is still an immediate at the import.
 //! A dynamic index stays dynamic and may come back as a result. The same
 //! function and the same abstract arguments are interpreted once.
+//!
+//! The memo key is that pair, and the stored value is only the result
+//! stack. A callee does not change anything the caller reads after return.
+//! When globals appear, the key has to grow with them.
 
 use super::Abs;
 use super::Ai;
@@ -16,9 +20,9 @@ use super::push;
 use crate::error::TranslateError;
 use crate::ir::Kind;
 
-/// One entry's memo of defined calls, and how many statements it has visited.
+/// One entry's memo of defined calls, and how many new pairs it has entered.
 pub(super) struct Seen {
-    steps: u32,
+    entries: u32,
     hits: Vec<Hit>,
 }
 
@@ -31,16 +35,19 @@ struct Hit {
 impl Seen {
     pub(super) fn new() -> Self {
         Self {
-            steps: 0,
+            entries: 0,
             hits: Vec::new(),
         }
     }
 }
 
-/// Count one statement. The same `(function, arguments)` pair is not visited again.
+/// Count one new `(function, arguments)` pair.
+///
+/// Instructions and loop iterations do not pass through here. A pair already
+/// in the memo is not counted again.
 pub(super) fn charge(ai: &mut Ai<'_>) -> Result<(), TranslateError> {
-    ai.seen.steps += 1;
-    if ai.seen.steps > crate::cx::MAX_AI_STEPS {
+    ai.seen.entries += 1;
+    if ai.seen.entries > crate::cx::MAX_AI_ENTRIES {
         return Err(TranslateError::Budget);
     }
     Ok(())
@@ -60,6 +67,8 @@ pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Tr
     if let Some(out) = recall(ai, index, &args) {
         return give(st, &out);
     }
+    // The key is `(function, args)` only. Extend it when globals appear.
+    charge(ai)?;
     let body = func.body.clone();
     let mut callee = entry(func);
     seed(&mut callee, func, &args)?;

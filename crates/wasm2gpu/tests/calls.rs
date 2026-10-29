@@ -190,6 +190,38 @@ const WIDE: usize = {
     PARAMS
 };
 
+const BULK: usize = {
+    const OPS: usize = 12000;
+    OPS
+};
+
+#[test]
+fn straight_line_body_is_not_charged_against_the_call_budget() {
+    let fs = fragment(&format!(
+        "{}f32.const 0 f32.const 0 f32.const 0 f32.const 1",
+        dropped(BULK)
+    ));
+    let started = std::time::Instant::now();
+    let got = wgsl("", &fs);
+    assert!(
+        started.elapsed().as_secs() < 2,
+        "straight line took too long"
+    );
+    assert!(got.contains("fn fs_main"), "{got}");
+}
+
+#[test]
+fn loop_body_is_not_charged_against_the_call_budget() {
+    let fs = fragment(&format!(
+        "(local i32) (block (loop local.get 2 i32.const 1 i32.add local.tee 2 {} br_if 0)) f32.const 0 f32.const 0 f32.const 0 f32.const 1",
+        dropped(BULK)
+    ));
+    let started = std::time::Instant::now();
+    let got = wgsl("", &fs);
+    assert!(started.elapsed().as_secs() < 2, "loop took too long");
+    assert!(got.contains("loop"), "{got}");
+}
+
 #[test]
 fn deep_call_chain_reuses_one_specialization_per_function() {
     let funcs = chain(DEPTH, false);
@@ -283,6 +315,16 @@ fn chain(depth: usize, fork: bool) -> String {
         };
         out.push_str(&format!("(func $f{index} (param i32) (result i32) {body})"));
         index += 1;
+    }
+    out
+}
+
+fn dropped(ops: usize) -> String {
+    let mut out = String::new();
+    let mut left = ops;
+    while left > 1 {
+        out.push_str("f32.const 1 drop ");
+        left -= 2;
     }
     out
 }

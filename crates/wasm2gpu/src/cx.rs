@@ -23,11 +23,13 @@ pub(super) const MAX_SPECS: usize = {
     const LIMIT: usize = 64;
     LIMIT
 };
-/// Statements abstract interpretation may visit while checking one entry.
+/// Distinct `(function, abstract arguments)` pairs one entry may interpret.
 ///
-/// A cached call does not visit the callee again. A tree of distinct
-/// constant arguments stops here instead of walking every path.
-pub(super) const MAX_AI_STEPS: u32 = {
+/// A straight-line body and a loop spend nothing here. Only a call that
+/// has not been seen enters the budget, and that pair is not counted again.
+/// A tree of distinct constant arguments stops here instead of walking
+/// every path.
+pub(super) const MAX_AI_ENTRIES: u32 = {
     const LIMIT: u32 = 8192;
     LIMIT
 };

@@ -104,7 +104,6 @@ fn interpret(ai: &mut Ai<'_>, st: &mut St, stmts: &[Stmt]) -> Result<(), Transla
         if st.stop {
             return Ok(());
         }
-        call::charge(ai)?;
         on_stmt(ai, st, stmt)?;
     }
     Ok(())

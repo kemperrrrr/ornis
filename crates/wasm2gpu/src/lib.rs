@@ -6,7 +6,8 @@
 //! function specialized by immediate group and binding; the offset passes as
 //! an argument or a result. The same constant arguments reuse one function.
 //! An `f32` argument is not specialized. Recursion, `call_indirect`, and a
-//! specialization past the budget are rejected. A `br_table` that continues
+//! specialization past the budget are rejected. The budget counts distinct
+//! calls, not instructions in a body that does not call. A `br_table` that continues
 //! a loop is a `continue`. A `br_table` aimed at a region this translator
 //! did not wrap in a naga loop is rejected.
 //! `cs_main`, when exported, is a compute entry with `@workgroup_size` and
