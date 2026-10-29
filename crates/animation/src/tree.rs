@@ -141,8 +141,9 @@ pub enum TreeNodeDef {
     /// (e.g. speed × direction) — no lattice. The points are
     /// triangulated (deterministic empty-circumcircle set, no
     /// allocations; cocircular sets tie-break to one fixed diagonal by
-    /// index — a fan from the smallest index — so the triangles
-    /// partition the hull) and the containing triangle's corners carry
+    /// a symbolic lexicographic perturbation — a geometric SoS rule,
+    /// independent of the arrival order — so the triangles partition
+    /// the hull) and the containing triangle's corners carry
     /// barycentric weights summing to one (`freeform2d_weights`); the
     /// weights are continuous across shared triangle edges. Exactly on
     /// a hull edge or corner the edge or corner owns the pose; outside

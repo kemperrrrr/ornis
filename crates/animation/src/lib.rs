@@ -100,6 +100,7 @@ pub use motion_match::{
 mod motion_warp;
 pub use motion_warp::warp_root_delta;
 
+mod freeform;
 mod ragdoll;
 mod tree;
 mod tree_eff;

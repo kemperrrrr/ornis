@@ -13,11 +13,12 @@
 //! refill in place (design §8.1).
 
 use crate::blend::fade_progress;
+use crate::freeform::freeform2d_weights;
 use crate::tree::{
     MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild, TreeChild2d, TreeNodeDef,
 };
 use crate::tree_eval::{freeform2d_children_valid, machine_states_valid, switch_children_valid};
-use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights, freeform2d_weights};
+use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
 
 /// Reusable buffers of the [`leaf_effective_weights`] walk — node weights
 /// and the leaf result. The caller keeps one in its frame scratch (like

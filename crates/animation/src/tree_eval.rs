@@ -9,10 +9,11 @@
 use ornis_core::ColdComponentStore;
 
 use crate::blend::{BlendedPose, SampleBuf, fade_progress, sample_joints};
+use crate::freeform::freeform2d_weights;
 use crate::tree::{
     MachineCursor, SkelTree, SkelTreePlayer, SwitchCursor, TreeChild2d, TreeNodeDef, TreeTransition,
 };
-use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights, freeform2d_weights};
+use crate::tree_weights::{BLEND2D_CORNERS, blend1d_weights, blend2d_weights};
 use crate::{ClipId, JointTrs, RetargetMap, SkelClip};
 
 /// Scratch buffers of [`eval_tree`], grouped to stay inside clippy's
