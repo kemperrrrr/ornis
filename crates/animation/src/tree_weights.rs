@@ -172,12 +172,12 @@ fn triangle_weights(a: [f32; 2], b: [f32; 2], c: [f32; 2], value: [f32; 2]) -> O
         .then_some(weights)
 }
 
-/// Whether `value` sits strictly inside the circumcircle of `a b c` —
-/// the Delaunay filter: triangles with a point strictly inside their
-/// circle are not part of the triangulation. Points exactly on the
-/// circle do not disqualify (cocircular sets then keep both diagonals —
-/// overlapping triangles instead of holes, and the fold stays total).
-fn circumcircle_contains(a: [f32; 2], b: [f32; 2], c: [f32; 2], value: [f32; 2]) -> bool {
+/// Which side of the circumcircle of `a b c` `value` sits on: positive
+/// — strictly inside, negative — strictly outside, zero — on the
+/// circle. The Delaunay filter keeps only triangles with no point
+/// strictly inside their circle; cocircular points (side near zero) are
+/// tie-broken by [`triangulated_at`].
+fn circumcircle_side(a: [f32; 2], b: [f32; 2], c: [f32; 2], value: [f32; 2]) -> f32 {
     let ((ax, ay), (bx, by), (cx, cy)) = (
         (a[0] - value[0], a[1] - value[1]),
         (b[0] - value[0], b[1] - value[1]),
@@ -188,13 +188,19 @@ fn circumcircle_contains(a: [f32; 2], b: [f32; 2], c: [f32; 2], value: [f32; 2])
         + (cx * cx + cy * cy) * (ax * by - ay * bx);
     // The translation to `value` turns the incircle test into this
     // determinant: positive = `value` inside for a CCW triangle.
-    det * orient(a, b, c).signum() > FREEFORM_EPS
+    det * orient(a, b, c).signum()
 }
 
 /// Barycentric weights of `value` in the candidate triangle
 /// `children[triple]`, `None` when the triple is degenerate, fails the
 /// Delaunay filter (a fourth point strictly inside its circumcircle),
-/// or leaves the value outside. The filter scans points in index order —
+/// or leaves the value outside. Cocircular fourth points (on the circle
+/// within [`FREEFORM_EPS`]) are tie-broken by index: of the two
+/// diagonals of the sorted four indices the one joining the smallest
+/// and the third index survives — a cocircular set folds into the fan
+/// of its smallest index instead of overlapping both diagonals, so the
+/// kept triangles partition the hull and the weights stay continuous
+/// across their shared edges. The filter scans points in index order —
 /// deterministic, no allocations.
 fn triangulated_at(
     children: &[TreeChild2d],
@@ -207,12 +213,19 @@ fn triangulated_at(
         children[triple[2]].position,
     );
     for (slot, child) in children.iter().enumerate() {
-        if slot != triple[0]
-            && slot != triple[1]
-            && slot != triple[2]
-            && circumcircle_contains(a, b, c, child.position)
-        {
+        if slot == triple[0] || slot == triple[1] || slot == triple[2] {
+            continue;
+        }
+        let side = circumcircle_side(a, b, c, child.position);
+        if side > FREEFORM_EPS {
             return None;
+        }
+        if side >= -FREEFORM_EPS {
+            let mut four = [triple[0], triple[1], triple[2], slot];
+            four.sort_unstable();
+            if !(triple.contains(&four[0]) && triple.contains(&four[2])) {
+                return None;
+            }
         }
     }
     let weights = triangle_weights(a, b, c, value)?;
@@ -350,8 +363,10 @@ fn compact(slots: [(usize, f32); FREEFORM_SLOTS]) -> FreeformSlots {
 ///
 /// Returns up to three live `(node, weight)` slots — the child's node
 /// index and its weight, summing to one. The value inside a
-/// triangulation triangle gets the corners' barycentric weights
-/// (continuity across shared edges); on the convex hull edge or a corner
+/// triangulation triangle gets the corners' barycentric weights — the
+/// triangulation is a partition of the hull (cocircular sets fold to a
+/// fixed diagonal, see [`triangulated_at`]), so the weights are
+/// continuous across shared edges; on the convex hull edge or a corner
 /// the edge or corner owns the pose; outside the convex hull the value
 /// clamps to its nearest hull segment (linear along it); a collinear set
 /// degenerates to its hull segment; empty `children` yields
@@ -369,8 +384,8 @@ pub(crate) fn freeform2d_weights(children: &[TreeChild2d], value: [f32; 2]) -> F
         _ => {}
     }
     // First containing triangle of the deterministic triangulation:
-    // every triple with an empty circumcircle (cocircular sets keep
-    // overlapping diagonals instead of holes), in index order.
+    // every triple with an empty circumcircle, cocircular sets folded
+    // to one diagonal by [`triangulated_at`] (no overlapping triangles).
     for i in 0..children.len() {
         for j in (i + 1)..children.len() {
             for k in (j + 1)..children.len() {
@@ -512,6 +527,188 @@ mod tests {
         ];
         let got = weights_of(&children, [0.5, 1.0]);
         assert_eq!(got, vec![(0, 0.75), (2, 0.25)]);
+    }
+
+    /// Sparse fold over `children` as a dense per-node weight vector.
+    fn dense(children: &[TreeChild2d], value: [f32; 2]) -> Vec<f32> {
+        let mut out = vec![0.0; children.len()];
+        for (node, weight) in weights_of(children, value) {
+            out[node] += weight;
+        }
+        out
+    }
+
+    fn l1(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum()
+    }
+
+    /// Five points in convex position plus one inside — deliberately
+    /// off any lattice.
+    fn irregular() -> Vec<TreeChild2d> {
+        vec![
+            TreeChild2d {
+                position: [-1.0, 0.5],
+                node: 0,
+            },
+            TreeChild2d {
+                position: [0.5, -1.0],
+                node: 1,
+            },
+            TreeChild2d {
+                position: [2.5, 0.0],
+                node: 2,
+            },
+            TreeChild2d {
+                position: [1.5, 2.0],
+                node: 3,
+            },
+            TreeChild2d {
+                position: [-0.5, 1.8],
+                node: 4,
+            },
+            TreeChild2d {
+                position: [1.0, 0.7],
+                node: 5,
+            },
+        ]
+    }
+
+    /// Whether `value` lies inside (or on) the hull of `children`.
+    fn inside_hull(children: &[TreeChild2d], value: [f32; 2]) -> bool {
+        let mut hull = [0usize; FREEFORM_MAX_POINTS];
+        let hull_len = hull_indices(children, &mut hull);
+        (0..hull_len).all(|edge| {
+            orient(
+                children[hull[edge]].position,
+                children[hull[(edge + 1) % hull_len]].position,
+                value,
+            ) >= -FREEFORM_EPS
+        })
+    }
+
+    /// Cocircular square: the fold keeps one diagonal (tie-break), so
+    /// the weights are continuous across it — the reviewer repro pair
+    /// on either side of the seam and a pair straddling the diagonal
+    /// differ by O(ε), not O(1).
+    #[test]
+    fn cocircular_square_folds_continuously_across_one_diagonal() {
+        let children = vec![
+            TreeChild2d {
+                position: [0.0, 0.0],
+                node: 0,
+            },
+            TreeChild2d {
+                position: [2.0, 0.0],
+                node: 1,
+            },
+            TreeChild2d {
+                position: [2.0, 2.0],
+                node: 2,
+            },
+            TreeChild2d {
+                position: [0.0, 2.0],
+                node: 3,
+            },
+        ];
+        let straddle = l1(
+            &dense(&children, [0.5, 0.5 - 1e-3]),
+            &dense(&children, [0.5, 0.5 + 1e-3]),
+        );
+        assert!(straddle < 5e-3, "jump across the diagonal: {straddle}");
+        let repro = l1(
+            &dense(&children, [0.5, 0.49]),
+            &dense(&children, [0.49, 0.5]),
+        );
+        assert!(repro < 0.05, "repro pair diverges: {repro}");
+    }
+
+    /// Cocircular diamond (the speed × direction case): same
+    /// continuity across the kept diagonal; the x = 0 seam the old
+    /// overlapping fold produced is gone.
+    #[test]
+    fn cocircular_diamond_folds_continuously_across_one_diagonal() {
+        let children = vec![
+            TreeChild2d {
+                position: [-1.0, 0.0],
+                node: 0,
+            },
+            TreeChild2d {
+                position: [0.0, -1.0],
+                node: 1,
+            },
+            TreeChild2d {
+                position: [1.0, 0.0],
+                node: 2,
+            },
+            TreeChild2d {
+                position: [0.0, 1.0],
+                node: 3,
+            },
+        ];
+        let straddle = l1(
+            &dense(&children, [0.0, -1e-3]),
+            &dense(&children, [0.0, 1e-3]),
+        );
+        assert!(straddle < 5e-3, "jump across the diagonal: {straddle}");
+        let repro = l1(
+            &dense(&children, [0.01, 0.2]),
+            &dense(&children, [-0.01, 0.2]),
+        );
+        assert!(repro < 0.05, "repro pair diverges: {repro}");
+    }
+
+    /// Irregular 5+1-point set: interior folds are non-negative,
+    /// sum to one, and reconstitute the query point (barycentric
+    /// identity — the weights are the corners' barycentrics of the
+    /// containing triangle).
+    #[test]
+    fn irregular_points_fold_barycentrically() {
+        let children = irregular();
+        for value in [[0.0, 0.5], [1.0, 0.5], [0.5, 0.2], [1.2, 1.2], [0.2, 1.2]] {
+            let weights = weights_of(&children, value);
+            assert!(weights.len() >= 2 && weights.len() <= 3, "at {value:?}");
+            let sum: f32 = weights.iter().map(|(_, weight)| *weight).sum();
+            assert!((sum - 1.0).abs() < 1e-4, "sum at {value:?}: {sum}");
+            for (node, weight) in &weights {
+                assert!((0.0..=1.0).contains(weight), "at {value:?}");
+                assert!(inside_hull(&children, children[*node].position));
+            }
+            let mut rebuilt = [0.0f32; 2];
+            for (node, weight) in &weights {
+                let p = children[*node].position;
+                rebuilt[0] += weight * p[0];
+                rebuilt[1] += weight * p[1];
+            }
+            assert!(
+                (rebuilt[0] - value[0]).abs() < 1e-4 && (rebuilt[1] - value[1]).abs() < 1e-4,
+                "rebuild at {value:?}: {rebuilt:?}"
+            );
+        }
+    }
+
+    /// «Close values → close weights» on a grid inside the hull of the
+    /// irregular set: a step of 1e-3 in either axis moves the weights
+    /// by little; a discontinuity would show O(1) jumps.
+    #[test]
+    fn nearby_values_give_nearby_weights_on_a_grid() {
+        let children = irregular();
+        let mut x = -1.0;
+        while x <= 2.5 {
+            let mut y = -1.0;
+            while y <= 2.0 {
+                let value = [x, y];
+                if inside_hull(&children, value) {
+                    let base = dense(&children, value);
+                    for step in [[1e-3, 0.0], [0.0, 1e-3]] {
+                        let moved = dense(&children, [x + step[0], y + step[1]]);
+                        let jump = l1(&base, &moved);
+                        assert!(jump < 0.05, "jump at {value:?} step {step:?}: {jump}");
+                    }
+                }
+                y += 0.25;
+            }
+            x += 0.25;
+        }
     }
 
     #[test]

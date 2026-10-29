@@ -12,7 +12,7 @@ use glam::{Mat4, Vec3};
 use ornis_animation::{
     ClipId, JointId, JointMask, JointPose, JointTrack, Key, KeyTrack, MachineCursor, SkelClip,
     SkelInertia, SkelLayerStack, SkelPlayer, SkelSampleSystem, SkelTree, SkelTreePlayer, Skeleton,
-    SwitchCursor, TreeNodeDef, switch_selection,
+    SwitchCursor, TreeChild2d, TreeNodeDef, switch_selection,
 };
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::{Clamped01, Seconds};
@@ -48,6 +48,14 @@ pub fn store_mut(engine: &mut Engine) -> &mut SmartStore {
 
 pub fn store_ref(engine: &Engine) -> &SmartStore {
     engine.world().store().expect("world owns SmartStore")
+}
+
+/// A [`TreeChild2d`] placement — shared by the blend2d and freeform tests.
+pub fn child2d(x: f32, y: f32, node: usize) -> TreeChild2d {
+    TreeChild2d {
+        position: [x, y],
+        node,
+    }
 }
 
 /// Joint track holding one constant translation.

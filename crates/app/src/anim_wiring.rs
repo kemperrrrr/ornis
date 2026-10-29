@@ -3401,6 +3401,116 @@ mod tests {
         }
     }
 
+    /// [`set_skel_tree`] refuses broken `Freeform2d` nodes — equal
+    /// axes, an axis outside the parameters, a repeated or non-finite
+    /// point, more than [`FREEFORM_MAX_POINTS`] points, a child not
+    /// earlier than its parent — and writes **nothing** on refusal: no
+    /// `SkelTreePlayer` appears for the root.
+    #[test]
+    fn set_skel_tree_rejects_broken_freeform_nodes() {
+        use ornis_animation::{SkelTree, TreeChild2d, TreeNodeDef, TreeParam};
+        let mut store = SmartStore::new();
+        let (root, clip) = tree_hero(&mut store);
+        let params = vec![
+            TreeParam {
+                name: "speed".to_string(),
+                default: 0.0,
+            },
+            TreeParam {
+                name: "dir".to_string(),
+                default: 0.0,
+            },
+        ];
+        let cell = |x: f32, y: f32, node: usize| TreeChild2d {
+            position: [x, y],
+            node,
+        };
+        let freeform = |axes: [usize; 2], children| TreeNodeDef::Freeform2d { axes, children };
+        let tree = |axes: [usize; 2], children| SkelTree {
+            nodes: vec![
+                TreeNodeDef::Clip { clip },
+                TreeNodeDef::Clip { clip },
+                TreeNodeDef::Clip { clip },
+                freeform(axes, children),
+            ],
+            params: params.clone(),
+        };
+        let refuses = |store: &mut SmartStore, tree: SkelTree, why: &str| {
+            assert!(!set_skel_tree(store, root, tree), "{why} accepted");
+            assert!(
+                store
+                    .read_lane::<SkelTreePlayer>()
+                    .is_none_or(|players| players.get(root).is_none()),
+                "{why} wrote a player"
+            );
+        };
+        refuses(
+            &mut store,
+            tree(
+                [0, 0],
+                vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(0.0, 2.0, 2)],
+            ),
+            "equal axes",
+        );
+        refuses(
+            &mut store,
+            tree(
+                [0, 2],
+                vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(0.0, 2.0, 2)],
+            ),
+            "axis out of range",
+        );
+        refuses(
+            &mut store,
+            tree(
+                [0, 1],
+                vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(0.0, 0.0, 2)],
+            ),
+            "repeated point",
+        );
+        refuses(
+            &mut store,
+            tree(
+                [0, 1],
+                vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(f32::NAN, 2.0, 2)],
+            ),
+            "non-finite point",
+        );
+        {
+            let points = (0..FREEFORM_MAX_POINTS + 1)
+                .map(|i| cell(i as f32, (i * i % 5) as f32, i))
+                .collect::<Vec<_>>();
+            refuses(
+                &mut store,
+                SkelTree {
+                    nodes: std::iter::repeat_n(TreeNodeDef::Clip { clip }, FREEFORM_MAX_POINTS + 1)
+                        .chain(std::iter::once(freeform([0, 1], points)))
+                        .collect(),
+                    params: params.clone(),
+                },
+                "more than FREEFORM_MAX_POINTS points",
+            );
+        }
+        refuses(
+            &mut store,
+            tree(
+                [0, 1],
+                vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 3), cell(0.0, 2.0, 2)],
+            ),
+            "child not earlier than parent",
+        );
+        {
+            let sound = tree(
+                [0, 1],
+                vec![cell(0.0, 0.0, 0), cell(2.0, 0.0, 1), cell(0.0, 2.0, 2)],
+            );
+            assert!(
+                set_skel_tree(&mut store, root, sound),
+                "the sound tree installs"
+            );
+        }
+    }
+
     /// The playback entries refuse a tree-driven root with
     /// [`PlaybackError::TreeDriven`] — no silent no-op — and
     /// [`clear_skel_tree`] hands the root back to them.

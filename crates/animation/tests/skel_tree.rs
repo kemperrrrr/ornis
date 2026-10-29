@@ -13,20 +13,13 @@ use common::*;
 use glam::Vec3;
 use ornis_animation::{
     ClipId, JointId, JointMask, MaskId, RetargetMap, SkelLayer, SkelLayerStack, SkelPlayer,
-    SkelTree, SkelTreePlayer, TreeChild, TreeChild2d, TreeNodeDef, TreeParam,
+    SkelTree, SkelTreePlayer, TreeChild, TreeNodeDef, TreeParam,
 };
 use ornis_core::Engine;
 use ornis_core::units::Clamped01;
 
 fn child(position: f32, node: usize) -> TreeChild {
     TreeChild { position, node }
-}
-
-fn child2d(x: f32, y: f32, node: usize) -> TreeChild2d {
-    TreeChild2d {
-        position: [x, y],
-        node,
-    }
 }
 
 /// 2×2 blend2d over parameters `x`/`y` — the four `clips` at the lattice
