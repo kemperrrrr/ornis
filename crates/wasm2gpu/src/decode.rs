@@ -77,6 +77,7 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::I32Ne => Ok(Op::I32Ne),
         Operator::I32LtU => Ok(Op::I32LtU),
         Operator::I32GtU => Ok(Op::I32GtU),
+        Operator::I32GeU => Ok(Op::I32GeU),
         Operator::I32Shl => Ok(Op::I32Shl),
         Operator::I32ShrU => Ok(Op::I32ShrU),
         Operator::I32Load { memarg } => Ok(Op::LoadI32(mem_offset(memarg)?)),

@@ -154,6 +154,8 @@ fn import_sig(name: &str) -> &'static str {
         symbols::UNIFORM_READ_F32 => "(param i32 i32 i32 i32) (result f32)",
         symbols::STORAGE_READ_F32 => "(param i32 i32 i32) (result f32)",
         symbols::STORAGE_WRITE_F32 => "(param i32 i32 i32 f32)",
+        symbols::STORAGE_READ_U32 => "(param i32 i32 i32) (result i32)",
+        symbols::STORAGE_WRITE_U32 => "(param i32 i32 i32 i32)",
         other => panic!("shade imports {other}, which the lifter does not know"),
     }
 }

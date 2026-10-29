@@ -54,6 +54,7 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::I32Ne => i32_cmp(st, |a, b| a != b),
         Op::I32LtU => i32_cmp(st, |a, b| a < b),
         Op::I32GtU => i32_cmp(st, |a, b| a > b),
+        Op::I32GeU => i32_cmp(st, |a, b| a >= b),
         Op::F32Lt => f32_lt(st),
         Op::LoadI32(_) => load_i32(st),
         Op::LoadF32(_) => load_f32(st),

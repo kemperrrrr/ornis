@@ -100,10 +100,10 @@ fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; LANES],
         label: Some("wasm2gpu cull"),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
-    let layout = bind_layout(device);
+    let bgl = bind_layout(device);
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wasm2gpu cull"),
-        bind_group_layouts: &[Some(&layout)],
+        bind_group_layouts: &[Some(&bgl)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -114,7 +114,7 @@ fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; LANES],
         compilation_options: Default::default(),
         cache: None,
     });
-    let (flags, bind) = upload(device, queue, &layout);
+    let (flags, bind) = upload(device, queue, &bgl);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wasm2gpu cull"),
     });

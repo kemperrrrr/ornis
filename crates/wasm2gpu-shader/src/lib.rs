@@ -77,9 +77,11 @@ pub const PLANE_COUNT: u32 = 6;
 pub const PLANE_LEN: u32 = PLANE_COUNT * 4;
 
 /// Lanes of one sphere: center xyz plus the radius.
+#[cfg(target_arch = "wasm32")]
 const LANES: u32 = 4;
 
 /// Index of the last lane: a sphere's radius, a plane's `w`.
+#[cfg(target_arch = "wasm32")]
 const LAST_LANE: u32 = LANES - 1;
 
 /// Group of every binding the `cull` kernel touches.

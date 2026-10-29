@@ -209,6 +209,7 @@ fn op_wat(imports: &[String], op: &Operator<'_>) -> Result<String, String> {
         Operator::I32Ne => Ok("i32.ne".to_string()),
         Operator::I32LtU => Ok("i32.lt_u".to_string()),
         Operator::I32GtU => Ok("i32.gt_u".to_string()),
+        Operator::I32GeU => Ok("i32.ge_u".to_string()),
         Operator::F32Add => Ok("f32.add".to_string()),
         Operator::F32Mul => Ok("f32.mul".to_string()),
         Operator::F32Lt => Ok("f32.lt".to_string()),

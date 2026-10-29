@@ -100,6 +100,7 @@ pub enum Op {
     I32LtU,
     /// Unsigned `i32.gt_u`.
     I32GtU,
+    I32GeU,
     /// Shift the top `i32` left by the next value's amount (mod 32).
     I32Shl,
     /// Unsigned shift of the top `i32` right by the next value's amount (mod 32).

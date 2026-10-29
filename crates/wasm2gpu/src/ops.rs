@@ -49,6 +49,7 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::I32Ne => i32_cmp(em, |a, b| a != b, BinaryOperator::NotEqual),
         Op::I32LtU => i32_cmp(em, |a, b| a < b, BinaryOperator::Less),
         Op::I32GtU => i32_cmp(em, |a, b| a > b, BinaryOperator::Greater),
+        Op::I32GeU => i32_cmp(em, |a, b| a >= b, BinaryOperator::GreaterEqual),
         Op::F32Lt => f32_lt(em),
         Op::LoadI32(offset) => storage::load_ptr(em, offset, Elem::U32),
         Op::LoadF32(offset) => storage::load_ptr(em, offset, Elem::F32),
