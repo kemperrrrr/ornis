@@ -64,7 +64,7 @@ fn constant_offset_folds_to_one_element() {
     let fs = fs_func(
         "(param f32 f32 i32) (result f32 f32 f32 f32)",
         &format!(
-            "{base} i32.const 4 i32.add i32.load f32.const 0 f32.const 0 f32.const 1",
+            "{base} i32.const 4 i32.add f32.load f32.const 0 f32.const 0 f32.const 1",
             base = base(),
         ),
     );

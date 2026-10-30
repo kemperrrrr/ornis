@@ -215,7 +215,7 @@ pub extern "C" fn ptr_copy(id: u32) {
     out.as_ref().index_storage(id).store(twice_plus_one(value));
 }
 
-/// The arithmetic half of [`ptr_copy`]: read-modify-write is one
+/// The arithmetic half of `ptr_copy`: read-modify-write is one
 /// computation, and keeping it out of the export leaves `ptr_copy` free
 /// of mixed logic-and-calls classification. `pub` so the gpu test's host
 /// expectation uses the same function (a private copy would only run
