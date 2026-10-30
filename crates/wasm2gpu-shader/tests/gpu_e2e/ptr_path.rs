@@ -37,7 +37,11 @@ fn gpu_ref_pointer_path_writes_storage() {
             let mut slot = 0usize;
             while slot < SRC.len() {
                 let want = SRC[slot] + SRC[slot] + 1.0;
-                assert_eq!(values[slot].to_bits(), want.to_bits(), "slot {slot}: {values:?}");
+                assert_eq!(
+                    values[slot].to_bits(),
+                    want.to_bits(),
+                    "slot {slot}: {values:?}"
+                );
                 slot += 1;
             }
         }

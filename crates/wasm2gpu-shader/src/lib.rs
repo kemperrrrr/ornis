@@ -203,14 +203,25 @@ fn arm_rest(index: u32) {
 /// `store` are one scalar each: this is the pointer path of
 /// `docs/rendering/wasm-segmented-memory.md` §4 on real `rustc` output —
 /// provenance through rustc's locals and `i32.add`, not hand-written WAT.
-/// The gpu test lifts this export and checks the buffer the GPU wrote.
+/// The arithmetic lives in `twice_plus_one` so the export itself is a
+/// pure integration (IOSP: logic and calls in separate functions). The gpu
+/// test lifts this export and checks the buffer the GPU wrote.
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn ptr_copy(id: u32) {
     let src = Storage::<0, 1, f32>::bind();
     let out = Storage::<0, 2, f32>::bind();
     let value = src.as_ref().index_storage(id).load();
-    out.as_ref().index_storage(id).store(value + value + 1.0);
+    out.as_ref().index_storage(id).store(twice_plus_one(value));
+}
+
+/// The arithmetic half of [`ptr_copy`]: read-modify-write is one
+/// computation, and keeping it out of the export leaves `ptr_copy` free
+/// of mixed logic-and-calls classification.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn twice_plus_one(value: f32) -> f32 {
+    value + value + 1.0
 }
 
 /// Wasm compute export: one visible flag per sphere against six planes.

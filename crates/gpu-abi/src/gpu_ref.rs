@@ -259,16 +259,39 @@ impl<const G: u32, const B: u32, T: GpuSafeLayout> Storage<G, B, T> {
     }
 }
 
+/// Byte-offset addition: checked on the host, wrapping under `wasm32`.
+///
+/// A host breach past `u32::MAX` stays a panic. Shader code never sees the
+/// panic branch — a trap edge would pull the core panic machinery into the
+/// lifted call graph and the translator rejects it by design — and there
+/// the token gates (alignment, the 4-byte size contract) plus the binding
+/// bounds carry the check, with `addr` wrapping the same way.
 fn add_offset(base: u32, delta: u32) -> u32 {
-    match base.checked_add(delta) {
-        Some(offset) => offset,
-        None => gpu_abi::contract_breach("GpuRef offset overflow"),
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match base.checked_add(delta) {
+            Some(offset) => offset,
+            None => gpu_abi::contract_breach("GpuRef offset overflow"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        base.wrapping_add(delta)
     }
 }
 
+/// [`add_offset`] for `element * stride`; checked on the host, wrapping
+/// under `wasm32` for the same lifted-graph reason.
 fn mul_offset(element: u32, stride: u32) -> u32 {
-    match element.checked_mul(stride) {
-        Some(offset) => offset,
-        None => gpu_abi::contract_breach("GpuRef index overflow"),
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match element.checked_mul(stride) {
+            Some(offset) => offset,
+            None => gpu_abi::contract_breach("GpuRef index overflow"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        element.wrapping_mul(stride)
     }
 }

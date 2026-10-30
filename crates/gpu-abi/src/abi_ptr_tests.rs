@@ -8,15 +8,14 @@ use crate::Storage;
 #[test]
 #[should_panic(expected = "GpuRef index stride is misaligned")]
 fn unaligned_dynamic_index_is_a_contract_breach() {
-    let token = Storage::<0, 0, f32>::bind().as_ref();
+    let storage = Storage::<0, 0, f32>::bind();
     let stride = core::hint::black_box(3u32);
-    let _ = token.index(core::hint::black_box(1), stride).read();
+    let _ = storage.as_ref().index(core::hint::black_box(1), stride).read();
 }
 
 #[test]
 #[should_panic(expected = "GpuRef field offset is misaligned")]
 fn misaligned_field_offset_is_a_contract_breach() {
-    let token = Storage::<0, 0, f32>::bind().as_ref();
-    let _ = token.field::<f32>(2).read();
+    let storage = Storage::<0, 0, f32>::bind();
+    let _ = storage.as_ref().field::<f32>(2).read();
 }
-
