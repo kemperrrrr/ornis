@@ -262,6 +262,43 @@ pub extern "C" fn cull(id: u32) {
     }
 }
 
+/// Lanes of one vertex output: clip `xy` + pad, uv (32-byte stride).
+#[cfg(target_arch = "wasm32")]
+const VS_OUT_LANES: u32 = 8;
+
+/// Corners of the fullscreen quad: a strip of four vertices.
+#[cfg(target_arch = "wasm32")]
+const VS_VERTICES: u32 = 4;
+
+/// Wasm vertex export: the fog fullscreen-quad vertex stage.
+///
+/// The quad and uv tables mirror `ornis_render`'s
+/// `shaders::{STANDARD_QUAD, STANDARD_UVS}` — shared INPUTS, not the
+/// formula under test: the production `vs_main` reads the same tables
+/// from its const block, and the gpu e2e test lifts this export and
+/// compares it against that production stage running verbatim. The
+/// 32-byte element stride matches the WGSL storage struct
+/// `{ pos: vec4<f32>, uv: vec2<f32> }` the test's adapter reads back.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_main(id: u32) {
+    let quad = [
+        -1.0f32, -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0,
+    ];
+    let uvs = [0.0f32, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
+    if id < VS_VERTICES {
+        let lane = id * VS_OUT_LANES;
+        let quad_at = id * 4u32;
+        let uv_at = id * 2u32;
+        storage_store_f32::<0, 0>(lane, quad[quad_at as usize]);
+        storage_store_f32::<0, 0>(lane + 1, quad[(quad_at + 1) as usize]);
+        storage_store_f32::<0, 0>(lane + 2, quad[(quad_at + 2) as usize]);
+        storage_store_f32::<0, 0>(lane + 3, quad[(quad_at + 3) as usize]);
+        storage_store_f32::<0, 0>(lane + 4, uvs[uv_at as usize]);
+        storage_store_f32::<0, 0>(lane + 5, uvs[(uv_at + 1) as usize]);
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
