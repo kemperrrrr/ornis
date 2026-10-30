@@ -87,6 +87,9 @@ pub(super) fn pure_stmt(stmt: &Stmt) -> bool {
             | Op::I32Ne
             | Op::I32LtU
             | Op::I32GtU
+            | Op::I32Shl
+            | Op::I32ShrU
+            | Op::F32Lt
             | Op::Add
             | Op::Mul
             | Op::Select

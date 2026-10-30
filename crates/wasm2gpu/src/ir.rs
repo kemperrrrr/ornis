@@ -100,6 +100,29 @@ pub enum Op {
     I32LtU,
     /// Unsigned `i32.gt_u`.
     I32GtU,
+    I32GeU,
+    I32LeU,
+    I32And,
+    I32Or,
+    I32Xor,
+    I32ShrS,
+    /// Shift the top `i32` left by the next value's amount (mod 32).
+    I32Shl,
+    /// Unsigned shift of the top `i32` right by the next value's amount (mod 32).
+    I32ShrU,
+    /// `i32.load` of four bytes at byte offset from a storage pointer.
+    ///
+    /// The offset immediate is added to the address, which must carry
+    /// storage provenance; a plain integer is a `LinearMemory` rejection.
+    LoadI32(u32),
+    /// `f32.load` of four bytes at byte offset from a storage pointer.
+    LoadF32(u32),
+    /// `i32.store` of four bytes at byte offset from a storage pointer.
+    StoreI32(u32),
+    /// `f32.store` of four bytes at byte offset from a storage pointer.
+    StoreF32(u32),
+    /// `f32.lt`: non-zero when the second float is below the first.
+    F32Lt,
     /// Wasm `select`: `v1` if the condition is non-zero, otherwise `v2`.
     Select,
 }

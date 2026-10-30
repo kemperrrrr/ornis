@@ -149,11 +149,14 @@ fn op_wat(imports: &[String], op: &Operator<'_>) -> String {
 
 fn import_sig(name: &str) -> &'static str {
     match name {
+        symbols::STORAGE_BASE => "(param i32 i32) (result i32)",
         symbols::UNIFORM_FIELD_F32 => "(param i32 i32 i32 i32) (result f32)",
         symbols::UNIFORM_FIELD_U32 => "(param i32 i32 i32 i32) (result i32)",
         symbols::UNIFORM_READ_F32 => "(param i32 i32 i32 i32) (result f32)",
         symbols::STORAGE_READ_F32 => "(param i32 i32 i32) (result f32)",
         symbols::STORAGE_WRITE_F32 => "(param i32 i32 i32 f32)",
+        symbols::STORAGE_READ_U32 => "(param i32 i32 i32) (result i32)",
+        symbols::STORAGE_WRITE_U32 => "(param i32 i32 i32 i32)",
         other => panic!("shade imports {other}, which the lifter does not know"),
     }
 }

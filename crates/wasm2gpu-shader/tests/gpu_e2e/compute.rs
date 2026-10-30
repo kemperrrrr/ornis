@@ -14,7 +14,7 @@ const LANES: usize = symbols::CS_WORKGROUP[0] as usize;
 #[test]
 fn compute_kernel_writes_storage() {
     let wasm = super::compile_wasm();
-    let lowered = translate(&super::compute_lift::lift(&wasm)).expect("wasm2gpu");
+    let lowered = translate(&super::compute_lift::lift(&wasm, "compute")).expect("wasm2gpu");
     let wgsl = &lowered.wgsl;
     assert!(wgsl.contains("switch "), "{wgsl}");
     assert!(wgsl.contains("case 0u"), "{wgsl}");

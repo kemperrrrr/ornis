@@ -108,10 +108,12 @@ macro_rules! import_sample {
 }
 
 // SAFETY: these symbols are the ornis_gpu import ABI. Calling them is sound
-// only through the macros above; they do not dereference a guest pointer.
+// only through the wrappers in this file; they do not dereference a guest
+// pointer. `storage_base` only returns the translator's base tag.
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "ornis_gpu")]
 unsafe extern "C" {
+    fn storage_base(group: u32, binding: u32) -> u32;
     fn raw_read_f32(group: u32, binding: u32, offset: u32) -> f32;
     fn raw_read(group: u32, binding: u32, offset: u32) -> Word4;
     fn raw_write(group: u32, binding: u32, offset: u32, x: f32, y: f32, z: f32, w: f32);
@@ -128,6 +130,77 @@ unsafe extern "C" {
     fn uniform_read_f32(group: u32, binding: u32, len: u32, index: u32) -> f32;
     fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32;
     fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
+    fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32;
+    fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_storage_base {
+    ($group:expr, $binding:expr) => {{
+        // SAFETY: `storage_base` is the ornis_gpu import. It returns the
+        // translator's base tag for the provenance pair and touches no memory.
+        unsafe { storage_base($group, $binding) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! ptr_read {
+    ($ty:ty, $addr:expr) => {{
+        // SAFETY: this macro is only reachable through `GpuRef::load`, which
+        // builds `addr` as `storage_base(G, B)` plus a `GpuRef` offset. Token
+        // construction checks alignment: `index` rejects a stride that is not
+        // a multiple of `T::ALIGN` and a computed offset that lands off it,
+        // `field` rejects a misaligned field offset and a computed offset
+        // that lands off `U::ALIGN`, and the layout gate keeps `T::ALIGN` a
+        // multiple of `align_of::<T>()`, so the address names a `$ty`-aligned
+        // element of that binding. (The tests in `abi_ptr_tests.rs` pin the
+        // token checks.) The four bytes hold a valid `$ty` — `T: GpuSafeLayout`
+        // — and the pointer is not retained.
+        unsafe { ($addr as *const $ty).read_volatile() }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! ptr_write {
+    ($ty:ty, $addr:expr, $value:expr) => {{
+        // SAFETY: same address contract as `ptr_read`: only `GpuRef::store`
+        // reaches this macro, and its offset half is alignment-checked when
+        // the token is built. The write covers exactly the four bytes of
+        // `addr`, which belongs to this binding's storage.
+        unsafe { ($addr as *mut $ty).write_volatile($value) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn wasm_storage_base<const G: u32, const B: u32>() -> u32 {
+    import_storage_base!(G, B)
+}
+
+/// Pointer-path read at a `storage_base` address.
+///
+/// The offset half of `addr` was alignment-checked when the `GpuRef` token
+/// was built (`index` / `field` in `gpu_ref.rs`); this stays `inline(always)`
+/// so the pointer never crosses a call as a raw value.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn ptr_load<T: GpuSafeLayout>(addr: u32) -> T {
+    if core::mem::size_of::<T>() != F32_SIZE as usize {
+        return crate::gpu_abi::contract_breach("pointer load supports 4-byte values");
+    }
+    ptr_read!(T, addr)
+}
+
+/// Pointer-path write at a `storage_base` address.
+///
+/// Same alignment contract and inlining as `ptr_load`.
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn ptr_store<T: GpuSafeLayout>(addr: u32, value: T) {
+    if core::mem::size_of::<T>() != F32_SIZE as usize {
+        crate::gpu_abi::contract_breach("pointer store supports 4-byte values");
+    }
+    ptr_write!(T, addr, value)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -247,6 +320,24 @@ macro_rules! import_storage_write_f32 {
 }
 
 #[cfg(target_arch = "wasm32")]
+macro_rules! import_storage_read_u32 {
+    ($group:expr, $binding:expr, $index:expr) => {{
+        // SAFETY: `storage_read_u32` is the ornis_gpu import. It returns one
+        // initialized u32 and does not expose linear memory.
+        unsafe { storage_read_u32($group, $binding, $index) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! import_storage_write_u32 {
+    ($group:expr, $binding:expr, $index:expr, $value:expr) => {{
+        // SAFETY: `storage_write_u32` is the ornis_gpu import. The lane is one
+        // u32. The import does not expose linear memory.
+        unsafe { storage_write_u32($group, $binding, $index, $value) }
+    }};
+}
+
+#[cfg(target_arch = "wasm32")]
 #[inline(always)]
 pub(super) fn call_uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32 {
     import_uniform_field_f32!(group, binding, sid, field)
@@ -274,6 +365,18 @@ pub(super) fn call_storage_read_f32(group: u32, binding: u32, index: u32) -> f32
 #[inline(always)]
 pub(super) fn call_storage_write_f32(group: u32, binding: u32, index: u32, value: f32) {
     import_storage_write_f32!(group, binding, index, value)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_storage_read_u32(group: u32, binding: u32, index: u32) -> u32 {
+    import_storage_read_u32!(group, binding, index)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub(super) fn call_storage_write_u32(group: u32, binding: u32, index: u32, value: u32) {
+    import_storage_write_u32!(group, binding, index, value)
 }
 
 #[cfg(target_arch = "wasm32")]

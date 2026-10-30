@@ -36,6 +36,12 @@ pub(super) struct Emit<'a, 'b> {
     pub(super) structs: &'b [StructDef],
     pub(super) funcs: &'b [crate::ir::Func],
     pub(super) locals: Vec<Option<naga::Handle<naga::LocalVariable>>>,
+    /// Storage provenance of the wasm local held in each shadow slot.
+    ///
+    /// `None` is a plain scalar. `local_set` stores `Some((group, binding))`
+    /// with a [`Val::Ptr`] and clears it on any other value, so a later
+    /// `local_get` wraps the offset it loaded back into a pointer.
+    pub(super) ptr_slots: Vec<Option<(u32, u32)>>,
     pub(super) labels: Vec<Flag>,
     /// Immediate values of specialized parameters. Empty for an entry.
     pub(super) baked: Vec<Option<u32>>,
@@ -128,6 +134,49 @@ impl Emit<'_, '_> {
 
     pub(super) fn bool(&mut self, value: bool) -> naga::Handle<Expression> {
         self.ex(Expression::Literal(Literal::Bool(value)))
+    }
+
+    /// Lower a pointer's byte offset to an expression.
+    pub(super) fn off_expr(&mut self, off: crate::cx::PtrOff) -> naga::Handle<Expression> {
+        match off {
+            crate::cx::PtrOff::Imm(value) => self.u32(value),
+            crate::cx::PtrOff::Dyn(handle) => handle,
+        }
+    }
+
+    /// Merge two pointer values behind `cond`, or `None` when either is
+    /// not a pointer or their provenance disagrees.
+    pub(super) fn merge_ptr(
+        &mut self,
+        cond: naga::Handle<Expression>,
+        accept: Val,
+        reject: Val,
+    ) -> Option<Val> {
+        let (
+            Val::Ptr {
+                group: accept_group,
+                binding: accept_binding,
+                off: accept_off,
+            },
+            Val::Ptr {
+                group: reject_group,
+                binding: reject_binding,
+                off: reject_off,
+            },
+        ) = (accept, reject)
+        else {
+            return None;
+        };
+        if accept_group != reject_group || accept_binding != reject_binding {
+            return None;
+        }
+        let left = self.off_expr(accept_off);
+        let right = self.off_expr(reject_off);
+        Some(Val::Ptr {
+            group: accept_group,
+            binding: accept_binding,
+            off: crate::cx::PtrOff::Dyn(self.pick(cond, left, right)),
+        })
     }
 
     pub(super) fn as_uint(&mut self, val: Val) -> Result<naga::Handle<Expression>, TranslateError> {

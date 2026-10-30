@@ -51,6 +51,15 @@ pub const STORAGE_READ_I32: &str = "storage_read_i32";
 /// `(param i32 i32 i32 i32)` — store one `i32` element.
 pub const STORAGE_WRITE_I32: &str = "storage_write_i32";
 
+/// `(param i32 i32) (result i32)` — base address of one storage binding.
+///
+/// Group and binding are constant immediates: the pair is the binding's
+/// provenance, and the result is the translator's base tag for it. Adding a
+/// byte offset and running `i32.load` / `i32.store` through that address
+/// accesses the binding directly; the lowering keeps the provenance instead
+/// of materializing linear memory.
+pub const STORAGE_BASE: &str = "storage_base";
+
 /// `(param i32 i32 i32) (result f32 f32)` — storage `array<vec2<f32>>`.
 pub const STORAGE_READ_VEC2: &str = "storage_read_vec2";
 
@@ -177,6 +186,7 @@ pub fn is_toy_import(name: &str) -> bool {
             | STORAGE_WRITE_U32
             | STORAGE_READ_I32
             | STORAGE_WRITE_I32
+            | STORAGE_BASE
             | STORAGE_READ_VEC2
             | STORAGE_WRITE_VEC2
             | STORAGE_READ_VEC3

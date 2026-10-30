@@ -105,6 +105,124 @@ pub const fn place_fields(fields: &[FieldLayout], uniform: bool, offsets: &mut [
     round_up(cursor, struct_align)
 }
 
+/// Why a Rust type's layout disagrees with the WGSL placement rules.
+///
+/// [`Uniform::bind`](crate::Uniform::bind) and
+/// [`Storage::bind`](crate::Storage::bind) turn this into a compile-time
+/// panic with the matching message, so a mismatched type never builds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutMismatch {
+    /// [`GpuSafeLayout::SIZE`] is zero.
+    ZeroSize,
+    /// [`GpuSafeLayout::SIZE`] differs from `size_of`.
+    Size,
+    /// [`GpuSafeLayout::ALIGN`] is not a power of two or not a multiple of
+    /// `align_of`.
+    Align,
+    /// [`GpuSafeLayout::STORAGE_STRIDE`] differs from `round_up(SIZE, ALIGN)`
+    /// (the `std430` array stride).
+    StorageStride,
+    /// [`GpuSafeLayout::UNIFORM_STRIDE`] differs from that storage stride
+    /// rounded up to 16 (the `std140` array stride).
+    UniformStride,
+}
+
+impl LayoutMismatch {
+    /// Compile-time failure text for a buffer binding check.
+    // qual:allow(complexity, error_handling) reason: "const layout gate for bind(): the rule that broke must name the panic, and const evaluation has no other reporting path"
+    pub(crate) const fn panic_bind(self) {
+        match self {
+            Self::ZeroSize => panic!("gpu layout mismatch: value is zero-sized"),
+            Self::Size => panic!("gpu layout mismatch: SIZE is not size_of"),
+            Self::Align => {
+                panic!("gpu layout mismatch: ALIGN is not a power-of-two multiple of align_of")
+            }
+            Self::StorageStride => panic!(
+                "gpu layout mismatch: STORAGE_STRIDE is not the std430 stride round_up(SIZE, ALIGN)"
+            ),
+            Self::UniformStride => {
+                panic!("gpu layout mismatch: UNIFORM_STRIDE is not the std140 stride of 16 bytes")
+            }
+        }
+    }
+}
+
+/// Storage (`std430`) placement check on raw numbers, for unit tests.
+pub(crate) const fn storage_layout_mismatch_raw(
+    size: u32,
+    align: u32,
+    rust_size: u32,
+    rust_align: u32,
+    storage_stride_bytes: u32,
+) -> Option<LayoutMismatch> {
+    if size == 0 {
+        return Some(LayoutMismatch::ZeroSize);
+    }
+    if rust_size != size {
+        return Some(LayoutMismatch::Size);
+    }
+    if align == 0 || !align.is_power_of_two() || rust_align == 0 {
+        return Some(LayoutMismatch::Align);
+    }
+    if !align.is_multiple_of(rust_align) {
+        return Some(LayoutMismatch::Align);
+    }
+    if storage_stride_bytes != round_up(size, align) {
+        return Some(LayoutMismatch::StorageStride);
+    }
+    None
+}
+
+/// Uniform (`std140`) placement check on raw numbers, for unit tests.
+pub(crate) const fn uniform_layout_mismatch_raw(
+    size: u32,
+    align: u32,
+    rust_size: u32,
+    rust_align: u32,
+    storage_stride_bytes: u32,
+    uniform_stride_bytes: u32,
+) -> Option<LayoutMismatch> {
+    match storage_layout_mismatch_raw(size, align, rust_size, rust_align, storage_stride_bytes) {
+        Some(mismatch) => Some(mismatch),
+        None if uniform_stride_bytes != uniform_stride(size, align) => {
+            Some(LayoutMismatch::UniformStride)
+        }
+        None => None,
+    }
+}
+
+/// `None` when `T`'s bytes match a WGSL storage (`std430`) value.
+///
+/// Checks the [`GpuSafeLayout`] contract against `size_of` / `align_of` and
+/// the `std430` array stride, so an `unsafe impl` with wrong constants is
+/// named before it reaches a translator. [`Storage::bind`](crate::Storage::bind)
+/// panics on the first mismatch at compile time.
+pub const fn storage_layout_mismatch<T: GpuSafeLayout>() -> Option<LayoutMismatch> {
+    storage_layout_mismatch_raw(
+        T::SIZE,
+        T::ALIGN,
+        core::mem::size_of::<T>() as u32,
+        core::mem::align_of::<T>() as u32,
+        T::STORAGE_STRIDE,
+    )
+}
+
+/// `None` when `T`'s bytes match a WGSL uniform (`std140`) value.
+///
+/// Every storage rule plus the `std140` stride: uniform array elements are
+/// at least 16 bytes apart. [`Uniform::bind`](crate::Uniform::bind) panics
+/// on the first mismatch at compile time.
+pub const fn uniform_layout_mismatch<T: GpuSafeLayout>() -> Option<LayoutMismatch> {
+    uniform_layout_mismatch_raw(
+        T::SIZE,
+        T::ALIGN,
+        core::mem::size_of::<T>() as u32,
+        core::mem::align_of::<T>() as u32,
+        T::STORAGE_STRIDE,
+        T::UNIFORM_STRIDE,
+    )
+}
+
 /// Plain data whose bytes match a WGSL uniform or storage value.
 ///
 /// # Safety

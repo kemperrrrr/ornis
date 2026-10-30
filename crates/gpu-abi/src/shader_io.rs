@@ -104,6 +104,40 @@ pub fn storage_at_f32<const GROUP: u32, const BINDING: u32>(index: u32) -> f32 {
     }
 }
 
+/// Read `array<u32>[index]` from a storage binding.
+///
+/// The stride is the packed storage stride of `u32`.
+#[inline(always)]
+pub fn storage_at_u32<const GROUP: u32, const BINDING: u32>(index: u32) -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Storage::<GROUP, BINDING, u32>::bind()
+            .as_ref()
+            .index_storage(index)
+            .read()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::gpu_abi::storage_read_u32(GROUP, BINDING, index)
+    }
+}
+
+/// Write one `u32` into `array<u32>[index]` of a storage binding.
+#[inline(always)]
+pub fn storage_store_u32<const GROUP: u32, const BINDING: u32>(index: u32, value: u32) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Storage::<GROUP, BINDING, u32>::bind()
+            .as_ref()
+            .index_storage(index)
+            .write(value);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::gpu_abi::storage_write_u32(GROUP, BINDING, index, value);
+    }
+}
+
 /// Write one `f32` into `array<f32>[index]` of a storage binding.
 #[inline(always)]
 pub fn storage_store_f32<const GROUP: u32, const BINDING: u32>(index: u32, value: f32) {

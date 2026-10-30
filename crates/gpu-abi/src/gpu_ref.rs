@@ -57,10 +57,23 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S>
     /// Token for a field at `field_offset` bytes past this token.
     ///
     /// Does not load GPU memory. Offsets come from [`gpu_struct!`](crate::gpu_struct)
-    /// / `offset_of!`, not from a caller-supplied raw pointer.
+    /// / `offset_of!`, not from a caller-supplied raw pointer. A field offset
+    /// that is not a multiple of `U::ALIGN` never becomes a token, and
+    /// neither does a sum that lands off `U::ALIGN` — however the base was
+    /// built (a narrower type must not widen into a misaligned `U`): either
+    /// would hand the pointer path a misaligned address, so both are a
+    /// contract breach.
+    #[inline(always)]
     pub fn field<U: GpuSafeLayout>(&self, field_offset: u32) -> GpuRef<'a, G, B, U, S> {
+        if !field_offset.is_multiple_of(U::ALIGN) {
+            gpu_abi::contract_breach("GpuRef field offset is misaligned");
+        }
+        let offset = add_offset(self.offset, field_offset);
+        if !offset.is_multiple_of(U::ALIGN) {
+            gpu_abi::contract_breach("GpuRef token offset is misaligned");
+        }
         GpuRef {
-            offset: add_offset(self.offset, field_offset),
+            offset,
             _marker: PhantomData,
         }
     }
@@ -69,22 +82,35 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S>
     ///
     /// The stride is not inferred: uniform and storage arrays disagree for
     /// some types. Prefer [`index_uniform`](Self::index_uniform) or
-    /// [`index_storage`](Self::index_storage).
+    /// [`index_storage`](Self::index_storage). A stride that is not a
+    /// multiple of [`T::ALIGN`](GpuSafeLayout::ALIGN) is a contract breach:
+    /// the product would be a misaligned byte offset. The computed offset is
+    /// checked against `T::ALIGN` as well, so a base built through a
+    /// narrower type cannot widen into a misaligned `T`.
+    #[inline(always)]
     pub fn index(&self, element: u32, stride: u32) -> Self {
+        if !stride.is_multiple_of(T::ALIGN) {
+            gpu_abi::contract_breach("GpuRef index stride is misaligned");
+        }
+        let offset = add_offset(self.offset, mul_offset(element, stride));
+        if !offset.is_multiple_of(T::ALIGN) {
+            gpu_abi::contract_breach("GpuRef token offset is misaligned");
+        }
         GpuRef {
-            offset: add_offset(self.offset, mul_offset(element, stride)),
+            offset,
             _marker: PhantomData,
         }
     }
 
     /// [`index`](Self::index) with [`T::UNIFORM_STRIDE`](GpuSafeLayout::UNIFORM_STRIDE).
     // qual:api — shader-facing index; in-tree callers are the unit tests.
+    #[inline(always)]
     pub fn index_uniform(&self, element: u32) -> Self {
         self.index(element, T::UNIFORM_STRIDE)
     }
 
     /// [`index`](Self::index) with [`T::STORAGE_STRIDE`](GpuSafeLayout::STORAGE_STRIDE).
-    // qual:api — shader-facing index; in-tree callers are the unit tests.
+    #[inline(always)]
     pub fn index_storage(&self, element: u32) -> Self {
         self.index(element, T::STORAGE_STRIDE)
     }
@@ -101,6 +127,43 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout> GpuRef<'a, G, B, T, Stora
         let _ = self;
         gpu_abi::write_at::<T>(G, B, self.offset, &value);
     }
+
+    /// Byte address of this token in shader code: the `storage_base` tag
+    /// for `(G, B)` plus the offset. Storage tokens only — a uniform
+    /// binding has no pointer path — and the method exists only where the
+    /// shader ABI does (`wasm32`).
+    ///
+    /// The wasm lowering keeps that provenance through `i32.add` and turns
+    /// `i32.load` / `i32.store` at the result into an access chain on the
+    /// binding — the pointer path of
+    /// `docs/rendering/wasm-segmented-memory.md` §4.
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn addr(&self) -> u32 {
+        gpu_abi::storage_base::<G, B>().wrapping_add(self.offset)
+    }
+
+    /// Pointer-path read at `addr()`: one `i32.load` through
+    /// the storage provenance, lowered to that binding's access chain.
+    ///
+    /// Only 4-byte values; a wider type is a contract breach. The import
+    /// path with the same result is [`read`](GpuRef::read), which the host
+    /// uses too.
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn load(&self) -> T {
+        gpu_abi::ptr_load::<T>(self.addr())
+    }
+
+    /// Pointer-path write at `addr()`: one `i32.store` through
+    /// the storage provenance, lowered to that binding's access chain.
+    ///
+    /// Only 4-byte values; a wider type is a contract breach.
+    #[cfg(target_arch = "wasm32")]
+    #[inline(always)]
+    pub fn store(&self, value: T) {
+        gpu_abi::ptr_store::<T>(self.addr(), value);
+    }
 }
 
 /// Uniform binding `(GROUP, BINDING)` of `T`.
@@ -110,14 +173,43 @@ pub struct Uniform<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout> {
 }
 
 impl<const G: u32, const B: u32, T: GpuSafeLayout> Uniform<G, B, T> {
+    /// Compile-time proof that `T` matches WGSL uniform (`std140`) placement.
+    ///
+    /// Evaluated when [`bind`](Self::bind) is monomorphized, so a mismatched
+    /// `T` fails the build with the [`LayoutMismatch`](crate::LayoutMismatch)
+    /// message.
+    const LAYOUT: () = match crate::layout::uniform_layout_mismatch::<T>() {
+        None => {}
+        Some(mismatch) => mismatch.panic_bind(),
+    };
+
     /// Bind this uniform. The handle carries no address.
+    ///
+    /// # Panics
+    ///
+    /// At compile time, when `T`'s size, alignment, or strides disagree with
+    /// the WGSL `std140` rules (see [`uniform_layout_mismatch`](crate::uniform_layout_mismatch)).
     pub const fn bind() -> Self {
+        let () = Self::LAYOUT;
         Self {
             _marker: PhantomData,
         }
     }
 
     /// Token at offset 0.
+    ///
+    /// The pointer path (`addr` / `load`) and writes live only on storage
+    /// tokens, so a uniform token cannot open one. The example below fails
+    /// on every target — `write` is a `StorageSpace` method with no cfg —
+    /// so the doctest proves the space split itself rather than a missing
+    /// `cfg(wasm32)` item; `load` follows the same impl placement and its
+    /// positive side compiles under `wasm32` in the gpu e2e.
+    ///
+    /// ```compile_fail
+    /// let uniform = ornis_gpu_abi::Uniform::<0, 0, f32>::bind();
+    /// uniform.as_ref().write(0.0);
+    /// ```
+    #[inline(always)]
     pub fn as_ref(&self) -> GpuRef<'_, G, B, T, UniformSpace> {
         let _ = self;
         GpuRef {
@@ -139,14 +231,31 @@ pub struct Storage<const GROUP: u32, const BINDING: u32, T: GpuSafeLayout> {
 }
 
 impl<const G: u32, const B: u32, T: GpuSafeLayout> Storage<G, B, T> {
+    /// Compile-time proof that `T` matches WGSL storage (`std430`) placement.
+    ///
+    /// Evaluated when [`bind`](Self::bind) is monomorphized, so a mismatched
+    /// `T` fails the build with the [`LayoutMismatch`](crate::LayoutMismatch)
+    /// message.
+    const LAYOUT: () = match crate::layout::storage_layout_mismatch::<T>() {
+        None => {}
+        Some(mismatch) => mismatch.panic_bind(),
+    };
+
     /// Bind this storage buffer. The handle carries no address.
+    ///
+    /// # Panics
+    ///
+    /// At compile time, when `T`'s size, alignment, or strides disagree with
+    /// the WGSL `std430` rules (see [`storage_layout_mismatch`](crate::storage_layout_mismatch)).
     pub const fn bind() -> Self {
+        let () = Self::LAYOUT;
         Self {
             _marker: PhantomData,
         }
     }
 
     /// Token at offset 0.
+    #[inline(always)]
     pub fn as_ref(&self) -> GpuRef<'_, G, B, T, StorageSpace> {
         let _ = self;
         GpuRef {
@@ -166,16 +275,46 @@ impl<const G: u32, const B: u32, T: GpuSafeLayout> Storage<G, B, T> {
     }
 }
 
+/// Byte-offset addition: checked on the host, wrapping under `wasm32`.
+///
+/// A host breach past `u32::MAX` stays a panic. Shader code never sees the
+/// panic branch — a trap edge would pull the core panic machinery into the
+/// lifted call graph and the translator rejects it by design — and there
+/// the token gates (alignment, the 4-byte size contract) plus the binding
+/// bounds carry the check, with `addr` wrapping the same way.
+///
+/// `inline(always)` keeps the sum inside the caller, so the alignment gate
+/// on the result folds for a const-provable offset instead of branching on
+/// an opaque call result.
+#[inline(always)]
 fn add_offset(base: u32, delta: u32) -> u32 {
-    match base.checked_add(delta) {
-        Some(offset) => offset,
-        None => gpu_abi::contract_breach("GpuRef offset overflow"),
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match base.checked_add(delta) {
+            Some(offset) => offset,
+            None => gpu_abi::contract_breach("GpuRef offset overflow"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        base.wrapping_add(delta)
     }
 }
 
+/// [`add_offset`] for `element * stride`; checked on the host, wrapping
+/// under `wasm32` for the same lifted-graph reason. Also
+/// `inline(always)`, for the same fold of the caller's alignment gate.
+#[inline(always)]
 fn mul_offset(element: u32, stride: u32) -> u32 {
-    match element.checked_mul(stride) {
-        Some(offset) => offset,
-        None => gpu_abi::contract_breach("GpuRef index overflow"),
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match element.checked_mul(stride) {
+            Some(offset) => offset,
+            None => gpu_abi::contract_breach("GpuRef index overflow"),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        element.wrapping_mul(stride)
     }
 }

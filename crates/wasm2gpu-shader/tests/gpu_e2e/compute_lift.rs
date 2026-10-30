@@ -1,9 +1,10 @@
-//! Lift the `compute` export into a toy module with `cs_main`.
+//! Lift a compute export (`compute` or `cull`) into a toy module with
+//! `cs_main`.
 //!
 //! `rustc` emits a memory section for the cdylib. The translator rejects
-//! that, so this lifter keeps only the functions `compute` reaches: the
-//! `match` (`br_table`) and the arm calls. Vertex and fragment stubs exist
-//! because the translator still requires those entries.
+//! that, so this lifter keeps only the functions the entry reaches: arm
+//! calls, guards, and loops. Vertex and fragment stubs exist because the
+//! translator still requires those entries.
 
 use ornis_gpu_abi::symbols;
 use wasmparser::Operator;
@@ -12,14 +13,23 @@ use wasmparser::Payload;
 use wasmparser::TypeRef;
 use wasmparser::ValType;
 
-pub(super) fn lift(wasm: &[u8]) -> Vec<u8> {
-    let module = read(wasm);
-    let wat = wrap(&module);
+pub(super) fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
+    let wat = lift_wat(wasm, export);
     wat::parse_str(&wat).unwrap_or_else(|err| panic!("compute wat: {err}\n{wat}"))
+}
+
+/// The toy-module text `lift` parses: exposed so a translate failure can
+/// print exactly what the translator saw.
+pub(super) fn lift_wat(wasm: &[u8], export: &str) -> String {
+    let module = read(wasm, export);
+    wrap(&module)
 }
 
 struct Func {
     params: Result<String, String>,
+    /// Declared results. A returning helper without them would validate a
+    /// stack the callee never agreed to and the translator rejects it.
+    results: Result<String, String>,
     /// Locals and operators. `Err` is an op this lifter does not keep.
     /// Only a function `compute` reaches turns that into a panic.
     body: Result<(String, String), String>,
@@ -31,7 +41,7 @@ struct Read {
     compute: u32,
 }
 
-fn read(wasm: &[u8]) -> Read {
+fn read(wasm: &[u8], export: &str) -> Read {
     let mut imports = Vec::new();
     let mut types = Vec::new();
     let mut func_types = Vec::new();
@@ -48,10 +58,10 @@ fn read(wasm: &[u8]) -> Read {
                 }
             }
             Payload::ExportSection(reader) => {
-                for export in reader {
-                    let export = export.expect("export");
-                    if export.name == "compute" {
-                        compute = Some(export.index);
+                for item in reader {
+                    let item = item.expect("export");
+                    if item.name == export {
+                        compute = Some(item.index);
                     }
                 }
             }
@@ -66,7 +76,7 @@ fn read(wasm: &[u8]) -> Read {
     Read {
         imports,
         bodies,
-        compute: compute.expect("missing compute export"),
+        compute: compute.unwrap_or_else(|| panic!("missing {export} export")),
     }
 }
 
@@ -106,12 +116,13 @@ fn func_of(
     ty: &Result<(String, String), String>,
     body: &wasmparser::FunctionBody<'_>,
 ) -> Func {
-    let params = match ty {
-        Ok((params, _)) => Ok(params.clone()),
-        Err(err) => Err(err.clone()),
+    let (params, results) = match ty {
+        Ok((params, results)) => (Ok(params.clone()), Ok(results.clone())),
+        Err(err) => (Err(err.clone()), Err(err.clone())),
     };
     Func {
         params,
+        results,
         body: lift_body(imports, body),
     }
 }
@@ -198,6 +209,30 @@ fn op_wat(imports: &[String], op: &Operator<'_>) -> Result<String, String> {
         Operator::Return => Ok("return".to_string()),
         Operator::BrTable { targets } => Ok(br_table(targets)),
         Operator::Drop => Ok("drop".to_string()),
+        Operator::I32Add => Ok("i32.add".to_string()),
+        Operator::I32Sub => Ok("i32.sub".to_string()),
+        Operator::I32Mul => Ok("i32.mul".to_string()),
+        Operator::I32Shl => Ok("i32.shl".to_string()),
+        Operator::I32ShrU => Ok("i32.shr_u".to_string()),
+        Operator::I32Eqz => Ok("i32.eqz".to_string()),
+        Operator::I32Eq => Ok("i32.eq".to_string()),
+        Operator::I32Ne => Ok("i32.ne".to_string()),
+        Operator::I32LtU => Ok("i32.lt_u".to_string()),
+        Operator::I32GtU => Ok("i32.gt_u".to_string()),
+        Operator::I32GeU => Ok("i32.ge_u".to_string()),
+        Operator::I32LeU => Ok("i32.le_u".to_string()),
+        Operator::I32And => Ok("i32.and".to_string()),
+        Operator::I32Or => Ok("i32.or".to_string()),
+        Operator::I32Xor => Ok("i32.xor".to_string()),
+        Operator::I32ShrS => Ok("i32.shr_s".to_string()),
+        Operator::F32Add => Ok("f32.add".to_string()),
+        Operator::F32Mul => Ok("f32.mul".to_string()),
+        Operator::F32Lt => Ok("f32.lt".to_string()),
+        Operator::Select => Ok("select".to_string()),
+        Operator::I32Load { memarg } => Ok(mem_op("i32.load", memarg)),
+        Operator::I32Store { memarg } => Ok(mem_op("i32.store", memarg)),
+        Operator::F32Load { memarg } => Ok(mem_op("f32.load", memarg)),
+        Operator::F32Store { memarg } => Ok(mem_op("f32.store", memarg)),
         Operator::Nop | Operator::Unreachable => Ok(String::new()),
         other => Err(format!("{other:?}")),
     }
@@ -213,6 +248,16 @@ fn f32_text(bits: u32) -> String {
     // `wast` reads `0x3f800000` as the integer 1065353216, not as bits.
     // Debug is the shortest decimal that parses back to the same value.
     format!("{value:?}")
+}
+
+/// A memory op with its immediate. `wast` defaults `align` to the natural
+/// alignment, so only a nonzero `offset` has to come back.
+fn mem_op(name: &str, memarg: &wasmparser::MemArg) -> String {
+    if memarg.offset == 0 {
+        name.to_string()
+    } else {
+        format!("{name} offset={}", memarg.offset)
+    }
 }
 
 fn call_wat(imports: &[String], index: u32) -> String {
@@ -278,8 +323,9 @@ fn wrap(module: &Read) -> String {
             String::new()
         };
         let params = param_list(func.params.as_deref().unwrap_or(""));
+        let results = result_list(func.results.as_deref().unwrap_or(""));
         funcs.push_str(&format!(
-            "(func $f{wasm_index} {export} {params} {locals} {ops})\n",
+            "(func $f{wasm_index} {export} {params} {results} {locals} {ops})\n",
         ));
         index += 1;
     }
@@ -302,6 +348,15 @@ fn param_list(params: &str) -> String {
         String::new()
     } else {
         format!("(param {params})")
+    }
+}
+
+fn result_list(results: &str) -> String {
+    let results = results.trim();
+    if results.is_empty() {
+        String::new()
+    } else {
+        format!("(result {results})")
     }
 }
 
@@ -341,11 +396,14 @@ fn push_calls(stack: &mut Vec<u32>, ops: &str) {
 
 fn import_sig(name: &str) -> &'static str {
     match name {
+        symbols::STORAGE_BASE => "(param i32 i32) (result i32)",
         symbols::STORAGE_WRITE_F32 => "(param i32 i32 i32 f32)",
         symbols::STORAGE_READ_F32 => "(param i32 i32 i32) (result f32)",
         symbols::UNIFORM_FIELD_F32 => "(param i32 i32 i32 i32) (result f32)",
         symbols::UNIFORM_FIELD_U32 => "(param i32 i32 i32 i32) (result i32)",
         symbols::UNIFORM_READ_F32 => "(param i32 i32 i32 i32) (result f32)",
+        symbols::STORAGE_READ_U32 => "(param i32 i32 i32) (result i32)",
+        symbols::STORAGE_WRITE_U32 => "(param i32 i32 i32 i32)",
         other => panic!("compute imports {other}, which the lifter does not know"),
     }
 }

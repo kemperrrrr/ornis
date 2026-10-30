@@ -10,8 +10,19 @@ use crate::globals;
 use crate::ir::Op;
 use crate::storage;
 use crate::ty;
+use crate::ty::Elem;
 use crate::ty::Imp;
 use crate::uniform;
+
+mod ptr;
+
+use ptr::f32_lt;
+use ptr::i32_pair;
+use ptr::i32_ready;
+use ptr::local_ptr;
+use ptr::provenance;
+use ptr::ptr_bin;
+use ptr::storage_base;
 
 pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> {
     match op {
@@ -28,14 +39,27 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::Call(index) => call(em, index),
         Op::Mul => bin(em, BinaryOperator::Multiply),
         Op::Add => bin(em, BinaryOperator::Add),
-        Op::I32Add => i32_bin(em, u32::wrapping_add, BinaryOperator::Add),
+        Op::I32Add => ptr_bin(em, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),
-        Op::I32Sub => i32_bin(em, u32::wrapping_sub, BinaryOperator::Subtract),
+        Op::I32Sub => ptr_bin(em, false, u32::wrapping_sub),
+        Op::I32Shl => i32_bin(em, u32::wrapping_shl, BinaryOperator::ShiftLeft),
+        Op::I32ShrU => i32_bin(em, u32::wrapping_shr, BinaryOperator::ShiftRight),
+        Op::I32ShrS => i32_bin(em, shr_s, BinaryOperator::ShiftRight),
+        Op::I32And => i32_bin(em, |a, b| a & b, BinaryOperator::And),
+        Op::I32Or => i32_bin(em, |a, b| a | b, BinaryOperator::InclusiveOr),
+        Op::I32Xor => i32_bin(em, |a, b| a ^ b, BinaryOperator::ExclusiveOr),
         Op::I32Eqz => i32_eqz(em),
         Op::I32Eq => i32_cmp(em, |a, b| a == b, BinaryOperator::Equal),
         Op::I32Ne => i32_cmp(em, |a, b| a != b, BinaryOperator::NotEqual),
         Op::I32LtU => i32_cmp(em, |a, b| a < b, BinaryOperator::Less),
         Op::I32GtU => i32_cmp(em, |a, b| a > b, BinaryOperator::Greater),
+        Op::I32GeU => i32_cmp(em, |a, b| a >= b, BinaryOperator::GreaterEqual),
+        Op::I32LeU => i32_cmp(em, |a, b| a <= b, BinaryOperator::LessEqual),
+        Op::F32Lt => f32_lt(em),
+        Op::LoadI32(offset) => storage::load_ptr(em, offset, Elem::U32),
+        Op::LoadF32(offset) => storage::load_ptr(em, offset, Elem::F32),
+        Op::StoreI32(offset) => storage::store_ptr(em, offset, Elem::U32),
+        Op::StoreF32(offset) => storage::store_ptr(em, offset, Elem::F32),
         Op::Select => wasm_select(em),
     }
 }
@@ -49,6 +73,7 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         return crate::call::call_defined(em, index);
     };
     match imp {
+        Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
         Imp::Sample => sample(em),
         Imp::Read(spec) => storage::load(em, spec),
@@ -105,6 +130,9 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
 
 fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
     let slot = index as usize;
+    if let Some(value) = local_ptr(em, slot)? {
+        return em.push(value);
+    }
     if let Some(bits) = em.baked.get(slot).copied().flatten() {
         return em.push(Val::Imm(bits));
     }
@@ -151,6 +179,9 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     if let Some(slot) = em.baked.get_mut(index as usize) {
         *slot = None;
     }
+    if let Some(slot) = em.ptr_slots.get_mut(index as usize) {
+        *slot = provenance(&val);
+    }
     if tee {
         em.stack.push(val);
     }
@@ -163,6 +194,7 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     let bits = match val {
         Val::Imm(value) => em.u32(value),
         Val::Index(handle) | Val::Scalar(handle) => handle,
+        Val::Ptr { off, .. } => em.off_expr(off),
         Val::Vec(_) => return Err(TranslateError::Unsupported),
     };
     em.store_var(var, bits);
@@ -202,30 +234,14 @@ enum Ready {
     Expr(naga::Handle<Expression>, naga::Handle<Expression>),
 }
 
-fn i32_ready(
-    em: &mut Emit<'_, '_>,
-    fold: impl Fn(u32, u32) -> u32,
-) -> Result<Ready, TranslateError> {
-    let right = em.pop()?;
-    let left = em.pop()?;
-    if let (Val::Imm(a), Val::Imm(b)) = (left, right) {
-        return Ok(Ready::Imm(fold(a, b)));
-    }
-    Ok(Ready::Expr(em.as_uint(left)?, em.as_uint(right)?))
-}
-
 fn i32_bin(
     em: &mut Emit<'_, '_>,
     fold: fn(u32, u32) -> u32,
     op: BinaryOperator,
 ) -> Result<(), TranslateError> {
-    match i32_ready(em, fold)? {
-        Ready::Imm(value) => em.push(Val::Imm(value)),
-        Ready::Expr(left, right) => {
-            let value = arith(em, op, left, right);
-            em.push(Val::Index(value))
-        }
-    }
+    let right = em.pop()?;
+    let left = em.pop()?;
+    i32_pair(em, left, right, fold, op)
 }
 
 fn i32_cmp(
@@ -257,6 +273,11 @@ fn i32_eqz(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     Ok(())
 }
 
+/// Arithmetic right shift on the `i32` value of a `u32` bit pattern.
+fn shr_s(a: u32, b: u32) -> u32 {
+    (a as i32).wrapping_shr(b) as u32
+}
+
 fn zero_one(em: &mut Emit<'_, '_>, cond: naga::Handle<Expression>) -> naga::Handle<Expression> {
     let accept = em.u32(1);
     let reject = em.u32(0);
@@ -268,6 +289,9 @@ fn wasm_select(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let cond = em.as_bool(cond_val)?;
     let reject = em.pop()?;
     let accept = em.pop()?;
+    if let Some(merged) = em.merge_ptr(cond, accept, reject) {
+        return em.push(merged);
+    }
     let value = match (accept, reject) {
         (Val::Scalar(left), Val::Scalar(right)) => Val::Scalar(em.pick(cond, left, right)),
         (Val::Vec(left), Val::Vec(right)) => Val::Vec(em.pick(cond, left, right)),

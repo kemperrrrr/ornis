@@ -20,7 +20,9 @@ use crate::layout::VEC3_ALIGN;
 use crate::layout::VEC3_SIZE;
 use crate::layout::place_fields;
 use crate::storage_at_f32;
+use crate::storage_at_u32;
 use crate::storage_store_f32;
+use crate::storage_store_u32;
 use crate::symbols;
 use crate::uniform_array_f32;
 use crate::uniform_field_f32;
@@ -416,6 +418,22 @@ fn lane(value: f32) -> UniformLane {
 }
 
 #[test]
+fn storage_u32_helpers_round_trip_on_the_host_shadow() {
+    let mut mem = HostMemory::new();
+    mem.bind_storage::<0, 1, [u32; 4]>();
+    mem.write_storage::<0, 1, [u32; 4]>(&[0, 1, 2, 3]);
+    mem.bind_storage::<0, 3, [u32; 4]>();
+    mem.write_storage::<0, 3, [u32; 4]>(&[0; 4]);
+    with_host(&mut mem, || {
+        let sample = storage_at_u32::<0, 1>(2);
+        storage_store_u32::<0, 3>(2, sample + 7);
+    });
+    let stored = mem.read_storage::<0, 3, [u32; 4]>();
+    assert!(stored[2] == 9);
+    assert!(stored[0] == 0);
+}
+
+#[test]
 fn types_section_encodes_one_f32_field() {
     let bytes = crate::encode_types_section(&[&[crate::TYPE_TAG_F32]]).expect("section");
     assert!(bytes == *b"OGT1\x01\x00\x01\x00\x01");
@@ -428,4 +446,73 @@ fn shade_once() -> f32 {
     let written = sample.mul_add(scale, uniform_array_f32::<0, 2, 4>(slot));
     storage_store_f32::<0, 3>(slot, written);
     written
+}
+
+#[test]
+fn sdk_types_match_wgsl_placement() {
+    use crate::layout::storage_layout_mismatch;
+    use crate::layout::uniform_layout_mismatch;
+    assert_eq!(uniform_layout_mismatch::<f32>(), None);
+    assert_eq!(uniform_layout_mismatch::<u32>(), None);
+    assert_eq!(uniform_layout_mismatch::<i32>(), None);
+    assert_eq!(uniform_layout_mismatch::<u8>(), None);
+    assert_eq!(uniform_layout_mismatch::<GpuVec2>(), None);
+    assert_eq!(uniform_layout_mismatch::<GpuVec3>(), None);
+    assert_eq!(uniform_layout_mismatch::<GpuVec4>(), None);
+    assert_eq!(uniform_layout_mismatch::<FrameTint>(), None);
+    assert_eq!(uniform_layout_mismatch::<TwoVec>(), None);
+    assert_eq!(uniform_layout_mismatch::<ScalarParams>(), None);
+    assert_eq!(uniform_layout_mismatch::<UniformLane>(), None);
+    assert_eq!(uniform_layout_mismatch::<[f32; 4]>(), None);
+    assert_eq!(uniform_layout_mismatch::<[u8; 3]>(), None);
+    assert_eq!(storage_layout_mismatch::<FrameTint>(), None);
+    assert_eq!(storage_layout_mismatch::<TwoVec>(), None);
+    assert_eq!(storage_layout_mismatch::<[f32; 4]>(), None);
+}
+
+#[test]
+fn bind_checks_layout_for_both_spaces() {
+    let _uniform = Uniform::<0, 0, FrameTint>::bind();
+    let _storage = Storage::<0, 1, [f32; 4]>::bind();
+}
+
+#[test]
+fn layout_mismatch_names_the_rule() {
+    use crate::layout::LayoutMismatch;
+    use crate::layout::storage_layout_mismatch_raw;
+    use crate::layout::uniform_layout_mismatch_raw;
+    // Size, align, and the std430 stride are checked for storage.
+    assert_eq!(
+        storage_layout_mismatch_raw(0, 4, 0, 4, 0),
+        Some(LayoutMismatch::ZeroSize)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 4, 4, 4, 8),
+        Some(LayoutMismatch::Size)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 3, 8, 1, 8),
+        Some(LayoutMismatch::Align)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 4, 8, 8, 8),
+        Some(LayoutMismatch::Align)
+    );
+    assert_eq!(
+        storage_layout_mismatch_raw(8, 8, 8, 8, 12),
+        Some(LayoutMismatch::StorageStride)
+    );
+    assert_eq!(storage_layout_mismatch_raw(8, 8, 8, 8, 8), None);
+    // Uniform adds the 16-byte std140 stride on top.
+    assert_eq!(
+        uniform_layout_mismatch_raw(4, 4, 4, 4, 4, 8),
+        Some(LayoutMismatch::UniformStride)
+    );
+    assert_eq!(uniform_layout_mismatch_raw(4, 4, 4, 4, 4, 16), None);
+}
+
+#[test]
+#[should_panic(expected = "gpu layout mismatch: SIZE is not size_of")]
+fn layout_mismatch_panics_with_the_named_rule() {
+    crate::layout::LayoutMismatch::Size.panic_bind();
 }

@@ -10,6 +10,16 @@ use super::fold;
 use super::join::join_abs;
 use super::local_get;
 use super::local_set;
+use super::mem::f32_lt;
+use super::mem::i32_offset;
+use super::mem::load_f32;
+use super::mem::load_i32;
+use super::mem::num_fold;
+use super::mem::pop_prov;
+use super::mem::pop_sid;
+use super::mem::storage_base;
+use super::mem::store_f32;
+use super::mem::store_i32;
 use super::pop;
 use super::pop_num;
 use super::push;
@@ -34,14 +44,27 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::Drop => pop(st).map(|_| ()),
         Op::Call(index) => call(ai, st, index),
         Op::Mul | Op::Add => f32_bin(st),
-        Op::I32Add => i32_bin(st, u32::wrapping_add),
+        Op::I32Add => i32_offset(st, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(st, u32::wrapping_mul),
-        Op::I32Sub => i32_bin(st, u32::wrapping_sub),
+        Op::I32Sub => i32_offset(st, false, u32::wrapping_sub),
+        Op::I32Shl => i32_bin(st, u32::wrapping_shl),
+        Op::I32ShrU => i32_bin(st, u32::wrapping_shr),
+        Op::I32ShrS => i32_bin(st, shr_s),
+        Op::I32And => i32_bin(st, |a, b| a & b),
+        Op::I32Or => i32_bin(st, |a, b| a | b),
+        Op::I32Xor => i32_bin(st, |a, b| a ^ b),
         Op::I32Eqz => i32_eqz(st),
         Op::I32Eq => i32_cmp(st, |a, b| a == b),
         Op::I32Ne => i32_cmp(st, |a, b| a != b),
         Op::I32LtU => i32_cmp(st, |a, b| a < b),
         Op::I32GtU => i32_cmp(st, |a, b| a > b),
+        Op::I32GeU => i32_cmp(st, |a, b| a >= b),
+        Op::I32LeU => i32_cmp(st, |a, b| a <= b),
+        Op::F32Lt => f32_lt(st),
+        Op::LoadI32(_) => load_i32(st),
+        Op::LoadF32(_) => load_f32(st),
+        Op::StoreI32(_) => store_i32(st),
+        Op::StoreF32(_) => store_f32(st),
         Op::Select => select(st),
     }
 }
@@ -58,6 +81,7 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         return Err(TranslateError::Unsupported);
     };
     match imp {
+        Imp::Base => storage_base(st, import),
         Imp::ReadUniform => read_uniform(st),
         Imp::Sample => sample(st, import),
         Imp::Read(spec) => read_storage(ai, st, import, spec),
@@ -237,27 +261,6 @@ pub(super) fn pop_n(st: &mut St, n: u32) -> Result<(), TranslateError> {
     Ok(())
 }
 
-pub(super) fn pop_sid(st: &mut St) -> Result<u16, TranslateError> {
-    match st.stack.pop() {
-        Some(Abs::I32(Num::Const(value))) => {
-            u16::try_from(value).map_err(|_| type_msg("struct type id is out of range"))
-        }
-        Some(Abs::I32(Num::Dyn { joined: true })) => Err(TranslateError::AmbiguousProvenance),
-        Some(_) => Err(type_msg("struct type id is not a constant")),
-        None => Err(TranslateError::Unsupported),
-    }
-}
-
-pub(super) fn pop_prov(st: &mut St) -> Result<(), TranslateError> {
-    match st.stack.pop() {
-        Some(Abs::I32(Num::Const(_))) => Ok(()),
-        Some(Abs::I32(Num::Dyn { joined: true })) => Err(TranslateError::AmbiguousProvenance),
-        Some(Abs::I32(Num::Dyn { joined: false })) => Err(TranslateError::DynamicBinding),
-        Some(_) => Err(TranslateError::DynamicBinding),
-        None => Err(TranslateError::Unsupported),
-    }
-}
-
 pub(super) fn pop_index(st: &mut St) -> Result<(), TranslateError> {
     match st.stack.pop() {
         Some(Abs::I32(_)) => Ok(()),
@@ -283,23 +286,15 @@ pub(super) fn f32_bin(st: &mut St) -> Result<(), TranslateError> {
     }
 }
 
+/// Arithmetic right shift on the `i32` value of a `u32` bit pattern.
+fn shr_s(a: u32, b: u32) -> u32 {
+    (a as i32).wrapping_shr(b) as u32
+}
+
 pub(super) fn i32_bin(st: &mut St, op: impl Fn(u32, u32) -> u32) -> Result<(), TranslateError> {
     let right = pop_num(st)?;
     let left = pop_num(st)?;
-    let num = match (left, right) {
-        (Num::Const(a), Num::Const(b)) => Num::Const(op(a, b)),
-        _ => Num::Dyn {
-            joined: num_joined(left) || num_joined(right),
-        },
-    };
-    push(st, Abs::I32(num))
-}
-
-fn num_joined(num: Num) -> bool {
-    match num {
-        Num::Const(_) => false,
-        Num::Dyn { joined } => joined,
-    }
+    push(st, Abs::I32(num_fold(left, right, op)))
 }
 
 pub(super) fn i32_cmp(st: &mut St, pred: fn(u32, u32) -> bool) -> Result<(), TranslateError> {

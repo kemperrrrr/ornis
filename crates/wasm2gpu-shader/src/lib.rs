@@ -18,6 +18,13 @@ use ornis_gpu_abi::uniform_array_f32;
 use ornis_gpu_abi::uniform_field_f32;
 use ornis_gpu_abi::uniform_field_u32;
 
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::Storage;
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::storage_at_u32;
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::storage_store_u32;
+
 gpu_struct! {
     /// Uniform parameters. Field 0 is the dynamic index. Field 1 is the scale.
     pub struct ShadeParams {
@@ -64,6 +71,35 @@ const THIRD: f32 = 3.0;
 const REST: f32 = 4.0;
 #[cfg(target_arch = "wasm32")]
 const REST_ID: u32 = 3;
+
+/// Planes of the `cull` clip test: four components per plane.
+pub const PLANE_COUNT: u32 = 6;
+
+/// Plane components as one uniform `f32` array (stride 16 bytes).
+pub const PLANE_LEN: u32 = PLANE_COUNT * 4;
+
+/// Lanes of one sphere: center xyz plus the radius.
+#[cfg(target_arch = "wasm32")]
+const LANES: u32 = 4;
+
+/// Index of the last lane: a sphere's radius, a plane's `w`.
+#[cfg(target_arch = "wasm32")]
+const LAST_LANE: u32 = LANES - 1;
+
+/// Group of every binding the `cull` kernel touches.
+pub const CULL_GROUP: u32 = 0;
+
+/// Uniform binding of the padded plane components.
+pub const PLANE_BINDING: u32 = 0;
+
+/// Storage binding of the four sphere lanes per sphere.
+pub const SPHERE_BINDING: u32 = 1;
+
+/// Storage binding the `cull` kernel writes one flag per sphere into.
+pub const FLAG_BINDING: u32 = 2;
+
+/// Storage binding whose element 0 is the guarded sphere count.
+pub const COUNT_BINDING: u32 = 3;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -159,6 +195,71 @@ fn arm2(index: u32) {
 #[inline(never)]
 fn arm_rest(index: u32) {
     storage_store_f32::<0, COMPUTE_BINDING>(index, compute_value(REST_ID));
+}
+
+/// Wasm compute export: read and write storage through `GpuRef` tokens.
+///
+/// `addr` folds the `storage_base` tag plus the element offset and `load` /
+/// `store` are one scalar each: this is the pointer path of
+/// `docs/rendering/wasm-segmented-memory.md` §4 on real `rustc` output —
+/// provenance through rustc's locals and `i32.add`, not hand-written WAT.
+/// The arithmetic lives in `twice_plus_one` so the export itself is a
+/// pure integration (IOSP: logic and calls in separate functions). The gpu
+/// test lifts this export and checks the buffer the GPU wrote.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_copy(id: u32) {
+    let src = Storage::<0, 1, f32>::bind();
+    let out = Storage::<0, 2, f32>::bind();
+    let value = src.as_ref().index_storage(id).load();
+    out.as_ref().index_storage(id).store(twice_plus_one(value));
+}
+
+/// The arithmetic half of `ptr_copy`: read-modify-write is one
+/// computation, and keeping it out of the export leaves `ptr_copy` free
+/// of mixed logic-and-calls classification. `pub` so the gpu test's host
+/// expectation uses the same function (a private copy would only run
+/// under `wasm32` and read as untested).
+#[inline(always)]
+pub fn twice_plus_one(value: f32) -> f32 {
+    value + value + 1.0
+}
+
+/// Wasm compute export: one visible flag per sphere against six planes.
+///
+/// The count guard wraps the whole body, so no work happens at `id >=
+/// count`. The body stays inline — the analysis rejects a callee that
+/// returns mid-function, and LLVM's loop-exit rotation is happy to grow
+/// one. `dot + w + radius < 0.0` is the production WGSL `sphere_visible`
+/// (`gpu_culling.rs`) rearranged onto one comparison; IEEE `<` fails open
+/// on NaN there too, while the CPU `Frustum::sphere_visible` guards
+/// non-finite inputs before the planes. The flag is `1` for visible and
+/// `0` for culled.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn cull(id: u32) {
+    let count = storage_at_u32::<CULL_GROUP, COUNT_BINDING>(0);
+    if id < count {
+        let base = id * LANES;
+        let cx = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
+        let cy = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
+        let cz = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
+        let radius = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + LAST_LANE);
+        let mut visible = 1u32;
+        let mut plane = 0u32;
+        while plane < PLANE_COUNT {
+            let at = plane * LANES;
+            let px = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at);
+            let py = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 1);
+            let pz = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 2);
+            let pw = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + LAST_LANE);
+            if px * cx + py * cy + pz * cz + pw + radius < 0.0 {
+                visible = 0;
+            }
+            plane += 1;
+        }
+        storage_store_u32::<CULL_GROUP, FLAG_BINDING>(id, visible);
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

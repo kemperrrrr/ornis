@@ -80,6 +80,8 @@ pub(super) enum Elem {
 /// How an import moves values.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Imp {
+    /// `storage_base`: the provenance pair folds into an address.
+    Base,
     /// Uniform `raw_read` of a `vec4<f32>` at byte offset 0.
     ReadUniform,
     /// `texture_sample_2d`.
@@ -116,6 +118,9 @@ pub(super) struct Layout {
 
 /// Classify a toy import. `None` means the name is not a gpu opcode we lower.
 pub(super) fn classify(name: &str) -> Option<Imp> {
+    if name == symbols::STORAGE_BASE {
+        return Some(Imp::Base);
+    }
     if name == symbols::RAW_READ {
         return Some(Imp::ReadUniform);
     }

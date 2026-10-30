@@ -8,9 +8,9 @@
 use super::Abs;
 use super::Num;
 use super::St;
+use super::mem::pop_prov;
+use super::mem::pop_sid;
 use super::type_msg;
-use super::value::pop_prov;
-use super::value::pop_sid;
 use super::value::push_elem;
 use super::value::push_field;
 use super::value::push_struct;

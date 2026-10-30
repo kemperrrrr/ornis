@@ -1,6 +1,7 @@
 //! Wasm operators to flat instructions, before label matching.
 
 use wasmparser::BlockType;
+use wasmparser::MemArg;
 use wasmparser::Operator;
 
 use crate::error::TranslateError;
@@ -25,17 +26,13 @@ pub(super) fn op(
 pub(super) fn memory(op: &Operator<'_>) -> bool {
     matches!(
         op,
-        Operator::I32Load { .. }
-            | Operator::I64Load { .. }
-            | Operator::F32Load { .. }
+        Operator::I64Load { .. }
             | Operator::F64Load { .. }
             | Operator::I32Load8S { .. }
             | Operator::I32Load8U { .. }
             | Operator::I32Load16S { .. }
             | Operator::I32Load16U { .. }
-            | Operator::I32Store { .. }
             | Operator::I64Store { .. }
-            | Operator::F32Store { .. }
             | Operator::F64Store { .. }
             | Operator::I32Store8 { .. }
             | Operator::I32Store16 { .. }
@@ -80,6 +77,19 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::I32Ne => Ok(Op::I32Ne),
         Operator::I32LtU => Ok(Op::I32LtU),
         Operator::I32GtU => Ok(Op::I32GtU),
+        Operator::I32GeU => Ok(Op::I32GeU),
+        Operator::I32LeU => Ok(Op::I32LeU),
+        Operator::I32And => Ok(Op::I32And),
+        Operator::I32Or => Ok(Op::I32Or),
+        Operator::I32Xor => Ok(Op::I32Xor),
+        Operator::I32ShrS => Ok(Op::I32ShrS),
+        Operator::I32Shl => Ok(Op::I32Shl),
+        Operator::I32ShrU => Ok(Op::I32ShrU),
+        Operator::I32Load { memarg } => Ok(Op::LoadI32(mem_offset(memarg)?)),
+        Operator::F32Load { memarg } => Ok(Op::LoadF32(mem_offset(memarg)?)),
+        Operator::I32Store { memarg } => Ok(Op::StoreI32(mem_offset(memarg)?)),
+        Operator::F32Store { memarg } => Ok(Op::StoreF32(mem_offset(memarg)?)),
+        Operator::F32Lt => Ok(Op::F32Lt),
         Operator::Select => Ok(Op::Select),
         _ => Err(TranslateError::Unsupported),
     }
@@ -99,6 +109,11 @@ fn br_table(targets: &wasmparser::BrTable<'_>) -> Result<Option<Flat>, Translate
 fn i32_const(value: i32) -> Result<Op, TranslateError> {
     let bits = u32::try_from(value).map_err(|_| TranslateError::Unsupported)?;
     Ok(Op::I32(bits))
+}
+
+/// A wasm memory offset wider than `u32` can never address wasm32 memory.
+fn mem_offset(memarg: &MemArg) -> Result<u32, TranslateError> {
+    u32::try_from(memarg.offset).map_err(|_| TranslateError::Unsupported)
 }
 
 fn local_get(locals: &[Kind], index: u32) -> Result<Op, TranslateError> {
