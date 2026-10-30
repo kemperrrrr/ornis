@@ -212,13 +212,13 @@ fn fog_vertex_kernel_matches_the_production_stage() {
 
     let layout_a = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("fog-vs a"),
-        bind_group_layouts: &[&pixels_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&pixels_layout)],
+        immediate_size: 0,
     });
     let layout_b = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("fog-vs b"),
-        bind_group_layouts: &[&pixels_layout, &out_layout],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&pixels_layout), Some(&out_layout)],
+        immediate_size: 0,
     });
     let pipeline_a = capture_pipeline(&device, &layout_a, &production);
     let pipeline_b = capture_pipeline(&device, &layout_b, &adapter);
@@ -226,8 +226,8 @@ fn fog_vertex_kernel_matches_the_production_stage() {
         label: Some("fog-vs kernel"),
         layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fog-vs kernel"),
-            bind_group_layouts: &[&kernel_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&kernel_layout)],
+            immediate_size: 0,
         })),
         module: &kernel,
         entry_point: Some(symbols::CS_MAIN),
