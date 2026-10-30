@@ -61,7 +61,7 @@ struct KernelVert {
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> QuadOut {
     let k = kernel_out[vertex_index];
-    return QuadOut { clip_position: k.pos, uv: k.uv };
+    return QuadOut(k.pos, k.uv);
 }
 ";
 
@@ -206,7 +206,11 @@ fn shader_modules(
 /// The pixel-capture, adapter-out, and kernel-storage group layouts.
 fn group_layouts(
     device: &wgpu::Device,
-) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
+) -> (
+    wgpu::BindGroupLayout,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroupLayout,
+) {
     let storage = wgpu::BufferBindingType::Storage { read_only: false };
     let pixels = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("fog-vs pixels"),
@@ -231,8 +235,16 @@ fn group_layouts(
 fn build_pipelines(
     device: &wgpu::Device,
     shaders: &(wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule),
-    layouts: &(wgpu::BindGroupLayout, wgpu::BindGroupLayout, wgpu::BindGroupLayout),
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::ComputePipeline) {
+    layouts: &(
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
+    ),
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::ComputePipeline,
+) {
     let (kernel, production, adapter) = shaders;
     let (pixels_layout, out_layout, kernel_layout) = layouts;
     let layout_a = pipeline_layout(device, "fog-vs a", pixels_layout, None);
@@ -270,9 +282,18 @@ fn frame_buffers(
 /// The four bind groups: kernel out, pixel captures, adapter out.
 fn frame_groups(
     device: &wgpu::Device,
-    layouts: &(wgpu::BindGroupLayout, wgpu::BindGroupLayout, wgpu::BindGroupLayout),
+    layouts: &(
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
+        wgpu::BindGroupLayout,
+    ),
     buffers: &(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer),
-) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup) {
+) -> (
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+) {
     let (pixels_layout, out_layout, kernel_layout) = layouts;
     let (kernel_out, pixels_a, pixels_b) = buffers;
     let group_kernel = bind_group_for(device, "fog-vs kernel", kernel_layout, kernel_out);
@@ -307,8 +328,17 @@ fn encode_and_submit(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     view: &wgpu::TextureView,
-    pipelines: &(wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::ComputePipeline),
-    groups: &(wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup),
+    pipelines: &(
+        wgpu::RenderPipeline,
+        wgpu::RenderPipeline,
+        wgpu::ComputePipeline,
+    ),
+    groups: &(
+        wgpu::BindGroup,
+        wgpu::BindGroup,
+        wgpu::BindGroup,
+        wgpu::BindGroup,
+    ),
 ) {
     let (pipeline_a, pipeline_b, kernel_pipeline) = pipelines;
     let (group_kernel, group_pixels_a, group_pixels_b, group_out) = groups;
