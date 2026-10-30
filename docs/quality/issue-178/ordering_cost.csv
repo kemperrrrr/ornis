@@ -1,0 +1,13 @@
+run,engine,scene,bodies,key_ns,comparison_sort_ns,radix_sort_ns,permute_ns,handle_indirection_ns_per_body
+si-main,si,islands_grid_16x16,1025,7167,14833,23459,24667,1.55
+si-main,si,small_grid_4x4,65,541,584,2292,1375,1.92
+si-main,si,body_grid_1000,1049,7333,14875,21208,24208,1.55
+si-main,si,body_grid_10000,10400,159000,176667,281542,553750,2.26
+si-main,si,stack_128_single_island,129,1000,1583,3708,2709,1.94
+si-main,si,pile_2000_active,2001,13375,25083,30667,40875,1.27
+avbd-main,avbd,islands_grid_16x16,1025,5042,10375,16500,17541,1.10
+avbd-main,avbd,small_grid_4x4,65,292,375,1333,792,1.28
+avbd-main,avbd,body_grid_1000,1049,5167,10541,14917,17208,1.11
+avbd-main,avbd,stack_128_single_island,129,625,959,2917,1709,1.29
+avbd-main,avbd,pile_2000_active,2001,12208,22292,28458,35500,1.17
+avbd-10k-recheck,avbd,body_grid_10000,10400,63375,95750,169333,188583,1.16

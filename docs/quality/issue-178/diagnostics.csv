@@ -1,0 +1,12 @@
+run,engine,scene,bodies,islands,contacts,broad_phase_ms,narrow_phase_ms,solver_ms,island_ms,substeps
+si-main,si,islands_grid_16x16,1025,257,1024,0.394,2.488,17.994,0.051,4
+si-main,si,small_grid_4x4,65,17,64,0.035,0.170,1.279,0.008,4
+si-main,si,body_grid_1000,1049,1049,1000,0.030,1.720,18.674,0.117,4
+si-main,si,body_grid_10000,10400,10400,11881,9.693,49.998,398.491,2.208,4
+si-main,si,stack_128_single_island,129,37,94,0.082,1.481,50.145,0.015,12
+si-main,si,pile_2000_active,2001,15,5239,1.227,10.523,138.718,0.300,12
+avbd-main,avbd,islands_grid_16x16,1025,1025,0,0.000,0.000,0.000,0.000,0
+avbd-main,avbd,small_grid_4x4,65,65,0,0.000,0.000,0.000,0.000,0
+avbd-main,avbd,body_grid_1000,1049,1049,0,0.000,0.000,0.000,0.000,0
+avbd-main,avbd,stack_128_single_island,129,4,126,0.000,0.000,0.000,0.000,0
+avbd-main,avbd,pile_2000_active,2001,2001,1735,0.000,0.000,0.000,0.000,0
