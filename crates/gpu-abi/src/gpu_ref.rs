@@ -282,6 +282,11 @@ impl<const G: u32, const B: u32, T: GpuSafeLayout> Storage<G, B, T> {
 /// lifted call graph and the translator rejects it by design — and there
 /// the token gates (alignment, the 4-byte size contract) plus the binding
 /// bounds carry the check, with `addr` wrapping the same way.
+///
+/// `inline(always)` keeps the sum inside the caller, so the alignment gate
+/// on the result folds for a const-provable offset instead of branching on
+/// an opaque call result.
+#[inline(always)]
 fn add_offset(base: u32, delta: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -297,7 +302,9 @@ fn add_offset(base: u32, delta: u32) -> u32 {
 }
 
 /// [`add_offset`] for `element * stride`; checked on the host, wrapping
-/// under `wasm32` for the same lifted-graph reason.
+/// under `wasm32` for the same lifted-graph reason. Also
+/// `inline(always)`, for the same fold of the caller's alignment gate.
+#[inline(always)]
 fn mul_offset(element: u32, stride: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
