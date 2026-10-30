@@ -1,5 +1,5 @@
-//! Lift a compute export (`compute` or `cull`) into a toy module with
-//! `cs_main`.
+//! Lift a compute export (`compute`, `cull`, or the fog `vs_main`) into
+//! a toy module with `cs_main`.
 //!
 //! `rustc` emits a memory section for the cdylib. The translator rejects
 //! that, so this lifter keeps only the functions the entry reaches: arm
@@ -7,6 +7,7 @@
 //! translator still requires those entries.
 
 use ornis_gpu_abi::symbols;
+use ornis_wasm2gpu::translate;
 use wasmparser::Operator;
 use wasmparser::Parser;
 use wasmparser::Payload;
@@ -16,6 +17,26 @@ use wasmparser::ValType;
 pub(super) fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
     let wat = lift_wat(wasm, export);
     wat::parse_str(&wat).unwrap_or_else(|err| panic!("compute wat: {err}\n{wat}"))
+}
+
+/// Lift `export` from the guest and translate it, pinning what every
+/// lowered kernel must keep: the compute entry, the id builtin, the
+/// named storage binding, and a non-empty SPIR-V twin. Shared by the
+/// `cull` A/B and the fog vertex A/B so the sequence exists once.
+pub(super) fn lowered_kernel(export: &str, storage_binding: &str) -> String {
+    let wasm = super::compile_wasm();
+    let wat = lift_wat(&wasm, export);
+    let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("{export} wat: {err}\n{wat}"));
+    let lowered = match translate(&module) {
+        Ok(lowered) => lowered,
+        Err(err) => panic!("{export} translate {err:?}\nWAT:\n{wat}"),
+    };
+    let wgsl = &lowered.wgsl;
+    assert!(wgsl.contains("@compute"), "{wgsl}");
+    assert!(wgsl.contains("@builtin(global_invocation_id)"), "{wgsl}");
+    assert!(wgsl.contains(storage_binding), "{wgsl}");
+    assert!(!lowered.compute_spirv.is_empty());
+    wgsl.clone()
 }
 
 /// The toy-module text `lift` parses: exposed so a translate failure can

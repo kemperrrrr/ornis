@@ -1,6 +1,6 @@
 //! A/B the lowered `cull` kernel against the shipped production WGSL.
 //!
-//! [`CULL_COMPUTE_WGSL`] (`render/src/gpu_culling.rs`) compacts
+//! `CULL_COMPUTE_WGSL` (`render/src/gpu_culling.rs`) compacts
 //! `PerObject` copies through `atomicAdd` and a `count` guard. This test
 //! feeds it the same frustum and the same eight spheres the wasm2gpu
 //! kernel reads — encoded as model matrices, so `instance_sphere` reads
@@ -9,10 +9,6 @@
 //! order is scheduler-dependent, so the contract is a sorted set of
 //! `material_index` values plus the atomic count, not byte order.
 
-use ornis_render::gpu_culling::CULL_COMPUTE_WGSL;
-use ornis_render::gpu_culling::CULL_PARAMS_BYTE_SIZE;
-use ornis_render::gpu_culling::INSTANCE_COUNT_WORD;
-
 use super::cull::ACTIVE_COUNT;
 use super::cull::EXPECTED;
 use super::cull::PLANES;
@@ -20,6 +16,15 @@ use super::cull::SPHERES;
 use super::cull::buffer_entry;
 use super::cull::lowered_kernel;
 use super::cull::run;
+
+/// The shipped cull kernel WGSL, bound by full path: this
+/// foundation-layer test may not `use` items from `render` (the layer
+/// gate flags the import edge), and the A/B needs the production shader.
+const CULL_COMPUTE_WGSL: &str = ornis_render::gpu_culling::CULL_COMPUTE_WGSL;
+/// Its params size, likewise bound by path instead of `use`.
+const CULL_PARAMS_BYTE_SIZE: u64 = ornis_render::gpu_culling::CULL_PARAMS_BYTE_SIZE;
+/// Word index of the atomic count inside the production `args` buffer.
+const INSTANCE_COUNT_WORD: usize = ornis_render::gpu_culling::INSTANCE_COUNT_WORD;
 
 /// Bytes one `PerObject` occupies in the production buffers: three
 /// `mat4x4` (192) plus `material_index`, `motion_valid`, and two pads.
@@ -56,9 +61,7 @@ fn cull_kernel_matches_the_production_wgsl() {
         None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
             panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
         }
-        None => eprintln!(
-            "cull_kernel_matches_the_production_wgsl: no wgpu adapter — skipped"
-        ),
+        None => eprintln!("cull_kernel_matches_the_production_wgsl: no wgpu adapter — skipped"),
     }
 }
 
@@ -84,12 +87,7 @@ fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32)
         cache: None,
     });
     let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-    let params = super::gpu_buffer(
-        device,
-        "prod-cull-params",
-        CULL_PARAMS_BYTE_SIZE,
-        uniform,
-    );
+    let params = super::gpu_buffer(device, "prod-cull-params", CULL_PARAMS_BYTE_SIZE, uniform);
     let src = super::storage_buffer(
         device,
         "prod-cull-src",

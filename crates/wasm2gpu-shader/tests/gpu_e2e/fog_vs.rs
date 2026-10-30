@@ -3,7 +3,7 @@
 //! The production fog `vs_main` — fullscreen-quad corner/uv fetch by
 //! `vertex_index`, `ornis_render::shaders::fog_generated::
 //! wgsl_vertex_source()` — runs VERBATIM in pipeline A. The wasm guest
-//! carries the same const tables (inputs shared by both sides), is
+//! carries the same corner and uv inputs (shared by both sides), is
 //! lifted to a compute kernel and writes `{ pos, uv }` per vertex into
 //! storage. Pipeline B re-emits those outputs through a thin adapter
 //! vertex stage; one shared fragment stage stores the rasterized
@@ -15,10 +15,9 @@
 use std::borrow::Cow;
 
 use ornis_gpu_abi::symbols;
-use ornis_wasm2gpu::translate;
 
-use super::compute_lift::lift_wat;
-use super::{compile_wasm, device, map_bytes, storage_buffer};
+use super::compute_lift::lowered_kernel;
+use super::{device, map_bytes, storage_buffer};
 
 /// Side of the drawn quad in pixels: one fragment per texel of capture.
 const SIZE: u32 = 8;
@@ -66,21 +65,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> QuadOut {
 }
 ";
 
-/// Lift the `vs_main` guest export and pin what the lowering must keep.
+/// Lift the `vs_main` guest export through the shared pinning helper.
 fn kernel_wgsl() -> String {
-    let wasm = compile_wasm();
-    let wat = lift_wat(&wasm, "vs_main");
-    let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("vs_main wat: {err}\n{wat}"));
-    let lowered = match translate(&module) {
-        Ok(lowered) => lowered,
-        Err(err) => panic!("vs_main translate {err:?}\nWAT:\n{wat}"),
-    };
-    let wgsl = &lowered.wgsl;
-    assert!(wgsl.contains("@compute"), "{wgsl}");
-    assert!(wgsl.contains("@builtin(global_invocation_id)"), "{wgsl}");
-    assert!(wgsl.contains("storage_0_0_"), "{wgsl}");
-    assert!(!lowered.compute_spirv.is_empty());
-    wgsl.clone()
+    lowered_kernel("vs_main", "storage_0_0_")
 }
 
 /// Render pipeline over two vertex modules (production or adapter) and
@@ -166,17 +153,39 @@ fn layout_entry(
     }
 }
 
-#[test]
-fn fog_vertex_kernel_matches_the_production_stage() {
-    let Some((device, queue)) = device() else {
-        if std::env::var_os("ORNIS_REQUIRE_GPU").is_none() {
-            eprintln!("no adapter; skipping (set ORNIS_REQUIRE_GPU to fail instead)");
-            return;
-        }
-        panic!("ORNIS_REQUIRE_GPU is set but no adapter is available");
-    };
+/// One pipeline layout over the given bind-group layouts.
+fn pipeline_layout(
+    device: &wgpu::Device,
+    label: &str,
+    first: &wgpu::BindGroupLayout,
+    second: Option<&wgpu::BindGroupLayout>,
+) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(first), second],
+        immediate_size: 0,
+    })
+}
 
-    let wgsl = kernel_wgsl();
+/// One bind group binding a single buffer at binding 0.
+fn bind_group_for(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[super::entry(0, buffer)],
+    })
+}
+
+/// The lifted kernel, the production fog stage, and the adapter module.
+fn shader_modules(
+    device: &wgpu::Device,
+    wgsl: String,
+) -> (wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule) {
     let kernel = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("fog-vs kernel"),
         source: wgpu::ShaderSource::Wgsl(Cow::Owned(wgsl)),
@@ -191,13 +200,19 @@ fn fog_vertex_kernel_matches_the_production_stage() {
         label: Some("fog-vs adapter"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(ADAPTER)),
     });
+    (kernel, production, adapter)
+}
 
+/// The pixel-capture, adapter-out, and kernel-storage group layouts.
+fn group_layouts(
+    device: &wgpu::Device,
+) -> (wgpu::BindGroupLayout, wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
     let storage = wgpu::BufferBindingType::Storage { read_only: false };
-    let pixels_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    let pixels = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("fog-vs pixels"),
         entries: &[layout_entry(0, storage, wgpu::ShaderStages::FRAGMENT)],
     });
-    let out_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    let out = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("fog-vs kernel out"),
         entries: &[layout_entry(
             0,
@@ -205,78 +220,70 @@ fn fog_vertex_kernel_matches_the_production_stage() {
             wgpu::ShaderStages::VERTEX,
         )],
     });
-    let kernel_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    let kernel = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("fog-vs kernel"),
         entries: &[layout_entry(0, storage, wgpu::ShaderStages::COMPUTE)],
     });
+    (pixels, out, kernel)
+}
 
-    let layout_a = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("fog-vs a"),
-        bind_group_layouts: &[Some(&pixels_layout)],
-        immediate_size: 0,
-    });
-    let layout_b = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("fog-vs b"),
-        bind_group_layouts: &[Some(&pixels_layout), Some(&out_layout)],
-        immediate_size: 0,
-    });
-    let pipeline_a = capture_pipeline(&device, &layout_a, &production);
-    let pipeline_b = capture_pipeline(&device, &layout_b, &adapter);
-    let kernel_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+/// Production and adapter render pipelines plus the kernel compute one.
+fn build_pipelines(
+    device: &wgpu::Device,
+    shaders: &(wgpu::ShaderModule, wgpu::ShaderModule, wgpu::ShaderModule),
+    layouts: &(wgpu::BindGroupLayout, wgpu::BindGroupLayout, wgpu::BindGroupLayout),
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::ComputePipeline) {
+    let (kernel, production, adapter) = shaders;
+    let (pixels_layout, out_layout, kernel_layout) = layouts;
+    let layout_a = pipeline_layout(device, "fog-vs a", pixels_layout, None);
+    let layout_b = pipeline_layout(device, "fog-vs b", pixels_layout, Some(out_layout));
+    let pipeline_a = capture_pipeline(device, &layout_a, production);
+    let pipeline_b = capture_pipeline(device, &layout_b, adapter);
+    let kernel_pl = pipeline_layout(device, "fog-vs kernel", kernel_layout, None);
+    let compute = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("fog-vs kernel"),
-        layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("fog-vs kernel"),
-            bind_group_layouts: &[Some(&kernel_layout)],
-            immediate_size: 0,
-        })),
-        module: &kernel,
+        layout: Some(&kernel_pl),
+        module: kernel,
         entry_point: Some(symbols::CS_MAIN),
         compilation_options: Default::default(),
         cache: None,
     });
+    (pipeline_a, pipeline_b, compute)
+}
 
+/// Kernel-output and both pixel-capture buffers, zero-initialized.
+fn frame_buffers(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer) {
     let out_bytes = STRIDE * u64::from(VERTICES);
     let pixels_bytes = u64::from(SIZE * SIZE) * 16;
-    let kernel_out = storage_buffer(&device, "fog-vs kernel out", out_bytes);
-    let pixels_a = storage_buffer(&device, "fog-vs pixels a", pixels_bytes);
-    let pixels_b = storage_buffer(&device, "fog-vs pixels b", pixels_bytes);
+    let kernel_out = storage_buffer(device, "fog-vs kernel out", out_bytes);
+    let pixels_a = storage_buffer(device, "fog-vs pixels a", pixels_bytes);
+    let pixels_b = storage_buffer(device, "fog-vs pixels b", pixels_bytes);
     queue.write_buffer(&kernel_out, 0, &vec![0u8; out_bytes as usize]);
     queue.write_buffer(&pixels_a, 0, &vec![0u8; pixels_bytes as usize]);
     queue.write_buffer(&pixels_b, 0, &vec![0u8; pixels_bytes as usize]);
+    (kernel_out, pixels_a, pixels_b)
+}
 
-    let group_kernel = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fog-vs kernel"),
-        layout: &kernel_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: kernel_out.as_entire_binding(),
-        }],
-    });
-    let group_pixels_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fog-vs pixels a"),
-        layout: &pixels_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: pixels_a.as_entire_binding(),
-        }],
-    });
-    let group_pixels_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fog-vs pixels b"),
-        layout: &pixels_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: pixels_b.as_entire_binding(),
-        }],
-    });
-    let group_out = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("fog-vs adapter out"),
-        layout: &out_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: kernel_out.as_entire_binding(),
-        }],
-    });
+/// The four bind groups: kernel out, pixel captures, adapter out.
+fn frame_groups(
+    device: &wgpu::Device,
+    layouts: &(wgpu::BindGroupLayout, wgpu::BindGroupLayout, wgpu::BindGroupLayout),
+    buffers: &(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer),
+) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup) {
+    let (pixels_layout, out_layout, kernel_layout) = layouts;
+    let (kernel_out, pixels_a, pixels_b) = buffers;
+    let group_kernel = bind_group_for(device, "fog-vs kernel", kernel_layout, kernel_out);
+    let group_pixels_a = bind_group_for(device, "fog-vs pixels a", pixels_layout, pixels_a);
+    let group_pixels_b = bind_group_for(device, "fog-vs pixels b", pixels_layout, pixels_b);
+    let group_out = bind_group_for(device, "fog-vs adapter out", out_layout, kernel_out);
+    (group_kernel, group_pixels_a, group_pixels_b, group_out)
+}
 
+/// The color target both pipelines rasterize into.
+fn render_target(device: &wgpu::Device) -> wgpu::TextureView {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("fog-vs target"),
         size: wgpu::Extent3d {
@@ -291,22 +298,34 @@ fn fog_vertex_kernel_matches_the_production_stage() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    target.create_view(&wgpu::TextureViewDescriptor::default())
+}
 
+/// Dispatch the lifted kernel, then draw both pipelines over the same
+/// viewport in one command buffer.
+fn encode_and_submit(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    pipelines: &(wgpu::RenderPipeline, wgpu::RenderPipeline, wgpu::ComputePipeline),
+    groups: &(wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup),
+) {
+    let (pipeline_a, pipeline_b, kernel_pipeline) = pipelines;
+    let (group_kernel, group_pixels_a, group_pixels_b, group_out) = groups;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("fog-vs kernel"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&kernel_pipeline);
-        pass.set_bind_group(0, &group_kernel, &[]);
+        pass.set_pipeline(kernel_pipeline);
+        pass.set_bind_group(0, group_kernel, &[]);
         pass.dispatch_workgroups(1, 1, 1);
     }
     let draw = wgpu::RenderPassDescriptor {
         label: Some("fog-vs draw"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &view,
+            view,
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
@@ -321,18 +340,39 @@ fn fog_vertex_kernel_matches_the_production_stage() {
     };
     {
         let mut pass = encoder.begin_render_pass(&draw);
-        pass.set_pipeline(&pipeline_a);
-        pass.set_bind_group(0, &group_pixels_a, &[]);
+        pass.set_pipeline(pipeline_a);
+        pass.set_bind_group(0, group_pixels_a, &[]);
         pass.draw(0..VERTICES, 0..1);
     }
     {
         let mut pass = encoder.begin_render_pass(&draw);
-        pass.set_pipeline(&pipeline_b);
-        pass.set_bind_group(0, &group_pixels_b, &[]);
-        pass.set_bind_group(1, &group_out, &[]);
+        pass.set_pipeline(pipeline_b);
+        pass.set_bind_group(0, group_pixels_b, &[]);
+        pass.set_bind_group(1, group_out, &[]);
         pass.draw(0..VERTICES, 0..1);
     }
     queue.submit([encoder.finish()]);
+}
+
+#[test]
+fn fog_vertex_kernel_matches_the_production_stage() {
+    let Some((device, queue)) = device() else {
+        if std::env::var_os("ORNIS_REQUIRE_GPU").is_none() {
+            eprintln!("no adapter; skipping (set ORNIS_REQUIRE_GPU to fail instead)");
+            return;
+        }
+        panic!("ORNIS_REQUIRE_GPU is set but no adapter is available");
+    };
+
+    let wgsl = kernel_wgsl();
+    let shaders = shader_modules(&device, wgsl);
+    let layouts = group_layouts(&device);
+    let pipelines = build_pipelines(&device, &shaders, &layouts);
+    let buffers = frame_buffers(&device, &queue);
+    let groups = frame_groups(&device, &layouts, &buffers);
+    let view = render_target(&device);
+    encode_and_submit(&device, &queue, &view, &pipelines, &groups);
+    let (_kernel_out, pixels_a, pixels_b) = buffers;
 
     let words = SIZE * SIZE * 4;
     let production_pixels = read_words(&device, &queue, &pixels_a, words);

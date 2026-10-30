@@ -14,7 +14,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use ornis_gpu_abi::symbols;
-use ornis_wasm2gpu::translate;
 use ornis_wasm2gpu_shader::COUNT_BINDING;
 use ornis_wasm2gpu_shader::FLAG_BINDING;
 use ornis_wasm2gpu_shader::PLANE_BINDING;
@@ -123,27 +122,12 @@ fn cull_kernel_matches_the_hand_twin() {
     }
 }
 
-/// Lift the `cull` guest export, translate it, and pin what the lowering
-/// must show: the compute entry, the id builtin, the flag binding, and a
-/// non-empty SPIR-V twin. Shared with [`super::cull_prod`], which A/Bs
-/// the same WGSL against the shipped production kernel.
+/// Lift the `cull` guest export through [`super::compute_lift`]'s shared
+/// pinning helper: the compute entry, the id builtin, the flag binding,
+/// and a non-empty SPIR-V twin. Shared with [`super::cull_prod`], which
+/// A/Bs the same WGSL against the shipped production kernel.
 pub(super) fn lowered_kernel() -> String {
-    let wasm = super::compile_wasm();
-    let wat = super::compute_lift::lift_wat(&wasm, "cull");
-    let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("cull wat: {err}\n{wat}"));
-    let lowered = match translate(&module) {
-        Ok(lowered) => lowered,
-        Err(err) => panic!("cull translate {err:?}\nWAT:\n{wat}"),
-    };
-    let wgsl = &lowered.wgsl;
-    assert!(wgsl.contains("@compute"), "{wgsl}");
-    assert!(wgsl.contains("@builtin(global_invocation_id)"), "{wgsl}");
-    assert!(
-        wgsl.contains(&format!("storage_0_{FLAG_BINDING}_")),
-        "{wgsl}"
-    );
-    assert!(!lowered.compute_spirv.is_empty());
-    wgsl.clone()
+    super::compute_lift::lowered_kernel("cull", &format!("storage_0_{FLAG_BINDING}_"))
 }
 
 /// Dispatch `wgsl` at `cs_main` for [`RUNS`] repeats and read the flags
