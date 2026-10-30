@@ -36,7 +36,7 @@ fn gpu_ref_pointer_path_writes_storage() {
             let values = dispatch(&device, &queue, wgsl);
             let mut slot = 0usize;
             while slot < SRC.len() {
-                let want = SRC[slot] + SRC[slot] + 1.0;
+                let want = ornis_wasm2gpu_shader::twice_plus_one(SRC[slot]);
                 assert_eq!(
                     values[slot].to_bits(),
                     want.to_bits(),

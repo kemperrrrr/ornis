@@ -27,6 +27,9 @@ pub(super) fn lift_wat(wasm: &[u8], export: &str) -> String {
 
 struct Func {
     params: Result<String, String>,
+    /// Declared results. A returning helper without them would validate a
+    /// stack the callee never agreed to and the translator rejects it.
+    results: Result<String, String>,
     /// Locals and operators. `Err` is an op this lifter does not keep.
     /// Only a function `compute` reaches turns that into a panic.
     body: Result<(String, String), String>,
@@ -113,12 +116,13 @@ fn func_of(
     ty: &Result<(String, String), String>,
     body: &wasmparser::FunctionBody<'_>,
 ) -> Func {
-    let params = match ty {
-        Ok((params, _)) => Ok(params.clone()),
-        Err(err) => Err(err.clone()),
+    let (params, results) = match ty {
+        Ok((params, results)) => (Ok(params.clone()), Ok(results.clone())),
+        Err(err) => (Err(err.clone()), Err(err.clone())),
     };
     Func {
         params,
+        results,
         body: lift_body(imports, body),
     }
 }
@@ -319,8 +323,9 @@ fn wrap(module: &Read) -> String {
             String::new()
         };
         let params = param_list(func.params.as_deref().unwrap_or(""));
+        let results = result_list(func.results.as_deref().unwrap_or(""));
         funcs.push_str(&format!(
-            "(func $f{wasm_index} {export} {params} {locals} {ops})\n",
+            "(func $f{wasm_index} {export} {params} {results} {locals} {ops})\n",
         ));
         index += 1;
     }
@@ -343,6 +348,15 @@ fn param_list(params: &str) -> String {
         String::new()
     } else {
         format!("(param {params})")
+    }
+}
+
+fn result_list(results: &str) -> String {
+    let results = results.trim();
+    if results.is_empty() {
+        String::new()
+    } else {
+        format!("(result {results})")
     }
 }
 

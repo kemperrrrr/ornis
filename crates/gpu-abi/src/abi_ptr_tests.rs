@@ -10,7 +10,10 @@ use crate::Storage;
 fn unaligned_dynamic_index_is_a_contract_breach() {
     let storage = Storage::<0, 0, f32>::bind();
     let stride = core::hint::black_box(3u32);
-    let _ = storage.as_ref().index(core::hint::black_box(1), stride).read();
+    let _ = storage
+        .as_ref()
+        .index(core::hint::black_box(1), stride)
+        .read();
 }
 
 #[test]

@@ -217,10 +217,11 @@ pub extern "C" fn ptr_copy(id: u32) {
 
 /// The arithmetic half of [`ptr_copy`]: read-modify-write is one
 /// computation, and keeping it out of the export leaves `ptr_copy` free
-/// of mixed logic-and-calls classification.
-#[cfg(target_arch = "wasm32")]
+/// of mixed logic-and-calls classification. `pub` so the gpu test's host
+/// expectation uses the same function (a private copy would only run
+/// under `wasm32` and read as untested).
 #[inline(always)]
-fn twice_plus_one(value: f32) -> f32 {
+pub fn twice_plus_one(value: f32) -> f32 {
     value + value + 1.0
 }
 
