@@ -149,12 +149,13 @@ macro_rules! ptr_read {
         // SAFETY: this macro is only reachable through `GpuRef::load`, which
         // builds `addr` as `storage_base(G, B)` plus a `GpuRef` offset. Token
         // construction checks alignment: `index` rejects a stride that is not
-        // a multiple of `T::ALIGN`, `field` rejects a misaligned field offset,
-        // and the layout gate keeps `T::ALIGN` a multiple of `align_of::<T>()`,
-        // so the address names a `$ty`-aligned element of that binding. (The
-        // tests in `abi_ptr_tests.rs` pin the two token checks.) The four
-        // bytes hold a valid `$ty` — `T: GpuSafeLayout` — and the pointer is
-        // not retained.
+        // a multiple of `T::ALIGN` and a computed offset that lands off it,
+        // `field` rejects a misaligned field offset and a computed offset
+        // that lands off `U::ALIGN`, and the layout gate keeps `T::ALIGN` a
+        // multiple of `align_of::<T>()`, so the address names a `$ty`-aligned
+        // element of that binding. (The tests in `abi_ptr_tests.rs` pin the
+        // token checks.) The four bytes hold a valid `$ty` — `T: GpuSafeLayout`
+        // — and the pointer is not retained.
         unsafe { ($addr as *const $ty).read_volatile() }
     }};
 }

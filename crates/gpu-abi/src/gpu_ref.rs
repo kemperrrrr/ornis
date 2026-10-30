@@ -58,16 +58,22 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S>
     ///
     /// Does not load GPU memory. Offsets come from [`gpu_struct!`](crate::gpu_struct)
     /// / `offset_of!`, not from a caller-supplied raw pointer. A field offset
-    /// that is not a multiple of `U::ALIGN` never becomes a token: it would
-    /// hand the pointer path a misaligned address, so it is a contract
-    /// breach.
+    /// that is not a multiple of `U::ALIGN` never becomes a token, and
+    /// neither does a sum that lands off `U::ALIGN` — however the base was
+    /// built (a narrower type must not widen into a misaligned `U`): either
+    /// would hand the pointer path a misaligned address, so both are a
+    /// contract breach.
     #[inline(always)]
     pub fn field<U: GpuSafeLayout>(&self, field_offset: u32) -> GpuRef<'a, G, B, U, S> {
         if !field_offset.is_multiple_of(U::ALIGN) {
             gpu_abi::contract_breach("GpuRef field offset is misaligned");
         }
+        let offset = add_offset(self.offset, field_offset);
+        if !offset.is_multiple_of(U::ALIGN) {
+            gpu_abi::contract_breach("GpuRef token offset is misaligned");
+        }
         GpuRef {
-            offset: add_offset(self.offset, field_offset),
+            offset,
             _marker: PhantomData,
         }
     }
@@ -78,14 +84,20 @@ impl<'a, const G: u32, const B: u32, T: GpuSafeLayout, S> GpuRef<'a, G, B, T, S>
     /// some types. Prefer [`index_uniform`](Self::index_uniform) or
     /// [`index_storage`](Self::index_storage). A stride that is not a
     /// multiple of [`T::ALIGN`](GpuSafeLayout::ALIGN) is a contract breach:
-    /// the product would be a misaligned byte offset.
+    /// the product would be a misaligned byte offset. The computed offset is
+    /// checked against `T::ALIGN` as well, so a base built through a
+    /// narrower type cannot widen into a misaligned `T`.
     #[inline(always)]
     pub fn index(&self, element: u32, stride: u32) -> Self {
         if !stride.is_multiple_of(T::ALIGN) {
             gpu_abi::contract_breach("GpuRef index stride is misaligned");
         }
+        let offset = add_offset(self.offset, mul_offset(element, stride));
+        if !offset.is_multiple_of(T::ALIGN) {
+            gpu_abi::contract_breach("GpuRef token offset is misaligned");
+        }
         GpuRef {
-            offset: add_offset(self.offset, mul_offset(element, stride)),
+            offset,
             _marker: PhantomData,
         }
     }
@@ -186,12 +198,16 @@ impl<const G: u32, const B: u32, T: GpuSafeLayout> Uniform<G, B, T> {
 
     /// Token at offset 0.
     ///
-    /// The pointer path (`addr` / `load`) lives only on storage tokens, so
-    /// a uniform token cannot open one:
+    /// The pointer path (`addr` / `load`) and writes live only on storage
+    /// tokens, so a uniform token cannot open one. The example below fails
+    /// on every target — `write` is a `StorageSpace` method with no cfg —
+    /// so the doctest proves the space split itself rather than a missing
+    /// `cfg(wasm32)` item; `load` follows the same impl placement and its
+    /// positive side compiles under `wasm32` in the gpu e2e.
     ///
     /// ```compile_fail
     /// let uniform = ornis_gpu_abi::Uniform::<0, 0, f32>::bind();
-    /// let _loaded = uniform.as_ref().load();
+    /// uniform.as_ref().write(0.0);
     /// ```
     #[inline(always)]
     pub fn as_ref(&self) -> GpuRef<'_, G, B, T, UniformSpace> {
