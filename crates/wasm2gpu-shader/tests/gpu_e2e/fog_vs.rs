@@ -29,6 +29,8 @@ const VERTICES: u32 = 4;
 const STRIDE: u64 = 32;
 
 /// Shared fragment stage: park what the rasterizer hands it in storage.
+/// The `@location(0)` return satisfies wgpu's "a render pipeline needs
+/// a color target" rule — nothing reads the attachment back.
 const CAPTURE: &str = "
 struct QuadOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -36,7 +38,7 @@ struct QuadOut {
 }
 @group(0) @binding(0) var<storage, read_write> pixels: array<vec4<f32>>;
 @fragment
-fn fs_main(input: QuadOut) {
+fn fs_main(input: QuadOut) -> @location(0) vec4<f32> {
     let idx = u32(input.clip_position.y) * 8u + u32(input.clip_position.x);
     pixels[idx] = vec4<f32>(
         input.clip_position.x,
@@ -44,6 +46,7 @@ fn fs_main(input: QuadOut) {
         input.uv.x,
         input.uv.y,
     );
+    return vec4<f32>(input.uv.x, input.uv.y, 0.0, 1.0);
 }
 ";
 
@@ -93,7 +96,11 @@ fn capture_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &fs,
             entry_point: Some("fs_main"),
-            targets: &[],
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
             compilation_options: Default::default(),
         }),
         primitive: wgpu::PrimitiveState {
