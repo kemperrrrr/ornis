@@ -19,6 +19,8 @@ use ornis_gpu_abi::uniform_field_f32;
 use ornis_gpu_abi::uniform_field_u32;
 
 #[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::Storage;
+#[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_at_u32;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_store_u32;
@@ -195,14 +197,32 @@ fn arm_rest(index: u32) {
     storage_store_f32::<0, COMPUTE_BINDING>(index, compute_value(REST_ID));
 }
 
+/// Wasm compute export: read and write storage through `GpuRef` tokens.
+///
+/// `addr` folds the `storage_base` tag plus the element offset and `load` /
+/// `store` are one scalar each: this is the pointer path of
+/// `docs/rendering/wasm-segmented-memory.md` §4 on real `rustc` output —
+/// provenance through rustc's locals and `i32.add`, not hand-written WAT.
+/// The gpu test lifts this export and checks the buffer the GPU wrote.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn ptr_copy(id: u32) {
+    let src = Storage::<0, 1, f32>::bind();
+    let out = Storage::<0, 2, f32>::bind();
+    let value = src.as_ref().index_storage(id).load();
+    out.as_ref().index_storage(id).store(value + value + 1.0);
+}
+
 /// Wasm compute export: one visible flag per sphere against six planes.
 ///
 /// The count guard wraps the whole body, so no work happens at `id >=
 /// count`. The body stays inline — the analysis rejects a callee that
 /// returns mid-function, and LLVM's loop-exit rotation is happy to grow
-/// one. `dot + w + radius < 0.0` is the production `sphere_visible` test
-/// rearranged onto one comparison; IEEE `<` fails open on NaN, like the
-/// CPU path. The flag is `1` for visible and `0` for culled.
+/// one. `dot + w + radius < 0.0` is the production WGSL `sphere_visible`
+/// (`gpu_culling.rs`) rearranged onto one comparison; IEEE `<` fails open
+/// on NaN there too, while the CPU `Frustum::sphere_visible` guards
+/// non-finite inputs before the planes. The flag is `1` for visible and
+/// `0` for culled.
 #[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn cull(id: u32) {

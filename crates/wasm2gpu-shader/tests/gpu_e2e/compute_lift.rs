@@ -382,6 +382,7 @@ fn push_calls(stack: &mut Vec<u32>, ops: &str) {
 
 fn import_sig(name: &str) -> &'static str {
     match name {
+        symbols::STORAGE_BASE => "(param i32 i32) (result i32)",
         symbols::STORAGE_WRITE_F32 => "(param i32 i32 i32 f32)",
         symbols::STORAGE_READ_F32 => "(param i32 i32 i32) (result f32)",
         symbols::UNIFORM_FIELD_F32 => "(param i32 i32 i32 i32) (result f32)",

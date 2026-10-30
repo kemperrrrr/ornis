@@ -43,4 +43,6 @@ pub use shader_io::{
 pub use texture::{Sampler, Texture2d};
 
 #[cfg(test)]
+mod abi_ptr_tests;
+#[cfg(test)]
 mod abi_tests;

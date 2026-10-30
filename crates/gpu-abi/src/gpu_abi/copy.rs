@@ -146,10 +146,15 @@ macro_rules! import_storage_base {
 #[cfg(target_arch = "wasm32")]
 macro_rules! ptr_read {
     ($ty:ty, $addr:expr) => {{
-        // SAFETY: `addr` is `storage_base(G, B)` plus a `GpuRef` offset, so
-        // it names four bytes of that storage binding at a `GpuSafeLayout`
-        // alignment. Every bit pattern of `size_of::<T>()` is a valid `T`,
-        // and the pointer is not retained.
+        // SAFETY: this macro is only reachable through `GpuRef::load`, which
+        // builds `addr` as `storage_base(G, B)` plus a `GpuRef` offset. Token
+        // construction checks alignment: `index` rejects a stride that is not
+        // a multiple of `T::ALIGN`, `field` rejects a misaligned field offset,
+        // and the layout gate keeps `T::ALIGN` a multiple of `align_of::<T>()`,
+        // so the address names a `$ty`-aligned element of that binding. (The
+        // tests in `abi_ptr_tests.rs` pin the two token checks.) The four
+        // bytes hold a valid `$ty` — `T: GpuSafeLayout` — and the pointer is
+        // not retained.
         unsafe { ($addr as *const $ty).read_volatile() }
     }};
 }
@@ -157,20 +162,27 @@ macro_rules! ptr_read {
 #[cfg(target_arch = "wasm32")]
 macro_rules! ptr_write {
     ($ty:ty, $addr:expr, $value:expr) => {{
-        // SAFETY: same address contract as `ptr_read`; the write covers
-        // exactly the four bytes of `addr`, which belongs to this binding's
-        // storage.
+        // SAFETY: same address contract as `ptr_read`: only `GpuRef::store`
+        // reaches this macro, and its offset half is alignment-checked when
+        // the token is built. The write covers exactly the four bytes of
+        // `addr`, which belongs to this binding's storage.
         unsafe { ($addr as *mut $ty).write_volatile($value) }
     }};
 }
 
 #[cfg(target_arch = "wasm32")]
+#[inline(always)]
 pub(super) fn wasm_storage_base<const G: u32, const B: u32>() -> u32 {
     import_storage_base!(G, B)
 }
 
 /// Pointer-path read at a `storage_base` address.
+///
+/// The offset half of `addr` was alignment-checked when the `GpuRef` token
+/// was built (`index` / `field` in `gpu_ref.rs`); this stays `inline(always)`
+/// so the pointer never crosses a call as a raw value.
 #[cfg(target_arch = "wasm32")]
+#[inline(always)]
 pub(super) fn ptr_load<T: GpuSafeLayout>(addr: u32) -> T {
     if core::mem::size_of::<T>() != F32_SIZE as usize {
         return crate::gpu_abi::contract_breach("pointer load supports 4-byte values");
@@ -179,7 +191,10 @@ pub(super) fn ptr_load<T: GpuSafeLayout>(addr: u32) -> T {
 }
 
 /// Pointer-path write at a `storage_base` address.
+///
+/// Same alignment contract and inlining as `ptr_load`.
 #[cfg(target_arch = "wasm32")]
+#[inline(always)]
 pub(super) fn ptr_store<T: GpuSafeLayout>(addr: u32, value: T) {
     if core::mem::size_of::<T>() != F32_SIZE as usize {
         crate::gpu_abi::contract_breach("pointer store supports 4-byte values");

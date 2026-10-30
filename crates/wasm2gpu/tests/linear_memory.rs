@@ -70,7 +70,7 @@ fn constant_offset_folds_to_one_element() {
         ),
     );
     let got = wgsl(&imports, &fs);
-    assert!(got.contains("storage_0_1_"), "{got}");
+    assert!(got.contains("storage_0_1_[1"), "{got}");
     assert!(!got.contains(">>"), "{got}");
 }
 
@@ -223,4 +223,25 @@ fn pointer_result_across_a_call_is_rejected() {
     );
     let got = err(&imports, &fs);
     assert!(matches!(got, TranslateError::Unsupported), "{got:?}");
+}
+
+#[test]
+fn mixed_element_types_on_one_binding_are_rejected() {
+    // The fs comes first so this window cannot mirror the other tests here.
+    let fs = fs_func(
+        "(param f32 f32 i32) (result f32 f32 f32 f32)",
+        &format!(
+            "{base} i32.const 0 i32.add i32.load drop \
+             {base} i32.const 4 i32.add f32.load drop {rgba}",
+            base = base(),
+            rgba = rgba(),
+        ),
+    );
+    let imports = storage_base_import();
+    match err(&imports, &fs) {
+        TranslateError::UnsupportedType(msg) => {
+            assert!(msg.contains("two storage types"), "{msg}");
+        }
+        other => panic!("expected a binding type rejection, got {other:?}"),
+    }
 }
