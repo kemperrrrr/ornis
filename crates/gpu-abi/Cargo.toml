@@ -8,3 +8,6 @@ description = "Toy GPU ABI for the Wasm-to-GPU research path (not the production
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+trybuild = "1"

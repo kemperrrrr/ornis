@@ -13,6 +13,7 @@ crate-type = ["rlib", "cdylib"]
 ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
 
 [dev-dependencies]
+ornis-render = { path = "../render", version = "0.1.0" }
 ornis-wasm2gpu = { path = "../wasm2gpu", version = "0.1.0" }
 pollster = "1.0"
 wasmparser = "0.262"

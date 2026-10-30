@@ -31,7 +31,7 @@ const RUNS: u32 = 64;
 
 /// Sphere centers and radii: four lanes each, packed storage order.
 /// Slots 6 and 7 sit past [`ACTIVE_COUNT`] and are never read.
-const SPHERES: [[f32; 4]; 8] = [
+pub(super) const SPHERES: [[f32; 4]; 8] = [
     // A clear pass against plane 0 (+x).
     [0.5, 0.0, 0.0, 0.25],
     // A clear cut by plane 0.
@@ -50,18 +50,18 @@ const SPHERES: [[f32; 4]; 8] = [
 ];
 
 /// Slots that do work: `id < count`; the rest must keep [`SENTINEL`].
-const ACTIVE_COUNT: usize = 6;
+pub(super) const ACTIVE_COUNT: usize = 6;
 
 /// Flag slots one dispatch covers: every sphere lane.
 const SLOTS: usize = SPHERES.len();
 
 /// Visible, culled, visible, boundary pass, NaN pass, cut by plane 3,
 /// then two untouched slots past [`ACTIVE_COUNT`].
-const EXPECTED: [u32; SPHERES.len()] = [1, 0, 1, 1, 1, 0, SENTINEL, SENTINEL];
+pub(super) const EXPECTED: [u32; SPHERES.len()] = [1, 0, 1, 1, 1, 0, SENTINEL, SENTINEL];
 
 /// The six clip planes in uniform slots: plane 0 is `+x`, plane 3 `+y`,
 /// the rest pass every sphere the test feeds.
-const PLANES: [[f32; 4]; PLANE_COUNT as usize] = [
+pub(super) const PLANES: [[f32; 4]; PLANE_COUNT as usize] = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 0.0, 0.0, 1.0],
     [0.0, 0.0, 0.0, 1.0],
@@ -104,6 +104,30 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 #[test]
 fn cull_kernel_matches_the_hand_twin() {
     assert_eq!(LANES * WORKGROUPS as usize, SPHERES.len());
+    let wgsl = lowered_kernel();
+    let derived = derived_flags();
+    assert_eq!(EXPECTED, derived, "production-formula cross-check");
+    match super::device() {
+        Some((device, queue)) => {
+            let (flags, wasm_time) = run(&device, &queue, &wgsl);
+            assert_eq!(flags, EXPECTED, "wasm2gpu kernel output");
+            let (twin, twin_time) = run(&device, &queue, TWIN_WGSL);
+            assert_eq!(twin, EXPECTED, "hand twin output");
+            assert_eq!(flags, twin, "bitwise A/B");
+            eprintln!("cull {flags:?}: wasm {wasm_time:?} twin {twin_time:?} x{RUNS}");
+        }
+        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+            panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
+        }
+        None => eprintln!("cull_kernel_matches_the_hand_twin: no wgpu adapter — skipped"),
+    }
+}
+
+/// Lift the `cull` guest export, translate it, and pin what the lowering
+/// must show: the compute entry, the id builtin, the flag binding, and a
+/// non-empty SPIR-V twin. Shared with [`super::cull_prod`], which A/Bs
+/// the same WGSL against the shipped production kernel.
+pub(super) fn lowered_kernel() -> String {
     let wasm = super::compile_wasm();
     let wat = super::compute_lift::lift_wat(&wasm, "cull");
     let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("cull wat: {err}\n{wat}"));
@@ -119,25 +143,16 @@ fn cull_kernel_matches_the_hand_twin() {
         "{wgsl}"
     );
     assert!(!lowered.compute_spirv.is_empty());
-    let derived = derived_flags();
-    assert_eq!(EXPECTED, derived, "production-formula cross-check");
-    match super::device() {
-        Some((device, queue)) => {
-            let (flags, wasm_time) = run(&device, &queue, wgsl);
-            assert_eq!(flags, EXPECTED, "wasm2gpu kernel output");
-            let (twin, twin_time) = run(&device, &queue, TWIN_WGSL);
-            assert_eq!(twin, EXPECTED, "hand twin output");
-            assert_eq!(flags, twin, "bitwise A/B");
-            eprintln!("cull {flags:?}: wasm {wasm_time:?} twin {twin_time:?} x{RUNS}");
-        }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
-            panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
-        }
-        None => eprintln!("cull_kernel_matches_the_hand_twin: no wgpu adapter — skipped"),
-    }
+    wgsl.clone()
 }
 
-fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; SLOTS], Duration) {
+/// Dispatch `wgsl` at `cs_main` for [`RUNS`] repeats and read the flags
+/// back; the repeats feed the timing line (idempotent writes).
+pub(super) fn run(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+) -> ([u32; SLOTS], Duration) {
     let bgl = bind_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("wasm2gpu cull"),
@@ -192,7 +207,10 @@ fn bind_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-fn buffer_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
+pub(super) fn buffer_entry(
+    binding: u32,
+    ty: wgpu::BufferBindingType,
+) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,

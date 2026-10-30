@@ -16,6 +16,9 @@ mod compute;
 #[path = "gpu_e2e/cull.rs"]
 mod cull;
 
+#[path = "gpu_e2e/cull_prod.rs"]
+mod cull_prod;
+
 #[path = "gpu_e2e/ptr_path.rs"]
 mod ptr_path;
 
