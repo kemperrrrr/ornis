@@ -14,6 +14,8 @@ use ornis_app::physics_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
 #[cfg(not(feature = "editor-only"))]
+use ornis_assets::collider::ColliderDesc;
+#[cfg(not(feature = "editor-only"))]
 use ornis_assets::scene::Scene;
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::AudioPlugin;
@@ -112,28 +114,8 @@ fn showcase_engine() -> GameWorld {
     // Object animation in the same DAG (after body poses); no-op
     // until an entity carries animation lanes.
     install_object_animation(runtime.engine_mut());
-    {
-        let entities = runtime.entities().to_vec();
-        let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
-            return runtime;
-        };
-        for (index, entity) in entities.into_iter().enumerate() {
-            let description = &scene.entities[index];
-            let radius = match &description.mesh {
-                ornis_assets::scene::MeshDesc::Sphere { radius, .. } => radius.get(),
-                // Custom/Box/Plane/Quad/Cylinder need an explicit validated collider recipe.
-                ornis_assets::scene::MeshDesc::Custom { .. }
-                | ornis_assets::scene::MeshDesc::Box { .. }
-                | ornis_assets::scene::MeshDesc::Plane { .. }
-                | ornis_assets::scene::MeshDesc::Quad { .. }
-                | ornis_assets::scene::MeshDesc::Cylinder { .. } => continue,
-            };
-            let mass = if index == 0 { 1.0 } else { 0.0 };
-            store.insert(
-                entity,
-                RigidBody::new_sphere(description.transform.translation, radius, mass),
-            );
-        }
+    for name in install_scene_bodies(&mut runtime, &scene) {
+        eprintln!("showcase entity {name:?} has no collider recipe; no physics body created");
     }
     // Hidden static floor: physics only, so it stays out of the frame upload.
     if let Err(error) = spawn_showcase_floor(runtime.engine_mut()) {
@@ -141,6 +123,51 @@ fn showcase_engine() -> GameWorld {
     }
     runtime.frame(0.0);
     runtime
+}
+
+/// Builds one physics body per scene entity through the shared collider
+/// projection ([`ornis_physics::colliders::body_for`]).
+///
+/// An explicit [`ColliderDesc`] lane entry wins over the exact auto recipe;
+/// otherwise sphere/box/cylinder meshes get their analytic collider. Plane,
+/// quad and custom meshes without an explicit recipe stay body-less, so their
+/// names are returned instead of being silently skipped by `continue`.
+/// The first scene entity is dynamic (mass `1`), the rest are static.
+#[cfg(not(feature = "editor-only"))]
+fn install_scene_bodies(runtime: &mut GameWorld, scene: &Scene) -> Vec<String> {
+    let entities = runtime.entities().to_vec();
+    let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
+        return Vec::new();
+    };
+    let mut without_body = Vec::new();
+    for (index, entity) in entities.into_iter().enumerate() {
+        let Some(description) = scene.entities.get(index) else {
+            continue;
+        };
+        let collider = store
+            .read_lane::<ColliderDesc>()
+            .and_then(|lane| lane.get(entity).cloned());
+        let mass = if index == 0 { 1.0 } else { 0.0 };
+        match ornis_physics::colliders::body_for(
+            &description.transform,
+            &description.mesh,
+            collider.as_ref(),
+            mass,
+        ) {
+            Ok(Some(body)) => {
+                store.insert(entity, body);
+            }
+            Ok(None) => without_body.push(description.name.clone()),
+            Err(error) => {
+                eprintln!(
+                    "showcase entity {:?} collider recipe failed: {error}",
+                    description.name
+                );
+                without_body.push(description.name.clone());
+            }
+        }
+    }
+    without_body
 }
 
 /// Centre of the hidden showcase static floor in world units.
@@ -193,4 +220,157 @@ fn spawn_showcase_floor(engine: &mut Engine) -> Result<Entity, ShowcaseFloorErro
 #[cfg(not(feature = "editor-only"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     ornis::run(showcase_engine())
+}
+
+#[cfg(all(test, not(feature = "editor-only")))]
+mod tests {
+    use super::{GameWorld, Scene, install_scene_bodies};
+    use ornis_assets::collider::ColliderDesc;
+    use ornis_physics::RigidBody;
+
+    #[test]
+    fn box_cylinder_and_explicit_plane_get_bodies() {
+        // Three supported authoring shapes; the plane needs an explicit recipe.
+        let scene = Scene::from_ron(
+            r#"
+Scene(
+    name: "collider_fixture",
+    entities: [
+        (
+            name: "Box",
+            transform: (
+                translation: (1.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Box(size: (2.0, 2.0, 2.0)),
+            material: Dielectric(base_color: (0.8, 0.2, 0.2), roughness: 0.5),
+        ),
+        (
+            name: "Cylinder",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Cylinder(radius: 0.5, height: 2.0, radial_segments: 16),
+            material: Dielectric(base_color: (0.2, 0.8, 0.2), roughness: 0.5),
+        ),
+        (
+            name: "Plane",
+            transform: (
+                translation: (0.0, -1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Plane(size: (4.0, 4.0)),
+            material: Dielectric(base_color: (0.2, 0.2, 0.8), roughness: 0.5),
+        ),
+    ],
+    lights: [],
+    camera: (
+        position: (0.0, 3.0, 11.0),
+        target: (0.0, 0.5, 0.0),
+        up: (0.0, 1.0, 0.0),
+        fov: 60.0,
+        near: 0.1,
+        far: 100.0,
+    ),
+    ambient: (0.1, 0.1, 0.1),
+)
+"#,
+        )
+        .expect("fixture parses");
+        let mut runtime = GameWorld::from_scene(&scene);
+        let entities = runtime.entities().to_vec();
+        assert_eq!(entities.len(), 3);
+        {
+            let store = runtime
+                .engine_mut()
+                .world_mut()
+                .store_mut()
+                .expect("engine carries a store");
+            store.register::<ColliderDesc>();
+            store.insert(
+                entities[2],
+                ColliderDesc::HalfSpace {
+                    normal: [0.0, 1.0, 0.0],
+                },
+            );
+        }
+
+        let without_body = install_scene_bodies(&mut runtime, &scene);
+        assert!(
+            without_body.is_empty(),
+            "unexpected skips: {without_body:?}"
+        );
+
+        let store = runtime
+            .engine_mut()
+            .world_mut()
+            .store_mut()
+            .expect("engine carries a store");
+        let bodies = store.read_lane::<RigidBody>().expect("body lane exists");
+        for entity in &entities {
+            assert!(bodies.contains(*entity), "entity {entity:?} has no body");
+        }
+        assert!(matches!(
+            bodies.get(entities[2]).map(|body| &body.shape),
+            Some(ornis_physics::Shape::HalfSpace { .. })
+        ));
+    }
+
+    #[test]
+    fn custom_without_recipe_is_reported_not_silently_skipped() {
+        let scene = Scene::from_ron(
+            r#"
+Scene(
+    name: "custom_fixture",
+    entities: [
+        (
+            name: "Soup",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Custom(
+                positions: [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+                indices: [0, 1, 2],
+            ),
+            material: Dielectric(base_color: (0.5, 0.5, 0.5), roughness: 0.5),
+        ),
+    ],
+    lights: [],
+    camera: (
+        position: (0.0, 3.0, 11.0),
+        target: (0.0, 0.5, 0.0),
+        up: (0.0, 1.0, 0.0),
+        fov: 60.0,
+        near: 0.1,
+        far: 100.0,
+    ),
+    ambient: (0.1, 0.1, 0.1),
+)
+"#,
+        )
+        .expect("fixture parses");
+        let mut runtime = GameWorld::from_scene(&scene);
+        let entity = runtime.entities()[0];
+
+        let without_body = install_scene_bodies(&mut runtime, &scene);
+        assert_eq!(without_body, vec!["Soup".to_string()]);
+
+        let store = runtime
+            .engine_mut()
+            .world_mut()
+            .store_mut()
+            .expect("engine carries a store");
+        assert!(
+            store
+                .read_lane::<RigidBody>()
+                .is_none_or(|lane| !lane.contains(entity)),
+            "custom soup without a recipe must not get a body"
+        );
+    }
 }
