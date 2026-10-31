@@ -209,7 +209,7 @@ Scene(
             name: "Cylinder",
             transform: (
                 translation: (0.0, 2.0, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
+                rotation: (0.0, 0.0, 0.7071068, 0.7071068),
                 scale: (1.0, 1.0, 1.0),
             ),
             mesh: Cylinder(radius: 0.5, height: 2.0, radial_segments: 16),
@@ -266,6 +266,8 @@ Scene(
         let cylinder_body = bodies.get(entities[1]).expect("cylinder body exists");
         assert_eq!(cylinder_body.mass, 0.0);
         assert_eq!(cylinder_body.position, Vec3::new(0.0, 2.0, 0.0));
+        // The cylinder axis is the local +Y, turned a quarter turn about Z.
+        assert!((cylinder_body.orientation * Vec3::Y).abs_diff_eq(Vec3::NEG_X, 1e-6));
         assert_cylinder(cylinder_body, 0.5, 1.0);
 
         let plane_body = bodies.get(entities[2]).expect("plane body exists");
