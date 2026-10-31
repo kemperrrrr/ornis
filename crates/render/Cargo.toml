@@ -30,12 +30,15 @@ thiserror = "2.0"
 # not pull the poller in — the `test-util` feature turns it on (the GPU
 # gates and the criterion bench build with it).
 pollster = { version = "1.0", optional = true }
+# The wasm2gpu cull A/B bench lowers the guest kernel. Optional for the
+# same reason as `pollster`: the frame path does not translate shaders.
+ornis-wasm2gpu-testkit = { path = "../wasm2gpu-testkit", version = "0.1.0", optional = true }
 
 [features]
 # Headless GPU-gate helpers (`try_headless_device`, `read_bytes_back`,
 # `gpu_required`). Test-only: the in-crate gates compile them under
 # `cfg(test)`, and the criterion bench builds with this feature.
-test-util = ["dep:pollster"]
+test-util = ["dep:pollster", "dep:ornis-wasm2gpu-testkit"]
 
 [dev-dependencies]
 png = "0.18"
@@ -60,6 +63,11 @@ harness = false
 
 [[bench]]
 name = "culling_bench"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "wasm2gpu_cull_ab"
 harness = false
 required-features = ["test-util"]
 

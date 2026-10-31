@@ -463,6 +463,14 @@ fn cull_instances(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 mod culler;
 
+/// Bench-only A/B of [`CULL_COMPUTE_WGSL`] against the wasm2gpu `cull` kernel.
+///
+/// Compiled for unit tests and the `test-util` bench. The frame path does
+/// not call it, and it does not change the shipped shader.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub mod shader_ab;
+
 pub use culler::{Culler, CullerError};
 
 #[cfg(test)]
