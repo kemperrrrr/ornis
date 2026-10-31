@@ -139,6 +139,11 @@ pub(super) struct Escape {
     pub self_nested: bool,
     /// The region holds a branch or a return.
     pub control: bool,
+    /// A branch jumps to the region's end or past it.
+    ///
+    /// The body then does not always run to its end: the path that jumps
+    /// keeps whatever the body had written up to that point.
+    pub skips_end: bool,
 }
 
 impl Escape {
@@ -151,6 +156,7 @@ impl Escape {
             beyond: false,
             self_nested: false,
             control: false,
+            skips_end: false,
         };
         out.walk(body, 0);
         out
@@ -190,6 +196,10 @@ impl Escape {
             self.beyond = true;
         } else if depth == level && level > 0 {
             self.self_nested = true;
+        }
+        if depth >= level {
+            // The branch jumps to the region's end or past it.
+            self.skips_end = true;
         }
     }
 }

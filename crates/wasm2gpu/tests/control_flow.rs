@@ -197,6 +197,17 @@ fn compute_wgsl(custom: &str, cs: &str) -> String {
     translate(&module).expect("translate").wgsl
 }
 
+/// The store of `value` has to sit inside the else arm of the `if`.
+fn else_arm_holds(got: &str, value: &str) {
+    let arm = got
+        .find("} else {")
+        .unwrap_or_else(|| panic!("no else arm in:\n{got}"));
+    let store = got
+        .find(value)
+        .unwrap_or_else(|| panic!("no {value} in:\n{got}"));
+    assert!(store > arm, "the store is not in the else arm:\n{got}");
+}
+
 #[test]
 fn a_return_in_one_arm_keeps_the_other_arm() {
     // A `return` leaves the arm it sits in. The other arm still reaches the
@@ -206,7 +217,7 @@ fn a_return_in_one_arm_keeps_the_other_arm() {
           (then (return))
           (else (i32.const 0) (i32.const 0) (i32.const 0) (f32.const 7.5) (call $storage_write_f32)))";
     let got = compute_wgsl(&write_f32(), cs);
-    assert!(got.contains("7.5f"), "{got}");
+    else_arm_holds(&got, "7.5f");
 }
 
 #[test]
@@ -219,7 +230,40 @@ fn a_branch_out_of_the_tail_block_keeps_the_else_arm() {
             (then (br 1))
             (else (i32.const 0) (i32.const 0) (i32.const 0) (f32.const 7.5) (call $storage_write_f32))))";
     let got = compute_wgsl(&write_f32(), cs);
-    assert!(got.contains("7.5f"), "{got}");
+    else_arm_holds(&got, "7.5f");
+}
+
+#[test]
+fn a_write_behind_a_branch_is_not_taken_for_granted() {
+    // The `br_if 0` leaves the block before the write, so on that path the
+    // local still holds the wasm zero. The index of the write may not be the
+    // constant the other path writes.
+    let cs = "(param i32)
+        (local i32)
+        (block
+          (local.get 0) (br_if 0)
+          (i32.const 7) (local.set 1)
+          (local.get 0) (br_if 0))
+        (i32.const 0) (i32.const 0) (local.get 1) (f32.const 1) (call $storage_write_f32)";
+    let got = compute_wgsl(&write_f32(), cs);
+    assert!(!got.contains("[7u]"), "the index is a constant:\n{got}");
+    assert!(got.contains("= 1f"), "{got}");
+}
+
+#[test]
+fn a_branch_in_the_lifted_prefix_keeps_its_target() {
+    // The inner block's `br 1` leaves the outer block. Lifting the prefix
+    // out of the outer block moves that branch one label up, and it would
+    // target another block. The block stays a block.
+    let cs = "(param i32)
+        (local i32)
+        (block
+          (block (br 1))
+          (local.get 0) (br_if 0)
+          (i32.const 7) (local.set 1))
+        (i32.const 0) (i32.const 0) (local.get 1) (f32.const 1) (call $storage_write_f32)";
+    let got = compute_wgsl(&write_f32(), cs);
+    assert!(got.contains("= 1f"), "{got}");
 }
 
 #[test]

@@ -17,6 +17,7 @@ use crate::ir::Func;
 use crate::ir::Op;
 use crate::ir::Stmt;
 
+use super::shape::Escape;
 use super::shape::targeted;
 
 /// Rewrite `func`'s body into the shapes the emitter lowers directly.
@@ -135,11 +136,17 @@ fn guard(ty: &BlockTy, body: &[Stmt]) -> Option<(Vec<Stmt>, Vec<Stmt>)> {
     if !matches!(body[split], Stmt::BrIf(0)) {
         return None;
     }
+    let prefix = &body[..split];
+    if Escape::of(prefix).control {
+        // The prefix leaves the block. Lifting it out would move its
+        // branches one label up, and they would target another block.
+        return None;
+    }
     let rest = &body[split + 1..];
     if targeted(rest, 0) || targeted(rest, 1) {
         return None;
     }
-    Some((body[..split].to_vec(), rest.to_vec()))
+    Some((prefix.to_vec(), rest.to_vec()))
 }
 
 fn is_branch(stmt: &Stmt) -> bool {

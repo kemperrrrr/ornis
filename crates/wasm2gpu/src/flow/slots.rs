@@ -8,6 +8,8 @@
 use crate::ir::Op;
 use crate::ir::Stmt;
 
+use super::shape::Escape;
+
 /// What a function does with each of its wasm locals.
 pub(super) struct Slots {
     /// The local is written.
@@ -107,9 +109,8 @@ fn scan(stmts: &[Stmt], mut definite: Vec<bool>, ok: &mut [bool]) -> Vec<bool> {
             Stmt::Op(_) => {}
             Stmt::Block { body, .. } => {
                 let end = scan(body, definite.clone(), ok);
-                for index in 0..definite.len() {
-                    definite[index] = definite[index] || end[index];
-                }
+                let state = region_state(&definite, &end, Escape::of(body).skips_end);
+                definite = state;
             }
             Stmt::If {
                 then_body,
@@ -118,10 +119,17 @@ fn scan(stmts: &[Stmt], mut definite: Vec<bool>, ok: &mut [bool]) -> Vec<bool> {
             } => {
                 let then_end = scan(then_body, definite.clone(), ok);
                 let else_end = scan(else_body, definite.clone(), ok);
-                // A slot written in one arm only is not written on every path.
-                for index in 0..definite.len() {
-                    definite[index] = definite[index] || (then_end[index] && else_end[index]);
+                let then_state =
+                    region_state(&definite, &then_end, Escape::of(then_body).skips_end);
+                let else_state =
+                    region_state(&definite, &else_end, Escape::of(else_body).skips_end);
+                let mut state = definite.clone();
+                for index in 0..state.len() {
+                    // Both arms have to agree: a slot one arm writes is not
+                    // written on the path through the other one.
+                    state[index] = then_state[index] && else_state[index];
                 }
+                definite = state;
             }
             Stmt::Loop { body, .. } => {
                 // The loop may run zero times, so its writes are not definite
@@ -133,6 +141,24 @@ fn scan(stmts: &[Stmt], mut definite: Vec<bool>, ok: &mut [bool]) -> Vec<bool> {
         }
     }
     definite
+}
+
+/// The state a region body leaves behind.
+///
+/// A body that can jump to its end early does not always write what it
+/// writes at the end: the path that jumped keeps the state it had at that
+/// moment. The state the region leaves behind is then the intersection with
+/// the state the region started with.
+fn region_state(definite: &[bool], end: &[bool], skips_end: bool) -> Vec<bool> {
+    let mut out = definite.to_vec();
+    for index in 0..out.len() {
+        out[index] = if skips_end {
+            definite[index] && end[index]
+        } else {
+            end[index]
+        };
+    }
+    out
 }
 
 /// Mark a slot as read before its write.
