@@ -9,7 +9,7 @@ description = "Offline toy translator from the ornis_gpu wasm ABI to WGSL and SP
 [dependencies]
 ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
 naga = { version = "30", features = ["wgsl-in", "wgsl-out", "spv-in", "spv-out"] }
-wasmparser = "0.262"
+wasmparser = "0.263"
 
 [dev-dependencies]
 wat = "1"

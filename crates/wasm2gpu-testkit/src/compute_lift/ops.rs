@@ -140,7 +140,7 @@ fn br_table(targets: &wasmparser::BrTable<'_>) -> String {
     text
 }
 
-fn val_list(vals: &[ValType]) -> Result<String, String> {
+pub(super) fn val_list(vals: &[ValType]) -> Result<String, String> {
     let mut text = String::new();
     for val in vals {
         text.push_str(val_name(*val)?);
@@ -149,7 +149,7 @@ fn val_list(vals: &[ValType]) -> Result<String, String> {
     Ok(text)
 }
 
-fn val_name(val: ValType) -> Result<&'static str, String> {
+pub(super) fn val_name(val: ValType) -> Result<&'static str, String> {
     match val {
         ValType::I32 => Ok("i32"),
         ValType::F32 => Ok("f32"),

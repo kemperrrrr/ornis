@@ -248,7 +248,11 @@ fn pack_flags() -> [u8; FLAG_BUFFER_BYTES] {
     let mut bytes = [0u8; FLAG_BUFFER_BYTES];
     let mut slot = 0usize;
     while slot < SLOTS {
-        put_u32(&mut bytes, (slot as u32) * size_of::<u32>() as u32, SENTINEL);
+        put_u32(
+            &mut bytes,
+            (slot as u32) * size_of::<u32>() as u32,
+            SENTINEL,
+        );
         slot += 1;
     }
     bytes

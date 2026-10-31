@@ -126,7 +126,7 @@ fn read_types(
 }
 
 fn func_ty(params: &[ValType], results: &[ValType]) -> Result<(String, String), String> {
-    Ok((val_list(params)?, val_list(results)?))
+    Ok((ops::val_list(params)?, ops::val_list(results)?))
 }
 
 // qual:allow(complexity, error_handling) reason: "Unexpected imports invalidate the test fixture."
@@ -171,7 +171,7 @@ fn locals_of(body: &wasmparser::FunctionBody<'_>) -> Result<String, String> {
     let reader = body.get_locals_reader().expect("locals");
     for local in reader {
         let (count, ty) = local.expect("local");
-        let name = val_name(ty)?;
+        let name = ops::val_name(ty)?;
         let mut index = 0u32;
         while index < count {
             text.push_str(&format!("(local {name})"));
