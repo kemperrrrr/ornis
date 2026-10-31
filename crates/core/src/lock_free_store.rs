@@ -26,7 +26,8 @@ trait LockFreeLane: Send + Sync {
     fn remove_entity(&self, entity: Entity);
 }
 
-// qual:test_helper
+// Internal prototype; the feature-gated lock-free tests exercise this type.
+#[allow(dead_code)]
 struct LaneInner<T: Clone + Send + Sync> {
     store: Atomic<ComponentStore<T>>,
 }
@@ -106,7 +107,8 @@ impl<T: Clone + Send + Sync> Drop for LaneInner<T> {
     }
 }
 
-// qual:test_helper
+// Internal prototype; the feature-gated lock-free tests exercise this type.
+#[allow(dead_code)]
 pub struct LockFreeStore {
     lanes: HashMap<TypeId, Box<dyn LockFreeLane>>,
     allocator: Mutex<EntityAllocator>,
@@ -190,7 +192,8 @@ impl LockFreeStore {
     }
 }
 
-// qual:test_helper
+// Internal prototype; the feature-gated lock-free tests exercise this type.
+#[allow(dead_code)]
 pub struct LockFreeReadGuard<'g, T> {
     store: &'g ComponentStore<T>,
     _guard: Guard,
