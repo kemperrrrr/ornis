@@ -199,16 +199,12 @@ impl<const G: u32, const B: u32, T: GpuSafeLayout> Uniform<G, B, T> {
     /// Token at offset 0.
     ///
     /// The pointer path (`addr` / `load`) and writes live only on storage
-    /// tokens, so a uniform token cannot open one. The example below fails
-    /// on every target — `write` is a `StorageSpace` method with no cfg —
-    /// so the doctest proves the space split itself rather than a missing
-    /// `cfg(wasm32)` item; `load` follows the same impl placement and its
-    /// positive side compiles under `wasm32` in the gpu e2e.
-    ///
-    /// ```compile_fail
-    /// let uniform = ornis_gpu_abi::Uniform::<0, 0, f32>::bind();
-    /// uniform.as_ref().write(0.0);
-    /// ```
+    /// tokens, so a uniform token cannot open one. The proof lives in
+    /// `tests/ui/uniform_token_has_no_write.rs`: trybuild asserts the exact
+    /// `E0599` on `write`, a method with no cfg — a `compile_fail`
+    /// doctest would pass on the host for the wrong reason, since `load`
+    /// itself only exists under `wasm32`. The positive side of `load`
+    /// compiles under `wasm32` in the gpu e2e.
     #[inline(always)]
     pub fn as_ref(&self) -> GpuRef<'_, G, B, T, UniformSpace> {
         let _ = self;

@@ -1,0 +1,18 @@
+[package]
+name = "ornis-wasm2gpu-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared E2E harness: guest build, wgpu bootstrap, lifted-kernel pins"
+
+[dependencies]
+ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
+ornis-wasm2gpu = { path = "../wasm2gpu", version = "0.1.0" }
+pollster = "1.0"
+wasmparser = "0.263"
+wat = "1"
+wgpu = { version = "30" }
+
+[lints]
+workspace = true

@@ -14,8 +14,8 @@ ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
 
 [dev-dependencies]
 ornis-wasm2gpu = { path = "../wasm2gpu", version = "0.1.0" }
-pollster = "1.0"
-wasmparser = "0.262"
+ornis-wasm2gpu-testkit = { path = "../wasm2gpu-testkit", version = "0.1.0" }
+wasmparser = "0.263"
 wat = "1"
 wgpu = { version = "30" }
 

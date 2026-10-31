@@ -262,6 +262,58 @@ pub extern "C" fn cull(id: u32) {
     }
 }
 
+/// Lanes of one vertex output: clip `x y z w`, then uv (32-byte stride).
+#[cfg(target_arch = "wasm32")]
+const VS_OUT_LANES: u32 = 8;
+
+/// Corners of the fullscreen quad: a strip of four vertices.
+#[cfg(target_arch = "wasm32")]
+const VS_VERTICES: u32 = 4;
+
+/// Component lane of clip `w` inside one vertex output (z precedes it).
+#[cfg(target_arch = "wasm32")]
+const VS_W_LANE: u32 = 3;
+
+/// First uv component lane inside one vertex output (v follows at `+1`).
+#[cfg(target_arch = "wasm32")]
+const VS_U_LANE: u32 = 4;
+
+/// Wasm vertex export: the fog fullscreen-quad vertex stage.
+///
+/// The corner and uv values REPEAT `ornis_render`'s
+/// `shaders::{STANDARD_QUAD, STANDARD_UVS}` — derived from the vertex id
+/// by parity, not read from the tables — and the gpu e2e test lifts this
+/// export and compares it against the production `vs_main` running
+/// verbatim, so a table change in render lands as a bitwise mismatch.
+/// The selection stays in scalar locals: a local array would spill to
+/// the shadow stack, and the stack-pointer `GlobalGet { global_index: 0 }`
+/// would re-enter the lifted graph — the translator refuses that op
+/// (§7.7 of `docs/rendering/wasm-segmented-memory.md`). The output
+/// layout keeps the 32-byte stride of the WGSL storage struct
+/// `{ pos: vec4<f32>, uv: vec2<f32> }` the test's adapter reads back.
+#[cfg(target_arch = "wasm32")]
+#[unsafe(no_mangle)]
+pub extern "C" fn vs_main(id: u32) {
+    if id < VS_VERTICES {
+        let lane = id * VS_OUT_LANES;
+        // STANDARD_QUAD row = (x, y); STANDARD_UVS row = (u, v):
+        // x flips on odd ids, y flips past half, u tracks x's parity,
+        // v is the inverse of the y row.
+        let odd = (id & 1) != 0;
+        let top = id >= 2;
+        let x = if odd { 1.0 } else { -1.0 };
+        let y = if top { 1.0 } else { -1.0 };
+        let u = if odd { 1.0 } else { 0.0 };
+        let v = if top { 0.0 } else { 1.0 };
+        storage_store_f32::<0, 0>(lane, x);
+        storage_store_f32::<0, 0>(lane + 1, y);
+        storage_store_f32::<0, 0>(lane + 2, 0.0);
+        storage_store_f32::<0, 0>(lane + VS_W_LANE, 1.0);
+        storage_store_f32::<0, 0>(lane + VS_U_LANE, u);
+        storage_store_f32::<0, 0>(lane + VS_U_LANE + 1, v);
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
