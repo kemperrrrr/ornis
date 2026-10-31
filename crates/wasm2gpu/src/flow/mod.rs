@@ -249,18 +249,22 @@ impl Emit<'_, '_> {
         }
         let saved = self.stack.clone();
         let saved_ptrs = self.ptr_slots.clone();
+        // Each arm starts fresh: a `return` in one arm leaves that arm, not
+        // the other one.
+        self.halted = false;
         let accept = self.sub(|em| em.arm(then_body, &temps, &ty.results))?;
         let then_ptrs = self.ptr_slots.clone();
         let then_stopped = self.halted;
         self.stack = saved.clone();
         self.ptr_slots = saved_ptrs;
+        self.halted = false;
         let reject = self.sub(|em| em.arm(else_body, &temps, &ty.results))?;
         let else_ptrs = self.ptr_slots.clone();
+        let else_stopped = self.halted;
         self.stack = saved;
         self.ptr_slots = final_ptrs(cond_val, then_stopped, then_ptrs, else_ptrs);
-        // A `return` inside an arm leaves that arm, not the code after the
-        // `if`: the other arm still reaches it.
-        self.halted = false;
+        // The code after the `if` is dead only when both arms returned.
+        self.halted = then_stopped && else_stopped;
         self.block.push(
             naga::Statement::If {
                 condition: cond,

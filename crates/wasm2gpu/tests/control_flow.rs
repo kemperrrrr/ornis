@@ -184,6 +184,44 @@ fn branch_to_the_function_is_an_error() {
     );
 }
 
+/// The compute entry, the only void function the toy subset lowers.
+fn compute_wgsl(custom: &str, cs: &str) -> String {
+    let module = wat::parse_str(format!(
+        "(module {custom} {vs} (func (export \"{name}\") {cs}) (func (export \"{fs}\") (param f32 f32) (result f32 f32 f32 f32) {tail}))",
+        vs = vertex(),
+        name = symbols::CS_MAIN,
+        fs = symbols::FS_MAIN,
+        tail = rgba(),
+    ))
+    .expect("wat");
+    translate(&module).expect("translate").wgsl
+}
+
+#[test]
+fn a_return_in_one_arm_keeps_the_other_arm() {
+    // A `return` leaves the arm it sits in. The other arm still reaches the
+    // code after the `if`, and its own body has to be lowered.
+    let cs = "(param i32)
+        (if (local.get 0)
+          (then (return))
+          (else (i32.const 0) (i32.const 0) (i32.const 0) (f32.const 7.5) (call $storage_write_f32)))";
+    let got = compute_wgsl(&write_f32(), cs);
+    assert!(got.contains("7.5f"), "{got}");
+}
+
+#[test]
+fn a_branch_out_of_the_tail_block_keeps_the_else_arm() {
+    // The tail block ends the function, so a branch out of it becomes a
+    // `return`. The else arm of the `if` around it still has to be lowered.
+    let cs = "(param i32)
+        (block
+          (if (local.get 0)
+            (then (br 1))
+            (else (i32.const 0) (i32.const 0) (i32.const 0) (f32.const 7.5) (call $storage_write_f32))))";
+    let got = compute_wgsl(&write_f32(), cs);
+    assert!(got.contains("7.5f"), "{got}");
+}
+
 #[test]
 fn pure_if_without_results_is_dropped() {
     let fs = "(param f32 f32 i32) (result f32 f32 f32 f32)
