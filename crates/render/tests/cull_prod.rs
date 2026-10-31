@@ -10,6 +10,7 @@
 //! `material_index` values plus the atomic count, not byte order.
 
 use ornis_render::gpu_culling::{CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD};
+use ornis_render::renderer::PerObjectGpu;
 use ornis_wasm2gpu_testkit::cull::{
     ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
 };
@@ -17,11 +18,22 @@ use ornis_wasm2gpu_testkit::{
     device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer,
 };
 
-/// Bytes one `PerObject` occupies in the production buffers: three
-/// `mat4x4` (192) plus `material_index`, `motion_valid`, and two pads.
-const OBJECT_BYTES: usize = 208;
-/// Byte offset of `material_index` inside an object: the three matrices.
-const MATERIAL_OFFSET: usize = 192;
+/// Production object-record stride, derived from the Rust ABI type.
+const OBJECT_BYTES: usize = std::mem::size_of::<PerObjectGpu>();
+/// Byte offset of `material_index` in the Rust ABI type.
+const MATERIAL_OFFSET: usize = std::mem::offset_of!(PerObjectGpu, material_index);
+/// Byte offset of the model matrix in the Rust ABI type.
+const MODEL_OFFSET: u32 = std::mem::offset_of!(PerObjectGpu, model) as u32;
+/// Bytes in one column of the model matrix.
+const MODEL_COLUMN_BYTES: u32 = std::mem::size_of::<[f32; 4]>() as u32;
+/// Bytes in one scalar lane.
+const F32_BYTES: u32 = std::mem::size_of::<f32>() as u32;
+/// Model-matrix diagonal offsets used to encode the sphere radius.
+const RADIUS_X_OFFSET: u32 = MODEL_OFFSET;
+const RADIUS_Y_OFFSET: u32 = MODEL_OFFSET + MODEL_COLUMN_BYTES + F32_BYTES;
+const RADIUS_Z_OFFSET: u32 = MODEL_OFFSET + 2 * MODEL_COLUMN_BYTES + 2 * F32_BYTES;
+/// Translation column of the model matrix.
+const TRANSLATION_OFFSET: u32 = MODEL_OFFSET + 3 * MODEL_COLUMN_BYTES;
 /// `args` holds `array<atomic<u32>, 5>`; word 1 is the compacted count.
 const ARGS_WORDS: usize = 5;
 
@@ -30,6 +42,14 @@ const ARGS_WORDS: usize = 5;
 /// shader" instead of a CPU re-implementation of the formula.
 #[test]
 fn cull_kernel_matches_the_production_wgsl() {
+    let nan_radius_slot = SPHERES
+        .iter()
+        .position(|sphere| sphere[3].is_nan())
+        .expect("test scene has a NaN radius");
+    assert_eq!(
+        EXPECTED[nan_radius_slot], 1,
+        "a NaN radius must fail open and remain visible"
+    );
     let wgsl = lowered_kernel();
     let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
         .filter(|slot| EXPECTED[*slot as usize] == 1)
@@ -44,6 +64,15 @@ fn cull_kernel_matches_the_production_wgsl() {
                 .map(|(slot, _)| slot as u32)
                 .collect();
             let (prod_visible, prod_count) = run_production(&device, &queue);
+            let nan_slot = nan_radius_slot as u32;
+            assert!(
+                wasm_visible.contains(&nan_slot),
+                "wasm2gpu NaN radius fails open"
+            );
+            assert!(
+                prod_visible.contains(&nan_slot),
+                "production NaN radius fails open"
+            );
             assert_eq!(wasm_visible, expected, "wasm set vs EXPECTED");
             assert_eq!(prod_visible, expected, "production set vs EXPECTED");
             assert_eq!(prod_count as usize, expected.len(), "args count");
@@ -182,13 +211,17 @@ fn pack_prod_objects() -> Vec<u8> {
     while object < SPHERES.len() {
         let sphere = SPHERES[object];
         let base = (object * OBJECT_BYTES) as u32;
-        put_f32(&mut bytes, base, sphere[3]);
-        put_f32(&mut bytes, base + 20, sphere[3]);
-        put_f32(&mut bytes, base + 40, sphere[3]);
-        put_f32(&mut bytes, base + 48, sphere[0]);
-        put_f32(&mut bytes, base + 52, sphere[1]);
-        put_f32(&mut bytes, base + 56, sphere[2]);
-        put_f32(&mut bytes, base + 60, 1.0);
+        put_f32(&mut bytes, base + RADIUS_X_OFFSET, sphere[3]);
+        put_f32(&mut bytes, base + RADIUS_Y_OFFSET, sphere[3]);
+        put_f32(&mut bytes, base + RADIUS_Z_OFFSET, sphere[3]);
+        put_f32(&mut bytes, base + TRANSLATION_OFFSET, sphere[0]);
+        put_f32(&mut bytes, base + TRANSLATION_OFFSET + F32_BYTES, sphere[1]);
+        put_f32(
+            &mut bytes,
+            base + TRANSLATION_OFFSET + 2 * F32_BYTES,
+            sphere[2],
+        );
+        put_f32(&mut bytes, base + TRANSLATION_OFFSET + 3 * F32_BYTES, 1.0);
         put_u32(&mut bytes, base + MATERIAL_OFFSET as u32, object as u32);
         object += 1;
     }

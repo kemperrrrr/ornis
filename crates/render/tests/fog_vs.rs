@@ -26,6 +26,11 @@ const VERTICES: u32 = 4;
 
 /// Bytes of one kernel vertex output (32-byte WGSL struct stride).
 const STRIDE: u64 = 32;
+/// Words in one vertex output buffer record.
+const WORDS_PER_VERTEX: u32 = (STRIDE / std::mem::size_of::<u32>() as u64) as u32;
+/// Lane indexes of clip-space z and w in `{ pos: vec4, uv: vec2 }`.
+const CLIP_Z_LANE: usize = 2;
+const CLIP_W_LANE: usize = 3;
 
 /// Shared fragment stage: park what the rasterizer hands it in storage.
 /// The `@location(0)` return satisfies wgpu's "a render pipeline needs
@@ -409,7 +414,22 @@ fn fog_vertex_kernel_matches_the_production_stage() {
     let groups = frame_groups(&device, &layouts, &buffers);
     let view = render_target(&device);
     encode_and_submit(&device, &queue, &view, &pipelines, &groups);
-    let (_kernel_out, pixels_a, pixels_b) = buffers;
+    let (kernel_out, pixels_a, pixels_b) = buffers;
+
+    let vertices = read_words(&device, &queue, &kernel_out, VERTICES * WORDS_PER_VERTEX);
+    for vertex in 0..VERTICES as usize {
+        let base = vertex * WORDS_PER_VERTEX as usize;
+        assert_eq!(
+            vertices[base + CLIP_Z_LANE],
+            0.0f32.to_bits(),
+            "vertex {vertex}: clip-space z must match the fullscreen quad"
+        );
+        assert_eq!(
+            vertices[base + CLIP_W_LANE],
+            1.0f32.to_bits(),
+            "vertex {vertex}: clip-space w must match the fullscreen quad"
+        );
+    }
 
     let words = SIZE * SIZE * 4;
     let production_pixels = read_words(&device, &queue, &pixels_a, words);

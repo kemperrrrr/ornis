@@ -17,11 +17,29 @@ use crate::env::ExecIn;
 use crate::env::Region;
 use crate::error::TranslateError;
 use crate::ir::BlockTy;
+use crate::ir::Func;
 use crate::ir::Kind;
 use crate::ir::Stmt;
 use crate::locals::Locals;
 use crate::locals::arg_map;
 use crate::ops;
+
+/// Canonical body and local-slot analysis shared by every specialization of
+/// one wasm function. The function tree and its signature do not change with
+/// baked arguments, so cloning and analysing them per specialization is
+/// unnecessary work on large call graphs.
+pub(super) struct Prepared {
+    stmts: Vec<Stmt>,
+    slots: Slots,
+}
+
+impl Prepared {
+    fn new(func: &Func) -> Self {
+        let stmts = canon::rewrite(func);
+        let slots = Slots::of(&stmts, func.locals.len());
+        Self { stmts, slots }
+    }
+}
 
 pub(super) fn exec(
     cx: &mut crate::cx::Cx<'_>,
@@ -31,26 +49,21 @@ pub(super) fn exec(
 ) -> Result<Vec<Val>, TranslateError> {
     let baked = input.baked.clone();
     let id_param = input.id_param;
-    let (args_at, locals, stmts, results, wasm_locals, params) = {
-        let func = code
-            .funcs
-            .get(input.func_index as usize)
-            .ok_or(TranslateError::Unsupported)?;
-        // The analyses read the same tree the emitter lowers.
-        let stmts = canon::rewrite(func);
-        let slots = Slots::of(&stmts, func.locals.len());
+    let func = code
+        .funcs
+        .get(input.func_index as usize)
+        .ok_or(TranslateError::Unsupported)?;
+    let prepared = code
+        .prepared
+        .get(input.func_index as usize)
+        .ok_or(TranslateError::Unsupported)?
+        .get_or_init(|| Prepared::new(func));
+    let (args_at, locals, results, wasm_locals, params) = {
         let args_at = arg_map(func, &input.baked, input.id_param);
-        let locals = bind_params(body, func, cx, &slots)?;
+        let locals = bind_params(body, func, cx, &prepared.slots)?;
         let results = func.sig.results;
-        let wasm_locals = Locals::of(func, slots.expr);
-        (
-            args_at,
-            locals,
-            stmts,
-            results,
-            wasm_locals,
-            func.sig.params,
-        )
+        let wasm_locals = Locals::of(func, prepared.slots.expr.clone());
+        (args_at, locals, results, wasm_locals, func.sig.params)
     };
     let block = std::mem::take(&mut body.body);
     let slots = locals.len();
@@ -71,9 +84,10 @@ pub(super) fn exec(
         imports: code.imports,
         structs: code.structs,
         funcs: code.funcs,
+        prepared: code.prepared,
     };
     copy_params(&mut em, params)?;
-    em.run(&stmts)?;
+    em.run(&prepared.stmts)?;
     let Emit {
         block, stack, func, ..
     } = em;

@@ -11,6 +11,7 @@
 //! than adding a Cargo dependency (which would cycle through its dev-dependency
 //! on this kit); that nested build honors `CARGO_TARGET_DIR` and uses `--locked`.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The guest's import module and entry symbols — re-exported so
@@ -20,6 +21,19 @@ pub use ornis_gpu_abi::symbols;
 pub mod compute_lift;
 pub mod cull;
 
+/// Isolated target subtree for the nested guest build.
+const GUEST_TARGET_SUBDIR: &str = "wasm2gpu-e2e";
+
+/// Add the nested-build suffix once, even when the caller's target directory
+/// already points at the guest subtree.
+fn guest_target_dir(target_root: &Path) -> PathBuf {
+    if target_root.file_name() == Some(std::ffi::OsStr::new(GUEST_TARGET_SUBDIR)) {
+        target_root.to_path_buf()
+    } else {
+        target_root.join(GUEST_TARGET_SUBDIR)
+    }
+}
+
 /// Build the guest crate (`ornis-wasm2gpu-shader`) for
 /// `wasm32-unknown-unknown` — release, size-optimized, no unwind — and
 /// return the `.wasm` bytes. This is a nested Cargo invocation rather than a
@@ -28,20 +42,20 @@ pub mod cull;
 // qual:allow(complexity, error_handling) reason: "A failed guest build fails the integration test."
 pub fn compile_wasm() -> Vec<u8> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest
         .parent()
         .and_then(|path| path.parent())
         .expect("workspace");
     let target_root = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_else(|| workspace.join("target"));
     let target_root = if target_root.is_absolute() {
         target_root
     } else {
         workspace.join(target_root)
     };
-    let target_dir = target_root.join("wasm2gpu-e2e");
+    let target_dir = guest_target_dir(&target_root);
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace)
         .args([
@@ -161,4 +175,17 @@ pub fn put_u32(bytes: &mut [u8], offset: u32, value: u32) {
 /// Pack a little-endian `f32` at `offset`.
 pub fn put_f32(bytes: &mut [u8], offset: u32, value: f32) {
     put_u32(bytes, offset, value.to_bits());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GUEST_TARGET_SUBDIR, guest_target_dir};
+
+    #[test]
+    fn nested_guest_target_directory_is_not_duplicated() {
+        let root = std::path::Path::new("target");
+        let guest = root.join(GUEST_TARGET_SUBDIR);
+        assert_eq!(guest_target_dir(root), guest);
+        assert_eq!(guest_target_dir(&guest), guest);
+    }
 }

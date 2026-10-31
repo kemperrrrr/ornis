@@ -69,8 +69,9 @@ pub const SPHERES: [[f32; 4]; 8] = [
     // Boundary: `dot + w + radius == 0.0`, and the production
     // `dot + w < -radius` is `false` on the same value — visible.
     [-0.25, 0.0, 0.0, 0.25],
-    // NaN radius: IEEE `<` fails open in the kernel and in the WGSL twin.
-    [0.0, 0.0, 0.0, f32::NAN],
+    // NaN radius: plane 0 would cull this center if the radius were finite.
+    // IEEE `<` must fail open in the kernel and in the WGSL twin.
+    [-1.0, 0.0, 0.0, f32::NAN],
     // A clear cut by plane 3 (+y), not by plane 0.
     [0.0, -0.5, 0.0, 0.25],
     [9.0, 9.0, 9.0, 1.0],

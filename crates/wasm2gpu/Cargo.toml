@@ -14,5 +14,9 @@ wasmparser = "0.263"
 [dev-dependencies]
 wat = "1"
 
+[[bench]]
+name = "translate_large"
+harness = false
+
 [lints]
 workspace = true

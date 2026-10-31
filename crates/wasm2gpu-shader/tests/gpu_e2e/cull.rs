@@ -80,6 +80,14 @@ fn derived_flags() -> [u32; SLOTS] {
 #[test]
 fn cull_kernel_matches_the_hand_twin() {
     assert_eq!(LANES * WORKGROUPS as usize, SPHERES.len());
+    let nan_radius_slot = SPHERES
+        .iter()
+        .position(|sphere| sphere[3].is_nan())
+        .expect("test scene has a NaN radius");
+    assert_eq!(
+        EXPECTED[nan_radius_slot], 1,
+        "a NaN radius must be explicitly fail-open"
+    );
     let wgsl = lowered_kernel();
     let derived = derived_flags();
     assert_eq!(EXPECTED, derived, "production-formula cross-check");
