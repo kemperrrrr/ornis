@@ -11,8 +11,8 @@
 //! both GPU times from the CI log.
 
 use ornis_wasm2gpu_testkit::cull::{
-    ACTIVE_COUNT, EXPECTED, LANES, PLANES, RUNS, SENTINEL, SLOTS, SPHERES,
-    WORKGROUPS, lowered_kernel, run,
+    ACTIVE_COUNT, EXPECTED, LANES, PLANES, RUNS, SENTINEL, SLOTS, SPHERES, WORKGROUPS,
+    lowered_kernel, run,
 };
 use ornis_wasm2gpu_testkit::device;
 
