@@ -1489,8 +1489,8 @@ fn level1(stages: &mut StageList<'_>) {
     stages.run(
         "test",
         "test",
-        "cargo test --workspace --no-fail-fast",
-        stages.cargo(&["test", "--workspace", "--no-fail-fast"]),
+        "cargo test --workspace --no-fail-fast --locked",
+        stages.cargo(&["test", "--workspace", "--no-fail-fast", "--locked"]),
         false,
     );
 
@@ -1501,7 +1501,7 @@ fn level1(stages: &mut StageList<'_>) {
     stages.run(
         "test-lockfree",
         "test (lock-free)",
-        "cargo test -p ornis-core --features lock-free --no-fail-fast",
+        "cargo test -p ornis-core --features lock-free --no-fail-fast --locked",
         stages.cargo(&[
             "test",
             "-p",
@@ -1509,6 +1509,7 @@ fn level1(stages: &mut StageList<'_>) {
             "--features",
             "lock-free",
             "--no-fail-fast",
+            "--locked",
         ]),
         false,
     );
