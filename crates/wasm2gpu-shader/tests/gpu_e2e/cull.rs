@@ -10,11 +10,11 @@
 //! (`render/src/gpu_culling.rs`), and the line this test prints shows
 //! both GPU times from the CI log.
 
-use wasm2gpu_testkit::cull::{
+use ornis_wasm2gpu_testkit::cull::{
     ACTIVE_COUNT, EXPECTED, LANES, PLANES, RUNS, SENTINEL, SLOTS, SPHERES, WORKGROUPS,
     lowered_kernel, run,
 };
-use wasm2gpu_testkit::device;
+use ornis_wasm2gpu_testkit::device;
 
 /// The hand twin runs the same guard, the same `dot + w + radius < 0.0`
 /// order, and the same workgroup, so bitwise agreement is the contract.

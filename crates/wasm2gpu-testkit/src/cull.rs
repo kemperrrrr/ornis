@@ -6,16 +6,11 @@
 //! comes from the guest, and neither side needs a `foundation → domain`
 //! import.
 
+use std::mem::size_of;
 use std::time::Duration;
 use std::time::Instant;
 
 use ornis_gpu_abi::symbols;
-use ornis_wasm2gpu_shader::COUNT_BINDING;
-use ornis_wasm2gpu_shader::FLAG_BINDING;
-use ornis_wasm2gpu_shader::PLANE_BINDING;
-use ornis_wasm2gpu_shader::PLANE_COUNT;
-use ornis_wasm2gpu_shader::PLANE_LEN;
-use ornis_wasm2gpu_shader::SPHERE_BINDING;
 
 use crate::entry;
 use crate::gpu_buffer;
@@ -23,6 +18,34 @@ use crate::map_bytes;
 use crate::put_f32;
 use crate::put_u32;
 use crate::storage_buffer;
+
+/// Group-0 uniform binding for the six packed frustum planes.
+const PLANE_BINDING: u32 = 0;
+/// Group-0 storage binding for packed sphere records.
+const SPHERE_BINDING: u32 = 1;
+/// Group-0 storage binding for output flags.
+const FLAG_BINDING: u32 = 2;
+/// Group-0 storage binding for the active sphere count.
+const COUNT_BINDING: u32 = 3;
+/// Number of planes read by the guest cull kernel.
+const PLANE_COUNT: u32 = 6;
+/// Four padded f32 lanes per plane uniform slot.
+const PLANE_LEN: u32 = PLANE_COUNT * 4;
+
+/// Bytes in one scalar lane used by the guest ABI.
+const BYTES_PER_LANE: usize = size_of::<f32>();
+/// Bytes in the std140 plane uniform slot.
+const PLANE_SLOT_BYTES: usize = 16;
+/// Bytes occupied by one four-lane sphere record.
+const SPHERE_BYTES: usize = LANES * BYTES_PER_LANE;
+/// Total plane-uniform binding extent.
+const PLANE_BUFFER_BYTES: u64 = (PLANE_LEN as usize * PLANE_SLOT_BYTES) as u64;
+/// All eight packed sphere records.
+const SPHERE_BUFFER_BYTES: u64 = (SPHERES.len() * SPHERE_BYTES) as u64;
+/// Flags storage extent: one u32 for each sphere slot.
+const FLAG_BUFFER_BYTES: usize = SLOTS * size_of::<u32>();
+/// Four count words form the fixed storage binding.
+const COUNT_BUFFER_BYTES: usize = LANES * size_of::<u32>();
 
 /// Workgroup size of the guest's `cs_main`: one sphere lane per thread.
 pub const LANES: usize = symbols::CS_WORKGROUP[0] as usize;
@@ -62,6 +85,7 @@ pub const SLOTS: usize = SPHERES.len();
 
 /// Visible, culled, visible, boundary pass, NaN pass, cut by plane 3,
 /// then two untouched slots past [`ACTIVE_COUNT`].
+// qual:api
 pub const EXPECTED: [u32; SPHERES.len()] = [1, 0, 1, 1, 1, 0, SENTINEL, SENTINEL];
 
 /// The six clip planes in uniform slots: plane 0 is `+x`, plane 3 `+y`,
@@ -162,10 +186,10 @@ fn upload(
     layout: &wgpu::BindGroupLayout,
 ) -> (wgpu::Buffer, wgpu::BindGroup) {
     let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-    let planes = gpu_buffer(device, "cull-planes", 384, uniform);
-    let spheres = storage_buffer(device, "cull-spheres", 128);
-    let flags = storage_buffer(device, "cull-flags", 32);
-    let count = storage_buffer(device, "cull-count", 16);
+    let planes = gpu_buffer(device, "cull-planes", PLANE_BUFFER_BYTES, uniform);
+    let spheres = storage_buffer(device, "cull-spheres", SPHERE_BUFFER_BYTES);
+    let flags = storage_buffer(device, "cull-flags", FLAG_BUFFER_BYTES as u64);
+    let count = storage_buffer(device, "cull-count", COUNT_BUFFER_BYTES as u64);
     queue.write_buffer(&planes, 0, &pack_planes());
     queue.write_buffer(&spheres, 0, &pack_spheres());
     queue.write_buffer(&flags, 0, &pack_flags());
@@ -186,14 +210,14 @@ fn upload(
 /// Plane components in uniform slots: one `f32` per 16-byte stride.
 /// Plane 0 points along `+x`, plane 3 along `+y`; the rest pass everything.
 fn pack_planes() -> Vec<u8> {
-    let mut bytes = vec![0u8; (PLANE_LEN * 16) as usize];
+    let mut bytes = vec![0u8; PLANE_LEN as usize * PLANE_SLOT_BYTES];
     let mut plane = 0u32;
     while plane < PLANE_COUNT {
         let mut lane = 0u32;
-        while lane < 4 {
+        while lane < LANES as u32 {
             put_f32(
                 &mut bytes,
-                (plane * 4 + lane) * 16,
+                (plane * LANES as u32 + lane) * PLANE_SLOT_BYTES as u32,
                 PLANES[plane as usize][lane as usize],
             );
             lane += 1;
@@ -204,12 +228,12 @@ fn pack_planes() -> Vec<u8> {
 }
 
 fn pack_spheres() -> Vec<u8> {
-    let mut bytes = vec![0u8; SPHERES.len() * 16];
+    let mut bytes = vec![0u8; SPHERES.len() * SPHERE_BYTES];
     let mut sphere = 0usize;
     while sphere < SPHERES.len() {
         let mut lane = 0usize;
-        while lane < 4 {
-            let at = (sphere * 4 + lane) as u32 * 4;
+        while lane < LANES {
+            let at = ((sphere * LANES + lane) * BYTES_PER_LANE) as u32;
             put_f32(&mut bytes, at, SPHERES[sphere][lane]);
             lane += 1;
         }
@@ -220,18 +244,18 @@ fn pack_spheres() -> Vec<u8> {
 
 /// Every flag starts at [`SENTINEL`]: an untouched slot keeps it, which
 /// is how the test sees that the count guard wrote nothing.
-fn pack_flags() -> [u8; 32] {
-    let mut bytes = [0u8; 32];
+fn pack_flags() -> [u8; FLAG_BUFFER_BYTES] {
+    let mut bytes = [0u8; FLAG_BUFFER_BYTES];
     let mut slot = 0usize;
     while slot < SLOTS {
-        put_u32(&mut bytes, (slot as u32) * 4, SENTINEL);
+        put_u32(&mut bytes, (slot as u32) * size_of::<u32>() as u32, SENTINEL);
         slot += 1;
     }
     bytes
 }
 
 fn pack_count() -> Vec<u8> {
-    let mut bytes = vec![0u8; 16];
+    let mut bytes = vec![0u8; COUNT_BUFFER_BYTES];
     put_u32(&mut bytes, 0, ACTIVE_COUNT as u32);
     bytes
 }
@@ -239,18 +263,18 @@ fn pack_count() -> Vec<u8> {
 fn map_u32s(device: &wgpu::Device, queue: &wgpu::Queue, storage: &wgpu::Buffer) -> [u32; SLOTS] {
     let read = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("cull-flags-read"),
-        size: 32,
+        size: FLAG_BUFFER_BYTES as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("cull-flags-read"),
     });
-    encoder.copy_buffer_to_buffer(storage, 0, &read, 0, 32);
+    encoder.copy_buffer_to_buffer(storage, 0, &read, 0, FLAG_BUFFER_BYTES as u64);
     queue.submit([encoder.finish()]);
     let bytes = map_bytes(device, &read);
     let mut values = [0u32; SLOTS];
-    for (slot, word) in bytes.chunks_exact(4).take(SLOTS).enumerate() {
+    for (slot, word) in bytes.chunks_exact(size_of::<u32>()).take(SLOTS).enumerate() {
         values[slot] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
     }
     values

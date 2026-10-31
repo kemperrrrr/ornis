@@ -9,18 +9,13 @@
 //! order is scheduler-dependent, so the contract is a sorted set of
 //! `material_index` values plus the atomic count, not byte order.
 
-use wasm2gpu_testkit::cull::ACTIVE_COUNT;
-use wasm2gpu_testkit::cull::EXPECTED;
-use wasm2gpu_testkit::cull::PLANES;
-use wasm2gpu_testkit::cull::SPHERES;
-use wasm2gpu_testkit::cull::buffer_entry;
-use wasm2gpu_testkit::cull::lowered_kernel;
-use wasm2gpu_testkit::cull::run;
-use wasm2gpu_testkit::{device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer};
-
-use ornis_render::gpu_culling::CULL_COMPUTE_WGSL;
-use ornis_render::gpu_culling::CULL_PARAMS_BYTE_SIZE;
-use ornis_render::gpu_culling::INSTANCE_COUNT_WORD;
+use ornis_render::gpu_culling::{CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD};
+use ornis_wasm2gpu_testkit::cull::{
+    ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
+};
+use ornis_wasm2gpu_testkit::{
+    device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer,
+};
 
 /// Bytes one `PerObject` occupies in the production buffers: three
 /// `mat4x4` (192) plus `material_index`, `motion_valid`, and two pads.

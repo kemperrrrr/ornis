@@ -3092,7 +3092,6 @@ version = "0.1.0"
 dependencies = [
  "ornis-gpu-abi",
  "ornis-wasm2gpu",
- "ornis-wasm2gpu-shader",
  "pollster",
  "wasmparser",
  "wat",

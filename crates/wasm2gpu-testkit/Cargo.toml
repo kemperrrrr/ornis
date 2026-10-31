@@ -9,7 +9,6 @@ description = "Shared E2E harness: guest build, wgpu bootstrap, lifted-kernel pi
 [dependencies]
 ornis-gpu-abi = { path = "../gpu-abi", version = "0.1.0" }
 ornis-wasm2gpu = { path = "../wasm2gpu", version = "0.1.0" }
-ornis-wasm2gpu-shader = { path = "../wasm2gpu-shader", version = "0.1.0" }
 pollster = "1.0"
 wasmparser = "0.262"
 wat = "1"

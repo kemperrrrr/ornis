@@ -13,12 +13,13 @@ use std::process::Command;
 /// downstream tests need only this crate for symbol lookups.
 pub use ornis_gpu_abi::symbols;
 
-pub mod cull;
 pub mod compute_lift;
+pub mod cull;
 
 /// Build the guest crate (`ornis-wasm2gpu-shader`) for
 /// `wasm32-unknown-unknown` — release, size-optimized, no unwind — and
 /// return the `.wasm` bytes.
+// qual:allow(complexity, error_handling) reason: "A failed guest build fails the integration test."
 pub fn compile_wasm() -> Vec<u8> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -119,6 +120,7 @@ pub fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 }
 
 /// Map a buffer for reading and return its bytes (staging copy, unmap).
+// qual:allow(complexity, error_handling) reason: "A failed GPU map invalidates the test readback."
 pub fn map_bytes(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();

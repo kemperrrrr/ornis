@@ -22,15 +22,8 @@ use ornis_wasm2gpu::translate;
 use ornis_wasm2gpu_shader::STORAGE_LEN;
 use ornis_wasm2gpu_shader::ShadeParams;
 use ornis_wasm2gpu_shader::shade;
-use wasm2gpu_testkit::{
-    compile_wasm,
-    compute_lift,
-    device,
-    entry,
-    gpu_buffer,
-    map_bytes,
-    put_f32,
-    put_u32,
+use ornis_wasm2gpu_testkit::{
+    compile_wasm, compute_lift, device, entry, gpu_buffer, map_bytes, put_f32, put_u32,
     storage_buffer,
 };
 
