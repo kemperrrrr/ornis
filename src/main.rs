@@ -114,9 +114,7 @@ fn showcase_engine() -> GameWorld {
     // Object animation in the same DAG (after body poses); no-op
     // until an entity carries animation lanes.
     install_object_animation(runtime.engine_mut());
-    for name in install_scene_bodies(&mut runtime, &scene) {
-        eprintln!("showcase entity {name:?} has no collider recipe; no physics body created");
-    }
+    let _ = install_scene_bodies(&mut runtime, &scene);
     // Hidden static floor: physics only, so it stays out of the frame upload.
     if let Err(error) = spawn_showcase_floor(runtime.engine_mut()) {
         eprintln!("showcase floor was not spawned: {error}");
@@ -130,9 +128,11 @@ fn showcase_engine() -> GameWorld {
 ///
 /// An explicit [`ColliderDesc`] lane entry wins over the exact auto recipe;
 /// otherwise sphere/box/cylinder meshes get their analytic collider. Plane,
-/// quad and custom meshes without an explicit recipe stay body-less, so their
-/// names are returned instead of being silently skipped by `continue`.
-/// The first scene entity is dynamic (mass `1`), the rest are static.
+/// quad and custom meshes without an explicit recipe stay body-less. Non-unit
+/// scale is rejected until the shared projection supports it. Every skip is
+/// logged once and its entity name is returned.
+/// The first scene entity is dynamic (mass `1`) unless its recipe is static-only;
+/// the rest are static.
 #[cfg(not(feature = "editor-only"))]
 fn install_scene_bodies(runtime: &mut GameWorld, scene: &Scene) -> Vec<String> {
     let entities = runtime.entities().to_vec();
@@ -144,10 +144,23 @@ fn install_scene_bodies(runtime: &mut GameWorld, scene: &Scene) -> Vec<String> {
         let Some(description) = scene.entities.get(index) else {
             continue;
         };
+        if description.transform.scale != Vec3::ONE {
+            eprintln!(
+                "showcase entity {:?} has non-unit scale {:?}; no physics body created",
+                description.name, description.transform.scale
+            );
+            without_body.push(description.name.clone());
+            continue;
+        }
         let collider = store
             .read_lane::<ColliderDesc>()
             .and_then(|lane| lane.get(entity).cloned());
-        let mass = if index == 0 { 1.0 } else { 0.0 };
+        let mass =
+            if index == 0 && !matches!(collider.as_ref(), Some(ColliderDesc::HalfSpace { .. })) {
+                1.0
+            } else {
+                0.0
+            };
         match ornis_physics::colliders::body_for(
             &description.transform,
             &description.mesh,
@@ -157,10 +170,16 @@ fn install_scene_bodies(runtime: &mut GameWorld, scene: &Scene) -> Vec<String> {
             Ok(Some(body)) => {
                 store.insert(entity, body);
             }
-            Ok(None) => without_body.push(description.name.clone()),
+            Ok(None) => {
+                eprintln!(
+                    "showcase entity {:?} has no collider recipe; no physics body created",
+                    description.name
+                );
+                without_body.push(description.name.clone());
+            }
             Err(error) => {
                 eprintln!(
-                    "showcase entity {:?} collider recipe failed: {error}",
+                    "showcase entity {:?} collider recipe failed: {error}; no physics body created",
                     description.name
                 );
                 without_body.push(description.name.clone());
@@ -225,8 +244,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(all(test, not(feature = "editor-only")))]
 mod tests {
     use super::{GameWorld, Scene, install_scene_bodies};
+    use glam::Vec3;
     use ornis_assets::collider::ColliderDesc;
-    use ornis_physics::RigidBody;
+    use ornis_physics::{RigidBody, Shape};
 
     #[test]
     fn box_cylinder_and_explicit_plane_get_bodies() {
@@ -260,7 +280,7 @@ Scene(
             name: "Plane",
             transform: (
                 translation: (0.0, -1.0, 0.0),
-                rotation: (0.0, 0.0, 0.0, 1.0),
+                rotation: (0.7071068, 0.0, 0.0, 0.7071068),
                 scale: (1.0, 1.0, 1.0),
             ),
             mesh: Plane(size: (4.0, 4.0)),
@@ -314,10 +334,116 @@ Scene(
         for entity in &entities {
             assert!(bodies.contains(*entity), "entity {entity:?} has no body");
         }
-        assert!(matches!(
-            bodies.get(entities[2]).map(|body| &body.shape),
-            Some(ornis_physics::Shape::HalfSpace { .. })
-        ));
+
+        let box_body = bodies.get(entities[0]).expect("box body exists");
+        assert_eq!(box_body.mass, 1.0);
+        assert_eq!(box_body.position, Vec3::new(1.0, 0.0, 0.0));
+        match &box_body.shape {
+            Shape::Box { half_extents } => assert_eq!(*half_extents, Vec3::ONE),
+            shape => panic!("expected box shape, got {shape:?}"),
+        }
+
+        let cylinder_body = bodies.get(entities[1]).expect("cylinder body exists");
+        assert_eq!(cylinder_body.mass, 0.0);
+        match &cylinder_body.shape {
+            Shape::Cylinder {
+                radius,
+                half_height,
+            } => {
+                assert_eq!(*radius, 0.5);
+                assert_eq!(*half_height, 1.0);
+            }
+            shape => panic!("expected cylinder shape, got {shape:?}"),
+        }
+
+        let plane_body = bodies.get(entities[2]).expect("plane body exists");
+        assert_eq!(plane_body.mass, 0.0);
+        assert_eq!(plane_body.position, Vec3::new(0.0, -1.0, 0.0));
+        assert!(
+            (plane_body.orientation * Vec3::Y).abs_diff_eq(Vec3::Z, 1e-6),
+            "plane rotation must be preserved"
+        );
+        match &plane_body.shape {
+            Shape::HalfSpace { normal } => assert_eq!(normal.get(), Vec3::Y),
+            shape => panic!("expected half-space shape, got {shape:?}"),
+        }
+    }
+
+    #[test]
+    fn first_half_space_stays_static_and_scaled_box_is_rejected() {
+        let scene = Scene::from_ron(
+            r#"
+Scene(
+    name: "collider_guard_fixture",
+    entities: [
+        (
+            name: "Ground",
+            transform: (
+                translation: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 1.0, 1.0),
+            ),
+            mesh: Plane(size: (4.0, 4.0)),
+            material: Dielectric(base_color: (0.2, 0.2, 0.8), roughness: 0.5),
+        ),
+        (
+            name: "Scaled Box",
+            transform: (
+                translation: (0.0, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.0, 1.0, 1.0),
+            ),
+            mesh: Box(size: (2.0, 2.0, 2.0)),
+            material: Dielectric(base_color: (0.8, 0.2, 0.2), roughness: 0.5),
+        ),
+    ],
+    lights: [],
+    camera: (
+        position: (0.0, 3.0, 11.0),
+        target: (0.0, 0.5, 0.0),
+        up: (0.0, 1.0, 0.0),
+        fov: 60.0,
+        near: 0.1,
+        far: 100.0,
+    ),
+    ambient: (0.1, 0.1, 0.1),
+)
+"#,
+        )
+        .expect("fixture parses");
+        let mut runtime = GameWorld::from_scene(&scene);
+        let entities = runtime.entities().to_vec();
+        {
+            let store = runtime
+                .engine_mut()
+                .world_mut()
+                .store_mut()
+                .expect("engine carries a store");
+            store.register::<ColliderDesc>();
+            store.insert(
+                entities[0],
+                ColliderDesc::HalfSpace {
+                    normal: [0.0, 1.0, 0.0],
+                },
+            );
+        }
+
+        let without_body = install_scene_bodies(&mut runtime, &scene);
+        assert_eq!(without_body, vec!["Scaled Box".to_string()]);
+
+        let store = runtime
+            .engine_mut()
+            .world_mut()
+            .store_mut()
+            .expect("engine carries a store");
+        let bodies = store.read_lane::<RigidBody>().expect("body lane exists");
+        let ground = bodies.get(entities[0]).expect("ground body exists");
+        assert_eq!(ground.mass, 0.0);
+        assert!(matches!(&ground.shape, Shape::HalfSpace { .. }));
+        assert!(
+            !bodies.contains(entities[1]),
+            "non-unit scale must not produce a mismatched collider"
+        );
     }
 
     #[test]

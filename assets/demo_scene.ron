@@ -1,10 +1,10 @@
 // Showcase demo scene: floor + wall + tower + rolling ball.
 //
 // All entities are spheres (scaled via TransformDesc scale for floor/wall
-// slabs) so the native showcase physics recipe (RigidBody sphere)
-// and the render extraction path handle every entity. The first entity is
-// the dynamic rolling ball; the rest are static. A hidden static floor tops
-// at y = -1.0, matching the visual floor top.
+// slabs). Native showcase physics currently accepts only unit-scale entities;
+// scaled slabs are reported at startup and stay render-only. The first entity
+// is the dynamic rolling ball; other physics bodies are static. A hidden static
+// floor tops at y = -1.0, matching the visual floor top.
 
 Scene(
     name: "demo_showcase",
