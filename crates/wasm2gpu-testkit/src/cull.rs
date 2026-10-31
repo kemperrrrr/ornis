@@ -29,8 +29,6 @@ const FLAG_BINDING: u32 = 2;
 const COUNT_BINDING: u32 = 3;
 /// Number of planes read by the guest cull kernel.
 const PLANE_COUNT: u32 = 6;
-/// Sphere slot whose radius is NaN; both cull paths must fail open for it.
-pub const NAN_RADIUS_SLOT: usize = 4;
 /// Four padded f32 lanes per plane uniform slot.
 const PLANE_LEN: u32 = PLANE_COUNT * 4;
 

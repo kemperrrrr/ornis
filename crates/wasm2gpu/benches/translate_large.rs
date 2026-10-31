@@ -8,6 +8,7 @@
 //! cargo bench -p ornis-wasm2gpu --bench translate_large
 //! ```
 
+use std::error::Error;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -25,22 +26,57 @@ const SPECIALIZED_BODY_OPS: usize = 1_024;
 /// Distinct constant-argument specializations (the translator's current cap).
 const SPECIALIZATIONS: usize = 64;
 
-fn main() {
-    let workloads = [
-        ("large_straight_line", large_straight_line(LINEAR_OPS)),
-        (
-            "many_specializations",
-            many_specializations(SPECIALIZATIONS, SPECIALIZED_BODY_OPS),
-        ),
-    ];
-    for (name, wasm) in workloads {
-        report(name, &wasm);
+fn main() -> Result<(), Box<dyn Error>> {
+    let module_with = |helper: &str, fragment_body: &str| -> Result<Vec<u8>, Box<dyn Error>> {
+        let text = format!(
+            r#"(module
+                {helper}
+                (func (export "{vs}")
+                    (param f32 f32 f32 f32)
+                    (result f32 f32 f32 f32 f32 f32)
+                    local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)
+                (func (export "{fs}")
+                    (param f32 f32)
+                    (result f32 f32 f32 f32)
+                    {fragment_body}))"#,
+            vs = symbols::VS_MAIN,
+            fs = symbols::FS_MAIN,
+        );
+        Ok(wat::parse_str(text)?)
+    };
+
+    let mut linear_body = String::new();
+    for _ in 0..LINEAR_OPS {
+        linear_body.push_str("f32.const 0 drop ");
     }
+    linear_body.push_str("f32.const 0 f32.const 0 f32.const 0 f32.const 1");
+    let linear_wasm = module_with("", &linear_body)?;
+
+    let mut helper = String::from("(func $large (param i32) (result i32) ");
+    for _ in 0..SPECIALIZED_BODY_OPS {
+        helper.push_str("local.get 0 drop ");
+    }
+    helper.push_str("local.get 0)");
+
+    let mut specialized_body = String::new();
+    for index in 0..SPECIALIZATIONS {
+        specialized_body.push_str(&format!("i32.const {index} call $large drop "));
+    }
+    specialized_body.push_str("f32.const 0 f32.const 0 f32.const 0 f32.const 1");
+    let specialized_wasm = module_with(&helper, &specialized_body)?;
+
+    for (name, wasm) in [
+        ("large_straight_line", linear_wasm),
+        ("many_specializations", specialized_wasm),
+    ] {
+        report(name, &wasm)?;
+    }
+    Ok(())
 }
 
-fn report(name: &str, wasm: &[u8]) {
+fn report(name: &str, wasm: &[u8]) -> Result<(), Box<dyn Error>> {
     for _ in 0..WARMUPS {
-        let translated = translate(wasm).expect("translate warm-up workload");
+        let translated = translate(wasm)?;
         black_box((
             translated.wgsl.len(),
             translated.vertex_spirv.len(),
@@ -48,14 +84,11 @@ fn report(name: &str, wasm: &[u8]) {
         ));
     }
 
-    let output_bytes = translate(wasm)
-        .expect("translate output-size probe")
-        .wgsl
-        .len();
+    let output_bytes = translate(wasm)?.wgsl.len();
     let mut samples = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
         let started = Instant::now();
-        let translated = translate(black_box(wasm)).expect("translate benchmark workload");
+        let translated = translate(black_box(wasm))?;
         samples.push(started.elapsed());
         black_box((
             translated.wgsl.len(),
@@ -72,46 +105,5 @@ fn report(name: &str, wasm: &[u8]) {
          Q1={q1:?}, Q3={q3:?}, n={SAMPLES}",
         wasm.len(),
     );
-}
-
-fn large_straight_line(operations: usize) -> Vec<u8> {
-    let mut body = String::new();
-    for _ in 0..operations {
-        body.push_str("f32.const 0 drop ");
-    }
-    body.push_str("f32.const 0 f32.const 0 f32.const 0 f32.const 1");
-    module_with("", &body)
-}
-
-fn many_specializations(specializations: usize, body_operations: usize) -> Vec<u8> {
-    let mut helper = String::from("(func $large (param i32) (result i32) ");
-    for _ in 0..body_operations {
-        helper.push_str("local.get 0 drop ");
-    }
-    helper.push_str("local.get 0)");
-
-    let mut body = String::new();
-    for index in 0..specializations {
-        body.push_str(&format!("i32.const {index} call $large drop "));
-    }
-    body.push_str("f32.const 0 f32.const 0 f32.const 0 f32.const 1");
-    module_with(&helper, &body)
-}
-
-fn module_with(helper: &str, fragment_body: &str) -> Vec<u8> {
-    let text = format!(
-        r#"(module
-            {helper}
-            (func (export "{vs}")
-                (param f32 f32 f32 f32)
-                (result f32 f32 f32 f32 f32 f32)
-                local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)
-            (func (export "{fs}")
-                (param f32 f32)
-                (result f32 f32 f32 f32)
-                {fragment_body}))"#,
-        vs = symbols::VS_MAIN,
-        fs = symbols::FS_MAIN,
-    );
-    wat::parse_str(text).expect("benchmark WAT")
+    Ok(())
 }

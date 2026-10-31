@@ -12,7 +12,7 @@
 use ornis_render::gpu_culling::{CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD};
 use ornis_render::renderer::PerObjectGpu;
 use ornis_wasm2gpu_testkit::cull::{
-    ACTIVE_COUNT, EXPECTED, NAN_RADIUS_SLOT, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
+    ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
 };
 use ornis_wasm2gpu_testkit::{
     device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer,
@@ -42,10 +42,12 @@ const ARGS_WORDS: usize = 5;
 /// shader" instead of a CPU re-implementation of the formula.
 #[test]
 fn cull_kernel_matches_the_production_wgsl() {
-    assert!(SPHERES[NAN_RADIUS_SLOT][3].is_nan());
+    let nan_radius_slot = SPHERES
+        .iter()
+        .position(|sphere| sphere[3].is_nan())
+        .expect("test scene has a NaN radius");
     assert_eq!(
-        EXPECTED[NAN_RADIUS_SLOT],
-        1,
+        EXPECTED[nan_radius_slot], 1,
         "a NaN radius must fail open and remain visible"
     );
     let wgsl = lowered_kernel();
@@ -62,9 +64,15 @@ fn cull_kernel_matches_the_production_wgsl() {
                 .map(|(slot, _)| slot as u32)
                 .collect();
             let (prod_visible, prod_count) = run_production(&device, &queue);
-            let nan_slot = NAN_RADIUS_SLOT as u32;
-            assert!(wasm_visible.contains(&nan_slot), "wasm2gpu NaN radius fails open");
-            assert!(prod_visible.contains(&nan_slot), "production NaN radius fails open");
+            let nan_slot = nan_radius_slot as u32;
+            assert!(
+                wasm_visible.contains(&nan_slot),
+                "wasm2gpu NaN radius fails open"
+            );
+            assert!(
+                prod_visible.contains(&nan_slot),
+                "production NaN radius fails open"
+            );
             assert_eq!(wasm_visible, expected, "wasm set vs EXPECTED");
             assert_eq!(prod_visible, expected, "production set vs EXPECTED");
             assert_eq!(prod_count as usize, expected.len(), "args count");
@@ -208,7 +216,11 @@ fn pack_prod_objects() -> Vec<u8> {
         put_f32(&mut bytes, base + RADIUS_Z_OFFSET, sphere[3]);
         put_f32(&mut bytes, base + TRANSLATION_OFFSET, sphere[0]);
         put_f32(&mut bytes, base + TRANSLATION_OFFSET + F32_BYTES, sphere[1]);
-        put_f32(&mut bytes, base + TRANSLATION_OFFSET + 2 * F32_BYTES, sphere[2]);
+        put_f32(
+            &mut bytes,
+            base + TRANSLATION_OFFSET + 2 * F32_BYTES,
+            sphere[2],
+        );
         put_f32(&mut bytes, base + TRANSLATION_OFFSET + 3 * F32_BYTES, 1.0);
         put_u32(&mut bytes, base + MATERIAL_OFFSET as u32, object as u32);
         object += 1;

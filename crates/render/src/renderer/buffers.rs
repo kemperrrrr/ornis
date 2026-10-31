@@ -725,7 +725,10 @@ mod tests {
         let previous_model_at = std::mem::offset_of!(PerObjectGpu, previous_model);
         let material_index_at = std::mem::offset_of!(PerObjectGpu, material_index);
         let motion_valid_at = std::mem::offset_of!(PerObjectGpu, motion_valid);
-        assert_eq!(std::mem::size_of::<MaterialIdx>(), std::mem::size_of::<u32>());
+        assert_eq!(
+            std::mem::size_of::<MaterialIdx>(),
+            std::mem::size_of::<u32>()
+        );
         assert_eq!(model_at, 0);
         assert_eq!(normal_matrix_at, model_at + matrix_bytes);
         assert_eq!(previous_model_at, normal_matrix_at + matrix_bytes);
