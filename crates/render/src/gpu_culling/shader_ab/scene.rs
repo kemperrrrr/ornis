@@ -92,6 +92,7 @@ pub(crate) struct Scene {
 }
 
 /// The four rows the bench times, in table order.
+#[cfg(feature = "test-util")]
 pub(crate) fn scenes() -> Vec<Scene> {
     vec![
         scene(Kind::Few),

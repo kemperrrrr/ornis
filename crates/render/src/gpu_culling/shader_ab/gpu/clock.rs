@@ -1,9 +1,9 @@
 //! Warmup, the recorded series, and the median/IQR lines.
 
-use super::super::ir::format_summary_us;
 use super::super::scene::Scene;
 use super::super::scene::kind_name;
 use super::super::scene::visible_ids;
+use super::super::stats::Summary;
 use super::super::stats::summarize;
 use super::dispatch::Sample;
 
@@ -11,6 +11,8 @@ use super::dispatch::Sample;
 pub(super) const WARMUP: u32 = 5;
 /// Recorded dispatches per shader per scene.
 pub(super) const REPEATS: u32 = 30;
+/// Nanoseconds in one microsecond. The table prints microseconds.
+const US_IN_NS: f64 = 1_000.0;
 
 pub(super) fn measure<F>(dispatch: F) -> Vec<Sample>
 where
@@ -85,6 +87,20 @@ fn ratio_text(left: f64, right: f64) -> String {
     } else {
         format!("{:.3}", left / right)
     }
+}
+
+fn format_summary_us(summary: &Summary) -> String {
+    format!(
+        "{:.3} [{:.3}–{:.3}] iqr {:.3}",
+        ns_to_us(summary.median),
+        ns_to_us(summary.q1),
+        ns_to_us(summary.q3),
+        ns_to_us(summary.iqr),
+    )
+}
+
+fn ns_to_us(ns: f64) -> f64 {
+    ns / US_IN_NS
 }
 
 fn walls(samples: &[Sample]) -> Vec<f64> {

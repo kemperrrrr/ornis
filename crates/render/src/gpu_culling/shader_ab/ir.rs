@@ -5,8 +5,6 @@
 //! Source length is reported beside them because the naga WGSL printer
 //! expands lets; the IR counts are the comparison that survives that printer.
 
-use super::stats::Summary;
-
 #[path = "walk.rs"]
 mod walk;
 
@@ -142,24 +140,6 @@ fn encoded_ops(words: &[u32]) -> u32 {
     }
     ops
 }
-
-/// One markdown row. `summary` is accepted so the bench printer and this
-/// walker share the quartile type without a second formatter owning it.
-pub(crate) fn format_summary_us(summary: &Summary) -> String {
-    format!(
-        "{:.3} [{:.3}–{:.3}] iqr {:.3}",
-        ns_to_us(summary.median),
-        ns_to_us(summary.q1),
-        ns_to_us(summary.q3),
-        ns_to_us(summary.iqr),
-    )
-}
-
-fn ns_to_us(ns: f64) -> f64 {
-    ns / US_IN_NS
-}
-
-const US_IN_NS: f64 = 1_000.0;
 
 #[cfg(test)]
 mod tests {

@@ -22,7 +22,8 @@ fn slab_keeps_the_same_band_on_the_short_and_long_line() {
     assert_eq!(many.spheres.len(), MANY as usize);
     assert_eq!(visible_ids(&few).len(), 64);
     assert_eq!(visible_ids(&many).len(), 64);
-    assert_eq!(kind_name(Kind::Few), "few");
+    assert_eq!(kind_name(few.kind), "few");
+    assert_eq!(kind_name(many.kind), "many");
 }
 
 #[test]
@@ -31,7 +32,8 @@ fn worst_rows_are_all_visible_or_fully_rejected() {
     let late = scene(Kind::WorstLate);
     assert_eq!(visible_ids(&all).len(), all.spheres.len());
     assert!(visible_ids(&late).is_empty());
-    assert_eq!(kind_name(Kind::WorstLate), "worst_late_reject");
+    assert_eq!(kind_name(all.kind), "worst_all_visible");
+    assert_eq!(kind_name(late.kind), "worst_late_reject");
 }
 
 #[test]
