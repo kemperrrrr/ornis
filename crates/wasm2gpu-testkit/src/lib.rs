@@ -6,6 +6,10 @@
 //! edge: the kit lives in `foundation`, `render` (domain) may depend on
 //! it, and the `foundation` tests keep their harness without reaching
 //! upward into `render`.
+//!
+//! Building the guest deliberately calls Cargo for the shader package rather
+//! than adding a Cargo dependency (which would cycle through its dev-dependency
+//! on this kit); that nested build honors `CARGO_TARGET_DIR` and uses `--locked`.
 
 use std::process::Command;
 
@@ -18,7 +22,9 @@ pub mod cull;
 
 /// Build the guest crate (`ornis-wasm2gpu-shader`) for
 /// `wasm32-unknown-unknown` — release, size-optimized, no unwind — and
-/// return the `.wasm` bytes.
+/// return the `.wasm` bytes. This is a nested Cargo invocation rather than a
+/// package dependency to keep the shader's dev-dependency on this kit acyclic;
+/// it passes `--locked` and uses the outer `CARGO_TARGET_DIR` when present.
 // qual:allow(complexity, error_handling) reason: "A failed guest build fails the integration test."
 pub fn compile_wasm() -> Vec<u8> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -27,7 +33,15 @@ pub fn compile_wasm() -> Vec<u8> {
         .parent()
         .and_then(|path| path.parent())
         .expect("workspace");
-    let target_dir = workspace.join("target").join("wasm2gpu-e2e");
+    let target_root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| workspace.join("target"));
+    let target_root = if target_root.is_absolute() {
+        target_root
+    } else {
+        workspace.join(target_root)
+    };
+    let target_dir = target_root.join("wasm2gpu-e2e");
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace)
         .args([
@@ -37,6 +51,7 @@ pub fn compile_wasm() -> Vec<u8> {
             "--release",
             "--target",
             "wasm32-unknown-unknown",
+            "--locked",
             "--target-dir",
         ])
         .arg(&target_dir)
