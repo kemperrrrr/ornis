@@ -11,8 +11,8 @@
 //! both GPU times from the CI log.
 
 use ornis_wasm2gpu_testkit::cull::{
-    ACTIVE_COUNT, EXPECTED, LANES, PLANES, RUNS, SENTINEL, SLOTS, SPHERES, WORKGROUPS,
-    lowered_kernel, run,
+    ACTIVE_COUNT, EXPECTED, LANES, NAN_RADIUS_SLOT, PLANES, RUNS, SENTINEL, SLOTS, SPHERES,
+    WORKGROUPS, lowered_kernel, run,
 };
 use ornis_wasm2gpu_testkit::device;
 
@@ -80,6 +80,12 @@ fn derived_flags() -> [u32; SLOTS] {
 #[test]
 fn cull_kernel_matches_the_hand_twin() {
     assert_eq!(LANES * WORKGROUPS as usize, SPHERES.len());
+    assert!(SPHERES[NAN_RADIUS_SLOT][3].is_nan());
+    assert_eq!(
+        EXPECTED[NAN_RADIUS_SLOT],
+        1,
+        "a NaN radius must be explicitly fail-open"
+    );
     let wgsl = lowered_kernel();
     let derived = derived_flags();
     assert_eq!(EXPECTED, derived, "production-formula cross-check");

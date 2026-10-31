@@ -399,8 +399,8 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
 /// args as `array<atomic<u32>, 5>` (read-write; the CPU pre-writes every
 /// word but `instance_count` and zeroes it). `PerObject` repeats
 /// the [`crate::renderer::PerObjectGpu`] layout (three `mat4x4`, two `u32`
-/// fields and two pad words = 208 bytes) so the existing vertex stages index
-/// the compacted buffer unchanged.
+/// fields, and two pad words) so the existing vertex stages index the
+/// compacted buffer unchanged.
 pub const CULL_COMPUTE_WGSL: &str = r#"
 struct CullParams {
     planes: array<vec4<f32>, 6>,
@@ -434,6 +434,12 @@ fn instance_sphere(model: mat4x4<f32>) -> vec4<f32> {
 }
 
 fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
+    // Match Frustum::sphere_visible: NaN and negative radii fail open.
+    // `NaN >= 0.0` is false, so this is explicit rather than relying on
+    // the later plane comparison to happen to reject nothing.
+    if (!(radius >= 0.0)) {
+        return true;
+    }
     for (var i = 0u; i < 6u; i++) {
         let plane = params.planes[i];
         if (dot(plane.xyz, center) + plane.w < -radius) {
@@ -705,10 +711,50 @@ mod tests {
         assert_eq!(cull_workgroup_count(CULL_WORKGROUP_SIZE + 1), 2);
     }
 
+    fn assert_per_object_shader_layout(module: &naga::Module) {
+        let Some((_, ty)) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("PerObject"))
+        else {
+            panic!("cull shader must declare PerObject");
+        };
+        let naga::TypeInner::Struct { members, span } = &ty.inner else {
+            panic!("cull shader PerObject must be a struct");
+        };
+        let motion_valid_at = std::mem::offset_of!(PerObjectGpu, motion_valid);
+        let padding_at = motion_valid_at + std::mem::size_of::<u32>();
+        let expected = [
+            ("model", std::mem::offset_of!(PerObjectGpu, model)),
+            (
+                "normal_matrix",
+                std::mem::offset_of!(PerObjectGpu, normal_matrix),
+            ),
+            (
+                "previous_model",
+                std::mem::offset_of!(PerObjectGpu, previous_model),
+            ),
+            (
+                "material_index",
+                std::mem::offset_of!(PerObjectGpu, material_index),
+            ),
+            ("motion_valid", motion_valid_at),
+            ("pad0", padding_at),
+            ("pad1", padding_at + std::mem::size_of::<u32>()),
+        ];
+        assert_eq!(*span as usize, std::mem::size_of::<PerObjectGpu>());
+        assert_eq!(members.len(), expected.len());
+        for (member, (name, offset)) in members.iter().zip(expected) {
+            assert_eq!(member.name.as_deref(), Some(name));
+            assert_eq!(member.offset as usize, offset);
+        }
+    }
+
     #[test]
     fn compute_shader_validates_with_naga() {
         let module = naga::front::wgsl::parse_str(CULL_COMPUTE_WGSL)
             .expect("cull compute shader must parse");
+        assert_per_object_shader_layout(&module);
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -878,12 +924,6 @@ mod tests {
         let Some((device, queue)) = try_device() else {
             return;
         };
-        // The shader `PerObject` is the 208-byte `PerObjectGpu` layout
-        // (three `mat4x4` + material `u32` + motion `u32` + 2 pad words).
-        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 208);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, previous_model), 128);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 192);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, motion_valid), 196);
         let (mut instances, view_proj, expected) = cull_test_scene();
         // Workgroup 0 covers indices `0..CULL_WORKGROUP_SIZE`, so three
         // spheres straddling that boundary put the visible set across two

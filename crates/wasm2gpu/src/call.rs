@@ -48,6 +48,7 @@ pub(super) fn call_defined(em: &mut Emit<'_, '_>, index: u32) -> Result<(), Tran
         imports: em.imports,
         structs: em.structs,
         funcs: em.funcs,
+        prepared: em.prepared,
     };
     let spec = ensure(em.cx, &code, func_index, &baked)?;
     invoke::invoke(em, &spec, &args)

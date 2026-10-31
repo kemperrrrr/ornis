@@ -1,6 +1,8 @@
 //! Toy IR to a naga module: vertex and fragment entries, plus `cs_main`
 //! when that export exists.
 
+use std::sync::OnceLock;
+
 use naga::BuiltIn;
 use naga::Function;
 use naga::FunctionArgument;
@@ -33,6 +35,8 @@ use ornis_gpu_abi::symbols;
 
 /// Lower `module` to naga IR. Group and binding come from `i32.const` operands.
 pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
+    let prepared: Vec<OnceLock<flow::Prepared>> =
+        module.funcs.iter().map(|_| OnceLock::new()).collect();
     let mut out = naga::Module::default();
     let scalar = scalar_ty(&mut out, ScalarKind::Float);
     let uint = scalar_ty(&mut out, ScalarKind::Uint);
@@ -60,8 +64,8 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
     };
     let vertex = stage(symbols::VS_MAIN, VS_PARAMS, VS_RESULTS, true);
     let fragment = stage(symbols::FS_MAIN, FS_PARAMS, FS_RESULTS, false);
-    let vs = shader(&mut cx, module, &vertex, None)?;
-    let fs = shader(&mut cx, module, &fragment, None)?;
+    let vs = shader(&mut cx, module, &prepared, &vertex, None)?;
+    let fs = shader(&mut cx, module, &prepared, &fragment, None)?;
     cx.module
         .entry_points
         .push(entry(symbols::VS_MAIN, ShaderStage::Vertex, [0, 0, 0], vs));
@@ -73,7 +77,7 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
     ));
     if let Some(index) = find_index(module, symbols::CS_MAIN) {
         let compute = stage(symbols::CS_MAIN, 1, 0, false);
-        let cs = shader(&mut cx, module, &compute, Some(index))?;
+        let cs = shader(&mut cx, module, &prepared, &compute, Some(index))?;
         cx.module.entry_points.push(entry(
             symbols::CS_MAIN,
             ShaderStage::Compute,
@@ -126,6 +130,7 @@ fn vector_ty(module: &mut naga::Module, size: VectorSize) -> naga::Handle<Type> 
 fn shader(
     cx: &mut Cx<'_>,
     module: &Module,
+    prepared: &[OnceLock<flow::Prepared>],
     stage: &Stage,
     compute: Option<u32>,
 ) -> Result<Function, TranslateError> {
@@ -163,6 +168,7 @@ fn shader(
         imports: &module.imports,
         structs: &module.structs,
         funcs: &module.funcs,
+        prepared,
     };
     let stack = flow::exec(
         cx,

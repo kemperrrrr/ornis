@@ -717,23 +717,45 @@ mod tests {
             "{}",
             GbufferFragmentInput::WGSL_SOURCE
         );
-        // The expanded record has an explicit 208-byte storage stride;
-        // assert the CPU offsets against the generated WGSL declaration.
-        assert_eq!(std::mem::size_of::<MaterialIdx>(), 4);
-        assert_eq!(std::mem::size_of::<PerObjectGpu>(), 208);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, previous_model), 128);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, material_index), 192);
-        assert_eq!(std::mem::offset_of!(PerObjectGpu, motion_valid), 196);
+        // Assert the CPU layout from its field types, then compare it with
+        // the generated WGSL declaration rather than pinning byte offsets.
+        let matrix_bytes = std::mem::size_of::<[[f32; 4]; 4]>();
+        let model_at = std::mem::offset_of!(PerObjectGpu, model);
+        let normal_matrix_at = std::mem::offset_of!(PerObjectGpu, normal_matrix);
+        let previous_model_at = std::mem::offset_of!(PerObjectGpu, previous_model);
+        let material_index_at = std::mem::offset_of!(PerObjectGpu, material_index);
+        let motion_valid_at = std::mem::offset_of!(PerObjectGpu, motion_valid);
+        assert_eq!(std::mem::size_of::<MaterialIdx>(), std::mem::size_of::<u32>());
+        assert_eq!(model_at, 0);
+        assert_eq!(normal_matrix_at, model_at + matrix_bytes);
+        assert_eq!(previous_model_at, normal_matrix_at + matrix_bytes);
+        assert_eq!(material_index_at, previous_model_at + matrix_bytes);
+        assert_eq!(
+            motion_valid_at,
+            material_index_at + std::mem::size_of::<MaterialIdx>()
+        );
+        assert_eq!(
+            std::mem::size_of::<PerObjectGpu>(),
+            motion_valid_at + std::mem::size_of::<u32>() + std::mem::size_of::<[u32; 2]>()
+        );
+
         // The derived declaration validates with naga.
         let mut module = naga::Module::default();
         let handle = PerObjectGpu::naga_add_type(&mut module);
         let naga::TypeInner::Struct { members, span } = &module.types[handle].inner else {
             panic!("PerObjectGpu must lower to a naga struct");
         };
-        assert_eq!(*span, 208);
-        assert_eq!(members[2].offset, 128);
-        assert_eq!(members[3].offset, 192);
-        assert_eq!(members[4].offset, 196);
+        assert_eq!(*span as usize, std::mem::size_of::<PerObjectGpu>());
+        assert_eq!(members.len(), PerObjectGpu::FIELD_NAMES.len());
+        for (member, expected) in members.iter().zip([
+            model_at,
+            normal_matrix_at,
+            previous_model_at,
+            material_index_at,
+            motion_valid_at,
+        ]) {
+            assert_eq!(member.offset as usize, expected);
+        }
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),

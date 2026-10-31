@@ -37,17 +37,21 @@ pub(super) const OBJECT_BYTES: usize = std::mem::size_of::<crate::renderer::PerO
 /// `material_index` byte offset inside that record.
 pub(super) const MATERIAL_AT: usize =
     std::mem::offset_of!(crate::renderer::PerObjectGpu, material_index);
+/// Byte offset of the model matrix in the object record.
+const MODEL_AT: usize = std::mem::offset_of!(crate::renderer::PerObjectGpu, model);
+/// Bytes in one model-matrix column.
+const MODEL_COLUMN_BYTES: usize = std::mem::size_of::<[f32; 4]>();
 /// Column 0, lane x: radius for `length(model[0].xyz)`.
-const COL0_X: usize = 0;
+const COL0_X: usize = MODEL_AT;
 /// Column 1, lane y: radius for `length(model[1].xyz)`.
-const COL1_Y: usize = 20;
+const COL1_Y: usize = MODEL_AT + MODEL_COLUMN_BYTES + F32_BYTES;
 /// Column 2, lane z: radius for `length(model[2].xyz)`.
-const COL2_Z: usize = 40;
+const COL2_Z: usize = MODEL_AT + 2 * MODEL_COLUMN_BYTES + 2 * F32_BYTES;
 /// Translation column of the model matrix.
-const COL3_X: usize = 48;
-const COL3_Y: usize = 52;
-const COL3_Z: usize = 56;
-const COL3_W: usize = 60;
+const COL3_X: usize = MODEL_AT + 3 * MODEL_COLUMN_BYTES;
+const COL3_Y: usize = COL3_X + F32_BYTES;
+const COL3_Z: usize = COL3_Y + F32_BYTES;
+const COL3_W: usize = COL3_Z + F32_BYTES;
 /// Guest sphere record: four tightly packed lanes.
 const SPHERE_BYTES: usize = F32_BYTES * 4;
 /// Guest uniform stride: one component per 16-byte slot.

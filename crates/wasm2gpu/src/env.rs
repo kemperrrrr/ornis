@@ -42,6 +42,7 @@ pub(super) struct Emit<'a, 'b> {
     pub(super) imports: &'b [Import],
     pub(super) structs: &'b [StructDef],
     pub(super) funcs: &'b [crate::ir::Func],
+    pub(super) prepared: &'b [std::sync::OnceLock<crate::flow::Prepared>],
     pub(super) locals: Vec<Option<naga::Handle<naga::LocalVariable>>>,
     /// Kind, expression state, and pending value of every wasm local.
     pub(super) wasm_locals: Locals,
@@ -73,6 +74,8 @@ pub(super) struct Code<'a> {
     pub structs: &'a [StructDef],
     /// Defined functions. Index 0 is the first function after the imports.
     pub funcs: &'a [crate::ir::Func],
+    /// Lazily prepared canonical bodies, shared across specializations.
+    pub prepared: &'a [std::sync::OnceLock<crate::flow::Prepared>],
 }
 
 /// How [`crate::flow::exec`] binds one function.

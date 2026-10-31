@@ -757,6 +757,17 @@ mod tests {
     }
 
     #[test]
+    fn frustum_sphere_visibility_fails_open_for_nan_radius() {
+        let orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
+        let (view_proj, _) = camera_view_projection(&orbit.view_parameters(), (320, 180));
+        let frustum = Frustum::from_view_proj(&view_proj);
+        assert!(
+            frustum.sphere_visible(Vec3::new(10.0, 0.0, 0.0), f32::NAN),
+            "a non-finite radius must never falsely cull"
+        );
+    }
+
+    #[test]
     fn orthographic_wheel_zooms_half_height_not_radius() {
         let mut orbit = OrbitCamera::from_desc(&ortho_camera(Meters::new(2.0)));
         let before = orbit.view_parameters();
