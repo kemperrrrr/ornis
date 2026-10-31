@@ -1,10 +1,9 @@
 // Showcase demo scene: floor + wall + tower + rolling ball.
 //
-// All entities are spheres (scaled via TransformDesc scale for floor/wall
-// slabs). Native showcase physics currently accepts only unit-scale entities;
-// scaled slabs are reported at startup and stay render-only. The first entity
-// is the dynamic rolling ball; other physics bodies are static. A hidden static
-// floor tops at y = -1.0, matching the visual floor top.
+// Floor, Wall and Tower Base bake their dimensions into Box/Cylinder meshes
+// and keep unit scale, so their analytic physics bodies match the rendered
+// geometry. The first entity is the dynamic rolling ball; other physics bodies
+// are static. A hidden static floor tops at y = -1.0, matching the visual floor.
 
 Scene(
     name: "demo_showcase",
@@ -23,15 +22,15 @@ Scene(
                 roughness: 0.25,
             ),
         ),
-        // Floor slab: flattened sphere, top at y = -1.0 (hidden floor top).
+        // Floor slab: top at y = -1.0 (hidden floor top).
         (
             name: "Floor",
             transform: (
                 translation: (0.0, -1.5, 0.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (12.0, 0.5, 12.0),
+                scale: (1.0, 1.0, 1.0),
             ),
-            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            mesh: Box(size: (24.0, 1.0, 24.0)),
             material: Dielectric(
                 base_color: (0.5, 0.5, 0.55),
                 roughness: 0.9,
@@ -43,9 +42,9 @@ Scene(
             transform: (
                 translation: (0.0, 1.0, -6.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (12.0, 4.0, 0.5),
+                scale: (1.0, 1.0, 1.0),
             ),
-            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            mesh: Box(size: (24.0, 8.0, 1.0)),
             material: Dielectric(
                 base_color: (0.6, 0.6, 0.65),
                 roughness: 0.8,
@@ -57,9 +56,9 @@ Scene(
             transform: (
                 translation: (3.0, -0.5, 1.0),
                 rotation: (0.0, 0.0, 0.0, 1.0),
-                scale: (1.5, 1.0, 1.5),
+                scale: (1.0, 1.0, 1.0),
             ),
-            mesh: Sphere(radius: 1.0, segments: 32, rings: 24),
+            mesh: Cylinder(radius: 1.5, height: 2.0, radial_segments: 32),
             material: Dielectric(
                 base_color: (0.8, 0.2, 0.2),
                 roughness: 0.5,

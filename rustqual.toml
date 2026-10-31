@@ -109,7 +109,7 @@ paths = [
     "crates/editor-backend/**",
     "crates/wasm/**",
     "src/main.rs",
-    "src/tests.rs",
+    "src/showcase_physics.rs",
     "xtask/**",
     "fuzz/fuzz_targets/**",
 ]

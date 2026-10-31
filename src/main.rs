@@ -8,13 +8,14 @@ use crossbeam_channel::unbounded;
 #[cfg(feature = "editor-only")]
 use editor_backend::RemoteEditor;
 #[cfg(not(feature = "editor-only"))]
+mod showcase_physics;
+
+#[cfg(not(feature = "editor-only"))]
 use glam::Vec3;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::physics_runtime::install_physics;
 #[cfg(not(feature = "editor-only"))]
 use ornis_app::{GameWorld, install_gameplay_physics_bridge, install_object_animation};
-#[cfg(not(feature = "editor-only"))]
-use ornis_assets::collider::ColliderDesc;
 #[cfg(not(feature = "editor-only"))]
 use ornis_assets::scene::Scene;
 #[cfg(not(feature = "editor-only"))]
@@ -22,13 +23,11 @@ use ornis_audio::AudioPlugin;
 #[cfg(not(feature = "editor-only"))]
 use ornis_audio::bridge::install_gameplay_audio_bridge;
 #[cfg(not(feature = "editor-only"))]
-use ornis_core::{Engine, Entity};
-#[cfg(not(feature = "editor-only"))]
 use ornis_gameplay::install_gameplay;
 #[cfg(not(feature = "editor-only"))]
-use ornis_physics::RigidBody;
-#[cfg(not(feature = "editor-only"))]
 use ornis_render::OrbitCamera;
+#[cfg(not(feature = "editor-only"))]
+use showcase_physics::{install_scene_bodies, spawn_showcase_floor};
 
 #[cfg(feature = "editor-only")]
 use ornis_runner::EDITOR_HTTP_PORT;
@@ -81,7 +80,7 @@ fn main() {
 // FULL ENGINE WITH A NATIVE WINDOW (default mode)
 // ═══════════════════════════════════════════════════════════════════════════
 // Run with: cargo run
-// winit window, wgpu rendering, a 3D scene of spheres (OpenPBR).
+// winit window, wgpu rendering and the OpenPBR showcase scene.
 // Animation demo: `cargo run --example anim` (starter character via
 // [`ornis::run`], not a binary flag).
 // The browser editor server is opt-in here: `cargo run -- --remote-editor`
@@ -90,8 +89,8 @@ fn main() {
 // lives in the browser (see editor-only mode / cargo xtask editor).
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Spheres showcase world: RON scene plus physics bodies, audio and
-/// object animation. `ornis::run` owns the window; content builders
+/// Showcase world: RON scene plus physics bodies, audio and object
+/// animation. `ornis::run` owns the window; content builders
 /// like this one stay here.
 #[cfg(not(feature = "editor-only"))]
 fn showcase_engine() -> GameWorld {
@@ -123,123 +122,7 @@ fn showcase_engine() -> GameWorld {
     runtime
 }
 
-/// Builds one physics body per scene entity through the shared collider
-/// projection ([`ornis_physics::colliders::body_for`]).
-///
-/// An explicit [`ColliderDesc`] lane entry wins over the exact auto recipe;
-/// otherwise sphere/box/cylinder meshes get their analytic collider. Plane,
-/// quad and custom meshes without an explicit recipe stay body-less. Non-unit
-/// scale is rejected until the shared projection supports it. Every skip is
-/// logged once and its entity name is returned.
-/// The first scene entity is dynamic (mass `1`) unless its recipe is static-only;
-/// the rest are static.
-#[cfg(not(feature = "editor-only"))]
-fn install_scene_bodies(runtime: &mut GameWorld, scene: &Scene) -> Vec<String> {
-    let entities = runtime.entities().to_vec();
-    let Some(store) = runtime.engine_mut().world_mut().store_mut() else {
-        return Vec::new();
-    };
-    let mut without_body = Vec::new();
-    for (index, entity) in entities.into_iter().enumerate() {
-        let Some(description) = scene.entities.get(index) else {
-            continue;
-        };
-        if description.transform.scale != Vec3::ONE {
-            eprintln!(
-                "showcase entity {:?} has non-unit scale {:?}; no physics body created",
-                description.name, description.transform.scale
-            );
-            without_body.push(description.name.clone());
-            continue;
-        }
-        let collider = store
-            .read_lane::<ColliderDesc>()
-            .and_then(|lane| lane.get(entity).cloned());
-        let mass =
-            if index == 0 && !matches!(collider.as_ref(), Some(ColliderDesc::HalfSpace { .. })) {
-                1.0
-            } else {
-                0.0
-            };
-        match ornis_physics::colliders::body_for(
-            &description.transform,
-            &description.mesh,
-            collider.as_ref(),
-            mass,
-        ) {
-            Ok(Some(body)) => {
-                store.insert(entity, body);
-            }
-            Ok(None) => {
-                eprintln!(
-                    "showcase entity {:?} has no collider recipe; no physics body created",
-                    description.name
-                );
-                without_body.push(description.name.clone());
-            }
-            Err(error) => {
-                eprintln!(
-                    "showcase entity {:?} collider recipe failed: {error}; no physics body created",
-                    description.name
-                );
-                without_body.push(description.name.clone());
-            }
-        }
-    }
-    without_body
-}
-
-/// Centre of the hidden showcase static floor in world units.
-#[cfg(not(feature = "editor-only"))]
-const SHOWCASE_FLOOR_CENTER: [f32; 3] = [0.0, -2.0, 0.0];
-/// Half-extents of the hidden showcase static floor in world units.
-#[cfg(not(feature = "editor-only"))]
-const SHOWCASE_FLOOR_HALF_EXTENTS: [f32; 3] = [20.0, 1.0, 20.0];
-
-/// The showcase world has no component store, so the floor cannot be placed.
-#[cfg(not(feature = "editor-only"))]
-#[derive(Debug)]
-struct ShowcaseFloorError;
-
-#[cfg(not(feature = "editor-only"))]
-impl std::fmt::Display for ShowcaseFloorError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("showcase world has no component store")
-    }
-}
-
-#[cfg(not(feature = "editor-only"))]
-impl std::error::Error for ShowcaseFloorError {}
-
-/// Spawns the hidden showcase static floor.
-///
-/// The floor carries only a physics component, so it never enters the frame
-/// upload; it exists so dynamic showcase bodies have ground to rest on.
-///
-/// # Errors
-///
-/// [`ShowcaseFloorError`] when the world has no component store.
-#[cfg(not(feature = "editor-only"))]
-fn spawn_showcase_floor(engine: &mut Engine) -> Result<Entity, ShowcaseFloorError> {
-    let Some(store) = engine.world_mut().store_mut() else {
-        return Err(ShowcaseFloorError);
-    };
-    let floor = store.create_entity();
-    store.insert(
-        floor,
-        RigidBody::new_box(
-            Vec3::from_array(SHOWCASE_FLOOR_CENTER),
-            Vec3::from_array(SHOWCASE_FLOOR_HALF_EXTENTS),
-            0.0,
-        ),
-    );
-    Ok(floor)
-}
-
 #[cfg(not(feature = "editor-only"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     ornis::run(showcase_engine())
 }
-
-#[cfg(all(test, not(feature = "editor-only")))]
-mod tests;
