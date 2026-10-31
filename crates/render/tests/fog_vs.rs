@@ -14,10 +14,10 @@
 
 use std::borrow::Cow;
 
-use ornis_gpu_abi::symbols;
+use wasm2gpu_testkit::symbols;
 
-use super::compute_lift::lowered_kernel;
-use super::{device, map_bytes, storage_buffer};
+use wasm2gpu_testkit::compute_lift::lowered_kernel;
+use wasm2gpu_testkit::{device, entry, map_bytes, storage_buffer};
 
 /// Side of the drawn quad in pixels: one fragment per texel of capture.
 const SIZE: u32 = 8;
@@ -184,7 +184,7 @@ fn bind_group_for(
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
-        entries: &[super::entry(0, buffer)],
+        entries: &[entry(0, buffer)],
     })
 }
 
@@ -393,6 +393,7 @@ fn encode_and_submit(
 
 #[test]
 fn fog_vertex_kernel_matches_the_production_stage() {
+    assert_eq!(SIZE, 8, "CAPTURE's pixel index hardcodes `* 8u` for the SIZE grid");
     let Some((device, queue)) = device() else {
         if std::env::var_os("ORNIS_REQUIRE_GPU").is_none() {
             eprintln!("no adapter; skipping (set ORNIS_REQUIRE_GPU to fail instead)");

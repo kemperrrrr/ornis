@@ -2893,6 +2893,9 @@ dependencies = [
 [[package]]
 name = "ornis-gpu-abi"
 version = "0.1.0"
+dependencies = [
+ "trybuild",
+]
 
 [[package]]
 name = "ornis-input"
@@ -2975,6 +2978,7 @@ dependencies = [
  "ornis-schedule",
  "ornis-shader-lang",
  "ornis-texture",
+ "ornis-wasm2gpu-testkit",
  "png",
  "pollster",
  "proptest",
@@ -3076,6 +3080,19 @@ version = "0.1.0"
 dependencies = [
  "ornis-gpu-abi",
  "ornis-wasm2gpu",
+ "ornis-wasm2gpu-testkit",
+ "wasmparser",
+ "wat",
+ "wgpu",
+]
+
+[[package]]
+name = "ornis-wasm2gpu-testkit"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-abi",
+ "ornis-wasm2gpu",
+ "ornis-wasm2gpu-shader",
  "pollster",
  "wasmparser",
  "wat",

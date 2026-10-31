@@ -280,13 +280,13 @@ const VS_U_LANE: u32 = 4;
 
 /// Wasm vertex export: the fog fullscreen-quad vertex stage.
 ///
-/// The corner and uv values mirror `ornis_render`'s
-/// `shaders::{STANDARD_QUAD, STANDARD_UVS}` — shared INPUTS, not the
-/// formula under test: the production `vs_main` reads the same tables
-/// from its const block, and the gpu e2e test lifts this export and
-/// compares it against that production stage running verbatim. The
-/// selection stays in scalar locals: a local array would spill to the
-/// shadow stack, and the stack-pointer `GlobalGet { global_index: 0 }`
+/// The corner and uv values REPEAT `ornis_render`'s
+/// `shaders::{STANDARD_QUAD, STANDARD_UVS}` — derived from the vertex id
+/// by parity, not read from the tables — and the gpu e2e test lifts this
+/// export and compares it against the production `vs_main` running
+/// verbatim, so a table change in render lands as a bitwise mismatch.
+/// The selection stays in scalar locals: a local array would spill to
+/// the shadow stack, and the stack-pointer `GlobalGet { global_index: 0 }`
 /// would re-enter the lifted graph — the translator refuses that op
 /// (§7.7 of `docs/rendering/wasm-segmented-memory.md`). The output
 /// layout keeps the 32-byte stride of the WGSL storage struct

@@ -14,7 +14,9 @@ use wasmparser::Payload;
 use wasmparser::TypeRef;
 use wasmparser::ValType;
 
-pub(super) fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
+/// Lift `export` into a standalone binary module (no memory section,
+/// no globals) that the translator accepts.
+pub fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
     let wat = lift_wat(wasm, export);
     wat::parse_str(&wat).unwrap_or_else(|err| panic!("compute wat: {err}\n{wat}"))
 }
@@ -23,8 +25,8 @@ pub(super) fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
 /// lowered kernel must keep: the compute entry, the id builtin, the
 /// named storage binding, and a non-empty SPIR-V twin. Shared by the
 /// `cull` A/B and the fog vertex A/B so the sequence exists once.
-pub(super) fn lowered_kernel(export: &str, storage_binding: &str) -> String {
-    let wasm = super::compile_wasm();
+pub fn lowered_kernel(export: &str, storage_binding: &str) -> String {
+    let wasm = crate::compile_wasm();
     let wat = lift_wat(&wasm, export);
     let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("{export} wat: {err}\n{wat}"));
     let lowered = match translate(&module) {
@@ -41,7 +43,7 @@ pub(super) fn lowered_kernel(export: &str, storage_binding: &str) -> String {
 
 /// The toy-module text `lift` parses: exposed so a translate failure can
 /// print exactly what the translator saw.
-pub(super) fn lift_wat(wasm: &[u8], export: &str) -> String {
+pub fn lift_wat(wasm: &[u8], export: &str) -> String {
     let module = read(wasm, export);
     wrap(&module)
 }

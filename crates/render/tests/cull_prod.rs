@@ -1,6 +1,6 @@
 //! A/B the lowered `cull` kernel against the shipped production WGSL.
 //!
-//! `CULL_COMPUTE_WGSL` (`render/src/gpu_culling.rs`) compacts
+//! [`CULL_COMPUTE_WGSL`] (`render/src/gpu_culling.rs`) compacts
 //! `PerObject` copies through `atomicAdd` and a `count` guard. This test
 //! feeds it the same frustum and the same eight spheres the wasm2gpu
 //! kernel reads — encoded as model matrices, so `instance_sphere` reads
@@ -9,22 +9,18 @@
 //! order is scheduler-dependent, so the contract is a sorted set of
 //! `material_index` values plus the atomic count, not byte order.
 
-use super::cull::ACTIVE_COUNT;
-use super::cull::EXPECTED;
-use super::cull::PLANES;
-use super::cull::SPHERES;
-use super::cull::buffer_entry;
-use super::cull::lowered_kernel;
-use super::cull::run;
+use wasm2gpu_testkit::cull::ACTIVE_COUNT;
+use wasm2gpu_testkit::cull::EXPECTED;
+use wasm2gpu_testkit::cull::PLANES;
+use wasm2gpu_testkit::cull::SPHERES;
+use wasm2gpu_testkit::cull::buffer_entry;
+use wasm2gpu_testkit::cull::lowered_kernel;
+use wasm2gpu_testkit::cull::run;
+use wasm2gpu_testkit::{device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer};
 
-/// The shipped cull kernel WGSL, bound by full path: this
-/// foundation-layer test may not `use` items from `render` (the layer
-/// gate flags the import edge), and the A/B needs the production shader.
-const CULL_COMPUTE_WGSL: &str = ornis_render::gpu_culling::CULL_COMPUTE_WGSL;
-/// Its params size, likewise bound by path instead of `use`.
-const CULL_PARAMS_BYTE_SIZE: u64 = ornis_render::gpu_culling::CULL_PARAMS_BYTE_SIZE;
-/// Word index of the atomic count inside the production `args` buffer.
-const INSTANCE_COUNT_WORD: usize = ornis_render::gpu_culling::INSTANCE_COUNT_WORD;
+use ornis_render::gpu_culling::CULL_COMPUTE_WGSL;
+use ornis_render::gpu_culling::CULL_PARAMS_BYTE_SIZE;
+use ornis_render::gpu_culling::INSTANCE_COUNT_WORD;
 
 /// Bytes one `PerObject` occupies in the production buffers: three
 /// `mat4x4` (192) plus `material_index`, `motion_valid`, and two pads.
@@ -43,7 +39,7 @@ fn cull_kernel_matches_the_production_wgsl() {
     let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
         .filter(|slot| EXPECTED[*slot as usize] == 1)
         .collect();
-    match super::device() {
+    match device() {
         Some((device, queue)) => {
             let (flags, _) = run(&device, &queue, &wgsl);
             let wasm_visible: Vec<u32> = flags
@@ -87,28 +83,28 @@ fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32)
         cache: None,
     });
     let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
-    let params = super::gpu_buffer(device, "prod-cull-params", CULL_PARAMS_BYTE_SIZE, uniform);
-    let src = super::storage_buffer(
+    let params = gpu_buffer(device, "prod-cull-params", CULL_PARAMS_BYTE_SIZE, uniform);
+    let src = storage_buffer(
         device,
         "prod-cull-src",
         (SPHERES.len() * OBJECT_BYTES) as u64,
     );
-    let dst = super::storage_buffer(
+    let dst = storage_buffer(
         device,
         "prod-cull-dst",
         (ACTIVE_COUNT * OBJECT_BYTES) as u64,
     );
-    let args = super::storage_buffer(device, "prod-cull-args", (ARGS_WORDS * 4) as u64);
+    let args = storage_buffer(device, "prod-cull-args", (ARGS_WORDS * 4) as u64);
     queue.write_buffer(&params, 0, &pack_prod_params());
     queue.write_buffer(&src, 0, &pack_prod_objects());
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("production cull"),
         layout: &bgl,
         entries: &[
-            super::entry(0, &params),
-            super::entry(1, &src),
-            super::entry(2, &dst),
-            super::entry(3, &args),
+            entry(0, &params),
+            entry(1, &src),
+            entry(2, &dst),
+            entry(3, &args),
         ],
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -172,12 +168,12 @@ fn pack_prod_params() -> Vec<u8> {
         let base = plane as u32 * 16;
         let mut lane = 0u32;
         while lane < 4 {
-            super::put_f32(&mut bytes, base + lane * 4, PLANES[plane][lane as usize]);
+            put_f32(&mut bytes, base + lane * 4, PLANES[plane][lane as usize]);
             lane += 1;
         }
         plane += 1;
     }
-    super::put_u32(&mut bytes, (PLANES.len() * 16) as u32, ACTIVE_COUNT as u32);
+    put_u32(&mut bytes, (PLANES.len() * 16) as u32, ACTIVE_COUNT as u32);
     bytes
 }
 
@@ -191,14 +187,14 @@ fn pack_prod_objects() -> Vec<u8> {
     while object < SPHERES.len() {
         let sphere = SPHERES[object];
         let base = (object * OBJECT_BYTES) as u32;
-        super::put_f32(&mut bytes, base, sphere[3]);
-        super::put_f32(&mut bytes, base + 20, sphere[3]);
-        super::put_f32(&mut bytes, base + 40, sphere[3]);
-        super::put_f32(&mut bytes, base + 48, sphere[0]);
-        super::put_f32(&mut bytes, base + 52, sphere[1]);
-        super::put_f32(&mut bytes, base + 56, sphere[2]);
-        super::put_f32(&mut bytes, base + 60, 1.0);
-        super::put_u32(&mut bytes, base + MATERIAL_OFFSET as u32, object as u32);
+        put_f32(&mut bytes, base, sphere[3]);
+        put_f32(&mut bytes, base + 20, sphere[3]);
+        put_f32(&mut bytes, base + 40, sphere[3]);
+        put_f32(&mut bytes, base + 48, sphere[0]);
+        put_f32(&mut bytes, base + 52, sphere[1]);
+        put_f32(&mut bytes, base + 56, sphere[2]);
+        put_f32(&mut bytes, base + 60, 1.0);
+        put_u32(&mut bytes, base + MATERIAL_OFFSET as u32, object as u32);
         object += 1;
     }
     bytes
@@ -232,5 +228,5 @@ fn read_bytes(
     });
     encoder.copy_buffer_to_buffer(src, 0, &read, 0, size);
     queue.submit([encoder.finish()]);
-    super::map_bytes(device, &read)
+    map_bytes(device, &read)
 }

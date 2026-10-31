@@ -81,6 +81,7 @@ paths = [
     "crates/gpu-abi/**",
     "crates/wasm2gpu/**",
     "crates/wasm2gpu-shader/**",
+    "crates/wasm2gpu-testkit/**",
     "crates/gltf/**",
     "crates/texture/**",
 ]
