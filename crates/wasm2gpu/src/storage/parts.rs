@@ -1,6 +1,6 @@
 //! Compose stored lanes into naga values and address one element.
 
-use super::Ix;
+use crate::ix::Ix;
 
 use naga::Expression;
 
@@ -135,14 +135,6 @@ pub(super) fn pop_floats(
 pub(super) fn pop_vals(em: &mut Emit<'_, '_>, n: u32) -> Result<Vec<Val>, TranslateError> {
     let count = usize::try_from(n).map_err(|_| TranslateError::Unsupported)?;
     em.take(count)
-}
-
-pub(super) fn pop_index(em: &mut Emit<'_, '_>) -> Result<Ix, TranslateError> {
-    match em.pop()? {
-        Val::Imm(value) => Ok(Ix::Const(value)),
-        Val::Index(handle) => Ok(Ix::Dyn(handle)),
-        _ => Err(TranslateError::Unsupported),
-    }
 }
 
 pub(super) fn pop_prov(em: &mut Emit<'_, '_>) -> Result<(u32, u32), TranslateError> {
