@@ -15,15 +15,12 @@ use crate::cx::Val;
 use crate::env::Emit;
 use crate::error::TranslateError;
 use crate::globals;
+use crate::ix::Ix;
+use crate::ix::pop_index;
 use crate::storage;
 use crate::ty::Elem;
 use crate::ty::FieldKind;
 use crate::ty::Uni;
-
-enum Ix {
-    Const(u32),
-    Dyn(naga::Handle<Expression>),
-}
 
 pub(super) fn load(em: &mut Emit<'_, '_>, uni: Uni) -> Result<(), TranslateError> {
     match uni {
@@ -107,7 +104,7 @@ fn field_at(em: &Emit<'_, '_>, id: u16, index: u32) -> Result<FieldKind, Transla
 fn pop_field(em: &mut Emit<'_, '_>) -> Result<u32, TranslateError> {
     match em.pop()? {
         Val::Imm(value) => Ok(value),
-        Val::Index(_) => Err(msg("uniform field index must be a constant")),
+        Val::Index(_) | Val::Bool(_) => Err(msg("uniform field index must be a constant")),
         _ => Err(TranslateError::Unsupported),
     }
 }
@@ -116,7 +113,7 @@ fn pop_len(em: &mut Emit<'_, '_>) -> Result<u32, TranslateError> {
     match em.pop()? {
         Val::Imm(0) => Err(msg("uniform array length must be positive")),
         Val::Imm(value) => Ok(value),
-        Val::Index(_) => Err(msg("uniform array length must be a constant")),
+        Val::Index(_) | Val::Bool(_) => Err(msg("uniform array length must be a constant")),
         _ => Err(TranslateError::Unsupported),
     }
 }
@@ -131,14 +128,6 @@ fn pop_prov(em: &mut Emit<'_, '_>) -> Result<(u32, u32), TranslateError> {
     let binding = em.pop_imm()?;
     let group = em.pop_imm()?;
     Ok((group, binding))
-}
-
-fn pop_index(em: &mut Emit<'_, '_>) -> Result<Ix, TranslateError> {
-    match em.pop()? {
-        Val::Imm(value) => Ok(Ix::Const(value)),
-        Val::Index(handle) => Ok(Ix::Dyn(handle)),
-        _ => Err(TranslateError::Unsupported),
-    }
 }
 
 fn array_pointer(

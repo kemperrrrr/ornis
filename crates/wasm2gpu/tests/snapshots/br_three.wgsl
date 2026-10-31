@@ -1,16 +1,10 @@
-                local_4 = true;
-                local_6 = true;
+local_1 = true;
                 local_2 = true;
-                break;
+                local = true;
                 break;
             }
-            let _e31 = local_5;
-            let _e33 = local_4;
-            if _e31 {
-                continue;
-            } else {
-                if _e33 {
-                    break;
-                }
+            let _e16 = local_1;
+            if _e16 {
+                break;
             }
             storage_0_1_[0u] = 1f;

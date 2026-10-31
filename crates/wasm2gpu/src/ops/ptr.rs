@@ -5,7 +5,6 @@ use naga::BinaryOperator;
 
 use super::Ready;
 use super::arith;
-use super::zero_one;
 use crate::cx::PtrOff;
 use crate::cx::Val;
 use crate::env::Emit;
@@ -128,8 +127,7 @@ pub(super) fn f32_lt(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let right = crate::env::float_of(em.pop()?)?;
     let left = crate::env::float_of(em.pop()?)?;
     let cond = arith(em, BinaryOperator::Less, left, right);
-    let value = zero_one(em, cond);
-    em.push(Val::Index(value))
+    em.push(Val::Bool(cond))
 }
 
 fn ready_of(

@@ -14,6 +14,8 @@ use crate::cx::sp;
 use crate::env::Emit;
 use crate::error::TranslateError;
 use crate::globals;
+use crate::ix::Ix;
+use crate::ix::pop_index;
 use crate::ty::Elem;
 use crate::ty::FieldKind;
 use crate::ty::Spec;
@@ -24,7 +26,6 @@ use parts::compose;
 use parts::compose_struct;
 use parts::element_ptr;
 use parts::pop_floats;
-use parts::pop_index;
 use parts::pop_prov;
 use parts::pop_vals;
 use parts::sint;
@@ -33,11 +34,6 @@ use parts::uint_bits;
 const STRUCT_HEADER: u32 = 4;
 /// Byte alignment of a scalar `i32.load` / `f32.load` address.
 const ADDR_ALIGN: u32 = ornis_gpu_abi::F32_SIZE;
-
-enum Ix {
-    Const(u32),
-    Dyn(naga::Handle<Expression>),
-}
 
 /// Group, binding, and element index of one storage access.
 type Site = (u32, u32, Ix);

@@ -116,6 +116,26 @@ fn uniform_f32_array_uses_uniform_stride_and_a_dynamic_index() {
 }
 
 #[test]
+fn a_comparison_can_be_a_uniform_array_index() {
+    // A comparison is a wasm `i32` that is known to be `0` or `1`, so it
+    // addresses an element like any other index.
+    let got = wgsl(
+        "",
+        &import(
+            symbols::UNIFORM_READ_F32,
+            "(param i32 i32 i32 i32) (result f32)",
+        ),
+        &format!(
+            "(param f32 f32 i32) (result f32 f32 f32 f32)
+             i32.const 0 i32.const 1 i32.const 4 local.get 2 i32.const 0 i32.eq call ${read}
+             f32.const 0 f32.const 0 f32.const 1",
+            read = symbols::UNIFORM_READ_F32,
+        ),
+    );
+    assert!(got.contains("select(0u, 1u"), "{got}");
+}
+
+#[test]
 fn dynamic_uniform_field_index_is_rejected() {
     let fs = format!(
         "(param f32 f32 i32) (result f32 f32 f32 f32)

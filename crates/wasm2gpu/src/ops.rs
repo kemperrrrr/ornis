@@ -130,6 +130,10 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
 
 fn local_get(em: &mut Emit<'_, '_>, index: u32, i32: bool) -> Result<(), TranslateError> {
     let slot = index as usize;
+    if let Some(value) = em.wasm_locals.pending.get(slot).copied().flatten() {
+        // The value is still an expression, so reading it costs nothing.
+        return em.push(value);
+    }
     if let Some(value) = local_ptr(em, slot)? {
         return em.push(value);
     }
@@ -185,15 +189,22 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     if tee {
         em.stack.push(val);
     }
+    let slot = index as usize;
+    if em.wasm_locals.expr.get(slot).copied().unwrap_or(false) && !matches!(val, Val::Ptr { .. }) {
+        // The slot is written once and read after that write, so its value
+        // stays an expression: no variable, no store, no load.
+        em.wasm_locals.set_pending(slot, val);
+        return Ok(());
+    }
     let var = em
-        .locals
-        .get(index as usize)
-        .copied()
-        .flatten()
-        .ok_or(TranslateError::Unsupported)?;
+        .wasm_locals
+        .shadow_for(&mut *em.func, &*em.cx, &mut em.locals, index as usize)?;
+    // The value now lives in the variable, not in an expression.
+    em.wasm_locals.clear_pending(slot);
     let bits = match val {
         Val::Imm(value) => em.u32(value),
         Val::Index(handle) | Val::Scalar(handle) => handle,
+        Val::Bool(handle) => crate::cx::bool_bits(em.func, &mut em.block, handle),
         Val::Ptr { off, .. } => em.off_expr(off),
         Val::Vec(_) => return Err(TranslateError::Unsupported),
     };
@@ -253,8 +264,7 @@ fn i32_cmp(
         Ready::Imm(value) => em.push(Val::Imm(value)),
         Ready::Expr(left, right) => {
             let cond = arith(em, op, left, right);
-            let value = zero_one(em, cond);
-            em.push(Val::Index(value))
+            em.push(Val::Bool(cond))
         }
     }
 }
@@ -265,23 +275,21 @@ fn i32_eqz(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
         em.stack.push(Val::Imm(u32::from(value == 0)));
         return Ok(());
     }
+    if let Val::Bool(handle) = val {
+        let negated = crate::cx::bool_not(em.func, &mut em.block, handle);
+        em.stack.push(Val::Bool(negated));
+        return Ok(());
+    }
     let bits = em.as_uint(val)?;
     let zero = em.u32(0);
     let cond = arith(em, BinaryOperator::Equal, bits, zero);
-    let value = zero_one(em, cond);
-    em.stack.push(Val::Index(value));
+    em.stack.push(Val::Bool(cond));
     Ok(())
 }
 
 /// Arithmetic right shift on the `i32` value of a `u32` bit pattern.
 fn shr_s(a: u32, b: u32) -> u32 {
     (a as i32).wrapping_shr(b) as u32
-}
-
-fn zero_one(em: &mut Emit<'_, '_>, cond: naga::Handle<Expression>) -> naga::Handle<Expression> {
-    let accept = em.u32(1);
-    let reject = em.u32(0);
-    em.pick(cond, accept, reject)
 }
 
 fn wasm_select(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
@@ -295,6 +303,8 @@ fn wasm_select(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let value = match (accept, reject) {
         (Val::Scalar(left), Val::Scalar(right)) => Val::Scalar(em.pick(cond, left, right)),
         (Val::Vec(left), Val::Vec(right)) => Val::Vec(em.pick(cond, left, right)),
+        // Both arms are `0`/`1`, so the result stays a boolean.
+        (Val::Bool(left), Val::Bool(right)) => Val::Bool(em.pick(cond, left, right)),
         (left, right) => {
             let accept = em.as_uint(left)?;
             let reject = em.as_uint(right)?;

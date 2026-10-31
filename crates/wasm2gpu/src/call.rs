@@ -66,7 +66,7 @@ fn bake(args: &[Val], sig: &Sig) -> Result<Vec<Option<u32>>, TranslateError> {
 fn one_baked(kind: Kind, val: Val) -> Result<Option<u32>, TranslateError> {
     match (kind, val) {
         (Kind::I32, Val::Imm(value)) => Ok(Some(value)),
-        (Kind::I32, Val::Index(_)) => Ok(None),
+        (Kind::I32, Val::Index(_)) | (Kind::I32, Val::Bool(_)) => Ok(None),
         (Kind::F32, Val::Scalar(_)) => Ok(None),
         _ => Err(TranslateError::Unsupported),
     }

@@ -106,6 +106,39 @@ fn storage_index_is_an_access_chain() {
 }
 
 #[test]
+fn a_comparison_can_be_a_storage_element_index() {
+    // A comparison is a wasm `i32` that is known to be `0` or `1`, so it
+    // addresses an element like any other index.
+    let wasm = wat::parse_str(format!(
+        r#"(module
+            (import "{module}" "{read}" (func $read (param i32 i32 i32) (result f32 f32 f32 f32)))
+            (func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
+                local.get 0
+                local.get 1
+                f32.const 0
+                f32.const 1
+                local.get 2
+                local.get 3)
+            (func (export "{fs}") (param f32 f32 i32) (result f32 f32 f32 f32)
+                i32.const 0
+                i32.const 1
+                local.get 2
+                i32.const 0
+                i32.eq
+                call $read))
+        "#,
+        module = symbols::MODULE,
+        read = symbols::STORAGE_READ,
+        vs = symbols::VS_MAIN,
+        fs = symbols::FS_MAIN,
+    ))
+    .expect("wat");
+    let translated = translate(&wasm).expect("storage");
+    assert!(translated.wgsl.contains("storage_0_1_["), "{translated:?}");
+    assert!(!translated.fragment_spirv.is_empty());
+}
+
+#[test]
 fn storage_dynamic_binding_is_rejected() {
     let wasm = wat::parse_str(format!(
         r#"(module

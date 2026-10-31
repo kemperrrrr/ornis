@@ -10,6 +10,7 @@ use crate::cx::expr_in;
 use crate::cx::sp;
 use crate::error::TranslateError;
 use crate::ir::Import;
+use crate::locals::Locals;
 use crate::ty::StructDef;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,12 +20,18 @@ pub(super) enum Region {
     If,
 }
 
+/// A lowered region: its label, and the flags a branch out of it needs.
+///
+/// A region only carries the flags its branches need. A region whose
+/// branches all stay inside it needs none, so it costs no local variables.
 #[derive(Clone, Copy)]
 pub(super) struct Flag {
     pub(super) kind: Region,
     pub(super) naga_loop: bool,
-    pub(super) leave: naga::Handle<naga::LocalVariable>,
-    pub(super) again: naga::Handle<naga::LocalVariable>,
+    /// Set when a branch leaves the region.
+    pub(super) leave: Option<naga::Handle<naga::LocalVariable>>,
+    /// Set when a branch restarts the region.
+    pub(super) again: Option<naga::Handle<naga::LocalVariable>>,
 }
 
 pub(super) struct Emit<'a, 'b> {
@@ -36,6 +43,8 @@ pub(super) struct Emit<'a, 'b> {
     pub(super) structs: &'b [StructDef],
     pub(super) funcs: &'b [crate::ir::Func],
     pub(super) locals: Vec<Option<naga::Handle<naga::LocalVariable>>>,
+    /// Kind, expression state, and pending value of every wasm local.
+    pub(super) wasm_locals: Locals,
     /// Storage provenance of the wasm local held in each shadow slot.
     ///
     /// `None` is a plain scalar. `local_set` stores `Some((group, binding))`
@@ -183,6 +192,7 @@ impl Emit<'_, '_> {
         match val {
             Val::Imm(value) => Ok(self.u32(value)),
             Val::Index(handle) => Ok(handle),
+            Val::Bool(handle) => Ok(crate::cx::bool_bits(self.func, &mut self.block, handle)),
             _ => Err(TranslateError::Unsupported),
         }
     }
@@ -191,6 +201,7 @@ impl Emit<'_, '_> {
         match val {
             Val::Imm(0) => Ok(self.bool(false)),
             Val::Imm(_) => Ok(self.bool(true)),
+            Val::Bool(handle) => Ok(handle),
             Val::Index(handle) => {
                 let zero = self.u32(0);
                 Ok(self.ex(Expression::Binary {

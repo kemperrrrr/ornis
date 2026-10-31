@@ -1,15 +1,9 @@
-                local_7 = true;
-                local_3 = true;
-                break;
+local_1 = true;
+                local = true;
                 break;
             }
-            let _e32 = local_4;
-            let _e34 = local_3;
-            if _e32 {
-                continue;
-            } else {
-                if _e34 {
-                    break;
-                }
+            let _e14 = local;
+            if _e14 {
+                break;
             }
             storage_0_1_[0u] = 1f;

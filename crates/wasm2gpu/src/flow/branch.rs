@@ -13,9 +13,17 @@ use crate::error::TranslateError;
 use crate::ir::Kind;
 use crate::ir::Stmt;
 
+use super::shape::Escape;
+
 impl Emit<'_, '_> {
     pub(crate) fn region(&mut self, kind: Region, body: &[Stmt]) -> Result<(), TranslateError> {
-        let flag = self.make_flag(kind, true)?;
+        let escape = Escape::of(body);
+        // A branch that leaves the region sets its `leave` flag; a branch
+        // that restarts it sets `again`. A region no branch leaves needs
+        // neither, so it costs no local variables.
+        let leave = escape.beyond || (kind != Region::Loop && escape.self_nested);
+        let again = kind == Region::Loop && escape.self_nested;
+        let flag = self.make_flag(kind, true, leave, again)?;
         let block = self.sub(|em| {
             em.clear_flag(flag)?;
             em.labels.push(flag);
@@ -31,6 +39,10 @@ impl Emit<'_, '_> {
         self.labels.pop();
         if self.halted {
             self.halted = false;
+            return;
+        }
+        if ends_with_jump(&self.block) {
+            // The body already left the loop: a `break` here is dead code.
             return;
         }
         self.block.push(naga::Statement::Break, sp());
@@ -91,16 +103,29 @@ impl Emit<'_, '_> {
         while index < n {
             let flag = self.labels[index];
             if flag.naga_loop {
-                self.store_flag(flag.leave, true)?;
+                self.set_leave(flag)?;
             }
             index += 1;
         }
         let flag = self.labels[target];
         if flag.kind == Region::Loop {
-            self.store_flag(flag.again, true)
+            self.set_again(flag)?;
         } else {
-            self.store_flag(flag.leave, true)
+            self.set_leave(flag)?;
         }
+        Ok(())
+    }
+
+    /// Set the `leave` flag of a region a branch leaves.
+    fn set_leave(&mut self, flag: Flag) -> Result<(), TranslateError> {
+        let var = flag.leave.ok_or(TranslateError::Unsupported)?;
+        self.store_flag(var, true)
+    }
+
+    /// Set the `again` flag of a region a branch restarts.
+    fn set_again(&mut self, flag: Flag) -> Result<(), TranslateError> {
+        let var = flag.again.ok_or(TranslateError::Unsupported)?;
+        self.store_flag(var, true)
     }
 
     /// Stop the arm when a multi-level `br` already left an outer naga loop.
@@ -122,16 +147,35 @@ impl Emit<'_, '_> {
     }
 
     pub(crate) fn flush(&mut self, flag: Flag) -> Result<(), TranslateError> {
-        let again = self.load_var(flag.again);
-        let leave = self.load_var(flag.leave);
-        let mut cont = naga::Block::new();
-        cont.push(naga::Statement::Continue, sp());
-        let mut stop = naga::Block::new();
-        stop.push(naga::Statement::Break, sp());
-        let mut rest = naga::Block::new();
-        rest.push(branch_if(leave, stop, naga::Block::new()), sp());
-        self.block.push(branch_if(again, cont, rest), sp());
-        Ok(())
+        let again = flag.again.map(|var| self.load_var(var));
+        let leave = flag.leave.map(|var| self.load_var(var));
+        match (again, leave) {
+            (None, None) => Ok(()),
+            (None, Some(leave)) => {
+                let mut stop = naga::Block::new();
+                stop.push(naga::Statement::Break, sp());
+                self.block
+                    .push(branch_if(leave, stop, naga::Block::new()), sp());
+                Ok(())
+            }
+            (Some(again), None) => {
+                let mut cont = naga::Block::new();
+                cont.push(naga::Statement::Continue, sp());
+                self.block
+                    .push(branch_if(again, cont, naga::Block::new()), sp());
+                Ok(())
+            }
+            (Some(again), Some(leave)) => {
+                let mut cont = naga::Block::new();
+                cont.push(naga::Statement::Continue, sp());
+                let mut stop = naga::Block::new();
+                stop.push(naga::Statement::Break, sp());
+                let mut rest = naga::Block::new();
+                rest.push(branch_if(leave, stop, naga::Block::new()), sp());
+                self.block.push(branch_if(again, cont, rest), sp());
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn push_loop(&mut self, body: naga::Block) {
@@ -149,9 +193,11 @@ impl Emit<'_, '_> {
         &mut self,
         kind: Region,
         naga_loop: bool,
+        leave: bool,
+        again: bool,
     ) -> Result<Flag, TranslateError> {
-        let leave = self.bool_var()?;
-        let again = self.bool_var()?;
+        let leave = if leave { Some(self.bool_var()?) } else { None };
+        let again = if again { Some(self.bool_var()?) } else { None };
         Ok(Flag {
             kind,
             naga_loop,
@@ -166,8 +212,13 @@ impl Emit<'_, '_> {
     }
 
     pub(crate) fn clear_flag(&mut self, flag: Flag) -> Result<(), TranslateError> {
-        self.store_flag(flag.leave, false)?;
-        self.store_flag(flag.again, false)
+        if let Some(var) = flag.leave {
+            self.store_flag(var, false)?;
+        }
+        if let Some(var) = flag.again {
+            self.store_flag(var, false)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn store_flag(
@@ -266,4 +317,12 @@ fn branch_if(
         accept,
         reject,
     }
+}
+
+/// Whether the block ends with a jump that leaves it.
+fn ends_with_jump(block: &naga::Block) -> bool {
+    matches!(
+        block.last(),
+        Some(naga::Statement::Break | naga::Statement::Continue)
+    )
 }

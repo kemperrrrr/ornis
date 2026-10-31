@@ -52,6 +52,7 @@ pub(super) fn invoke(
 fn arg_expr(em: &mut Emit<'_, '_>, val: Val) -> Result<naga::Handle<Expression>, TranslateError> {
     match val {
         Val::Index(handle) | Val::Scalar(handle) => Ok(handle),
+        Val::Bool(handle) => Ok(crate::cx::bool_bits(em.func, &mut em.block, handle)),
         Val::Imm(value) => Ok(em.u32(value)),
         // A pointer argument would cross a function boundary, which this
         // subset rejects before emission; the analysis rejects it first.
