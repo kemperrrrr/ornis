@@ -1,16 +1,14 @@
-//! Predicates and shadow locals for structured control flow.
+//! Shape of structured control flow: which branches leave a region, which
+//! locals need a shadow variable, and which parameters a function rewrites.
 
-use naga::Expression;
-use naga::Literal;
-
-use crate::cx::sp;
 use crate::env::Emit;
-use crate::env::const_expr;
 use crate::error::TranslateError;
 use crate::ir::Func;
-use crate::ir::Kind;
 use crate::ir::Op;
 use crate::ir::Stmt;
+use crate::locals::shadow;
+
+use super::slots::Slots;
 
 pub(super) fn is_nested(stmt: &Stmt) -> bool {
     matches!(
@@ -19,19 +17,52 @@ pub(super) fn is_nested(stmt: &Stmt) -> bool {
     )
 }
 
-pub(super) fn needs_shadow(stmts: &[Stmt]) -> bool {
-    stmts.iter().any(shadow_stmt)
-}
-
-pub(super) fn shadow_stmt(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Op(Op::LocalSet(_) | Op::LocalTee(_)) => true,
-        Stmt::Op(_) => false,
-        Stmt::Br(_) | Stmt::BrIf(_) | Stmt::BrTable { .. } | Stmt::Return => true,
-        Stmt::Block { .. } | Stmt::Loop { .. } | Stmt::If { .. } => true,
+/// Shadows of the parameters a function writes.
+///
+/// naga wants a constant initializer, so a parameter that keeps its value
+/// in a variable gets that variable before the body runs, with the argument
+/// value stored into it. A parameter nobody writes, or one that keeps its
+/// value as an expression, needs no variable at all.
+pub(super) fn bind_params(
+    func: &mut naga::Function,
+    ir: &Func,
+    cx: &crate::cx::Cx<'_>,
+    slots: &Slots,
+) -> Result<Vec<Option<naga::Handle<naga::LocalVariable>>>, TranslateError> {
+    let mut out = vec![None; ir.locals.len()];
+    let mut index = 0usize;
+    while index < ir.locals.len() {
+        let is_param = index < ir.sig.params as usize;
+        let keeps = slots.written.get(index).copied().unwrap_or(false)
+            && !slots.expr.get(index).copied().unwrap_or(false);
+        if is_param && keeps {
+            out[index] = Some(shadow(func, cx, ir.locals[index])?);
+        }
+        index += 1;
     }
+    Ok(out)
 }
 
+/// Copy the argument value of every parameter into its shadow.
+pub(super) fn copy_params(em: &mut Emit<'_, '_>, params: u32) -> Result<(), TranslateError> {
+    let mut index = 0u32;
+    while index < params {
+        let Some(var) = em.locals.get(index as usize).copied().flatten() else {
+            index += 1;
+            continue;
+        };
+        if em.baked.get(index as usize).copied().flatten().is_some() {
+            index += 1;
+            continue;
+        }
+        let value = em.param_expr(index)?;
+        em.store_var(var, value);
+        index += 1;
+    }
+    Ok(())
+}
+
+/// How a wasm `if` lowers.
 pub(super) enum IfKind {
     Bad,
     Pure,
@@ -96,6 +127,73 @@ pub(super) fn pure_stmt(stmt: &Stmt) -> bool {
     )
 }
 
+/// Branches inside a region, seen from that region.
+///
+/// A branch that leaves the region needs the region's `leave` flag, and a
+/// branch that restarts it needs `again`. A region whose branches all stay
+/// inside it needs neither.
+pub(super) struct Escape {
+    /// A branch leaves the region.
+    pub beyond: bool,
+    /// A branch inside a nested region targets the region itself.
+    pub self_nested: bool,
+    /// The region holds a branch or a return.
+    pub control: bool,
+}
+
+impl Escape {
+    /// Collect the branches of a region body.
+    ///
+    /// `level` counts the labels between the statements and the region, so a
+    /// branch to `level` targets the region and a deeper one leaves it.
+    pub(super) fn of(body: &[Stmt]) -> Escape {
+        let mut out = Escape {
+            beyond: false,
+            self_nested: false,
+            control: false,
+        };
+        out.walk(body, 0);
+        out
+    }
+
+    fn walk(&mut self, stmts: &[Stmt], level: u32) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Br(depth) | Stmt::BrIf(depth) => {
+                    self.control = true;
+                    self.branch(*depth, level);
+                }
+                Stmt::BrTable { targets, default } => {
+                    self.control = true;
+                    for target in targets {
+                        self.branch(*target, level);
+                    }
+                    self.branch(*default, level);
+                }
+                Stmt::Return => self.control = true,
+                Stmt::Block { body, .. } | Stmt::Loop { body, .. } => self.walk(body, level + 1),
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.walk(then_body, level + 1);
+                    self.walk(else_body, level + 1);
+                }
+                Stmt::Op(_) => {}
+            }
+        }
+    }
+
+    fn branch(&mut self, depth: u32, level: u32) {
+        if depth > level {
+            self.beyond = true;
+        } else if depth == level && level > 0 {
+            self.self_nested = true;
+        }
+    }
+}
+
 // qual:recursive
 pub(super) fn targeted(stmts: &[Stmt], depth: u32) -> bool {
     let mut index = 0usize;
@@ -118,69 +216,4 @@ pub(super) fn targeted(stmts: &[Stmt], depth: u32) -> bool {
         index += 1;
     }
     false
-}
-
-pub(super) fn bind_locals(
-    func: &mut naga::Function,
-    ir: &Func,
-    cx: &crate::cx::Cx<'_>,
-    shadowed: bool,
-) -> Result<Vec<Option<naga::Handle<naga::LocalVariable>>>, TranslateError> {
-    let mut out = Vec::new();
-    let mut index = 0usize;
-    while index < ir.locals.len() {
-        if shadowed {
-            out.push(Some(shadow(func, cx, ir.locals[index])?));
-        } else {
-            out.push(None);
-        }
-        index += 1;
-    }
-    Ok(out)
-}
-
-pub(super) fn shadow(
-    func: &mut naga::Function,
-    cx: &crate::cx::Cx<'_>,
-    kind: Kind,
-) -> Result<naga::Handle<naga::LocalVariable>, TranslateError> {
-    let (ty, init) = if kind == Kind::I32 {
-        (
-            cx.uint,
-            const_expr(func, Expression::Literal(Literal::U32(0))),
-        )
-    } else {
-        (
-            cx.scalar,
-            const_expr(func, Expression::Literal(Literal::F32(0.0))),
-        )
-    };
-    Ok(func.local_variables.append(
-        naga::LocalVariable {
-            name: None,
-            ty,
-            init: Some(init),
-        },
-        sp(),
-    ))
-}
-
-pub(super) fn copy_params(em: &mut Emit<'_, '_>, params: u32) -> Result<(), TranslateError> {
-    let mut index = 0u32;
-    while index < params {
-        let var = em
-            .locals
-            .get(index as usize)
-            .copied()
-            .flatten()
-            .ok_or(TranslateError::Unsupported)?;
-        if em.baked.get(index as usize).copied().flatten().is_some() {
-            index += 1;
-            continue;
-        }
-        let value = em.param_expr(index)?;
-        em.store_var(var, value);
-        index += 1;
-    }
-    Ok(())
 }

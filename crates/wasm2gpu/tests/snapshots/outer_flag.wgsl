@@ -1,17 +1,13 @@
-            if (_e22 != 0u) {
-                local_5 = true;
-                local_3 = true;
+loop {
+            local_1 = false;
+            if (param_6 != 0u) {
+                local_1 = true;
+                local = true;
                 break;
             }
             continue;
-            break;
         }
-        let _e30 = local_4;
-        let _e32 = local_3;
-        if _e30 {
-            continue;
-        } else {
-            if _e32 {
-                break;
-            }
+        let _e14 = local;
+        if _e14 {
+            break;
         }

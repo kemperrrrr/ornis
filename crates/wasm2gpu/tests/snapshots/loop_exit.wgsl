@@ -1,18 +1,12 @@
-            if (_e22 != 0u) {
-                local_5 = true;
-                local_3 = true;
+if (param_6 != 0u) {
+                local_1 = true;
+                local = true;
                 break;
             }
             storage_0_1_[0u] = 1f;
             continue;
-            break;
         }
-        let _e34 = local_4;
-        let _e36 = local_3;
-        if _e34 {
-            continue;
-        } else {
-            if _e36 {
-                break;
-            }
+        let _e18 = local;
+        if _e18 {
+            break;
         }

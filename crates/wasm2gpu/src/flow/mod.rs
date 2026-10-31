@@ -17,9 +17,10 @@ use crate::env::ExecIn;
 use crate::env::Region;
 use crate::error::TranslateError;
 use crate::ir::BlockTy;
-use crate::ir::Func;
 use crate::ir::Kind;
 use crate::ir::Stmt;
+use crate::locals::Locals;
+use crate::locals::arg_map;
 use crate::ops;
 
 pub(super) fn exec(
@@ -30,27 +31,37 @@ pub(super) fn exec(
 ) -> Result<Vec<Val>, TranslateError> {
     let baked = input.baked.clone();
     let id_param = input.id_param;
-    let (shadowed, args_at, locals, stmts, params, results) = {
+    let (args_at, locals, stmts, results, wasm_locals, params) = {
         let func = code
             .funcs
             .get(input.func_index as usize)
             .ok_or(TranslateError::Unsupported)?;
-        let shadowed = needs_shadow(&func.body);
+        // The analyses read the same tree the emitter lowers.
+        let stmts = canon::rewrite(func);
+        let slots = Slots::of(&stmts, func.locals.len());
         let args_at = arg_map(func, &input.baked, input.id_param);
-        let locals = bind_locals(body, func, cx, shadowed)?;
-        let stmts = func.body.clone();
-        let params = func.sig.params;
+        let locals = bind_params(body, func, cx, &slots)?;
         let results = func.sig.results;
-        (shadowed, args_at, locals, stmts, params, results)
+        let wasm_locals = Locals::of(func, slots.expr);
+        (
+            args_at,
+            locals,
+            stmts,
+            results,
+            wasm_locals,
+            func.sig.params,
+        )
     };
     let block = std::mem::take(&mut body.body);
+    let slots = locals.len();
     let mut em = Emit {
         cx,
         func: body,
         block,
         stack: Vec::new(),
-        ptr_slots: vec![None; locals.len()],
+        ptr_slots: vec![None; slots],
         locals,
+        wasm_locals,
         labels: Vec::new(),
         baked,
         args_at,
@@ -61,36 +72,13 @@ pub(super) fn exec(
         structs: code.structs,
         funcs: code.funcs,
     };
-    if shadowed {
-        copy_params(&mut em, params)?;
-    }
+    copy_params(&mut em, params)?;
     em.run(&stmts)?;
     let Emit {
         block, stack, func, ..
     } = em;
     func.body = block;
     Ok(stack)
-}
-
-fn arg_map(func: &Func, baked: &[Option<u32>], id_param: Option<u32>) -> Vec<Option<u32>> {
-    let mut out = vec![None; func.locals.len()];
-    if id_param.is_some() {
-        if func.sig.params > 0 {
-            out[0] = Some(0);
-        }
-        return out;
-    }
-    let mut slot = 0u32;
-    let mut index = 0u32;
-    while index < func.sig.params {
-        let immediate = baked.get(index as usize).copied().flatten();
-        if immediate.is_none() {
-            out[index as usize] = Some(slot);
-            slot += 1;
-        }
-        index += 1;
-    }
-    out
 }
 
 impl Emit<'_, '_> {
@@ -143,6 +131,11 @@ impl Emit<'_, '_> {
     ) -> Result<(), TranslateError> {
         if !ty.params.is_empty() || !ty.results.is_empty() {
             return Err(TranslateError::Unsupported);
+        }
+        if kind == Region::Block && !Escape::of(body).control {
+            // A block without a branch is a scope: no branch can target it,
+            // so it needs neither a label nor a loop.
+            return self.run(body);
         }
         self.region(kind, body)
     }
@@ -226,7 +219,8 @@ impl Emit<'_, '_> {
         then_body: &[Stmt],
         else_body: &[Stmt],
     ) -> Result<(), TranslateError> {
-        let flag = self.make_flag(Region::If, true)?;
+        // A branch targets this `if`, so it needs the `leave` flag.
+        let flag = self.make_flag(Region::If, true, true, false)?;
         let body = self.sub(|em| {
             em.clear_flag(flag)?;
             em.labels.push(flag);
@@ -249,7 +243,8 @@ impl Emit<'_, '_> {
         let cond = self.as_bool(cond_val)?;
         let temps = self.temps(&ty.results)?;
         if as_label {
-            let flag = self.make_flag(Region::If, false)?;
+            // No branch targets a statement `if`, so it needs no flags.
+            let flag = self.make_flag(Region::If, false, false, false)?;
             self.labels.push(flag);
         }
         let saved = self.stack.clone();
@@ -263,6 +258,9 @@ impl Emit<'_, '_> {
         let else_ptrs = self.ptr_slots.clone();
         self.stack = saved;
         self.ptr_slots = final_ptrs(cond_val, then_stopped, then_ptrs, else_ptrs);
+        // A `return` inside an arm leaves that arm, not the code after the
+        // `if`: the other arm still reaches it.
+        self.halted = false;
         self.block.push(
             naga::Statement::If {
                 condition: cond,
@@ -311,12 +309,15 @@ fn final_ptrs(
 }
 
 mod branch;
+mod canon;
 mod shape;
+mod slots;
 mod switch;
 
+use shape::Escape;
 use shape::IfKind;
-use shape::bind_locals;
+use shape::bind_params;
 use shape::copy_params;
 use shape::if_kind;
 use shape::is_nested;
-use shape::needs_shadow;
+use slots::Slots;

@@ -38,6 +38,11 @@ pub(super) fn finish(
             Val::Imm(value) => result_imm[index] = Some(value),
             Val::Scalar(handle) => dynamic.push((cx.scalar, handle)),
             Val::Index(handle) => dynamic.push((cx.uint, handle)),
+            // A `0`/`1` boolean widens into the `u32` an `i32` result holds.
+            Val::Bool(handle) => {
+                let bits = bool_bits(body, handle);
+                dynamic.push((cx.uint, bits));
+            }
             // A pointer result would leave the callee; the analysis
             // rejects it before emission reaches here.
             Val::Ptr { .. } => return Err(TranslateError::Unsupported),
@@ -55,6 +60,20 @@ pub(super) fn finish(
 }
 
 type Packed = Option<(naga::Handle<Type>, naga::Handle<Expression>)>;
+
+/// Widen a `0`/`1` boolean into the `u32` bits an `i32` result holds.
+fn bool_bits(body: &mut Function, condition: naga::Handle<Expression>) -> naga::Handle<Expression> {
+    let one = expr(body, Expression::Literal(naga::Literal::U32(1)));
+    let zero = expr(body, Expression::Literal(naga::Literal::U32(0)));
+    expr(
+        body,
+        Expression::Select {
+            condition,
+            accept: one,
+            reject: zero,
+        },
+    )
+}
 
 fn pack(
     body: &mut Function,

@@ -118,6 +118,12 @@ pub(super) enum Val {
     Scalar(naga::Handle<Expression>),
     /// Runtime `u32` bits. An element index, or any other wasm `i32`.
     Index(naga::Handle<Expression>),
+    /// A wasm `i32` that is known to be `0` or `1`.
+    ///
+    /// A comparison or a `f32.lt` produces this instead of an [`Val::Index`],
+    /// so a condition stays a naga `bool` instead of a `u32` that a later
+    /// `!= 0u` has to unwrap again.
+    Bool(naga::Handle<Expression>),
     /// One `vec4<f32>` from `raw_read`, `texture_sample_2d`, or `storage_read`.
     Vec(naga::Handle<Expression>),
     /// A storage address: provenance (group, binding) plus a byte offset.
@@ -165,6 +171,41 @@ pub(super) fn expr(body: &mut naga::Function, value: Expression) -> naga::Handle
     let handle = expr_in(body, &mut block, value);
     body.body = block;
     handle
+}
+
+/// Widen a `0`/`1` boolean into the `u32` bits a wasm `i32` holds.
+pub(super) fn bool_bits(
+    func: &mut naga::Function,
+    block: &mut naga::Block,
+    condition: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    let one = expr_in(func, block, Expression::Literal(naga::Literal::U32(1)));
+    let zero = expr_in(func, block, Expression::Literal(naga::Literal::U32(0)));
+    expr_in(
+        func,
+        block,
+        Expression::Select {
+            condition,
+            accept: one,
+            reject: zero,
+        },
+    )
+}
+
+/// Negate a `0`/`1` boolean.
+pub(super) fn bool_not(
+    func: &mut naga::Function,
+    block: &mut naga::Block,
+    condition: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    expr_in(
+        func,
+        block,
+        Expression::Unary {
+            op: naga::UnaryOperator::LogicalNot,
+            expr: condition,
+        },
+    )
 }
 
 pub(super) fn expr_in(

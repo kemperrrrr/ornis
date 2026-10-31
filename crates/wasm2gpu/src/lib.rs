@@ -35,6 +35,7 @@ mod error;
 mod flow;
 mod globals;
 mod ir;
+mod locals;
 mod lower;
 mod ops;
 mod parse;
