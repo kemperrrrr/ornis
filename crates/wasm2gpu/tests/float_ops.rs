@@ -37,7 +37,9 @@ fn wasm() -> Vec<u8> {
                 i32.const 0 i32.const 1 i32.const 4
                 f32.const 2 f32.const 1 f32.gt call $store_u32
                 i32.const 0 i32.const 1 i32.const 5
-                f32.const 2 f32.const 1 f32.ge call $store_u32))"#,
+                f32.const 2 f32.const 1 f32.ge call $store_u32
+                i32.const 0 i32.const 1 i32.const 6 i32.const -1
+                call $store_u32))"#,
         module = symbols::MODULE,
         store_f32 = symbols::STORAGE_WRITE_F32,
         store_u32 = symbols::STORAGE_WRITE_U32,
@@ -49,7 +51,7 @@ fn wasm() -> Vec<u8> {
 }
 
 #[test]
-fn scalar_float_arithmetic_and_all_comparisons_lower_to_wgsl() {
+fn scalar_float_ops_and_signed_i32_constants_lower_to_wgsl() {
     let translated = translate(&wasm()).expect("translate float operators");
     for operator in [" - ", " / ", " == ", " != ", " < ", " <= ", " > ", " >= "] {
         assert!(

@@ -192,7 +192,11 @@ fn shader(
     let stack = stack?;
     if compute.is_some() {
         if !stack.is_empty() {
-            eprintln!("wasm2gpu: {} leaves {} compute stack values", stage.name, stack.len());
+            eprintln!(
+                "wasm2gpu: {} leaves {} compute stack values",
+                stage.name,
+                stack.len()
+            );
             return Err(TranslateError::Unsupported);
         }
         return Ok(body);

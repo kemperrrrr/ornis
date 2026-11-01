@@ -59,7 +59,7 @@ fn control(types: &[Sig], op: &Operator<'_>) -> Result<Option<Flat>, TranslateEr
 
 fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
     match op {
-        Operator::I32Const { value } => i32_const(*value),
+        Operator::I32Const { value } => Ok(i32_const(*value)),
         Operator::F32Const { value } => Ok(Op::F32(value.bits())),
         Operator::LocalGet { local_index } => local_get(locals, *local_index),
         Operator::LocalSet { local_index } => Ok(Op::LocalSet(*local_index)),
@@ -115,9 +115,9 @@ fn br_table(targets: &wasmparser::BrTable<'_>) -> Result<Option<Flat>, Translate
     }))
 }
 
-fn i32_const(value: i32) -> Result<Op, TranslateError> {
-    let bits = u32::try_from(value).map_err(|_| TranslateError::Unsupported)?;
-    Ok(Op::I32(bits))
+/// Preserve the Wasm immediate's two's-complement bits in the `u32` IR.
+fn i32_const(value: i32) -> Op {
+    Op::I32(value as u32)
 }
 
 /// A wasm memory offset wider than `u32` can never address wasm32 memory.
