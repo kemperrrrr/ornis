@@ -47,19 +47,6 @@ impl Emit<'_, '_> {
             }
             _ => return Err(TranslateError::Unsupported),
         };
-        if self
-            .func
-            .name
-            .as_deref()
-            .is_some_and(|name| name.starts_with("fn"))
-        {
-            eprintln!(
-                "wasm2gpu: {:?} return results={} value={}",
-                self.func.name,
-                self.results,
-                value.is_some()
-            );
-        }
         self.block.push(naga::Statement::Return { value }, sp());
         self.halted = true;
         self.returned = true;
