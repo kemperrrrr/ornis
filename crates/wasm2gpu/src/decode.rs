@@ -59,7 +59,7 @@ fn control(types: &[Sig], op: &Operator<'_>) -> Result<Option<Flat>, TranslateEr
 
 fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
     match op {
-        Operator::I32Const { value } => i32_const(*value),
+        Operator::I32Const { value } => Ok(i32_const(*value)),
         Operator::F32Const { value } => Ok(Op::F32(value.bits())),
         Operator::LocalGet { local_index } => local_get(locals, *local_index),
         Operator::LocalSet { local_index } => Ok(Op::LocalSet(*local_index)),
@@ -69,6 +69,11 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::CallIndirect { .. } => Err(TranslateError::IndirectCall),
         Operator::F32Mul => Ok(Op::Mul),
         Operator::F32Add => Ok(Op::Add),
+        Operator::F32Sub => Ok(Op::Sub),
+        Operator::F32Div => Ok(Op::Div),
+        Operator::F32Abs => Ok(Op::F32Abs),
+        Operator::F32Neg => Ok(Op::F32Neg),
+        Operator::F32ConvertI32U => Ok(Op::F32ConvertI32U),
         Operator::I32Add => Ok(Op::I32Add),
         Operator::I32Mul => Ok(Op::I32Mul),
         Operator::I32Sub => Ok(Op::I32Sub),
@@ -90,6 +95,11 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::I32Store { memarg } => Ok(Op::StoreI32(mem_offset(memarg)?)),
         Operator::F32Store { memarg } => Ok(Op::StoreF32(mem_offset(memarg)?)),
         Operator::F32Lt => Ok(Op::F32Lt),
+        Operator::F32Le => Ok(Op::F32Le),
+        Operator::F32Gt => Ok(Op::F32Gt),
+        Operator::F32Ge => Ok(Op::F32Ge),
+        Operator::F32Eq => Ok(Op::F32Eq),
+        Operator::F32Ne => Ok(Op::F32Ne),
         Operator::Select => Ok(Op::Select),
         _ => Err(TranslateError::Unsupported),
     }
@@ -106,9 +116,9 @@ fn br_table(targets: &wasmparser::BrTable<'_>) -> Result<Option<Flat>, Translate
     }))
 }
 
-fn i32_const(value: i32) -> Result<Op, TranslateError> {
-    let bits = u32::try_from(value).map_err(|_| TranslateError::Unsupported)?;
-    Ok(Op::I32(bits))
+/// Preserve the Wasm immediate's two's-complement bits in the `u32` IR.
+fn i32_const(value: i32) -> Op {
+    Op::I32(value as u32)
 }
 
 /// A wasm memory offset wider than `u32` can never address wasm32 memory.

@@ -4,7 +4,7 @@
 use naga::BinaryOperator;
 
 use super::Ready;
-use super::arith;
+use super::float::arith;
 use crate::cx::PtrOff;
 use crate::cx::Val;
 use crate::env::Emit;
@@ -121,13 +121,6 @@ fn off_math(
             Ok(PtrOff::Dyn(arith(em, op, left, right)))
         }
     }
-}
-
-pub(super) fn f32_lt(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let right = crate::env::float_of(em.pop()?)?;
-    let left = crate::env::float_of(em.pop()?)?;
-    let cond = arith(em, BinaryOperator::Less, left, right);
-    em.push(Val::Bool(cond))
 }
 
 fn ready_of(

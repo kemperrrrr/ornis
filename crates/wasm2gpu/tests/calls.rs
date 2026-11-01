@@ -42,6 +42,17 @@ fn err(imports: &str, funcs: &str) -> TranslateError {
     translate(&wasm(imports, funcs)).expect_err("reject")
 }
 
+fn compute_err(funcs: &str, body: &str) -> TranslateError {
+    let cs = format!(
+        r#"(func (export "{name}") (param i32) {body})"#,
+        name = symbols::CS_MAIN,
+    );
+    let fs = fragment("f32.const 0 f32.const 0 f32.const 0 f32.const 1");
+    let module = wat::parse_str(format!("(module {funcs} {vs} {cs} {fs})", vs = vertex()))
+        .expect("valid compute module");
+    translate(&module).expect_err("reject compute helper")
+}
+
 fn read_f32() -> String {
     import(
         symbols::STORAGE_READ_F32,
@@ -80,6 +91,19 @@ fn returned_immediate_is_a_binding() {
     ));
     let got = wgsl(&read_f32(), &format!("{slot} {fs}"));
     assert!(got.contains("storage_0_1_"), "{got}");
+}
+
+#[test]
+fn dynamic_explicit_return_with_immediate_fallthrough_is_rejected() {
+    let mixed = r#"(func $mixed (param i32) (result i32)
+        local.get 0
+        if
+            local.get 0
+            return
+        end
+        i32.const 7)"#;
+    let error = compute_err(mixed, "local.get 0 call $mixed drop");
+    assert!(matches!(error, TranslateError::Unsupported), "{error}");
 }
 
 #[test]

@@ -18,6 +18,7 @@ use crate::cx::Val;
 use crate::cx::expr;
 use crate::cx::sp;
 use crate::error::TranslateError;
+use crate::ir::Kind;
 use crate::ir::MAX_PARAMS;
 use crate::ir::Sig;
 
@@ -26,7 +27,33 @@ pub(super) fn finish(
     cx: &mut Cx<'_>,
     stack: &[Val],
     sig: &Sig,
+    returned: bool,
 ) -> Result<([Option<u32>; MAX_PARAMS], u8), TranslateError> {
+    // An explicit dynamic return and an immediate fallthrough result cannot
+    // share a Naga function result: immediates are returned to the caller as
+    // specialization metadata, but the explicit return requires a typed Naga
+    // result. Reject this mixed case rather than emitting an invalid helper.
+    if returned && stack.iter().any(|value| matches!(value, Val::Imm(_))) {
+        return Err(TranslateError::Unsupported);
+    }
+    // Explicit returns nested in loops can make Naga require a final return
+    // it cannot prove unreachable from Wasm's validated control flow.
+    if stack.is_empty() && sig.results == 1 && returned {
+        let is_float = sig.result_kind[0] == Kind::F32;
+        let ty = if is_float { cx.scalar } else { cx.uint };
+        body.result = Some(FunctionResult { ty, binding: None });
+        if !matches!(body.body.last(), Some(Statement::Return { .. })) {
+            let literal = if is_float {
+                naga::Literal::F32(0.0)
+            } else {
+                naga::Literal::U32(0)
+            };
+            let value = expr(body, Expression::Literal(literal));
+            body.body
+                .push(Statement::Return { value: Some(value) }, sp());
+        }
+        return Ok(([None; MAX_PARAMS], 1));
+    }
     if stack.len() != sig.results as usize {
         return Err(TranslateError::Unsupported);
     }
@@ -52,8 +79,10 @@ pub(super) fn finish(
     }
     if let Some((ty, value)) = pack(body, cx, &dynamic)? {
         body.result = Some(FunctionResult { ty, binding: None });
-        body.body
-            .push(Statement::Return { value: Some(value) }, sp());
+        if !matches!(body.body.last(), Some(Statement::Return { .. })) {
+            body.body
+                .push(Statement::Return { value: Some(value) }, sp());
+        }
     }
     let nresults = u8::try_from(stack.len()).map_err(|_| TranslateError::Unsupported)?;
     Ok((result_imm, nresults))

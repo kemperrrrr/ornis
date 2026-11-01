@@ -1,42 +1,65 @@
 # Wasm → GPU: сегментированная виртуальная память
 
-Статус: research note (2026-10-25; срез вызовов, `switch` и compute — 2026-10-29; потолок специализаций считается по уникальным входам, не по инструкциям — 2026-10-29; указатели на storage через `storage_base` + `i32.load` / `i32.store` — 2026-10-29).
+Статус: research note (2026-10-25; срез вызовов, `switch` и compute —
+2026-10-29; потолок специализаций считается по уникальным входам, не по
+инструкциям — 2026-10-29; указатели на storage через `storage_base` +
+`i32.load` / `i32.store` — 2026-10-29).
+
 Не принято как замена текущему пути Rust → Shader IR → WGSL
-(`rust-to-wgsl-architecture.md`). Фиксирует идею «Virtual Memory
-Space Translation / Software-Managed Memory Paging» поверх Wasm linear
-memory и предложения по ABI надстройки. Research-прототип (не
-production path) — `crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`,
-`unsafe` только в `gpu_abi`) и offline `crates/wasm2gpu`.
+(`rust-to-wgsl-architecture.md`). Фиксирует идею «Virtual Memory Space
+Translation / Software-Managed Memory Paging» поверх Wasm linear memory и
+предложения по ABI надстройки. Research-прототип (не production path) —
+`crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`, `unsafe` только в `gpu_abi`)
+и offline `crates/wasm2gpu`.
+
 Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
-`storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` /
-`i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Uniform
-на том же контракте: `uniform_read_struct`, `uniform_field_*` (индекс
-поля только константа) и `uniform_read_*` / `uniform_index_struct`
-(длина константа, индекс элемента может быть динамическим, если WGSL
-это принимает). Раскладка структуры — `place_fields` с выравниванием
-uniform (16), та же, что у хостового `GpuRef` / `gpu_struct!`. Поля
-задаёт custom section `ornis_gpu.types`. Group и binding остаются
-immediate-операндами импорта; индекс элемента может быть динамическим
-и опускается в access chain (`OpAccessChain` / WGSL `array[index]`).
+`storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` / `i32`),
+`vec2` / `vec3` / `vec4<f32>` и простые структуры. Для скалярного `f32`
+lifter также опускает `+`, `-`, `*`, `/`, `abs`, `neg`, все шесть сравнений
+и unsigned `i32` → `f32`. Wasm `inf`/`NaN`-константы материализуются через
+runtime arithmetic с конечными WGSL-литералами, а не через bitcast
+const-expression; NaN payload не сохраняется, и точное поведение
+non-finite arithmetic зависит от GPU backend.
+
+Текстурная загрузка, atomics, workgroup memory и barriers пока не входят в
+ABI. TODO: определить и проверить отдельный контракт для этих механизмов,
+прежде чем поднимать на них kernel'ы. Исследовательский auto-exposure
+использует storage mirror и три последовательных compute-pass'а вместо
+них. Он сохраняет histogram counts как `u32`, но заменяет WGSL `log2`/`exp2`
+приближениями из скалярных операций; production render path не меняется.
+
+Uniform на том же контракте: `uniform_read_struct`, `uniform_field_*`
+(индекс поля только константа) и `uniform_read_*` / `uniform_index_struct`
+(длина константа, индекс элемента может быть динамическим, если WGSL это
+принимает). Раскладка структуры — `place_fields` с выравниванием uniform
+(16), та же, что у хостового `GpuRef` / `gpu_struct!`. Поля задаёт custom
+section `ornis_gpu.types`. Group и binding остаются immediate-операндами
+импорта; индекс элемента может быть динамическим и опускается в access
+chain (`OpAccessChain` / WGSL `array[index]`).
+
 Структурный control flow (`block` / `loop` / `if` / `br` / `br_if` /
 `br_table`) строится в CFG; абстрактная интерпретация несёт provenance
-указателя и offset через ветки и join (`phi` / `select`, §3.4). Два
-разных binding на одном join — отказ. `br_table` опускается в WGSL
-`switch`, поэтому Rust `match` доходит до GPU. Прямой `call`
-определённой функции модуля становится функцией naga: константный
-group/binding запекается в специализацию, динамический offset проходит
-аргументом или результатом. Одинаковый набор константных аргументов
-берётся из кэша. Рекурсия, `call_indirect` и выход за потолок
-специализаций — явная ошибка.
-Прямой `if` без побочных эффектов опускается в WGSL `select`, остальной
-— в `if` / `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V
-через naga. Bindless и descriptor indexing не default. Экспорт `shade`
-и, если он есть, `compute` в `crates/wasm2gpu-shader` помечены
+указателя и offset через ветки и join (`phi` / `select`, §3.4). Два разных
+binding на одном join — отказ. `br_table` опускается в WGSL `switch`,
+поэтому Rust `match` доходит до GPU. Прямой `call` определённой функции
+модуля становится функцией naga: константный group/binding запекается в
+специализацию, динамический offset проходит аргументом или результатом.
+Одинаковый набор константных аргументов берётся из кэша. Один динамический
+скалярный результат helper-функции (включая `f32` с явным `return`)
+сохраняется; multi-value return не входит в subset. Явный immediate-only
+return (`i32.const N; return`) и helper с dynamic explicit return плюс
+immediate fallthrough отвергаются.
+
+Рекурсия, `call_indirect` и выход за потолок специализаций — явная ошибка.
+Прямой `if` без побочных эффектов опускается в WGSL `select`, остальной —
+в `if` / `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V через
+naga. Bindless и descriptor indexing не default. Экспорт `shade` и, если он
+есть, `compute` в `crates/wasm2gpu-shader` помечены
 `#[unsafe(no_mangle)]`: лифтер gpu-теста ищет эти имена, а в Rust 2024
-атрибут unsafe. Это не блок `unsafe` и не код `gpu-abi`. `compute`
-лифтер переименовывает в `cs_main`: `@workgroup_size(4, 1, 1)`, builtin
-`global_invocation_id`, запись в storage. Упаковка
-space+binding+offset в каждый `i32` по-прежнему не default ABI.
+атрибут unsafe. Это не блок `unsafe` и не код `gpu-abi`. `compute` лифтер
+переименовывает в `cs_main`: `@workgroup_size(4, 1, 1)`, builtin
+`global_invocation_id`, запись в storage. Упаковка space+binding+offset в
+каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
 Kongruent как носителей типов для шейдерного бэкенда.

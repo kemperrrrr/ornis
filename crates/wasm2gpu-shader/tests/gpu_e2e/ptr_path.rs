@@ -98,15 +98,7 @@ fn dispatch(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> [f32; 4] 
         label: Some("wasm2gpu ptr"),
     });
     let start = Instant::now();
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("wasm2gpu ptr"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
+    super::record_compute_pass(&mut encoder, &pipeline, &bind, [1, 1, 1]);
     queue.submit([encoder.finish()]);
     let values = super::map_f32s(device, queue, &out);
     let elapsed = start.elapsed();

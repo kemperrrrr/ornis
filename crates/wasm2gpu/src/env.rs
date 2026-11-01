@@ -64,6 +64,8 @@ pub(super) struct Emit<'a, 'b> {
     /// A `return` already left this function. The enclosing loop must not
     /// also `break`, or naga sees that break as unreachable.
     pub(super) halted: bool,
+    /// At least one explicit return was emitted in this function.
+    pub(super) returned: bool,
 }
 
 /// Imports and defined functions visible to one lowering.
@@ -141,7 +143,26 @@ impl Emit<'_, '_> {
     }
 
     pub(super) fn f32(&mut self, value: f32) -> naga::Handle<Expression> {
-        self.ex(Expression::Literal(Literal::F32(value)))
+        if value.is_finite() {
+            return self.ex(Expression::Literal(Literal::F32(value)));
+        }
+        // WGSL rejects non-finite constants, including bitcast const-expressions.
+        // Read the finite seed back from a mutable local so the arithmetic is
+        // a runtime operation in WGSL, not another constant expression.
+        if value.is_infinite() {
+            let largest = dynamic_f32(self, f32::MAX);
+            let two = self.ex(Expression::Literal(Literal::F32(2.0)));
+            let magnitude = f32_binary(self, naga::BinaryOperator::Multiply, largest, two);
+            if value.is_sign_negative() {
+                return self.ex(Expression::Unary {
+                    op: naga::UnaryOperator::Negate,
+                    expr: magnitude,
+                });
+            }
+            return magnitude;
+        }
+        let zero = dynamic_f32(self, 0.0);
+        f32_binary(self, naga::BinaryOperator::Divide, zero, zero)
     }
 
     pub(super) fn bool(&mut self, value: bool) -> naga::Handle<Expression> {
@@ -283,6 +304,27 @@ impl Emit<'_, '_> {
         }
         Ok(base)
     }
+}
+
+fn dynamic_f32(emit: &mut Emit<'_, '_>, value: f32) -> naga::Handle<Expression> {
+    let init = emit
+        .func
+        .expressions
+        .append(Expression::Literal(Literal::F32(value)), sp());
+    let scalar = emit.cx.scalar;
+    let local = emit.var(scalar, init);
+    let stored = emit.ex(Expression::Literal(Literal::F32(value)));
+    emit.store_var(local, stored);
+    emit.load_var(local)
+}
+
+pub(super) fn f32_binary(
+    emit: &mut Emit<'_, '_>,
+    op: naga::BinaryOperator,
+    left: naga::Handle<Expression>,
+    right: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    emit.ex(Expression::Binary { op, left, right })
 }
 
 pub(super) fn float_of(val: Val) -> Result<naga::Handle<Expression>, TranslateError> {

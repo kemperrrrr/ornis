@@ -14,6 +14,7 @@ use super::Ai;
 use super::St;
 use super::interpret;
 use super::join::entry;
+use super::join::join_vec;
 use super::pop;
 use super::push;
 
@@ -73,16 +74,32 @@ pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Tr
     let mut callee = entry(func);
     seed(&mut callee, func, &args)?;
     ai.active.push(index);
-    let saved = std::mem::take(&mut ai.labels);
+    let saved_labels = std::mem::take(&mut ai.labels);
+    let saved_returns = std::mem::take(&mut ai.returns);
     let result = interpret(ai, &mut callee, &body);
-    ai.labels = saved;
+    ai.labels = saved_labels;
+    let return_stacks = std::mem::take(&mut ai.returns);
+    ai.returns = saved_returns;
     ai.active.pop();
     result?;
-    if callee.stop || callee.stack.len() != results as usize || returns_ptr(&callee.stack) {
+
+    let mut out = if callee.stop {
+        None
+    } else {
+        Some(callee.stack)
+    };
+    for returned in return_stacks {
+        out = Some(match out {
+            Some(current) => join_vec(current, returned)?,
+            None => returned,
+        });
+    }
+    let out = out.ok_or(TranslateError::Unsupported)?;
+    if out.len() != results as usize || returns_ptr(&out) {
         return Err(TranslateError::Unsupported);
     }
-    remember(ai, index, &args, &callee.stack);
-    give(st, &callee.stack)
+    remember(ai, index, &args, &out);
+    give(st, &out)
 }
 
 /// A pointer result would leave the callee with provenance this subset

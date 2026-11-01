@@ -140,6 +140,22 @@ pub fn storage_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Bu
     )
 }
 
+/// Record one compute pass that binds group zero and dispatches `workgroups`.
+pub fn record_compute_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    bind_group: &wgpu::BindGroup,
+    workgroups: [u32; 3],
+) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: None,
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.dispatch_workgroups(workgroups[0], workgroups[1], workgroups[2]);
+}
+
 /// One bind-group entry for `buffer` at `binding`.
 pub fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {

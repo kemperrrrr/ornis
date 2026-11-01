@@ -132,8 +132,8 @@ fn lower_one(
         baked: baked.to_vec(),
         id_param: None,
     };
-    let stack = flow::exec(cx, code, &mut body, &input)?;
-    let (result_imm, nresults) = ret::finish(&mut body, cx, &stack, &sig)?;
+    let output = flow::exec(cx, code, &mut body, &input)?;
+    let (result_imm, nresults) = ret::finish(&mut body, cx, &output.stack, &sig, output.returned)?;
     let handle = cx.module.functions.append(body, Span::default());
     Ok(Spec {
         func: func_index,

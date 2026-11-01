@@ -170,7 +170,7 @@ fn shader(
         funcs: &module.funcs,
         prepared,
     };
-    let stack = flow::exec(
+    let output = flow::exec(
         cx,
         &code,
         &mut body,
@@ -181,7 +181,8 @@ fn shader(
         },
     );
     cx.active.pop();
-    let stack = stack?;
+    let output = output?;
+    let stack = output.stack;
     if compute.is_some() {
         if !stack.is_empty() {
             return Err(TranslateError::Unsupported);

@@ -46,7 +46,7 @@ pub(super) fn exec(
     code: &Code<'_>,
     body: &mut naga::Function,
     input: &ExecIn,
-) -> Result<Vec<Val>, TranslateError> {
+) -> Result<ret::Output, TranslateError> {
     let baked = input.baked.clone();
     let id_param = input.id_param;
     let func = code
@@ -81,6 +81,7 @@ pub(super) fn exec(
         id_param,
         results,
         halted: false,
+        returned: false,
         imports: code.imports,
         structs: code.structs,
         funcs: code.funcs,
@@ -89,10 +90,14 @@ pub(super) fn exec(
     copy_params(&mut em, params)?;
     em.run(&prepared.stmts)?;
     let Emit {
-        block, stack, func, ..
+        block,
+        stack,
+        func,
+        returned,
+        ..
     } = em;
     func.body = block;
-    Ok(stack)
+    Ok(ret::Output { stack, returned })
 }
 
 impl Emit<'_, '_> {
@@ -125,16 +130,6 @@ impl Emit<'_, '_> {
             Stmt::BrTable { targets, default } => self.br_table(targets, *default),
             Stmt::Return => self.fn_return(),
         }
-    }
-
-    fn fn_return(&mut self) -> Result<(), TranslateError> {
-        if self.results != 0 {
-            return Err(TranslateError::FunctionBranch);
-        }
-        self.block
-            .push(naga::Statement::Return { value: None }, sp());
-        self.halted = true;
-        Ok(())
     }
 
     pub(crate) fn plain(
@@ -328,6 +323,7 @@ fn final_ptrs(
 
 mod branch;
 mod canon;
+pub(crate) mod ret;
 mod shape;
 mod slots;
 mod switch;

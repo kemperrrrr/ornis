@@ -89,8 +89,18 @@ fn op_wat(imports: &[String], op: &Operator<'_>) -> Result<String, String> {
         Operator::I32Xor => Ok("i32.xor".to_string()),
         Operator::I32ShrS => Ok("i32.shr_s".to_string()),
         Operator::F32Add => Ok("f32.add".to_string()),
+        Operator::F32Sub => Ok("f32.sub".to_string()),
         Operator::F32Mul => Ok("f32.mul".to_string()),
+        Operator::F32Div => Ok("f32.div".to_string()),
+        Operator::F32Abs => Ok("f32.abs".to_string()),
+        Operator::F32Neg => Ok("f32.neg".to_string()),
+        Operator::F32ConvertI32U => Ok("f32.convert_i32_u".to_string()),
+        Operator::F32Eq => Ok("f32.eq".to_string()),
+        Operator::F32Ne => Ok("f32.ne".to_string()),
         Operator::F32Lt => Ok("f32.lt".to_string()),
+        Operator::F32Gt => Ok("f32.gt".to_string()),
+        Operator::F32Le => Ok("f32.le".to_string()),
+        Operator::F32Ge => Ok("f32.ge".to_string()),
         Operator::Select => Ok("select".to_string()),
         Operator::I32Load { memarg } => Ok(mem_op("i32.load", memarg)),
         Operator::I32Store { memarg } => Ok(mem_op("i32.store", memarg)),
@@ -154,5 +164,23 @@ pub(super) fn val_name(val: ValType) -> Result<&'static str, String> {
         ValType::I32 => Ok("i32"),
         ValType::F32 => Ok("f32"),
         other => Err(format!("{other:?}")),
+    }
+}
+
+pub(super) fn param_list(params: &str) -> String {
+    let params = params.trim();
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!("(param {params})")
+    }
+}
+
+pub(super) fn result_list(results: &str) -> String {
+    let results = results.trim();
+    if results.is_empty() {
+        String::new()
+    } else {
+        format!("(result {results})")
     }
 }

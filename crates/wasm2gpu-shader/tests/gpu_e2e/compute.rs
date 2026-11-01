@@ -94,15 +94,7 @@ fn dispatch(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> [f32; LAN
         }],
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("wasm2gpu compute"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
+    super::record_compute_pass(&mut encoder, &pipeline, &bind, [1, 1, 1]);
     queue.submit([encoder.finish()]);
     super::map_f32s(device, queue, &storage)
 }
