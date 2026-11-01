@@ -39,7 +39,13 @@ struct ProductionInputs<'a> {
 #[test]
 fn wasm_guest_matches_production_histogram_and_exposure_for_scene_modes() {
     let lowered = lower_guest();
+    // The shared bootstrap already panics under the CI gate; keep the
+    // requirement explicit at this parity test's skip boundary as well.
     let Some((device, queue)) = try_device() else {
+        assert!(
+            !crate::gpu_required(),
+            "ORNIS_REQUIRE_GPU is set but auto-exposure parity has no wgpu device"
+        );
         return;
     };
     let scenes = scenes();

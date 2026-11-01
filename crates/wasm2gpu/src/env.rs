@@ -146,12 +146,43 @@ impl Emit<'_, '_> {
         if value.is_finite() {
             return self.ex(Expression::Literal(Literal::F32(value)));
         }
-        let bits = self.u32(value.to_bits());
-        self.ex(Expression::As {
-            expr: bits,
-            kind: naga::ScalarKind::Float,
-            convert: None,
+        // WGSL rejects non-finite constants, including bitcast const-expressions.
+        // Read the finite seed back from a mutable local so the arithmetic is
+        // a runtime operation in WGSL, not another constant expression.
+        if value.is_infinite() {
+            let largest = self.dynamic_f32(f32::MAX);
+            let two = self.ex(Expression::Literal(Literal::F32(2.0)));
+            let magnitude = self.ex(Expression::Binary {
+                op: naga::BinaryOperator::Multiply,
+                left: largest,
+                right: two,
+            });
+            if value.is_sign_negative() {
+                return self.ex(Expression::Unary {
+                    op: naga::UnaryOperator::Negate,
+                    expr: magnitude,
+                });
+            }
+            return magnitude;
+        }
+        let zero = self.dynamic_f32(0.0);
+        self.ex(Expression::Binary {
+            op: naga::BinaryOperator::Divide,
+            left: zero,
+            right: zero,
         })
+    }
+
+    fn dynamic_f32(&mut self, value: f32) -> naga::Handle<Expression> {
+        let init = self
+            .func
+            .expressions
+            .append(Expression::Literal(Literal::F32(value)), sp());
+        let scalar = self.cx.scalar;
+        let local = self.var(scalar, init);
+        let stored = self.ex(Expression::Literal(Literal::F32(value)));
+        self.store_var(local, stored);
+        self.load_var(local)
     }
 
     pub(super) fn bool(&mut self, value: bool) -> naga::Handle<Expression> {

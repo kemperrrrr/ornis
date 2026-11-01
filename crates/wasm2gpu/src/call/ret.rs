@@ -29,6 +29,13 @@ pub(super) fn finish(
     sig: &Sig,
     returned: bool,
 ) -> Result<([Option<u32>; MAX_PARAMS], u8), TranslateError> {
+    // An explicit dynamic return and an immediate fallthrough result cannot
+    // share a Naga function result: immediates are returned to the caller as
+    // specialization metadata, but the explicit return requires a typed Naga
+    // result. Reject this mixed case rather than emitting an invalid helper.
+    if returned && stack.iter().any(|value| matches!(value, Val::Imm(_))) {
+        return Err(TranslateError::Unsupported);
+    }
     // Explicit returns nested in loops can make Naga require a final return
     // it cannot prove unreachable from Wasm's validated control flow.
     if stack.is_empty() && sig.results == 1 && returned {
