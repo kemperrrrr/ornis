@@ -29,14 +29,22 @@ pub(super) fn finish(
     sig: &Sig,
     returned: bool,
 ) -> Result<([Option<u32>; MAX_PARAMS], u8), TranslateError> {
-    // When every path returns explicitly, no fallthrough value remains here.
+    // Explicit returns nested in loops can make Naga require a final return
+    // it cannot prove unreachable from Wasm's validated control flow.
     if stack.is_empty() && sig.results == 1 && returned {
-        let ty = if sig.result_kind[0] == Kind::F32 {
-            cx.scalar
-        } else {
-            cx.uint
-        };
+        let is_float = sig.result_kind[0] == Kind::F32;
+        let ty = if is_float { cx.scalar } else { cx.uint };
         body.result = Some(FunctionResult { ty, binding: None });
+        if !matches!(body.body.last(), Some(Statement::Return { .. })) {
+            let literal = if is_float {
+                naga::Literal::F32(0.0)
+            } else {
+                naga::Literal::U32(0)
+            };
+            let value = expr(body, Expression::Literal(literal));
+            body.body
+                .push(Statement::Return { value: Some(value) }, sp());
+        }
         return Ok(([None; MAX_PARAMS], 1));
     }
     if stack.len() != sig.results as usize {
