@@ -6,6 +6,7 @@ use crate::auto_exposure::ExposureFrame;
 use crate::auto_exposure::wasm2gpu::GuestFrame;
 use crate::auto_exposure::wasm2gpu::GuestGpu;
 use crate::auto_exposure::wasm2gpu::GuestInputs;
+use crate::auto_exposure::wasm2gpu::GuestOutput;
 use crate::auto_exposure::wasm2gpu::lower_guest;
 
 use super::build_histogram;
@@ -74,7 +75,7 @@ fn check_scene(
         settings,
     };
     let production_histogram = production_histogram(&production);
-    let guest_result = guest
+    let guest_result: GuestOutput = guest
         .run(
             device,
             queue,
@@ -128,9 +129,7 @@ fn production_histogram(inputs: &ProductionInputs<'_>) -> [u32; super::HISTOGRAM
             dt_seconds: DT,
         },
     );
-    inputs
-        .queue
-        .submit(std::iter::once(encoder.finish()));
+    inputs.queue.submit(std::iter::once(encoder.finish()));
     read_histogram(inputs.device, inputs.queue, &pass)
 }
 
@@ -156,9 +155,7 @@ fn production_exposure(inputs: &ProductionInputs<'_>) -> f32 {
             dt_seconds: DT,
         },
     );
-    inputs
-        .queue
-        .submit(std::iter::once(encoder.finish()));
+    inputs.queue.submit(std::iter::once(encoder.finish()));
     read_exposure(inputs.device, inputs.queue, &pass)
 }
 

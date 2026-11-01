@@ -16,9 +16,8 @@ pub(super) fn bench_texels(width: u32, height: u32) -> (Vec<[f32; 4]>, Vec<[f32;
     let mut forward = Vec::with_capacity(count);
     for index in 0..count {
         let level = BENCH_LUMINANCE_LEVELS[index % BENCH_LUMINANCE_LEVELS.len()];
-        let forward_index =
-            (index * FORWARD_LEVEL_INDEX_SCALE + FORWARD_LEVEL_INDEX_OFFSET)
-                % BENCH_LUMINANCE_LEVELS.len();
+        let forward_index = (index * FORWARD_LEVEL_INDEX_SCALE + FORWARD_LEVEL_INDEX_OFFSET)
+            % BENCH_LUMINANCE_LEVELS.len();
         let forward_level = BENCH_LUMINANCE_LEVELS[forward_index];
         deferred.push([level, level, level, 1.0]);
         forward.push([
@@ -36,6 +35,17 @@ pub(super) struct TextureUpload<'a> {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) texels: &'a [[f32; 4]],
+}
+
+impl<'a> TextureUpload<'a> {
+    pub(super) fn new(label: &'a str, width: u32, height: u32, texels: &'a [[f32; 4]]) -> Self {
+        Self {
+            label,
+            width,
+            height,
+            texels,
+        }
+    }
 }
 
 pub(super) fn texture(

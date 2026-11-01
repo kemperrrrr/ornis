@@ -227,7 +227,6 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     Ok(())
 }
 
-
 /// Immediate bits, or the two operands already lowered to `u32`.
 enum Ready {
     Imm(u32),

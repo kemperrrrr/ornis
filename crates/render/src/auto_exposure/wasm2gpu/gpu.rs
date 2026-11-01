@@ -5,7 +5,9 @@ mod pipeline;
 mod resources;
 
 use bytemuck::cast_slice;
+#[cfg(test)]
 use ornis_wasm2gpu_testkit::gpu_buffer;
+#[cfg(test)]
 use ornis_wasm2gpu_testkit::map_bytes;
 use ornis_wasm2gpu_testkit::symbols;
 
@@ -13,10 +15,9 @@ use crate::auto_exposure::AutoExposureSettings;
 use crate::auto_exposure::HISTOGRAM_BINS;
 
 use super::Lowered;
-use data::{
-    ADAPT_PARAMS_LEN, HISTOGRAM_PARAMS_LEN, adapt_params, histogram_params, output_from_bytes,
-    uniform_bytes,
-};
+use data::{ADAPT_PARAMS_LEN, HISTOGRAM_PARAMS_LEN, adapt_params, histogram_params, uniform_bytes};
+#[cfg(test)]
+use data::output_from_bytes;
 use pipeline::{dispatch, pipeline};
 use resources::{bind_entry, binding, storage_buffer, uniform_buffer};
 
@@ -31,10 +32,15 @@ const FRAME_BINDING: u32 = 3;
 const HISTOGRAM_PARAMS_BINDING: u32 = 4;
 const ADAPT_PARAMS_BINDING: u32 = 5;
 const EXPOSURE_BINDING: u32 = 6;
+#[cfg(test)]
 const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
+#[cfg(test)]
 const HISTOGRAM_SNAPSHOT_BYTES: u64 = HISTOGRAM_BINS as u64 * std::mem::size_of::<u32>() as u64;
+#[cfg(test)]
 const EXPOSURE_READBACK_OFFSET: u64 = HISTOGRAM_SNAPSHOT_BYTES;
+#[cfg(test)]
 const EXPOSURE_OUTPUT_OFFSET: u64 = FLOAT_BYTES;
+#[cfg(test)]
 const STAGING_BYTES: u64 = HISTOGRAM_SNAPSHOT_BYTES + FLOAT_BYTES;
 
 /// The two HDR layers in the production pass's compositing mode.
@@ -52,6 +58,7 @@ pub(crate) struct GuestInputs<'a> {
 }
 
 /// Inputs and timing state for one guest frame.
+#[cfg(test)]
 pub(crate) struct GuestFrame<'a> {
     /// Packed HDR input layers and composite mode.
     pub(crate) inputs: GuestInputs<'a>,
@@ -64,6 +71,7 @@ pub(crate) struct GuestFrame<'a> {
 }
 
 /// Histogram snapshot and smoothed exposure emitted by one guest frame.
+#[cfg(test)]
 pub(crate) struct GuestOutput {
     pub(crate) histogram: [u32; HISTOGRAM_BINS],
     pub(crate) exposure: f32,
@@ -83,6 +91,7 @@ pub(crate) struct GuestGpu {
     frame: wgpu::Buffer,
     histogram_params: wgpu::Buffer,
     adapt_params: wgpu::Buffer,
+    #[cfg(test)]
     staging: wgpu::Buffer,
     pixel_count: u32,
 }
@@ -115,6 +124,7 @@ impl GuestGpu {
         let frame = storage_buffer(device, "ae frame settings", FRAME_WORDS);
         let histogram_params = uniform_buffer(device, "ae histogram params", HISTOGRAM_PARAMS_LEN);
         let adapt_params = uniform_buffer(device, "ae adapt params", ADAPT_PARAMS_LEN);
+        #[cfg(test)]
         let staging = gpu_buffer(
             device,
             "ae guest readback",
@@ -147,6 +157,7 @@ impl GuestGpu {
             frame,
             histogram_params,
             adapt_params,
+            #[cfg(test)]
             staging,
             pixel_count,
         }
@@ -171,8 +182,7 @@ impl GuestGpu {
         for pixel in 0..self.pixel_count as usize {
             let at = pixel * INPUT_LANES;
             packed[at..at + RGBA_LANES].copy_from_slice(&inputs.deferred[pixel]);
-            packed[at + RGBA_LANES..at + INPUT_LANES]
-                .copy_from_slice(&inputs.forward[pixel]);
+            packed[at + RGBA_LANES..at + INPUT_LANES].copy_from_slice(&inputs.forward[pixel]);
         }
         queue.write_buffer(&self.input, 0, cast_slice(&packed));
         queue.write_buffer(&self.frame, 0, cast_slice(&[self.pixel_count, inputs.mode]));
@@ -215,6 +225,7 @@ impl GuestGpu {
     }
 
     /// Executes one frame and snapshots the histogram before the guest clears it.
+    #[cfg(test)]
     pub(crate) fn run(
         &self,
         device: &wgpu::Device,

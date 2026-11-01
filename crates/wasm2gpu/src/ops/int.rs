@@ -7,9 +7,9 @@ use crate::cx::Val;
 use crate::env::Emit;
 use crate::error::TranslateError;
 
+use super::Ready;
 use super::ptr::i32_pair;
 use super::ptr::i32_ready;
-use super::Ready;
 
 pub(super) fn i32_bin(
     em: &mut Emit<'_, '_>,

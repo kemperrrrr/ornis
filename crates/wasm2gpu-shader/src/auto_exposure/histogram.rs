@@ -5,15 +5,15 @@ use ornis_gpu_abi::storage_at_u32;
 use ornis_gpu_abi::storage_store_u32;
 use ornis_gpu_abi::uniform_array_f32;
 
-use super::math::log_luminance_is_in_bin;
 use super::FRAME_BINDING;
 use super::HISTOGRAM_BINDING;
 use super::HISTOGRAM_BINS;
 use super::HISTOGRAM_PARAMS_BINDING;
 use super::HISTOGRAM_PARAMS_LEN;
+use super::INV_LOG_RANGE_INDEX;
 use super::LOG_LUMINANCE_BINDING;
 use super::MIN_LOG_LUMINANCE_INDEX;
-use super::INV_LOG_RANGE_INDEX;
+use super::math::log_luminance_is_in_bin;
 
 /// Wasm entry for a histogram bin; each lane scans scratch and writes one count.
 ///
@@ -25,14 +25,12 @@ use super::INV_LOG_RANGE_INDEX;
 pub extern "C" fn ae_histogram(bin: u32) {
     if bin < HISTOGRAM_BINS {
         let pixel_count = storage_at_u32::<0, FRAME_BINDING>(0);
-        let min_log_lum =
-            uniform_array_f32::<0, HISTOGRAM_PARAMS_BINDING, HISTOGRAM_PARAMS_LEN>(
-                MIN_LOG_LUMINANCE_INDEX,
-            );
-        let inv_log_range =
-            uniform_array_f32::<0, HISTOGRAM_PARAMS_BINDING, HISTOGRAM_PARAMS_LEN>(
-                INV_LOG_RANGE_INDEX,
-            );
+        let min_log_lum = uniform_array_f32::<0, HISTOGRAM_PARAMS_BINDING, HISTOGRAM_PARAMS_LEN>(
+            MIN_LOG_LUMINANCE_INDEX,
+        );
+        let inv_log_range = uniform_array_f32::<0, HISTOGRAM_PARAMS_BINDING, HISTOGRAM_PARAMS_LEN>(
+            INV_LOG_RANGE_INDEX,
+        );
         let mut count = 0_u32;
         let mut pixel = 0_u32;
         while pixel < pixel_count {

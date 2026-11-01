@@ -21,10 +21,10 @@ use super::HISTOGRAM_BINDING;
 use super::HISTOGRAM_BINS;
 use super::HISTOGRAM_PARAMS_BINDING;
 use super::HISTOGRAM_PARAMS_LEN;
-use super::HISTOGRAM_MIN_LOG_LUMINANCE_INDEX;
-use super::HISTOGRAM_INV_LOG_RANGE_INDEX;
 use super::INPUT_BINDING;
+use super::INV_LOG_RANGE_INDEX;
 use super::LOG_LUMINANCE_BINDING;
+use super::MIN_LOG_LUMINANCE_INDEX;
 use super::adapt::ae_adapt;
 use super::histogram::ae_histogram;
 use super::log_luma::ae_log_luma;
@@ -86,8 +86,8 @@ fn histogram_params() -> [f32; HISTOGRAM_PARAMETER_WORDS] {
     for (index, value) in values.iter_mut().take(HISTOGRAM_WORDS + 1).enumerate() {
         *value = index as f32;
     }
-    values[HISTOGRAM_MIN_LOG_LUMINANCE_INDEX as usize] = -7.0;
-    values[HISTOGRAM_INV_LOG_RANGE_INDEX as usize] = 1.0 / 14.0;
+    values[MIN_LOG_LUMINANCE_INDEX as usize] = -7.0;
+    values[INV_LOG_RANGE_INDEX as usize] = 1.0 / 14.0;
     values
 }
 
@@ -102,16 +102,12 @@ fn run_histogram(log_values: &[f32; PIXEL_COUNT]) -> [u32; HISTOGRAM_WORDS] {
     memory.write_storage::<0, HISTOGRAM_BINDING, [u32; HISTOGRAM_WORDS]>(&[0; HISTOGRAM_WORDS]);
     let values = histogram_params();
     let lanes = uniform_lanes(&values);
-    memory.bind_uniform::<
-        0,
-        HISTOGRAM_PARAMS_BINDING,
-        [UniformF32Lane; HISTOGRAM_PARAMETER_WORDS],
-    >();
-    memory.write_uniform::<
-        0,
-        HISTOGRAM_PARAMS_BINDING,
-        [UniformF32Lane; HISTOGRAM_PARAMETER_WORDS],
-    >(&lanes);
+    memory
+        .bind_uniform::<0, HISTOGRAM_PARAMS_BINDING, [UniformF32Lane; HISTOGRAM_PARAMETER_WORDS]>();
+    memory
+        .write_uniform::<0, HISTOGRAM_PARAMS_BINDING, [UniformF32Lane; HISTOGRAM_PARAMETER_WORDS]>(
+            &lanes,
+        );
     with_host(&mut memory, || {
         for bin in 0..HISTOGRAM_BINS {
             ae_histogram(bin);
@@ -162,14 +158,9 @@ fn run_adaptation(
     memory.write_storage::<0, EXPOSURE_BINDING, [f32; EXPOSURE_SLOTS]>(exposure);
     let values = adapt_params();
     let lanes = uniform_lanes(&values);
-    memory.bind_uniform::<
-        0,
-        ADAPT_PARAMS_BINDING,
-        [UniformF32Lane; ADAPT_PARAMETER_WORDS],
-    >();
-    memory.write_uniform::<0, ADAPT_PARAMS_BINDING, [UniformF32Lane; ADAPT_PARAMETER_WORDS]>(
-        &lanes,
-    );
+    memory.bind_uniform::<0, ADAPT_PARAMS_BINDING, [UniformF32Lane; ADAPT_PARAMETER_WORDS]>();
+    memory
+        .write_uniform::<0, ADAPT_PARAMS_BINDING, [UniformF32Lane; ADAPT_PARAMETER_WORDS]>(&lanes);
     with_host(&mut memory, || {
         ae_adapt(1);
         ae_adapt(0);

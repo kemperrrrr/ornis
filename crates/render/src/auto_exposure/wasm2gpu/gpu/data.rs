@@ -3,7 +3,9 @@
 use crate::auto_exposure::AutoExposureSettings;
 use crate::auto_exposure::HISTOGRAM_BINS;
 
+#[cfg(test)]
 use super::EXPOSURE_READBACK_OFFSET;
+#[cfg(test)]
 use super::GuestOutput;
 
 const IN_RANGE_BINS: f32 = HISTOGRAM_BINS as f32 - 2.0;
@@ -23,6 +25,7 @@ const ADAPT_DARKEN_SPEED_INDEX: usize = HISTOGRAM_BINS + 6;
 const ADAPT_TRANSITION_DISTANCE_INDEX: usize = HISTOGRAM_BINS + 7;
 const ADAPT_DT_INDEX: usize = HISTOGRAM_BINS + 8;
 const UNIFORM_SLOT_BYTES: usize = 16;
+#[cfg(test)]
 const U32_BYTES: usize = std::mem::size_of::<u32>();
 const F32_BYTES: usize = std::mem::size_of::<f32>();
 
@@ -63,6 +66,7 @@ pub(super) fn uniform_bytes(values: &[f32]) -> Vec<u8> {
     bytes
 }
 
+#[cfg(test)]
 pub(super) fn output_from_bytes(bytes: &[u8]) -> Option<GuestOutput> {
     let mut histogram = [0_u32; HISTOGRAM_BINS];
     for (index, count) in histogram.iter_mut().enumerate() {

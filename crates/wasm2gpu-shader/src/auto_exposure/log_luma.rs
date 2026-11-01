@@ -4,12 +4,12 @@ use ornis_gpu_abi::storage_at_f32;
 use ornis_gpu_abi::storage_at_u32;
 use ornis_gpu_abi::storage_store_f32;
 
-use super::math::log_luminance;
-use super::math::selected_channel;
 use super::FRAME_BINDING;
 use super::INPUT_BINDING;
 use super::LOG_LUMINANCE_BINDING;
 use super::TEXEL_LANES;
+use super::math::log_luminance;
+use super::math::selected_channel;
 
 const FORWARD_RGBA_OFFSET: u32 = TEXEL_LANES / 2;
 const FORWARD_GREEN_OFFSET: u32 = 1;

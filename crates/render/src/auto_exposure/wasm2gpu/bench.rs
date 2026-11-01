@@ -128,7 +128,7 @@ fn adapter_header(info: &wgpu::AdapterInfo, warmup: usize, repeats: usize) -> St
     format!(
         concat!(
             "adapter: {}\nbackend: {:?}\ndevice_type: {:?}\ndriver: {} {}\n",
-            "software: {}\nwarmup: {warmup} repeats: {repeats}\n",
+            "software: {}\nwarmup: {} repeats: {}\n",
             "Times are wall-clock microseconds (encode, submit, and blocking poll); ",
             "software-adapter times are CPU software-rendering costs, not discrete-GPU costs.\n",
         ),
@@ -138,6 +138,8 @@ fn adapter_header(info: &wgpu::AdapterInfo, warmup: usize, repeats: usize) -> St
         info.driver,
         info.driver_info,
         if software { "yes" } else { "no" },
+        warmup,
+        repeats,
     )
 }
 
@@ -170,22 +172,12 @@ fn bench_size(
     let deferred_tex = texture(
         &session.device,
         &session.queue,
-        TextureUpload {
-            label: "ae bench deferred",
-            width,
-            height,
-            texels: &deferred,
-        },
+        TextureUpload::new("ae bench deferred", width, height, &deferred),
     );
     let forward_tex = texture(
         &session.device,
         &session.queue,
-        TextureUpload {
-            label: "ae bench forward",
-            width,
-            height,
-            texels: &forward,
-        },
+        TextureUpload::new("ae bench forward", width, height, &forward),
     );
     let production = AutoExposure::new(&session.device);
     let production_frame = ProductionFrame {
@@ -217,12 +209,13 @@ fn bench_size(
 
 fn run_production(frame: &ProductionFrame<'_>) -> Duration {
     let started = Instant::now();
-    let mut encoder = frame
-        .session
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("auto-exposure production A/B"),
-        });
+    let mut encoder =
+        frame
+            .session
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("auto-exposure production A/B"),
+            });
     frame.pass.encode(
         &frame.session.device,
         &frame.session.queue,
