@@ -132,8 +132,14 @@ fn lower_one(
         baked: baked.to_vec(),
         id_param: None,
     };
-    let stack = flow::exec(cx, code, &mut body, &input)?;
-    let (result_imm, nresults) = ret::finish(&mut body, cx, &stack, &sig)?;
+    let stack = flow::exec(cx, code, &mut body, &input).map_err(|error| {
+        eprintln!("wasm2gpu: helper {func_index} flow lowering failed: {error:?}");
+        error
+    })?;
+    let (result_imm, nresults) = ret::finish(&mut body, cx, &stack, &sig).map_err(|error| {
+        eprintln!("wasm2gpu: helper {func_index} return lowering failed: {error:?}");
+        error
+    })?;
     let handle = cx.module.functions.append(body, Span::default());
     Ok(Spec {
         func: func_index,

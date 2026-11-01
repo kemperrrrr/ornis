@@ -151,7 +151,11 @@ fn shader(
         &module.imports,
         &module.structs,
         &module.funcs,
-    )?;
+    )
+    .map_err(|error| {
+        eprintln!("wasm2gpu: {} cfg/AI check failed: {error:?}", stage.name);
+        error
+    })?;
     let id_param = compute.map(|_| 0);
     let arguments = if compute.is_some() {
         vec![invocation_arg(cx)]
@@ -179,11 +183,16 @@ fn shader(
             baked: Vec::new(),
             id_param,
         },
-    );
+    )
+    .map_err(|error| {
+        eprintln!("wasm2gpu: {} flow lowering failed: {error:?}", stage.name);
+        error
+    });
     cx.active.pop();
     let stack = stack?;
     if compute.is_some() {
         if !stack.is_empty() {
+            eprintln!("wasm2gpu: {} leaves {} compute stack values", stage.name, stack.len());
             return Err(TranslateError::Unsupported);
         }
         return Ok(body);
