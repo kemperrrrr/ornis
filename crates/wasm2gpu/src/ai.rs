@@ -83,6 +83,8 @@ struct Ai<'a> {
     labels: Vec<Lab>,
     /// Defined-function indices on the call stack. A repeat is recursion.
     active: Vec<u32>,
+    /// Result stacks from explicit returns in the active callee.
+    returns: Vec<Vec<Abs>>,
     seen: call::Seen,
 }
 
@@ -98,6 +100,7 @@ pub(super) fn check(
         funcs,
         labels: Vec::new(),
         active: Vec::new(),
+        returns: Vec::new(),
         seen: call::Seen::new(),
     };
     let mut pushed = false;
@@ -137,12 +140,15 @@ fn on_stmt(ai: &mut Ai<'_>, st: &mut St, stmt: &Stmt) -> Result<(), TranslateErr
         Stmt::Br(depth) => branch(ai, st, *depth, true),
         Stmt::BrIf(depth) => br_if(ai, st, *depth),
         Stmt::BrTable { targets, default } => table::br_table(ai, st, targets, *default),
-        Stmt::Return => ret_stop(st),
+        Stmt::Return => ret_stop(ai, st),
     }
 }
 
-fn ret_stop(st: &mut St) -> Result<(), TranslateError> {
+fn ret_stop(ai: &mut Ai<'_>, st: &mut St) -> Result<(), TranslateError> {
     st.stop = true;
+    if !ai.returns.contains(&st.stack) {
+        ai.returns.push(st.stack.clone());
+    }
     Ok(())
 }
 

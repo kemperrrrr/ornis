@@ -14,7 +14,9 @@ fn wasm() -> Vec<u8> {
             (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
                 f32.const 0 f32.const 0 f32.const 0 f32.const 1)
             (func $absolute (param f32) (result f32)
-                local.get 0 f32.abs return)
+                local.get 0 f32.const 0 f32.lt
+                if local.get 0 f32.abs return end
+                local.get 0 f32.abs)
             (func (export "{cs}") (param i32)
                 i32.const 0 i32.const 0 i32.const 0
                 f32.const 7 f32.const 2 f32.sub call $store_f32
