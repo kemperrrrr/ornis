@@ -7,6 +7,7 @@ use super::Num;
 use super::STRUCT_HEADER;
 use super::St;
 use super::float::f32_abs;
+use super::float::f32_neg;
 use super::fold;
 use super::join::join_abs;
 use super::local_get;
@@ -47,6 +48,7 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::Call(index) => call(ai, st, index),
         Op::Mul | Op::Add | Op::Sub | Op::Div => f32_bin(st),
         Op::F32Abs => f32_abs(st),
+        Op::F32Neg => f32_neg(st),
         Op::F32ConvertI32U => f32_from_u32(st),
         Op::I32Add => i32_offset(st, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(st, u32::wrapping_mul),

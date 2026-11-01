@@ -90,6 +90,8 @@ pub enum Op {
     Div,
     /// Absolute value of the top `f32` value.
     F32Abs,
+    /// Negate the top `f32` value.
+    F32Neg,
     /// Convert an unsigned `i32` value to `f32`.
     F32ConvertI32U,
     /// Wrapping `i32` add.

@@ -33,6 +33,8 @@ fn wasm() -> Vec<u8> {
                 f32.const -3 call $absolute call $store_f32
                 i32.const 0 i32.const 0 i32.const 4
                 f32.const -3 call $absolute_all call $store_f32
+                i32.const 0 i32.const 0 i32.const 5
+                f32.const 3 f32.neg call $store_f32
                 i32.const 0 i32.const 0 i32.const 3
                 local.get 0 f32.convert_i32_u call $store_f32
                 i32.const 0 i32.const 1 i32.const 0

@@ -53,6 +53,15 @@ pub(super) fn f32_abs(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     em.push(Val::Scalar(absolute))
 }
 
+pub(super) fn f32_neg(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let value = crate::env::float_of(em.pop()?)?;
+    let negated = em.ex(Expression::Unary {
+        op: naga::UnaryOperator::Negate,
+        expr: value,
+    });
+    em.push(Val::Scalar(negated))
+}
+
 pub(super) fn f32_from_u32(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let raw = em.pop()?;
     let value = em.as_uint(raw)?;
