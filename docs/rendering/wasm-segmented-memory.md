@@ -11,7 +11,8 @@ Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
 `storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` /
 `i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Для
 скалярного `f32` lifter также опускает `+`, `-`, `*`, `/`, `abs`, `neg`, все
-шесть сравнений и unsigned `i32` → `f32`. Текстурная загрузка, atomics,
+шесть сравнений и unsigned `i32` → `f32`; `inf`/`NaN`-константы
+сохраняются через `bitcast`. Текстурная загрузка, atomics,
 workgroup memory и barriers пока не входят в ABI; исследовательский
 auto-exposure использует storage mirror и три последовательных
 compute-pass'а вместо этих механизмов. Он сохраняет histogram counts как

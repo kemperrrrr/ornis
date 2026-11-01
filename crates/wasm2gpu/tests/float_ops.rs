@@ -35,6 +35,8 @@ fn wasm() -> Vec<u8> {
                 f32.const -3 call $absolute_all call $store_f32
                 i32.const 0 i32.const 0 i32.const 5
                 f32.const 3 f32.neg call $store_f32
+                i32.const 0 i32.const 0 i32.const 6
+                f32.const inf call $store_f32
                 i32.const 0 i32.const 0 i32.const 3
                 local.get 0 f32.convert_i32_u call $store_f32
                 i32.const 0 i32.const 1 i32.const 0
@@ -79,6 +81,11 @@ fn scalar_float_ops_and_signed_i32_constants_lower_to_wgsl() {
     assert!(
         translated.wgsl.contains("f32("),
         "missing unsigned i32 conversion: {}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("bitcast<f32>"),
+        "missing non-finite float bitcast: {}",
         translated.wgsl
     );
     assert!(!translated.compute_spirv.is_empty());

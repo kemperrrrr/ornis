@@ -143,7 +143,15 @@ impl Emit<'_, '_> {
     }
 
     pub(super) fn f32(&mut self, value: f32) -> naga::Handle<Expression> {
-        self.ex(Expression::Literal(Literal::F32(value)))
+        if value.is_finite() {
+            return self.ex(Expression::Literal(Literal::F32(value)));
+        }
+        let bits = self.u32(value.to_bits());
+        self.ex(Expression::As {
+            expr: bits,
+            kind: naga::ScalarKind::Float,
+            convert: None,
+        })
     }
 
     pub(super) fn bool(&mut self, value: bool) -> naga::Handle<Expression> {
