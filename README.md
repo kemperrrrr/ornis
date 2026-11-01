@@ -137,8 +137,8 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | `crates/materialx` | Парсер `.mtlx` и конвертация в OpenPBR | Активен |
 | `crates/wasm` | WASM-обёртка для рендера сцены в браузере | Активен |
 | `crates/gpu-abi` | Toy SDK ABI Wasm→GPU: `GpuRef`/`GpuSafeLayout`, текстуры как вызовы, `unsafe` только в `gpu_abi` | Прототип (не замена shader DSL) |
-| `crates/wasm2gpu` | Offline research-транслятор vertex+fragment и необязательного `cs_main` (uniform-поля и индексы, `texture_sample`, storage, прямые `call`, CFG `if`/`loop`/`switch`) в WGSL/SPIR-V через naga | Прототип (не замена shader DSL) |
-| `crates/wasm2gpu-shader` | Маленький Rust-шейдер: `shade` и compute-`match`, которые тот же транслятор гоняет на wgpu. Wasm-экспорты помечены `#[unsafe(no_mangle)]`: лифтер ищет эти имена, в Rust 2024 атрибут unsafe, это не второй `unsafe`-блок | Прототип (тест gpu-шарда, не shader DSL). `test-wasm2gpu` требует таргет wasm32 и GPU-адаптер при `ORNIS_REQUIRE_GPU`; compute-readback печатается в лог |
+| `crates/wasm2gpu` | Offline research-транслятор vertex+fragment и необязательного `cs_main` (uniform-поля и индексы, `texture_sample`, storage, `f32` arithmetic/comparisons и `u32→f32`, прямые `call`, CFG `if`/`loop`/`switch`) в WGSL/SPIR-V через naga | Прототип (не замена shader DSL) |
+| `crates/wasm2gpu-shader` | Rust-гости `shade`, `cull`, fog vertex и auto-exposure (`log-luminance → histogram → adaptation`), компилируемые в wasm32 и прогоняемые через тот же транслятор на wgpu. Wasm-экспорты помечены `#[unsafe(no_mangle)]`: лифтер ищет эти имена, в Rust 2024 атрибут unsafe, это не второй `unsafe`-блок | Прототип (тест GPU-шарда, не shader DSL). `test-wasm2gpu` требует таргет wasm32 и GPU-адаптер при `ORNIS_REQUIRE_GPU`; compute-readback печатается в лог |
 | `crates/audio` | Аудио: `AudioSource`/`AudioListener`, бэкенды cpal / Web Audio | Активен |
 | `assets/` | Сцены (`scene.ron`, `demo_scene.ron`) | Служебное |
 

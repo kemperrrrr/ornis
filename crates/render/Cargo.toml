@@ -71,5 +71,10 @@ name = "wasm2gpu_cull_ab"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "wasm2gpu_auto_exposure_ab"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true

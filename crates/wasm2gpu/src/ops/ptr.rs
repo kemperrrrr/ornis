@@ -123,13 +123,6 @@ fn off_math(
     }
 }
 
-pub(super) fn f32_lt(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let right = crate::env::float_of(em.pop()?)?;
-    let left = crate::env::float_of(em.pop()?)?;
-    let cond = arith(em, BinaryOperator::Less, left, right);
-    em.push(Val::Bool(cond))
-}
-
 fn ready_of(
     em: &mut Emit<'_, '_>,
     left: Val,

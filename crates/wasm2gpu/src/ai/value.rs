@@ -10,7 +10,8 @@ use super::fold;
 use super::join::join_abs;
 use super::local_get;
 use super::local_set;
-use super::mem::f32_lt;
+use super::mem::f32_cmp;
+use super::mem::f32_from_u32;
 use super::mem::i32_offset;
 use super::mem::load_f32;
 use super::mem::load_i32;
@@ -43,7 +44,8 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::LocalTee(index) => local_set(st, index, true),
         Op::Drop => pop(st).map(|_| ()),
         Op::Call(index) => call(ai, st, index),
-        Op::Mul | Op::Add => f32_bin(st),
+        Op::Mul | Op::Add | Op::Sub | Op::Div => f32_bin(st),
+        Op::F32ConvertI32U => f32_from_u32(st),
         Op::I32Add => i32_offset(st, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(st, u32::wrapping_mul),
         Op::I32Sub => i32_offset(st, false, u32::wrapping_sub),
@@ -60,7 +62,7 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::I32GtU => i32_cmp(st, |a, b| a > b),
         Op::I32GeU => i32_cmp(st, |a, b| a >= b),
         Op::I32LeU => i32_cmp(st, |a, b| a <= b),
-        Op::F32Lt => f32_lt(st),
+        Op::F32Lt | Op::F32Le | Op::F32Gt | Op::F32Ge | Op::F32Eq | Op::F32Ne => f32_cmp(st),
         Op::LoadI32(_) => load_i32(st),
         Op::LoadF32(_) => load_f32(st),
         Op::StoreI32(_) => store_i32(st),

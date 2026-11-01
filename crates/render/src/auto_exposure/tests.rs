@@ -7,6 +7,10 @@
 #[cfg(test)]
 use super::*;
 
+#[cfg(test)]
+#[path = "tests/wasm2gpu.rs"]
+mod wasm2gpu_parity;
+
 /// Adapter handle, or `None` on headless hosts without a GPU (the skip is
 /// logged, never silent).
 ///

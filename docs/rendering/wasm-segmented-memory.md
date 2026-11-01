@@ -9,8 +9,14 @@ production path) — `crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`,
 `unsafe` только в `gpu_abi`) и offline `crates/wasm2gpu`.
 Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
 `storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` /
-`i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Uniform
-на том же контракте: `uniform_read_struct`, `uniform_field_*` (индекс
+`i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Для
+скалярного `f32` lifter также опускает `+`, `-`, `*`, `/`, все шесть
+сравнений и unsigned `i32` → `f32`. Текстурная загрузка, atomics,
+workgroup memory и barriers пока не входят в ABI; исследовательский
+auto-exposure использует storage mirror и три последовательных
+compute-pass'а вместо этих механизмов. Он сохраняет histogram counts как
+`u32`, но заменяет WGSL `log2`/`exp2` приближениями из скалярных
+операций; production render path не меняется. Uniform на том же контракте: `uniform_read_struct`, `uniform_field_*` (индекс
 поля только константа) и `uniform_read_*` / `uniform_index_struct`
 (длина константа, индекс элемента может быть динамическим, если WGSL
 это принимает). Раскладка структуры — `place_fields` с выравниванием

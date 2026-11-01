@@ -84,6 +84,12 @@ pub enum Op {
     Mul,
     /// Add the top two `f32` values.
     Add,
+    /// Subtract the top `f32` value from the next one.
+    Sub,
+    /// Divide the next `f32` value by the top one.
+    Div,
+    /// Convert an unsigned `i32` value to `f32`.
+    F32ConvertI32U,
     /// Wrapping `i32` add.
     I32Add,
     /// Wrapping `i32` multiply.
@@ -121,8 +127,18 @@ pub enum Op {
     StoreI32(u32),
     /// `f32.store` of four bytes at byte offset from a storage pointer.
     StoreF32(u32),
-    /// `f32.lt`: non-zero when the second float is below the first.
+    /// `f32.lt`: true when the left float is less than the right float.
     F32Lt,
+    /// `f32.le`: true when the left float is less than or equal to the right.
+    F32Le,
+    /// `f32.gt`: true when the left float is greater than the right float.
+    F32Gt,
+    /// `f32.ge`: true when the left float is greater than or equal to the right.
+    F32Ge,
+    /// `f32.eq`: true when the float operands are equal.
+    F32Eq,
+    /// `f32.ne`: true when the float operands are not equal.
+    F32Ne,
     /// Wasm `select`: `v1` if the condition is non-zero, otherwise `v2`.
     Select,
 }

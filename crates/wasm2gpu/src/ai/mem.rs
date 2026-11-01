@@ -137,10 +137,15 @@ fn pop_i32(st: &mut St) -> Result<(), TranslateError> {
     }
 }
 
-pub(super) fn f32_lt(st: &mut St) -> Result<(), TranslateError> {
+pub(super) fn f32_cmp(st: &mut St) -> Result<(), TranslateError> {
     pop_f32(st)?;
     pop_f32(st)?;
     push(st, Abs::I32(Num::Dyn { joined: false }))
+}
+
+pub(super) fn f32_from_u32(st: &mut St) -> Result<(), TranslateError> {
+    pop_i32(st)?;
+    push(st, Abs::F32)
 }
 
 /// `i32.load` analysis: the address is already checked provenance.

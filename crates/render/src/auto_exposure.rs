@@ -53,6 +53,11 @@
 
 mod wgsl;
 
+/// GPU parity and A/B harness for the experimental wasm2gpu auto-exposure guest.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub mod wasm2gpu;
+
 #[cfg(test)]
 mod tests;
 

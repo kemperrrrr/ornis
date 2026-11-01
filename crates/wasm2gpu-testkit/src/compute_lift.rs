@@ -1,5 +1,5 @@
-//! Lift a compute export (`compute`, `cull`, or the fog `vs_main`) into
-//! a toy module with `cs_main`.
+//! Lift a compute export (`compute`, `cull`, fog `vs_main`, or an
+//! auto-exposure entry) into a toy module with `cs_main`.
 //!
 //! `rustc` emits a memory section for the cdylib. The translator rejects
 //! that, so this lifter keeps only the functions the entry reaches: arm
@@ -25,14 +25,11 @@ pub fn lift(wasm: &[u8], export: &str) -> Vec<u8> {
     wat::parse_str(&wat).unwrap_or_else(|err| panic!("compute wat: {err}\n{wat}"))
 }
 
-/// Lift `export` from the guest and translate it, pinning what every
-/// lowered kernel must keep: the compute entry, the id builtin, the
-/// named storage binding, and a non-empty SPIR-V twin. Shared by the
-/// `cull` A/B and the fog vertex A/B so the sequence exists once.
+/// Lift and translate one export from an already-built guest, pinning the
+/// compute entry, invocation id, named storage binding, and SPIR-V twin.
 // qual:allow(complexity, error_handling) reason: "Translation failure invalidates the shader test."
-pub fn lowered_kernel(export: &str, storage_binding: &str) -> String {
-    let wasm = crate::compile_wasm();
-    let wat = lift_wat(&wasm, export);
+pub fn lowered_kernel_from(wasm: &[u8], export: &str, storage_binding: &str) -> String {
+    let wat = lift_wat(wasm, export);
     let module = wat::parse_str(&wat).unwrap_or_else(|err| panic!("{export} wat: {err}\n{wat}"));
     let lowered = match translate(&module) {
         Ok(lowered) => lowered,
@@ -44,6 +41,12 @@ pub fn lowered_kernel(export: &str, storage_binding: &str) -> String {
     assert!(wgsl.contains(storage_binding), "{wgsl}");
     assert!(!lowered.compute_spirv.is_empty());
     wgsl.clone()
+}
+
+/// Compile the guest and lower one export through the shared compute lifter.
+pub fn lowered_kernel(export: &str, storage_binding: &str) -> String {
+    let wasm = crate::compile_wasm();
+    lowered_kernel_from(&wasm, export, storage_binding)
 }
 
 /// The toy-module text `lift` parses: exposed so a translate failure can
@@ -210,8 +213,8 @@ fn wrap(module: &Read) -> String {
         } else {
             String::new()
         };
-        let params = param_list(func.params.as_deref().unwrap_or(""));
-        let results = result_list(func.results.as_deref().unwrap_or(""));
+        let params = ops::param_list(func.params.as_deref().unwrap_or(""));
+        let results = ops::result_list(func.results.as_deref().unwrap_or(""));
         funcs.push_str(&format!(
             "(func $f{wasm_index} {export} {params} {results} {locals} {ops})\n",
         ));
@@ -228,24 +231,6 @@ fn wrap(module: &Read) -> String {
         vs = symbols::VS_MAIN,
         fs = symbols::FS_MAIN,
     )
-}
-
-fn param_list(params: &str) -> String {
-    let params = params.trim();
-    if params.is_empty() {
-        String::new()
-    } else {
-        format!("(param {params})")
-    }
-}
-
-fn result_list(results: &str) -> String {
-    let results = results.trim();
-    if results.is_empty() {
-        String::new()
-    } else {
-        format!("(result {results})")
-    }
 }
 
 fn reaches(module: &Read, wasm_index: u32) -> bool {

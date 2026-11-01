@@ -1,5 +1,7 @@
 //! Stack steps for arithmetic, locals, and gpu imports.
 
+use std::num::NonZeroU8;
+
 use naga::BinaryOperator;
 use naga::Expression;
 
@@ -16,7 +18,6 @@ use crate::uniform;
 
 mod ptr;
 
-use ptr::f32_lt;
 use ptr::i32_pair;
 use ptr::i32_ready;
 use ptr::local_ptr;
@@ -39,6 +40,9 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::Call(index) => call(em, index),
         Op::Mul => bin(em, BinaryOperator::Multiply),
         Op::Add => bin(em, BinaryOperator::Add),
+        Op::Sub => bin(em, BinaryOperator::Subtract),
+        Op::Div => bin(em, BinaryOperator::Divide),
+        Op::F32ConvertI32U => f32_from_u32(em),
         Op::I32Add => ptr_bin(em, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),
         Op::I32Sub => ptr_bin(em, false, u32::wrapping_sub),
@@ -55,7 +59,12 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::I32GtU => i32_cmp(em, |a, b| a > b, BinaryOperator::Greater),
         Op::I32GeU => i32_cmp(em, |a, b| a >= b, BinaryOperator::GreaterEqual),
         Op::I32LeU => i32_cmp(em, |a, b| a <= b, BinaryOperator::LessEqual),
-        Op::F32Lt => f32_lt(em),
+        Op::F32Lt => f32_cmp(em, BinaryOperator::Less),
+        Op::F32Le => f32_cmp(em, BinaryOperator::LessEqual),
+        Op::F32Gt => f32_cmp(em, BinaryOperator::Greater),
+        Op::F32Ge => f32_cmp(em, BinaryOperator::GreaterEqual),
+        Op::F32Eq => f32_cmp(em, BinaryOperator::Equal),
+        Op::F32Ne => f32_cmp(em, BinaryOperator::NotEqual),
         Op::LoadI32(offset) => storage::load_ptr(em, offset, Elem::U32),
         Op::LoadF32(offset) => storage::load_ptr(em, offset, Elem::F32),
         Op::StoreI32(offset) => storage::store_ptr(em, offset, Elem::U32),
@@ -237,6 +246,23 @@ fn arith(
     right: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
     em.ex(Expression::Binary { op, left, right })
+}
+
+fn f32_cmp(em: &mut Emit<'_, '_>, op: BinaryOperator) -> Result<(), TranslateError> {
+    let right = crate::env::float_of(em.pop()?)?;
+    let left = crate::env::float_of(em.pop()?)?;
+    em.push(Val::Bool(arith(em, op, left, right)))
+}
+
+fn f32_from_u32(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let raw = em.pop()?;
+    let value = em.as_uint(raw)?;
+    let converted = em.ex(Expression::As {
+        expr: value,
+        kind: naga::ScalarKind::Float,
+        convert: NonZeroU8::new(crate::cx::F32_WIDTH),
+    });
+    em.push(Val::Scalar(converted))
 }
 
 /// Immediate bits, or the two operands already lowered to `u32`.

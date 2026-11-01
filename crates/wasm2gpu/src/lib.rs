@@ -12,11 +12,14 @@
 //! did not wrap in a naga loop is rejected.
 //! `cs_main`, when exported, is a compute entry with `@workgroup_size` and
 //! `global_invocation_id`. `raw_read` and `texture_sample_2d` lower as before.
-//! Storage imports lower to an access chain on one array global: scalars,
-//! vectors, and simple structs use the host `GpuSafeLayout` stride. Uniform
-//! bindings use that same provenance and the same `place_fields` layout: a
-//! struct field index is constant, and a fixed-size array index may be
-//! dynamic where WGSL allows it. Group and binding stay immediate operands.
+//! Scalar `f32` arithmetic (`+ - * /`) and comparisons lower directly to
+//! WGSL operators; unsigned `i32`-to-`f32` conversion lowers to a WGSL cast.
+//! Storage imports lower to an access chain on one array
+//! global: scalars, vectors, and simple structs use the host `GpuSafeLayout`
+//! stride. Uniform bindings use that same provenance and the same
+//! `place_fields` layout: a struct field index is constant, and a fixed-size
+//! array index may be dynamic where WGSL allows it. Group and binding stay
+//! immediate operands.
 //! A join that names two bindings is rejected. `storage_base` plus
 //! `i32.load` / `f32.load` / the matching stores addresses one storage
 //! binding through its provenance; any other linear memory is rejected.
