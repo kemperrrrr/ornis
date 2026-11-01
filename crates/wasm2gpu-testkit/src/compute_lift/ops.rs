@@ -92,6 +92,7 @@ fn op_wat(imports: &[String], op: &Operator<'_>) -> Result<String, String> {
         Operator::F32Sub => Ok("f32.sub".to_string()),
         Operator::F32Mul => Ok("f32.mul".to_string()),
         Operator::F32Div => Ok("f32.div".to_string()),
+        Operator::F32Abs => Ok("f32.abs".to_string()),
         Operator::F32ConvertI32U => Ok("f32.convert_i32_u".to_string()),
         Operator::F32Eq => Ok("f32.eq".to_string()),
         Operator::F32Ne => Ok("f32.ne".to_string()),

@@ -130,6 +130,7 @@ pub(super) fn pure_stmt(stmt: &Stmt) -> bool {
             | Op::Mul
             | Op::Sub
             | Op::Div
+            | Op::F32Abs
             | Op::F32ConvertI32U
             | Op::Select
     )

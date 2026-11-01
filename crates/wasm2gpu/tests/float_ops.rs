@@ -19,6 +19,8 @@ fn wasm() -> Vec<u8> {
                 i32.const 0 i32.const 0 i32.const 1
                 f32.const 8 f32.const 2 f32.div call $store_f32
                 i32.const 0 i32.const 0 i32.const 2
+                f32.const -3 f32.abs call $store_f32
+                i32.const 0 i32.const 0 i32.const 3
                 local.get 0 f32.convert_i32_u call $store_f32
                 i32.const 0 i32.const 1 i32.const 0
                 f32.const 1 f32.const 2 f32.eq call $store_u32
@@ -52,6 +54,11 @@ fn scalar_float_arithmetic_and_all_comparisons_lower_to_wgsl() {
             translated.wgsl
         );
     }
+    assert!(
+        translated.wgsl.contains("abs("),
+        "missing absolute value: {}",
+        translated.wgsl
+    );
     assert!(
         translated.wgsl.contains("f32("),
         "missing unsigned i32 conversion: {}",

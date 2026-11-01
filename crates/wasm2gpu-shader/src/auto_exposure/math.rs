@@ -43,12 +43,8 @@ pub(super) fn selected_channel(mode: u32, deferred: f32, forward: f32, alpha: f3
 pub(super) fn log_luminance(red: f32, green: f32, blue: f32) -> f32 {
     let mut luminance =
         red * REC709_RED_WEIGHT + green * REC709_GREEN_WEIGHT + blue * REC709_BLUE_WEIGHT;
-    if luminance != luminance
-        || MAX_FINITE_LUMINANCE < luminance
-        || luminance < -MAX_FINITE_LUMINANCE
-    {
-        luminance = LUMINANCE_FLOOR;
-    } else if luminance < LUMINANCE_FLOOR {
+    let finite_range = (-MAX_FINITE_LUMINANCE..=MAX_FINITE_LUMINANCE).contains(&luminance);
+    if !finite_range || luminance < LUMINANCE_FLOOR {
         luminance = LUMINANCE_FLOOR;
     }
     log2_approx(luminance)
@@ -71,7 +67,7 @@ pub(super) fn log_luminance_is_in_bin(
     let upper = uniform_array_f32::<0, HISTOGRAM_PARAMS_BINDING, HISTOGRAM_PARAMS_LEN>(bin + 1);
     let t = clamp_f32((log_lum - min_log_lum) * inv_log_range, 0.0, 1.0);
     let scaled = t * IN_RANGE_BINS + 1.0;
-    !(scaled < lower) && scaled < upper
+    lower <= scaled && scaled < upper
 }
 
 #[cfg(any(target_arch = "wasm32", test))]

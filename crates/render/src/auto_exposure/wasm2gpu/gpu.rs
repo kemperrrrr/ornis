@@ -15,9 +15,9 @@ use crate::auto_exposure::AutoExposureSettings;
 use crate::auto_exposure::HISTOGRAM_BINS;
 
 use super::Lowered;
-use data::{ADAPT_PARAMS_LEN, HISTOGRAM_PARAMS_LEN, adapt_params, histogram_params, uniform_bytes};
 #[cfg(test)]
 use data::output_from_bytes;
+use data::{ADAPT_PARAMS_LEN, HISTOGRAM_PARAMS_LEN, adapt_params, histogram_params, uniform_bytes};
 use pipeline::{dispatch, pipeline};
 use resources::{bind_entry, binding, storage_buffer, uniform_buffer};
 

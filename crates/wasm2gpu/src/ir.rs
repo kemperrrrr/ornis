@@ -88,6 +88,8 @@ pub enum Op {
     Sub,
     /// Divide the next `f32` value by the top one.
     Div,
+    /// Absolute value of the top `f32` value.
+    F32Abs,
     /// Convert an unsigned `i32` value to `f32`.
     F32ConvertI32U,
     /// Wrapping `i32` add.

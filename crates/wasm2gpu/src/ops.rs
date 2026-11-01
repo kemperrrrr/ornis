@@ -19,6 +19,7 @@ mod int;
 mod ptr;
 
 use float::bin;
+use float::f32_abs;
 use float::f32_cmp;
 use float::f32_from_u32;
 use int::i32_bin;
@@ -48,6 +49,7 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::Add => bin(em, BinaryOperator::Add),
         Op::Sub => bin(em, BinaryOperator::Subtract),
         Op::Div => bin(em, BinaryOperator::Divide),
+        Op::F32Abs => f32_abs(em),
         Op::F32ConvertI32U => f32_from_u32(em),
         Op::I32Add => ptr_bin(em, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),

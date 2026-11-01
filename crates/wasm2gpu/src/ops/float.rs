@@ -41,6 +41,18 @@ pub(super) fn f32_cmp(em: &mut Emit<'_, '_>, op: BinaryOperator) -> Result<(), T
     em.push(Val::Bool(condition))
 }
 
+pub(super) fn f32_abs(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let value = crate::env::float_of(em.pop()?)?;
+    let absolute = em.ex(Expression::Math {
+        fun: naga::MathFunction::Abs,
+        arg: value,
+        arg1: None,
+        arg2: None,
+        arg3: None,
+    });
+    em.push(Val::Scalar(absolute))
+}
+
 pub(super) fn f32_from_u32(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let raw = em.pop()?;
     let value = em.as_uint(raw)?;

@@ -26,7 +26,8 @@ pub(super) fn adapted_exposure(total: u32, previous: f32) -> f32 {
     let total_f32 = total as f32;
     let low = clamp_f32(total_f32 * low_clip, 0.0, total_f32);
     let high = clamp_f32(total_f32 * high_clip, 0.0, total_f32);
-    if !(low < high) {
+    let has_clip_range = low < high;
+    if !has_clip_range {
         return previous;
     }
     let average_log_lum = clipped_log_average(low, high);

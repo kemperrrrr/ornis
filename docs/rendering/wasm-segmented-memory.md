@@ -10,8 +10,8 @@ production path) — `crates/gpu-abi` (`GpuRef` + `GpuSafeLayout`,
 Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
 `storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` /
 `i32`), `vec2` / `vec3` / `vec4<f32>` и простые структуры. Для
-скалярного `f32` lifter также опускает `+`, `-`, `*`, `/`, все шесть
-сравнений и unsigned `i32` → `f32`. Текстурная загрузка, atomics,
+скалярного `f32` lifter также опускает `+`, `-`, `*`, `/`, `abs`, все
+шесть сравнений и unsigned `i32` → `f32`. Текстурная загрузка, atomics,
 workgroup memory и barriers пока не входят в ABI; исследовательский
 auto-exposure использует storage mirror и три последовательных
 compute-pass'а вместо этих механизмов. Он сохраняет histogram counts как
