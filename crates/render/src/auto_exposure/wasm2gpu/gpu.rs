@@ -13,15 +13,29 @@ use crate::auto_exposure::AutoExposureSettings;
 use crate::auto_exposure::HISTOGRAM_BINS;
 
 use super::Lowered;
-use data::{adapt_params, histogram_params, output_from_bytes, uniform_bytes};
+use data::{
+    ADAPT_PARAMS_LEN, HISTOGRAM_PARAMS_LEN, adapt_params, histogram_params, output_from_bytes,
+    uniform_bytes,
+};
 use pipeline::{dispatch, pipeline};
-use resources::{binding, bind_entry, storage_buffer, uniform_buffer};
+use resources::{bind_entry, binding, storage_buffer, uniform_buffer};
 
-const INPUT_LANES: usize = 8;
-const HISTOGRAM_SNAPSHOT_BYTES: u64 = (HISTOGRAM_BINS * 4) as u64;
+const RGBA_LANES: usize = 4;
+const INPUT_LANES: usize = RGBA_LANES * 2;
+const EXPOSURE_SLOTS: usize = 2;
+const FRAME_WORDS: usize = 2;
+const INPUT_BINDING: u32 = 0;
+const LOG_LUMINANCE_BINDING: u32 = 1;
+const HISTOGRAM_BINDING: u32 = 2;
+const FRAME_BINDING: u32 = 3;
+const HISTOGRAM_PARAMS_BINDING: u32 = 4;
+const ADAPT_PARAMS_BINDING: u32 = 5;
+const EXPOSURE_BINDING: u32 = 6;
+const FLOAT_BYTES: u64 = std::mem::size_of::<f32>() as u64;
+const HISTOGRAM_SNAPSHOT_BYTES: u64 = HISTOGRAM_BINS as u64 * std::mem::size_of::<u32>() as u64;
 const EXPOSURE_READBACK_OFFSET: u64 = HISTOGRAM_SNAPSHOT_BYTES;
-const EXPOSURE_OUTPUT_OFFSET: u64 = 4;
-const STAGING_BYTES: u64 = HISTOGRAM_SNAPSHOT_BYTES + 4;
+const EXPOSURE_OUTPUT_OFFSET: u64 = FLOAT_BYTES;
+const STAGING_BYTES: u64 = HISTOGRAM_SNAPSHOT_BYTES + FLOAT_BYTES;
 
 /// The two HDR layers in the production pass's compositing mode.
 pub(crate) struct GuestInputs<'a> {
@@ -35,6 +49,18 @@ pub(crate) struct GuestInputs<'a> {
     pub(crate) deferred: &'a [[f32; 4]],
     /// Forward RGBA layer, one texel per element.
     pub(crate) forward: &'a [[f32; 4]],
+}
+
+/// Inputs and timing state for one guest frame.
+pub(crate) struct GuestFrame<'a> {
+    /// Packed HDR input layers and composite mode.
+    pub(crate) inputs: GuestInputs<'a>,
+    /// Sanitized exposure controls.
+    pub(crate) settings: AutoExposureSettings,
+    /// Frame delta in seconds.
+    pub(crate) dt: f32,
+    /// Exposure multiplier from the previous frame.
+    pub(crate) previous_exposure: f32,
 }
 
 /// Histogram snapshot and smoothed exposure emitted by one guest frame.
@@ -64,19 +90,19 @@ pub(crate) struct GuestGpu {
 impl GuestGpu {
     /// Builds compute pipelines and exact-sized storage/uniform buffers.
     pub(crate) fn new(device: &wgpu::Device, lowered: &Lowered, width: u32, height: u32) -> Self {
-        let pixel_count = width.checked_mul(height).expect("guest dimensions fit u32");
+        let pixel_count = width.checked_mul(height).unwrap_or_default();
         assert!(pixel_count > 0, "guest image must contain a pixel");
         let storage = wgpu::BufferBindingType::Storage { read_only: false };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("wasm2gpu auto-exposure layout"),
             entries: &[
-                binding(0, storage),
-                binding(1, storage),
-                binding(2, storage),
-                binding(3, storage),
-                binding(4, wgpu::BufferBindingType::Uniform),
-                binding(5, wgpu::BufferBindingType::Uniform),
-                binding(6, storage),
+                binding(INPUT_BINDING, storage),
+                binding(LOG_LUMINANCE_BINDING, storage),
+                binding(HISTOGRAM_BINDING, storage),
+                binding(FRAME_BINDING, storage),
+                binding(HISTOGRAM_PARAMS_BINDING, wgpu::BufferBindingType::Uniform),
+                binding(ADAPT_PARAMS_BINDING, wgpu::BufferBindingType::Uniform),
+                binding(EXPOSURE_BINDING, storage),
             ],
         });
         let log_luma = pipeline(device, &layout, &lowered.log_luma, "ae_log_luma");
@@ -85,10 +111,10 @@ impl GuestGpu {
         let input = storage_buffer(device, "ae packed hdr", pixel_count as usize * INPUT_LANES);
         let log_values = storage_buffer(device, "ae log luminance", pixel_count as usize);
         let histogram = storage_buffer(device, "ae u32 histogram", HISTOGRAM_BINS);
-        let exposure = storage_buffer(device, "ae exposure history", 2);
-        let frame = storage_buffer(device, "ae frame settings", 2);
-        let histogram_params = uniform_buffer(device, "ae histogram params", 259);
-        let adapt_params = uniform_buffer(device, "ae adapt params", 265);
+        let exposure = storage_buffer(device, "ae exposure history", EXPOSURE_SLOTS);
+        let frame = storage_buffer(device, "ae frame settings", FRAME_WORDS);
+        let histogram_params = uniform_buffer(device, "ae histogram params", HISTOGRAM_PARAMS_LEN);
+        let adapt_params = uniform_buffer(device, "ae adapt params", ADAPT_PARAMS_LEN);
         let staging = gpu_buffer(
             device,
             "ae guest readback",
@@ -99,13 +125,13 @@ impl GuestGpu {
             label: Some("wasm2gpu auto-exposure bind group"),
             layout: &layout,
             entries: &[
-                bind_entry(0, &input),
-                bind_entry(1, &log_values),
-                bind_entry(2, &histogram),
-                bind_entry(3, &frame),
-                bind_entry(4, &histogram_params),
-                bind_entry(5, &adapt_params),
-                bind_entry(6, &exposure),
+                bind_entry(INPUT_BINDING, &input),
+                bind_entry(LOG_LUMINANCE_BINDING, &log_values),
+                bind_entry(HISTOGRAM_BINDING, &histogram),
+                bind_entry(FRAME_BINDING, &frame),
+                bind_entry(HISTOGRAM_PARAMS_BINDING, &histogram_params),
+                bind_entry(ADAPT_PARAMS_BINDING, &adapt_params),
+                bind_entry(EXPOSURE_BINDING, &exposure),
             ],
         });
         Self {
@@ -135,14 +161,18 @@ impl GuestGpu {
         dt: f32,
         previous_exposure: f32,
     ) {
-        assert_eq!(inputs.width.checked_mul(inputs.height), Some(self.pixel_count));
+        assert_eq!(
+            inputs.width.checked_mul(inputs.height),
+            Some(self.pixel_count)
+        );
         assert_eq!(inputs.deferred.len(), self.pixel_count as usize);
         assert_eq!(inputs.forward.len(), self.pixel_count as usize);
         let mut packed = vec![0.0_f32; self.pixel_count as usize * INPUT_LANES];
         for pixel in 0..self.pixel_count as usize {
             let at = pixel * INPUT_LANES;
-            packed[at..at + 4].copy_from_slice(&inputs.deferred[pixel]);
-            packed[at + 4..at + 8].copy_from_slice(&inputs.forward[pixel]);
+            packed[at..at + RGBA_LANES].copy_from_slice(&inputs.deferred[pixel]);
+            packed[at + RGBA_LANES..at + INPUT_LANES]
+                .copy_from_slice(&inputs.forward[pixel]);
         }
         queue.write_buffer(&self.input, 0, cast_slice(&packed));
         queue.write_buffer(&self.frame, 0, cast_slice(&[self.pixel_count, inputs.mode]));
@@ -181,13 +211,7 @@ impl GuestGpu {
     }
 
     fn encode_adaptation(&self, encoder: &mut wgpu::CommandEncoder) {
-        dispatch(
-            encoder,
-            &self.adapt,
-            &self.bind_group,
-            1,
-            "ae guest adapt",
-        );
+        dispatch(encoder, &self.adapt, &self.bind_group, 1, "ae guest adapt");
     }
 
     /// Executes one frame and snapshots the histogram before the guest clears it.
@@ -195,12 +219,15 @@ impl GuestGpu {
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        inputs: GuestInputs<'_>,
-        settings: AutoExposureSettings,
-        dt: f32,
-        previous_exposure: f32,
-    ) -> GuestOutput {
-        self.prepare(queue, inputs, settings, dt, previous_exposure);
+        frame: GuestFrame<'_>,
+    ) -> Option<GuestOutput> {
+        self.prepare(
+            queue,
+            frame.inputs,
+            frame.settings,
+            frame.dt,
+            frame.previous_exposure,
+        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("wasm2gpu auto-exposure encoder"),
         });
@@ -218,7 +245,7 @@ impl GuestGpu {
             EXPOSURE_OUTPUT_OFFSET,
             &self.staging,
             EXPOSURE_READBACK_OFFSET,
-            4,
+            FLOAT_BYTES,
         );
         queue.submit(std::iter::once(encoder.finish()));
         output_from_bytes(&map_bytes(device, &self.staging))

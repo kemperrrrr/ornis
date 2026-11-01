@@ -26,7 +26,10 @@ pub(crate) fn lower_guest() -> Lowered {
     let log_luma = lowered_kernel_from(&wasm, "ae_log_luma", "storage_0_1_");
     let histogram = lowered_kernel_from(&wasm, "ae_histogram", "storage_0_2_");
     let adapt = lowered_kernel_from(&wasm, "ae_adapt", "storage_0_2_");
-    assert!(adapt.contains("storage_0_6_"), "guest exposure binding missing: {adapt}");
+    assert!(
+        adapt.contains("storage_0_6_"),
+        "guest exposure binding missing: {adapt}"
+    );
     Lowered {
         log_luma,
         histogram,

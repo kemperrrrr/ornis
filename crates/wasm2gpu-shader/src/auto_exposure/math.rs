@@ -1,25 +1,34 @@
 //! Scalar HDR and exposure math shared by the wasm auto-exposure kernels.
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use super::LUMINANCE_FLOOR;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use super::HISTOGRAM_PARAMS_BINDING;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use super::HISTOGRAM_PARAMS_LEN;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 use ornis_gpu_abi::uniform_array_f32;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const IN_RANGE_BINS: f32 = super::HISTOGRAM_BINS as f32 - 2.0;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const MAX_FINITE_LUMINANCE: f32 = 3.4e38;
 const LN_2: f32 = core::f32::consts::LN_2;
+const HALF_F32: f32 = 0.5;
+const MAX_EXP2_INPUT: f32 = 127.0;
+const MIN_EXP2_INPUT: f32 = -149.0;
 const LOG2_FRACTION_STOP: f32 = 5.960_464_5e-8;
 const EXP_SERIES_TERMS: f32 = 13.0;
+#[cfg(any(target_arch = "wasm32", test))]
+const REC709_RED_WEIGHT: f32 = 0.2126;
+#[cfg(any(target_arch = "wasm32", test))]
+const REC709_GREEN_WEIGHT: f32 = 0.7152;
+#[cfg(any(target_arch = "wasm32", test))]
+const REC709_BLUE_WEIGHT: f32 = 0.0722;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub(super) fn selected_channel(mode: u32, deferred: f32, forward: f32, alpha: f32) -> f32 {
     if mode == 1 {
         forward * alpha
@@ -30,9 +39,10 @@ pub(super) fn selected_channel(mode: u32, deferred: f32, forward: f32, alpha: f3
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub(super) fn log_luminance(red: f32, green: f32, blue: f32) -> f32 {
-    let mut luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+    let mut luminance =
+        red * REC709_RED_WEIGHT + green * REC709_GREEN_WEIGHT + blue * REC709_BLUE_WEIGHT;
     if luminance != luminance
         || MAX_FINITE_LUMINANCE < luminance
         || luminance < -MAX_FINITE_LUMINANCE
@@ -44,7 +54,7 @@ pub(super) fn log_luminance(red: f32, green: f32, blue: f32) -> f32 {
     log2_approx(luminance)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub(super) fn log_luminance_is_in_bin(
     log_lum: f32,
     bin: u32,
@@ -64,7 +74,7 @@ pub(super) fn log_luminance_is_in_bin(
     !(scaled < lower) && scaled < upper
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub(super) fn clamp_f32(value: f32, low: f32, high: f32) -> f32 {
     if value < low {
         low
@@ -84,29 +94,29 @@ pub(super) fn log2_approx(value: f32) -> f32 {
         exponent -= 1.0;
     }
     while 2.0 < mantissa {
-        mantissa *= 0.5;
+        mantissa *= HALF_F32;
         exponent += 1.0;
     }
 
     let mut fraction = 0.0_f32;
-    let mut bit = 0.5_f32;
+    let mut bit = HALF_F32;
     while LOG2_FRACTION_STOP < bit {
         mantissa *= mantissa;
         if 2.0 < mantissa {
-            mantissa *= 0.5;
+            mantissa *= HALF_F32;
             fraction += bit;
         }
-        bit *= 0.5;
+        bit *= HALF_F32;
     }
     exponent + fraction
 }
 
 /// Range-reduced `2^x` with a short exponential series for the fractional part.
 pub(super) fn exp2_approx(value: f32) -> f32 {
-    if 127.0 < value {
+    if MAX_EXP2_INPUT < value {
         return f32::INFINITY;
     }
-    if value < -149.0 {
+    if value < MIN_EXP2_INPUT {
         return 0.0;
     }
     let mut fraction = value;
@@ -116,7 +126,7 @@ pub(super) fn exp2_approx(value: f32) -> f32 {
         fraction -= 1.0;
     }
     while fraction < 0.0 {
-        scale *= 0.5;
+        scale *= HALF_F32;
         fraction += 1.0;
     }
 
@@ -139,7 +149,16 @@ mod tests {
 
     #[test]
     fn range_reduced_log2_matches_reference_across_hdr_window() {
-        for value in [1.0e-6_f32, 2.0_f32.powi(-8), 0.18, 0.5, 1.0, 3.0, 256.0, 1.0e6] {
+        for value in [
+            1.0e-6_f32,
+            2.0_f32.powi(-8),
+            0.18,
+            0.5,
+            1.0,
+            3.0,
+            256.0,
+            1.0e6,
+        ] {
             let error = (log2_approx(value) - value.log2()).abs();
             assert!(error < 2.0e-6, "log2({value}) error {error}");
         }
@@ -151,7 +170,10 @@ mod tests {
             let expected = 2.0_f32.powf(value);
             let actual = exp2_approx(value);
             let relative_error = (actual - expected).abs() / expected;
-            assert!(relative_error < 2.0e-6, "exp2({value}) error {relative_error}");
+            assert!(
+                relative_error < 2.0e-6,
+                "exp2({value}) error {relative_error}"
+            );
         }
         assert!(exp2_approx(128.0).is_infinite());
         assert_eq!(exp2_approx(-150.0), 0.0);

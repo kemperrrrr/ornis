@@ -10,5 +10,8 @@
 //! The report labels software adapters; those timings are CPU Vulkan costs.
 
 fn main() {
-    print!("{}", ornis_render::auto_exposure::wasm2gpu::run_auto_exposure_ab());
+    print!(
+        "{}",
+        ornis_render::auto_exposure::wasm2gpu::run_auto_exposure_ab()
+    );
 }

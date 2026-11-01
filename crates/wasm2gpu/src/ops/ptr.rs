@@ -4,7 +4,7 @@
 use naga::BinaryOperator;
 
 use super::Ready;
-use super::arith;
+use super::float::arith;
 use crate::cx::PtrOff;
 use crate::cx::Val;
 use crate::env::Emit;

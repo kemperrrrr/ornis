@@ -5,6 +5,7 @@ mod gpu;
 mod lower;
 
 pub use bench::run_auto_exposure_ab;
+pub(crate) use gpu::GuestFrame;
 pub(crate) use gpu::GuestGpu;
 pub(crate) use gpu::GuestInputs;
 pub(crate) use gpu::GuestOutput;

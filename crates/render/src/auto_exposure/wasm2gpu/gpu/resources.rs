@@ -2,6 +2,8 @@
 
 use ornis_wasm2gpu_testkit::gpu_buffer;
 
+const UNIFORM_SLOT_BYTES: usize = 16;
+
 pub(super) fn binding(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -35,7 +37,7 @@ pub(super) fn uniform_buffer(device: &wgpu::Device, label: &str, elements: usize
     gpu_buffer(
         device,
         label,
-        (elements * 16) as u64,
+        (elements * UNIFORM_SLOT_BYTES) as u64,
         wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     )
 }

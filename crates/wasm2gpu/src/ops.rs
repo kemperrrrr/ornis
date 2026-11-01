@@ -1,7 +1,5 @@
 //! Stack steps for arithmetic, locals, and gpu imports.
 
-use std::num::NonZeroU8;
-
 use naga::BinaryOperator;
 use naga::Expression;
 
@@ -16,10 +14,18 @@ use crate::ty::Elem;
 use crate::ty::Imp;
 use crate::uniform;
 
+mod float;
+mod int;
 mod ptr;
 
-use ptr::i32_pair;
-use ptr::i32_ready;
+use float::bin;
+use float::f32_cmp;
+use float::f32_from_u32;
+use int::i32_bin;
+use int::i32_cmp;
+use int::i32_eqz;
+use int::shr_s;
+use int::wasm_select;
 use ptr::local_ptr;
 use ptr::provenance;
 use ptr::ptr_bin;
@@ -221,122 +227,9 @@ fn local_set(em: &mut Emit<'_, '_>, index: u32, tee: bool) -> Result<(), Transla
     Ok(())
 }
 
-fn bin(em: &mut Emit<'_, '_>, op: BinaryOperator) -> Result<(), TranslateError> {
-    let right = em.pop()?;
-    let left = em.pop()?;
-    match (left, right) {
-        (Val::Vec(left), Val::Vec(right)) => {
-            let value = arith(em, op, left, right);
-            em.stack.push(Val::Vec(value));
-            Ok(())
-        }
-        (Val::Scalar(left), Val::Scalar(right)) => {
-            let value = arith(em, op, left, right);
-            em.stack.push(Val::Scalar(value));
-            Ok(())
-        }
-        _ => Err(TranslateError::Unsupported),
-    }
-}
-
-fn arith(
-    em: &mut Emit<'_, '_>,
-    op: BinaryOperator,
-    left: naga::Handle<Expression>,
-    right: naga::Handle<Expression>,
-) -> naga::Handle<Expression> {
-    em.ex(Expression::Binary { op, left, right })
-}
-
-fn f32_cmp(em: &mut Emit<'_, '_>, op: BinaryOperator) -> Result<(), TranslateError> {
-    let right = crate::env::float_of(em.pop()?)?;
-    let left = crate::env::float_of(em.pop()?)?;
-    em.push(Val::Bool(arith(em, op, left, right)))
-}
-
-fn f32_from_u32(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let raw = em.pop()?;
-    let value = em.as_uint(raw)?;
-    let converted = em.ex(Expression::As {
-        expr: value,
-        kind: naga::ScalarKind::Float,
-        convert: NonZeroU8::new(crate::cx::F32_WIDTH),
-    });
-    em.push(Val::Scalar(converted))
-}
 
 /// Immediate bits, or the two operands already lowered to `u32`.
 enum Ready {
     Imm(u32),
     Expr(naga::Handle<Expression>, naga::Handle<Expression>),
-}
-
-fn i32_bin(
-    em: &mut Emit<'_, '_>,
-    fold: fn(u32, u32) -> u32,
-    op: BinaryOperator,
-) -> Result<(), TranslateError> {
-    let right = em.pop()?;
-    let left = em.pop()?;
-    i32_pair(em, left, right, fold, op)
-}
-
-fn i32_cmp(
-    em: &mut Emit<'_, '_>,
-    fold: fn(u32, u32) -> bool,
-    op: BinaryOperator,
-) -> Result<(), TranslateError> {
-    match i32_ready(em, |a, b| u32::from(fold(a, b)))? {
-        Ready::Imm(value) => em.push(Val::Imm(value)),
-        Ready::Expr(left, right) => {
-            let cond = arith(em, op, left, right);
-            em.push(Val::Bool(cond))
-        }
-    }
-}
-
-fn i32_eqz(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let val = em.pop()?;
-    if let Val::Imm(value) = val {
-        em.stack.push(Val::Imm(u32::from(value == 0)));
-        return Ok(());
-    }
-    if let Val::Bool(handle) = val {
-        let negated = crate::cx::bool_not(em.func, &mut em.block, handle);
-        em.stack.push(Val::Bool(negated));
-        return Ok(());
-    }
-    let bits = em.as_uint(val)?;
-    let zero = em.u32(0);
-    let cond = arith(em, BinaryOperator::Equal, bits, zero);
-    em.stack.push(Val::Bool(cond));
-    Ok(())
-}
-
-/// Arithmetic right shift on the `i32` value of a `u32` bit pattern.
-fn shr_s(a: u32, b: u32) -> u32 {
-    (a as i32).wrapping_shr(b) as u32
-}
-
-fn wasm_select(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let cond_val = em.pop()?;
-    let cond = em.as_bool(cond_val)?;
-    let reject = em.pop()?;
-    let accept = em.pop()?;
-    if let Some(merged) = em.merge_ptr(cond, accept, reject) {
-        return em.push(merged);
-    }
-    let value = match (accept, reject) {
-        (Val::Scalar(left), Val::Scalar(right)) => Val::Scalar(em.pick(cond, left, right)),
-        (Val::Vec(left), Val::Vec(right)) => Val::Vec(em.pick(cond, left, right)),
-        // Both arms are `0`/`1`, so the result stays a boolean.
-        (Val::Bool(left), Val::Bool(right)) => Val::Bool(em.pick(cond, left, right)),
-        (left, right) => {
-            let accept = em.as_uint(left)?;
-            let reject = em.as_uint(right)?;
-            Val::Index(em.pick(cond, accept, reject))
-        }
-    };
-    em.stack.push(value);
-    Ok(())
 }

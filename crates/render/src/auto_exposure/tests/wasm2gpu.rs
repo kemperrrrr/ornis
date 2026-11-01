@@ -3,6 +3,7 @@
 use crate::auto_exposure::AutoExposure;
 use crate::auto_exposure::AutoExposureSettings;
 use crate::auto_exposure::ExposureFrame;
+use crate::auto_exposure::wasm2gpu::GuestFrame;
 use crate::auto_exposure::wasm2gpu::GuestGpu;
 use crate::auto_exposure::wasm2gpu::GuestInputs;
 use crate::auto_exposure::wasm2gpu::lower_guest;
@@ -23,6 +24,15 @@ struct Scene {
     mode: u32,
     deferred: Vec<[f32; 4]>,
     forward: Vec<[f32; 4]>,
+}
+
+struct ProductionInputs<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    hdr: &'a wgpu::TextureView,
+    hdr_fwd: &'a wgpu::TextureView,
+    mode: u32,
+    settings: AutoExposureSettings,
 }
 
 #[test]
@@ -55,18 +65,29 @@ fn check_scene(
         deferred: &scene.deferred,
         forward: &scene.forward,
     };
-    let production_histogram = production_histogram(
+    let production = ProductionInputs {
         device,
         queue,
-        &hdr,
-        &hdr_fwd,
-        scene.mode,
+        hdr: &hdr,
+        hdr_fwd: &hdr_fwd,
+        mode: scene.mode,
         settings,
-    );
-    let guest_result = guest.run(device, queue, inputs, settings, DT, PREVIOUS);
+    };
+    let production_histogram = production_histogram(&production);
+    let guest_result = guest
+        .run(
+            device,
+            queue,
+            GuestFrame {
+                inputs,
+                settings,
+                dt: DT,
+                previous_exposure: PREVIOUS,
+            },
+        )
+        .expect("guest readback should match its allocation");
     assert_eq!(
-        production_histogram,
-        guest_result.histogram,
+        production_histogram, guest_result.histogram,
         "{} histogram: production vs wasm guest",
         scene.name,
     );
@@ -76,14 +97,7 @@ fn check_scene(
         "{} histogram: production vs CPU reference",
         scene.name,
     );
-    let production_exposure = production_exposure(
-        device,
-        queue,
-        &hdr,
-        &hdr_fwd,
-        scene.mode,
-        settings,
-    );
+    let production_exposure = production_exposure(&production);
     let error = (production_exposure - guest_result.exposure).abs();
     assert!(
         error <= 5e-4,
@@ -93,65 +107,59 @@ fn check_scene(
     );
 }
 
-fn production_histogram(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    hdr: &wgpu::TextureView,
-    hdr_fwd: &wgpu::TextureView,
-    mode: u32,
-    settings: AutoExposureSettings,
-) -> [u32; super::HISTOGRAM_BINS] {
-    let pass = AutoExposure::new(device);
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("auto-exposure production histogram parity"),
-    });
+fn production_histogram(inputs: &ProductionInputs<'_>) -> [u32; super::HISTOGRAM_BINS] {
+    let pass = AutoExposure::new(inputs.device);
+    let mut encoder = inputs
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auto-exposure production histogram parity"),
+        });
     pass.encode_histogram_only(
-        device,
-        queue,
+        inputs.device,
+        inputs.queue,
         &mut encoder,
         ExposureFrame {
-            hdr,
-            hdr_fwd,
-            mode,
+            hdr: inputs.hdr,
+            hdr_fwd: inputs.hdr_fwd,
+            mode: inputs.mode,
             width: WIDTH,
             height: HEIGHT,
-            settings,
+            settings: inputs.settings,
             dt_seconds: DT,
         },
     );
-    queue.submit(std::iter::once(encoder.finish()));
-    read_histogram(device, queue, &pass)
+    inputs
+        .queue
+        .submit(std::iter::once(encoder.finish()));
+    read_histogram(inputs.device, inputs.queue, &pass)
 }
 
-fn production_exposure(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    hdr: &wgpu::TextureView,
-    hdr_fwd: &wgpu::TextureView,
-    mode: u32,
-    settings: AutoExposureSettings,
-) -> f32 {
-    let pass = AutoExposure::new(device);
-    pass.write_manual(queue, PREVIOUS);
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("auto-exposure production exposure parity"),
-    });
+fn production_exposure(inputs: &ProductionInputs<'_>) -> f32 {
+    let pass = AutoExposure::new(inputs.device);
+    pass.write_manual(inputs.queue, PREVIOUS);
+    let mut encoder = inputs
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("auto-exposure production exposure parity"),
+        });
     pass.encode(
-        device,
-        queue,
+        inputs.device,
+        inputs.queue,
         &mut encoder,
         ExposureFrame {
-            hdr,
-            hdr_fwd,
-            mode,
+            hdr: inputs.hdr,
+            hdr_fwd: inputs.hdr_fwd,
+            mode: inputs.mode,
             width: WIDTH,
             height: HEIGHT,
-            settings,
+            settings: inputs.settings,
             dt_seconds: DT,
         },
     );
-    queue.submit(std::iter::once(encoder.finish()));
-    read_exposure(device, queue, &pass)
+    inputs
+        .queue
+        .submit(std::iter::once(encoder.finish()));
+    read_exposure(inputs.device, inputs.queue, &pass)
 }
 
 fn selected_rgb(scene: &Scene) -> Vec<[f32; 3]> {

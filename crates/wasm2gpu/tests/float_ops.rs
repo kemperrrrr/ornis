@@ -46,7 +46,11 @@ fn wasm() -> Vec<u8> {
 fn scalar_float_arithmetic_and_all_comparisons_lower_to_wgsl() {
     let translated = translate(&wasm()).expect("translate float operators");
     for operator in [" - ", " / ", " == ", " != ", " < ", " <= ", " > ", " >= "] {
-        assert!(translated.wgsl.contains(operator), "missing {operator:?}: {}", translated.wgsl);
+        assert!(
+            translated.wgsl.contains(operator),
+            "missing {operator:?}: {}",
+            translated.wgsl
+        );
     }
     assert!(
         translated.wgsl.contains("f32("),
