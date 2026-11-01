@@ -189,7 +189,8 @@ fn shader(
         error
     });
     cx.active.pop();
-    let stack = stack?;
+    let output = stack?;
+    let stack = output.stack;
     if compute.is_some() {
         if !stack.is_empty() {
             eprintln!(

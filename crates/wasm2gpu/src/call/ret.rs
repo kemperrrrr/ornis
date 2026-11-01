@@ -18,6 +18,7 @@ use crate::cx::Val;
 use crate::cx::expr;
 use crate::cx::sp;
 use crate::error::TranslateError;
+use crate::ir::Kind;
 use crate::ir::MAX_PARAMS;
 use crate::ir::Sig;
 
@@ -26,7 +27,18 @@ pub(super) fn finish(
     cx: &mut Cx<'_>,
     stack: &[Val],
     sig: &Sig,
+    returned: bool,
 ) -> Result<([Option<u32>; MAX_PARAMS], u8), TranslateError> {
+    // When every path returns explicitly, no fallthrough value remains here.
+    if stack.is_empty() && sig.results == 1 && returned {
+        let ty = if sig.result_kind[0] == Kind::F32 {
+            cx.scalar
+        } else {
+            cx.uint
+        };
+        body.result = Some(FunctionResult { ty, binding: None });
+        return Ok(([None; MAX_PARAMS], 1));
+    }
     if stack.len() != sig.results as usize {
         return Err(TranslateError::Unsupported);
     }

@@ -64,6 +64,8 @@ pub(super) struct Emit<'a, 'b> {
     /// A `return` already left this function. The enclosing loop must not
     /// also `break`, or naga sees that break as unreachable.
     pub(super) halted: bool,
+    /// At least one explicit return was emitted in this function.
+    pub(super) returned: bool,
 }
 
 /// Imports and defined functions visible to one lowering.

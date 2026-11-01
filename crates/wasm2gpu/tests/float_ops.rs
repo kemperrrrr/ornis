@@ -17,6 +17,13 @@ fn wasm() -> Vec<u8> {
                 local.get 0 f32.const 0 f32.lt
                 if local.get 0 f32.abs return end
                 local.get 0 f32.abs)
+            (func $absolute_all (param f32) (result f32)
+                local.get 0 f32.const 0 f32.lt
+                if
+                    local.get 0 f32.abs return
+                else
+                    local.get 0 f32.abs return
+                end)
             (func (export "{cs}") (param i32)
                 i32.const 0 i32.const 0 i32.const 0
                 f32.const 7 f32.const 2 f32.sub call $store_f32
@@ -24,6 +31,8 @@ fn wasm() -> Vec<u8> {
                 f32.const 8 f32.const 2 f32.div call $store_f32
                 i32.const 0 i32.const 0 i32.const 2
                 f32.const -3 call $absolute call $store_f32
+                i32.const 0 i32.const 0 i32.const 4
+                f32.const -3 call $absolute_all call $store_f32
                 i32.const 0 i32.const 0 i32.const 3
                 local.get 0 f32.convert_i32_u call $store_f32
                 i32.const 0 i32.const 1 i32.const 0

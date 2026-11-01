@@ -5,6 +5,14 @@ use crate::cx::sp;
 use crate::env::Emit;
 use crate::error::TranslateError;
 
+/// The fallthrough stack and explicit-return status of one lowered function.
+pub(crate) struct Output {
+    /// Values left by the path that falls through.
+    pub(crate) stack: Vec<Val>,
+    /// Whether the body emitted an explicit return on any path.
+    pub(crate) returned: bool,
+}
+
 impl Emit<'_, '_> {
     pub(super) fn fn_return(&mut self) -> Result<(), TranslateError> {
         let value = match self.results {
@@ -41,6 +49,7 @@ impl Emit<'_, '_> {
         };
         self.block.push(naga::Statement::Return { value }, sp());
         self.halted = true;
+        self.returned = true;
         Ok(())
     }
 }

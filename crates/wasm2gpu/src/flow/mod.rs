@@ -46,7 +46,7 @@ pub(super) fn exec(
     code: &Code<'_>,
     body: &mut naga::Function,
     input: &ExecIn,
-) -> Result<Vec<Val>, TranslateError> {
+) -> Result<ret::Output, TranslateError> {
     let baked = input.baked.clone();
     let id_param = input.id_param;
     let func = code
@@ -81,6 +81,7 @@ pub(super) fn exec(
         id_param,
         results,
         halted: false,
+        returned: false,
         imports: code.imports,
         structs: code.structs,
         funcs: code.funcs,
@@ -89,10 +90,14 @@ pub(super) fn exec(
     copy_params(&mut em, params)?;
     em.run(&prepared.stmts)?;
     let Emit {
-        block, stack, func, ..
+        block,
+        stack,
+        func,
+        returned,
+        ..
     } = em;
     func.body = block;
-    Ok(stack)
+    Ok(ret::Output { stack, returned })
 }
 
 impl Emit<'_, '_> {
@@ -318,7 +323,7 @@ fn final_ptrs(
 
 mod branch;
 mod canon;
-mod ret;
+pub(crate) mod ret;
 mod shape;
 mod slots;
 mod switch;
