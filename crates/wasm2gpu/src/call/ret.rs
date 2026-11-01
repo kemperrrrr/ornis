@@ -52,8 +52,10 @@ pub(super) fn finish(
     }
     if let Some((ty, value)) = pack(body, cx, &dynamic)? {
         body.result = Some(FunctionResult { ty, binding: None });
-        body.body
-            .push(Statement::Return { value: Some(value) }, sp());
+        if !matches!(body.body.last(), Some(Statement::Return { .. })) {
+            body.body
+                .push(Statement::Return { value: Some(value) }, sp());
+        }
     }
     let nresults = u8::try_from(stack.len()).map_err(|_| TranslateError::Unsupported)?;
     Ok((result_imm, nresults))

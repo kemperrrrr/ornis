@@ -62,7 +62,6 @@ pub use error::TranslateError;
 /// The result has already been validated by naga, reprinted as WGSL, parsed
 /// back, and round-tripped through SPIR-V. Bindless `binding_array` types are
 /// rejected.
-// qual:api — public translator entry; in-tree callers are the integration tests.
 pub fn translate(wasm: &[u8]) -> Result<Translated, TranslateError> {
     let module = parse::parse(wasm)?;
     let lowered = lower::lower(&module)?;

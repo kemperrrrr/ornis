@@ -14,6 +14,7 @@ use crate::ir::Stmt;
 use crate::ty::StructDef;
 
 mod call;
+mod float;
 mod join;
 mod mem;
 mod table;

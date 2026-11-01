@@ -78,7 +78,8 @@ pub(super) fn defined(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Tr
     ai.labels = saved;
     ai.active.pop();
     result?;
-    if callee.stop || callee.stack.len() != results as usize || returns_ptr(&callee.stack) {
+    // A stopped callee has returned explicitly; its stack still carries results.
+    if callee.stack.len() != results as usize || returns_ptr(&callee.stack) {
         return Err(TranslateError::Unsupported);
     }
     remember(ai, index, &args, &callee.stack);

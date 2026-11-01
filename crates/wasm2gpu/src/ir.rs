@@ -177,8 +177,9 @@ pub enum Stmt {
     Br(u32),
     /// Branch to relative label `depth` when the top `i32` is non-zero.
     BrIf(u32),
-    /// `return`. Void entries become a naga `return`. A value-returning
-    /// `return` is rejected: it would have to compose shader outputs.
+    /// `return`. Void returns and one dynamic scalar helper result are
+    /// preserved; multi-value and immediate-only integer returns are outside
+    /// the translator subset.
     Return,
     /// `br_table`. `targets[i]` is the relative depth for index `i`.
     ///
