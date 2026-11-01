@@ -31,7 +31,7 @@ pub(super) fn arith(
     left: naga::Handle<Expression>,
     right: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
-    em.ex(Expression::Binary { op, left, right })
+    crate::env::f32_binary(em, op, left, right)
 }
 
 pub(super) fn f32_cmp(em: &mut Emit<'_, '_>, op: BinaryOperator) -> Result<(), TranslateError> {

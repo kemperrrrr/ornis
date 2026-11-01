@@ -17,6 +17,7 @@ use crate::gpu_buffer;
 use crate::map_bytes;
 use crate::put_f32;
 use crate::put_u32;
+use crate::record_compute_pass;
 use crate::storage_buffer;
 
 /// Group-0 uniform binding for the six packed frustum planes.
@@ -135,13 +136,7 @@ pub fn run(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> ([u32; SLO
     });
     let start = Instant::now();
     for _ in 0..RUNS {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("wasm2gpu cull"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(WORKGROUPS, 1, 1);
+        record_compute_pass(&mut encoder, &pipeline, &bind, [WORKGROUPS, 1, 1]);
     }
     queue.submit([encoder.finish()]);
     let _ = device.poll(wgpu::PollType::Wait {

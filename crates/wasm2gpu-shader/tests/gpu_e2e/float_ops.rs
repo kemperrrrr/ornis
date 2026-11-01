@@ -7,17 +7,10 @@ use super::device;
 use super::entry;
 use super::gpu_buffer;
 use super::map_bytes;
+use super::record_compute_pass;
 use super::storage_buffer;
 
-const FLOAT_EXPECTED: [f32; 7] = [
-    9.0,
-    5.0,
-    14.0,
-    4.5,
-    3.25,
-    -3.25,
-    4_294_967_296.0,
-];
+const FLOAT_EXPECTED: [f32; 7] = [9.0, 5.0, 14.0, 4.5, 3.25, -3.25, 4_294_967_296.0];
 const COMPARISON_EXPECTED: [u32; 12] = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
 
 fn comparisons() -> String {
@@ -37,10 +30,16 @@ fn comparisons() -> String {
     ];
     let mut body = String::new();
     for (index, left, right, op) in tests {
-        body.push_str(&format!(concat!(
-            "i32.const 0 i32.const 1 i32.const {index} ",
-            "f32.const {left} f32.const {right} f32.{op} call $store_u32\n"
-        )));
+        body.push_str(&format!(
+            concat!(
+                "i32.const 0 i32.const 1 i32.const {index} ",
+                "f32.const {left} f32.const {right} f32.{op} call $store_u32\n"
+            ),
+            index = index,
+            left = left,
+            right = right,
+            op = op,
+        ));
     }
     body
 }
@@ -90,8 +89,8 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
     // the translator test, while their exact GPU results vary by backend.
     let translated = translate(&wasm()).expect("translate scalar float operators");
     let Some((device, queue)) = device() else {
-        let required = std::env::var("ORNIS_REQUIRE_GPU")
-            .is_ok_and(|value| !value.is_empty() && value != "0");
+        let required =
+            std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0");
         assert!(
             !required,
             "ORNIS_REQUIRE_GPU is set but scalar-float test has no wgpu device"
@@ -125,15 +124,7 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wasm2gpu scalar float operators"),
     });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("wasm2gpu scalar float operators"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-    }
+    record_compute_pass(&mut encoder, &pipeline, &bind_group, [1, 1, 1]);
     queue.submit([encoder.finish()]);
 
     let floats: Vec<f32> = readback_words(&device, &queue, &float_output, float_bytes)
