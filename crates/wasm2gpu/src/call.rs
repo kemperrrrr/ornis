@@ -133,8 +133,7 @@ fn lower_one(
         id_param: None,
     };
     let output = flow::exec(cx, code, &mut body, &input)?;
-    let (result_imm, nresults) =
-        ret::finish(&mut body, cx, &output.stack, &sig, output.returned)?;
+    let (result_imm, nresults) = ret::finish(&mut body, cx, &output.stack, &sig, output.returned)?;
     let handle = cx.module.functions.append(body, Span::default());
     Ok(Spec {
         func: func_index,
