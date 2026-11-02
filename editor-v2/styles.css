@@ -1,12 +1,12 @@
-/* Ornis editor-v2 mockup — original stylesheet (no third-party UI copied). */
+/* Ornis editor-v2 frontend — original stylesheet (no third-party UI copied). */
 @font-face {
   font-family: "Inter";
   font-style: normal;
   font-weight: 400;
   font-display: swap;
   src:
-    url("../editor/Inter-Regular.woff2") format("woff2"),
-    url("../editor/fonts/Inter-Regular.ttf") format("truetype");
+    url("Inter-Regular.woff2") format("woff2"),
+    url("fonts/Inter-Regular.ttf") format("truetype");
 }
 
 :root {
@@ -171,22 +171,9 @@ button { font: inherit; color: inherit; }
 .center-top #toggle-right.docked { right: 6px; }
 .viewport { position: relative; flex: 1; min-height: 0; overflow: hidden;
   background: var(--viewport); }
-.grid-bg {
-  position: absolute; inset: 0;
-  background-image: linear-gradient(#323337 1px, transparent 1px), linear-gradient(90deg, #323337 1px, transparent 1px);
-  background-size: 28px 28px;
-}
-.shapes { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 18px; }
-.sphere {
-  width: 54px; height: 54px; border-radius: 50%; cursor: pointer;
-  border: 2px solid transparent;
-}
-.sphere.selected { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
-.viewport-hint {
-  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-  background: rgba(0,0,0,0.55); padding: 4px 10px; border-radius: 999px;
-  font-size: 12px; color: var(--muted); white-space: nowrap;
-}
+.viewport-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.viewport-canvas.failed { background: #300; }
+.plane-grid { position: absolute; inset: 0; pointer-events: none; }
 .viewport-gizmos {
   position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
   display: flex; gap: 2px;
@@ -213,7 +200,7 @@ button { font: inherit; color: inherit; }
 }
 .viewport-settings svg { width: 18px; height: 18px; }
 .viewport-settings:hover { fill: var(--text); }
-/* 2D/3D viewport mode switch (mock of the K2 plane camera toggle). */
+/* 2D/3D viewport mode switch (drives `set_viewport_mode` on the WASM canvas). */
 .viewport-mode {
   position: absolute; top: 8px; right: 58px;
   display: flex; gap: 2px;
@@ -224,7 +211,6 @@ button { font: inherit; color: inherit; }
   padding: 3px 10px; cursor: pointer; color: var(--muted); font: inherit; font-size: 12px;
 }
 .viewport-mode button.active { background: var(--panel-2); color: var(--text); }
-.viewport.mode-2d .viewport-hint { display: none; }
 /* Browser */
 .tabs { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .tab { background: transparent; border: 0; padding: 5px 10px; border-radius: 7px; cursor: pointer; color: var(--muted); }

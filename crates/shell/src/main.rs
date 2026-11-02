@@ -10,8 +10,8 @@
 //! Run with:
 //!
 //! ```sh
-//! cargo run -p ornis-shell [--editor-dir <path>]   # editor/ or editor-v2/
-//! ORNIS_EDITOR_DIR=editor-v2 cargo run -p ornis-shell
+//! cargo run -p ornis-shell [--editor-dir <path>]   # editor-v2/ (default) or editor/
+//! ORNIS_EDITOR_DIR=editor cargo run -p ornis-shell
 //! cargo run -p ornis-shell -- --webgpu-probe       # WebGPU capability check
 //! ```
 
@@ -68,7 +68,7 @@ fn parse_options() -> Options {
             "--webgpu-probe" => options.webgpu_probe = true,
             "--help" | "-h" => {
                 println!(
-                    "ornis-shell: native editor window\n\n  --editor-dir <path>  frontend root (default: ORNIS_EDITOR_DIR or <workspace>/editor)\n  --webgpu-probe       load the inline WebGPU capability page instead of the editor"
+                    "ornis-shell: native editor window\n\n  --editor-dir <path>  frontend root (default: ORNIS_EDITOR_DIR or <workspace>/editor-v2)\n  --webgpu-probe       load the inline WebGPU capability page instead of the editor"
                 );
                 std::process::exit(0);
             }

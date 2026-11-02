@@ -1087,6 +1087,17 @@ Scene(
 )
 "#;
 
+    /// The "Empty Project" template offered by the editor welcome flow must
+    /// stay loadable by `load_scene` (see `assets/templates/empty.ron`).
+    #[test]
+    fn empty_project_template_parses() {
+        let scene = Scene::from_ron(include_str!("../../../assets/templates/empty.ron"))
+            .expect("empty project template");
+        assert_eq!(scene.name, "untitled");
+        assert_eq!(scene.entities.len(), 1);
+        assert_eq!(scene.lights.len(), 1);
+    }
+
     #[test]
     fn parses_all_material_variants() {
         let scene = Scene::from_ron(FULL_SCENE_RON).expect("valid scene");

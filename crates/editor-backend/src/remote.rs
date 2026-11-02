@@ -57,7 +57,7 @@ const HTTP_UNSUPPORTED_MEDIA: u16 = 415;
 /// Editor frontend root. Resolution order:
 ///   1. `--editor-dir <path>` CLI argument
 ///   2. `ORNIS_EDITOR_DIR` environment variable
-///   3. `<workspace>/editor` (this crate lives at `crates/editor-backend`,
+///   3. `<workspace>/editor-v2` (this crate lives at `crates/editor-backend`,
 ///      so CARGO_MANIFEST_DIR is two levels below the workspace root)
 fn assets_root() -> PathBuf {
     let mut args = std::env::args().skip_while(|a| a != "--editor-dir");
@@ -71,7 +71,7 @@ fn assets_root() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor-v2")
 }
 
 /// The HTTP remote editor server: serves the static editor assets and the
@@ -1543,6 +1543,8 @@ fn content_type(path: &Path) -> Option<Header> {
         Some("gif") => "image/gif",
         Some("woff2") => "font/woff2",
         Some("woff") => "font/woff",
+        Some("ttf") => "font/ttf",
+        Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     };
     Header::from_bytes("Content-Type", ct).ok()
@@ -2013,6 +2015,7 @@ mod tests {
         assert!(ct("svg").starts_with("image/svg+xml"));
         assert!(ct("png").starts_with("image/png"));
         assert!(ct("woff2").starts_with("font/woff2"));
+        assert_eq!(ct("wasm"), "application/wasm");
         assert_eq!(ct("unknown"), "application/octet-stream");
     }
 
@@ -2519,6 +2522,45 @@ mod tests {
         // cannot easily inject args without affecting the real process; we
         // at least verify the env + default path resolve without panicking.
         let _ = assets_root();
+    }
+
+    /// The default frontend must stay self-contained: both static servers
+    /// reject `..` segments, so any `../editor/…` reference in `editor-v2/`
+    /// would 404 in the browser and in the native shell.
+    #[test]
+    fn editor_v2_frontend_is_self_contained() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../editor-v2");
+        for entry in [
+            "index.html",
+            "app.js",
+            "live.js",
+            "viewport.js",
+            "styles.css",
+        ] {
+            let text = std::fs::read_to_string(root.join(entry))
+                .unwrap_or_else(|e| panic!("read editor-v2/{entry}: {e}"));
+            assert!(
+                !text.contains("../editor/"),
+                "editor-v2/{entry} still references ../editor/ (rejected by the static servers)"
+            );
+        }
+        let index = std::fs::read_to_string(root.join("index.html")).expect("editor-v2 index");
+        assert!(
+            index.contains("id=\"canvas\""),
+            "live viewport canvas missing"
+        );
+        assert!(
+            index.contains("id=\"scene-tabs\""),
+            "scene tab strip missing"
+        );
+        // The viewport loads the wasm-pack package `cargo xtask editor` builds
+        // into `editor-v2/pkg` (`--skip-wasm` reuses the same path).
+        let viewport =
+            std::fs::read_to_string(root.join("viewport.js")).expect("editor-v2 viewport");
+        assert!(
+            viewport.contains("pkg/ornis_wasm.js"),
+            "viewport must import the wasm-pack package under editor-v2/pkg"
+        );
     }
 
     // ── POST guards: Origin / Host / Content-Type / body limit ────────────
