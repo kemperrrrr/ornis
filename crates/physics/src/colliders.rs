@@ -17,20 +17,86 @@ use crate::body::RigidBody;
 use crate::errors::ColliderError;
 use crate::shape::{Pose, Shape};
 
+/// Relative tolerance for treating per-axis scales as uniform.
+const SCALE_TOLERANCE: f32 = 1e-6;
+
+/// Validated positive, finite transform scale.
+///
+/// The renderer applies scale in body-local axes before rotation
+/// (`T·R·S`), so collider geometry must be scaled the same way. A
+/// non-positive or non-finite scale has no collider interpretation and
+/// becomes [`ColliderError::InvalidScale`].
+#[derive(Debug, Clone, Copy)]
+struct Scale(Vec3);
+
+impl Scale {
+    fn try_new(raw: Vec3) -> Result<Self, ColliderError> {
+        let positive = raw.is_finite() && raw.x > 0.0 && raw.y > 0.0 && raw.z > 0.0;
+        if !positive {
+            return Err(ColliderError::InvalidScale {
+                scale: raw.to_array(),
+            });
+        }
+        Ok(Self(raw))
+    }
+
+    fn raw(self) -> Vec3 {
+        self.0
+    }
+
+    fn max_component(self) -> f32 {
+        self.0.max_element()
+    }
+
+    /// Uniform factor when all axes agree within [`SCALE_TOLERANCE`],
+    /// using the largest axis so the collider contains the scaled mesh.
+    fn uniform_for(self, shape: &'static str) -> Result<f32, ColliderError> {
+        let max = self.0.max_element();
+        let min = self.0.min_element();
+        if max - min <= SCALE_TOLERANCE * max.max(1.0) {
+            Ok(max)
+        } else {
+            Err(ColliderError::NonUniformScale {
+                shape,
+                scale: self.0.to_array(),
+            })
+        }
+    }
+
+    /// Cylinder radius under scale: `radius * max(sx, sz)`. Non-uniform
+    /// XZ is not representable by a circular cross-section and is a typed
+    /// error.
+    fn cylinder_radius(self, radius: f32) -> Result<f32, ColliderError> {
+        let radial = self.0.x.max(self.0.z);
+        if (self.0.x - self.0.z).abs() > SCALE_TOLERANCE * radial.max(1.0) {
+            return Err(ColliderError::NonUniformScale {
+                shape: "cylinder",
+                scale: self.0.to_array(),
+            });
+        }
+        Ok(radius * radial)
+    }
+}
+
 /// Builds a solver body for an entity: `Ok(None)` means "no collider"
 /// (no recipe, explicit `None`, or a non-`Custom` soup without an explicit
-/// `TriMesh` recipe); `Err` means "broken collider" (bad soup).
+/// `TriMesh` recipe); `Err` means "broken collider" (bad soup or scale).
 ///
 /// Precedence: explicit [`ColliderDesc`] first (`None` suppresses even
 /// exact auto recipes), then the auto recipe for the mesh. `TriMesh`
 /// needs a `Custom` soup with triangular, in-range indices. Pose comes
 /// from `transform` (translation + quaternion); `mass` follows the
-/// [`RigidBody`] convention (0 = static).
+/// [`RigidBody`] convention (0 = static). `transform.scale` is applied in
+/// body-local axes to match render extraction: boxes scale per axis,
+/// spheres use the largest axis, cylinders require equal X/Z scale, and
+/// compounds, rounded shapes and half-spaces require uniform scale.
 ///
 /// # Errors
 ///
 /// [`ColliderError`] when an explicit `TriMesh` soup is malformed
-/// (non-triangular length or out-of-range indices).
+/// (non-triangular length or out-of-range indices), the scale is
+/// non-positive/non-finite, or a shape cannot represent the non-uniform
+/// scale.
 pub fn body_for(
     transform: &TransformDesc,
     mesh: &MeshDesc,
@@ -47,30 +113,42 @@ pub fn body_for(
     if matches!(recipe, ColliderDesc::None) {
         return Ok(None);
     }
+    let scale = Scale::try_new(transform.scale)?;
     let position = transform.translation;
     let orientation = transform.rotation.get();
     let mut body = match recipe {
-        ColliderDesc::Sphere { radius } => RigidBody::new_sphere(position, radius, mass),
-        ColliderDesc::Box { half } => RigidBody::new_box(position, Vec3::from_array(half), mass),
+        ColliderDesc::Sphere { radius } => {
+            RigidBody::new_sphere(position, radius * scale.max_component(), mass)
+        }
+        ColliderDesc::Box { half } => {
+            RigidBody::new_box(position, Vec3::from_array(half) * scale.raw(), mass)
+        }
         ColliderDesc::Cylinder { radius, height } => {
-            RigidBody::new_cylinder(position, radius, height / 2.0, mass)
+            let radius = scale.cylinder_radius(radius)?;
+            RigidBody::new_cylinder(position, radius, height / 2.0 * scale.raw().y, mass)
         }
         ColliderDesc::TriMesh => {
             let Some((positions, indices)) = mesh.as_custom() else {
                 return Ok(None);
             };
-            let vertices: Vec<Vec3> = positions.iter().map(|p| Vec3::from_array(*p)).collect();
+            let vertices: Vec<Vec3> = positions
+                .iter()
+                .map(|p| Vec3::from_array(*p) * scale.raw())
+                .collect();
             let triangles = validated_triangles(&vertices, indices)?;
             RigidBody::try_new_trimesh(position, &vertices, &triangles, mass)
                 .map_err(ColliderError::InvalidMesh)?
         }
         ColliderDesc::Compound { children } => {
+            let factor = scale.uniform_for("compound")?;
+            let child_scale = Scale(Vec3::splat(factor));
             let mut parts = Vec::with_capacity(children.len());
             for child in &children {
-                let Some(shape) = shape_for(&child.shape, mesh)? else {
+                let Some(shape) = shape_for(&child.shape, mesh, child_scale)? else {
                     continue; // `None` skips that part (render-only geometry).
                 };
-                parts.push((shape, child_pose(child)));
+                let position = Vec3::from_array(child.translation) * factor;
+                parts.push((shape, child_pose(child, position)));
             }
             RigidBody::try_new_compound(position, parts, mass)?
         }
@@ -78,14 +156,17 @@ pub fn body_for(
             inner,
             border_radius,
         } => {
-            let Some(inner_shape) = shape_for(inner.as_ref(), mesh)? else {
+            let factor = scale.uniform_for("rounded collider")?;
+            let Some(inner_shape) = shape_for(inner.as_ref(), mesh, Scale(Vec3::splat(factor)))?
+            else {
                 return Err(ColliderError::EmptyRecipe {
                     detail: "rounded collider needs an inner recipe",
                 });
             };
-            RigidBody::try_new_round(position, inner_shape, border_radius, mass)?
+            RigidBody::try_new_round(position, inner_shape, border_radius * factor, mass)?
         }
         ColliderDesc::HalfSpace { normal } => {
+            scale.uniform_for("half-space")?;
             RigidBody::try_new_halfspace(position, Vec3::from_array(normal), mass)?
         }
         ColliderDesc::None => return Ok(None),
@@ -94,35 +175,47 @@ pub fn body_for(
     Ok(Some(body))
 }
 
-/// Authoring recipe plus entity soup into solver geometry (`None` for
-/// [`ColliderDesc::None`] — the caller decides skip-vs-error). Recursive
-/// over compound/rounded recipes; triangle soup validates like
-/// [`body_for`].
-fn shape_for(desc: &ColliderDesc, mesh: &MeshDesc) -> Result<Option<Shape>, ColliderError> {
+/// Authoring recipe plus entity soup into solver geometry, with
+/// body-local scale applied (`None` for [`ColliderDesc::None`] — the
+/// caller decides skip-vs-error). Recursive over compound/rounded
+/// recipes; triangle soup validates like [`body_for`].
+fn shape_for(
+    desc: &ColliderDesc,
+    mesh: &MeshDesc,
+    scale: Scale,
+) -> Result<Option<Shape>, ColliderError> {
     match desc {
-        ColliderDesc::Sphere { radius } => Ok(Some(Shape::Sphere { radius: *radius })),
+        ColliderDesc::Sphere { radius } => Ok(Some(Shape::Sphere {
+            radius: radius * scale.max_component(),
+        })),
         ColliderDesc::Box { half } => Ok(Some(Shape::Box {
-            half_extents: Vec3::from_array(*half),
+            half_extents: Vec3::from_array(*half) * scale.raw(),
         })),
         ColliderDesc::Cylinder { radius, height } => Ok(Some(Shape::Cylinder {
-            radius: *radius,
-            half_height: height / 2.0,
+            radius: scale.cylinder_radius(*radius)?,
+            half_height: height / 2.0 * scale.raw().y,
         })),
         ColliderDesc::TriMesh => {
             let Some((positions, indices)) = mesh.as_custom() else {
                 return Ok(None);
             };
-            let vertices: Vec<Vec3> = positions.iter().map(|p| Vec3::from_array(*p)).collect();
+            let vertices: Vec<Vec3> = positions
+                .iter()
+                .map(|p| Vec3::from_array(*p) * scale.raw())
+                .collect();
             let triangles = validated_triangles(&vertices, indices)?;
             Ok(Some(Shape::TriMesh(crate::shape::TriMesh::from_triangles(
                 &vertices, &triangles,
             )?)))
         }
         ColliderDesc::Compound { children } => {
+            let factor = scale.uniform_for("compound")?;
+            let child_scale = Scale(Vec3::splat(factor));
             let mut parts = Vec::with_capacity(children.len());
             for child in children {
-                if let Some(shape) = shape_for(&child.shape, mesh)? {
-                    parts.push((shape, child_pose(child)));
+                if let Some(shape) = shape_for(&child.shape, mesh, child_scale)? {
+                    let position = Vec3::from_array(child.translation) * factor;
+                    parts.push((shape, child_pose(child, position)));
                 }
             }
             Ok(Some(Shape::try_compound(parts)?))
@@ -131,31 +224,38 @@ fn shape_for(desc: &ColliderDesc, mesh: &MeshDesc) -> Result<Option<Shape>, Coll
             inner,
             border_radius,
         } => {
-            let Some(inner_shape) = shape_for(inner.as_ref(), mesh)? else {
+            let factor = scale.uniform_for("rounded collider")?;
+            let Some(inner_shape) = shape_for(inner.as_ref(), mesh, Scale(Vec3::splat(factor)))?
+            else {
                 return Err(ColliderError::EmptyRecipe {
                     detail: "rounded collider needs an inner recipe",
                 });
             };
-            Ok(Some(Shape::try_round(inner_shape, *border_radius).ok_or(
-                crate::errors::ShapeError::BadBorderRadius {
-                    radius: *border_radius,
-                },
-            )?))
+            Ok(Some(
+                Shape::try_round(inner_shape, *border_radius * factor).ok_or(
+                    crate::errors::ShapeError::BadBorderRadius {
+                        radius: *border_radius * factor,
+                    },
+                )?,
+            ))
         }
-        ColliderDesc::HalfSpace { normal } => Ok(Some(
-            Shape::try_halfspace(Vec3::from_array(*normal))
-                .ok_or(crate::errors::ShapeError::BadNormal)?,
-        )),
+        ColliderDesc::HalfSpace { normal } => {
+            scale.uniform_for("half-space")?;
+            Ok(Some(
+                Shape::try_halfspace(Vec3::from_array(*normal))
+                    .ok_or(crate::errors::ShapeError::BadNormal)?,
+            ))
+        }
         ColliderDesc::None => Ok(None),
     }
 }
 
-/// Compound-local placement of one authoring child (translation plus
+/// Compound-local placement of one authoring child (`position` plus its
 /// `[x, y, z, w]` quaternion; degenerate rotations fall back at query
 /// time via [`Pose::world_rot`], so projection never fails here).
-fn child_pose(child: &CompoundChild) -> Pose {
+fn child_pose(child: &CompoundChild, position: Vec3) -> Pose {
     Pose::new(
-        Vec3::from_array(child.translation),
+        position,
         Quat::from_xyzw(
             child.rotation[0],
             child.rotation[1],
@@ -459,6 +559,242 @@ mod tests {
         assert!(matches!(
             body_for(&transform, &mesh, Some(&no_inner), 0.0),
             Err(ColliderError::EmptyRecipe { .. })
+        ));
+    }
+
+    fn scaled(scale: Vec3) -> TransformDesc {
+        TransformDesc {
+            scale,
+            ..TransformDesc::IDENTITY
+        }
+    }
+
+    fn unit_box_mesh() -> MeshDesc {
+        MeshDesc::Box {
+            size: [
+                PositiveF32::expect_valid(2.0),
+                PositiveF32::expect_valid(2.0),
+                PositiveF32::expect_valid(2.0),
+            ],
+        }
+    }
+
+    #[test]
+    fn box_and_sphere_scale_in_body_local_axes() {
+        let body = body_for(
+            &scaled(Vec3::new(2.0, 3.0, 4.0)),
+            &unit_box_mesh(),
+            None,
+            0.0,
+        )
+        .expect("scaled box infallible")
+        .expect("scaled box builds");
+        match body.shape {
+            Shape::Box { half_extents } => assert_eq!(half_extents, Vec3::new(2.0, 3.0, 4.0)),
+            _ => panic!("expected box"),
+        }
+
+        let sphere = MeshDesc::Sphere {
+            radius: PositiveF32::expect_valid(2.0),
+            segments: 16,
+            rings: 8,
+        };
+        let body = body_for(&scaled(Vec3::new(2.0, 3.0, 1.5)), &sphere, None, 0.0)
+            .expect("scaled sphere infallible")
+            .expect("scaled sphere builds");
+        match body.shape {
+            Shape::Sphere { radius } => assert_eq!(radius, 6.0),
+            _ => panic!("expected sphere"),
+        }
+    }
+
+    #[test]
+    fn cylinder_uses_radial_max_and_rejects_non_circular_xz() {
+        let mesh = unit_box_mesh();
+        let recipe = ColliderDesc::Cylinder {
+            radius: 2.0,
+            height: 4.0,
+        };
+        let body = body_for(&scaled(Vec3::new(2.0, 3.0, 2.0)), &mesh, Some(&recipe), 0.0)
+            .expect("scaled cylinder infallible")
+            .expect("scaled cylinder builds");
+        match body.shape {
+            Shape::Cylinder {
+                radius,
+                half_height,
+            } => {
+                assert_eq!(radius, 4.0);
+                assert_eq!(half_height, 6.0);
+            }
+            _ => panic!("expected cylinder"),
+        }
+        assert!(matches!(
+            body_for(&scaled(Vec3::new(2.0, 3.0, 1.0)), &mesh, Some(&recipe), 0.0),
+            Err(ColliderError::NonUniformScale {
+                shape: "cylinder",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn half_space_accepts_uniform_scale_only() {
+        let mesh = unit_box_mesh();
+        let recipe = ColliderDesc::HalfSpace {
+            normal: [0.0, 1.0, 0.0],
+        };
+        let body = body_for(&scaled(Vec3::splat(2.0)), &mesh, Some(&recipe), 0.0)
+            .expect("scaled half-space infallible")
+            .expect("scaled half-space builds");
+        match body.shape {
+            Shape::HalfSpace { normal } => assert_eq!(normal.get(), Vec3::Y),
+            _ => panic!("expected half-space"),
+        }
+        assert!(matches!(
+            body_for(&scaled(Vec3::new(2.0, 1.0, 1.0)), &mesh, Some(&recipe), 0.0),
+            Err(ColliderError::NonUniformScale {
+                shape: "half-space",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn invalid_scale_is_typed() {
+        let mesh = unit_box_mesh();
+        for scale in [
+            Vec3::ZERO,
+            Vec3::new(-1.0, 1.0, 1.0),
+            Vec3::new(f32::NAN, 1.0, 1.0),
+            Vec3::new(1.0, f32::INFINITY, 1.0),
+        ] {
+            assert!(
+                matches!(
+                    body_for(&scaled(scale), &mesh, None, 0.0),
+                    Err(ColliderError::InvalidScale { .. })
+                ),
+                "scale {scale:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn trimesh_vertices_follow_scale() {
+        let soup = MeshDesc::Custom {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            indices: vec![0, 1, 2],
+        };
+        let body = body_for(
+            &scaled(Vec3::new(2.0, 3.0, 4.0)),
+            &soup,
+            Some(&ColliderDesc::TriMesh),
+            0.0,
+        )
+        .expect("scaled soup infallible")
+        .expect("scaled soup builds");
+        match body.shape {
+            Shape::TriMesh(mesh) => {
+                assert_eq!(mesh.local_min, Vec3::ZERO);
+                assert_eq!(mesh.local_max, Vec3::new(2.0, 6.0, 0.0));
+            }
+            _ => panic!("expected trimesh"),
+        }
+    }
+
+    #[test]
+    fn uniform_scale_propagates_through_compound_and_round() {
+        use ornis_assets::collider::CompoundChild;
+        let mesh = unit_box_mesh();
+        let compound = ColliderDesc::Compound {
+            children: vec![
+                CompoundChild {
+                    shape: ColliderDesc::Box {
+                        half: [1.0, 1.0, 1.0],
+                    },
+                    translation: [-1.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                },
+                CompoundChild {
+                    shape: ColliderDesc::Box {
+                        half: [1.0, 1.0, 1.0],
+                    },
+                    translation: [1.0, 0.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                },
+            ],
+        };
+        let body = body_for(&scaled(Vec3::splat(2.0)), &mesh, Some(&compound), 1.0)
+            .expect("scaled compound infallible")
+            .expect("scaled compound builds");
+        let children = body.shape.compound_children().expect("compound shape");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].1.position, Vec3::new(-2.0, 0.0, 0.0));
+        match children[1].0 {
+            Shape::Box { half_extents } => assert_eq!(half_extents, Vec3::splat(2.0)),
+            _ => panic!("expected child box"),
+        }
+
+        let round = ColliderDesc::Round {
+            inner: Box::new(ColliderDesc::Box {
+                half: [1.0, 1.0, 1.0],
+            }),
+            border_radius: 0.25,
+        };
+        let body = body_for(&scaled(Vec3::splat(2.0)), &mesh, Some(&round), 1.0)
+            .expect("scaled round infallible")
+            .expect("scaled round builds");
+        match body.shape {
+            Shape::Round {
+                inner,
+                border_radius,
+            } => {
+                assert_eq!(border_radius, 0.5);
+                match *inner {
+                    Shape::Box { half_extents } => assert_eq!(half_extents, Vec3::splat(2.0)),
+                    _ => panic!("expected rounded box"),
+                }
+            }
+            _ => panic!("expected round"),
+        }
+    }
+
+    #[test]
+    fn compound_and_round_reject_non_uniform_scale() {
+        use ornis_assets::collider::CompoundChild;
+        let mesh = unit_box_mesh();
+        let compound = ColliderDesc::Compound {
+            children: vec![CompoundChild {
+                shape: ColliderDesc::Box {
+                    half: [1.0, 1.0, 1.0],
+                },
+                translation: [0.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+            }],
+        };
+        assert!(matches!(
+            body_for(
+                &scaled(Vec3::new(2.0, 1.0, 1.0)),
+                &mesh,
+                Some(&compound),
+                1.0
+            ),
+            Err(ColliderError::NonUniformScale {
+                shape: "compound",
+                ..
+            })
+        ));
+        let round = ColliderDesc::Round {
+            inner: Box::new(ColliderDesc::Box {
+                half: [1.0, 1.0, 1.0],
+            }),
+            border_radius: 0.25,
+        };
+        assert!(matches!(
+            body_for(&scaled(Vec3::new(2.0, 1.0, 1.0)), &mesh, Some(&round), 1.0),
+            Err(ColliderError::NonUniformScale {
+                shape: "rounded collider",
+                ..
+            })
         ));
     }
 }
