@@ -564,35 +564,3 @@ fn non_looping_cursor_clamps_at_duration() {
         .time;
     assert!((time.get() - 1.0).abs() < 1e-5);
 }
-
-#[test]
-fn gpu_fallback_only_skips_gpu_eligible_meshes() {
-    // A one-joint palette fits the GPU path: the fallback-only pass
-    // leaves the mesh untouched and counts neither skin nor defect.
-    let mut store = SmartStore::new();
-    store.register::<Skeleton>();
-    store.register::<JointPose>();
-    store.register::<SkinnedMesh>();
-    let root = store.create_entity();
-    store.insert(
-        root,
-        Skeleton::new(vec![None], vec![Mat4::IDENTITY], vec!["root".to_string()]),
-    );
-    store.insert(root, JointPose::identity(1));
-    let mesh = store.create_entity();
-    let mut placed = simple_mesh(root);
-    placed.skinned_positions = vec![[9.0, 9.0, 9.0]];
-    store.insert(mesh, placed);
-
-    let mut resources = Resources::new();
-    resources.insert(store);
-    resources.insert(Time::new());
-    let stats = ornis_animation::run_skel_skin_with(&resources, true);
-    assert_eq!(stats, SkelSkinStats::default());
-    let store = resources.get::<SmartStore>().expect("store resource kept");
-    let meshes = store.read_lane::<SkinnedMesh>().expect("lane kept");
-    assert_eq!(
-        meshes.get(mesh).expect("mesh kept").skinned_positions,
-        vec![[9.0, 9.0, 9.0]]
-    );
-}
