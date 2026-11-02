@@ -7,7 +7,8 @@
 //! the bitset variant [`bitset_level_plan`]), a plan cache with diagnostics
 //! ([`PlanCache`]), a level executor ([`run_levels`]: sequential / rayon /
 //! wasm-sequential) and a mermaid projector for plan debug diagrams
-//! ([`MermaidDiagram`]).
+//! ([`MermaidDiagram`]), plus opt-in per-node timing and frame-time
+//! aggregation for debug statistics ([`stats`]).
 //!
 //! Consumers keep domain data on their side and assemble key slices:
 //! `ornis-core::schedule::Schedule` schedules systems by singleton
@@ -33,6 +34,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fixedbitset::FixedBitSet;
 #[cfg(not(target_family = "wasm"))]
 use rayon::prelude::*;
+
+pub mod stats;
+#[cfg(not(target_family = "wasm"))]
+pub use stats::run_levels_timed;
+pub use stats::{FrameHistory, NodeTimings, TimingSnapshot};
 
 /// Parallelism level engine — unified for all schedulers in the project
 /// (IDEAS §28.2: "one scheduler for everything"). `ordered(i, j)` = there is

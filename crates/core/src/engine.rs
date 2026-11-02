@@ -704,6 +704,33 @@ impl Engine<Running> {
         self
     }
 
+    /// Turns per-system timing on or off for every [`Stage`] schedule
+    /// (debug statistics, see [`Schedule::set_timing`]). Off by default.
+    pub fn set_stage_timing(&mut self, enabled: bool) {
+        for schedule in [
+            &mut self.pre_update,
+            &mut self.input,
+            &mut self.fixed_schedule,
+            &mut self.schedule,
+        ] {
+            schedule.set_timing(enabled);
+        }
+    }
+
+    /// Drains the per-stage timings accumulated since the previous call,
+    /// in execution order; empty while timing is off.
+    pub fn take_stage_timings(&self) -> Vec<(Stage, crate::ScheduleTimings)> {
+        [
+            Stage::PreUpdate,
+            Stage::Input,
+            Stage::Gameplay,
+            Stage::PostFrame,
+        ]
+        .into_iter()
+        .filter_map(|stage| Some((stage, self.stage_schedule(stage).take_timings()?)))
+        .collect()
+    }
+
     /// Runs one frame with `delta_seconds` and publishes [`Time`] first.
     ///
     /// Available only on [`Engine<Running>`]: a build-phase engine must be
@@ -927,6 +954,31 @@ mod tests {
         assert!(input.keycode_down(KeyCode::KeyW));
         assert!(input.key_down(17));
         assert!(input.key_down(87));
+    }
+
+    #[test]
+    fn stage_timing_reports_post_frame_systems() {
+        let mut engine = Engine::new();
+        engine
+            .schedule_mut()
+            .add_system(CaptureTime(Arc::new(Mutex::new(Vec::new()))));
+        assert!(engine.take_stage_timings().is_empty(), "off by default");
+        engine.set_stage_timing(true);
+        engine.run_frame(0.25);
+        let timings = engine.take_stage_timings();
+        let stages: Vec<_> = timings.iter().map(|(stage, _)| *stage).collect();
+        assert_eq!(
+            stages,
+            [
+                Stage::PreUpdate,
+                Stage::Input,
+                Stage::Gameplay,
+                Stage::PostFrame
+            ]
+        );
+        assert_eq!(timings[3].1.systems[0].0, "capture_time");
+        engine.set_stage_timing(false);
+        assert!(engine.take_stage_timings().is_empty());
     }
 
     #[test]

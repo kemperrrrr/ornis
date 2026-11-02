@@ -85,8 +85,12 @@ use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use std::time::Duration;
+
+#[cfg(not(target_family = "wasm"))]
+use ornis_schedule::run_levels_timed;
 use ornis_schedule::{
-    MermaidDiagram, PlanCache, bitset_level_plan, resolve_named_edge, run_levels,
+    MermaidDiagram, NodeTimings, PlanCache, bitset_level_plan, resolve_named_edge, run_levels,
 };
 pub use ornis_schedule::{OrderError, compute_levels};
 
@@ -519,6 +523,20 @@ pub struct Schedule {
     /// `FrameLayout` S1 cache): recomputed only after
     /// `add_system`/`order_before`.
     plan: PlanCache,
+    /// Opt-in per-system wall-time accumulator (debug statistics);
+    /// `None` keeps [`Schedule::run`] on the untimed path.
+    timings: Option<NodeTimings>,
+}
+
+/// Wall time a [`Schedule`] spent since the previous
+/// [`Schedule::take_timings`], accumulated over every run in between.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScheduleTimings {
+    /// Wall time of whole schedule passes (parallel levels overlap, so
+    /// this can be less than the sum of `systems`).
+    pub total: Duration,
+    /// Per-system wall time in registration order.
+    pub systems: Vec<(&'static str, Duration)>,
 }
 
 /// Schedule execution mode (typed replacement for `parallel: bool`).
@@ -607,7 +625,31 @@ impl Schedule {
             mode: ExecMode::Parallel,
             enforcement: Enforcement::from(cfg!(debug_assertions)),
             plan: PlanCache::new(),
+            timings: None,
         }
+    }
+
+    /// Turns per-system timing on or off (debug statistics). Off by
+    /// default; while off, [`Schedule::run`] takes no clock samples.
+    /// Timing is unavailable on wasm (`Instant` is unsupported there).
+    pub fn set_timing(&mut self, enabled: bool) {
+        self.timings = enabled.then(|| NodeTimings::new(self.systems.len()));
+    }
+
+    /// Returns the wall time accumulated since the previous call and
+    /// resets it; `None` while timing is off.
+    pub fn take_timings(&self) -> Option<ScheduleTimings> {
+        let snapshot = self.timings.as_ref()?.drain();
+        let systems = self
+            .systems
+            .iter()
+            .zip(snapshot.nodes)
+            .map(|(system, elapsed)| (system.name(), elapsed))
+            .collect();
+        Some(ScheduleTimings {
+            total: snapshot.total,
+            systems,
+        })
     }
 
     /// Adds a system (order = priority on conflicts).
@@ -638,6 +680,11 @@ impl Schedule {
 
     fn invalidate_plan(&mut self) {
         self.plan.invalidate();
+        if self.timings.is_some() {
+            // Registration changed: re-index the accumulator (pending
+            // samples are dropped, the next frame starts clean).
+            self.set_timing(true);
+        }
     }
 
     /// S5c: declares that system `before` must execute before system
@@ -804,6 +851,17 @@ impl Schedule {
         } else {
             Vec::new()
         };
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(timings) = &self.timings {
+            run_levels_timed(
+                &levels,
+                self.systems.len(),
+                self.mode.is_parallel(),
+                timings,
+                |i| self.run_system(i, resources),
+            );
+            return;
+        }
         run_levels(&levels, self.systems.len(), self.mode.is_parallel(), |i| {
             self.run_system(i, resources);
         });
@@ -852,6 +910,22 @@ mod tests {
             self.1.clone()
         }
         fn run(&self, _: &Resources) {}
+    }
+
+    #[test]
+    fn timing_is_opt_in_and_names_systems() {
+        let mut schedule = Schedule::new();
+        schedule.add_system(NamedNoop("first", SystemAccess::new()));
+        assert_eq!(schedule.take_timings(), None);
+        schedule.set_timing(true);
+        schedule.add_system(NamedNoop("second", SystemAccess::new()));
+        let resources = Resources::new();
+        schedule.run(&resources);
+        let timings = schedule.take_timings().expect("timing on");
+        let names: Vec<_> = timings.systems.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["first", "second"]);
+        schedule.set_timing(false);
+        assert_eq!(schedule.take_timings(), None);
     }
 
     #[test]
