@@ -89,5 +89,11 @@ workspace = true
 [profile.dev]
 debug = 1
 
+# Dependencies (glam, wgpu, naga, gltf, image) are never debugged here:
+# optimize them so `cargo run --example anim` is not dominated by
+# unoptimized math and asset decoding. Workspace crates stay debuggable.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.test]
 debug = 1

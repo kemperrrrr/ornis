@@ -3341,12 +3341,31 @@ fn root_matrix(transforms: Option<&ComponentStore<TransformDesc>>, entity: Entit
 /// Ordering: register after `skel_sample`, pin
 /// `try_order_before("skel_sample", "skel_skin_cpu")`.
 #[derive(Debug, Clone, Copy)]
-pub struct SkelSkinSystem;
+pub struct SkelSkinSystem {
+    /// Skip meshes the GPU palette path can draw (see
+    /// [`SkelSkinSystem::gpu_fallback_only`]).
+    fallback_only: bool,
+}
 
 impl SkelSkinSystem {
-    /// Creates the CPU skinning pass.
+    /// Creates the CPU skinning pass: every valid mesh skins every run.
     pub fn new() -> Self {
-        Self
+        Self {
+            fallback_only: false,
+        }
+    }
+
+    /// CPU skinning only where the GPU palette path cannot draw the mesh
+    /// (palette over [`JointLimit::GPU`]). GPU-eligible meshes render
+    /// from bind-pose rows plus the joint palette, so their CPU buffers
+    /// are never read: skipping them saves the per-vertex blend, two
+    /// buffer allocations per mesh and the per-frame `SkinnedMesh` lane
+    /// write (which otherwise escalates the render change feed to a full
+    /// rebuild every frame).
+    pub fn gpu_fallback_only() -> Self {
+        Self {
+            fallback_only: true,
+        }
     }
 }
 
@@ -3377,7 +3396,7 @@ impl System for SkelSkinSystem {
     fn run(&self, resources: &Resources) {
         // Same contract as `SkelSampleSystem::run`: per-run counters via
         // `run_skel_skin`; persistent counters land with phase C wiring.
-        let _ = run_skel_skin(resources);
+        let _ = run_skel_skin_with(resources, self.fallback_only);
     }
 }
 
@@ -3385,12 +3404,19 @@ impl System for SkelSkinSystem {
 ///
 /// Returns per-run counters (skinned meshes/vertices, bad-skin skips).
 pub fn run_skel_skin(resources: &Resources) -> SkelSkinStats {
+    run_skel_skin_with(resources, false)
+}
+
+/// [`run_skel_skin`] with an opt-in skip of GPU-eligible meshes (see
+/// [`SkelSkinSystem::gpu_fallback_only`]); skipped meshes keep their
+/// previous buffers and count neither as skinned nor as bad skin.
+pub fn run_skel_skin_with(resources: &Resources, fallback_only: bool) -> SkelSkinStats {
     let mut stats = SkelSkinStats::default();
     let Some(store) = resources.get::<SmartStore>() else {
         return stats;
     };
     let palette = joint_palette(store);
-    let jobs = collect_skin_jobs(store, &palette, &mut stats);
+    let jobs = collect_skin_jobs(store, &palette, fallback_only, &mut stats);
     if jobs.is_empty() {
         return stats;
     }
@@ -3455,6 +3481,7 @@ struct SkinJob {
 fn collect_skin_jobs(
     store: &SmartStore,
     palette: &HashMap<Entity, Vec<Mat4>>,
+    fallback_only: bool,
     stats: &mut SkelSkinStats,
 ) -> Vec<SkinJob> {
     let Some(meshes) = store.read_lane::<SkinnedMesh>() else {
@@ -3462,12 +3489,25 @@ fn collect_skin_jobs(
     };
     let mut jobs = Vec::new();
     for (entity, mesh) in meshes.entities.iter().zip(meshes.data.iter()) {
+        if fallback_only
+            && palette
+                .get(&mesh.skeleton)
+                .is_some_and(|matrices| gpu_eligible(matrices.len()))
+        {
+            continue;
+        }
         match skin_job(*entity, mesh, palette) {
             Some(job) => jobs.push(job),
             None => stats.skipped_bad_skin += 1,
         }
     }
     jobs
+}
+
+/// `true` when a palette of `count` joints fits the GPU skinning path
+/// (`0 < count <= JointLimit::GPU`, the `SkinningResources::build` gate).
+fn gpu_eligible(count: usize) -> bool {
+    count > 0 && count <= JointLimit::GPU.index()
 }
 
 /// Skins one mesh against the palette; [`None`] (bad skin) on missing

@@ -163,7 +163,9 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
         .fixed_schedule_mut()
         .try_order_before("physics_sync_out", "ragdoll_sync");
     engine.schedule_mut().add_system(SkelSampleSystem::new());
-    engine.schedule_mut().add_system(SkelSkinSystem::new());
+    engine
+        .schedule_mut()
+        .add_system(SkelSkinSystem::gpu_fallback_only());
     let _ = engine
         .schedule_mut()
         .try_order_before("anim_sample", "skel_sample");
