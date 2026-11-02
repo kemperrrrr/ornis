@@ -81,7 +81,6 @@ pub use lights::{LightUploadStats, MAX_LIGHTS, ShadingDebug, count_light_drops};
 // in-crate users outside their module right now.
 #[allow(unused_imports)]
 pub(crate) use lights::{GpuLightKind, LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
-pub use mesh_cache::CustomMeshBufferStats;
 pub use meshes::{
     CustomGbufferDraw, StagedCustomMesh, custom_draw_items, upload_custom_mesh,
     upload_skinned_mesh, upload_vertex_rows,

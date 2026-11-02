@@ -300,9 +300,9 @@ pub use render_backend::{
 };
 pub use renderer::{
     AoBlurInputs, AoRawInputs, BlendMode, CameraUniform, CompositeInputs, CompositePass,
-    CustomGbufferDraw, CustomMeshBufferStats, EdgeInputs, FogInputs, ForwardPass, GBufferTextures,
-    GbufferTargets, InstanceData, LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu,
-    Renderer3D, SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh, TaaInputs, TransparencyError,
+    CustomGbufferDraw, EdgeInputs, FogInputs, ForwardPass, GBufferTextures, GbufferTargets,
+    InstanceData, LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu, Renderer3D,
+    SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh, TaaInputs, TransparencyError,
     TransparencyOptions, custom_draw_items, forward_blend_state, negotiate_sample_count,
     normalize_sample_count, sort_by_depth, upload_vertex_rows,
 };

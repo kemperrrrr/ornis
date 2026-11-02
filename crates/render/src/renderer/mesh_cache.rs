@@ -8,7 +8,7 @@
 //!   lists, GPU-skinned bind-pose rows);
 //! * new contents that fit — `queue.write_buffer` into the existing buffer;
 //! * new contents that do not fit — the buffer is recreated (the only path
-//!   that allocates; counted in [`CustomMeshBufferStats::allocations`]).
+//!   that allocates; counted by the cache allocation counter).
 //!
 //! Entities not staged in a frame are evicted at its end. `write_buffer`
 //! lands before the commands of the next `queue.submit`, so the staged
@@ -20,22 +20,124 @@ use ornis_core::Entity;
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
-/// Buffer counters of the custom-mesh cache (diagnostics / tests).
+/// Buffer counters of the custom-mesh cache (tests).
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CustomMeshBufferStats {
-    /// GPU buffers created since the renderer was built.
-    pub allocations: u64,
+pub(crate) struct CustomMeshBufferStats {
+    /// GPU buffers created since the cache was built.
+    pub(crate) allocations: u64,
     /// `queue.write_buffer` uploads into an existing buffer.
-    pub writes: u64,
+    pub(crate) writes: u64,
     /// Entities currently holding a cached buffer pair.
-    pub cached_entities: usize,
+    pub(crate) cached_entities: usize,
+}
+
+/// Which buffer of the pair a [`Slot`] is (label + usage).
+#[derive(Clone, Copy)]
+enum SlotKind {
+    Vertex,
+    Index,
+}
+
+impl SlotKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vertex => "custom_mesh_vb",
+            Self::Index => "custom_mesh_ib",
+        }
+    }
+
+    fn usage(self) -> wgpu::BufferUsages {
+        match self {
+            Self::Vertex => wgpu::BufferUsages::VERTEX,
+            Self::Index => wgpu::BufferUsages::INDEX,
+        }
+    }
+}
+
+/// Allocation / upload counters.
+#[derive(Default)]
+struct Counters {
+    allocations: u64,
+    writes: u64,
 }
 
 /// One GPU buffer plus the bytes last written to it.
 struct Slot {
+    kind: SlotKind,
     buffer: wgpu::Buffer,
     capacity: u64,
     bytes: Vec<u8>,
+}
+
+impl Slot {
+    fn create(device: &wgpu::Device, kind: SlotKind, data: &[u8], counters: &mut Counters) -> Self {
+        counters.allocations += 1;
+        Self {
+            kind,
+            buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(kind.label()),
+                contents: data,
+                usage: kind.usage() | wgpu::BufferUsages::COPY_DST,
+            }),
+            capacity: data.len() as u64,
+            bytes: data.to_vec(),
+        }
+    }
+
+    /// Unchanged — nothing; fits — `write_buffer`; grew — recreate.
+    fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+        counters: &mut Counters,
+    ) {
+        let action = self.plan(data);
+        action.apply(self, device, queue, data, counters);
+    }
+
+    /// Decides what an update with `data` needs; pure, touches no GPU state.
+    fn plan(&self, data: &[u8]) -> SlotAction {
+        if self.bytes == data {
+            SlotAction::Keep
+        } else if data.len() as u64 <= self.capacity {
+            SlotAction::Write
+        } else {
+            SlotAction::Recreate
+        }
+    }
+
+    fn write(&mut self, queue: &wgpu::Queue, data: &[u8], counters: &mut Counters) {
+        queue.write_buffer(&self.buffer, 0, data);
+        counters.writes += 1;
+        self.bytes.clear();
+        self.bytes.extend_from_slice(data);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SlotAction {
+    Keep,
+    Write,
+    Recreate,
+}
+
+impl SlotAction {
+    fn apply(
+        self,
+        slot: &mut Slot,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+        counters: &mut Counters,
+    ) {
+        match self {
+            Self::Keep => {}
+            Self::Write => slot.write(queue, data, counters),
+            Self::Recreate => *slot = Slot::create(device, slot.kind, data, counters),
+        }
+    }
 }
 
 struct CachedMesh {
@@ -49,27 +151,7 @@ struct CachedMesh {
 pub(crate) struct CustomMeshCache {
     meshes: HashMap<Entity, CachedMesh>,
     frame: u64,
-    allocations: u64,
-    writes: u64,
-}
-
-fn create_slot(
-    device: &wgpu::Device,
-    label: &str,
-    usage: wgpu::BufferUsages,
-    data: &[u8],
-    allocations: &mut u64,
-) -> Slot {
-    *allocations += 1;
-    Slot {
-        buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: data,
-            usage: usage | wgpu::BufferUsages::COPY_DST,
-        }),
-        capacity: data.len() as u64,
-        bytes: data.to_vec(),
-    }
+    counters: Counters,
 }
 
 impl CustomMeshCache {
@@ -85,97 +167,68 @@ impl CustomMeshCache {
     }
 
     /// Current counters.
+    #[cfg(test)]
     pub(crate) fn stats(&self) -> CustomMeshBufferStats {
         CustomMeshBufferStats {
-            allocations: self.allocations,
-            writes: self.writes,
+            allocations: self.counters.allocations,
+            writes: self.counters.writes,
             cached_entities: self.meshes.len(),
         }
     }
 
-    /// Validates `rows` / `indices` like the `upload_*` helpers, then
-    /// [`Self::stage`]s them.
-    ///
-    /// # Errors
-    ///
-    /// The [`super::meshes::validate_rows`] errors; nothing is cached then.
-    pub(crate) fn stage_rows<T: bytemuck::Pod>(
+    /// Stages `entry`'s rows: interleaved skinned rows when `gpu_draw`,
+    /// classic rows otherwise. `None` when a GPU entry has no interleaved
+    /// rows; `Some(Err)` when the rows fail the `upload_*` validation
+    /// (nothing is cached then).
+    pub(crate) fn stage_entry(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        entry: &crate::extraction::CustomMeshEntry,
+        gpu_draw: bool,
+    ) -> Option<Result<Mesh, crate::mesh_upload::UploadError>> {
+        let indices = &entry.indices;
+        if !gpu_draw {
+            return Some(
+                super::meshes::validate_rows(entry.vertices.len(), indices)
+                    .map(|()| self.stage(device, queue, entry.entity, &entry.vertices, indices)),
+            );
+        }
+        let rows = entry.skinned_gpu_vertices()?;
+        Some(
+            super::meshes::validate_rows(rows.len(), indices)
+                .map(|()| self.stage(device, queue, entry.entity, &rows, indices)),
+        )
+    }
+
+    /// Returns a [`Mesh`] over `entity`'s cached buffers holding `rows` /
+    /// `indices` (already validated by the caller). A second request for
+    /// the same entity within one frame gets fresh, uncached buffers so it
+    /// cannot overwrite the first one before submit.
+    pub(crate) fn stage<T: bytemuck::Pod>(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         entity: Entity,
         rows: &[T],
         indices: &[u32],
-    ) -> Result<Mesh, crate::mesh_upload::UploadError> {
-        super::meshes::validate_rows(rows.len(), indices)?;
-        Ok(self.stage(
-            device,
-            queue,
-            entity,
-            bytemuck::cast_slice(rows),
-            rows.len() as u32,
-            indices,
-        ))
-    }
-
-    /// Returns a [`Mesh`] over `entity`'s cached buffers holding `vertices`
-    /// / `indices` (already validated by the caller). A second request for
-    /// the same entity within one frame gets fresh, uncached buffers so it
-    /// cannot overwrite the first one before submit.
-    pub(crate) fn stage(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        entity: Entity,
-        vertices: &[u8],
-        vertex_count: u32,
-        indices: &[u32],
     ) -> Mesh {
+        let vertices: &[u8] = bytemuck::cast_slice(rows);
         let index_bytes: &[u8] = bytemuck::cast_slice(indices);
         let frame = self.frame;
-        let (allocations, writes) = (&mut self.allocations, &mut self.writes);
+        let counters = &mut self.counters;
         let cached = match self.meshes.get_mut(&entity) {
             Some(m) if m.seen_frame == frame => None,
             Some(m) => {
                 m.seen_frame = frame;
-                update_slot(
-                    device,
-                    queue,
-                    &mut m.vertex,
-                    "custom_mesh_vb",
-                    wgpu::BufferUsages::VERTEX,
-                    vertices,
-                    allocations,
-                    writes,
-                );
-                update_slot(
-                    device,
-                    queue,
-                    &mut m.index,
-                    "custom_mesh_ib",
-                    wgpu::BufferUsages::INDEX,
-                    index_bytes,
-                    allocations,
-                    writes,
-                );
+                m.vertex.update(device, queue, vertices, counters);
+                m.index.update(device, queue, index_bytes, counters);
                 Some(&*m)
             }
             None => {
                 let m = CachedMesh {
-                    vertex: create_slot(
-                        device,
-                        "custom_mesh_vb",
-                        wgpu::BufferUsages::VERTEX,
-                        vertices,
-                        allocations,
-                    ),
-                    index: create_slot(
-                        device,
-                        "custom_mesh_ib",
-                        wgpu::BufferUsages::INDEX,
-                        index_bytes,
-                        allocations,
-                    ),
+                    vertex: Slot::create(device, SlotKind::Vertex, vertices, counters),
+                    index: Slot::create(device, SlotKind::Index, index_bytes, counters),
                     seen_frame: frame,
                 };
                 Some(&*self.meshes.entry(entity).or_insert(m))
@@ -184,54 +237,16 @@ impl CustomMeshCache {
         let (vertex_buffer, index_buffer) = match cached {
             Some(m) => (m.vertex.buffer.clone(), m.index.buffer.clone()),
             None => (
-                create_slot(
-                    device,
-                    "custom_mesh_vb",
-                    wgpu::BufferUsages::VERTEX,
-                    vertices,
-                    allocations,
-                )
-                .buffer,
-                create_slot(
-                    device,
-                    "custom_mesh_ib",
-                    wgpu::BufferUsages::INDEX,
-                    index_bytes,
-                    allocations,
-                )
-                .buffer,
+                Slot::create(device, SlotKind::Vertex, vertices, counters).buffer,
+                Slot::create(device, SlotKind::Index, index_bytes, counters).buffer,
             ),
         };
         Mesh {
             vertex_buffer,
             index_buffer,
             num_indices: indices.len() as u32,
-            vertex_count,
+            vertex_count: rows.len() as u32,
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn update_slot(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    slot: &mut Slot,
-    label: &str,
-    usage: wgpu::BufferUsages,
-    data: &[u8],
-    allocations: &mut u64,
-    writes: &mut u64,
-) {
-    if slot.bytes == data {
-        return;
-    }
-    if data.len() as u64 <= slot.capacity {
-        queue.write_buffer(&slot.buffer, 0, data);
-        *writes += 1;
-        slot.bytes.clear();
-        slot.bytes.extend_from_slice(data);
-    } else {
-        *slot = create_slot(device, label, usage, data, allocations);
     }
 }
 
@@ -241,20 +256,20 @@ mod tests {
 
     const TRI: [u32; 3] = [0, 1, 2];
 
-    fn rows(value: f32, count: usize) -> Vec<u8> {
-        bytemuck::cast_slice(&vec![value; count * 4]).to_vec()
+    fn rows(value: f32, count: usize) -> Vec<[f32; 4]> {
+        vec![[value; 4]; count]
     }
 
     fn frame(
         cache: &mut CustomMeshCache,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        meshes: &[(Entity, &[u8])],
+        meshes: &[(Entity, &[[f32; 4]])],
     ) -> Vec<Mesh> {
         cache.begin_frame();
         let staged = meshes
             .iter()
-            .map(|(entity, bytes)| cache.stage(device, queue, *entity, bytes, 3, &TRI))
+            .map(|(entity, bytes)| cache.stage(device, queue, *entity, bytes, &TRI))
             .collect();
         cache.end_frame();
         queue.submit([]);
@@ -291,7 +306,7 @@ mod tests {
         assert_ne!(grown[0].vertex_buffer, first[0].vertex_buffer);
         assert_eq!(grown[0].index_buffer, first[0].index_buffer);
         assert_eq!(cache.stats().allocations, 3);
-        assert_eq!(grown[0].vertex_count, 3);
+        assert_eq!(grown[0].vertex_count, 6);
     }
 
     #[test]

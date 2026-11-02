@@ -526,7 +526,7 @@ impl Renderer3D {
     /// `queue.write_buffer`, only growth reallocates, and entities not
     /// staged this call are evicted. Call once per frame and submit the
     /// result before the next call (the next call rewrites the same
-    /// buffers). Counters: [`Renderer3D::custom_mesh_buffer_stats`].
+    /// buffers).
     ///
     /// Deterministic: output order matches `entries` order (dense lane
     /// order); no randomness. The caller uploads
@@ -593,19 +593,10 @@ impl Renderer3D {
                 matches!(draw, SkinnedDraw::Gpu(_)),
                 palette_motion_valid,
             );
-            let mesh = match draw {
-                SkinnedDraw::Gpu(_) => match entry.skinned_gpu_vertices() {
-                    Some(rows) => {
-                        cache.stage_rows(device, queue, entry.entity, &rows, &entry.indices)
-                    }
-                    None => {
-                        self.invalidate_skin_palette_history(entry.entity);
-                        continue;
-                    }
-                },
-                SkinnedDraw::Cpu => {
-                    cache.stage_rows(device, queue, entry.entity, &entry.vertices, &entry.indices)
-                }
+            let gpu_draw = matches!(draw, SkinnedDraw::Gpu(_));
+            let Some(mesh) = cache.stage_entry(device, queue, entry, gpu_draw) else {
+                self.invalidate_skin_palette_history(entry.entity);
+                continue;
             };
             let Ok(mesh) = mesh else {
                 if entry.skinning.is_gpu() {
@@ -624,13 +615,6 @@ impl Renderer3D {
         }
         cache.end_frame();
         staged
-    }
-
-    /// Buffer counters of the cross-frame custom-mesh cache used by
-    /// [`Self::stage_custom_meshes`] (allocations stay flat while the
-    /// staged meshes keep their size).
-    pub fn custom_mesh_buffer_stats(&self) -> mesh_cache::CustomMeshBufferStats {
-        read_lock(&self.custom_mesh_cache).stats()
     }
 
     /// Draw one per-entity custom mesh with its own instance.
