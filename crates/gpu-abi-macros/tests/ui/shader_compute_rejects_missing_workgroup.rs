@@ -1,6 +1,6 @@
 //! UI test: `#[compute]` requires a workgroup size.
 
-use ornis_macros::compute;
+use ornis_gpu_abi_macros::compute;
 
 #[compute]
 fn cull(id: u32) {

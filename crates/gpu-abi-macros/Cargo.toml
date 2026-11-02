@@ -1,0 +1,21 @@
+[package]
+name = "ornis-gpu-abi-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Entry-point attribute macros for the toy wasm2gpu GPU ABI"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+[dev-dependencies]
+trybuild = "1"
+
+[lints]
+workspace = true

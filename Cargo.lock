@@ -2894,7 +2894,17 @@ dependencies = [
 name = "ornis-gpu-abi"
 version = "0.1.0"
 dependencies = [
- "ornis-macros",
+ "ornis-gpu-abi-macros",
+ "trybuild",
+]
+
+[[package]]
+name = "ornis-gpu-abi-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
  "trybuild",
 ]
 

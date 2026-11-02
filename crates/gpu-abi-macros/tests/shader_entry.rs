@@ -5,9 +5,9 @@
 //! macro does not require a manual `extern "C"`.
 
 mod shader {
-    pub use ornis_macros::compute;
-    pub use ornis_macros::fragment;
-    pub use ornis_macros::vertex;
+    pub use ornis_gpu_abi_macros::compute;
+    pub use ornis_gpu_abi_macros::fragment;
+    pub use ornis_gpu_abi_macros::vertex;
 }
 
 #[shader::compute(workgroup_size = 4)]

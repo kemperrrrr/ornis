@@ -32,9 +32,9 @@ pub mod gpu_abi;
 /// stages. The offline translator reads that section instead of hard-coding
 /// the entry's workgroup size.
 pub mod shader {
-    pub use ornis_macros::compute;
-    pub use ornis_macros::fragment;
-    pub use ornis_macros::vertex;
+    pub use ornis_gpu_abi_macros::compute;
+    pub use ornis_gpu_abi_macros::fragment;
+    pub use ornis_gpu_abi_macros::vertex;
 }
 /// Import names the offline translator recognizes.
 pub mod symbols;

@@ -79,6 +79,7 @@ paths = [
     "crates/input/**",
     "crates/shader-lang/**",
     "crates/gpu-abi/**",
+    "crates/gpu-abi-macros/**",
     "crates/wasm2gpu/**",
     "crates/wasm2gpu-shader/**",
     "crates/wasm2gpu-testkit/**",
@@ -119,6 +120,7 @@ ornis_schedule = "foundation"
 ornis_input = "foundation"
 ornis_shader_lang = "foundation"
 ornis_gpu_abi = "foundation"
+ornis_gpu_abi_macros = "foundation"
 ornis_wasm2gpu = "foundation"
 ornis_wasm2gpu_shader = "foundation"
 ornis_wasm2gpu_testkit = "foundation"
@@ -253,6 +255,7 @@ forbidden_in = [
     "crates/schedule/src/**",
     "crates/shader-lang/src/**",
     "crates/gpu-abi/src/**",
+    "crates/gpu-abi-macros/src/**",
     "crates/wasm2gpu/src/**",
     "crates/wasm2gpu-shader/src/**",
     "crates/wasm/src/**",

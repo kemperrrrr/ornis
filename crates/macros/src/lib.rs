@@ -18,9 +18,6 @@
 //!   `#[smart_pipeline]` — declare pipelines with static bind-group /
 //!   layout metadata, letting the engine build them without hand-written
 //!   boilerplate; `for_each_entity!` stamps per-component dispatch glue.
-//! - `#[shader::compute]` / `#[shader::vertex]` / `#[shader::fragment]` —
-//!   declare wasm2gpu entry points and record their stage and workgroup
-//!   size in a wasm custom section.
 #![warn(missing_docs)]
 
 mod auto_pipeline;
@@ -37,8 +34,6 @@ mod pack_mut;
 mod pipeline_config;
 mod plain_resource;
 mod register_component;
-mod shader_entry;
-mod shader_entry_sig;
 mod smart_pipeline;
 mod smart_system;
 mod smart_system_body_links;
@@ -218,33 +213,4 @@ pub fn kernel(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(RegisterComponent, attributes(component))]
 pub fn derive_register_component(input: TokenStream) -> TokenStream {
     register_component::derive(input)
-}
-
-/// Declare a compute entry point for the wasm2gpu path.
-///
-/// Adds `#[unsafe(no_mangle)] pub extern "C"` to the annotated function and
-/// records its stage and `workgroup_size` in the `ornis_gpu.entries` custom
-/// section. The function takes exactly one `u32` invocation id and returns
-/// `()`. The translator reads the workgroup size from that section.
-#[proc_macro_attribute]
-pub fn compute(attr: TokenStream, item: TokenStream) -> TokenStream {
-    shader_entry::compute(attr, item)
-}
-
-/// Declare a vertex entry point for the wasm2gpu path.
-///
-/// Adds the export wrapper and entry metadata. Parameters and the return
-/// value must be `f32`, `i32`, `u32`, or `()`.
-#[proc_macro_attribute]
-pub fn vertex(attr: TokenStream, item: TokenStream) -> TokenStream {
-    shader_entry::vertex(attr, item)
-}
-
-/// Declare a fragment entry point for the wasm2gpu path.
-///
-/// Adds the export wrapper and entry metadata. Parameters and the return
-/// value must be `f32`, `i32`, `u32`, or `()`.
-#[proc_macro_attribute]
-pub fn fragment(attr: TokenStream, item: TokenStream) -> TokenStream {
-    shader_entry::fragment(attr, item)
 }
