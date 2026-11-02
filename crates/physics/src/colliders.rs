@@ -63,6 +63,29 @@ impl Scale {
         }
     }
 
+    /// Plane `n·p = d` (local space) mapped through the body-local scale.
+    ///
+    /// A point `p` on the plane maps to `s∘p`, and `(n/s)·(s∘p) = d`, so the
+    /// scaled plane has normal `normalize(n / s)` (inverse-transpose,
+    /// applied per component before rotation) and offset `d / |n/s|`.
+    /// Returns `None` for a zero or non-finite normal.
+    fn plane(self, normal: Vec3, offset: f32) -> Option<(Vec3, f32)> {
+        let inv = normal / self.0;
+        let len = inv.length();
+        if !len.is_finite() || len <= 0.0 {
+            return None;
+        }
+        Some((inv / len, offset / len))
+    }
+
+    /// Half-space normal under scale. Body half-spaces pass through the
+    /// body origin (`d = 0`), so the offset stays zero.
+    fn halfspace_normal(self, normal: [f32; 3]) -> Result<Vec3, ColliderError> {
+        self.plane(Vec3::from_array(normal), 0.0)
+            .map(|(n, _)| n)
+            .ok_or(ColliderError::from(crate::errors::ShapeError::BadNormal))
+    }
+
     /// Cylinder radius under scale: `radius * max(sx, sz)`. Non-uniform
     /// XZ is not representable by a circular cross-section and is a typed
     /// error.
@@ -89,7 +112,8 @@ impl Scale {
 /// [`RigidBody`] convention (0 = static). `transform.scale` is applied in
 /// body-local axes to match render extraction: boxes scale per axis,
 /// spheres use the largest axis, cylinders require equal X/Z scale, and
-/// compounds, rounded shapes and half-spaces require uniform scale.
+/// compounds and rounded shapes require uniform scale; half-space
+/// normals map through the inverse-transpose (`normalize(n / s)`).
 ///
 /// # Errors
 ///
@@ -166,8 +190,8 @@ pub fn body_for(
             RigidBody::try_new_round(position, inner_shape, border_radius * factor, mass)?
         }
         ColliderDesc::HalfSpace { normal } => {
-            scale.uniform_for("half-space")?;
-            RigidBody::try_new_halfspace(position, Vec3::from_array(normal), mass)?
+            let normal = scale.halfspace_normal(normal)?;
+            RigidBody::try_new_halfspace(position, normal, mass)?
         }
         ColliderDesc::None => return Ok(None),
     };
@@ -240,10 +264,9 @@ fn shape_for(
             ))
         }
         ColliderDesc::HalfSpace { normal } => {
-            scale.uniform_for("half-space")?;
+            let normal = scale.halfspace_normal(*normal)?;
             Ok(Some(
-                Shape::try_halfspace(Vec3::from_array(*normal))
-                    .ok_or(crate::errors::ShapeError::BadNormal)?,
+                Shape::try_halfspace(normal).ok_or(crate::errors::ShapeError::BadNormal)?,
             ))
         }
         ColliderDesc::None => Ok(None),
@@ -638,25 +661,74 @@ mod tests {
     }
 
     #[test]
-    fn half_space_accepts_uniform_scale_only() {
+    fn half_space_floor_keeps_normal_under_non_uniform_scale() {
         let mesh = unit_box_mesh();
         let recipe = ColliderDesc::HalfSpace {
             normal: [0.0, 1.0, 0.0],
         };
-        let body = body_for(&scaled(Vec3::splat(2.0)), &mesh, Some(&recipe), 0.0)
-            .expect("scaled half-space infallible")
-            .expect("scaled half-space builds");
+        let body = body_for(
+            &scaled(Vec3::new(100.0, 1.0, 100.0)),
+            &mesh,
+            Some(&recipe),
+            0.0,
+        )
+        .expect("floor half-space infallible")
+        .expect("floor half-space builds");
         match body.shape {
             Shape::HalfSpace { normal } => assert_eq!(normal.get(), Vec3::Y),
             _ => panic!("expected half-space"),
         }
-        assert!(matches!(
-            body_for(&scaled(Vec3::new(2.0, 1.0, 1.0)), &mesh, Some(&recipe), 0.0),
-            Err(ColliderError::NonUniformScale {
-                shape: "half-space",
-                ..
-            })
-        ));
+        let scale = Scale::try_new(Vec3::new(100.0, 1.0, 100.0)).expect("valid scale");
+        let (normal, offset) = scale.plane(Vec3::Y, 3.0).expect("plane");
+        assert_eq!(normal, Vec3::Y);
+        assert_eq!(offset, 3.0);
+    }
+
+    #[test]
+    fn half_space_tilted_normal_under_non_uniform_scale() {
+        let raw = Vec3::new(2.0, 1.0, 1.0);
+        let scale = Scale::try_new(raw).expect("valid scale");
+        let n = Vec3::new(1.0, 1.0, 0.0).normalize();
+        let d = 0.5;
+        let (normal, offset) = scale.plane(n, d).expect("plane");
+        // n / s = (0.5, 1, 0)·(1/√2) → normalize → (1, 2, 0)/√5.
+        let expected = Vec3::new(1.0, 2.0, 0.0) / 5.0_f32.sqrt();
+        assert!((normal - expected).length() < 1e-6, "{normal:?}");
+        // |n/s| = √(1.25/2) = √5/(2√2); d' = 0.5·2√2/√5 = √2/√5.
+        let expected_offset = (2.0_f32 / 5.0).sqrt();
+        assert!((offset - expected_offset).abs() < 1e-6, "{offset}");
+        // A point on the original plane stays on the scaled plane, also
+        // after the body rotation (rotation acts on both point and normal).
+        let p = Vec3::new(0.3, -1.2, 7.0);
+        let p = p - n * (n.dot(p) - d);
+        assert!((n.dot(p) - d).abs() < 1e-6);
+        let q = p * raw;
+        assert!((normal.dot(q) - offset).abs() < 1e-5);
+        let rot = Quat::from_rotation_z(0.7) * Quat::from_rotation_x(-0.3);
+        assert!(((rot * normal).dot(rot * q) - offset).abs() < 1e-5);
+
+        let mesh = unit_box_mesh();
+        let recipe = ColliderDesc::HalfSpace {
+            normal: [1.0, 1.0, 0.0],
+        };
+        let body = body_for(&scaled(raw), &mesh, Some(&recipe), 0.0)
+            .expect("tilted half-space infallible")
+            .expect("tilted half-space builds");
+        match body.shape {
+            Shape::HalfSpace { normal } => {
+                assert!((normal.get() - expected).length() < 1e-6);
+            }
+            _ => panic!("expected half-space"),
+        }
+        let shape = shape_for(&recipe, &mesh, scale)
+            .expect("shape_for infallible")
+            .expect("shape_for builds");
+        match shape {
+            Shape::HalfSpace { normal } => {
+                assert!((normal.get() - expected).length() < 1e-6);
+            }
+            _ => panic!("expected half-space"),
+        }
     }
 
     #[test]
