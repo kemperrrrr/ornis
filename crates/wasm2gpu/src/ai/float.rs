@@ -12,6 +12,10 @@ pub(super) fn f32_neg(st: &mut St) -> Result<(), TranslateError> {
     unary_f32(st)
 }
 
+pub(super) fn f32_sqrt(st: &mut St) -> Result<(), TranslateError> {
+    unary_f32(st)
+}
+
 pub(super) fn f32_bin(st: &mut St) -> Result<(), TranslateError> {
     let right = super::pop(st)?;
     let left = super::pop(st)?;

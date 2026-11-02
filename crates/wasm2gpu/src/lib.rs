@@ -14,6 +14,8 @@
 //! `global_invocation_id`. `raw_read` and `texture_sample_2d` lower as before.
 //! Scalar `f32` arithmetic (`+ - * /`) and comparisons lower directly to
 //! WGSL operators; unsigned `i32`-to-`f32` conversion lowers to a WGSL cast.
+//! `f32.sqrt` lowers to WGSL `sqrt` with weaker precision/edge semantics
+//! than wasm (see `Op::F32Sqrt`).
 //! Storage imports lower to an access chain on one array
 //! global: scalars, vectors, and simple structs use the host `GpuSafeLayout`
 //! stride. Uniform bindings use that same provenance and the same

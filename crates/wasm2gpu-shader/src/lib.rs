@@ -24,6 +24,9 @@ use ornis_gpu_abi::uniform_field_u32;
 #[cfg(any(target_arch = "wasm32", test))]
 mod auto_exposure;
 
+#[cfg(any(target_arch = "wasm32", test))]
+mod skinning;
+
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::Storage;
 #[cfg(target_arch = "wasm32")]

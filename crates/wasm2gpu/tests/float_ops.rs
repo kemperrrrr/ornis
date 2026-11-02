@@ -43,7 +43,9 @@ fn wasm() -> Vec<u8> {
                 i32.const 0 i32.const 1 i32.const 5
                 f32.const 2 f32.const 1 f32.ge call $store_u32
                 i32.const 0 i32.const 0 i32.const 8
-                local.get 0 f32.convert_i32_u call $store_f32))"#,
+                local.get 0 f32.convert_i32_u call $store_f32
+                i32.const 0 i32.const 0 i32.const 9
+                local.get 0 f32.convert_i32_u f32.sqrt call $store_f32))"#,
         module = symbols::MODULE,
         store_f32 = symbols::STORAGE_WRITE_F32,
         store_u32 = symbols::STORAGE_WRITE_U32,
@@ -69,6 +71,11 @@ fn scalar_float_ops_and_non_finite_constants_lower_to_wgsl() {
     assert!(
         translated.wgsl.contains("abs("),
         "missing absolute value: {}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("sqrt("),
+        "missing square root: {}",
         translated.wgsl
     );
     assert!(

@@ -23,6 +23,7 @@ use float::f32_abs;
 use float::f32_cmp;
 use float::f32_from_u32;
 use float::f32_neg;
+use float::f32_sqrt;
 use int::i32_bin;
 use int::i32_cmp;
 use int::i32_eqz;
@@ -52,6 +53,7 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::Div => bin(em, BinaryOperator::Divide),
         Op::F32Abs => f32_abs(em),
         Op::F32Neg => f32_neg(em),
+        Op::F32Sqrt => f32_sqrt(em),
         Op::F32ConvertI32U => f32_from_u32(em),
         Op::I32Add => ptr_bin(em, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),
