@@ -1,0 +1,5 @@
+error: `workgroup_size` must be greater than zero
+ --> tests/ui/shader_compute_rejects_zero_workgroup.rs:5:28
+  |
+5 | #[compute(workgroup_size = 0)]
+  |                            ^

@@ -1,0 +1,13 @@
+error: supported parameter types are `f32`, `i32`, and `u32`
+  --> tests/ui/shader_entry_rejects_qualified_scalar.rs:10:13
+   |
+10 | fn shade(v: foo::f32) {
+   |             ^^^^^^^^
+
+warning: unused import: `core::primitive::f32`
+ --> tests/ui/shader_entry_rejects_qualified_scalar.rs:6:13
+  |
+6 |     pub use core::primitive::f32;
+  |             ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

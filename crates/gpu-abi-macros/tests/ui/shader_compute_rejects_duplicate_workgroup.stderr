@@ -1,0 +1,5 @@
+error: duplicate `workgroup_size` argument
+ --> tests/ui/shader_compute_rejects_duplicate_workgroup.rs:5:31
+  |
+5 | #[compute(workgroup_size = 4, workgroup_size = 8)]
+  |                               ^^^^^^^^^^^^^^^^^^

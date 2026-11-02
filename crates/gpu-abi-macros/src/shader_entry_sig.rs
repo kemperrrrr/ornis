@@ -45,14 +45,13 @@ pub(super) fn parse_args(stage: Stage, args: TokenStream) -> syn::Result<[u32; 3
                         "`workgroup_size` expects an integer literal",
                     ));
                 };
-                let value: u32 = lit.base10_parse()?;
-                if value == 0 {
+                if workgroup.is_some() {
                     return Err(syn::Error::new_spanned(
-                        lit,
-                        "`workgroup_size` must be greater than zero",
+                        &meta,
+                        "duplicate `workgroup_size` argument",
                     ));
                 }
-                workgroup = Some([value, 1, 1]);
+                workgroup = Some(workgroup_size(lit)?);
             }
             other => {
                 return Err(syn::Error::new_spanned(
@@ -68,6 +67,34 @@ pub(super) fn parse_args(stage: Stage, args: TokenStream) -> syn::Result<[u32; 3
             "#[shader::compute] needs `workgroup_size = N`",
         )
     })
+}
+
+/// Upper bound on the invocations in one workgroup.
+///
+/// Matches wgpu's default `max_compute_invocations_per_workgroup` and
+/// `max_compute_workgroup_size_x`, so a declared size always fits a default
+/// device. Only the x axis is declared, so the product is the value itself.
+const MAX_WORKGROUP_INVOCATIONS: u32 = 256;
+
+fn workgroup_size(lit: &syn::LitInt) -> syn::Result<[u32; 3]> {
+    let value: u32 = lit.base10_parse()?;
+    if value == 0 {
+        return Err(syn::Error::new_spanned(
+            lit,
+            "`workgroup_size` must be greater than zero",
+        ));
+    }
+    let shape = [value, 1, 1];
+    let invocations = shape
+        .iter()
+        .try_fold(1u32, |acc, axis| acc.checked_mul(*axis));
+    if invocations.is_none_or(|total| total > MAX_WORKGROUP_INVOCATIONS) {
+        return Err(syn::Error::new_spanned(
+            lit,
+            format!("`workgroup_size` must be at most {MAX_WORKGROUP_INVOCATIONS} invocations"),
+        ));
+    }
+    Ok(shape)
 }
 
 pub(super) fn check_signature(stage: Stage, func: &ItemFn) -> syn::Result<()> {
@@ -175,10 +202,12 @@ fn scalar_name(ty: &Type) -> Option<&'static str> {
     let Type::Path(path) = ty else {
         return None;
     };
-    if path.qself.is_some() {
+    // Only a bare one-segment path such as `f32`: `foo::f32` or `::f32` may
+    // name a different type, and the macro runs before name resolution.
+    if path.qself.is_some() || path.path.leading_colon.is_some() || path.path.segments.len() != 1 {
         return None;
     }
-    let segment = path.path.segments.last()?;
+    let segment = path.path.segments.first()?;
     if !segment.arguments.is_none() {
         return None;
     }

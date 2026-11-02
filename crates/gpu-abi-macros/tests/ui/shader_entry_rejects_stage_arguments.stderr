@@ -1,0 +1,15 @@
+error: #[shader::vertex] and #[shader::fragment] take no arguments
+ --> tests/ui/shader_entry_rejects_stage_arguments.rs:5:1
+  |
+5 | #[vertex(workgroup_size = 4)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `vertex` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: #[shader::vertex] and #[shader::fragment] take no arguments
+  --> tests/ui/shader_entry_rejects_stage_arguments.rs:10:1
+   |
+10 | #[fragment(workgroup_size = 4)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `fragment` (in Nightly builds, run with -Z macro-backtrace for more info)
