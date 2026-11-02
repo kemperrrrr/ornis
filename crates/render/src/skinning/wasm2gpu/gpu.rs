@@ -26,7 +26,7 @@ const OUT_BINDING: u32 = 4;
 const PARAMS_BINDING: u32 = 5;
 /// Workgroup width of the guest entry (its `#[shader::compute]` record).
 const SKIN_WORKGROUP: u32 = 64;
-/// Lanes per packed palette joint / vertex (mirrors the guest ABI).
+/// Lanes per packed palette joint (mirrors the guest ABI).
 const JOINT_LANES: usize = 32;
 /// Lanes per packed vertex record.
 const VERTEX_LANES: usize = 6;
@@ -36,12 +36,13 @@ const MAX_INFLUENCES: usize = 4;
 const PARAM_WORDS: usize = 4;
 /// First normal lane inside one output vertex record.
 const NORMAL_LANE: usize = 3;
+/// Storage bindings of the guest ABI (palette through params).
+const BINDING_COUNT: usize = 6;
 
 /// Persistent compute pipeline and buffers of the guest skinning pass.
 pub(crate) struct SkinGpu {
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
-    _layout: wgpu::BindGroupLayout,
     palette: wgpu::Buffer,
     bind: wgpu::Buffer,
     joints: wgpu::Buffer,
@@ -56,76 +57,32 @@ pub(crate) struct SkinGpu {
 
 impl SkinGpu {
     /// Builds the pipeline and exact-sized buffers for one mesh shape.
-    pub(crate) fn new(device: &wgpu::Device, wgsl: &str, vertex_count: u32, joint_count: u32) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        wgsl: &str,
+        vertex_count: u32,
+        joint_count: u32,
+    ) -> Self {
         assert!(vertex_count > 0, "guest skin needs a vertex");
         assert!(joint_count > 0, "guest skin needs a joint");
-        let storage = wgpu::BufferBindingType::Storage { read_only: false };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("wasm2gpu skinning layout"),
-            entries: &[
-                binding(PALETTE_BINDING, storage),
-                binding(BIND_BINDING, storage),
-                binding(JOINTS_BINDING, storage),
-                binding(WEIGHTS_BINDING, storage),
-                binding(OUT_BINDING, storage),
-                binding(PARAMS_BINDING, storage),
-            ],
-        });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("wasm2gpu skin"),
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("wasm2gpu skin"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("wasm2gpu skin"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("cs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
-        let vertices = vertex_count as usize;
-        let palette = storage_buffer(device, "skin palette", joint_count as usize * JOINT_LANES);
-        let bind = storage_buffer(device, "skin bind vertices", vertices * VERTEX_LANES);
-        let joints = storage_buffer(device, "skin joints", vertices * MAX_INFLUENCES);
-        let weights = storage_buffer(device, "skin weights", vertices * MAX_INFLUENCES);
-        let out = storage_buffer(device, "skin output", vertices * VERTEX_LANES);
-        let params = storage_buffer(device, "skin params", PARAM_WORDS);
-        #[cfg(test)]
-        let staging = gpu_buffer(
-            device,
-            "skin readback",
-            (vertices * VERTEX_LANES * std::mem::size_of::<f32>()) as u64,
-            wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        );
+        let pipeline = skin_pipeline(device, wgsl);
+        let buffers = SkinBuffers::new(device, vertex_count as usize, joint_count as usize);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("wasm2gpu skinning bind group"),
-            layout: &layout,
-            entries: &[
-                bind_entry(PALETTE_BINDING, &palette),
-                bind_entry(BIND_BINDING, &bind),
-                bind_entry(JOINTS_BINDING, &joints),
-                bind_entry(WEIGHTS_BINDING, &weights),
-                bind_entry(OUT_BINDING, &out),
-                bind_entry(PARAMS_BINDING, &params),
-            ],
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &buffers.entries(),
         });
         Self {
             pipeline,
             bind_group,
-            _layout: layout,
-            palette,
-            bind,
-            joints,
-            weights,
-            out,
-            params,
+            palette: buffers.palette,
+            bind: buffers.bind,
+            joints: buffers.joints,
+            weights: buffers.weights,
+            out: buffers.out,
+            params: buffers.params,
             #[cfg(test)]
-            staging,
+            staging: buffers.staging,
             vertex_count,
             joint_count,
         }
@@ -192,17 +149,68 @@ impl SkinGpu {
     }
 }
 
-fn binding(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::COMPUTE,
-        ty: wgpu::BindingType::Buffer {
-            ty,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        },
-        count: None,
+/// The six storage buffers of one guest dispatch, sized once per mesh shape.
+struct SkinBuffers {
+    palette: wgpu::Buffer,
+    bind: wgpu::Buffer,
+    joints: wgpu::Buffer,
+    weights: wgpu::Buffer,
+    out: wgpu::Buffer,
+    params: wgpu::Buffer,
+    #[cfg(test)]
+    staging: wgpu::Buffer,
+}
+
+impl SkinBuffers {
+    fn new(device: &wgpu::Device, vertices: usize, joints: usize) -> Self {
+        Self {
+            palette: storage_buffer(device, "skin palette", joints * JOINT_LANES),
+            bind: storage_buffer(device, "skin bind vertices", vertices * VERTEX_LANES),
+            joints: storage_buffer(device, "skin joints", vertices * MAX_INFLUENCES),
+            weights: storage_buffer(device, "skin weights", vertices * MAX_INFLUENCES),
+            out: storage_buffer(device, "skin output", vertices * VERTEX_LANES),
+            params: storage_buffer(device, "skin params", PARAM_WORDS),
+            #[cfg(test)]
+            staging: gpu_buffer(
+                device,
+                "skin readback",
+                (vertices * VERTEX_LANES * std::mem::size_of::<f32>()) as u64,
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            ),
+        }
     }
+
+    /// Bind-group entries in guest ABI binding order.
+    fn entries(&self) -> [wgpu::BindGroupEntry<'_>; BINDING_COUNT] {
+        [
+            bind_entry(PALETTE_BINDING, &self.palette),
+            bind_entry(BIND_BINDING, &self.bind),
+            bind_entry(JOINTS_BINDING, &self.joints),
+            bind_entry(WEIGHTS_BINDING, &self.weights),
+            bind_entry(OUT_BINDING, &self.out),
+            bind_entry(PARAMS_BINDING, &self.params),
+        ]
+    }
+}
+
+/// Compute pipeline over the lowered guest WGSL.
+///
+/// The layout is the pipeline's auto layout: the guest ABI bindings are
+/// fixed by the translator's storage globals, so no hand-written layout
+/// can drift from the lowered shader.
+fn skin_pipeline(device: &wgpu::Device, wgsl: &str) -> wgpu::ComputePipeline {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("wasm2gpu skin"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("wasm2gpu skin"),
+        layout: None,
+        module: &module,
+        entry_point: Some("cs_main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    })
 }
 
 fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

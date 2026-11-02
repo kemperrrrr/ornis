@@ -51,6 +51,8 @@ const MAX_INFLUENCES: u32 = 4;
 const NORMAL_LANE: u32 = 3;
 /// Column stride of one column-major 4×4 matrix.
 const COLUMN_LANES: u32 = 4;
+/// Lane offset of the translation column inside one palette matrix.
+const TRANSLATION_LANE: u32 = 12;
 /// Lane of the joint-count word inside the params binding.
 const JOINT_COUNT_LANE: u32 = 1;
 /// Weight-sum floor before normalize (same rule as the CPU path).
@@ -68,7 +70,6 @@ const MAX_FINITE_SUM: f32 = 3.4e38;
 /// to the bind vertex after the loop — arithmetically the CPU path's
 /// per-slot identity fallback.
 #[shader::compute(workgroup_size = 64)]
-// qual:test_helper — host tests call it; the wasm export is added by the shader macro.
 pub fn skin(id: u32) {
     let vertex_count = storage_at_u32::<0, PARAMS_BINDING>(0);
     if id < vertex_count {
@@ -123,19 +124,22 @@ fn skin_vertex(id: u32) {
 /// One row of `matrix * vec4(position, 1)` over the palette lanes.
 #[inline(always)]
 fn position_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
-    storage_at_f32::<0, PALETTE_BINDING>(base + row) * x
-        + storage_at_f32::<0, PALETTE_BINDING>(base + COLUMN_LANES + row) * y
-        + storage_at_f32::<0, PALETTE_BINDING>(base + COLUMN_LANES * 2 + row) * z
-        + storage_at_f32::<0, PALETTE_BINDING>(base + COLUMN_LANES * 3 + row)
+    dot_row(base, x, y, z, row)
+        + storage_at_f32::<0, PALETTE_BINDING>(base + TRANSLATION_LANE + row)
 }
 
 /// One row of `normal_matrix * vec4(normal, 0)` over the palette lanes.
 #[inline(always)]
 fn normal_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
-    let normal = base + MATRIX_LANES;
-    storage_at_f32::<0, PALETTE_BINDING>(normal + row) * x
-        + storage_at_f32::<0, PALETTE_BINDING>(normal + COLUMN_LANES + row) * y
-        + storage_at_f32::<0, PALETTE_BINDING>(normal + COLUMN_LANES * 2 + row) * z
+    dot_row(base + MATRIX_LANES, x, y, z, row)
+}
+
+/// The linear part of one palette-matrix row against a direction.
+#[inline(always)]
+fn dot_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
+    storage_at_f32::<0, PALETTE_BINDING>(base + row) * x
+        + storage_at_f32::<0, PALETTE_BINDING>(base + COLUMN_LANES + row) * y
+        + storage_at_f32::<0, PALETTE_BINDING>(base + COLUMN_LANES * 2 + row) * z
 }
 
 /// Canonical-weight multiplier of one vertex: `1 / sum` for a finite

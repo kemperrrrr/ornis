@@ -17,12 +17,21 @@ const NANOS_PER_MICROSECOND: f64 = 1_000.0;
 
 /// Runs the release A/B bench; setup and WGSL lowering are reported separately.
 pub fn run_skin_ab() -> String {
-    let warmup = if cfg!(test) { 0 } else { WARMUP };
-    let repeats = if cfg!(test) { 1 } else { REPEATS };
-    run_skin_ab_with(warmup, repeats)
+    let timing = Timing {
+        warmup: if cfg!(test) { 0 } else { WARMUP },
+        repeats: if cfg!(test) { 1 } else { REPEATS },
+    };
+    run_skin_ab_with(timing)
 }
 
-fn run_skin_ab_with(warmup: usize, repeats: usize) -> String {
+/// Warmup/repeat shape shared by every timed scene.
+#[derive(Clone, Copy)]
+struct Timing {
+    warmup: usize,
+    repeats: usize,
+}
+
+fn run_skin_ab_with(timing: Timing) -> String {
     let lowered = lower_guest();
     let mut report = format!(
         concat!(
@@ -41,7 +50,12 @@ fn run_skin_ab_with(warmup: usize, repeats: usize) -> String {
     };
     report.push_str("vertices\tjoints\tcpu median us\twasm2gpu median us\tcpu/guest\n");
     for (vertices, joints) in SCENES {
-        report.push_str(&bench_scene(&session, &lowered.wgsl, vertices, joints, warmup, repeats));
+        let scene = BenchScene {
+            vertices,
+            joints,
+            timing,
+        };
+        report.push_str(&bench_scene(&session, &lowered.wgsl, scene));
     }
     report
 }
@@ -92,33 +106,43 @@ fn no_adapter(reason: &str) -> Option<Session> {
     None
 }
 
-fn bench_scene(
-    session: &Session,
-    wgsl: &str,
+/// One bench scene: synthetic mesh shape plus the timing shape.
+#[derive(Clone, Copy)]
+struct BenchScene {
     vertices: usize,
     joints: usize,
-    warmup: usize,
-    repeats: usize,
-) -> String {
-    let scene = synthetic_skin(vertices, joints);
-    let inputs = scene.guest_inputs().expect("synthetic scene packs");
-    let cpu = median_us(&time_cpu(&scene, warmup, repeats));
-    let guest_gpu = SkinGpu::new(&session.device, wgsl, inputs.vertex_count, inputs.joint_count);
-    let guest = median_us(&time_guest(session, &guest_gpu, &inputs, warmup, repeats));
+    timing: Timing,
+}
+
+fn bench_scene(session: &Session, wgsl: &str, scene: BenchScene) -> String {
+    let synthetic = synthetic_skin(scene.vertices, scene.joints);
+    let Some(inputs) = synthetic.guest_inputs() else {
+        return format!("{}\t{}\tpack failed\n", scene.vertices, scene.joints);
+    };
+    let cpu = median_us(&time_cpu(&synthetic, scene.timing));
+    let guest_gpu = SkinGpu::new(
+        &session.device,
+        wgsl,
+        inputs.vertex_count,
+        inputs.joint_count,
+    );
+    let guest = median_us(&time_guest(session, &guest_gpu, &inputs, scene.timing));
     format!(
-        "{vertices}\t{joints}\t{cpu:.2}\t{guest:.2}\t{:.2}\n",
+        "{}\t{}\t{cpu:.2}\t{guest:.2}\t{:.2}\n",
+        scene.vertices,
+        scene.joints,
         cpu / guest,
     )
 }
 
-fn time_cpu(scene: &SyntheticSkin, warmup: usize, repeats: usize) -> Vec<Duration> {
-    let mut samples = Vec::with_capacity(repeats);
-    for run in 0..warmup + repeats {
+fn time_cpu(scene: &SyntheticSkin, timing: Timing) -> Vec<Duration> {
+    let mut samples = Vec::with_capacity(timing.repeats);
+    for run in 0..timing.warmup + timing.repeats {
         let started = Instant::now();
         let skinned = scene.cpu_skin();
         let elapsed = started.elapsed();
         std::hint::black_box(&skinned);
-        if run >= warmup {
+        if run >= timing.warmup {
             samples.push(elapsed);
         }
     }
@@ -129,12 +153,11 @@ fn time_guest(
     session: &Session,
     gpu: &SkinGpu,
     inputs: &SkinInputs,
-    warmup: usize,
-    repeats: usize,
+    timing: Timing,
 ) -> Vec<Duration> {
     gpu.prepare(&session.queue, inputs);
-    let mut samples = Vec::with_capacity(repeats);
-    for run in 0..warmup + repeats {
+    let mut samples = Vec::with_capacity(timing.repeats);
+    for run in 0..timing.warmup + timing.repeats {
         let started = Instant::now();
         let mut encoder = session
             .device
@@ -144,7 +167,7 @@ fn time_guest(
         gpu.encode(&mut encoder);
         session.queue.submit(std::iter::once(encoder.finish()));
         let _ = session.device.poll(wgpu::PollType::wait_indefinitely());
-        if run >= warmup {
+        if run >= timing.warmup {
             samples.push(started.elapsed());
         }
     }

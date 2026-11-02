@@ -8,6 +8,7 @@ use super::St;
 use super::float::f32_abs;
 use super::float::f32_bin;
 use super::float::f32_neg;
+use super::float::f32_sqrt;
 use super::int::i32_bin;
 use super::int::i32_cmp;
 use super::int::i32_eqz;

@@ -142,11 +142,8 @@ impl SyntheticSkin {
 
     /// This scene packed for the guest kernel; `None` only on `u32` overflow.
     pub(crate) fn guest_inputs(&self) -> Option<SkinInputs> {
-        let joints: Vec<[u32; MAX_INFLUENCES]> = self
-            .joints
-            .iter()
-            .map(|lane| lane.map(u32::from))
-            .collect();
+        let joints: Vec<[u32; MAX_INFLUENCES]> =
+            self.joints.iter().map(|lane| lane.map(u32::from)).collect();
         SkinInputs::pack(
             &self.palette,
             &self.positions,
@@ -160,53 +157,65 @@ impl SyntheticSkin {
 /// Builds one [`SyntheticSkin`] with `vertex_count` vertices over
 /// `joint_count` joints.
 pub(crate) fn synthetic_skin(vertex_count: usize, joint_count: usize) -> SyntheticSkin {
-    let palette = (0..joint_count)
-        .map(|joint| {
-            let angle = joint as f32 * JOINT_ANGLE_STEP;
-            let rotation = match joint % AXIS_CYCLE {
-                0 => Quat::from_rotation_x(angle),
-                1 => Quat::from_rotation_y(angle),
-                _ => Quat::from_rotation_z(angle),
-            };
-            let scale = Vec3::new(
-                1.0 + JOINT_SCALE_STEP * (joint % AXIS_CYCLE) as f32,
-                1.0,
-                JOINT_SCALE_Z,
-            );
-            let translation = Vec3::new(
-                joint as f32 * JOINT_TRANSLATION_STEP,
-                0.0,
-                joint as f32 * JOINT_DEPTH_STEP,
-            );
-            Mat4::from_scale_rotation_translation(scale, rotation, translation)
-        })
-        .collect();
-    let mut positions = Vec::with_capacity(vertex_count);
-    let mut normals = Vec::with_capacity(vertex_count);
-    let mut joints = Vec::with_capacity(vertex_count);
-    for index in 0..vertex_count {
-        let column = (index % SYNTHETIC_GRID) as f32;
-        let row = (index / SYNTHETIC_GRID) as f32;
-        positions.push([
-            column * SHEET_SPACING,
-            row * SHEET_SPACING,
-            (index % SHEET_RIPPLE_PERIOD) as f32 * SHEET_RIPPLE_STEP,
-        ]);
-        normals.push(
-            Vec3::new(column + 1.0, row + 2.0, NORMAL_Z)
-                .normalize()
-                .to_array(),
-        );
-        let first = index % joint_count.max(1);
-        joints.push(std::array::from_fn(|slot| {
-            u16::try_from((first + slot) % joint_count.max(1)).unwrap_or_default()
-        }));
-    }
+    let joints_per_vertex = joint_count.max(1);
     SyntheticSkin {
-        palette,
-        positions,
-        normals,
-        joints,
+        palette: (0..joint_count).map(synthetic_joint).collect(),
+        positions: (0..vertex_count)
+            .map(|index| {
+                [
+                    sheet_column(index) * SHEET_SPACING,
+                    sheet_row(index) * SHEET_SPACING,
+                    (index % SHEET_RIPPLE_PERIOD) as f32 * SHEET_RIPPLE_STEP,
+                ]
+            })
+            .collect(),
+        normals: (0..vertex_count)
+            .map(|index| {
+                Vec3::new(sheet_column(index) + 1.0, sheet_row(index) + 2.0, NORMAL_Z)
+                    .normalize()
+                    .to_array()
+            })
+            .collect(),
+        joints: (0..vertex_count)
+            .map(|index| {
+                let first = index % joints_per_vertex;
+                std::array::from_fn(|slot| {
+                    u16::try_from((first + slot) % joints_per_vertex).unwrap_or_default()
+                })
+            })
+            .collect(),
         weights: vec![SYNTHETIC_WEIGHTS; vertex_count],
     }
+}
+
+/// One synthetic palette joint: axis-cycling rotation, non-uniform scale,
+/// stepped translation.
+fn synthetic_joint(joint: usize) -> Mat4 {
+    let angle = joint as f32 * JOINT_ANGLE_STEP;
+    let rotation = match joint % AXIS_CYCLE {
+        0 => Quat::from_rotation_x(angle),
+        1 => Quat::from_rotation_y(angle),
+        _ => Quat::from_rotation_z(angle),
+    };
+    let scale = Vec3::new(
+        1.0 + JOINT_SCALE_STEP * (joint % AXIS_CYCLE) as f32,
+        1.0,
+        JOINT_SCALE_Z,
+    );
+    let translation = Vec3::new(
+        joint as f32 * JOINT_TRANSLATION_STEP,
+        0.0,
+        joint as f32 * JOINT_DEPTH_STEP,
+    );
+    Mat4::from_scale_rotation_translation(scale, rotation, translation)
+}
+
+/// Column of synthetic vertex `index` on the bind-pose sheet.
+fn sheet_column(index: usize) -> f32 {
+    (index % SYNTHETIC_GRID) as f32
+}
+
+/// Row of synthetic vertex `index` on the bind-pose sheet.
+fn sheet_row(index: usize) -> f32 {
+    (index / SYNTHETIC_GRID) as f32
 }

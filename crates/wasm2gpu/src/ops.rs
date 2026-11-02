@@ -23,6 +23,7 @@ use float::f32_abs;
 use float::f32_cmp;
 use float::f32_from_u32;
 use float::f32_neg;
+use float::f32_sqrt;
 use int::i32_bin;
 use int::i32_cmp;
 use int::i32_eqz;
