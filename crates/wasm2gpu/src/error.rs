@@ -47,6 +47,9 @@ pub enum TranslateError {
     /// A storage element the lowerer will not emit, or a struct whose lanes
     /// do not match the host layout rules.
     UnsupportedType(String),
+    /// The `ornis_gpu.entries` custom section is malformed, or it names an
+    /// entry whose stage or dispatch shape the translator cannot use.
+    EntryMetadata(String),
     /// `vs_main` or `fs_main` was not exported.
     MissingEntry(&'static str),
     /// naga rejected the lowered module or a round-trip.
@@ -66,6 +69,7 @@ impl fmt::Display for TranslateError {
             Self::IndirectCall => f.write_str("indirect call is not lowered"),
             Self::Budget => f.write_str("specialization budget exceeded"),
             Self::UnsupportedType(msg) => f.write_str(msg),
+            Self::EntryMetadata(msg) => write!(f, "entry metadata: {msg}"),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
         }
     }

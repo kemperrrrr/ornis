@@ -1,0 +1,5 @@
+error: #[shader::compute] parameter must be `u32`
+ --> tests/ui/shader_compute_rejects_bad_parameter.rs:6:13
+  |
+6 | fn cull(id: f32) {
+  |             ^^^

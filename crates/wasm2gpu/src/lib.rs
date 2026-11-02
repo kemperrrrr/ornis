@@ -33,6 +33,7 @@ mod cfg;
 mod cx;
 mod decode;
 mod emit;
+mod entry;
 mod env;
 mod error;
 mod flow;

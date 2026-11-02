@@ -195,12 +195,14 @@ pub enum Stmt {
     },
 }
 
-/// Imports, struct layouts, and defined functions.
+/// Imports, struct layouts, entry metadata, and defined functions.
 pub struct Module {
     /// Function imports, in index order.
     pub imports: Vec<Import>,
     /// Structs from the `ornis_gpu.types` custom section, in id order.
     pub structs: Vec<crate::ty::StructDef>,
+    /// Entry points from the `ornis_gpu.entries` custom section.
+    pub entries: Vec<ornis_gpu_abi::entry_meta::EntryPoint>,
     /// Defined functions. Function index is `imports.len() + position`.
     pub funcs: Vec<Func>,
 }

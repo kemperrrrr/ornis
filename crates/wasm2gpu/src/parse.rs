@@ -24,6 +24,7 @@ pub(crate) struct Raw {
     bodies: Vec<Vec<Flat>>,
     exports: Vec<(String, u32)>,
     structs: Vec<StructDef>,
+    entries: Vec<ornis_gpu_abi::entry_meta::EntryPoint>,
     saw_types: bool,
 }
 
@@ -37,6 +38,7 @@ pub fn parse(bytes: &[u8]) -> Result<Module, TranslateError> {
         bodies: Vec::new(),
         exports: Vec::new(),
         structs: Vec::new(),
+        entries: Vec::new(),
         saw_types: false,
     };
     for payload in Parser::new(0).parse_all(bytes) {
@@ -69,6 +71,14 @@ pub(crate) fn read_custom(
     raw: &mut Raw,
     section: &wasmparser::CustomSectionReader<'_>,
 ) -> Result<(), TranslateError> {
+    if section.name() == ornis_gpu_abi::symbols::ENTRY_SECTION {
+        let text = core::str::from_utf8(section.data())
+            .map_err(|err| TranslateError::EntryMetadata(err.to_string()))?;
+        let entries = ornis_gpu_abi::entry_meta::decode(text)
+            .map_err(|err| TranslateError::EntryMetadata(err.to_string()))?;
+        raw.entries.extend(entries);
+        return Ok(());
+    }
     if section.name() != ornis_gpu_abi::symbols::TYPES_SECTION {
         return Ok(());
     }
@@ -290,6 +300,7 @@ pub(crate) fn assemble(raw: Raw) -> Result<Module, TranslateError> {
     Ok(Module {
         imports: raw.imports,
         structs: raw.structs,
+        entries: raw.entries,
         funcs,
     })
 }

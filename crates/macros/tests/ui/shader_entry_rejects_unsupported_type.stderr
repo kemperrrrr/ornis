@@ -1,0 +1,5 @@
+error: supported parameter types are `f32`, `i32`, and `u32`
+ --> tests/ui/shader_entry_rejects_unsupported_type.rs:6:12
+  |
+6 | fn quad(v: u64) {
+  |            ^^^

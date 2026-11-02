@@ -1,5 +1,6 @@
 //! Production-style floating-point histogram bin assignment.
 
+use ornis_gpu_abi::shader;
 use ornis_gpu_abi::storage_at_f32;
 use ornis_gpu_abi::storage_at_u32;
 use ornis_gpu_abi::storage_store_u32;
@@ -21,8 +22,9 @@ use super::math::log_luminance_is_in_bin;
 /// `0..=256`, then `min_log_lum` and `inv_log_range` at 257 and 258. This
 /// interval test mirrors the production `u32(t * 254 + 1)` mapping without a
 /// float-to-integer cast or cross-lane atomic update.
-#[unsafe(no_mangle)]
-pub extern "C" fn ae_histogram(bin: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:test_helper — host tests call it; the wasm export is added by the shader macro.
+pub fn ae_histogram(bin: u32) {
     if bin < HISTOGRAM_BINS {
         let pixel_count = storage_at_u32::<0, FRAME_BINDING>(0);
         let min_log_lum = uniform_array_f32::<0, HISTOGRAM_PARAMS_BINDING, HISTOGRAM_PARAMS_LEN>(

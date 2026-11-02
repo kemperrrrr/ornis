@@ -87,6 +87,13 @@ pub const STORAGE_WRITE_STRUCT: &str = "storage_write_struct";
 /// Custom section that lists struct fields for [`STORAGE_READ_STRUCT`].
 pub const TYPES_SECTION: &str = "ornis_gpu.types";
 
+/// Custom section with stage and workgroup metadata for shader entries.
+///
+/// The `#[shader::*]` attribute macros emit one record per entry point. The
+/// offline translator reads the workgroup size from it instead of assuming
+/// [`CS_WORKGROUP`]. See `ornis_gpu_abi::entry_meta` for the format.
+pub const ENTRY_SECTION: &str = "ornis_gpu.entries";
+
 /// `(param i32 i32 i32) (result …)` — one uniform struct, not an array.
 ///
 /// Operands are group, binding, and the struct id from [`TYPES_SECTION`].

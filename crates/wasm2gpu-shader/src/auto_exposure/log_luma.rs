@@ -1,5 +1,6 @@
 //! Per-pixel selection, compositing, and log-luminance kernel.
 
+use ornis_gpu_abi::shader;
 use ornis_gpu_abi::storage_at_f32;
 use ornis_gpu_abi::storage_at_u32;
 use ornis_gpu_abi::storage_store_f32;
@@ -21,8 +22,9 @@ const FORWARD_ALPHA_OFFSET: u32 = 3;
 /// Binding 0 stores eight packed `f32` lanes per pixel (deferred RGBA then
 /// forward RGBA); binding 1 stores the resulting scalar log luminance. Frame
 /// binding 3 contains pixel count at word 0 and layer mode at word 1.
-#[unsafe(no_mangle)]
-pub extern "C" fn ae_log_luma(id: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:test_helper — host tests call it; the wasm export is added by the shader macro.
+pub fn ae_log_luma(id: u32) {
     let pixel_count = storage_at_u32::<0, FRAME_BINDING>(0);
     if id < pixel_count {
         let mode = storage_at_u32::<0, FRAME_BINDING>(1);

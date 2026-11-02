@@ -2,6 +2,7 @@
 
 mod exposure;
 
+use ornis_gpu_abi::shader;
 use ornis_gpu_abi::storage_at_f32;
 use ornis_gpu_abi::storage_at_u32;
 use ornis_gpu_abi::storage_store_f32;
@@ -15,8 +16,9 @@ use super::HISTOGRAM_BINS;
 ///
 /// Binding 2 holds `u32` histogram bins; binding 6 holds previous exposure
 /// at slot 0 and the adapted multiplier at slot 1. Only invocation zero works.
-#[unsafe(no_mangle)]
-pub extern "C" fn ae_adapt(id: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:test_helper — host tests call it; the wasm export is added by the shader macro.
+pub fn ae_adapt(id: u32) {
     if id == 0 {
         adapt_histogram();
     }
