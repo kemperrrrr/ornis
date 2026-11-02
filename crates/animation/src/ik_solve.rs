@@ -81,6 +81,12 @@ pub(crate) fn fk_model(trs: &[JointTrs], parents: &[Option<JointId>], buf: &mut 
 /// The aim that puts the `root → mid → end` chain on `target` (clamped
 /// to arm reach) — or `None` for a non-chain or degenerate geometry.
 /// Pure: validation, the fold and the bend axis kept from the pose.
+///
+/// The bend side is the pose's own hinge, from its bend normal
+/// `(mid - root) × (end - mid)`: projecting the base bone onto the
+/// target line flips the hinge whenever the bone crosses that line
+/// (knees bending backwards under foot goals). Straight poses fall
+/// back to those projections, then to a deterministic arbitrary plane.
 pub(crate) fn fold_chain(
     fk: &FkScratch,
     parents: &[Option<JointId>],
@@ -134,11 +140,11 @@ pub(crate) fn fold_chain(
         return None;
     }
     let dir_t = to_target / d_raw;
-    // Bend axis: keep the pose's own bend plane; a straight chain on the
-    // target line bends in a deterministic arbitrary plane.
-    let mut side = u / l1 - dir_t * (u / l1).dot(dir_t);
-    if side.length_squared() <= ZERO_LENGTH * ZERO_LENGTH {
-        side = v / l2 - dir_t * (v / l2).dot(dir_t);
+    let mut side = dir_t.cross(u.cross(v) / (l1 * l2));
+    for bone in [u / l1, v / l2] {
+        if side.length_squared() <= ZERO_LENGTH * ZERO_LENGTH {
+            side = bone - dir_t * bone.dot(dir_t);
+        }
     }
     if side.length_squared() <= ZERO_LENGTH * ZERO_LENGTH {
         side = dir_t.any_orthonormal_vector();

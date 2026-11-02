@@ -936,4 +936,51 @@ mod tests {
         assert_eq!(trs[0].translation, Vec3::ZERO);
         assert_eq!(trs[1].rotation, Quat::IDENTITY);
     }
+    /// A walk-stance leg: hip at the origin, knee bent forward (+Z) of
+    /// the hip→ankle line, ankle trailing behind.
+    fn trailing_leg() -> (Vec<JointTrs>, Vec<Option<JointId>>) {
+        let joint = |translation| JointTrs {
+            translation,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        };
+        let trs = vec![
+            joint(Vec3::ZERO),
+            joint(Vec3::new(0.0, -0.45, 0.05)),
+            joint(Vec3::new(0.0, -0.45, -0.15)),
+        ];
+        let parents = vec![None, Some(JointId::from_raw(0)), Some(JointId::from_raw(1))];
+        (trs, parents)
+    }
+
+    /// Forward offset of the knee from the hip→ankle line (+ = forward).
+    fn knee_forward(trs: &[JointTrs]) -> f32 {
+        let (hip, knee, ankle) = (
+            model_position(trs, 0),
+            model_position(trs, 1),
+            model_position(trs, 2),
+        );
+        let line = (ankle - hip).normalize();
+        let knee = knee - hip;
+        (knee - line * knee.dot(line)).z
+    }
+
+    #[test]
+    fn two_bone_keeps_the_knee_forward_when_the_goal_leads_the_thigh() {
+        // The goal sits ahead of the thigh direction: the old
+        // thigh-vs-target projection flipped the hinge backwards.
+        let (mut trs, parents) = trailing_leg();
+        let mut fk = FkScratch::default();
+        assert!(knee_forward(&trs) > 0.0, "the pose bends forward");
+        let constraint = TwoBoneIk {
+            root: JointId::from_raw(0),
+            mid: JointId::from_raw(1),
+            end: JointId::from_raw(2),
+            target: Vec3::new(0.0, -0.8, 0.3),
+            weight: Clamped01::ONE,
+        };
+        assert!(solve_two_bone_ik(&mut trs, &parents, &constraint, &mut fk));
+        assert!((model_position(&trs, 2) - constraint.target).length() < 1e-3);
+        assert!(knee_forward(&trs) > 0.0, "the knee stays forward");
+    }
 }
