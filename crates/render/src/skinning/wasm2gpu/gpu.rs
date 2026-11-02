@@ -50,8 +50,10 @@ pub(crate) struct SkinGpu {
     bind: wgpu::Buffer,
     joints: wgpu::Buffer,
     weights: wgpu::Buffer,
-    // Bound in the group; outside tests nothing reads it back yet.
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "bound in the group; read back only in tests")
+    )]
     out: wgpu::Buffer,
     params: wgpu::Buffer,
     #[cfg(test)]

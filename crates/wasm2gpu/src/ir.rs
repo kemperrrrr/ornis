@@ -93,6 +93,13 @@ pub enum Op {
     /// Negate the top `f32` value.
     F32Neg,
     /// Square root of the top `f32` value.
+    ///
+    /// Lowered to WGSL `sqrt`, which is weaker than the wasm semantics:
+    /// wasm `f32.sqrt` is correctly rounded (NaN→NaN, `-0`→`-0`,
+    /// negatives→NaN, `+inf`→`+inf`), while WGSL inherits the precision
+    /// of `inverseSqrt`, gives an indeterminate value for negative
+    /// inputs, and may flush subnormals. Guests must not rely on the
+    /// wasm-exact result.
     F32Sqrt,
     /// Convert an unsigned `i32` value to `f32`.
     F32ConvertI32U,

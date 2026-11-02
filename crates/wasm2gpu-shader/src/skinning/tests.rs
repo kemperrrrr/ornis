@@ -50,6 +50,10 @@ fn bind_vertices() -> [f32; VERTEX_LANES] {
 }
 
 fn run_skin() -> [f32; VERTEX_LANES] {
+    run_skin_over(&palette())
+}
+
+fn run_skin_over(palette: &[f32; PALETTE_LANES]) -> [f32; VERTEX_LANES] {
     let joints: [u32; INFLUENCE_LANES] = [1, 0, 0, 0, 0, 1, 0, 0, 7, 0, 0, 0, 1, 0, 0, 0];
     let weights: [f32; INFLUENCE_LANES] = [
         1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
@@ -57,7 +61,7 @@ fn run_skin() -> [f32; VERTEX_LANES] {
     let params = [VERTICES as u32, JOINTS as u32];
     let mut memory = HostMemory::new();
     memory.bind_storage::<0, PALETTE_BINDING, [f32; PALETTE_LANES]>();
-    memory.write_storage::<0, PALETTE_BINDING, [f32; PALETTE_LANES]>(&palette());
+    memory.write_storage::<0, PALETTE_BINDING, [f32; PALETTE_LANES]>(palette);
     memory.bind_storage::<0, BIND_BINDING, [f32; VERTEX_LANES]>();
     memory.write_storage::<0, BIND_BINDING, [f32; VERTEX_LANES]>(&bind_vertices());
     memory.bind_storage::<0, JOINTS_BINDING, [u32; INFLUENCE_LANES]>();
@@ -110,7 +114,7 @@ fn sqrt_approx_matches_the_std_reference_across_the_normal_range() {
     // Blended-normal squared lengths sit near 1, but non-uniform joint
     // scales can move them orders of magnitude either way.
     for value in [
-        1.0e-8_f32, 0.25, 1.0, 2.0, 3.999, 4.0, 100.0, 65_536.0, 1.0e12,
+        1.0e-45_f32, 1.0e-8, 0.25, 1.0, 2.0, 3.999, 4.0, 100.0, 65_536.0, 1.0e12, f32::MAX,
     ] {
         let expected = value.sqrt();
         let relative_error = (sqrt_approx(value) - expected).abs() / expected;
@@ -119,4 +123,40 @@ fn sqrt_approx_matches_the_std_reference_across_the_normal_range() {
             "sqrt({value}) relative error {relative_error}"
         );
     }
+}
+
+#[test]
+fn sqrt_approx_terminates_on_non_finite_inputs() {
+    assert!(sqrt_approx(f32::INFINITY).is_infinite());
+    assert!(sqrt_approx(f32::NAN).is_nan());
+}
+
+/// Joint scale whose square overflows `f32` (the review's hang scenario).
+const OVERFLOW_SCALE: f32 = 1.0e20;
+
+/// Identity joint 0 plus joint 1 scaled by [`OVERFLOW_SCALE`] along x
+/// (matrix and normal matrix alike).
+fn overflow_palette() -> [f32; PALETTE_LANES] {
+    let mut lanes = [0.0; PALETTE_LANES];
+    lanes[..32].copy_from_slice(&IDENTITY_JOINT);
+    lanes[32..].copy_from_slice(&IDENTITY_JOINT);
+    lanes[32] = OVERFLOW_SCALE;
+    lanes[48] = OVERFLOW_SCALE;
+    lanes
+}
+
+#[test]
+fn skin_kernel_terminates_when_the_blended_normal_overflows() {
+    // The 50/50 vertex blends normals (1,0,0) and (1e20,0,0): the squared
+    // length overflows f32, so the kernel must skip the renormalize and
+    // emit the blended normal as-is instead of spinning in the sqrt.
+    let out = run_skin_over(&overflow_palette());
+    let expected = 0.5 + 0.5 * OVERFLOW_SCALE;
+    let normal_x = out[1 * 6 + 3];
+    assert!(
+        (normal_x - expected).abs() / expected < TOL,
+        "expected unscaled normal x {expected}, got {normal_x}"
+    );
+    assert_eq!(out[1 * 6 + 4], 0.0);
+    assert_eq!(out[1 * 6 + 5], 0.0);
 }

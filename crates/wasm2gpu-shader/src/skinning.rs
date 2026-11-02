@@ -67,9 +67,14 @@ const SQRT_SHRINK: f32 = 0.25;
 const SQRT_SEED_DIVISOR: f32 = 3.0;
 /// Newton iterations after the secant seed (relative error below 1e-6).
 const SQRT_STEPS: u32 = 4;
+/// Cap on range-reduction steps: every finite `f32` needs at most ~76
+/// (subnormals up, `f32::MAX` down). The cap exists only so a stray
+/// non-finite input terminates instead of spinning the kernel forever.
+const SQRT_RANGE_STEPS: u32 = 128;
 /// One half, for the Newton mean and the inverse range scale.
 const HALF_F32: f32 = 0.5;
-/// Largest finite `f32` magnitude the weight guard accepts as finite.
+/// Finiteness bound for kernel guards: magnitudes at or above this are
+/// treated as non-finite (weight sums, squared normal lengths).
 const MAX_FINITE_SUM: f32 = 3.4e38;
 
 /// Wasm compute entry: skins vertex `id` into the output binding.
@@ -128,9 +133,12 @@ fn skin_vertex(id: u32) {
     out_nx += identity * nrm_x;
     out_ny += identity * nrm_y;
     out_nz += identity * nrm_z;
-    // Renormalize unless the blended normal collapsed (CPU-path rule).
+    // Renormalize unless the blended normal collapsed (CPU-path rule) or
+    // its squared length overflowed: a non-finite `len2` (huge joint
+    // scale, corrupt palette) must skip the sqrt entirely, never spin in
+    // its range reduction.
     let len2 = out_nx * out_nx + out_ny * out_ny + out_nz * out_nz;
-    let normal_scale = if len2 > DEGENERATE_LEN2 {
+    let normal_scale = if len2 > DEGENERATE_LEN2 && len2 < MAX_FINITE_SUM {
         1.0 / sqrt_approx(len2)
     } else {
         1.0
@@ -159,21 +167,30 @@ fn normal_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
 /// Range-reduced square root on scalar operations the lifter supports.
 ///
 /// The guest crate is `no_std` on wasm32, where `f32::sqrt` does not
-/// exist — same constraint as `log2_approx`/`exp2_approx` in the
-/// auto-exposure math. The value is reduced by powers of four into
-/// `[1, 4)`, Newton-iterated from a secant seed, then scaled back by
-/// powers of two. The caller guarantees a positive, finite input.
+/// exist and `core::arch::wasm32::f32_sqrt` is still unstable — same
+/// constraint as `log2_approx`/`exp2_approx` in the auto-exposure math.
+/// The value is reduced by powers of four into `[1, 4)`, Newton-iterated
+/// from a secant seed, then scaled back by powers of two.
+///
+/// Total over all inputs: NaN yields NaN and `+inf` yields `+inf`, and
+/// the reduction loops are step-capped ([`SQRT_RANGE_STEPS`]), so even a
+/// stray non-finite value terminates. The kernel still guards finiteness
+/// at the call site; accuracy is only promised for positive finite input.
 #[inline(always)]
 fn sqrt_approx(value: f32) -> f32 {
     let mut mantissa = value;
     let mut scale = 1.0_f32;
-    while mantissa >= SQRT_RANGE_TOP {
+    let mut range_step = 0;
+    while mantissa >= SQRT_RANGE_TOP && range_step < SQRT_RANGE_STEPS {
         mantissa *= SQRT_SHRINK;
         scale *= 2.0;
+        range_step += 1;
     }
-    while mantissa < 1.0 {
+    range_step = 0;
+    while mantissa < 1.0 && range_step < SQRT_RANGE_STEPS {
         mantissa *= SQRT_RANGE_TOP;
         scale *= HALF_F32;
+        range_step += 1;
     }
     // Secant seed through (1, 1) and (4, 2); Newton refines it quadratically.
     let mut guess = (mantissa + 2.0) / SQRT_SEED_DIVISOR;
@@ -198,10 +215,12 @@ fn dot_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
 #[inline(always)]
 fn weight_scale(id: u32) -> f32 {
     let base = id * MAX_INFLUENCES;
-    let sum = storage_at_f32::<0, WEIGHTS_BINDING>(base)
-        + storage_at_f32::<0, WEIGHTS_BINDING>(base + 1)
-        + storage_at_f32::<0, WEIGHTS_BINDING>(base + 2)
-        + storage_at_f32::<0, WEIGHTS_BINDING>(base + NORMAL_LANE);
+    let mut sum = 0.0_f32;
+    let mut slot = 0_u32;
+    while slot < MAX_INFLUENCES {
+        sum += storage_at_f32::<0, WEIGHTS_BINDING>(base + slot);
+        slot += 1;
+    }
     if sum > NEAR_ZERO && sum < MAX_FINITE_SUM {
         1.0 / sum
     } else {
