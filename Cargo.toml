@@ -87,7 +87,8 @@ workspace = true
 # Large scripting/GPU dependencies otherwise exhaust hosted-runner memory.
 # Keep line tables and all debug assertions; only type-level DWARF is reduced.
 [profile.dev]
-debug = 1
+# Only line tables: backtraces keep file:line, linking is much faster.
+debug = "line-tables-only"
 
 # Dependencies (glam, wgpu, naga, gltf, image) are never debugged here:
 # optimize them so `cargo run --example anim` is not dominated by
