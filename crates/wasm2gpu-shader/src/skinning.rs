@@ -47,6 +47,8 @@ const MATRIX_LANES: u32 = 16;
 const VERTEX_LANES: u32 = 6;
 /// Influence lanes per vertex (top-4 joints and weights).
 const MAX_INFLUENCES: u32 = 4;
+/// Lane of the last influence slot inside one vertex's weight record.
+const LAST_SLOT_LANE: u32 = 3;
 /// First normal lane inside one vertex record.
 const NORMAL_LANE: u32 = 3;
 /// Column stride of one column-major 4×4 matrix.
@@ -222,12 +224,10 @@ fn dot_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
 #[inline(always)]
 fn weight_scale(id: u32) -> f32 {
     let base = id * MAX_INFLUENCES;
-    let mut sum = 0.0_f32;
-    let mut slot = 0_u32;
-    while slot < MAX_INFLUENCES {
-        sum += storage_at_f32::<0, WEIGHTS_BINDING>(base + slot);
-        slot += 1;
-    }
+    let sum = storage_at_f32::<0, WEIGHTS_BINDING>(base)
+        + storage_at_f32::<0, WEIGHTS_BINDING>(base + 1)
+        + storage_at_f32::<0, WEIGHTS_BINDING>(base + 2)
+        + storage_at_f32::<0, WEIGHTS_BINDING>(base + LAST_SLOT_LANE);
     if sum > NEAR_ZERO && sum < MAX_FINITE_SUM {
         1.0 / sum
     } else {
