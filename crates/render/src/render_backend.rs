@@ -60,6 +60,30 @@ pub struct RenderBackendConfig {
     pub material_anisotropy: AnisotropyLevel,
 }
 
+/// Environment variable that turns vsync off for window surfaces
+/// (`1` / `true` / `yes`, case-insensitive). Anything else keeps vsync.
+pub const NO_VSYNC_ENV: &str = "ORNIS_NO_VSYNC";
+
+/// Present mode for a given [`NO_VSYNC_ENV`] value: [`wgpu::PresentMode::AutoVsync`]
+/// (Fifo-backed, frame rate capped at the display refresh) by default,
+/// [`wgpu::PresentMode::AutoNoVsync`] when the opt-out is set.
+#[must_use]
+pub fn present_mode_for(no_vsync: Option<&str>) -> wgpu::PresentMode {
+    match no_vsync.map(str::trim) {
+        Some(v) if v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes") => {
+            wgpu::PresentMode::AutoNoVsync
+        }
+        _ => wgpu::PresentMode::AutoVsync,
+    }
+}
+
+/// Present mode every window-surface (re)configuration uses: vsync on
+/// unless [`NO_VSYNC_ENV`] opts out (benchmarking / uncapped FPS).
+#[must_use]
+pub fn surface_present_mode() -> wgpu::PresentMode {
+    present_mode_for(std::env::var(NO_VSYNC_ENV).ok().as_deref())
+}
+
 impl Default for RenderBackendConfig {
     fn default() -> Self {
         Self {

@@ -38,6 +38,7 @@ mod forward;
 mod gbuffer;
 mod ibl_bind;
 mod lights;
+mod mesh_cache;
 mod meshes;
 mod post;
 mod shadows;
@@ -80,6 +81,7 @@ pub use lights::{LightUploadStats, MAX_LIGHTS, ShadingDebug, count_light_drops};
 // in-crate users outside their module right now.
 #[allow(unused_imports)]
 pub(crate) use lights::{GpuLightKind, LIGHT_KIND_POINT, LIGHT_KIND_SPOT};
+pub use mesh_cache::CustomMeshBufferStats;
 pub use meshes::{
     CustomGbufferDraw, StagedCustomMesh, custom_draw_items, upload_custom_mesh,
     upload_skinned_mesh, upload_vertex_rows,
@@ -420,6 +422,9 @@ pub struct Renderer3D {
     /// CPU shadow of the previous frame's palettes keyed by stable entity
     /// identity; palette-slot reordering cannot borrow another skin's pose.
     previous_skin_palettes: std::sync::RwLock<HashMap<Entity, Vec<u8>>>,
+    /// Cross-frame per-entity GPU buffers for staged custom / skinned
+    /// meshes (see `mesh_cache`).
+    custom_mesh_cache: std::sync::RwLock<mesh_cache::CustomMeshCache>,
     /// Capacity of [`Renderer3D::palette_buffer`] in palette slots; grows
     /// on demand like the per-object buffer.
     max_palettes: std::sync::atomic::AtomicU32,

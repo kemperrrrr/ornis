@@ -179,6 +179,7 @@ impl Renderer3D {
             palette_buffer: std::sync::RwLock::new(palette_buffer),
             previous_palette_buffer: std::sync::RwLock::new(previous_palette_buffer),
             previous_skin_palettes: std::sync::RwLock::new(std::collections::HashMap::new()),
+            custom_mesh_cache: std::sync::RwLock::new(super::mesh_cache::CustomMeshCache::default()),
             max_palettes: std::sync::atomic::AtomicU32::new(1),
             palette_count: std::sync::atomic::AtomicU32::new(0),
             culler: std::sync::RwLock::new(None),

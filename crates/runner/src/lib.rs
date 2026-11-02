@@ -278,7 +278,7 @@ impl GameApp {
             format: surface_format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoNoVsync,
+            present_mode: ornis_render::surface_present_mode(),
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
@@ -373,10 +373,11 @@ impl GameApp {
         // frame stays here (fixed + variable schedules + CPU extraction); the Present
         // system acquires via surface.get_current_texture and renders via frame3d itself.
         //
-        // Vsync is OFF: the surface is configured with
-        // `wgpu::PresentMode::AutoNoVsync` (see `initialize` and the
-        // `Resized` handler), so frames are unthrottled and the wall-clock
-        // interval varies with load. The simulation therefore measures the
+        // Vsync is ON by default: the surface is configured with
+        // `ornis_render::surface_present_mode()` (`AutoVsync`; see
+        // `initialize` and the `Resized` handler), and `ORNIS_NO_VSYNC=1`
+        // switches to unthrottled `AutoNoVsync`. Either way the wall-clock
+        // interval can vary with load (missed vblanks, uncapped mode). The simulation therefore measures the
         // real delta since the last frame (clamped against hitches by
         // `clamp_frame_dt`, at most ~6 fixed steps) instead of assuming
         // 1/60 s — sim speed is independent of FPS; the engine's bounded
@@ -632,7 +633,7 @@ impl ApplicationHandler for GameApp {
                             format,
                             width: w,
                             height: h,
-                            present_mode: wgpu::PresentMode::AutoNoVsync,
+                            present_mode: ornis_render::surface_present_mode(),
                             alpha_mode: wgpu::CompositeAlphaMode::Auto,
                             view_formats: vec![],
                             desired_maximum_frame_latency: 2,

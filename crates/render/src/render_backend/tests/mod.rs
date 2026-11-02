@@ -412,3 +412,14 @@ fn trait_object_renders_one_instance() {
     );
     queue.submit([encoder.finish()]);
 }
+
+#[test]
+fn present_mode_defaults_to_vsync_and_env_opts_out() {
+    use crate::render_backend::present_mode_for;
+    assert_eq!(present_mode_for(None), wgpu::PresentMode::AutoVsync);
+    assert_eq!(present_mode_for(Some("0")), wgpu::PresentMode::AutoVsync);
+    assert_eq!(present_mode_for(Some("")), wgpu::PresentMode::AutoVsync);
+    for on in ["1", "true", "YES", " 1 "] {
+        assert_eq!(present_mode_for(Some(on)), wgpu::PresentMode::AutoNoVsync);
+    }
+}

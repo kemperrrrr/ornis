@@ -592,7 +592,7 @@ impl System for RenderPresent {
                             format: surface_state.format,
                             width: surface_state.size.0.max(1),
                             height: surface_state.size.1.max(1),
-                            present_mode: wgpu::PresentMode::AutoNoVsync,
+                            present_mode: crate::render_backend::surface_present_mode(),
                             alpha_mode: wgpu::CompositeAlphaMode::Auto,
                             view_formats: vec![],
                             desired_maximum_frame_latency: 2,

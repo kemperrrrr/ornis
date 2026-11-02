@@ -295,13 +295,14 @@ pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBR
 /// `ornis_core` re-exports for systems.
 pub use ornis_schedule::OrderError;
 pub use render_backend::{
-    RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+    NO_VSYNC_ENV, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+    present_mode_for, surface_present_mode,
 };
 pub use renderer::{
     AoBlurInputs, AoRawInputs, BlendMode, CameraUniform, CompositeInputs, CompositePass,
-    CustomGbufferDraw, EdgeInputs, FogInputs, ForwardPass, GBufferTextures, GbufferTargets,
-    InstanceData, LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu, Renderer3D,
-    SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh, TaaInputs, TransparencyError,
+    CustomGbufferDraw, CustomMeshBufferStats, EdgeInputs, FogInputs, ForwardPass, GBufferTextures,
+    GbufferTargets, InstanceData, LightingPass, MSAA_SAMPLE_COUNT, MaterialIdx, PerObjectGpu,
+    Renderer3D, SINGLE_SAMPLE_COUNT, ShadingDebug, StagedCustomMesh, TaaInputs, TransparencyError,
     TransparencyOptions, custom_draw_items, forward_blend_state, negotiate_sample_count,
     normalize_sample_count, sort_by_depth, upload_vertex_rows,
 };
