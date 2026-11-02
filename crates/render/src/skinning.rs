@@ -35,6 +35,13 @@ use crate::renderer::{CameraUniform, PerObjectGpu};
 use crate::shaders::interface::GbufferVertexOutput as VertexOutput;
 use crate::shaders::{Resource, ResourceKind, ShaderModule, wgsl_decl};
 
+/// GPU parity and A/B harness for the experimental wasm2gpu compute
+/// skinning guest (issue #228): a Rust→Wasm→WGSL pre-pass next to the
+/// DSL vertex-stage path above, which it does not touch.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub mod wasm2gpu;
+
 /// GPU joint-palette capacity (matches [`JointLimit::GPU`]).
 const GPU_PALETTE_SLOTS: usize = 128;
 
