@@ -3341,31 +3341,14 @@ fn root_matrix(transforms: Option<&ComponentStore<TransformDesc>>, entity: Entit
 /// Ordering: register after `skel_sample`, pin
 /// `try_order_before("skel_sample", "skel_skin_cpu")`.
 #[derive(Debug, Clone, Copy)]
-pub struct SkelSkinSystem {
-    /// Skip meshes the GPU palette path can draw (see
-    /// [`SkelSkinSystem::gpu_fallback_only`]).
-    fallback_only: bool,
-}
+// qual:api — public host API kept for compatibility (custom schedules
+// that skin every mesh); the engine installs `SkelSkinGpuFallbackSystem`.
+pub struct SkelSkinSystem;
 
 impl SkelSkinSystem {
-    /// Creates the CPU skinning pass: every valid mesh skins every run.
+    /// Creates the CPU skinning pass.
     pub fn new() -> Self {
-        Self {
-            fallback_only: false,
-        }
-    }
-
-    /// CPU skinning only where the GPU palette path cannot draw the mesh
-    /// (palette over [`JointLimit::GPU`]). GPU-eligible meshes render
-    /// from bind-pose rows plus the joint palette, so their CPU buffers
-    /// are never read: skipping them saves the per-vertex blend, two
-    /// buffer allocations per mesh and the per-frame `SkinnedMesh` lane
-    /// write (which otherwise escalates the render change feed to a full
-    /// rebuild every frame).
-    pub fn gpu_fallback_only() -> Self {
-        Self {
-            fallback_only: true,
-        }
+        Self
     }
 }
 
@@ -3376,27 +3359,59 @@ impl Default for SkelSkinSystem {
     }
 }
 
+/// Lane access shared by both CPU skinning passes. `SkinnedMesh` is both
+/// read (bind data) and written (output buffers): declared `writes_lane`
+/// (which covers reads), and the implementation sequences read and write
+/// guards so they never overlap on the lane `RwLock`.
+fn skel_skin_access() -> SystemAccess {
+    SystemAccess::new()
+        .reads::<SmartStore>()
+        .reads_lane::<Skeleton>()
+        .reads_lane::<JointPose>()
+        .writes_lane::<SkinnedMesh>()
+}
+
 impl System for SkelSkinSystem {
     fn name(&self) -> &'static str {
         "skel_skin_cpu"
     }
 
     fn access(&self) -> SystemAccess {
-        // `SkinnedMesh` is both read (bind data) and written (output
-        // buffers): declared `writes_lane` (which covers reads), and the
-        // implementation sequences read and write guards so they never
-        // overlap on the lane `RwLock`.
-        SystemAccess::new()
-            .reads::<SmartStore>()
-            .reads_lane::<Skeleton>()
-            .reads_lane::<JointPose>()
-            .writes_lane::<SkinnedMesh>()
+        skel_skin_access()
     }
 
     fn run(&self, resources: &Resources) {
         // Same contract as `SkelSampleSystem::run`: per-run counters via
         // `run_skel_skin`; persistent counters land with phase C wiring.
-        let _ = run_skel_skin_with(resources, self.fallback_only);
+        let _ = run_skel_skin(resources);
+    }
+}
+
+/// CPU skinning pass for GPU-fallback meshes only (system name
+/// `skel_skin_cpu`, a drop-in replacement for [`SkelSkinSystem`] with the
+/// same ordering pin).
+///
+/// Skins only meshes the GPU palette path cannot draw (palette over
+/// [`JointLimit::GPU`]). GPU-eligible meshes render from bind-pose rows
+/// plus the joint palette, so their CPU buffers are never read: skipping
+/// them saves the per-vertex blend, two buffer allocations per mesh and
+/// the per-frame `SkinnedMesh` lane write (which otherwise escalates the
+/// render change feed to a full rebuild every frame). Skipped meshes keep
+/// their previous buffers.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkelSkinGpuFallbackSystem;
+
+impl System for SkelSkinGpuFallbackSystem {
+    fn name(&self) -> &'static str {
+        "skel_skin_cpu"
+    }
+
+    fn access(&self) -> SystemAccess {
+        skel_skin_access()
+    }
+
+    fn run(&self, resources: &Resources) {
+        let _ = run_skel_skin_with(resources, true);
     }
 }
 
@@ -3408,7 +3423,7 @@ pub fn run_skel_skin(resources: &Resources) -> SkelSkinStats {
 }
 
 /// [`run_skel_skin`] with an opt-in skip of GPU-eligible meshes (see
-/// [`SkelSkinSystem::gpu_fallback_only`]); skipped meshes keep their
+/// [`SkelSkinGpuFallbackSystem`]); skipped meshes keep their
 /// previous buffers and count neither as skinned nor as bad skin.
 pub fn run_skel_skin_with(resources: &Resources, fallback_only: bool) -> SkelSkinStats {
     let mut stats = SkelSkinStats::default();

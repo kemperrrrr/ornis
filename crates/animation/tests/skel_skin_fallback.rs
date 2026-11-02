@@ -1,5 +1,5 @@
 //! `skel_skin_cpu` in GPU-fallback-only mode
-//! ([`SkelSkinSystem::gpu_fallback_only`]): meshes whose palette fits the
+//! ([`ornis_animation::SkelSkinGpuFallbackSystem`]): meshes whose palette fits the
 //! GPU skinning path are left to the renderer and never CPU-skinned.
 
 use glam::Mat4;

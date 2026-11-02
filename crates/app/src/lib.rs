@@ -8,7 +8,9 @@
 //! type — extraction reads its lanes directly, never a second world copy.
 
 use glam::Vec3;
-use ornis_animation::{AnimClip, AnimPlayer, AnimSampleSystem, SkelSampleSystem, SkelSkinSystem};
+use ornis_animation::{
+    AnimClip, AnimPlayer, AnimSampleSystem, SkelSampleSystem, SkelSkinGpuFallbackSystem,
+};
 use ornis_assets::scene::TransformDesc;
 use ornis_core::{
     Engine, Entity, FixedTime, GlobalTransform, InputState, Resources, SmartStore, System,
@@ -163,9 +165,7 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
         .fixed_schedule_mut()
         .try_order_before("physics_sync_out", "ragdoll_sync");
     engine.schedule_mut().add_system(SkelSampleSystem::new());
-    engine
-        .schedule_mut()
-        .add_system(SkelSkinSystem::gpu_fallback_only());
+    engine.schedule_mut().add_system(SkelSkinGpuFallbackSystem);
     let _ = engine
         .schedule_mut()
         .try_order_before("anim_sample", "skel_sample");
