@@ -2894,6 +2894,17 @@ dependencies = [
 name = "ornis-gpu-abi"
 version = "0.1.0"
 dependencies = [
+ "ornis-gpu-abi-macros",
+ "trybuild",
+]
+
+[[package]]
+name = "ornis-gpu-abi-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
  "trybuild",
 ]
 
@@ -3741,6 +3752,7 @@ checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
+ "libc",
  "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]

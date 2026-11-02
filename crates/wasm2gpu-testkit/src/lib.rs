@@ -24,6 +24,15 @@ pub mod cull;
 /// Isolated target subtree for the nested guest build.
 const GUEST_TARGET_SUBDIR: &str = "wasm2gpu-e2e";
 
+/// Serializes nested Cargo invocations.
+///
+/// Integration tests run in parallel and each calls [`compile_wasm`]. Two
+/// concurrent builds share the guest target directory, and the window between
+/// a finished build and reading its artifact is not atomic: one test can read
+/// while the other Cargo has the artifact checked out for a rebuild. The lock
+/// also covers the read, so a test never observes that window.
+static GUEST_BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Add the nested-build suffix once, even when the caller's target directory
 /// already points at the guest subtree.
 fn guest_target_dir(target_root: &Path) -> PathBuf {
@@ -41,6 +50,9 @@ fn guest_target_dir(target_root: &Path) -> PathBuf {
 /// it passes `--locked` and uses the outer `CARGO_TARGET_DIR` when present.
 // qual:allow(complexity, error_handling) reason: "A failed guest build fails the integration test."
 pub fn compile_wasm() -> Vec<u8> {
+    let _build = GUEST_BUILD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest

@@ -53,13 +53,17 @@ immediate fallthrough отвергаются.
 Рекурсия, `call_indirect` и выход за потолок специализаций — явная ошибка.
 Прямой `if` без побочных эффектов опускается в WGSL `select`, остальной —
 в `if` / `loop`. Неподдерживаемый тип — явная ошибка. WGSL/SPIR-V через
-naga. Bindless и descriptor indexing не default. Экспорт `shade` и, если он
-есть, `compute` в `crates/wasm2gpu-shader` помечены
-`#[unsafe(no_mangle)]`: лифтер gpu-теста ищет эти имена, а в Rust 2024
-атрибут unsafe. Это не блок `unsafe` и не код `gpu-abi`. `compute` лифтер
-переименовывает в `cs_main`: `@workgroup_size(4, 1, 1)`, builtin
-`global_invocation_id`, запись в storage. Упаковка space+binding+offset в
-каждый `i32` по-прежнему не default ABI.
+naga. Bindless и descriptor indexing не default. Экспорты `shade`,
+`compute`, `cull`, auto-exposure и fog vertex объявляются атрибутами
+`#[shader::compute(workgroup_size = N)]` и `#[shader::fragment]` из
+`gpu-abi`: макрос ставит `#[unsafe(no_mangle)] pub extern "C"`, проверяет
+сигнатуру и пишет stage и workgroup в custom section
+`ornis_gpu.entries`. Это не блок `unsafe` и не код `gpu-abi`. Лифтер
+gpu-теста ищет имя экспорта и переносит запись в toy-модуль; `compute`
+он переименовывает в `cs_main`, а транслятор берёт `@workgroup_size` из
+этой записи. Без секции действует ABI default `4, 1, 1`. Compute-запись
+в storage — тот же `storage_write_*`, builtin `global_invocation_id`.
+Упаковка space+binding+offset в каждый `i32` по-прежнему не default ABI.
 
 Связано: `rust-to-wgsl-architecture.md`, обсуждения Wasm GC / DWARF /
 Kongruent как носителей типов для шейдерного бэкенда.
@@ -305,8 +309,9 @@ table/element — `indirect call is not lowered`.
 по-прежнему опускается. Сигнатура compute — ровно один `i32` и ноль
 результатов. Аргумент naga — `vec3<u32>` с builtin
 `global_invocation_id`; wasm-параметр 0 читает компоненту `x`.
-`@workgroup_size` — 4, 1, 1. Запись в storage — тот же
-`storage_write_*`, что у фрагмента.
+`@workgroup_size` берётся из записи `cs_main` в `ornis_gpu.entries`; без
+неё (рукописный WAT, старый гость) — ABI default `4, 1, 1`. Запись в
+storage — тот же `storage_write_*`, что у фрагмента.
 
 Control flow шире прямой линии `vs_main` / `fs_main`. Парсер строит
 CFG из Wasm structured control flow (`block` / `loop` / `if` / `br` /

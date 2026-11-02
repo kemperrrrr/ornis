@@ -9,5 +9,8 @@ description = "Toy GPU ABI for the Wasm-to-GPU research path (not the production
 [lints]
 workspace = true
 
+[dependencies]
+ornis-gpu-abi-macros = { path = "../gpu-abi-macros", version = "0.1.0" }
+
 [dev-dependencies]
 trybuild = "1"

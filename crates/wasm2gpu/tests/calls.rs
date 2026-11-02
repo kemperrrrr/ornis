@@ -194,6 +194,80 @@ fn compute_entry_has_workgroup_and_invocation_id() {
     .unwrap_or_else(|err| panic!("naga: {err}\n{}", translated.wgsl));
 }
 
+#[test]
+fn compute_entry_reads_workgroup_from_entry_metadata() {
+    let body = format!(
+        r#"(func (export "{cs}") (param i32)
+            i32.const 0 i32.const 1 local.get 0 f32.const 1 call ${write})
+           (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
+            f32.const 0 f32.const 0 f32.const 0 f32.const 1)"#,
+        cs = symbols::CS_MAIN,
+        fs = symbols::FS_MAIN,
+        write = symbols::STORAGE_WRITE_F32,
+    );
+    let imports = import(symbols::STORAGE_WRITE_F32, "(param i32 i32 i32 f32)");
+    let wasm = wat::parse_str(format!(
+        r#"(module
+            (@custom "{entries}" "compute,cs_main,8,2,1\n")
+            {imports} {vertex} {body})"#,
+        entries = symbols::ENTRY_SECTION,
+        vertex = vertex(),
+    ))
+    .expect("wat");
+    let translated = translate(&wasm).expect("compute");
+    assert!(
+        translated.wgsl.contains("@workgroup_size(8, 2, 1)"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn entry_metadata_with_the_wrong_stage_is_rejected() {
+    let body = format!(
+        r#"(func (export "{cs}") (param i32))
+           (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
+            f32.const 0 f32.const 0 f32.const 0 f32.const 1)"#,
+        cs = symbols::CS_MAIN,
+        fs = symbols::FS_MAIN,
+    );
+    let wasm = wat::parse_str(format!(
+        r#"(module
+            (@custom "{entries}" "fragment,cs_main,4,1,1\n")
+            {vertex} {body})"#,
+        entries = symbols::ENTRY_SECTION,
+        vertex = vertex(),
+    ))
+    .expect("wat");
+    assert!(matches!(
+        translate(&wasm),
+        Err(TranslateError::EntryMetadata(_))
+    ));
+}
+
+#[test]
+fn malformed_entry_metadata_is_rejected() {
+    let body = format!(
+        r#"(func (export "{cs}") (param i32))
+           (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
+            f32.const 0 f32.const 0 f32.const 0 f32.const 1)"#,
+        cs = symbols::CS_MAIN,
+        fs = symbols::FS_MAIN,
+    );
+    let wasm = wat::parse_str(format!(
+        r#"(module
+            (@custom "{entries}" "compute,cs_main\n")
+            {vertex} {body})"#,
+        entries = symbols::ENTRY_SECTION,
+        vertex = vertex(),
+    ))
+    .expect("wat");
+    assert!(matches!(
+        translate(&wasm),
+        Err(TranslateError::EntryMetadata(_))
+    ));
+}
+
 const DEPTH: usize = {
     const LEVELS: usize = 20;
     LEVELS

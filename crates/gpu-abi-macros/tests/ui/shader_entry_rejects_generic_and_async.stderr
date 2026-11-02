@@ -1,0 +1,11 @@
+error: a shader entry point cannot be generic
+ --> tests/ui/shader_entry_rejects_generic_and_async.rs:6:8
+  |
+6 | fn quad<T>(x: f32) -> f32 {
+  |        ^^^
+
+error: a shader entry point cannot be `async`
+  --> tests/ui/shader_entry_rejects_generic_and_async.rs:11:1
+   |
+11 | async fn shade(u: f32) -> f32 {
+   | ^^^^^

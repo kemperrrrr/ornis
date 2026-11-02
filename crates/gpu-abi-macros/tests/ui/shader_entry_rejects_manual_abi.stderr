@@ -1,0 +1,5 @@
+error: drop the manual ABI; the shader attribute adds `extern "C"`
+ --> tests/ui/shader_entry_rejects_manual_abi.rs:6:1
+  |
+6 | extern "C" fn cull(id: u32) {
+  | ^^^^^^^^^^

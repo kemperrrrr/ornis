@@ -6,6 +6,8 @@
 //! calls, guards, and loops. Vertex and fragment stubs exist because the
 //! translator still requires those entries.
 
+use ornis_gpu_abi::entry_meta::EntryPoint;
+use ornis_gpu_abi::entry_meta::Stage;
 use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
 use wasmparser::Parser;
@@ -70,6 +72,8 @@ struct Read {
     imports: Vec<String>,
     bodies: Vec<Func>,
     compute: u32,
+    export: String,
+    entries: Vec<EntryPoint>,
 }
 
 // qual:allow(complexity, error_handling) reason: "Malformed fixture wasm fails the test."
@@ -79,6 +83,7 @@ fn read(wasm: &[u8], export: &str) -> Read {
     let mut func_types = Vec::new();
     let mut bodies = Vec::new();
     let mut compute = None;
+    let mut entries = Vec::new();
     for payload in Parser::new(0).parse_all(wasm) {
         let payload = payload.unwrap_or_else(|err| panic!("wasm: {err}"));
         match payload {
@@ -97,6 +102,12 @@ fn read(wasm: &[u8], export: &str) -> Read {
                     }
                 }
             }
+            Payload::CustomSection(section) if section.name() == symbols::ENTRY_SECTION => {
+                let text = std::str::from_utf8(section.data()).expect("entry metadata utf8");
+                entries.extend(
+                    ornis_gpu_abi::entry_meta::decode(text).expect("entry metadata records"),
+                );
+            }
             Payload::CodeSectionEntry(body) => {
                 let slot = bodies.len();
                 let ty = func_types[slot] as usize;
@@ -109,6 +120,8 @@ fn read(wasm: &[u8], export: &str) -> Read {
         imports,
         bodies,
         compute: compute.unwrap_or_else(|| panic!("missing {export} export")),
+        export: export.to_string(),
+        entries,
     }
 }
 
@@ -222,15 +235,56 @@ fn wrap(module: &Read) -> String {
     }
     format!(
         r#"(module
+            (@custom "{entries}" "{metadata}")
             {imports}
             {funcs}
             (func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
                 local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)
             (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
                 f32.const 0 f32.const 0 f32.const 0 f32.const 1))"#,
+        entries = symbols::ENTRY_SECTION,
+        metadata = escape_custom(&entry_metadata(module)),
         vs = symbols::VS_MAIN,
         fs = symbols::FS_MAIN,
     )
+}
+
+/// The metadata record for the lifted entry, renamed to `cs_main`.
+///
+/// A guest built before the `#[shader::*]` macro has no record; the ABI
+/// default keeps those fixtures working. A record for another stage means
+/// the caller lifted a non-compute export and the result would not mean what
+/// the test asserts.
+// qual:allow(complexity, error_handling) reason: "The lifter is test-only: a missing or non-compute record must fail the test, not return an error."
+fn entry_metadata(module: &Read) -> String {
+    let mut meta = None;
+    for entry in &module.entries {
+        if entry.export == module.export {
+            meta = Some(entry);
+        }
+    }
+    let workgroup = match meta {
+        Some(entry) if entry.stage == Stage::Compute => entry.workgroup,
+        Some(entry) => panic!(
+            "{} is a {:?} entry, not compute",
+            module.export, entry.stage
+        ),
+        None => symbols::CS_WORKGROUP,
+    };
+    EntryPoint {
+        stage: Stage::Compute,
+        export: symbols::CS_MAIN.to_string(),
+        workgroup,
+    }
+    .encode()
+}
+
+fn escape_custom(text: &str) -> String {
+    let mut escaped = String::new();
+    for byte in text.bytes() {
+        escaped.push_str(&format!("\\{byte:02x}"));
+    }
+    escaped
 }
 
 fn reaches(module: &Read, wasm_index: u32) -> bool {

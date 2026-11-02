@@ -19,8 +19,23 @@ mod macros;
 mod shader_io;
 mod texture;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod entry_meta;
 /// Host shadow memory and the only `unsafe` in the SDK.
 pub mod gpu_abi;
+/// Attribute macros that declare wasm shader entry points.
+///
+/// `#[shader::compute(workgroup_size = N)]` adds the `extern "C"` export and
+/// records the stage and dispatch shape in the
+/// [`symbols::ENTRY_SECTION`] custom section.
+/// `#[shader::vertex]` and `#[shader::fragment]` do the same for the other
+/// stages. The offline translator reads that section instead of hard-coding
+/// the entry's workgroup size.
+pub mod shader {
+    pub use ornis_gpu_abi_macros::compute;
+    pub use ornis_gpu_abi_macros::fragment;
+    pub use ornis_gpu_abi_macros::vertex;
+}
 /// Import names the offline translator recognizes.
 pub mod symbols;
 

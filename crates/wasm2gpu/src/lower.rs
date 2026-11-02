@@ -81,7 +81,7 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
         cx.module.entry_points.push(entry(
             symbols::CS_MAIN,
             ShaderStage::Compute,
-            symbols::CS_WORKGROUP,
+            crate::entry::compute_workgroup(module)?,
             cs,
         ));
     }

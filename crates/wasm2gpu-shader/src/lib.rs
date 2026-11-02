@@ -1,17 +1,20 @@
 //! Shader body compiled to wasm32 and lowered by `ornis-wasm2gpu`.
 //!
 //! The host build of [`shade`] is the CPU reference. On `wasm32` the same
-//! function is an `extern "C"` export named `shade`. `#[unsafe(no_mangle)]`
-//! keeps that export name: the gpu-test lifter looks it up, and Rust 2024
-//! makes `no_mangle` an unsafe attribute. It is an export attribute, not a
-//! memory-unsafe block; the only `unsafe` code stays in `gpu-abi`. Returning
-//! a struct would spill through linear memory, which the translator rejects.
-//! This crate is not the production shader DSL.
+//! function is an `extern "C"` export named `shade`. The `#[shader::*]`
+//! attribute macros keep those export names, add the Rust 2024
+//! `#[unsafe(no_mangle)]` wrapper, and record each entry's stage and
+//! workgroup size in the `ornis_gpu.entries` custom section. It is an export
+//! attribute, not a memory-unsafe block; the only `unsafe` code stays in
+//! `gpu-abi`. Returning a struct would spill through linear memory, which the
+//! translator rejects. This crate is not the production shader DSL.
 
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
 
 use ornis_gpu_abi::gpu_struct;
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::shader;
 use ornis_gpu_abi::storage_at_f32;
 use ornis_gpu_abi::storage_store_f32;
 use ornis_gpu_abi::uniform_array_f32;
@@ -131,12 +134,13 @@ pub fn shade(u: f32, v: f32) -> f32 {
 
 /// Wasm export named `shade`.
 ///
-/// `#[unsafe(no_mangle)]` is the Rust 2024 spelling of the export attribute.
-/// The lifter copies this body into the toy `fs_main` only when the export
-/// name is `shade`.
+/// [`shader`] adds the export wrapper and records a fragment entry. The
+/// lifter copies this body into the toy `fs_main` only when the export name
+/// is `shade`.
 #[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn shade(u: f32, v: f32) -> f32 {
+#[shader::fragment]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn shade(u: f32, v: f32) -> f32 {
     shade_body(u, v)
 }
 
@@ -156,11 +160,12 @@ fn shade_body(_u: f32, _v: f32) -> f32 {
 /// Each `match` arm calls its own `#[inline(never)]` function so wasm32 keeps
 /// a multi-way branch (`br_table`) instead of a rodata load. The index is an
 /// argument of that function: provenance stays in the const generics, and the
-/// offset crosses the call. `#[unsafe(no_mangle)]` is the Rust 2024 export
-/// attribute, same as [`shade`].
+/// offset crosses the call. [`shader`] adds the export wrapper and the
+/// `workgroup_size = 4` the translator reads.
 #[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn compute(id: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn compute(id: u32) {
     let index = slot(id);
     match id {
         0 => arm0(index),
@@ -210,8 +215,9 @@ fn arm_rest(index: u32) {
 /// pure integration (IOSP: logic and calls in separate functions). The gpu
 /// test lifts this export and checks the buffer the GPU wrote.
 #[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn ptr_copy(id: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn ptr_copy(id: u32) {
     let src = Storage::<0, 1, f32>::bind();
     let out = Storage::<0, 2, f32>::bind();
     let value = src.as_ref().index_storage(id).load();
@@ -239,8 +245,9 @@ pub fn twice_plus_one(value: f32) -> f32 {
 /// non-finite inputs before the planes. The flag is `1` for visible and
 /// `0` for culled.
 #[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn cull(id: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn cull(id: u32) {
     let count = storage_at_u32::<CULL_GROUP, COUNT_BINDING>(0);
     if id < count {
         let base = id * LANES;
@@ -295,8 +302,9 @@ const VS_U_LANE: u32 = 4;
 /// layout keeps the 32-byte stride of the WGSL storage struct
 /// `{ pos: vec4<f32>, uv: vec2<f32> }` the test's adapter reads back.
 #[cfg(target_arch = "wasm32")]
-#[unsafe(no_mangle)]
-pub extern "C" fn vs_main(id: u32) {
+#[shader::compute(workgroup_size = 4)]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn vs_main(id: u32) {
     if id < VS_VERTICES {
         let lane = id * VS_OUT_LANES;
         // STANDARD_QUAD row = (x, y); STANDARD_UVS row = (u, v):
