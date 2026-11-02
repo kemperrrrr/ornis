@@ -10,6 +10,8 @@
 
 #![warn(missing_docs)]
 
+mod stats;
+
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -44,7 +46,7 @@ const MOUSE_FORWARD: u8 = 4;
 pub type BuildWorld = Box<dyn FnOnce() -> (GameWorld, u32)>;
 
 /// Native run options: window title plus the CLI conventions
-/// (`--remote-editor`, `--frames N`, `--aa MODE`); see
+/// (`--remote-editor`, `--frames N`, `--aa MODE`, `--stats`); see
 /// [`NativeOptions::from_env`].
 pub struct NativeOptions {
     /// Window title.
@@ -55,14 +57,19 @@ pub struct NativeOptions {
     pub remote_editor: bool,
     /// The anti-aliasing mode of the frame (`--aa off|msaa|taa|fxaa|smaa`).
     pub anti_alias: AntiAliasMode,
+    /// Open the debug stats window (`--stats` or `ORNIS_STATS=1`).
+    pub stats: bool,
 }
 
 impl NativeOptions {
     /// Parses the shell CLI conventions with the given window title:
     /// `--remote-editor` serves the editor on
-    /// [`EDITOR_HTTP_PORT`], `--frames N` exits after N frames.
+    /// [`EDITOR_HTTP_PORT`], `--frames N` exits after N frames, `--stats`
+    /// (or `ORNIS_STATS=1`) opens the debug stats window.
     pub fn from_env(title: impl Into<String>) -> Self {
-        let mut args = std::env::args();
+        let argv: Vec<String> = std::env::args().collect();
+        let stats = stats::stats_requested(&argv, std::env::var(stats::STATS_ENV).ok().as_deref());
+        let mut args = argv.into_iter();
         let mut frames = None;
         let mut remote_editor = false;
         let mut anti_alias = AntiAliasMode::Msaa;
@@ -83,6 +90,7 @@ impl NativeOptions {
             frames,
             remote_editor,
             anti_alias,
+            stats,
         }
     }
 }
@@ -185,6 +193,8 @@ struct GameContext {
     last_frame: Instant,
     /// `--frames N` smoke-test budget: `None` runs forever.
     frames_left: Option<u64>,
+    /// Debug stats window (`None` unless `--stats`).
+    stats: Option<stats::StatsWindow>,
 }
 
 impl GameApp {
@@ -364,6 +374,7 @@ impl GameApp {
             entity_count,
             last_frame: Instant::now(),
             frames_left: frames,
+            stats: None,
         })
     }
 
@@ -383,7 +394,15 @@ impl GameApp {
         // fixed accumulator absorbs the residual jitter.
         let elapsed = ctx.last_frame.elapsed();
         ctx.last_frame = Instant::now();
+        let Some(stats) = ctx.stats.as_mut() else {
+            ctx.runtime.frame_secs(clamp_frame_dt(elapsed));
+            return;
+        };
+        let work = Instant::now();
         ctx.runtime.frame_secs(clamp_frame_dt(elapsed));
+        let work = work.elapsed();
+        let stages = ctx.runtime.engine_mut().take_stage_timings();
+        stats.on_frame(elapsed, work, &stages);
     }
 }
 
@@ -550,7 +569,21 @@ impl ApplicationHandler for GameApp {
                     options_frames,
                     options_anti_alias,
                 ) {
-                    Ok(ctx) => {
+                    Ok(mut ctx) => {
+                        // Opt-in stats window; a failure only logs (the
+                        // game keeps running without stats).
+                        match self
+                            .options
+                            .stats
+                            .then(|| stats::StatsWindow::open(event_loop))
+                        {
+                            Some(Ok(window)) => {
+                                ctx.runtime.engine_mut().set_stage_timing(true);
+                                ctx.stats = Some(window);
+                            }
+                            Some(Err(e)) => eprintln!("ornis: stats window: {e}"),
+                            None => {}
+                        }
                         self.context = Some(ctx);
                     }
                     Err(e) => {
@@ -575,11 +608,24 @@ impl ApplicationHandler for GameApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: winit::window::WindowId,
+        window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
         let ctx = self.context();
         let Some(ctx) = ctx else { return };
+        // Stats window: closing it drops only the stats (timers off), a
+        // resize reconfigures its surface; nothing reaches the game.
+        if let Some(stats) = ctx.stats.as_mut().filter(|s| s.id() == window_id) {
+            match event {
+                WindowEvent::CloseRequested => {
+                    ctx.stats = None;
+                    ctx.runtime.engine_mut().set_stage_timing(false);
+                }
+                WindowEvent::Resized(size) => stats.resize(size),
+                _ => {}
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();

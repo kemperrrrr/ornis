@@ -109,6 +109,7 @@ paths = ["crates/app/**", "crates/editor/**"]
 paths = [
     "crates/editor-backend/**",
     "crates/wasm/**",
+    "crates/runner/**",
     "src/main.rs",
     "src/showcase_physics.rs",
     "xtask/**",

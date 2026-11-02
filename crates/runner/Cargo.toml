@@ -9,6 +9,7 @@ license.workspace = true
 ornis-app = { path = "../app", version = "0.1.0" }
 ornis-core = { path = "../core", version = "0.1.0" }
 ornis-render = { path = "../render", version = "0.1.0" }
+ornis-schedule = { path = "../schedule", version = "0.1.0" }
 crossbeam-channel = "0.5"
 editor-backend = { path = "../editor-backend", version = "0.1.0" }
 pollster = "1.0"
