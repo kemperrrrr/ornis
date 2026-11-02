@@ -92,6 +92,8 @@ pub enum Op {
     F32Abs,
     /// Negate the top `f32` value.
     F32Neg,
+    /// Square root of the top `f32` value.
+    F32Sqrt,
     /// Convert an unsigned `i32` value to `f32`.
     F32ConvertI32U,
     /// Wrapping `i32` add.

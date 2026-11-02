@@ -72,6 +72,11 @@ fn scalar_float_ops_and_non_finite_constants_lower_to_wgsl() {
         translated.wgsl
     );
     assert!(
+        translated.wgsl.contains("sqrt("),
+        "missing square root: {}",
+        translated.wgsl
+    );
+    assert!(
         translated.wgsl.contains("f32("),
         "missing unsigned i32 conversion: {}",
         translated.wgsl

@@ -53,6 +53,18 @@ pub(super) fn f32_abs(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     em.push(Val::Scalar(absolute))
 }
 
+pub(super) fn f32_sqrt(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let value = crate::env::float_of(em.pop()?)?;
+    let root = em.ex(Expression::Math {
+        fun: naga::MathFunction::Sqrt,
+        arg: value,
+        arg1: None,
+        arg2: None,
+        arg3: None,
+    });
+    em.push(Val::Scalar(root))
+}
+
 pub(super) fn f32_neg(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let value = crate::env::float_of(em.pop()?)?;
     let negated = em.ex(Expression::Unary {
