@@ -147,6 +147,20 @@ pub enum ColliderError {
         /// What was missing.
         detail: &'static str,
     },
+    /// Transform scale is non-positive or non-finite.
+    #[error("transform scale {scale:?} must be finite and > 0")]
+    InvalidScale {
+        /// Offending per-axis scale.
+        scale: [f32; 3],
+    },
+    /// The recipe cannot represent this non-uniform scale exactly.
+    #[error("collider `{shape}` does not support non-uniform scale {scale:?}")]
+    NonUniformScale {
+        /// Recipe family that rejected the scale.
+        shape: &'static str,
+        /// Offending per-axis scale.
+        scale: [f32; 3],
+    },
 }
 
 /// Raycast/shapecast input failure: `Ok(None)` is a clean miss.
