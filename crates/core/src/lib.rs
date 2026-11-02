@@ -86,7 +86,8 @@ pub use registry::{
     FieldSegment, FieldSurface, LaneId, RegisterComponent, RegistryError,
 };
 pub use schedule::{
-    OrderError, Resources, Schedule, System, SystemAccess, SystemName, compute_levels,
+    OrderError, Resources, Schedule, ScheduleTimings, System, SystemAccess, SystemName,
+    compute_levels,
 };
 pub use smart_store::{Pack, SmartStore};
 pub use system_param::{
