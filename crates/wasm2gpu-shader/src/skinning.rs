@@ -59,6 +59,16 @@ const JOINT_COUNT_LANE: u32 = 1;
 const NEAR_ZERO: f32 = 1e-6;
 /// Squared length floor for collapsed blended normals (CPU-path rule).
 const DEGENERATE_LEN2: f32 = 1e-12;
+/// Upper edge of the sqrt Newton range (also its growth factor).
+const SQRT_RANGE_TOP: f32 = 4.0;
+/// Shrink factor bringing large sqrt inputs into the Newton range.
+const SQRT_SHRINK: f32 = 0.25;
+/// Secant-seed divisor through the Newton range endpoints (1, 1), (4, 2).
+const SQRT_SEED_DIVISOR: f32 = 3.0;
+/// Newton iterations after the secant seed (relative error below 1e-6).
+const SQRT_STEPS: u32 = 4;
+/// One half, for the Newton mean and the inverse range scale.
+const HALF_F32: f32 = 0.5;
 /// Largest finite `f32` magnitude the weight guard accepts as finite.
 const MAX_FINITE_SUM: f32 = 3.4e38;
 
@@ -121,7 +131,7 @@ fn skin_vertex(id: u32) {
     // Renormalize unless the blended normal collapsed (CPU-path rule).
     let len2 = out_nx * out_nx + out_ny * out_ny + out_nz * out_nz;
     let normal_scale = if len2 > DEGENERATE_LEN2 {
-        1.0 / len2.sqrt()
+        1.0 / sqrt_approx(len2)
     } else {
         1.0
     };
@@ -144,6 +154,35 @@ fn position_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
 #[inline(always)]
 fn normal_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
     dot_row(base + MATRIX_LANES, x, y, z, row)
+}
+
+/// Range-reduced square root on scalar operations the lifter supports.
+///
+/// The guest crate is `no_std` on wasm32, where `f32::sqrt` does not
+/// exist — same constraint as `log2_approx`/`exp2_approx` in the
+/// auto-exposure math. The value is reduced by powers of four into
+/// `[1, 4)`, Newton-iterated from a secant seed, then scaled back by
+/// powers of two. The caller guarantees a positive, finite input.
+#[inline(always)]
+fn sqrt_approx(value: f32) -> f32 {
+    let mut mantissa = value;
+    let mut scale = 1.0_f32;
+    while mantissa >= SQRT_RANGE_TOP {
+        mantissa *= SQRT_SHRINK;
+        scale *= 2.0;
+    }
+    while mantissa < 1.0 {
+        mantissa *= SQRT_RANGE_TOP;
+        scale *= HALF_F32;
+    }
+    // Secant seed through (1, 1) and (4, 2); Newton refines it quadratically.
+    let mut guess = (mantissa + 2.0) / SQRT_SEED_DIVISOR;
+    let mut step = 0;
+    while step < SQRT_STEPS {
+        guess = HALF_F32 * (guess + mantissa / guess);
+        step += 1;
+    }
+    guess * scale
 }
 
 /// The linear part of one palette-matrix row against a direction.

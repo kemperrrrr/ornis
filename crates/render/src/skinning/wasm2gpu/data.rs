@@ -5,7 +5,9 @@ use glam::Mat4;
 use glam::Quat;
 use glam::Vec3;
 
+#[cfg(test)]
 use crate::extraction::CustomMeshEntry;
+#[cfg(test)]
 use crate::extraction::MeshPose;
 use crate::skinning::SkinJoint;
 
@@ -109,6 +111,7 @@ impl SkinInputs {
     /// [`None`] for CPU entries and for lane defects — same verdict as
     /// [`CustomMeshEntry::skinned_gpu_vertices`].
     // qual:api — harness packing surface for production skinning entries.
+    #[cfg(test)]
     pub(crate) fn from_entry(entry: &CustomMeshEntry) -> Option<Self> {
         let MeshPose::Bind(influences) = &entry.pose else {
             return None;

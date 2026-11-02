@@ -35,6 +35,7 @@ const MAX_INFLUENCES: usize = 4;
 /// Count words in the params binding (vertex count, joint count, padding).
 const PARAM_WORDS: usize = 4;
 /// First normal lane inside one output vertex record.
+#[cfg(test)]
 const NORMAL_LANE: usize = 3;
 /// Storage bindings of the guest ABI (palette through params).
 const BINDING_COUNT: usize = 6;
@@ -47,6 +48,8 @@ pub(crate) struct SkinGpu {
     bind: wgpu::Buffer,
     joints: wgpu::Buffer,
     weights: wgpu::Buffer,
+    // Bound in the group; outside tests nothing reads it back yet.
+    #[allow(dead_code)]
     out: wgpu::Buffer,
     params: wgpu::Buffer,
     #[cfg(test)]

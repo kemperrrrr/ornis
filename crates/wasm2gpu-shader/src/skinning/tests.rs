@@ -10,6 +10,7 @@ use super::PALETTE_BINDING;
 use super::PARAMS_BINDING;
 use super::WEIGHTS_BINDING;
 use super::skin;
+use super::sqrt_approx;
 
 const VERTICES: usize = 4;
 const JOINTS: usize = 2;
@@ -102,4 +103,18 @@ fn skin_kernel_falls_back_like_the_cpu_path() {
     assert_vertex(&out, 2, [2.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     // Zero weights fall back to full weight on slot 0 (joint 1 here).
     assert_vertex(&out, 3, [1.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn sqrt_approx_matches_the_std_reference_across_the_normal_range() {
+    // Blended-normal squared lengths sit near 1, but non-uniform joint
+    // scales can move them orders of magnitude either way.
+    for value in [1.0e-8, 0.25, 1.0, 2.0, 3.999, 4.0, 100.0, 65_536.0, 1.0e12] {
+        let expected = value.sqrt();
+        let relative_error = (sqrt_approx(value) - expected).abs() / expected;
+        assert!(
+            relative_error < TOL,
+            "sqrt({value}) relative error {relative_error}"
+        );
+    }
 }
