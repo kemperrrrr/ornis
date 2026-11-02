@@ -17,7 +17,6 @@ pub(crate) use data::SkinInputs;
 pub(crate) use data::SyntheticSkin;
 pub(crate) use data::synthetic_skin;
 pub(crate) use gpu::SkinGpu;
-pub(crate) use lower::Lowered;
 pub(crate) use lower::lower_guest;
 
 #[cfg(test)]

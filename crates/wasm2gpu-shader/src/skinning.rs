@@ -118,7 +118,19 @@ fn skin_vertex(id: u32) {
     out_nx += identity * nrm_x;
     out_ny += identity * nrm_y;
     out_nz += identity * nrm_z;
-    store_vertex(id, out_x, out_y, out_z, out_nx, out_ny, out_nz);
+    // Renormalize unless the blended normal collapsed (CPU-path rule).
+    let len2 = out_nx * out_nx + out_ny * out_ny + out_nz * out_nz;
+    let normal_scale = if len2 > DEGENERATE_LEN2 {
+        1.0 / len2.sqrt()
+    } else {
+        1.0
+    };
+    storage_store_f32::<0, OUT_BINDING>(bind, out_x);
+    storage_store_f32::<0, OUT_BINDING>(bind + 1, out_y);
+    storage_store_f32::<0, OUT_BINDING>(bind + 2, out_z);
+    storage_store_f32::<0, OUT_BINDING>(bind + NORMAL_LANE, out_nx * normal_scale);
+    storage_store_f32::<0, OUT_BINDING>(bind + NORMAL_LANE + 1, out_ny * normal_scale);
+    storage_store_f32::<0, OUT_BINDING>(bind + NORMAL_LANE + 2, out_nz * normal_scale);
 }
 
 /// One row of `matrix * vec4(position, 1)` over the palette lanes.
