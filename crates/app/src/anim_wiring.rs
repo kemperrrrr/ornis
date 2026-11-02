@@ -1194,6 +1194,13 @@ pub fn wire_loaded_animation(
         store.insert(root, Name(format!("skeleton_{index}")));
         store.insert(root, skeleton);
         store.insert(root, JointPose::identity(joints));
+        // Hierarchical spawn: local identity under the model root, so the
+        // propagated `GlobalTransform` places the skinned pose in world
+        // space (otherwise every instance skins at the origin).
+        if spawn.scene_root.is_some() {
+            store.insert(root, ornis_core::Transform::IDENTITY);
+            store.insert(root, ornis_core::GlobalTransform::IDENTITY);
+        }
         wiring.roots.push(root);
     }
     // Skeletal playlists, one per clip and shared across roots. No player

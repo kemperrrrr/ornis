@@ -2159,6 +2159,7 @@ impl System for SkelSampleSystem {
             .reads_lane::<ClipEvents>()
             .reads_lane::<Skeleton>()
             .reads_lane::<TransformDesc>()
+            .reads_lane::<GlobalTransform>()
             .reads_lane::<ChildOf>()
             .reads_lane::<JointMask>()
             .reads_lane::<SkelTree>()
@@ -2837,6 +2838,7 @@ struct SampleLanes<'a> {
     clips: &'a ColdComponentStore<SkelClip>,
     skeletons: &'a ComponentStore<Skeleton>,
     transforms: Option<&'a ComponentStore<TransformDesc>>,
+    globals: Option<&'a ComponentStore<GlobalTransform>>,
     fades: Option<&'a ComponentStore<SkelFade>>,
     layers: Option<&'a ComponentStore<SkelLayerStack>>,
     masks: Option<&'a ColdComponentStore<JointMask>>,
@@ -2861,6 +2863,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         return;
     };
     let transforms = store.read_lane::<TransformDesc>();
+    let globals = store.read_lane::<GlobalTransform>();
     let fades = store.read_lane::<SkelFade>();
     let layers = store.read_lane::<SkelLayerStack>();
     let masks = store.read_cold_lane::<JointMask>();
@@ -2876,6 +2879,7 @@ fn collect_pose_work(store: &SmartStore, stats: &mut SkelSampleStats, scratch: &
         clips: &clips,
         skeletons: &skeletons,
         transforms: transforms.as_deref(),
+        globals: globals.as_deref(),
         fades: fades.as_deref(),
         layers: layers.as_deref(),
         masks: masks.as_deref(),
@@ -3040,7 +3044,7 @@ fn finish_pose(
     scratch
         .skel_locals
         .extend(scratch.pose_a.trs.iter().map(|trs| trs.matrix()));
-    let root = root_matrix(lanes.transforms, entity);
+    let root = root_matrix(lanes.globals, lanes.transforms, entity);
     compose_model_matrices(skeleton, &scratch.skel_locals, &root, &mut scratch.matrices)?;
     // §8.3: a retargeted root drives its `JointPose` only — the hierarchy
     // stays still (no node re-binds through the map), trees included.
@@ -3319,8 +3323,19 @@ fn sampled_pose(pose: &BlendedPose, joint: usize) -> SampledPose {
     }
 }
 
-/// Root matrix from the entity's [`TransformDesc`], identity when absent.
-fn root_matrix(transforms: Option<&ComponentStore<TransformDesc>>, entity: Entity) -> Mat4 {
+/// Root matrix: the entity's [`GlobalTransform`] when present, else its
+/// [`TransformDesc`], identity when both are absent.
+fn root_matrix(
+    globals: Option<&ComponentStore<GlobalTransform>>,
+    transforms: Option<&ComponentStore<TransformDesc>>,
+    entity: Entity,
+) -> Mat4 {
+    // A skeleton root inside a model hierarchy carries the propagated
+    // world transform: without it every instance of a model would skin
+    // at the origin (overlapping copies of the same character).
+    if let Some(global) = globals.and_then(|lane| lane.get(entity)) {
+        return global.to_mat4();
+    }
     let Some(desc) = transforms.and_then(|lane| lane.get(entity)) else {
         return Mat4::IDENTITY;
     };
