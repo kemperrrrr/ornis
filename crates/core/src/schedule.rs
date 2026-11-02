@@ -632,8 +632,12 @@ impl Schedule {
     /// Turns per-system timing on or off (debug statistics). Off by
     /// default; while off, [`Schedule::run`] takes no clock samples.
     /// Timing is unavailable on wasm (`Instant` is unsupported there).
+    /// Idempotent: enabling while already on keeps the samples
+    /// accumulated since the previous [`Schedule::take_timings`].
     pub fn set_timing(&mut self, enabled: bool) {
-        self.timings = enabled.then(|| NodeTimings::new(self.systems.len()));
+        if enabled != self.timings.is_some() {
+            self.timings = enabled.then(|| NodeTimings::new(self.systems.len()));
+        }
     }
 
     /// Returns the wall time accumulated since the previous call and
@@ -683,7 +687,7 @@ impl Schedule {
         if self.timings.is_some() {
             // Registration changed: re-index the accumulator (pending
             // samples are dropped, the next frame starts clean).
-            self.set_timing(true);
+            self.timings = Some(NodeTimings::new(self.systems.len()));
         }
     }
 
@@ -921,9 +925,14 @@ mod tests {
         schedule.add_system(NamedNoop("second", SystemAccess::new()));
         let resources = Resources::new();
         schedule.run(&resources);
+        schedule.set_timing(true);
         let timings = schedule.take_timings().expect("timing on");
         let names: Vec<_> = timings.systems.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, vec!["first", "second"]);
+        assert!(
+            timings.total > Duration::ZERO,
+            "re-enabling keeps the pending samples"
+        );
         schedule.set_timing(false);
         assert_eq!(schedule.take_timings(), None);
     }
