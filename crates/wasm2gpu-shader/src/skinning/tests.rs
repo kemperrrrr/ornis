@@ -109,7 +109,9 @@ fn skin_kernel_falls_back_like_the_cpu_path() {
 fn sqrt_approx_matches_the_std_reference_across_the_normal_range() {
     // Blended-normal squared lengths sit near 1, but non-uniform joint
     // scales can move them orders of magnitude either way.
-    for value in [1.0e-8_f32, 0.25, 1.0, 2.0, 3.999, 4.0, 100.0, 65_536.0, 1.0e12] {
+    for value in [
+        1.0e-8_f32, 0.25, 1.0, 2.0, 3.999, 4.0, 100.0, 65_536.0, 1.0e12,
+    ] {
         let expected = value.sqrt();
         let relative_error = (sqrt_approx(value) - expected).abs() / expected;
         assert!(

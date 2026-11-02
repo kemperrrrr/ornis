@@ -150,10 +150,7 @@ impl SkinGpu {
                 vertex[NORMAL_LANE + 2],
             ]);
         }
-        Some(SkinOutput {
-            positions,
-            normals,
-        })
+        Some(SkinOutput { positions, normals })
     }
 }
 

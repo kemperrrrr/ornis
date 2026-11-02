@@ -168,10 +168,7 @@ impl SyntheticSkin {
             &self.positions,
             &self.normals,
         );
-        SkinOutput {
-            positions,
-            normals,
-        }
+        SkinOutput { positions, normals }
     }
 
     /// This scene packed for the guest kernel; `None` only on `u32` overflow.

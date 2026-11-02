@@ -141,7 +141,8 @@ fn time_cpu(scene: &SyntheticSkin, timing: Timing) -> Vec<Duration> {
         let started = Instant::now();
         let skinned = scene.cpu_skin();
         let elapsed = started.elapsed();
-        std::hint::black_box(&skinned);
+        std::hint::black_box(&skinned.positions);
+        std::hint::black_box(&skinned.normals);
         if run >= timing.warmup {
             samples.push(elapsed);
         }
