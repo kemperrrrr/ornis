@@ -37,6 +37,8 @@
 //! [`writer`] renders them. The translator lowers `syn` → IR and prints
 //! IR → WGSL, so each side is testable without the other.
 
+#![warn(missing_docs)]
+
 pub mod ir;
 pub mod pack_lane;
 pub mod words;
@@ -50,22 +52,39 @@ use syn::visit::Visit;
 /// Shader primitive types: the DSL's closed type world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderType {
+    /// 32-bit float scalar.
     F32,
+    /// 32-bit signed integer scalar.
     I32,
+    /// 32-bit unsigned integer scalar.
     U32,
+    /// Two-component `f32` vector.
     Vec2,
+    /// Three-component `f32` vector.
     Vec3,
+    /// Four-component `f32` vector.
     Vec4,
+    /// 3x3 `f32` matrix.
     Mat3,
+    /// 4x4 `f32` matrix.
     Mat4,
+    /// Two-component `u32` vector.
     UVec2,
+    /// Three-component `u32` vector.
     UVec3,
+    /// Four-component `u32` vector.
     UVec4,
+    /// Two-component `i32` vector.
     IVec2,
+    /// Three-component `i32` vector.
     IVec3,
+    /// Four-component `i32` vector.
     IVec4,
+    /// Two-component `bool` vector.
     BVec2,
+    /// Three-component `bool` vector.
     BVec3,
+    /// Four-component `bool` vector.
     BVec4,
 }
 
@@ -129,43 +148,81 @@ const TERNARY_ARITY: usize = 3;
 /// Several Rust spellings can share one variant (`mix`/`lerp`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderBuiltin {
+    /// `abs(x)`.
     Abs,
+    /// `sqrt(x)`.
     Sqrt,
+    /// `sin(x)`.
     Sin,
+    /// `cos(x)`.
     Cos,
+    /// `tan(x)`.
     Tan,
+    /// `asin(x)`.
     Asin,
+    /// `acos(x)`.
     Acos,
+    /// `atan(x)`.
     Atan,
+    /// `floor(x)`.
     Floor,
+    /// `ceil(x)`.
     Ceil,
+    /// `round(x)`.
     Round,
+    /// `fract(x)`.
     Fract,
+    /// `exp(x)`.
     Exp,
+    /// `log(x)`.
     Log,
+    /// `normalize(v)`.
     Normalize,
+    /// `length(v)`.
     Length,
+    /// `saturate(x)` (clamped to `[0, 1]`).
     Saturate,
+    /// `transpose(m)`.
     Transpose,
+    /// `determinant(m)`.
     Determinant,
+    /// `inverse(m)`.
     Inverse,
+    /// `dpdx(x)`.
     Dpdx,
+    /// `dpdy(x)`.
     Dpdy,
+    /// `fwidth(x)`.
     Fwidth,
+    /// `sign(x)`.
     Sign,
+    /// `dot(v, v)` for squared length (emitted as `dot`).
     LengthSq,
+    /// `dot(a, b)`.
     Dot,
+    /// `cross(a, b)`.
     Cross,
+    /// `pow(x, y)`.
     Pow,
+    /// `max(a, b)`.
     Max,
+    /// `min(a, b)`.
     Min,
+    /// `step(edge, x)`.
     Step,
+    /// `reflect(i, n)`.
     Reflect,
+    /// `atan2(y, x)`.
     Atan2,
+    /// `mix(a, b, t)` (`lerp` in Rust).
     Mix,
+    /// `smoothstep(lo, hi, x)`.
     Smoothstep,
+    /// `clamp(x, lo, hi)`.
     Clamp,
+    /// `select(f, t, cond)`.
     Select,
+    /// `refract(i, n, eta)`.
     Refract,
 }
 

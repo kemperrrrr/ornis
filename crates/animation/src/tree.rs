@@ -309,6 +309,12 @@ impl FreeformCache {
     }
 }
 
+/// Per-entity cursors for a [`SkelTree`] lane: parameter values plus the
+/// player/cursor state of every clip, machine, switch and freeform node.
+///
+/// The vectors are aligned with the node order of the installed tree, so
+/// rebuilding the tree re-aligns them; a raw lane write that changes the
+/// point count reads as bad skin.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SkelTreePlayer {

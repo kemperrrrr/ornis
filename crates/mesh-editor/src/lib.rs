@@ -14,6 +14,8 @@
 //! subdivision upstream is midpoint — both gaps are closed on the Ornis
 //! side, not by patching the kernel.
 
+#![warn(missing_docs)]
+
 pub mod bridge;
 pub mod dirty;
 pub mod editable;
