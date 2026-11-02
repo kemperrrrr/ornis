@@ -50,8 +50,8 @@ fn usage(code: i32) -> ! {
          editor [--skip-wasm] [--editor-dir <path>]\n      \
          Build the WASM viewport (wasm-pack) and launch the engine\n      \
          with the remote editor at http://127.0.0.1:3420\n      \
-         --skip-wasm    reuse the existing editor/pkg build\n      \
-          --editor-dir   editor frontend directory (default: <workspace>/editor)\n  \
+         --skip-wasm    reuse the existing editor-v2/pkg build\n      \
+          --editor-dir   editor frontend directory (default: <workspace>/editor-v2)\n  \
            e2e [--port 3420] [--out <dir>]\n      \
           Manual live-pixel e2e for the WASM viewport (honest SKIP\n      \
           without a browser/WebGPU adapter; see docs/WASM_PIXEL_E2E.md)\n  \
@@ -174,7 +174,7 @@ fn editor(args: &[String]) {
     let root = workspace_root();
     let editor_dir = editor_dir
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("editor"));
+        .unwrap_or_else(|| root.join("editor-v2"));
     let editor_dir = std::fs::canonicalize(&editor_dir).unwrap_or_else(|e| {
         eprintln!(
             "xtask: editor dir '{}' not found: {e}",
@@ -191,7 +191,7 @@ fn editor(args: &[String]) {
             eprintln!(
                 "xtask: wasm-pack not found in PATH.\n\
                  Install it with:  cargo install wasm-pack\n\
-                 (or pass --skip-wasm to reuse the existing editor/pkg build)"
+                 (or pass --skip-wasm to reuse the existing editor-v2/pkg build)"
             );
             exit(1);
         }

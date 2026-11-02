@@ -35,11 +35,12 @@ ORNIS_E2E_INSTALL=1 cargo xtask e2e   # allow browser download
 ```
 
 The task builds the viewport exactly like `cargo xtask editor`
-(`wasm-pack build crates/wasm --target web --out-dir editor/pkg`), starts
-`cargo run --features editor-only` (fixed port 3420), polls `/api/scene`,
-captures `frame.png` of the `#bevy` canvas (`editor/index.html`), and —
-when ImageMagick `compare` exists and `editor/e2e_golden.png` is present —
-reports the RMSE. Any missing capability is an honest `SKIP` (exit 0).
+(`wasm-pack build crates/wasm --target web --out-dir editor-v2/pkg`), starts
+`cargo run --features editor-only` (fixed port 3420, `editor-v2/` frontend),
+polls `/api/scene`, captures `frame.png` of the `#canvas` canvas
+(`editor-v2/index.html?nowelcome`), and — when ImageMagick `compare` exists
+and `editor-v2/e2e_golden.png` is present — reports the RMSE. Any missing
+capability is an honest `SKIP` (exit 0).
 
 ## Golden tolerances (never bytewise)
 
@@ -47,10 +48,10 @@ reports the RMSE. Any missing capability is an honest `SKIP` (exit 0).
 - mean absolute diff ≤ 2/255,
 - mismatched-pixel fraction ≤ 0.5%.
 
-First run bootstraps the golden: with no `editor/e2e_golden.png` the
+First run bootstraps the golden: with no `editor-v2/e2e_golden.png` the
 harness stores the screenshot under `--out` for manual review; promote it
-to `editor/e2e_golden.png` only after visual sign-off. Re-render with the
-default orbit camera (`viewport.js` → `start_renderer('bevy')`) and a
+to `editor-v2/e2e_golden.png` only after visual sign-off. Re-render with the
+default orbit camera (`viewport.js` → `start_renderer('canvas')`) and a
 fixed 800×600 viewport so runs are comparable.
 
 ## Known gap 2026-09-20: headless canvas renders solid red

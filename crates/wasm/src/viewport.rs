@@ -54,9 +54,9 @@ impl ModeRequest {
 /// Minimum grid step on screen for the overlay wire state.
 const MIN_GRID_STEP_PX: f32 = 48.0;
 
-/// Wire state for the grid overlay and cursor readout, shared by the live
-/// `editor/` overlay and the `editor-v2` mock (`applyViewState` accepts this
-/// exact shape). In `perspective3d` the plane fields are all `null`.
+/// Wire state for the grid overlay and cursor readout, consumed by the live
+/// editor overlays (`editor/` and `editor-v2/`; both accept this exact
+/// shape). In `perspective3d` the plane fields are all `null`.
 #[derive(serde::Serialize)]
 struct ViewportStateWire {
     /// `"perspective3d"` or `"plane2d"`.

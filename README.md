@@ -30,9 +30,10 @@ cargo xtask editor        # или: cargo editor
 - `wasm-pack` (сборка `crates/wasm`)
 - Chrome/Edge с WebGPU (на macOS работает из коробки)
 
-Что происходит при запуске: xtask собирает WASM-пакет в `editor/pkg/`,
+Что происходит при запуске: xtask собирает WASM-пакет в `editor-v2/pkg/`,
 запускает бинарь `ornis` в режиме `editor-only`, который поднимает
-HTTP-сервер на порту 3420 и раздаёт фронтенд из `editor/`.
+HTTP-сервер на порту 3420 и раздаёт фронтенд из `editor-v2/`. Легаси-фронтенд
+`editor/` остаётся доступен явно: `cargo xtask editor --editor-dir editor`.
 
 Нативный режим (`cargo run` без фичи) сервер **не поднимает** — движку
 редактор не нужен; браузерный редактор рядом с нативным окном доступен
@@ -126,7 +127,8 @@ cargo xtask quality            # регресс-гейт: падает толь�
 | Путь | Назначение | Статус |
 |---|---|---|
 | `src/` | Бинарь `ornis`: нативный режим (winit + wgpu) и `editor-only` (HTTP-сервер) | Активен |
-| `editor/` | Фронтенд редактора: `index.html`, `css/`, `js/`, `icons/`, `scene.ron` | Активен |
+| `editor-v2/` | Фронтенд редактора по умолчанию: welcome-поток, live ECS, WASM-canvas | Активен |
+| `editor/` | Легаси-фронтенд редактора (REST/WS + WASM-canvas) | Доступен по `--editor-dir editor` |
 | `xtask/` | Команды `cargo xtask`: `editor`, `e2e`, `quality`, `fuzz`, `mutants` | Активен |
 | `crates/core` | Sparse Sets, Entity (генерационные индексы), диспетчер, Command Sync | Активен |
 | `crates/physics` | Физика: трейт `PhysicsEngine`, `BroadPhaseKind::Auto` (SAP/Grid/Tree + adaptive), GJK/EPA-формы (cylinder/cone/hull/TriMesh/heightfield/compound/round/halfspace), CCD, joints с limits/motors (rope/spring + обобщённый `JointMotor`: velocity/position/servo, force/acceleration), `RigidBody`, raycast/shapecast | Активен (вынесен из core в августе 2026) |
@@ -145,7 +147,7 @@ cargo xtask quality            # регресс-гейт: падает толь�
 > Удалено (август 2026): нативный UI-стек `crates/ui`, `crates/ui-blitz`,
 > `crates/ui-gosub`, `crates/ui-core`, `src/bin_blitz.rs` и локальные форки
 > `forks/` (blitz, boa_engine, icu_normalizer). Решение: писать собственный
-> отрисовщик фронтенда нецелесообразно — редактор живёт в браузере (`editor/`),
+> отрисовщик фронтенда нецелесообразно — редактор живёт в браузере (`editor-v2/`),
 > сцена рендерится через WASM/WebGPU. IPC-типы `UiCommand`/`GameEvent`
 > переехали в `crates/editor-backend/src/ipc.rs`. Планы и контекст — в git-истории.
 
@@ -194,10 +196,10 @@ cargo xtask quality            # регресс-гейт: падает толь�
 |---|---|---|
 | Desktop: winit + wgpu (Vulkan/Metal/DX12) | ✅ | `src/main.rs`, нативный режим |
 | WASM + WebGPU в браузере | ✅ | `crates/wasm`; `/api/scene` (без fallback — без сервера ошибка) проходит через `GameWorld` (browser replica)/`Engine`/прямое чтение лейн, затем `RenderFrame3D`; orbit-камера остаётся client-side |
-| Браузерный редактор: фронтенд (панели, иконки, раскладка) | ✅ | `editor/` отдаётся сервером; WASM-canvas рендерит живую сцену из `/api/scene` через единый runtime (без fallback), orbit-камера через InputState |
+| Браузерный редактор: фронтенд (панели, иконки, раскладка) | ✅ | `editor-v2/` отдаётся сервером по умолчанию (`editor/` — по `--editor-dir editor`); WASM-canvas рендерит живую сцену из `/api/scene` через единый runtime (без fallback), orbit-камера через InputState |
 | Браузерный редактор: связь с живым движком | ✅ | Единый `Engine/World/Schedule` (композиция `install_gameplay` + bridges): native showcase и `editor-only` — authoritative `GameWorld`, WASM — browser-реплика того же типа через serialization boundary; browser шлёт `BrowserInput`→`UiCommand::Input` по WS `POST /api/input` → `InputState::apply_snapshot`; `GameWorld` — один тип, два инстанса (authoritative + browser view без второго World-типа); `editor/scene.ron` (5 сфер) загружается при старте, `version` инкремент, `POST /api/command` `create_entity/destroy_entity/set_component`, `save_scene/load_scene`; события `CommandCompleted/error/scene_saved` в `/api/events` |
 | Сохранение/загрузка сцены (save/load) | ✅ | `save_scene`/`load_scene` через `POST /api/command` (опциональный `{"path": …}`, по умолчанию `editor/scene.ron`): мир сериализуется в RON и пишется атомарно (sibling `*.tmp` + rename), загрузка заменяет мир из файла; результаты — события `scene_saved {path, version}` / `scene_loaded {path, version, entity_count}` / `error` в `GET /api/events`. В UI — меню File → Save/Reload, результат в футере. WASM-canvas рендерит живую сцену: polling `/api/scene` (~1/с), при недоступности сервера — ошибка (требуется `cargo run --features editor-only`) |
-| Remote API (HTTP + WebSocket, порт 3420) | ✅ | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events?after=<sequence>`, WebSocket upgrade на `/api/events`, `POST /api/command`, статика из `editor/`. `POST /api/command` возвращает `request_id` + `accepted` ACK; engine-wrapped commands завершаются коррелированным `CommandCompleted`; snapshot endpoints получают transport `sequence`; `/api/events` хранит bounded replay window и сообщает `EventGap`; editor предпочитает WebSocket и откатывается к cursor polling; сервер отправляет heartbeat ping и normal close при shutdown. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
+| Remote API (HTTP + WebSocket, порт 3420) | ✅ | `GET /`, `GET /api/status`, `GET /api/scene`, `GET /api/events?after=<sequence>`, WebSocket upgrade на `/api/events`, `POST /api/command`, статика из `editor-v2/` (по умолчанию; `editor/` — по флагу). `POST /api/command` возвращает `request_id` + `accepted` ACK; engine-wrapped commands завершаются коррелированным `CommandCompleted`; snapshot endpoints получают transport `sequence`; `/api/events` хранит bounded replay window и сообщает `EventGap`; editor предпочитает WebSocket и откатывается к cursor polling; сервер отправляет heartbeat ping и normal close при shutdown. В режиме `editor-only` команды исполняются ECS-миром (`editor-world` поток); в нативном режиме сервер opt-in (`cargo run -- --remote-editor`), а команды там исполняет заглушка-счётчик в игровом цикле |
 | `GET /api/scene` (выгрузка сцены из живого ECS) | ✅ | полный снапшот: `version`, transport `sequence`, `entity_count`, сущности (id, генерация, имя, компоненты, transform/mesh/material), `lights`, `camera`, `ambient`; снапшот публикуется после каждой команды |
 | Нативный UI-крейт | 🗑️ | удалён (август 2026): `crates/ui*`, форки, vello/boa-стек; нативный режим рендерит 3D-сцену без UI-overlay |
 

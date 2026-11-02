@@ -175,7 +175,7 @@ fn fetch_scene(port: u16) -> Option<Vec<u8>> {
 }
 
 /// Screenshot `url` into `out_png`. `true` when the file appears.
-/// Waits for the `#bevy` canvas and lets it settle, so the shot pins a
+/// Waits for the `#canvas` canvas and lets it settle, so the shot pins a
 /// rendered frame rather than a blank viewport.
 fn screenshot(browser: &str, url: &str, out_png: &Path) -> bool {
     let status = if browser == "playwright-chromium" {
@@ -187,7 +187,7 @@ fn screenshot(browser: &str, url: &str, out_png: &Path) -> bool {
                 "--browser=chromium",
                 &format!("--viewport-size={VIEWPORT}"),
                 "--wait-for-selector",
-                "#bevy",
+                "#canvas",
                 "--wait-for-timeout",
                 "3000",
                 url,
@@ -220,7 +220,7 @@ fn screenshot(browser: &str, url: &str, out_png: &Path) -> bool {
 
 /// Compare `frame` against the golden (or bootstrap it). Always exit 0.
 fn compare_golden(root: &Path, frame: &Path) -> ! {
-    let golden = root.join("editor/e2e_golden.png");
+    let golden = root.join("editor-v2/e2e_golden.png");
     if !golden.is_file() {
         println!(
             "no {} yet — stored {} for manual review \
@@ -307,7 +307,11 @@ fn pixel_leg(port: u16, browser: &str, out_scene: &Path, out_frame: &Path) -> Re
         .map_err(|e| format!("cannot write {}: {e}", out_scene.display()))?;
 
     println!("capturing screenshot…");
-    if !screenshot(browser, &format!("http://127.0.0.1:{port}"), out_frame) {
+    if !screenshot(
+        browser,
+        &format!("http://127.0.0.1:{port}/?nowelcome"),
+        out_frame,
+    ) {
         return Err("screenshot failed (likely no WebGPU adapter)".to_string());
     }
     if !out_frame.is_file() {
@@ -400,7 +404,7 @@ pub fn e2e(args: &[String]) {
         skip("no wasm-pack");
     }
     let root = workspace_root();
-    let pkg = root.join("editor/pkg");
+    let pkg = root.join("editor-v2/pkg");
     println!("xtask: wasm-pack build crates/wasm --target web");
     let built = Command::new("wasm-pack")
         .arg("build")
@@ -418,7 +422,7 @@ pub fn e2e(args: &[String]) {
     }
 
     println!("xtask: starting editor server on :{port}…");
-    let mut server = spawn_server(&root, &root.join("editor"));
+    let mut server = spawn_server(&root, &root.join("editor-v2"));
     let out_scene = out.join("scene.json");
     let out_frame = out.join("frame.png");
     let result = pixel_leg(port, &browser, &out_scene, &out_frame);

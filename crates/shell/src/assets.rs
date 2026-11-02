@@ -1,12 +1,12 @@
 //! Editor assets behind the `ornis://app/…` custom scheme.
 //!
 //! Resolution order mirrors `editor_backend::remote::assets_root` (CLI
-//! `--editor-dir`, then `ORNIS_EDITOR_DIR`, then `<workspace>/editor`), so
+//! `--editor-dir`, then `ORNIS_EDITOR_DIR`, then `<workspace>/editor-v2`), so
 //! the shell loads exactly the frontend the browser mode would serve —
-//! both `editor/` and the future `editor-v2/` mockup, selected the same
-//! way. The difference is delivery: files are read from disk by the custom
-//! protocol handler instead of over loopback HTTP, and no localhost server
-//! is started in embedded mode.
+//! both `editor-v2/` (default) and the legacy `editor/` frontend, selected the
+//! same way. The difference is delivery: files are read from disk by the custom
+//! protocol handler instead of over loopback HTTP, and no localhost server is
+//! started in embedded mode.
 //!
 //! All mapping here is pure functions over explicit inputs (no ambient
 //! `std::env::args` reads), so scheme/path handling is unit-tested without
@@ -34,7 +34,7 @@ pub fn start_url() -> String {
 ///
 /// 1. `cli_dir` — the `--editor-dir <path>` CLI argument, when present;
 /// 2. `env_dir` — the `ORNIS_EDITOR_DIR` variable, when non-empty;
-/// 3. `<manifest_dir>/../../editor` — the workspace checkout default (this
+/// 3. `<manifest_dir>/../../editor-v2` — the workspace checkout default (this
 ///    crate lives at `crates/shell`, two levels below the root).
 ///
 /// The caller passes the already-read CLI/env values plus
@@ -52,7 +52,7 @@ pub fn resolve_editor_dir(
     {
         return PathBuf::from(dir);
     }
-    normalize_lexically(&manifest_dir.join("../../editor"))
+    normalize_lexically(&manifest_dir.join("../../editor-v2"))
 }
 
 /// Collapse `.`/`..`/duplicate separators without touching the filesystem.
@@ -192,11 +192,11 @@ mod tests {
         // An empty env value falls through to the workspace default.
         assert_eq!(
             resolve_editor_dir(None, Some(""), manifest),
-            PathBuf::from("/repo/editor")
+            PathBuf::from("/repo/editor-v2")
         );
         assert_eq!(
             resolve_editor_dir(None, None, manifest),
-            PathBuf::from("/repo/editor")
+            PathBuf::from("/repo/editor-v2")
         );
     }
 

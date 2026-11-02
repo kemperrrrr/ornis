@@ -23,6 +23,9 @@ editor_test.html
 /mutants.out/
 /mutants.out.old/
 
+# wasm-pack output for the editor viewport (rebuilt by `cargo xtask editor`)
+/editor-v2/pkg/
+
 # CodeGraph local knowledge-graph index (12 MB SQLite, rebuilt by `codegraph init`)
 .codegraph/
 
