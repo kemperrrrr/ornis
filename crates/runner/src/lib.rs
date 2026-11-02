@@ -404,6 +404,14 @@ impl GameApp {
         let stages = ctx.runtime.engine_mut().take_stage_timings();
         stats.on_frame(elapsed, work, &stages);
     }
+
+    /// Prints the collected `--stats` timings to stdout: a scripted perf
+    /// run captures the numbers from the process output.
+    fn print_stats_summary(ctx: &GameContext) {
+        if let Some(stats) = ctx.stats.as_ref() {
+            print!("{}", stats.summary());
+        }
+    }
 }
 
 /// Default procedural sphere resolution (matches the showcase): sector count.
@@ -618,6 +626,9 @@ impl ApplicationHandler for GameApp {
         if let Some(stats) = ctx.stats.as_mut().filter(|s| s.id() == window_id) {
             match event {
                 WindowEvent::CloseRequested => {
+                    // The collected timings leave with the window: print
+                    // them before the collector is dropped.
+                    print!("{}", stats.summary());
                     ctx.stats = None;
                     ctx.runtime.engine_mut().set_stage_timing(false);
                 }
@@ -628,6 +639,7 @@ impl ApplicationHandler for GameApp {
         }
         match event {
             WindowEvent::CloseRequested => {
+                Self::print_stats_summary(ctx);
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
@@ -753,6 +765,7 @@ impl ApplicationHandler for GameApp {
             Self::process_remote_commands(ctx);
             if let Some(left) = ctx.frames_left.as_mut() {
                 if *left == 0 {
+                    Self::print_stats_summary(ctx);
                     event_loop.exit();
                     return;
                 }

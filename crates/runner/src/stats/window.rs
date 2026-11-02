@@ -150,6 +150,11 @@ impl StatsWindow {
         self.redraw_if_due(Instant::now());
     }
 
+    /// The collected timings as text (see [`StatsCollector::summary`]).
+    pub fn summary(&self) -> String {
+        self.collector.summary()
+    }
+
     /// Redraws and presents the panel when the collector refreshed.
     fn redraw_if_due(&mut self, now: Instant) -> Option<()> {
         self.collector.refresh(now).then_some(())?;

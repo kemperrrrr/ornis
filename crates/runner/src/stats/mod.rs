@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use ornis_core::{ScheduleTimings, Stage};
 use ornis_schedule::FrameHistory;
 
+use self::panel::format_ms;
+
 pub(crate) use window::StatsWindow;
 
 /// Environment switch equivalent to `--stats`.
@@ -71,6 +73,9 @@ pub(crate) struct StatsCollector {
     pub work: FrameHistory,
     /// Stage rows first, then the heaviest systems.
     pub rows: Vec<TimingRow>,
+    /// Frames recorded since the run started (the histories keep only the
+    /// last [`HISTORY_FRAMES`]).
+    pub total_frames: u64,
     pending: Vec<Accum>,
     pending_frames: u32,
     last_refresh: Option<Instant>,
@@ -82,6 +87,7 @@ impl Default for StatsCollector {
             frames: FrameHistory::new(HISTORY_FRAMES),
             work: FrameHistory::new(HISTORY_FRAMES),
             rows: Vec::new(),
+            total_frames: 0,
             pending: Vec::new(),
             pending_frames: 0,
             last_refresh: None,
@@ -101,6 +107,7 @@ impl StatsCollector {
         self.frames.push(interval);
         self.work.push(work);
         self.pending_frames += 1;
+        self.total_frames += 1;
         for (stage, timings) in stages {
             self.add(stage.name().to_owned(), timings.total);
             for (system, elapsed) in &timings.systems {
@@ -157,6 +164,32 @@ impl StatsCollector {
     pub fn worst_frame(&self) -> Duration {
         self.frames.worst_within(WORST_WINDOW)
     }
+
+    /// Text summary of the collected timings, one line per metric: the
+    /// wall frame time (mean and worst), the runner's CPU work time and
+    /// the per-stage/system rows of the last refresh.
+    ///
+    /// Printed to stdout when a `--stats` run ends, so a scripted perf
+    /// run captures the numbers instead of reading the window.
+    pub fn summary(&self) -> String {
+        let mut out = format!(
+            "ornis-stats frames={} buffered={} frame_avg_ms={} frame_worst_ms={} work_avg_ms={}\n",
+            self.total_frames,
+            self.frames.len(),
+            format_ms(self.frames.average()),
+            format_ms(self.worst_frame()),
+            format_ms(self.work.average()),
+        );
+        for row in &self.rows {
+            out.push_str(&format!(
+                "ornis-stats {} avg_ms={} max_ms={}\n",
+                row.label,
+                format_ms(row.avg),
+                format_ms(row.max),
+            ));
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +242,17 @@ mod tests {
         assert_eq!(c.frames.average(), ms(32));
         assert_eq!(c.worst_frame(), ms(48));
         assert_eq!(c.work.average(), ms(20));
+    }
+
+    #[test]
+    fn summary_reports_frame_times_and_rows() {
+        let mut c = StatsCollector::default();
+        c.record(ms(16), ms(10), &[]);
+        c.record(ms(48), ms(30), &[]);
+        let summary = c.summary();
+        assert!(summary.contains("frames=2"), "{summary}");
+        assert!(summary.contains("frame_avg_ms=32.00"), "{summary}");
+        assert!(summary.contains("frame_worst_ms=48.00"), "{summary}");
+        assert!(summary.contains("work_avg_ms=20.00"), "{summary}");
     }
 }
