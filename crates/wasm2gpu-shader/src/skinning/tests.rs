@@ -114,7 +114,17 @@ fn sqrt_approx_matches_the_std_reference_across_the_normal_range() {
     // Blended-normal squared lengths sit near 1, but non-uniform joint
     // scales can move them orders of magnitude either way.
     for value in [
-        1.0e-45_f32, 1.0e-8, 0.25, 1.0, 2.0, 3.999, 4.0, 100.0, 65_536.0, 1.0e12, f32::MAX,
+        1.0e-45_f32,
+        1.0e-8,
+        0.25,
+        1.0,
+        2.0,
+        3.999,
+        4.0,
+        100.0,
+        65_536.0,
+        1.0e12,
+        f32::MAX,
     ] {
         let expected = value.sqrt();
         let relative_error = (sqrt_approx(value) - expected).abs() / expected;
@@ -129,6 +139,8 @@ fn sqrt_approx_matches_the_std_reference_across_the_normal_range() {
 fn sqrt_approx_terminates_on_non_finite_inputs() {
     assert!(sqrt_approx(f32::INFINITY).is_infinite());
     assert!(sqrt_approx(f32::NAN).is_nan());
+    assert!(sqrt_approx(-1.0).is_nan());
+    assert_eq!(sqrt_approx(0.0), 0.0);
 }
 
 /// Joint scale whose square overflows `f32` (the review's hang scenario).
@@ -152,11 +164,12 @@ fn skin_kernel_terminates_when_the_blended_normal_overflows() {
     // emit the blended normal as-is instead of spinning in the sqrt.
     let out = run_skin_over(&overflow_palette());
     let expected = 0.5 + 0.5 * OVERFLOW_SCALE;
-    let normal_x = out[1 * 6 + 3];
+    let blend_vertex = 1;
+    let normal_x = out[blend_vertex * 6 + 3];
     assert!(
         (normal_x - expected).abs() / expected < TOL,
         "expected unscaled normal x {expected}, got {normal_x}"
     );
-    assert_eq!(out[1 * 6 + 4], 0.0);
-    assert_eq!(out[1 * 6 + 5], 0.0);
+    assert_eq!(out[blend_vertex * 6 + 4], 0.0);
+    assert_eq!(out[blend_vertex * 6 + 5], 0.0);
 }

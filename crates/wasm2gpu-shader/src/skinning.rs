@@ -172,12 +172,19 @@ fn normal_row(base: u32, x: f32, y: f32, z: f32, row: u32) -> f32 {
 /// The value is reduced by powers of four into `[1, 4)`, Newton-iterated
 /// from a secant seed, then scaled back by powers of two.
 ///
-/// Total over all inputs: NaN yields NaN and `+inf` yields `+inf`, and
-/// the reduction loops are step-capped ([`SQRT_RANGE_STEPS`]), so even a
-/// stray non-finite value terminates. The kernel still guards finiteness
-/// at the call site; accuracy is only promised for positive finite input.
+/// Total over all inputs, mirroring the std edge cases (negative→NaN,
+/// NaN→NaN, `±0`→`±0`, `+inf`→`+inf`); the reduction loops are also
+/// step-capped ([`SQRT_RANGE_STEPS`]) as defense in depth. The kernel
+/// still guards finiteness at the call site; accuracy is only promised
+/// for positive finite input.
 #[inline(always)]
 fn sqrt_approx(value: f32) -> f32 {
+    if value < 0.0 {
+        return f32::NAN;
+    }
+    if value.is_nan() || value.is_infinite() || value == 0.0 {
+        return value;
+    }
     let mut mantissa = value;
     let mut scale = 1.0_f32;
     let mut range_step = 0;
