@@ -46,6 +46,36 @@ pub fn upload_custom_mesh(
     })
 }
 
+/// Shared validation of pre-converted vertex rows + a triangle index list.
+///
+/// # Errors
+///
+/// [`crate::mesh_upload::UploadError::EmptyMesh`] for an empty side,
+/// [`crate::mesh_upload::UploadError::InvalidMesh`] for a non-triangle
+/// count or an index past `vertex_count`.
+pub(crate) fn validate_rows(
+    vertex_count: usize,
+    indices: &[u32],
+) -> Result<(), crate::mesh_upload::UploadError> {
+    use crate::mesh_upload::UploadError;
+    use ornis_mesh_editor::MeshError;
+    if vertex_count == 0 || indices.is_empty() {
+        return Err(UploadError::EmptyMesh);
+    }
+    if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
+        return Err(UploadError::InvalidMesh(
+            MeshError::IndexCountNotMultipleOfThree,
+        ));
+    }
+    if indices
+        .iter()
+        .any(|index| (*index as usize) >= vertex_count)
+    {
+        return Err(UploadError::InvalidMesh(MeshError::IndexOutOfBounds));
+    }
+    Ok(())
+}
+
 /// Upload interleaved [`SkinnedVertex`] rows as their own [`Mesh`].
 ///
 /// GPU-draw path for [`SkinningMode::Gpu`](ornis_animation::SkinningMode)
@@ -66,22 +96,7 @@ pub fn upload_skinned_mesh(
     vertices: &[SkinnedVertex],
     indices: &[u32],
 ) -> Result<Mesh, crate::mesh_upload::UploadError> {
-    use crate::mesh_upload::UploadError;
-    use ornis_mesh_editor::MeshError;
-    if vertices.is_empty() || indices.is_empty() {
-        return Err(UploadError::EmptyMesh);
-    }
-    if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
-        return Err(UploadError::InvalidMesh(
-            MeshError::IndexCountNotMultipleOfThree,
-        ));
-    }
-    if indices
-        .iter()
-        .any(|index| (*index as usize) >= vertices.len())
-    {
-        return Err(UploadError::InvalidMesh(MeshError::IndexOutOfBounds));
-    }
+    validate_rows(vertices.len(), indices)?;
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("skinned mesh vertex buffer"),
         contents: bytemuck::cast_slice(vertices),
@@ -120,22 +135,7 @@ pub fn upload_vertex_rows(
     vertices: &[Vertex],
     indices: &[u32],
 ) -> Result<Mesh, crate::mesh_upload::UploadError> {
-    use crate::mesh_upload::UploadError;
-    use ornis_mesh_editor::MeshError;
-    if vertices.is_empty() || indices.is_empty() {
-        return Err(UploadError::EmptyMesh);
-    }
-    if !indices.len().is_multiple_of(TRIANGLE_VERTS) {
-        return Err(UploadError::InvalidMesh(
-            MeshError::IndexCountNotMultipleOfThree,
-        ));
-    }
-    if indices
-        .iter()
-        .any(|index| (*index as usize) >= vertices.len())
-    {
-        return Err(UploadError::InvalidMesh(MeshError::IndexOutOfBounds));
-    }
+    validate_rows(vertices.len(), indices)?;
     let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("custom mesh vertex buffer"),
         contents: bytemuck::cast_slice(vertices),
@@ -520,14 +520,13 @@ impl Renderer3D {
     /// validation, or GPU entries without interleaved rows, are skipped
     /// (no sphere stub, no invented geometry).
     ///
-    /// Caching: per-frame re-upload (correctness fallback). CPU-side
-    /// conversion is already deduplicated upstream by the extraction's
-    /// [`SoupCache`](crate::mesh_upload::SoupCache) (identical soups
-    /// convert once per frame); the GPU buffers here are rebuilt every
-    /// frame instead of keyed across frames. A cross-frame GPU cache
-    /// (content-hash → shared buffers with eviction) is the follow-up —
-    /// it needs buffer sharing plus a growth bound this change
-    /// deliberately does not introduce.
+    /// Caching: GPU buffers are kept per entity across frames by the
+    /// renderer's custom-mesh cache (`mesh_cache`): unchanged contents
+    /// skip the upload, changed contents that fit go through
+    /// `queue.write_buffer`, only growth reallocates, and entities not
+    /// staged this call are evicted. Call once per frame and submit the
+    /// result before the next call (the next call rewrites the same
+    /// buffers).
     ///
     /// Deterministic: output order matches `entries` order (dense lane
     /// order); no randomness. The caller uploads
@@ -571,6 +570,8 @@ impl Renderer3D {
         // One cursor keeps handles and validity aligned across CPU entries.
         let mut palette_cursor = 0usize;
         let mut staged = Vec::with_capacity(entries.len());
+        let mut cache = write_lock(&self.custom_mesh_cache);
+        cache.begin_frame();
         for (entry, bytes) in entries.iter().zip(&palette_bytes) {
             let (handle, palette_motion_valid) = match bytes {
                 Some(_) => {
@@ -592,15 +593,10 @@ impl Renderer3D {
                 matches!(draw, SkinnedDraw::Gpu(_)),
                 palette_motion_valid,
             );
-            let mesh = match draw {
-                SkinnedDraw::Gpu(_) => match entry.skinned_gpu_vertices() {
-                    Some(rows) => upload_skinned_mesh(device, &rows, &entry.indices),
-                    None => {
-                        self.invalidate_skin_palette_history(entry.entity);
-                        continue;
-                    }
-                },
-                SkinnedDraw::Cpu => upload_vertex_rows(device, &entry.vertices, &entry.indices),
+            let gpu_draw = matches!(draw, SkinnedDraw::Gpu(_));
+            let Some(mesh) = cache.stage_entry(device, queue, entry, gpu_draw) else {
+                self.invalidate_skin_palette_history(entry.entity);
+                continue;
             };
             let Ok(mesh) = mesh else {
                 if entry.skinning.is_gpu() {
@@ -617,6 +613,7 @@ impl Renderer3D {
                 shadow,
             });
         }
+        cache.end_frame();
         staged
     }
 

@@ -38,6 +38,7 @@ mod forward;
 mod gbuffer;
 mod ibl_bind;
 mod lights;
+mod mesh_cache;
 mod meshes;
 mod post;
 mod shadows;
@@ -420,6 +421,9 @@ pub struct Renderer3D {
     /// CPU shadow of the previous frame's palettes keyed by stable entity
     /// identity; palette-slot reordering cannot borrow another skin's pose.
     previous_skin_palettes: std::sync::RwLock<HashMap<Entity, Vec<u8>>>,
+    /// Cross-frame per-entity GPU buffers for staged custom / skinned
+    /// meshes (see `mesh_cache`).
+    custom_mesh_cache: std::sync::RwLock<mesh_cache::CustomMeshCache>,
     /// Capacity of [`Renderer3D::palette_buffer`] in palette slots; grows
     /// on demand like the per-object buffer.
     max_palettes: std::sync::atomic::AtomicU32,

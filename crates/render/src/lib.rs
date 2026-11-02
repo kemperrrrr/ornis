@@ -295,7 +295,8 @@ pub use ornis_core::{OPENPBR_MATERIAL_SIZE, OPENPBR_MATERIAL_VEC4_COUNT, OpenPBR
 /// `ornis_core` re-exports for systems.
 pub use ornis_schedule::OrderError;
 pub use render_backend::{
-    RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+    NO_VSYNC_ENV, RenderBackend, RenderBackendConfig, RenderContext, create_render_backend,
+    present_mode_for, surface_present_mode,
 };
 pub use renderer::{
     AoBlurInputs, AoRawInputs, BlendMode, CameraUniform, CompositeInputs, CompositePass,
