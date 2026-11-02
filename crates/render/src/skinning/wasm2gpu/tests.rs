@@ -7,6 +7,7 @@ use ornis_animation::SkinningMode;
 
 use super::SkinGpu;
 use super::SkinInputs;
+use super::SkinOutput;
 use super::SyntheticSkin;
 use super::lower_guest;
 use super::synthetic_skin;
@@ -128,17 +129,21 @@ fn second_instance(mut scene: SyntheticSkin) -> SyntheticSkin {
     scene
 }
 
-fn assert_skin_parity(
-    label: &str,
-    guest: (Vec<[f32; 3]>, Vec<[f32; 3]>),
-    cpu: (Vec<[f32; 3]>, Vec<[f32; 3]>),
-) {
-    assert_eq!(guest.0.len(), cpu.0.len(), "{label}: vertex count");
-    for index in 0..cpu.0.len() {
+fn assert_skin_parity(label: &str, guest: SkinOutput, cpu: SkinOutput) {
+    let SkinOutput {
+        positions: guest_pos,
+        normals: guest_nrm,
+    } = guest;
+    let SkinOutput {
+        positions: cpu_pos,
+        normals: cpu_nrm,
+    } = cpu;
+    assert_eq!(guest_pos.len(), cpu_pos.len(), "{label}: vertex count");
+    for index in 0..cpu_pos.len() {
         let position_drift =
-            (Vec3::from_array(guest.0[index]) - Vec3::from_array(cpu.0[index])).length();
+            (Vec3::from_array(guest_pos[index]) - Vec3::from_array(cpu_pos[index])).length();
         let normal_drift =
-            (Vec3::from_array(guest.1[index]) - Vec3::from_array(cpu.1[index])).length();
+            (Vec3::from_array(guest_nrm[index]) - Vec3::from_array(cpu_nrm[index])).length();
         assert!(
             position_drift < CPU_GPU_TOLERANCE,
             "{label}: vertex {index} position drifts {position_drift}"
@@ -176,5 +181,5 @@ fn guest_skin_matches_cpu_skin_for_two_instances() {
         assert_skin_parity(label, guest, scene.cpu_skin());
     }
     // The two instances really are posed differently (no shared-state fluke).
-    assert_ne!(first.cpu_skin().0, second.cpu_skin().0);
+    assert_ne!(first.cpu_skin().positions, second.cpu_skin().positions);
 }

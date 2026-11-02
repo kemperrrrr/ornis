@@ -14,6 +14,8 @@ mod lower;
 
 pub use bench::run_skin_ab;
 pub(crate) use data::SkinInputs;
+#[cfg(test)]
+pub(crate) use data::SkinOutput;
 pub(crate) use data::SyntheticSkin;
 pub(crate) use data::synthetic_skin;
 pub(crate) use gpu::SkinGpu;

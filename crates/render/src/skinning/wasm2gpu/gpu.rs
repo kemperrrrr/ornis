@@ -11,6 +11,8 @@ use ornis_wasm2gpu_testkit::gpu_buffer;
 use ornis_wasm2gpu_testkit::map_bytes;
 
 use super::SkinInputs;
+#[cfg(test)]
+use super::SkinOutput;
 
 /// Storage binding of the joint palette lanes.
 const PALETTE_BINDING: u32 = 0;
@@ -124,7 +126,7 @@ impl SkinGpu {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         inputs: &SkinInputs,
-    ) -> Option<(Vec<[f32; 3]>, Vec<[f32; 3]>)> {
+    ) -> Option<SkinOutput> {
         self.prepare(queue, inputs);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("wasm2gpu skinning encoder"),
@@ -148,7 +150,10 @@ impl SkinGpu {
                 vertex[NORMAL_LANE + 2],
             ]);
         }
-        Some((positions, normals))
+        Some(SkinOutput {
+            positions,
+            normals,
+        })
     }
 }
 

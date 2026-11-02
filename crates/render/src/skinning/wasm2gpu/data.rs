@@ -150,16 +150,28 @@ pub(crate) struct SyntheticSkin {
     pub(crate) weights: Vec<[f32; MAX_INFLUENCES]>,
 }
 
+/// One skinned vertex stream: positions and normals in lockstep.
+pub(crate) struct SkinOutput {
+    /// Skinned positions, one per input vertex.
+    pub(crate) positions: Vec<[f32; 3]>,
+    /// Skinned unit normals, one per input vertex.
+    pub(crate) normals: Vec<[f32; 3]>,
+}
+
 impl SyntheticSkin {
     /// The CPU reference skin of this scene (`ornis_animation::skin_vertices`).
-    pub(crate) fn cpu_skin(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
-        ornis_animation::skin_vertices(
+    pub(crate) fn cpu_skin(&self) -> SkinOutput {
+        let (positions, normals) = ornis_animation::skin_vertices(
             &self.palette,
             &self.joints,
             &self.weights,
             &self.positions,
             &self.normals,
-        )
+        );
+        SkinOutput {
+            positions,
+            normals,
+        }
     }
 
     /// This scene packed for the guest kernel; `None` only on `u32` overflow.
