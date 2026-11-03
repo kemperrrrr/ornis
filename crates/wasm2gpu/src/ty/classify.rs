@@ -1,6 +1,6 @@
 //! Import name classification.
 
-use super::{Elem, Imp, Spec, symbols};
+use super::{Imp, symbols};
 
 /// Classify a toy import. `None` means the name is not a gpu opcode we lower.
 pub(crate) fn classify(name: &str) -> Option<Imp> {

@@ -135,6 +135,7 @@ fn find_atomic_storage(
     group: u32,
     binding: u32,
 ) -> Option<naga::Handle<naga::GlobalVariable>> {
+    // qual:allow(dry, fragment) reason: "Atomic slots share the linear binding-key scan but have a distinct slot type and payload."
     let mut index = 0usize;
     while index < slots.len() {
         if slots[index].group == group && slots[index].binding == binding {

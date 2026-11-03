@@ -12,6 +12,7 @@ pub(super) fn storage_atomic_add(em: &mut Emit<'_, '_>) -> Result<(), TranslateE
     let binding = em.pop_imm()?;
     let group = em.pop_imm()?;
     let var = globals::atomic_storage(em.cx, group, binding)?;
+    // qual:allow(dry, fragment) reason: "Storage and workgroup atomics share Naga pointer setup while targeting different address spaces."
     let base = em.ex(Expression::GlobalVariable(var));
     let pointer = em.ex(Expression::Access { base, index });
     let ty = em.cx.uint;
@@ -61,6 +62,7 @@ pub(super) fn workgroup_atomic_add(em: &mut Emit<'_, '_>) -> Result<(), Translat
     let value = em.pop_uint()?;
     let index = em.pop_uint()?;
     let var = globals::workgroup_atomics(em.cx);
+    // qual:allow(dry, fragment) reason: "Storage and workgroup atomics share Naga pointer setup while targeting different address spaces."
     let base = em.ex(Expression::GlobalVariable(var));
     let pointer = em.ex(Expression::Access { base, index });
     let ty = em.cx.uint;
