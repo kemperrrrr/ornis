@@ -5,7 +5,7 @@ use ornis_wasm2gpu::translate;
 
 mod common;
 
-use common::{fragment, import, vertex, wasm, wgsl};
+use common::{fragment, import, wasm, wgsl};
 
 #[test]
 fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
