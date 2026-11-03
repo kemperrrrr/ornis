@@ -258,21 +258,6 @@ pub fn switch_selection(value: f32, len: usize) -> usize {
     }
 }
 
-/// Runtime state of one [`SkelTree`] (hot lane, on the skeleton root).
-///
-/// The only mutable state of the tree, and it is all cursor clocks plus
-/// host-set parameter values — no pose ever feeds back into the next
-/// frame, matching the phase-E contract.
-///
-/// `set_skel_tree` pairs `leaves[i]` with the i-th [`TreeNodeDef::Clip`]
-/// and mirrors that node's id in `leaves[i].clip`; the sampler reads the
-/// node's clip def on the cursor's clock. A hand-inserted player that lets
-/// the two diverge still samples correctly, but its cursor metadata lies —
-/// install through the facade or keep them aligned. The same pairing holds
-/// for `machines[i]` and the i-th [`TreeNodeDef::Machine`], and for
-/// `switches[i]` and the i-th [`TreeNodeDef::Switch`]: a lane whose counts
-/// diverge steps the matching prefix and reads as bad skin (`eval_tree`
-/// demands one cursor per machine or switch node).
 /// Triangle capacity of one [`FreeformCache`] — the Delaunay
 /// triangulation of `n` points has at most `2n − 5` triangles, so
 /// [`FREEFORM_MAX_POINTS`] points never need more.
@@ -309,12 +294,28 @@ impl FreeformCache {
     }
 }
 
-/// Per-entity cursors for a [`SkelTree`] lane: parameter values plus the
-/// player/cursor state of every clip, machine, switch and freeform node.
+/// Runtime state of one [`SkelTree`] (hot lane, on the skeleton root):
+/// parameter values plus the player/cursor state of every clip, machine,
+/// switch and freeform node.
+///
+/// The only mutable state of the tree, and it is all cursor clocks plus
+/// host-set parameter values — no pose ever feeds back into the next
+/// frame, matching the phase-E contract.
+///
+/// `set_skel_tree` pairs `leaves[i]` with the i-th [`TreeNodeDef::Clip`]
+/// and mirrors that node's id in `leaves[i].clip`; the sampler reads the
+/// node's clip def on the cursor's clock. A hand-inserted player that lets
+/// the two diverge still samples correctly, but its cursor metadata lies —
+/// install through the facade or keep them aligned. The same pairing holds
+/// for `machines[i]` and the i-th [`TreeNodeDef::Machine`], and for
+/// `switches[i]` and the i-th [`TreeNodeDef::Switch`]: a lane whose counts
+/// diverge steps the matching prefix and reads as bad skin (`eval_tree`
+/// demands one cursor per machine or switch node).
 ///
 /// The vectors are aligned with the node order of the installed tree, so
 /// rebuilding the tree re-aligns them; a raw lane write that changes the
-/// point count reads as bad skin.
+/// cursor/cache counts reads as bad skin — only `set_skel_tree` rebuilds
+/// the player.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct SkelTreePlayer {
