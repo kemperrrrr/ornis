@@ -101,6 +101,10 @@ pub enum Op {
     /// inputs, and may flush subnormals. Guests must not rely on the
     /// wasm-exact result.
     F32Sqrt,
+    /// Minimum of two `f32` values. Inputs must be finite for WGSL parity.
+    F32Min,
+    /// Maximum of two `f32` values. Inputs must be finite for WGSL parity.
+    F32Max,
     /// Convert an unsigned `i32` value to `f32`.
     F32ConvertI32U,
     /// Wrapping `i32` add.

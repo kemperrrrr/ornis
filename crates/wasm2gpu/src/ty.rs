@@ -100,12 +100,6 @@ pub(super) enum Imp {
     MathLength3,
     /// Normalize one `vec3<f32>` value.
     MathNormalize3,
-    /// Scalar minimum of two `f32` values.
-    MathMinF32,
-    /// Scalar maximum of two `f32` values.
-    MathMaxF32,
-    /// Clamp one `f32` value to ordered bounds.
-    MathClampF32,
     /// Atomic add to one word in a named storage buffer.
     StorageAtomicAddU32,
     /// Load one `u32` from workgroup scratch.
