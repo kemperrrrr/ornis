@@ -17,9 +17,9 @@
 
 - `gpu_culling.rs::cull_instances`: ручной WGSL, compaction + `atomicAdd` indirect args.
 - `renderer/clusters/wgsl.rs::assign_lights_to_clusters`: ручной WGSL, атомарные счётчики и storage-массивы.
-- `auto_exposure/wgsl.rs::build_histogram` и `adapt_exposure`: ручной WGSL; histogram использует workgroup memory, atomics, барьеры и `textureLoad`.
+- `auto_exposure/wgsl.rs::build_histogram` и `adapt_exposure`: ручной WGSL; histogram использует workgroup memory, atomics, барьеры и `textureLoad`. Именно этот путь сейчас используется в кадре: `AutoExposure::new` создаёт пайплайны из `auto_exposure_shaders()` → `histogram_wgsl()`/`adapt_wgsl()` в `auto_exposure.rs`; `Renderer3D::apply_exposure` в `renderer/post.rs` вызывает `self.auto_exposure.encode(...)` для `ExposureMode::Auto`.
+- `auto_exposure/wasm2gpu`: wasm2gpu-гости/харнесс — экспериментальный parity/A-B прототип, не production frame path. Модуль включён только при `test` или `test-util` (`#[cfg(any(test, feature = "test-util"))]` в `auto_exposure.rs`); его `GuestGpu` буферизует HDR на CPU и создаёт отдельные compute pipelines, но `AutoExposure::new` / `apply_exposure` его не выбирают.
 - `wasm2gpu-shader/src/skinning.rs::skin`: уже wasm2gpu после #229; production GPU-путь и parity-бенч/тест существуют.
-- Auto-exposure имеет и wasm2gpu-гостей/харнесс; это существующий прототип, отдельно нужно сверить, какой вариант реально выбран в штатном frame path.
 
 **Остальной GPU-код/генерация**
 
@@ -38,6 +38,6 @@
 
 ### Рекомендуемое разбиение следующих этапов
 
-Сначала расширить IR/ABI и snapshots на: произвольные entry points + stage IO/builtins; textureLoad/dimensions и нужные типы текстур; векторно-матричные builtins; затем atomics/workgroup memory/barriers. Каждый набор подтверждать минимальным гостем и naga WGSL snapshots. После этого переносить compute по одному проходу (culling, clusters, AO/bloom/TAA и auto-exposure), затем raster-кластеры (G-buffer/PBR/lighting, shadows, post), сохраняя старый путь до parity и M1 A/B. Physics и полное удаление `ornis-shader-lang`/макросов — финальная волна; физический GPU-код за пределами render включён в аудит, хотя он не перечислен в render-подразделе issue.
+Сначала расширить IR/ABI и snapshots на: произвольные entry points + stage IO/builtins; textureLoad/dimensions и нужные типы текстур; векторно-матричные builtins; затем atomics/workgroup memory/barriers. Каждый набор подтверждать минимальным гостем и naga WGSL snapshots. В compute-волне переносить текущие compute-проходы culling, clusters и production auto-exposure; для последнего прототипом служит существующий wasm2gpu-гость, но production switch — отдельный шаг после parity. Как прямо задано в этапе 3 #243, AO/bloom/TAA предлагаются как **переписывание существующих fullscreen fragment-проходов в compute**, а не как утверждение, что они уже compute: каждый invocation может рассчитывать независимый выходной пиксель, dispatch привязывается к размеру target, а обращения к соседним пикселям выражаются явными texture reads. Это архитектурная гипотеза, не обещание ускорения: потребуется сохранить фильтрацию (включая явный LOD вместо implicit-derivative sampling), MSAA-режимы, форматы/округление render target и границы выборок; старый fragment-путь остаётся oracle до pixel parity и M1 A/B. Если эквивалентность/стоимость не подтверждается, их можно перевести как fragment shaders в растровой волне wasm2gpu — цель #243 сама по себе требует wasm2gpu, а не обязательного compute-stage для каждого эффекта. Затем переносить raster-кластеры G-buffer/PBR/lighting, shadows, composite/fog/HDR и остальные fragment passes, сохраняя старый путь до parity. Physics и полное удаление `ornis-shader-lang`/макросов — финальная волна; физический GPU-код за пределами render включён в аудит, хотя он не перечислен в render-подразделе issue.
 
 Это аудит, не изменение runtime-пути: DSL/WGSL-производство и production frame path не менялись.
