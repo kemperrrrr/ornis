@@ -1295,6 +1295,8 @@ fn init_editor_replica(
 ///
 /// Returns a `JsValue` error if the canvas is missing, WebGPU initialization
 /// or scene loading fails, or no `window` object is available.
+// The wasm-bindgen export is called from JS, not from Rust.
+#[allow(dead_code)]
 #[wasm_bindgen]
 pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     console::log_1(&format!("[ornis-wasm] init canvas={}", canvas_id).into());
