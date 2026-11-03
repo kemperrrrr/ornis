@@ -1,0 +1,4 @@
+dot(
+cross(
+length(
+normalize(

@@ -37,7 +37,9 @@ pub(super) fn uniform_global(
     shape: UniformShape,
     structs: &[StructDef],
 ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
-    if globals::storage_taken(&cx.storages, group, binding) {
+    if globals::storage_taken(&cx.storages, group, binding)
+        || globals::atomic_taken(&cx.atomic_storages, group, binding)
+    {
         return Err(type_msg("binding is used as both uniform and storage"));
     }
     if let Some(slot) = find_uniform(&cx.uniforms, group, binding) {

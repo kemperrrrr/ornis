@@ -34,6 +34,16 @@ pub(crate) fn sig_ok(
         Imp::TextureLoad => fixed_sig(sig, 4, &FLOAT4, "texture_load_2d"),
         Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
         Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),
+        Imp::MathDot3 => float_sig(sig, 6, 1, "math_dot3"),
+        Imp::MathCross3 => float_sig(sig, 6, 3, "math_cross3"),
+        Imp::MathLength3 => float_sig(sig, 3, 1, "math_length3"),
+        Imp::MathNormalize3 => float_sig(sig, 3, 3, "math_normalize3"),
+        Imp::StorageAtomicAddU32 => fixed_sig(sig, 4, &[Kind::I32], "storage_atomic_add_u32"),
+        Imp::WorkgroupLoadU32 => fixed_sig(sig, 1, &[Kind::I32], "workgroup_load_u32"),
+        Imp::WorkgroupStoreU32 => fixed_sig(sig, 2, &[], "workgroup_store_u32"),
+        Imp::WorkgroupAtomicAddU32 => fixed_sig(sig, 2, &[Kind::I32], "workgroup_atomic_add_u32"),
+        Imp::WorkgroupBarrier => count_only(sig, 0, 0, "workgroup_barrier"),
+        Imp::StorageBarrier => count_only(sig, 0, 0, "storage_barrier"),
         Imp::Read(Spec::Fixed(elem)) => {
             fixed_sig(sig, PROV_PARAMS, &lanes_of(elem)?, "storage read")
         }
@@ -109,6 +119,32 @@ pub(super) fn push_lanes(lanes: &mut Vec<Kind>, kind: FieldKind) -> Result<(), T
     }
     if lanes.len() + STRUCT_HEADER as usize > crate::ir::MAX_PARAMS {
         return Err(type_err("unsupported struct width"));
+    }
+    Ok(())
+}
+
+fn float_sig(
+    sig: &Sig,
+    params: u32,
+    results: u32,
+    what: &str,
+) -> Result<(), TranslateError> {
+    if sig.params != params || sig.results != results {
+        return Err(mismatch(what));
+    }
+    let mut index = 0usize;
+    while index < params as usize {
+        if sig.param_kind[index] != Kind::F32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    index = 0;
+    while index < results as usize {
+        if sig.result_kind[index] != Kind::F32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
     }
     Ok(())
 }

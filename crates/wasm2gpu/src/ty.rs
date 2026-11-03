@@ -90,6 +90,26 @@ pub(super) enum Imp {
     TextureLoad,
     /// Width query for a 2D texture.
     TextureWidth,
+    /// Dot product of two `vec3<f32>` values.
+    MathDot3,
+    /// Cross product of two `vec3<f32>` values.
+    MathCross3,
+    /// Length of one `vec3<f32>` value.
+    MathLength3,
+    /// Normalize one `vec3<f32>` value.
+    MathNormalize3,
+    /// Atomic add to one word in a named storage buffer.
+    StorageAtomicAddU32,
+    /// Load one `u32` from workgroup scratch.
+    WorkgroupLoadU32,
+    /// Store one `u32` in workgroup scratch.
+    WorkgroupStoreU32,
+    /// Atomic add to workgroup scratch.
+    WorkgroupAtomicAddU32,
+    /// Workgroup execution and memory barrier.
+    WorkgroupBarrier,
+    /// Storage memory barrier.
+    StorageBarrier,
     /// Height query for a 2D texture.
     TextureHeight,
     /// Storage load of `elem`. `Struct` ids are an immediate operand.
@@ -135,6 +155,36 @@ pub(super) fn classify(name: &str) -> Option<Imp> {
     }
     if name == symbols::TEXTURE_LOAD_2D {
         return Some(Imp::TextureLoad);
+    }
+    if name == symbols::MATH_DOT3 {
+        return Some(Imp::MathDot3);
+    }
+    if name == symbols::MATH_CROSS3 {
+        return Some(Imp::MathCross3);
+    }
+    if name == symbols::MATH_LENGTH3 {
+        return Some(Imp::MathLength3);
+    }
+    if name == symbols::MATH_NORMALIZE3 {
+        return Some(Imp::MathNormalize3);
+    }
+    if name == symbols::STORAGE_ATOMIC_ADD_U32 {
+        return Some(Imp::StorageAtomicAddU32);
+    }
+    if name == symbols::WORKGROUP_LOAD_U32 {
+        return Some(Imp::WorkgroupLoadU32);
+    }
+    if name == symbols::WORKGROUP_STORE_U32 {
+        return Some(Imp::WorkgroupStoreU32);
+    }
+    if name == symbols::WORKGROUP_ATOMIC_ADD_U32 {
+        return Some(Imp::WorkgroupAtomicAddU32);
+    }
+    if name == symbols::WORKGROUP_BARRIER {
+        return Some(Imp::WorkgroupBarrier);
+    }
+    if name == symbols::STORAGE_BARRIER {
+        return Some(Imp::StorageBarrier);
     }
     if name == symbols::TEXTURE_WIDTH_2D {
         return Some(Imp::TextureWidth);
