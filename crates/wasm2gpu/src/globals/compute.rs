@@ -27,8 +27,10 @@ pub(crate) fn atomic_storage(
             "binding is used as both atomic and ordinary storage".to_string(),
         ));
     }
-    if let Some(var) = find_atomic_storage(&cx.atomic_storages, group, binding) {
-        return Ok(var);
+    if let Some(slot) = super::find_binding(&cx.atomic_storages, group, binding, |slot| {
+        (slot.group, slot.binding)
+    }) {
+        return Ok(slot.var);
     }
     let atomic = cx.module.types.insert(
         Type {
@@ -126,22 +128,5 @@ fn workgroup_array(cx: &mut Cx<'_>, base: naga::Handle<Type>) -> naga::Handle<Ty
 }
 
 pub(crate) fn atomic_taken(slots: &[AtomicSlot], group: u32, binding: u32) -> bool {
-    find_atomic_storage(slots, group, binding).is_some()
-}
-
-// qual:allow(dry, fragment) reason: "Ordinary and atomic binding caches scan distinct slot types and return different payloads; a shared abstraction would obscure the binding invariant."
-fn find_atomic_storage(
-    slots: &[AtomicSlot],
-    group: u32,
-    binding: u32,
-) -> Option<naga::Handle<naga::GlobalVariable>> {
-    // qual:allow(dry, fragment) reason: "Atomic slots share the linear binding-key scan but have a distinct slot type and payload."
-    let mut index = 0usize;
-    while index < slots.len() {
-        if slots[index].group == group && slots[index].binding == binding {
-            return Some(slots[index].var);
-        }
-        index += 1;
-    }
-    None
+    super::find_binding(slots, group, binding, |slot| (slot.group, slot.binding)).is_some()
 }

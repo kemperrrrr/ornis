@@ -67,3 +67,5 @@ mod abi_struct_tests;
 mod abi_sync_tests;
 #[cfg(test)]
 mod abi_tests;
+#[cfg(test)]
+mod abi_texture_tests;

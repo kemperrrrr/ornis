@@ -1,9 +1,13 @@
-// qual:allow(srp, file_length=400) reason: "The ABI boundary keeps wasm imports, layout-safe host copies, and their safety contracts together; splitting them obscures the shared invariants."
 //! Byte copies and wasm32 import calls.
 //!
-//! This file is the only place the SDK spells `unsafe`. Callers have already
+//! This module is the only place the SDK spells `unsafe`. Callers have already
 //! checked that the byte region is in-bounds and aligned for `T`, and that
 //! `T: GpuSafeLayout` (every bit pattern is a valid value).
+
+#[cfg(target_arch = "wasm32")]
+mod texture;
+#[cfg(target_arch = "wasm32")]
+pub(super) use texture::wasm_sample_lod;
 
 #[cfg(target_arch = "wasm32")]
 use crate::layout::F32_SIZE;
@@ -127,15 +131,6 @@ macro_rules! import_sample {
     }};
 }
 
-#[cfg(target_arch = "wasm32")]
-macro_rules! import_sample_lod {
-    ($tg:expr, $tb:expr, $sg:expr, $sb:expr, $u:expr, $v:expr, $level:expr) => {{
-        // SAFETY: `texture_sample_2d_lod` returns four initialized lanes and
-        // does not load from linear memory.
-        unsafe { texture_sample_2d_lod($tg, $tb, $sg, $sb, $u, $v, $level) }
-    }};
-}
-
 // SAFETY: these symbols are the ornis_gpu import ABI. Calling them is sound
 // only through the wrappers in this file; they do not dereference a guest
 // pointer. `storage_base` only returns the translator's base tag.
@@ -153,15 +148,6 @@ unsafe extern "C" {
         samp_binding: u32,
         u: f32,
         v: f32,
-    ) -> Word4;
-    fn texture_sample_2d_lod(
-        tex_group: u32,
-        tex_binding: u32,
-        samp_group: u32,
-        samp_binding: u32,
-        u: f32,
-        v: f32,
-        level: f32,
     ) -> Word4;
     fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
     fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
@@ -296,20 +282,6 @@ pub(super) fn wasm_sample<const TG: u32, const TB: u32, const SG: u32, const SB:
     uv: GpuVec2,
 ) -> GpuVec4 {
     let word = import_sample!(TG, TB, SG, SB, uv.x, uv.y);
-    GpuVec4 {
-        x: word.x,
-        y: word.y,
-        z: word.z,
-        w: word.w,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn wasm_sample_lod<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
-    uv: GpuVec2,
-    level: f32,
-) -> GpuVec4 {
-    let word = import_sample_lod!(TG, TB, SG, SB, uv.x, uv.y, level);
     GpuVec4 {
         x: word.x,
         y: word.y,

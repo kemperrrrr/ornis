@@ -175,11 +175,21 @@ pub(super) fn base_ty(
 }
 
 fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga::GlobalVariable>> {
-    // qual:allow(dry, fragment) reason: "This slot cache uses the shared linear binding-key scan, but stores ordinary texture/sampler globals."
+    find_binding(slots, group, binding, |slot| (slot.group, slot.binding))
+        .map(|slot| slot.var)
+}
+
+pub(super) fn find_binding<T>(
+    slots: &[T],
+    group: u32,
+    binding: u32,
+    key: impl Fn(&T) -> (u32, u32),
+) -> Option<&T> {
     let mut index = 0usize;
     while index < slots.len() {
-        if slots[index].group == group && slots[index].binding == binding {
-            return Some(slots[index].var);
+        let slot = &slots[index];
+        if key(slot) == (group, binding) {
+            return Some(slot);
         }
         index += 1;
     }
