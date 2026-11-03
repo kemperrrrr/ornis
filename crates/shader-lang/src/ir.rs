@@ -94,7 +94,7 @@ impl From<&String> for ShaderCustomTy {
 pub enum IrType {
     /// Registry scalar/vector/matrix primitive (see [`ShaderType`]).
     Scalar(ShaderType),
-    /// `bool` — kept out of the [`ShaderType`] registry, which covers shader types only.
+    /// Scalar `bool`; the registry holds only the bool vectors (`BVec*`).
     Bool,
     /// Opaque named type (struct mirrors): lexical, like [`IrExpr::Path`]
     /// segments — never a spelling.
@@ -396,7 +396,7 @@ pub enum IrExpr {
     Block(Vec<IrStmt>),
     /// `return [expr]` in expression position.
     Return(Option<Box<IrExpr>>),
-    /// `continue` / `break` (labels/values lower to [`IrExpr::Unsupported`]).
+    /// `continue` (labels/values lower to [`IrExpr::Unsupported`]).
     Continue,
     /// `break`.
     Break,
@@ -538,7 +538,7 @@ pub enum IrStmt {
         mutable: bool,
         /// Optional initializer.
         init: Option<IrExpr>,
-        /// Declared type for uninitialized declarations.
+        /// Optional declared type (`let x: T`), emitted with or without an initializer.
         decl_ty: Option<String>,
     },
     /// `for i in start..end` over `u32` (half-open or closed).
