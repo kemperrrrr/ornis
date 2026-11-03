@@ -74,6 +74,8 @@ fn stack_op(locals: &[Kind], op: &Operator<'_>) -> Result<Op, TranslateError> {
         Operator::F32Abs => Ok(Op::F32Abs),
         Operator::F32Neg => Ok(Op::F32Neg),
         Operator::F32Sqrt => Ok(Op::F32Sqrt),
+        Operator::F32Min => Ok(Op::F32Min),
+        Operator::F32Max => Ok(Op::F32Max),
         Operator::F32ConvertI32U => Ok(Op::F32ConvertI32U),
         Operator::I32Add => Ok(Op::I32Add),
         Operator::I32Mul => Ok(Op::I32Mul),

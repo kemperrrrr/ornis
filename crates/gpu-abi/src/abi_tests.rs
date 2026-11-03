@@ -293,7 +293,7 @@ fn threads_do_not_share_the_shadow() {
 }
 
 #[test]
-fn scalar_math_helpers_match_finite_host_values() {
+fn scalar_min_max_clamp_helpers_match_finite_host_values() {
     assert_eq!(crate::gpu_min_f32(2.0, 1.0), 1.0);
     assert_eq!(crate::gpu_max_f32(2.0, 1.0), 2.0);
     assert_eq!(crate::gpu_clamp_f32(2.0, 0.0, 1.0), 1.0);
@@ -326,9 +326,6 @@ fn import_names_stay_unpacked() {
     assert!(symbols::is_toy_import(symbols::MATH_CROSS3));
     assert!(symbols::is_toy_import(symbols::MATH_LENGTH3));
     assert!(symbols::is_toy_import(symbols::MATH_NORMALIZE3));
-    assert!(symbols::is_toy_import(symbols::MATH_MIN_F32));
-    assert!(symbols::is_toy_import(symbols::MATH_MAX_F32));
-    assert!(symbols::is_toy_import(symbols::MATH_CLAMP_F32));
     assert!(symbols::is_toy_import(symbols::STORAGE_ATOMIC_ADD_U32));
     assert!(symbols::is_toy_import(symbols::WORKGROUP_LOAD_U32));
     assert!(symbols::is_toy_import(symbols::WORKGROUP_STORE_U32));

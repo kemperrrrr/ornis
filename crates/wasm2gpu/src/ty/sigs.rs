@@ -51,8 +51,6 @@ pub(crate) fn sig_ok(
             crate::cx::VEC3_LANES,
             "math_normalize3",
         ),
-        Imp::MathMinF32 | Imp::MathMaxF32 => float_sig(sig, 2, 1, "scalar min/max"),
-        Imp::MathClampF32 => float_sig(sig, 3, 1, "scalar clamp"),
         Imp::StorageAtomicAddU32 => fixed_sig(
             sig,
             STORAGE_ATOMIC_U32_PARAMS,

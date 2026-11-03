@@ -69,25 +69,17 @@ pub(super) fn pop_vec3(em: &mut Emit<'_, '_>) -> Result<naga::Handle<Expression>
     }))
 }
 
-pub(super) fn math_scalar(
+pub(super) fn scalar_binary(
     em: &mut Emit<'_, '_>,
     fun: naga::MathFunction,
-    arity: usize,
 ) -> Result<(), TranslateError> {
-    let mut args = Vec::with_capacity(arity);
-    while args.len() < arity {
-        args.push(crate::env::float_of(em.pop()?)?);
-    }
-    args.reverse();
-    let mut args = args.into_iter();
-    let arg = args.next().ok_or(TranslateError::Unsupported)?;
-    let arg1 = args.next();
-    let arg2 = args.next();
+    let right = crate::env::float_of(em.pop()?)?;
+    let left = crate::env::float_of(em.pop()?)?;
     let value = em.ex(Expression::Math {
         fun,
-        arg,
-        arg1,
-        arg2,
+        arg: left,
+        arg1: Some(right),
+        arg2: None,
         arg3: None,
     });
     em.stack.push(Val::Scalar(value));

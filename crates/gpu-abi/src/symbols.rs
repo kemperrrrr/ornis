@@ -76,15 +76,6 @@ pub const MATH_LENGTH3: &str = "math_length3";
 /// `(param f32 × 3) (result f32 × 3)` — normalize a `vec3<f32>` value.
 pub const MATH_NORMALIZE3: &str = "math_normalize3";
 
-/// `(param f32 f32) (result f32)` — component-wise scalar minimum.
-pub const MATH_MIN_F32: &str = "math_min_f32";
-
-/// `(param f32 f32) (result f32)` — component-wise scalar maximum.
-pub const MATH_MAX_F32: &str = "math_max_f32";
-
-/// `(param f32 f32 f32) (result f32)` — clamp value between ordered bounds.
-pub const MATH_CLAMP_F32: &str = "math_clamp_f32";
-
 /// `(param i32 i32 i32 i32) (result i32)` — storage `atomicAdd` on u32.
 pub const STORAGE_ATOMIC_ADD_U32: &str = "storage_atomic_add_u32";
 
@@ -253,9 +244,6 @@ pub fn is_toy_import(name: &str) -> bool {
             | MATH_CROSS3
             | MATH_LENGTH3
             | MATH_NORMALIZE3
-            | MATH_MIN_F32
-            | MATH_MAX_F32
-            | MATH_CLAMP_F32
             | STORAGE_ATOMIC_ADD_U32
             | WORKGROUP_LOAD_U32
             | WORKGROUP_STORE_U32

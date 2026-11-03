@@ -28,15 +28,6 @@ pub(crate) fn classify(name: &str) -> Option<Imp> {
     if name == symbols::MATH_NORMALIZE3 {
         return Some(Imp::MathNormalize3);
     }
-    if name == symbols::MATH_MIN_F32 {
-        return Some(Imp::MathMinF32);
-    }
-    if name == symbols::MATH_MAX_F32 {
-        return Some(Imp::MathMaxF32);
-    }
-    if name == symbols::MATH_CLAMP_F32 {
-        return Some(Imp::MathClampF32);
-    }
     if name == symbols::STORAGE_ATOMIC_ADD_U32 {
         return Some(Imp::StorageAtomicAddU32);
     }
