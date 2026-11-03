@@ -1451,6 +1451,7 @@ impl<O: FrameResource> FramePass for OutlinePass<O> {
         "outline"
     }
 
+    // qual:allow(test_quality, untested) reason: "GPU-only frame node; layout tests pin registration and the renderer outline path has a device-gated test"
     fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let flags = self.state.snapshot();
         if flags.is_empty() {
@@ -1497,6 +1498,18 @@ mod tests {
     /// Specs mirror the imperative wiring (frame_exec parity test); the
     /// dump names are part of the contract.
     #[test]
+    /// The host replaces the outline flag set wholesale; the pass reads a
+    /// snapshot so a concurrent host update cannot tear a frame.
+    #[test]
+    fn outline_state_snapshots_the_last_flag_set() {
+        let state = OutlineState::new();
+        assert!(state.snapshot().is_empty(), "empty by default (pass off)");
+        state.set_flags(&[0, 2, 1]);
+        assert_eq!(state.snapshot(), vec![0, 2, 1]);
+        state.set_flags(&[]);
+        assert!(state.snapshot().is_empty());
+    }
+
     fn resource_names_and_specs() {
         assert_eq!(Albedo::NAME, "albedo");
         owned_spec::<Albedo>(F::Rgba8Unorm, SizePolicy::MatchSurface);

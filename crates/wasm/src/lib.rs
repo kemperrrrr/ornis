@@ -421,6 +421,7 @@ fn post_input_snapshot(body: String) {
 
 /// Fire-and-forget `POST /api/command` (select fallback when the WS socket
 /// is not open).
+// qual:allow(test_quality, untested) reason: "browser fetch edge; the command body it posts is host-tested by select_command_is_exclusive_or_explicit_clear"
 fn post_select_command(body: String) {
     post_json("/api/command", "POST /api/command", body);
 }
@@ -431,6 +432,7 @@ fn post_select_command(body: String) {
 /// matching `editor/editor.js`. Without that header the browser sends
 /// `text/plain` and the server answers 415. Network errors and non-success
 /// statuses are logged; the caller retries on the next dirty frame.
+// qual:allow(test_quality, untested) reason: "browser fetch edge; callers' JSON bodies are host-tested, the transport itself needs a window"
 fn post_json(endpoint: &'static str, label: &'static str, body: String) {
     let Some(window) = web_sys::window() else {
         return;
@@ -1141,6 +1143,7 @@ impl<'a> FrameState<'a> {
     /// up in the same presented frame; the plan uploads the flags to the
     /// GPU. Selection and hover are exclusive lanes, so two lane reads
     /// answer every instance.
+    // qual:allow(test_quality, untested) reason: "browser frame edge; the flag mapping it delegates to is pinned by outline_flags_map_selection_and_hover_to_instances"
     fn refresh_outline(&self) {
         let Some(store) = self.render_world.engine().world().store() else {
             return;

@@ -1037,11 +1037,10 @@ impl RenderFrame3D {
             systems.add_system(FogPass::new(state));
         }
         Self::register_composite::<O>(&mut systems, technique, bloom);
-        // Editor outline: overlays the composited layer before AA filters
-        // it (or the presented target without AA). MSAA plans have no
-        // single-sample depth, so the pass is skipped there.
-        if let Some(state) = outline.clone()
-            && sample_count == crate::renderer::SINGLE_SAMPLE_COUNT
+        // Outline overlays the composited layer before AA; MSAA has no
+        // single-sample depth/present layer, so it is skipped there.
+        if let Some(state) =
+            outline.filter(|_| sample_count == crate::renderer::SINGLE_SAMPLE_COUNT)
         {
             systems.add_system(OutlinePass::<O>::new(state, surface_format, sample_count));
         }

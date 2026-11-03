@@ -27,9 +27,22 @@ pub(crate) struct OutlineVertexContext {
     pub outline_flags: Vec<u32>,
 }
 
+/// WGSL constants spliced into the vertex module.
+///
+/// The DSL emits identifiers verbatim, so the numeric literals live here
+/// once instead of in the translated Rust body.
+const OUTLINE_CONSTS: &str = "\
+const OUTLINE_WIDTH: f32 = 0.05;
+const OUTLINE_HOVER: vec3<f32> = vec3<f32>(0.55, 0.75, 1.0);
+const OUTLINE_SELECTED: vec3<f32> = vec3<f32>(0.16, 0.55, 1.0);
+";
+
 /// Outline vertex entry: expand flagged instances along their world normal.
 /// Unflagged instances collapse outside clip space, so the draw culls them
 /// without a separate draw call per silhouette.
+// The `#[stage]` macro consumes this Rust body: the generated WGSL is the
+// only caller, so rustc/rustqual see the entry as uncalled.
+#[allow(dead_code)]
 #[stage(vertex)]
 fn vs_main(
     input: VertexInput,
@@ -40,15 +53,15 @@ fn vs_main(
     let flag = ctx.outline_flags[instance_index];
     // Expand in object space so the ring keeps a constant fraction of the
     // mesh size: the replica bakes an entity's radius into the model scale.
-    let expanded = input.position + input.normal * 0.05;
+    let expanded = input.position + input.normal * OUTLINE_WIDTH;
     let mut clip_position = ctx.camera.view_proj * (obj.model * Vec4::new(expanded, 1.0));
     if flag == 0u {
         // Outside NDC: every vertex of the instance is clipped.
         clip_position = Vec4::new(2.0, 2.0, 2.0, 1.0);
     }
-    let mut color = Vec3::new(0.55, 0.75, 1.0);
+    let mut color = OUTLINE_HOVER;
     if flag == 2u {
-        color = Vec3::new(0.16, 0.55, 1.0);
+        color = OUTLINE_SELECTED;
     }
     let mut output: OutlineVertexOutput;
     output.clip_position = clip_position;
@@ -57,6 +70,7 @@ fn vs_main(
 }
 
 /// Outline fragment entry: the vertex stage already chose hover/selected.
+#[allow(dead_code)]
 #[stage(fragment)]
 fn fs_main(input: OutlineFragmentInput) -> super::Location<0, glam::Vec4> {
     return glam::Vec4::new(input.color, 1.0);
@@ -98,6 +112,7 @@ pub fn wgsl_vertex_source() -> String {
         .resources(&OUTLINE_RESOURCES, &[0, 1, 2])
         .decl(wgsl_decl(VertexInput::WGSL_SOURCE))
         .decl(wgsl_decl(OutlineVertexOutput::WGSL_SOURCE))
+        .consts(OUTLINE_CONSTS)
         .entry(vs_main::wgsl_source())
         .emit()
 }

@@ -7,7 +7,9 @@
 //! GPU handles — required because `wgpu` resources are `!Send` on wasm and
 //! [`crate::system::FramePass`] is `Send`.
 
-use super::*;
+use super::{Renderer3D, read_lock};
+use crate::mesh::{Mesh, Vertex};
+use crate::shaders;
 
 /// Outline pipeline plus the per-instance flag buffer.
 pub(crate) struct OutlineGpu {
@@ -19,20 +21,42 @@ pub(crate) struct OutlineGpu {
 }
 
 impl OutlineGpu {
-    /// Builds the pipeline, bind-group layout and the initial flag buffer.
+    /// Builds the bind-group layout, pipeline and the initial flag buffer.
     fn create(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
+        let layout = Self::layout(device);
+        let pipeline = Self::pipeline(device, &layout, format, sample_count);
+        let flags = Self::flags_buffer(device, 1);
+        Self {
+            pipeline,
+            layout,
+            flags,
+            capacity: 1,
+        }
+    }
+
+    /// Bind-group layout from the outline resource table.
+    fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         let entries: Vec<wgpu::BindGroupLayoutEntry> =
             shaders::outline_generated::OUTLINE_RESOURCES
                 .iter()
                 .map(|resource| shaders::bgl_entry(resource, false))
                 .collect();
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("outline bind group layout"),
             entries: &entries,
-        });
+        })
+    }
+
+    /// Inverted-hull pipeline: expanded back faces, no depth writes.
+    fn pipeline(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> wgpu::RenderPipeline {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("outline pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(bind_group_layout)],
             immediate_size: 0,
         });
         let vertex = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -43,7 +67,7 @@ impl OutlineGpu {
             label: Some("outline fragment"),
             source: wgpu::ShaderSource::Wgsl(shaders::outline_fragment().into()),
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("outline pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -88,14 +112,7 @@ impl OutlineGpu {
             },
             multiview_mask: None,
             cache: None,
-        });
-        let flags = Self::flags_buffer(device, 1);
-        Self {
-            pipeline,
-            layout,
-            flags,
-            capacity: 1,
-        }
+        })
     }
 
     /// Storage buffer for `capacity` instance flags.
@@ -212,5 +229,135 @@ impl Renderer3D {
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::test_util::{offscreen_target, readback_rgba8, try_device};
+    use crate::renderer::{InstanceData, MaterialIdx};
+    use glam::Mat4;
+
+    /// Depth attachment matching the outline pipeline (Depth32Float, 1x).
+    fn depth_target(device: &wgpu::Device, size: u32) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("outline depth"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
+    /// A flagged instance draws silhouette pixels; an empty flag set records
+    /// nothing (no panic, no GPU work). Skips without an adapter.
+    #[test]
+    fn outline_pass_draws_flagged_instances_and_ignores_empty_flags() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("SKIPPED (outline pass): no wgpu adapter");
+            return;
+        };
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            width: 8,
+            height: 8,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        };
+        let renderer = Renderer3D::new(&device, &surface_config, 1);
+        renderer.upload_instances(
+            &device,
+            &queue,
+            &[InstanceData {
+                model_matrix: Mat4::IDENTITY,
+                normal_matrix: Mat4::IDENTITY,
+                material_index: MaterialIdx::from_raw(0),
+            }],
+        );
+        let (color, color_view) = offscreen_target(&device, 8, 8);
+        let (_depth, depth_view) = depth_target(&device, 8);
+        let mesh = crate::create_sphere(&device, 1.0, 8, 6);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("outline test clear"),
+        });
+        {
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("outline test clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        renderer.render_outline(
+            &device,
+            &queue,
+            &mut encoder,
+            OutlineInputs {
+                output: &color_view,
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 1,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                sample_count: 1,
+                flags: &[2],
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let pixels = readback_rgba8(&device, &queue, &color, 8, 8);
+        assert!(
+            pixels.iter().any(|&byte| byte != 0),
+            "a selected instance must draw outline pixels"
+        );
+
+        // Empty flags: the pass returns before touching the GPU.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("outline test empty"),
+        });
+        renderer.render_outline(
+            &device,
+            &queue,
+            &mut encoder,
+            OutlineInputs {
+                output: &color_view,
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 1,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                sample_count: 1,
+                flags: &[],
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
     }
 }
