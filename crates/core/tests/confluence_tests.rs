@@ -35,16 +35,21 @@ struct Force {
 
 // ===== Helper Functions =====
 
-fn run_with_threads<F>(threads: usize, f: F) -> Vec<Position>
-where
-    F: FnOnce(&mut SmartStore) -> Vec<Position>,
-{
+/// Point rayon's global pool at `threads` before the first pool init.
+fn set_rayon_threads(threads: usize) {
     // SAFETY: no other test in this binary touches the process environment,
     // and rayon reads `RAYON_NUM_THREADS` once at first pool init; no
     // concurrent env reader exists while these tests run.
     unsafe {
         std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
     }
+}
+
+fn run_with_threads<F>(threads: usize, f: F) -> Vec<Position>
+where
+    F: FnOnce(&mut SmartStore) -> Vec<Position>,
+{
+    set_rayon_threads(threads);
 
     let mut store = SmartStore::new();
     store.register::<Position>();
@@ -320,12 +325,7 @@ fn branch_step(body: &mut BranchBody) {
 
 /// One `#[smart_system]` tick of the branching update at `threads`.
 fn run_branch_system(threads: usize) -> Vec<Position> {
-    // SAFETY: no other test in this binary touches the process environment,
-    // and rayon reads `RAYON_NUM_THREADS` once at first pool init; no
-    // concurrent env reader exists while these tests run.
-    unsafe {
-        std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
-    }
+    set_rayon_threads(threads);
 
     let mut store = SmartStore::new();
     BranchBody::pack_register(&mut store);
