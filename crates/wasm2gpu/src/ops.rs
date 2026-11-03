@@ -14,11 +14,12 @@ use crate::ty::Elem;
 use crate::ty::Imp;
 use crate::uniform;
 
-const TEXTURE_LOAD_MIP_LEVEL_ZERO: i32 = 0;
-
+mod compute;
 mod float;
 mod int;
+mod math;
 mod ptr;
+mod texture;
 
 use float::bin;
 use float::f32_abs;
@@ -99,110 +100,23 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
         Imp::Sample => sample(em),
-        Imp::TextureLoad => texture_load(em),
+        Imp::TextureLoad => texture::texture_load(em),
         Imp::TextureWidth => texture_dimension(em, 0),
         Imp::TextureHeight => texture_dimension(em, 1),
-        Imp::MathDot3 => math_dot3(em),
-        Imp::MathCross3 => math_vec3(em, naga::MathFunction::Cross, true),
-        Imp::MathLength3 => math_length3(em),
-        Imp::MathNormalize3 => math_vec3(em, naga::MathFunction::Normalize, false),
-        Imp::StorageAtomicAddU32 => storage_atomic_add(em),
-        Imp::WorkgroupLoadU32 => workgroup_load(em),
-        Imp::WorkgroupStoreU32 => workgroup_store(em),
-        Imp::WorkgroupAtomicAddU32 => workgroup_atomic_add(em),
-        Imp::WorkgroupBarrier => workgroup_barrier(em),
-        Imp::StorageBarrier => storage_barrier(em),
+        Imp::MathDot3 => math::math_dot3(em),
+        Imp::MathCross3 => math::math_vec3(em, naga::MathFunction::Cross, true),
+        Imp::MathLength3 => math::math_length3(em),
+        Imp::MathNormalize3 => math::math_vec3(em, naga::MathFunction::Normalize, false),
+        Imp::StorageAtomicAddU32 => compute::storage_atomic_add(em),
+        Imp::WorkgroupLoadU32 => compute::workgroup_load(em),
+        Imp::WorkgroupStoreU32 => compute::workgroup_store(em),
+        Imp::WorkgroupAtomicAddU32 => compute::workgroup_atomic_add(em),
+        Imp::WorkgroupBarrier => compute::workgroup_barrier(em),
+        Imp::StorageBarrier => compute::storage_barrier(em),
         Imp::Read(spec) => storage::load(em, spec),
         Imp::Write(spec) => storage::store(em, spec, index),
         Imp::Uniform(uni) => uniform::load(em, uni),
     }
-}
-
-fn storage_atomic_add(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let value = em.pop_uint()?;
-    let index = em.pop_uint()?;
-    let binding = em.pop_imm()?;
-    let group = em.pop_imm()?;
-    let var = globals::atomic_storage(em.cx, group, binding)?;
-    let base = em.ex(Expression::GlobalVariable(var));
-    let pointer = em.ex(Expression::Access { base, index });
-    let ty = em.cx.uint;
-    let result = em.ex(Expression::AtomicResult {
-        ty,
-        comparison: false,
-    });
-    em.block.push(
-        naga::Statement::Atomic {
-            pointer,
-            fun: naga::AtomicFunction::Add,
-            value,
-            result: Some(result),
-        },
-        crate::cx::sp(),
-    );
-    em.stack.push(Val::Index(result));
-    Ok(())
-}
-
-fn workgroup_load(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let index = em.pop_uint()?;
-    let var = globals::workgroup(em.cx);
-    let base = em.ex(Expression::GlobalVariable(var));
-    let pointer = em.ex(Expression::Access { base, index });
-    let value = em.ex(Expression::Load { pointer });
-    em.stack.push(Val::Index(value));
-    Ok(())
-}
-
-fn workgroup_store(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let value = em.pop_uint()?;
-    let index = em.pop_uint()?;
-    let var = globals::workgroup(em.cx);
-    let base = em.ex(Expression::GlobalVariable(var));
-    let pointer = em.ex(Expression::Access { base, index });
-    em.block
-        .push(naga::Statement::Store { pointer, value }, crate::cx::sp());
-    Ok(())
-}
-
-fn workgroup_atomic_add(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let value = em.pop_uint()?;
-    let index = em.pop_uint()?;
-    let var = globals::workgroup_atomics(em.cx);
-    let base = em.ex(Expression::GlobalVariable(var));
-    let pointer = em.ex(Expression::Access { base, index });
-    let ty = em.cx.uint;
-    let result = em.ex(Expression::AtomicResult {
-        ty,
-        comparison: false,
-    });
-    em.block.push(
-        naga::Statement::Atomic {
-            pointer,
-            fun: naga::AtomicFunction::Add,
-            value,
-            result: Some(result),
-        },
-        crate::cx::sp(),
-    );
-    em.stack.push(Val::Index(result));
-    Ok(())
-}
-
-fn workgroup_barrier(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    em.block.push(
-        naga::Statement::ControlBarrier(naga::Barrier::WORK_GROUP),
-        crate::cx::sp(),
-    );
-    Ok(())
-}
-
-fn storage_barrier(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    em.block.push(
-        naga::Statement::MemoryBarrier(naga::Barrier::STORAGE),
-        crate::cx::sp(),
-    );
-    Ok(())
 }
 
 fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
@@ -216,103 +130,6 @@ fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let pointer = em.ex(Expression::GlobalVariable(var));
     let loaded = em.ex(Expression::Load { pointer });
     em.stack.push(Val::Vec(loaded));
-    Ok(())
-}
-
-fn math_dot3(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let right = pop_vec3(em)?;
-    let left = pop_vec3(em)?;
-    let value = em.ex(Expression::Math {
-        fun: naga::MathFunction::Dot,
-        arg: left,
-        arg1: Some(right),
-        arg2: None,
-        arg3: None,
-    });
-    em.stack.push(Val::Scalar(value));
-    Ok(())
-}
-
-fn math_length3(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let vector = pop_vec3(em)?;
-    let value = em.ex(Expression::Math {
-        fun: naga::MathFunction::Length,
-        arg: vector,
-        arg1: None,
-        arg2: None,
-        arg3: None,
-    });
-    em.stack.push(Val::Scalar(value));
-    Ok(())
-}
-
-fn math_vec3(
-    em: &mut Emit<'_, '_>,
-    fun: naga::MathFunction,
-    binary: bool,
-) -> Result<(), TranslateError> {
-    let right = if binary { Some(pop_vec3(em)?) } else { None };
-    let left = pop_vec3(em)?;
-    let vector = em.ex(Expression::Math {
-        fun,
-        arg: left,
-        arg1: right,
-        arg2: None,
-        arg3: None,
-    });
-    let mut index = 0;
-    while index < 3 {
-        let lane = em.ex(Expression::AccessIndex { base: vector, index });
-        em.stack.push(Val::Scalar(lane));
-        index += 1;
-    }
-    Ok(())
-}
-
-fn pop_vec3(em: &mut Emit<'_, '_>) -> Result<naga::Handle<Expression>, TranslateError> {
-    let z = crate::env::float_of(em.pop()?)?;
-    let y = crate::env::float_of(em.pop()?)?;
-    let x = crate::env::float_of(em.pop()?)?;
-    let ty = em.cx.vec3;
-    Ok(em.ex(Expression::Compose {
-        ty,
-        components: vec![x, y, z],
-    }))
-}
-
-fn texture_load(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let y_value = em.pop()?;
-    let y = em.as_uint(y_value)?;
-    let x_value = em.pop()?;
-    let x = em.as_uint(x_value)?;
-    let binding = em.pop_imm()?;
-    let group = em.pop_imm()?;
-    let x = em.ex(Expression::As {
-        expr: x,
-        kind: naga::ScalarKind::Sint,
-        convert: None,
-    });
-    let y = em.ex(Expression::As {
-        expr: y,
-        kind: naga::ScalarKind::Sint,
-        convert: None,
-    });
-    let coordinate_ty = em.cx.ivec2;
-    let coordinate = em.ex(Expression::Compose {
-        ty: coordinate_ty,
-        components: vec![x, y],
-    });
-    let texture = globals::texture(em.cx, group, binding);
-    let image = em.ex(Expression::GlobalVariable(texture));
-    let level = em.ex(Expression::Literal(naga::Literal::I32(TEXTURE_LOAD_MIP_LEVEL_ZERO)));
-    let texel = em.ex(Expression::ImageLoad {
-        image,
-        coordinate,
-        array_index: None,
-        sample: None,
-        level: Some(level),
-    });
-    em.stack.push(Val::Vec(texel));
     Ok(())
 }
 

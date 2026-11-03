@@ -13,6 +13,7 @@ use crate::ir::Import;
 use crate::ir::Stmt;
 use crate::ty::StructDef;
 
+mod builtins;
 mod call;
 mod float;
 mod int;

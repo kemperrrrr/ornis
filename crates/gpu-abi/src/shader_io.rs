@@ -12,11 +12,11 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::GpuSafeLayout;
+use crate::GpuVec3;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Storage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Uniform;
-use crate::GpuVec3;
 
 /// Read one `f32` field of uniform struct `SID` at host byte `OFFSET`.
 ///
@@ -186,10 +186,7 @@ pub fn gpu_normalize3(value: GpuVec3) -> GpuVec3 {
 /// On the host this is serialized by the shadow; shader execution uses WGSL
 /// `atomicAdd` and requires an atomic-compatible storage binding.
 #[inline(always)]
-pub fn storage_atomic_add_u32<const GROUP: u32, const BINDING: u32>(
-    index: u32,
-    value: u32,
-) -> u32 {
+pub fn storage_atomic_add_u32<const GROUP: u32, const BINDING: u32>(index: u32, value: u32) -> u32 {
     crate::gpu_abi::storage_atomic_add_u32(GROUP, BINDING, index, value)
 }
 
