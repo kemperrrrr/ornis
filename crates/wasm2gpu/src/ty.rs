@@ -86,6 +86,12 @@ pub(super) enum Imp {
     ReadUniform,
     /// `texture_sample_2d`.
     Sample,
+    /// Load one texel from a 2D texture.
+    TextureLoad,
+    /// Width query for a 2D texture.
+    TextureWidth,
+    /// Height query for a 2D texture.
+    TextureHeight,
     /// Storage load of `elem`. `Struct` ids are an immediate operand.
     Read(Spec),
     /// Storage store of `elem`.
@@ -126,6 +132,15 @@ pub(super) fn classify(name: &str) -> Option<Imp> {
     }
     if name == symbols::TEXTURE_SAMPLE_2D {
         return Some(Imp::Sample);
+    }
+    if name == symbols::TEXTURE_LOAD_2D {
+        return Some(Imp::TextureLoad);
+    }
+    if name == symbols::TEXTURE_WIDTH_2D {
+        return Some(Imp::TextureWidth);
+    }
+    if name == symbols::TEXTURE_HEIGHT_2D {
+        return Some(Imp::TextureHeight);
     }
     if let Some(uni) = uni::imp(name) {
         return Some(Imp::Uniform(uni));

@@ -217,6 +217,43 @@ pub(super) fn host_write<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32
     })
 }
 
+pub(super) fn host_texture_load(group: u32, binding: u32, x: i32, y: i32) -> GpuVec4 {
+    HOST.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(mem) = borrowed.as_ref() else {
+            contract_breach("texture load outside with_host");
+        };
+        let image = image_at(mem, group, binding);
+        assert!(x >= 0 && y >= 0, "texture coordinate out of bounds");
+        let (x, y) = (x as u32, y as u32);
+        assert!(
+            x < image.width && y < image.height,
+            "texture coordinate out of bounds"
+        );
+        image.texels[(y as usize * image.width as usize) + x as usize]
+    })
+}
+
+pub(super) fn host_texture_width(group: u32, binding: u32) -> u32 {
+    HOST.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(mem) = borrowed.as_ref() else {
+            contract_breach("texture dimensions outside with_host");
+        };
+        image_at(mem, group, binding).width
+    })
+}
+
+pub(super) fn host_texture_height(group: u32, binding: u32) -> u32 {
+    HOST.with(|slot| {
+        let borrowed = slot.borrow();
+        let Some(mem) = borrowed.as_ref() else {
+            contract_breach("texture dimensions outside with_host");
+        };
+        image_at(mem, group, binding).height
+    })
+}
+
 pub(super) fn host_sample<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
 ) -> GpuVec4 {

@@ -97,6 +97,9 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
         Imp::Sample => sample(em),
+        Imp::TextureLoad => texture_load(em),
+        Imp::TextureWidth => texture_dimension(em, 0),
+        Imp::TextureHeight => texture_dimension(em, 1),
         Imp::Read(spec) => storage::load(em, spec),
         Imp::Write(spec) => storage::store(em, spec, index),
         Imp::Uniform(uni) => uniform::load(em, uni),
@@ -114,6 +117,56 @@ fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let pointer = em.ex(Expression::GlobalVariable(var));
     let loaded = em.ex(Expression::Load { pointer });
     em.stack.push(Val::Vec(loaded));
+    Ok(())
+}
+
+fn texture_load(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    let y_value = em.pop()?;
+    let y = em.as_uint(y_value)?;
+    let x_value = em.pop()?;
+    let x = em.as_uint(x_value)?;
+    let binding = em.pop_imm()?;
+    let group = em.pop_imm()?;
+    let x = em.ex(Expression::As {
+        expr: x,
+        kind: naga::ScalarKind::Sint,
+        convert: None,
+    });
+    let y = em.ex(Expression::As {
+        expr: y,
+        kind: naga::ScalarKind::Sint,
+        convert: None,
+    });
+    let coordinate_ty = em.cx.ivec2;
+    let coordinate = em.ex(Expression::Compose {
+        ty: coordinate_ty,
+        components: vec![x, y],
+    });
+    let texture = globals::texture(em.cx, group, binding);
+    let image = em.ex(Expression::GlobalVariable(texture));
+    let level = em.ex(Expression::Literal(naga::Literal::I32(0)));
+    let texel = em.ex(Expression::ImageLoad {
+        image,
+        coordinate,
+        array_index: None,
+        sample: None,
+        level: Some(level),
+    });
+    em.stack.push(Val::Vec(texel));
+    Ok(())
+}
+
+fn texture_dimension(em: &mut Emit<'_, '_>, axis: u32) -> Result<(), TranslateError> {
+    let binding = em.pop_imm()?;
+    let group = em.pop_imm()?;
+    let texture = globals::texture(em.cx, group, binding);
+    let image = em.ex(Expression::GlobalVariable(texture));
+    let size = em.ex(Expression::ImageQuery {
+        image,
+        query: naga::ImageQuery::Size { level: None },
+    });
+    let lane = em.ex(Expression::AccessIndex { base: size, index: axis });
+    em.stack.push(Val::Index(lane));
     Ok(())
 }
 

@@ -94,10 +94,28 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         Imp::Base => storage_base(st, import),
         Imp::ReadUniform => read_uniform(st),
         Imp::Sample => sample(st, import),
+        Imp::TextureLoad => texture_load(st, import),
+        Imp::TextureWidth | Imp::TextureHeight => texture_dimension(st, import, imp),
         Imp::Read(spec) => read_storage(ai, st, import, spec),
         Imp::Write(spec) => write_storage(ai, st, import, spec),
         Imp::Uniform(uni) => super::uniform::on_uniform(st, import, ai.structs, uni),
     }
+}
+
+fn texture_load(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::TextureLoad, &[], None)?;
+    pop_num(st)?;
+    pop_num(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    push(st, Abs::Vec)
+}
+
+fn texture_dimension(st: &mut St, import: &Import, imp: Imp) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, imp, &[], None)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    push(st, Abs::I32(Num::Dyn { joined: false }))
 }
 
 pub(super) fn read_uniform(st: &mut St) -> Result<(), TranslateError> {

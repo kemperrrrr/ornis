@@ -132,6 +132,9 @@ unsafe extern "C" {
     fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
     fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32;
     fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
+    fn texture_load_2d(group: u32, binding: u32, x: i32, y: i32) -> Word4;
+    fn texture_width_2d(group: u32, binding: u32) -> u32;
+    fn texture_height_2d(group: u32, binding: u32) -> u32;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -392,4 +395,28 @@ fn lanes_from_bytes(bytes: &[u8; VEC4_SIZE as usize]) -> [f32; LANE_COUNT] {
         index += 1;
     }
     lanes
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn call_texture_load_2d(group: u32, binding: u32, x: i32, y: i32) -> GpuVec4 {
+    // SAFETY: the import returns one texel as four initialized f32 lanes.
+    let word = unsafe { texture_load_2d(group, binding, x, y) };
+    GpuVec4 {
+        x: word.x,
+        y: word.y,
+        z: word.z,
+        w: word.w,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn call_texture_width_2d(group: u32, binding: u32) -> u32 {
+    // SAFETY: this import returns the bound texture's width, not a pointer.
+    unsafe { texture_width_2d(group, binding) }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn call_texture_height_2d(group: u32, binding: u32) -> u32 {
+    // SAFETY: this import returns the bound texture's height, not a pointer.
+    unsafe { texture_height_2d(group, binding) }
 }
