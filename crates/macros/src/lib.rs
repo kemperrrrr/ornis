@@ -14,10 +14,11 @@
 //!   assignments generated from field attributes.
 //! - `#[kernel]` — translate a small Rust function AST into WGSL compute
 //!   code (used e.g. for BRDF math in `render/shaders/math.rs`).
-//! - `#[gpu_pipeline]`, `#[derive(PipelineConfig)]`,
-//!   `#[smart_pipeline]` — declare pipelines with static bind-group /
-//!   layout metadata, letting the engine build them without hand-written
-//!   boilerplate; `for_each_entity!` stamps per-component dispatch glue.
+//! - `#[gpu_pipeline]`, `#[derive(PipelineConfig)]` — declare pipelines
+//!   with static bind-group / layout metadata, letting the engine build
+//!   them without hand-written boilerplate; `for_each_entity!` stamps
+//!   per-component dispatch glue. `#[smart_system]` turns a per-object
+//!   function into a `System` whose accesses come from parameter types.
 #![warn(missing_docs)]
 
 mod auto_pipeline;
@@ -34,7 +35,6 @@ mod pack_mut;
 mod pipeline_config;
 mod plain_resource;
 mod register_component;
-mod smart_pipeline;
 mod smart_system;
 mod smart_system_body_links;
 mod smart_system_body_visit;
@@ -111,15 +111,6 @@ pub fn derive_wgsl_interface(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn for_each_entity(input: TokenStream) -> TokenStream {
     for_each_entity::for_each_entity(input)
-}
-
-/// Declare a GPU pipeline whose configuration is chosen at runtime between
-/// handwritten variants ("smart" dispatch): inspects the attributed item and
-/// emits a dispatcher selecting the appropriate precompiled path based on
-/// the attribute's criteria.
-#[proc_macro_attribute]
-pub fn smart_pipeline(attr: TokenStream, item: TokenStream) -> TokenStream {
-    smart_pipeline::attribute(attr, item)
 }
 
 /// Derive static pipeline configuration from `#[gpu]` / `#[cpu]` / `#[auto]`

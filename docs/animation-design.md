@@ -192,8 +192,9 @@ writes_lane: JointPose`. Уровни: после `anim_sample` (разные л
   по своим лейнам параллельны со всем остальным.
 - Детерминизм: сэмплирование — чистая функция `(clip, time)`; `time` из
   `Time::elapsed_seconds` (монотонно, `engine.rs:55-64`). Параллелизм внутри системы —
-  только через `#[smart_pipeline]`-паттерн с `capture_access_frame`
-  (`schedule.rs:348-381`), ручной `rayon::scope` без capture запрещён.
+  только через `capture_access_frame` / `AccessFrameCapture::install`
+  (`schedule.rs`), ручной `rayon::scope` без capture запрещён.
+  Макрос `#[smart_pipeline]`, который раньше ставил эту пару сам, удалён (#246).
 - GameWorld: `frame` без изменений — экстракция после `run_frame`
   автоматически видит финальные позы. Регистрация — через
   `Engine::add_stage_system(Stage::PostFrame, …)` (словарь `GameStage`

@@ -2,14 +2,12 @@
 //!
 //! One positive expansion per public entry point (`#[stage]`,
 //! `#[gpu_pipeline]` (legacy + full-shader), `#[wgsl_fn]`,
-//! `#[derive(WgslStruct)]` / `#[derive(WgslInterface)]`,
-//! `#[smart_pipeline]`), asserting the generated surface
-//! (`wgsl_source`, `pipeline_label`, `entry_point`, layout constants)
-//! and naga-validating the complete compute/helper modules.
-//! Error paths stay in `tests/ui` (trybuild).
+//! `#[derive(WgslStruct)]` / `#[derive(WgslInterface)]`), asserting the
+//! generated surface (`wgsl_source`, `pipeline_label`, `entry_point`,
+//! layout constants) and naga-validating the complete compute/helper
+//! modules. Error paths stay in `tests/ui` (trybuild).
 
-use ornis_core::SmartStore;
-use ornis_macros::{WgslInterface, WgslStruct, gpu_pipeline, smart_pipeline, stage, wgsl_fn};
+use ornis_macros::{WgslInterface, WgslStruct, gpu_pipeline, stage, wgsl_fn};
 
 // ── #[stage] ─────────────────────────────────────────────────────────────
 
@@ -158,81 +156,4 @@ fn gpu_pipeline_legacy_and_full_shader_modes() {
     assert_eq!(entry_scale::pipeline_label(), "entry_scale");
     validate_module("entry_scale compute module", full);
     validate_module("entry_helper helper", entry_helper::wgsl_source());
-}
-
-// ── #[smart_pipeline] ────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct EntryPos {
-    x: f32,
-}
-
-#[derive(Debug, Clone)]
-struct EntryVel {
-    x: f32,
-}
-
-#[smart_pipeline]
-fn entry_integrate(store: &SmartStore, dt: f32) -> usize {
-    let mut positions = store.write_lane::<EntryPos>().expect("pos lane");
-    let velocities = store.read_lane::<EntryVel>().expect("vel lane");
-    for (pos, vel) in positions.iter_mut().zip(velocities.iter()) {
-        pos.x += vel.x * dt;
-    }
-    positions.len()
-}
-
-#[test]
-fn smart_pipeline_entry_compiles_and_runs() {
-    let mut store = SmartStore::new();
-    store.register::<EntryPos>();
-    store.register::<EntryVel>();
-    for _ in 0..4 {
-        let e = store.create_entity();
-        store.insert(e, EntryPos { x: 0.0 });
-        store.insert(e, EntryVel { x: 2.0 });
-    }
-    assert_eq!(entry_integrate(&store, 0.5), 4);
-    let lane = store.read_lane::<EntryPos>().expect("pos lane");
-    for pos in lane.iter() {
-        assert_eq!(pos.x, 1.0);
-    }
-}
-
-/// R3: the macro exports the access set derived from the lane bindings as a
-/// sorted `(type, is_write)` constant next to the function.
-#[test]
-fn smart_pipeline_access_const_matches_lane_bindings() {
-    // Sorted by type name; a write covers a read of the same lane.
-    assert_eq!(
-        __SMART_PIPELINE_ACCESS_entry_integrate,
-        &[("EntryPos", true), ("EntryVel", false)]
-    );
-}
-
-#[smart_pipeline]
-fn entry_readonly(store: &SmartStore) -> usize {
-    let velocities = store.read_lane::<EntryVel>().expect("vel lane");
-    velocities.len()
-}
-
-/// R3: a read-only single lane exports one read entry.
-#[test]
-fn smart_pipeline_access_const_single_read_lane() {
-    assert_eq!(
-        __SMART_PIPELINE_ACCESS_entry_readonly,
-        &[("EntryVel", false)]
-    );
-}
-
-#[smart_pipeline]
-fn entry_no_lanes(dt: f32) -> f32 {
-    dt * 2.0
-}
-
-/// R3: no lane bindings export an empty access set (still deterministic).
-#[test]
-fn smart_pipeline_access_const_empty_without_lanes() {
-    assert!(__SMART_PIPELINE_ACCESS_entry_no_lanes.is_empty());
-    assert_eq!(entry_no_lanes(21.0), 42.0);
 }

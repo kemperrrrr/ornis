@@ -4,8 +4,8 @@
 // Tests that parallel execution produces bitwise-identical results
 // regardless of RAYON_NUM_THREADS setting.
 
-use ornis_core::SmartStore;
-use ornis_macros::for_each_entity;
+use ornis_core::{Pack, Resources, Schedule, SmartStore};
+use ornis_macros::{for_each_entity, smart_system};
 
 // ===== Test Types =====
 
@@ -299,77 +299,75 @@ fn strong_confluence_three_lanes() {
     assert_bitwise_equal(&threads_1, &threads_32, "three_lanes");
 }
 
+/// Bundle for the branching confluence check. One `#[smart_system]` owns
+/// both fields; the body branches on velocity and writes position.
+#[derive(Clone, Copy, Debug, PartialEq, ornis_macros::Pack)]
+struct BranchBody {
+    position: Position,
+    velocity: Velocity,
+}
+
+#[smart_system]
+fn branch_step(body: &mut BranchBody) {
+    if body.velocity.x > 0.0 {
+        body.position.x += body.velocity.x * 2.0;
+    } else {
+        body.position.x += body.velocity.x * 0.5;
+    }
+    body.position.y += body.velocity.y;
+    body.position.z += body.velocity.z;
+}
+
+/// One `#[smart_system]` tick of the branching update at `threads`.
+fn run_branch_system(threads: usize) -> Vec<Position> {
+    // SAFETY: no other test in this binary touches the process environment,
+    // and rayon reads `RAYON_NUM_THREADS` once at first pool init; no
+    // concurrent env reader exists while these tests run.
+    unsafe {
+        std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
+    }
+
+    let mut store = SmartStore::new();
+    BranchBody::pack_register(&mut store);
+    for i in 0..1000 {
+        let entity = store.create_entity();
+        BranchBody {
+            position: Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },
+            velocity: Velocity {
+                x: if i % 2 == 0 { 0.1 } else { -0.1 },
+                y: 0.0,
+                z: 0.0,
+            },
+        }
+        .pack_insert(&mut store, entity);
+    }
+
+    let mut resources = Resources::new();
+    resources.insert(store);
+    let mut schedule = Schedule::new();
+    schedule.add_system(BranchStepSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let mut positions: Vec<_> = BranchBody::pack_entities(store)
+        .into_iter()
+        .map(|entity| BranchBody::pack_get(store, entity).expect("body").position)
+        .collect();
+    positions.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+    positions
+}
+
+/// Strong confluence of a data-dependent `#[smart_system]` update:
+/// 1 thread and 32 threads must agree bitwise.
 #[test]
-fn strong_confluence_smart_pipeline_branching() {
-    let threads_1 = run_with_threads(1, |store| {
-        for i in 0..1000 {
-            let e = store.create_entity();
-            store.insert(
-                e,
-                Position {
-                    x: i as f32,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-            store.insert(
-                e,
-                Velocity {
-                    x: if i % 2 == 0 { 0.1 } else { -0.1 },
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-        }
-
-        for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
-            if vel.x > 0.0 {
-                pos.x += vel.x * 2.0;
-            } else {
-                pos.x += vel.x * 0.5;
-            }
-            pos.y += vel.y;
-            pos.z += vel.z;
-        });
-
-        collect_positions(store)
-    });
-
-    let threads_32 = run_with_threads(32, |store| {
-        for i in 0..1000 {
-            let e = store.create_entity();
-            store.insert(
-                e,
-                Position {
-                    x: i as f32,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-            store.insert(
-                e,
-                Velocity {
-                    x: if i % 2 == 0 { 0.1 } else { -0.1 },
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-        }
-
-        for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
-            if vel.x > 0.0 {
-                pos.x += vel.x * 2.0;
-            } else {
-                pos.x += vel.x * 0.5;
-            }
-            pos.y += vel.y;
-            pos.z += vel.z;
-        });
-
-        collect_positions(store)
-    });
-
-    assert_bitwise_equal(&threads_1, &threads_32, "smart_pipeline_branching");
+fn strong_confluence_smart_system_branching() {
+    let threads_1 = run_branch_system(1);
+    let threads_32 = run_branch_system(32);
+    assert_bitwise_equal(&threads_1, &threads_32, "smart_system_branching");
 }
 
 #[test]
@@ -572,5 +570,5 @@ fn strong_confluence_for_each_entity_pure_math() {
         collect_positions(store)
     });
 
-    assert_bitwise_equal(&threads_1, &threads_32, "smart_pipeline_pure_math");
+    assert_bitwise_equal(&threads_1, &threads_32, "for_each_entity_pure_math");
 }

@@ -120,21 +120,9 @@ pub trait PipelineConfig: Sized {
     const THRESHOLD: usize;
 }
 
-/// Hook called when a `#[smart_pipeline]` function enters.
-pub fn pipeline_enter() {}
-
-/// Hook called when a `#[smart_pipeline]` function exits.
-pub fn pipeline_exit() {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pipeline_hooks_noop() {
-        pipeline_enter();
-        pipeline_exit();
-    }
 
     #[test]
     fn auto_pipeline_for_primitives() {

@@ -1884,16 +1884,6 @@
       "name": "parse_binding_group"
     },
     {
-      "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 249,
-      "name": "collect_pat_idents"
-    },
-    {
-      "file": "crates/macros/src/smart_pipeline.rs",
-      "line": 462,
-      "name": "LoopRewriter<'_>::plan"
-    },
-    {
       "file": "crates/macros/src/pipeline_config.rs",
       "line": 127,
       "name": "TypeAnalyzer::visit_type"

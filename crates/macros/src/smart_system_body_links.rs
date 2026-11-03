@@ -2,8 +2,7 @@
 //!
 //! Free-function predicates over `syn` AST shapes: member-chain roots,
 //! link aliases, and pattern bindings. The recursive helpers mix match
-//! logic with self calls by construction (same as the baselined
-//! `smart_pipeline::collect_pat_idents`); each carries a targeted
+//! logic with self calls by construction; each carries a targeted
 //! `qual:allow(iosp)` pin that re-fires if logic or calls grow.
 
 use std::collections::HashSet;
@@ -12,7 +11,7 @@ use syn::visit::Visit;
 use syn::{Expr, Pat};
 
 /// Root ident of a `a.b.c` member chain, when the base is a plain ident.
-// qual:allow(iosp) reason: "recursive member-chain walk mixing match logic with a self call — same shape as baselined smart_pipeline::collect_pat_idents"
+// qual:allow(iosp) reason: "recursive member-chain walk mixing match logic with a self call"
 pub(crate) fn member_root(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Path(p) => {
@@ -60,7 +59,7 @@ pub(crate) fn mentions_entity_member(expr: &Expr, u: &str, links: &HashSet<Strin
 /// Whether `expr` is an alias of a link binding (`t`, `&t`, `t.clone()`,
 /// `Some(t)`) — i.e. the bound value is still the entity handle, not a
 /// computed value like `u.target.map(…)`.
-// qual:allow(iosp) reason: "recursive shape predicate mixing match logic with self calls — same shape as baselined smart_pipeline::collect_pat_idents"
+// qual:allow(iosp) reason: "recursive shape predicate mixing match logic with self calls"
 pub(crate) fn is_link_alias(expr: &Expr, links: &HashSet<String>) -> bool {
     match expr {
         Expr::Path(p) => {
@@ -88,7 +87,7 @@ pub(crate) fn is_link_alias(expr: &Expr, links: &HashSet<String>) -> bool {
     }
 }
 
-// qual:allow(iosp) reason: "recursive pattern walk mixing match logic with self calls — same shape as baselined smart_pipeline::collect_pat_idents"
+// qual:allow(iosp) reason: "recursive pattern walk mixing match logic with self calls"
 pub(crate) fn pat_idents(pat: &Pat, out: &mut Vec<String>) {
     match pat {
         Pat::Ident(id) => out.push(id.ident.to_string()),
