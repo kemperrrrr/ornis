@@ -29,9 +29,11 @@ pub(super) use texture::{
 #[cfg(target_arch = "wasm32")]
 mod math;
 #[cfg(target_arch = "wasm32")]
-pub(super) use math::{
-    call_math_cross3, call_math_dot3, call_math_length3, call_math_normalize3,
-};
+pub(super) use math::{call_math_cross3, call_math_dot3, call_math_length3, call_math_normalize3};
+#[cfg(target_arch = "wasm32")]
+mod compute;
+#[cfg(target_arch = "wasm32")]
+pub(super) use compute::{call_storage_atomic_add_u32, call_storage_barrier, call_workgroup_atomic_add_u32, call_workgroup_barrier, call_workgroup_load_u32, call_workgroup_store_u32};
 
 /// Lane count of a `vec4<f32>`.
 #[cfg(target_arch = "wasm32")]
@@ -133,12 +135,6 @@ unsafe extern "C" {
     fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
     fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32;
     fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
-    fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
-    fn workgroup_load_u32(index: u32) -> u32;
-    fn workgroup_store_u32(index: u32, value: u32);
-    fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32;
-    fn workgroup_barrier();
-    fn storage_barrier();
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -386,40 +382,4 @@ fn lanes_from_bytes(bytes: &[u8; VEC4_SIZE as usize]) -> [f32; LANE_COUNT] {
         index += 1;
     }
     lanes
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
-    // SAFETY: the import performs one atomic operation on its named storage binding.
-    call_gpu_import!(storage_atomic_add_u32(group, binding, index, value))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_workgroup_load_u32(index: u32) -> u32 {
-    // SAFETY: the import reads a bounded word from workgroup scratch.
-    call_gpu_import!(workgroup_load_u32(index))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_workgroup_store_u32(index: u32, value: u32) {
-    // SAFETY: the import writes a bounded word to workgroup scratch.
-    call_gpu_import!(workgroup_store_u32(index, value))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
-    // SAFETY: the import performs one atomic operation in workgroup scratch.
-    call_gpu_import!(workgroup_atomic_add_u32(index, value))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_workgroup_barrier() {
-    // SAFETY: the import lowers to a workgroup control barrier.
-    call_gpu_import!(workgroup_barrier())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_storage_barrier() {
-    // SAFETY: the import lowers to a storage memory barrier.
-    call_gpu_import!(storage_barrier())
 }
