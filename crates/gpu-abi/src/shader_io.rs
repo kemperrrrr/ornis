@@ -158,19 +158,19 @@ pub fn storage_store_f32<const GROUP: u32, const BINDING: u32>(index: u32, value
 /// Dot product of two `vec3<f32>` values.
 #[inline(always)]
 pub fn gpu_dot3(a: GpuVec3, b: GpuVec3) -> f32 {
-    gpu_abi::math_dot3(a, b)
+    crate::gpu_abi::math_dot3(a, b)
 }
 
 /// Cross product of two `vec3<f32>` values.
 #[inline(always)]
 pub fn gpu_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
-    gpu_abi::math_cross3(a, b)
+    crate::gpu_abi::math_cross3(a, b)
 }
 
 /// Euclidean length of a `vec3<f32>` value.
 #[inline(always)]
 pub fn gpu_length3(value: GpuVec3) -> f32 {
-    gpu_abi::math_length3(value)
+    crate::gpu_abi::math_length3(value)
 }
 
 /// Normalize a `vec3<f32>` value to unit length.
@@ -178,7 +178,7 @@ pub fn gpu_length3(value: GpuVec3) -> f32 {
 /// As with WGSL `normalize`, a zero vector has no defined direction.
 #[inline(always)]
 pub fn gpu_normalize3(value: GpuVec3) -> GpuVec3 {
-    gpu_abi::math_normalize3(value)
+    crate::gpu_abi::math_normalize3(value)
 }
 
 /// Atomically add to one `u32` in storage and return its previous value.
