@@ -10,6 +10,7 @@
 //! Building the guest deliberately calls Cargo for the shader package rather
 //! than adding a Cargo dependency (which would cycle through its dev-dependency
 //! on this kit); that nested build honors `CARGO_TARGET_DIR` and uses `--locked`.
+#![warn(missing_docs)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
