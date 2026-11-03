@@ -14,6 +14,7 @@
 //! ORNIS_EDITOR_DIR=editor cargo run -p ornis-shell
 //! cargo run -p ornis-shell -- --webgpu-probe       # WebGPU capability check
 //! ```
+#![warn(missing_docs)]
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
