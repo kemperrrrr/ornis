@@ -102,6 +102,25 @@ fn binding_array(module: &naga::Module) -> bool {
     false
 }
 
+fn has_workgroup_atomic(module: &naga::Module) -> bool {
+    module.global_variables.iter().any(|(_, global)| {
+        global.space == naga::AddressSpace::WorkGroup
+            && contains_atomic(module, global.ty)
+    })
+}
+
+fn contains_atomic(module: &naga::Module, ty: naga::Handle<naga::Type>) -> bool {
+    match &module.types[ty].inner {
+        naga::TypeInner::Atomic(_) => true,
+        naga::TypeInner::Array { base, .. }
+        | naga::TypeInner::BindingArray { base, .. } => contains_atomic(module, *base),
+        naga::TypeInner::Struct { members, .. } => members
+            .iter()
+            .any(|member| contains_atomic(module, member.ty)),
+        _ => false,
+    }
+}
+
 fn spirv(
     module: &naga::Module,
     info: &naga::valid::ModuleInfo,
@@ -109,6 +128,13 @@ fn spirv(
     entry_point: &str,
 ) -> Result<Vec<u32>, TranslateError> {
     let mut options = naga::back::spv::Options::default();
+    if stage == naga::ShaderStage::Compute && has_workgroup_atomic(module) {
+        // Naga's Polyfill mode writes a whole-array Store for every WorkGroup
+        // global; that Store is invalid when the array contains atomics.
+        // Native mode preserves zero initialization through the SPIR-V extension.
+        options.zero_initialize_workgroup_memory =
+            naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Native;
+    }
     options
         .flags
         .remove(naga::back::spv::WriterFlags::ADJUST_COORDINATE_SPACE);
@@ -125,7 +151,7 @@ fn spirv(
 }
 
 fn naga_chain(err: &impl std::error::Error) -> String {
-    let mut msg = format!("{} ({err:?})", err);
+    let mut msg = err.to_string();
     let mut src = std::error::Error::source(err);
     while let Some(inner) = src {
         msg.push_str(": ");
@@ -154,20 +180,6 @@ fn reparse_spirv(words: &[u32]) -> Result<(), TranslateError> {
         naga::valid::Capabilities::empty(),
     )
     .validate(&parsed)
-    .map_err(|err| {
-        let function = parsed
-            .functions
-            .iter()
-            .find_map(|(handle, function)| {
-                (function.name.as_deref() == Some("cs_main"))
-                    .then(|| format!("{handle:?}: {function:#?}"))
-            })
-            .unwrap_or_else(|| "cs_main function body unavailable".to_string());
-        TranslateError::Naga(format!(
-            "{}; globals: {:#?}; function: {function}",
-            naga_chain(&err),
-            parsed.global_variables
-        ))
-    })?;
+    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     Ok(())
 }
