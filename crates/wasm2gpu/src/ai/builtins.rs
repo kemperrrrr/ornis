@@ -2,7 +2,7 @@
 
 use super::mem::{pop_num, pop_prov};
 use super::value::pop_f32;
-use super::{push, Abs, Num, St};
+use super::{Abs, Num, St, push};
 use crate::error::TranslateError;
 use crate::ir::Import;
 use crate::ty;
@@ -81,4 +81,3 @@ pub(super) fn texture_load(st: &mut St, import: &Import) -> Result<(), Translate
     pop_prov(st)?;
     push(st, Abs::Vec)
 }
-

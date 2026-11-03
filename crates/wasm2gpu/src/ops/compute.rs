@@ -98,4 +98,3 @@ pub(super) fn storage_barrier(em: &mut Emit<'_, '_>) -> Result<(), TranslateErro
     );
     Ok(())
 }
-

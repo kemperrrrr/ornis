@@ -206,7 +206,6 @@ fn storage_index_write_does_not_touch_the_neighbor() {
     assert!(got[1] == 3.0);
 }
 
-
 #[test]
 #[should_panic(expected = "texture coordinate out of bounds")]
 fn texture_load_rejects_out_of_bounds_coordinates() {

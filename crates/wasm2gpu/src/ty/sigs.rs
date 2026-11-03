@@ -37,7 +37,12 @@ pub(crate) fn sig_ok(
         Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
         Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),
         Imp::MathDot3 => float_sig(sig, VEC3_BINARY_PARAMS, 1, "math_dot3"),
-        Imp::MathCross3 => float_sig(sig, VEC3_BINARY_PARAMS, crate::cx::VEC3_LANES, "math_cross3"),
+        Imp::MathCross3 => float_sig(
+            sig,
+            VEC3_BINARY_PARAMS,
+            crate::cx::VEC3_LANES,
+            "math_cross3",
+        ),
         Imp::MathLength3 => float_sig(sig, crate::cx::VEC3_LANES, 1, "math_length3"),
         Imp::MathNormalize3 => float_sig(
             sig,

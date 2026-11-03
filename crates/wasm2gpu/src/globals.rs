@@ -20,10 +20,10 @@ use crate::ty::StructDef;
 
 mod compute;
 
-pub(super) use compute::{atomic_storage, atomic_taken, workgroup, workgroup_atomics};
 pub(super) use crate::struct_members::struct_ty;
 pub(super) use crate::uniform_global::uniform;
 pub(super) use crate::uniform_global::uniform_global;
+pub(super) use compute::{atomic_storage, atomic_taken, workgroup, workgroup_atomics};
 
 pub(super) fn storage(
     cx: &mut Cx<'_>,
