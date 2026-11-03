@@ -4,12 +4,14 @@
 // `GET /api/scene` (with `GET /api/status` and the WS `/api/events` stream as
 // the push channel, cursor polling as fallback). Hierarchy, inspector and the
 // console render that snapshot; edits go back through `POST /api/command`
-// (`create_entity`, `destroy_entity`, `set_component`, `save_scene`,
-// `load_scene`) with the same ACK/`CommandCompleted` contract as `editor/`.
+// (`create_entity`, `destroy_entity`, `set_component`, `select`,
+// `save_scene`, `load_scene`) with the same ACK/`CommandCompleted`
+// contract as `editor/`.
 //
 // The 3D viewport is `viewport.js` (WASM); this module only owns the DOM
-// around it. Selection is local for now: the authoritative `select` command
-// and the replica outline arrive with the E2 slice.
+// around it. Selection is authoritative: `editor.selected` from the
+// snapshot drives the tree/inspector, tree clicks send `select`, and the
+// WASM viewport sends the same command on its own picking.
 (function () {
   "use strict";
 
@@ -252,6 +254,22 @@
     syncInspector();
     renderTabs();
     onSelectionChanged(key);
+    // The authoritative world owns the selection; an empty payload clears.
+    var entity = key && lastScene ? findEntity(lastScene, key) : null;
+    var data = entity ? { id: entity.id, generation: entity.generation } : {};
+    sendCommand("select", data).catch(function () {});
+  }
+
+  function clearSelection() {
+    if (!selectedKey) return;
+    selectedKey = null;
+    lastInspectorKey = "";
+    updateTreeSelection();
+    syncInspector();
+    renderTabs();
+    onSelectionChanged(null);
+    // Empty payload = authoritative clear (same as a viewport miss).
+    sendCommand("select", {}).catch(function () {});
   }
 
   function updateTreeSelection() {
@@ -452,7 +470,7 @@
       node.appendChild(svgIcon(tab.root ? "cube-outline" : entityIcon(findEntity(lastScene, tab.id) || {})));
       node.appendChild(el("span", "label", tabLabel(tab)));
       node.addEventListener("click", function () {
-        if (tab.root) { selectedKey = null; updateTreeSelection(); syncInspector(); renderTabs(); }
+        if (tab.root) clearSelection();
         else selectEntity(tab.id);
       });
       if (!tab.root) {
@@ -473,11 +491,7 @@
 
   function closeTab(key) {
     openTabs = openTabs.filter(function (t) { return t.id !== key; });
-    if (selectedKey === key) {
-      selectedKey = null;
-      updateTreeSelection();
-      syncInspector();
-    }
+    // Closing a tab does not deselect: selection belongs to the engine.
     renderTabs();
   }
 
@@ -548,8 +562,14 @@
       if (typeof sequence === "number" && sequence < lastSceneSequence) return;
       if (typeof sequence === "number") lastSceneSequence = sequence;
       lastScene = scene;
-      if (selectedKey && selectedKey !== "root" && !findEntity(scene, selectedKey)) {
-        selectedKey = null;
+      // `editor.selected` is the source of truth: the viewport replica
+      // writes it through `select`, and tree clicks are confirmed here.
+      var serverKey = null;
+      (scene.entities || []).forEach(function (entity) {
+        if (!serverKey && entity.editor && entity.editor.selected) serverKey = entityKey(entity);
+      });
+      if (serverKey !== selectedKey) {
+        selectedKey = serverKey;
         lastInspectorKey = "";
       }
       renderTree();
@@ -559,8 +579,8 @@
     }).catch(function () { /* engine offline — keep the last state */ });
   }
 
-  // Hook for the E2 slice: the authoritative selection will arrive in
-  // `editor.selected`; the replica/welcome code can override this.
+  // Hook for the viewport overlay: `key` mirrors `editor.selected` after
+  // every snapshot (the replica/welcome code can override this).
   function onSelectionChanged(key) {
     if (window.OrnisSelection && typeof window.OrnisSelection.changed === "function") {
       window.OrnisSelection.changed(key);
@@ -612,6 +632,10 @@
         log("loaded " + (data.path || "scene") + " — " + data.entity_count + " entities (v" + data.version + ")");
         refreshScene();
         refreshStatus();
+      } else if (custom.cmd_type === "scene") {
+        // A new snapshot is ready (selection, edits, spawns): fetch it now
+        // instead of waiting for the poll; polling stays the fallback.
+        refreshScene();
       } else if (custom.cmd_type === "error") {
         log((data.command || "command") + ": " + (data.message || "error"), true);
       }

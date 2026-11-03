@@ -151,6 +151,7 @@ impl Renderer3D {
             record_cache: std::sync::RwLock::new(Default::default()),
             material_buffer: std::sync::RwLock::new(buffers.material),
             lighting_buffer: buffers.lighting,
+            outline: std::sync::Mutex::new(None),
             _bind_group_layout: bind_group_layout,
             _bind_group: bind_group,
             _pipeline: pipeline,

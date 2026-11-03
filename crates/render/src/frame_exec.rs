@@ -18,8 +18,8 @@ use crate::frame_passes::{
     CompositeDeferredBloom, CompositeForward, CompositeForwardBloom, CompositeHybrid,
     CompositeHybridBloom, Depth, EdgeFilterPass, FogPass, FogPlacement, FogWiring, Forward,
     FromDeferred, FromForward, GbufferMotionPass, GbufferPass, Hdr, HdrFwd, LdrLayer,
-    LightingAoPass, LightingPass, MaterialId, MaterialParams, Motion, Normal, OwnsDepth,
-    PreviousDepth, SharedDepth, TaaPass, Target, WorldPosition,
+    LightingAoPass, LightingPass, MaterialId, MaterialParams, Motion, Normal, OutlinePass,
+    OutlineState, OwnsDepth, PreviousDepth, SharedDepth, TaaPass, Target, WorldPosition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
@@ -466,6 +466,9 @@ pub struct RenderFrame3D {
     /// against, whose pipelines and resolve targets are built for the same
     /// count. Single-sample resources stay 1x in all modes.
     sample_count: u32,
+    /// Opt-in editor outline flags (see [`OutlineState`]); `None` on plans
+    /// that do not register the `outline` pass.
+    outline: Option<Arc<OutlineState>>,
 }
 
 /// Which lighting technique the plan wires up. The choice is expressed
@@ -551,6 +554,7 @@ struct FramePassWiring {
     fog: Option<FogWiring>,
     ao: Option<crate::ao::AoWiring>,
     aa: Option<AaWiring>,
+    outline: Option<Arc<OutlineState>>,
 }
 
 impl RenderFrame3D {
@@ -755,6 +759,58 @@ impl RenderFrame3D {
         aa: AaWiring,
         sample_count: u32,
     ) -> Self {
+        Self::new_with_aa_impl(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            aa,
+            sample_count,
+            None,
+        )
+    }
+
+    /// Like [`new_with_aa`](Self::new_with_aa), plus the editor outline pass
+    /// (inverted-hull silhouettes driven by
+    /// [`set_outline_flags`](Self::set_outline_flags)).
+    ///
+    /// The `outline` node sits after `composite` and before the AA pass, so
+    /// the filter also smooths the silhouette edges. Without flags the
+    /// pass records no commands, keeping an unedited frame pixel-identical
+    /// to [`new_with_aa`](Self::new_with_aa). The pass needs a
+    /// single-sample present layer and depth, so it is not registered for
+    /// [`AntiAliasMode::Msaa`].
+    #[must_use]
+    pub fn new_with_aa_outline(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        aa: AaWiring,
+    ) -> Self {
+        Self::new_with_aa_impl(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            aa,
+            crate::renderer::SINGLE_SAMPLE_COUNT,
+            Some(Arc::new(OutlineState::new())),
+        )
+    }
+
+    /// Shared AA wiring: picks the presented layer ([`LdrLayer`] with AA,
+    /// [`Target`] without) and optionally registers the outline pass.
+    // qual:allow(iosp) reason: "the runtime AA mode selects distinct generic target types in the typed render graph"
+    fn new_with_aa_impl(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        aa: AaWiring,
+        sample_count: u32,
+        outline: Option<Arc<OutlineState>>,
+    ) -> Self {
         let sample_count = match aa.mode {
             AntiAliasMode::Off => crate::renderer::SINGLE_SAMPLE_COUNT,
             AntiAliasMode::Msaa => crate::renderer::normalize_sample_count(sample_count),
@@ -770,6 +826,7 @@ impl RenderFrame3D {
                 bloom,
                 FramePassWiring {
                     aa: Some(aa),
+                    outline,
                     ..FramePassWiring::default()
                 },
                 sample_count,
@@ -782,10 +839,23 @@ impl RenderFrame3D {
                 bloom,
                 FramePassWiring {
                     aa: Some(aa),
+                    outline,
                     ..FramePassWiring::default()
                 },
                 sample_count,
             )
+        }
+    }
+
+    /// Replaces the per-instance outline flags for the next frame.
+    ///
+    /// One `u32` per uploaded instance: `0` = none, `1` = hover, `2` =
+    /// selected. Plans built without [`new_with_aa_outline`](Self::new_with_aa_outline)
+    /// ignore the call. The flags are uploaded by the outline pass on the
+    /// next [`render`](Self::render).
+    pub fn set_outline_flags(&self, flags: &[u32]) {
+        if let Some(state) = &self.outline {
+            state.set_flags(flags);
         }
     }
 
@@ -917,7 +987,12 @@ impl RenderFrame3D {
         passes: FramePassWiring,
         sample_count: u32,
     ) -> Self {
-        let FramePassWiring { fog, ao, aa } = passes;
+        let FramePassWiring {
+            fog,
+            ao,
+            aa,
+            outline,
+        } = passes;
         // Register resources by type in the plan's stable declaration order.
         let mut systems = SystemSet::new();
         systems.set_sample_count(sample_count);
@@ -962,6 +1037,14 @@ impl RenderFrame3D {
             systems.add_system(FogPass::new(state));
         }
         Self::register_composite::<O>(&mut systems, technique, bloom);
+        // Editor outline: overlays the composited layer before AA filters
+        // it (or the presented target without AA). MSAA plans have no
+        // single-sample depth, so the pass is skipped there.
+        if let Some(state) = outline.clone()
+            && sample_count == crate::renderer::SINGLE_SAMPLE_COUNT
+        {
+            systems.add_system(OutlinePass::<O>::new(state, surface_format, sample_count));
+        }
         // The AA pass filters the composite and presents the result.
         Self::register_anti_alias(&mut systems, aa);
         // After-composite fog writes the presented frame.
@@ -981,6 +1064,7 @@ impl RenderFrame3D {
             technique,
             anti_alias: aa.map_or(AntiAliasMode::Msaa, |wiring| wiring.mode),
             sample_count,
+            outline,
         }
     }
 
@@ -1744,6 +1828,42 @@ mod tests {
             names_of(AntiAliasMode::Msaa),
             vec!["gbuffer", "lighting", "forward", "composite"]
         );
+    }
+
+    #[test]
+    fn outline_plan_wires_the_pass_before_aa() {
+        // The outline overlays the composited layer, so the AA filter
+        // smooths its silhouette too. Plans without the opt-in keep the
+        // exact pass list (covered by `anti_alias_plans_wire_the_matching_pass`).
+        let mut plan = RenderFrame3D::new_with_aa_outline(
+            wgpu::TextureFormat::Rgba8Unorm,
+            (32, 32),
+            Technique::Hybrid,
+            Bloom::Off,
+            AaWiring::new(AntiAliasMode::Fxaa),
+        );
+        let names: Vec<String> = plan
+            .systems
+            .build()
+            .passes
+            .iter()
+            .map(|pass| pass.name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "gbuffer",
+                "lighting",
+                "forward",
+                "composite",
+                "outline",
+                "edge_filter"
+            ]
+        );
+        // Empty flags disable the pass; setting them is accepted without a
+        // device (the pass uploads on the next frame).
+        plan.set_outline_flags(&[]);
+        plan.set_outline_flags(&[0, 2]);
     }
 
     #[test]

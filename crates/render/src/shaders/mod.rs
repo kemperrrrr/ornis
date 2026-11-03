@@ -21,6 +21,7 @@ pub mod lighting_generated;
 pub mod material_textures;
 pub mod math;
 pub mod naga_ir;
+pub mod outline_generated;
 pub mod pbr_generated;
 
 /// Splice a derived [`WgslStruct`](ornis_macros::WgslStruct) declaration into
@@ -702,6 +703,22 @@ pub fn taa_fragment(sample_count: u32) -> String {
 /// [`taa_fragment`].
 pub fn aa_edge_fragment() -> String {
     aa_edge_generated::wgsl_source()
+}
+
+// ── OUTLINE ───────────────────────────────────────────────────────────
+
+/// Assemble the editor outline vertex shader (inverted hull + flag test).
+///
+/// Single source of truth — [`outline_generated::wgsl_vertex_source`].
+pub fn outline_vertex() -> String {
+    outline_generated::wgsl_vertex_source()
+}
+
+/// Assemble the editor outline fragment shader (constant silhouette color).
+///
+/// Single source of truth — [`outline_generated::wgsl_fragment_source`].
+pub fn outline_fragment() -> String {
+    outline_generated::wgsl_fragment_source()
 }
 
 // ── GBUFFER_VERTEX ────────────────────────────────────────────────────
@@ -1434,9 +1451,11 @@ mod tests {
 
     #[test]
     fn assembled_shaders_validate_with_naga() {
-        let shaders: [(&str, String); 11] = [
+        let shaders: [(&str, String); 13] = [
             ("composite_vertex", composite_vertex()),
             ("composite_fragment", composite_fragment()),
+            ("outline_vertex", outline_vertex()),
+            ("outline_fragment", outline_fragment()),
             ("bloom_fragment", bloom_fragment()),
             ("fog_fragment", fog_fragment()),
             ("gbuffer_vertex", gbuffer_vertex()),

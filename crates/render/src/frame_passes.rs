@@ -16,6 +16,7 @@ use crate::system::{
 };
 use crate::transient_pool::{SizePolicy, TextureSpec};
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 /// Default fog tint (linear RGB).
 const DEFAULT_FOG_RGB: [f32; 3] = [0.5, 0.6, 0.7];
 /// Default fog density (1/m).
@@ -1371,6 +1372,106 @@ impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
             frame.encoder,
             inputs,
             frame.renderer.frame_dt_seconds(),
+        );
+    }
+}
+
+/// Per-instance outline flags shared between the host and [`OutlinePass`].
+///
+/// One `u32` per uploaded instance, parallel to the per-object record order:
+/// `0` = no outline, `1` = hover, `2` = selected. The host replaces the set
+/// whenever selection, hover or the instance list changes; an empty set
+/// disables the pass (it records no commands).
+#[derive(Debug, Default)]
+pub struct OutlineState {
+    flags: Mutex<Vec<u32>>,
+}
+
+impl OutlineState {
+    /// Empty flag set: the outline pass is a no-op until the first
+    /// [`set_flags`](Self::set_flags).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the flags used by the next frame.
+    pub fn set_flags(&self, flags: &[u32]) {
+        *self
+            .flags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = flags.to_vec();
+    }
+
+    /// Snapshot of the current flags (the pass reads it once per frame).
+    fn snapshot(&self) -> Vec<u32> {
+        self.flags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// Editor outline pass: inverted-hull silhouettes for selected/hovered
+/// instances.
+///
+/// Reads the g-buffer depth and writes the presented layer `O` (the
+/// composited `ldr_layer` before anti-aliasing, or the swapchain target on
+/// plans without AA). `OutlineState` supplies one flag per instance; the
+/// vertex stage expands flagged instances along their world normal, culls
+/// front faces and collapses unflagged instances outside clip space.
+///
+/// The pass owns no GPU handles (they live in the renderer, lazily built),
+/// keeping it `Send` on wasm where `wgpu` resources are not.
+pub struct OutlinePass<O: FrameResource> {
+    state: Arc<OutlineState>,
+    format: wgpu::TextureFormat,
+    sample_count: u32,
+    _output: PhantomData<fn() -> O>,
+}
+
+impl<O: FrameResource> OutlinePass<O> {
+    /// Outline pass for `O` (`LdrLayer` with anti-aliasing, `Target`
+    /// without); flags come from `state`.
+    pub fn new(state: Arc<OutlineState>, format: wgpu::TextureFormat, sample_count: u32) -> Self {
+        Self {
+            state,
+            format,
+            sample_count,
+            _output: PhantomData,
+        }
+    }
+}
+
+impl<O: FrameResource> FramePass for OutlinePass<O> {
+    type Reads = (Read<Depth>,);
+    type Writes = (Write<O>,);
+
+    fn name(&self) -> &'static str {
+        "outline"
+    }
+
+    fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
+        let flags = self.state.snapshot();
+        if flags.is_empty() {
+            return;
+        }
+        let (Some(depth), Some(output)) = (views.get::<Depth>(), views.get::<O>()) else {
+            return;
+        };
+        frame.renderer.render_outline(
+            frame.device,
+            frame.queue,
+            frame.encoder,
+            crate::renderer::outline::OutlineInputs {
+                output,
+                depth,
+                mesh: frame.mesh,
+                instance_count: frame.instance_count,
+                format: self.format,
+                sample_count: self.sample_count,
+                flags: &flags,
+            },
         );
     }
 }

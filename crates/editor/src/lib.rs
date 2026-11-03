@@ -246,40 +246,60 @@ fn within_clip(camera: &ViewportCamera, distance: ornis_core::PositiveF32) -> bo
     d >= camera.near() && d <= camera.far()
 }
 
-/// Applies a click outcome to the [`Selected`] lane: exclusive hit, clear
-/// on miss. Idempotent (an unchanged set performs no lane writes).
+/// Applies a click outcome to the [`Selected`] lane through
+/// [`set_selection`]: exclusive hit, clear on miss.
 fn apply_selection(store: &SmartStore, outcome: &PickOutcome) {
-    match outcome {
-        PickOutcome::Hit(hit) => {
+    let wanted = match outcome {
+        PickOutcome::Hit(hit) => Some(hit.entity()),
+        PickOutcome::Miss => None,
+    };
+    set_selection(store, wanted);
+}
+
+/// Makes `entity` the exclusive [`Selected`] entity (`None` clears it).
+///
+/// This is the one selection writer: the viewport click pipeline and the
+/// authoritative `select` command both go through it, so "exclusive" has a
+/// single definition. Returns whether the lane changed; an unchanged set
+/// performs no writes (the caller can skip version bumps and snapshots).
+/// Requires the lane from [`install_editor`] — a store without it reports
+/// `false` and stays untouched.
+pub fn set_selection(store: &SmartStore, entity: Option<Entity>) -> bool {
+    match entity {
+        Some(wanted) => {
             let already = store
                 .read_lane::<Selected>()
-                .is_some_and(|lane| lane.entities.len() == 1 && lane.contains(hit.entity()));
+                .is_some_and(|lane| lane.entities.len() == 1 && lane.contains(wanted));
             if already {
-                return;
+                return false;
             }
-            if let Some(mut lane) = store.write_lane::<Selected>() {
-                for entity in lane.entities.clone() {
-                    if entity != hit.entity() {
-                        lane.remove(entity);
-                    }
-                }
-                if !lane.contains(hit.entity()) {
-                    lane.insert(hit.entity(), Selected);
+            let Some(mut lane) = store.write_lane::<Selected>() else {
+                return false;
+            };
+            for entity in lane.entities.clone() {
+                if entity != wanted {
+                    lane.remove(entity);
                 }
             }
+            if !lane.contains(wanted) {
+                lane.insert(wanted, Selected);
+            }
+            true
         }
-        PickOutcome::Miss => {
+        None => {
             let empty = store
                 .read_lane::<Selected>()
                 .is_none_or(|lane| lane.entities.is_empty());
             if empty {
-                return;
+                return false;
             }
-            if let Some(mut lane) = store.write_lane::<Selected>() {
-                for entity in lane.entities.clone() {
-                    lane.remove(entity);
-                }
+            let Some(mut lane) = store.write_lane::<Selected>() else {
+                return false;
+            };
+            for entity in lane.entities.clone() {
+                lane.remove(entity);
             }
+            true
         }
     }
 }
@@ -534,6 +554,38 @@ mod tests {
         );
         assert!(is_editor_only(store, gizmo));
         assert!(!is_editor_only(store, plain));
+    }
+
+    /// [`set_selection`] is exclusive and idempotent: selecting another
+    /// entity drops the previous mark, a repeat reports "no change", and
+    /// `None` clears the lane.
+    #[test]
+    fn set_selection_is_exclusive_and_reports_changes() {
+        let mut engine = Engine::new();
+        install_editor(&mut engine);
+        let store = engine.world().store().expect("store");
+        let first = store.create_entity();
+        let second = store.create_entity();
+
+        assert!(set_selection(store, Some(first)));
+        assert!(has::<Selected>(&engine, first));
+        assert!(!set_selection(store, Some(first)), "repeat is a no-op");
+
+        assert!(set_selection(store, Some(second)));
+        assert!(!has::<Selected>(&engine, first), "previous is cleared");
+        assert!(has::<Selected>(&engine, second));
+
+        assert!(set_selection(store, None));
+        assert!(!has::<Selected>(&engine, second));
+        assert!(!set_selection(store, None), "empty clear is a no-op");
+
+        let bare = Engine::new();
+        let bare_store = bare.world().store().expect("store");
+        let entity = bare_store.create_entity();
+        assert!(
+            !set_selection(bare_store, Some(entity)),
+            "a store without the lane stays untouched"
+        );
     }
 
     /// Declared accesses cover the honest E1 set (schedule enforcement).

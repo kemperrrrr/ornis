@@ -271,6 +271,8 @@ pub enum EditorCommand {
     ListEntities,
     /// Generic component upsert by registry name.
     SetComponent,
+    /// Set or clear the authoritative viewport selection.
+    Select,
     /// Persist the scene to disk.
     SaveScene,
     /// Load the scene from disk.
@@ -291,6 +293,7 @@ impl EditorCommand {
             EditorCommand::DestroyEntity => "destroy_entity",
             EditorCommand::ListEntities => "list_entities",
             EditorCommand::SetComponent => "set_component",
+            EditorCommand::Select => "select",
             EditorCommand::SaveScene => "save_scene",
             EditorCommand::LoadScene => "load_scene",
             EditorCommand::Input => "input",
@@ -315,6 +318,7 @@ impl From<&str> for EditorCommand {
             "destroy_entity" => EditorCommand::DestroyEntity,
             "list_entities" => EditorCommand::ListEntities,
             "set_component" => EditorCommand::SetComponent,
+            "select" => EditorCommand::Select,
             "save_scene" => EditorCommand::SaveScene,
             "load_scene" => EditorCommand::LoadScene,
             "input" => EditorCommand::Input,
@@ -389,6 +393,29 @@ pub enum SetComponentError {
     EmptyComponent,
 }
 
+/// Typed `select` wire payload (`{"id"?: u32, "generation"?: u32}`).
+///
+/// An absent `id` clears the selection; `generation` is only meaningful
+/// together with an id and is rejected on its own. Deserializes `id` as
+/// `u32` so out-of-range numbers are rejected instead of truncated.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct SelectPayload {
+    /// Id to select; `None` clears the selection.
+    #[serde(default, alias = "entity_id")]
+    pub id: Option<u32>,
+    /// `None` matches any alive generation.
+    #[serde(default)]
+    pub generation: Option<u32>,
+}
+
+/// Rejection of a [`SelectPayload`] → [`UiCommand`] conversion.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SelectError {
+    /// A generation without an id cannot resolve to an entity.
+    #[error("generation requires an id")]
+    GenerationWithoutId,
+}
+
 /// Commands sent from UI (JS) to the game thread
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // protocol surface for editor↔engine (roadmap)
@@ -414,6 +441,16 @@ pub enum UiCommand {
         type_name: ComponentName,
         /// serde-canonical JSON of the whole component (full replace).
         json_data: String,
+    },
+    /// Set or clear the authoritative viewport selection.
+    ///
+    /// `entity_id: None` clears the selection (exclusive): the session
+    /// removes every `Selected` mark and bumps the snapshot version.
+    Select {
+        /// Id to select; `None` clears the selection.
+        entity_id: Option<u32>,
+        /// `None` matches any alive generation.
+        generation: Option<u32>,
     },
     /// Generic command with a type tag and JSON payload.
     Custom {
@@ -442,6 +479,21 @@ pub enum UiCommand {
         /// Command to execute on the engine thread.
         command: Box<UiCommand>,
     },
+}
+
+impl TryFrom<SelectPayload> for UiCommand {
+    type Error = SelectError;
+
+    /// Builds the typed select; an absent id clears the selection.
+    fn try_from(payload: SelectPayload) -> Result<Self, Self::Error> {
+        if payload.id.is_none() && payload.generation.is_some() {
+            return Err(SelectError::GenerationWithoutId);
+        }
+        Ok(UiCommand::Select {
+            entity_id: payload.id,
+            generation: payload.generation,
+        })
+    }
 }
 
 impl TryFrom<SetComponentPayload> for UiCommand {
@@ -702,6 +754,7 @@ mod tests {
         for (tag, command) in [
             ("create_entity", EditorCommand::CreateEntity),
             ("set_component", EditorCommand::SetComponent),
+            ("select", EditorCommand::Select),
             ("ping", EditorCommand::Ping),
         ] {
             assert_eq!(EditorCommand::from(tag), command);
@@ -753,6 +806,44 @@ mod tests {
             value: serde_json::json!({}),
         };
         assert!(UiCommand::try_from(empty).is_err());
+    }
+
+    #[test]
+    fn select_payload_clears_and_rejects_generation_without_id() {
+        let select: SelectPayload = serde_json::from_value(serde_json::json!({
+            "id": 4u64,
+            "generation": 2u64
+        }))
+        .expect("valid payload parses");
+        assert!(matches!(
+            UiCommand::try_from(select),
+            Ok(UiCommand::Select {
+                entity_id: Some(4),
+                generation: Some(2)
+            })
+        ));
+        let clear: SelectPayload =
+            serde_json::from_value(serde_json::json!({})).expect("empty payload parses as clear");
+        assert!(matches!(
+            UiCommand::try_from(clear),
+            Ok(UiCommand::Select {
+                entity_id: None,
+                generation: None
+            })
+        ));
+        let orphan = SelectPayload {
+            id: None,
+            generation: Some(1),
+        };
+        assert!(matches!(
+            UiCommand::try_from(orphan),
+            Err(SelectError::GenerationWithoutId)
+        ));
+        assert!(
+            serde_json::from_value::<SelectPayload>(serde_json::json!({"id": 4_294_967_296u64}))
+                .is_err(),
+            "u32 overflow must not truncate"
+        );
     }
 
     #[test]

@@ -14,14 +14,15 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use ornis_core::InputState;
+use ornis_core::{Entity, InputState, SmartStore};
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
 use ornis_editor::{
-    PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
+    Hovered, PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
+    set_selection,
 };
 use ornis_render::{
     AntiAliasMode, CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D,
@@ -34,7 +35,7 @@ mod scene_api;
 // the crate — a private module makes them ORPHAN_SUPPRESSION findings.
 pub mod viewport;
 
-use scene_api::LiveScene;
+use scene_api::{LiveEntityMeta, LiveScene};
 use viewport::{
     PENDING_MODE, VIEWPORT_MODE, apply_mode_request, refresh_viewport_state_json,
     sync_picking_camera,
@@ -376,12 +377,12 @@ pub fn ws_events_url(page_protocol: &str, host: &str) -> String {
     format!("{scheme}//{host}/api/events")
 }
 
-/// Send-only `/api/events` socket for gameplay input snapshots.
+/// `/api/events` socket for outbound gameplay input and editor commands.
 ///
-/// The server already forwards client WS text frames as `BrowserInput`
-/// (tungstenite transport); this is the browser half. When the socket is
-/// missing or not open the poster falls back to `POST /api/input`, so
-/// older proxies keep working.
+/// The server forwards client WS text frames as command envelopes or
+/// `BrowserInput` snapshots (tungstenite transport); this is the browser
+/// half. When the socket is missing or not open callers fall back to the
+/// matching POST endpoint, so older proxies keep working.
 pub struct InputSocket {
     socket: Option<web_sys::WebSocket>,
 }
@@ -413,39 +414,46 @@ impl InputSocket {
 
 /// Fire-and-forget `POST /api/input` of one snapshot.
 ///
+/// Fallback when the WS socket is not open; see [`post_json`].
+fn post_input_snapshot(body: String) {
+    post_json("/api/input", "POST /api/input", body);
+}
+
+/// Fire-and-forget `POST /api/command` (select fallback when the WS socket
+/// is not open).
+fn post_select_command(body: String) {
+    post_json("/api/command", "POST /api/command", body);
+}
+
+/// Fire-and-forget JSON POST to `endpoint`.
+///
 /// The body is JSON and the header is `Content-Type: application/json`,
 /// matching `editor/editor.js`. Without that header the browser sends
 /// `text/plain` and the server answers 415. Network errors and non-success
-/// statuses are logged; the next dirty frame retries.
-fn post_input_snapshot(body: String) {
+/// statuses are logged; the caller retries on the next dirty frame.
+fn post_json(endpoint: &'static str, label: &'static str, body: String) {
     let Some(window) = web_sys::window() else {
         return;
     };
     let headers = match web_sys::Headers::new() {
         Ok(headers) => headers,
         Err(e) => {
-            console::warn_1(
-                &format!("[ornis-wasm] POST /api/input failed to build headers: {e:?}").into(),
-            );
+            console::warn_1(&format!("[ornis-wasm] {label} failed to build headers: {e:?}").into());
             return;
         }
     };
     if let Err(e) = headers.set("Content-Type", "application/json") {
-        console::warn_1(
-            &format!("[ornis-wasm] POST /api/input failed to set Content-Type: {e:?}").into(),
-        );
+        console::warn_1(&format!("[ornis-wasm] {label} failed to set Content-Type: {e:?}").into());
         return;
     }
     let init = web_sys::RequestInit::new();
     init.set_method("POST");
     init.set_headers(&headers);
     init.set_body(&JsValue::from_str(&body));
-    let request = match web_sys::Request::new_with_str_and_init("/api/input", &init) {
+    let request = match web_sys::Request::new_with_str_and_init(endpoint, &init) {
         Ok(request) => request,
         Err(e) => {
-            console::warn_1(
-                &format!("[ornis-wasm] POST /api/input failed to build request: {e:?}").into(),
-            );
+            console::warn_1(&format!("[ornis-wasm] {label} failed to build request: {e:?}").into());
             return;
         }
     };
@@ -455,23 +463,18 @@ fn post_input_snapshot(body: String) {
             Ok(value) => match value.dyn_into::<web_sys::Response>() {
                 Ok(resp) if !resp.ok() => {
                     console::warn_1(
-                        &format!(
-                            "[ornis-wasm] POST /api/input failed: HTTP {}",
-                            resp.status()
-                        )
-                        .into(),
+                        &format!("[ornis-wasm] {label} failed: HTTP {}", resp.status()).into(),
                     );
                 }
                 Ok(_) => {}
                 Err(value) => {
                     console::warn_1(
-                        &format!("[ornis-wasm] POST /api/input returned a non-response: {value:?}")
-                            .into(),
+                        &format!("[ornis-wasm] {label} returned a non-response: {value:?}").into(),
                     );
                 }
             },
             Err(e) => {
-                console::warn_1(&format!("[ornis-wasm] POST /api/input failed: {e:?}").into());
+                console::warn_1(&format!("[ornis-wasm] {label} failed: {e:?}").into());
             }
         }
     });
@@ -521,14 +524,118 @@ thread_local! {
 
 /// Sorted `Selected` entity ids for the change-triggered selection log.
 /// Pure store read (no console edge), so host tests pin the shape; the
-/// browser-only log edge lives in `FrameState::log_selection_changes`.
-fn selected_snapshot(store: &ornis_core::SmartStore) -> Vec<u32> {
+/// browser-only log edge lives in [`FrameState::sync_selection`].
+fn selected_snapshot(store: &SmartStore) -> Vec<u32> {
     let mut ids: Vec<u32> = store
         .read_lane::<Selected>()
         .map(|lane| lane.entities.iter().map(|e| e.id()).collect())
         .unwrap_or_default();
     ids.sort_unstable();
     ids
+}
+
+/// Per-instance outline flags (`0` none, `1` hover, `2` selected) in
+/// instance order.
+///
+/// Pure store read: the host tests pin the mapping, while the browser edge
+/// is [`FrameState::refresh_outline`].
+fn outline_flags(store: &SmartStore, entities: &[Entity]) -> Vec<u32> {
+    let selected = store.read_lane::<Selected>();
+    let hovered = store.read_lane::<Hovered>();
+    entities
+        .iter()
+        .map(|entity| {
+            if selected.as_ref().is_some_and(|lane| lane.contains(*entity)) {
+                2
+            } else if hovered.as_ref().is_some_and(|lane| lane.contains(*entity)) {
+                1
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
+/// Replica-side bridge from a local entity handle to the authoritative id.
+///
+/// `/api/scene` recreates local entities on every snapshot, so local ids
+/// are not server ids. Each replicated entity carries this component and
+/// the replica uses it to address `select` upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ServerEntityId {
+    id: u32,
+    generation: u32,
+}
+
+/// Applies one snapshot's editor marks to the freshly rebuilt replica:
+/// attaches [`ServerEntityId`], mirrors `Selected`/`Hovered`, and returns
+/// the sorted selected local ids (for the echo guard in `LAST_SELECTED`).
+///
+/// The authoritative world owns the selection: the replica takes the first
+/// `selected` mark as the exclusive choice, so a malformed multi-selected
+/// snapshot still resolves to one entity.
+fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Vec<u32> {
+    let handles: Vec<Entity> = world.scene_entities().iter().copied().collect();
+    let Some(store) = world.engine_mut().world_mut().store_mut() else {
+        return Vec::new();
+    };
+    for (entity, meta) in handles.iter().zip(meta) {
+        store.insert(
+            *entity,
+            ServerEntityId {
+                id: meta.id,
+                generation: meta.generation,
+            },
+        );
+    }
+    let selected = handles
+        .iter()
+        .zip(meta)
+        .find(|(_, meta)| meta.editor.selected)
+        .map(|(entity, _)| *entity);
+    set_selection(store, selected);
+    if let Some(mut lane) = store.write_lane::<Hovered>() {
+        for entity in lane.entities.clone() {
+            lane.remove(entity);
+        }
+        for (entity, meta) in handles.iter().zip(meta) {
+            if meta.editor.hovered {
+                lane.insert(*entity, Hovered);
+            }
+        }
+    }
+    selected_snapshot(store)
+}
+
+/// Server target of the replica's current selection: `None` when the store
+/// has no selection, `Some(None)` when the selection is empty (clear), and
+/// `None` (outer) when a selected entity has no authoritative id yet —
+/// such a frame must not invent a command.
+fn server_selection(store: &SmartStore) -> Option<Option<(u32, u32)>> {
+    let selected: Vec<Entity> = store
+        .read_lane::<Selected>()
+        .map(|lane| lane.entities.to_vec())
+        .unwrap_or_default();
+    if selected.is_empty() {
+        return Some(None);
+    }
+    let lane = store.read_lane::<ServerEntityId>()?;
+    selected
+        .iter()
+        .find_map(|entity| lane.get(*entity).map(|id| (id.id, id.generation)))
+        .map(Some)
+}
+
+/// `select` command envelope for a server target (`None` clears).
+fn select_command_json(target: Option<(u32, u32)>) -> String {
+    match target {
+        Some((id, generation)) => serde_json::json!({
+            "type": "select",
+            "data": {"id": id, "generation": generation},
+        })
+        .to_string(),
+        None => serde_json::json!({"type": "select", "data": {}}).to_string(),
+    }
 }
 
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
@@ -802,7 +909,7 @@ fn pick_surface_format(caps: &wgpu::SurfaceCapabilities) -> wgpu::TextureFormat 
 /// When the remote server is unavailable the renderer returns an error instead of
 /// falling back to a static scene, ensuring the single `Engine/Schedule/World` host
 /// is the sole source of truth.
-async fn load_initial_scene() -> Result<(Scene, u64, bool), JsValue> {
+async fn load_initial_scene() -> Result<LiveScene, JsValue> {
     if let Some(live) = fetch_live_scene().await {
         console::log_1(
             &format!(
@@ -814,8 +921,7 @@ async fn load_initial_scene() -> Result<(Scene, u64, bool), JsValue> {
             )
             .into(),
         );
-        let LiveScene { scene, version, .. } = live;
-        return Ok((scene, version, true));
+        return Ok(live);
     }
 
     console::log_1(
@@ -838,6 +944,9 @@ struct FrameState<'a> {
     mesh: ornis_render::Mesh,
     mesh_params: (u32, u32),
     instance_count: u32,
+    /// Entity behind each uploaded instance (parallel to the GPU record
+    /// order) — the outline flags map selection onto instance indices.
+    instance_entities: Vec<Entity>,
     input: Rc<RefCell<InputState>>,
     poster: InputPoster,
     socket: InputSocket,
@@ -891,6 +1000,11 @@ impl<'a> FrameState<'a> {
     /// device/surface recreation is needed for a live scene update.
     fn apply_live_scene(&mut self, live: &LiveScene, applied_version: &Cell<u64>) {
         self.render_world.replace_scene(&live.scene);
+        // The server owns the selection: mirror its marks on the fresh
+        // handles and remember them, so `sync_selection` does not echo the
+        // snapshot back as a `select` command.
+        let selected = apply_live_marks(&mut self.render_world, &live.meta);
+        LAST_SELECTED.with(|cell| *cell.borrow_mut() = selected);
         self.render_world.frame(0.0);
         let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
         if gpu.mesh_params != self.mesh_params {
@@ -904,6 +1018,7 @@ impl<'a> FrameState<'a> {
         self.renderer
             .set_lights(&self.queue, live.scene.ambient, &gpu.lights);
         self.instance_count = gpu.extracted.instances.len() as u32;
+        self.instance_entities = gpu.extracted.instance_entities.clone();
         applied_version.set(live.version);
         console::log_1(
             &format!(
@@ -987,10 +1102,15 @@ impl<'a> FrameState<'a> {
         );
     }
 
-    /// Logs the `Selected` set when it changes (`[ornis-wasm] selected …`).
-    /// Command-up over WS and the outline are E2, out of scope.
-    // qual:allow(test_quality, untested) reason: "browser console edge over a thread-local; the snapshot shape it logs is pinned by the selected_snapshot host test"
-    fn log_selection_changes(&mut self) {
+    /// Mirrors a local `Selected` change upstream as one `select` command
+    /// and logs it (`[ornis-wasm] selected …`).
+    ///
+    /// The change is sent on the frame that observes it (not per frame):
+    /// snapshots overwrite `LAST_SELECTED` when applied, so server-driven
+    /// selection never echoes back. Commands go over the WS socket with a
+    /// `POST /api/command` fallback, like the input poster.
+    // qual:allow(test_quality, untested) reason: "browser send/console edge over a thread-local; the command shape and server target are pinned by host tests"
+    fn sync_selection(&mut self) {
         let store = self.render_world.engine().world().store();
         let current = store.map_or_else(Vec::new, selected_snapshot);
         let changed = LAST_SELECTED.with(|cell| {
@@ -1002,9 +1122,31 @@ impl<'a> FrameState<'a> {
                 true
             }
         });
-        if changed {
-            console::log_1(&format!("[ornis-wasm] selected {current:?}").into());
+        if !changed {
+            return;
         }
+        if let Some(target) = store.and_then(server_selection) {
+            let body = select_command_json(target);
+            if !self.socket.send(&body) {
+                post_select_command(body);
+            }
+        }
+        console::log_1(&format!("[ornis-wasm] selected {current:?}").into());
+    }
+
+    /// Maps the authoritative selection marks onto per-instance outline
+    /// flags (`0` none, `1` hover, `2` selected).
+    ///
+    /// Runs after each schedule frame, so local picking/hover changes show
+    /// up in the same presented frame; the plan uploads the flags to the
+    /// GPU. Selection and hover are exclusive lanes, so two lane reads
+    /// answer every instance.
+    fn refresh_outline(&self) {
+        let Some(store) = self.render_world.engine().world().store() else {
+            return;
+        };
+        self.frame3d
+            .set_outline_flags(&outline_flags(store, &self.instance_entities));
     }
 
     /// Draw one frame into the given swap-chain view through the shared
@@ -1121,7 +1263,13 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     let instance = make_instance();
     let ctx = init_webgpu(&instance, &canvas).await?;
 
-    let (scene, initial_version, live_mode) = load_initial_scene().await?;
+    let LiveScene {
+        scene,
+        version: initial_version,
+        meta,
+        ..
+    } = load_initial_scene().await?;
+    let live_mode = true;
     // Keep the browser-side ECS explicitly separate from the server's
     // authoritative world: the serialized scene crosses the boundary once,
     // then the same `GameWorld` frame contract as native is used locally
@@ -1149,12 +1297,16 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
             }
         }
     }
+    // The initial snapshot carries the authoritative selection too: mirror
+    // it before the first frame so the replica and tree agree immediately.
+    let selected = apply_live_marks(&mut render_world, &meta);
+    LAST_SELECTED.with(|cell| *cell.borrow_mut() = selected);
     render_world.frame(0.0);
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
     let renderer = Renderer3D::new(&ctx.device, &ctx.config, 1);
     renderer.set_anti_alias(AntiAliasMode::Fxaa); // WASM has no hardware MSAA.
-    let frame3d = RenderFrame3D::new_with_aa(
+    let frame3d = RenderFrame3D::new_with_aa_outline(
         ctx.config.format,
         (ctx.config.width, ctx.config.height),
         Technique::Hybrid,
@@ -1232,6 +1384,7 @@ fn spawn_render_loop(
         mesh: gpu_scene.mesh,
         mesh_params: gpu_scene.mesh_params,
         instance_count: gpu_scene.extracted.instances.len() as u32,
+        instance_entities: gpu_scene.extracted.instance_entities.clone(),
         input,
         poster: InputPoster::new(),
         socket,
@@ -1265,7 +1418,7 @@ fn spawn_render_loop(
         // stays a browser-only console edge.
         let size = (frame.config.width, frame.config.height);
         sync_picking_camera(frame.render_world.engine_mut(), size);
-        frame.log_selection_changes();
+        frame.sync_selection();
         frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────
@@ -1302,6 +1455,7 @@ fn spawn_render_loop(
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
 
+                frame.refresh_outline();
                 frame.draw(&view);
                 frame.queue.present(presentable);
 
@@ -1451,6 +1605,66 @@ mod integration_tests {
             extracted.instances[0].model_matrix.w_axis.truncate(),
             glam::Vec3::new(-5.6, 0.0, 0.0)
         );
+    }
+
+    #[test]
+    fn live_marks_mirror_selection_and_map_server_ids() {
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        let mut render_world = ReplicaGameWorld::new_replica();
+        install_editor(render_world.engine_mut());
+        render_world.replace_scene(&live.scene);
+
+        let selected = apply_live_marks(&mut render_world, &live.meta);
+        let store = render_world.engine().world().store().expect("store");
+        assert_eq!(selected, selected_snapshot(store));
+        assert_eq!(
+            server_selection(store),
+            Some(Some((4, 2))),
+            "the replica maps its local handle back to the server id"
+        );
+
+        // A snapshot without selected marks clears the replica selection;
+        // the outbound command is then an explicit clear.
+        let cleared = vec![LiveEntityMeta::default()];
+        assert!(apply_live_marks(&mut render_world, &cleared).is_empty());
+        let store = render_world.engine().world().store().expect("store");
+        assert_eq!(server_selection(store), Some(None));
+    }
+
+    #[test]
+    fn outline_flags_map_selection_and_hover_to_instances() {
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        let mut render_world = ReplicaGameWorld::new_replica();
+        install_editor(render_world.engine_mut());
+        render_world.replace_scene(&live.scene);
+        let entity = render_world.entities()[0];
+        let store = render_world.engine().world().store().expect("store");
+
+        assert_eq!(outline_flags(store, &[entity]), vec![0]);
+        set_selection(store, Some(entity));
+        assert_eq!(outline_flags(store, &[entity]), vec![2]);
+        set_selection(store, None);
+        store
+            .write_lane::<Hovered>()
+            .expect("hover lane")
+            .insert(entity, Hovered);
+        assert_eq!(outline_flags(store, &[entity]), vec![1]);
+    }
+
+    #[test]
+    fn select_command_is_exclusive_or_explicit_clear() {
+        let select: serde_json::Value =
+            serde_json::from_str(&select_command_json(Some((4, 2)))).expect("valid JSON");
+        assert_eq!(select["type"], "select");
+        assert_eq!(select["data"]["id"], 4);
+        assert_eq!(select["data"]["generation"], 2);
+
+        let clear: serde_json::Value =
+            serde_json::from_str(&select_command_json(None)).expect("valid JSON");
+        assert_eq!(clear["type"], "select");
+        assert_eq!(clear["data"], serde_json::json!({}));
     }
 
     #[test]

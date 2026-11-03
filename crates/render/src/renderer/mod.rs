@@ -40,6 +40,7 @@ mod ibl_bind;
 mod lights;
 mod mesh_cache;
 mod meshes;
+pub(crate) mod outline;
 mod post;
 mod shadows;
 #[cfg(test)]
@@ -355,6 +356,9 @@ pub struct Renderer3D {
     record_cache: std::sync::RwLock<buffers::RecordCache>,
     material_buffer: std::sync::RwLock<wgpu::Buffer>,
     lighting_buffer: wgpu::Buffer,
+    /// Lazily built editor outline pipeline plus its per-instance flag
+    /// buffer; only allocated on the first frame with outline flags.
+    outline: std::sync::Mutex<Option<outline::OutlineGpu>>,
     _bind_group_layout: wgpu::BindGroupLayout,
     _bind_group: wgpu::BindGroup,
     _pipeline: wgpu::RenderPipeline,
