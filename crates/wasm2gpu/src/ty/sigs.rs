@@ -19,6 +19,8 @@ use crate::ir::Sig;
 
 const SAMPLE_PARAMS: u32 = 6;
 const SAMPLE_RESULTS: u32 = 4;
+const VEC3_BINARY_PARAMS: u32 = crate::cx::VEC3_LANES * 2;
+const STORAGE_ATOMIC_U32_PARAMS: u32 = PROV_PARAMS + 1;
 const FLOAT4: [Kind; 4] = [Kind::F32, Kind::F32, Kind::F32, Kind::F32];
 
 pub(crate) fn sig_ok(
@@ -34,11 +36,21 @@ pub(crate) fn sig_ok(
         Imp::TextureLoad => fixed_sig(sig, 4, &FLOAT4, "texture_load_2d"),
         Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
         Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),
-        Imp::MathDot3 => float_sig(sig, 6, 1, "math_dot3"),
-        Imp::MathCross3 => float_sig(sig, 6, 3, "math_cross3"),
-        Imp::MathLength3 => float_sig(sig, 3, 1, "math_length3"),
-        Imp::MathNormalize3 => float_sig(sig, 3, 3, "math_normalize3"),
-        Imp::StorageAtomicAddU32 => fixed_sig(sig, 4, &[Kind::I32], "storage_atomic_add_u32"),
+        Imp::MathDot3 => float_sig(sig, VEC3_BINARY_PARAMS, 1, "math_dot3"),
+        Imp::MathCross3 => float_sig(sig, VEC3_BINARY_PARAMS, crate::cx::VEC3_LANES, "math_cross3"),
+        Imp::MathLength3 => float_sig(sig, crate::cx::VEC3_LANES, 1, "math_length3"),
+        Imp::MathNormalize3 => float_sig(
+            sig,
+            crate::cx::VEC3_LANES,
+            crate::cx::VEC3_LANES,
+            "math_normalize3",
+        ),
+        Imp::StorageAtomicAddU32 => fixed_sig(
+            sig,
+            STORAGE_ATOMIC_U32_PARAMS,
+            &[Kind::I32],
+            "storage_atomic_add_u32",
+        ),
         Imp::WorkgroupLoadU32 => fixed_sig(sig, 1, &[Kind::I32], "workgroup_load_u32"),
         Imp::WorkgroupStoreU32 => fixed_sig(sig, 2, &[], "workgroup_store_u32"),
         Imp::WorkgroupAtomicAddU32 => fixed_sig(sig, 2, &[Kind::I32], "workgroup_atomic_add_u32"),
@@ -123,12 +135,7 @@ pub(super) fn push_lanes(lanes: &mut Vec<Kind>, kind: FieldKind) -> Result<(), T
     Ok(())
 }
 
-fn float_sig(
-    sig: &Sig,
-    params: u32,
-    results: u32,
-    what: &str,
-) -> Result<(), TranslateError> {
+fn float_sig(sig: &Sig, params: u32, results: u32, what: &str) -> Result<(), TranslateError> {
     if sig.params != params || sig.results != results {
         return Err(mismatch(what));
     }

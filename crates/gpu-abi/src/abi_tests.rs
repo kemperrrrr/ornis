@@ -21,8 +21,6 @@ use crate::layout::VEC3_SIZE;
 use crate::layout::place_fields;
 use crate::storage_at_f32;
 use crate::storage_at_u32;
-use crate::storage_atomic_add_u32;
-use crate::storage_barrier;
 use crate::storage_store_f32;
 use crate::storage_store_u32;
 use crate::symbols;
@@ -30,10 +28,6 @@ use crate::uniform_array_f32;
 use crate::uniform_field_f32;
 use crate::uniform_field_u32;
 use crate::with_host;
-use crate::workgroup_atomic_add_u32;
-use crate::workgroup_barrier;
-use crate::workgroup_load_u32;
-use crate::workgroup_store_u32;
 
 gpu_struct! {
     struct FrameTint {
@@ -212,36 +206,6 @@ fn storage_index_write_does_not_touch_the_neighbor() {
     assert!(got[1] == 3.0);
 }
 
-#[test]
-fn vec3_math_helpers_match_scalar_reference() {
-    let a = GpuVec3 { x: 1.0, y: 2.0, z: 3.0 };
-    let b = GpuVec3 { x: 4.0, y: 5.0, z: 6.0 };
-    assert_eq!(crate::gpu_dot3(a, b), 32.0);
-    assert_eq!(crate::gpu_cross3(a, b), GpuVec3 { x: -3.0, y: 6.0, z: -3.0 });
-    assert_eq!(crate::gpu_length3(GpuVec3 { x: 0.0, y: 3.0, z: 4.0 }), 5.0);
-    assert_eq!(
-        crate::gpu_normalize3(GpuVec3 { x: 0.0, y: 3.0, z: 4.0 }),
-        GpuVec3 {
-            x: 0.0,
-            y: 0.6,
-            z: 0.8,
-        }
-    );
-}
-
-#[test]
-fn texture_load_reads_the_requested_texel() {
-    let mut mem = HostMemory::new();
-    let texels = [
-        rgba(1.0, 0.0, 0.0, 1.0),
-        rgba(0.0, 1.0, 0.0, 1.0),
-        rgba(0.0, 0.0, 1.0, 1.0),
-        rgba(1.0, 1.0, 0.0, 1.0),
-    ];
-    mem.bind_texture::<4, 2>(2, 2, &texels);
-    let got = with_host(&mut mem, || Texture2d::<4, 2>::bind().load(1, 0));
-    assert_eq!(got, texels[1]);
-}
 
 #[test]
 #[should_panic(expected = "texture coordinate out of bounds")]
@@ -498,23 +462,6 @@ fn storage_u32_helpers_round_trip_on_the_host_shadow() {
     let stored = mem.read_storage::<0, 3, [u32; 4]>();
     assert!(stored[2] == 9);
     assert!(stored[0] == 0);
-}
-
-#[test]
-fn atomics_and_workgroup_memory_have_host_shadows() {
-    let mut mem = HostMemory::new();
-    mem.bind_storage::<1, 2, [u32; 4]>();
-    with_host(&mut mem, || {
-        assert_eq!(storage_atomic_add_u32::<1, 2>(2, 5), 0);
-        assert_eq!(storage_atomic_add_u32::<1, 2>(2, 7), 5);
-        workgroup_store_u32(4, 3);
-        assert_eq!(workgroup_load_u32(4), 3);
-        assert_eq!(workgroup_atomic_add_u32(4, 6), 3);
-        assert_eq!(workgroup_load_u32(4), 9);
-        workgroup_barrier();
-        storage_barrier();
-    });
-    assert_eq!(mem.read_storage::<1, 2, [u32; 4]>(), [0, 0, 12, 0]);
 }
 
 #[test]

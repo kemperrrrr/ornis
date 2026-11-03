@@ -166,12 +166,7 @@ pub(crate) fn texture_height_2d(group: u32, binding: u32) -> u32 {
     }
 }
 
-pub(crate) fn storage_atomic_add_u32(
-    group: u32,
-    binding: u32,
-    index: u32,
-    value: u32,
-) -> u32 {
+pub(crate) fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
         host::host_storage_atomic_add_u32(group, binding, index, value)
