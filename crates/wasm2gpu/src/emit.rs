@@ -125,7 +125,7 @@ fn spirv(
 }
 
 fn naga_chain(err: &impl std::error::Error) -> String {
-    let mut msg = err.to_string();
+    let mut msg = format!("{} ({err:?})", err);
     let mut src = std::error::Error::source(err);
     while let Some(inner) = src {
         msg.push_str(": ");
