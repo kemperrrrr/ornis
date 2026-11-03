@@ -24,7 +24,7 @@ use crate::frame_passes::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
 use crate::mesh::Mesh;
-use crate::renderer::{CustomGbufferDraw, Renderer3D};
+use crate::renderer::{CustomGbufferDraw, Renderer3D, SINGLE_SAMPLE_COUNT};
 use crate::schedule_bridge::ProjectionError;
 use crate::system::{Frame, SystemSet};
 use crate::transient_pool::{
@@ -1037,10 +1037,10 @@ impl RenderFrame3D {
             systems.add_system(FogPass::new(state));
         }
         Self::register_composite::<O>(&mut systems, technique, bloom);
-        // Outline overlays the composited layer before AA; MSAA has no
-        // single-sample depth/present layer, so it is skipped there.
-        if let Some(state) =
-            outline.filter(|_| sample_count == crate::renderer::SINGLE_SAMPLE_COUNT)
+        // Outline overlays the composited layer before AA (single-sample only).
+        if let Some(state) = outline
+            .clone()
+            .filter(|_| sample_count == SINGLE_SAMPLE_COUNT)
         {
             systems.add_system(OutlinePass::<O>::new(state, surface_format, sample_count));
         }

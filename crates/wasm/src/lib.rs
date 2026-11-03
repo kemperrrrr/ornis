@@ -1248,6 +1248,45 @@ struct LoopHandles {
     socket: InputSocket,
 }
 
+/// Installs the editor domain on the replica, the plane camera and the
+/// initial snapshot marks (selection/hover) before the first frame.
+///
+/// Browser-only construction edge; the pieces it wires (`apply_live_marks`,
+/// `install_plane_camera`, `install_editor`) are host-tested individually.
+// qual:allow(test_quality, untested) reason: "browser construction edge; delegates to host-tested installers and mark mirroring"
+fn init_editor_replica(
+    render_world: &mut ReplicaGameWorld,
+    meta: &[LiveEntityMeta],
+    canvas: &web_sys::HtmlCanvasElement,
+) {
+    // Editor domain on the replica: click/hover picking plus the plane
+    // camera. `Perspective3d` stays the active mode, so orbit input works
+    // exactly as before until `set_viewport_mode("plane2d")`.
+    install_editor(render_world.engine_mut());
+    {
+        let engine = render_world.engine_mut();
+        if let Some(orbit) = read_orbit_camera(engine) {
+            let view = orbit.view_parameters();
+            if let Some(plane) = PlaneCamera::from_camera_view(
+                view.eye,
+                view.target,
+                view.projection,
+                view.fov,
+                view.near,
+                view.far,
+                [canvas.width() as f32, canvas.height() as f32],
+            ) {
+                install_plane_camera(engine, plane);
+            }
+        }
+    }
+    // The initial snapshot carries the authoritative selection too: mirror
+    // it before the first frame so the replica and tree agree immediately.
+    let selected = apply_live_marks(render_world, meta);
+    LAST_SELECTED.with(|cell| *cell.borrow_mut() = selected);
+    render_world.frame(0.0);
+}
+
 /// Browser entry point: initializes WebGPU on the canvas with `canvas_id`,
 /// loads the initial scene (`/api/scene` or the compiled-in fallback), and
 /// spawns the render loop with orbit controls and live scene polling.
@@ -1279,32 +1318,7 @@ pub async fn start_renderer(canvas_id: String) -> Result<(), JsValue> {
     // through the `Replica` role.
     let mut render_world = ReplicaGameWorld::from_scene_replica(&scene);
     render_world.spawn(OrbitCamera::from_desc(&scene.camera));
-    // Editor domain on the replica: click/hover picking plus the plane
-    // camera. `Perspective3d` stays the active mode, so orbit input works
-    // exactly as before until `set_viewport_mode("plane2d")`.
-    install_editor(render_world.engine_mut());
-    {
-        let engine = render_world.engine_mut();
-        if let Some(orbit) = read_orbit_camera(engine) {
-            let view = orbit.view_parameters();
-            if let Some(plane) = PlaneCamera::from_camera_view(
-                view.eye,
-                view.target,
-                view.projection,
-                view.fov,
-                view.near,
-                view.far,
-                [canvas.width() as f32, canvas.height() as f32],
-            ) {
-                install_plane_camera(engine, plane);
-            }
-        }
-    }
-    // The initial snapshot carries the authoritative selection too: mirror
-    // it before the first frame so the replica and tree agree immediately.
-    let selected = apply_live_marks(&mut render_world, &meta);
-    LAST_SELECTED.with(|cell| *cell.borrow_mut() = selected);
-    render_world.frame(0.0);
+    init_editor_replica(&mut render_world, &meta, &canvas);
     let gpu_scene = build_gpu_scene(&ctx.device, &render_world, &scene);
 
     let renderer = Renderer3D::new(&ctx.device, &ctx.config, 1);

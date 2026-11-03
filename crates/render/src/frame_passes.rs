@@ -1495,9 +1495,6 @@ mod tests {
         );
     }
 
-    /// Specs mirror the imperative wiring (frame_exec parity test); the
-    /// dump names are part of the contract.
-    #[test]
     /// The host replaces the outline flag set wholesale; the pass reads a
     /// snapshot so a concurrent host update cannot tear a frame.
     #[test]
@@ -1510,6 +1507,9 @@ mod tests {
         assert!(state.snapshot().is_empty());
     }
 
+    /// Specs mirror the imperative wiring (frame_exec parity test); the
+    /// dump names are part of the contract.
+    #[test]
     fn resource_names_and_specs() {
         assert_eq!(Albedo::NAME, "albedo");
         owned_spec::<Albedo>(F::Rgba8Unorm, SizePolicy::MatchSurface);
