@@ -1,8 +1,11 @@
 //! Editor outline pipeline: inverted-hull silhouettes for selected/hovered
 //! instances.
 //!
-//! The pipeline is created lazily on the first frame that supplies outline
-//! flags and lives next to the renderer's camera/per-object buffers, so the
+//! The host supplies one flag per scene instance (`0` none, `1` hover,
+//! `2` selected). The renderer compacts the flagged entries into an index
+//! list and draws only those instances, so an idle viewport records no
+//! outline commands. The pipeline is created lazily on the first outline
+//! frame and lives next to the renderer's camera/per-object buffers, so the
 //! typed frame pass ([`crate::frame_passes::OutlinePass`]) stays free of
 //! GPU handles — required because `wgpu` resources are `!Send` on wasm and
 //! [`crate::system::FramePass`] is `Send`.
@@ -10,28 +13,90 @@
 use super::{Renderer3D, read_lock};
 use crate::mesh::{Mesh, Vertex};
 use crate::shaders;
+use std::borrow::Cow;
 
-/// Outline pipeline plus the per-instance flag buffer.
+/// Outline pipeline plus the compact per-frame index/flag buffers.
 pub(crate) struct OutlineGpu {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
+    /// Attachment format the pipeline was built for.
+    format: wgpu::TextureFormat,
+    /// Sample count the pipeline was built for.
+    sample_count: u32,
+    /// Compact scene-instance indices (capacity in elements).
+    indices: wgpu::Buffer,
+    /// Flags parallel to `indices`.
     flags: wgpu::Buffer,
-    /// Capacity of `flags` in elements.
+    /// Capacity of both buffers in elements.
     capacity: usize,
+    /// Reused CPU staging for the compact lists (no per-frame allocation).
+    indices_cpu: Vec<u32>,
+    flags_cpu: Vec<u32>,
+    /// Cached bind group and the buffer sizes it was built against.
+    bind_group: Option<wgpu::BindGroup>,
+    bind_sizes: (u64, u64),
 }
 
 impl OutlineGpu {
-    /// Builds the bind-group layout, pipeline and the initial flag buffer.
+    /// Builds the bind-group layout, pipeline and the initial buffers.
     fn create(device: &wgpu::Device, format: wgpu::TextureFormat, sample_count: u32) -> Self {
         let layout = Self::layout(device);
         let pipeline = Self::pipeline(device, &layout, format, sample_count);
-        let flags = Self::flags_buffer(device, 1);
         Self {
             pipeline,
             layout,
-            flags,
+            format,
+            sample_count,
+            indices: Self::storage_buffer(device, 1),
+            flags: Self::storage_buffer(device, 1),
             capacity: 1,
+            indices_cpu: Vec::new(),
+            flags_cpu: Vec::new(),
+            bind_group: None,
+            bind_sizes: (0, 0),
         }
+    }
+
+    /// Whether this pipeline matches the current frame's attachment key.
+    fn matches(&self, format: wgpu::TextureFormat, sample_count: u32) -> bool {
+        self.format == format && self.sample_count == sample_count
+    }
+
+    /// Grows the index/flag buffers when the compact list outgrows them.
+    // qual:allow(iosp) reason: "buffer growth keeps the two parallel lists and their cached bind group in lockstep"
+    fn ensure_capacity(&mut self, device: &wgpu::Device, needed: usize) {
+        if needed <= self.capacity {
+            return;
+        }
+        self.capacity = needed.next_power_of_two();
+        self.indices = Self::storage_buffer(device, self.capacity);
+        self.flags = Self::storage_buffer(device, self.capacity);
+        // The cached group referenced the old buffers.
+        self.bind_group = None;
+    }
+
+    /// Bind group over the camera, per-object records and both compact lists.
+    fn create_bind_group(
+        &self,
+        device: &wgpu::Device,
+        camera: &wgpu::Buffer,
+        per_objects: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("outline bind group"),
+            layout: &self.layout,
+            entries: &shaders::bind_group_entries(
+                &shaders::outline_generated::OUTLINE_RESOURCES,
+                |resource| match resource.name {
+                    "camera" => Some(camera.as_entire_binding()),
+                    "per_objects" => Some(per_objects.as_entire_binding()),
+                    "outline_indices" => Some(self.indices.as_entire_binding()),
+                    "outline_flags" => Some(self.flags.as_entire_binding()),
+                    _ => None,
+                },
+            )
+            .unwrap_or_default(),
+        })
     }
 
     /// Bind-group layout from the outline resource table.
@@ -115,15 +180,28 @@ impl OutlineGpu {
         })
     }
 
-    /// Storage buffer for `capacity` instance flags.
-    fn flags_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    /// Storage buffer for `capacity` u32 entries.
+    fn storage_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("outline flags"),
+            label: Some("outline list"),
             size: (capacity.max(1) * std::mem::size_of::<u32>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
     }
+}
+
+/// Flags adjusted to exactly `instance_count` entries: short input is
+/// zero-padded (no stale reads past the written range) and extra input is
+/// ignored. Returns the input unchanged when the lengths already match.
+fn outline_flags_for(flags: &[u32], instance_count: u32) -> Cow<'_, [u32]> {
+    let count = instance_count as usize;
+    if flags.len() == count {
+        return Cow::Borrowed(flags);
+    }
+    let mut padded = flags[..flags.len().min(count)].to_vec();
+    padded.resize(count, 0);
+    Cow::Owned(padded)
 }
 
 /// Inputs of one [`Renderer3D::render_outline`] call.
@@ -134,7 +212,7 @@ pub(crate) struct OutlineInputs<'a> {
     pub depth: &'a wgpu::TextureView,
     /// Shared mesh batch drawn for every instance.
     pub mesh: &'a Mesh,
-    /// Number of uploaded instances.
+    /// Number of uploaded instances (flags are indexed by this order).
     pub instance_count: u32,
     /// Format of `output`.
     pub format: wgpu::TextureFormat,
@@ -147,10 +225,12 @@ pub(crate) struct OutlineInputs<'a> {
 impl Renderer3D {
     /// Records the editor outline pass over `inputs.output`.
     ///
-    /// No-op for an empty flag set (including the instance-less case), so
-    /// plans wired with the pass but no selection stay pixel-identical.
-    /// Resources are built on the first non-empty frame and the flag buffer
-    /// grows with the scene.
+    /// No-op when no instance is flagged (and when `instance_count` is
+    /// zero), so an idle viewport records no outline commands. The compact
+    /// index list is rebuilt every call (editor-sized), while the pipeline
+    /// and bind group are cached until the attachment key or a buffer
+    /// changes.
+    // qual:allow(iosp) reason: "one frame submission: compact the flags, cache pipeline/bind state and record the draw"
     pub(crate) fn render_outline(
         &self,
         device: &wgpu::Device,
@@ -170,66 +250,102 @@ impl Renderer3D {
         if flags.is_empty() || instance_count == 0 {
             return;
         }
-        let mut outline = self
-            .outline
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if outline.is_none() {
+        let effective = outline_flags_for(flags, instance_count);
+        let mut outline = self.outline.lock().unwrap_or_else(|poisoned| {
+            eprintln!("ornis-render: outline lock poisoned — continuing");
+            poisoned.into_inner()
+        });
+        if outline
+            .as_ref()
+            .is_none_or(|gpu| !gpu.matches(format, sample_count))
+        {
             *outline = Some(OutlineGpu::create(device, format, sample_count));
         }
         let Some(gpu) = outline.as_mut() else {
             return;
         };
-        if flags.len() > gpu.capacity {
-            gpu.capacity = flags.len().next_power_of_two();
-            gpu.flags = OutlineGpu::flags_buffer(device, gpu.capacity);
+        gpu.indices_cpu.clear();
+        gpu.flags_cpu.clear();
+        for (index, &flag) in effective.iter().enumerate() {
+            if flag != 0 {
+                gpu.indices_cpu.push(index as u32);
+                gpu.flags_cpu.push(flag);
+            }
         }
-        queue.write_buffer(&gpu.flags, 0, bytemuck::cast_slice(flags));
+        if gpu.indices_cpu.is_empty() {
+            return;
+        }
+        gpu.ensure_capacity(device, gpu.indices_cpu.len());
+        queue.write_buffer(&gpu.indices, 0, bytemuck::cast_slice(&gpu.indices_cpu));
+        queue.write_buffer(&gpu.flags, 0, bytemuck::cast_slice(&gpu.flags_cpu));
         let per_objects = read_lock(&self.per_object_buffer);
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("outline bind group"),
-            layout: &gpu.layout,
-            entries: &shaders::bind_group_entries(
-                &shaders::outline_generated::OUTLINE_RESOURCES,
-                |resource| match resource.name {
-                    "camera" => Some(self.camera_buffer.as_entire_binding()),
-                    "per_objects" => Some(per_objects.as_entire_binding()),
-                    "outline_flags" => Some(gpu.flags.as_entire_binding()),
-                    _ => None,
-                },
-            )
-            .unwrap_or_default(),
-        });
+        let per_object_size = per_objects.size();
+        let outline_size = gpu.indices.size();
+        if gpu.bind_group.is_none() || gpu.bind_sizes != (per_object_size, outline_size) {
+            let group = gpu.create_bind_group(device, &self.camera_buffer, &per_objects);
+            gpu.bind_group = Some(group);
+            gpu.bind_sizes = (per_object_size, outline_size);
+        }
         drop(per_objects);
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("outline pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: output,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(&gpu.pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..mesh.num_indices, 0, 0..instance_count);
+        let Some(bind_group) = gpu.bind_group.as_ref() else {
+            return;
+        };
+        record_outline_pass(
+            encoder,
+            OutlineDraw {
+                output,
+                depth,
+                pipeline: &gpu.pipeline,
+                bind_group,
+                mesh,
+                instances: gpu.indices_cpu.len() as u32,
+            },
+        );
     }
+}
+
+/// One outline draw call: the composited output, the depth it tests
+/// against, the cached pipeline/bind group and the compact instance count.
+struct OutlineDraw<'a> {
+    output: &'a wgpu::TextureView,
+    depth: &'a wgpu::TextureView,
+    pipeline: &'a wgpu::RenderPipeline,
+    bind_group: &'a wgpu::BindGroup,
+    mesh: &'a Mesh,
+    instances: u32,
+}
+
+/// Records the outline render pass; no decisions, just the draw.
+fn record_outline_pass(encoder: &mut wgpu::CommandEncoder, draw: OutlineDraw<'_>) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("outline pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: draw.output,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: draw.depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                // The outline only reads depth; nobody reads it later.
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(draw.pipeline);
+    pass.set_bind_group(0, draw.bind_group, &[]);
+    pass.set_vertex_buffer(0, draw.mesh.vertex_buffer.slice(..));
+    pass.set_index_buffer(draw.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..draw.mesh.num_indices, 0, 0..draw.instances);
 }
 
 #[cfg(test)]
@@ -237,9 +353,51 @@ mod tests {
     use super::*;
     use crate::renderer::test_util::{offscreen_target, readback_rgba8, try_device};
     use crate::renderer::{InstanceData, MaterialIdx};
-    use glam::Mat4;
+    use glam::{Mat4, Vec3};
 
-    /// Depth attachment matching the outline pipeline (Depth32Float, 1x).
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    const CAMERA: [f32; 3] = [0.0, 0.0, 3.0];
+    const FOV: ornis_core::units::Degrees = ornis_core::units::Degrees::new(60.0);
+    const NEAR: ornis_core::units::Meters = ornis_core::units::Meters::new(0.1);
+    const FAR: ornis_core::units::Meters = ornis_core::units::Meters::new(100.0);
+
+    fn surface_config() -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: FORMAT,
+            width: 8,
+            height: 8,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        }
+    }
+
+    fn target_with_format(
+        device: &wgpu::Device,
+        size: u32,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("outline test target"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
+
     fn depth_target(device: &wgpu::Device, size: u32) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("outline depth"),
@@ -259,66 +417,96 @@ mod tests {
         (texture, view)
     }
 
-    /// A flagged instance draws silhouette pixels; an empty flag set records
-    /// nothing (no panic, no GPU work). Skips without an adapter.
+    fn instances(count: u32) -> Vec<InstanceData> {
+        (0..count)
+            .map(|index| InstanceData {
+                model_matrix: Mat4::from_translation(Vec3::new(index as f32, 0.0, 0.0)),
+                normal_matrix: Mat4::IDENTITY,
+                material_index: MaterialIdx::from_raw(0),
+            })
+            .collect()
+    }
+
+    fn clear_targets(
+        encoder: &mut wgpu::CommandEncoder,
+        color: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+    ) {
+        let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("outline test clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Transparent, not opaque black: then a non-zero byte
+                    // means the outline actually drew.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+
+    /// Short flag slices are padded with zeros (no stale reads past the
+    /// written range); extra entries are ignored.
     #[test]
-    fn outline_pass_draws_flagged_instances_and_ignores_empty_flags() {
+    fn outline_flags_pad_and_truncate_to_instance_count() {
+        assert!(matches!(
+            outline_flags_for(&[1, 2], 2),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(&*outline_flags_for(&[2], 2), &[2, 0]);
+        assert_eq!(&*outline_flags_for(&[1, 2, 2], 1), &[1]);
+        assert_eq!(&*outline_flags_for(&[], 2), &[0, 0]);
+    }
+
+    /// Flagged instances draw; all-zero/empty flags record no draw at all.
+    /// Skips without an adapter.
+    #[test]
+    fn outline_pass_draws_selected_and_skips_zero_flags() {
         let Some((device, queue)) = try_device() else {
             eprintln!("SKIPPED (outline pass): no wgpu adapter");
             return;
         };
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            width: 8,
-            height: 8,
-            present_mode: wgpu::PresentMode::AutoNoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-            color_space: wgpu::SurfaceColorSpace::Auto,
+        let renderer = Renderer3D::new(&device, &surface_config(), 1);
+        let view = crate::camera::CameraView {
+            eye: Vec3::from_array(CAMERA),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            projection: ornis_assets::scene::CameraProjection::Perspective,
+            fov: FOV,
+            near: NEAR,
+            far: FAR,
         };
-        let renderer = Renderer3D::new(&device, &surface_config, 1);
-        renderer.upload_instances(
-            &device,
-            &queue,
-            &[InstanceData {
-                model_matrix: Mat4::IDENTITY,
-                normal_matrix: Mat4::IDENTITY,
-                material_index: MaterialIdx::from_raw(0),
-            }],
-        );
+        let (view_proj, eye) = crate::camera::camera_view_projection(&view, (8, 8));
+        renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), eye.to_array());
+        renderer.upload_instances(&device, &queue, &instances(2));
         let (color, color_view) = offscreen_target(&device, 8, 8);
+        assert_eq!(
+            color.format(),
+            FORMAT,
+            "the test target must match the pipeline format"
+        );
         let (_depth, depth_view) = depth_target(&device, 8);
         let mesh = crate::create_sphere(&device, 1.0, 8, 6);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("outline test clear"),
+            label: Some("outline test selected"),
         });
-        {
-            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("outline test clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        clear_targets(&mut encoder, &color_view, &depth_view);
         renderer.render_outline(
             &device,
             &queue,
@@ -327,37 +515,81 @@ mod tests {
                 output: &color_view,
                 depth: &depth_view,
                 mesh: &mesh,
-                instance_count: 1,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                instance_count: 2,
+                format: FORMAT,
                 sample_count: 1,
-                flags: &[2],
+                // Two compact entries grow the buffers (capacity 1 → 2).
+                flags: &[1, 2],
             },
         );
         queue.submit(std::iter::once(encoder.finish()));
-        let pixels = readback_rgba8(&device, &queue, &color, 8, 8);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let validation = pollster::block_on(scope.pop());
         assert!(
-            pixels.iter().any(|&byte| byte != 0),
-            "a selected instance must draw outline pixels"
+            validation.is_none(),
+            "outline pass must not raise validation errors: {validation:?}"
+        );
+        let selected = readback_rgba8(&device, &queue, &color, 8, 8);
+        let drawn = selected.iter().filter(|&&byte| byte != 0).count();
+        assert!(
+            drawn > 0,
+            "a selected instance must draw outline pixels (got {drawn} non-zero bytes)"
+        );
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+        // Zero flags: the pass compacts to an empty list and records no draw.
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("outline test zero flags"),
+        });
+        clear_targets(&mut encoder, &color_view, &depth_view);
+        renderer.render_outline(
+            &device,
+            &queue,
+            &mut encoder,
+            OutlineInputs {
+                output: &color_view,
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 2,
+                format: FORMAT,
+                sample_count: 1,
+                flags: &[0, 0],
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let empty = readback_rgba8(&device, &queue, &color, 8, 8);
+        assert!(
+            empty.iter().all(|&byte| byte == 0),
+            "zero flags must leave the frame untouched"
         );
 
-        // Empty flags: the pass returns before touching the GPU.
+        // A format change must rebuild the cached pipeline, not reuse the
+        // sRGB one against an Unorm attachment.
+        let (_, unorm_view) = target_with_format(&device, 8, wgpu::TextureFormat::Rgba8Unorm);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("outline test empty"),
+            label: Some("outline test format change"),
         });
         renderer.render_outline(
             &device,
             &queue,
             &mut encoder,
             OutlineInputs {
-                output: &color_view,
+                output: &unorm_view,
                 depth: &depth_view,
                 mesh: &mesh,
-                instance_count: 1,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                instance_count: 2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
                 sample_count: 1,
-                flags: &[],
+                flags: &[2, 0],
             },
         );
         queue.submit(std::iter::once(encoder.finish()));
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+
+        let validation = pollster::block_on(scope.pop());
+        assert!(
+            validation.is_none(),
+            "outline format change must not raise validation errors: {validation:?}"
+        );
     }
 }

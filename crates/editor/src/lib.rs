@@ -296,7 +296,7 @@ pub fn set_selection(store: &SmartStore, entity: Option<Entity>) -> bool {
             let Some(mut lane) = store.write_lane::<Selected>() else {
                 return false;
             };
-            for entity in lane.entities.clone() {
+            while let Some(entity) = lane.entities.last().copied() {
                 lane.remove(entity);
             }
             true
@@ -327,7 +327,7 @@ fn apply_hover(resources: &Resources, store: &SmartStore, outcome: &PickOutcome)
         }
     }
     if let Some(mut lane) = store.write_lane::<Hovered>() {
-        for entity in lane.entities.clone() {
+        while let Some(entity) = lane.entities.last().copied() {
             lane.remove(entity);
         }
         if let Some(entity) = wanted {

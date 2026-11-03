@@ -1384,7 +1384,8 @@ impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
 /// disables the pass (it records no commands).
 #[derive(Debug, Default)]
 pub struct OutlineState {
-    flags: Mutex<Vec<u32>>,
+    /// Immutable snapshot shared with the pass (clone is an Arc bump).
+    flags: Mutex<Arc<[u32]>>,
 }
 
 impl OutlineState {
@@ -1400,15 +1401,18 @@ impl OutlineState {
         *self
             .flags
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = flags.to_vec();
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::from(flags);
     }
 
-    /// Snapshot of the current flags (the pass reads it once per frame).
-    fn snapshot(&self) -> Vec<u32> {
-        self.flags
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+    /// Snapshot of the current flags (the pass reads it once per frame;
+    /// the clone only bumps the shared reference count).
+    fn snapshot(&self) -> Arc<[u32]> {
+        Arc::clone(
+            &self
+                .flags
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 }
 
@@ -1451,6 +1455,7 @@ impl<O: FrameResource> FramePass for OutlinePass<O> {
         "outline"
     }
 
+    // qual:allow(iosp) reason: "frame-graph node: resolves its typed views and hands the draw to the renderer — pipeline wiring, not a layer crossing"
     // qual:allow(test_quality, untested) reason: "GPU-only frame node; layout tests pin registration and the renderer outline path has a device-gated test"
     fn run<'a>(&mut self, views: SystemViews<'a, Self>, frame: &mut Frame<'a>) {
         let flags = self.state.snapshot();
@@ -1502,7 +1507,9 @@ mod tests {
         let state = OutlineState::new();
         assert!(state.snapshot().is_empty(), "empty by default (pass off)");
         state.set_flags(&[0, 2, 1]);
-        assert_eq!(state.snapshot(), vec![0, 2, 1]);
+        assert_eq!(&*state.snapshot(), &[0, 2, 1]);
+        state.set_flags(&[0, 0]);
+        assert_eq!(&*state.snapshot(), &[0, 0]);
         state.set_flags(&[]);
         assert!(state.snapshot().is_empty());
     }

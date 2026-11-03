@@ -24,6 +24,9 @@ use ornis_macros::stage;
 pub(crate) struct OutlineVertexContext {
     pub per_objects: Vec<PerObjectGpu>,
     pub camera: CameraUniform,
+    /// Compact list of scene instance indices to outline.
+    pub outline_indices: Vec<u32>,
+    /// Flag per compact entry (`1` hover, `2` selected).
     pub outline_flags: Vec<u32>,
 }
 
@@ -37,9 +40,11 @@ const OUTLINE_HOVER: vec3<f32> = vec3<f32>(0.55, 0.75, 1.0);
 const OUTLINE_SELECTED: vec3<f32> = vec3<f32>(0.16, 0.55, 1.0);
 ";
 
-/// Outline vertex entry: expand flagged instances along their world normal.
-/// Unflagged instances collapse outside clip space, so the draw culls them
-/// without a separate draw call per silhouette.
+/// Outline vertex entry: expand the compact outlined instances along their
+/// object-space normals.
+///
+/// The draw carries only selected/hovered instances (compact index list), so
+/// there is no full-scene pass and no per-vertex discard.
 // The `#[stage]` macro consumes this Rust body: the generated WGSL is the
 // only caller, so rustc/rustqual see the entry as uncalled.
 #[allow(dead_code)]
@@ -49,16 +54,13 @@ fn vs_main(
     instance_index: super::InstanceIndex,
     ctx: Context<OutlineVertexContext>,
 ) -> OutlineVertexOutput {
-    let obj = ctx.per_objects[instance_index];
+    let scene_index = ctx.outline_indices[instance_index];
+    let obj = ctx.per_objects[scene_index];
     let flag = ctx.outline_flags[instance_index];
     // Expand in object space so the ring keeps a constant fraction of the
     // mesh size: the replica bakes an entity's radius into the model scale.
     let expanded = input.position + input.normal * OUTLINE_WIDTH;
-    let mut clip_position = ctx.camera.view_proj * (obj.model * Vec4::new(expanded, 1.0));
-    if flag == 0u {
-        // Outside NDC: every vertex of the instance is clipped.
-        clip_position = Vec4::new(2.0, 2.0, 2.0, 1.0);
-    }
+    let clip_position = ctx.camera.view_proj * (obj.model * Vec4::new(expanded, 1.0));
     let mut color = OUTLINE_HOVER;
     if flag == 2u {
         color = OUTLINE_SELECTED;
@@ -76,8 +78,9 @@ fn fs_main(input: OutlineFragmentInput) -> super::Location<0, glam::Vec4> {
     return glam::Vec4::new(input.color, 1.0);
 }
 
-/// Outline bindings: camera + per-object records + the per-instance flags.
-pub const OUTLINE_RESOURCES: [Resource; 3] = [
+/// Outline bindings: camera + per-object records + the compact instance
+/// index list and its flags.
+pub const OUTLINE_RESOURCES: [Resource; 4] = [
     Resource {
         group: 0,
         binding: 0,
@@ -98,6 +101,14 @@ pub const OUTLINE_RESOURCES: [Resource; 3] = [
         group: 0,
         binding: 2,
         visibility: wgpu::ShaderStages::VERTEX,
+        name: "outline_indices",
+        kind: ResourceKind::StorageReadArray("u32"),
+        min_size: None,
+    },
+    Resource {
+        group: 0,
+        binding: 3,
+        visibility: wgpu::ShaderStages::VERTEX,
         name: "outline_flags",
         kind: ResourceKind::StorageReadArray("u32"),
         min_size: None,
@@ -106,10 +117,11 @@ pub const OUTLINE_RESOURCES: [Resource; 3] = [
 
 /// Outline vertex module: camera/instance transforms plus the flag check.
 pub fn wgsl_vertex_source() -> String {
+    let bindings: Vec<u32> = OUTLINE_RESOURCES.iter().map(|r| r.binding).collect();
     ShaderModule::new()
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(PerObjectGpu::WGSL_SOURCE)
-        .resources(&OUTLINE_RESOURCES, &[0, 1, 2])
+        .resources(&OUTLINE_RESOURCES, &bindings)
         .decl(wgsl_decl(VertexInput::WGSL_SOURCE))
         .decl(wgsl_decl(OutlineVertexOutput::WGSL_SOURCE))
         .consts(OUTLINE_CONSTS)

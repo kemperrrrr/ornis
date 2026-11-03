@@ -581,6 +581,27 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
     let Some(store) = world.engine_mut().world_mut().store_mut() else {
         return Vec::new();
     };
+    // Marks are positional: a length mismatch means the snapshot and the
+    // rebuilt replica disagree, so no id/mark can be trusted. Clear instead
+    // of silently attaching them to the wrong entity.
+    if handles.len() != meta.len() {
+        #[cfg(target_arch = "wasm32")]
+        console::warn_1(
+            &format!(
+                "[ornis-wasm] snapshot marks/handles mismatch: {} marks, {} entities",
+                meta.len(),
+                handles.len()
+            )
+            .into(),
+        );
+        set_selection(store, None);
+        if let Some(mut lane) = store.write_lane::<Hovered>() {
+            while let Some(entity) = lane.entities.last().copied() {
+                lane.remove(entity);
+            }
+        }
+        return Vec::new();
+    }
     for (entity, meta) in handles.iter().zip(meta) {
         store.insert(
             *entity,
@@ -597,7 +618,7 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
         .map(|(entity, _)| *entity);
     set_selection(store, selected);
     if let Some(mut lane) = store.write_lane::<Hovered>() {
-        for entity in lane.entities.clone() {
+        while let Some(entity) = lane.entities.last().copied() {
             lane.remove(entity);
         }
         for (entity, meta) in handles.iter().zip(meta) {
@@ -949,6 +970,8 @@ struct FrameState<'a> {
     /// Entity behind each uploaded instance (parallel to the GPU record
     /// order) — the outline flags map selection onto instance indices.
     instance_entities: Vec<Entity>,
+    /// Flags last pushed to the render plan (idle frames skip the update).
+    last_outline_flags: Vec<u32>,
     input: Rc<RefCell<InputState>>,
     poster: InputPoster,
     socket: InputSocket,
@@ -1144,12 +1167,15 @@ impl<'a> FrameState<'a> {
     /// GPU. Selection and hover are exclusive lanes, so two lane reads
     /// answer every instance.
     // qual:allow(test_quality, untested) reason: "browser frame edge; the flag mapping it delegates to is pinned by outline_flags_map_selection_and_hover_to_instances"
-    fn refresh_outline(&self) {
+    fn refresh_outline(&mut self) {
         let Some(store) = self.render_world.engine().world().store() else {
             return;
         };
-        self.frame3d
-            .set_outline_flags(&outline_flags(store, &self.instance_entities));
+        let flags = outline_flags(store, &self.instance_entities);
+        if flags != self.last_outline_flags {
+            self.frame3d.set_outline_flags(&flags);
+            self.last_outline_flags = flags;
+        }
     }
 
     /// Draw one frame into the given swap-chain view through the shared
@@ -1404,6 +1430,7 @@ fn spawn_render_loop(
         mesh_params: gpu_scene.mesh_params,
         instance_count: gpu_scene.extracted.instances.len() as u32,
         instance_entities: gpu_scene.extracted.instance_entities.clone(),
+        last_outline_flags: Vec::new(),
         input,
         poster: InputPoster::new(),
         socket,
@@ -1649,6 +1676,39 @@ mod integration_tests {
         assert!(apply_live_marks(&mut render_world, &cleared).is_empty());
         let store = render_world.engine().world().store().expect("store");
         assert_eq!(server_selection(store), Some(None));
+    }
+
+    /// A snapshot whose mark list length differs from the replica's entity
+    /// list cannot be mapped positionally; the replica clears instead of
+    /// attaching marks to the wrong entity.
+    #[test]
+    fn live_marks_reject_positional_mismatch_without_marking() {
+        let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
+            .expect("the shared API contract must parse");
+        let mut render_world = ReplicaGameWorld::new_replica();
+        install_editor(render_world.engine_mut());
+        render_world.replace_scene(&live.scene);
+        let entity = render_world.entities()[0];
+
+        // More marks than handles.
+        let longer = vec![LiveEntityMeta::default(); live.meta.len() + 1];
+        assert!(apply_live_marks(&mut render_world, &longer).is_empty());
+        let store = render_world.engine().world().store().expect("store");
+        assert!(
+            !store
+                .read_lane::<Selected>()
+                .is_some_and(|lane| lane.contains(entity)),
+            "a mismatched snapshot must not select anything"
+        );
+
+        // Fewer marks than handles: still no positional mapping.
+        assert!(apply_live_marks(&mut render_world, &[]).is_empty());
+        let store = render_world.engine().world().store().expect("store");
+        assert!(
+            !store
+                .read_lane::<Selected>()
+                .is_some_and(|lane| lane.contains(entity))
+        );
     }
 
     #[test]
