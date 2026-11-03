@@ -237,10 +237,10 @@ active-100k) и #112.
   (`cff2a11`) — подтверждён, поверх легла иерархия физики
   (см. ниже, поведение не менялось); hardening PR #12 closed
   (`966bac9`, мерж PR #13 `0a26089`) — подтверждён; CI — 5 шардов
-  (`28e7301`) — действует. Остаток solver-трека «100k tiled ~8 с/шаг»
-  — **частично закрыт**: settled-вердикт `74b6424` даёт
-  ~2–3 мс на полностью спящей сцене (fast path, zero phase work),
-  активный шаг 100k по-прежнему вне real-time — см. «остатки» ниже.
+  (`28e7301`) — действует. Пункт «100k tiled ~8 с/шаг»
+  — **снят**: settled-вердикт `74b6424` даёт
+  ~2–3 мс на полностью спящей сцене (fast path, zero phase work);
+  100k активных тел в real-time на CPU не цель (недостижимо); закрыто решением Юры 3 ноя 2026.
 - **SI-переименование — DONE (`5c0e0c8`, 2026-09-19).**
   `BuiltinPhysicsEngine` → `SequentialImpulseEngine`
   (`crates/physics/src/sequential_impulse/mod.rs`, фасад `engine.rs`
@@ -346,8 +346,7 @@ active-100k) и #112.
 - **CI — 5 шардов (`28e7301`, поверх мержа PR #13 `0a26089`).**
   Quality-гейт шардирован (fast/clippy/test/gpu/docs + сводный report);
   локально то же самое — `cargo xtask quality --ci`.
-- **Остаток по solver-треку:** 100k tiled всё ещё вне real-time
-  (~8 с/шаг — следующий шаг после M3, не закрыт); GPU AVBD (DSL-
+- **Остаток по solver-треку:** GPU AVBD (DSL-
   предусловия закрыты в M2, самого солвера нет); Custom per-entity
   коллайдеры физики открыты (мосты скипают Custom без выдуманной
   сферы-заглушки, `1020931`: `src/main.rs:287-288`,
@@ -372,11 +371,8 @@ active-100k) и #112.
   broadphase, narrow/SAT-кэши, per-substep pair bucketing через stable
   counting sort (`73d5617`), full step attribution + trigger-detect gate
   со 100k-вердиктом (`35b3cf0`), world-scale sleep (statics born asleep,
-  `02edf24`). Остаток по масштабу: **100k tiled всё ещё вне real-time**
-  (~8 с/шаг на Grid по `perf-baseline-2026-09-02.md`) — следующий шаг
-  зафиксирован как **модульные солверы Genesis-стиль, план M0–M3 в
-   `PLAN.md`** (M0 — CPU-спайк AVBD как предусловие; GPU-предусловия AVBD
-   см. `crates/physics/src/gpu.rs:46-53`).
+  `02edf24`). Масштаб: 100k tiled ~8 с/шаг на Grid
+  (`perf-baseline-2026-09-02.md`) — исторический замер; 100k активных тел в real-time на CPU не цель (недостижимо); закрыто решением Юры 3 ноя 2026.
 - **CCD/контакты/трение/джойнты — закрыто.** Kinematic CCD (`c0aa7c5`,
   deferred proof `e55857b`), unified CCD impact со spin-aware restitution
   (`520feb0`), angular CCD travel gate (`0f2c8a6`), gyroscopic torque
@@ -441,8 +437,8 @@ active-100k) и #112.
   AutoLane вне доказанных kernel'ов.
 - ~~Физический API ограничен набором форм~~ — **неактуально:**
   8 форм включая TriMesh/BVH-GJK, CCD всех видов, джойнты с
-  limits/motors, анизотропное трение, contact events. Открыто: 100k
-  real-time (план M0–M3, AVBD-спайк первый).
+  limits/motors, анизотропное трение, contact events. 100k активных
+  тел в real-time на CPU не цель (недостижимо); закрыто решением Юры 3 ноя 2026.
 - ~~Нет gameplay consumers~~ — **частично неактуально:** референсная
   тройка `player_input`/`physics_push`/`transform_update` зарегистрирована
   в `Engine`; нет полноценного cross-domain runtime с контентом.
@@ -783,13 +779,13 @@ bucketing + sleep), референсные gameplay-системы зареги�
 
 ## Основные проблемы
 
-### 1. ~~Критическая проблема производительности физики~~ — ✅ ядро закрыто 2026-09-09, остаток: solver-масштаб 100k (M0–M3)
+### 1. ~~Критическая проблема производительности физики~~ — ✅ ядро закрыто 2026-09-09; 100k real-time снят решением Юры 3 ноя 2026
 
 > Статус 2026-09-12: вводный диагноз ниже — исторический снимок 2026-08-28.
 > Broadphase-ядро закрыто (`BroadPhaseKind::Auto` + adaptive cell + tree
 > buffering/rotations + bucketing + sleep + 100k-вердикт `35b3cf0`); tiled 10k
-> укладывается в бюджет кадра, 100k tiled — нет (~8 с/шаг). Следующий шаг —
-> модульные солверы (AVBD-спайк M0, см. `PLAN.md`).
+> укладывается в бюджет кадра, 100k tiled — нет (~8 с/шаг, исторический замер).
+> 100k активных тел в real-time на CPU не цель (недостижимо); закрыто решением Юры 3 ноя 2026.
 
 Это самая серьёзная техническая находка.
 
