@@ -33,6 +33,8 @@
 //! over time. Per-joint layers ([`SkelLayer`] + [`JointMask`]) stack per
 //! root in [`SkelLayerStack`], bottom-up over the base pose.
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;

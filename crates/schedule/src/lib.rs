@@ -26,6 +26,8 @@
 //! contract on their own types (`core::schedule` — with the eponymous test,
 //! `render` — with golden `levels` partitions including the production graph).
 
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Mutex;
@@ -118,14 +120,22 @@ pub fn bitset_level_plan<K: Copy + Eq + Hash>(
 pub enum OrderError {
     /// No node with this name exists (name uniqueness is the caller's responsibility).
     #[error("no node named '{name}'")]
-    UnknownNode { name: String },
+    UnknownNode {
+        /// The node name that was not registered.
+        name: String,
+    },
     /// `after` is registered before `before`: execution order is
     /// registration order, explicit edges only split levels.
     #[error(
         "'{after}' is registered earlier than '{before}' — register nodes in \
          execution order; explicit edges only split parallel levels"
     )]
-    BackwardEdge { before: String, after: String },
+    BackwardEdge {
+        /// The node that must run first (it was registered later than `after`).
+        before: String,
+        /// The node that must run after `before`, but was registered earlier.
+        after: String,
+    },
 }
 
 /// Name-based edge validation: names → registration indices via

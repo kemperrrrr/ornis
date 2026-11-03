@@ -7,6 +7,8 @@
 //! [`GameWorld`] is the single scene-backed world
 //! type — extraction reads its lanes directly, never a second world copy.
 
+#![warn(missing_docs)]
+
 use glam::Vec3;
 use ornis_animation::{
     AnimClip, AnimPlayer, AnimSampleSystem, SkelSampleSystem, SkelSkinGpuFallbackSystem,
@@ -174,6 +176,8 @@ pub fn install_skeletal_animation(engine: &mut Engine) {
         .try_order_before("skel_sample", "skel_skin_cpu");
 }
 
+/// Installs the single unified runtime on `engine`: core gameplay systems
+/// plus the gameplay↔physics bridge, all planned by one schedule.
 pub fn install_unified_runtime(engine: &mut Engine) {
     // Core gameplay (player_input @ frame, physics_push @ fixed, transform_update @ frame)
     install_gameplay(engine);

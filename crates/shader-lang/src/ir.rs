@@ -92,13 +92,18 @@ impl From<&String> for ShaderCustomTy {
 /// single `array<T, N>` spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrType {
+    /// Registry scalar/vector/matrix primitive (see [`ShaderType`]).
     Scalar(ShaderType),
+    /// Scalar `bool`; the registry holds only the bool vectors (`BVec*`).
     Bool,
     /// Opaque named type (struct mirrors): lexical, like [`IrExpr::Path`]
     /// segments — never a spelling.
     Custom(ShaderCustomTy),
+    /// Fixed-size array `array<T, N>`; the writer owns the spelling.
     Array {
+        /// Element type.
         elem: Box<IrType>,
+        /// Number of elements.
         len: usize,
     },
     /// Runtime-sized `array<T>` (storage buffers document capacity in
@@ -180,9 +185,13 @@ impl IrType {
 /// writer prints items and bodies from the same nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrItem {
+    /// A module-scope variable.
     Global(IrGlobal),
+    /// A module-scope `struct` declaration.
     Struct {
+        /// Struct name as written in WGSL.
         name: String,
+        /// Fields in declaration order.
         fields: Vec<IrStructField>,
     },
 }
@@ -191,37 +200,61 @@ pub enum IrItem {
 /// `@group`/`@binding` numbers stay data (today always group 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrGlobal {
+    /// `var<storage>` buffer: element type and access mode travel structurally.
     Storage {
+        /// Bind group index.
         group: u32,
+        /// Binding index within the group.
         binding: u32,
+        /// Variable name as written in WGSL.
         name: String,
+        /// Buffer element type.
         elem: IrType,
+        /// `read` (true) versus `read_write` (false) access.
         read_only: bool,
     },
+    /// `var<uniform>` buffer.
     Uniform {
+        /// Bind group index.
         group: u32,
+        /// Binding index within the group.
         binding: u32,
+        /// Variable name as written in WGSL.
         name: String,
+        /// Value type.
         ty: IrType,
     },
+    /// Texture binding.
     Texture {
+        /// Bind group index.
         group: u32,
+        /// Binding index within the group.
         binding: u32,
+        /// Variable name as written in WGSL.
         name: String,
+        /// Texture shape.
         kind: IrTexture,
     },
+    /// Sampler binding.
     Sampler {
+        /// Bind group index.
         group: u32,
+        /// Binding index within the group.
         binding: u32,
+        /// Variable name as written in WGSL.
         name: String,
+        /// Whether this is a comparison sampler.
         comparison: bool,
     },
     /// Module-scope `var<private>` with initializer (the only mutable
     /// module scope; also the address space for lookup tables: `const`
     /// arrays reject dynamic indices, `private` allows them).
     Private {
+        /// Variable name as written in WGSL.
         name: String,
+        /// Value type.
         ty: IrType,
+        /// Initializer expression.
         init: IrExpr,
     },
 }
@@ -231,19 +264,28 @@ pub enum IrGlobal {
 /// sees — unknown shapes are loud at parse, not at naga.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrTexture {
+    /// `texture_2d<f32>`.
     Tex2dF32,
+    /// `texture_2d<u32>`.
     Tex2dU32,
+    /// `texture_2d<i32>`.
     Tex2dI32,
+    /// `texture_depth_2d`.
     Depth2d,
+    /// `texture_depth_2d_array`.
     Depth2dArray,
+    /// `texture_depth_cube_array`.
     DepthCubeArray,
 }
 
 /// One `struct` field with its WGSL attribute, if any.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrStructField {
+    /// WGSL attribute (`@builtin`/`@location`), if any.
     pub attr: Option<IrFieldAttr>,
+    /// Field name.
     pub name: String,
+    /// Field type.
     pub ty: IrType,
 }
 
@@ -251,7 +293,9 @@ pub struct IrStructField {
 /// number.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrFieldAttr {
+    /// `@builtin(semantic)` with the semantic as a lexical ident.
     Builtin(String),
+    /// `@location(n)`.
     Location(u32),
 }
 
@@ -270,12 +314,16 @@ pub enum IrExpr {
     Path(Vec<String>),
     /// `base.member` (swizzles, struct fields, `.x`).
     Field {
+        /// Receiver expression.
         base: Box<IrExpr>,
+        /// Member or swizzle name.
         member: String,
     },
     /// `base[index]`.
     Index {
+        /// Indexed expression.
         base: Box<IrExpr>,
+        /// Index expression.
         index: Box<IrExpr>,
     },
     /// Source-level parentheses (preserved verbatim: the writer adds no
@@ -284,55 +332,73 @@ pub enum IrExpr {
     /// `left op right`, including compound assignment (`+=` etc. — syn
     /// parses those as binary expressions with an assign-op).
     Binary {
+        /// Binary operator.
         op: IrBinOp,
+        /// Left operand.
         left: Box<IrExpr>,
+        /// Right operand.
         right: Box<IrExpr>,
     },
     /// `-x` / `!c` / `*p` (deref and unknown prefix ops both spell `*`,
     /// matching the translator's historical behavior).
     Unary {
+        /// Prefix operator.
         op: IrUnOp,
+        /// Operand.
         expr: Box<IrExpr>,
     },
     /// `left = right` as an expression (WGSL has no assign-expressions;
     /// the translator historically emits it inline — preserved).
     Assign {
+        /// Assignment target.
         left: Box<IrExpr>,
+        /// Assigned value.
         right: Box<IrExpr>,
     },
     /// Any call: the callee is classified at lowering (constructors and
     /// built-ins resolve through the registry; kernels/helpers stay
     /// verbatim; exotic callee shapes stay structural).
     Call {
+        /// Classified callee.
         target: IrCallee,
+        /// Arguments in call order.
         args: Vec<IrExpr>,
     },
     /// Unrecognized `recv.method(args)`: WGSL has no methods, so this only
     /// survives for shapes naga will reject loudly (same as before).
     Method {
+        /// Receiver expression.
         base: Box<IrExpr>,
+        /// Method name (verbatim).
         method: String,
+        /// Arguments in call order.
         args: Vec<IrExpr>,
     },
     /// Struct literal → positional constructor; the writer appends the
     /// `/* field, names */` comment so the field-order test can verify
     /// declaration order instead of trusting it blindly.
     Struct {
+        /// Struct name.
         name: String,
+        /// Field name/value pairs in source order.
         fields: Vec<(String, IrExpr)>,
     },
     /// `if (c) { .. } [else ..]` as an expression.
     If {
+        /// Condition expression.
         cond: Box<IrExpr>,
+        /// Statements of the `then` block.
         then: Vec<IrStmt>,
+        /// Optional `else` arm.
         els: Option<IrElse>,
     },
     /// `{ stmts }` as an expression.
     Block(Vec<IrStmt>),
     /// `return [expr]` in expression position.
     Return(Option<Box<IrExpr>>),
-    /// `continue` / `break` (labels/values lower to [`IrExpr::Unsupported`]).
+    /// `continue` (labels/values lower to [`IrExpr::Unsupported`]).
     Continue,
+    /// `break`.
     Break,
     /// `e as T`: lowered to a WGSL conversion-constructor call at
     /// lowering time (`f32(x)`/`u32(x)`/`i32(x)` — exactly the 32-bit
@@ -346,7 +412,9 @@ pub enum IrExpr {
     /// `array<f32, 6>(0.0, …)`. Built from Rust `[T; N]` literals and
     /// repeats (see lowering); the writer derives `N` from the items.
     Array {
+        /// Element type.
         elem: IrType,
+        /// Array items in order; the writer derives the length from this.
         items: Vec<IrExpr>,
     },
     /// Pre-rendered escape hatch: `syn::Error::to_compile_error` output
@@ -361,40 +429,70 @@ pub enum IrExpr {
 /// Binary operators of the supported subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrBinOp {
+    /// `+`.
     Add,
+    /// `-`.
     Sub,
+    /// `*`.
     Mul,
+    /// `/`.
     Div,
+    /// `%`.
     Rem,
+    /// `&&`.
     And,
+    /// `||`.
     Or,
+    /// `==`.
     Eq,
+    /// `!=`.
     Ne,
+    /// `<`.
     Lt,
+    /// `<=`.
     Le,
+    /// `>`.
     Gt,
+    /// `>=`.
     Ge,
+    /// `<<`.
     Shl,
+    /// `>>`.
     Shr,
+    /// `^`.
     BitXor,
+    /// `&`.
     BitAnd,
+    /// `|`.
     BitOr,
+    /// `+=`.
     AddAssign,
+    /// `-=`.
     SubAssign,
+    /// `*=`.
     MulAssign,
+    /// `/=`.
     DivAssign,
+    /// `%=`.
     RemAssign,
+    /// `<<=`.
     ShlAssign,
+    /// `>>=`.
     ShrAssign,
+    /// `&=`.
     BitAndAssign,
+    /// `|=`.
     BitOrAssign,
+    /// `^=`.
     BitXorAssign,
 }
 
 /// Prefix operators of the supported subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrUnOp {
+    /// `-x`.
     Neg,
+    /// `!c`.
     Not,
     /// `*p` — and any other unrecognized prefix op (historical behavior).
     DerefOrUnknown,
@@ -406,7 +504,10 @@ pub enum IrCallee {
     /// A type constructor (`Vec3::new` / `Mat3::from_cols` classified at
     /// lowering): the type travels as a registry variant, spelled by the
     /// writer — never a pre-rendered string.
-    Constructor { ty: ShaderType },
+    Constructor {
+        /// Constructed primitive type.
+        ty: ShaderType,
+    },
     /// A registry built-in: applied by the writer via [`ShaderBuiltin::lower`].
     Builtin(ShaderBuiltin),
     /// Kernels/helpers: WGSL shares the spelling by design.
@@ -418,7 +519,9 @@ pub enum IrCallee {
 /// The `else` arm of an [`IrExpr::If`]: a block or a chained `if`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IrElse {
+    /// A plain block.
     Block(Vec<IrStmt>),
+    /// A chained `else if`.
     If(Box<IrExpr>),
 }
 
@@ -429,26 +532,43 @@ pub enum IrStmt {
     /// (`let mut out: T;` → `var out: T;`); `init` covers the rest.
     /// (`let x = if ..` expands to several statements at lowering.)
     Let {
+        /// Binding name.
         name: String,
+        /// `let` (false) versus `var` (true).
         mutable: bool,
+        /// Optional initializer.
         init: Option<IrExpr>,
+        /// Optional declared type (`let x: T`), emitted with or without an initializer.
         decl_ty: Option<String>,
     },
     /// `for i in start..end` over `u32` (half-open or closed).
     For {
+        /// Loop variable name.
         var: String,
+        /// Inclusive range start.
         start: IrExpr,
+        /// Range end (exclusive unless `closed`).
         end: IrExpr,
+        /// Whether the range is inclusive (`..=`).
         closed: bool,
+        /// Loop body.
         body: Vec<IrStmt>,
     },
     /// `if` / block in statement position (with the source semicolon flag).
-    Flow { expr: IrExpr, semi: bool },
+    Flow {
+        /// Expression in statement position.
+        expr: IrExpr,
+        /// Whether the source had a trailing semicolon.
+        semi: bool,
+    },
     /// Any other expression as a statement (with the source semicolon flag
     /// and the tail flag that promotes a trailing value to `return`).
     Expr {
+        /// Expression in statement position.
         expr: IrExpr,
+        /// Whether the source had a trailing semicolon.
         semi: bool,
+        /// Whether a trailing value is promoted to `return`.
         is_tail: bool,
     },
     /// A trailing block value promoted to `return ..;` at lowering.
