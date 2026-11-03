@@ -81,3 +81,16 @@ pub(super) fn texture_load(st: &mut St, import: &Import) -> Result<(), Translate
     pop_prov(st)?;
     push(st, Abs::Vec)
 }
+
+pub(super) fn math_scalar(st: &mut St, import: &Import, imp: Imp) -> Result<(), TranslateError> {
+    let params = match imp {
+        Imp::MathMinF32 | Imp::MathMaxF32 => 2,
+        Imp::MathClampF32 => 3,
+        _ => return Err(TranslateError::Unsupported),
+    };
+    ty::sig_ok(&import.sig, imp, &[], None)?;
+    for _ in 0..params {
+        pop_f32(st)?;
+    }
+    push(st, Abs::F32)
+}

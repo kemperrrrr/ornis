@@ -100,6 +100,9 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         Imp::MathCross3 => super::builtins::math_vec3(st, import, Imp::MathCross3),
         Imp::MathLength3 => super::builtins::math_length3(st, import),
         Imp::MathNormalize3 => super::builtins::math_vec3(st, import, Imp::MathNormalize3),
+        Imp::MathMinF32 | Imp::MathMaxF32 | Imp::MathClampF32 => {
+            super::builtins::math_scalar(st, import, imp)
+        }
         Imp::StorageAtomicAddU32 => super::builtins::storage_atomic_add(st, import),
         Imp::WorkgroupLoadU32 => super::builtins::workgroup_load(st, import),
         Imp::WorkgroupStoreU32 => super::builtins::workgroup_store(st, import),

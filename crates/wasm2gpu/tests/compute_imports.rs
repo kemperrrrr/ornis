@@ -56,6 +56,34 @@ fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
 }
 
 #[test]
+fn scalar_min_max_clamp_imports_lower_to_wgsl_builtins() {
+    let cases = [
+        (
+            symbols::MATH_MIN_F32,
+            "(param f32 f32) (result f32)",
+            "f32.const 2 f32.const 1 call $op f32.const 0 f32.const 0 f32.const 1",
+        ),
+        (
+            symbols::MATH_MAX_F32,
+            "(param f32 f32) (result f32)",
+            "f32.const 2 f32.const 1 call $op f32.const 0 f32.const 0 f32.const 1",
+        ),
+        (
+            symbols::MATH_CLAMP_F32,
+            "(param f32 f32 f32) (result f32)",
+            "f32.const 2 f32.const 0 f32.const 1 call $op f32.const 0 f32.const 0 f32.const 1",
+        ),
+    ];
+    let snapshots = include_str!("snapshots/math_scalar.wgsl").lines();
+    for ((name, signature, body), snapshot) in cases.into_iter().zip(snapshots) {
+        let imports = import(name, signature);
+        let fs = fragment(&body.replace("$op", &format!("${name}")));
+        let got = wgsl(&imports, &fs);
+        assert!(got.contains(snapshot), "missing {snapshot} in {got}");
+    }
+}
+
+#[test]
 fn vector_math_imports_lower_to_wgsl_builtins() {
     let cases = [
         (
