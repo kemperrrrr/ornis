@@ -22,8 +22,8 @@ fn sample_lod_uses_the_host_shadow_base_level() {
     let sampled = with_host(&mut memory, || {
         Texture2d::<0, 0>::bind().sample_lod(&Sampler::<0, 1>::bind(), uv, 2.0)
     });
-    assert_eq!(sampled.x.to_bits(), texel.x.to_bits());
-    assert_eq!(sampled.y.to_bits(), texel.y.to_bits());
-    assert_eq!(sampled.z.to_bits(), texel.z.to_bits());
-    assert_eq!(sampled.w.to_bits(), texel.w.to_bits());
+    assert_eq!(sampled.x.to_bits(), 0.25_f32.to_bits());
+    assert_eq!(sampled.y.to_bits(), 0.5_f32.to_bits());
+    assert_eq!(sampled.z.to_bits(), 0.75_f32.to_bits());
+    assert_eq!(sampled.w.to_bits(), 1.0_f32.to_bits());
 }

@@ -9,8 +9,6 @@ use crate::layout::F32_SIZE;
 #[cfg(target_arch = "wasm32")]
 use crate::layout::GpuSafeLayout;
 #[cfg(target_arch = "wasm32")]
-use crate::layout::GpuVec3;
-#[cfg(target_arch = "wasm32")]
 use crate::layout::VEC4_SIZE;
 
 #[cfg(target_arch = "wasm32")]
@@ -27,6 +25,12 @@ mod texture;
 pub(super) use texture::{
     call_texture_height_2d, call_texture_load_2d, call_texture_width_2d, wasm_sample,
     wasm_sample_lod,
+};
+#[cfg(target_arch = "wasm32")]
+mod math;
+#[cfg(target_arch = "wasm32")]
+pub(super) use math::{
+    call_math_cross3, call_math_dot3, call_math_length3, call_math_normalize3,
 };
 
 /// Lane count of a `vec4<f32>`.
@@ -72,15 +76,6 @@ macro_rules! pod_store {
 pub(super) use pod_load;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) use pod_store;
-
-/// Three `f32` lanes returned by the vec3 math imports.
-#[cfg(target_arch = "wasm32")]
-#[repr(C)]
-struct Word3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
 
 /// Four `f32` lanes returned by vec4 wasm imports.
 #[cfg(target_arch = "wasm32")]
@@ -138,10 +133,6 @@ unsafe extern "C" {
     fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
     fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32;
     fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
-    fn math_dot3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32;
-    fn math_cross3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> Word3;
-    fn math_length3(x: f32, y: f32, z: f32) -> f32;
-    fn math_normalize3(x: f32, y: f32, z: f32) -> Word3;
     fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
     fn workgroup_load_u32(index: u32) -> u32;
     fn workgroup_store_u32(index: u32, value: u32);
@@ -395,40 +386,6 @@ fn lanes_from_bytes(bytes: &[u8; VEC4_SIZE as usize]) -> [f32; LANE_COUNT] {
         index += 1;
     }
     lanes
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_math_dot3(a: GpuVec3, b: GpuVec3) -> f32 {
-    // SAFETY: the import accepts six scalar lanes and returns one scalar.
-    call_gpu_import!(math_dot3(a.x, a.y, a.z, b.x, b.y, b.z))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
-    // SAFETY: the import returns three initialized f32 lanes.
-    let word = call_gpu_import!(math_cross3(a.x, a.y, a.z, b.x, b.y, b.z));
-    GpuVec3 {
-        x: word.x,
-        y: word.y,
-        z: word.z,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_math_length3(value: GpuVec3) -> f32 {
-    // SAFETY: the import accepts three scalar lanes and returns one scalar.
-    call_gpu_import!(math_length3(value.x, value.y, value.z))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_math_normalize3(value: GpuVec3) -> GpuVec3 {
-    // SAFETY: the import returns three initialized f32 lanes.
-    let word = call_gpu_import!(math_normalize3(value.x, value.y, value.z));
-    GpuVec3 {
-        x: word.x,
-        y: word.y,
-        z: word.z,
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
