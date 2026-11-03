@@ -96,10 +96,81 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         Imp::Sample => sample(st, import),
         Imp::TextureLoad => texture_load(st, import),
         Imp::TextureWidth | Imp::TextureHeight => texture_dimension(st, import, imp),
+        Imp::MathDot3 => math_dot3(st, import),
+        Imp::MathCross3 => math_vec3(st, import, Imp::MathCross3),
+        Imp::MathLength3 => math_length3(st, import),
+        Imp::MathNormalize3 => math_vec3(st, import, Imp::MathNormalize3),
+        Imp::StorageAtomicAddU32 => storage_atomic_add(st, import),
+        Imp::WorkgroupLoadU32 => workgroup_load(st, import),
+        Imp::WorkgroupStoreU32 => workgroup_store(st, import),
+        Imp::WorkgroupAtomicAddU32 => workgroup_atomic_add(st, import),
+        Imp::WorkgroupBarrier => barrier(st, import, Imp::WorkgroupBarrier),
+        Imp::StorageBarrier => barrier(st, import, Imp::StorageBarrier),
         Imp::Read(spec) => read_storage(ai, st, import, spec),
         Imp::Write(spec) => write_storage(ai, st, import, spec),
         Imp::Uniform(uni) => super::uniform::on_uniform(st, import, ai.structs, uni),
     }
+}
+
+fn math_dot3(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::MathDot3, &[], None)?;
+    for _ in 0..6 {
+        pop_f32(st)?;
+    }
+    push(st, Abs::F32)
+}
+
+fn math_vec3(st: &mut St, import: &Import, imp: Imp) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, imp, &[], None)?;
+    let inputs = if imp == Imp::MathCross3 { 6 } else { 3 };
+    for _ in 0..inputs {
+        pop_f32(st)?;
+    }
+    for _ in 0..3 {
+        push(st, Abs::F32)?;
+    }
+    Ok(())
+}
+
+fn math_length3(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::MathLength3, &[], None)?;
+    for _ in 0..3 {
+        pop_f32(st)?;
+    }
+    push(st, Abs::F32)
+}
+
+fn storage_atomic_add(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::StorageAtomicAddU32, &[], None)?;
+    pop_num(st)?; // value
+    pop_num(st)?; // word index
+    pop_prov(st)?; // binding
+    pop_prov(st)?; // group
+    push(st, Abs::I32(Num::Dyn { joined: false }))
+}
+
+fn workgroup_load(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::WorkgroupLoadU32, &[], None)?;
+    pop_num(st)?;
+    push(st, Abs::I32(Num::Dyn { joined: false }))
+}
+
+fn workgroup_store(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::WorkgroupStoreU32, &[], None)?;
+    pop_num(st)?;
+    pop_num(st)?;
+    Ok(())
+}
+
+fn workgroup_atomic_add(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::WorkgroupAtomicAddU32, &[], None)?;
+    pop_num(st)?;
+    pop_num(st)?;
+    push(st, Abs::I32(Num::Dyn { joined: false }))
+}
+
+fn barrier(_st: &mut St, import: &Import, imp: Imp) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, imp, &[], None)
 }
 
 fn texture_load(st: &mut St, import: &Import) -> Result<(), TranslateError> {

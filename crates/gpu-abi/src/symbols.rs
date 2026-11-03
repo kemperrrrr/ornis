@@ -64,6 +64,39 @@ pub const STORAGE_BASE: &str = "storage_base";
 /// and signed texel coordinate `(x, y)` at mip level zero.
 pub const TEXTURE_LOAD_2D: &str = "texture_load_2d";
 
+/// `(param f32 × 6) (result f32)` — dot product of two `vec3<f32>` values.
+pub const MATH_DOT3: &str = "math_dot3";
+
+/// `(param f32 × 6) (result f32 × 3)` — cross product of two `vec3<f32>` values.
+pub const MATH_CROSS3: &str = "math_cross3";
+
+/// `(param f32 × 3) (result f32)` — length of a `vec3<f32>` value.
+pub const MATH_LENGTH3: &str = "math_length3";
+
+/// `(param f32 × 3) (result f32 × 3)` — normalize a `vec3<f32>` value.
+pub const MATH_NORMALIZE3: &str = "math_normalize3";
+
+/// `(param i32 i32 i32 i32) (result i32)` — storage `atomicAdd` on u32.
+pub const STORAGE_ATOMIC_ADD_U32: &str = "storage_atomic_add_u32";
+
+/// `(param i32) (result i32)` — load one word from workgroup scratch.
+pub const WORKGROUP_LOAD_U32: &str = "workgroup_load_u32";
+
+/// `(param i32 i32)` — store one word into workgroup scratch.
+pub const WORKGROUP_STORE_U32: &str = "workgroup_store_u32";
+
+/// `(param i32 i32) (result i32)` — atomic add in workgroup scratch.
+pub const WORKGROUP_ATOMIC_ADD_U32: &str = "workgroup_atomic_add_u32";
+
+/// `()` — synchronize workgroup execution and workgroup memory.
+pub const WORKGROUP_BARRIER: &str = "workgroup_barrier";
+
+/// `()` — order storage memory accesses.
+pub const STORAGE_BARRIER: &str = "storage_barrier";
+
+/// Number of `u32` words in the translator's fixed workgroup scratch array.
+pub const WORKGROUP_WORDS: u32 = 256;
+
 /// `(param i32 i32) (result i32)` — width of a 2D texture.
 pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
 
@@ -207,6 +240,16 @@ pub fn is_toy_import(name: &str) -> bool {
             | TEXTURE_LOAD_2D
             | TEXTURE_WIDTH_2D
             | TEXTURE_HEIGHT_2D
+            | MATH_DOT3
+            | MATH_CROSS3
+            | MATH_LENGTH3
+            | MATH_NORMALIZE3
+            | STORAGE_ATOMIC_ADD_U32
+            | WORKGROUP_LOAD_U32
+            | WORKGROUP_STORE_U32
+            | WORKGROUP_ATOMIC_ADD_U32
+            | WORKGROUP_BARRIER
+            | STORAGE_BARRIER
             | STORAGE_READ_VEC2
             | STORAGE_WRITE_VEC2
             | STORAGE_READ_VEC3

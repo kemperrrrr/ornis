@@ -16,6 +16,7 @@ use crate::GpuSafeLayout;
 use crate::Storage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::Uniform;
+use crate::GpuVec3;
 
 /// Read one `f32` field of uniform struct `SID` at host byte `OFFSET`.
 ///
@@ -152,4 +153,81 @@ pub fn storage_store_f32<const GROUP: u32, const BINDING: u32>(index: u32, value
     {
         crate::gpu_abi::storage_write_f32(GROUP, BINDING, index, value);
     }
+}
+
+/// Dot product of two `vec3<f32>` values.
+#[inline(always)]
+pub fn gpu_dot3(a: GpuVec3, b: GpuVec3) -> f32 {
+    gpu_abi::math_dot3(a, b)
+}
+
+/// Cross product of two `vec3<f32>` values.
+#[inline(always)]
+pub fn gpu_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
+    gpu_abi::math_cross3(a, b)
+}
+
+/// Euclidean length of a `vec3<f32>` value.
+#[inline(always)]
+pub fn gpu_length3(value: GpuVec3) -> f32 {
+    gpu_abi::math_length3(value)
+}
+
+/// Normalize a `vec3<f32>` value to unit length.
+///
+/// As with WGSL `normalize`, a zero vector has no defined direction.
+#[inline(always)]
+pub fn gpu_normalize3(value: GpuVec3) -> GpuVec3 {
+    gpu_abi::math_normalize3(value)
+}
+
+/// Atomically add to one `u32` in storage and return its previous value.
+///
+/// On the host this is serialized by the shadow; shader execution uses WGSL
+/// `atomicAdd` and requires an atomic-compatible storage binding.
+#[inline(always)]
+pub fn storage_atomic_add_u32<const GROUP: u32, const BINDING: u32>(
+    index: u32,
+    value: u32,
+) -> u32 {
+    crate::gpu_abi::storage_atomic_add_u32(GROUP, BINDING, index, value)
+}
+
+/// Read one word from the fixed-size workgroup scratch array.
+///
+/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. The host
+/// shadow checks this; shader code must keep the index in bounds.
+#[inline(always)]
+pub fn workgroup_load_u32(index: u32) -> u32 {
+    crate::gpu_abi::workgroup_load_u32(index)
+}
+
+/// Write one word to the fixed-size workgroup scratch array.
+///
+/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. The host
+/// shadow checks this; shader code must keep the index in bounds.
+#[inline(always)]
+pub fn workgroup_store_u32(index: u32, value: u32) {
+    crate::gpu_abi::workgroup_store_u32(index, value)
+}
+
+/// Atomically add to a workgroup scratch word and return the previous value.
+///
+/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. Atomic
+/// scratch is a separate array from the ordinary workgroup scratch words.
+#[inline(always)]
+pub fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
+    crate::gpu_abi::workgroup_atomic_add_u32(index, value)
+}
+
+/// Synchronize workgroup execution and workgroup-memory accesses.
+#[inline(always)]
+pub fn workgroup_barrier() {
+    crate::gpu_abi::workgroup_barrier()
+}
+
+/// Order storage-buffer memory accesses within a workgroup.
+#[inline(always)]
+pub fn storage_barrier() {
+    crate::gpu_abi::storage_barrier()
 }

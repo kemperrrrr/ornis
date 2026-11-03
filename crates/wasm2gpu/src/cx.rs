@@ -68,6 +68,12 @@ pub(super) struct StorageSlot {
     pub(super) var: naga::Handle<naga::GlobalVariable>,
 }
 
+pub(super) struct AtomicSlot {
+    pub(super) group: u32,
+    pub(super) binding: u32,
+    pub(super) var: naga::Handle<naga::GlobalVariable>,
+}
+
 pub(super) struct Cx<'a> {
     pub(super) module: &'a mut naga::Module,
     pub(super) scalar: naga::Handle<Type>,
@@ -80,6 +86,9 @@ pub(super) struct Cx<'a> {
     pub(super) vec4: naga::Handle<Type>,
     pub(super) uniforms: Vec<UniformSlot>,
     pub(super) storages: Vec<StorageSlot>,
+    pub(super) atomic_storages: Vec<AtomicSlot>,
+    pub(super) workgroup: Option<naga::Handle<naga::GlobalVariable>>,
+    pub(super) workgroup_atomics: Option<naga::Handle<naga::GlobalVariable>>,
     pub(super) textures: Vec<Slot>,
     pub(super) samplers: Vec<Slot>,
     pub(super) struct_tys: Vec<(u16, naga::Handle<Type>)>,

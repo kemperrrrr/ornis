@@ -58,6 +58,9 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
         vec4,
         uniforms: Vec::new(),
         storages: Vec::new(),
+        atomic_storages: Vec::new(),
+        workgroup: None,
+        workgroup_atomics: None,
         textures: Vec::new(),
         samplers: Vec::new(),
         struct_tys: Vec::new(),
@@ -116,11 +119,7 @@ fn bool_ty(module: &mut naga::Module) -> naga::Handle<Type> {
         .insert(Type { name: None, inner }, Span::default())
 }
 
-fn vector_ty(
-    module: &mut naga::Module,
-    size: VectorSize,
-    kind: ScalarKind,
-) -> naga::Handle<Type> {
+fn vector_ty(module: &mut naga::Module, size: VectorSize, kind: ScalarKind) -> naga::Handle<Type> {
     let inner = TypeInner::Vector {
         size,
         scalar: Scalar {
