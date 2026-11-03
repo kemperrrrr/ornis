@@ -2,8 +2,8 @@
 
 use crate::GpuVec3;
 use crate::GpuVec4;
-use crate::Texture2d;
 use crate::HostMemory;
+use crate::Texture2d;
 use crate::storage_atomic_add_u32;
 use crate::storage_barrier;
 use crate::with_host;
@@ -53,8 +53,8 @@ const TEXTURE_TEST_GROUP: u32 = 4;
 const TEXTURE_TEST_BINDING: u32 = 2;
 const TEXTURE_TEST_WIDTH: u32 = 2;
 const TEXTURE_TEST_HEIGHT: u32 = 2;
-const TEXTURE_TEST_X: u32 = 1;
-const TEXTURE_TEST_Y: u32 = 0;
+const TEXTURE_TEST_X: i32 = 1;
+const TEXTURE_TEST_Y: i32 = 0;
 const TEXTURE_TEST_TEXELS: [GpuVec4; 4] = [
     GpuVec4 {
         x: 1.0,

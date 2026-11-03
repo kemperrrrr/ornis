@@ -175,6 +175,7 @@ pub(super) fn base_ty(
 }
 
 fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga::GlobalVariable>> {
+    // qual:allow(dry, fragment) reason: "This slot cache uses the shared linear binding-key scan, but stores ordinary texture/sampler globals."
     let mut index = 0usize;
     while index < slots.len() {
         if slots[index].group == group && slots[index].binding == binding {
