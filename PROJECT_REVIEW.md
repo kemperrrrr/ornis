@@ -2090,12 +2090,13 @@ command recording
 
 ### Render pass как обычная система
 
-Целевая форма может выглядеть примерно так (имя атрибута в наброске
-иллюстративное; макрос автопараллелизации циклов по лейнам удалён, #246,
-актуальный путь систем — `#[smart_system]`):
+Целевая форма может выглядеть примерно так. Атрибут — реальный
+`#[smart_system]`; список параметров ниже — набросок типизированных
+доступов пасса (текущий макрос принимает бандл `Pack` и `Res`/`ResMut`,
+не `Query`/`Write`):
 
 ```rust
-#[system]
+#[smart_system]
 fn gbuffer(
     entities: Query<(&Transform, &MeshHandle, &MaterialHandle)>,
     camera: Res<Camera>,
@@ -2108,7 +2109,7 @@ fn gbuffer(
 Или более низкоуровнево:
 
 ```rust
-#[system]
+#[smart_system]
 fn lighting(
     gbuffer: Read<GBuffer>,
     lights: Read<Lights>,

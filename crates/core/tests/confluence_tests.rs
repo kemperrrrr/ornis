@@ -1,8 +1,13 @@
 //! Strong confluence tests: parallel execution determinism across thread counts.
+//!
+//! `sequential_smart_system_branching_is_deterministic` is not one of
+//! those checks. `#[smart_system]` walks entities on the calling thread,
+//! so that test compares two sequential runs.
 
 // Strong Confluence Tests - Determinism across thread counts
 // Tests that parallel execution produces bitwise-identical results
-// regardless of RAYON_NUM_THREADS setting.
+// regardless of RAYON_NUM_THREADS setting. The smart_system case below
+// does not: its generated loop is sequential.
 
 use ornis_core::{Pack, Resources, Schedule, SmartStore};
 use ornis_macros::{for_each_entity, smart_system};
@@ -304,7 +309,7 @@ fn strong_confluence_three_lanes() {
     assert_bitwise_equal(&threads_1, &threads_32, "three_lanes");
 }
 
-/// Bundle for the branching confluence check. One `#[smart_system]` owns
+/// Bundle for the sequential branching check. One `#[smart_system]` owns
 /// both fields; the body branches on velocity and writes position.
 #[derive(Clone, Copy, Debug, PartialEq, ornis_macros::Pack)]
 struct BranchBody {
@@ -323,10 +328,9 @@ fn branch_step(body: &mut BranchBody) {
     body.position.z += body.velocity.z;
 }
 
-/// One `#[smart_system]` tick of the branching update at `threads`.
-fn run_branch_system(threads: usize) -> Vec<Position> {
-    set_rayon_threads(threads);
-
+/// One sequential `#[smart_system]` tick. The generated loop does not
+/// enter a rayon pool, so the result does not depend on thread count.
+fn run_branch_system() -> Vec<Position> {
     let mut store = SmartStore::new();
     BranchBody::pack_register(&mut store);
     for i in 0..1000 {
@@ -353,21 +357,26 @@ fn run_branch_system(threads: usize) -> Vec<Position> {
     schedule.run(&resources);
 
     let store = resources.get::<SmartStore>().expect("store");
-    let mut positions: Vec<_> = BranchBody::pack_entities(store)
+    BranchBody::pack_entities(store)
         .into_iter()
         .map(|entity| BranchBody::pack_get(store, entity).expect("body").position)
-        .collect();
-    positions.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
-    positions
+        .collect()
 }
 
-/// Strong confluence of a data-dependent `#[smart_system]` update:
-/// 1 thread and 32 threads must agree bitwise.
+/// Determinism of the sequential `#[smart_system]` path.
+///
+/// The macro walks entities in id order on the calling thread
+/// (`for` over the lane, not `par_iter`). Two runs of the same branching
+/// update must agree bitwise, and the branch must actually move `x`.
+/// This does not compare a 1-thread pool with a 32-thread pool.
 #[test]
-fn strong_confluence_smart_system_branching() {
-    let threads_1 = run_branch_system(1);
-    let threads_32 = run_branch_system(32);
-    assert_bitwise_equal(&threads_1, &threads_32, "smart_system_branching");
+fn sequential_smart_system_branching_is_deterministic() {
+    let first = run_branch_system();
+    let second = run_branch_system();
+    assert_eq!(first.len(), 1000, "sequential_smart_system_branching");
+    assert_eq!(first[0].x, 0.1 * 2.0);
+    assert_eq!(first[1].x, 1.0 + (-0.1) * 0.5);
+    assert_bitwise_equal(&first, &second, "sequential_smart_system_branching");
 }
 
 #[test]
