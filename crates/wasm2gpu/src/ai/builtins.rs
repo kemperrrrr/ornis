@@ -1,8 +1,8 @@
 //! Type-stack handlers for vector math, memory synchronization, and texture reads.
 
-use super::mem::{pop_num, pop_prov};
+use super::mem::pop_prov;
 use super::value::pop_f32;
-use super::{Abs, Num, St, push};
+use super::{Abs, Num, St, pop_num, push};
 use crate::error::TranslateError;
 use crate::ir::Import;
 use crate::ty;

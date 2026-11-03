@@ -12,7 +12,7 @@ use naga::StorageAccess;
 use naga::Type;
 use naga::TypeInner;
 
-pub(super) fn atomic_storage(
+pub(crate) fn atomic_storage(
     cx: &mut Cx<'_>,
     group: u32,
     binding: u32,
@@ -58,7 +58,7 @@ pub(super) fn atomic_storage(
     Ok(var)
 }
 
-pub(super) fn workgroup(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVariable> {
+pub(crate) fn workgroup(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVariable> {
     if let Some(var) = cx.workgroup {
         return var;
     }
@@ -79,7 +79,7 @@ pub(super) fn workgroup(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVariable> {
     var
 }
 
-pub(super) fn workgroup_atomics(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVariable> {
+pub(crate) fn workgroup_atomics(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVariable> {
     if let Some(var) = cx.workgroup_atomics {
         return var;
     }
@@ -125,10 +125,11 @@ fn workgroup_array(cx: &mut Cx<'_>, base: naga::Handle<Type>) -> naga::Handle<Ty
     )
 }
 
-pub(super) fn atomic_taken(slots: &[AtomicSlot], group: u32, binding: u32) -> bool {
+pub(crate) fn atomic_taken(slots: &[AtomicSlot], group: u32, binding: u32) -> bool {
     find_atomic_storage(slots, group, binding).is_some()
 }
 
+// qual:allow(dry, fragment) reason: "Ordinary and atomic binding caches scan distinct slot types and return different payloads; a shared abstraction would obscure the binding invariant."
 fn find_atomic_storage(
     slots: &[AtomicSlot],
     group: u32,

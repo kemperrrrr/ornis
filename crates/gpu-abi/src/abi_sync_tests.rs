@@ -55,6 +55,32 @@ const TEXTURE_TEST_WIDTH: u32 = 2;
 const TEXTURE_TEST_HEIGHT: u32 = 2;
 const TEXTURE_TEST_X: u32 = 1;
 const TEXTURE_TEST_Y: u32 = 0;
+const TEXTURE_TEST_TEXELS: [GpuVec4; 4] = [
+    GpuVec4 {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+        w: 1.0,
+    },
+    GpuVec4 {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+        w: 1.0,
+    },
+    GpuVec4 {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+        w: 1.0,
+    },
+    GpuVec4 {
+        x: 1.0,
+        y: 1.0,
+        z: 0.0,
+        w: 1.0,
+    },
+];
 
 #[test]
 fn vec3_math_helpers_match_scalar_reference() {
@@ -105,13 +131,15 @@ fn atomics_and_workgroup_memory_have_host_shadows() {
 #[test]
 fn texture_load_reads_the_requested_texel() {
     let mut mem = HostMemory::new();
-    let texels = [
-        GpuVec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 },
-        GpuVec4 { x: 0.0, y: 1.0, z: 0.0, w: 1.0 },
-        GpuVec4 { x: 0.0, y: 0.0, z: 1.0, w: 1.0 },
-        GpuVec4 { x: 1.0, y: 1.0, z: 0.0, w: 1.0 },
-    ];
-    mem.bind_texture::<TEXTURE_TEST_GROUP, TEXTURE_TEST_BINDING>(TEXTURE_TEST_WIDTH, TEXTURE_TEST_HEIGHT, &texels);
-    let got = with_host(&mut mem, || Texture2d::<TEXTURE_TEST_GROUP, TEXTURE_TEST_BINDING>::bind().load(TEXTURE_TEST_X, TEXTURE_TEST_Y));
+    let texels = TEXTURE_TEST_TEXELS;
+    mem.bind_texture::<TEXTURE_TEST_GROUP, TEXTURE_TEST_BINDING>(
+        TEXTURE_TEST_WIDTH,
+        TEXTURE_TEST_HEIGHT,
+        &texels,
+    );
+    let got = with_host(&mut mem, || {
+        Texture2d::<TEXTURE_TEST_GROUP, TEXTURE_TEST_BINDING>::bind()
+            .load(TEXTURE_TEST_X, TEXTURE_TEST_Y)
+    });
     assert_eq!(got, texels[1]);
 }

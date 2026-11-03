@@ -3,7 +3,7 @@
 use super::{Elem, Imp, Spec, symbols};
 
 /// Classify a toy import. `None` means the name is not a gpu opcode we lower.
-pub(super) fn classify(name: &str) -> Option<Imp> {
+pub(crate) fn classify(name: &str) -> Option<Imp> {
     if name == symbols::STORAGE_BASE {
         return Some(Imp::Base);
     }
@@ -52,8 +52,8 @@ pub(super) fn classify(name: &str) -> Option<Imp> {
     if name == symbols::TEXTURE_HEIGHT_2D {
         return Some(Imp::TextureHeight);
     }
-    if let Some(uni) = uni::imp(name) {
+    if let Some(uni) = super::uni::imp(name) {
         return Some(Imp::Uniform(uni));
     }
-    storage_imp(name)
+    super::storage_imp(name)
 }

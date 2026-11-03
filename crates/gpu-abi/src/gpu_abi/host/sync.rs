@@ -1,9 +1,14 @@
 //! Host-shadow texture, atomic, and workgroup synchronization operations.
 
-use super::{HOST, HostMemory, Kind, contract_breach, image_at};
+use super::{HOST, Kind, contract_breach, image_at};
 use crate::layout::GpuVec4;
 
-pub(in crate::gpu_abi) fn host_storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
+pub(in crate::gpu_abi) fn host_storage_atomic_add_u32(
+    group: u32,
+    binding: u32,
+    index: u32,
+    value: u32,
+) -> u32 {
     HOST.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let Some(mem) = borrowed.as_mut() else {

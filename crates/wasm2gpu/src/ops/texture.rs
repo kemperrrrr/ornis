@@ -15,16 +15,8 @@ pub(super) fn texture_load(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> 
     let x = em.as_uint(x_value)?;
     let binding = em.pop_imm()?;
     let group = em.pop_imm()?;
-    let x = em.ex(Expression::As {
-        expr: x,
-        kind: naga::ScalarKind::Sint,
-        convert: None,
-    });
-    let y = em.ex(Expression::As {
-        expr: y,
-        kind: naga::ScalarKind::Sint,
-        convert: None,
-    });
+    let x = em.ex(as_signed(x));
+    let y = em.ex(as_signed(y));
     let coordinate_ty = em.cx.ivec2;
     let coordinate = em.ex(Expression::Compose {
         ty: coordinate_ty,
@@ -44,4 +36,12 @@ pub(super) fn texture_load(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> 
     });
     em.stack.push(Val::Vec(texel));
     Ok(())
+}
+
+fn as_signed(expr: naga::Handle<Expression>) -> Expression {
+    Expression::As {
+        expr,
+        kind: naga::ScalarKind::Sint,
+        convert: None,
+    }
 }
