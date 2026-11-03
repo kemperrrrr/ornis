@@ -1,11 +1,16 @@
 //! Strong confluence tests: parallel execution determinism across thread counts.
+//!
+//! `sequential_smart_system_branching_is_deterministic` is not one of
+//! those checks. `#[smart_system]` walks entities on the calling thread,
+//! so that test compares two sequential runs.
 
 // Strong Confluence Tests - Determinism across thread counts
 // Tests that parallel execution produces bitwise-identical results
-// regardless of RAYON_NUM_THREADS setting.
+// regardless of RAYON_NUM_THREADS setting. The smart_system case below
+// does not: its generated loop is sequential.
 
-use ornis_core::SmartStore;
-use ornis_macros::for_each_entity;
+use ornis_core::{Pack, Resources, Schedule, SmartStore};
+use ornis_macros::{for_each_entity, smart_system};
 
 // ===== Test Types =====
 
@@ -35,16 +40,21 @@ struct Force {
 
 // ===== Helper Functions =====
 
-fn run_with_threads<F>(threads: usize, f: F) -> Vec<Position>
-where
-    F: FnOnce(&mut SmartStore) -> Vec<Position>,
-{
+/// Point rayon's global pool at `threads` before the first pool init.
+fn set_rayon_threads(threads: usize) {
     // SAFETY: no other test in this binary touches the process environment,
     // and rayon reads `RAYON_NUM_THREADS` once at first pool init; no
     // concurrent env reader exists while these tests run.
     unsafe {
         std::env::set_var("RAYON_NUM_THREADS", threads.to_string());
     }
+}
+
+fn run_with_threads<F>(threads: usize, f: F) -> Vec<Position>
+where
+    F: FnOnce(&mut SmartStore) -> Vec<Position>,
+{
+    set_rayon_threads(threads);
 
     let mut store = SmartStore::new();
     store.register::<Position>();
@@ -299,77 +309,74 @@ fn strong_confluence_three_lanes() {
     assert_bitwise_equal(&threads_1, &threads_32, "three_lanes");
 }
 
+/// Bundle for the sequential branching check. One `#[smart_system]` owns
+/// both fields; the body branches on velocity and writes position.
+#[derive(Clone, Copy, Debug, PartialEq, ornis_macros::Pack)]
+struct BranchBody {
+    position: Position,
+    velocity: Velocity,
+}
+
+#[smart_system]
+fn branch_step(body: &mut BranchBody) {
+    if body.velocity.x > 0.0 {
+        body.position.x += body.velocity.x * 2.0;
+    } else {
+        body.position.x += body.velocity.x * 0.5;
+    }
+    body.position.y += body.velocity.y;
+    body.position.z += body.velocity.z;
+}
+
+/// One sequential `#[smart_system]` tick. The generated loop does not
+/// enter a rayon pool, so the result does not depend on thread count.
+fn run_branch_system() -> Vec<Position> {
+    let mut store = SmartStore::new();
+    BranchBody::pack_register(&mut store);
+    for i in 0..1000 {
+        let entity = store.create_entity();
+        BranchBody {
+            position: Position {
+                x: i as f32,
+                y: 0.0,
+                z: 0.0,
+            },
+            velocity: Velocity {
+                x: if i % 2 == 0 { 0.1 } else { -0.1 },
+                y: 0.0,
+                z: 0.0,
+            },
+        }
+        .pack_insert(&mut store, entity);
+    }
+
+    let mut resources = Resources::new();
+    resources.insert(store);
+    let mut schedule = Schedule::new();
+    schedule.add_system(BranchStepSystem::new());
+    schedule.run(&resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    BranchBody::pack_entities(store)
+        .into_iter()
+        .map(|entity| BranchBody::pack_get(store, entity).expect("body").position)
+        .collect()
+}
+
+/// Determinism of the sequential `#[smart_system]` path.
+///
+/// The macro walks entities in id order on the calling thread
+/// (`for` over the lane, not `par_iter`). Two runs of the same branching
+/// update must agree bitwise, and the branch must actually move `x`.
+/// This does not compare a 1-thread pool with a 32-thread pool.
 #[test]
-fn strong_confluence_smart_pipeline_branching() {
-    let threads_1 = run_with_threads(1, |store| {
-        for i in 0..1000 {
-            let e = store.create_entity();
-            store.insert(
-                e,
-                Position {
-                    x: i as f32,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-            store.insert(
-                e,
-                Velocity {
-                    x: if i % 2 == 0 { 0.1 } else { -0.1 },
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-        }
-
-        for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
-            if vel.x > 0.0 {
-                pos.x += vel.x * 2.0;
-            } else {
-                pos.x += vel.x * 0.5;
-            }
-            pos.y += vel.y;
-            pos.z += vel.z;
-        });
-
-        collect_positions(store)
-    });
-
-    let threads_32 = run_with_threads(32, |store| {
-        for i in 0..1000 {
-            let e = store.create_entity();
-            store.insert(
-                e,
-                Position {
-                    x: i as f32,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-            store.insert(
-                e,
-                Velocity {
-                    x: if i % 2 == 0 { 0.1 } else { -0.1 },
-                    y: 0.0,
-                    z: 0.0,
-                },
-            );
-        }
-
-        for_each_entity!(store, |pos: &mut Position, vel: &Velocity| {
-            if vel.x > 0.0 {
-                pos.x += vel.x * 2.0;
-            } else {
-                pos.x += vel.x * 0.5;
-            }
-            pos.y += vel.y;
-            pos.z += vel.z;
-        });
-
-        collect_positions(store)
-    });
-
-    assert_bitwise_equal(&threads_1, &threads_32, "smart_pipeline_branching");
+fn sequential_smart_system_branching_is_deterministic() {
+    let first = run_branch_system();
+    let second = run_branch_system();
+    assert_eq!(first.len(), 1000, "sequential_smart_system_branching");
+    assert_eq!(first[0].x, 0.1 * 2.0);
+    assert_eq!(first[1].x, 1.0 + (-0.1) * 0.5);
+    assert_bitwise_equal(&first, &second, "sequential_smart_system_branching");
 }
 
 #[test]
@@ -572,5 +579,5 @@ fn strong_confluence_for_each_entity_pure_math() {
         collect_positions(store)
     });
 
-    assert_bitwise_equal(&threads_1, &threads_32, "smart_pipeline_pure_math");
+    assert_bitwise_equal(&threads_1, &threads_32, "for_each_entity_pure_math");
 }

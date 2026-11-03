@@ -7,7 +7,7 @@
 //! derives the graph wiring from them (reads/writes → lifetime → pool). A resource is
 //! a type implementing [`FrameResource`]; the `type → ResourceId` mapping is
 //! held by [`SystemSet`]. No strings and no syn parsing: resource identity is
-//! the type (lesson from `smart_pipeline` brittleness, see Appendix C anti-goals).
+//! the type (lesson from syntactic method-matching macros, see Appendix C anti-goals).
 //!
 //! [`SystemSet`] is also the single declaration registry (d3): resource
 //! and pass declarations live here together with the declaration

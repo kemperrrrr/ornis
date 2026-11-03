@@ -6,7 +6,7 @@
 //! the mutation-producer batch protocol, scene serialization (phase 7), scheduler
 //! lane granularity (`lane_id` — dense index for future access bitsets).
 //! Hot per-frame loops **do not touch** the registry — they stay typed
-//! (SoA lanes, `#[smart_pipeline]`); the boundary is the same as Bevy's
+//! (SoA lanes, `#[smart_system]`); the boundary is the same as Bevy's
 //! `bevy_reflect` vs typed queries.
 //!
 //! Thunks are monomorphized via plain generic registration; derive sugar

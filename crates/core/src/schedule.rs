@@ -67,13 +67,12 @@
 //! The TLS stack is active in the thread executing `System::run`; child
 //! tasks of the system start with an empty stack. The gap is closed by
 //! frame capture: [`capture_access_frame`] before entering the parallel
-//! section and [`AccessFrameCapture::install`] in each child task. The
-//! `#[smart_pipeline]` macro generates this pair around `par_iter` bodies
-//! automatically (the engine's main pattern is covered). Documented
-//! limitation: manual parallelism (`rayon::scope`/`spawn`) inside a
-//! system **without** capture is still unchecked, and enforcement is
-//! debug-only by default (both limits are the "document it"
-//! requirement from §3.3).
+//! section and [`AccessFrameCapture::install`] in each child task.
+//! Callers that spawn work inside a system (`rayon::scope`/`spawn`,
+//! `std::thread::scope`) capture and install the frame themselves.
+//! Documented limitation: parallelism **without** capture is still
+//! unchecked, and enforcement is debug-only by default (both limits are
+//! the "document it" requirement from §3.3).
 //!
 //! Level and conflict mechanics (including the bitset plan and plan
 //! cache with diagnostics), the unified [`OrderError`] and the level
@@ -419,12 +418,11 @@ impl Drop for AccessFrameGuard {
 /// Snapshot of the top active access declaration for carrying enforcement
 /// into a system's parallel child tasks (audit §3.3, backlog #7).
 ///
-/// `#[smart_pipeline]` generates the capture and install around
-/// `par_iter` loop bodies automatically. For manual parallelism inside
-/// `System::run` (`rayon::scope`/`spawn`, `std::thread::scope`): capture
-/// before entering the parallel section, install in each child task;
-/// then the child thread inherits the system declaration and an
-/// undeclared access panics just as in the system thread.
+/// For parallelism inside `System::run` (`rayon::scope`/`spawn`,
+/// `std::thread::scope`): capture before entering the parallel section
+/// and install in each child task. The child thread then inherits the
+/// system declaration, and an undeclared access panics just as in the
+/// system thread.
 ///
 /// `Send + Sync` (&'static str + TypeId): the snapshot is shared by
 /// reference in rayon `for_each` closures. Empty outside

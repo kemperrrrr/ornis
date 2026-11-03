@@ -566,7 +566,8 @@ active-100k) и #112.
    > ✅ 2026-08-27: README и связанные текущие статусы сверены с кодом.
    > Исправлено: `src/` без Vello;
    > IPC-типы — в `crates/editor-backend/src/ipc.rs` (не `src/ipc.rs`);
-   > линтер `#[smart_pipeline]` — deprecated-note трюк вместо `compile_warning!`;
+   > линтер автопараллелизации — deprecated-note трюк вместо `compile_warning!`
+   > (сам макрос удалён, #246);
    > `Pack` → ✅ (`for_each_packed` + совместимость лент с `for_each_entity!`);
    > WASM-viewport рендерит живую сцену из `/api/scene` (без fallback, единый runtime,
    > orbit-камера) — статусы редактора и roadmap п.4 обновлены; Приложение A
@@ -2089,10 +2090,13 @@ command recording
 
 ### Render pass как обычная система
 
-Целевая форма может выглядеть примерно так:
+Целевая форма может выглядеть примерно так. Атрибут — реальный
+`#[smart_system]`; список параметров ниже — набросок типизированных
+доступов пасса (текущий макрос принимает бандл `Pack` и `Res`/`ResMut`,
+не `Query`/`Write`):
 
 ```rust
-#[smart_pipeline]
+#[smart_system]
 fn gbuffer(
     entities: Query<(&Transform, &MeshHandle, &MaterialHandle)>,
     camera: Res<Camera>,
@@ -2105,7 +2109,7 @@ fn gbuffer(
 Или более низкоуровнево:
 
 ```rust
-#[smart_pipeline]
+#[smart_system]
 fn lighting(
     gbuffer: Read<GBuffer>,
     lights: Read<Lights>,
