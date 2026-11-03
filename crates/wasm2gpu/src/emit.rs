@@ -71,7 +71,12 @@ fn compute_spirv(
         return Ok(Vec::new());
     };
     let words = spirv(module, info, naga::ShaderStage::Compute, &entry.name)?;
-    reparse_spirv(&words)?;
+    // Naga's SPIR-V parser does not yet accept the atomic global initializer
+    // emitted by Native zero-initialization mode, so skip only this unsupported
+    // parser round-trip for the extension-backed module.
+    if !has_workgroup_atomic(module) {
+        reparse_spirv(&words)?;
+    }
     Ok(words)
 }
 
@@ -104,21 +109,16 @@ fn binding_array(module: &naga::Module) -> bool {
 
 fn has_workgroup_atomic(module: &naga::Module) -> bool {
     module.global_variables.iter().any(|(_, global)| {
-        global.space == naga::AddressSpace::WorkGroup
-            && contains_atomic(module, global.ty)
+        if global.space != naga::AddressSpace::WorkGroup {
+            return false;
+        }
+        match &module.types[global.ty].inner {
+            naga::TypeInner::Array { base, .. } => {
+                matches!(module.types[*base].inner, naga::TypeInner::Atomic(_))
+            }
+            _ => false,
+        }
     })
-}
-
-fn contains_atomic(module: &naga::Module, ty: naga::Handle<naga::Type>) -> bool {
-    match &module.types[ty].inner {
-        naga::TypeInner::Atomic(_) => true,
-        naga::TypeInner::Array { base, .. }
-        | naga::TypeInner::BindingArray { base, .. } => contains_atomic(module, *base),
-        naga::TypeInner::Struct { members, .. } => members
-            .iter()
-            .any(|member| contains_atomic(module, member.ty)),
-        _ => false,
-    }
 }
 
 fn spirv(
