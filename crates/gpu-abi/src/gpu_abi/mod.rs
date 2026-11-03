@@ -298,18 +298,14 @@ pub(crate) fn texture_sample_2d<const TG: u32, const TB: u32, const SG: u32, con
     }
 }
 
-pub(crate) fn texture_sample_2d_lod<
-    const TG: u32,
-    const TB: u32,
-    const SG: u32,
-    const SB: u32,
->(
+pub(crate) fn texture_sample_2d_lod<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
     level: f32,
 ) -> GpuVec4 {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        host::host_sample_lod::<TG, TB, SG, SB>(uv, level)
+        let _ = level;
+        host::host_sample::<TG, TB, SG, SB>(uv)
     }
     #[cfg(target_arch = "wasm32")]
     {

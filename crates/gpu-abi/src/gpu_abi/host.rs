@@ -243,18 +243,6 @@ pub(super) fn host_sample<const TG: u32, const TB: u32, const SG: u32, const SB:
     })
 }
 
-pub(super) fn host_sample_lod<
-    const TG: u32,
-    const TB: u32,
-    const SG: u32,
-    const SB: u32,
->(
-    uv: GpuVec2,
-    _level: f32,
-) -> GpuVec4 {
-    host_sample::<TG, TB, SG, SB>(uv)
-}
-
 fn image_at(mem: &HostMemory, group: u32, binding: u32) -> &HostImage {
     let index = mem.index_of(group, binding);
     let slot = &mem.slots[index];

@@ -305,12 +305,7 @@ pub(super) fn wasm_sample<const TG: u32, const TB: u32, const SG: u32, const SB:
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(super) fn wasm_sample_lod<
-    const TG: u32,
-    const TB: u32,
-    const SG: u32,
-    const SB: u32,
->(
+pub(super) fn wasm_sample_lod<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
     level: f32,
 ) -> GpuVec4 {

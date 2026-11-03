@@ -101,11 +101,11 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
     match imp {
         Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
-        Imp::Sample => sample(em),
-        Imp::SampleLod => sample_lod(em),
+        Imp::Sample => texture::sample(em, false),
+        Imp::SampleLod => texture::sample(em, true),
         Imp::TextureLoad => texture::texture_load(em),
-        Imp::TextureWidth => texture_dimension(em, 0),
-        Imp::TextureHeight => texture_dimension(em, 1),
+        Imp::TextureWidth => texture::dimension(em, 0),
+        Imp::TextureHeight => texture::dimension(em, 1),
         Imp::MathDot3 => math::math_dot3(em),
         Imp::MathCross3 => math::math_vec3(em, naga::MathFunction::Cross, true),
         Imp::MathLength3 => math::math_length3(em),
@@ -133,69 +133,6 @@ fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let pointer = em.ex(Expression::GlobalVariable(var));
     let loaded = em.ex(Expression::Load { pointer });
     em.stack.push(Val::Vec(loaded));
-    Ok(())
-}
-
-fn texture_dimension(em: &mut Emit<'_, '_>, axis: u32) -> Result<(), TranslateError> {
-    let binding = em.pop_imm()?;
-    let group = em.pop_imm()?;
-    let texture = globals::texture(em.cx, group, binding);
-    let image = em.ex(Expression::GlobalVariable(texture));
-    let size = em.ex(Expression::ImageQuery {
-        image,
-        query: naga::ImageQuery::Size { level: None },
-    });
-    let lane = em.ex(Expression::AccessIndex {
-        base: size,
-        index: axis,
-    });
-    em.stack.push(Val::Index(lane));
-    Ok(())
-}
-
-fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    sample_with_level(em, false)
-}
-
-fn sample_lod(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    sample_with_level(em, true)
-}
-
-fn sample_with_level(em: &mut Emit<'_, '_>, explicit_level: bool) -> Result<(), TranslateError> {
-    let level = if explicit_level {
-        let value = em.pop()?;
-        Some(crate::env::float_of(value)?)
-    } else {
-        None
-    };
-    let v_val = em.pop()?;
-    let u_val = em.pop()?;
-    let v = crate::env::float_of(v_val)?;
-    let u = crate::env::float_of(u_val)?;
-    let samp_binding = em.pop_imm()?;
-    let samp_group = em.pop_imm()?;
-    let tex_binding = em.pop_imm()?;
-    let tex_group = em.pop_imm()?;
-    let tex = globals::texture(em.cx, tex_group, tex_binding);
-    let samp = globals::sampler(em.cx, samp_group, samp_binding);
-    let image = em.ex(Expression::GlobalVariable(tex));
-    let sampler = em.ex(Expression::GlobalVariable(samp));
-    let coordinate = em.ex(Expression::Compose {
-        ty: em.cx.vec2,
-        components: vec![u, v],
-    });
-    let sampled = em.ex(Expression::ImageSample {
-        image,
-        sampler,
-        gather: None,
-        coordinate,
-        array_index: None,
-        offset: None,
-        level: level.map_or(naga::SampleLevel::Auto, naga::SampleLevel::Exact),
-        depth_ref: None,
-        clamp_to_edge: false,
-    });
-    em.stack.push(Val::Vec(sampled));
     Ok(())
 }
 
