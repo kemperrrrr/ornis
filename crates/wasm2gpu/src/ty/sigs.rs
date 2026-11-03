@@ -21,6 +21,7 @@ const SAMPLE_PARAMS: u32 = 6;
 const SAMPLE_RESULTS: u32 = 4;
 const VEC3_BINARY_PARAMS: u32 = crate::cx::VEC3_LANES * 2;
 const STORAGE_ATOMIC_U32_PARAMS: u32 = PROV_PARAMS + 1;
+const TEXTURE_LOAD_PARAMS: u32 = 4;
 const FLOAT4: [Kind; 4] = [Kind::F32, Kind::F32, Kind::F32, Kind::F32];
 
 pub(crate) fn sig_ok(
@@ -33,7 +34,7 @@ pub(crate) fn sig_ok(
         Imp::Base => fixed_sig(sig, 2, &[Kind::I32], "storage_base"),
         Imp::ReadUniform => fixed_sig(sig, PROV_PARAMS, &FLOAT4, "raw_read"),
         Imp::Sample => count_only(sig, SAMPLE_PARAMS, SAMPLE_RESULTS, "texture_sample_2d"),
-        Imp::TextureLoad => fixed_sig(sig, 4, &FLOAT4, "texture_load_2d"),
+        Imp::TextureLoad => fixed_sig(sig, TEXTURE_LOAD_PARAMS, &FLOAT4, "texture_load_2d"),
         Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
         Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),
         Imp::MathDot3 => float_sig(sig, VEC3_BINARY_PARAMS, 1, "math_dot3"),
