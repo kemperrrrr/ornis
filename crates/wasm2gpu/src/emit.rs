@@ -154,6 +154,6 @@ fn reparse_spirv(words: &[u32]) -> Result<(), TranslateError> {
         naga::valid::Capabilities::empty(),
     )
     .validate(&parsed)
-    .map_err(|err| TranslateError::Naga(err.to_string()))?;
+    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     Ok(())
 }
