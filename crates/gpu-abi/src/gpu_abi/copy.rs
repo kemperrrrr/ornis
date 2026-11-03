@@ -5,20 +5,11 @@
 //! `T: GpuSafeLayout` (every bit pattern is a valid value).
 
 #[cfg(target_arch = "wasm32")]
-mod texture;
-#[cfg(target_arch = "wasm32")]
-pub(super) use texture::wasm_sample_lod;
-
-#[cfg(target_arch = "wasm32")]
 use crate::layout::F32_SIZE;
 #[cfg(target_arch = "wasm32")]
 use crate::layout::GpuSafeLayout;
 #[cfg(target_arch = "wasm32")]
-use crate::layout::GpuVec2;
-#[cfg(target_arch = "wasm32")]
 use crate::layout::GpuVec3;
-#[cfg(target_arch = "wasm32")]
-use crate::layout::GpuVec4;
 #[cfg(target_arch = "wasm32")]
 use crate::layout::VEC4_SIZE;
 
@@ -29,6 +20,14 @@ macro_rules! call_gpu_import {
         unsafe { $call }
     }};
 }
+
+#[cfg(target_arch = "wasm32")]
+mod texture;
+#[cfg(target_arch = "wasm32")]
+pub(super) use texture::{
+    call_texture_height_2d, call_texture_load_2d, call_texture_width_2d, wasm_sample,
+    wasm_sample_lod,
+};
 
 /// Lane count of a `vec4<f32>`.
 #[cfg(target_arch = "wasm32")]
@@ -122,15 +121,6 @@ macro_rules! import_write {
     }};
 }
 
-#[cfg(target_arch = "wasm32")]
-macro_rules! import_sample {
-    ($tg:expr, $tb:expr, $sg:expr, $sb:expr, $u:expr, $v:expr) => {{
-        // SAFETY: `texture_sample_2d` is the ornis_gpu import. It returns four
-        // initialized lanes and does not load from linear memory.
-        unsafe { texture_sample_2d($tg, $tb, $sg, $sb, $u, $v) }
-    }};
-}
-
 // SAFETY: these symbols are the ornis_gpu import ABI. Calling them is sound
 // only through the wrappers in this file; they do not dereference a guest
 // pointer. `storage_base` only returns the translator's base tag.
@@ -141,14 +131,6 @@ unsafe extern "C" {
     fn raw_read_f32(group: u32, binding: u32, offset: u32) -> f32;
     fn raw_read(group: u32, binding: u32, offset: u32) -> Word4;
     fn raw_write(group: u32, binding: u32, offset: u32, x: f32, y: f32, z: f32, w: f32);
-    fn texture_sample_2d(
-        tex_group: u32,
-        tex_binding: u32,
-        samp_group: u32,
-        samp_binding: u32,
-        u: f32,
-        v: f32,
-    ) -> Word4;
     fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
     fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
     fn uniform_read_f32(group: u32, binding: u32, len: u32, index: u32) -> f32;
@@ -156,9 +138,6 @@ unsafe extern "C" {
     fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
     fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32;
     fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
-    fn texture_load_2d(group: u32, binding: u32, x: i32, y: i32) -> Word4;
-    fn texture_width_2d(group: u32, binding: u32) -> u32;
-    fn texture_height_2d(group: u32, binding: u32) -> u32;
     fn math_dot3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32;
     fn math_cross3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> Word3;
     fn math_length3(x: f32, y: f32, z: f32) -> f32;
@@ -275,19 +254,6 @@ pub(super) fn wasm_write<T: GpuSafeLayout>(group: u32, binding: u32, offset: u32
     pod_store!(T, &mut bytes[..], value);
     let lanes = lanes_from_bytes(&bytes);
     wasm_raw_write(group, binding, offset, lanes);
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn wasm_sample<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
-    uv: GpuVec2,
-) -> GpuVec4 {
-    let word = import_sample!(TG, TB, SG, SB, uv.x, uv.y);
-    GpuVec4 {
-        x: word.x,
-        y: word.y,
-        z: word.z,
-        w: word.w,
-    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -429,30 +395,6 @@ fn lanes_from_bytes(bytes: &[u8; VEC4_SIZE as usize]) -> [f32; LANE_COUNT] {
         index += 1;
     }
     lanes
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_texture_load_2d(group: u32, binding: u32, x: i32, y: i32) -> GpuVec4 {
-    // SAFETY: the import returns one texel as four initialized f32 lanes.
-    let word = call_gpu_import!(texture_load_2d(group, binding, x, y));
-    GpuVec4 {
-        x: word.x,
-        y: word.y,
-        z: word.z,
-        w: word.w,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_texture_width_2d(group: u32, binding: u32) -> u32 {
-    // SAFETY: this import returns the bound texture's width, not a pointer.
-    call_gpu_import!(texture_width_2d(group, binding))
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) fn call_texture_height_2d(group: u32, binding: u32) -> u32 {
-    // SAFETY: this import returns the bound texture's height, not a pointer.
-    call_gpu_import!(texture_height_2d(group, binding))
 }
 
 #[cfg(target_arch = "wasm32")]

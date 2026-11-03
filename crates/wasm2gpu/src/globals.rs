@@ -175,8 +175,7 @@ pub(super) fn base_ty(
 }
 
 fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga::GlobalVariable>> {
-    find_binding(slots, group, binding, |slot| (slot.group, slot.binding))
-        .map(|slot| slot.var)
+    find_binding(slots, group, binding, |slot| (slot.group, slot.binding)).map(|slot| slot.var)
 }
 
 pub(super) fn find_binding<T>(
