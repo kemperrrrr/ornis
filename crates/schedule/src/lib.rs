@@ -131,9 +131,9 @@ pub enum OrderError {
          execution order; explicit edges only split parallel levels"
     )]
     BackwardEdge {
-        /// The node that must run later.
+        /// The node that must run first (it was registered later than `after`).
         before: String,
-        /// The node registered earlier that must run before `before`.
+        /// The node that must run after `before`, but was registered earlier.
         after: String,
     },
 }
