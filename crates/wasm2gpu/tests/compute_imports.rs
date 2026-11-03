@@ -3,35 +3,9 @@
 use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
 
-fn vertex() -> String {
-    format!(
-        r#"(func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
-            local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)"#,
-        vs = symbols::VS_MAIN,
-    )
-}
+mod common;
 
-fn fragment(body: &str) -> String {
-    format!(
-        r#"(func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32) {body})"#,
-        fs = symbols::FS_MAIN,
-    )
-}
-
-fn wasm(imports: &str, funcs: &str) -> Vec<u8> {
-    wat::parse_str(format!("(module {imports} {funcs} {vs})", vs = vertex())).expect("wat")
-}
-
-fn import(name: &str, sig: &str) -> String {
-    format!(
-        "(import \"{m}\" \"{name}\" (func ${name} {sig}))",
-        m = symbols::MODULE,
-    )
-}
-
-fn wgsl(imports: &str, funcs: &str) -> String {
-    translate(&wasm(imports, funcs)).expect("translate").wgsl
-}
+use common::{fragment, import, vertex, wasm, wgsl};
 
 #[test]
 fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
@@ -81,7 +55,6 @@ fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
     assert!(!translated.compute_spirv.is_empty());
 }
 
-
 #[test]
 fn vector_math_imports_lower_to_wgsl_builtins() {
     let cases = [
@@ -114,4 +87,3 @@ fn vector_math_imports_lower_to_wgsl_builtins() {
         assert!(got.contains(snapshot), "missing {snapshot} in {got}");
     }
 }
-

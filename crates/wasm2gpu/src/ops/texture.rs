@@ -45,4 +45,3 @@ pub(super) fn texture_load(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> 
     em.stack.push(Val::Vec(texel));
     Ok(())
 }
-

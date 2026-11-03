@@ -68,4 +68,3 @@ pub(super) fn pop_vec3(em: &mut Emit<'_, '_>) -> Result<naga::Handle<Expression>
         components: vec![x, y, z],
     }))
 }
-

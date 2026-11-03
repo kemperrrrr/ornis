@@ -1,8 +1,9 @@
 //! Host-shadow texture, atomic, and workgroup synchronization operations.
 
-use super::*;
+use super::{HOST, HostMemory, Kind, contract_breach, image_at};
+use crate::layout::GpuVec4;
 
-pub(super) fn host_storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
+pub(in crate::gpu_abi) fn host_storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
     HOST.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let Some(mem) = borrowed.as_mut() else {
@@ -23,7 +24,7 @@ pub(super) fn host_storage_atomic_add_u32(group: u32, binding: u32, index: u32, 
     })
 }
 
-pub(super) fn host_workgroup_load_u32(index: u32) -> u32 {
+pub(in crate::gpu_abi) fn host_workgroup_load_u32(index: u32) -> u32 {
     HOST.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let Some(mem) = borrowed.as_mut() else {
@@ -36,7 +37,7 @@ pub(super) fn host_workgroup_load_u32(index: u32) -> u32 {
     })
 }
 
-pub(super) fn host_workgroup_store_u32(index: u32, value: u32) {
+pub(in crate::gpu_abi) fn host_workgroup_store_u32(index: u32, value: u32) {
     HOST.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let Some(mem) = borrowed.as_mut() else {
@@ -50,7 +51,7 @@ pub(super) fn host_workgroup_store_u32(index: u32, value: u32) {
     })
 }
 
-pub(super) fn host_workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
+pub(in crate::gpu_abi) fn host_workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
     HOST.with(|slot| {
         let mut borrowed = slot.borrow_mut();
         let Some(mem) = borrowed.as_mut() else {
@@ -66,7 +67,7 @@ pub(super) fn host_workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
     })
 }
 
-pub(super) fn host_workgroup_barrier() {
+pub(in crate::gpu_abi) fn host_workgroup_barrier() {
     HOST.with(|slot| {
         if slot.borrow().is_none() {
             contract_breach("workgroup barrier outside with_host");
@@ -74,7 +75,7 @@ pub(super) fn host_workgroup_barrier() {
     })
 }
 
-pub(super) fn host_storage_barrier() {
+pub(in crate::gpu_abi) fn host_storage_barrier() {
     HOST.with(|slot| {
         if slot.borrow().is_none() {
             contract_breach("storage barrier outside with_host");
@@ -82,7 +83,7 @@ pub(super) fn host_storage_barrier() {
     })
 }
 
-pub(super) fn host_texture_load(group: u32, binding: u32, x: i32, y: i32) -> GpuVec4 {
+pub(in crate::gpu_abi) fn host_texture_load(group: u32, binding: u32, x: i32, y: i32) -> GpuVec4 {
     HOST.with(|slot| {
         let borrowed = slot.borrow();
         let Some(mem) = borrowed.as_ref() else {
@@ -99,7 +100,7 @@ pub(super) fn host_texture_load(group: u32, binding: u32, x: i32, y: i32) -> Gpu
     })
 }
 
-pub(super) fn host_texture_width(group: u32, binding: u32) -> u32 {
+pub(in crate::gpu_abi) fn host_texture_width(group: u32, binding: u32) -> u32 {
     HOST.with(|slot| {
         let borrowed = slot.borrow();
         let Some(mem) = borrowed.as_ref() else {
@@ -109,7 +110,7 @@ pub(super) fn host_texture_width(group: u32, binding: u32) -> u32 {
     })
 }
 
-pub(super) fn host_texture_height(group: u32, binding: u32) -> u32 {
+pub(in crate::gpu_abi) fn host_texture_height(group: u32, binding: u32) -> u32 {
     HOST.with(|slot| {
         let borrowed = slot.borrow();
         let Some(mem) = borrowed.as_ref() else {
@@ -118,4 +119,3 @@ pub(super) fn host_texture_height(group: u32, binding: u32) -> u32 {
         image_at(mem, group, binding).height
     })
 }
-

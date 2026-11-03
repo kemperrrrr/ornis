@@ -143,4 +143,3 @@ fn find_atomic_storage(
     }
     None
 }
-
