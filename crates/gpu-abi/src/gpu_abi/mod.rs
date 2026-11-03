@@ -285,6 +285,39 @@ pub(crate) fn math_normalize3(value: GpuVec3) -> GpuVec3 {
     }
 }
 
+pub(crate) fn math_min_f32(a: f32, b: f32) -> f32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        a.min(b)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy::call_math_min_f32(a, b)
+    }
+}
+
+pub(crate) fn math_max_f32(a: f32, b: f32) -> f32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        a.max(b)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy::call_math_max_f32(a, b)
+    }
+}
+
+pub(crate) fn math_clamp_f32(value: f32, low: f32, high: f32) -> f32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        value.clamp(low, high)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy::call_math_clamp_f32(value, low, high)
+    }
+}
+
 pub(crate) fn texture_sample_2d<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
 ) -> GpuVec4 {

@@ -159,6 +159,9 @@ unsafe extern "C" {
     fn math_cross3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> Word3;
     fn math_length3(x: f32, y: f32, z: f32) -> f32;
     fn math_normalize3(x: f32, y: f32, z: f32) -> Word3;
+    fn math_min_f32(a: f32, b: f32) -> f32;
+    fn math_max_f32(a: f32, b: f32) -> f32;
+    fn math_clamp_f32(value: f32, low: f32, high: f32) -> f32;
     fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
     fn workgroup_load_u32(index: u32) -> u32;
     fn workgroup_store_u32(index: u32, value: u32);
@@ -483,6 +486,24 @@ pub(super) fn call_math_normalize3(value: GpuVec3) -> GpuVec3 {
         y: word.y,
         z: word.z,
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn call_math_min_f32(a: f32, b: f32) -> f32 {
+    // SAFETY: the scalar import returns one f32.
+    call_gpu_import!(math_min_f32(a, b))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn call_math_max_f32(a: f32, b: f32) -> f32 {
+    // SAFETY: the scalar import returns one f32.
+    call_gpu_import!(math_max_f32(a, b))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(super) fn call_math_clamp_f32(value: f32, low: f32, high: f32) -> f32 {
+    // SAFETY: the scalar import returns one f32.
+    call_gpu_import!(math_clamp_f32(value, low, high))
 }
 
 #[cfg(target_arch = "wasm32")]
