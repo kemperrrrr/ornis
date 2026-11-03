@@ -16,7 +16,6 @@
 mod gpu_ref;
 mod layout;
 mod macros;
-mod math;
 mod shader_io;
 mod texture;
 
@@ -52,7 +51,6 @@ pub use layout::{
     place_fields, round_up, storage_layout_mismatch, storage_stride, uniform_layout_mismatch,
     uniform_stride,
 };
-pub use math::{gpu_clamp_f32, gpu_max_f32, gpu_min_f32};
 pub use shader_io::{
     gpu_cross3, gpu_dot3, gpu_length3, gpu_normalize3, storage_at_f32, storage_at_u32,
     storage_atomic_add_u32, storage_barrier, storage_store_f32, storage_store_u32,

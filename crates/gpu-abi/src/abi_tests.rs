@@ -293,13 +293,6 @@ fn threads_do_not_share_the_shadow() {
 }
 
 #[test]
-fn scalar_min_max_clamp_helpers_match_finite_host_values() {
-    assert_eq!(crate::gpu_min_f32(2.0, 1.0), 1.0);
-    assert_eq!(crate::gpu_max_f32(2.0, 1.0), 2.0);
-    assert_eq!(crate::gpu_clamp_f32(2.0, 0.0, 1.0), 1.0);
-}
-
-#[test]
 fn import_names_stay_unpacked() {
     assert!(symbols::is_toy_import(symbols::RAW_READ));
     assert!(symbols::is_toy_import(symbols::RAW_READ_F32));
