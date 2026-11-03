@@ -13,6 +13,9 @@ pub(crate) fn classify(name: &str) -> Option<Imp> {
     if name == symbols::TEXTURE_SAMPLE_2D {
         return Some(Imp::Sample);
     }
+    if name == symbols::TEXTURE_SAMPLE_2D_LOD {
+        return Some(Imp::SampleLod);
+    }
     if name == symbols::TEXTURE_LOAD_2D {
         return Some(Imp::TextureLoad);
     }

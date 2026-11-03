@@ -101,3 +101,20 @@ fn vector_math_imports_lower_to_wgsl_builtins() {
         assert!(got.contains(snapshot), "missing {snapshot} in {got}");
     }
 }
+
+#[test]
+fn texture_sample_explicit_lod_lowers_to_wgsl() {
+    let name = symbols::TEXTURE_SAMPLE_2D_LOD;
+    let imports = import(
+        name,
+        "(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)",
+    );
+    let body = format!(
+        "i32.const 1 i32.const 2 i32.const 3 i32.const 4 \
+         f32.const 0.25 f32.const 0.75 f32.const 2 call ${name}",
+    );
+    let got = wgsl(&imports, &fragment(&body));
+    for line in include_str!("snapshots/texture_sample_lod.wgsl").lines() {
+        assert!(got.contains(line), "missing {line:?} in {got}");
+    }
+}

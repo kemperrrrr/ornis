@@ -312,6 +312,7 @@ fn import_names_stay_unpacked() {
     assert!(symbols::is_toy_import(symbols::STORAGE_READ_STRUCT));
     assert!(symbols::is_toy_import(symbols::STORAGE_WRITE_STRUCT));
     assert!(symbols::is_toy_import(symbols::TEXTURE_SAMPLE_2D));
+    assert!(symbols::is_toy_import(symbols::TEXTURE_SAMPLE_2D_LOD));
     assert!(symbols::is_toy_import(symbols::TEXTURE_LOAD_2D));
     assert!(symbols::is_toy_import(symbols::TEXTURE_WIDTH_2D));
     assert!(symbols::is_toy_import(symbols::TEXTURE_HEIGHT_2D));
@@ -397,6 +398,20 @@ fn duplicate_binding_panics() {
     let mut mem = HostMemory::new();
     mem.bind_uniform::<0, 0, f32>();
     mem.bind_storage::<0, 0, f32>();
+}
+
+#[test]
+fn sample_lod_uses_the_host_shadow_base_level() {
+    let mut mem = HostMemory::new();
+    let texels = bind_image::<0, 0, 0, 1>(&mut mem, 0.75);
+    let uv = GpuVec2 { x: 0.75, y: 0.75 };
+    let got = with_host(&mut mem, || {
+        Texture2d::<0, 0>::bind().sample_lod(&Sampler::<0, 1>::bind(), uv, 2.0)
+    });
+    assert!(got.x.to_bits() == texels[3].x.to_bits());
+    assert!(got.y.to_bits() == texels[3].y.to_bits());
+    assert!(got.z.to_bits() == texels[3].z.to_bits());
+    assert!(got.w.to_bits() == texels[3].w.to_bits());
 }
 
 #[test]

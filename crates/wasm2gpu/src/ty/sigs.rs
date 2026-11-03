@@ -18,6 +18,7 @@ use crate::ir::Kind;
 use crate::ir::Sig;
 
 const SAMPLE_PARAMS: u32 = 6;
+const SAMPLE_LOD_PARAMS: u32 = 7;
 const SAMPLE_RESULTS: u32 = 4;
 const VEC3_BINARY_PARAMS: u32 = crate::cx::VEC3_LANES * 2;
 const STORAGE_ATOMIC_U32_PARAMS: u32 = PROV_PARAMS + 1;
@@ -34,6 +35,12 @@ pub(crate) fn sig_ok(
         Imp::Base => fixed_sig(sig, 2, &[Kind::I32], "storage_base"),
         Imp::ReadUniform => fixed_sig(sig, PROV_PARAMS, &FLOAT4, "raw_read"),
         Imp::Sample => count_only(sig, SAMPLE_PARAMS, SAMPLE_RESULTS, "texture_sample_2d"),
+        Imp::SampleLod => count_only(
+            sig,
+            SAMPLE_LOD_PARAMS,
+            SAMPLE_RESULTS,
+            "texture_sample_2d_lod",
+        ),
         Imp::TextureLoad => fixed_sig(sig, TEXTURE_LOAD_PARAMS, &FLOAT4, "texture_load_2d"),
         Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
         Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),

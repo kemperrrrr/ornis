@@ -102,6 +102,7 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
         Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
         Imp::Sample => sample(em),
+        Imp::SampleLod => sample_lod(em),
         Imp::TextureLoad => texture::texture_load(em),
         Imp::TextureWidth => texture_dimension(em, 0),
         Imp::TextureHeight => texture_dimension(em, 1),
@@ -153,6 +154,20 @@ fn texture_dimension(em: &mut Emit<'_, '_>, axis: u32) -> Result<(), TranslateEr
 }
 
 fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    sample_with_level(em, false)
+}
+
+fn sample_lod(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
+    sample_with_level(em, true)
+}
+
+fn sample_with_level(em: &mut Emit<'_, '_>, explicit_level: bool) -> Result<(), TranslateError> {
+    let level = if explicit_level {
+        let value = em.pop()?;
+        Some(crate::env::float_of(value)?)
+    } else {
+        None
+    };
     let v_val = em.pop()?;
     let u_val = em.pop()?;
     let v = crate::env::float_of(v_val)?;
@@ -176,7 +191,7 @@ fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
         coordinate,
         array_index: None,
         offset: None,
-        level: naga::SampleLevel::Auto,
+        level: level.map_or(naga::SampleLevel::Auto, naga::SampleLevel::Exact),
         depth_ref: None,
         clamp_to_edge: false,
     });

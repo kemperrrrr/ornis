@@ -95,6 +95,7 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         Imp::Base => storage_base(st, import),
         Imp::ReadUniform => read_uniform(st),
         Imp::Sample => sample(st, import),
+        Imp::SampleLod => sample_lod(st, import),
         Imp::TextureLoad => super::builtins::texture_load(st, import),
         Imp::TextureWidth | Imp::TextureHeight => texture_dimension(st, import, imp),
         Imp::MathDot3 => super::builtins::math_dot3(st, import),
@@ -135,6 +136,18 @@ pub(super) fn read_uniform(st: &mut St) -> Result<(), TranslateError> {
 
 pub(super) fn sample(st: &mut St, import: &Import) -> Result<(), TranslateError> {
     ty::sig_ok(&import.sig, Imp::Sample, &[], None)?;
+    pop_f32(st)?;
+    pop_f32(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    push(st, Abs::Vec)
+}
+
+pub(super) fn sample_lod(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::SampleLod, &[], None)?;
+    pop_f32(st)?;
     pop_f32(st)?;
     pop_f32(st)?;
     pop_prov(st)?;

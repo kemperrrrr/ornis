@@ -203,6 +203,12 @@ pub const UNIFORM_READ_VEC4: &str = "uniform_read_vec4";
 /// binding, then UV. The binding pair is constant provenance; UV is data.
 pub const TEXTURE_SAMPLE_2D: &str = "texture_sample_2d";
 
+/// `(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)`.
+///
+/// Operands are texture group, texture binding, sampler group, sampler
+/// binding, UV, then an explicit mip level.
+pub const TEXTURE_SAMPLE_2D_LOD: &str = "texture_sample_2d_lod";
+
 /// Vertex entry the toy translator expects.
 pub const VS_MAIN: &str = "vs_main";
 
@@ -271,5 +277,6 @@ pub fn is_toy_import(name: &str) -> bool {
             | UNIFORM_READ_VEC3
             | UNIFORM_READ_VEC4
             | TEXTURE_SAMPLE_2D
+            | TEXTURE_SAMPLE_2D_LOD
     )
 }

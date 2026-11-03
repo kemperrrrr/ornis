@@ -55,6 +55,21 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         let _ = (self, sampler);
         gpu_abi::texture_sample_2d::<G, B, SG, SB>(uv)
     }
+
+    /// Sample at `uv` from an explicit mip level.
+    ///
+    /// The level is passed through to the GPU's `textureSampleLevel` operation.
+    /// The host shadow stores only one mip level, so it samples that level for
+    /// every requested LOD.
+    pub fn sample_lod<const SG: u32, const SB: u32>(
+        &self,
+        sampler: &Sampler<SG, SB>,
+        uv: GpuVec2,
+        level: f32,
+    ) -> GpuVec4 {
+        let _ = (self, sampler);
+        gpu_abi::texture_sample_2d_lod::<G, B, SG, SB>(uv, level)
+    }
 }
 
 /// Sampler at `(GROUP, BINDING)`.

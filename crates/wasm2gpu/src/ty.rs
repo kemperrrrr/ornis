@@ -88,6 +88,8 @@ pub(super) enum Imp {
     ReadUniform,
     /// `texture_sample_2d`.
     Sample,
+    /// `texture_sample_2d_lod` with an explicit mip level.
+    SampleLod,
     /// Load one texel from a 2D texture.
     TextureLoad,
     /// Width query for a 2D texture.
