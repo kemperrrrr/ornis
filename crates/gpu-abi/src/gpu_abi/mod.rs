@@ -129,6 +129,42 @@ pub(crate) fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32
     copy::call_storage_write_u32(group, binding, index, value);
 }
 
+#[inline(always)]
+pub(crate) fn texture_load_2d(group: u32, binding: u32, x: i32, y: i32) -> GpuVec4 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        host::host_texture_load(group, binding, x, y)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy::call_texture_load_2d(group, binding, x, y)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn texture_width_2d(group: u32, binding: u32) -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        host::host_texture_width(group, binding)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy::call_texture_width_2d(group, binding)
+    }
+}
+
+#[inline(always)]
+pub(crate) fn texture_height_2d(group: u32, binding: u32) -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        host::host_texture_height(group, binding)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy::call_texture_height_2d(group, binding)
+    }
+}
+
 pub(crate) fn texture_sample_2d<const TG: u32, const TB: u32, const SG: u32, const SB: u32>(
     uv: GpuVec2,
 ) -> GpuVec4 {

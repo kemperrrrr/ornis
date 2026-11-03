@@ -436,3 +436,42 @@ fn wide_consts(value: u32) -> String {
     }
     out
 }
+
+#[test]
+fn texture_dimensions_lower_to_wgsl_size_queries() {
+    let imports = format!(
+        "{} {}",
+        import(symbols::TEXTURE_WIDTH_2D, "(param i32 i32) (result i32)"),
+        import(symbols::TEXTURE_HEIGHT_2D, "(param i32 i32) (result i32)"),
+    );
+    let fs = fragment(&format!(
+        "i32.const 2 i32.const 3 call ${width} f32.convert_i32_u
+         i32.const 2 i32.const 3 call ${height} f32.convert_i32_u
+         f32.const 0 f32.const 1",
+        width = symbols::TEXTURE_WIDTH_2D,
+        height = symbols::TEXTURE_HEIGHT_2D,
+    ));
+    let got = wgsl(&imports, &fs);
+    let snapshot = include_str!("snapshots/texture_dimensions.wgsl").trim();
+    assert!(got.contains(snapshot), "{got}");
+    assert_eq!(got.matches(snapshot).count(), 2, "{got}");
+}
+
+#[test]
+fn texture_load_lowers_to_explicit_level_zero() {
+    let imports = import(
+        symbols::TEXTURE_LOAD_2D,
+        "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
+    );
+    let load_fn = format!(
+        r#"(func $load (param i32 i32) (result f32 f32 f32 f32)
+            i32.const 1 i32.const 2 local.get 0 local.get 1 call ${load})"#,
+        load = symbols::TEXTURE_LOAD_2D,
+    );
+    let fs = fragment("i32.const 1 i32.const 0 call $load");
+    let got = wgsl(&imports, &format!("{load_fn} {fs}"));
+    let snapshot = include_str!("snapshots/texture_load_2d.wgsl").trim();
+    assert!(got.contains(snapshot), "{got}");
+    assert!(got.contains(", vec2<i32>("), "{got}");
+    assert!(got.contains(", 0)"), "{got}");
+}

@@ -1,9 +1,9 @@
 //! Import module and function names shared with `ornis-wasm2gpu`.
 //!
 //! The toy translator treats these as GPU opcodes. `raw_read` returns four
-//! `f32` lanes (a `vec4` at a byte offset). `texture_sample_2d` is a call,
-//! never an `i32.load` from linear memory. Group and binding are separate
-//! immediate operands, not bits packed into the offset.
+//! `f32` lanes (a `vec4` at a byte offset); texture sampling, texel loads, and
+//! dimension queries are calls, not linear-memory accesses. Group and binding are
+//! separate immediate operands, not bits packed into the offset.
 
 /// Wasm import module (`(import "ornis_gpu" ...)`).
 pub const MODULE: &str = "ornis_gpu";
@@ -59,6 +59,16 @@ pub const STORAGE_WRITE_I32: &str = "storage_write_i32";
 /// accesses the binding directly; the lowering keeps the provenance instead
 /// of materializing linear memory.
 pub const STORAGE_BASE: &str = "storage_base";
+
+/// `(param i32 i32 i32 i32) (result f32 f32 f32 f32)` — group, binding,
+/// and signed texel coordinate `(x, y)` at mip level zero.
+pub const TEXTURE_LOAD_2D: &str = "texture_load_2d";
+
+/// `(param i32 i32) (result i32)` — width of a 2D texture.
+pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
+
+/// `(param i32 i32) (result i32)` — height of a 2D texture.
+pub const TEXTURE_HEIGHT_2D: &str = "texture_height_2d";
 
 /// `(param i32 i32 i32) (result f32 f32)` — storage `array<vec2<f32>>`.
 pub const STORAGE_READ_VEC2: &str = "storage_read_vec2";
@@ -194,6 +204,9 @@ pub fn is_toy_import(name: &str) -> bool {
             | STORAGE_READ_I32
             | STORAGE_WRITE_I32
             | STORAGE_BASE
+            | TEXTURE_LOAD_2D
+            | TEXTURE_WIDTH_2D
+            | TEXTURE_HEIGHT_2D
             | STORAGE_READ_VEC2
             | STORAGE_WRITE_VEC2
             | STORAGE_READ_VEC3
