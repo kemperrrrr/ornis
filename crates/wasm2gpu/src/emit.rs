@@ -154,6 +154,20 @@ fn reparse_spirv(words: &[u32]) -> Result<(), TranslateError> {
         naga::valid::Capabilities::empty(),
     )
     .validate(&parsed)
-    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
+    .map_err(|err| {
+        let function = parsed
+            .functions
+            .iter()
+            .find_map(|(handle, function)| {
+                (function.name.as_deref() == Some("cs_main"))
+                    .then(|| format!("{handle:?}: {function:#?}"))
+            })
+            .unwrap_or_else(|| "cs_main function body unavailable".to_string());
+        TranslateError::Naga(format!(
+            "{}; globals: {:#?}; function: {function}",
+            naga_chain(&err),
+            parsed.global_variables
+        ))
+    })?;
     Ok(())
 }
