@@ -32,3 +32,26 @@ pub fn import(name: &str, sig: &str) -> String {
 pub fn wgsl(imports: &str, funcs: &str) -> String {
     translate(&wasm(imports, funcs)).expect("translate").wgsl
 }
+
+pub fn assert_wgsl_expressions(wgsl: &str, snapshot: &str) {
+    let normalized = wgsl.split_whitespace().collect::<Vec<_>>().join(" ");
+    for expression in snapshot.lines() {
+        let expression = expression.trim();
+        assert!(
+            normalized.contains(expression),
+            "missing expression {expression:?} in WGSL:\n{wgsl}"
+        );
+    }
+}
+
+pub fn assert_vector_lanes_in_order(wgsl: &str, expression: &str) {
+    let normalized = wgsl.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = normalized
+        .find(expression)
+        .unwrap_or_else(|| panic!("missing vector expression {expression:?}: {wgsl}"));
+    let result = &normalized[start + expression.len()..];
+    let x = result.find(".x").expect("x lane after vector expression");
+    let y = result.find(".y").expect("y lane after vector expression");
+    let z = result.find(".z").expect("z lane after vector expression");
+    assert!(x < y && y < z, "vector lanes not in x/y/z order: {wgsl}");
+}

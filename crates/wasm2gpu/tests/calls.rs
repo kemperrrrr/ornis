@@ -10,7 +10,7 @@ use ornis_wasm2gpu::translate;
 
 mod common;
 
-use common::{fragment, import, vertex, wasm, wgsl};
+use common::{assert_wgsl_expressions, fragment, import, vertex, wasm, wgsl};
 
 fn err(imports: &str, funcs: &str) -> TranslateError {
     translate(&wasm(imports, funcs)).expect_err("reject")
@@ -426,9 +426,7 @@ fn texture_dimensions_lower_to_wgsl_size_queries() {
         height = symbols::TEXTURE_HEIGHT_2D,
     ));
     let got = wgsl(&imports, &fs);
-    let snapshot = include_str!("snapshots/texture_dimensions.wgsl").trim();
-    assert!(got.contains(snapshot), "{got}");
-    assert_eq!(got.matches(snapshot).count(), 2, "{got}");
+    assert_wgsl_expressions(&got, include_str!("snapshots/texture_dimensions.wgsl"));
 }
 
 #[test]
@@ -443,7 +441,5 @@ fn texture_load_lowers_to_explicit_level_zero() {
     ));
     let got = wgsl(&imports, &fs);
     let snapshot = include_str!("snapshots/texture_load_2d.wgsl").trim();
-    assert!(got.contains(snapshot), "{got}");
-    assert!(got.contains(", vec2<i32>("), "{got}");
-    assert!(got.contains(", 0i)"), "{got}");
+    assert_wgsl_expressions(&got, snapshot);
 }

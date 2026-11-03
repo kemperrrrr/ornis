@@ -143,3 +143,29 @@ fn texture_load_reads_the_requested_texel() {
     });
     assert_eq!(got, texels[1]);
 }
+
+#[test]
+#[should_panic(expected = "workgroup index out of bounds")]
+fn workgroup_shadow_rejects_out_of_range_indices() {
+    let mut mem = HostMemory::new();
+    with_host(&mut mem, || {
+        workgroup_load_u32(crate::symbols::WORKGROUP_WORDS)
+    });
+}
+
+#[test]
+#[should_panic(expected = "gpu access out of bounds")]
+fn atomic_storage_shadow_rejects_out_of_range_indices() {
+    let mut mem = HostMemory::new();
+    mem.bind_storage::<1, 2, [u32; 1]>();
+    with_host(&mut mem, || storage_atomic_add_u32::<1, 2>(1, 1));
+}
+
+#[test]
+#[should_panic(expected = "workgroup index out of bounds")]
+fn workgroup_atomic_shadow_rejects_out_of_range_indices() {
+    let mut mem = HostMemory::new();
+    with_host(&mut mem, || {
+        workgroup_atomic_add_u32(crate::symbols::WORKGROUP_WORDS, 1)
+    });
+}

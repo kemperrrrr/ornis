@@ -10,6 +10,9 @@ mod lift;
 #[path = "gpu_e2e/compute.rs"]
 mod compute;
 
+#[path = "gpu_e2e/compute_abi.rs"]
+mod compute_abi;
+
 #[path = "gpu_e2e/float_ops.rs"]
 mod float_ops;
 

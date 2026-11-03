@@ -69,19 +69,144 @@ pub(super) fn pop_vec3(em: &mut Emit<'_, '_>) -> Result<naga::Handle<Expression>
     }))
 }
 
+const F32_SIGN_BIT: u32 = 1 << 31;
+const F32_CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
+const F32_POSITIVE_ZERO: f32 = 0.0;
+const F32_NEGATIVE_ZERO: f32 = f32::from_bits(F32_SIGN_BIT);
+const U32_ZERO: u32 = 0;
+
 pub(super) fn scalar_binary(
     em: &mut Emit<'_, '_>,
     fun: naga::MathFunction,
 ) -> Result<(), TranslateError> {
     let right = crate::env::float_of(em.pop()?)?;
     let left = crate::env::float_of(em.pop()?)?;
-    let value = em.ex(Expression::Math {
+    let value = match fun {
+        naga::MathFunction::Min | naga::MathFunction::Max => wasm_min_max(em, fun, left, right),
+        _ => em.ex(Expression::Math {
+            fun,
+            arg: left,
+            arg1: Some(right),
+            arg2: None,
+            arg3: None,
+        }),
+    };
+    em.stack.push(Val::Scalar(value));
+    Ok(())
+}
+
+fn wasm_min_max(
+    em: &mut Emit<'_, '_>,
+    fun: naga::MathFunction,
+    left: naga::Handle<Expression>,
+    right: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    let ordinary = em.ex(Expression::Math {
         fun,
         arg: left,
         arg1: Some(right),
         arg2: None,
         arg3: None,
     });
-    em.stack.push(Val::Scalar(value));
-    Ok(())
+    let zero_corrected = signed_zero_min_max(em, fun, left, right, ordinary);
+    canonical_nan_min_max(em, left, right, zero_corrected)
+}
+
+fn signed_zero_min_max(
+    em: &mut Emit<'_, '_>,
+    fun: naga::MathFunction,
+    left: naga::Handle<Expression>,
+    right: naga::Handle<Expression>,
+    ordinary: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    let zero = em.ex(Expression::Literal(naga::Literal::F32(F32_POSITIVE_ZERO)));
+    let left_zero = binary(em, naga::BinaryOperator::Equal, left, zero);
+    let right_zero = binary(em, naga::BinaryOperator::Equal, right, zero);
+    let both_zero = binary(em, naga::BinaryOperator::LogicalAnd, left_zero, right_zero);
+    let left_negative = sign_bit_set(em, left);
+    let right_negative = sign_bit_set(em, right);
+    let zero_is_negative = binary(
+        em,
+        if fun == naga::MathFunction::Min {
+            naga::BinaryOperator::LogicalOr
+        } else {
+            naga::BinaryOperator::LogicalAnd
+        },
+        left_negative,
+        right_negative,
+    );
+    let negative_zero = em.ex(Expression::Literal(naga::Literal::F32(F32_NEGATIVE_ZERO)));
+    let signed_zero = em.ex(Expression::Select {
+        condition: zero_is_negative,
+        accept: negative_zero,
+        reject: zero,
+    });
+    em.ex(Expression::Select {
+        condition: both_zero,
+        accept: signed_zero,
+        reject: ordinary,
+    })
+}
+
+fn canonical_nan_min_max(
+    em: &mut Emit<'_, '_>,
+    left: naga::Handle<Expression>,
+    right: naga::Handle<Expression>,
+    numeric: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    let left_nan = is_nan(em, left);
+    let right_nan = is_nan(em, right);
+    let either_nan = binary(em, naga::BinaryOperator::LogicalOr, left_nan, right_nan);
+    let canonical_nan_bits = em.ex(Expression::Literal(naga::Literal::U32(
+        F32_CANONICAL_NAN_BITS,
+    )));
+    let canonical_nan = em.ex(Expression::As {
+        expr: canonical_nan_bits,
+        kind: naga::ScalarKind::Float,
+        convert: None,
+    });
+    em.ex(Expression::Select {
+        condition: either_nan,
+        accept: canonical_nan,
+        reject: numeric,
+    })
+}
+
+fn binary(
+    em: &mut Emit<'_, '_>,
+    op: naga::BinaryOperator,
+    left: naga::Handle<Expression>,
+    right: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    em.ex(Expression::Binary { op, left, right })
+}
+
+fn is_nan(em: &mut Emit<'_, '_>, value: naga::Handle<Expression>) -> naga::Handle<Expression> {
+    em.ex(Expression::Relational {
+        fun: naga::RelationalFunction::IsNan,
+        argument: value,
+    })
+}
+
+fn sign_bit_set(
+    em: &mut Emit<'_, '_>,
+    value: naga::Handle<Expression>,
+) -> naga::Handle<Expression> {
+    let bits = em.ex(Expression::As {
+        expr: value,
+        kind: naga::ScalarKind::Uint,
+        convert: None,
+    });
+    let mask = em.ex(Expression::Literal(naga::Literal::U32(F32_SIGN_BIT)));
+    let sign = em.ex(Expression::Binary {
+        op: naga::BinaryOperator::And,
+        left: bits,
+        right: mask,
+    });
+    let zero = em.ex(Expression::Literal(naga::Literal::U32(U32_ZERO)));
+    em.ex(Expression::Binary {
+        op: naga::BinaryOperator::NotEqual,
+        left: sign,
+        right: zero,
+    })
 }

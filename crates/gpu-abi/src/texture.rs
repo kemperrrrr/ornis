@@ -22,9 +22,12 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
 
     /// Load the texel at integer coordinates from mip level zero.
     ///
-    /// The coordinates must be within the bound texture. On the host, panics
-    /// outside `with_host`, when the texture is missing, or for out-of-bounds
-    /// coordinates. This operation does not use a sampler.
+    /// Require `0 <= x < width` and `0 <= y < height`, where dimensions come
+    /// from [`Self::dimensions`]. Coordinates are signed to match WGSL's
+    /// `textureLoad`; convert and bounds-check the returned `u32` dimensions
+    /// before calling. Out-of-bounds coordinates are invalid shader input (GPU
+    /// results are backend-dependent); the host shadow panics on them. This
+    /// operation does not use a sampler.
     pub fn load(&self, x: i32, y: i32) -> GpuVec4 {
         let _ = self;
         gpu_abi::texture_load_2d(G, B, x, y)

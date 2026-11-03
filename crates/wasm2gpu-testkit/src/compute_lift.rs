@@ -332,6 +332,15 @@ fn import_sig(name: &str) -> &'static str {
         symbols::UNIFORM_READ_F32 => "(param i32 i32 i32 i32) (result f32)",
         symbols::STORAGE_READ_U32 => "(param i32 i32 i32) (result i32)",
         symbols::STORAGE_WRITE_U32 => "(param i32 i32 i32 i32)",
+        symbols::STORAGE_ATOMIC_ADD_U32 => "(param i32 i32 i32 i32) (result i32)",
+        symbols::WORKGROUP_LOAD_U32 => "(param i32) (result i32)",
+        symbols::WORKGROUP_STORE_U32 => "(param i32 i32)",
+        symbols::WORKGROUP_ATOMIC_ADD_U32 => "(param i32 i32) (result i32)",
+        symbols::WORKGROUP_BARRIER | symbols::STORAGE_BARRIER => "",
+        symbols::TEXTURE_LOAD_2D => "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
+        symbols::TEXTURE_SAMPLE_2D_LOD => {
+            "(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)"
+        }
         other => panic!("compute imports {other}, which the lifter does not know"),
     }
 }

@@ -5,7 +5,7 @@ use ornis_wasm2gpu::translate;
 
 mod common;
 
-use common::{fragment, import, wasm, wgsl};
+use common::{assert_vector_lanes_in_order, assert_wgsl_expressions, fragment, import, wasm, wgsl};
 
 #[test]
 fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
@@ -45,13 +45,10 @@ fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
         storage_barrier = symbols::STORAGE_BARRIER,
     );
     let translated = translate(&wasm(&imports, &compute)).expect("atomics and barriers");
-    for line in include_str!("snapshots/atomics_workgroup.wgsl").lines() {
-        assert!(
-            translated.wgsl.contains(line),
-            "missing {line:?}: {}",
-            translated.wgsl
-        );
-    }
+    assert_wgsl_expressions(
+        &translated.wgsl,
+        include_str!("snapshots/atomics_workgroup.wgsl"),
+    );
     assert!(!translated.compute_spirv.is_empty());
 }
 
@@ -65,7 +62,7 @@ fn scalar_min_max_clamp_lower_to_wgsl_builtins() {
     let snapshots = include_str!("snapshots/math_scalar.wgsl").lines();
     for (body, snapshot) in cases.into_iter().zip(snapshots) {
         let got = wgsl("", &fragment(body));
-        assert!(got.contains(snapshot), "missing {snapshot} in {got}");
+        assert_wgsl_expressions(&got, snapshot);
     }
 }
 
@@ -98,7 +95,10 @@ fn vector_math_imports_lower_to_wgsl_builtins() {
         let imports = import(name, signature);
         let fs = fragment(&body.replace("$op", &format!("${name}")));
         let got = wgsl(&imports, &fs);
-        assert!(got.contains(snapshot), "missing {snapshot} in {got}");
+        assert_wgsl_expressions(&got, snapshot);
+        if name == symbols::MATH_CROSS3 || name == symbols::MATH_NORMALIZE3 {
+            assert_vector_lanes_in_order(&got, snapshot);
+        }
     }
 }
 
@@ -114,7 +114,118 @@ fn texture_sample_explicit_lod_lowers_to_wgsl() {
          f32.const 0.25 f32.const 0.75 f32.const 2 call ${name}",
     );
     let got = wgsl(&imports, &fragment(&body));
-    for line in include_str!("snapshots/texture_sample_lod.wgsl").lines() {
-        assert!(got.contains(line), "missing {line:?} in {got}");
+    assert_wgsl_expressions(&got, include_str!("snapshots/texture_sample_lod.wgsl"));
+}
+
+#[test]
+fn new_compute_imports_reject_wrong_signatures() {
+    let cases = [
+        (
+            symbols::MATH_DOT3,
+            "(param i32 f32 f32 f32 f32 f32) (result f32)",
+            "i32.const 0 f32.const 0 f32.const 0 f32.const 0 f32.const 0 f32.const 0",
+        ),
+        (
+            symbols::STORAGE_ATOMIC_ADD_U32,
+            "(param i32 i32 i32 i32) (result f32)",
+            "i32.const 0 i32.const 1 i32.const 0 i32.const 1",
+        ),
+        (
+            symbols::WORKGROUP_LOAD_U32,
+            "(param i32) (result f32)",
+            "i32.const 0",
+        ),
+        (
+            symbols::WORKGROUP_STORE_U32,
+            "(param i32 i32) (result i32)",
+            "i32.const 0 i32.const 1",
+        ),
+        (
+            symbols::WORKGROUP_ATOMIC_ADD_U32,
+            "(param i32 f32) (result i32)",
+            "i32.const 0 f32.const 1",
+        ),
+        (symbols::WORKGROUP_BARRIER, "(param i32)", "i32.const 0"),
+        (symbols::STORAGE_BARRIER, "(result i32)", ""),
+    ];
+    for (name, signature, arguments) in cases {
+        let import = import(name, signature);
+        let discard = if name == symbols::WORKGROUP_BARRIER {
+            ""
+        } else {
+            "drop"
+        };
+        let fs = fragment(&format!(
+            "{arguments} call ${name} {discard} f32.const 0 f32.const 0 f32.const 0 f32.const 1"
+        ));
+        let error = translate(&wasm(&import, &fs)).expect_err("reject invalid signature");
+        assert!(
+            matches!(error, TranslateError::UnsupportedType(_)),
+            "{name} accepted {signature}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn storage_binding_cannot_be_both_atomic_and_ordinary() {
+    let atomic = import(
+        symbols::STORAGE_ATOMIC_ADD_U32,
+        "(param i32 i32 i32 i32) (result i32)",
+    );
+    let read = import(
+        symbols::STORAGE_READ_F32,
+        "(param i32 i32 i32) (result f32)",
+    );
+    let tail = "f32.const 0 f32.const 0 f32.const 0 f32.const 1";
+    for operations in [
+        format!(
+            "i32.const 0 i32.const 1 i32.const 0 i32.const 1 call ${} drop \
+             i32.const 0 i32.const 1 i32.const 0 call ${} drop {tail}",
+            symbols::STORAGE_ATOMIC_ADD_U32,
+            symbols::STORAGE_READ_F32,
+        ),
+        format!(
+            "i32.const 0 i32.const 1 i32.const 0 call ${} drop \
+             i32.const 0 i32.const 1 i32.const 0 i32.const 1 call ${} drop {tail}",
+            symbols::STORAGE_READ_F32,
+            symbols::STORAGE_ATOMIC_ADD_U32,
+        ),
+    ] {
+        let error = translate(&wasm(&format!("{atomic} {read}"), &fragment(&operations)))
+            .expect_err("reject mixed atomic and ordinary storage");
+        assert!(
+            matches!(error, TranslateError::UnsupportedType(message)
+                if message.contains("atomic and ordinary storage")),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
+fn new_texture_imports_reject_wrong_lane_signatures() {
+    let cases = [
+        (
+            symbols::TEXTURE_LOAD_2D,
+            "(param f32 i32 i32 i32) (result f32 f32 f32 f32)",
+            "f32.const 0 i32.const 1 i32.const 0 i32.const 0",
+        ),
+        (
+            symbols::TEXTURE_SAMPLE_2D_LOD,
+            "(param i32 i32 i32 i32 f32 f32 i32) (result f32 f32 f32 f32)",
+            "i32.const 0 i32.const 1 i32.const 0 i32.const 1 \
+             f32.const 0.5 f32.const 0.5 i32.const 0",
+        ),
+    ];
+    for (name, signature, arguments) in cases {
+        let import = import(name, signature);
+        let fs = fragment(&format!(
+            "{arguments} call ${name} drop drop drop drop \
+             f32.const 0 f32.const 0 f32.const 0 f32.const 1"
+        ));
+        let error = translate(&wasm(&import, &fs)).expect_err("reject invalid texture signature");
+        assert!(
+            matches!(error, TranslateError::UnsupportedType(_)),
+            "{name} accepted {signature}: {error:?}"
+        );
     }
 }

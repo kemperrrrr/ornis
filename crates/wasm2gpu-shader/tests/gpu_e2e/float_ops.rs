@@ -10,7 +10,21 @@ use super::map_bytes;
 use super::record_compute_pass;
 use super::storage_buffer;
 
-const FLOAT_EXPECTED: [f32; 7] = [9.0, 5.0, 14.0, 4.5, 3.25, -3.25, 4_294_967_296.0];
+const FLOAT_EXPECTED: [f32; 13] = [
+    9.0,
+    5.0,
+    14.0,
+    4.5,
+    3.25,
+    -3.25,
+    4_294_967_296.0,
+    f32::from_bits(0x7fc0_0000),
+    f32::from_bits(0x7fc0_0000),
+    -0.0,
+    0.0,
+    -0.0,
+    -0.0,
+];
 const COMPARISON_EXPECTED: [u32; 12] = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
 
 fn comparisons() -> String {
@@ -71,6 +85,18 @@ fn wasm() -> Vec<u8> {
                 f32.const 3.25 f32.neg call $store_f32
                 i32.const 0 i32.const 0 i32.const 6
                 i32.const -1 f32.convert_i32_u call $store_f32
+                i32.const 0 i32.const 0 i32.const 7
+                f32.const nan f32.const 1 f32.min call $store_f32
+                i32.const 0 i32.const 0 i32.const 8
+                f32.const 1 f32.const nan f32.max call $store_f32
+                i32.const 0 i32.const 0 i32.const 9
+                f32.const -0 f32.const 0 f32.min call $store_f32
+                i32.const 0 i32.const 0 i32.const 10
+                f32.const -0 f32.const 0 f32.max call $store_f32
+                i32.const 0 i32.const 0 i32.const 11
+                f32.const 0 f32.const -0 f32.min call $store_f32
+                i32.const 0 i32.const 0 i32.const 12
+                f32.const -0 f32.const -0 f32.max call $store_f32
                 {comparisons}))"#,
         module = symbols::MODULE,
         store_f32 = symbols::STORAGE_WRITE_F32,
@@ -85,8 +111,8 @@ fn wasm() -> Vec<u8> {
 
 #[test]
 fn lowered_scalar_float_ops_match_expected_gpu_values() {
-    // Keep runtime assertions finite; non-finite constants are validated by
-    // the translator test, while their exact GPU results vary by backend.
+    // Check the Wasm-defined NaN and signed-zero min/max results on the GPU,
+    // alongside the finite scalar operators.
     let translated = translate(&wasm()).expect("translate scalar float operators");
     let Some((device, queue)) = device() else {
         let required =
@@ -127,11 +153,9 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
     record_compute_pass(&mut encoder, &pipeline, &bind_group, [1, 1, 1]);
     queue.submit([encoder.finish()]);
 
-    let floats: Vec<f32> = readback_words(&device, &queue, &float_output, float_bytes)
-        .into_iter()
-        .map(f32::from_bits)
-        .collect();
-    assert_eq!(floats.as_slice(), FLOAT_EXPECTED.as_slice());
+    let float_bits = readback_words(&device, &queue, &float_output, float_bytes);
+    let expected_bits = FLOAT_EXPECTED.map(f32::to_bits);
+    assert_eq!(float_bits.as_slice(), expected_bits.as_slice());
     let comparisons = readback_words(&device, &queue, &comparison_output, comparison_bytes);
     assert_eq!(comparisons.as_slice(), COMPARISON_EXPECTED.as_slice());
 }

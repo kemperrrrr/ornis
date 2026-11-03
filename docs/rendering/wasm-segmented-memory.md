@@ -15,18 +15,31 @@ Translation / Software-Managed Memory Paging» поверх Wasm linear memory �
 Toy-проход: vertex+fragment, uniform и `texture_sample`. Storage
 `storage_read` / `storage_write` покрывает скаляры (`f32` / `u32` / `i32`),
 `vec2` / `vec3` / `vec4<f32>` и простые структуры. Для скалярного `f32`
-lifter также опускает `+`, `-`, `*`, `/`, `abs`, `neg`, все шесть сравнений
-и unsigned `i32` → `f32`. Wasm `inf`/`NaN`-константы материализуются через
-runtime arithmetic с конечными WGSL-литералами, а не через bitcast
-const-expression; NaN payload не сохраняется, и точное поведение
-non-finite arithmetic зависит от GPU backend.
+lifter также опускает `+`, `-`, `*`, `/`, `abs`, `neg`, `min`, `max`, все
+шесть сравнений и unsigned `i32` → `f32`. Wasm `inf`/`NaN`-константы
+материализуются через runtime arithmetic с конечными WGSL-литералами, а не
+через bitcast const-expression; NaN payload не сохраняется.
 
-Текстурная загрузка, atomics, workgroup memory и barriers пока не входят в
-ABI. TODO: определить и проверить отдельный контракт для этих механизмов,
-прежде чем поднимать на них kernel'ы. Исследовательский auto-exposure
+Этап 2 добавляет 2D `textureLoad` на mip 0, `textureDimensions`, explicit-LOD
+`textureSampleLevel` для 2D float-текстуры, vec3 math, `u32 atomicAdd` для
+storage/workgroup, 256 слов workgroup scratch и workgroup/storage barriers.
+Это research ABI, не production path. Индексы storage/atomic, индексы
+workgroup и координаты texture load должны быть в пределах ресурса; выход за
+границы — недопустимый shader input с backend-dependent GPU поведением.
+Host shadow диагностирует такие вызовы panic'ом. `Texture2d::dimensions`
+возвращает `u32`, а `Texture2d::load` принимает `i32`: перед вызовом нужно
+проверить неотрицательность координат и сравнить с размерами. Workgroup scratch
+и workgroup atomics резервируют по 256 `u32` (1 KiB) каждый при использовании;
+при совместном использовании модуль расходует 2 KiB workgroup memory на
+workgroup. Лимит устройства и влияние на occupancy остаются ограничением ядра.
+
+Wasm `f32.min` / `f32.max` имеют явный контракт: если любой операнд NaN,
+результат — canonical quiet NaN `0x7fc00000`; `min(-0, +0)` возвращает `-0`,
+`max(-0, +0)` — `+0`, а для пары `(-0, -0)` обе операции возвращают `-0`.
+Транслятор синтезирует эти случаи вокруг WGSL `min`/`max`, поскольку их
+backend-реализации не являются контрактом Wasm. Research auto-exposure
 использует storage mirror и три последовательных compute-pass'а вместо
-них. Он сохраняет histogram counts как `u32`, но заменяет WGSL `log2`/`exp2`
-приближениями из скалярных операций; production render path не меняется.
+общего production renderer; production render path не меняется.
 
 Uniform на том же контракте: `uniform_read_struct`, `uniform_field_*`
 (индекс поля только константа) и `uniform_read_*` / `uniform_index_struct`

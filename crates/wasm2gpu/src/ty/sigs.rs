@@ -17,6 +17,7 @@ use crate::error::TranslateError;
 use crate::ir::Kind;
 use crate::ir::Sig;
 
+const SAMPLE_RESOURCE_PARAMS: u32 = 4;
 const SAMPLE_PARAMS: u32 = 6;
 const SAMPLE_LOD_PARAMS: u32 = 7;
 const SAMPLE_RESULTS: u32 = 4;
@@ -34,13 +35,8 @@ pub(crate) fn sig_ok(
     match imp {
         Imp::Base => fixed_sig(sig, 2, &[Kind::I32], "storage_base"),
         Imp::ReadUniform => fixed_sig(sig, PROV_PARAMS, &FLOAT4, "raw_read"),
-        Imp::Sample => count_only(sig, SAMPLE_PARAMS, SAMPLE_RESULTS, "texture_sample_2d"),
-        Imp::SampleLod => count_only(
-            sig,
-            SAMPLE_LOD_PARAMS,
-            SAMPLE_RESULTS,
-            "texture_sample_2d_lod",
-        ),
+        Imp::Sample => sample_sig(sig, SAMPLE_PARAMS, "texture_sample_2d"),
+        Imp::SampleLod => sample_sig(sig, SAMPLE_LOD_PARAMS, "texture_sample_2d_lod"),
         Imp::TextureLoad => fixed_sig(sig, TEXTURE_LOAD_PARAMS, &FLOAT4, "texture_load_2d"),
         Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
         Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),
@@ -167,6 +163,26 @@ fn float_sig(sig: &Sig, params: u32, results: u32, what: &str) -> Result<(), Tra
         index += 1;
     }
     Ok(())
+}
+
+fn sample_sig(sig: &Sig, params: u32, what: &str) -> Result<(), TranslateError> {
+    if sig.params != params || sig.results != SAMPLE_RESULTS {
+        return Err(mismatch(what));
+    }
+    let mut index = 0usize;
+    while index < SAMPLE_RESOURCE_PARAMS as usize {
+        if sig.param_kind[index] != Kind::I32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    while index < params as usize {
+        if sig.param_kind[index] != Kind::F32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    kinds_eq(&sig.result_kind, sig.results, &FLOAT4, what)
 }
 
 pub(super) fn count_only(

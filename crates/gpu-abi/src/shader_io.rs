@@ -184,7 +184,9 @@ pub fn gpu_normalize3(value: GpuVec3) -> GpuVec3 {
 /// Atomically add to one `u32` in storage and return its previous value.
 ///
 /// On the host this is serialized by the shadow; shader execution uses WGSL
-/// `atomicAdd` and requires an atomic-compatible storage binding.
+/// `atomicAdd` and requires an atomic-compatible storage binding. `index` must
+/// name a `u32` element within that binding. Out-of-range indices are invalid
+/// shader input with backend-dependent GPU behavior; the host shadow panics.
 #[inline(always)]
 pub fn storage_atomic_add_u32<const GROUP: u32, const BINDING: u32>(index: u32, value: u32) -> u32 {
     crate::gpu_abi::storage_atomic_add_u32(GROUP, BINDING, index, value)
@@ -192,8 +194,9 @@ pub fn storage_atomic_add_u32<const GROUP: u32, const BINDING: u32>(index: u32, 
 
 /// Read one word from the fixed-size workgroup scratch array.
 ///
-/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. The host
-/// shadow checks this; shader code must keep the index in bounds.
+/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. Out-of-range
+/// indices are invalid shader input with backend-dependent GPU behavior; the
+/// host shadow panics.
 #[inline(always)]
 pub fn workgroup_load_u32(index: u32) -> u32 {
     crate::gpu_abi::workgroup_load_u32(index)
@@ -201,8 +204,9 @@ pub fn workgroup_load_u32(index: u32) -> u32 {
 
 /// Write one word to the fixed-size workgroup scratch array.
 ///
-/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. The host
-/// shadow checks this; shader code must keep the index in bounds.
+/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. Out-of-range
+/// indices are invalid shader input with backend-dependent GPU behavior; the
+/// host shadow panics.
 #[inline(always)]
 pub fn workgroup_store_u32(index: u32, value: u32) {
     crate::gpu_abi::workgroup_store_u32(index, value)
@@ -210,8 +214,9 @@ pub fn workgroup_store_u32(index: u32, value: u32) {
 
 /// Atomically add to a workgroup scratch word and return the previous value.
 ///
-/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. Atomic
-/// scratch is a separate array from the ordinary workgroup scratch words.
+/// `index` must be less than [`crate::symbols::WORKGROUP_WORDS`]. Out-of-range
+/// indices are invalid shader input with backend-dependent GPU behavior; the
+/// host shadow panics. Atomic scratch is separate from ordinary scratch.
 #[inline(always)]
 pub fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
     crate::gpu_abi::workgroup_atomic_add_u32(index, value)

@@ -111,15 +111,19 @@ pub(crate) fn workgroup_atomics(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVar
     var
 }
 
+const WORKGROUP_ARRAY_SIZE: std::num::NonZeroU32 =
+    match std::num::NonZeroU32::new(ornis_gpu_abi::symbols::WORKGROUP_WORDS) {
+        Some(size) => size,
+        None => panic!("WORKGROUP_WORDS must be nonzero"),
+    };
+
 fn workgroup_array(cx: &mut Cx<'_>, base: naga::Handle<Type>) -> naga::Handle<Type> {
-    let size = std::num::NonZeroU32::new(ornis_gpu_abi::symbols::WORKGROUP_WORDS)
-        .unwrap_or(std::num::NonZeroU32::MIN);
     cx.module.types.insert(
         Type {
             name: None,
             inner: TypeInner::Array {
                 base,
-                size: ArraySize::Constant(size),
+                size: ArraySize::Constant(WORKGROUP_ARRAY_SIZE),
                 stride: ornis_gpu_abi::F32_SIZE,
             },
         },
