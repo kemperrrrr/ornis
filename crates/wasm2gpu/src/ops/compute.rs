@@ -57,7 +57,6 @@ pub(super) fn workgroup_store(em: &mut Emit<'_, '_>) -> Result<(), TranslateErro
     Ok(())
 }
 
-// qual:allow(dry, fragment) reason: "The two atomic operations intentionally share Naga pointer setup while selecting distinct address spaces and globals."
 pub(super) fn workgroup_atomic_add(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let value = em.pop_uint()?;
     let index = em.pop_uint()?;

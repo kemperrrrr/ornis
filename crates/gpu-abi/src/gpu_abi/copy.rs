@@ -33,7 +33,10 @@ pub(super) use math::{call_math_cross3, call_math_dot3, call_math_length3, call_
 #[cfg(target_arch = "wasm32")]
 mod compute;
 #[cfg(target_arch = "wasm32")]
-pub(super) use compute::{call_storage_atomic_add_u32, call_storage_barrier, call_workgroup_atomic_add_u32, call_workgroup_barrier, call_workgroup_load_u32, call_workgroup_store_u32};
+pub(super) use compute::{
+    call_storage_atomic_add_u32, call_storage_barrier, call_workgroup_atomic_add_u32,
+    call_workgroup_barrier, call_workgroup_load_u32, call_workgroup_store_u32,
+};
 
 /// Lane count of a `vec4<f32>`.
 #[cfg(target_arch = "wasm32")]
