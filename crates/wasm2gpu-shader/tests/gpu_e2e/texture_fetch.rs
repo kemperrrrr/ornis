@@ -9,6 +9,9 @@ const TEXTURE_HEIGHT: u32 = 1;
 const TARGET_SIZE: u32 = 1;
 const ROW_BYTES: u32 = 256;
 const EXPECTED_GREEN: [u8; 4] = [0, 255, 0, 255];
+const SAMPLER_LOD_MIN: f32 = 0.0;
+const SAMPLER_LOD_MAX: f32 = 1.0;
+const SAMPLER_ANISOTROPY_OFF: u16 = 1;
 
 #[test]
 fn texture_load_and_sample_lod_return_the_expected_texel_on_gpu() {
@@ -183,10 +186,18 @@ fn input_texture(
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("known texture-fetch sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        ..Default::default()
+        lod_min_clamp: SAMPLER_LOD_MIN,
+        lod_max_clamp: SAMPLER_LOD_MAX,
+        compare: None,
+        anisotropy_clamp: SAMPLER_ANISOTROPY_OFF,
+        border_color: None,
     });
     (texture, view, sampler)
 }
