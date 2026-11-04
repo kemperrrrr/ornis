@@ -31,12 +31,8 @@ mod auto_exposure;
 #[cfg(any(target_arch = "wasm32", test))]
 mod skinning;
 
-#[cfg(any(target_arch = "wasm32", test))]
-use ornis_gpu_abi::GpuVec3;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::Storage;
-#[cfg(target_arch = "wasm32")]
-use ornis_gpu_abi::gpu_length3;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_at_u32;
 #[cfg(target_arch = "wasm32")]
@@ -98,7 +94,7 @@ pub const PLANE_COUNT: u32 = 6;
 pub const PLANE_LEN: u32 = PLANE_COUNT * 4;
 
 /// Lanes of one sphere: center xyz plus the radius.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const LANES: u32 = 4;
 
 /// Index of the last lane: a sphere's radius, a plane's `w`.
@@ -143,9 +139,7 @@ const CULL_COMPACT_MODEL_COLUMN_STRIDE: u32 = 4;
 #[cfg(any(target_arch = "wasm32", test))]
 const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
 #[cfg(target_arch = "wasm32")]
-const CULL_COMPACT_COUNT_UNIFORM_INDEX: u32 = PLANE_LEN;
-#[cfg(any(target_arch = "wasm32", test))]
-const CULL_COMPACT_UNIFORM_LEN: u32 = PLANE_LEN + 1;
+const CULL_COMPACT_COUNT_UNIFORM_BINDING: u32 = 5;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -315,12 +309,10 @@ pub fn cull(id: u32) {
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
 fn cull_storage_length(base: u32) -> f32 {
-    let vector = GpuVec3 {
-        x: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base),
-        y: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1),
-        z: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2),
-    };
-    gpu_length3(vector)
+    let x = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
+    let y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
+    let z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
+    (x * x + y * y + z * z).sqrt()
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -333,10 +325,10 @@ fn cull_plane_outside(
     plane: u32,
 ) -> bool {
     let at = plane * LANES;
-    let normal_x = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(at);
-    let normal_y = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(at + 1);
-    let normal_z = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(at + 2);
-    let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(
+    let normal_x = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at);
+    let normal_y = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 1);
+    let normal_z = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 2);
+    let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(
         at + CULL_COMPACT_PLANE_DISTANCE_LANE,
     );
     normal_x * center_x + normal_y * center_y + normal_z * center_z + distance < -radius
@@ -349,22 +341,25 @@ fn cull_plane_outside(
 /// supplies the same record bytes as `u32` words for bit-preserving copies.
 /// The current lowering declares storage imports writable, so the two
 /// source views must use distinct bindings/buffers. Binding 0 contains the
-/// six planes plus an exact-integer `f32` count lane (the storage-buffer
-/// limits keep the count below `2^24`). Binding 3 is the five-word
-/// indirect-args buffer, where `instance_count` at word 1 is incremented
-/// atomically. The dense destination record words are at binding 2.
+/// six planes, and binding 5 is a uniform count struct. Binding 3 is the
+/// five-word indirect-args buffer, where `instance_count` at word 1 is
+/// incremented atomically. The dense destination record words are at
+/// binding 2.
 #[cfg(target_arch = "wasm32")]
 #[shader::compute(workgroup_size = 4)]
 // qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
 pub fn cull_compact(id: u32) {
-    let count = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(
-        CULL_COMPACT_COUNT_UNIFORM_INDEX,
-    ) as u32;
+    let count = uniform_field_u32::<
+        CULL_GROUP,
+        CULL_COMPACT_COUNT_UNIFORM_BINDING,
+        0,
+        0,
+        { ShadeParams::FIELD_OFFSETS[0] },
+    >();
     if id < count {
         let base = id * CULL_COMPACT_RECORD_WORDS;
-        let center_x = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
-            base + CULL_COMPACT_MODEL_CENTER_OFFSET,
-        );
+        let center_x =
+            storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
         let center_y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
             base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1,
         );

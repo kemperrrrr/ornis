@@ -190,7 +190,7 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
     memory.write_storage::<{ super::CULL_GROUP }, { super::SPHERE_BINDING }, [f32; 3]>(
         &CULL_STORAGE_INPUT,
     );
-    let uniform_values: [super::UniformF32Lane; super::CULL_COMPACT_UNIFORM_LEN as usize] =
+    let uniform_values: [super::UniformF32Lane; super::PLANE_LEN as usize] =
         std::array::from_fn(|index| super::UniformF32Lane {
             value: if index == 0 { 1.0 } else { 0.0 },
             pad0: 0,
@@ -200,12 +200,12 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
     memory.bind_uniform::<
         { super::CULL_GROUP },
         { super::PLANE_BINDING },
-        [super::UniformF32Lane; super::CULL_COMPACT_UNIFORM_LEN as usize],
+        [super::UniformF32Lane; super::PLANE_LEN as usize],
     >();
     memory.write_uniform::<
         { super::CULL_GROUP },
         { super::PLANE_BINDING },
-        [super::UniformF32Lane; super::CULL_COMPACT_UNIFORM_LEN as usize],
+        [super::UniformF32Lane; super::PLANE_LEN as usize],
     >(&uniform_values);
 
     let (radius, outside, inside) = with_host(&mut memory, || {

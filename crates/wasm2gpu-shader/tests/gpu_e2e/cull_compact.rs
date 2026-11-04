@@ -23,7 +23,7 @@ const PLANES: usize = 6;
 const LANES: usize = 4;
 const UNIFORM_LANE_BYTES: usize = 16;
 const PLANES_BYTES: usize = PLANES * LANES * UNIFORM_LANE_BYTES;
-const CULL_UNIFORM_BYTES: usize = PLANES_BYTES + UNIFORM_LANE_BYTES;
+const COUNT_UNIFORM_BYTES: usize = 4 * U32_BYTES;
 const ARGS_WORDS: usize = 5;
 const MODEL_X_AXIS_WORD: usize = 0;
 const MODEL_Y_AXIS_WORD: usize = 5;
@@ -52,6 +52,7 @@ struct CullCompactInputs<'a> {
     source_words: &'a wgpu::Buffer,
     args: &'a wgpu::Buffer,
     planes: &'a wgpu::Buffer,
+    count: &'a wgpu::Buffer,
 }
 
 #[test]
@@ -120,7 +121,13 @@ fn create_gpu_case(
     let planes = gpu_buffer(
         device,
         "wasm2gpu cull compact planes",
-        CULL_UNIFORM_BYTES as u64,
+        PLANES_BYTES as u64,
+        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    );
+    let count = gpu_buffer(
+        device,
+        "wasm2gpu cull compact count",
+        COUNT_UNIFORM_BYTES as u64,
         wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     );
     let inputs = CullCompactInputs {
@@ -128,6 +135,7 @@ fn create_gpu_case(
         source_words: &source_words,
         args: &args,
         planes: &planes,
+        count: &count,
     };
     upload_inputs(queue, records, &inputs);
 
@@ -141,6 +149,7 @@ fn create_gpu_case(
             entry(2, &destination),
             entry(3, &args),
             entry(4, &source_words),
+            entry(5, &count),
         ],
     });
     let pipeline = create_pipeline(device, &layout);
@@ -166,7 +175,8 @@ fn upload_inputs(
     queue.write_buffer(inputs.source, 0, &source_bytes);
     queue.write_buffer(inputs.source_words, 0, &source_bytes);
     queue.write_buffer(inputs.args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
-    queue.write_buffer(inputs.planes, 0, &packed_planes(ACTIVE_COUNT));
+    queue.write_buffer(inputs.planes, 0, &packed_planes());
+    queue.write_buffer(inputs.count, 0, &words_to_bytes(&[ACTIVE_COUNT, 0, 0, 0]));
 }
 
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -178,6 +188,7 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             buffer_layout_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
             buffer_layout_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
             buffer_layout_entry(4, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_layout_entry(5, wgpu::BufferBindingType::Uniform),
         ],
     })
 }
@@ -313,8 +324,8 @@ fn object_record(
     words
 }
 
-fn packed_planes(count: u32) -> Vec<u8> {
-    let mut bytes = vec![0_u8; CULL_UNIFORM_BYTES];
+fn packed_planes() -> Vec<u8> {
+    let mut bytes = vec![0_u8; PLANES_BYTES];
     for plane in 0..PLANES {
         let values: [f32; LANES] = if plane == 0 {
             [1.0, 0.0, 0.0, 0.0]
@@ -326,7 +337,6 @@ fn packed_planes(count: u32) -> Vec<u8> {
             bytes[start..start + U32_BYTES].copy_from_slice(&value.to_le_bytes());
         }
     }
-    bytes[PLANES_BYTES..PLANES_BYTES + U32_BYTES].copy_from_slice(&(count as f32).to_le_bytes());
     bytes
 }
 
