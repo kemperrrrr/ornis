@@ -46,6 +46,14 @@ struct CullCompactGpu {
     args: wgpu::Buffer,
 }
 
+struct CullCompactInputs<'a> {
+    source: &'a wgpu::Buffer,
+    source_words: &'a wgpu::Buffer,
+    args: &'a wgpu::Buffer,
+    planes: &'a wgpu::Buffer,
+    count: &'a wgpu::Buffer,
+}
+
 #[test]
 fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
     let Some((device, queue)) = device() else {
@@ -121,7 +129,14 @@ fn create_gpu_case(
         U32_BYTES as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     );
-    upload_inputs(queue, records, &source, &source_words, &args, &planes, &count);
+    let inputs = CullCompactInputs {
+        source: &source,
+        source_words: &source_words,
+        args: &args,
+        planes: &planes,
+        count: &count,
+    };
+    upload_inputs(queue, records, &inputs);
 
     let layout = create_bind_group_layout(device);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -149,22 +164,18 @@ fn create_gpu_case(
 fn upload_inputs(
     queue: &wgpu::Queue,
     records: &[[u32; RECORD_WORDS]; SOURCE_COUNT],
-    source: &wgpu::Buffer,
-    source_words: &wgpu::Buffer,
-    args: &wgpu::Buffer,
-    planes: &wgpu::Buffer,
-    count: &wgpu::Buffer,
+    inputs: &CullCompactInputs<'_>,
 ) {
     let source_record_words = records
         .iter()
         .flat_map(|record| record.iter().copied())
         .collect::<Vec<_>>();
     let source_bytes = words_to_bytes(&source_record_words);
-    queue.write_buffer(source, 0, &source_bytes);
-    queue.write_buffer(source_words, 0, &source_bytes);
-    queue.write_buffer(args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
-    queue.write_buffer(planes, 0, &packed_planes());
-    queue.write_buffer(count, 0, &ACTIVE_COUNT.to_le_bytes());
+    queue.write_buffer(inputs.source, 0, &source_bytes);
+    queue.write_buffer(inputs.source_words, 0, &source_bytes);
+    queue.write_buffer(inputs.args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
+    queue.write_buffer(inputs.planes, 0, &packed_planes());
+    queue.write_buffer(inputs.count, 0, &ACTIVE_COUNT.to_le_bytes());
 }
 
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -181,10 +192,7 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-fn create_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-) -> wgpu::ComputePipeline {
+fn create_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
     let wgsl = lowered_kernel("cull_compact", "storage_0_2_");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("wasm2gpu cull compact"),
@@ -336,5 +344,9 @@ fn words_to_bytes(words: &[u32]) -> Vec<u8> {
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + U32_BYTES].try_into().expect("u32 lane"))
+    u32::from_le_bytes(
+        bytes[offset..offset + U32_BYTES]
+            .try_into()
+            .expect("u32 lane"),
+    )
 }

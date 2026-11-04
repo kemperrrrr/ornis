@@ -193,8 +193,8 @@ fn compute_texture_and_atomic_imports_match_the_host_shadow() {
 #[test]
 fn cull_vector_helpers_read_storage_and_strided_uniform_lanes() {
     let mut memory = HostMemory::new();
-    memory.bind_storage::<super::CULL_GROUP, super::SPHERE_BINDING, [f32; 3]>();
-    memory.write_storage::<super::CULL_GROUP, super::SPHERE_BINDING, [f32; 3]>(
+    memory.bind_storage::<{ super::CULL_GROUP }, { super::SPHERE_BINDING }, [f32; 3]>();
+    memory.write_storage::<{ super::CULL_GROUP }, { super::SPHERE_BINDING }, [f32; 3]>(
         &CULL_STORAGE_INPUT,
     );
     let uniform_values: [super::UniformF32Lane; super::PLANE_LEN as usize] =
@@ -205,13 +205,13 @@ fn cull_vector_helpers_read_storage_and_strided_uniform_lanes() {
             pad2: 0,
         });
     memory.bind_uniform::<
-        super::CULL_GROUP,
-        super::PLANE_BINDING,
+        { super::CULL_GROUP },
+        { super::PLANE_BINDING },
         [super::UniformF32Lane; super::PLANE_LEN as usize],
     >();
     memory.write_uniform::<
-        super::CULL_GROUP,
-        super::PLANE_BINDING,
+        { super::CULL_GROUP },
+        { super::PLANE_BINDING },
         [super::UniformF32Lane; super::PLANE_LEN as usize],
     >(&uniform_values);
 
