@@ -286,6 +286,11 @@ pub enum Stage {
     /// ([`StructuralQueue`](crate::mutation::StructuralQueue)) is applied
     /// first, then registered systems run once per frame — so a `Last`
     /// system observes this frame's `add`/`remove`/`spawn` results.
+    ///
+    /// Ops queued *by* a `Last` system cannot be applied in the same frame
+    /// (the single apply already happened); they land at the next frame's
+    /// apply, still in FIFO order. Put frame-final structural work in
+    /// `PostFrame` when the same frame must observe it.
     Last,
 }
 
@@ -788,6 +793,8 @@ impl Engine<Running> {
     /// `Last`. The structural apply is the same kind of exclusive
     /// boundary step: it drains the queue between `PostFrame` and `Last`,
     /// where `&mut` access to the store exists exactly once per frame.
+    /// Ops queued inside `Last` are therefore applied by the *next* frame's
+    /// apply; queue frame-final structural work from `PostFrame`.
     ///
     /// The delta must be finite and non-negative. Domain-specific mutable
     /// state continues to use the scheduler's declared resource/lane access
@@ -1220,6 +1227,76 @@ mod tests {
         assert_eq!(*probe.lock().expect("probe lock"), Some(Some(7)));
         let store = engine.world().store().expect("store");
         assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(1));
+    }
+
+    /// Ops queued inside `Last` cannot be applied by the same frame (the one
+    /// apply already ran); they land at the next frame's apply, in FIFO
+    /// order — the documented placement rule for frame-final structural work.
+    #[test]
+    fn ops_queued_in_last_stage_apply_on_the_next_frame() {
+        /// Queues a lane write with no observable side effect of its own.
+        struct QueueFromLast(Arc<Mutex<usize>>);
+        impl System for QueueFromLast {
+            fn name(&self) -> &'static str {
+                "queue_from_last"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new()
+                    .reads::<SmartStore>()
+                    .writes::<crate::mutation::StructuralQueue>()
+            }
+            fn run(&self, resources: &Resources) {
+                let queue = resources
+                    .get::<crate::mutation::StructuralQueue>()
+                    .expect("queue registered by World");
+                let store = resources.get::<SmartStore>().expect("store");
+                let entity = store.create_entity();
+                queue.push(Box::new(move |store: &mut SmartStore| {
+                    store.insert(entity, 7_u32);
+                }));
+                *self.0.lock().expect("count lock") += 1;
+            }
+        }
+
+        let runs = Arc::new(Mutex::new(0));
+        let mut engine = Engine::new();
+        engine.add_stage_system(Stage::Last, QueueFromLast(runs.clone()));
+
+        engine.run_frame(1.0 / 60.0);
+        assert_eq!(
+            engine
+                .world()
+                .store()
+                .expect("store")
+                .read_lane::<u32>()
+                .map(|lane| lane.len()),
+            None,
+            "an op queued in Last waits for the next frame's apply"
+        );
+        assert_eq!(
+            engine
+                .world()
+                .resources()
+                .get::<crate::mutation::StructuralQueue>()
+                .expect("queue registered")
+                .len(),
+            1
+        );
+
+        engine.run_frame(1.0 / 60.0);
+        assert_eq!(
+            engine
+                .world()
+                .store()
+                .expect("store")
+                .read_lane::<u32>()
+                .map(|lane| lane.len()),
+            // Frame 1 applied the op queued in frame 0; frame 2's op is
+            // still pending, so exactly one entry landed.
+            Some(1),
+            "the pending op applies at the next frame boundary"
+        );
+        assert_eq!(*runs.lock().expect("count lock"), 2);
     }
 
     #[test]
