@@ -1476,6 +1476,16 @@ mod tests {
         assert_eq!(Technique::Hybrid.composite_mode(), 2);
     }
 
+    /// Pass names of a built plan (shared by the graph-shape tests).
+    fn pass_names_of(plan: &mut RenderFrame3D) -> Vec<String> {
+        plan.systems
+            .build()
+            .passes
+            .iter()
+            .map(|pass| pass.name.clone())
+            .collect()
+    }
+
     #[test]
     fn technique_wires_expected_passes() {
         let pass_names = |technique: Technique| {
@@ -1485,12 +1495,7 @@ mod tests {
                 technique,
                 Bloom::On,
             );
-            plan.systems
-                .build()
-                .passes
-                .iter()
-                .map(|p| p.name.clone())
-                .collect::<Vec<_>>()
+            pass_names_of(&mut plan)
         };
         assert_eq!(
             pass_names(Technique::Forward),
@@ -1830,26 +1835,24 @@ mod tests {
     }
 
     #[test]
-    fn outline_plan_wires_the_pass_before_aa() {
+    fn outline_plan_wires_before_taa_and_edge_filter() {
         // The outline overlays the composited layer, so the AA filter
-        // smooths its silhouette too. Plans without the opt-in keep the
-        // exact pass list (covered by `anti_alias_plans_wire_the_matching_pass`).
-        let mut plan = RenderFrame3D::new_with_aa_outline(
-            wgpu::TextureFormat::Rgba8Unorm,
-            (32, 32),
-            Technique::Hybrid,
-            Bloom::Off,
-            AaWiring::new(AntiAliasMode::Fxaa),
-        );
-        let names: Vec<String> = plan
-            .systems
-            .build()
-            .passes
-            .iter()
-            .map(|pass| pass.name.clone())
-            .collect();
+        // smooths its silhouette too. TAA reads the g-buffer depth after
+        // the outline, so the pass must not discard it. Plans without the
+        // opt-in keep the plain pass list (see the AA matrix test).
+        // qual:allow(dry, fragment) reason: "the mode matrix repeats identical graph inspection to compare each AA target type"
+        let names_of = |mode: AntiAliasMode| {
+            let mut plan = RenderFrame3D::new_with_aa_outline(
+                wgpu::TextureFormat::Rgba8Unorm,
+                (32, 32),
+                Technique::Hybrid,
+                Bloom::Off,
+                AaWiring::new(mode),
+            );
+            pass_names_of(&mut plan)
+        };
         assert_eq!(
-            names,
+            names_of(AntiAliasMode::Fxaa),
             vec![
                 "gbuffer",
                 "lighting",
@@ -1859,10 +1862,21 @@ mod tests {
                 "edge_filter"
             ]
         );
-        // Empty flags disable the pass; setting them is accepted without a
-        // device (the pass uploads on the next frame).
-        plan.set_outline_flags(&[]);
-        plan.set_outline_flags(&[0, 2]);
+        assert_eq!(
+            names_of(AntiAliasMode::Taa),
+            vec![
+                "gbuffer",
+                "lighting",
+                "forward",
+                "composite",
+                "outline",
+                "taa"
+            ]
+        );
+        assert_eq!(
+            names_of(AntiAliasMode::Off),
+            vec!["gbuffer", "lighting", "forward", "composite", "outline"]
+        );
     }
 
     #[test]

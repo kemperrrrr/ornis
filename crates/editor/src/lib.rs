@@ -296,8 +296,18 @@ pub fn set_selection(store: &SmartStore, entity: Option<Entity>) -> bool {
             let Some(mut lane) = store.write_lane::<Selected>() else {
                 return false;
             };
-            while let Some(entity) = lane.entities.last().copied() {
+            // Bounded by the initial length: a failing `remove` can never
+            // spin forever, and the debug assert catches it in tests.
+            for _ in 0..lane.entities.len() {
+                let Some(entity) = lane.entities.last().copied() else {
+                    break;
+                };
+                let before = lane.entities.len();
                 lane.remove(entity);
+                debug_assert!(
+                    lane.entities.len() < before,
+                    "remove must drop the lane entry"
+                );
             }
             true
         }
@@ -327,8 +337,16 @@ fn apply_hover(resources: &Resources, store: &SmartStore, outcome: &PickOutcome)
         }
     }
     if let Some(mut lane) = store.write_lane::<Hovered>() {
-        while let Some(entity) = lane.entities.last().copied() {
+        for _ in 0..lane.entities.len() {
+            let Some(entity) = lane.entities.last().copied() else {
+                break;
+            };
+            let before = lane.entities.len();
             lane.remove(entity);
+            debug_assert!(
+                lane.entities.len() < before,
+                "remove must drop the lane entry"
+            );
         }
         if let Some(entity) = wanted {
             lane.insert(entity, Hovered);

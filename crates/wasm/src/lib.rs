@@ -20,6 +20,8 @@ use web_sys::console;
 
 use ornis_app::ReplicaGameWorld;
 use ornis_assets::scene::Scene;
+#[cfg(test)]
+use ornis_editor::EditorMarks;
 use ornis_editor::{
     Hovered, PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
     set_selection,
@@ -596,8 +598,16 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
         );
         set_selection(store, None);
         if let Some(mut lane) = store.write_lane::<Hovered>() {
-            while let Some(entity) = lane.entities.last().copied() {
+            for _ in 0..lane.entities.len() {
+                let Some(entity) = lane.entities.last().copied() else {
+                    break;
+                };
+                let before = lane.entities.len();
                 lane.remove(entity);
+                debug_assert!(
+                    lane.entities.len() < before,
+                    "remove must drop the lane entry"
+                );
             }
         }
         return Vec::new();
@@ -618,8 +628,16 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
         .map(|(entity, _)| *entity);
     set_selection(store, selected);
     if let Some(mut lane) = store.write_lane::<Hovered>() {
-        while let Some(entity) = lane.entities.last().copied() {
+        for _ in 0..lane.entities.len() {
+            let Some(entity) = lane.entities.last().copied() else {
+                break;
+            };
+            let before = lane.entities.len();
             lane.remove(entity);
+            debug_assert!(
+                lane.entities.len() < before,
+                "remove must drop the lane entry"
+            );
         }
         for (entity, meta) in handles.iter().zip(meta) {
             if meta.editor.hovered {
@@ -1678,37 +1696,68 @@ mod integration_tests {
         assert_eq!(server_selection(store), Some(None));
     }
 
-    /// A snapshot whose mark list length differs from the replica's entity
-    /// list cannot be mapped positionally; the replica clears instead of
-    /// attaching marks to the wrong entity.
-    #[test]
-    fn live_marks_reject_positional_mismatch_without_marking() {
+    /// A replica with one entity pre-selected and pre-hovered.
+    fn selected_replica() -> (ReplicaGameWorld, Entity) {
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
             .expect("the shared API contract must parse");
         let mut render_world = ReplicaGameWorld::new_replica();
         install_editor(render_world.engine_mut());
         render_world.replace_scene(&live.scene);
         let entity = render_world.entities()[0];
-
-        // More marks than handles.
-        let longer = vec![LiveEntityMeta::default(); live.meta.len() + 1];
-        assert!(apply_live_marks(&mut render_world, &longer).is_empty());
         let store = render_world.engine().world().store().expect("store");
-        assert!(
-            !store
+        set_selection(store, Some(entity));
+        store
+            .write_lane::<Hovered>()
+            .expect("hover lane")
+            .insert(entity, Hovered);
+        (render_world, entity)
+    }
+
+    /// `(selected, hovered)` marks of `entity` in `world`.
+    fn marks_of(world: &ReplicaGameWorld, entity: Entity) -> (bool, bool) {
+        let store = world.engine().world().store().expect("store");
+        (
+            store
                 .read_lane::<Selected>()
                 .is_some_and(|lane| lane.contains(entity)),
-            "a mismatched snapshot must not select anything"
+            store
+                .read_lane::<Hovered>()
+                .is_some_and(|lane| lane.contains(entity)),
+        )
+    }
+
+    /// A snapshot whose mark list length differs from the replica's entity
+    /// list cannot be mapped positionally; the replica clears the existing
+    /// selection/hover instead of attaching marks to the wrong entity.
+    #[test]
+    fn live_marks_reject_positional_mismatch_without_marking() {
+        // More marks than handles: the zipped first mark is selected+hovered,
+        // so without the length guard this would (wrongly) keep the entity
+        // selected.
+        let (mut world, entity) = selected_replica();
+        assert_eq!(marks_of(&world, entity), (true, true), "precondition");
+        let longer = vec![
+            LiveEntityMeta {
+                editor: EditorMarks {
+                    editor_only: false,
+                    selected: true,
+                    hovered: true,
+                },
+                ..LiveEntityMeta::default()
+            },
+            LiveEntityMeta::default(),
+        ];
+        assert!(apply_live_marks(&mut world, &longer).is_empty());
+        assert_eq!(
+            marks_of(&world, entity),
+            (false, false),
+            "a mismatched snapshot must clear selection and hover"
         );
 
-        // Fewer marks than handles: still no positional mapping.
-        assert!(apply_live_marks(&mut render_world, &[]).is_empty());
-        let store = render_world.engine().world().store().expect("store");
-        assert!(
-            !store
-                .read_lane::<Selected>()
-                .is_some_and(|lane| lane.contains(entity))
-        );
+        // Fewer marks than handles: also no positional mapping.
+        let (mut world, entity) = selected_replica();
+        assert!(apply_live_marks(&mut world, &[]).is_empty());
+        assert_eq!(marks_of(&world, entity), (false, false));
     }
 
     #[test]

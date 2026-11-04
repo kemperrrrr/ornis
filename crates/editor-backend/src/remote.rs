@@ -760,6 +760,7 @@ fn forward_client_frame(payload: &[u8], game_tx: &Sender<UiCommand>) {
 /// snapshot (the legacy, input-only shape). The update path is the same
 /// as `POST /api/command` / `POST /api/input`, so WS clients (`select`
 /// from the replica) are validated exactly like HTTP callers.
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_client_frame(payload: &[u8]) -> Option<UiCommand> {
     if let Ok(text) = std::str::from_utf8(payload)
         && let Some(command) = parse_command_payload(text)

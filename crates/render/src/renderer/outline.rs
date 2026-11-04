@@ -164,8 +164,8 @@ impl OutlineGpu {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: Some(false),
-                // Equal keeps the ring where the object's own depth is the
-                // same surface; faces further back fail.
+                // The hull's back faces lose to the object's own depth and
+                // survive outside the silhouette (against the far clear).
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -332,8 +332,9 @@ fn record_outline_pass(encoder: &mut wgpu::CommandEncoder, draw: OutlineDraw<'_>
             view: draw.depth,
             depth_ops: Some(wgpu::Operations {
                 load: wgpu::LoadOp::Load,
-                // The outline only reads depth; nobody reads it later.
-                store: wgpu::StoreOp::Discard,
+                // The plan declares `Read<Depth>` and later passes (TAA)
+                // still read it; never discard the content here.
+                store: wgpu::StoreOp::Store,
             }),
             stencil_ops: None,
         }),
@@ -474,6 +475,7 @@ mod tests {
 
     /// Flagged instances draw; all-zero/empty flags record no draw at all.
     /// Skips without an adapter.
+    // qual:allow(complexity, max_function_lines=121) reason: "one device setup covers draw, zero-flag no-op and format-change recreation"
     #[test]
     fn outline_pass_draws_selected_and_skips_zero_flags() {
         let Some((device, queue)) = try_device() else {
@@ -565,7 +567,7 @@ mod tests {
 
         // A format change must rebuild the cached pipeline, not reuse the
         // sRGB one against an Unorm attachment.
-        let (_, unorm_view) = target_with_format(&device, 8, wgpu::TextureFormat::Rgba8Unorm);
+        let (unorm, unorm_view) = target_with_format(&device, 8, wgpu::TextureFormat::Rgba8Unorm);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("outline test format change"),
         });
@@ -584,7 +586,11 @@ mod tests {
             },
         );
         queue.submit(std::iter::once(encoder.finish()));
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let changed = readback_rgba8(&device, &queue, &unorm, 8, 8);
+        assert!(
+            changed.iter().any(|&byte| byte != 0),
+            "the format-change frame must still draw the outline"
+        );
 
         let validation = pollster::block_on(scope.pop());
         assert!(
