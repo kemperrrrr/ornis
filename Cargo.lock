@@ -3091,6 +3091,7 @@ name = "ornis-wasm2gpu-shader"
 version = "0.1.0"
 dependencies = [
  "ornis-gpu-abi",
+ "ornis-render",
  "ornis-wasm2gpu",
  "ornis-wasm2gpu-testkit",
  "wasmparser",

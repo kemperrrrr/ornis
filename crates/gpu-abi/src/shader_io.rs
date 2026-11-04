@@ -174,6 +174,10 @@ pub fn gpu_length3(value: GpuVec3) -> f32 {
 }
 
 /// Euclidean length of three scalar lanes, avoiding a `GpuVec3` aggregate.
+///
+/// The host shadow uses scalar `f32` arithmetic and `sqrt`; it is not
+/// guaranteed bit-exact with WGSL `length` on every GPU, particularly for
+/// extreme magnitudes and rounding.
 #[inline(always)]
 pub fn gpu_length3_xyz(x: f32, y: f32, z: f32) -> f32 {
     crate::gpu_abi::math_length3_xyz(x, y, z)

@@ -1,5 +1,6 @@
 //! GPU parity test for the wasm2gpu frustum-cull-and-compact kernel.
 
+use ornis_render::gpu_culling::CULL_COMPUTE_WGSL;
 use ornis_wasm2gpu_testkit::compute_lift::lowered_kernel;
 use ornis_wasm2gpu_testkit::device;
 use ornis_wasm2gpu_testkit::entry;
@@ -16,15 +17,20 @@ const MATERIAL_BASE: u32 = 10;
 const MATERIAL_NEXT: u32 = 11;
 const MATERIAL_LAST_VISIBLE: u32 = 12;
 const MATERIAL_INACTIVE: u32 = 13;
-const ACTIVE_COUNT: u32 = 3;
-const ACTIVE_COUNT_F32: f32 = ACTIVE_COUNT as f32;
+const MATERIAL_NAN_RADIUS: u32 = 14;
+const MATERIAL_NAN_AXIS: u32 = 15;
+const ACTIVE_COUNT: u32 = 5;
 const INDEX_COUNT: u32 = 36;
-const SOURCE_COUNT: usize = 4;
+const SOURCE_COUNT: usize = 65;
+const COUNT_UNIFORM_ELEMENTS: usize = 3;
+const EXPECTED_WORKGROUP_SIZE: u32 = 64;
+const DESTINATION_CANARY: u32 = 0xdead_beef;
 const PLANES: usize = 6;
 const LANES: usize = 4;
 const UNIFORM_LANE_BYTES: usize = 16;
 const PLANES_BYTES: usize = PLANES * LANES * UNIFORM_LANE_BYTES;
-const COUNT_UNIFORM_BYTES: usize = 4 * U32_BYTES;
+const COUNT_UNIFORM_BYTES: usize = COUNT_UNIFORM_ELEMENTS * UNIFORM_LANE_BYTES;
+const PRODUCTION_PARAMS_BYTES: usize = PLANES * LANES * U32_BYTES + 4 * U32_BYTES;
 const ARGS_WORDS: usize = 5;
 const MODEL_X_AXIS_WORD: usize = 0;
 const MODEL_Y_AXIS_WORD: usize = 5;
@@ -38,6 +44,7 @@ const VISIBLE_CENTER_NEAR: f32 = 0.5;
 const VISIBLE_CENTER_FAR: f32 = 2.0;
 const CULLED_CENTER: f32 = -1.0;
 const VISIBLE_RADIUS: f32 = 0.25;
+const CULL_TEST_BOUNDARY_CENTER: f32 = -VISIBLE_RADIUS;
 const FAR_VISIBLE_RADIUS: f32 = 0.1;
 const OPEN_PLANE_DISTANCE: f32 = 100.0;
 
@@ -46,6 +53,13 @@ struct CullCompactGpu {
     bind_group: wgpu::BindGroup,
     destination: wgpu::Buffer,
     args: wgpu::Buffer,
+}
+
+#[derive(Clone, Copy)]
+struct CullCounts {
+    active: u32,
+    source: u32,
+    destination: u32,
 }
 
 struct CullCompactInputs<'a> {
@@ -68,29 +82,76 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
     };
 
     let records = test_records();
-    let gpu = create_gpu_case(&device, &queue, &records);
+    let counts = CullCounts {
+        active: ACTIVE_COUNT,
+        source: SOURCE_COUNT as u32,
+        destination: SOURCE_COUNT as u32,
+    };
+    let gpu = create_gpu_case(&device, &queue, &records, counts);
     let bytes = dispatch_and_readback(&device, &queue, &gpu);
+    let production_bytes = dispatch_production(&device, &queue, &records);
     assert_compacted_output(&bytes, &records);
+    assert_eq!(
+        compacted_records(&bytes),
+        compacted_records(&production_bytes),
+        "wasm2gpu output must match CULL_COMPUTE_WGSL"
+    );
+}
+
+#[test]
+fn cull_compact_guards_source_and_destination_capacity() {
+    let Some((device, queue)) = device() else {
+        assert!(
+            !super::gpu_required(),
+            "ORNIS_REQUIRE_GPU is set but cull-compaction capacity test has no wgpu device"
+        );
+        eprintln!("SKIPPED (wasm2gpu cull compaction capacity): no wgpu device");
+        return;
+    };
+
+    let mut records = test_records();
+    records[1] = object_record(MATERIAL_NEXT, 1, VISIBLE_CENTER_FAR, FAR_VISIBLE_RADIUS);
+    records[2] = object_record(MATERIAL_LAST_VISIBLE, 1, VISIBLE_CENTER_NEAR, VISIBLE_RADIUS);
+    records[SOURCE_COUNT - 1] =
+        object_record(MATERIAL_INACTIVE, 1, VISIBLE_CENTER_FAR, FAR_VISIBLE_RADIUS);
+    let counts = CullCounts {
+        active: SOURCE_COUNT as u32,
+        source: 2,
+        destination: 1,
+    };
+    let gpu = create_gpu_case(&device, &queue, &records, counts);
+    let bytes = dispatch_and_readback(&device, &queue, &gpu);
+    assert_capacity_guards(&bytes, &records);
 }
 
 fn test_records() -> [[u32; RECORD_WORDS]; SOURCE_COUNT] {
-    [
-        object_record(MATERIAL_BASE, 1, VISIBLE_CENTER_NEAR, VISIBLE_RADIUS),
-        object_record(MATERIAL_NEXT, 0, CULLED_CENTER, VISIBLE_RADIUS),
-        object_record(
-            MATERIAL_LAST_VISIBLE,
-            1,
-            VISIBLE_CENTER_FAR,
-            FAR_VISIBLE_RADIUS,
-        ),
-        object_record(MATERIAL_INACTIVE, 0, 0.0, VISIBLE_RADIUS),
-    ]
+    let mut records =
+        [object_record(MATERIAL_INACTIVE, 0, CULLED_CENTER, VISIBLE_RADIUS); SOURCE_COUNT];
+    records[0] = object_record(MATERIAL_BASE, 1, VISIBLE_CENTER_NEAR, VISIBLE_RADIUS);
+    records[1] = object_record(MATERIAL_NEXT, 0, CULLED_CENTER, VISIBLE_RADIUS);
+    records[2] = object_record(
+        MATERIAL_LAST_VISIBLE,
+        1,
+        CULL_TEST_BOUNDARY_CENTER,
+        VISIBLE_RADIUS,
+    );
+    records[3] = object_record(MATERIAL_NAN_RADIUS, 1, CULLED_CENTER, f32::NAN);
+    records[4] = object_record_with_scales(
+        MATERIAL_NAN_AXIS,
+        1,
+        CULLED_CENTER,
+        f32::NAN,
+        VISIBLE_RADIUS,
+        VISIBLE_RADIUS,
+    );
+    records
 }
 
 fn create_gpu_case(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     records: &[[u32; RECORD_WORDS]; SOURCE_COUNT],
+    counts: CullCounts,
 ) -> CullCompactGpu {
     let source = gpu_buffer(
         device,
@@ -111,7 +172,7 @@ fn create_gpu_case(
         device,
         "wasm2gpu cull compact destination",
         (SOURCE_COUNT * RECORD_BYTES) as u64,
-        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
     );
     let args = gpu_buffer(
         device,
@@ -138,7 +199,12 @@ fn create_gpu_case(
         planes: &planes,
         count: &count,
     };
-    upload_inputs(queue, records, &inputs);
+    queue.write_buffer(
+        &destination,
+        0,
+        &words_to_bytes(&vec![DESTINATION_CANARY; SOURCE_COUNT * RECORD_WORDS]),
+    );
+    upload_inputs(queue, records, &inputs, counts);
 
     let layout = create_bind_group_layout(device);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -167,21 +233,24 @@ fn upload_inputs(
     queue: &wgpu::Queue,
     records: &[[u32; RECORD_WORDS]; SOURCE_COUNT],
     inputs: &CullCompactInputs<'_>,
+    counts: CullCounts,
 ) {
-    let source_record_words = records
-        .iter()
-        .flat_map(|record| record.iter().copied())
-        .collect::<Vec<_>>();
-    let source_bytes = words_to_bytes(&source_record_words);
+    let source_bytes = records_to_bytes(records);
     queue.write_buffer(inputs.source, 0, &source_bytes);
     queue.write_buffer(inputs.source_words, 0, &source_bytes);
     queue.write_buffer(inputs.args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
     queue.write_buffer(inputs.planes, 0, &packed_planes());
-    queue.write_buffer(
-        inputs.count,
-        0,
-        &words_to_bytes(&[ACTIVE_COUNT_F32.to_bits(), 0, 0, 0]),
-    );
+    queue.write_buffer(inputs.count, 0, &packed_counts(counts));
+}
+
+fn packed_counts(counts: CullCounts) -> Vec<u8> {
+    let values = [counts.active, counts.source, counts.destination];
+    let mut bytes = vec![0; COUNT_UNIFORM_BYTES];
+    for (index, value) in values.into_iter().enumerate() {
+        let offset = index * UNIFORM_LANE_BYTES;
+        bytes[offset..offset + U32_BYTES].copy_from_slice(&(value as f32).to_le_bytes());
+    }
+    bytes
 }
 
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -224,6 +293,7 @@ fn dispatch_and_readback(
     queue: &wgpu::Queue,
     gpu: &CullCompactGpu,
 ) -> Vec<u8> {
+    assert_eq!(symbols::CS_WORKGROUP[0], EXPECTED_WORKGROUP_SIZE);
     let workgroup_size = symbols::CS_WORKGROUP[0] as usize;
     let readback = gpu_buffer(
         device,
@@ -242,12 +312,127 @@ fn dispatch_and_readback(
         pass.set_pipeline(&gpu.pipeline);
         pass.set_bind_group(0, &gpu.bind_group, &[]);
         pass.dispatch_workgroups(
-            (ACTIVE_COUNT as usize).div_ceil(workgroup_size) as u32,
+            SOURCE_COUNT.div_ceil(workgroup_size) as u32,
             1,
             1,
         );
     }
     copy_outputs(&mut encoder, gpu, &readback);
+    queue.submit([encoder.finish()]);
+    map_bytes(device, &readback)
+}
+
+fn dispatch_production(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    records: &[[u32; RECORD_WORDS]; SOURCE_COUNT],
+) -> Vec<u8> {
+    let source = gpu_buffer(
+        device,
+        "production cull compact source",
+        (SOURCE_COUNT * RECORD_BYTES) as u64,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    );
+    let destination = gpu_buffer(
+        device,
+        "production cull compact destination",
+        (SOURCE_COUNT * RECORD_BYTES) as u64,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+    );
+    let args = gpu_buffer(
+        device,
+        "production cull compact args",
+        (ARGS_WORDS * U32_BYTES) as u64,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+    );
+    let params = gpu_buffer(
+        device,
+        "production cull compact params",
+        PRODUCTION_PARAMS_BYTES as u64,
+        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    );
+    queue.write_buffer(&source, 0, &records_to_bytes(records));
+    queue.write_buffer(
+        &destination,
+        0,
+        &words_to_bytes(&vec![DESTINATION_CANARY; SOURCE_COUNT * RECORD_WORDS]),
+    );
+    queue.write_buffer(&args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
+    queue.write_buffer(&params, 0, &production_params(ACTIVE_COUNT));
+
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("production cull compact layout"),
+        entries: &[
+            buffer_layout_entry(0, wgpu::BufferBindingType::Uniform),
+            buffer_layout_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
+            buffer_layout_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_layout_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
+        ],
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("production cull compact bindings"),
+        layout: &layout,
+        entries: &[
+            entry(0, &params),
+            entry(1, &source),
+            entry(2, &destination),
+            entry(3, &args),
+        ],
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("production cull compact shader"),
+        source: wgpu::ShaderSource::Wgsl(CULL_COMPUTE_WGSL.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("production cull compact pipeline layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("production cull compact pipeline"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("cull_instances"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let readback = gpu_buffer(
+        device,
+        "production cull compact readback",
+        (SOURCE_COUNT * RECORD_BYTES + ARGS_WORDS * U32_BYTES) as u64,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("production cull compact"),
+    });
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("production cull compact"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(
+            SOURCE_COUNT.div_ceil(EXPECTED_WORKGROUP_SIZE as usize) as u32,
+            1,
+            1,
+        );
+    }
+    let args_offset = SOURCE_COUNT * RECORD_BYTES;
+    encoder.copy_buffer_to_buffer(
+        &destination,
+        0,
+        &readback,
+        0,
+        (SOURCE_COUNT * RECORD_BYTES) as u64,
+    );
+    encoder.copy_buffer_to_buffer(
+        &args,
+        0,
+        &readback,
+        args_offset as u64,
+        (ARGS_WORDS * U32_BYTES) as u64,
+    );
     queue.submit([encoder.finish()]);
     map_bytes(device, &readback)
 }
@@ -273,16 +458,56 @@ fn copy_outputs(encoder: &mut wgpu::CommandEncoder, gpu: &CullCompactGpu, readba
 fn assert_compacted_output(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
     let args_offset = SOURCE_COUNT * RECORD_BYTES;
     let instance_count = read_u32(bytes, args_offset + U32_BYTES);
-    assert_eq!(instance_count, 2, "indirect args visible count");
+    assert_eq!(instance_count, 4, "indirect args visible count");
     assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
 
-    let mut actual = (0..instance_count as usize)
-        .map(|slot| read_record(bytes, slot * RECORD_BYTES))
-        .collect::<Vec<_>>();
-    actual.sort_by_key(|record| record[MATERIAL_WORD]);
-    let expected = vec![records[0].to_vec(), records[2].to_vec()];
+    let actual = compacted_records(bytes);
+    let expected = vec![
+        records[0].to_vec(),
+        records[2].to_vec(),
+        records[3].to_vec(),
+        records[4].to_vec(),
+    ];
     assert_eq!(actual, expected, "compacted records must be bit-identical");
     assert_eq!(actual[0][MOTION_VALID_WORD], 1);
+    assert_canary_slots(bytes, instance_count as usize);
+}
+
+fn assert_capacity_guards(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
+    let args_offset = SOURCE_COUNT * RECORD_BYTES;
+    let instance_count = read_u32(bytes, args_offset + U32_BYTES);
+    assert_eq!(instance_count, 2, "count is bounded by source, not dst");
+    assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
+
+    let first = read_record(bytes, 0);
+    assert!(
+        first.as_slice() == records[0].as_slice() || first.as_slice() == records[1].as_slice(),
+        "only an in-range visible source may be compacted"
+    );
+    assert_canary_slots(bytes, 1);
+}
+
+fn assert_canary_slots(bytes: &[u8], start_slot: usize) {
+    for slot in start_slot..SOURCE_COUNT {
+        for word in 0..RECORD_WORDS {
+            let offset = slot * RECORD_BYTES + word * U32_BYTES;
+            assert_eq!(
+                read_u32(bytes, offset),
+                DESTINATION_CANARY,
+                "destination slot {slot} word {word} must stay within capacity"
+            );
+        }
+    }
+}
+
+fn compacted_records(bytes: &[u8]) -> Vec<Vec<u32>> {
+    let args_offset = SOURCE_COUNT * RECORD_BYTES;
+    let count = read_u32(bytes, args_offset + U32_BYTES) as usize;
+    let mut records = (0..count)
+        .map(|slot| read_record(bytes, slot * RECORD_BYTES))
+        .collect::<Vec<_>>();
+    records.sort_by_key(|record| record[MATERIAL_WORD]);
+    records
 }
 
 fn read_record(bytes: &[u8], start: usize) -> Vec<u32> {
@@ -310,10 +535,21 @@ fn object_record(
     center_x: f32,
     scale: f32,
 ) -> [u32; RECORD_WORDS] {
+    object_record_with_scales(material, motion_valid, center_x, scale, scale, scale)
+}
+
+fn object_record_with_scales(
+    material: u32,
+    motion_valid: u32,
+    center_x: f32,
+    x_scale: f32,
+    y_scale: f32,
+    z_scale: f32,
+) -> [u32; RECORD_WORDS] {
     let mut words = [0_u32; RECORD_WORDS];
-    words[MODEL_X_AXIS_WORD] = scale.to_bits();
-    words[MODEL_Y_AXIS_WORD] = scale.to_bits();
-    words[MODEL_Z_AXIS_WORD] = scale.to_bits();
+    words[MODEL_X_AXIS_WORD] = x_scale.to_bits();
+    words[MODEL_Y_AXIS_WORD] = y_scale.to_bits();
+    words[MODEL_Z_AXIS_WORD] = z_scale.to_bits();
     words[MODEL_CENTER_X_WORD] = center_x.to_bits();
     words[MODEL_CENTER_W_WORD] = 1.0_f32.to_bits();
     for (index, word) in words[NORMAL_MATRIX_START_WORD..MATERIAL_WORD]
@@ -329,20 +565,45 @@ fn object_record(
     words
 }
 
-fn packed_planes() -> Vec<u8> {
-    let mut bytes = vec![0_u8; PLANES_BYTES];
-    for plane in 0..PLANES {
-        let values: [f32; LANES] = if plane == 0 {
+fn frustum_planes() -> [[f32; LANES]; PLANES] {
+    std::array::from_fn(|plane| {
+        if plane == 0 {
             [1.0, 0.0, 0.0, 0.0]
         } else {
             [0.0, 0.0, 0.0, OPEN_PLANE_DISTANCE]
-        };
+        }
+    })
+}
+
+fn packed_planes() -> Vec<u8> {
+    let mut bytes = vec![0_u8; PLANES_BYTES];
+    for (plane, values) in frustum_planes().into_iter().enumerate() {
         for (lane, value) in values.into_iter().enumerate() {
             let start = (plane * LANES + lane) * UNIFORM_LANE_BYTES;
             bytes[start..start + U32_BYTES].copy_from_slice(&value.to_le_bytes());
         }
     }
     bytes
+}
+
+fn production_params(count: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(PRODUCTION_PARAMS_BYTES);
+    for plane in frustum_planes() {
+        for value in plane {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes.extend_from_slice(&count.to_le_bytes());
+    bytes.resize(PRODUCTION_PARAMS_BYTES, 0);
+    bytes
+}
+
+fn records_to_bytes(records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) -> Vec<u8> {
+    let words = records
+        .iter()
+        .flat_map(|record| record.iter().copied())
+        .collect::<Vec<_>>();
+    words_to_bytes(&words)
 }
 
 fn words_to_bytes(words: &[u32]) -> Vec<u8> {

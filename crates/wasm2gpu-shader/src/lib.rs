@@ -143,7 +143,13 @@ const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_COUNT_UNIFORM_BINDING: u32 = 5;
 #[cfg(target_arch = "wasm32")]
-const CULL_COMPACT_COUNT_UNIFORM_LEN: u32 = 1;
+const CULL_COMPACT_COUNT_UNIFORM_LEN: u32 = 3;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_ACTIVE_COUNT_INDEX: u32 = 0;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_SOURCE_COUNT_INDEX: u32 = 1;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_DESTINATION_COUNT_INDEX: u32 = 2;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -321,6 +327,42 @@ fn cull_storage_length(base: u32) -> f32 {
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
+fn cull_radius_invalid(x_radius: f32, y_radius: f32, z_radius: f32) -> bool {
+    !(x_radius >= 0.0) || !(y_radius >= 0.0) || !(z_radius >= 0.0)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_record_visible(
+    center_x: f32,
+    center_y: f32,
+    center_z: f32,
+    x_radius: f32,
+    y_radius: f32,
+    z_radius: f32,
+) -> bool {
+    if cull_radius_invalid(x_radius, y_radius, z_radius) {
+        return true;
+    }
+    let mut radius = x_radius;
+    if y_radius > radius {
+        radius = y_radius;
+    }
+    if z_radius > radius {
+        radius = z_radius;
+    }
+    let mut plane = 0u32;
+    while plane < PLANE_COUNT {
+        if cull_plane_outside(center_x, center_y, center_z, radius, plane) {
+            return false;
+        }
+        plane += 1;
+    }
+    true
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
 fn cull_plane_outside(
     center_x: f32,
     center_y: f32,
@@ -345,57 +387,64 @@ fn cull_plane_outside(
 /// supplies the same record bytes as `u32` words for bit-preserving copies.
 /// The current lowering declares storage imports writable, so the two
 /// source views must use distinct bindings/buffers. Binding 0 contains the
-/// six planes, and binding 5 is a one-element uniform count array of f32.
-/// Binding 3 is the five-word indirect-args buffer, where `instance_count` at word 1 is
-/// incremented atomically. The dense destination record words are at
-/// binding 2.
+/// six planes; binding 5 is a padded uniform array of active, source, and
+/// destination counts. Binding 3 is the five-word indirect-args buffer,
+/// where `instance_count` at word 1 is incremented atomically. The dense
+/// destination record words are at binding 2.
+///
+/// TODO(#243): replace the count array and duplicated source with u32
+/// uniforms and read-only storage before Culler integration. Capacities must describe the
+/// bound buffers and remain exactly representable in f32.
 #[cfg(target_arch = "wasm32")]
-#[shader::compute(workgroup_size = 4)]
+#[shader::compute(workgroup_size = 64)]
 // qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
 pub fn cull_compact(id: u32) {
-    let count = uniform_array_f32::<
+    let id_f32 = id as f32;
+    let active_count = uniform_array_f32::<
         CULL_GROUP,
         CULL_COMPACT_COUNT_UNIFORM_BINDING,
         CULL_COMPACT_COUNT_UNIFORM_LEN,
-    >(0);
-    if (id as f32) < count {
-        let base = id * CULL_COMPACT_RECORD_WORDS;
-        let center_x =
-            storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
-        let center_y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
-            base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1,
-        );
-        let center_z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
-            base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2,
-        );
-        let mut radius = cull_storage_length(base);
-        let y_radius = cull_storage_length(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
-        let z_radius = cull_storage_length(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);
-        if y_radius > radius {
-            radius = y_radius;
-        }
-        if z_radius > radius {
-            radius = z_radius;
-        }
-        let mut visible = 1u32;
-        let mut plane = 0u32;
-        while plane < PLANE_COUNT {
-            if cull_plane_outside(center_x, center_y, center_z, radius, plane) {
-                visible = 0;
-            }
-            plane += 1;
-        }
-        if visible != 0 {
-            let slot = storage_atomic_add_u32::<CULL_GROUP, CULL_COMPACT_ARGS_BINDING>(1, 1);
-            let output = slot * CULL_COMPACT_RECORD_WORDS;
-            let mut word = 0u32;
-            while word < CULL_COMPACT_RECORD_WORDS {
-                let value =
-                    storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + word);
-                storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + word, value);
-                word += 1;
-            }
-        }
+    >(CULL_COMPACT_ACTIVE_COUNT_INDEX);
+    let source_count = uniform_array_f32::<
+        CULL_GROUP,
+        CULL_COMPACT_COUNT_UNIFORM_BINDING,
+        CULL_COMPACT_COUNT_UNIFORM_LEN,
+    >(CULL_COMPACT_SOURCE_COUNT_INDEX);
+    if id_f32 >= active_count || id_f32 >= source_count {
+        return;
+    }
+
+    let base = id * CULL_COMPACT_RECORD_WORDS;
+    let center_x =
+        storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
+    let center_y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
+        base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1,
+    );
+    let center_z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
+        base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2,
+    );
+    let x_radius = cull_storage_length(base);
+    let y_radius = cull_storage_length(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
+    let z_radius = cull_storage_length(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);
+    if !cull_record_visible(center_x, center_y, center_z, x_radius, y_radius, z_radius) {
+        return;
+    }
+
+    let slot = storage_atomic_add_u32::<CULL_GROUP, CULL_COMPACT_ARGS_BINDING>(1, 1);
+    let destination_count = uniform_array_f32::<
+        CULL_GROUP,
+        CULL_COMPACT_COUNT_UNIFORM_BINDING,
+        CULL_COMPACT_COUNT_UNIFORM_LEN,
+    >(CULL_COMPACT_DESTINATION_COUNT_INDEX);
+    if (slot as f32) >= destination_count {
+        return;
+    }
+    let output = slot * CULL_COMPACT_RECORD_WORDS;
+    let mut word = 0u32;
+    while word < CULL_COMPACT_RECORD_WORDS {
+        let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + word);
+        storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + word, value);
+        word += 1;
     }
 }
 

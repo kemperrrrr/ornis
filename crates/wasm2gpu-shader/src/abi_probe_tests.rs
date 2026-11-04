@@ -51,6 +51,7 @@ const CULL_STORAGE_LENGTH: f32 = 5.0;
 const CULL_TEST_OUTSIDE_CENTER: f32 = -2.0;
 const CULL_TEST_INSIDE_CENTER: f32 = 0.5;
 const CULL_TEST_RADIUS: f32 = 0.25;
+const CULL_TEST_BOUNDARY_CENTER: f32 = -CULL_TEST_RADIUS;
 const CULL_TEST_PLANE: u32 = 0;
 const FLOATS: [u32; 8] = [
     0,
@@ -208,26 +209,72 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
         [super::UniformF32Lane; super::PLANE_LEN as usize],
     >(&uniform_values);
 
-    let (radius, outside, inside) = with_host(&mut memory, || {
-        (
-            super::cull_storage_length(0),
-            super::cull_plane_outside(
-                CULL_TEST_OUTSIDE_CENTER,
-                0.0,
-                0.0,
-                CULL_TEST_RADIUS,
-                CULL_TEST_PLANE,
-            ),
-            super::cull_plane_outside(
-                CULL_TEST_INSIDE_CENTER,
-                0.0,
-                0.0,
-                CULL_TEST_RADIUS,
-                CULL_TEST_PLANE,
-            ),
-        )
-    });
+    let (
+        radius,
+        outside,
+        inside,
+        boundary,
+        boundary_visible,
+        nan_radius_visible,
+        negative_radius_visible,
+    ) = with_host(&mut memory, || {
+            (
+                super::cull_storage_length(0),
+                super::cull_plane_outside(
+                    CULL_TEST_OUTSIDE_CENTER,
+                    0.0,
+                    0.0,
+                    CULL_TEST_RADIUS,
+                    CULL_TEST_PLANE,
+                ),
+                super::cull_plane_outside(
+                    CULL_TEST_INSIDE_CENTER,
+                    0.0,
+                    0.0,
+                    CULL_TEST_RADIUS,
+                    CULL_TEST_PLANE,
+                ),
+                super::cull_plane_outside(
+                    CULL_TEST_BOUNDARY_CENTER,
+                    0.0,
+                    0.0,
+                    CULL_TEST_RADIUS,
+                    CULL_TEST_PLANE,
+                ),
+                super::cull_record_visible(
+                    CULL_TEST_BOUNDARY_CENTER,
+                    0.0,
+                    0.0,
+                    CULL_TEST_RADIUS,
+                    CULL_TEST_RADIUS,
+                    CULL_TEST_RADIUS,
+                ),
+                super::cull_record_visible(
+                    CULL_TEST_OUTSIDE_CENTER,
+                    0.0,
+                    0.0,
+                    f32::NAN,
+                    0.0,
+                    0.0,
+                ),
+                super::cull_record_visible(
+                    CULL_TEST_OUTSIDE_CENTER,
+                    0.0,
+                    0.0,
+                    -1.0,
+                    0.0,
+                    0.0,
+                ),
+            )
+        });
     assert_eq!(radius, CULL_STORAGE_LENGTH);
     assert!(outside);
     assert!(!inside);
+    assert!(!boundary, "touching a plane remains visible");
+    assert!(boundary_visible);
+    assert!(nan_radius_visible);
+    assert!(negative_radius_visible);
+    assert!(super::cull_radius_invalid(f32::NAN, 0.0, 0.0));
+    assert!(super::cull_radius_invalid(0.0, -1.0, 0.0));
+    assert!(!super::cull_radius_invalid(0.0, 1.0, 2.0));
 }
