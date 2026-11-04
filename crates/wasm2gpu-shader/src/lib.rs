@@ -328,7 +328,12 @@ fn cull_storage_length(base: u32) -> f32 {
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
 fn cull_radius_invalid(x_radius: f32, y_radius: f32, z_radius: f32) -> bool {
-    !(x_radius >= 0.0) || !(y_radius >= 0.0) || !(z_radius >= 0.0)
+    x_radius.is_nan()
+        || x_radius < 0.0
+        || y_radius.is_nan()
+        || y_radius < 0.0
+        || z_radius.is_nan()
+        || z_radius < 0.0
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -417,9 +422,8 @@ pub fn cull_compact(id: u32) {
     let base = id * CULL_COMPACT_RECORD_WORDS;
     let center_x =
         storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
-    let center_y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
-        base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1,
-    );
+    let center_y =
+        storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1);
     let center_z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
         base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2,
     );

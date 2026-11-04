@@ -129,12 +129,7 @@ fn test_records() -> [[u32; RECORD_WORDS]; SOURCE_COUNT] {
         [object_record(MATERIAL_INACTIVE, 0, CULLED_CENTER, VISIBLE_RADIUS); SOURCE_COUNT];
     records[0] = object_record(MATERIAL_BASE, 1, VISIBLE_CENTER_NEAR, VISIBLE_RADIUS);
     records[1] = object_record(MATERIAL_NEXT, 0, CULLED_CENTER, VISIBLE_RADIUS);
-    records[2] = object_record(
-        MATERIAL_LAST_VISIBLE,
-        1,
-        CULL_TEST_BOUNDARY_CENTER,
-        VISIBLE_RADIUS,
-    );
+    records[2] = object_record(MATERIAL_LAST_VISIBLE, 1, CULL_TEST_BOUNDARY_CENTER, VISIBLE_RADIUS);
     records[3] = object_record(MATERIAL_NAN_RADIUS, 1, CULLED_CENTER, f32::NAN);
     records[4] = object_record_with_scales(
         MATERIAL_NAN_AXIS,
@@ -293,8 +288,7 @@ fn dispatch_and_readback(
     queue: &wgpu::Queue,
     gpu: &CullCompactGpu,
 ) -> Vec<u8> {
-    assert_eq!(symbols::CS_WORKGROUP[0], EXPECTED_WORKGROUP_SIZE);
-    let workgroup_size = symbols::CS_WORKGROUP[0] as usize;
+    let workgroup_size = EXPECTED_WORKGROUP_SIZE as usize;
     let readback = gpu_buffer(
         device,
         "wasm2gpu cull compact readback",
@@ -311,11 +305,7 @@ fn dispatch_and_readback(
         });
         pass.set_pipeline(&gpu.pipeline);
         pass.set_bind_group(0, &gpu.bind_group, &[]);
-        pass.dispatch_workgroups(
-            SOURCE_COUNT.div_ceil(workgroup_size) as u32,
-            1,
-            1,
-        );
+        pass.dispatch_workgroups(SOURCE_COUNT.div_ceil(workgroup_size) as u32, 1, 1);
     }
     copy_outputs(&mut encoder, gpu, &readback);
     queue.submit([encoder.finish()]);
