@@ -350,17 +350,41 @@ fn draw(
     queue.submit([encoder.finish()]);
 }
 
-fn map_f32s(device: &wgpu::Device, queue: &wgpu::Queue, storage: &wgpu::Buffer) -> [f32; 4] {
-    let read = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("out-read"),
-        size: 16,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+fn readback_bytes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    size: u64,
+    label: &str,
+) -> Vec<u8> {
+    let staging = gpu_buffer(
+        device,
+        label,
+        size,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(label),
     });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_buffer_to_buffer(storage, 0, &read, 0, 16);
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     queue.submit([encoder.finish()]);
-    let bytes = map_bytes(device, &read);
+    map_bytes(device, &staging)
+}
+
+fn read_words(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    size: u64,
+) -> Vec<u32> {
+    readback_bytes(device, queue, buffer, size, "wasm2gpu word readback")
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
+        .collect()
+}
+
+fn map_f32s(device: &wgpu::Device, queue: &wgpu::Queue, storage: &wgpu::Buffer) -> [f32; 4] {
+    let bytes = readback_bytes(device, queue, storage, 16, "out-read");
     let mut values = [0f32; 4];
     let mut index = 0usize;
     while index < values.len() {

@@ -5,8 +5,6 @@ use ornis_wasm2gpu::translate;
 
 use super::device;
 use super::entry;
-use super::gpu_buffer;
-use super::map_bytes;
 use super::record_compute_pass;
 use super::storage_buffer;
 
@@ -156,41 +154,9 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
     record_compute_pass(&mut encoder, &pipeline, &bind_group, [1, 1, 1]);
     queue.submit([encoder.finish()]);
 
-    let float_bits = readback_words(&device, &queue, &float_output, float_bytes);
+    let float_bits = super::read_words(&device, &queue, &float_output, float_bytes);
     let expected_bits = FLOAT_EXPECTED.map(f32::to_bits);
     assert_eq!(float_bits.as_slice(), expected_bits.as_slice());
-    let comparisons = readback_words(&device, &queue, &comparison_output, comparison_bytes);
+    let comparisons = super::read_words(&device, &queue, &comparison_output, comparison_bytes);
     assert_eq!(comparisons.as_slice(), COMPARISON_EXPECTED.as_slice());
-}
-
-fn readback_words(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    size: u64,
-) -> Vec<u32> {
-    readback(device, queue, buffer, size)
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
-        .collect()
-}
-
-fn readback(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    size: u64,
-) -> Vec<u8> {
-    let staging = gpu_buffer(
-        device,
-        "wasm2gpu scalar-float readback",
-        size,
-        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-    );
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("wasm2gpu scalar-float readback"),
-    });
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
-    queue.submit([encoder.finish()]);
-    map_bytes(device, &staging)
 }

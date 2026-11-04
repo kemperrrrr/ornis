@@ -4,8 +4,6 @@
 //! Wasm avoids rustc's stack-pointer globals so this test isolates import ABI
 //! lowering and GPU execution.
 
-use super::gpu_buffer;
-use super::map_bytes;
 use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
 use ornis_wasm2gpu_testkit::record_compute_pass;
@@ -45,7 +43,6 @@ const TEXTURE_HEIGHT: u32 = 1;
 const TEXTURE_LAYERS: u32 = 1;
 const TEXTURE_MIP_LEVELS: u32 = 1;
 const TEXTURE_SAMPLE_COUNT: u32 = 1;
-const GPU_WORD_BYTES: usize = 4;
 
 fn wasm() -> Vec<u8> {
     wat::parse_str(format!(
@@ -180,9 +177,9 @@ fn dispatch(
     record_compute_pass(&mut encoder, &pipeline, &bind_group, DISPATCH_GROUPS);
     queue.submit([encoder.finish()]);
     (
-        read_words(device, queue, &floats, FLOAT_OUTPUT_BYTES),
-        read_words(device, queue, &workgroup, U32_OUTPUT_BYTES),
-        read_words(device, queue, &atomic, ATOMIC_OUTPUT_BYTES),
+        super::read_words(device, queue, &floats, FLOAT_OUTPUT_BYTES),
+        super::read_words(device, queue, &workgroup, U32_OUTPUT_BYTES),
+        super::read_words(device, queue, &atomic, ATOMIC_OUTPUT_BYTES),
     )
 }
 
@@ -240,37 +237,4 @@ fn bind_probe(
         ],
     });
     (bind_group, texture, view, sampler)
-}
-
-fn read_words(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    size: u64,
-) -> Vec<u32> {
-    let staging = gpu_buffer(
-        device,
-        "wasm2gpu compute ABI readback",
-        size,
-        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-    );
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("wasm2gpu compute ABI readback"),
-    });
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
-    queue.submit([encoder.finish()]);
-    let bytes = map_bytes(device, &staging);
-    let mut words = Vec::with_capacity(bytes.len() / GPU_WORD_BYTES);
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let end = offset + GPU_WORD_BYTES;
-        let word = u32::from_le_bytes(
-            bytes[offset..end]
-                .try_into()
-                .expect("four-byte word"),
-        );
-        words.push(word);
-        offset = end;
-    }
-    words
 }
