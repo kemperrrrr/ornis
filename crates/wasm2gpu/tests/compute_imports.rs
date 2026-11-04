@@ -1,8 +1,8 @@
 //! Translator snapshots for vector math and compute synchronization imports.
 
 use ornis_gpu_abi::symbols;
-use ornis_wasm2gpu::translate;
 use ornis_wasm2gpu::TranslateError;
+use ornis_wasm2gpu::translate;
 
 mod common;
 

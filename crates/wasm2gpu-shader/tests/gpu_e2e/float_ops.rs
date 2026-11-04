@@ -114,7 +114,7 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
     // Check the Wasm-defined NaN and signed-zero min/max results on the GPU,
     // alongside the finite scalar operators.
     let translated = translate(&wasm()).unwrap_or_else(|error| {
-        println!("::error title=float-ops-translate::{error:?}");
+        eprintln!("error: scalar float translation failed: {error:?}");
         panic!("translate scalar float operators: {error:?}");
     });
     let Some((device, queue)) = device() else {

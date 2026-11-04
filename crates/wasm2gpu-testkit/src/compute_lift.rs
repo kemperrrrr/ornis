@@ -218,7 +218,7 @@ fn wrap(module: &Read) -> String {
         }
         let func = &module.bodies[index as usize];
         let (locals, ops) = func.body.as_ref().unwrap_or_else(|op| {
-            println!("::error title=compute-lift-unsupported-op::{}: {op}", module.export);
+            eprintln!("error: {} reaches an unsupported wasm op: {op}", module.export);
             panic!("compute reaches an op the lifter will not keep: {op}");
         });
         let export = if wasm_index == module.compute {
@@ -338,12 +338,8 @@ fn import_sig(name: &str) -> &'static str {
         symbols::WORKGROUP_ATOMIC_ADD_U32 => "(param i32 i32) (result i32)",
         symbols::WORKGROUP_BARRIER | symbols::STORAGE_BARRIER => "",
         symbols::TEXTURE_LOAD_2D => "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
-        symbols::TEXTURE_SAMPLE_2D => {
-            "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)"
-        }
-        symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => {
-            "(param i32 i32) (result i32)"
-        }
+        symbols::TEXTURE_SAMPLE_2D => "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)",
+        symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => "(param i32 i32) (result i32)",
         symbols::MATH_DOT3 => "(param f32 f32 f32 f32 f32 f32) (result f32)",
         symbols::MATH_CROSS3 => {
             "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)"

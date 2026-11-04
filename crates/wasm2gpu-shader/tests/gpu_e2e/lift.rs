@@ -163,15 +163,11 @@ fn import_sig(name: &str) -> &'static str {
         symbols::WORKGROUP_ATOMIC_ADD_U32 => "(param i32 i32) (result i32)",
         symbols::WORKGROUP_BARRIER | symbols::STORAGE_BARRIER => "",
         symbols::TEXTURE_LOAD_2D => "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
-        symbols::TEXTURE_SAMPLE_2D => {
-            "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)"
-        }
+        symbols::TEXTURE_SAMPLE_2D => "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)",
         symbols::TEXTURE_SAMPLE_2D_LOD => {
             "(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)"
         }
-        symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => {
-            "(param i32 i32) (result i32)"
-        }
+        symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => "(param i32 i32) (result i32)",
         symbols::MATH_DOT3 => "(param f32 f32 f32 f32 f32 f32) (result f32)",
         symbols::MATH_CROSS3 => {
             "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)"
