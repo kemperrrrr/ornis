@@ -170,37 +170,16 @@ fn input_texture(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
+    write_texture_mip(
+        queue,
+        &texture,
+        0,
         &[255, 0, 0, 255, 0, 255, 0, 255],
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(8),
-            rows_per_image: Some(1),
-        },
         size,
+        8,
     );
     // A distinct second mip makes an LOD-1 selection observable in readback.
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 1,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &EXPECTED_BLUE,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4),
-            rows_per_image: Some(1),
-        },
-        INPUT_MIP_SIZE,
-    );
+    write_texture_mip(queue, &texture, 1, &EXPECTED_BLUE, INPUT_MIP_SIZE, 4);
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("known texture-fetch sampler"),
@@ -217,6 +196,31 @@ fn input_texture(
         border_color: None,
     });
     (texture, view, sampler)
+}
+
+fn write_texture_mip(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    mip_level: u32,
+    data: &[u8],
+    size: wgpu::Extent3d,
+    bytes_per_row: u32,
+) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(1),
+        },
+        size,
+    );
 }
 
 fn texture_bind_group(
