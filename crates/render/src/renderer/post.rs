@@ -6,6 +6,9 @@ use crate::auto_exposure::{ExposureFrame, ExposureMode};
 pub struct CompositePass {
     /// Full-screen triangle-strip pipeline targeting the surface format.
     pipeline: wgpu::RenderPipeline,
+    /// Same pipeline with a Depth32Float attachment state, for the
+    /// composite+outline pass (the shader itself does not sample depth).
+    pipeline_depth: wgpu::RenderPipeline,
     /// Bindings: two HDR layers, sampler, bloom view, params buffer.
     bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -27,6 +30,24 @@ pub struct CompositeInputs<'a> {
     pub bloom_intensity: f32,
     /// Layer mix selector in the shader: 0 = deferred-only, 1 = forward-only, 2 = hybrid.
     pub mode: u32,
+}
+
+/// Composite color attachment: the fullscreen mix clears the target first.
+fn composite_color(target: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view: target,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            store: wgpu::StoreOp::Store,
+        },
+    }
 }
 
 /// Inputs of the opt-in distance-fog pass: the deferred HDR layer plus the
@@ -171,46 +192,62 @@ impl Renderer3D {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("composite pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vs_module,
-                entry_point: Some(shaders::hdr_composite_generated::vs_main::entry_point()),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &fs_module,
-                entry_point: Some(shaders::hdr_composite_generated::fs_main::entry_point()),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+        let create = |label: &'static str, depth_stencil: Option<wgpu::DepthStencilState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vs_module,
+                    entry_point: Some(shaders::hdr_composite_generated::vs_main::entry_point()),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &fs_module,
+                    entry_point: Some(shaders::hdr_composite_generated::fs_main::entry_point()),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = create("composite pipeline", None);
+        // The composite shader ignores depth; the state only makes the
+        // pipeline compatible with the composite+outline pass attachment.
+        let pipeline_depth = create(
+            "composite pipeline (outline depth)",
+            Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        );
 
         CompositePass {
             pipeline,
+            pipeline_depth,
             bind_group_layout,
         }
     }
@@ -468,11 +505,75 @@ impl Renderer3D {
         inputs: CompositeInputs<'_>,
         dt_seconds: f32,
     ) {
+        let bind_group = self.prepare_composite(device, queue, encoder, &inputs, dt_seconds);
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("composite pass"),
+            color_attachments: &[Some(composite_color(inputs.target))],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.draw_composite(&mut rpass, &bind_group, false);
+    }
+
+    /// Composite plus the editor outline overlay in one render pass: the
+    /// fullscreen mix draws first, the compact selected hulls draw over it
+    /// against the existing depth. Sharing the pass avoids a second
+    /// full-target load/store on tile-based GPUs.
+    pub(crate) fn render_composite_with_outline(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        inputs: CompositeInputs<'_>,
+        dt_seconds: f32,
+        outline: super::outline::OutlineCompositeInputs<'_>,
+    ) {
+        let bind_group = self.prepare_composite(device, queue, encoder, &inputs, dt_seconds);
+        self.with_outline(
+            device,
+            queue,
+            outline.flags,
+            outline.instance_count,
+            outline.format,
+            outline.sample_count,
+            |prepared| {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("composite + outline pass"),
+                    color_attachments: &[Some(composite_color(inputs.target))],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: outline.depth,
+                        depth_ops: Some(super::outline::outline_depth_ops()),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                self.draw_composite(&mut rpass, &bind_group, true);
+                if let Some(prepared) = prepared {
+                    prepared.record(&mut rpass, outline.mesh);
+                }
+            },
+        );
+    }
+
+    /// Exposure + bloom params + composite bind group (shared by both
+    /// composite entry points).
+    fn prepare_composite(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        inputs: &CompositeInputs<'_>,
+        dt_seconds: f32,
+    ) -> wgpu::BindGroup {
         // Auto-exposure runs before the composite samples: manual mode writes
         // the constant multiplier, auto mode builds the histogram of the lit
         // HDR target and adapts the exposure — both into the same uniform the
         // fragment stage reads at binding 5.
-        self.apply_exposure(device, queue, encoder, &inputs, dt_seconds);
+        self.apply_exposure(device, queue, encoder, inputs, dt_seconds);
         // The bloom view is bound unconditionally; a zero intensity makes the
         // contribution null, so the legacy path (`render_scene`) stays
         // pixel-identical to the plan path with bloom culled.
@@ -486,7 +587,7 @@ impl Renderer3D {
                 _pad: 0.0,
             }),
         );
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("composite bind group"),
             layout: &self.composite_pass.bind_group_layout,
             // Binding numbers come from the table; only the name → live
@@ -512,33 +613,25 @@ impl Renderer3D {
                 },
             )
             .unwrap_or_default(),
-        });
+        })
+    }
 
-        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("composite pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: inputs.target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        rpass.set_pipeline(&self.composite_pass.pipeline);
-        rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
+    /// Bind and draw the fullscreen composite. `with_depth` picks the
+    /// pipeline variant compatible with the composite+outline pass.
+    fn draw_composite(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        bind_group: &wgpu::BindGroup,
+        with_depth: bool,
+    ) {
+        let pipeline = if with_depth {
+            &self.composite_pass.pipeline_depth
+        } else {
+            &self.composite_pass.pipeline
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..FULLSCREEN_QUAD_VERTS, 0..1);
     }
 
     /// Record the opt-in distance-fog mix: `hdr` through the fog blend into

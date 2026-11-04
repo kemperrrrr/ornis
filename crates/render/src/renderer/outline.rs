@@ -204,51 +204,74 @@ fn outline_flags_for(flags: &[u32], instance_count: u32) -> Cow<'_, [u32]> {
     Cow::Owned(padded)
 }
 
-/// Inputs of one [`Renderer3D::render_outline`] call.
-pub(crate) struct OutlineInputs<'a> {
-    /// Presented layer to overlay (`ldr_layer` before AA, `target` without).
-    pub output: &'a wgpu::TextureView,
+/// Inputs the composite pass hands to the outline overlay.
+pub(crate) struct OutlineCompositeInputs<'a> {
     /// G-buffer depth the hull is tested against.
     pub depth: &'a wgpu::TextureView,
     /// Shared mesh batch drawn for every instance.
     pub mesh: &'a Mesh,
     /// Number of uploaded instances (flags are indexed by this order).
     pub instance_count: u32,
-    /// Format of `output`.
+    /// Format of the composited layer.
     pub format: wgpu::TextureFormat,
-    /// Sample count of `output` and `depth`.
+    /// Sample count of the composited layer and depth.
     pub sample_count: u32,
     /// One flag per instance (`0` none, `1` hover, `2` selected).
     pub flags: &'a [u32],
 }
 
+/// A ready outline draw inside the caller's (composite) render pass.
+pub(crate) struct PreparedOutline<'a> {
+    pipeline: &'a wgpu::RenderPipeline,
+    bind_group: &'a wgpu::BindGroup,
+    instances: u32,
+}
+
+impl PreparedOutline<'_> {
+    /// Binds and draws the compact outlined instances.
+    pub(crate) fn record(&self, pass: &mut wgpu::RenderPass<'_>, mesh: &Mesh) {
+        pass.set_pipeline(self.pipeline);
+        pass.set_bind_group(0, self.bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.num_indices, 0, 0..self.instances);
+    }
+}
+
+/// Depth attachment operations of the outline overlay.
+///
+/// `Store`, never `Discard`: the plan declares `Read<Depth>`, and later
+/// passes (TAA) still read the buffer after the composite/outline pass.
+pub(crate) fn outline_depth_ops() -> wgpu::Operations<f32> {
+    wgpu::Operations {
+        load: wgpu::LoadOp::Load,
+        store: wgpu::StoreOp::Store,
+    }
+}
+
 impl Renderer3D {
-    /// Records the editor outline pass over `inputs.output`.
+    /// Prepares the compact outline state and hands it to `f`, which records
+    /// it into its own render pass (the composite pass). `f(None)` means no
+    /// instance is flagged, so the caller records no outline commands.
     ///
-    /// No-op when no instance is flagged (and when `instance_count` is
-    /// zero), so an idle viewport records no outline commands. The compact
-    /// index list is rebuilt every call (editor-sized), while the pipeline
-    /// and bind group are cached until the attachment key or a buffer
-    /// changes.
-    // qual:allow(iosp) reason: "one frame submission: compact the flags, cache pipeline/bind state and record the draw"
-    pub(crate) fn render_outline(
+    /// The pipeline and bind group are cached until the attachment key or a
+    /// buffer changes; the compact index list is rebuilt per call (editor
+    /// selection is small).
+    // qual:allow(iosp) reason: "one frame submission: compact the flags, cache pipeline/bind state and hand the draw to the composite pass"
+    // qual:allow(srp, max_parameters=7) reason: "one prepared frame: attachment key, flags and the drawing callback"
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_outline<R>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        inputs: OutlineInputs<'_>,
-    ) {
-        let OutlineInputs {
-            output,
-            depth,
-            mesh,
-            instance_count,
-            format,
-            sample_count,
-            flags,
-        } = inputs;
+        flags: &[u32],
+        instance_count: u32,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        f: impl FnOnce(Option<PreparedOutline<'_>>) -> R,
+    ) -> R {
         if flags.is_empty() || instance_count == 0 {
-            return;
+            return f(None);
         }
         let effective = outline_flags_for(flags, instance_count);
         let mut outline = self.outline.lock().unwrap_or_else(|poisoned| {
@@ -262,7 +285,7 @@ impl Renderer3D {
             *outline = Some(OutlineGpu::create(device, format, sample_count));
         }
         let Some(gpu) = outline.as_mut() else {
-            return;
+            return f(None);
         };
         gpu.indices_cpu.clear();
         gpu.flags_cpu.clear();
@@ -273,7 +296,7 @@ impl Renderer3D {
             }
         }
         if gpu.indices_cpu.is_empty() {
-            return;
+            return f(None);
         }
         gpu.ensure_capacity(device, gpu.indices_cpu.len());
         queue.write_buffer(&gpu.indices, 0, bytemuck::cast_slice(&gpu.indices_cpu));
@@ -288,65 +311,74 @@ impl Renderer3D {
         }
         drop(per_objects);
         let Some(bind_group) = gpu.bind_group.as_ref() else {
-            return;
+            return f(None);
         };
-        record_outline_pass(
-            encoder,
-            OutlineDraw {
-                output,
-                depth,
-                pipeline: &gpu.pipeline,
-                bind_group,
-                mesh,
-                instances: gpu.indices_cpu.len() as u32,
-            },
-        );
+        f(Some(PreparedOutline {
+            pipeline: &gpu.pipeline,
+            bind_group,
+            instances: gpu.indices_cpu.len() as u32,
+        }))
     }
 }
 
-/// One outline draw call: the composited output, the depth it tests
-/// against, the cached pipeline/bind group and the compact instance count.
-struct OutlineDraw<'a> {
-    output: &'a wgpu::TextureView,
-    depth: &'a wgpu::TextureView,
-    pipeline: &'a wgpu::RenderPipeline,
-    bind_group: &'a wgpu::BindGroup,
-    mesh: &'a Mesh,
-    instances: u32,
-}
-
-/// Records the outline render pass; no decisions, just the draw.
-fn record_outline_pass(encoder: &mut wgpu::CommandEncoder, draw: OutlineDraw<'_>) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("outline pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: draw.output,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
+/// Standalone outline pass used by the device tests. Production draws the
+/// overlay inside the composite pass.
+#[cfg(test)]
+impl Renderer3D {
+    #[allow(clippy::too_many_arguments)]
+    // qual:allow(srp, max_parameters=10) reason: "device-test helper mirrors the old standalone pass signature"
+    pub(crate) fn render_outline_for_test(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        mesh: &Mesh,
+        instance_count: u32,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        flags: &[u32],
+    ) {
+        self.with_outline(
+            device,
+            queue,
+            flags,
+            instance_count,
+            format,
+            sample_count,
+            |prepared| {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("outline test pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: output,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            // The plan declares `Read<Depth>` and later
+                            // passes (TAA) still read it.
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                if let Some(prepared) = prepared {
+                    prepared.record(&mut pass, mesh);
+                }
             },
-        })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: draw.depth,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                // The plan declares `Read<Depth>` and later passes (TAA)
-                // still read it; never discard the content here.
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        }),
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
-    pass.set_pipeline(draw.pipeline);
-    pass.set_bind_group(0, draw.bind_group, &[]);
-    pass.set_vertex_buffer(0, draw.mesh.vertex_buffer.slice(..));
-    pass.set_index_buffer(draw.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-    pass.draw_indexed(0..draw.mesh.num_indices, 0, 0..draw.instances);
+        );
+    }
 }
 
 #[cfg(test)]
@@ -475,7 +507,6 @@ mod tests {
 
     /// Flagged instances draw; all-zero/empty flags record no draw at all.
     /// Skips without an adapter.
-    // qual:allow(complexity, max_function_lines=121) reason: "one device setup covers draw, zero-flag no-op and format-change recreation"
     #[test]
     fn outline_pass_draws_selected_and_skips_zero_flags() {
         let Some((device, queue)) = try_device() else {
@@ -509,20 +540,18 @@ mod tests {
             label: Some("outline test selected"),
         });
         clear_targets(&mut encoder, &color_view, &depth_view);
-        renderer.render_outline(
+        renderer.render_outline_for_test(
             &device,
             &queue,
             &mut encoder,
-            OutlineInputs {
-                output: &color_view,
-                depth: &depth_view,
-                mesh: &mesh,
-                instance_count: 2,
-                format: FORMAT,
-                sample_count: 1,
-                // Two compact entries grow the buffers (capacity 1 → 2).
-                flags: &[1, 2],
-            },
+            &color_view,
+            &depth_view,
+            &mesh,
+            2,
+            FORMAT,
+            1,
+            // Two compact entries grow the buffers (capacity 1 → 2).
+            &[1, 2],
         );
         queue.submit(std::iter::once(encoder.finish()));
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
@@ -544,19 +573,17 @@ mod tests {
             label: Some("outline test zero flags"),
         });
         clear_targets(&mut encoder, &color_view, &depth_view);
-        renderer.render_outline(
+        renderer.render_outline_for_test(
             &device,
             &queue,
             &mut encoder,
-            OutlineInputs {
-                output: &color_view,
-                depth: &depth_view,
-                mesh: &mesh,
-                instance_count: 2,
-                format: FORMAT,
-                sample_count: 1,
-                flags: &[0, 0],
-            },
+            &color_view,
+            &depth_view,
+            &mesh,
+            2,
+            FORMAT,
+            1,
+            &[0, 0],
         );
         queue.submit(std::iter::once(encoder.finish()));
         let empty = readback_rgba8(&device, &queue, &color, 8, 8);
@@ -571,19 +598,17 @@ mod tests {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("outline test format change"),
         });
-        renderer.render_outline(
+        renderer.render_outline_for_test(
             &device,
             &queue,
             &mut encoder,
-            OutlineInputs {
-                output: &unorm_view,
-                depth: &depth_view,
-                mesh: &mesh,
-                instance_count: 2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                sample_count: 1,
-                flags: &[2, 0],
-            },
+            &unorm_view,
+            &depth_view,
+            &mesh,
+            2,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            &[2, 0],
         );
         queue.submit(std::iter::once(encoder.finish()));
         let changed = readback_rgba8(&device, &queue, &unorm, 8, 8);
@@ -596,6 +621,112 @@ mod tests {
         assert!(
             validation.is_none(),
             "outline format change must not raise validation errors: {validation:?}"
+        );
+    }
+
+    /// The depth attachment must survive the overlay: the plan declares
+    /// `Read<Depth>` and TAA (when wired) reads it afterwards.
+    #[test]
+    fn outline_depth_is_stored_for_later_passes() {
+        assert!(matches!(outline_depth_ops().store, wgpu::StoreOp::Store));
+    }
+
+    /// RGB of one texel in an RGBA8 readback.
+    fn rgb_at(pixels: &[u8], size: u32, x: u32, y: u32) -> [u8; 3] {
+        let index = ((y * size + x) * 4) as usize;
+        [pixels[index], pixels[index + 1], pixels[index + 2]]
+    }
+
+    /// The ring exists only outside the object's silhouette: with the
+    /// object's own depth present, the centre stays untouched while a texel
+    /// between the object and the expanded hull is painted. Skips without
+    /// an adapter.
+    #[test]
+    fn outline_draws_only_outside_the_object_silhouette() {
+        let Some((device, queue)) = try_device() else {
+            eprintln!("SKIPPED (outline silhouette): no wgpu adapter");
+            return;
+        };
+        const SIZE: u32 = 128;
+        const CENTER: u32 = SIZE / 2;
+        // Camera at z=3 with a unit sphere: object radius ≈39.2 px, the 5%
+        // hull ≈41.5 px, so x = center + 40 sits in the ring.
+        const RING_OFFSET: u32 = 40;
+        let renderer = Renderer3D::new(&device, &surface_config(), 1);
+        let view = crate::camera::CameraView {
+            eye: Vec3::new(0.0, 0.0, 3.0),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            projection: ornis_assets::scene::CameraProjection::Perspective,
+            fov: FOV,
+            near: NEAR,
+            far: FAR,
+        };
+        let (view_proj, eye) = crate::camera::camera_view_projection(&view, (SIZE, SIZE));
+        renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), eye.to_array());
+        renderer.upload_instances(
+            &device,
+            &queue,
+            &[InstanceData {
+                model_matrix: Mat4::IDENTITY,
+                normal_matrix: Mat4::IDENTITY,
+                material_index: MaterialIdx::from_raw(0),
+            }],
+        );
+        let mesh = crate::create_sphere(&device, 1.0, 16, 12);
+        let (_albedo, albedo_view) =
+            target_with_format(&device, SIZE, wgpu::TextureFormat::Rgba8Unorm);
+        let (_normal, normal_view) =
+            target_with_format(&device, SIZE, wgpu::TextureFormat::Rg16Float);
+        let (_material_id, material_id_view) =
+            target_with_format(&device, SIZE, wgpu::TextureFormat::R16Uint);
+        let (_world_pos, world_pos_view) =
+            target_with_format(&device, SIZE, wgpu::TextureFormat::Rg16Float);
+        let (_material_params, material_params_view) =
+            target_with_format(&device, SIZE, wgpu::TextureFormat::Rgba16Float);
+        let (_depth, depth_view) = depth_target(&device, SIZE);
+        let targets = crate::renderer::GbufferTargets {
+            albedo: &albedo_view,
+            normal: &normal_view,
+            material_id: &material_id_view,
+            world_position: &world_pos_view,
+            material_params: &material_params_view,
+            depth: &depth_view,
+            motion: None,
+            previous_depth: None,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("outline silhouette gbuffer"),
+        });
+        renderer.render_gbuffer(&device, &mut encoder, &targets, &mesh, 1);
+        queue.submit(std::iter::once(encoder.finish()));
+        let (color, color_view) = offscreen_target(&device, SIZE, SIZE);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("outline silhouette overlay"),
+        });
+        renderer.render_outline_for_test(
+            &device,
+            &queue,
+            &mut encoder,
+            &color_view,
+            &depth_view,
+            &mesh,
+            1,
+            FORMAT,
+            1,
+            &[2],
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        let pixels = readback_rgba8(&device, &queue, &color, SIZE, SIZE);
+        assert_eq!(
+            rgb_at(&pixels, SIZE, CENTER, CENTER),
+            [0, 0, 0],
+            "the object's own depth must occlude the hull centre"
+        );
+        assert_ne!(
+            rgb_at(&pixels, SIZE, CENTER + RING_OFFSET, CENTER),
+            [0, 0, 0],
+            "the hull ring outside the silhouette must be painted"
         );
     }
 }
