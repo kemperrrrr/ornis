@@ -31,6 +31,25 @@ where
     });
 }
 
+pub(super) fn compact_scene_report(
+    scene: &Scene,
+    production: &[Sample],
+    compact: &[Sample],
+    source_view_bytes: usize,
+) -> String {
+    format!(
+        "{}\tn={}\tvisible={}\tsource_views=2\tsource_bytes={}\n  production\t{}\n  compact\t{}\n  gpu compact/prod {}  wall compact/prod {}",
+        kind_name(scene.kind),
+        scene.spheres.len(),
+        visible_ids(scene).len(),
+        source_view_bytes,
+        clock_line(production, scene.spheres.len()),
+        clock_line(compact, scene.spheres.len()),
+        clock_ratio(compact, production),
+        wall_ratio(compact, production),
+    )
+}
+
 pub(super) fn scene_report(
     scene: &Scene,
     prod: &[Sample],
@@ -79,6 +98,10 @@ fn clock_ratio(left: &[Sample], right: &[Sample]) -> String {
         (Some(lhs), Some(rhs)) => ratio_text(summarize(&lhs).median, summarize(&rhs).median),
         _ => "n/a".to_string(),
     }
+}
+
+fn wall_ratio(left: &[Sample], right: &[Sample]) -> String {
+    ratio_text(summarize(&walls(left)).median, summarize(&walls(right)).median)
 }
 
 fn ratio_text(left: f64, right: f64) -> String {

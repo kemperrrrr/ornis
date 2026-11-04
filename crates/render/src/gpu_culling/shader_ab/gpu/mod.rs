@@ -1,4 +1,5 @@
-//! GPU timings for issue #201. The bench binary calls [`run_cull_ab`].
+//! GPU timings for the flag kernel (issue #201) and compaction candidate (issue #243).
+//! The bench binary calls [`run_cull_ab`].
 //!
 //! Each sample is one compute dispatch, bracketed by timestamp queries
 //! when the device has them. Host wall time is the submit plus the
@@ -13,6 +14,7 @@ use super::ir::IrStats;
 use super::ir::ir_stats;
 
 mod clock;
+mod compact;
 mod dispatch;
 mod pass;
 mod pipeline;
@@ -25,11 +27,16 @@ mod upload;
 /// The guest wasm build is inside this call. The bench prints the returned
 /// text; this function does not write to stdout.
 pub fn run_cull_ab() -> String {
-    let lowered = load_lowered();
-    let mut report = static_report(&lowered);
+    let build_started = Instant::now();
+    let wasm = ornis_wasm2gpu_testkit::compile_wasm();
+    let guest_build = build_started.elapsed();
+    let lowered = load_lowered(&wasm);
+    let compact = load_compact(&wasm);
+    let mut report = static_report(&lowered, &compact, guest_build);
     if let Some(session) = pass::open() {
         report.push('\n');
         report.push_str(&pass::time_scenes(&session, &lowered.wgsl));
+        report.push_str(&compact::time_scenes(&session, &compact.wgsl));
     }
     report
 }
@@ -40,10 +47,14 @@ struct Lowered {
     saved: String,
 }
 
-fn load_lowered() -> Lowered {
+fn load_lowered(wasm: &[u8]) -> Lowered {
     let started = Instant::now();
-    let wgsl = ornis_wasm2gpu_testkit::cull::lowered_kernel();
-    let saved = remember_lowered(&wgsl);
+    let wgsl = ornis_wasm2gpu_testkit::compute_lift::lowered_kernel_from(
+        wasm,
+        "cull",
+        "storage_0_2_",
+    );
+    let saved = remember_lowered(&wgsl, "ornis-issue-201-cull.wgsl");
     Lowered {
         wgsl,
         elapsed: started.elapsed(),
@@ -51,8 +62,23 @@ fn load_lowered() -> Lowered {
     }
 }
 
-fn remember_lowered(wgsl: &str) -> String {
-    let path = std::env::temp_dir().join("ornis-issue-201-cull.wgsl");
+fn load_compact(wasm: &[u8]) -> Lowered {
+    let started = Instant::now();
+    let wgsl = ornis_wasm2gpu_testkit::compute_lift::lowered_kernel_from(
+        wasm,
+        "cull_compact",
+        "storage_0_2_",
+    );
+    let saved = remember_lowered(&wgsl, "ornis-issue-243-cull-compact.wgsl");
+    Lowered {
+        wgsl,
+        elapsed: started.elapsed(),
+        saved,
+    }
+}
+
+fn remember_lowered(wgsl: &str, filename: &str) -> String {
+    let path = std::env::temp_dir().join(filename);
     match std::fs::write(&path, wgsl) {
         Ok(()) => format!("lowered_wgsl_path: {}", path.display()),
         Err(err) => {
@@ -62,25 +88,37 @@ fn remember_lowered(wgsl: &str) -> String {
     }
 }
 
-fn static_report(lowered: &Lowered) -> String {
+fn static_report(lowered: &Lowered, compact: &Lowered, guest_build: Duration) -> String {
     let production = ir_stats(CULL_COMPUTE_WGSL);
     let wasm = ir_stats(&lowered.wgsl);
+    let compact_stats = ir_stats(&compact.wgsl);
     let twin = ir_stats(pipeline::TWIN_WGSL);
     format!(
-        "wasm2gpu cull A/B (issue #201)\n\
-         {saved}\n\
-         guest build + lift: {elapsed:?} (warm nested cargo of the guest plus the lift, not a cold translate)\n\
+        "wasm2gpu cull A/B (issues #201 and #243)\n\
+         guest wasm build: {guest_build:?}\n\
+         flag lifted WGSL: {saved} ({elapsed:?})\n\
+         compact lifted WGSL: {compact_saved} ({compact_elapsed:?})\n\
          IR rows count the compute entry and helper functions. Vertex and fragment stubs the translator requires are left out of those rows. spirv is the whole module.\n\
          {table}\
-         {notes}",
+         {notes}\n\
+         compact bytes/prod {compact_bytes:.2}  stmts/prod {compact_stmts:.2}  exprs/prod {compact_exprs:.2}  alu/prod {compact_alu:.2}  spirv/prod {compact_spirv}",
         saved = lowered.saved,
         elapsed = lowered.elapsed,
+        compact_saved = compact.saved,
+        compact_elapsed = compact.elapsed,
+        guest_build,
         table = ir_table(&[
             ("production", &production),
-            ("wasm2gpu", &wasm),
+            ("wasm2gpu_flag", &wasm),
+            ("wasm2gpu_compact", &compact_stats),
             ("hand_twin", &twin),
         ]),
         notes = ir_notes(&production, &wasm, &twin),
+        compact_bytes = ratio(compact_stats.bytes as f64, production.bytes as f64),
+        compact_stmts = ratio(compact_stats.statements as f64, production.statements as f64),
+        compact_exprs = ratio(compact_stats.expressions as f64, production.expressions as f64),
+        compact_alu = ratio(compact_stats.alu as f64, production.alu as f64),
+        compact_spirv = opt_ratio(compact_stats.spirv_ops, production.spirv_ops),
     )
 }
 

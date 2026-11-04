@@ -112,7 +112,12 @@ fn upload(
     buffer
 }
 
-fn make(session: &Session, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+pub(super) fn make(
+    session: &Session,
+    label: &str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     session.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
@@ -153,7 +158,7 @@ fn bind4(
         })
 }
 
-fn resource(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+pub(super) fn resource(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
