@@ -1,4 +1,4 @@
-// qual:allow(srp, max_independent_clusters=3) reason: "The benchmark separates pipeline setup, dispatch verification, and compaction-specific buffer packing; keep this focused A/B harness together."
+// qual:allow(srp, max_independent_clusters=4) reason: "The benchmark separates pipeline setup, dispatch verification, buffer packing, and readback; keep this focused A/B harness together."
 //! Timings for cull_compact against production WGSL. The duplicated float/word
 //! source views are part of measured shader traffic.
 
