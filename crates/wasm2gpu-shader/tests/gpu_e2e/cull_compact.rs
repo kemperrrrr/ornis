@@ -9,8 +9,13 @@ use ornis_wasm2gpu_testkit::symbols;
 
 const RECORD_WORDS: usize = 52;
 const RECORD_BYTES: usize = RECORD_WORDS * std::mem::size_of::<u32>();
+const U32_BYTES: usize = std::mem::size_of::<u32>();
 const MATERIAL_WORD: usize = 48;
 const MOTION_VALID_WORD: usize = 49;
+const MATERIAL_BASE: u32 = 10;
+const MATERIAL_NEXT: u32 = 11;
+const MATERIAL_LAST_VISIBLE: u32 = 12;
+const MATERIAL_INACTIVE: u32 = 13;
 const ACTIVE_COUNT: u32 = 3;
 const INDEX_COUNT: u32 = 36;
 const SOURCE_COUNT: usize = 4;
@@ -19,6 +24,27 @@ const LANES: usize = 4;
 const UNIFORM_LANE_BYTES: usize = 16;
 const PLANES_BYTES: usize = PLANES * LANES * UNIFORM_LANE_BYTES;
 const ARGS_WORDS: usize = 5;
+const MODEL_X_AXIS_WORD: usize = 0;
+const MODEL_Y_AXIS_WORD: usize = 5;
+const MODEL_Z_AXIS_WORD: usize = 10;
+const MODEL_CENTER_X_WORD: usize = 12;
+const MODEL_CENTER_W_WORD: usize = 15;
+const NORMAL_MATRIX_START_WORD: usize = 16;
+const EXTRA_PAD_0_WORD: usize = 50;
+const EXTRA_PAD_1_WORD: usize = 51;
+const VISIBLE_CENTER_NEAR: f32 = 0.5;
+const VISIBLE_CENTER_FAR: f32 = 2.0;
+const CULLED_CENTER: f32 = -1.0;
+const VISIBLE_RADIUS: f32 = 0.25;
+const FAR_VISIBLE_RADIUS: f32 = 0.1;
+const OPEN_PLANE_DISTANCE: f32 = 100.0;
+
+struct CullCompactGpu {
+    pipeline: wgpu::ComputePipeline,
+    bind_group: wgpu::BindGroup,
+    destination: wgpu::Buffer,
+    args: wgpu::Buffer,
+}
 
 #[test]
 fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
@@ -31,15 +57,33 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
         return;
     };
 
-    let workgroup_size = symbols::CS_WORKGROUP[0] as usize;
-    let records = [
-        object_record(10, 1, 0.5, 0.25),
-        object_record(11, 0, -1.0, 0.25),
-        object_record(12, 1, 2.0, 0.1),
-        object_record(13, 0, 0.0, 0.25),
-    ];
+    let records = test_records();
+    let gpu = create_gpu_case(&device, &queue, &records);
+    let bytes = dispatch_and_readback(&device, &queue, &gpu);
+    assert_compacted_output(&bytes, &records);
+}
+
+fn test_records() -> [[u32; RECORD_WORDS]; SOURCE_COUNT] {
+    [
+        object_record(MATERIAL_BASE, 1, VISIBLE_CENTER_NEAR, VISIBLE_RADIUS),
+        object_record(MATERIAL_NEXT, 0, CULLED_CENTER, VISIBLE_RADIUS),
+        object_record(
+            MATERIAL_LAST_VISIBLE,
+            1,
+            VISIBLE_CENTER_FAR,
+            FAR_VISIBLE_RADIUS,
+        ),
+        object_record(MATERIAL_INACTIVE, 0, 0.0, VISIBLE_RADIUS),
+    ]
+}
+
+fn create_gpu_case(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    records: &[[u32; RECORD_WORDS]; SOURCE_COUNT],
+) -> CullCompactGpu {
     let source = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact source floats",
         (SOURCE_COUNT * RECORD_BYTES) as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
@@ -48,57 +92,38 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
     // the u32 copy view separate from the f32 culling view to avoid binding
     // the same writable buffer range twice.
     let source_words = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact source words",
         (SOURCE_COUNT * RECORD_BYTES) as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     );
     let destination = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact destination",
         (SOURCE_COUNT * RECORD_BYTES) as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     );
     let args = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact args",
-        (ARGS_WORDS * std::mem::size_of::<u32>()) as u64,
+        (ARGS_WORDS * U32_BYTES) as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     );
     let planes = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact planes",
         PLANES_BYTES as u64,
         wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     );
     let count = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact count",
-        std::mem::size_of::<u32>() as u64,
+        U32_BYTES as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     );
-    let source_record_words = records
-        .iter()
-        .flat_map(|record| record.iter().copied())
-        .collect::<Vec<_>>();
-    let source_bytes = words_to_bytes(&source_record_words);
-    queue.write_buffer(&source, 0, &source_bytes);
-    queue.write_buffer(&source_words, 0, &source_bytes);
-    queue.write_buffer(&args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
-    queue.write_buffer(&planes, 0, &packed_planes());
-    queue.write_buffer(&count, 0, &ACTIVE_COUNT.to_le_bytes());
+    upload_inputs(queue, records, &source, &source_words, &args, &planes, &count);
 
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("wasm2gpu cull compact layout"),
-        entries: &[
-            buffer_layout_entry(0, wgpu::BufferBindingType::Uniform),
-            buffer_layout_entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
-            buffer_layout_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
-            buffer_layout_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
-            buffer_layout_entry(4, wgpu::BufferBindingType::Storage { read_only: false }),
-            buffer_layout_entry(5, wgpu::BufferBindingType::Storage { read_only: false }),
-        ],
-    });
+    let layout = create_bind_group_layout(device);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wasm2gpu cull compact bindings"),
         layout: &layout,
@@ -111,6 +136,55 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
             entry(5, &count),
         ],
     });
+    let pipeline = create_pipeline(device, &layout);
+
+    CullCompactGpu {
+        pipeline,
+        bind_group,
+        destination,
+        args,
+    }
+}
+
+fn upload_inputs(
+    queue: &wgpu::Queue,
+    records: &[[u32; RECORD_WORDS]; SOURCE_COUNT],
+    source: &wgpu::Buffer,
+    source_words: &wgpu::Buffer,
+    args: &wgpu::Buffer,
+    planes: &wgpu::Buffer,
+    count: &wgpu::Buffer,
+) {
+    let source_record_words = records
+        .iter()
+        .flat_map(|record| record.iter().copied())
+        .collect::<Vec<_>>();
+    let source_bytes = words_to_bytes(&source_record_words);
+    queue.write_buffer(source, 0, &source_bytes);
+    queue.write_buffer(source_words, 0, &source_bytes);
+    queue.write_buffer(args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
+    queue.write_buffer(planes, 0, &packed_planes());
+    queue.write_buffer(count, 0, &ACTIVE_COUNT.to_le_bytes());
+}
+
+fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("wasm2gpu cull compact layout"),
+        entries: &[
+            buffer_layout_entry(0, wgpu::BufferBindingType::Uniform),
+            buffer_layout_entry(1, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_layout_entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_layout_entry(3, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_layout_entry(4, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_layout_entry(5, wgpu::BufferBindingType::Storage { read_only: false }),
+        ],
+    })
+}
+
+fn create_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+) -> wgpu::ComputePipeline {
     let wgsl = lowered_kernel("cull_compact", "storage_0_2_");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("wasm2gpu cull compact"),
@@ -118,21 +192,29 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("wasm2gpu cull compact"),
-        bind_group_layouts: &[Some(&layout)],
+        bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some("wasm2gpu cull compact"),
         layout: Some(&pipeline_layout),
         module: &shader,
         entry_point: Some(symbols::CS_MAIN),
         compilation_options: Default::default(),
         cache: None,
-    });
+    })
+}
+
+fn dispatch_and_readback(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    gpu: &CullCompactGpu,
+) -> Vec<u8> {
+    let workgroup_size = symbols::CS_WORKGROUP[0] as usize;
     let readback = gpu_buffer(
-        &device,
+        device,
         "wasm2gpu cull compact readback",
-        ((SOURCE_COUNT * RECORD_BYTES) + ARGS_WORDS * 4) as u64,
+        (SOURCE_COUNT * RECORD_BYTES + ARGS_WORDS * U32_BYTES) as u64,
         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
     );
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -143,44 +225,56 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
             label: Some("wasm2gpu cull compact"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((ACTIVE_COUNT as usize).div_ceil(workgroup_size) as u32, 1, 1);
+        pass.set_pipeline(&gpu.pipeline);
+        pass.set_bind_group(0, &gpu.bind_group, &[]);
+        pass.dispatch_workgroups(
+            (ACTIVE_COUNT as usize).div_ceil(workgroup_size) as u32,
+            1,
+            1,
+        );
     }
-    encoder.copy_buffer_to_buffer(
-        &destination,
-        0,
-        &readback,
-        0,
-        (SOURCE_COUNT * RECORD_BYTES) as u64,
-    );
-    encoder.copy_buffer_to_buffer(
-        &args,
-        0,
-        &readback,
-        (SOURCE_COUNT * RECORD_BYTES) as u64,
-        (ARGS_WORDS * 4) as u64,
-    );
+    copy_outputs(&mut encoder, gpu, &readback);
     queue.submit([encoder.finish()]);
+    map_bytes(device, &readback)
+}
 
-    let bytes = map_bytes(&device, &readback);
+fn copy_outputs(encoder: &mut wgpu::CommandEncoder, gpu: &CullCompactGpu, readback: &wgpu::Buffer) {
     let args_offset = SOURCE_COUNT * RECORD_BYTES;
-    let instance_count = read_u32(&bytes, args_offset + 4);
-    assert_eq!(instance_count, 2, "indirect args visible count");
-    assert_eq!(read_u32(&bytes, args_offset), INDEX_COUNT);
+    encoder.copy_buffer_to_buffer(
+        &gpu.destination,
+        0,
+        readback,
+        0,
+        (SOURCE_COUNT * RECORD_BYTES) as u64,
+    );
+    encoder.copy_buffer_to_buffer(
+        &gpu.args,
+        0,
+        readback,
+        args_offset as u64,
+        (ARGS_WORDS * U32_BYTES) as u64,
+    );
+}
 
-    let mut actual = Vec::new();
-    for slot in 0..instance_count as usize {
-        let start = slot * RECORD_BYTES;
-        let words = (0..RECORD_WORDS)
-            .map(|word| read_u32(&bytes, start + word * 4))
-            .collect::<Vec<_>>();
-        actual.push(words);
-    }
+fn assert_compacted_output(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
+    let args_offset = SOURCE_COUNT * RECORD_BYTES;
+    let instance_count = read_u32(bytes, args_offset + U32_BYTES);
+    assert_eq!(instance_count, 2, "indirect args visible count");
+    assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
+
+    let mut actual = (0..instance_count as usize)
+        .map(|slot| read_record(bytes, slot * RECORD_BYTES))
+        .collect::<Vec<_>>();
     actual.sort_by_key(|record| record[MATERIAL_WORD]);
     let expected = vec![records[0].to_vec(), records[2].to_vec()];
     assert_eq!(actual, expected, "compacted records must be bit-identical");
     assert_eq!(actual[0][MOTION_VALID_WORD], 1);
+}
+
+fn read_record(bytes: &[u8], start: usize) -> Vec<u32> {
+    (0..RECORD_WORDS)
+        .map(|word| read_u32(bytes, start + word * U32_BYTES))
+        .collect()
 }
 
 fn buffer_layout_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
@@ -196,46 +290,51 @@ fn buffer_layout_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindG
     }
 }
 
-fn object_record(material: u32, motion_valid: u32, center_x: f32, scale: f32) -> [u32; RECORD_WORDS] {
+fn object_record(
+    material: u32,
+    motion_valid: u32,
+    center_x: f32,
+    scale: f32,
+) -> [u32; RECORD_WORDS] {
     let mut words = [0_u32; RECORD_WORDS];
-    words[0] = scale.to_bits();
-    words[5] = scale.to_bits();
-    words[10] = scale.to_bits();
-    words[12] = center_x.to_bits();
-    words[15] = 1.0_f32.to_bits();
-    for (index, word) in words[16..48].iter_mut().enumerate() {
+    words[MODEL_X_AXIS_WORD] = scale.to_bits();
+    words[MODEL_Y_AXIS_WORD] = scale.to_bits();
+    words[MODEL_Z_AXIS_WORD] = scale.to_bits();
+    words[MODEL_CENTER_X_WORD] = center_x.to_bits();
+    words[MODEL_CENTER_W_WORD] = 1.0_f32.to_bits();
+    for (index, word) in words[NORMAL_MATRIX_START_WORD..MATERIAL_WORD]
+        .iter_mut()
+        .enumerate()
+    {
         *word = 0x3f00_0000 + index as u32;
     }
     words[MATERIAL_WORD] = material;
     words[MOTION_VALID_WORD] = motion_valid;
-    words[50] = 0x1234_5678;
-    words[51] = 0x9abc_def0;
+    words[EXTRA_PAD_0_WORD] = 0x1234_5678;
+    words[EXTRA_PAD_1_WORD] = 0x9abc_def0;
     words
 }
 
 fn packed_planes() -> Vec<u8> {
     let mut bytes = vec![0_u8; PLANES_BYTES];
     for plane in 0..PLANES {
-        let values = if plane == 0 {
+        let values: [f32; LANES] = if plane == 0 {
             [1.0, 0.0, 0.0, 0.0]
         } else {
-            [0.0, 0.0, 0.0, 100.0]
+            [0.0, 0.0, 0.0, OPEN_PLANE_DISTANCE]
         };
         for (lane, value) in values.into_iter().enumerate() {
             let start = (plane * LANES + lane) * UNIFORM_LANE_BYTES;
-            bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
+            bytes[start..start + U32_BYTES].copy_from_slice(&value.to_le_bytes());
         }
     }
     bytes
 }
 
 fn words_to_bytes(words: &[u32]) -> Vec<u8> {
-    words
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect()
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("u32 lane"))
+    u32::from_le_bytes(bytes[offset..offset + U32_BYTES].try_into().expect("u32 lane"))
 }

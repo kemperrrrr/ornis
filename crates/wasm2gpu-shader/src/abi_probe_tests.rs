@@ -1,6 +1,7 @@
 //! Host-shadow coverage for compute and texture ABI imports.
 
 use ornis_gpu_abi::GpuVec2;
+use ornis_gpu_abi::GpuVec3;
 use ornis_gpu_abi::GpuVec4;
 use ornis_gpu_abi::HostMemory;
 use ornis_gpu_abi::Sampler;
@@ -46,6 +47,18 @@ const STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT: u32 = 3;
 const INITIAL_ATOMIC_VALUE: u32 = 10;
 const STORAGE_ATOMIC_RESULT: u32 = INITIAL_ATOMIC_VALUE + STORAGE_ATOMIC_VALUE;
 const WORKGROUP_ATOMIC_OLD: u32 = 0;
+const CULL_STORAGE_INPUT: [f32; 3] = [1.25, 2.5, 3.75];
+const CULL_STORAGE_EXPECTED: GpuVec3 = GpuVec3 {
+    x: CULL_STORAGE_INPUT[0],
+    y: CULL_STORAGE_INPUT[1],
+    z: CULL_STORAGE_INPUT[2],
+};
+const CULL_UNIFORM_BASE: u32 = 4;
+const CULL_UNIFORM_EXPECTED: GpuVec3 = GpuVec3 {
+    x: 4.0,
+    y: 5.0,
+    z: 6.0,
+};
 const FLOATS: [u32; 8] = [
     0,
     0x3f80_0000,
@@ -175,4 +188,39 @@ fn compute_texture_and_atomic_imports_match_the_host_shadow() {
         memory.read_storage::<ABI_GROUP, ATOMIC_INPUT_BINDING, [u32; 1]>(),
         [STORAGE_ATOMIC_RESULT]
     );
+}
+
+#[test]
+fn cull_vector_helpers_read_storage_and_strided_uniform_lanes() {
+    let mut memory = HostMemory::new();
+    memory.bind_storage::<super::CULL_GROUP, super::SPHERE_BINDING, [f32; 3]>();
+    memory.write_storage::<super::CULL_GROUP, super::SPHERE_BINDING, [f32; 3]>(
+        &CULL_STORAGE_INPUT,
+    );
+    let uniform_values: [super::UniformF32Lane; super::PLANE_LEN as usize] =
+        std::array::from_fn(|index| super::UniformF32Lane {
+            value: index as f32,
+            pad0: 0,
+            pad1: 0,
+            pad2: 0,
+        });
+    memory.bind_uniform::<
+        super::CULL_GROUP,
+        super::PLANE_BINDING,
+        [super::UniformF32Lane; super::PLANE_LEN as usize],
+    >();
+    memory.write_uniform::<
+        super::CULL_GROUP,
+        super::PLANE_BINDING,
+        [super::UniformF32Lane; super::PLANE_LEN as usize],
+    >(&uniform_values);
+
+    let (storage_vector, uniform_vector) = with_host(&mut memory, || {
+        (
+            super::cull_storage_vec3(0),
+            super::cull_uniform_vec3(CULL_UNIFORM_BASE),
+        )
+    });
+    assert_eq!(storage_vector, CULL_STORAGE_EXPECTED);
+    assert_eq!(uniform_vector, CULL_UNIFORM_EXPECTED);
 }

@@ -31,6 +31,8 @@ mod auto_exposure;
 #[cfg(any(target_arch = "wasm32", test))]
 mod skinning;
 
+#[cfg(any(target_arch = "wasm32", test))]
+use ornis_gpu_abi::GpuVec3;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::Storage;
 #[cfg(target_arch = "wasm32")]
@@ -43,8 +45,6 @@ use ornis_gpu_abi::storage_at_u32;
 use ornis_gpu_abi::storage_atomic_add_u32;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_store_u32;
-#[cfg(target_arch = "wasm32")]
-use ornis_gpu_abi::GpuVec3;
 
 gpu_struct! {
     /// Uniform parameters. Field 0 is the dynamic index. Field 1 is the scale.
@@ -141,6 +141,13 @@ const CULL_COMPACT_ARGS_BINDING: u32 = 3;
 /// Four matrices plus four metadata/padding words in `PerObjectGpu`.
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_RECORD_WORDS: u32 = 52;
+
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_MODEL_CENTER_OFFSET: u32 = 12;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_MODEL_COLUMN_STRIDE: u32 = 4;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -307,7 +314,7 @@ pub fn cull(id: u32) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
 fn cull_storage_vec3(base: u32) -> GpuVec3 {
     GpuVec3 {
@@ -317,7 +324,7 @@ fn cull_storage_vec3(base: u32) -> GpuVec3 {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
 fn cull_uniform_vec3(base: u32) -> GpuVec3 {
     GpuVec3 {
@@ -344,10 +351,10 @@ pub fn cull_compact(id: u32) {
     let count = storage_at_u32::<CULL_GROUP, CULL_COMPACT_COUNT_BINDING>(0);
     if id < count {
         let base = id * CULL_COMPACT_RECORD_WORDS;
-        let center = cull_storage_vec3(base + 12);
+        let center = cull_storage_vec3(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
         let x_axis = cull_storage_vec3(base);
-        let y_axis = cull_storage_vec3(base + 4);
-        let z_axis = cull_storage_vec3(base + 8);
+        let y_axis = cull_storage_vec3(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
+        let z_axis = cull_storage_vec3(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);
         let mut radius = gpu_length3(x_axis);
         let y_radius = gpu_length3(y_axis);
         let z_radius = gpu_length3(z_axis);
@@ -362,7 +369,9 @@ pub fn cull_compact(id: u32) {
         while plane < PLANE_COUNT {
             let at = plane * LANES;
             let normal = cull_uniform_vec3(at);
-            let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 3);
+            let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(
+                at + CULL_COMPACT_PLANE_DISTANCE_LANE,
+            );
             if gpu_dot3(normal, center) + distance < -radius {
                 visible = 0;
             }
