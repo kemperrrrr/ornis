@@ -13,7 +13,9 @@
 //! `cs_main`, when exported, is a compute entry with `@workgroup_size` and
 //! `global_invocation_id`. A `workgroup_barrier` or `storage_barrier` reached
 //! under control flow that this translator can prove depends on that id is
-//! rejected. `raw_read` and `texture_sample_2d` lower as before.
+//! rejected, including `br_if`, `br_table`, and loop-carried copies of the
+//! id. Ordered comparisons and memory loads are not proved. A 1×1×1
+//! workgroup is not checked. `raw_read` and `texture_sample_2d` lower as before.
 //! Scalar `f32` arithmetic (`+ - * /`) and comparisons lower directly to
 //! WGSL operators; unsigned `i32`-to-`f32` conversion lowers to a WGSL cast.
 //! `f32.sqrt` lowers to WGSL `sqrt` with weaker precision/edge semantics

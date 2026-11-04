@@ -44,15 +44,19 @@ fn expect_divergent(helpers: &str, body: &str, barrier: &str, site: BarrierSite)
         TranslateError::DivergentBarrier {
             barrier: got,
             site: got_site,
+            function,
+            position: _,
         } => {
             assert!(*got == barrier, "{error}");
             assert!(*got_site == site, "{error}");
+            assert!(!function.is_empty(), "{error}");
         }
         other => panic!("expected a divergent barrier, got {other}"),
     }
     let text = error.to_string();
     assert!(text.contains(barrier), "{text}");
-    assert!(text.contains("not uniform"), "{text}");
+    assert!(text.contains("is not uniform"), "{text}");
+    assert!(text.contains("position"), "{text}");
 }
 
 #[test]

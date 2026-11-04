@@ -1,17 +1,24 @@
 //! Static check that a barrier is reached in uniform control flow.
 //!
 //! `workgroup_barrier` and `storage_barrier` are workgroup synchronization
-//! points: every invocation must reach the call in the same order. This pass
-//! rejects a call when the compute invocation id (`cs_main`'s parameter, the
-//! lowered `global_invocation_id.x`) proves that some invocations do not.
-//! The proof follows copies and injective `i32` updates of that id through
-//! `if`, `br_if`, `loop`, and direct calls.
+//! points. This pass rejects a call when it can prove that not every
+//! `cs_main` invocation reaches it. The proof follows the invocation id
+//! (`global_invocation_id.x`), copies (`local.set`, `local.tee`, and helper
+//! results), injective `i32` updates, `f32` arithmetic on that id, and
+//! `select` with that id as the condition, through `if`, `br_if`,
+//! `br_table`, `loop` (including values carried across the back edge), and
+//! direct calls.
 //!
-//! A predicate this pass cannot tie to the invocation id — a memory load, an
-//! unknown parameter, a comparison of two copies of the id — stays the
-//! documented ABI precondition and is allowed through. The walk runs only
-//! when the module imports a barrier, so shaders that never synchronize do
-//! not pay for it.
+//! A `br_table` whose index is uniform or unknown is explored as a branch to
+//! each target, so later proved divergence is not skipped. An index that is
+//! the invocation id opens a split until the outermost target. Ordered
+//! comparisons (`id < n`) and values loaded from memory are not proved and
+//! stay the ABI precondition.
+//!
+//! The walk runs only when the module imports a barrier. Direct calls are
+//! memoized by `(function, incoming split, argument tags)` and the callee
+//! body is borrowed, so a deep call dag is not exponential. A `cs_main`
+//! whose workgroup is 1×1×1 is skipped: one invocation cannot diverge.
 
 use crate::error::BarrierSite;
 use crate::error::TranslateError;
@@ -21,6 +28,8 @@ use crate::ir::Kind;
 use ornis_gpu_abi::symbols;
 
 mod call;
+mod exit;
+mod loops;
 mod merge;
 mod region;
 mod tag;
@@ -29,21 +38,39 @@ use tag::Tag;
 
 /// Reject proven non-uniform barriers in `func` and the helpers it calls.
 ///
-/// Returns immediately when `imports` has no barrier. Vertex and fragment
-/// entries take that path in modules that do not synchronize, and also when
-/// they do: the walk is linear in the body and does not run the naga emitter.
-pub(super) fn check(func: &Func, imports: &[Import], funcs: &[Func]) -> Result<(), TranslateError> {
+/// Returns immediately when `imports` has no barrier, and when `func` is
+/// `cs_main` of a 1×1×1 workgroup. Vertex and fragment entries have no
+/// invocation id, so they cannot prove divergence. The walk does not run
+/// the naga emitter.
+pub(super) fn check(
+    func: &Func,
+    imports: &[Import],
+    funcs: &[Func],
+    workgroup: [u32; 3],
+) -> Result<(), TranslateError> {
     if !imports
         .iter()
         .any(|item| barrier_name(&item.name).is_some())
     {
         return Ok(());
     }
+    if func.export == symbols::CS_MAIN && workgroup == [1, 1, 1] {
+        return Ok(());
+    }
+    let func_index = funcs
+        .iter()
+        .position(|item| std::ptr::eq(item, func))
+        .unwrap_or(0) as u32;
     let mut uni = Uni {
         imports,
         funcs,
         active: Vec::new(),
         labels: Vec::new(),
+        pending: Vec::new(),
+        memo: call::Memo::new(),
+        func: func_index,
+        pos: 0,
+        at: 0,
         st: entry_state(func),
     };
     uni.walk(&func.body)
@@ -88,6 +115,15 @@ struct Uni<'a> {
     /// Defined-function indices on the call stack. A repeat is recursion.
     active: Vec<u32>,
     labels: Vec<Lab>,
+    /// Exits of a `br_table` that have not reached their target yet.
+    pending: Vec<St>,
+    memo: call::Memo,
+    /// Defined-function index currently being walked.
+    func: u32,
+    /// Next statement index in `func`. Loop rounds restore the entry value.
+    pos: u32,
+    /// Preorder index of the statement being walked.
+    at: u32,
     st: St,
 }
 
@@ -137,6 +173,11 @@ struct Lab {
     /// this, so the rewalk does not mark the loop a second time.
     clear: bool,
     varies: bool,
+    /// Locals carried by a branch back to this loop. Empty when no branch
+    /// has continued it yet.
+    carry: Vec<Tag>,
+    /// Outermost label a divergent branch uses to leave this loop.
+    exit_at: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,6 +193,8 @@ impl Lab {
             kind,
             clear,
             varies: false,
+            carry: Vec::new(),
+            exit_at: None,
         }
     }
 }

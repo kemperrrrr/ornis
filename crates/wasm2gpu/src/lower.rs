@@ -156,6 +156,7 @@ fn shader(
         &module.imports,
         &module.structs,
         &module.funcs,
+        crate::entry::compute_workgroup(module)?,
     )?;
     let id_param = compute.map(|_| 0);
     let arguments = if compute.is_some() {
