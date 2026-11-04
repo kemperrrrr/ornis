@@ -363,9 +363,8 @@ fn readback_bytes(
         size,
         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
     );
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some(label),
-    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     queue.submit([encoder.finish()]);
     map_bytes(device, &staging)
