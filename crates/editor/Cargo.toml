@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Editor viewport domain (selection, hover, gizmos, grid) as engine systems"
 
 [dependencies]
 glam = "0.34"

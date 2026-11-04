@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Object animation: clip lanes, players and the anim_sample system"
 
 [dependencies]
 ornis-assets = { path = "../assets", version = "0.1.0" }

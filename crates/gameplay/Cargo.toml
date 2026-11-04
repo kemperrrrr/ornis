@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Canonical gameplay building blocks over the shared World/Engine host"
 
 [dependencies]
 ornis-core = { path = "../core", version = "0.1.0" }

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Runtime mesh editing: canonical mesh data plus boolean operations"
 
 [dependencies]
 glam = "0.34"

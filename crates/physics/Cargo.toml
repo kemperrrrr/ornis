@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Sequential-impulse rigid-body physics: dynamics, collision detection, contact and joint solving"
 
 [dependencies]
 glam = "0.34"

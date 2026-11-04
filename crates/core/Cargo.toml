@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core ECS: entities, component storage, scheduling and the CPU/GPU dispatch layer"
 
 [dependencies]
 rayon = "1.12"

@@ -65,6 +65,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Rust game engine with an invisible ECS: native launch for a ready GameWorld"
 
 [dependencies]
 ornis-assets = { path = "crates/assets", version = "0.1.0" }

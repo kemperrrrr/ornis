@@ -583,6 +583,9 @@ This dual-licensing approach is the de-facto standard in the Rust ecosystem.
 
 Vendored code under [`third_party`](third_party) keeps its own upstream license terms.
 
+Note for Windows: each crate's `LICENSE-MIT`/`LICENSE-APACHE` is a symlink to the root files.
+Clone with `git clone -c core.symlinks=true` (requires Developer Mode or admin rights), and publish crates from Linux/macOS.
+
 ### Your contributions
 
 Unless you explicitly state otherwise,

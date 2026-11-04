@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Geometry-only glTF 2.0 import into engine-shaped data"
 
 [dependencies]
 ornis-texture = { path = "../texture", version = "0.1.0" }

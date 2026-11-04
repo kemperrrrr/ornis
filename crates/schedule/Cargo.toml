@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Domain-agnostic parallelism level scheduling"
 
 [dependencies]
 fixedbitset = "0.5"

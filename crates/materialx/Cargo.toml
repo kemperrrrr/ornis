@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "MaterialX parser and OpenPBR material converter"
 
 [dependencies]
 ornis-render = { path = "../render", version = "0.1.0" }
