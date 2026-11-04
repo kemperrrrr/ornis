@@ -16,10 +16,20 @@
 //! `PhysicsEngine` and `RenderBackend` as plugin traits.
 //!
 //! Timing split (deliberate, one vocabulary): frame producers drain through
-//! [`MutationTick`](crate::mutation::MutationTick) into the bus and apply
+//! [`MutationTick`] into the bus and apply
 //! between frames, while synchronous producers (the built-in editor) call
 //! [`apply_mutations`](crate::mutation::apply_mutations) directly for an
 //! immediate report. Both paths share the type, the applier and the report.
+//!
+//! In-frame structural ops (R4, [`StructuralQueue`]): a `#[smart_system]`
+//! body sees shared storage only, so `add`/`remove`/`spawn` cannot take the
+//! `&mut SmartStore` they need — they enqueue typed closures through
+//! [`StructuralWriter`](crate::StructuralWriter) instead, and
+//! [`apply_structural_queue`] drains them at the frame boundary, right
+//! before [`Stage::Last`](crate::Stage::Last). Same between-frames rule as
+//! the mutations above, two surfaces by design: `Mutation` stays the
+//! registry-backed JSON tooling/editor seam, the structural queue is the
+//! typed hot-lane seam for system bodies.
 
 use std::sync::{
     Mutex,
@@ -296,6 +306,141 @@ fn parse_and_insert(
     } else {
         Err(MutationError::InsertMismatch(meta.component_name().clone()))
     }
+}
+
+/// One deferred structural operation: a closure applied to the store at
+/// the frame boundary (see [`apply_structural_queue`]).
+///
+/// `Send` so producers on any parallel level can enqueue; `FnOnce` because
+/// each op runs exactly once (the queue is drained, never replayed).
+pub type StructuralOp = Box<dyn FnOnce(&mut SmartStore) + Send>;
+
+/// Deterministic deferred-operations queue for in-frame structural changes
+/// (R4, IDEAS §32): `add`/`remove`/`spawn` from `#[smart_system]` bodies.
+///
+/// A system body only receives shared `&Resources` and lane references, but
+/// [`SmartStore::insert`](crate::SmartStore::insert) and
+/// [`Pack::pack_insert`](crate::Pack::pack_insert) need `&mut SmartStore`.
+/// [`StructuralWriter`](crate::StructuralWriter) queues the op here instead
+/// of applying it inline; [`apply_structural_queue`] drains the queue in
+/// FIFO order at the frame boundary, before [`Stage::Last`](crate::Stage::Last).
+///
+/// Determinism (Strong Confluence, IDEAS §24.1): the writer parameter
+/// declares `writes::<StructuralQueue>()`, so every queueing system
+/// conflicts with every other and the scheduler splits them across levels
+/// in registration order — enqueues are strictly sequential regardless of
+/// the rayon thread count, and the FIFO drain reproduces that order,
+/// making entity-id allocation and application bitwise-reproducible for
+/// 1 and 32 threads alike.
+///
+/// [`World`](crate::World) registers the singleton automatically; raw
+/// [`Resources`] users call [`register_structural_queue`]. Systems reach
+/// the queue only through [`StructuralWriter`](crate::StructuralWriter) —
+/// `Res`/`ResMut` declarations of this type are rejected by the macro so
+/// duplicate and conflicting declarations stay detectable.
+pub struct StructuralQueue {
+    ops: Mutex<Vec<StructuralOp>>,
+}
+
+impl Default for StructuralQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StructuralQueue {
+    /// Creates an empty queue.
+    pub fn new() -> Self {
+        Self {
+            ops: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Appends one deferred operation; callable from any thread.
+    pub fn push(&self, op: StructuralOp) {
+        self.ops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(op);
+    }
+
+    /// Takes all queued operations in FIFO (enqueue) order; the queue is
+    /// empty afterwards, so every op applies at most once.
+    pub fn drain(&self) -> Vec<StructuralOp> {
+        self.ops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .split_off(0)
+    }
+
+    /// Re-queues operations taken by [`drain`](Self::drain) at the front,
+    /// preserving their order (apply fallback when the store is missing —
+    /// ops are never silently dropped).
+    pub fn restore(&self, ops: Vec<StructuralOp>) {
+        if ops.is_empty() {
+            return;
+        }
+        let mut queue = self
+            .ops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        queue.splice(0..0, ops);
+    }
+
+    /// Number of queued operations.
+    pub fn len(&self) -> usize {
+        self.ops
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
+    /// Whether the queue is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Registers the [`StructuralQueue`] singleton (systems fetch it through
+/// [`StructuralWriter`](crate::StructuralWriter); the queue must exist
+/// before the schedule runs). [`World`](crate::World) does this at
+/// construction — call it only when building [`Resources`] by hand.
+pub fn register_structural_queue(resources: &mut Resources) {
+    if resources.get::<StructuralQueue>().is_none() {
+        resources.insert(StructuralQueue::new());
+    }
+}
+
+/// Applies every queued structural operation to the store, in FIFO order,
+/// and returns how many ran.
+///
+/// Call between schedule runs with exclusive resources access — the engine
+/// runs it once per frame inside [`Engine::run_frame`](crate::Engine::run_frame)
+/// right before [`Stage::Last`](crate::Stage::Last); raw [`Schedule`](crate::Schedule)
+/// hosts call it after [`Schedule::run`](crate::Schedule::run). Each op sees
+/// the store state left by the previous op, so a later `despawn` cancels an
+/// earlier queued insert for the same entity and vice versa. With no queue
+/// registered nothing happens; with a queue but no store the ops go back
+/// untouched (never dropped).
+pub fn apply_structural_queue(resources: &mut Resources) -> usize {
+    let Some(queue) = resources.get::<StructuralQueue>() else {
+        return 0;
+    };
+    let ops = queue.drain();
+    if ops.is_empty() {
+        return 0;
+    }
+    let Some(store) = resources.get_mut::<SmartStore>() else {
+        if let Some(queue) = resources.get::<StructuralQueue>() {
+            queue.restore(ops);
+        }
+        return 0;
+    };
+    let applied = ops.len();
+    for op in ops {
+        op(store);
+    }
+    applied
 }
 
 /// A per-frame source of [`Mutation`] values: a scripting language, a
@@ -791,5 +936,96 @@ mod tests {
             report.entries[0].errors[0],
             MutationError::MissingComponent { .. }
         ));
+    }
+
+    fn structural_resources() -> Resources {
+        let mut resources = Resources::new();
+        resources.insert(SmartStore::new());
+        register_structural_queue(&mut resources);
+        resources
+    }
+
+    #[test]
+    fn structural_queue_applies_ops_in_fifo_order() {
+        let resources = structural_resources();
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        for value in [1_u32, 2, 3] {
+            let log = log.clone();
+            resources
+                .get::<StructuralQueue>()
+                .expect("queue registered")
+                .push(Box::new(move |store: &mut SmartStore| {
+                    let entity = store.create_entity();
+                    store.insert(entity, value);
+                    log.lock().expect("log").push(value);
+                }));
+        }
+
+        let mut resources = resources;
+        assert_eq!(apply_structural_queue(&mut resources), 3);
+        assert_eq!(*log.lock().expect("log"), vec![1, 2, 3]);
+        assert!(
+            resources
+                .get::<StructuralQueue>()
+                .expect("queue registered")
+                .is_empty()
+        );
+        let store = resources.get::<SmartStore>().expect("store");
+        assert_eq!(store.read_lane::<u32>().expect("lane").len(), 3);
+    }
+
+    #[test]
+    fn apply_structural_queue_without_queue_is_noop() {
+        let mut resources = Resources::new();
+        resources.insert(SmartStore::new());
+        assert_eq!(apply_structural_queue(&mut resources), 0);
+    }
+
+    #[test]
+    fn apply_structural_queue_restores_ops_when_store_is_missing() {
+        let mut resources = Resources::new();
+        register_structural_queue(&mut resources);
+        let log = std::sync::Arc::new(Mutex::new(Vec::new()));
+        {
+            let queue = resources.get::<StructuralQueue>().expect("queue");
+            let log = log.clone();
+            queue.push(Box::new(move |_store: &mut SmartStore| {
+                log.lock().expect("log").push(1);
+            }));
+        }
+
+        assert_eq!(apply_structural_queue(&mut resources), 0);
+        assert_eq!(
+            resources.get::<StructuralQueue>().expect("queue").len(),
+            1,
+            "ops are restored, never dropped"
+        );
+        assert!(log.lock().expect("log").is_empty());
+
+        // Once the store exists the restored op applies in order.
+        resources.insert(SmartStore::new());
+        assert_eq!(apply_structural_queue(&mut resources), 1);
+        assert_eq!(*log.lock().expect("log"), vec![1]);
+    }
+
+    #[test]
+    fn apply_structural_queue_sees_prior_ops_state() {
+        let mut resources = structural_resources();
+        let entity = resources
+            .get::<SmartStore>()
+            .expect("store")
+            .create_entity();
+        let queue = resources.get::<StructuralQueue>().expect("queue");
+        queue.push(Box::new(move |store: &mut SmartStore| {
+            store.insert(entity, 7_u32)
+        }));
+        queue.push(Box::new(move |store: &mut SmartStore| {
+            store.destroy_entity(entity)
+        }));
+
+        assert_eq!(apply_structural_queue(&mut resources), 2);
+        let store = resources.get::<SmartStore>().expect("store");
+        assert!(!store.is_alive(entity));
+        assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(0));
     }
 }

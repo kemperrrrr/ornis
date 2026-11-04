@@ -2,10 +2,10 @@
 //!
 //! Turns one `FnArg` into a [`TypedParam`]: the entity parameter
 //! (`u: &T` / `u: &mut T`, `T: Pack`), the typed wrappers
-//! (`Res`/`ResMut`/`EventWriter`/`EventReader`), and the attribute
-//! parameters (`#[config]`, `#[entity]`). Forbidden shapes get dedicated
-//! diagnostics here; signature-level checks and the aggregate collection
-//! live in [`crate::smart_system_parse`].
+//! (`Res`/`ResMut`/`EventWriter`/`EventReader`/`StructuralWriter`), and the
+//! attribute parameters (`#[config]`, `#[entity]`). Forbidden shapes get
+//! dedicated diagnostics here; signature-level checks and the aggregate
+//! collection live in [`crate::smart_system_parse`].
 
 use syn::{FnArg, GenericArgument, Ident, Pat, PathArguments, Type};
 
@@ -51,7 +51,8 @@ pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
             return Err(syn::Error::new_spanned(
                 r,
                 "smart_system: unexpected `self` — only the first parameter is the entity, \
-                 the rest are `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` / `#[config]`",
+                 the rest are `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` / \
+                 `StructuralWriter` / `#[config]`",
             ));
         }
         FnArg::Typed(t) => t,
@@ -90,17 +91,19 @@ pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
         Type::Reference(_) => Err(syn::Error::new_spanned(
             &typed.ty,
             "smart_system: raw `&Resources` is forbidden — declare typed parameters \
-             (`Res<T>`, `ResMut<T>`, `EventWriter<E>` / `EventReader<E>`) so access follows from types",
+             (`Res<T>`, `ResMut<T>`, `EventWriter<E>` / `EventReader<E>`, `StructuralWriter`) \
+             so access follows from types",
         )),
         Type::Path(tp) => parse_wrapper_param(name, &typed.ty, tp),
         _ => Err(syn::Error::new_spanned(
             &typed.ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / \
+             `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         )),
     }
 }
-/// Validates one `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` wrapper parameter.
+/// Validates one `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` /
+/// `StructuralWriter` wrapper parameter.
 pub(crate) fn parse_wrapper_param(
     name: Ident,
     ty: &Type,
@@ -109,8 +112,8 @@ pub(crate) fn parse_wrapper_param(
     let Some(seg) = tp.path.segments.last() else {
         return Err(syn::Error::new_spanned(
             ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / \
+             `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         ));
     };
     let Some(kind) = is_param_wrapper(seg) else {
@@ -123,10 +126,30 @@ pub(crate) fn parse_wrapper_param(
         }
         return Err(syn::Error::new_spanned(
             ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / \
+             `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         ));
     };
+    // `StructuralWriter` carries a lifetime, not a type parameter: accept
+    // the bare name and `StructuralWriter<'_>`, reject anything else before
+    // the single-type-argument checks below.
+    if matches!(kind, ParamKind::StructuralWriter) {
+        match &seg.arguments {
+            PathArguments::None => {}
+            PathArguments::AngleBracketed(args)
+                if args.args.len() == 1
+                    && matches!(args.args.first(), Some(GenericArgument::Lifetime(_))) => {}
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "smart_system: `StructuralWriter` takes no type arguments — it queues \
+                     deferred `add`/`remove`/`spawn` ops for the frame's `Last` stage \
+                     (write a bare `StructuralWriter`)",
+                ));
+            }
+        }
+        return Ok(TypedParam::new(name, kind, (*ty).clone(), (*ty).clone()));
+    }
     let PathArguments::AngleBracketed(args) = &seg.arguments else {
         return Err(syn::Error::new_spanned(
             ty,
@@ -172,6 +195,16 @@ pub(crate) fn parse_wrapper_param(
             "smart_system: `Res<EventStore<_>>` / `ResMut<EventStore<_>>` are forbidden — \
              declare queue access with `EventWriter<E>` / `EventReader<E>` so duplicate \
              and conflicting declarations stay detectable",
+        ));
+    }
+    if matches!(kind, ParamKind::Res | ParamKind::ResMut)
+        && path_last_ident(inner).as_deref() == Some("StructuralQueue")
+    {
+        return Err(syn::Error::new_spanned(
+            inner,
+            "smart_system: `Res<StructuralQueue>` / `ResMut<StructuralQueue>` are forbidden — \
+             declare deferred ops with `StructuralWriter` so duplicate and conflicting \
+             declarations stay detectable",
         ));
     }
     if matches!(kind, ParamKind::Res) {

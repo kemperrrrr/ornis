@@ -133,10 +133,11 @@ where
 
 /// Rejects two parameters that address the same resource when at least one
 /// of them declares a write: `Res<C>` + `ResMut<C>`, two `ResMut<C>`,
-/// `EventWriter<E>` + `EventReader<E>`. Two read-only `Res<C>` stay legal —
-/// the scheduler needs no ordering between them. Keys are compared as
-/// written, so differently spelled aliases are not detected here (the
-/// `ResMutResource`/`PlainResource` bounds still gate what they can name).
+/// `EventWriter<E>` + `EventReader<E>`, two `StructuralWriter`s. Two
+/// read-only `Res<C>` stay legal — the scheduler needs no ordering between
+/// them. Keys are compared as written, so differently spelled aliases are
+/// not detected here (the `ResMutResource`/`PlainResource` bounds still
+/// gate what they can name).
 fn reject_conflicting_params(params: &[TypedParam]) -> Result<(), syn::Error> {
     for (index, later) in params.iter().enumerate() {
         let Some(family) = later.kind.resource_family() else {
@@ -155,7 +156,7 @@ fn reject_conflicting_params(params: &[TypedParam]) -> Result<(), syn::Error> {
                 format!(
                     "smart_system: `{}` declares `{}` a second time — declare each \
                      resource/queue through one parameter (`Res` reads, `ResMut` writes, \
-                     `EventWriter`/`EventReader` events)",
+                     `EventWriter`/`EventReader` events, `StructuralWriter` deferred ops)",
                     later.name, later_key
                 ),
             ));
@@ -166,8 +167,12 @@ fn reject_conflicting_params(params: &[TypedParam]) -> Result<(), syn::Error> {
 
 /// Written spelling of a parameter's resource key: the inner type for
 /// `Res`/`ResMut` (the resource) and for the event roles (the payload of
-/// the `EventStore<E>` singleton).
+/// the `EventStore<E>` singleton); the `StructuralWriter` key is always
+/// the `StructuralQueue` singleton (the writer has no type argument).
 fn resource_key(param: &TypedParam) -> String {
+    if matches!(param.kind, ParamKind::StructuralWriter) {
+        return "StructuralQueue".to_string();
+    }
     let inner = &param.inner;
     quote!(#inner).to_string()
 }

@@ -1,0 +1,5 @@
+error: smart_system: `Res<StructuralQueue>` / `ResMut<StructuralQueue>` are forbidden — declare deferred ops with `StructuralWriter` so duplicate and conflicting declarations stay detectable
+  --> tests/ui/smart_system_rejects_structural_queue_res_mut.rs:13:36
+   |
+13 | fn sys(u: &mut Unit, queue: ResMut<StructuralQueue>) {
+   |                                    ^^^^^^^^^^^^^^^

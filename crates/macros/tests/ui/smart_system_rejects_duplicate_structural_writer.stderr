@@ -1,0 +1,5 @@
+error: smart_system: `second` declares `StructuralQueue` a second time — declare each resource/queue through one parameter (`Res` reads, `ResMut` writes, `EventWriter`/`EventReader` events, `StructuralWriter` deferred ops)
+  --> tests/ui/smart_system_rejects_duplicate_structural_writer.rs:12:47
+   |
+12 | fn sys(u: &mut Unit, first: StructuralWriter, second: StructuralWriter<'_>) {
+   |                                               ^^^^^^

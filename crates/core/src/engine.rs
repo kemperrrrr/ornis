@@ -265,11 +265,12 @@ impl FixedTime {
 ///
 /// Stages are logical plans, not extra worlds: `PreUpdate` and `Input` run
 /// once per frame before the fixed catch-up loop, `Gameplay` is the bounded
-/// fixed-rate plan, and `PostFrame` is the once-per-frame plan after all
-/// fixed updates. Physically `PostFrame` reuses the legacy variable
-/// [`Engine::schedule`] storage and `Gameplay` reuses
-/// [`Engine::fixed_schedule`], so the pre-existing entry points delegate
-/// unchanged; see [`Engine::stage_schedule`].
+/// fixed-rate plan, `PostFrame` is the once-per-frame plan after all
+/// fixed updates, and `Last` is the frame-final plan that runs after the
+/// deferred structural queue has been applied. Physically `PostFrame`
+/// reuses the legacy variable [`Engine::schedule`] storage, `Gameplay`
+/// reuses [`Engine::fixed_schedule`], and `Last` has its own schedule; the
+/// pre-existing entry points delegate unchanged; see [`Engine::stage_schedule`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Stage {
     /// Between-frame input ingest (reserved, runs first, once per frame).
@@ -278,8 +279,14 @@ pub enum Stage {
     Input,
     /// Fixed-step intent and physics (bounded catch-up loop).
     Gameplay,
-    /// Pose propagation and audio/render extraction views (runs last).
+    /// Pose propagation and audio/render extraction views (runs after all
+    /// fixed updates).
     PostFrame,
+    /// Frame-final plan: the deferred structural queue
+    /// ([`StructuralQueue`](crate::mutation::StructuralQueue)) is applied
+    /// first, then registered systems run once per frame — so a `Last`
+    /// system observes this frame's `add`/`remove`/`spawn` results.
+    Last,
 }
 
 impl Stage {
@@ -290,6 +297,7 @@ impl Stage {
             Stage::Input => "input",
             Stage::Gameplay => "gameplay",
             Stage::PostFrame => "post_frame",
+            Stage::Last => "last",
         }
     }
 
@@ -309,9 +317,10 @@ impl Stage {
 /// layers and the core runner does not choose a physics or render backend.
 ///
 /// Staged plans ([`Stage`]) run in `PreUpdate → Input → Gameplay(fixed) →
-/// PostFrame` order; `PreUpdate`/`Input` are new once-per-frame schedules
-/// ahead of the fixed loop, while `Gameplay`/`PostFrame` delegate to the
-/// pre-existing `fixed_schedule`/`schedule` storage.
+/// PostFrame → Last` order; `PreUpdate`/`Input` are new once-per-frame
+/// schedules ahead of the fixed loop, `Gameplay`/`PostFrame` delegate to
+/// the pre-existing `fixed_schedule`/`schedule` storage, and `Last` runs
+/// once after the deferred structural queue is applied.
 ///
 /// Typestate: the `State` phantom tracks the build/run phase
 /// ([`Building`]/[`Running`], default [`Running`]). The canonical
@@ -333,6 +342,7 @@ pub struct Engine<State: Phase = Running> {
     fixed_schedule: Schedule,
     pre_update: Schedule,
     input: Schedule,
+    last: Schedule,
     phase: PhantomData<State>,
 }
 
@@ -380,6 +390,7 @@ impl Engine<Building> {
             fixed_schedule: self.fixed_schedule,
             pre_update: self.pre_update,
             input: self.input,
+            last: self.last,
             phase: PhantomData,
         }
     }
@@ -466,7 +477,7 @@ impl EngineBuilder {
     /// Returns the build-phase schedule backing a named [`Stage`].
     ///
     /// Canonical staged registration route; execution order stays
-    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`.
+    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame → Last`.
     pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
         self.inner.stage_schedule_mut(stage)
     }
@@ -522,6 +533,7 @@ impl<State: Phase> Engine<State> {
             fixed_schedule: Schedule::new(),
             pre_update: Schedule::new(),
             input: Schedule::new(),
+            last: Schedule::new(),
             phase: PhantomData,
         }
     }
@@ -549,14 +561,16 @@ impl<State: Phase> Engine<State> {
     /// Returns the schedule backing a named [`Stage`] for inspection.
     ///
     /// `PreUpdate`/`Input` are dedicated once-per-frame schedules ahead of
-    /// the fixed loop; `Gameplay` delegates to [`Engine::fixed_schedule`]
-    /// and `PostFrame` to [`Engine::schedule`].
+    /// the fixed loop; `Gameplay` delegates to [`Engine::fixed_schedule`],
+    /// `PostFrame` to [`Engine::schedule`], and `Last` to the engine's
+    /// frame-final schedule (structural apply happens right before it).
     pub fn stage_schedule(&self, stage: Stage) -> &Schedule {
         match stage {
             Stage::PreUpdate => &self.pre_update,
             Stage::Input => &self.input,
             Stage::Gameplay => &self.fixed_schedule,
             Stage::PostFrame => &self.schedule,
+            Stage::Last => &self.last,
         }
     }
 }
@@ -595,13 +609,14 @@ impl Engine<Building> {
     /// Returns the build-phase schedule backing a named [`Stage`].
     ///
     /// Canonical staged registration route; execution order stays
-    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`.
+    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame → Last`.
     pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
         match stage {
             Stage::PreUpdate => &mut self.pre_update,
             Stage::Input => &mut self.input,
             Stage::Gameplay => &mut self.fixed_schedule,
             Stage::PostFrame => &mut self.schedule,
+            Stage::Last => &mut self.last,
         }
     }
 
@@ -669,7 +684,7 @@ impl Engine<Running> {
     ///
     /// Legacy escape hatch routing to the same storage as the build-phase
     /// accessor; execution order stays
-    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame`. New setup code
+    /// `PreUpdate → Input → Gameplay(fixed) → PostFrame → Last`. New setup code
     /// should prefer [`EngineBuilder::stage_schedule_mut`].
     pub fn stage_schedule_mut(&mut self, stage: Stage) -> &mut Schedule {
         match stage {
@@ -677,6 +692,7 @@ impl Engine<Running> {
             Stage::Input => &mut self.input,
             Stage::Gameplay => &mut self.fixed_schedule,
             Stage::PostFrame => &mut self.schedule,
+            Stage::Last => &mut self.last,
         }
     }
 
@@ -712,6 +728,7 @@ impl Engine<Running> {
             &mut self.input,
             &mut self.fixed_schedule,
             &mut self.schedule,
+            &mut self.last,
         ] {
             schedule.set_timing(enabled);
         }
@@ -725,6 +742,7 @@ impl Engine<Running> {
             Stage::Input,
             Stage::Gameplay,
             Stage::PostFrame,
+            Stage::Last,
         ]
         .into_iter()
         .filter_map(|stage| Some((stage, self.stage_schedule(stage).take_timings()?)))
@@ -737,12 +755,18 @@ impl Engine<Running> {
     /// sealed with [`Engine::build`] (or built via [`EngineBuilder`])
     /// before entering the frame loop.
     ///
-    /// Staged order is `PreUpdate → Input → Gameplay(fixed × N) → PostFrame`.
-    /// The fixed accumulator is advanced before the staged schedules run so
+    /// Staged order is `PreUpdate → Input → Gameplay(fixed × N) →
+    /// PostFrame → Last`. The fixed accumulator is advanced before the
+    /// staged schedules run so
     /// the frame-level input snapshot and the [`FixedTime`] step count are
     /// already published when `PreUpdate`/`Input` execute; each selected
     /// fixed update then receives the same snapshot, and the `PostFrame`
-    /// (legacy variable) schedule runs once last. Input events accumulated
+    /// (legacy variable) schedule runs once after the fixed loop. The
+    /// deferred structural queue
+    /// ([`StructuralQueue`](crate::mutation::StructuralQueue)) is then
+    /// applied — every `add`/`remove`/`spawn` enqueued by this frame's
+    /// systems lands, in registration order — and the `Last` schedule runs
+    /// once over the applied state. Input events accumulated
     /// by a platform adapter are visible to all stages during the frame.
     /// Consumers of transient pointer/wheel deltas should normally run in a
     /// once-per-frame stage so a catch-up frame does not apply one event
@@ -761,7 +785,9 @@ impl Engine<Running> {
     /// level executor and every system impl). The host loop must bracket
     /// the schedules anyway: `begin_frame` before the stages, one step
     /// advance between fixed iterations, transients cleared after
-    /// `PostFrame`.
+    /// `Last`. The structural apply is the same kind of exclusive
+    /// boundary step: it drains the queue between `PostFrame` and `Last`,
+    /// where `&mut` access to the store exists exactly once per frame.
     ///
     /// The delta must be finite and non-negative. Domain-specific mutable
     /// state continues to use the scheduler's declared resource/lane access
@@ -797,6 +823,9 @@ impl Engine<Running> {
         }
         self.world.run(&self.schedule);
 
+        crate::mutation::apply_structural_queue(self.world.resources_mut());
+        self.world.run(&self.last);
+
         if let Some(input) = self.world.resources_mut().get_mut::<InputState>() {
             input.clear_frame_transients();
         }
@@ -812,7 +841,7 @@ impl Engine<Running> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InputState, KeyCode, Resources, System, SystemAccess};
+    use crate::{InputState, KeyCode, Resources, SmartStore, System, SystemAccess};
     use std::sync::{Arc, Mutex};
 
     struct CaptureTime(Arc<Mutex<Vec<Time>>>);
@@ -973,10 +1002,15 @@ mod tests {
                 Stage::PreUpdate,
                 Stage::Input,
                 Stage::Gameplay,
-                Stage::PostFrame
+                Stage::PostFrame,
+                Stage::Last
             ]
         );
         assert_eq!(timings[3].1.systems[0].0, "capture_time");
+        assert!(
+            timings[4].1.systems.is_empty(),
+            "no Last systems registered"
+        );
         engine.set_stage_timing(false);
         assert!(engine.take_stage_timings().is_empty());
     }
@@ -1067,6 +1101,7 @@ mod tests {
         assert!(engine.stage_schedule(Stage::Input).is_empty());
         assert!(engine.stage_schedule(Stage::Gameplay).is_empty());
         assert!(engine.stage_schedule(Stage::PostFrame).is_empty());
+        assert!(engine.stage_schedule(Stage::Last).is_empty());
     }
 
     #[test]
@@ -1075,10 +1110,12 @@ mod tests {
         assert_eq!(Stage::Input.name(), "input");
         assert_eq!(Stage::Gameplay.name(), "gameplay");
         assert_eq!(Stage::PostFrame.name(), "post_frame");
+        assert_eq!(Stage::Last.name(), "last");
         assert!(!Stage::PreUpdate.is_fixed());
         assert!(!Stage::Input.is_fixed());
         assert!(Stage::Gameplay.is_fixed());
         assert!(!Stage::PostFrame.is_fixed());
+        assert!(!Stage::Last.is_fixed());
     }
 
     #[test]
@@ -1116,13 +1153,73 @@ mod tests {
         engine.add_stage_system(Stage::Input, Tag("input"));
         engine.add_stage_system(Stage::Gameplay, Tag("gameplay"));
         engine.add_stage_system(Stage::PostFrame, Tag("post_frame"));
+        engine.add_stage_system(Stage::Last, Tag("last"));
 
         let delta = FixedTime::default().delta_seconds();
         engine.run_frame(delta);
         assert_eq!(
             *trace.lock().expect("trace lock"),
-            vec!["pre_update", "input", "gameplay", "post_frame"]
+            vec!["pre_update", "input", "gameplay", "post_frame", "last"]
         );
+    }
+
+    /// The deferred structural queue applies between `PostFrame` and
+    /// `Last`, so a `Last` system observes this frame's structural ops.
+    #[test]
+    fn structural_queue_applies_before_last_stage_systems() {
+        /// Queues one structural op (declares the queue write).
+        struct QueueInsert;
+        impl System for QueueInsert {
+            fn name(&self) -> &'static str {
+                "queue_insert"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new()
+                    .reads::<SmartStore>()
+                    .writes::<crate::mutation::StructuralQueue>()
+            }
+            fn run(&self, resources: &Resources) {
+                let queue = resources
+                    .get::<crate::mutation::StructuralQueue>()
+                    .expect("queue registered by World");
+                let store = resources.get::<SmartStore>().expect("store");
+                let entity = store.create_entity();
+                queue.push(Box::new(move |store: &mut SmartStore| {
+                    store.insert(entity, 7_u32);
+                }));
+            }
+        }
+        /// Observes the applied component inside the `Last` stage.
+        struct ExpectApplied(Arc<Mutex<Option<Option<u32>>>>);
+        impl System for ExpectApplied {
+            fn name(&self) -> &'static str {
+                "expect_applied"
+            }
+            fn access(&self) -> SystemAccess {
+                SystemAccess::new()
+                    .reads::<SmartStore>()
+                    .reads_lane::<u32>()
+            }
+            fn run(&self, resources: &Resources) {
+                let store = resources.get::<SmartStore>().expect("store");
+                let value = store.read_lane::<u32>().and_then(|lane| {
+                    let entity = lane.entities.first().copied()?;
+                    lane.get(entity).copied()
+                });
+                *self.0.lock().expect("probe lock") = Some(value);
+            }
+        }
+
+        let probe = Arc::new(Mutex::new(None));
+        let mut engine = Engine::new();
+        engine.schedule_mut().add_system(QueueInsert);
+        engine.add_stage_system(Stage::Last, ExpectApplied(probe.clone()));
+
+        engine.run_frame(1.0 / 60.0);
+
+        assert_eq!(*probe.lock().expect("probe lock"), Some(Some(7)));
+        let store = engine.world().store().expect("store");
+        assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(1));
     }
 
     #[test]

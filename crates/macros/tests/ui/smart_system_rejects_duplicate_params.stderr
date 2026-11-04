@@ -1,4 +1,4 @@
-error: smart_system: `write` declares `u32` a second time — declare each resource/queue through one parameter (`Res` reads, `ResMut` writes, `EventWriter`/`EventReader` events)
+error: smart_system: `write` declares `u32` a second time — declare each resource/queue through one parameter (`Res` reads, `ResMut` writes, `EventWriter`/`EventReader` events, `StructuralWriter` deferred ops)
   --> tests/ui/smart_system_rejects_duplicate_params.rs:11:38
    |
 11 | fn sys(u: &mut Unit, read: Res<u32>, write: ResMut<u32>) {

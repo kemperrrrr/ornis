@@ -1,0 +1,5 @@
+error: smart_system: `StructuralWriter` takes no type arguments — it queues deferred `add`/`remove`/`spawn` ops for the frame's `Last` stage (write a bare `StructuralWriter`)
+  --> tests/ui/smart_system_rejects_structural_writer_type_arg.rs:12:27
+   |
+12 | fn sys(u: &mut Unit, ops: StructuralWriter<u32>) {
+   |                           ^^^^^^^^^^^^^^^^^^^^^
