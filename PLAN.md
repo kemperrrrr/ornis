@@ -946,7 +946,18 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   > enqueue; `Res`/`ResMut<StructuralQueue>` и дубликаты `StructuralWriter`
   > — ошибки компиляции (trybuild). Гейты: паритет «generated = ручной
   > lane-цикл» (`structural_defer.rs`), confluence 1-vs-32
-  > (`strong_confluence_structural_queue`), порядок/FIFO/`Last`-интеграция.
+  > (`confluence_structural.rs::strong_confluence_structural_queue`),
+  > порядок/FIFO/`Last`-интеграция, `remove`/`despawn` через очередь.
+  > **Ограничение `spawn`:** id выдаёт аллокатор store под `&self` (внутри
+  > `RwLock`) в момент вызова, а не в порядке применения. Очередь
+  > сериализует системы, поэтому одиночный writer (и все системы одного
+  > уровня) получает id в порядке вызовов; но writer с бо́льшим приоритетом
+  > и system без очереди (`store.create_entity()` напрямую, на том же
+  > уровне) могут перемешать порядок id. Состав/порядок самих опк всегда
+  > FIFO по регистрации; для строгого порядка id — `writes::<SmartStore>()`
+  > у всех аллоцирующих систем либо отдельная стадия (см. PROJECT_REVIEW).
+  > Хендл жив сразу, батч приезжает в apply; `despawn` до apply отменяет
+  > вставку (проверка `is_alive`), сущность не воскресает.
 - **R5 — захваченное изменяемое состояние** → `atomic`/`reduce`-трансформация
   (у удалённого макроса это был warning; на `#[smart_system]` не перенесено).
 - **R6 — `Send`/`Sync`-проверка компонентов.**

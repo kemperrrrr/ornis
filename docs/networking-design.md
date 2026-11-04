@@ -299,8 +299,9 @@ into master» и «Release & Publish 0.16» так и не закрыты, ре�
 - `Engine::run_frame` (`crates/core/src/engine.rs`): публикует `Time` из
   дельты кадра, вызывает `begin_frame` этой же дельтой, затем гоняет
   `PreUpdate` → `Input` → цикл `Gameplay` (`fixed_schedule`, N раз) →
-  `PostFrame` (хранилище `schedule`, `engine.rs:771`). Туда же
-  `install_gpu_resources` ставит `RenderSubmit` и `RenderPresent`
+  `PostFrame` (хранилище `schedule`) → apply очереди отложенных
+  структурных опсов (#115) → `Last`, затем транзиенты сбрасываются. Туда
+  же `install_gpu_resources` ставит `RenderSubmit` и `RenderPresent`
   (`crates/render/src/gpu_resources.rs:219-220`, через `schedule_mut`).
   Комментарий `GameApp::render_frame` (`crates/runner/src/lib.rs:326-329`)
   говорит то же: submit и present — системы этого расписания, кадр
@@ -584,11 +585,12 @@ SI-Single. Границы сетевых сцен (§4.4) отсюда и сле
 `crates/app/src/lib.rs:146`) на этот путь и остаются. Живой раннер с
 записью и L0 `run_frame` не зовут. Кадр у них тот же порядок, что у
 `run_frame`: `run_frame_begin`, затем пачка `run_fixed_step`, затем
-`run_frame_end` (§6.1). `run_frame_end` несёт `PostFrame`, а в нём
-`RenderSubmit` / `RenderPresent`, поэтому картинка этого кадра уходит
+`run_frame_end` (§6.1). `run_frame_end` несёт `PostFrame`, apply очереди
+структурных опсов и `Last`, а в `PostFrame` — `RenderSubmit` /
+`RenderPresent`, поэтому картинка этого кадра уходит
 на экран после тиков. Смешивать `run_frame` с `run_fixed_step` на одном
-`Engine` нельзя. В сессии с журналом ни `PostFrame`, ни хост не пишут
-то, что читает fixed-расписание (§6.1).
+`Engine` нельзя. В сессии с журналом ни `PostFrame`, ни `Last`, ни хост
+не пишут то, что читает fixed-расписание (§6.1).
 
 ### 2.7. `Entity` и аллокатор
 
@@ -881,15 +883,15 @@ footer: final_digest + tick_count
 4. **Шаг 60 Гц**, `Tick` с нуля сессии после детерминированного старта (§6.1).
    Другой шаг — вне v1.
 5. **Ни одна стадия вне fixed-шага и ни хост не пишут то, что fixed-шаг
-   читает в digest.** Стадии — `PreUpdate`, `Input`, `PostFrame`
-   (`Stage`, `crates/core/src/engine.rs:274-283`). `Gameplay` — сам шаг,
+   читает в digest.** Стадии — `PreUpdate`, `Input`, `PostFrame`, `Last`
+   (`Stage`, `crates/core/src/engine.rs:265-290`). `Gameplay` — сам шаг,
    его писатели остаются. Иначе живая запись (`run_frame_begin` /
    `run_frame_end`, в том числе кадр с `N = 0`) и headless-replay
    (только `run_fixed_step`) расходятся, а границ кадров в `.ornis-rec`
    нет и не будет: файл — один `InputBundle` на тик. Писать туда `N` и
    места `begin`/`end` нельзя. Это заморозило бы FPS записывающей
    машины. Проверка при загрузке обходит расписания `PreUpdate`, `Input`
-   и `PostFrame`, не один `schedule_mut`. Системы туда ставят через
+   `PostFrame` и `Last`, не один `schedule_mut`. Системы туда ставят через
    `Engine::stage_schedule_mut` (`engine.rs:470` на фазе сборки и
    `:674-680` на `Engine<Running>`); `schedule_mut` — только `PostFrame`.
    У `Schedule` поля `systems` и `accesses` приватны
@@ -1224,8 +1226,8 @@ pub trait WorldCheckpoint {
   Два шага здесь возможны только из-за округления `f32` на самой границе
   `r + delta`, не из-за hitch-буфера `(max_steps + 1) × delta`: тот в
   этот вызов не входит. Один шаг — неявное свойство `begin_frame`, не
-  контракт журнала. Плюс каждый такой вызов гоняет `PreUpdate`, `Input`
-  и `PostFrame`, двигает `Time` и зовёт `clear_frame_transients`
+  контракт журнала. Плюс каждый такой вызов гоняет `PreUpdate`, `Input`,
+  `PostFrame` и `Last`, двигает `Time` и зовёт `clear_frame_transients`
   (`Engine::run_frame`). Replay тогда зависит от variable-систем
   (`MutationTick`, `transform_update`, `body_to_transform`, камера), а
   не только от `fixed_schedule`. `run_frame(0.0)` этот путь тоже не
@@ -1299,7 +1301,8 @@ pub fn run_fixed_step(&mut self, input: ornis_input::TickInput)
 `start_step` в debug ожидает аккумулятор не меньше шага и в release
 зажимает вычитание `max(0.0)` (§2.1); `alpha` он считает из остатка.
 Для журнала это другой путь. Не двигает variable-`Time`, не гоняет
-`PreUpdate`, `Input` и `PostFrame`, не вызывает `clear_frame_transients`.
+`PreUpdate`, `Input`, `PostFrame` и `Last`, не вызывает
+`clear_frame_transients`.
 
 После вызова четыре кадровых поля всегда одни и те же:
 `accumulator_seconds = 0`, `steps_this_frame = 1`, `current_step = 1`,
@@ -1323,9 +1326,9 @@ pub fn run_fixed_step(&mut self, input: ornis_input::TickInput)
 `Schedule::accesses`. Ничего сверх.
 
 Кадр живого хоста — два метода вокруг тиков, в том порядке, в каком
-скобки уже стоят в `run_frame` (`engine.rs:763-775`: `PreUpdate`,
-`Input`, затем цикл fixed, затем `PostFrame`, затем
-`clear_frame_transients`).
+скобки уже стоят в `run_frame` (`engine.rs:794-833`: `PreUpdate`,
+`Input`, затем цикл fixed, затем `PostFrame`, apply очереди структурных
+опсов, `Last`, затем `clear_frame_transients`).
 
 Почему не «сначала шаги, потом один `run_variable_frame`». Тот вариант
 тоже уносит present за тики и короче на метод. Не берём его: метод —
@@ -1374,9 +1377,10 @@ pub fn run_frame_end(&mut self)
 реализацию — отдельная задача ядра, не этот срез. Совет, не контракт:
 `begin` может вернуть `FrameScope` без `Clone`, а `end` его поглотить,
 чтобы `end` без `begin` не компилировался. В v1 два вызова, порядок
-держит хост. Fixed-цикл, `PostFrame` и `clear_frame_transients` `begin`
-не трогает.
-`run_frame_end`: гоняет `PostFrame` и при наличии `InputState` зовёт
+держит хост. Fixed-цикл, `PostFrame`, `Last` и `clear_frame_transients`
+`begin` не трогает.
+`run_frame_end`: гоняет `PostFrame`, применяет очередь отложенных
+структурных опсов (#115) и гоняет `Last`, при наличии `InputState` зовёт
 `clear_frame_transients`. `Time`, `FixedTime` и `fixed_schedule` не
 трогает. Ввод тика — аргумент `run_fixed_step`. `PreUpdate` и `Input`
 не пишут хешируемые лейны: это запрет загрузки §4.4 п.5, не допущение.
