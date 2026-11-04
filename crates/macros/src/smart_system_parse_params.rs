@@ -134,21 +134,7 @@ pub(crate) fn parse_wrapper_param(
     // the bare name and `StructuralWriter<'_>`, reject anything else before
     // the single-type-argument checks below.
     if matches!(kind, ParamKind::StructuralWriter) {
-        match &seg.arguments {
-            PathArguments::None => {}
-            PathArguments::AngleBracketed(args)
-                if args.args.len() == 1
-                    && matches!(args.args.first(), Some(GenericArgument::Lifetime(_))) => {}
-            _ => {
-                return Err(syn::Error::new_spanned(
-                    ty,
-                    "smart_system: `StructuralWriter` takes no type arguments — it queues \
-                     deferred `add`/`remove`/`spawn` ops for the frame's `Last` stage \
-                     (write a bare `StructuralWriter`)",
-                ));
-            }
-        }
-        return Ok(TypedParam::new(name, kind, (*ty).clone(), (*ty).clone()));
+        return parse_structural_writer(name, ty, seg);
     }
     let PathArguments::AngleBracketed(args) = &seg.arguments else {
         return Err(syn::Error::new_spanned(
@@ -168,6 +154,49 @@ pub(crate) fn parse_wrapper_param(
             "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
         ));
     };
+    reject_forbidden_inner(&kind, inner)?;
+    if matches!(kind, ParamKind::Res) {
+        check_plain_shape(inner)?;
+    }
+    Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
+}
+
+/// Accepts the lifetime-carrying `StructuralWriter` shapes (`StructuralWriter`
+/// and `StructuralWriter<'_>`) and rejects a type argument, which has no
+/// meaning here: the writer always addresses the single `StructuralQueue`.
+fn parse_structural_writer(
+    name: Ident,
+    ty: &Type,
+    seg: &syn::PathSegment,
+) -> Result<TypedParam, syn::Error> {
+    match &seg.arguments {
+        PathArguments::None => {}
+        PathArguments::AngleBracketed(args)
+            if args.args.len() == 1
+                && matches!(args.args.first(), Some(GenericArgument::Lifetime(_))) => {}
+        _ => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "smart_system: `StructuralWriter` takes no type arguments — it queues \
+                 deferred `add`/`remove`/`spawn` ops for the frame's `Last` stage \
+                 (write a bare `StructuralWriter`)",
+            ));
+        }
+    }
+    Ok(TypedParam::new(
+        name,
+        ParamKind::StructuralWriter,
+        ty.clone(),
+        ty.clone(),
+    ))
+}
+
+/// Rejects `Res`/`ResMut` of a type that has a dedicated parameter: the
+/// `SmartStore`/`Resources` handles and the `EventStore`/`StructuralQueue`
+/// singletons. Naming them as a plain resource would bypass the role-based
+/// declaration, so duplicate and conflicting parameters would go undetected.
+fn reject_forbidden_inner(kind: &ParamKind, inner: &Type) -> Result<(), syn::Error> {
+    let last = path_last_ident(inner);
     if matches!(kind, ParamKind::Res) && is_smart_store_ty(inner) {
         return Err(syn::Error::new_spanned(
             inner,
@@ -176,10 +205,7 @@ pub(crate) fn parse_wrapper_param(
         ));
     }
     if matches!(kind, ParamKind::ResMut)
-        && matches!(
-            path_last_ident(inner).as_deref(),
-            Some("SmartStore" | "Resources")
-        )
+        && matches!(last.as_deref(), Some("SmartStore" | "Resources"))
     {
         return Err(syn::Error::new_spanned(
             inner,
@@ -187,30 +213,20 @@ pub(crate) fn parse_wrapper_param(
              use `Pack`/typed parameters so scheduler access stays explicit",
         ));
     }
-    if matches!(kind, ParamKind::Res | ParamKind::ResMut)
-        && path_last_ident(inner).as_deref() == Some("EventStore")
-    {
-        return Err(syn::Error::new_spanned(
-            inner,
+    let dedicated = match (kind, last.as_deref()) {
+        (ParamKind::Res | ParamKind::ResMut, Some("EventStore")) => {
             "smart_system: `Res<EventStore<_>>` / `ResMut<EventStore<_>>` are forbidden — \
              declare queue access with `EventWriter<E>` / `EventReader<E>` so duplicate \
-             and conflicting declarations stay detectable",
-        ));
-    }
-    if matches!(kind, ParamKind::Res | ParamKind::ResMut)
-        && path_last_ident(inner).as_deref() == Some("StructuralQueue")
-    {
-        return Err(syn::Error::new_spanned(
-            inner,
+             and conflicting declarations stay detectable"
+        }
+        (ParamKind::Res | ParamKind::ResMut, Some("StructuralQueue")) => {
             "smart_system: `Res<StructuralQueue>` / `ResMut<StructuralQueue>` are forbidden — \
              declare deferred ops with `StructuralWriter` so duplicate and conflicting \
-             declarations stay detectable",
-        ));
-    }
-    if matches!(kind, ParamKind::Res) {
-        check_plain_shape(inner)?;
-    }
-    Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
+             declarations stay detectable"
+        }
+        _ => return Ok(()),
+    };
+    Err(syn::Error::new_spanned(inner, dedicated))
 }
 
 /// Early syntactic backstop for the `PlainResource` bound: well-known
