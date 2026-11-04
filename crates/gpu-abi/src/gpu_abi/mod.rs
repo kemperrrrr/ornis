@@ -259,13 +259,17 @@ pub(crate) fn math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
 }
 
 pub(crate) fn math_length3(value: GpuVec3) -> f32 {
+    math_length3_xyz(value.x, value.y, value.z)
+}
+
+pub(crate) fn math_length3_xyz(x: f32, y: f32, z: f32) -> f32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        math_dot3(value, value).sqrt()
+        (x * x + y * y + z * z).sqrt()
     }
     #[cfg(target_arch = "wasm32")]
     {
-        copy::call_math_length3(value)
+        copy::call_math_length3_xyz(x, y, z)
     }
 }
 

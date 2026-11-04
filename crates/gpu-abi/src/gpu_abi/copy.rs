@@ -29,7 +29,10 @@ pub(super) use texture::{
 #[cfg(target_arch = "wasm32")]
 mod math;
 #[cfg(target_arch = "wasm32")]
-pub(super) use math::{call_math_cross3, call_math_dot3, call_math_length3, call_math_normalize3};
+pub(super) use math::{
+    call_math_cross3, call_math_dot3, call_math_length3_xyz,
+    call_math_normalize3,
+};
 #[cfg(target_arch = "wasm32")]
 mod compute;
 #[cfg(target_arch = "wasm32")]

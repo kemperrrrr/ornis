@@ -52,7 +52,8 @@ pub use layout::{
     uniform_stride,
 };
 pub use shader_io::{
-    gpu_cross3, gpu_dot3, gpu_length3, gpu_normalize3, storage_at_f32, storage_at_u32,
+    gpu_cross3, gpu_dot3, gpu_length3, gpu_length3_xyz, gpu_normalize3, storage_at_f32,
+    storage_at_u32,
     storage_atomic_add_u32, storage_barrier, storage_store_f32, storage_store_u32,
     uniform_array_f32, uniform_field_f32, uniform_field_u32, workgroup_atomic_add_u32,
     workgroup_barrier, workgroup_load_u32, workgroup_store_u32,

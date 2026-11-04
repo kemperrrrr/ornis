@@ -87,6 +87,7 @@ fn vec3_math_helpers_match_scalar_reference() {
     assert_eq!(crate::gpu_dot3(ABI_MATH_A, ABI_MATH_B), ABI_MATH_DOT);
     assert_eq!(crate::gpu_cross3(ABI_MATH_A, ABI_MATH_B), ABI_MATH_CROSS);
     assert_eq!(crate::gpu_length3(ABI_MATH_LENGTH_INPUT), ABI_MATH_LENGTH);
+    assert_eq!(crate::gpu_length3_xyz(0.0, 3.0, 4.0), ABI_MATH_LENGTH);
     assert_eq!(
         crate::gpu_normalize3(ABI_MATH_LENGTH_INPUT),
         ABI_MATH_NORMALIZED

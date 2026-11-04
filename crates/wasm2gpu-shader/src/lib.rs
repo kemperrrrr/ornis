@@ -12,6 +12,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
 
+use ornis_gpu_abi::gpu_length3_xyz;
 use ornis_gpu_abi::gpu_struct;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::shader;
@@ -312,7 +313,7 @@ fn cull_storage_length(base: u32) -> f32 {
     let x = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
     let y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
     let z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
-    (x * x + y * y + z * z).sqrt()
+    gpu_length3_xyz(x, y, z)
 }
 
 #[cfg(any(target_arch = "wasm32", test))]

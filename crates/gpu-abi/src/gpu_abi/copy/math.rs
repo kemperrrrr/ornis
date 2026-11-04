@@ -32,8 +32,8 @@ pub(in crate::gpu_abi) fn call_math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
     }
 }
 
-pub(in crate::gpu_abi) fn call_math_length3(value: GpuVec3) -> f32 {
-    call_gpu_import!(math_length3(value.x, value.y, value.z))
+pub(in crate::gpu_abi) fn call_math_length3_xyz(x: f32, y: f32, z: f32) -> f32 {
+    call_gpu_import!(math_length3(x, y, z))
 }
 
 pub(in crate::gpu_abi) fn call_math_normalize3(value: GpuVec3) -> GpuVec3 {
