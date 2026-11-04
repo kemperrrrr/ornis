@@ -1,0 +1,284 @@
+//! GPU-visible results for texture-load and explicit-LOD sampling imports.
+
+use ornis_gpu_abi::symbols;
+use ornis_wasm2gpu::translate;
+use ornis_wasm2gpu_testkit::{device, gpu_buffer, map_bytes};
+
+const TEXTURE_WIDTH: u32 = 2;
+const TEXTURE_HEIGHT: u32 = 1;
+const TARGET_SIZE: u32 = 1;
+const ROW_BYTES: u32 = 256;
+const EXPECTED_GREEN: [u8; 4] = [0, 255, 0, 255];
+
+#[test]
+fn texture_load_and_sample_lod_return_the_expected_texel_on_gpu() {
+    let Some((device, queue)) = device() else {
+        assert!(
+            !gpu_required(),
+            "ORNIS_REQUIRE_GPU is set but texture-fetch test has no wgpu device"
+        );
+        eprintln!("SKIPPED (wasm2gpu texture fetch): no wgpu device");
+        return;
+    };
+
+    let cases = [
+        (
+            format!(
+                "i32.const 0 i32.const 1 i32.const 1 i32.const 0 call ${}",
+                symbols::TEXTURE_LOAD_2D
+            ),
+            false,
+            "textureLoad",
+        ),
+        (
+            format!(
+                "i32.const 0 i32.const 1 i32.const 0 i32.const 2 \
+                 f32.const 0.75 f32.const 0.5 f32.const 0 call ${}",
+                symbols::TEXTURE_SAMPLE_2D_LOD
+            ),
+            true,
+            "textureSampleLevel",
+        ),
+    ];
+
+    for (body, needs_sampler, label) in cases {
+        let translated = translate(&wasm(&body)).unwrap_or_else(|error| {
+            panic!("translate {label} fixture: {error:?}");
+        });
+        assert_eq!(
+            render(&device, &queue, &translated.wgsl, needs_sampler),
+            EXPECTED_GREEN,
+            "{label} returned the wrong texel"
+        );
+    }
+}
+
+fn gpu_required() -> bool {
+    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
+fn import(name: &str, signature: &str) -> String {
+    format!(
+        "(import \"{}\" \"{}\" (func ${} {}))",
+        symbols::MODULE,
+        name,
+        name,
+        signature
+    )
+}
+
+fn wasm(fragment_body: &str) -> Vec<u8> {
+    let imports = format!(
+        "{} {}",
+        import(
+            symbols::TEXTURE_LOAD_2D,
+            "(param i32 i32 i32 i32) (result f32 f32 f32 f32)"
+        ),
+        import(
+            symbols::TEXTURE_SAMPLE_2D_LOD,
+            "(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)"
+        ),
+    );
+    wat::parse_str(format!(
+        r#"(module {imports}
+            (func (export "{vs}") (param f32 f32 f32 f32)
+                (result f32 f32 f32 f32 f32 f32)
+                local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)
+            (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
+                {fragment_body}))"#,
+        vs = symbols::VS_MAIN,
+        fs = symbols::FS_MAIN,
+    ))
+    .expect("valid texture-fetch Wasm fixture")
+}
+
+fn render(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    needs_sampler: bool,
+) -> [u8; 4] {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("wasm2gpu texture fetch"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("wasm2gpu texture fetch"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some(symbols::VS_MAIN),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: 16,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    vertex_attribute(0, 0),
+                    vertex_attribute(4, 1),
+                    vertex_attribute(8, 2),
+                    vertex_attribute(12, 3),
+                ],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some(symbols::FS_MAIN),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("known texture-fetch input"),
+        size: wgpu::Extent3d {
+            width: TEXTURE_WIDTH,
+            height: TEXTURE_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255, 0, 0, 255, 0, 255, 0, 255],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: TEXTURE_WIDTH,
+            height: TEXTURE_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 1,
+        resource: wgpu::BindingResource::TextureView(&view),
+    }];
+    if needs_sampler {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::Sampler(&sampler),
+        });
+    }
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("wasm2gpu texture fetch"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    });
+
+    let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("texture fetch fullscreen triangle"),
+        size: 48,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let vertex_data: [f32; 12] = [
+        -1.0, -1.0, 0.0, 0.0, 3.0, -1.0, 0.0, 0.0, -1.0, 3.0, 0.0, 0.0,
+    ];
+    let vertex_bytes = vertex_data
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<_>>();
+    queue.write_buffer(&vertices, 0, &vertex_bytes);
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("texture fetch color output"),
+        size: wgpu::Extent3d {
+            width: TARGET_SIZE,
+            height: TARGET_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let readback = gpu_buffer(
+        device,
+        "texture fetch pixel readback",
+        u64::from(ROW_BYTES),
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("wasm2gpu texture fetch"),
+    });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("wasm2gpu texture fetch"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.draw(0..3, 0..1);
+    }
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(ROW_BYTES),
+                rows_per_image: Some(1),
+            },
+        },
+        wgpu::Extent3d {
+            width: TARGET_SIZE,
+            height: TARGET_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    let bytes = map_bytes(device, &readback);
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
+fn vertex_attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset,
+        shader_location: location,
+    }
+}

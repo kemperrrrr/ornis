@@ -95,7 +95,7 @@ pub(super) fn workgroup_barrier(em: &mut Emit<'_, '_>) -> Result<(), TranslateEr
 
 pub(super) fn storage_barrier(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     em.block.push(
-        naga::Statement::MemoryBarrier(naga::Barrier::STORAGE),
+        naga::Statement::ControlBarrier(naga::Barrier::STORAGE),
         crate::cx::sp(),
     );
     Ok(())

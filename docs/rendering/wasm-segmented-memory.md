@@ -23,7 +23,9 @@ lifter также опускает `+`, `-`, `*`, `/`, `abs`, `neg`, `min`, `max
 Этап 2 добавляет 2D `textureLoad` на mip 0, `textureDimensions`, explicit-LOD
 `textureSampleLevel` для 2D float-текстуры, vec3 math, `u32 atomicAdd` для
 storage/workgroup, 256 слов workgroup scratch и workgroup/storage barriers.
-Это research ABI, не production path. Индексы storage/atomic, индексы
+`i32`-атомики, atomic-типы кроме `u32` и операции кроме `atomicAdd` не
+поддерживаются и отвергаются транслятором. Это research ABI, не production
+path. Индексы storage/atomic, индексы
 workgroup и координаты texture load должны быть в пределах ресурса; выход за
 границы — недопустимый shader input с backend-dependent GPU поведением.
 Host shadow диагностирует такие вызовы panic'ом. `Texture2d::dimensions`
@@ -31,7 +33,12 @@ Host shadow диагностирует такие вызовы panic'ом. `Text
 проверить неотрицательность координат и сравнить с размерами. Workgroup scratch
 и workgroup atomics резервируют по 256 `u32` (1 KiB) каждый при использовании;
 при совместном использовании модуль расходует 2 KiB workgroup memory на
-workgroup. Лимит устройства и влияние на occupancy остаются ограничением ядра.
+workgroup. Каждый вызов `workgroup_barrier` и `storage_barrier` должен быть
+достигнут всеми invocations workgroup в одном и том же порядке; нельзя
+вызывать его из неоднородного control flow или возвращаться до него только
+части invocations. Транслятор пока не проверяет uniformity этого control flow;
+это предусловие shader-а. Лимит устройства и влияние на occupancy остаются
+ограничением ядра.
 
 Wasm `f32.min` / `f32.max` имеют явный контракт: если любой операнд NaN,
 результат — canonical quiet NaN `0x7fc00000`; `min(-0, +0)` возвращает `-0`,

@@ -10,6 +10,10 @@ use ornis_wasm2gpu_testkit::record_compute_pass;
 use ornis_wasm2gpu_testkit::storage_buffer;
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+
+static SPIRV_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 const FLOAT_OUTPUT_BITS: [u32; 8] = [
     0,
@@ -75,39 +79,43 @@ fn wasm() -> Vec<u8> {
             (func (export "{cs}") (param i32)
                 (local $storage_old i32) (local $workgroup_loaded i32)
                 (local $workgroup_old i32)
-                local.get 0 if return end
+                ;; Lane zero performs the writes; every lane reaches each barrier.
+                local.get 0 i32.eqz
+                if
+                    i32.const 0 i32.const 1 i32.const 1 i32.const 0 call $texture_load drop
+                    i32.const 0 i32.const 1 i32.const 0 i32.const 2
+                    f32.const 0.75 f32.const 0.5 f32.const 0 call $texture_sample_lod drop
 
-                i32.const 0 i32.const 1 i32.const 1 i32.const 0 call $texture_load drop
-                i32.const 0 i32.const 1 i32.const 0 i32.const 2
-                f32.const 0.75 f32.const 0.5 f32.const 0 call $texture_sample_lod drop
+                    i32.const 0 i32.const 3 i32.const 0 f32.const 0 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 1 f32.const 1 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 2 f32.const 0 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 3 f32.const 1 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 4 f32.const 0 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 5 f32.const 1 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 6 f32.const 0 call $storage_write_f32
+                    i32.const 0 i32.const 3 i32.const 7 f32.const 1 call $storage_write_f32
 
-                i32.const 0 i32.const 3 i32.const 0 f32.const 0 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 1 f32.const 1 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 2 f32.const 0 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 3 f32.const 1 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 4 f32.const 0 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 5 f32.const 1 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 6 f32.const 0 call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 7 f32.const 1 call $storage_write_f32
-
-                i32.const 0 i32.const 4 i32.const 0 i32.const 5
-                call $storage_atomic_add local.set $storage_old
-                i32.const 0 i32.const 5 i32.const 0 local.get $storage_old
-                call $storage_write_u32
-
-                i32.const 0 i32.const 7 call $workgroup_store
+                    i32.const 0 i32.const 4 i32.const 0 i32.const 5
+                    call $storage_atomic_add local.set $storage_old
+                    i32.const 0 i32.const 5 i32.const 0 local.get $storage_old
+                    call $storage_write_u32
+                    i32.const 0 i32.const 7 call $workgroup_store
+                end
                 call $workgroup_barrier
-                i32.const 0 call $workgroup_load local.set $workgroup_loaded
-                i32.const 0 i32.const 5 i32.const 1 local.get $workgroup_loaded
-                call $storage_write_u32
-                i32.const 1 i32.const 5 call $workgroup_atomic_add
-                local.set $workgroup_old
-                i32.const 0 i32.const 5 i32.const 2 local.get $workgroup_old
-                call $storage_write_u32
-                i32.const 1 i32.const 7 call $workgroup_atomic_add
-                local.set $workgroup_old
-                i32.const 0 i32.const 5 i32.const 3 local.get $workgroup_old
-                call $storage_write_u32
+                local.get 0 i32.eqz
+                if
+                    i32.const 0 call $workgroup_load local.set $workgroup_loaded
+                    i32.const 0 i32.const 5 i32.const 1 local.get $workgroup_loaded
+                    call $storage_write_u32
+                    i32.const 1 i32.const 5 call $workgroup_atomic_add
+                    local.set $workgroup_old
+                    i32.const 0 i32.const 5 i32.const 2 local.get $workgroup_old
+                    call $storage_write_u32
+                    i32.const 1 i32.const 7 call $workgroup_atomic_add
+                    local.set $workgroup_old
+                    i32.const 0 i32.const 5 i32.const 3 local.get $workgroup_old
+                    call $storage_write_u32
+                end
                 call $storage_barrier))"#,
         module = symbols::MODULE,
         texture_load = symbols::TEXTURE_LOAD_2D,
@@ -136,7 +144,7 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
     assert!(!translated.compute_spirv.is_empty());
     validate_compute_spirv(&translated.compute_spirv);
     let Some((device, queue)) = super::device() else {
-        let required = std::env::var_os("ORNIS_REQUIRE_GPU").is_some();
+        let required = env_flag_enabled("ORNIS_REQUIRE_GPU");
         assert!(
             !required,
             "ORNIS_REQUIRE_GPU is set but no adapter was found"
@@ -151,8 +159,12 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
     assert_eq!(atomic.as_slice(), ATOMIC_OUTPUT.as_slice());
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 fn validate_compute_spirv(words: &[u32]) {
-    let required = matches!(std::env::var("ORNIS_REQUIRE_SPIRV_VAL").as_deref(), Ok("1"));
+    let required = env_flag_enabled("ORNIS_REQUIRE_SPIRV_VAL");
     let probe = Command::new("spirv-val").arg("--version").output();
     let Ok(probe) = probe else {
         assert!(
@@ -164,10 +176,10 @@ fn validate_compute_spirv(words: &[u32]) {
     };
     assert!(probe.status.success(), "spirv-val --version failed");
 
+    let file_id = SPIRV_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "ornis-wasm2gpu-compute-{}-{}.spv",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("test")
+        "ornis-wasm2gpu-compute-{}-{file_id}.spv",
+        std::process::id()
     ));
     let bytes = words
         .iter()

@@ -223,12 +223,20 @@ pub fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
 }
 
 /// Synchronize workgroup execution and workgroup-memory accesses.
+///
+/// Every invocation in the workgroup must reach this barrier in the same
+/// order. Do not place it in non-uniform control flow or return from only a
+/// subset of invocations before reaching it.
 #[inline(always)]
 pub fn workgroup_barrier() {
     crate::gpu_abi::workgroup_barrier()
 }
 
-/// Order storage-buffer memory accesses within a workgroup.
+/// Synchronize workgroup execution and order storage-buffer accesses.
+///
+/// Every invocation in the workgroup must reach this barrier in the same
+/// order. Do not place it in non-uniform control flow or return from only a
+/// subset of invocations before reaching it.
 #[inline(always)]
 pub fn storage_barrier() {
     crate::gpu_abi::storage_barrier()

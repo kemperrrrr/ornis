@@ -111,7 +111,6 @@ pub(crate) fn workgroup_atomics(cx: &mut Cx<'_>) -> naga::Handle<naga::GlobalVar
     var
 }
 
-const _: () = assert!(ornis_gpu_abi::symbols::WORKGROUP_WORDS > 0);
 const WORKGROUP_ARRAY_SIZE: std::num::NonZeroU32 =
     std::num::NonZeroU32::new(ornis_gpu_abi::symbols::WORKGROUP_WORDS)
         .expect("WORKGROUP_WORDS must be nonzero");
