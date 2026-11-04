@@ -1,9 +1,9 @@
 //! Import module and function names shared with `ornis-wasm2gpu`.
 //!
 //! The toy translator treats these as GPU opcodes. `raw_read` returns four
-//! `f32` lanes (a `vec4` at a byte offset). `texture_sample_2d` is a call,
-//! never an `i32.load` from linear memory. Group and binding are separate
-//! immediate operands, not bits packed into the offset.
+//! `f32` lanes (a `vec4` at a byte offset); texture sampling, texel loads, and
+//! dimension queries are calls, not linear-memory accesses. Group and binding are
+//! separate immediate operands, not bits packed into the offset.
 
 /// Wasm import module (`(import "ornis_gpu" ...)`).
 pub const MODULE: &str = "ornis_gpu";
@@ -59,6 +59,49 @@ pub const STORAGE_WRITE_I32: &str = "storage_write_i32";
 /// accesses the binding directly; the lowering keeps the provenance instead
 /// of materializing linear memory.
 pub const STORAGE_BASE: &str = "storage_base";
+
+/// `(param i32 i32 i32 i32) (result f32 f32 f32 f32)` — group, binding,
+/// and signed texel coordinate `(x, y)` at mip level zero.
+pub const TEXTURE_LOAD_2D: &str = "texture_load_2d";
+
+/// `(param f32 × 6) (result f32)` — dot product of two `vec3<f32>` values.
+pub const MATH_DOT3: &str = "math_dot3";
+
+/// `(param f32 × 6) (result f32 × 3)` — cross product of two `vec3<f32>` values.
+pub const MATH_CROSS3: &str = "math_cross3";
+
+/// `(param f32 × 3) (result f32)` — length of a `vec3<f32>` value.
+pub const MATH_LENGTH3: &str = "math_length3";
+
+/// `(param f32 × 3) (result f32 × 3)` — normalize a `vec3<f32>` value.
+pub const MATH_NORMALIZE3: &str = "math_normalize3";
+
+/// `(param i32 i32 i32 i32) (result i32)` — storage `atomicAdd` on u32.
+pub const STORAGE_ATOMIC_ADD_U32: &str = "storage_atomic_add_u32";
+
+/// `(param i32) (result i32)` — load one word from workgroup scratch.
+pub const WORKGROUP_LOAD_U32: &str = "workgroup_load_u32";
+
+/// `(param i32 i32)` — store one word into workgroup scratch.
+pub const WORKGROUP_STORE_U32: &str = "workgroup_store_u32";
+
+/// `(param i32 i32) (result i32)` — atomic add in workgroup scratch.
+pub const WORKGROUP_ATOMIC_ADD_U32: &str = "workgroup_atomic_add_u32";
+
+/// `()` — synchronize workgroup execution and workgroup memory.
+pub const WORKGROUP_BARRIER: &str = "workgroup_barrier";
+
+/// `()` — order storage memory accesses.
+pub const STORAGE_BARRIER: &str = "storage_barrier";
+
+/// Number of `u32` words in the translator's fixed workgroup scratch array.
+pub const WORKGROUP_WORDS: u32 = 256;
+
+/// `(param i32 i32) (result i32)` — width of a 2D texture.
+pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
+
+/// `(param i32 i32) (result i32)` — height of a 2D texture.
+pub const TEXTURE_HEIGHT_2D: &str = "texture_height_2d";
 
 /// `(param i32 i32 i32) (result f32 f32)` — storage `array<vec2<f32>>`.
 pub const STORAGE_READ_VEC2: &str = "storage_read_vec2";
@@ -160,6 +203,12 @@ pub const UNIFORM_READ_VEC4: &str = "uniform_read_vec4";
 /// binding, then UV. The binding pair is constant provenance; UV is data.
 pub const TEXTURE_SAMPLE_2D: &str = "texture_sample_2d";
 
+/// `(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)`.
+///
+/// Operands are texture group, texture binding, sampler group, sampler
+/// binding, UV, then an explicit mip level.
+pub const TEXTURE_SAMPLE_2D_LOD: &str = "texture_sample_2d_lod";
+
 /// Vertex entry the toy translator expects.
 pub const VS_MAIN: &str = "vs_main";
 
@@ -194,6 +243,19 @@ pub fn is_toy_import(name: &str) -> bool {
             | STORAGE_READ_I32
             | STORAGE_WRITE_I32
             | STORAGE_BASE
+            | TEXTURE_LOAD_2D
+            | TEXTURE_WIDTH_2D
+            | TEXTURE_HEIGHT_2D
+            | MATH_DOT3
+            | MATH_CROSS3
+            | MATH_LENGTH3
+            | MATH_NORMALIZE3
+            | STORAGE_ATOMIC_ADD_U32
+            | WORKGROUP_LOAD_U32
+            | WORKGROUP_STORE_U32
+            | WORKGROUP_ATOMIC_ADD_U32
+            | WORKGROUP_BARRIER
+            | STORAGE_BARRIER
             | STORAGE_READ_VEC2
             | STORAGE_WRITE_VEC2
             | STORAGE_READ_VEC3
@@ -215,5 +277,6 @@ pub fn is_toy_import(name: &str) -> bool {
             | UNIFORM_READ_VEC3
             | UNIFORM_READ_VEC4
             | TEXTURE_SAMPLE_2D
+            | TEXTURE_SAMPLE_2D_LOD
     )
 }

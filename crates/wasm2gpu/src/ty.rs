@@ -26,9 +26,11 @@ const MAX_FIELDS: usize = 8;
 const STRUCT_HEADER: u32 = 4;
 const PROV_PARAMS: u32 = 3;
 
+mod classify;
 mod sigs;
 mod uni;
 
+pub(super) use classify::classify;
 pub(super) use sigs::sig_ok;
 pub(crate) use uni::Uni;
 pub(crate) use uni::uniform_elem_stride;
@@ -86,6 +88,34 @@ pub(super) enum Imp {
     ReadUniform,
     /// `texture_sample_2d`.
     Sample,
+    /// `texture_sample_2d_lod` with an explicit mip level.
+    SampleLod,
+    /// Load one texel from a 2D texture.
+    TextureLoad,
+    /// Width query for a 2D texture.
+    TextureWidth,
+    /// Dot product of two `vec3<f32>` values.
+    MathDot3,
+    /// Cross product of two `vec3<f32>` values.
+    MathCross3,
+    /// Length of one `vec3<f32>` value.
+    MathLength3,
+    /// Normalize one `vec3<f32>` value.
+    MathNormalize3,
+    /// Atomic add to one word in a named storage buffer.
+    StorageAtomicAddU32,
+    /// Load one `u32` from workgroup scratch.
+    WorkgroupLoadU32,
+    /// Store one `u32` in workgroup scratch.
+    WorkgroupStoreU32,
+    /// Atomic add to workgroup scratch.
+    WorkgroupAtomicAddU32,
+    /// Workgroup execution and memory barrier.
+    WorkgroupBarrier,
+    /// Storage memory barrier.
+    StorageBarrier,
+    /// Height query for a 2D texture.
+    TextureHeight,
     /// Storage load of `elem`. `Struct` ids are an immediate operand.
     Read(Spec),
     /// Storage store of `elem`.
@@ -114,23 +144,6 @@ pub(super) struct Layout {
     pub(super) stride: u32,
     /// Field offsets. Empty unless this is a struct.
     pub(super) offsets: Vec<u32>,
-}
-
-/// Classify a toy import. `None` means the name is not a gpu opcode we lower.
-pub(super) fn classify(name: &str) -> Option<Imp> {
-    if name == symbols::STORAGE_BASE {
-        return Some(Imp::Base);
-    }
-    if name == symbols::RAW_READ {
-        return Some(Imp::ReadUniform);
-    }
-    if name == symbols::TEXTURE_SAMPLE_2D {
-        return Some(Imp::Sample);
-    }
-    if let Some(uni) = uni::imp(name) {
-        return Some(Imp::Uniform(uni));
-    }
-    storage_imp(name)
 }
 
 /// Layout of `elem`, using `structs` for [`Elem::Struct`].

@@ -197,7 +197,6 @@ fn locals_of(body: &wasmparser::FunctionBody<'_>) -> Result<String, String> {
     Ok(text)
 }
 
-// qual:allow(complexity, error_handling) reason: "Unsupported reachable ops fail this test."
 fn wrap(module: &Read) -> String {
     let mut imports = String::new();
     for name in &module.imports {
@@ -217,10 +216,13 @@ fn wrap(module: &Read) -> String {
             continue;
         }
         let func = &module.bodies[index as usize];
-        let (locals, ops) = func
-            .body
-            .as_ref()
-            .unwrap_or_else(|op| panic!("compute reaches an op the lifter will not keep: {op}"));
+        let (locals, ops) = func.body.as_ref().unwrap_or_else(|op| {
+            eprintln!(
+                "error: {} function {wasm_index} reaches unsupported wasm op: {op}",
+                module.export
+            );
+            panic!("compute reaches an op the lifter will not keep: {op}");
+        });
         let export = if wasm_index == module.compute {
             format!("(export \"{}\")", symbols::CS_MAIN)
         } else {
@@ -332,6 +334,21 @@ fn import_sig(name: &str) -> &'static str {
         symbols::UNIFORM_READ_F32 => "(param i32 i32 i32 i32) (result f32)",
         symbols::STORAGE_READ_U32 => "(param i32 i32 i32) (result i32)",
         symbols::STORAGE_WRITE_U32 => "(param i32 i32 i32 i32)",
+        symbols::STORAGE_ATOMIC_ADD_U32 => "(param i32 i32 i32 i32) (result i32)",
+        symbols::WORKGROUP_LOAD_U32 => "(param i32) (result i32)",
+        symbols::WORKGROUP_STORE_U32 => "(param i32 i32)",
+        symbols::WORKGROUP_ATOMIC_ADD_U32 => "(param i32 i32) (result i32)",
+        symbols::WORKGROUP_BARRIER | symbols::STORAGE_BARRIER => "",
+        symbols::TEXTURE_LOAD_2D => "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
+        symbols::TEXTURE_SAMPLE_2D => "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)",
+        symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => "(param i32 i32) (result i32)",
+        symbols::MATH_DOT3 => "(param f32 f32 f32 f32 f32 f32) (result f32)",
+        symbols::MATH_CROSS3 => "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)",
+        symbols::MATH_LENGTH3 => "(param f32 f32 f32) (result f32)",
+        symbols::MATH_NORMALIZE3 => "(param f32 f32 f32) (result f32 f32 f32)",
+        symbols::TEXTURE_SAMPLE_2D_LOD => {
+            "(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)"
+        }
         other => panic!("compute imports {other}, which the lifter does not know"),
     }
 }

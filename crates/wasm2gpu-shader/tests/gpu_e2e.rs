@@ -10,6 +10,12 @@ mod lift;
 #[path = "gpu_e2e/compute.rs"]
 mod compute;
 
+#[path = "gpu_e2e/compute_abi.rs"]
+mod compute_abi;
+
+#[path = "gpu_e2e/texture_fetch.rs"]
+mod texture_fetch;
+
 #[path = "gpu_e2e/float_ops.rs"]
 mod float_ops;
 
@@ -38,6 +44,14 @@ const INTENSITY: f32 = 0.5;
 const SRC: f32 = 0.25;
 const EXTRA: f32 = 0.25;
 
+fn gpu_required() -> bool {
+    env_flag_enabled("ORNIS_REQUIRE_GPU")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 #[test]
 fn lowered_shader_matches_the_cpu_reference() {
     let wasm = compile_wasm();
@@ -54,7 +68,7 @@ fn lowered_shader_matches_the_cpu_reference() {
             );
             assert!(pixel[0] > 0, "fragment wrote the clear color: {pixel:?}");
         }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+        None if gpu_required() => {
             panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
         }
         None => eprintln!("lowered_shader_matches_the_cpu_reference: no wgpu adapter — skipped"),
@@ -347,17 +361,40 @@ fn draw(
     queue.submit([encoder.finish()]);
 }
 
-fn map_f32s(device: &wgpu::Device, queue: &wgpu::Queue, storage: &wgpu::Buffer) -> [f32; 4] {
-    let read = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("out-read"),
-        size: 16,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_buffer_to_buffer(storage, 0, &read, 0, 16);
+fn readback_bytes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    size: u64,
+    label: &str,
+) -> Vec<u8> {
+    let staging = gpu_buffer(
+        device,
+        label,
+        size,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     queue.submit([encoder.finish()]);
-    let bytes = map_bytes(device, &read);
+    map_bytes(device, &staging)
+}
+
+fn read_words(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    size: u64,
+) -> Vec<u32> {
+    readback_bytes(device, queue, buffer, size, "wasm2gpu word readback")
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
+        .collect()
+}
+
+fn map_f32s(device: &wgpu::Device, queue: &wgpu::Queue, storage: &wgpu::Buffer) -> [f32; 4] {
+    let bytes = readback_bytes(device, queue, storage, 16, "out-read");
     let mut values = [0f32; 4];
     let mut index = 0usize;
     while index < values.len() {

@@ -17,8 +17,13 @@ use crate::error::TranslateError;
 use crate::ir::Kind;
 use crate::ir::Sig;
 
+const SAMPLE_RESOURCE_PARAMS: u32 = 4;
 const SAMPLE_PARAMS: u32 = 6;
+const SAMPLE_LOD_PARAMS: u32 = 7;
 const SAMPLE_RESULTS: u32 = 4;
+const VEC3_BINARY_PARAMS: u32 = crate::cx::VEC3_LANES * 2;
+const STORAGE_ATOMIC_U32_PARAMS: u32 = PROV_PARAMS + 1;
+const TEXTURE_LOAD_PARAMS: u32 = 4;
 const FLOAT4: [Kind; 4] = [Kind::F32, Kind::F32, Kind::F32, Kind::F32];
 
 pub(crate) fn sig_ok(
@@ -30,7 +35,36 @@ pub(crate) fn sig_ok(
     match imp {
         Imp::Base => fixed_sig(sig, 2, &[Kind::I32], "storage_base"),
         Imp::ReadUniform => fixed_sig(sig, PROV_PARAMS, &FLOAT4, "raw_read"),
-        Imp::Sample => count_only(sig, SAMPLE_PARAMS, SAMPLE_RESULTS, "texture_sample_2d"),
+        Imp::Sample => sample_sig(sig, SAMPLE_PARAMS, "texture_sample_2d"),
+        Imp::SampleLod => sample_sig(sig, SAMPLE_LOD_PARAMS, "texture_sample_2d_lod"),
+        Imp::TextureLoad => fixed_sig(sig, TEXTURE_LOAD_PARAMS, &FLOAT4, "texture_load_2d"),
+        Imp::TextureWidth => fixed_sig(sig, 2, &[Kind::I32], "texture_width_2d"),
+        Imp::TextureHeight => fixed_sig(sig, 2, &[Kind::I32], "texture_height_2d"),
+        Imp::MathDot3 => float_sig(sig, VEC3_BINARY_PARAMS, 1, "math_dot3"),
+        Imp::MathCross3 => float_sig(
+            sig,
+            VEC3_BINARY_PARAMS,
+            crate::cx::VEC3_LANES,
+            "math_cross3",
+        ),
+        Imp::MathLength3 => float_sig(sig, crate::cx::VEC3_LANES, 1, "math_length3"),
+        Imp::MathNormalize3 => float_sig(
+            sig,
+            crate::cx::VEC3_LANES,
+            crate::cx::VEC3_LANES,
+            "math_normalize3",
+        ),
+        Imp::StorageAtomicAddU32 => fixed_sig(
+            sig,
+            STORAGE_ATOMIC_U32_PARAMS,
+            &[Kind::I32],
+            "storage_atomic_add_u32",
+        ),
+        Imp::WorkgroupLoadU32 => fixed_sig(sig, 1, &[Kind::I32], "workgroup_load_u32"),
+        Imp::WorkgroupStoreU32 => fixed_sig(sig, 2, &[], "workgroup_store_u32"),
+        Imp::WorkgroupAtomicAddU32 => fixed_sig(sig, 2, &[Kind::I32], "workgroup_atomic_add_u32"),
+        Imp::WorkgroupBarrier => count_only(sig, 0, 0, "workgroup_barrier"),
+        Imp::StorageBarrier => count_only(sig, 0, 0, "storage_barrier"),
         Imp::Read(Spec::Fixed(elem)) => {
             fixed_sig(sig, PROV_PARAMS, &lanes_of(elem)?, "storage read")
         }
@@ -108,6 +142,47 @@ pub(super) fn push_lanes(lanes: &mut Vec<Kind>, kind: FieldKind) -> Result<(), T
         return Err(type_err("unsupported struct width"));
     }
     Ok(())
+}
+
+fn float_sig(sig: &Sig, params: u32, results: u32, what: &str) -> Result<(), TranslateError> {
+    if sig.params != params || sig.results != results {
+        return Err(mismatch(what));
+    }
+    let mut index = 0usize;
+    while index < params as usize {
+        if sig.param_kind[index] != Kind::F32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    index = 0;
+    while index < results as usize {
+        if sig.result_kind[index] != Kind::F32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn sample_sig(sig: &Sig, params: u32, what: &str) -> Result<(), TranslateError> {
+    if sig.params != params || sig.results != SAMPLE_RESULTS {
+        return Err(mismatch(what));
+    }
+    let mut index = 0usize;
+    while index < SAMPLE_RESOURCE_PARAMS as usize {
+        if sig.param_kind[index] != Kind::I32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    while index < params as usize {
+        if sig.param_kind[index] != Kind::F32 {
+            return Err(mismatch(what));
+        }
+        index += 1;
+    }
+    kinds_eq(&sig.result_kind, sig.results, &FLOAT4, what)
 }
 
 pub(super) fn count_only(

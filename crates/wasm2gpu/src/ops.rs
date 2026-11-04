@@ -14,9 +14,12 @@ use crate::ty::Elem;
 use crate::ty::Imp;
 use crate::uniform;
 
+mod compute;
 mod float;
 mod int;
+mod math;
 mod ptr;
+mod texture;
 
 use float::bin;
 use float::f32_abs;
@@ -54,6 +57,8 @@ pub(super) fn step(em: &mut Emit<'_, '_>, op: Op) -> Result<(), TranslateError> 
         Op::F32Abs => f32_abs(em),
         Op::F32Neg => f32_neg(em),
         Op::F32Sqrt => f32_sqrt(em),
+        Op::F32Min => math::scalar_binary(em, naga::MathFunction::Min),
+        Op::F32Max => math::scalar_binary(em, naga::MathFunction::Max),
         Op::F32ConvertI32U => f32_from_u32(em),
         Op::I32Add => ptr_bin(em, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(em, u32::wrapping_mul, BinaryOperator::Multiply),
@@ -96,7 +101,21 @@ fn call(em: &mut Emit<'_, '_>, index: u32) -> Result<(), TranslateError> {
     match imp {
         Imp::Base => storage_base(em),
         Imp::ReadUniform => read_uniform(em),
-        Imp::Sample => sample(em),
+        Imp::Sample => texture::sample(em, false),
+        Imp::SampleLod => texture::sample(em, true),
+        Imp::TextureLoad => texture::texture_load(em),
+        Imp::TextureWidth => texture::dimension(em, 0),
+        Imp::TextureHeight => texture::dimension(em, 1),
+        Imp::MathDot3 => math::math_dot3(em),
+        Imp::MathCross3 => math::math_vec3(em, naga::MathFunction::Cross, true),
+        Imp::MathLength3 => math::math_length3(em),
+        Imp::MathNormalize3 => math::math_vec3(em, naga::MathFunction::Normalize, false),
+        Imp::StorageAtomicAddU32 => compute::storage_atomic_add(em),
+        Imp::WorkgroupLoadU32 => compute::workgroup_load(em),
+        Imp::WorkgroupStoreU32 => compute::workgroup_store(em),
+        Imp::WorkgroupAtomicAddU32 => compute::workgroup_atomic_add(em),
+        Imp::WorkgroupBarrier => compute::workgroup_barrier(em),
+        Imp::StorageBarrier => compute::storage_barrier(em),
         Imp::Read(spec) => storage::load(em, spec),
         Imp::Write(spec) => storage::store(em, spec, index),
         Imp::Uniform(uni) => uniform::load(em, uni),
@@ -114,38 +133,6 @@ fn read_uniform(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
     let pointer = em.ex(Expression::GlobalVariable(var));
     let loaded = em.ex(Expression::Load { pointer });
     em.stack.push(Val::Vec(loaded));
-    Ok(())
-}
-
-fn sample(em: &mut Emit<'_, '_>) -> Result<(), TranslateError> {
-    let v_val = em.pop()?;
-    let u_val = em.pop()?;
-    let v = crate::env::float_of(v_val)?;
-    let u = crate::env::float_of(u_val)?;
-    let samp_binding = em.pop_imm()?;
-    let samp_group = em.pop_imm()?;
-    let tex_binding = em.pop_imm()?;
-    let tex_group = em.pop_imm()?;
-    let tex = globals::texture(em.cx, tex_group, tex_binding);
-    let samp = globals::sampler(em.cx, samp_group, samp_binding);
-    let image = em.ex(Expression::GlobalVariable(tex));
-    let sampler = em.ex(Expression::GlobalVariable(samp));
-    let coordinate = em.ex(Expression::Compose {
-        ty: em.cx.vec2,
-        components: vec![u, v],
-    });
-    let sampled = em.ex(Expression::ImageSample {
-        image,
-        sampler,
-        gather: None,
-        coordinate,
-        array_index: None,
-        offset: None,
-        level: naga::SampleLevel::Auto,
-        depth_ref: None,
-        clamp_to_edge: false,
-    });
-    em.stack.push(Val::Vec(sampled));
     Ok(())
 }
 

@@ -42,9 +42,10 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
     let uint = scalar_ty(&mut out, ScalarKind::Uint);
     let sint = scalar_ty(&mut out, ScalarKind::Sint);
     let bool_ty = bool_ty(&mut out);
-    let vec2 = vector_ty(&mut out, VectorSize::Bi);
-    let vec3 = vector_ty(&mut out, VectorSize::Tri);
-    let vec4 = vector_ty(&mut out, VectorSize::Quad);
+    let vec2 = vector_ty(&mut out, VectorSize::Bi, ScalarKind::Float);
+    let ivec2 = vector_ty(&mut out, VectorSize::Bi, ScalarKind::Sint);
+    let vec3 = vector_ty(&mut out, VectorSize::Tri, ScalarKind::Float);
+    let vec4 = vector_ty(&mut out, VectorSize::Quad, ScalarKind::Float);
     let mut cx = Cx {
         module: &mut out,
         scalar,
@@ -52,10 +53,14 @@ pub fn lower(module: &Module) -> Result<naga::Module, TranslateError> {
         sint,
         bool_ty,
         vec2,
+        ivec2,
         vec3,
         vec4,
         uniforms: Vec::new(),
         storages: Vec::new(),
+        atomic_storages: Vec::new(),
+        workgroup: None,
+        workgroup_atomics: None,
         textures: Vec::new(),
         samplers: Vec::new(),
         struct_tys: Vec::new(),
@@ -114,11 +119,11 @@ fn bool_ty(module: &mut naga::Module) -> naga::Handle<Type> {
         .insert(Type { name: None, inner }, Span::default())
 }
 
-fn vector_ty(module: &mut naga::Module, size: VectorSize) -> naga::Handle<Type> {
+fn vector_ty(module: &mut naga::Module, size: VectorSize, kind: ScalarKind) -> naga::Handle<Type> {
     let inner = TypeInner::Vector {
         size,
         scalar: Scalar {
-            kind: ScalarKind::Float,
+            kind,
             width: F32_WIDTH,
         },
     };

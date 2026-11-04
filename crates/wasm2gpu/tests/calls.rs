@@ -8,35 +8,9 @@ use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::TranslateError;
 use ornis_wasm2gpu::translate;
 
-fn vertex() -> String {
-    format!(
-        r#"(func (export "{vs}") (param f32 f32 f32 f32) (result f32 f32 f32 f32 f32 f32)
-            local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)"#,
-        vs = symbols::VS_MAIN,
-    )
-}
+mod common;
 
-fn fragment(body: &str) -> String {
-    format!(
-        r#"(func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32) {body})"#,
-        fs = symbols::FS_MAIN,
-    )
-}
-
-fn wasm(imports: &str, funcs: &str) -> Vec<u8> {
-    wat::parse_str(format!("(module {imports} {funcs} {vs})", vs = vertex(),)).expect("wat")
-}
-
-fn import(name: &str, sig: &str) -> String {
-    format!(
-        "(import \"{m}\" \"{name}\" (func ${name} {sig}))",
-        m = symbols::MODULE,
-    )
-}
-
-fn wgsl(imports: &str, funcs: &str) -> String {
-    translate(&wasm(imports, funcs)).expect("translate").wgsl
-}
+use common::{assert_wgsl_expressions, fragment, import, vertex, wasm, wgsl};
 
 fn err(imports: &str, funcs: &str) -> TranslateError {
     translate(&wasm(imports, funcs)).expect_err("reject")
@@ -435,4 +409,37 @@ fn wide_consts(value: u32) -> String {
         index += 1;
     }
     out
+}
+
+#[test]
+fn texture_dimensions_lower_to_wgsl_size_queries() {
+    let imports = format!(
+        "{} {}",
+        import(symbols::TEXTURE_WIDTH_2D, "(param i32 i32) (result i32)"),
+        import(symbols::TEXTURE_HEIGHT_2D, "(param i32 i32) (result i32)"),
+    );
+    let fs = fragment(&format!(
+        "i32.const 2 i32.const 3 call ${width} f32.convert_i32_u
+         i32.const 2 i32.const 3 call ${height} f32.convert_i32_u
+         f32.const 0 f32.const 1",
+        width = symbols::TEXTURE_WIDTH_2D,
+        height = symbols::TEXTURE_HEIGHT_2D,
+    ));
+    let got = wgsl(&imports, &fs);
+    assert_wgsl_expressions(&got, include_str!("snapshots/texture_dimensions.wgsl"));
+}
+
+#[test]
+fn texture_load_lowers_to_explicit_level_zero() {
+    let imports = import(
+        symbols::TEXTURE_LOAD_2D,
+        "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
+    );
+    let fs = fragment(&format!(
+        "i32.const 1 i32.const 2 i32.const 1 i32.const 2 call ${load}",
+        load = symbols::TEXTURE_LOAD_2D,
+    ));
+    let got = wgsl(&imports, &fs);
+    let snapshot = include_str!("snapshots/texture_load_2d.wgsl").trim();
+    assert_wgsl_expressions(&got, snapshot);
 }

@@ -157,6 +157,21 @@ fn import_sig(name: &str) -> &'static str {
         symbols::STORAGE_WRITE_F32 => "(param i32 i32 i32 f32)",
         symbols::STORAGE_READ_U32 => "(param i32 i32 i32) (result i32)",
         symbols::STORAGE_WRITE_U32 => "(param i32 i32 i32 i32)",
+        symbols::STORAGE_ATOMIC_ADD_U32 => "(param i32 i32 i32 i32) (result i32)",
+        symbols::WORKGROUP_LOAD_U32 => "(param i32) (result i32)",
+        symbols::WORKGROUP_STORE_U32 => "(param i32 i32)",
+        symbols::WORKGROUP_ATOMIC_ADD_U32 => "(param i32 i32) (result i32)",
+        symbols::WORKGROUP_BARRIER | symbols::STORAGE_BARRIER => "",
+        symbols::TEXTURE_LOAD_2D => "(param i32 i32 i32 i32) (result f32 f32 f32 f32)",
+        symbols::TEXTURE_SAMPLE_2D => "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)",
+        symbols::TEXTURE_SAMPLE_2D_LOD => {
+            "(param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)"
+        }
+        symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => "(param i32 i32) (result i32)",
+        symbols::MATH_DOT3 => "(param f32 f32 f32 f32 f32 f32) (result f32)",
+        symbols::MATH_CROSS3 => "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)",
+        symbols::MATH_LENGTH3 => "(param f32 f32 f32) (result f32)",
+        symbols::MATH_NORMALIZE3 => "(param f32 f32 f32) (result f32 f32 f32)",
         other => panic!("shade imports {other}, which the lifter does not know"),
     }
 }

@@ -18,9 +18,12 @@ use crate::error::TranslateError;
 use crate::ty::Elem;
 use crate::ty::StructDef;
 
+mod compute;
+
 pub(super) use crate::struct_members::struct_ty;
 pub(super) use crate::uniform_global::uniform;
 pub(super) use crate::uniform_global::uniform_global;
+pub(super) use compute::{atomic_storage, atomic_taken, workgroup, workgroup_atomics};
 
 pub(super) fn storage(
     cx: &mut Cx<'_>,
@@ -32,6 +35,11 @@ pub(super) fn storage(
     if crate::uniform_global::uniform_taken(&cx.uniforms, group, binding) {
         return Err(TranslateError::UnsupportedType(
             "binding is used as both uniform and storage".to_string(),
+        ));
+    }
+    if atomic_taken(&cx.atomic_storages, group, binding) {
+        return Err(TranslateError::UnsupportedType(
+            "binding is used as both atomic and ordinary storage".to_string(),
         ));
     }
     if let Some((found, var)) = find_storage(&cx.storages, group, binding) {
@@ -167,10 +175,20 @@ pub(super) fn base_ty(
 }
 
 fn cached(slots: &[Slot], group: u32, binding: u32) -> Option<naga::Handle<naga::GlobalVariable>> {
+    find_binding(slots, group, binding, |slot| (slot.group, slot.binding)).map(|slot| slot.var)
+}
+
+pub(super) fn find_binding<T>(
+    slots: &[T],
+    group: u32,
+    binding: u32,
+    key: impl Fn(&T) -> (u32, u32),
+) -> Option<&T> {
     let mut index = 0usize;
     while index < slots.len() {
-        if slots[index].group == group && slots[index].binding == binding {
-            return Some(slots[index].var);
+        let slot = &slots[index];
+        if key(slot) == (group, binding) {
+            return Some(slot);
         }
         index += 1;
     }

@@ -207,6 +207,23 @@ fn storage_index_write_does_not_touch_the_neighbor() {
 }
 
 #[test]
+#[should_panic(expected = "texture coordinate out of bounds")]
+fn texture_load_rejects_out_of_bounds_coordinates() {
+    let mut mem = HostMemory::new();
+    mem.bind_texture::<4, 2>(1, 1, &[rgba(0.0, 0.0, 0.0, 1.0)]);
+    with_host(&mut mem, || Texture2d::<4, 2>::bind().load(1, 0));
+}
+
+#[test]
+fn texture_dimensions_report_the_bound_extent() {
+    let mut mem = HostMemory::new();
+    let texels = [rgba(0.0, 0.0, 0.0, 1.0); 6];
+    mem.bind_texture::<4, 2>(3, 2, &texels);
+    let dimensions = with_host(&mut mem, || Texture2d::<4, 2>::bind().dimensions());
+    assert_eq!(dimensions, (3, 2));
+}
+
+#[test]
 fn texture_sample_is_not_a_linear_load() {
     let mut mem = HostMemory::new();
     mem.bind_uniform::<0, 0, GpuVec4>();
@@ -295,6 +312,20 @@ fn import_names_stay_unpacked() {
     assert!(symbols::is_toy_import(symbols::STORAGE_READ_STRUCT));
     assert!(symbols::is_toy_import(symbols::STORAGE_WRITE_STRUCT));
     assert!(symbols::is_toy_import(symbols::TEXTURE_SAMPLE_2D));
+    assert!(symbols::is_toy_import(symbols::TEXTURE_SAMPLE_2D_LOD));
+    assert!(symbols::is_toy_import(symbols::TEXTURE_LOAD_2D));
+    assert!(symbols::is_toy_import(symbols::TEXTURE_WIDTH_2D));
+    assert!(symbols::is_toy_import(symbols::TEXTURE_HEIGHT_2D));
+    assert!(symbols::is_toy_import(symbols::MATH_DOT3));
+    assert!(symbols::is_toy_import(symbols::MATH_CROSS3));
+    assert!(symbols::is_toy_import(symbols::MATH_LENGTH3));
+    assert!(symbols::is_toy_import(symbols::MATH_NORMALIZE3));
+    assert!(symbols::is_toy_import(symbols::STORAGE_ATOMIC_ADD_U32));
+    assert!(symbols::is_toy_import(symbols::WORKGROUP_LOAD_U32));
+    assert!(symbols::is_toy_import(symbols::WORKGROUP_STORE_U32));
+    assert!(symbols::is_toy_import(symbols::WORKGROUP_ATOMIC_ADD_U32));
+    assert!(symbols::is_toy_import(symbols::WORKGROUP_BARRIER));
+    assert!(symbols::is_toy_import(symbols::STORAGE_BARRIER));
     assert!(symbols::TYPES_SECTION == "ornis_gpu.types");
     assert!(!symbols::is_toy_import("i32.load"));
     assert!(symbols::MODULE == "ornis_gpu");

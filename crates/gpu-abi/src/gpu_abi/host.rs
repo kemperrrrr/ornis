@@ -15,6 +15,13 @@ use crate::layout::GpuSafeLayout;
 use crate::layout::GpuVec2;
 use crate::layout::GpuVec4;
 
+mod sync;
+pub(super) use sync::{
+    host_storage_atomic_add_u32, host_storage_barrier, host_texture_height, host_texture_load,
+    host_texture_width, host_workgroup_atomic_add_u32, host_workgroup_barrier,
+    host_workgroup_load_u32, host_workgroup_store_u32,
+};
+
 std::thread_local! {
     static HOST: RefCell<Option<HostMemory>> = const { RefCell::new(None) };
 }
@@ -23,6 +30,7 @@ std::thread_local! {
 #[derive(Default)]
 pub struct HostMemory {
     slots: Vec<Slot>,
+    workgroup: Vec<u32>,
 }
 
 impl HostMemory {
@@ -101,6 +109,11 @@ impl HostMemory {
     // qual:api — host upload entry; in-tree callers are the unit tests.
     pub fn read_storage<const G: u32, const B: u32, T: GpuSafeLayout>(&self) -> T {
         self.load_kind::<T>(G, B, Kind::Storage, 0)
+    }
+
+    fn ensure_workgroup(&mut self) {
+        self.workgroup
+            .resize(crate::symbols::WORKGROUP_WORDS as usize, 0);
     }
 
     fn bind_bytes(&mut self, group: u32, binding: u32, kind: Kind, size: u32, align: u32) {

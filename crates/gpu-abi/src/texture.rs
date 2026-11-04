@@ -6,7 +6,7 @@ use crate::gpu_abi;
 use crate::layout::GpuVec2;
 use crate::layout::GpuVec4;
 
-/// 2D texture at `(GROUP, BINDING)`. Sampling is an import, not a load.
+/// 2D texture at `(GROUP, BINDING)`. Sampling and texel loads are imports.
 #[derive(Clone, Copy, Debug)]
 pub struct Texture2d<const GROUP: u32, const BINDING: u32> {
     _marker: PhantomData<()>,
@@ -18,6 +18,30 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         Self {
             _marker: PhantomData,
         }
+    }
+
+    /// Load the texel at integer coordinates from mip level zero.
+    ///
+    /// Require `0 <= x < width` and `0 <= y < height`, where dimensions come
+    /// from [`Self::dimensions`]. Coordinates are signed to match WGSL's
+    /// `textureLoad`; convert and bounds-check the returned `u32` dimensions
+    /// before calling. Out-of-bounds coordinates are invalid shader input (GPU
+    /// results are backend-dependent); the host shadow panics on them. This
+    /// operation does not use a sampler.
+    pub fn load(&self, x: i32, y: i32) -> GpuVec4 {
+        let _ = self;
+        gpu_abi::texture_load_2d(G, B, x, y)
+    }
+
+    /// Return the bound texture's width and height in texels.
+    ///
+    /// On the host, panics outside `with_host` or when the texture is missing.
+    pub fn dimensions(&self) -> (u32, u32) {
+        let _ = self;
+        (
+            gpu_abi::texture_width_2d(G, B),
+            gpu_abi::texture_height_2d(G, B),
+        )
     }
 
     /// Sample at `uv`. `sampler` selects the sampler binding; it is not a pointer.
@@ -33,6 +57,21 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
     ) -> GpuVec4 {
         let _ = (self, sampler);
         gpu_abi::texture_sample_2d::<G, B, SG, SB>(uv)
+    }
+
+    /// Sample at `uv` from an explicit mip level.
+    ///
+    /// The level is passed through to the GPU's `textureSampleLevel` operation.
+    /// The host shadow stores only one mip level, so it samples that level for
+    /// every requested LOD.
+    pub fn sample_lod<const SG: u32, const SB: u32>(
+        &self,
+        sampler: &Sampler<SG, SB>,
+        uv: GpuVec2,
+        level: f32,
+    ) -> GpuVec4 {
+        let _ = (self, sampler);
+        gpu_abi::texture_sample_2d_lod::<G, B, SG, SB>(uv, level)
     }
 }
 

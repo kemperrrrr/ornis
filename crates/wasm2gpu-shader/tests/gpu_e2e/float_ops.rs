@@ -5,12 +5,24 @@ use ornis_wasm2gpu::translate;
 
 use super::device;
 use super::entry;
-use super::gpu_buffer;
-use super::map_bytes;
 use super::record_compute_pass;
 use super::storage_buffer;
 
-const FLOAT_EXPECTED: [f32; 7] = [9.0, 5.0, 14.0, 4.5, 3.25, -3.25, 4_294_967_296.0];
+const FLOAT_EXPECTED: [f32; 13] = [
+    9.0,
+    5.0,
+    14.0,
+    4.5,
+    3.25,
+    -3.25,
+    4_294_967_296.0,
+    f32::from_bits(0x7fc0_0000),
+    f32::from_bits(0x7fc0_0000),
+    -0.0,
+    0.0,
+    -0.0,
+    -0.0,
+];
 const COMPARISON_EXPECTED: [u32; 12] = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
 
 fn comparisons() -> String {
@@ -71,6 +83,18 @@ fn wasm() -> Vec<u8> {
                 f32.const 3.25 f32.neg call $store_f32
                 i32.const 0 i32.const 0 i32.const 6
                 i32.const -1 f32.convert_i32_u call $store_f32
+                i32.const 0 i32.const 0 i32.const 7
+                f32.const nan f32.const 1 f32.min call $store_f32
+                i32.const 0 i32.const 0 i32.const 8
+                f32.const 1 f32.const nan f32.max call $store_f32
+                i32.const 0 i32.const 0 i32.const 9
+                f32.const -0 f32.const 0 f32.min call $store_f32
+                i32.const 0 i32.const 0 i32.const 10
+                f32.const -0 f32.const 0 f32.max call $store_f32
+                i32.const 0 i32.const 0 i32.const 11
+                f32.const 0 f32.const -0 f32.min call $store_f32
+                i32.const 0 i32.const 0 i32.const 12
+                f32.const -0 f32.const -0 f32.max call $store_f32
                 {comparisons}))"#,
         module = symbols::MODULE,
         store_f32 = symbols::STORAGE_WRITE_F32,
@@ -85,12 +109,14 @@ fn wasm() -> Vec<u8> {
 
 #[test]
 fn lowered_scalar_float_ops_match_expected_gpu_values() {
-    // Keep runtime assertions finite; non-finite constants are validated by
-    // the translator test, while their exact GPU results vary by backend.
-    let translated = translate(&wasm()).expect("translate scalar float operators");
+    // Check the Wasm-defined NaN and signed-zero min/max results on the GPU,
+    // alongside the finite scalar operators.
+    let translated = translate(&wasm()).unwrap_or_else(|error| {
+        eprintln!("error: scalar float translation failed: {error:?}");
+        panic!("translate scalar float operators: {error:?}");
+    });
     let Some((device, queue)) = device() else {
-        let required =
-            std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0");
+        let required = super::gpu_required();
         assert!(
             !required,
             "ORNIS_REQUIRE_GPU is set but scalar-float test has no wgpu device"
@@ -127,43 +153,9 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
     record_compute_pass(&mut encoder, &pipeline, &bind_group, [1, 1, 1]);
     queue.submit([encoder.finish()]);
 
-    let floats: Vec<f32> = readback_words(&device, &queue, &float_output, float_bytes)
-        .into_iter()
-        .map(f32::from_bits)
-        .collect();
-    assert_eq!(floats.as_slice(), FLOAT_EXPECTED.as_slice());
-    let comparisons = readback_words(&device, &queue, &comparison_output, comparison_bytes);
+    let float_bits = super::read_words(&device, &queue, &float_output, float_bytes);
+    let expected_bits = FLOAT_EXPECTED.map(f32::to_bits);
+    assert_eq!(float_bits.as_slice(), expected_bits.as_slice());
+    let comparisons = super::read_words(&device, &queue, &comparison_output, comparison_bytes);
     assert_eq!(comparisons.as_slice(), COMPARISON_EXPECTED.as_slice());
-}
-
-fn readback_words(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    size: u64,
-) -> Vec<u32> {
-    readback(device, queue, buffer, size)
-        .chunks_exact(std::mem::size_of::<u32>())
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
-        .collect()
-}
-
-fn readback(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    buffer: &wgpu::Buffer,
-    size: u64,
-) -> Vec<u8> {
-    let staging = gpu_buffer(
-        device,
-        "wasm2gpu scalar-float readback",
-        size,
-        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-    );
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("wasm2gpu scalar-float readback"),
-    });
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
-    queue.submit([encoder.finish()]);
-    map_bytes(device, &staging)
 }

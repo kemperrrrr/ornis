@@ -71,7 +71,12 @@ fn compute_spirv(
         return Ok(Vec::new());
     };
     let words = spirv(module, info, naga::ShaderStage::Compute, &entry.name)?;
-    reparse_spirv(&words)?;
+    // Naga's SPIR-V parser does not yet accept the atomic global initializer
+    // emitted by Native zero-initialization mode, so skip only this unsupported
+    // parser round-trip for the extension-backed module.
+    if !has_workgroup_atomic(module) {
+        reparse_spirv(&words)?;
+    }
     Ok(words)
 }
 
@@ -102,6 +107,20 @@ fn binding_array(module: &naga::Module) -> bool {
     false
 }
 
+fn has_workgroup_atomic(module: &naga::Module) -> bool {
+    module.global_variables.iter().any(|(_, global)| {
+        if global.space != naga::AddressSpace::WorkGroup {
+            return false;
+        }
+        match &module.types[global.ty].inner {
+            naga::TypeInner::Array { base, .. } => {
+                matches!(module.types[*base].inner, naga::TypeInner::Atomic(_))
+            }
+            _ => false,
+        }
+    })
+}
+
 fn spirv(
     module: &naga::Module,
     info: &naga::valid::ModuleInfo,
@@ -109,6 +128,13 @@ fn spirv(
     entry_point: &str,
 ) -> Result<Vec<u32>, TranslateError> {
     let mut options = naga::back::spv::Options::default();
+    if stage == naga::ShaderStage::Compute && has_workgroup_atomic(module) {
+        // Naga's Polyfill mode writes a whole-array Store for every WorkGroup
+        // global; that Store is invalid when the array contains atomics.
+        // Native mode preserves zero initialization through the SPIR-V extension.
+        options.zero_initialize_workgroup_memory =
+            naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Native;
+    }
     options
         .flags
         .remove(naga::back::spv::WriterFlags::ADJUST_COORDINATE_SPACE);
@@ -154,6 +180,6 @@ fn reparse_spirv(words: &[u32]) -> Result<(), TranslateError> {
         naga::valid::Capabilities::empty(),
     )
     .validate(&parsed)
-    .map_err(|err| TranslateError::Naga(err.to_string()))?;
+    .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
     Ok(())
 }

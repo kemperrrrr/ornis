@@ -68,6 +68,12 @@ pub(super) struct StorageSlot {
     pub(super) var: naga::Handle<naga::GlobalVariable>,
 }
 
+pub(super) struct AtomicSlot {
+    pub(super) group: u32,
+    pub(super) binding: u32,
+    pub(super) var: naga::Handle<naga::GlobalVariable>,
+}
+
 pub(super) struct Cx<'a> {
     pub(super) module: &'a mut naga::Module,
     pub(super) scalar: naga::Handle<Type>,
@@ -75,10 +81,14 @@ pub(super) struct Cx<'a> {
     pub(super) sint: naga::Handle<Type>,
     pub(super) bool_ty: naga::Handle<Type>,
     pub(super) vec2: naga::Handle<Type>,
+    pub(super) ivec2: naga::Handle<Type>,
     pub(super) vec3: naga::Handle<Type>,
     pub(super) vec4: naga::Handle<Type>,
     pub(super) uniforms: Vec<UniformSlot>,
     pub(super) storages: Vec<StorageSlot>,
+    pub(super) atomic_storages: Vec<AtomicSlot>,
+    pub(super) workgroup: Option<naga::Handle<naga::GlobalVariable>>,
+    pub(super) workgroup_atomics: Option<naga::Handle<naga::GlobalVariable>>,
     pub(super) textures: Vec<Slot>,
     pub(super) samplers: Vec<Slot>,
     pub(super) struct_tys: Vec<(u16, naga::Handle<Type>)>,
@@ -124,7 +134,7 @@ pub(super) enum Val {
     /// so a condition stays a naga `bool` instead of a `u32` that a later
     /// `!= 0u` has to unwrap again.
     Bool(naga::Handle<Expression>),
-    /// One `vec4<f32>` from `raw_read`, `texture_sample_2d`, or `storage_read`.
+    /// One `vec4<f32>` from a texture, `raw_read`, or `storage_read`.
     Vec(naga::Handle<Expression>),
     /// A storage address: provenance (group, binding) plus a byte offset.
     ///

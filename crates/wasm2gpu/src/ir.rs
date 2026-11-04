@@ -101,6 +101,14 @@ pub enum Op {
     /// inputs, and may flush subnormals. Guests must not rely on the
     /// wasm-exact result.
     F32Sqrt,
+    /// Wasm `f32.min`: NaN operands produce canonical NaN; for two zeros,
+    /// the result is negative if either operand is negative. Other values use
+    /// numeric minimum. Lowering preserves these cases around WGSL `min`.
+    F32Min,
+    /// Wasm `f32.max`: NaN operands produce canonical NaN; for two zeros,
+    /// the result is negative only if both operands are negative. Other values
+    /// use numeric maximum. Lowering preserves these cases around WGSL `max`.
+    F32Max,
     /// Convert an unsigned `i32` value to `f32`.
     F32ConvertI32U,
     /// Wrapping `i32` add.

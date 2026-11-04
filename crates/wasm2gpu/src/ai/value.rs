@@ -53,6 +53,7 @@ pub(super) fn on_op(ai: &mut Ai<'_>, st: &mut St, op: Op) -> Result<(), Translat
         Op::F32Abs => f32_abs(st),
         Op::F32Neg => f32_neg(st),
         Op::F32Sqrt => f32_sqrt(st),
+        Op::F32Min | Op::F32Max => f32_bin(st),
         Op::F32ConvertI32U => f32_from_u32(st),
         Op::I32Add => i32_offset(st, true, u32::wrapping_add),
         Op::I32Mul => i32_bin(st, u32::wrapping_mul),
@@ -94,10 +95,30 @@ pub(super) fn call(ai: &mut Ai<'_>, st: &mut St, index: u32) -> Result<(), Trans
         Imp::Base => storage_base(st, import),
         Imp::ReadUniform => read_uniform(st),
         Imp::Sample => sample(st, import),
+        Imp::SampleLod => sample_lod(st, import),
+        Imp::TextureLoad => super::builtins::texture_load(st, import),
+        Imp::TextureWidth | Imp::TextureHeight => texture_dimension(st, import, imp),
+        Imp::MathDot3 => super::builtins::math_dot3(st, import),
+        Imp::MathCross3 => super::builtins::math_vec3(st, import, Imp::MathCross3),
+        Imp::MathLength3 => super::builtins::math_length3(st, import),
+        Imp::MathNormalize3 => super::builtins::math_vec3(st, import, Imp::MathNormalize3),
+        Imp::StorageAtomicAddU32 => super::builtins::storage_atomic_add(st, import),
+        Imp::WorkgroupLoadU32 => super::builtins::workgroup_load(st, import),
+        Imp::WorkgroupStoreU32 => super::builtins::workgroup_store(st, import),
+        Imp::WorkgroupAtomicAddU32 => super::builtins::workgroup_atomic_add(st, import),
+        Imp::WorkgroupBarrier => super::builtins::barrier(st, import, Imp::WorkgroupBarrier),
+        Imp::StorageBarrier => super::builtins::barrier(st, import, Imp::StorageBarrier),
         Imp::Read(spec) => read_storage(ai, st, import, spec),
         Imp::Write(spec) => write_storage(ai, st, import, spec),
         Imp::Uniform(uni) => super::uniform::on_uniform(st, import, ai.structs, uni),
     }
+}
+
+fn texture_dimension(st: &mut St, import: &Import, imp: Imp) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, imp, &[], None)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    push(st, Abs::I32(Num::Dyn { joined: false }))
 }
 
 pub(super) fn read_uniform(st: &mut St) -> Result<(), TranslateError> {
@@ -115,6 +136,18 @@ pub(super) fn read_uniform(st: &mut St) -> Result<(), TranslateError> {
 
 pub(super) fn sample(st: &mut St, import: &Import) -> Result<(), TranslateError> {
     ty::sig_ok(&import.sig, Imp::Sample, &[], None)?;
+    pop_f32(st)?;
+    pop_f32(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    pop_prov(st)?;
+    push(st, Abs::Vec)
+}
+
+pub(super) fn sample_lod(st: &mut St, import: &Import) -> Result<(), TranslateError> {
+    ty::sig_ok(&import.sig, Imp::SampleLod, &[], None)?;
+    pop_f32(st)?;
     pop_f32(st)?;
     pop_f32(st)?;
     pop_prov(st)?;

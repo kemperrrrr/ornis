@@ -44,7 +44,7 @@ fn compute_kernel_writes_storage() {
             }
             eprintln!("wasm2gpu compute GPU readback {got:?}");
         }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+        None if super::gpu_required() => {
             panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
         }
         None => eprintln!("compute_kernel_writes_storage: no wgpu adapter — skipped"),
