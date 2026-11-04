@@ -215,7 +215,8 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
         inside,
         boundary,
         boundary_visible,
-        nan_radius_visible,
+        nan_axes_visible,
+        mixed_nan_axis_visible,
         negative_radius_visible,
     ) = with_host(&mut memory, || {
         (
@@ -254,17 +255,18 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
                 0.0,
                 0.0,
                 f32::NAN,
-                0.0,
-                0.0,
+                f32::NAN,
+                f32::NAN,
             ),
             super::cull_record_visible(
                 CULL_TEST_OUTSIDE_CENTER,
                 0.0,
                 0.0,
-                -1.0,
-                0.0,
-                0.0,
+                f32::NAN,
+                CULL_TEST_RADIUS,
+                CULL_TEST_RADIUS,
             ),
+            super::cull_record_visible(CULL_TEST_OUTSIDE_CENTER, 0.0, 0.0, -1.0, 0.0, 0.0),
         )
     });
     assert_eq!(radius, CULL_STORAGE_LENGTH);
@@ -272,9 +274,10 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
     assert!(!inside);
     assert!(!boundary, "touching a plane remains visible");
     assert!(boundary_visible);
-    assert!(nan_radius_visible);
+    assert!(nan_axes_visible);
+    assert!(!mixed_nan_axis_visible);
     assert!(negative_radius_visible);
-    assert!(super::cull_radius_invalid(f32::NAN, 0.0, 0.0));
-    assert!(super::cull_radius_invalid(0.0, -1.0, 0.0));
-    assert!(!super::cull_radius_invalid(0.0, 1.0, 2.0));
+    assert!(super::cull_radius_invalid(f32::NAN));
+    assert!(super::cull_radius_invalid(-1.0));
+    assert!(!super::cull_radius_invalid(2.0));
 }

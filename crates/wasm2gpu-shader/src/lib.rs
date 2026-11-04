@@ -9,6 +9,7 @@
 //! `gpu-abi`. Returning a struct would spill through linear memory, which the
 //! translator rejects. This crate is not the production shader DSL.
 
+// qual:allow(srp) reason: "Shader exports and their scalar ABI helpers remain together so wasm entry names and translator-visible calls stay stable."
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
 
@@ -327,15 +328,27 @@ fn cull_storage_length(base: u32) -> f32 {
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
-fn cull_radius_invalid(x_radius: f32, y_radius: f32, z_radius: f32) -> bool {
-    x_radius.is_nan()
-        || x_radius < 0.0
-        || y_radius.is_nan()
-        || y_radius < 0.0
-        || z_radius.is_nan()
-        || z_radius < 0.0
+fn cull_radius_invalid(radius: f32) -> bool {
+    radius.is_nan() || radius < 0.0
 }
 
+// Mirror WGSL `max`: a single NaN axis yields the finite other axis; all-NaN
+// radii stay NaN and are handled fail-open by `cull_radius_invalid`.
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_max(left: f32, right: f32) -> f32 {
+    if left.is_nan() {
+        right
+    } else if right.is_nan() {
+        left
+    } else if left > right {
+        left
+    } else {
+        right
+    }
+}
+
+// qual:allow(srp) reason: "The wasm2gpu shader ABI only supports scalar arguments; this helper mirrors the WGSL sphere test without a translated aggregate."
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
 fn cull_record_visible(
@@ -346,15 +359,9 @@ fn cull_record_visible(
     y_radius: f32,
     z_radius: f32,
 ) -> bool {
-    if cull_radius_invalid(x_radius, y_radius, z_radius) {
+    let radius = cull_max(x_radius, cull_max(y_radius, z_radius));
+    if cull_radius_invalid(radius) {
         return true;
-    }
-    let mut radius = x_radius;
-    if y_radius > radius {
-        radius = y_radius;
-    }
-    if z_radius > radius {
-        radius = z_radius;
     }
     let mut plane = 0u32;
     while plane < PLANE_COUNT {
@@ -424,9 +431,8 @@ pub fn cull_compact(id: u32) {
         storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
     let center_y =
         storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1);
-    let center_z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
-        base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2,
-    );
+    let center_z =
+        storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2);
     let x_radius = cull_storage_length(base);
     let y_radius = cull_storage_length(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
     let z_radius = cull_storage_length(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);

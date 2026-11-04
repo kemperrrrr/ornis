@@ -1,4 +1,4 @@
-//! A/B the lowered `cull` kernel against the shipped production WGSL.
+//! A/B the lowered culling kernels against the shipped production WGSL.
 //!
 //! [`CULL_COMPUTE_WGSL`] (`render/src/gpu_culling.rs`) compacts
 //! `PerObject` copies through `atomicAdd` and a `count` guard. This test
@@ -11,6 +11,9 @@
 
 use ornis_render::gpu_culling::{CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD};
 use ornis_render::renderer::PerObjectGpu;
+#[path = "cull_prod/compact_parity.rs"]
+mod compact_parity;
+
 use ornis_wasm2gpu_testkit::cull::{
     ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
 };
@@ -36,6 +39,8 @@ const RADIUS_Z_OFFSET: u32 = MODEL_OFFSET + 2 * MODEL_COLUMN_BYTES + 2 * F32_BYT
 const TRANSLATION_OFFSET: u32 = MODEL_OFFSET + 3 * MODEL_COLUMN_BYTES;
 /// `args` holds `array<atomic<u32>, 5>`; word 1 is the compacted count.
 const ARGS_WORDS: usize = 5;
+/// Existing outside-frustum sphere whose x-axis becomes NaN for max parity.
+const MIXED_NAN_AXIS_SLOT: usize = 1;
 
 /// The translated kernel and the production kernel must cull the same
 /// objects from the same bytes — the review's "A/B against the real
@@ -50,12 +55,18 @@ fn cull_kernel_matches_the_production_wgsl() {
         EXPECTED[nan_radius_slot], 1,
         "a NaN radius must fail open and remain visible"
     );
+    assert_eq!(
+        EXPECTED[MIXED_NAN_AXIS_SLOT],
+        0,
+        "one NaN scale axis follows WGSL max and preserves the finite radius"
+    );
     let wgsl = lowered_kernel();
     let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
         .filter(|slot| EXPECTED[*slot as usize] == 1)
         .collect();
     match device() {
         Some((device, queue)) => {
+            let objects = pack_prod_objects();
             let (flags, _) = run(&device, &queue, &wgsl);
             let wasm_visible: Vec<u32> = flags
                 .iter()
@@ -63,7 +74,7 @@ fn cull_kernel_matches_the_production_wgsl() {
                 .filter(|(_, flag)| **flag == 1)
                 .map(|(slot, _)| slot as u32)
                 .collect();
-            let (prod_visible, prod_count) = run_production(&device, &queue);
+            let (prod_visible, prod_count) = run_production(&device, &queue, &objects);
             let nan_slot = nan_radius_slot as u32;
             assert!(
                 wasm_visible.contains(&nan_slot),
@@ -87,7 +98,11 @@ fn cull_kernel_matches_the_production_wgsl() {
 
 /// Dispatch the shipped kernel once and read back the compacted set:
 /// `material_index` of every entry below the atomic count, sorted.
-fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
+fn run_production(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    objects: &[u8],
+) -> (Vec<u32>, u32) {
     let bgl = production_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("production cull"),
@@ -120,7 +135,7 @@ fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32)
     );
     let args = storage_buffer(device, "prod-cull-args", (ARGS_WORDS * 4) as u64);
     queue.write_buffer(&params, 0, &pack_prod_params());
-    queue.write_buffer(&src, 0, &pack_prod_objects());
+    queue.write_buffer(&src, 0, objects);
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("production cull"),
         layout: &bgl,
@@ -211,7 +226,12 @@ fn pack_prod_objects() -> Vec<u8> {
     while object < SPHERES.len() {
         let sphere = SPHERES[object];
         let base = (object * OBJECT_BYTES) as u32;
-        put_f32(&mut bytes, base + RADIUS_X_OFFSET, sphere[3]);
+        let radius_x = if object == MIXED_NAN_AXIS_SLOT {
+            f32::NAN
+        } else {
+            sphere[3]
+        };
+        put_f32(&mut bytes, base + RADIUS_X_OFFSET, radius_x);
         put_f32(&mut bytes, base + RADIUS_Y_OFFSET, sphere[3]);
         put_f32(&mut bytes, base + RADIUS_Z_OFFSET, sphere[3]);
         put_f32(&mut bytes, base + TRANSLATION_OFFSET, sphere[0]);
