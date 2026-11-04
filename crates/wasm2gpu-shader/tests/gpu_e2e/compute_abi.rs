@@ -8,6 +8,8 @@ use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
 use ornis_wasm2gpu_testkit::record_compute_pass;
 use ornis_wasm2gpu_testkit::storage_buffer;
+use std::fs;
+use std::process::Command;
 
 const FLOAT_OUTPUT_BITS: [u32; 8] = [
     0,
@@ -132,6 +134,7 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
         panic!("translate ABI imports: {error:?}");
     });
     assert!(!translated.compute_spirv.is_empty());
+    validate_compute_spirv(&translated.compute_spirv);
     let Some((device, queue)) = super::device() else {
         let required = std::env::var_os("ORNIS_REQUIRE_GPU").is_some();
         assert!(
@@ -146,6 +149,42 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
     assert_eq!(floats.as_slice(), FLOAT_OUTPUT_BITS.as_slice());
     assert_eq!(workgroup.as_slice(), U32_OUTPUT.as_slice());
     assert_eq!(atomic.as_slice(), ATOMIC_OUTPUT.as_slice());
+}
+
+fn validate_compute_spirv(words: &[u32]) {
+    let required = matches!(std::env::var("ORNIS_REQUIRE_SPIRV_VAL").as_deref(), Ok("1"));
+    let probe = Command::new("spirv-val").arg("--version").output();
+    let Ok(probe) = probe else {
+        assert!(
+            !required,
+            "ORNIS_REQUIRE_SPIRV_VAL=1 but spirv-val is unavailable"
+        );
+        eprintln!("SKIPPED (compute SPIR-V validation): spirv-val is unavailable");
+        return;
+    };
+    assert!(probe.status.success(), "spirv-val --version failed");
+
+    let path = std::env::temp_dir().join(format!(
+        "ornis-wasm2gpu-compute-{}-{}.spv",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let bytes = words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect::<Vec<_>>();
+    fs::write(&path, bytes).expect("write compute SPIR-V for validation");
+    let result = Command::new("spirv-val")
+        .args(["--target-env", "vulkan1.3"])
+        .arg(&path)
+        .output()
+        .expect("run spirv-val");
+    let _ = fs::remove_file(&path);
+    assert!(
+        result.status.success(),
+        "spirv-val rejected compute SPIR-V:\n{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 fn dispatch(
