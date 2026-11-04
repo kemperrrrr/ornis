@@ -54,6 +54,33 @@ pub enum TranslateError {
     MissingEntry(&'static str),
     /// naga rejected the lowered module or a round-trip.
     Naga(String),
+    /// A workgroup or storage barrier is not reached by every invocation.
+    ///
+    /// `barrier` is the import name. [`BarrierSite`] is the construct the
+    /// analysis proved divergent. A predicate the analysis cannot prove
+    /// (for example a value loaded from memory) stays the ABI precondition
+    /// and does not produce this error.
+    DivergentBarrier {
+        /// `workgroup_barrier` or `storage_barrier`.
+        barrier: &'static str,
+        /// The divergent construct that reaches the call.
+        site: BarrierSite,
+    },
+}
+
+/// Where a barrier call sits when control flow is not uniform.
+///
+/// Uniform here means every invocation that entered the function is still
+/// together. The translator reports a site only when the compute invocation
+/// id proves that is no longer true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarrierSite {
+    /// The call is inside a branch on an invocation-dependent condition.
+    Branch,
+    /// The call is inside a loop whose continue or exit depends on the invocation.
+    Loop,
+    /// An invocation-dependent `return` skips the call.
+    EarlyReturn,
 }
 
 impl fmt::Display for TranslateError {
@@ -71,6 +98,24 @@ impl fmt::Display for TranslateError {
             Self::UnsupportedType(msg) => f.write_str(msg),
             Self::EntryMetadata(msg) => write!(f, "entry metadata: {msg}"),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
+            Self::DivergentBarrier { barrier, site } => write!(f, "{}", site.message(barrier)),
+        }
+    }
+}
+
+impl BarrierSite {
+    /// Sentence that names `barrier` and why its control flow is not uniform.
+    pub fn message(self, barrier: &str) -> String {
+        match self {
+            Self::Branch => format!(
+                "{barrier} is not uniform: the call is inside a branch on an invocation-dependent condition"
+            ),
+            Self::Loop => format!(
+                "{barrier} is not uniform: the call is inside a loop controlled by an invocation-dependent condition"
+            ),
+            Self::EarlyReturn => {
+                format!("{barrier} is not uniform: an invocation-dependent return skips the call")
+            }
         }
     }
 }

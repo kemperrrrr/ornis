@@ -11,7 +11,9 @@
 //! a loop is a `continue`. A `br_table` aimed at a region this translator
 //! did not wrap in a naga loop is rejected.
 //! `cs_main`, when exported, is a compute entry with `@workgroup_size` and
-//! `global_invocation_id`. `raw_read` and `texture_sample_2d` lower as before.
+//! `global_invocation_id`. A `workgroup_barrier` or `storage_barrier` reached
+//! under control flow that this translator can prove depends on that id is
+//! rejected. `raw_read` and `texture_sample_2d` lower as before.
 //! Scalar `f32` arithmetic (`+ - * /`) and comparisons lower directly to
 //! WGSL operators; unsigned `i32`-to-`f32` conversion lowers to a WGSL cast.
 //! `f32.sqrt` lowers to WGSL `sqrt` with weaker precision/edge semantics
@@ -30,6 +32,7 @@
 #![warn(missing_docs)]
 
 mod ai;
+mod barrier_uniform;
 mod call;
 mod cfg;
 mod cx;
@@ -55,6 +58,7 @@ mod uniform;
 mod uniform_global;
 
 pub use emit::Translated;
+pub use error::BarrierSite;
 pub use error::TranslateError;
 
 /// Parse `wasm` and lower the toy vertex and fragment entries.
