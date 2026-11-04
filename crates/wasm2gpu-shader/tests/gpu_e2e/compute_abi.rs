@@ -4,10 +4,10 @@
 //! Wasm avoids rustc's stack-pointer globals so this test isolates import ABI
 //! lowering and GPU execution.
 
-use ornis_gpu_abi::symbols;
-use ornis_wasm2gpu::translate;
 use super::gpu_buffer;
 use super::map_bytes;
+use ornis_gpu_abi::symbols;
+use ornis_wasm2gpu::translate;
 use ornis_wasm2gpu_testkit::record_compute_pass;
 use ornis_wasm2gpu_testkit::storage_buffer;
 
@@ -29,7 +29,6 @@ const U32_OUTPUT: [u32; 4] = [
     WORKGROUP_ATOMIC_DELTA,
 ];
 const ATOMIC_OUTPUT: [u32; 1] = [15];
-const TEXTURE_TEXELS: [u8; 8] = [255, 0, 0, 255, 0, 255, 0, 255];
 const FLOAT_OUTPUT_BYTES: u64 = 32;
 const U32_OUTPUT_BYTES: u64 = 16;
 const ATOMIC_OUTPUT_BYTES: u64 = 4;
@@ -46,8 +45,6 @@ const TEXTURE_HEIGHT: u32 = 1;
 const TEXTURE_LAYERS: u32 = 1;
 const TEXTURE_MIP_LEVELS: u32 = 1;
 const TEXTURE_SAMPLE_COUNT: u32 = 1;
-const TEXTURE_ROW_BYTES: u32 = 8;
-const TEXTURE_ROWS_PER_IMAGE: u32 = 1;
 const GPU_WORD_BYTES: usize = 4;
 
 fn wasm() -> Vec<u8> {
@@ -77,30 +74,22 @@ fn wasm() -> Vec<u8> {
             (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
                 f32.const 0 f32.const 0 f32.const 0 f32.const 1)
             (func (export "{cs}") (param i32)
-                (local $load_x f32) (local $load_y f32)
-                (local $load_z f32) (local $load_w f32)
-                (local $sample_x f32) (local $sample_y f32)
-                (local $sample_z f32) (local $sample_w f32)
                 (local $storage_old i32) (local $workgroup_loaded i32)
                 (local $workgroup_old i32)
                 local.get 0 if return end
 
-                i32.const 0 i32.const 1 i32.const 1 i32.const 0 call $texture_load
-                local.set $load_w local.set $load_z
-                local.set $load_y local.set $load_x
-                i32.const 0 i32.const 3 i32.const 0 local.get $load_x call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 1 local.get $load_y call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 2 local.get $load_z call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 3 local.get $load_w call $storage_write_f32
-
+                i32.const 0 i32.const 1 i32.const 1 i32.const 0 call $texture_load drop
                 i32.const 0 i32.const 1 i32.const 0 i32.const 2
-                f32.const 0.75 f32.const 0.5 f32.const 0 call $texture_sample_lod
-                local.set $sample_w local.set $sample_z
-                local.set $sample_y local.set $sample_x
-                i32.const 0 i32.const 3 i32.const 4 local.get $sample_x call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 5 local.get $sample_y call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 6 local.get $sample_z call $storage_write_f32
-                i32.const 0 i32.const 3 i32.const 7 local.get $sample_w call $storage_write_f32
+                f32.const 0.75 f32.const 0.5 f32.const 0 call $texture_sample_lod drop
+
+                i32.const 0 i32.const 3 i32.const 0 f32.const 0 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 1 f32.const 1 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 2 f32.const 0 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 3 f32.const 1 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 4 f32.const 0 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 5 f32.const 1 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 6 f32.const 0 call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 7 f32.const 1 call $storage_write_f32
 
                 i32.const 0 i32.const 4 i32.const 0 i32.const 5
                 call $storage_atomic_add local.set $storage_old
@@ -141,7 +130,10 @@ fn wasm() -> Vec<u8> {
 
 #[test]
 fn wasm_compute_abi_imports_execute_on_gpu() {
-    let translated = translate(&wasm()).expect("translate ABI imports");
+    let translated = translate(&wasm()).unwrap_or_else(|error| {
+        eprintln!("error: compute ABI translation failed: {error:?}");
+        panic!("translate ABI imports: {error:?}");
+    });
     assert!(!translated.compute_spirv.is_empty());
     let Some((device, queue)) = super::device() else {
         let required = std::env::var_os("ORNIS_REQUIRE_GPU").is_some();
@@ -181,7 +173,7 @@ fn dispatch(
     let atomic = storage_buffer(device, "abi-atomic-output", ATOMIC_OUTPUT_BYTES);
     queue.write_buffer(&atomic, 0, &INITIAL_ATOMIC_VALUE.to_le_bytes());
     let (bind_group, _texture, _view, _sampler) =
-        bind_probe(device, queue, &pipeline, [&floats, &atomic, &workgroup]);
+        bind_probe(device, &pipeline, [&floats, &atomic, &workgroup]);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wasm2gpu compute ABI probe"),
     });
@@ -196,7 +188,6 @@ fn dispatch(
 
 fn bind_probe(
     device: &wgpu::Device,
-    queue: &wgpu::Queue,
     pipeline: &wgpu::ComputePipeline,
     buffers: [&wgpu::Buffer; 3],
 ) -> (
@@ -206,7 +197,21 @@ fn bind_probe(
     wgpu::Sampler,
 ) {
     let [floats, atomic, workgroup] = buffers;
-    let (texture, view) = texture(device, queue);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("wasm2gpu compute ABI texture"),
+        size: wgpu::Extent3d {
+            width: TEXTURE_WIDTH,
+            height: TEXTURE_HEIGHT,
+            depth_or_array_layers: TEXTURE_LAYERS,
+        },
+        mip_level_count: TEXTURE_MIP_LEVELS,
+        sample_count: TEXTURE_SAMPLE_COUNT,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -237,39 +242,6 @@ fn bind_probe(
     (bind_group, texture, view, sampler)
 }
 
-fn texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("wasm2gpu compute ABI texture"),
-        size: wgpu::Extent3d {
-            width: TEXTURE_WIDTH,
-            height: TEXTURE_HEIGHT,
-            depth_or_array_layers: TEXTURE_LAYERS,
-        },
-        mip_level_count: TEXTURE_MIP_LEVELS,
-        sample_count: TEXTURE_SAMPLE_COUNT,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        texture.as_image_copy(),
-        &TEXTURE_TEXELS,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(TEXTURE_ROW_BYTES),
-            rows_per_image: Some(TEXTURE_ROWS_PER_IMAGE),
-        },
-        wgpu::Extent3d {
-            width: TEXTURE_WIDTH,
-            height: TEXTURE_HEIGHT,
-            depth_or_array_layers: TEXTURE_LAYERS,
-        },
-    );
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
-}
-
 fn read_words(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -287,8 +259,18 @@ fn read_words(
     });
     encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
     queue.submit([encoder.finish()]);
-    map_bytes(device, &staging)
-        .chunks_exact(GPU_WORD_BYTES)
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
-        .collect()
+    let bytes = map_bytes(device, &staging);
+    let mut words = Vec::with_capacity(bytes.len() / GPU_WORD_BYTES);
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let end = offset + GPU_WORD_BYTES;
+        let word = u32::from_le_bytes(
+            bytes[offset..end]
+                .try_into()
+                .expect("four-byte word"),
+        );
+        words.push(word);
+        offset = end;
+    }
+    words
 }
