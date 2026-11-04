@@ -21,14 +21,15 @@
 //! [`apply_mutations`](crate::mutation::apply_mutations) directly for an
 //! immediate report. Both paths share the type, the applier and the report.
 //!
-//! In-frame structural ops (R4, [`StructuralQueue`](crate::mutation::StructuralQueue)):
-//! a `#[smart_system]` body sees shared storage only, so `add`/`remove`/`spawn`
-//! cannot take the `&mut SmartStore` they need — they enqueue typed closures
-//! through [`StructuralWriter`](crate::StructuralWriter) instead, and
-//! [`apply_structural_queue`](crate::mutation::apply_structural_queue) drains
-//! them at the frame boundary, right
-//! before [`Stage::Last`](crate::Stage::Last). Same between-frames rule as
-//! the mutations above, two surfaces by design: `Mutation` stays the
+//! In-frame structural ops (R4,
+//! [`StructuralQueue`](crate::mutation::StructuralQueue)): a `#[smart_system]`
+//! body sees shared storage only, so `add`/`remove`/`spawn` cannot take the
+//! `&mut SmartStore` they need — they enqueue typed closures through
+//! [`StructuralWriter`](crate::StructuralWriter) instead, and
+//! [`apply_structural_queue`](crate::mutation::apply_structural_queue)
+//! drains them at the frame boundary, right before
+//! [`Stage::Last`](crate::Stage::Last). Same between-frames rule as the
+//! mutations above, two surfaces by design: `Mutation` stays the
 //! registry-backed JSON tooling/editor seam, the structural queue is the
 //! typed hot-lane seam for system bodies.
 
