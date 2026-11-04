@@ -9,6 +9,12 @@ const TEXTURE_HEIGHT: u32 = 1;
 const TARGET_SIZE: u32 = 1;
 const ROW_BYTES: u32 = 256;
 const EXPECTED_GREEN: [u8; 4] = [0, 255, 0, 255];
+const EXPECTED_BLUE: [u8; 4] = [0, 0, 255, 255];
+const INPUT_MIP_SIZE: wgpu::Extent3d = wgpu::Extent3d {
+    width: 1,
+    height: 1,
+    depth_or_array_layers: 1,
+};
 const SAMPLER_LOD_MIN: f32 = 0.0;
 const SAMPLER_LOD_MAX: f32 = 1.0;
 const SAMPLER_ANISOTROPY_OFF: u16 = 1;
@@ -17,7 +23,7 @@ const SAMPLER_ANISOTROPY_OFF: u16 = 1;
 fn texture_load_and_sample_lod_return_the_expected_texel_on_gpu() {
     let Some((device, queue)) = device() else {
         assert!(
-            !gpu_required(),
+            !super::gpu_required(),
             "ORNIS_REQUIRE_GPU is set but texture-fetch test has no wgpu device"
         );
         eprintln!("SKIPPED (wasm2gpu texture fetch): no wgpu device");
@@ -32,32 +38,30 @@ fn texture_load_and_sample_lod_return_the_expected_texel_on_gpu() {
             ),
             false,
             "textureLoad",
+            EXPECTED_GREEN,
         ),
         (
             format!(
                 "i32.const 0 i32.const 1 i32.const 0 i32.const 2 \
-                 f32.const 0.75 f32.const 0.5 f32.const 0 call ${}",
+                 f32.const 0.75 f32.const 0.5 f32.const 1 call ${}",
                 symbols::TEXTURE_SAMPLE_2D_LOD
             ),
             true,
             "textureSampleLevel",
+            EXPECTED_BLUE,
         ),
     ];
 
-    for (body, needs_sampler, label) in cases {
+    for (body, needs_sampler, label, expected) in cases {
         let translated = translate(&wasm(&body)).unwrap_or_else(|error| {
             panic!("translate {label} fixture: {error:?}");
         });
         assert_eq!(
             render(&device, &queue, &translated.wgsl, needs_sampler),
-            EXPECTED_GREEN,
+            expected,
             "{label} returned the wrong texel"
         );
     }
-}
-
-fn gpu_required() -> bool {
-    std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0")
 }
 
 fn import(name: &str, signature: &str) -> String {
@@ -159,7 +163,7 @@ fn input_texture(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("known texture-fetch input"),
         size,
-        mip_level_count: 1,
+        mip_level_count: 2,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Rgba8Unorm,
@@ -180,6 +184,21 @@ fn input_texture(
             rows_per_image: Some(1),
         },
         size,
+    );
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 1,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &EXPECTED_BLUE,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        INPUT_MIP_SIZE,
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {

@@ -45,7 +45,7 @@ fn gpu_ref_pointer_path_writes_storage() {
                 slot += 1;
             }
         }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+        None if super::gpu_required() => {
             panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
         }
         None => eprintln!("gpu_ref_pointer_path_writes_storage: no wgpu adapter — skipped"),

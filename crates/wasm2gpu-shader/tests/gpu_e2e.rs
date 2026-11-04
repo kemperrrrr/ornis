@@ -44,6 +44,14 @@ const INTENSITY: f32 = 0.5;
 const SRC: f32 = 0.25;
 const EXTRA: f32 = 0.25;
 
+fn gpu_required() -> bool {
+    env_flag_enabled("ORNIS_REQUIRE_GPU")
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0")
+}
+
 #[test]
 fn lowered_shader_matches_the_cpu_reference() {
     let wasm = compile_wasm();
@@ -60,7 +68,7 @@ fn lowered_shader_matches_the_cpu_reference() {
             );
             assert!(pixel[0] > 0, "fragment wrote the clear color: {pixel:?}");
         }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+        None if gpu_required() => {
             panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
         }
         None => eprintln!("lowered_shader_matches_the_cpu_reference: no wgpu adapter — skipped"),

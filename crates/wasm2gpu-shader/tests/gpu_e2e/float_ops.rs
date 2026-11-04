@@ -116,8 +116,7 @@ fn lowered_scalar_float_ops_match_expected_gpu_values() {
         panic!("translate scalar float operators: {error:?}");
     });
     let Some((device, queue)) = device() else {
-        let required =
-            std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0");
+        let required = super::gpu_required();
         assert!(
             !required,
             "ORNIS_REQUIRE_GPU is set but scalar-float test has no wgpu device"

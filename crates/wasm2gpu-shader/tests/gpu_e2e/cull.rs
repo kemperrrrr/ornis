@@ -100,7 +100,7 @@ fn cull_kernel_matches_the_hand_twin() {
             assert_eq!(flags, twin, "bitwise A/B");
             eprintln!("cull {flags:?}: wasm {wasm_time:?} twin {twin_time:?} x{RUNS}");
         }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+        None if super::gpu_required() => {
             panic!("ORNIS_REQUIRE_GPU is set but no wgpu adapter was found");
         }
         None => eprintln!("cull_kernel_matches_the_hand_twin: no wgpu adapter — skipped"),

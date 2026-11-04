@@ -144,7 +144,7 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
     assert!(!translated.compute_spirv.is_empty());
     validate_compute_spirv(&translated.compute_spirv);
     let Some((device, queue)) = super::device() else {
-        let required = env_flag_enabled("ORNIS_REQUIRE_GPU");
+        let required = super::gpu_required();
         assert!(
             !required,
             "ORNIS_REQUIRE_GPU is set but no adapter was found"
@@ -159,12 +159,8 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
     assert_eq!(atomic.as_slice(), ATOMIC_OUTPUT.as_slice());
 }
 
-fn env_flag_enabled(name: &str) -> bool {
-    std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0")
-}
-
 fn validate_compute_spirv(words: &[u32]) {
-    let required = env_flag_enabled("ORNIS_REQUIRE_SPIRV_VAL");
+    let required = super::env_flag_enabled("ORNIS_REQUIRE_SPIRV_VAL");
     let probe = Command::new("spirv-val").arg("--version").output();
     let Ok(probe) = probe else {
         assert!(
