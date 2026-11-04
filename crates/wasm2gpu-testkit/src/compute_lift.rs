@@ -197,7 +197,6 @@ fn locals_of(body: &wasmparser::FunctionBody<'_>) -> Result<String, String> {
     Ok(text)
 }
 
-// qual:allow(complexity, error_handling) reason: "Unsupported reachable ops fail this test."
 fn wrap(module: &Read) -> String {
     let mut imports = String::new();
     for name in &module.imports {
