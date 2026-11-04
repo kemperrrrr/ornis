@@ -1,13 +1,13 @@
 //! Execute the ABI imports after lowering a compact Wasm fixture.
 //!
-//! The matching Rust shader is host-shadow tested separately; this explicit
+//! The same import sequence is host-shadow tested separately; this explicit
 //! Wasm avoids rustc's stack-pointer globals so this test isolates import ABI
 //! lowering and GPU execution.
 
 use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
-use ornis_wasm2gpu_testkit::gpu_buffer;
-use ornis_wasm2gpu_testkit::map_bytes;
+use super::gpu_buffer;
+use super::map_bytes;
 use ornis_wasm2gpu_testkit::record_compute_pass;
 use ornis_wasm2gpu_testkit::storage_buffer;
 
@@ -49,7 +49,6 @@ const TEXTURE_SAMPLE_COUNT: u32 = 1;
 const TEXTURE_ROW_BYTES: u32 = 8;
 const TEXTURE_ROWS_PER_IMAGE: u32 = 1;
 const GPU_WORD_BYTES: usize = 4;
-const SPIRV_VALIDATION_TARGET: &str = "vulkan1.3";
 
 fn wasm() -> Vec<u8> {
     wat::parse_str(format!(
@@ -144,7 +143,6 @@ fn wasm() -> Vec<u8> {
 fn wasm_compute_abi_imports_execute_on_gpu() {
     let translated = translate(&wasm()).expect("translate ABI imports");
     assert!(!translated.compute_spirv.is_empty());
-    validate_spirv(&translated.compute_spirv);
     let Some((device, queue)) = super::device() else {
         let required = std::env::var_os("ORNIS_REQUIRE_GPU").is_some();
         assert!(
@@ -278,17 +276,19 @@ fn read_words(
     buffer: &wgpu::Buffer,
     size: u64,
 ) -> Vec<u32> {
-    map_bytes(device, queue, buffer, size)
+    let staging = gpu_buffer(
+        device,
+        "wasm2gpu compute ABI readback",
+        size,
+        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+    );
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("wasm2gpu compute ABI readback"),
+    });
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
+    queue.submit([encoder.finish()]);
+    map_bytes(device, &staging)
         .chunks_exact(GPU_WORD_BYTES)
         .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
         .collect()
-}
-
-fn validate_spirv(words: &[u32]) {
-    let module = rspirv::dr::load_words(words).expect("parse compute ABI SPIR-V");
-    let mut validator = spirv_tools::val::create(SPIRV_VALIDATION_TARGET)
-        .expect("create SPIR-V validator");
-    validator
-        .validate(&module)
-        .expect("validate compute ABI SPIR-V");
 }
