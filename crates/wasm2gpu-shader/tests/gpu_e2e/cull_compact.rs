@@ -17,6 +17,7 @@ const MATERIAL_NEXT: u32 = 11;
 const MATERIAL_LAST_VISIBLE: u32 = 12;
 const MATERIAL_INACTIVE: u32 = 13;
 const ACTIVE_COUNT: u32 = 3;
+const ACTIVE_COUNT_F32: f32 = ACTIVE_COUNT as f32;
 const INDEX_COUNT: u32 = 36;
 const SOURCE_COUNT: usize = 4;
 const PLANES: usize = 6;
@@ -176,7 +177,11 @@ fn upload_inputs(
     queue.write_buffer(inputs.source_words, 0, &source_bytes);
     queue.write_buffer(inputs.args, 0, &words_to_bytes(&[INDEX_COUNT, 0, 0, 0, 0]));
     queue.write_buffer(inputs.planes, 0, &packed_planes());
-    queue.write_buffer(inputs.count, 0, &words_to_bytes(&[ACTIVE_COUNT, 0, 0, 0]));
+    queue.write_buffer(
+        inputs.count,
+        0,
+        &words_to_bytes(&[ACTIVE_COUNT_F32.to_bits(), 0, 0, 0]),
+    );
 }
 
 fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {

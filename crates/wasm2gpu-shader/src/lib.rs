@@ -12,6 +12,7 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
 
+#[cfg(any(target_arch = "wasm32", test))]
 use ornis_gpu_abi::gpu_length3_xyz;
 use ornis_gpu_abi::gpu_struct;
 #[cfg(target_arch = "wasm32")]
@@ -141,6 +142,8 @@ const CULL_COMPACT_MODEL_COLUMN_STRIDE: u32 = 4;
 const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_COUNT_UNIFORM_BINDING: u32 = 5;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_COUNT_UNIFORM_LEN: u32 = 1;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -342,22 +345,20 @@ fn cull_plane_outside(
 /// supplies the same record bytes as `u32` words for bit-preserving copies.
 /// The current lowering declares storage imports writable, so the two
 /// source views must use distinct bindings/buffers. Binding 0 contains the
-/// six planes, and binding 5 is a uniform count struct. Binding 3 is the
-/// five-word indirect-args buffer, where `instance_count` at word 1 is
+/// six planes, and binding 5 is a one-element uniform count array of f32.
+/// Binding 3 is the five-word indirect-args buffer, where `instance_count` at word 1 is
 /// incremented atomically. The dense destination record words are at
 /// binding 2.
 #[cfg(target_arch = "wasm32")]
 #[shader::compute(workgroup_size = 4)]
 // qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
 pub fn cull_compact(id: u32) {
-    let count = uniform_field_u32::<
+    let count = uniform_array_f32::<
         CULL_GROUP,
         CULL_COMPACT_COUNT_UNIFORM_BINDING,
-        0,
-        0,
-        { ShadeParams::FIELD_OFFSETS[0] },
-    >();
-    if id < count {
+        CULL_COMPACT_COUNT_UNIFORM_LEN,
+    >(0);
+    if (id as f32) < count {
         let base = id * CULL_COMPACT_RECORD_WORDS;
         let center_x =
             storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
