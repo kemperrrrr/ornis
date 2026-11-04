@@ -130,10 +130,6 @@ const CULL_COMPACT_DST_BINDING: u32 = 2;
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_SOURCE_WORDS_BINDING: u32 = 4;
 
-/// Storage binding whose element 0 is the active compact-input count.
-#[cfg(target_arch = "wasm32")]
-const CULL_COMPACT_COUNT_BINDING: u32 = 5;
-
 /// Storage binding of the indirect draw's atomic instance counter.
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_ARGS_BINDING: u32 = 3;
@@ -148,6 +144,10 @@ const CULL_COMPACT_MODEL_CENTER_OFFSET: u32 = 12;
 const CULL_COMPACT_MODEL_COLUMN_STRIDE: u32 = 4;
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_COUNT_UNIFORM_INDEX: u32 = PLANE_LEN;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_UNIFORM_LEN: u32 = PLANE_LEN + 1;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -338,17 +338,20 @@ fn cull_uniform_vec3(base: u32) -> GpuVec3 {
 ///
 /// The source record is the 52-word `PerObjectGpu` layout. Binding 1
 /// supplies its `f32` values for the model-matrix sphere test; binding 4
-/// supplies the same record bytes as `u32` words for bit-preserving
-/// copies. The currently lowered storage ABI declares both views writable,
-/// so a production binding layout must not alias these two slots. Binding
-/// 3 is the five-word indirect-args buffer, where `instance_count` at
-/// word 1 is incremented atomically. The destination is a dense array of
-/// record words at binding 2, and binding 5 holds the input count.
+/// supplies the same record bytes as `u32` words for bit-preserving copies.
+/// The current lowering declares storage imports writable, so the two
+/// source views must use distinct bindings/buffers. Binding 0 contains the
+/// six planes plus an exact-integer `f32` count lane (the storage-buffer
+/// limits keep the count below `2^24`). Binding 3 is the five-word
+/// indirect-args buffer, where `instance_count` at word 1 is incremented
+/// atomically. The dense destination record words are at binding 2.
 #[cfg(target_arch = "wasm32")]
 #[shader::compute(workgroup_size = 4)]
 // qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
 pub fn cull_compact(id: u32) {
-    let count = storage_at_u32::<CULL_GROUP, CULL_COMPACT_COUNT_BINDING>(0);
+    let count = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(
+        CULL_COMPACT_COUNT_UNIFORM_INDEX,
+    ) as u32;
     if id < count {
         let base = id * CULL_COMPACT_RECORD_WORDS;
         let center = cull_storage_vec3(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
