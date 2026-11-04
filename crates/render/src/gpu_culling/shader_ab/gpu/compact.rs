@@ -1,3 +1,4 @@
+// qual:allow(srp, max_independent_clusters=3) reason: "The benchmark separates pipeline setup, dispatch verification, and compaction-specific buffer packing; keep this focused A/B harness together."
 //! Timings for cull_compact against production WGSL. The duplicated float/word
 //! source views are part of measured shader traffic.
 
@@ -11,14 +12,12 @@ use super::session::Session;
 use super::upload::make;
 use super::upload::resource;
 
-const U32_BYTES: usize = std::mem::size_of::<u32>();
 const F32_BYTES: usize = std::mem::size_of::<f32>();
 const UNIFORM_STRIDE: usize = 16;
 const COUNT_LANES: usize = 3;
 const SOURCE_VIEW_COUNT: usize = 2;
-const ARGS_BYTES: u64 =
-    super::super::super::INDIRECT_ARGS_WORD_COUNT as u64
-        * super::super::super::INDIRECT_ARGS_WORD_BYTES;
+const ARGS_BYTES: u64 = super::super::super::INDIRECT_ARGS_WORD_COUNT as u64
+    * super::super::super::INDIRECT_ARGS_WORD_BYTES;
 const PLANE_BINDING: u32 = 0;
 const SOURCE_FLOAT_BINDING: u32 = 1;
 const DESTINATION_BINDING: u32 = 2;
@@ -51,9 +50,8 @@ pub(super) fn time_scenes(session: &Session, lowered: &str) -> String {
         pipeline::FLAG_ENTRY,
         compact_layout,
     );
-    let mut report = String::from(
-        "\ncompact ABI A/B — same 52-word records; duplicated source view included\n",
-    );
+    let mut report =
+        String::from("\ncompact ABI A/B — same 52-word records; duplicated source view included\n");
     super::super::scene::scenes().iter().for_each(|scene| {
         report.push_str(&time_scene(session, scene, &production, &compact, lowered));
         report.push('\n');
@@ -79,8 +77,7 @@ fn time_scene(
         &compact_set,
         lowered,
     );
-    let production_groups =
-        crate::gpu_culling::cull_workgroup_count(scene.spheres.len() as u32);
+    let production_groups = crate::gpu_culling::cull_workgroup_count(scene.spheres.len() as u32);
     let compact_groups = pipeline::groups(scene.spheres.len(), lowered);
     let production_samples = super::clock::measure(|| {
         dispatch::submit(
@@ -118,8 +115,7 @@ fn verify_outputs(
     compact_set: &CompactSet,
     lowered: &str,
 ) {
-    let production_groups =
-        crate::gpu_culling::cull_workgroup_count(scene.spheres.len() as u32);
+    let production_groups = crate::gpu_culling::cull_workgroup_count(scene.spheres.len() as u32);
     let compact_groups = pipeline::groups(scene.spheres.len(), lowered);
     let _ = dispatch::submit(
         session,
@@ -252,21 +248,16 @@ fn pack_counts(count: usize) -> Vec<u8> {
 
 fn compact_ids(session: &Session, set: &CompactSet, capacity: usize) -> Vec<u32> {
     let args = readback::read_exact(session, &set.args, ARGS_BYTES);
-    let count = load_u32(&args, super::dispatch::instance_at());
+    let count = readback::load_u32(&args, super::dispatch::instance_at());
     let take = (count as usize).min(capacity);
     if take == 0 {
         return Vec::new();
     }
-    let bytes =
-        readback::read_exact(session, &set.destination, (take * OBJECT_BYTES) as u64);
+    let bytes = readback::read_exact(session, &set.destination, (take * OBJECT_BYTES) as u64);
     let mut ids = bytes
         .chunks_exact(OBJECT_BYTES)
-        .map(|record| load_u32(record, MATERIAL_AT))
+        .map(|record| readback::load_u32(record, MATERIAL_AT))
         .collect::<Vec<_>>();
     ids.sort_unstable();
     ids
-}
-
-fn load_u32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + U32_BYTES].try_into().expect("complete u32 lane"))
 }

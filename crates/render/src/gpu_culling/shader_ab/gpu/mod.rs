@@ -49,11 +49,8 @@ struct Lowered {
 
 fn load_lowered(wasm: &[u8]) -> Lowered {
     let started = Instant::now();
-    let wgsl = ornis_wasm2gpu_testkit::compute_lift::lowered_kernel_from(
-        wasm,
-        "cull",
-        "storage_0_2_",
-    );
+    let wgsl =
+        ornis_wasm2gpu_testkit::compute_lift::lowered_kernel_from(wasm, "cull", "storage_0_2_");
     let saved = remember_lowered(&wgsl, "ornis-issue-201-cull.wgsl");
     Lowered {
         wgsl,
@@ -106,7 +103,7 @@ fn static_report(lowered: &Lowered, compact: &Lowered, guest_build: Duration) ->
         elapsed = lowered.elapsed,
         compact_saved = compact.saved,
         compact_elapsed = compact.elapsed,
-        guest_build,
+        guest_build = guest_build,
         table = ir_table(&[
             ("production", &production),
             ("wasm2gpu_flag", &wasm),
@@ -115,8 +112,14 @@ fn static_report(lowered: &Lowered, compact: &Lowered, guest_build: Duration) ->
         ]),
         notes = ir_notes(&production, &wasm, &twin),
         compact_bytes = ratio(compact_stats.bytes as f64, production.bytes as f64),
-        compact_stmts = ratio(compact_stats.statements as f64, production.statements as f64),
-        compact_exprs = ratio(compact_stats.expressions as f64, production.expressions as f64),
+        compact_stmts = ratio(
+            compact_stats.statements as f64,
+            production.statements as f64
+        ),
+        compact_exprs = ratio(
+            compact_stats.expressions as f64,
+            production.expressions as f64
+        ),
         compact_alu = ratio(compact_stats.alu as f64, production.alu as f64),
         compact_spirv = opt_ratio(compact_stats.spirv_ops, production.spirv_ops),
     )

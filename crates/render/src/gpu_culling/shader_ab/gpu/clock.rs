@@ -101,7 +101,10 @@ fn clock_ratio(left: &[Sample], right: &[Sample]) -> String {
 }
 
 fn wall_ratio(left: &[Sample], right: &[Sample]) -> String {
-    ratio_text(summarize(&walls(left)).median, summarize(&walls(right)).median)
+    ratio_text(
+        summarize(&walls(left)).median,
+        summarize(&walls(right)).median,
+    )
 }
 
 fn ratio_text(left: f64, right: f64) -> String {
