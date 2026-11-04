@@ -1,4 +1,4 @@
-// qual:allow(srp, max_independent_clusters=12) reason: "The shader DSL requires exported kernels and translator-visible scalar helpers in one source module; cap future independent clusters rather than relocating entry points."
+// qual:allow(srp, max_independent_clusters=3) reason: "The shader DSL requires exported kernels and translator-visible scalar helpers in one source module; pin the current three independent clusters rather than relocating entry points."
 //! Shader body compiled to wasm32 and lowered by `ornis-wasm2gpu`.
 //!
 //! The host build of [`shade`] is the CPU reference. On `wasm32` the same

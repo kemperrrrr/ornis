@@ -195,7 +195,6 @@ fn compact_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-// qual:allow(dry, fragment) reason: "Lowered shader module, pipeline layout, and compute entry wiring are required for this standalone GPU parity harness."
 // qual:allow(dry, duplicate) reason: "This parity harness independently builds the same lowered guest entry as its e2e test, using a production-record input layout."
 fn compact_pipeline(
     device: &wgpu::Device,
