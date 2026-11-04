@@ -65,6 +65,22 @@ fn spawn_wave(u: &mut Mote, ops: StructuralWriter) {
     ops.spawn(Mote { hp: 200.0 });
 }
 
+/// Queues removal of the generated `hp` field lane entry for the current
+/// entity: `remove` goes through the same deferred path as `insert`.
+#[smart_system]
+fn drop_hp(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.remove::<Mote__hp__PackLane>(e);
+}
+
+/// Queues its own destruction: `despawn` must clear every lane entry and
+/// recycle the id, in the same FIFO pass.
+#[smart_system]
+fn retire_self(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.despawn(e);
+}
+
 fn seeded_resources(hps: &[f32]) -> (Resources, Vec<Entity>) {
     let mut resources = Resources::new();
     let mut store = SmartStore::new();
@@ -266,4 +282,78 @@ fn engine_applies_queued_ops_before_last_stage_systems() {
         Some(Mote { hp: 2.5 }),
         "PostFrame lane writes landed too"
     );
+}
+
+/// `remove` reaches the store through the same deferred path: the `hp` lane
+/// entry disappears at apply, not during the run.
+#[test]
+fn queued_remove_lands_at_apply() {
+    let (mut resources, entities) = seeded_resources(&[1.0, 2.0]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(DropHpSystem::new());
+
+    schedule.run(&resources);
+    assert_eq!(
+        hp_of(&resources, entities[0]).to_bits(),
+        (2.0f32).to_bits(),
+        "the lane write lands during the run"
+    );
+
+    apply_structural_queue(&mut resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let lane = store.read_lane::<Mote__hp__PackLane>().expect("hp lane");
+    assert_eq!(
+        lane.len(),
+        0,
+        "every queued remove dropped its lane entry at apply"
+    );
+    assert!(
+        store.is_alive(entities[0]) && store.is_alive(entities[1]),
+        "removing a component leaves the entity alive"
+    );
+}
+
+/// `despawn` through the writer clears the bundle's lanes and recycles the
+/// id at apply — and the queued op order (write, then destroy) is preserved.
+#[test]
+fn queued_despawn_lands_at_apply() {
+    let (mut resources, entities) = seeded_resources(&[1.0, 2.0]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(RetireSelfSystem::new());
+
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    assert!(
+        store.is_alive(entities[0]),
+        "despawn is deferred to the frame boundary"
+    );
+
+    apply_structural_queue(&mut resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    for &entity in &entities {
+        assert!(!store.is_alive(entity), "queued despawn retired {entity:?}");
+    }
+    assert_eq!(
+        store.read_lane::<Mote__hp__PackLane>().map(|l| l.len()),
+        Some(0),
+        "despawn cleared the hot lane"
+    );
+    // The ids went back to the allocator: the next allocations hand them
+    // out again (with a bumped generation, so the old handles stay dead).
+    let mut recycled = Vec::new();
+    for _ in 0..entities.len() {
+        recycled.push(store.create_entity());
+    }
+    for entity in &entities {
+        assert!(
+            recycled.iter().any(|fresh| fresh.id() == entity.id()),
+            "despawn returned {entity:?} to the allocator"
+        );
+        assert!(
+            !store.is_alive(*entity),
+            "the recycled id must not resurrect the old handle"
+        );
+    }
 }
