@@ -169,9 +169,7 @@ fn import_sig(name: &str) -> &'static str {
         }
         symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => "(param i32 i32) (result i32)",
         symbols::MATH_DOT3 => "(param f32 f32 f32 f32 f32 f32) (result f32)",
-        symbols::MATH_CROSS3 => {
-            "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)"
-        }
+        symbols::MATH_CROSS3 => "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)",
         symbols::MATH_LENGTH3 => "(param f32 f32 f32) (result f32)",
         symbols::MATH_NORMALIZE3 => "(param f32 f32 f32) (result f32 f32 f32)",
         other => panic!("shade imports {other}, which the lifter does not know"),

@@ -218,7 +218,10 @@ fn wrap(module: &Read) -> String {
         }
         let func = &module.bodies[index as usize];
         let (locals, ops) = func.body.as_ref().unwrap_or_else(|op| {
-            eprintln!("error: {} reaches an unsupported wasm op: {op}", module.export);
+            eprintln!(
+                "error: {} reaches an unsupported wasm op: {op}",
+                module.export
+            );
             panic!("compute reaches an op the lifter will not keep: {op}");
         });
         let export = if wasm_index == module.compute {
@@ -341,9 +344,7 @@ fn import_sig(name: &str) -> &'static str {
         symbols::TEXTURE_SAMPLE_2D => "(param i32 i32 i32 i32 f32 f32) (result f32 f32 f32 f32)",
         symbols::TEXTURE_WIDTH_2D | symbols::TEXTURE_HEIGHT_2D => "(param i32 i32) (result i32)",
         symbols::MATH_DOT3 => "(param f32 f32 f32 f32 f32 f32) (result f32)",
-        symbols::MATH_CROSS3 => {
-            "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)"
-        }
+        symbols::MATH_CROSS3 => "(param f32 f32 f32 f32 f32 f32) (result f32 f32 f32)",
         symbols::MATH_LENGTH3 => "(param f32 f32 f32) (result f32)",
         symbols::MATH_NORMALIZE3 => "(param f32 f32 f32) (result f32 f32 f32)",
         symbols::TEXTURE_SAMPLE_2D_LOD => {

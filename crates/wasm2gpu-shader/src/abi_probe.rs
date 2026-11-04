@@ -43,19 +43,19 @@ const STORAGE_OUTPUT_WORKGROUP_ATOMIC_OLD: u32 = 2;
 const STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT: u32 = 3;
 
 /// Wasm compute export for testing atomics, barriers, texture loads, and LOD sampling.
+// qual:api — GPU ABI fixture selected by its Wasm export name in the lifter test.
 #[shader::compute(workgroup_size = 1)]
 pub fn abi_probe(_invocation: u32) {
+    texture_load_probe();
+    texture_sample_probe();
+    storage_atomic_probe();
+    workgroup_probe();
+}
+
+#[inline(never)]
+fn texture_load_probe() {
     let texture = Texture2d::<ABI_GROUP, TEXTURE_BINDING>::bind();
-    let sampler = Sampler::<ABI_GROUP, SAMPLER_BINDING>::bind();
     let loaded = texture.load(TEXEL_X, TEXEL_Y);
-    let sampled = texture.sample_lod(
-        &sampler,
-        GpuVec2 {
-            x: SAMPLE_U,
-            y: SAMPLE_V,
-        },
-        SAMPLE_LOD,
-    );
     storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
         LOAD_OUTPUT_OFFSET + VECTOR_X_OFFSET,
         loaded.x,
@@ -71,6 +71,20 @@ pub fn abi_probe(_invocation: u32) {
     storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
         LOAD_OUTPUT_OFFSET + VECTOR_W_OFFSET,
         loaded.w,
+    );
+}
+
+#[inline(never)]
+fn texture_sample_probe() {
+    let texture = Texture2d::<ABI_GROUP, TEXTURE_BINDING>::bind();
+    let sampler = Sampler::<ABI_GROUP, SAMPLER_BINDING>::bind();
+    let sampled = texture.sample_lod(
+        &sampler,
+        GpuVec2 {
+            x: SAMPLE_U,
+            y: SAMPLE_V,
+        },
+        SAMPLE_LOD,
     );
     storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
         SAMPLE_OUTPUT_OFFSET + VECTOR_X_OFFSET,
@@ -88,33 +102,30 @@ pub fn abi_probe(_invocation: u32) {
         SAMPLE_OUTPUT_OFFSET + VECTOR_W_OFFSET,
         sampled.w,
     );
+}
 
-    let previous_storage = storage_atomic_add_u32::<ABI_GROUP, ATOMIC_INPUT_BINDING>(
+#[inline(never)]
+fn storage_atomic_probe() {
+    let previous = storage_atomic_add_u32::<ABI_GROUP, ATOMIC_INPUT_BINDING>(
         STORAGE_ATOMIC_INDEX,
         STORAGE_ATOMIC_VALUE,
     );
-    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
-        STORAGE_OUTPUT_STORAGE_OLD,
-        previous_storage,
-    );
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(STORAGE_OUTPUT_STORAGE_OLD, previous);
+}
+
+#[inline(never)]
+fn workgroup_probe() {
     workgroup_store_u32(WORKGROUP_INDEX, WORKGROUP_INITIAL_VALUE);
     workgroup_barrier();
-    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
-        STORAGE_OUTPUT_WORKGROUP_LOAD,
-        workgroup_load_u32(WORKGROUP_INDEX),
-    );
-    let previous_workgroup =
-        workgroup_atomic_add_u32(WORKGROUP_ATOMIC_INDEX, WORKGROUP_ATOMIC_FIRST_VALUE);
-    let previous_workgroup_after_add =
-        workgroup_atomic_add_u32(WORKGROUP_ATOMIC_INDEX, WORKGROUP_ATOMIC_SECOND_VALUE);
+    let loaded = workgroup_load_u32(WORKGROUP_INDEX);
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(STORAGE_OUTPUT_WORKGROUP_LOAD, loaded);
+    let previous = workgroup_atomic_add_u32(WORKGROUP_ATOMIC_INDEX, WORKGROUP_ATOMIC_FIRST_VALUE);
+    let next = workgroup_atomic_add_u32(WORKGROUP_ATOMIC_INDEX, WORKGROUP_ATOMIC_SECOND_VALUE);
     storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
         STORAGE_OUTPUT_WORKGROUP_ATOMIC_OLD,
-        previous_workgroup,
+        previous,
     );
-    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
-        STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT,
-        previous_workgroup_after_add,
-    );
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT, next);
     storage_barrier();
 }
 

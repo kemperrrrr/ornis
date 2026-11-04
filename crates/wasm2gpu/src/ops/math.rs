@@ -146,8 +146,10 @@ fn canonical_nan_min_max(
     right: naga::Handle<Expression>,
     numeric: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
-    let left_nan = is_nan(em, left);
-    let right_nan = is_nan(em, right);
+    // IEEE equality is unordered for NaN, so x != x identifies it without
+    // relying on a Naga relational builtin that may not be backend-supported.
+    let left_nan = binary(em, naga::BinaryOperator::NotEqual, left, left);
+    let right_nan = binary(em, naga::BinaryOperator::NotEqual, right, right);
     let either_nan = binary(em, naga::BinaryOperator::LogicalOr, left_nan, right_nan);
     let canonical_nan_bits = em.ex(Expression::Literal(naga::Literal::U32(
         F32_CANONICAL_NAN_BITS,
@@ -180,13 +182,6 @@ fn binary(
     right: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
     em.ex(Expression::Binary { op, left, right })
-}
-
-fn is_nan(em: &mut Emit<'_, '_>, value: naga::Handle<Expression>) -> naga::Handle<Expression> {
-    em.ex(Expression::Relational {
-        fun: naga::RelationalFunction::IsNan,
-        argument: value,
-    })
 }
 
 fn sign_bit_set(

@@ -195,7 +195,7 @@ fn storage_binding_cannot_be_both_atomic_and_ordinary() {
         let error = translate(&wasm(&format!("{atomic} {read}"), &fragment(&operations)))
             .expect_err("reject mixed atomic and ordinary storage");
         assert!(
-            matches!(error, TranslateError::UnsupportedType(message)
+            matches!(error, TranslateError::UnsupportedType(ref message)
                 if message.contains("atomic and ordinary storage")),
             "{error:?}"
         );
