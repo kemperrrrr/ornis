@@ -34,9 +34,17 @@ mod skinning;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::Storage;
 #[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::gpu_dot3;
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::gpu_length3;
+#[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_at_u32;
 #[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::storage_atomic_add_u32;
+#[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_store_u32;
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::GpuVec3;
 
 gpu_struct! {
     /// Uniform parameters. Field 0 is the dynamic index. Field 1 is the scale.
@@ -113,6 +121,26 @@ pub const FLAG_BINDING: u32 = 2;
 
 /// Storage binding whose element 0 is the guarded sphere count.
 pub const COUNT_BINDING: u32 = 3;
+
+/// Storage binding of the dense destination record words.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_DST_BINDING: u32 = 2;
+
+/// Storage binding of source record words for bit-preserving copies.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_SOURCE_WORDS_BINDING: u32 = 4;
+
+/// Storage binding whose element 0 is the active compact-input count.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_COUNT_BINDING: u32 = 5;
+
+/// Storage binding of the indirect draw's atomic instance counter.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_ARGS_BINDING: u32 = 3;
+
+/// Four matrices plus four metadata/padding words in `PerObjectGpu`.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_RECORD_WORDS: u32 = 52;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -276,6 +304,81 @@ pub fn cull(id: u32) {
             plane += 1;
         }
         storage_store_u32::<CULL_GROUP, FLAG_BINDING>(id, visible);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn cull_storage_vec3(base: u32) -> GpuVec3 {
+    GpuVec3 {
+        x: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base),
+        y: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1),
+        z: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn cull_uniform_vec3(base: u32) -> GpuVec3 {
+    GpuVec3 {
+        x: uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(base),
+        y: uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(base + 1),
+        z: uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(base + 2),
+    }
+}
+
+/// Wasm compute export for the production culling compaction ABI.
+///
+/// The source record is the 52-word `PerObjectGpu` layout. Binding 1
+/// supplies its `f32` values for the model-matrix sphere test; binding 4
+/// supplies the same record bytes as `u32` words for bit-preserving
+/// copies. The currently lowered storage ABI declares both views writable,
+/// so a production binding layout must not alias these two slots. Binding
+/// 3 is the five-word indirect-args buffer, where `instance_count` at
+/// word 1 is incremented atomically. The destination is a dense array of
+/// record words at binding 2, and binding 5 holds the input count.
+#[cfg(target_arch = "wasm32")]
+#[shader::compute(workgroup_size = 4)]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn cull_compact(id: u32) {
+    let count = storage_at_u32::<CULL_GROUP, CULL_COMPACT_COUNT_BINDING>(0);
+    if id < count {
+        let base = id * CULL_COMPACT_RECORD_WORDS;
+        let center = cull_storage_vec3(base + 12);
+        let x_axis = cull_storage_vec3(base);
+        let y_axis = cull_storage_vec3(base + 4);
+        let z_axis = cull_storage_vec3(base + 8);
+        let mut radius = gpu_length3(x_axis);
+        let y_radius = gpu_length3(y_axis);
+        let z_radius = gpu_length3(z_axis);
+        if y_radius > radius {
+            radius = y_radius;
+        }
+        if z_radius > radius {
+            radius = z_radius;
+        }
+        let mut visible = 1u32;
+        let mut plane = 0u32;
+        while plane < PLANE_COUNT {
+            let at = plane * LANES;
+            let normal = cull_uniform_vec3(at);
+            let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 3);
+            if gpu_dot3(normal, center) + distance < -radius {
+                visible = 0;
+            }
+            plane += 1;
+        }
+        if visible != 0 {
+            let slot = storage_atomic_add_u32::<CULL_GROUP, CULL_COMPACT_ARGS_BINDING>(1, 1);
+            let output = slot * CULL_COMPACT_RECORD_WORDS;
+            let mut word = 0u32;
+            while word < CULL_COMPACT_RECORD_WORDS {
+                let value =
+                    storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + word);
+                storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + word, value);
+                word += 1;
+            }
+        }
     }
 }
 

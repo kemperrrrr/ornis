@@ -22,6 +22,9 @@ mod float_ops;
 #[path = "gpu_e2e/cull.rs"]
 mod cull;
 
+#[path = "gpu_e2e/cull_compact.rs"]
+mod cull_compact;
+
 #[path = "gpu_e2e/entry_meta.rs"]
 mod entry_meta;
 
