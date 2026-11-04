@@ -52,6 +52,7 @@ pub fn abi_probe(_invocation: u32) {
     workgroup_probe();
 }
 
+// qual:test_helper — test-only shader helper keeps this ABI probe function isolated.
 #[inline(never)]
 fn texture_load_probe() {
     let texture = Texture2d::<ABI_GROUP, TEXTURE_BINDING>::bind();
@@ -74,6 +75,7 @@ fn texture_load_probe() {
     );
 }
 
+// qual:test_helper — test-only shader helper keeps this ABI probe function isolated.
 #[inline(never)]
 fn texture_sample_probe() {
     let texture = Texture2d::<ABI_GROUP, TEXTURE_BINDING>::bind();
@@ -104,6 +106,7 @@ fn texture_sample_probe() {
     );
 }
 
+// qual:test_helper — test-only shader helper keeps this ABI probe function isolated.
 #[inline(never)]
 fn storage_atomic_probe() {
     let previous = storage_atomic_add_u32::<ABI_GROUP, ATOMIC_INPUT_BINDING>(
@@ -113,6 +116,7 @@ fn storage_atomic_probe() {
     storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(STORAGE_OUTPUT_STORAGE_OLD, previous);
 }
 
+// qual:test_helper — test-only shader helper keeps this ABI probe function isolated.
 #[inline(never)]
 fn workgroup_probe() {
     workgroup_store_u32(WORKGROUP_INDEX, WORKGROUP_INITIAL_VALUE);

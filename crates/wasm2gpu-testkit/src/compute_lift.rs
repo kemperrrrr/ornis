@@ -219,7 +219,7 @@ fn wrap(module: &Read) -> String {
         let func = &module.bodies[index as usize];
         let (locals, ops) = func.body.as_ref().unwrap_or_else(|op| {
             eprintln!(
-                "error: {} reaches an unsupported wasm op: {op}",
+                "error: {} function {wasm_index} reaches unsupported wasm op: {op}",
                 module.export
             );
             panic!("compute reaches an op the lifter will not keep: {op}");

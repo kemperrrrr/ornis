@@ -70,6 +70,8 @@ pub(super) fn pop_vec3(em: &mut Emit<'_, '_>) -> Result<naga::Handle<Expression>
 }
 
 const F32_SIGN_BIT: u32 = 1 << 31;
+const F32_EXPONENT_MASK: u32 = 0x7f80_0000;
+const F32_MANTISSA_MASK: u32 = 0x007f_ffff;
 const F32_CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
 const F32_POSITIVE_ZERO: f32 = 0.0;
 const F32_NEGATIVE_ZERO: f32 = f32::from_bits(F32_SIGN_BIT);
@@ -146,10 +148,8 @@ fn canonical_nan_min_max(
     right: naga::Handle<Expression>,
     numeric: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
-    // IEEE equality is unordered for NaN, so x != x identifies it without
-    // relying on a Naga relational builtin that may not be backend-supported.
-    let left_nan = binary(em, naga::BinaryOperator::NotEqual, left, left);
-    let right_nan = binary(em, naga::BinaryOperator::NotEqual, right, right);
+    let left_nan = is_nan(em, left);
+    let right_nan = is_nan(em, right);
     let either_nan = binary(em, naga::BinaryOperator::LogicalOr, left_nan, right_nan);
     let canonical_nan_bits = em.ex(Expression::Literal(naga::Literal::U32(
         F32_CANONICAL_NAN_BITS,
@@ -182,6 +182,27 @@ fn binary(
     right: naga::Handle<Expression>,
 ) -> naga::Handle<Expression> {
     em.ex(Expression::Binary { op, left, right })
+}
+
+fn is_nan(em: &mut Emit<'_, '_>, value: naga::Handle<Expression>) -> naga::Handle<Expression> {
+    let bits = em.ex(Expression::As {
+        expr: value,
+        kind: naga::ScalarKind::Uint,
+        convert: None,
+    });
+    let exponent_mask = em.ex(Expression::Literal(naga::Literal::U32(F32_EXPONENT_MASK)));
+    let exponent = binary(em, naga::BinaryOperator::And, bits, exponent_mask);
+    let exponent_all_ones = binary(em, naga::BinaryOperator::Equal, exponent, exponent_mask);
+    let mantissa_mask = em.ex(Expression::Literal(naga::Literal::U32(F32_MANTISSA_MASK)));
+    let mantissa = binary(em, naga::BinaryOperator::And, bits, mantissa_mask);
+    let zero = em.ex(Expression::Literal(naga::Literal::U32(U32_ZERO)));
+    let mantissa_nonzero = binary(em, naga::BinaryOperator::NotEqual, mantissa, zero);
+    binary(
+        em,
+        naga::BinaryOperator::LogicalAnd,
+        exponent_all_ones,
+        mantissa_nonzero,
+    )
 }
 
 fn sign_bit_set(

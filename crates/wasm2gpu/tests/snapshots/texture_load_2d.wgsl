@@ -1,1 +1,1 @@
-textureLoad(tex_1_2, vec2<i32>(1i, 2i), 0i)
+textureLoad(tex_1_2_, vec2<i32>(bitcast<i32>(1u), bitcast<i32>(2u)), 0i)

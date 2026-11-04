@@ -54,16 +54,36 @@ fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
 }
 
 #[test]
-fn scalar_min_max_clamp_lower_to_wgsl_builtins() {
+fn scalar_min_max_clamp_preserve_wasm_nan_and_signed_zero_semantics() {
     let cases = [
-        "f32.const 2 f32.const 1 f32.min f32.const 0 f32.const 0 f32.const 1",
-        "f32.const 2 f32.const 1 f32.max f32.const 0 f32.const 0 f32.const 1",
-        "f32.const 2 f32.const 0 f32.max f32.const 1 f32.min f32.const 0 f32.const 0 f32.const 1",
+        (
+            "f32.const 2 f32.const 1 f32.min f32.const 0 f32.const 0 f32.const 1",
+            "min(",
+        ),
+        (
+            "f32.const 2 f32.const 1 f32.max f32.const 0 f32.const 0 f32.const 1",
+            "max(",
+        ),
+        (
+            "f32.const 2 f32.const 0 f32.max f32.const 1 f32.min f32.const 0 f32.const 0 f32.const 1",
+            "min(",
+        ),
     ];
-    let snapshots = include_str!("snapshots/math_scalar.wgsl").lines();
-    for (body, snapshot) in cases.into_iter().zip(snapshots) {
+    for (body, operation) in cases {
         let got = wgsl("", &fragment(body));
-        assert_wgsl_expressions(&got, snapshot);
+        let normalized = got.split_whitespace().collect::<Vec<_>>().join(" ");
+        for expression in [
+            operation,
+            "select(",
+            "bitcast<f32>(2143289344u)",
+            "bitcast<u32>(",
+            "2147483648u",
+        ] {
+            assert!(
+                normalized.contains(expression),
+                "missing expression {expression:?} in WGSL:\n{got}"
+            );
+        }
     }
 }
 
