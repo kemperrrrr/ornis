@@ -98,11 +98,22 @@ fn render(
     wgsl: &str,
     needs_sampler: bool,
 ) -> [u8; 4] {
+    let pipeline = render_pipeline(device, wgsl);
+    let (_texture, texture_view, sampler) = input_texture(device, queue);
+    let bind_group = texture_bind_group(device, &pipeline, &texture_view, &sampler, needs_sampler);
+    let vertices = fullscreen_triangle(device, queue);
+    let (target, target_view, readback) = output_target(device);
+    draw_and_copy(device, queue, &pipeline, &bind_group, &vertices, &target, &target_view, &readback);
+    let bytes = map_bytes(device, &readback);
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
+fn render_pipeline(device: &wgpu::Device, wgsl: &str) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("wasm2gpu texture fetch"),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("wasm2gpu texture fetch"),
         layout: None,
         vertex: wgpu::VertexState {
@@ -135,8 +146,13 @@ fn render(
         multisample: Default::default(),
         multiview_mask: None,
         cache: None,
-    });
+    })
+}
 
+fn input_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("known texture-fetch input"),
         size: wgpu::Extent3d {
@@ -177,22 +193,35 @@ fn render(
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
     });
+    (texture, view, sampler)
+}
+
+fn texture_bind_group(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    needs_sampler: bool,
+) -> wgpu::BindGroup {
     let mut entries = vec![wgpu::BindGroupEntry {
         binding: 1,
-        resource: wgpu::BindingResource::TextureView(&view),
+        resource: wgpu::BindingResource::TextureView(view),
     }];
     if needs_sampler {
         entries.push(wgpu::BindGroupEntry {
             binding: 2,
-            resource: wgpu::BindingResource::Sampler(&sampler),
+            resource: wgpu::BindingResource::Sampler(sampler),
         });
     }
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let layout = pipeline.get_bind_group_layout(0);
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("wasm2gpu texture fetch"),
-        layout: &pipeline.get_bind_group_layout(0),
+        layout: &layout,
         entries: &entries,
-    });
+    })
+}
 
+fn fullscreen_triangle(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Buffer {
     let vertices = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("texture fetch fullscreen triangle"),
         size: 48,
@@ -202,12 +231,17 @@ fn render(
     let vertex_data: [f32; 12] = [
         -1.0, -1.0, 0.0, 0.0, 3.0, -1.0, 0.0, 0.0, -1.0, 3.0, 0.0, 0.0,
     ];
-    let vertex_bytes = vertex_data
+    let bytes = vertex_data
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect::<Vec<_>>();
-    queue.write_buffer(&vertices, 0, &vertex_bytes);
+    queue.write_buffer(&vertices, 0, &bytes);
+    vertices
+}
 
+fn output_target(
+    device: &wgpu::Device,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::Buffer) {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("texture fetch color output"),
         size: wgpu::Extent3d {
@@ -222,13 +256,26 @@ fn render(
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
     let readback = gpu_buffer(
         device,
         "texture fetch pixel readback",
         u64::from(ROW_BYTES),
         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
     );
-    let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    (target, view, readback)
+}
+
+fn draw_and_copy(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+    vertices: &wgpu::Buffer,
+    target: &wgpu::Texture,
+    target_view: &wgpu::TextureView,
+    readback: &wgpu::Buffer,
+) {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wasm2gpu texture fetch"),
     });
@@ -236,7 +283,7 @@ fn render(
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("wasm2gpu texture fetch"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &target_view,
+                view: target_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
@@ -249,15 +296,15 @@ fn render(
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.draw(0..3, 0..1);
     }
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
+            buffer: readback,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(ROW_BYTES),
@@ -271,8 +318,6 @@ fn render(
         },
     );
     queue.submit([encoder.finish()]);
-    let bytes = map_bytes(device, &readback);
-    [bytes[0], bytes[1], bytes[2], bytes[3]]
 }
 
 fn vertex_attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {

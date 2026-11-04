@@ -169,7 +169,7 @@ fn validate_compute_spirv(words: &[u32]) {
     let Ok(probe) = probe else {
         assert!(
             !required,
-            "ORNIS_REQUIRE_SPIRV_VAL=1 but spirv-val is unavailable"
+            "ORNIS_REQUIRE_SPIRV_VAL is enabled but spirv-val is unavailable"
         );
         eprintln!("SKIPPED (compute SPIR-V validation): spirv-val is unavailable");
         return;
