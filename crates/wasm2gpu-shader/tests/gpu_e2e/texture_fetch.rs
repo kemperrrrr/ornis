@@ -185,6 +185,7 @@ fn input_texture(
         },
         size,
     );
+    // A distinct second mip makes an LOD-1 selection observable in readback.
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
