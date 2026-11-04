@@ -7,6 +7,13 @@ use crate::Sampler;
 use crate::Texture2d;
 use crate::with_host;
 
+const OOB_TEXEL: GpuVec4 = GpuVec4 {
+    x: 0.0,
+    y: 0.0,
+    z: 0.0,
+    w: 1.0,
+};
+
 #[test]
 fn sample_lod_uses_the_host_shadow_base_level() {
     let mut memory = HostMemory::new();
@@ -32,15 +39,6 @@ fn sample_lod_uses_the_host_shadow_base_level() {
 #[should_panic(expected = "texture coordinate out of bounds")]
 fn texture_load_shadow_rejects_negative_coordinates() {
     let mut memory = HostMemory::new();
-    memory.bind_texture::<0, 0>(
-        1,
-        1,
-        &[GpuVec4 {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            w: 1.0,
-        }],
-    );
+    memory.bind_texture::<0, 0>(1, 1, &[OOB_TEXEL]);
     with_host(&mut memory, || Texture2d::<0, 0>::bind().load(-1, 0));
 }

@@ -17,7 +17,13 @@ const FLOAT_OUTPUT_BITS: [u32; 8] = [
     0,
     0x3f80_0000,
 ];
-const U32_OUTPUT: [u32; 2] = [10, 7];
+const WORKGROUP_INITIAL_VALUE: u32 = 7;
+const U32_OUTPUT: [u32; 4] = [
+    INITIAL_ATOMIC_VALUE,
+    WORKGROUP_INITIAL_VALUE,
+    0,
+    WORKGROUP_ATOMIC_DELTA,
+];
 const ATOMIC_OUTPUT: [u32; 1] = [15];
 const TEXTURE_TEXELS: [u8; 8] = [255, 0, 0, 255, 0, 255, 0, 255];
 const FLOAT_OUTPUT_BYTES: u64 = 32;
@@ -60,8 +66,7 @@ fn wasm_compute_abi_imports_execute_on_gpu() {
 
     let (floats, workgroup, atomic) = dispatch(&device, &queue, &translated.wgsl);
     assert_eq!(floats.as_slice(), FLOAT_OUTPUT_BITS.as_slice());
-    assert_eq!(&workgroup[..2], U32_OUTPUT.as_slice());
-    assert_eq!(workgroup[3].wrapping_sub(workgroup[2]), WORKGROUP_ATOMIC_DELTA);
+    assert_eq!(workgroup.as_slice(), U32_OUTPUT.as_slice());
     assert_eq!(atomic.as_slice(), ATOMIC_OUTPUT.as_slice());
 }
 
@@ -87,7 +92,7 @@ fn dispatch(
     let atomic = storage_buffer(device, "abi-atomic-output", ATOMIC_OUTPUT_BYTES);
     queue.write_buffer(&atomic, 0, &INITIAL_ATOMIC_VALUE.to_le_bytes());
     let (bind_group, _texture, _view, _sampler) =
-        bind_probe(device, queue, &pipeline, &floats, &atomic, &workgroup);
+        bind_probe(device, queue, &pipeline, [&floats, &atomic, &workgroup]);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("wasm2gpu compute ABI probe"),
     });
@@ -104,15 +109,14 @@ fn bind_probe(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pipeline: &wgpu::ComputePipeline,
-    floats: &wgpu::Buffer,
-    atomic: &wgpu::Buffer,
-    workgroup: &wgpu::Buffer,
+    buffers: [&wgpu::Buffer; 3],
 ) -> (
     wgpu::BindGroup,
     wgpu::Texture,
     wgpu::TextureView,
     wgpu::Sampler,
 ) {
+    let [floats, atomic, workgroup] = buffers;
     let (texture, view) = texture(device, queue);
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -120,7 +124,7 @@ fn bind_probe(
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
-        mipmap_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
     });
     let layout = pipeline.get_bind_group_layout(0);

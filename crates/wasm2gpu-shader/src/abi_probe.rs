@@ -1,7 +1,6 @@
 //! GPU-only fixture that exercises the new compute and texture ABI imports.
 
 use ornis_gpu_abi::GpuVec2;
-use ornis_gpu_abi::GpuVec4;
 use ornis_gpu_abi::Sampler;
 use ornis_gpu_abi::Texture2d;
 use ornis_gpu_abi::shader;
@@ -49,18 +48,58 @@ pub fn abi_probe(_invocation: u32) {
     let texture = Texture2d::<ABI_GROUP, TEXTURE_BINDING>::bind();
     let sampler = Sampler::<ABI_GROUP, SAMPLER_BINDING>::bind();
     let loaded = texture.load(TEXEL_X, TEXEL_Y);
-    let sampled = texture.sample_lod(&sampler, GpuVec2 { x: SAMPLE_U, y: SAMPLE_V }, SAMPLE_LOD);
-    store_vec4(LOAD_OUTPUT_OFFSET, loaded);
-    store_vec4(SAMPLE_OUTPUT_OFFSET, sampled);
+    let sampled = texture.sample_lod(
+        &sampler,
+        GpuVec2 {
+            x: SAMPLE_U,
+            y: SAMPLE_V,
+        },
+        SAMPLE_LOD,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        LOAD_OUTPUT_OFFSET + VECTOR_X_OFFSET,
+        loaded.x,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        LOAD_OUTPUT_OFFSET + VECTOR_Y_OFFSET,
+        loaded.y,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        LOAD_OUTPUT_OFFSET + VECTOR_Z_OFFSET,
+        loaded.z,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        LOAD_OUTPUT_OFFSET + VECTOR_W_OFFSET,
+        loaded.w,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        SAMPLE_OUTPUT_OFFSET + VECTOR_X_OFFSET,
+        sampled.x,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        SAMPLE_OUTPUT_OFFSET + VECTOR_Y_OFFSET,
+        sampled.y,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        SAMPLE_OUTPUT_OFFSET + VECTOR_Z_OFFSET,
+        sampled.z,
+    );
+    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(
+        SAMPLE_OUTPUT_OFFSET + VECTOR_W_OFFSET,
+        sampled.w,
+    );
 
     let previous_storage = storage_atomic_add_u32::<ABI_GROUP, ATOMIC_INPUT_BINDING>(
         STORAGE_ATOMIC_INDEX,
         STORAGE_ATOMIC_VALUE,
     );
-    store_u32_output(STORAGE_OUTPUT_STORAGE_OLD, previous_storage);
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
+        STORAGE_OUTPUT_STORAGE_OLD,
+        previous_storage,
+    );
     workgroup_store_u32(WORKGROUP_INDEX, WORKGROUP_INITIAL_VALUE);
     workgroup_barrier();
-    store_u32_output(
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
         STORAGE_OUTPUT_WORKGROUP_LOAD,
         workgroup_load_u32(WORKGROUP_INDEX),
     );
@@ -68,20 +107,13 @@ pub fn abi_probe(_invocation: u32) {
         workgroup_atomic_add_u32(WORKGROUP_ATOMIC_INDEX, WORKGROUP_ATOMIC_FIRST_VALUE);
     let previous_workgroup_after_add =
         workgroup_atomic_add_u32(WORKGROUP_ATOMIC_INDEX, WORKGROUP_ATOMIC_SECOND_VALUE);
-    store_u32_output(STORAGE_OUTPUT_WORKGROUP_ATOMIC_OLD, previous_workgroup);
-    store_u32_output(STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT, previous_workgroup_after_add);
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
+        STORAGE_OUTPUT_WORKGROUP_ATOMIC_OLD,
+        previous_workgroup,
+    );
+    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(
+        STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT,
+        previous_workgroup_after_add,
+    );
     storage_barrier();
-}
-
-#[inline(always)]
-fn store_vec4(base: u32, value: GpuVec4) {
-    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(base + VECTOR_X_OFFSET, value.x);
-    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(base + VECTOR_Y_OFFSET, value.y);
-    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(base + VECTOR_Z_OFFSET, value.z);
-    storage_store_f32::<ABI_GROUP, FLOAT_OUTPUT_BINDING>(base + VECTOR_W_OFFSET, value.w);
-}
-
-#[inline(always)]
-fn store_u32_output(index: u32, value: u32) {
-    storage_store_u32::<ABI_GROUP, U32_OUTPUT_BINDING>(index, value);
 }
