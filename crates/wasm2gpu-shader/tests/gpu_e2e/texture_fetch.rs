@@ -118,10 +118,10 @@ fn render_pipeline(device: &wgpu::Device, wgsl: &str) -> wgpu::RenderPipeline {
                 array_stride: 16,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
-                    vertex_attribute(0, 0),
-                    vertex_attribute(4, 1),
-                    vertex_attribute(8, 2),
-                    vertex_attribute(12, 3),
+                    super::vertex_attr(0, 0),
+                    super::vertex_attr(4, 1),
+                    super::vertex_attr(8, 2),
+                    super::vertex_attr(12, 3),
                 ],
             })],
             compilation_options: Default::default(),
@@ -319,12 +319,4 @@ fn draw_and_copy(
         },
     );
     queue.submit([encoder.finish()]);
-}
-
-fn vertex_attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {
-    wgpu::VertexAttribute {
-        format: wgpu::VertexFormat::Float32,
-        offset,
-        shader_location: location,
-    }
 }
