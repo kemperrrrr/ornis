@@ -209,15 +209,15 @@ fn texture_bind_group(
     sampler: &wgpu::Sampler,
     needs_sampler: bool,
 ) -> wgpu::BindGroup {
-    let mut entries = vec![wgpu::BindGroupEntry {
-        binding: 1,
-        resource: wgpu::BindingResource::TextureView(view),
-    }];
+    let mut entries = vec![texture_bind_group_entry(
+        1,
+        wgpu::BindingResource::TextureView(view),
+    )];
     if needs_sampler {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 2,
-            resource: wgpu::BindingResource::Sampler(sampler),
-        });
+        entries.push(texture_bind_group_entry(
+            2,
+            wgpu::BindingResource::Sampler(sampler),
+        ));
     }
     let layout = pipeline.get_bind_group_layout(0);
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -225,6 +225,13 @@ fn texture_bind_group(
         layout: &layout,
         entries: &entries,
     })
+}
+
+fn texture_bind_group_entry(
+    binding: u32,
+    resource: wgpu::BindingResource<'_>,
+) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry { binding, resource }
 }
 
 fn fullscreen_triangle(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Buffer {
