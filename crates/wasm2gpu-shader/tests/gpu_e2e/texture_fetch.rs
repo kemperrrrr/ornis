@@ -151,13 +151,14 @@ fn input_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
+    let size = wgpu::Extent3d {
+        width: TEXTURE_WIDTH,
+        height: TEXTURE_HEIGHT,
+        depth_or_array_layers: 1,
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("known texture-fetch input"),
-        size: wgpu::Extent3d {
-            width: TEXTURE_WIDTH,
-            height: TEXTURE_HEIGHT,
-            depth_or_array_layers: 1,
-        },
+        size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -178,11 +179,7 @@ fn input_texture(
             bytes_per_row: Some(8),
             rows_per_image: Some(1),
         },
-        wgpu::Extent3d {
-            width: TEXTURE_WIDTH,
-            height: TEXTURE_HEIGHT,
-            depth_or_array_layers: 1,
-        },
+        size,
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
