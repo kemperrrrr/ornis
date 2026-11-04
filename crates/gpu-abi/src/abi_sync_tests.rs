@@ -148,7 +148,9 @@ fn texture_load_reads_the_requested_texel() {
 #[should_panic(expected = "workgroup index out of bounds")]
 fn workgroup_shadow_rejects_out_of_range_indices() {
     let mut mem = HostMemory::new();
-    with_host(&mut mem, || workgroup_load_u32(crate::symbols::WORKGROUP_WORDS));
+    with_host(&mut mem, || {
+        workgroup_load_u32(crate::symbols::WORKGROUP_WORDS)
+    });
 }
 
 #[test]

@@ -113,7 +113,10 @@ fn wasm() -> Vec<u8> {
 fn lowered_scalar_float_ops_match_expected_gpu_values() {
     // Check the Wasm-defined NaN and signed-zero min/max results on the GPU,
     // alongside the finite scalar operators.
-    let translated = translate(&wasm()).expect("translate scalar float operators");
+    let translated = translate(&wasm()).unwrap_or_else(|error| {
+        println!("::error title=float-ops-translate::{error:?}");
+        panic!("translate scalar float operators: {error:?}");
+    });
     let Some((device, queue)) = device() else {
         let required =
             std::env::var("ORNIS_REQUIRE_GPU").is_ok_and(|value| !value.is_empty() && value != "0");

@@ -117,3 +117,68 @@ pub fn abi_probe(_invocation: u32) {
     );
     storage_barrier();
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ornis_gpu_abi::GpuVec4;
+    use ornis_gpu_abi::HostMemory;
+    use ornis_gpu_abi::with_host;
+
+    const TEXELS: [GpuVec4; 2] = [
+        GpuVec4 {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        },
+        GpuVec4 {
+            x: 0.0,
+            y: 1.0,
+            z: 0.0,
+            w: 1.0,
+        },
+    ];
+    const FLOATS: [u32; 8] = [
+        0,
+        0x3f80_0000,
+        0,
+        0x3f80_0000,
+        0,
+        0x3f80_0000,
+        0,
+        0x3f80_0000,
+    ];
+    const U32S: [u32; 4] = [10, 7, 0, 5];
+
+    #[test]
+    fn abi_probe_matches_the_host_shadow() {
+        let mut memory = HostMemory::new();
+        memory.bind_texture::<ABI_GROUP, TEXTURE_BINDING>(2, 1, &TEXELS);
+        memory.bind_sampler::<ABI_GROUP, SAMPLER_BINDING>();
+        memory.bind_storage::<ABI_GROUP, FLOAT_OUTPUT_BINDING, [f32; 8]>();
+        memory.bind_storage::<ABI_GROUP, ATOMIC_INPUT_BINDING, [u32; 1]>();
+        memory.write_storage::<ABI_GROUP, ATOMIC_INPUT_BINDING, [u32; 1]>(
+            &[INITIAL_ATOMIC_VALUE],
+        );
+        memory.bind_storage::<ABI_GROUP, U32_OUTPUT_BINDING, [u32; 4]>();
+
+        with_host(&mut memory, || abi_probe(0));
+
+        assert_eq!(
+            memory
+                .read_storage::<ABI_GROUP, FLOAT_OUTPUT_BINDING, [f32; 8]>()
+                .map(f32::to_bits),
+            FLOATS
+        );
+        assert_eq!(
+            memory.read_storage::<ABI_GROUP, U32_OUTPUT_BINDING, [u32; 4]>(),
+            U32S
+        );
+        assert_eq!(
+            memory.read_storage::<ABI_GROUP, ATOMIC_INPUT_BINDING, [u32; 1]>(),
+            [15]
+        );
+    }
+}

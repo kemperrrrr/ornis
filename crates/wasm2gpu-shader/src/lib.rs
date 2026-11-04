@@ -21,8 +21,8 @@ use ornis_gpu_abi::uniform_array_f32;
 use ornis_gpu_abi::uniform_field_f32;
 use ornis_gpu_abi::uniform_field_u32;
 
-#[cfg(target_arch = "wasm32")]
-pub mod abi_probe;
+#[cfg(any(target_arch = "wasm32", test))]
+mod abi_probe;
 
 #[cfg(any(target_arch = "wasm32", test))]
 mod auto_exposure;

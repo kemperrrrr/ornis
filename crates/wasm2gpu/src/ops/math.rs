@@ -82,9 +82,7 @@ pub(super) fn scalar_binary(
     let right = crate::env::float_of(em.pop()?)?;
     let left = crate::env::float_of(em.pop()?)?;
     let value = match fun {
-        naga::MathFunction::Min | naga::MathFunction::Max => {
-            wasm_min_max(em, fun, left, right)
-        }
+        naga::MathFunction::Min | naga::MathFunction::Max => wasm_min_max(em, fun, left, right),
         _ => em.ex(Expression::Math {
             fun,
             arg: left,

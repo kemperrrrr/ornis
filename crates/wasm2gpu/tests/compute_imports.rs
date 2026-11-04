@@ -2,10 +2,11 @@
 
 use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
+use ornis_wasm2gpu::TranslateError;
 
 mod common;
 
-use common::{assert_vector_lanes_in_order, assert_wgsl_expressions, fragment, import, wasm, wgsl};
+use common::{assert_wgsl_expressions, fragment, import, wasm, wgsl};
 
 #[test]
 fn atomics_workgroup_memory_and_barriers_lower_to_wgsl() {
@@ -228,4 +229,16 @@ fn new_texture_imports_reject_wrong_lane_signatures() {
             "{name} accepted {signature}: {error:?}"
         );
     }
+}
+
+fn assert_vector_lanes_in_order(wgsl: &str, expression: &str) {
+    let normalized = wgsl.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = normalized
+        .find(expression)
+        .unwrap_or_else(|| panic!("missing vector expression {expression:?}: {wgsl}"));
+    let result = &normalized[start + expression.len()..];
+    let x = result.find(".x").expect("x lane after vector expression");
+    let y = result.find(".y").expect("y lane after vector expression");
+    let z = result.find(".z").expect("z lane after vector expression");
+    assert!(x < y && y < z, "vector lanes not in x/y/z order: {wgsl}");
 }
