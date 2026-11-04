@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Desktop shell for the Ornis editor: native window (wry webview) over the editor frontend, no localhost"
 
 [dependencies]
