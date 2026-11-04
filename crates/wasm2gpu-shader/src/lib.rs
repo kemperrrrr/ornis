@@ -24,6 +24,11 @@ use ornis_gpu_abi::uniform_field_u32;
 #[cfg(any(target_arch = "wasm32", test))]
 mod abi_probe;
 
+#[cfg(target_arch = "wasm32")]
+// qual:api — exported compute fixture consumed by the Wasm-to-GPU test path.
+/// GPU ABI fixture exported for the Wasm integration tests.
+pub use abi_probe::abi_probe;
+
 #[cfg(any(target_arch = "wasm32", test))]
 mod auto_exposure;
 

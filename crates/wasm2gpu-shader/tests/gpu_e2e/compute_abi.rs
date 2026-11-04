@@ -1,4 +1,8 @@
-//! Execute the new ABI imports after a real wasm32 build and lowering pass.
+//! Execute the ABI imports after lowering a compact Wasm fixture.
+//!
+//! The matching Rust shader is host-shadow tested separately; this explicit
+//! Wasm avoids rustc's stack-pointer globals so this test isolates import ABI
+//! lowering and GPU execution.
 
 use ornis_gpu_abi::symbols;
 use ornis_wasm2gpu::translate;
@@ -47,11 +51,98 @@ const TEXTURE_ROWS_PER_IMAGE: u32 = 1;
 const GPU_WORD_BYTES: usize = 4;
 const SPIRV_VALIDATION_TARGET: &str = "vulkan1.3";
 
+fn wasm() -> Vec<u8> {
+    wat::parse_str(format!(
+        r#"(module
+            (import "{module}" "{texture_load}" (func $texture_load
+                (param i32 i32 i32 i32) (result f32 f32 f32 f32)))
+            (import "{module}" "{texture_sample_lod}" (func $texture_sample_lod
+                (param i32 i32 i32 i32 f32 f32 f32) (result f32 f32 f32 f32)))
+            (import "{module}" "{storage_write_f32}" (func $storage_write_f32
+                (param i32 i32 i32 f32)))
+            (import "{module}" "{storage_write_u32}" (func $storage_write_u32
+                (param i32 i32 i32 i32)))
+            (import "{module}" "{storage_atomic_add}" (func $storage_atomic_add
+                (param i32 i32 i32 i32) (result i32)))
+            (import "{module}" "{workgroup_store}" (func $workgroup_store
+                (param i32 i32)))
+            (import "{module}" "{workgroup_load}" (func $workgroup_load
+                (param i32) (result i32)))
+            (import "{module}" "{workgroup_atomic_add}" (func $workgroup_atomic_add
+                (param i32 i32) (result i32)))
+            (import "{module}" "{workgroup_barrier}" (func $workgroup_barrier))
+            (import "{module}" "{storage_barrier}" (func $storage_barrier))
+            (func (export "{vs}") (param f32 f32 f32 f32)
+                (result f32 f32 f32 f32 f32 f32)
+                local.get 0 local.get 1 f32.const 0 f32.const 1 local.get 2 local.get 3)
+            (func (export "{fs}") (param f32 f32) (result f32 f32 f32 f32)
+                f32.const 0 f32.const 0 f32.const 0 f32.const 1)
+            (func (export "{cs}") (param i32)
+                (local $load_x f32) (local $load_y f32)
+                (local $load_z f32) (local $load_w f32)
+                (local $sample_x f32) (local $sample_y f32)
+                (local $sample_z f32) (local $sample_w f32)
+                (local $storage_old i32) (local $workgroup_loaded i32)
+                (local $workgroup_old i32)
+                local.get 0 if return end
+
+                i32.const 0 i32.const 1 i32.const 1 i32.const 0 call $texture_load
+                local.set $load_w local.set $load_z
+                local.set $load_y local.set $load_x
+                i32.const 0 i32.const 3 i32.const 0 local.get $load_x call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 1 local.get $load_y call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 2 local.get $load_z call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 3 local.get $load_w call $storage_write_f32
+
+                i32.const 0 i32.const 1 i32.const 0 i32.const 2
+                f32.const 0.75 f32.const 0.5 f32.const 0 call $texture_sample_lod
+                local.set $sample_w local.set $sample_z
+                local.set $sample_y local.set $sample_x
+                i32.const 0 i32.const 3 i32.const 4 local.get $sample_x call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 5 local.get $sample_y call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 6 local.get $sample_z call $storage_write_f32
+                i32.const 0 i32.const 3 i32.const 7 local.get $sample_w call $storage_write_f32
+
+                i32.const 0 i32.const 4 i32.const 0 i32.const 5
+                call $storage_atomic_add local.set $storage_old
+                i32.const 0 i32.const 5 i32.const 0 local.get $storage_old
+                call $storage_write_u32
+
+                i32.const 0 i32.const 7 call $workgroup_store
+                call $workgroup_barrier
+                i32.const 0 call $workgroup_load local.set $workgroup_loaded
+                i32.const 0 i32.const 5 i32.const 1 local.get $workgroup_loaded
+                call $storage_write_u32
+                i32.const 1 i32.const 5 call $workgroup_atomic_add
+                local.set $workgroup_old
+                i32.const 0 i32.const 5 i32.const 2 local.get $workgroup_old
+                call $storage_write_u32
+                i32.const 1 i32.const 7 call $workgroup_atomic_add
+                local.set $workgroup_old
+                i32.const 0 i32.const 5 i32.const 3 local.get $workgroup_old
+                call $storage_write_u32
+                call $storage_barrier))"#,
+        module = symbols::MODULE,
+        texture_load = symbols::TEXTURE_LOAD_2D,
+        texture_sample_lod = symbols::TEXTURE_SAMPLE_2D_LOD,
+        storage_write_f32 = symbols::STORAGE_WRITE_F32,
+        storage_write_u32 = symbols::STORAGE_WRITE_U32,
+        storage_atomic_add = symbols::STORAGE_ATOMIC_ADD_U32,
+        workgroup_store = symbols::WORKGROUP_STORE_U32,
+        workgroup_load = symbols::WORKGROUP_LOAD_U32,
+        workgroup_atomic_add = symbols::WORKGROUP_ATOMIC_ADD_U32,
+        workgroup_barrier = symbols::WORKGROUP_BARRIER,
+        storage_barrier = symbols::STORAGE_BARRIER,
+        vs = symbols::VS_MAIN,
+        fs = symbols::FS_MAIN,
+        cs = symbols::CS_MAIN,
+    ))
+    .expect("valid compute ABI fixture")
+}
+
 #[test]
 fn wasm_compute_abi_imports_execute_on_gpu() {
-    let wasm = super::compile_wasm();
-    let module = super::compute_lift::lift(&wasm, "abi_probe");
-    let translated = translate(&module).expect("translate ABI probe");
+    let translated = translate(&wasm()).expect("translate ABI imports");
     assert!(!translated.compute_spirv.is_empty());
     validate_spirv(&translated.compute_spirv);
     let Some((device, queue)) = super::device() else {
@@ -149,14 +240,13 @@ fn bind_probe(
 }
 
 fn texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::TextureView) {
-    let size = wgpu::Extent3d {
-        width: TEXTURE_WIDTH,
-        height: TEXTURE_HEIGHT,
-        depth_or_array_layers: TEXTURE_LAYERS,
-    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("wasm2gpu ABI probe texture"),
-        size,
+        label: Some("wasm2gpu compute ABI texture"),
+        size: wgpu::Extent3d {
+            width: TEXTURE_WIDTH,
+            height: TEXTURE_HEIGHT,
+            depth_or_array_layers: TEXTURE_LAYERS,
+        },
         mip_level_count: TEXTURE_MIP_LEVELS,
         sample_count: TEXTURE_SAMPLE_COUNT,
         dimension: wgpu::TextureDimension::D2,
@@ -165,19 +255,18 @@ fn texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Texture, wgpu::
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
+        texture.as_image_copy(),
         &TEXTURE_TEXELS,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(TEXTURE_ROW_BYTES),
             rows_per_image: Some(TEXTURE_ROWS_PER_IMAGE),
         },
-        size,
+        wgpu::Extent3d {
+            width: TEXTURE_WIDTH,
+            height: TEXTURE_HEIGHT,
+            depth_or_array_layers: TEXTURE_LAYERS,
+        },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
@@ -189,47 +278,17 @@ fn read_words(
     buffer: &wgpu::Buffer,
     size: u64,
 ) -> Vec<u32> {
-    let staging = gpu_buffer(
-        device,
-        "wasm2gpu ABI readback",
-        size,
-        wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-    );
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
-    queue.submit([encoder.finish()]);
-    map_bytes(device, &staging)
+    map_bytes(device, queue, buffer, size)
         .chunks_exact(GPU_WORD_BYTES)
         .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four-byte word")))
         .collect()
 }
 
 fn validate_spirv(words: &[u32]) {
-    let mut bytes = Vec::with_capacity(words.len() * GPU_WORD_BYTES);
-    for word in words {
-        bytes.extend(word.to_le_bytes());
-    }
-    let path = std::env::temp_dir().join(format!("ornis-abi-probe-{}.spv", std::process::id()));
-    std::fs::write(&path, bytes).expect("write compute SPIR-V");
-    let result = std::process::Command::new("spirv-val")
-        .args(["--target-env", SPIRV_VALIDATION_TARGET])
-        .arg(&path)
-        .output();
-    let _ = std::fs::remove_file(&path);
-    match result {
-        Ok(output) => assert!(
-            output.status.success(),
-            "spirv-val rejected workgroup-atomic output:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            assert!(
-                std::env::var_os("ORNIS_REQUIRE_SPIRV_VAL").is_none(),
-                "ORNIS_REQUIRE_SPIRV_VAL is set but spirv-val is not installed"
-            );
-            eprintln!("SKIPPED (SPIR-V validation): spirv-val is not installed");
-        }
-        Err(error) => panic!("failed to run spirv-val: {error}"),
-    }
+    let module = rspirv::dr::load_words(words).expect("parse compute ABI SPIR-V");
+    let mut validator = spirv_tools::val::create(SPIRV_VALIDATION_TARGET)
+        .expect("create SPIR-V validator");
+    validator
+        .validate(&module)
+        .expect("validate compute ABI SPIR-V");
 }
