@@ -326,8 +326,7 @@ fn packed_planes(count: u32) -> Vec<u8> {
             bytes[start..start + U32_BYTES].copy_from_slice(&value.to_le_bytes());
         }
     }
-    bytes[PLANES_BYTES..PLANES_BYTES + U32_BYTES]
-        .copy_from_slice(&(count as f32).to_le_bytes());
+    bytes[PLANES_BYTES..PLANES_BYTES + U32_BYTES].copy_from_slice(&(count as f32).to_le_bytes());
     bytes
 }
 

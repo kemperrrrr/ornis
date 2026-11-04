@@ -36,8 +36,6 @@ use ornis_gpu_abi::GpuVec3;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::Storage;
 #[cfg(target_arch = "wasm32")]
-use ornis_gpu_abi::gpu_dot3;
-#[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::gpu_length3;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_at_u32;
@@ -142,11 +140,11 @@ const CULL_COMPACT_RECORD_WORDS: u32 = 52;
 const CULL_COMPACT_MODEL_CENTER_OFFSET: u32 = 12;
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_MODEL_COLUMN_STRIDE: u32 = 4;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
 #[cfg(target_arch = "wasm32")]
 const CULL_COMPACT_COUNT_UNIFORM_INDEX: u32 = PLANE_LEN;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const CULL_COMPACT_UNIFORM_LEN: u32 = PLANE_LEN + 1;
 
 /// Value the wasm `compute` export stores at invocation `id`.
@@ -316,22 +314,32 @@ pub fn cull(id: u32) {
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
-fn cull_storage_vec3(base: u32) -> GpuVec3 {
-    GpuVec3 {
+fn cull_storage_length(base: u32) -> f32 {
+    let vector = GpuVec3 {
         x: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base),
         y: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1),
         z: storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2),
-    }
+    };
+    gpu_length3(vector)
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
-fn cull_uniform_vec3(base: u32) -> GpuVec3 {
-    GpuVec3 {
-        x: uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(base),
-        y: uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(base + 1),
-        z: uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(base + 2),
-    }
+fn cull_plane_outside(
+    center_x: f32,
+    center_y: f32,
+    center_z: f32,
+    radius: f32,
+    plane: u32,
+) -> bool {
+    let at = plane * LANES;
+    let normal_x = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(at);
+    let normal_y = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(at + 1);
+    let normal_z = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(at + 2);
+    let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, CULL_COMPACT_UNIFORM_LEN>(
+        at + CULL_COMPACT_PLANE_DISTANCE_LANE,
+    );
+    normal_x * center_x + normal_y * center_y + normal_z * center_z + distance < -radius
 }
 
 /// Wasm compute export for the production culling compaction ABI.
@@ -354,13 +362,18 @@ pub fn cull_compact(id: u32) {
     ) as u32;
     if id < count {
         let base = id * CULL_COMPACT_RECORD_WORDS;
-        let center = cull_storage_vec3(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
-        let x_axis = cull_storage_vec3(base);
-        let y_axis = cull_storage_vec3(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
-        let z_axis = cull_storage_vec3(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);
-        let mut radius = gpu_length3(x_axis);
-        let y_radius = gpu_length3(y_axis);
-        let z_radius = gpu_length3(z_axis);
+        let center_x = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
+            base + CULL_COMPACT_MODEL_CENTER_OFFSET,
+        );
+        let center_y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
+            base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1,
+        );
+        let center_z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(
+            base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2,
+        );
+        let mut radius = cull_storage_length(base);
+        let y_radius = cull_storage_length(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
+        let z_radius = cull_storage_length(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);
         if y_radius > radius {
             radius = y_radius;
         }
@@ -370,12 +383,7 @@ pub fn cull_compact(id: u32) {
         let mut visible = 1u32;
         let mut plane = 0u32;
         while plane < PLANE_COUNT {
-            let at = plane * LANES;
-            let normal = cull_uniform_vec3(at);
-            let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(
-                at + CULL_COMPACT_PLANE_DISTANCE_LANE,
-            );
-            if gpu_dot3(normal, center) + distance < -radius {
+            if cull_plane_outside(center_x, center_y, center_z, radius, plane) {
                 visible = 0;
             }
             plane += 1;
