@@ -16,16 +16,17 @@
 //! `PhysicsEngine` and `RenderBackend` as plugin traits.
 //!
 //! Timing split (deliberate, one vocabulary): frame producers drain through
-//! [`MutationTick`] into the bus and apply
+//! [`MutationTick`](crate::mutation::MutationTick) into the bus and apply
 //! between frames, while synchronous producers (the built-in editor) call
 //! [`apply_mutations`](crate::mutation::apply_mutations) directly for an
 //! immediate report. Both paths share the type, the applier and the report.
 //!
-//! In-frame structural ops (R4, [`StructuralQueue`]): a `#[smart_system]`
-//! body sees shared storage only, so `add`/`remove`/`spawn` cannot take the
-//! `&mut SmartStore` they need — they enqueue typed closures through
-//! [`StructuralWriter`](crate::StructuralWriter) instead, and
-//! [`apply_structural_queue`] drains them at the frame boundary, right
+//! In-frame structural ops (R4, [`StructuralQueue`](crate::mutation::StructuralQueue)):
+//! a `#[smart_system]` body sees shared storage only, so `add`/`remove`/`spawn`
+//! cannot take the `&mut SmartStore` they need — they enqueue typed closures
+//! through [`StructuralWriter`](crate::StructuralWriter) instead, and
+//! [`apply_structural_queue`](crate::mutation::apply_structural_queue) drains
+//! them at the frame boundary, right
 //! before [`Stage::Last`](crate::Stage::Last). Same between-frames rule as
 //! the mutations above, two surfaces by design: `Mutation` stays the
 //! registry-backed JSON tooling/editor seam, the structural queue is the
@@ -330,8 +331,13 @@ pub type StructuralOp = Box<dyn FnOnce(&mut SmartStore) + Send>;
 /// conflicts with every other and the scheduler splits them across levels
 /// in registration order — enqueues are strictly sequential regardless of
 /// the rayon thread count, and the FIFO drain reproduces that order,
-/// making entity-id allocation and application bitwise-reproducible for
-/// 1 and 32 threads alike.
+/// making the *operation sequence* bitwise-reproducible for 1 and 32
+/// threads alike.
+///
+/// That guarantee covers the ops, not pre-allocated entity ids:
+/// [`StructuralWriter::spawn`](crate::StructuralWriter::spawn) asks the
+/// store's allocator under shared access, so a system outside the queue
+/// that allocates on the same level can interleave ids (see `spawn` docs).
 ///
 /// [`World`](crate::World) registers the singleton automatically; raw
 /// [`Resources`] users call [`register_structural_queue`]. Systems reach
@@ -401,10 +407,10 @@ impl StructuralQueue {
     }
 }
 
-/// Registers the [`StructuralQueue`] singleton (systems fetch it through
-/// [`StructuralWriter`](crate::StructuralWriter); the queue must exist
-/// before the schedule runs). [`World`](crate::World) does this at
-/// construction — call it only when building [`Resources`] by hand.
+/// Registers the [`StructuralQueue`] singleton if absent (systems fetch it
+/// through [`StructuralWriter`](crate::StructuralWriter); the queue must
+/// exist before the schedule runs). [`World`](crate::World) does this at
+/// construction, so this is only for [`Resources`] built by hand.
 pub fn register_structural_queue(resources: &mut Resources) {
     if resources.get::<StructuralQueue>().is_none() {
         resources.insert(StructuralQueue::new());

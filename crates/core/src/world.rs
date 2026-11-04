@@ -86,7 +86,7 @@ impl<State: Phase> World<State> {
         // The deferred structural queue rides along with the store: system
         // bodies enqueue `add`/`remove`/`spawn` and `Engine::run_frame`
         // applies them at the frame boundary.
-        resources.insert(crate::mutation::StructuralQueue::new());
+        crate::mutation::register_structural_queue(&mut resources);
         Self {
             resources,
             phase: PhantomData,

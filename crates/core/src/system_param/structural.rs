@@ -63,9 +63,18 @@ impl<'a> StructuralWriter<'a> {
     /// Queues creation of an entity carrying `bundle` and returns its live
     /// handle immediately.
     ///
-    /// The id is allocated now (the interior allocator works under shared
-    /// access; queue serialization keeps the order deterministic) and the
-    /// bundle lands at apply time — see
+    /// The id is allocated now through the store's interior allocator (the
+    /// only allocation route available under shared access), so handle
+    /// ordering follows *call* order, not apply order.
+    /// [`StructuralWriter`](Self) declares a queue write, which serializes
+    /// every queueing system in registration order — so all writers (and
+    /// every system on their levels) observe call order == id order. A
+    /// system that allocates directly (`SmartStore::create_entity` under a
+    /// plain read declaration) does not conflict with the queue and may
+    /// interleave ids; declare a write on the store from such systems when
+    /// id order matters.
+    ///
+    /// The bundle lands at apply time — see
     /// [`apply_structural_queue`](crate::mutation::apply_structural_queue).
     /// A handle to an entity despawned before the apply is skipped there,
     /// so a queued spawn can never resurrect a dead id.
@@ -92,6 +101,13 @@ impl<'a> StructuralWriter<'a> {
 
     /// Queues removal of component `T` from `entity` (no-op when the entity
     /// or the lane entry is already gone).
+    ///
+    /// # Panics
+    /// At apply time, if `T` was registered as a lock-free lane:
+    /// [`SmartStore::write_lane`](crate::SmartStore::write_lane) rejects
+    /// those, and this deferred path cannot use the snapshot API (it needs
+    /// `remove` under `&mut`). `#[smart_system]` has the same constraint
+    /// for field writes, so packed/system components stay `RwLock` lanes.
     pub fn remove<T: 'static + Send + Sync>(&self, entity: Entity) {
         self.queue.push(Box::new(move |store: &mut SmartStore| {
             if store.is_alive(entity)
@@ -284,5 +300,26 @@ mod tests {
         schedule.add_system(Probe);
         schedule.add_system(Probe);
         assert_eq!(schedule.levels(), vec![vec![0], vec![1]]);
+    }
+
+    /// Pins the documented `remove` constraint: the deferred path goes
+    /// through `write_lane`, which rejects lock-free lanes at apply time.
+    #[test]
+    #[should_panic(expected = "cannot access a lock-free lane")]
+    fn remove_panics_on_lock_free_lane() {
+        let mut resources = Resources::new();
+        resources.insert(SmartStore::new());
+        register_structural_queue(&mut resources);
+        resources
+            .get_mut::<SmartStore>()
+            .expect("store")
+            .register_lock_free::<u32>();
+        let entity = resources
+            .get::<SmartStore>()
+            .expect("store")
+            .create_entity();
+
+        StructuralWriter::fetch(&resources).remove::<u32>(entity);
+        crate::mutation::apply_structural_queue(&mut resources);
     }
 }
