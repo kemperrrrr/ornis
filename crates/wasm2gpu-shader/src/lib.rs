@@ -9,7 +9,7 @@
 //! `gpu-abi`. Returning a struct would spill through linear memory, which the
 //! translator rejects. This crate is not the production shader DSL.
 
-// qual:allow(srp) reason: "Shader exports and their scalar ABI helpers remain together so wasm entry names and translator-visible calls stay stable."
+// qual:allow(srp, max_independent_clusters=12) reason: "The shader DSL requires exported kernels and translator-visible scalar helpers in one source module; cap future independent clusters rather than relocating entry points."
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
 
@@ -339,16 +339,14 @@ fn cull_radius_invalid(radius: f32) -> bool {
 fn cull_max(left: f32, right: f32) -> f32 {
     if left.is_nan() {
         right
-    } else if right.is_nan() {
-        left
-    } else if left > right {
+    } else if right.is_nan() || left > right {
         left
     } else {
         right
     }
 }
 
-// qual:allow(srp) reason: "The wasm2gpu shader ABI only supports scalar arguments; this helper mirrors the WGSL sphere test without a translated aggregate."
+// qual:allow(srp, max_parameters=6) reason: "The wasm2gpu shader ABI only supports scalar arguments; this helper mirrors the WGSL sphere test without a translated aggregate."
 #[cfg(any(target_arch = "wasm32", test))]
 #[inline(always)]
 fn cull_record_visible(

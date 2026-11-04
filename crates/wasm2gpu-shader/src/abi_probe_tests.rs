@@ -266,7 +266,7 @@ fn cull_helpers_read_storage_length_and_test_uniform_planes() {
                 CULL_TEST_RADIUS,
                 CULL_TEST_RADIUS,
             ),
-            super::cull_record_visible(CULL_TEST_OUTSIDE_CENTER, 0.0, 0.0, -1.0, 0.0, 0.0),
+            super::cull_record_visible(CULL_TEST_OUTSIDE_CENTER, 0.0, 0.0, -1.0, -1.0, -1.0),
         )
     });
     assert_eq!(radius, CULL_STORAGE_LENGTH);

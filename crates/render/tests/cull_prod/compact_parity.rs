@@ -56,11 +56,7 @@ fn cull_compact_matches_the_production_wgsl() {
     assert_eq!(compact_count, production_count);
 }
 
-fn run_compact(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    objects: &[u8],
-) -> (Vec<u32>, u32) {
+fn run_compact(device: &wgpu::Device, queue: &wgpu::Queue, objects: &[u8]) -> (Vec<u32>, u32) {
     let buffers = create_compact_buffers(device, queue, objects);
     let layout = compact_layout(device);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -119,7 +115,6 @@ fn run_compact(
     (visible, count)
 }
 
-// qual:allow(fragment) reason: "The two source views, destination, args, planes, and capacity uniforms are distinct shader ABI buffers."
 fn create_compact_buffers(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -187,7 +182,10 @@ fn compact_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 DESTINATION_BINDING,
                 wgpu::BufferBindingType::Storage { read_only: false },
             ),
-            buffer_entry(ARGS_BINDING, wgpu::BufferBindingType::Storage { read_only: false }),
+            buffer_entry(
+                ARGS_BINDING,
+                wgpu::BufferBindingType::Storage { read_only: false },
+            ),
             buffer_entry(
                 SOURCE_WORDS_BINDING,
                 wgpu::BufferBindingType::Storage { read_only: false },
@@ -197,6 +195,8 @@ fn compact_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+// qual:allow(dry, fragment) reason: "Lowered shader module, pipeline layout, and compute entry wiring are required for this standalone GPU parity harness."
+// qual:allow(dry, duplicate) reason: "This parity harness independently builds the same lowered guest entry as its e2e test, using a production-record input layout."
 fn compact_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -225,7 +225,7 @@ fn pack_planes() -> Vec<u8> {
     let mut bytes = vec![0; super::PLANES.len() * PLANE_LANES * UNIFORM_SLOT_BYTES];
     for (plane_index, plane) in super::PLANES.iter().enumerate() {
         for (lane, value) in plane.iter().enumerate() {
-            let offset = (plane_index * 4 + lane) * UNIFORM_SLOT_BYTES;
+            let offset = (plane_index * PLANE_LANES + lane) * UNIFORM_SLOT_BYTES;
             put_f32(&mut bytes, offset as u32, *value);
         }
     }

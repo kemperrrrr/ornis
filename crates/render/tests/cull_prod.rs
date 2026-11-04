@@ -56,8 +56,7 @@ fn cull_kernel_matches_the_production_wgsl() {
         "a NaN radius must fail open and remain visible"
     );
     assert_eq!(
-        EXPECTED[MIXED_NAN_AXIS_SLOT],
-        0,
+        EXPECTED[MIXED_NAN_AXIS_SLOT], 0,
         "one NaN scale axis follows WGSL max and preserves the finite radius"
     );
     let wgsl = lowered_kernel();
@@ -98,11 +97,7 @@ fn cull_kernel_matches_the_production_wgsl() {
 
 /// Dispatch the shipped kernel once and read back the compacted set:
 /// `material_index` of every entry below the atomic count, sorted.
-fn run_production(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    objects: &[u8],
-) -> (Vec<u32>, u32) {
+fn run_production(device: &wgpu::Device, queue: &wgpu::Queue, objects: &[u8]) -> (Vec<u32>, u32) {
     let bgl = production_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("production cull"),

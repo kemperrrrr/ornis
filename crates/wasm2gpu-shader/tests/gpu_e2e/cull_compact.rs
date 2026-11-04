@@ -142,7 +142,6 @@ fn test_records() -> [[u32; RECORD_WORDS]; SOURCE_COUNT] {
     records
 }
 
-// qual:allow(fragment) reason: "The shader's scalar float view, bit-preserving word view, output, args, and two uniforms require independent GPU bindings."
 fn create_gpu_case(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -263,6 +262,8 @@ fn create_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+// qual:allow(dry, fragment) reason: "The compute pipeline repeats the guest shader module, pipeline layout, and entry-point wiring required by this standalone GPU test."
+// qual:allow(dry, duplicate) reason: "The standalone shader test and render parity test both construct lowered compute pipelines with separate GPU contexts."
 fn create_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
     let wgsl = lowered_kernel("cull_compact", "storage_0_2_");
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -338,7 +339,11 @@ fn assert_compacted_output(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_
     assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
 
     let actual = compacted_records(bytes);
-    let expected = vec![records[0].to_vec(), records[2].to_vec(), records[3].to_vec()];
+    let expected = vec![
+        records[0].to_vec(),
+        records[2].to_vec(),
+        records[3].to_vec(),
+    ];
     assert_eq!(actual, expected, "compacted records must be bit-identical");
     assert_eq!(actual[0][MOTION_VALID_WORD], 1);
     assert_canary_slots(bytes, instance_count as usize);
