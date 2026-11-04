@@ -55,6 +55,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/kemperrrrr/ornis"
 categories = ["game-engines", "graphics"]
 
 [package]
@@ -63,6 +64,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Rust game engine with an invisible ECS: native launch for a ready GameWorld"
 
 [dependencies]
 ornis-assets = { path = "crates/assets", version = "0.1.0" }

@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Shader language registry: primitive types and built-in functions mapped by the DSL"
 
 [dependencies]
 syn = { version = "3", features = ["full", "visit"] }

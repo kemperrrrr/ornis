@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Backend-neutral per-frame input: raw state, named keys and action mapping"
 
 [lints]
 workspace = true

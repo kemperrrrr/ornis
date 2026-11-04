@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "GPU-independent material images, role-aware mip generation and KTX2 transcoding"
 
 [dependencies]
 ktx2 = "0.5"
