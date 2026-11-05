@@ -367,7 +367,10 @@ fn copy_outputs(encoder: &mut wgpu::CommandEncoder, gpu: &CullCompactGpu, readba
 fn assert_compacted_output(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
     let args_offset = SOURCE_COUNT * RECORD_BYTES;
     let instance_count = read_u32(bytes, args_offset + U32_BYTES);
-    assert_eq!(instance_count, 4, "indirect args visible count across two workgroups");
+    assert_eq!(
+        instance_count, 4,
+        "indirect args visible count across two workgroups"
+    );
     assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
 
     let mut actual = compacted_records(bytes);
@@ -393,7 +396,10 @@ fn assert_compacted_output(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_
 fn assert_capacity_guards(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
     let args_offset = SOURCE_COUNT * RECORD_BYTES;
     let instance_count = read_u32(bytes, args_offset + U32_BYTES);
-    assert_eq!(instance_count, 1, "indirect count must be clamped to dst capacity");
+    assert_eq!(
+        instance_count, 1,
+        "indirect count must be clamped to dst capacity"
+    );
     assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
 
     let first = read_record(bytes, 0);
