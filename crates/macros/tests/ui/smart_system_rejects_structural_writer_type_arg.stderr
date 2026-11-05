@@ -1,4 +1,4 @@
-error: smart_system: `StructuralWriter` takes no type arguments — it queues deferred `add`/`remove`/`spawn` ops for the frame's `Last` stage (write a bare `StructuralWriter`)
+error: smart_system: `StructuralWriter` takes only a queue-kind argument — write `StructuralWriter` / `StructuralWriter<'_, FixedStep>` for the fixed plan (applied after every tick, `Stage::Gameplay`) or `StructuralWriter<'_, FrameStep>` for the once-per-frame plan
   --> tests/ui/smart_system_rejects_structural_writer_type_arg.rs:12:27
    |
 12 | fn sys(u: &mut Unit, ops: StructuralWriter<u32>) {

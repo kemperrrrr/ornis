@@ -22,9 +22,13 @@
 //! compile time), because optional lanes list only the entries that exist.
 //! Access also follows from parameter types: `Res` → read, `ResMut` → write,
 //! `EventWriter`/`EventReader` → exclusive queue access, `StructuralWriter`
-//! → deferred structural-queue write (R4: `add`/`remove`/`spawn` enqueue
-//! during the frame and apply before `Stage::Last`; raw `Res`/`ResMut`
-//! of `StructuralQueue` are rejected in favour of the parameter). Raw
+//! → deferred structural-queue write (R4: `add`/`remove`/`spawn` enqueue and
+//! apply at a boundary). The writer's kind parameter selects that boundary
+//! and must match the stage: `StructuralWriter` / `StructuralWriter<'_, FixedStep>`
+//! for `Stage::Gameplay` (drained after **every** fixed tick, so results do
+//! not depend on FPS) and `StructuralWriter<'_, FrameStep>` for the
+//! once-per-frame plans (drained before `Stage::Last`). Raw `Res`/`ResMut`
+//! of the queue types are rejected in favour of the parameter. Raw
 //! `&Resources`,
 //! `Res<SmartStore>`, and `ResMut` aliases of `SmartStore`/`Resources` are
 //! compile errors, as are writes to another entity (`t.hp -= …` — use
@@ -55,8 +59,10 @@ pub(crate) enum ParamKind {
     EventWriter,
     EventReader,
     /// `StructuralWriter` (optional `<'_>`) — deferred `add`/`remove`/
-    /// `spawn` ops for the frame-boundary apply (R4).
-    StructuralWriter,
+    /// `spawn` ops for the fixed-tick boundary (R4).
+    StructuralWriterFixed,
+    /// `StructuralWriter<FrameStep>` — deferred ops for the frame boundary.
+    StructuralWriterFrame,
 }
 
 impl ParamKind {
@@ -69,7 +75,9 @@ impl ParamKind {
         match self {
             ParamKind::Res | ParamKind::ResMut => Some("resource"),
             ParamKind::EventWriter | ParamKind::EventReader => Some("event"),
-            ParamKind::StructuralWriter => Some("structural"),
+            ParamKind::StructuralWriterFixed | ParamKind::StructuralWriterFrame => {
+                Some("structural")
+            }
             ParamKind::Config | ParamKind::EntityHandle => None,
         }
     }
@@ -83,7 +91,8 @@ impl ParamKind {
             ParamKind::ResMut
                 | ParamKind::EventWriter
                 | ParamKind::EventReader
-                | ParamKind::StructuralWriter
+                | ParamKind::StructuralWriterFixed
+                | ParamKind::StructuralWriterFrame
         )
     }
 }
@@ -117,7 +126,7 @@ pub(crate) fn is_param_wrapper(seg: &syn::PathSegment) -> Option<ParamKind> {
         "ResMut" => Some(ParamKind::ResMut),
         "EventWriter" => Some(ParamKind::EventWriter),
         "EventReader" => Some(ParamKind::EventReader),
-        "StructuralWriter" => Some(ParamKind::StructuralWriter),
+        "StructuralWriter" => Some(ParamKind::StructuralWriterFixed),
         _ => None,
     }
 }

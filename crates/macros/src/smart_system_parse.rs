@@ -167,11 +167,16 @@ fn reject_conflicting_params(params: &[TypedParam]) -> Result<(), syn::Error> {
 
 /// Written spelling of a parameter's resource key: the inner type for
 /// `Res`/`ResMut` (the resource) and for the event roles (the payload of
-/// the `EventStore<E>` singleton); the `StructuralWriter` key is always
-/// the `StructuralQueue` singleton (the writer has no type argument).
+/// the `EventStore<E>` singleton).
+///
+/// Structural writers key on their queue, so one fixed and one frame writer
+/// may coexist in a system (they address different singletons) while two
+/// writers of the *same* kind stay a duplicate error.
 fn resource_key(param: &TypedParam) -> String {
-    if matches!(param.kind, ParamKind::StructuralWriter) {
-        return "StructuralQueue".to_string();
+    match param.kind {
+        ParamKind::StructuralWriterFixed => return "FixedStructuralQueue".to_string(),
+        ParamKind::StructuralWriterFrame => return "FrameStructuralQueue".to_string(),
+        _ => {}
     }
     let inner = &param.inner;
     quote!(#inner).to_string()

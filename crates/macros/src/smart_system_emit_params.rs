@@ -31,10 +31,15 @@ pub(crate) fn build_user_params(params: &[TypedParam]) -> Vec<TokenStream2> {
                 ParamKind::Res
                 | ParamKind::ResMut
                 | ParamKind::EventWriter
-                | ParamKind::EventReader
-                | ParamKind::StructuralWriter => {
+                | ParamKind::EventReader => {
                     let ty = with_elided_lifetime(param.wrapper.clone());
                     quote! { #name: #ty }
+                }
+                ParamKind::StructuralWriterFixed => {
+                    quote! { #name: ornis_core::StructuralWriter<'_, ornis_core::FixedStep> }
+                }
+                ParamKind::StructuralWriterFrame => {
+                    quote! { #name: ornis_core::StructuralWriter<'_, ornis_core::FrameStep> }
                 }
             }
         })
@@ -72,9 +77,16 @@ pub(crate) fn build_access_stmts(params: &[TypedParam]) -> Vec<TokenStream2> {
                     __access = __access.combine(ornis_core::EventReader::<#inner>::access());
                 });
             }
-            ParamKind::StructuralWriter => {
+            ParamKind::StructuralWriterFixed => {
                 access_stmts.push(quote! {
-                    __access = __access.combine(ornis_core::StructuralWriter::access());
+                    __access = __access
+                        .combine(ornis_core::StructuralWriter::<ornis_core::FixedStep>::access());
+                });
+            }
+            ParamKind::StructuralWriterFrame => {
+                access_stmts.push(quote! {
+                    __access = __access
+                        .combine(ornis_core::StructuralWriter::<ornis_core::FrameStep>::access());
                 });
             }
             ParamKind::Config | ParamKind::EntityHandle => {}
@@ -130,9 +142,21 @@ pub(crate) fn build_fetch_stmts(
                 });
                 call_args.push(quote! { #name });
             }
-            ParamKind::StructuralWriter => {
+            ParamKind::StructuralWriterFixed => {
                 fetch_stmts.push(quote! {
-                    let #name = ornis_core::StructuralWriter::fetch(#resources_ident);
+                    let #name =
+                        ornis_core::StructuralWriter::<ornis_core::FixedStep>::fetch(
+                            #resources_ident,
+                        );
+                });
+                call_args.push(quote! { #name });
+            }
+            ParamKind::StructuralWriterFrame => {
+                fetch_stmts.push(quote! {
+                    let #name =
+                        ornis_core::StructuralWriter::<ornis_core::FrameStep>::fetch(
+                            #resources_ident,
+                        );
                 });
                 call_args.push(quote! { #name });
             }

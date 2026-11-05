@@ -130,10 +130,12 @@ pub(crate) fn parse_wrapper_param(
              `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         ));
     };
-    // `StructuralWriter` carries a lifetime, not a type parameter: accept
-    // the bare name and `StructuralWriter<'_>`, reject anything else before
-    // the single-type-argument checks below.
-    if matches!(kind, ParamKind::StructuralWriter) {
+    // `StructuralWriter` carries a lifetime and a queue-kind argument, not
+    // a resource type: handled before the single-type-argument checks below.
+    if matches!(
+        kind,
+        ParamKind::StructuralWriterFixed | ParamKind::StructuralWriterFrame
+    ) {
         return parse_structural_writer(name, ty, seg);
     }
     let PathArguments::AngleBracketed(args) = &seg.arguments else {
@@ -161,34 +163,75 @@ pub(crate) fn parse_wrapper_param(
     Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
 }
 
-/// Accepts the lifetime-carrying `StructuralWriter` shapes (`StructuralWriter`
-/// and `StructuralWriter<'_>`) and rejects a type argument, which has no
-/// meaning here: the writer always addresses the single `StructuralQueue`.
+/// Accepts the `StructuralWriter` shapes and derives the queue kind from the
+/// type argument.
+///
+/// - bare `StructuralWriter` / `StructuralWriter<'_>` → `FixedStep` (the
+///   fixed plan, applied after every tick). This is the default because
+///   simulation code is the common case and it is the safe choice: a fixed
+///   writer is validated against the stage at registration.
+/// - `StructuralWriter<FrameStep>` / `StructuralWriter<'_, FrameStep>` → the
+///   frame queue, applied once per frame before `Stage::Last`.
+///
+/// Anything else (`StructuralWriter<u32>`, two type arguments) is rejected:
+/// the only meaningful parameter is the queue kind.
 fn parse_structural_writer(
     name: Ident,
     ty: &Type,
     seg: &syn::PathSegment,
 ) -> Result<TypedParam, syn::Error> {
+    let mut kind = ParamKind::StructuralWriterFixed;
     match &seg.arguments {
         PathArguments::None => {}
-        PathArguments::AngleBracketed(args)
-            if args.args.len() == 1
-                && matches!(args.args.first(), Some(GenericArgument::Lifetime(_))) => {}
-        _ => {
+        PathArguments::AngleBracketed(args) => {
+            // Accepted forms: `<'_>`, `<Kind>`, `<'_, Kind>` — at most one
+            // lifetime and at most one known kind, nothing else.
+            let lifetimes = args
+                .args
+                .iter()
+                .filter(|arg| matches!(arg, GenericArgument::Lifetime(_)))
+                .count();
+            let mut kinds = args.args.iter().filter_map(|arg| match arg {
+                GenericArgument::Type(Type::Path(tp)) => tp.path.segments.last(),
+                _ => None,
+            });
+            let first = kinds.next();
+            let extra_kinds = kinds.count();
+            let known = match first.as_ref().map(|seg| seg.ident.to_string()).as_deref() {
+                Some("FixedStep") => Some(ParamKind::StructuralWriterFixed),
+                Some("FrameStep") => Some(ParamKind::StructuralWriterFrame),
+                _ => None,
+            };
+            let type_args = args
+                .args
+                .iter()
+                .filter(|arg| matches!(arg, GenericArgument::Type(_)))
+                .count();
+            match known {
+                Some(found) if extra_kinds == 0 && type_args == 1 && lifetimes <= 1 => kind = found,
+                None if type_args == 0 && lifetimes <= 1 => {}
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "smart_system: `StructuralWriter` takes only a queue-kind argument — \
+                         write `StructuralWriter` / `StructuralWriter<'_, FixedStep>` for the \
+                         fixed plan (applied after every tick, `Stage::Gameplay`) or \
+                         `StructuralWriter<'_, FrameStep>` for the once-per-frame plan",
+                    ));
+                }
+            }
+        }
+        PathArguments::Parenthesized(_) => {
             return Err(syn::Error::new_spanned(
                 ty,
-                "smart_system: `StructuralWriter` takes no type arguments — it queues \
-                 deferred `add`/`remove`/`spawn` ops for the frame's `Last` stage \
-                 (write a bare `StructuralWriter`)",
+                "smart_system: `StructuralWriter` takes only a queue-kind argument — \
+                 write `StructuralWriter` / `StructuralWriter<'_, FixedStep>` for the \
+                 fixed plan (applied after every tick, `Stage::Gameplay`) or \
+                 `StructuralWriter<'_, FrameStep>` for the once-per-frame plan",
             ));
         }
     }
-    Ok(TypedParam::new(
-        name,
-        ParamKind::StructuralWriter,
-        ty.clone(),
-        ty.clone(),
-    ))
+    Ok(TypedParam::new(name, kind, ty.clone(), ty.clone()))
 }
 
 /// Rejects `Res`/`ResMut` of a type that has a dedicated parameter: the
