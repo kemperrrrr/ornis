@@ -23,7 +23,7 @@ pub(super) fn merge_if(
         return merge_unproven(parent, then_end, else_end, then_live, else_live);
     }
     match (then_live, else_live) {
-        (true, true) => joined(then_end, else_end, parent),
+        (true, true) => joined(then_end, else_end, parent, true),
         (true, false) => diverge_after(then_end, else_end.leave, parent),
         (false, true) => diverge_after(else_end, then_end.leave, parent),
         (false, false) => stopped(then_end, else_end, parent),
@@ -47,19 +47,31 @@ fn merge_unproven(
     else_live: bool,
 ) -> St {
     match (then_live, else_live) {
-        (true, true) => joined(then_end, else_end, parent),
+        (true, true) => joined(then_end, else_end, parent, false),
         (true, false) => fall_through(then_end, parent),
         (false, true) => fall_through(else_end, parent),
         (false, false) => stopped(then_end, else_end, parent),
     }
 }
 
-fn joined(then_end: St, else_end: St, parent: Option<Split>) -> St {
+fn joined(then_end: St, else_end: St, parent: Option<Split>, control: bool) -> St {
+    let (stack, locals) = if control {
+        (
+            tag::control_join_vec(&then_end.stack, &else_end.stack),
+            tag::control_join_vec(&then_end.locals, &else_end.locals),
+        )
+    } else {
+        (
+            tag::join_vec(&then_end.stack, &else_end.stack),
+            tag::join_vec(&then_end.locals, &else_end.locals),
+        )
+    };
     St {
-        stack: tag::join_vec(&then_end.stack, &else_end.stack),
-        locals: tag::join_vec(&then_end.locals, &else_end.locals),
+        stack,
+        locals,
         split: parent,
         leave: Leave::Fall,
+        taint: then_end.taint,
     }
 }
 

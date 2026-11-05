@@ -1,8 +1,11 @@
 //! Fixed point of loop-carried locals, then one rewalk if the loop diverges.
 //!
-//! The lattice has three tags, so each local moves at most twice. A barrier
-//! after the loop is uniform once every exit has reached the loop's own
-//! merge; an exit to an outer label keeps the split until that label.
+//! The lattice has three tags, so each local moves at most twice. Once a loop
+//! exit depends on the invocation id, one more round treats every definition
+//! in the body as invocation-dependent, including a counter updated before
+//! the exit test. A barrier after the loop is uniform once every exit has
+//! reached the loop's own merge; an exit to an outer label keeps the split
+//! until that label.
 
 use super::Lab;
 use super::LabKind;
@@ -45,9 +48,12 @@ impl Uni<'_> {
     ) -> Result<(Vec<tag::Tag>, bool, Option<usize>), TranslateError> {
         let mut header = round.entry.locals.clone();
         let mut rounds = 0u32;
+        let mut poison = false;
         let limit = (header.len() as u32).saturating_mul(2).saturating_add(1);
         loop {
+            let seen = poison;
             self.prepare_round(round, &header);
+            self.st.taint = poison || round.entry.taint;
             self.walk(round.body)?;
             let carried = self
                 .labels
@@ -59,11 +65,15 @@ impl Uni<'_> {
                 .absorb_loop_pending(round.index, carried_header(round.entry, &header, &carried));
             let stable = next == header;
             header = next;
-            if stable || rounds >= limit {
+            if self.labels.last().is_some_and(|lab| lab.varies) {
+                poison = true;
+            }
+            if (stable && poison == seen) || rounds >= limit {
                 break;
             }
             rounds += 1;
         }
+        self.st.taint = round.entry.taint;
         let varies = self.labels.last().is_some_and(|lab| lab.varies);
         let exit_at = self.labels.last().and_then(|lab| lab.exit_at);
         Ok((header, varies, exit_at))

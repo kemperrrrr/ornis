@@ -2,8 +2,9 @@
 //!
 //! An imported barrier is rejected when that split is already open. Any
 //! other import pushes unknown results, so it cannot prove a later branch.
-//! A defined call is memoized by the function, the incoming split, and the
-//! argument tags. The body is borrowed from [`Uni::funcs`].
+//! A defined call is memoized by the function, the incoming split, whether
+//! definitions are already tainted, and the argument tags. The body is
+//! borrowed from [`Uni::funcs`].
 
 use std::collections::HashMap;
 
@@ -20,6 +21,9 @@ use crate::ir::Import;
 pub(super) struct MemoKey {
     index: u32,
     split: Option<BarrierSite>,
+    /// Caller is tainting definitions. Distinct from `split`: a varying loop
+    /// taints the body before the exit test opens a split.
+    taint: bool,
     args: Vec<Tag>,
 }
 
@@ -80,6 +84,7 @@ impl Uni<'_> {
         let key = MemoKey {
             index,
             split: self.st.split.map(|item| item.site),
+            taint: self.st.taint,
             args: args.clone(),
         };
         if let Some(hit) = self.memo.get(&key).cloned() {
@@ -103,6 +108,7 @@ impl Uni<'_> {
             .ok_or(TranslateError::Unsupported)?
             .body;
         let caller_split = self.st.split;
+        let caller_taint = self.st.taint;
         self.active.push(index);
         let saved_labels = std::mem::take(&mut self.labels);
         let saved_pending = std::mem::take(&mut self.pending);
@@ -110,7 +116,10 @@ impl Uni<'_> {
         let saved_pos = self.pos;
         self.func = index;
         self.pos = 0;
-        let saved = std::mem::replace(&mut self.st, callee_state(nlocals, args, caller_split));
+        let saved = std::mem::replace(
+            &mut self.st,
+            callee_state(nlocals, args, caller_split, caller_taint),
+        );
         let walked = self.walk(body);
         let stack = self.st.stack.clone();
         self.st = saved;
@@ -131,12 +140,12 @@ impl Uni<'_> {
         let tags = hit?;
         let mut index = 0usize;
         while index < tags.len() {
-            self.st.stack.push(tags[index]);
+            self.push_result(tags[index]);
             index += 1;
         }
         let mut missing = n as usize - tags.len().min(n as usize);
         while missing > 0 {
-            self.st.stack.push(Tag::Unknown);
+            self.push_result(Tag::Unknown);
             missing -= 1;
         }
         Ok(())
@@ -163,9 +172,18 @@ impl Uni<'_> {
     fn push_n(&mut self, n: u32, tag: Tag) {
         let mut left = n;
         while left > 0 {
-            self.st.stack.push(tag);
+            self.push_result(tag);
             left -= 1;
         }
+    }
+
+    fn push_result(&mut self, tag: Tag) {
+        let tag = if self.st.taint || self.st.split.is_some() {
+            Tag::Inv
+        } else {
+            tag
+        };
+        self.st.stack.push(tag);
     }
 }
 
@@ -181,7 +199,7 @@ fn top_tags(n: u32, stack: &[Tag]) -> Vec<Tag> {
     out
 }
 
-fn callee_state(nlocals: usize, args: &[Tag], split: Option<Split>) -> St {
+fn callee_state(nlocals: usize, args: &[Tag], split: Option<Split>, taint: bool) -> St {
     let mut locals = vec![Tag::Uniform; nlocals];
     let mut index = 0usize;
     while index < args.len() && index < locals.len() {
@@ -190,5 +208,6 @@ fn callee_state(nlocals: usize, args: &[Tag], split: Option<Split>) -> St {
     }
     let mut st = St::fresh(locals);
     st.split = split;
+    st.taint = taint;
     st
 }

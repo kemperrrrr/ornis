@@ -7,7 +7,10 @@
 //! results), injective `i32` updates, `f32` arithmetic on that id, and
 //! `select` with that id as the condition, through `if`, `br_if`,
 //! `br_table`, `loop` (including values carried across the back edge), and
-//! direct calls.
+//! direct calls. A value defined inside that split is invocation-dependent
+//! too: a `local.set` / `local.tee`, an `if` result, a store after
+//! `br_if` / `br_table`, or a counter in a loop whose trip count depends on
+//! the id. The same rule applies inside a helper.
 //!
 //! A `br_table` whose index is uniform or unknown is explored as a branch to
 //! each target, so later proved divergence is not skipped. An index that is
@@ -16,7 +19,7 @@
 //! stay the ABI precondition.
 //!
 //! The walk runs only when the module imports a barrier. Direct calls are
-//! memoized by `(function, incoming split, argument tags)` and the callee
+//! memoized by `(function, incoming split, taint, argument tags)` and the callee
 //! body is borrowed, so a deep call dag is not exponential. A `cs_main`
 //! whose workgroup is 1×1×1 is skipped: one invocation cannot diverge.
 
@@ -133,6 +136,12 @@ struct St {
     locals: Vec<Tag>,
     split: Option<Split>,
     leave: Leave,
+    /// Definitions in this state are invocation-dependent even before `split`.
+    ///
+    /// A loop whose trip count depends on the invocation id sets this for the
+    /// whole body, so a counter updated before the exit test is
+    /// invocation-dependent.
+    taint: bool,
 }
 
 impl St {
@@ -142,6 +151,7 @@ impl St {
             locals,
             split: None,
             leave: Leave::Fall,
+            taint: false,
         }
     }
 }
@@ -161,7 +171,7 @@ enum Leave {
     Br {
         target: usize,
     },
-    /// `br_table`, or two arms that leave toward different labels.
+    /// Two `if` arms that leave toward different labels.
     Gone,
 }
 

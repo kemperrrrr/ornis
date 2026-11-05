@@ -80,10 +80,20 @@ impl Uni<'_> {
     pub(super) fn finish_block(&mut self, parent: Option<Split>, index: usize) {
         let mut outward = Vec::new();
         let mut cont = None;
-        take_cont(&mut cont, &mut outward, parent, index, self.st.clone());
+        let mut control = false;
         let pending = std::mem::take(&mut self.pending);
-        for alt in pending {
-            take_cont(&mut cont, &mut outward, parent, index, alt);
+        {
+            let mut merge = BlockMerge {
+                parent,
+                index,
+                cont: &mut cont,
+                outward: &mut outward,
+                control: &mut control,
+            };
+            merge.take(self.st.clone());
+            for alt in pending {
+                merge.take(alt);
+            }
         }
         self.pending = outward;
         if let Some(live) = cont {
@@ -94,22 +104,30 @@ impl Uni<'_> {
     }
 }
 
-fn take_cont(
-    cont: &mut Option<St>,
-    outward: &mut Vec<St>,
+struct BlockMerge<'a> {
     parent: Option<Split>,
     index: usize,
-    mut st: St,
-) {
-    if !continues_here(st.leave, index) {
-        outward.push(st);
-        return;
+    cont: &'a mut Option<St>,
+    outward: &'a mut Vec<St>,
+    control: &'a mut bool,
+}
+
+impl BlockMerge<'_> {
+    fn take(&mut self, mut st: St) {
+        if !continues_here(st.leave, self.index) {
+            self.outward.push(st);
+            return;
+        }
+        if st.split.is_some() {
+            *self.control = true;
+        }
+        reconverge_at(&mut st, self.parent, self.index);
+        let control = *self.control;
+        *self.cont = Some(match self.cont.take() {
+            Some(prev) => join_cont(prev, st, control),
+            None => st,
+        });
     }
-    reconverge_at(&mut st, parent, index);
-    *cont = Some(match cont.take() {
-        Some(prev) => join_cont(prev, st),
-        None => st,
-    });
 }
 
 pub(super) fn reconverge_at(st: &mut St, parent: Option<Split>, region: usize) {
@@ -132,9 +150,14 @@ fn continues_here(leave: Leave, region: usize) -> bool {
     }
 }
 
-fn join_cont(mut left: St, right: St) -> St {
-    left.stack = tag::join_vec(&left.stack, &right.stack);
-    left.locals = tag::join_vec(&left.locals, &right.locals);
+fn join_cont(mut left: St, right: St, control: bool) -> St {
+    if control {
+        left.stack = tag::control_join_vec(&left.stack, &right.stack);
+        left.locals = tag::control_join_vec(&left.locals, &right.locals);
+    } else {
+        left.stack = tag::join_vec(&left.stack, &right.stack);
+        left.locals = tag::join_vec(&left.locals, &right.locals);
+    }
     left.split = wider_split(left.split, right.split);
     left.leave = Leave::Fall;
     left

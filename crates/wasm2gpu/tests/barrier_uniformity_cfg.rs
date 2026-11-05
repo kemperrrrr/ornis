@@ -254,6 +254,127 @@ fn a_workgroup_of_one_skips_the_pass() {
 }
 
 #[test]
+fn a_store_under_a_uniform_condition_stays_uniform() {
+    expect_uniform(
+        "",
+        &format!(
+            "(local i32) i32.const 1 if i32.const 1 local.set 1 end local.get 1 if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+    );
+}
+
+#[test]
+fn local_set_inside_an_invocation_if_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(local i32) local.get 0 if i32.const 1 local.set 1 end local.get 1 if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn local_tee_inside_an_invocation_if_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(local i32) local.get 0 if i32.const 1 local.tee 1 drop end local.get 1 if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn constants_in_both_arms_of_an_invocation_if_are_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(local i32) local.get 0 if i32.const 1 local.set 1 else i32.const 0 local.set 1 end local.get 1 i32.const 1 i32.eq if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn an_invocation_if_result_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "local.get 0 if (result i32) i32.const 0 else i32.const 1 end if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn a_flag_cleared_after_an_invocation_br_if_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(local i32) (block i32.const 1 local.set 1 local.get 0 br_if 0 i32.const 0 local.set 1) local.get 1 if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn a_store_after_an_invocation_br_table_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(local i32) (block (block (br_table 0 1 (local.get 0))) i32.const 1 local.set 1) local.get 1 if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn a_counter_of_an_invocation_dependent_loop_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(local i32) (loop local.get 1 i32.const 1 i32.add local.set 1 local.get 0 br_if 0) local.get 1 if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn a_helper_store_under_the_invocation_id_is_rejected() {
+    let helper = "(func $h (param i32) (result i32) (local i32) local.get 0 if i32.const 1 local.set 1 else i32.const 0 local.set 1 end local.get 1)";
+    expect_divergent(
+        helper,
+        &format!(
+            "local.get 0 call $h if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn a_helper_return_under_the_invocation_id_is_rejected() {
+    let helper = "(func $h (param i32) (result i32) (local i32) i32.const 0 local.set 1 local.get 0 if i32.const 1 local.set 1 local.get 1 return end local.get 1)";
+    expect_divergent(
+        helper,
+        &format!(
+            "local.get 0 call $h if call ${wb} end",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
 fn recursion_through_a_barrier_import_is_rejected() {
     let helpers = "(func $a call $b) (func $b call $a)";
     let error = translate(&module(helpers, "call $a")).expect_err("recursion");
