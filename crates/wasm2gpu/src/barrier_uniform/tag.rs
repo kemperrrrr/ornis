@@ -22,7 +22,9 @@ use crate::ir::Op;
 pub(super) enum Tag {
     /// Proved to be the same value for every invocation.
     Uniform,
-    /// Proved to differ across invocations.
+    /// Proved to differ across invocations, including a value defined where
+    /// invocations have already split (even when both arms write the same
+    /// constant).
     Inv,
     /// May depend on the invocation, but this pass did not prove it.
     Unknown,

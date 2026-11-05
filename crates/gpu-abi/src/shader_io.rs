@@ -229,7 +229,9 @@ pub fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
 /// subset of invocations before reaching it. The translator rejects a call
 /// when the invocation id proves that divergence (`if`, `br_if`, `br_table`,
 /// a loop, or an early return, including copies, injective arithmetic, and
-/// any value defined in that region).
+/// any value defined in that region). Arms that leave through different
+/// labels, or through `br` and `return`, keep the split on a continuation
+/// only some invocations reach.
 /// Ordered comparisons (`id < n`) and values loaded from memory stay this
 /// precondition. A 1×1×1 workgroup is not checked.
 #[inline(always)]
@@ -244,7 +246,9 @@ pub fn workgroup_barrier() {
 /// subset of invocations before reaching it. The translator rejects a call
 /// when the invocation id proves that divergence (`if`, `br_if`, `br_table`,
 /// a loop, or an early return, including copies, injective arithmetic, and
-/// any value defined in that region).
+/// any value defined in that region). Arms that leave through different
+/// labels, or through `br` and `return`, keep the split on a continuation
+/// only some invocations reach.
 /// Ordered comparisons (`id < n`) and values loaded from memory stay this
 /// precondition. A 1×1×1 workgroup is not checked.
 #[inline(always)]

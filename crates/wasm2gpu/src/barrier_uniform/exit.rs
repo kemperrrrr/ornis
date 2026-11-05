@@ -78,56 +78,83 @@ impl Uni<'_> {
     }
 
     pub(super) fn finish_block(&mut self, parent: Option<Split>, index: usize) {
-        let mut outward = Vec::new();
-        let mut cont = None;
-        let mut control = false;
-        let pending = std::mem::take(&mut self.pending);
-        {
-            let mut merge = BlockMerge {
-                parent,
-                index,
-                cont: &mut cont,
-                outward: &mut outward,
-                control: &mut control,
-            };
-            merge.take(self.st.clone());
-            for alt in pending {
-                merge.take(alt);
-            }
-        }
+        let mut states = vec![self.st.clone()];
+        states.append(&mut self.pending);
+        let (arrivals, outward) = split_arrivals(states, index);
         self.pending = outward;
-        if let Some(live) = cont {
-            self.st = live;
-        } else if let Some(out) = self.pending.pop() {
-            self.st = out;
-        }
-    }
-}
-
-struct BlockMerge<'a> {
-    parent: Option<Split>,
-    index: usize,
-    cont: &'a mut Option<St>,
-    outward: &'a mut Vec<St>,
-    control: &'a mut bool,
-}
-
-impl BlockMerge<'_> {
-    fn take(&mut self, mut st: St) {
-        if !continues_here(st.leave, self.index) {
-            self.outward.push(st);
+        let Some(merged) = fold_arrivals(arrivals) else {
+            if let Some(out) = self.pending.pop() {
+                self.st = out;
+            }
             return;
-        }
-        if st.split.is_some() {
-            *self.control = true;
-        }
-        reconverge_at(&mut st, self.parent, self.index);
-        let control = *self.control;
-        *self.cont = Some(match self.cont.take() {
-            Some(prev) => join_cont(prev, st, control),
-            None => st,
-        });
+        };
+        self.st = settle(merged, &self.pending, parent, index);
     }
+}
+
+fn split_arrivals(states: Vec<St>, index: usize) -> (Vec<St>, Vec<St>) {
+    let mut arrivals = Vec::new();
+    let mut outward = Vec::new();
+    for st in states {
+        if continues_here(st.leave, index) {
+            arrivals.push(st);
+        } else {
+            outward.push(st);
+        }
+    }
+    (arrivals, outward)
+}
+
+fn fold_arrivals(mut arrivals: Vec<St>) -> Option<St> {
+    let mut merged = arrivals.pop()?;
+    for alt in arrivals {
+        let control = merged.split.is_some() || alt.split.is_some();
+        merged = join_cont(merged, alt, control);
+    }
+    Some(merged)
+}
+
+/// Keep a split open when some divergent exit did not arrive here.
+fn settle(mut merged: St, elsewhere: &[St], parent: Option<Split>, index: usize) -> St {
+    if elsewhere.iter().any(|st| st.split.is_some()) {
+        merged.leave = Leave::Fall;
+        merged.split = hold_split(merged.split, elsewhere, parent);
+        return merged;
+    }
+    reconverge_at(&mut merged, parent, index);
+    merged
+}
+
+fn hold_split(split: Option<Split>, elsewhere: &[St], parent: Option<Split>) -> Option<Split> {
+    let mut early = matches!(
+        split,
+        Some(Split {
+            site: BarrierSite::EarlyReturn,
+            ..
+        })
+    );
+    let mut at = split.and_then(|item| item.at);
+    for st in elsewhere {
+        if st.split.is_none() {
+            continue;
+        }
+        match st.leave {
+            Leave::Return | Leave::Gone => {
+                early = true;
+                at = None;
+            }
+            Leave::Br { target } if !early => {
+                at = Some(at.map(|cur| cur.min(target)).unwrap_or(target));
+            }
+            Leave::Br { .. } | Leave::Fall => {}
+        }
+    }
+    let site = if early {
+        BarrierSite::EarlyReturn
+    } else {
+        split.map(|item| item.site).unwrap_or(BarrierSite::Branch)
+    };
+    wider_split(parent, Some(Split { site, at }))
 }
 
 pub(super) fn reconverge_at(st: &mut St, parent: Option<Split>, region: usize) {
@@ -163,7 +190,7 @@ fn join_cont(mut left: St, right: St, control: bool) -> St {
     left
 }
 
-fn wider_split(left: Option<Split>, right: Option<Split>) -> Option<Split> {
+pub(super) fn wider_split(left: Option<Split>, right: Option<Split>) -> Option<Split> {
     match (left, right) {
         (None, other) | (other, None) => other,
         (Some(left), Some(right)) => Some(if outer_than(left, right) { left } else { right }),

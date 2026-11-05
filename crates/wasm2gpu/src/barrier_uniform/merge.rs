@@ -7,6 +7,7 @@
 use super::Leave;
 use super::Split;
 use super::St;
+use super::exit;
 use super::tag;
 use crate::error::BarrierSite;
 
@@ -105,6 +106,40 @@ fn opened_by(dead: Leave, parent: Option<Split>) -> Split {
             at: None,
         },
     }
+}
+
+/// Both arms left the `if`. `true` when neither continues after it.
+pub(super) fn both_left(then_leave: Leave, else_leave: Leave, if_index: usize) -> bool {
+    !live_at(then_leave, if_index) && !live_at(else_leave, if_index)
+}
+
+/// Split carried by exits that do not meet again at the `if`.
+///
+/// A `return` beside a `br` never rejoins, so the split stays open. Two
+/// branches to different labels stay open until the outer one. The same
+/// label, or two returns, is not a partial exit.
+pub(super) fn cover_exit(
+    parent: Option<Split>,
+    then_leave: Leave,
+    else_leave: Leave,
+) -> Option<Split> {
+    let extra = match (then_leave, else_leave) {
+        (Leave::Return, Leave::Return) => None,
+        (Leave::Br { target: left }, Leave::Br { target: right }) if left == right => None,
+        (Leave::Br { .. }, Leave::Return) | (Leave::Return, Leave::Br { .. }) => Some(Split {
+            site: BarrierSite::EarlyReturn,
+            at: None,
+        }),
+        (Leave::Br { target: left }, Leave::Br { target: right }) => Some(Split {
+            site: BarrierSite::Branch,
+            at: Some(if left < right { left } else { right }),
+        }),
+        _ => Some(Split {
+            site: BarrierSite::Branch,
+            at: None,
+        }),
+    };
+    exit::wider_split(parent, extra)
 }
 
 fn stopped(mut then_end: St, else_end: St, parent: Option<Split>) -> St {

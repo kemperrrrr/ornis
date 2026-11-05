@@ -375,6 +375,113 @@ fn a_helper_return_under_the_invocation_id_is_rejected() {
 }
 
 #[test]
+fn br_and_return_from_an_invocation_if_are_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(block local.get 0 if br 1 else return end) call ${wb}",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::EarlyReturn,
+    );
+}
+
+#[test]
+fn br_and_return_inside_a_loop_are_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(block (loop local.get 0 if br 2 else return end)) call ${wb}",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::EarlyReturn,
+    );
+}
+
+#[test]
+fn br_if_to_one_label_and_br_to_another_are_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(block (block local.get 0 br_if 0 br 1) call ${wb})",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn br_if_and_return_are_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(block local.get 0 br_if 0 return) call ${wb}",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::EarlyReturn,
+    );
+}
+
+#[test]
+fn an_invocation_if_leaving_a_loop_toward_different_labels_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(block (block (loop local.get 0 if br 2 else br 3 end)) call ${wb})",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn barrier_between_uniform_br_table_targets_stays_uniform() {
+    expect_uniform(
+        "",
+        &format!(
+            "(block (block (br_table 0 1 (i32.const 0))) call ${wb})",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+    );
+}
+
+#[test]
+fn both_exits_return_before_a_later_barrier_stays_uniform() {
+    expect_uniform(
+        "",
+        &format!(
+            "(block (block local.get 0 if br 0 else br 1 end) return) call ${wb}",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+    );
+}
+
+#[test]
+fn an_invocation_if_leaving_toward_different_labels_is_rejected() {
+    expect_divergent(
+        "",
+        &format!(
+            "(block (block local.get 0 if br 1 else br 2 end) call ${wb})",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+        BarrierSite::Branch,
+    );
+}
+
+#[test]
+fn different_labels_that_meet_before_the_barrier_stay_uniform() {
+    // `br 0` resumes after the `if` and falls out of the inner block, so it
+    // meets `br 1` before the barrier.
+    expect_uniform(
+        "",
+        &format!(
+            "(block (block local.get 0 if br 0 else br 1 end) call ${wb})",
+            wb = symbols::WORKGROUP_BARRIER,
+        ),
+    );
+}
+
+#[test]
 fn recursion_through_a_barrier_import_is_rejected() {
     let helpers = "(func $a call $b) (func $b call $a)";
     let error = translate(&module(helpers, "call $a")).expect_err("recursion");
