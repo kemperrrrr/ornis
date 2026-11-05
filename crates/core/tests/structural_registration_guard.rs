@@ -19,7 +19,7 @@
 //! compiling `q.enqueue(..)` against `FixedStructuralQueue` from an
 //! integration test: `no method named 'enqueue'`.)
 
-use ornis_core::{Engine, EngineBuilder, Pack, Schedule, Stage};
+use ornis_core::{Engine, EngineBuilder, Pack, PlanRole, Schedule, Stage};
 use ornis_macros::smart_system;
 
 /// Minimal bundle: the writers only need a `Pack` entity set.
@@ -220,4 +220,92 @@ fn builder_build_keeps_the_guard() {
         .fixed_schedule_mut()
         .add_system(FrameWriterSystem::new());
     let _ = builder.build();
+}
+
+// ===== Schedule replacement (the role must not be forgeable) =====
+//
+// `*_schedule_mut` hands out `&mut Schedule`, so a caller can replace the
+// whole schedule, `mem::take` it, or re-tag it. All of those discard or forge
+// the role the schedule stores about itself, which is why the engine keeps its
+// own mapping and re-validates before running. Each bypass below is otherwise
+// silent — `add_system` succeeds and only the frame boundary reveals it.
+
+/// Replacing the fixed schedule wholesale drops its `Fixed` role.
+#[test]
+#[should_panic(expected = "StructuralWriter<FrameStep>")]
+fn replacing_gameplay_schedule_wholesale_is_caught() {
+    let mut engine = Engine::new();
+    *engine.stage_schedule_mut(Stage::Gameplay) = Schedule::new();
+    engine
+        .stage_schedule_mut(Stage::Gameplay)
+        .add_system(FrameWriterSystem::new());
+    engine.run_frame(1.0 / 60.0);
+}
+
+/// `mem::take` + re-tagging the fixed schedule as `Standalone` forges the
+/// role; the engine's own mapping still says `Fixed`.
+#[test]
+#[should_panic(expected = "StructuralWriter<FrameStep>")]
+fn retagging_fixed_schedule_as_standalone_is_caught() {
+    let mut engine = Engine::new();
+    let taken = std::mem::take(engine.fixed_schedule_mut());
+    *engine.fixed_schedule_mut() = taken.with_plan_role(PlanRole::Standalone);
+    engine
+        .fixed_schedule_mut()
+        .add_system(FrameWriterSystem::new());
+    engine.run_frame(1.0 / 60.0);
+}
+
+/// Same forgery, but only the `run_fixed_step` (replay) entry point is used —
+/// it must validate too, or the two paths would disagree.
+#[test]
+#[should_panic(expected = "StructuralWriter<FrameStep>")]
+fn retagged_fixed_schedule_is_caught_on_run_fixed_step() {
+    let mut engine = Engine::new();
+    let taken = std::mem::take(engine.fixed_schedule_mut());
+    *engine.fixed_schedule_mut() = taken.with_plan_role(PlanRole::Standalone);
+    engine
+        .fixed_schedule_mut()
+        .add_system(FrameWriterSystem::new());
+    let _ = engine.run_fixed_step();
+}
+
+/// Replacing the fixed schedule with one *labelled* `Frame` is the same
+/// forgery in the other direction.
+#[test]
+#[should_panic(expected = "StructuralWriter<FrameStep>")]
+fn replacing_gameplay_schedule_labelled_frame_is_caught() {
+    let mut engine = Engine::new();
+    *engine.stage_schedule_mut(Stage::Gameplay) = Schedule::new().with_plan_role(PlanRole::Frame);
+    engine
+        .stage_schedule_mut(Stage::Gameplay)
+        .add_system(FrameWriterSystem::new());
+    engine.run_frame(1.0 / 60.0);
+}
+
+/// The mirror case: a fixed writer sitting in a replaced `PostFrame` plan.
+#[test]
+#[should_panic(expected = "StructuralWriter<FixedStep>")]
+fn replaced_post_frame_schedule_rejects_fixed_writer() {
+    let mut engine = Engine::new();
+    *engine.stage_schedule_mut(Stage::PostFrame) = Schedule::new().with_plan_role(PlanRole::Fixed);
+    engine
+        .stage_schedule_mut(Stage::PostFrame)
+        .add_system(FixedWriterSystem::new());
+    engine.run_frame(1.0 / 60.0);
+}
+
+/// The validation must be cheap enough to run every frame: a schedule whose
+/// system set did not change is not re-walked, and a legitimate
+/// replace-with-correct-pairing keeps working.
+#[test]
+fn legitimate_schedule_replacement_keeps_running() {
+    let mut engine = Engine::new();
+    *engine.stage_schedule_mut(Stage::Gameplay) = Schedule::new().with_plan_role(PlanRole::Fixed);
+    engine
+        .stage_schedule_mut(Stage::Gameplay)
+        .add_system(FixedWriterSystem::new());
+    engine.run_frame(1.0 / 60.0);
+    engine.run_frame(1.0 / 60.0);
+    let _ = engine.run_fixed_step();
 }
