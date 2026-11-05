@@ -556,13 +556,17 @@ fn assert_writer_matches_role(role: PlanRole, system: &'static str, access: &Sys
     let frame_writer = writes(std::any::TypeId::of::<crate::mutation::FrameStructuralQueue>());
     if fixed_writer && role == PlanRole::Frame {
         panic!(
-            "engine: system `{system}` declares `StructuralWriter<FixedStep>` but is registered              in a once-per-frame plan — the fixed queue drains after every fixed tick, so fixed              writers belong only to the fixed plan (`Stage::Gameplay`); use \
+            "engine: system `{system}` declares `StructuralWriter<FixedStep>` but is registered \
+             in a once-per-frame plan — the fixed queue drains after every fixed tick, so fixed \
+             writers belong only to the fixed plan (`Stage::Gameplay`); use \
              `StructuralWriter<FrameStep>` for once-per-frame stages"
         );
     }
     if frame_writer && role == PlanRole::Fixed {
         panic!(
-            "engine: system `{system}` declares `StructuralWriter<FrameStep>` but is registered              in the fixed plan — the frame queue drains once per frame, so a spawn queued here              would land at a frame-dependent moment. Use `StructuralWriter<FixedStep>`, which \
+            "engine: system `{system}` declares `StructuralWriter<FrameStep>` but is registered \
+             in the fixed plan — the frame queue drains once per frame, so a spawn queued here \
+             would land at a frame-dependent moment. Use `StructuralWriter<FixedStep>`, which \
              applies after this tick"
         );
     }
@@ -589,6 +593,14 @@ pub struct Schedule {
     /// registration guard. Defaults to [`PlanRole::Standalone`] so schedules
     /// that do not back an engine plan keep accepting both writer kinds.
     role: PlanRole,
+    /// `(system count, role)` the writer/plan guard last verified, so a
+    /// caller can re-check cheaply after registration.
+    ///
+    /// The field is advisory only: a schedule can be replaced wholesale
+    /// (`*engine.stage_schedule_mut(..) = Schedule::new()`) or re-tagged, so
+    /// the engine re-validates against its **own** authoritative role
+    /// instead of trusting this one.
+    validated: Option<(usize, PlanRole)>,
 }
 
 /// Wall time a [`Schedule`] spent since the previous
@@ -690,6 +702,7 @@ impl Schedule {
             plan: PlanCache::new(),
             timings: None,
             role: PlanRole::Standalone,
+            validated: None,
         }
     }
 
@@ -703,6 +716,28 @@ impl Schedule {
     pub fn with_plan_role(mut self, role: PlanRole) -> Self {
         self.role = role;
         self
+    }
+
+    /// Verifies every registered system against `role`, then caches the
+    /// result so repeat calls with an unchanged system set are free.
+    ///
+    /// This is the enforcement point that does **not** trust the [`PlanRole`]
+    /// stored on the schedule: a caller can replace the whole schedule
+    /// (`*engine.stage_schedule_mut(Stage::Gameplay) = Schedule::new()`),
+    /// `mem::take` it, or re-tag it with [`with_plan_role`](Self::with_plan_role),
+    /// all of which would discard or forge the registration-time role. The
+    /// engine therefore re-checks against the role *it* owns.
+    ///
+    /// # Panics
+    /// When a registered system's structural writer does not match `role`.
+    pub fn validate_plan_role(&mut self, role: PlanRole) {
+        if self.validated == Some((self.systems.len(), role)) {
+            return;
+        }
+        for (system, access) in self.systems.iter().zip(&self.accesses) {
+            assert_writer_matches_role(role, system.name(), access);
+        }
+        self.validated = Some((self.systems.len(), role));
     }
 
     /// Turns per-system timing on or off (debug statistics). Off by
@@ -767,6 +802,7 @@ impl Schedule {
     }
 
     fn invalidate_plan(&mut self) {
+        self.validated = None;
         self.plan.invalidate();
         if self.timings.is_some() {
             // Registration changed: re-index the accumulator (pending

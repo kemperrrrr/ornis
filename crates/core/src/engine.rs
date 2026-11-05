@@ -779,6 +779,37 @@ impl Engine<Running> {
         .collect()
     }
 
+    /// Re-validates every staged schedule against the role the **engine**
+    /// owns, not the role a schedule may carry.
+    ///
+    /// A schedule can be replaced wholesale
+    /// (`*engine.stage_schedule_mut(Stage::Gameplay) = Schedule::new()`),
+    /// swapped out with `mem::take`, or re-tagged with
+    /// [`Schedule::with_plan_role`] — all of which would otherwise discard or
+    /// forge the registration-time role and sneak a `StructuralWriter<FrameStep>`
+    /// into the fixed plan. Checking here, against the engine's own mapping,
+    /// makes those bypasses inert: the cost is one system-count comparison per
+    /// schedule in steady state.
+    ///
+    /// # Panics
+    /// When a staged system's structural writer does not match its stage.
+    fn validate_plan_roles(&mut self) {
+        for stage in [
+            Stage::PreUpdate,
+            Stage::Input,
+            Stage::Gameplay,
+            Stage::PostFrame,
+            Stage::Last,
+        ] {
+            let role = if stage.is_fixed() {
+                crate::PlanRole::Fixed
+            } else {
+                crate::PlanRole::Frame
+            };
+            self.stage_schedule_mut(stage).validate_plan_role(role);
+        }
+    }
+
     /// Runs one frame with `delta_seconds` and publishes [`Time`] first.
     ///
     /// Available only on [`Engine<Running>`]: a build-phase engine must be
@@ -828,6 +859,7 @@ impl Engine<Running> {
     /// state continues to use the scheduler's declared resource/lane access
     /// contract.
     pub fn run_frame(&mut self, delta_seconds: f32) {
+        self.validate_plan_roles();
         if let Some(time) = self.world.resources_mut().get_mut::<Time>() {
             time.advance(delta_seconds);
         } else {
@@ -893,6 +925,7 @@ impl Engine<Running> {
     /// Returns the tick index that ran.
     // qual:api — replay/rollback entry point; hosts are the callers, the in-crate tests pin its per-tick queue apply.
     pub fn run_fixed_step(&mut self) -> Tick {
+        self.validate_plan_roles();
         if self.world.resources().get::<FixedTime>().is_none() {
             let _ = self.world.insert(FixedTime::default());
         }
