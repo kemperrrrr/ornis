@@ -1419,7 +1419,6 @@ impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
                     frame.queue,
                     frame.encoder,
                     inputs,
-                    dt,
                     crate::renderer::outline::OutlineCompositeInputs {
                         depth,
                         mesh: frame.mesh,
@@ -1427,6 +1426,7 @@ impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
                         format: outline.format,
                         sample_count: outline.sample_count,
                         flags: &flags,
+                        dt_seconds: dt,
                     },
                 );
                 return;

@@ -218,6 +218,20 @@ pub(crate) struct OutlineCompositeInputs<'a> {
     pub sample_count: u32,
     /// One flag per instance (`0` none, `1` hover, `2` selected).
     pub flags: &'a [u32],
+    /// Frame delta handed to auto-exposure by the composite.
+    pub dt_seconds: f32,
+}
+
+/// Per-frame outline inputs for [`Renderer3D::with_outline`].
+pub(crate) struct OutlineFrame<'a> {
+    /// One flag per instance (`0` none, `1` hover, `2` selected).
+    pub flags: &'a [u32],
+    /// Number of uploaded instances (flags are indexed by this order).
+    pub instance_count: u32,
+    /// Format of the composited layer.
+    pub format: wgpu::TextureFormat,
+    /// Sample count of the composited layer and depth.
+    pub sample_count: u32,
 }
 
 /// A ready outline draw inside the caller's (composite) render pass.
@@ -258,18 +272,19 @@ impl Renderer3D {
     /// buffer changes; the compact index list is rebuilt per call (editor
     /// selection is small).
     // qual:allow(iosp) reason: "one frame submission: compact the flags, cache pipeline/bind state and hand the draw to the composite pass"
-    // qual:allow(srp, max_parameters=7) reason: "one prepared frame: attachment key, flags and the drawing callback"
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_outline<R>(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        flags: &[u32],
-        instance_count: u32,
-        format: wgpu::TextureFormat,
-        sample_count: u32,
+        frame: OutlineFrame<'_>,
         f: impl FnOnce(Option<PreparedOutline<'_>>) -> R,
     ) -> R {
+        let OutlineFrame {
+            flags,
+            instance_count,
+            format,
+            sample_count,
+        } = frame;
         if flags.is_empty() || instance_count == 0 {
             return f(None);
         }
@@ -325,28 +340,23 @@ impl Renderer3D {
 /// overlay inside the composite pass.
 #[cfg(test)]
 impl Renderer3D {
-    #[allow(clippy::too_many_arguments)]
-    // qual:allow(srp, max_parameters=10) reason: "device-test helper mirrors the old standalone pass signature"
     pub(crate) fn render_outline_for_test(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         output: &wgpu::TextureView,
-        depth: &wgpu::TextureView,
-        mesh: &Mesh,
-        instance_count: u32,
-        format: wgpu::TextureFormat,
-        sample_count: u32,
-        flags: &[u32],
+        inputs: OutlineCompositeInputs<'_>,
     ) {
         self.with_outline(
             device,
             queue,
-            flags,
-            instance_count,
-            format,
-            sample_count,
+            OutlineFrame {
+                flags: inputs.flags,
+                instance_count: inputs.instance_count,
+                format: inputs.format,
+                sample_count: inputs.sample_count,
+            },
             |prepared| {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("outline test pass"),
@@ -360,7 +370,7 @@ impl Renderer3D {
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: depth,
+                        view: inputs.depth,
                         // Same ops as production: the test would catch a
                         // Discard regression here too.
                         depth_ops: Some(outline_depth_ops()),
@@ -371,7 +381,7 @@ impl Renderer3D {
                     multiview_mask: None,
                 });
                 if let Some(prepared) = prepared {
-                    prepared.record(&mut pass, mesh);
+                    prepared.record(&mut pass, inputs.mesh);
                 }
             },
         );
@@ -508,6 +518,7 @@ mod tests {
 
     /// Flagged instances draw; all-zero/empty flags record no draw at all.
     /// Skips without an adapter.
+    // qual:allow(complexity, max_function_lines=124) reason: "one device setup covers draw, zero-flag no-op and format-change recreation"
     #[test]
     fn outline_pass_draws_selected_and_skips_zero_flags() {
         let Some((device, queue)) = try_device() else {
@@ -546,13 +557,16 @@ mod tests {
             &queue,
             &mut encoder,
             &color_view,
-            &depth_view,
-            &mesh,
-            2,
-            FORMAT,
-            1,
-            // Two compact entries grow the buffers (capacity 1 → 2).
-            &[1, 2],
+            OutlineCompositeInputs {
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 2,
+                format: FORMAT,
+                sample_count: 1,
+                // Two compact entries grow the buffers (capacity 1 → 2).
+                flags: &[1, 2],
+                dt_seconds: 0.0,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
@@ -579,12 +593,15 @@ mod tests {
             &queue,
             &mut encoder,
             &color_view,
-            &depth_view,
-            &mesh,
-            2,
-            FORMAT,
-            1,
-            &[0, 0],
+            OutlineCompositeInputs {
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 2,
+                format: FORMAT,
+                sample_count: 1,
+                flags: &[0, 0],
+                dt_seconds: 0.0,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
         let empty = readback_rgba8(&device, &queue, &color, 8, 8);
@@ -604,12 +621,15 @@ mod tests {
             &queue,
             &mut encoder,
             &unorm_view,
-            &depth_view,
-            &mesh,
-            2,
-            wgpu::TextureFormat::Rgba8Unorm,
-            1,
-            &[2, 0],
+            OutlineCompositeInputs {
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                sample_count: 1,
+                flags: &[2, 0],
+                dt_seconds: 0.0,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
         let changed = readback_rgba8(&device, &queue, &unorm, 8, 8);
@@ -710,12 +730,15 @@ mod tests {
             &queue,
             &mut encoder,
             &color_view,
-            &depth_view,
-            &mesh,
-            1,
-            FORMAT,
-            1,
-            &[2],
+            OutlineCompositeInputs {
+                depth: &depth_view,
+                mesh: &mesh,
+                instance_count: 1,
+                format: FORMAT,
+                sample_count: 1,
+                flags: &[2],
+                dt_seconds: 0.0,
+            },
         );
         queue.submit(std::iter::once(encoder.finish()));
         let pixels = readback_rgba8(&device, &queue, &color, SIZE, SIZE);

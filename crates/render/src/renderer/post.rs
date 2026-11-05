@@ -527,17 +527,19 @@ impl Renderer3D {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         inputs: CompositeInputs<'_>,
-        dt_seconds: f32,
         outline: super::outline::OutlineCompositeInputs<'_>,
     ) {
-        let bind_group = self.prepare_composite(device, queue, encoder, &inputs, dt_seconds);
+        let bind_group =
+            self.prepare_composite(device, queue, encoder, &inputs, outline.dt_seconds);
         self.with_outline(
             device,
             queue,
-            outline.flags,
-            outline.instance_count,
-            outline.format,
-            outline.sample_count,
+            super::outline::OutlineFrame {
+                flags: outline.flags,
+                instance_count: outline.instance_count,
+                format: outline.format,
+                sample_count: outline.sample_count,
+            },
             |prepared| {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("composite + outline pass"),
