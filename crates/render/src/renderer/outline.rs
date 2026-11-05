@@ -6,9 +6,9 @@
 //! list and draws only those instances, so an idle viewport records no
 //! outline commands. The pipeline is created lazily on the first outline
 //! frame and lives next to the renderer's camera/per-object buffers, so the
-//! typed frame pass ([`crate::frame_passes::OutlinePass`]) stays free of
-//! GPU handles — required because `wgpu` resources are `!Send` on wasm and
-//! [`crate::system::FramePass`] is `Send`.
+//! composite pass ([`crate::frame_passes::Composite::with_outline`]) stays
+//! free of GPU handles — required because `wgpu` resources are `!Send` on
+//! wasm and [`crate::system::FramePass`] is `Send`.
 
 use super::{Renderer3D, read_lock};
 use crate::mesh::{Mesh, Vertex};
@@ -361,12 +361,9 @@ impl Renderer3D {
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: depth,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            // The plan declares `Read<Depth>` and later
-                            // passes (TAA) still read it.
-                            store: wgpu::StoreOp::Store,
-                        }),
+                        // Same ops as production: the test would catch a
+                        // Discard regression here too.
+                        depth_ops: Some(outline_depth_ops()),
                         stencil_ops: None,
                     }),
                     timestamp_writes: None,
@@ -394,18 +391,22 @@ mod tests {
     const NEAR: ornis_core::units::Meters = ornis_core::units::Meters::new(0.1);
     const FAR: ornis_core::units::Meters = ornis_core::units::Meters::new(100.0);
 
-    fn surface_config() -> wgpu::SurfaceConfiguration {
+    fn surface_config_sized(size: u32) -> wgpu::SurfaceConfiguration {
         wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: FORMAT,
-            width: 8,
-            height: 8,
+            width: size,
+            height: size,
             present_mode: wgpu::PresentMode::AutoNoVsync,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
             color_space: wgpu::SurfaceColorSpace::Auto,
         }
+    }
+
+    fn surface_config() -> wgpu::SurfaceConfiguration {
+        surface_config_sized(8)
     }
 
     fn target_with_format(
@@ -727,6 +728,81 @@ mod tests {
             rgb_at(&pixels, SIZE, CENTER + RING_OFFSET, CENTER),
             [0, 0, 0],
             "the hull ring outside the silhouette must be painted"
+        );
+    }
+
+    /// Production path: `new_with_aa_outline` with non-empty flags must run
+    /// `render_composite_with_outline` (depth-compatible composite pipeline,
+    /// one pass) without validation errors and paint the ring over the
+    /// composited frame. The centre stays identical to the plain frame.
+    #[test]
+    fn composite_outline_production_path_draws_over_the_frame() {
+        let Some((device, queue)) = try_device() else {
+            // `try_device` panics instead when ORNIS_REQUIRE_GPU is set.
+            eprintln!("SKIPPED (composite outline): no wgpu adapter");
+            return;
+        };
+        const SIZE: u32 = 128;
+        const CENTER: u32 = SIZE / 2;
+        const RING_OFFSET: u32 = 40;
+        let renderer = Renderer3D::new(&device, &surface_config_sized(SIZE), 1);
+        renderer.set_anti_alias(crate::AntiAliasMode::Fxaa);
+        let mut plan = crate::RenderFrame3D::new_with_aa_outline(
+            FORMAT,
+            (SIZE, SIZE),
+            crate::Technique::Hybrid,
+            crate::Bloom::Off,
+            crate::AaWiring::new(crate::AntiAliasMode::Fxaa),
+        );
+        let view = crate::camera::CameraView {
+            eye: Vec3::new(0.0, 0.0, 3.0),
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            projection: ornis_assets::scene::CameraProjection::Perspective,
+            fov: FOV,
+            near: NEAR,
+            far: FAR,
+        };
+        let (view_proj, eye) = crate::camera::camera_view_projection(&view, (SIZE, SIZE));
+        renderer.set_camera(&queue, &view_proj.to_cols_array_2d(), eye.to_array());
+        renderer.upload_instances(&device, &queue, &instances(1));
+        let mesh = crate::create_sphere(&device, 1.0, 16, 12);
+        let (color, color_view) = offscreen_target(&device, SIZE, SIZE);
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut render = |flags: &[u32]| {
+            plan.set_outline_flags(flags);
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            plan.render(
+                crate::RenderContext {
+                    device: &device,
+                    queue: &queue,
+                    encoder: &mut encoder,
+                    target: &color_view,
+                },
+                &renderer,
+                &mesh,
+                1,
+            );
+            queue.submit(std::iter::once(encoder.finish()));
+            readback_rgba8(&device, &queue, &color, SIZE, SIZE)
+        };
+        let plain = render(&[]);
+        let selected = render(&[2]);
+        let validation = pollster::block_on(scope.pop());
+        assert!(
+            validation.is_none(),
+            "composite+outline must not raise validation errors: {validation:?}"
+        );
+        assert_eq!(
+            rgb_at(&plain, SIZE, CENTER, CENTER),
+            rgb_at(&selected, SIZE, CENTER, CENTER),
+            "the object's depth must keep the hull centre identical"
+        );
+        assert_ne!(
+            rgb_at(&plain, SIZE, CENTER + RING_OFFSET, CENTER),
+            rgb_at(&selected, SIZE, CENTER + RING_OFFSET, CENTER),
+            "the outline ring must paint over the composited frame"
         );
     }
 }

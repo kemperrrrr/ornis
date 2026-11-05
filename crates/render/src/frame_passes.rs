@@ -790,6 +790,14 @@ impl<I: BrightInput> FramePass for BloomBright<I> {
 // ── composite: six modes = (technique) × (bloom on/off) ──────────────
 
 /// Which HDR layers exist and whether the bloom chain feeds the mix.
+///
+/// Every mode also reads [`Depth`]: the optional outline overlay attaches
+/// it in the composite pass. Plans without the overlay keep the same GPU
+/// work and passes, but the depth resource's lifetime extends to composite,
+/// so the transient pool cannot recycle it earlier (a full-res depth
+/// texture, 4x under MSAA). The alternative — six extra outline-only mode
+/// types — would duplicate the mode matrix for a read that costs no GPU
+/// work unless the overlay is active.
 pub trait CompositeMode: Sized + 'static {
     /// This mode's live layers (dead ones bind a zeroed view instead).
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
@@ -1401,10 +1409,11 @@ impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
         let dt = frame.renderer.frame_dt_seconds();
         if let Some(outline) = &self.outline {
             let flags = outline.state.snapshot();
-            if !flags.is_empty() {
-                let Some(depth) = views.get::<Depth>() else {
-                    return;
-                };
+            // A missing depth view must not leave the frame unpainted:
+            // fall through to the plain composite below.
+            if !flags.is_empty()
+                && let Some(depth) = views.get::<Depth>()
+            {
                 frame.renderer.render_composite_with_outline(
                     frame.device,
                     frame.queue,
