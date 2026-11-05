@@ -83,6 +83,11 @@ impl<State: Phase> World<State> {
     pub(crate) fn new_in_phase() -> Self {
         let mut resources = Resources::new();
         resources.insert(SmartStore::new());
+        // Both structural queues ride along with the store: `Gameplay`
+        // systems enqueue onto the fixed queue (drained per tick) and
+        // once-per-frame systems onto the frame queue (drained before
+        // `Stage::Last`).
+        crate::mutation::register_structural_queues(&mut resources);
         Self {
             resources,
             phase: PhantomData,

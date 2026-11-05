@@ -28,8 +28,9 @@
 - Скедулер: `SystemAccess` (`crates/core/src/schedule.rs:168-177`),
   `reads_lane/writes_lane` (`schedule.rs:197-207`), enforcement на границе
   `read_lane/write_lane` (`smart_store.rs:285-320`, проверки `schedule.rs:415-439`).
-  Стадии `PreUpdate → Input → Gameplay(fixed) → PostFrame` (`crates/core/src/engine.rs:221-257`),
-  порядок `run_frame` (`engine.rs:436-470`); fixed-кап `DEFAULT_MAX_FIXED_STEPS_PER_FRAME=8`
+  Стадии `PreUpdate → Input → Gameplay(fixed) → PostFrame → Last` (`crates/core/src/engine.rs:265-310`),
+  порядок `run_frame` (`engine.rs:794-833`; между `PostFrame` и `Last` применяется очередь
+  отложенных структурных опсов — R4, #115); fixed-кап `DEFAULT_MAX_FIXED_STEPS_PER_FRAME=8`
   (`engine.rs:11-15`).
 - `crates/core/src/mutation.rs:37-48` — `Mutation::Set` (JSON через реестр);
   `apply_mutations` (`mutation.rs:89-100`) — только между кадрами, не из систем.

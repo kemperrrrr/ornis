@@ -83,13 +83,13 @@ pub use registry::{
     FieldSegment, FieldSurface, LaneId, RegisterComponent, RegistryError,
 };
 pub use schedule::{
-    OrderError, Resources, Schedule, ScheduleTimings, System, SystemAccess, SystemName,
+    OrderError, PlanRole, Resources, Schedule, ScheduleTimings, System, SystemAccess, SystemName,
     compute_levels,
 };
 pub use smart_store::{Pack, SmartStore};
 pub use system_param::{
-    EventReader, EventStore, EventWriter, PlainResource, Res, ResMut, ResMutResource, SystemParam,
-    register_events,
+    EventReader, EventStore, EventWriter, FixedStep, FrameStep, Kind, PendingEntity, PlainResource,
+    Res, ResMut, ResMutResource, StructuralWriter, SystemParam, register_events,
 };
 pub use typestate::{
     Authoritative, Building, FixedSteps, Frame, Phase, Replica, Running, SceneEntities, SceneRole,

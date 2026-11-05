@@ -507,6 +507,71 @@ pub(crate) fn assert_lane_access_declared<T: 'static>(for_write: bool) {
     });
 }
 
+/// Execution plan a [`Schedule`] backs, as far as registration rules care.
+///
+/// Only the fixed/frame distinction matters here: it decides which structural
+/// queue a writer system may declare. The engine tags every schedule it owns
+/// with the plan it backs, so the check lives on the single registration path
+/// (`Schedule::add_system`/`prepend_system`) instead of on each accessor —
+/// `stage_schedule_mut(Gameplay).add_system(..)` and
+/// `add_fixed_system(..)` cannot bypass it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PlanRole {
+    /// Once-per-frame plan (`PreUpdate`/`Input`/`PostFrame`/`Last`): a
+    /// `StructuralWriter<FrameStep>` may register, a fixed one may not.
+    Frame,
+    /// The fixed-step plan (`Stage::Gameplay`): only
+    /// `StructuralWriter<FixedStep>` may register.
+    Fixed,
+    /// Standalone schedule with no engine boundary: either writer kind may
+    /// register.
+    ///
+    /// The default, because a `Schedule` built directly (`Schedule::new`) is
+    /// not driven by an engine: its host decides when to call
+    /// `apply_fixed_structural_queue` / `apply_frame_structural_queue`, so
+    /// neither writer is inherently wrong. The engine tags every schedule it
+    /// owns with [`Fixed`](Self::Fixed) or [`Frame`](Self::Frame), so the
+    /// guard is enforced on exactly the schedules whose boundary the engine
+    /// controls.
+    #[default]
+    Standalone,
+}
+
+/// Rejects a structural writer registered in a plan that cannot drain its
+/// queue.
+///
+/// The fixed queue drains after every fixed tick and the frame queue once per
+/// frame; a writer in the wrong plan would make `add`/`remove`/`spawn`
+/// visibility depend on FPS and catch-up — the exact bug the per-tick apply
+/// closed. Registration is the one cheap place to catch it: the access set
+/// names the queue and the schedule's [`PlanRole`] names the plan.
+///
+/// # Panics
+/// When a fixed writer sits in a frame plan, or a frame writer in the fixed
+/// plan. Both are setup bugs, so this fails at registration instead of
+/// producing a plausible but frame-dependent simulation.
+fn assert_writer_matches_role(role: PlanRole, system: &'static str, access: &SystemAccess) {
+    let writes = |id| access.writes.contains(&id);
+    let fixed_writer = writes(std::any::TypeId::of::<crate::mutation::FixedStructuralQueue>());
+    let frame_writer = writes(std::any::TypeId::of::<crate::mutation::FrameStructuralQueue>());
+    if fixed_writer && role == PlanRole::Frame {
+        panic!(
+            "engine: system `{system}` declares `StructuralWriter<FixedStep>` but is registered \
+             in a once-per-frame plan — the fixed queue drains after every fixed tick, so fixed \
+             writers belong only to the fixed plan (`Stage::Gameplay`); use \
+             `StructuralWriter<FrameStep>` for once-per-frame stages"
+        );
+    }
+    if frame_writer && role == PlanRole::Fixed {
+        panic!(
+            "engine: system `{system}` declares `StructuralWriter<FrameStep>` but is registered \
+             in the fixed plan — the frame queue drains once per frame, so a spawn queued here \
+             would land at a frame-dependent moment. Use `StructuralWriter<FixedStep>`, which \
+             applies after this tick"
+        );
+    }
+}
+
 /// System schedule: registration order is the conflict tie-break.
 pub struct Schedule {
     systems: Vec<Box<dyn System>>,
@@ -524,6 +589,18 @@ pub struct Schedule {
     /// Opt-in per-system wall-time accumulator (debug statistics);
     /// `None` keeps [`Schedule::run`] on the untimed path.
     timings: Option<NodeTimings>,
+    /// Which execution plan this schedule backs; drives the structural-writer
+    /// registration guard. Defaults to [`PlanRole::Standalone`] so schedules
+    /// that do not back an engine plan keep accepting both writer kinds.
+    role: PlanRole,
+    /// `(system count, role)` the writer/plan guard last verified, so a
+    /// caller can re-check cheaply after registration.
+    ///
+    /// The field is advisory only: a schedule can be replaced wholesale
+    /// (`*engine.stage_schedule_mut(..) = Schedule::new()`) or re-tagged, so
+    /// the engine re-validates against its **own** authoritative role
+    /// instead of trusting this one.
+    validated: Option<(usize, PlanRole)>,
 }
 
 /// Wall time a [`Schedule`] spent since the previous
@@ -624,7 +701,43 @@ impl Schedule {
             enforcement: Enforcement::from(cfg!(debug_assertions)),
             plan: PlanCache::new(),
             timings: None,
+            role: PlanRole::Standalone,
+            validated: None,
         }
+    }
+
+    /// Backs this schedule with an execution plan, enabling the
+    /// structural-writer registration guard.
+    ///
+    /// The engine calls this for every schedule it owns. A schedule left on the
+    /// default [`PlanRole::Standalone`] accepts either writer kind, because
+    /// its host applies whichever queue it enqueued into.
+    #[must_use]
+    pub fn with_plan_role(mut self, role: PlanRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Verifies every registered system against `role`, then caches the
+    /// result so repeat calls with an unchanged system set are free.
+    ///
+    /// This is the enforcement point that does **not** trust the [`PlanRole`]
+    /// stored on the schedule: a caller can replace the whole schedule
+    /// (`*engine.stage_schedule_mut(Stage::Gameplay) = Schedule::new()`),
+    /// `mem::take` it, or re-tag it with [`with_plan_role`](Self::with_plan_role),
+    /// all of which would discard or forge the registration-time role. The
+    /// engine therefore re-checks against the role *it* owns.
+    ///
+    /// # Panics
+    /// When a registered system's structural writer does not match `role`.
+    pub fn validate_plan_role(&mut self, role: PlanRole) {
+        if self.validated == Some((self.systems.len(), role)) {
+            return;
+        }
+        for (system, access) in self.systems.iter().zip(&self.accesses) {
+            assert_writer_matches_role(role, system.name(), access);
+        }
+        self.validated = Some((self.systems.len(), role));
     }
 
     /// Turns per-system timing on or off (debug statistics). Off by
@@ -655,7 +768,14 @@ impl Schedule {
     }
 
     /// Adds a system (order = priority on conflicts).
+    ///
+    /// # Panics
+    /// When the system's structural writer does not match this schedule's
+    /// [`PlanRole`] — see [`Schedule::with_plan_role`]. Every registration
+    /// path funnels through here, so `add_fixed_system`,
+    /// `stage_schedule_mut(..).add_system(..)` and friends are all covered.
     pub fn add_system<S: System + 'static>(&mut self, system: S) -> &mut Self {
+        assert_writer_matches_role(self.role, system.name(), &system.access());
         self.accesses.push(system.access());
         self.systems.push(Box::new(system));
         self.invalidate_plan();
@@ -669,6 +789,7 @@ impl Schedule {
     /// automatically shifted by one index; registration order of the
     /// remaining systems is preserved.
     pub fn prepend_system<S: System + 'static>(&mut self, system: S) -> &mut Self {
+        assert_writer_matches_role(self.role, system.name(), &system.access());
         self.accesses.insert(0, system.access());
         self.systems.insert(0, Box::new(system));
         self.ordering = self
@@ -681,6 +802,7 @@ impl Schedule {
     }
 
     fn invalidate_plan(&mut self) {
+        self.validated = None;
         self.plan.invalidate();
         if self.timings.is_some() {
             // Registration changed: re-index the accumulator (pending
@@ -801,6 +923,11 @@ impl Schedule {
         self.systems.is_empty()
     }
 
+    /// Declared accesses of every registered system, in registration order.
+    ///
+    /// Registration-time validation uses this (the engine checks that
+    /// structural-writer systems sit in the stage whose queue they write);
+    /// execution never reads it — the cached level plan is the hot path.
     /// Parallelism levels (system indices in registration order).
     /// One concept under one name on both engine frontends (mirrors
     /// render's `FrameLayout::levels`; canonical, backlog #19).

@@ -2,10 +2,10 @@
 //!
 //! Turns one `FnArg` into a [`TypedParam`]: the entity parameter
 //! (`u: &T` / `u: &mut T`, `T: Pack`), the typed wrappers
-//! (`Res`/`ResMut`/`EventWriter`/`EventReader`), and the attribute
-//! parameters (`#[config]`, `#[entity]`). Forbidden shapes get dedicated
-//! diagnostics here; signature-level checks and the aggregate collection
-//! live in [`crate::smart_system_parse`].
+//! (`Res`/`ResMut`/`EventWriter`/`EventReader`/`StructuralWriter`), and the
+//! attribute parameters (`#[config]`, `#[entity]`). Forbidden shapes get
+//! dedicated diagnostics here; signature-level checks and the aggregate
+//! collection live in [`crate::smart_system_parse`].
 
 use syn::{FnArg, GenericArgument, Ident, Pat, PathArguments, Type};
 
@@ -51,7 +51,8 @@ pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
             return Err(syn::Error::new_spanned(
                 r,
                 "smart_system: unexpected `self` — only the first parameter is the entity, \
-                 the rest are `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` / `#[config]`",
+                 the rest are `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` / \
+                 `StructuralWriter` / `#[config]`",
             ));
         }
         FnArg::Typed(t) => t,
@@ -90,17 +91,19 @@ pub(crate) fn parse_param(arg: &FnArg) -> Result<TypedParam, syn::Error> {
         Type::Reference(_) => Err(syn::Error::new_spanned(
             &typed.ty,
             "smart_system: raw `&Resources` is forbidden — declare typed parameters \
-             (`Res<T>`, `ResMut<T>`, `EventWriter<E>` / `EventReader<E>`) so access follows from types",
+             (`Res<T>`, `ResMut<T>`, `EventWriter<E>` / `EventReader<E>`, `StructuralWriter`) \
+             so access follows from types",
         )),
         Type::Path(tp) => parse_wrapper_param(name, &typed.ty, tp),
         _ => Err(syn::Error::new_spanned(
             &typed.ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / \
+             `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         )),
     }
 }
-/// Validates one `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` wrapper parameter.
+/// Validates one `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` /
+/// `StructuralWriter` wrapper parameter.
 pub(crate) fn parse_wrapper_param(
     name: Ident,
     ty: &Type,
@@ -109,8 +112,8 @@ pub(crate) fn parse_wrapper_param(
     let Some(seg) = tp.path.segments.last() else {
         return Err(syn::Error::new_spanned(
             ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / \
+             `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         ));
     };
     let Some(kind) = is_param_wrapper(seg) else {
@@ -123,10 +126,18 @@ pub(crate) fn parse_wrapper_param(
         }
         return Err(syn::Error::new_spanned(
             ty,
-            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / `EventReader<E>` \
-             (or `#[config] name: T`)",
+            "smart_system: parameters must be `Res<T>` / `ResMut<T>` / `EventWriter<E>` / \
+             `EventReader<E>` / `StructuralWriter` (or `#[config] name: T`)",
         ));
     };
+    // `StructuralWriter` carries a lifetime and a queue-kind argument, not
+    // a resource type: handled before the single-type-argument checks below.
+    if matches!(
+        kind,
+        ParamKind::StructuralWriterFixed | ParamKind::StructuralWriterFrame
+    ) {
+        return parse_structural_writer(name, ty, seg);
+    }
     let PathArguments::AngleBracketed(args) = &seg.arguments else {
         return Err(syn::Error::new_spanned(
             ty,
@@ -145,6 +156,90 @@ pub(crate) fn parse_wrapper_param(
             "smart_system: wrapper takes exactly one type (`Res<FixedTime>`)",
         ));
     };
+    reject_forbidden_inner(&kind, inner)?;
+    if matches!(kind, ParamKind::Res) {
+        check_plain_shape(inner)?;
+    }
+    Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
+}
+
+/// Accepts the `StructuralWriter` shapes and derives the queue kind from the
+/// type argument.
+///
+/// - bare `StructuralWriter` / `StructuralWriter<'_>` → `FixedStep` (the
+///   fixed plan, applied after every tick). This is the default because
+///   simulation code is the common case and it is the safe choice: a fixed
+///   writer is validated against the stage at registration.
+/// - `StructuralWriter<FrameStep>` / `StructuralWriter<'_, FrameStep>` → the
+///   frame queue, applied once per frame before `Stage::Last`.
+///
+/// Anything else (`StructuralWriter<u32>`, two type arguments) is rejected:
+/// the only meaningful parameter is the queue kind.
+fn parse_structural_writer(
+    name: Ident,
+    ty: &Type,
+    seg: &syn::PathSegment,
+) -> Result<TypedParam, syn::Error> {
+    let mut kind = ParamKind::StructuralWriterFixed;
+    match &seg.arguments {
+        PathArguments::None => {}
+        PathArguments::AngleBracketed(args) => {
+            // Accepted forms: `<'_>`, `<Kind>`, `<'_, Kind>` — at most one
+            // lifetime and at most one known kind, nothing else.
+            let lifetimes = args
+                .args
+                .iter()
+                .filter(|arg| matches!(arg, GenericArgument::Lifetime(_)))
+                .count();
+            let mut kinds = args.args.iter().filter_map(|arg| match arg {
+                GenericArgument::Type(Type::Path(tp)) => tp.path.segments.last(),
+                _ => None,
+            });
+            let first = kinds.next();
+            let extra_kinds = kinds.count();
+            let known = match first.as_ref().map(|seg| seg.ident.to_string()).as_deref() {
+                Some("FixedStep") => Some(ParamKind::StructuralWriterFixed),
+                Some("FrameStep") => Some(ParamKind::StructuralWriterFrame),
+                _ => None,
+            };
+            let type_args = args
+                .args
+                .iter()
+                .filter(|arg| matches!(arg, GenericArgument::Type(_)))
+                .count();
+            match known {
+                Some(found) if extra_kinds == 0 && type_args == 1 && lifetimes <= 1 => kind = found,
+                None if type_args == 0 && lifetimes <= 1 => {}
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "smart_system: `StructuralWriter` takes only a queue-kind argument — \
+                         write `StructuralWriter` / `StructuralWriter<'_, FixedStep>` for the \
+                         fixed plan (applied after every tick, `Stage::Gameplay`) or \
+                         `StructuralWriter<'_, FrameStep>` for the once-per-frame plan",
+                    ));
+                }
+            }
+        }
+        PathArguments::Parenthesized(_) => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "smart_system: `StructuralWriter` takes only a queue-kind argument — \
+                 write `StructuralWriter` / `StructuralWriter<'_, FixedStep>` for the \
+                 fixed plan (applied after every tick, `Stage::Gameplay`) or \
+                 `StructuralWriter<'_, FrameStep>` for the once-per-frame plan",
+            ));
+        }
+    }
+    Ok(TypedParam::new(name, kind, ty.clone(), ty.clone()))
+}
+
+/// Rejects `Res`/`ResMut` of a type that has a dedicated parameter: the
+/// `SmartStore`/`Resources` handles and the `EventStore`/`StructuralQueue`
+/// singletons. Naming them as a plain resource would bypass the role-based
+/// declaration, so duplicate and conflicting parameters would go undetected.
+fn reject_forbidden_inner(kind: &ParamKind, inner: &Type) -> Result<(), syn::Error> {
+    let last = path_last_ident(inner);
     if matches!(kind, ParamKind::Res) && is_smart_store_ty(inner) {
         return Err(syn::Error::new_spanned(
             inner,
@@ -153,10 +248,7 @@ pub(crate) fn parse_wrapper_param(
         ));
     }
     if matches!(kind, ParamKind::ResMut)
-        && matches!(
-            path_last_ident(inner).as_deref(),
-            Some("SmartStore" | "Resources")
-        )
+        && matches!(last.as_deref(), Some("SmartStore" | "Resources"))
     {
         return Err(syn::Error::new_spanned(
             inner,
@@ -164,20 +256,20 @@ pub(crate) fn parse_wrapper_param(
              use `Pack`/typed parameters so scheduler access stays explicit",
         ));
     }
-    if matches!(kind, ParamKind::Res | ParamKind::ResMut)
-        && path_last_ident(inner).as_deref() == Some("EventStore")
-    {
-        return Err(syn::Error::new_spanned(
-            inner,
+    let dedicated = match (kind, last.as_deref()) {
+        (ParamKind::Res | ParamKind::ResMut, Some("EventStore")) => {
             "smart_system: `Res<EventStore<_>>` / `ResMut<EventStore<_>>` are forbidden — \
              declare queue access with `EventWriter<E>` / `EventReader<E>` so duplicate \
-             and conflicting declarations stay detectable",
-        ));
-    }
-    if matches!(kind, ParamKind::Res) {
-        check_plain_shape(inner)?;
-    }
-    Ok(TypedParam::new(name, kind, inner.clone(), (*ty).clone()))
+             and conflicting declarations stay detectable"
+        }
+        (ParamKind::Res | ParamKind::ResMut, Some("StructuralQueue")) => {
+            "smart_system: `Res<StructuralQueue>` / `ResMut<StructuralQueue>` are forbidden — \
+             declare deferred ops with `StructuralWriter` so duplicate and conflicting \
+             declarations stay detectable"
+        }
+        _ => return Ok(()),
+    };
+    Err(syn::Error::new_spanned(inner, dedicated))
 }
 
 /// Early syntactic backstop for the `PlainResource` bound: well-known

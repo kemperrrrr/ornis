@@ -1,0 +1,320 @@
+//! R4 deferred structural ops end-to-end (RAT-57, issue #115): the
+//! `#[smart_system]` `StructuralWriter` parameter, both apply boundaries, and
+//! the engine stage contract.
+//!
+//! Covers the issue criteria plus the review findings:
+//!
+//! - parity with a manual lane loop (the queued path lands the same bits as
+//!   direct store writes);
+//! - deterministic queue order (registration-order level splits + FIFO);
+//! - `remove`/`despawn` through the writer and `spawn_deferred`.
+//!
+//! The tick-boundary determinism gates live in `structural_fixed_boundary.rs`
+//! and the frame/stage contract in `structural_frame_boundary.rs` (split to
+//! keep each file under the SRP test-file length limit).
+
+use ornis_core::{
+    Entity, Pack, Resources, Schedule, SmartStore,
+    mutation::{
+        FixedStructuralQueue, StructuralQueue, apply_fixed_structural_queue,
+        register_structural_queues,
+    },
+};
+use ornis_macros::smart_system;
+
+/// Test bundle: one generated lane per field.
+#[derive(Clone, Debug, PartialEq, ornis_macros::Pack)]
+struct Mote {
+    hp: f32,
+}
+
+/// Component queued through `StructuralWriter::insert`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Buff {
+    amount: f32,
+}
+
+/// Generated fixed writer: touches the bundle lane and queues a deferred
+/// insert whose payload depends on the very field the body mutates.
+/// Registered in `Stage::Gameplay`, so it addresses the fixed queue.
+#[smart_system]
+fn queue_buff(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 0.5;
+    ops.insert(e, Buff { amount: u.hp * 2.0 });
+}
+
+/// Same body for the frame plan: registered in `PostFrame`, it addresses the
+/// frame queue.
+#[smart_system]
+fn queue_buff_frame(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter<FrameStep>) {
+    u.hp += 0.5;
+    ops.insert(e, Buff { amount: u.hp * 2.0 });
+}
+
+/// Three queue writers in one schedule: all conflict on the queue and the
+/// `hp` lane, so their levels pin the enqueue order to registration order.
+#[smart_system]
+fn stamp_one(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.insert(e, Buff { amount: 1.0 });
+}
+
+#[smart_system]
+fn stamp_two(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.insert(e, Buff { amount: 2.0 });
+}
+
+#[smart_system]
+fn stamp_three(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.insert(e, Buff { amount: 3.0 });
+}
+
+/// Queues two spawns per entity: dense-lane append order must mirror queue
+/// order across the apply.
+#[smart_system]
+fn spawn_wave(u: &mut Mote, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.spawn(Mote { hp: 100.0 });
+    ops.spawn(Mote { hp: 200.0 });
+}
+
+/// Queues removal of the generated `hp` field lane entry for the current
+/// entity: `remove` goes through the same deferred path as `insert`.
+#[smart_system]
+fn drop_hp(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.remove::<Mote__hp__PackLane>(e);
+}
+
+/// Queues its own destruction: `despawn` must clear every lane entry and
+/// recycle the id, in the same FIFO pass.
+#[smart_system]
+fn retire_self(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 1.0;
+    ops.despawn(e);
+}
+
+fn seeded_resources(hps: &[f32]) -> (Resources, Vec<Entity>) {
+    let mut resources = Resources::new();
+    let mut store = SmartStore::new();
+    Mote::pack_register(&mut store);
+    let mut entities = Vec::with_capacity(hps.len());
+    for &hp in hps {
+        let entity = store.create_entity();
+        Mote { hp }.pack_insert(&mut store, entity);
+        entities.push(entity);
+    }
+    resources.insert(store);
+    register_structural_queues(&mut resources);
+    (resources, entities)
+}
+
+fn hp_of(resources: &Resources, entity: Entity) -> f32 {
+    let store = resources.get::<SmartStore>().expect("store");
+    Mote::pack_get(store, entity).expect("mote bundle").hp
+}
+
+fn buff_of(resources: &Resources, entity: Entity) -> Option<Buff> {
+    let store = resources.get::<SmartStore>().expect("store");
+    store
+        .read_lane::<Buff>()
+        .and_then(|lane| lane.get(entity).copied())
+}
+
+/// Parity: the queued `StructuralWriter` path lands byte-identical state to
+/// a hand-written lane loop over the same columns (issue #115, criterion 3).
+#[test]
+fn generated_structural_writer_matches_manual_lane_loop() {
+    let hps: Vec<f32> = (0..257).map(|i| i as f32 * 0.25).collect();
+
+    let (mut generated, generated_entities) = seeded_resources(&hps);
+    let mut schedule = Schedule::new();
+    schedule.add_system(QueueBuffSystem::new());
+    schedule.run(&generated);
+    apply_fixed_structural_queue(&mut generated);
+
+    let (mut manual, manual_entities) = seeded_resources(&hps);
+    {
+        let store = manual.get_mut::<SmartStore>().expect("store");
+        let mut updates = Vec::with_capacity(manual_entities.len());
+        {
+            let lane = store.read_lane::<Mote__hp__PackLane>().expect("hp lane");
+            for &entity in &lane.entities {
+                let hp = lane.get(entity).expect("hp entry").0;
+                let next = hp + 0.5;
+                updates.push((entity, next, Buff { amount: next * 2.0 }));
+            }
+        }
+        for (entity, hp, buff) in updates {
+            store
+                .write_lane::<Mote__hp__PackLane>()
+                .expect("hp lane")
+                .insert(entity, Mote__hp__PackLane(hp));
+            store.insert(entity, buff);
+        }
+    }
+
+    assert_eq!(generated_entities, manual_entities, "seeded ids match");
+    for (left, right) in generated_entities.iter().zip(&manual_entities) {
+        let a = hp_of(&generated, *left);
+        let b = hp_of(&manual, *right);
+        assert_eq!(a.to_bits(), b.to_bits(), "hp bits diverge at {left:?}");
+        let x = buff_of(&generated, *left).expect("generated buff");
+        let y = buff_of(&manual, *right).expect("manual buff");
+        assert_eq!(
+            x.amount.to_bits(),
+            y.amount.to_bits(),
+            "buff bits diverge at {left:?}"
+        );
+    }
+}
+
+/// Determinism: queueing systems serialize into separate levels in
+/// registration order, ops apply FIFO after the run, and the last writer's
+/// value wins (issue #115, criterion 2).
+#[test]
+fn queue_ops_apply_in_registration_order() {
+    let hps = [10.0, 20.0];
+    let (mut resources, entities) = seeded_resources(&hps);
+    let mut schedule = Schedule::new();
+    schedule.add_system(StampOneSystem::new());
+    schedule.add_system(StampTwoSystem::new());
+    schedule.add_system(StampThreeSystem::new());
+    assert_eq!(schedule.levels(), vec![vec![0], vec![1], vec![2]]);
+
+    schedule.run(&resources);
+    assert!(
+        resources
+            .get::<FixedStructuralQueue>()
+            .expect("queue registered")
+            .len()
+            == 3 * entities.len(),
+        "every writer's ops stay queued during the run"
+    );
+    assert!(
+        buff_of(&resources, entities[0]).is_none(),
+        "not applied yet"
+    );
+
+    apply_fixed_structural_queue(&mut resources);
+
+    for (entity, &seed) in entities.iter().zip(&hps) {
+        // Three FIFO insert ops of the same component: the last writer wins.
+        assert_eq!(
+            buff_of(&resources, *entity),
+            Some(Buff { amount: 3.0 }),
+            "registration order must survive apply at {entity:?}"
+        );
+        // Every writer's lane touch landed as well: seed + 1 + 1 + 1.
+        assert_eq!(
+            hp_of(&resources, *entity).to_bits(),
+            (seed + 3.0f32).to_bits()
+        );
+    }
+    assert!(
+        resources
+            .get::<FixedStructuralQueue>()
+            .expect("queue registered")
+            .is_empty()
+    );
+}
+
+/// Spawns queue their ids in call order, so the dense lane receives them in
+/// exactly that order at apply time.
+#[test]
+fn spawn_ops_land_in_queue_order() {
+    let (mut resources, entities) = seeded_resources(&[1.0]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(SpawnWaveSystem::new());
+    schedule.run(&resources);
+    apply_fixed_structural_queue(&mut resources);
+
+    assert_eq!(hp_of(&resources, entities[0]).to_bits(), (2.0f32).to_bits());
+    let store = resources.get::<SmartStore>().expect("store");
+    let lane = store.read_lane::<Mote__hp__PackLane>().expect("hp lane");
+    assert_eq!(
+        lane.entities
+            .iter()
+            .skip(entities.len())
+            .map(|entity| lane.get(*entity).expect("hp entry").0)
+            .collect::<Vec<_>>(),
+        vec![100.0, 200.0],
+        "spawn queue order == dense lane append order"
+    );
+}
+
+/// `remove` reaches the store through the same deferred path: the `hp` lane
+/// entry disappears at apply, not during the run.
+#[test]
+fn queued_remove_lands_at_apply() {
+    let (mut resources, entities) = seeded_resources(&[1.0, 2.0]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(DropHpSystem::new());
+
+    schedule.run(&resources);
+    assert_eq!(
+        hp_of(&resources, entities[0]).to_bits(),
+        (2.0f32).to_bits(),
+        "the lane write lands during the run"
+    );
+
+    apply_fixed_structural_queue(&mut resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    let lane = store.read_lane::<Mote__hp__PackLane>().expect("hp lane");
+    assert_eq!(
+        lane.len(),
+        0,
+        "every queued remove dropped its lane entry at apply"
+    );
+    assert!(
+        store.is_alive(entities[0]) && store.is_alive(entities[1]),
+        "removing a component leaves the entity alive"
+    );
+}
+
+/// `despawn` through the writer clears the bundle's lanes and recycles the
+/// id at apply — and the queued op order (write, then destroy) is preserved.
+#[test]
+fn queued_despawn_lands_at_apply() {
+    let (mut resources, entities) = seeded_resources(&[1.0, 2.0]);
+    let mut schedule = Schedule::new();
+    schedule.add_system(RetireSelfSystem::new());
+
+    schedule.run(&resources);
+    let store = resources.get::<SmartStore>().expect("store");
+    assert!(
+        store.is_alive(entities[0]),
+        "despawn is deferred to the boundary"
+    );
+
+    apply_fixed_structural_queue(&mut resources);
+
+    let store = resources.get::<SmartStore>().expect("store");
+    for &entity in &entities {
+        assert!(!store.is_alive(entity), "queued despawn retired {entity:?}");
+    }
+    assert_eq!(
+        store.read_lane::<Mote__hp__PackLane>().map(|l| l.len()),
+        Some(0),
+        "despawn cleared the hot lane"
+    );
+    // The ids went back to the allocator: the next allocations hand them
+    // out again (with a bumped generation, so the old handles stay dead).
+    let mut recycled = Vec::new();
+    for _ in 0..entities.len() {
+        recycled.push(store.create_entity());
+    }
+    for entity in &entities {
+        assert!(
+            recycled.iter().any(|fresh| fresh.id() == entity.id()),
+            "despawn returned {entity:?} to the allocator"
+        );
+        assert!(
+            !store.is_alive(*entity),
+            "the recycled id must not resurrect the old handle"
+        );
+    }
+}

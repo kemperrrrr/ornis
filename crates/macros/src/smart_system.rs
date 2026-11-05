@@ -21,7 +21,15 @@
 //! entity-id order. A body must touch at least one required field (checked at
 //! compile time), because optional lanes list only the entries that exist.
 //! Access also follows from parameter types: `Res` → read, `ResMut` → write,
-//! `EventWriter`/`EventReader` → exclusive queue access. Raw `&Resources`,
+//! `EventWriter`/`EventReader` → exclusive queue access, `StructuralWriter`
+//! → deferred structural-queue write (R4: `add`/`remove`/`spawn` enqueue and
+//! apply at a boundary). The writer's kind parameter selects that boundary
+//! and must match the stage: `StructuralWriter` / `StructuralWriter<'_, FixedStep>`
+//! for `Stage::Gameplay` (drained after **every** fixed tick, so results do
+//! not depend on FPS) and `StructuralWriter<'_, FrameStep>` for the
+//! once-per-frame plans (drained before `Stage::Last`). Raw `Res`/`ResMut`
+//! of the queue types are rejected in favour of the parameter. Raw
+//! `&Resources`,
 //! `Res<SmartStore>`, and `ResMut` aliases of `SmartStore`/`Resources` are
 //! compile errors, as are writes to another entity (`t.hp -= …` — use
 //! [`ornis_core::EventWriter`] instead), passing whole `u` to a free function
@@ -50,27 +58,41 @@ pub(crate) enum ParamKind {
     ResMut,
     EventWriter,
     EventReader,
+    /// `StructuralWriter` (optional `<'_>`) — deferred `add`/`remove`/
+    /// `spawn` ops for the fixed-tick boundary (R4).
+    StructuralWriterFixed,
+    /// `StructuralWriter<FrameStep>` — deferred ops for the frame boundary.
+    StructuralWriterFrame,
 }
 
 impl ParamKind {
     /// Resource family of this role — the namespace its inner type keys:
     /// `Res`/`ResMut` address the resource itself, `EventWriter`/
-    /// `EventReader` address the `EventStore<E>` singleton. Configs and
-    /// entity handles are not resources.
+    /// `EventReader` address the `EventStore<E>` singleton, and
+    /// `StructuralWriter` addresses the `StructuralQueue` singleton.
+    /// Configs and entity handles are not resources.
     pub(crate) fn resource_family(&self) -> Option<&'static str> {
         match self {
             ParamKind::Res | ParamKind::ResMut => Some("resource"),
             ParamKind::EventWriter | ParamKind::EventReader => Some("event"),
+            ParamKind::StructuralWriterFixed | ParamKind::StructuralWriterFrame => {
+                Some("structural")
+            }
             ParamKind::Config | ParamKind::EntityHandle => None,
         }
     }
 
-    /// Whether the role declares a scheduler write: `ResMut`, and both
-    /// event roles (a reader may drain the queue).
+    /// Whether the role declares a scheduler write: `ResMut`, both
+    /// event roles (a reader may drain the queue), and the structural
+    /// writer (every queued op mutates the store at apply).
     pub(crate) fn declares_write(&self) -> bool {
         matches!(
             self,
-            ParamKind::ResMut | ParamKind::EventWriter | ParamKind::EventReader
+            ParamKind::ResMut
+                | ParamKind::EventWriter
+                | ParamKind::EventReader
+                | ParamKind::StructuralWriterFixed
+                | ParamKind::StructuralWriterFrame
         )
     }
 }
@@ -104,6 +126,7 @@ pub(crate) fn is_param_wrapper(seg: &syn::PathSegment) -> Option<ParamKind> {
         "ResMut" => Some(ParamKind::ResMut),
         "EventWriter" => Some(ParamKind::EventWriter),
         "EventReader" => Some(ParamKind::EventReader),
+        "StructuralWriter" => Some(ParamKind::StructuralWriterFixed),
         _ => None,
     }
 }
@@ -120,22 +143,37 @@ pub(crate) fn is_smart_store_ty(ty: &Type) -> bool {
     path_last_ident(ty).as_deref() == Some("SmartStore")
 }
 
-/// Adds an elided lifetime to `Res<X>` → `Res<'_, X>` for the generated
-/// body function (users write the Bevy-style short form).
+/// Adds an elided lifetime for the generated body function (users write
+/// the short form): `Res<X>` → `Res<'_, X>`, and bare `StructuralWriter`
+/// → `StructuralWriter<'_>`. An already-lifetime-only
+/// `StructuralWriter<'_>` is left untouched.
 pub(crate) fn with_elided_lifetime(mut ty: Type) -> Type {
     if let Type::Path(tp) = &mut ty
         && let Some(seg) = tp.path.segments.last_mut()
         && matches!(
             seg.ident.to_string().as_str(),
-            "Res" | "ResMut" | "EventWriter" | "EventReader"
+            "Res" | "ResMut" | "EventWriter" | "EventReader" | "StructuralWriter"
         )
-        && let PathArguments::AngleBracketed(args) = &mut seg.arguments
-        && args.args.len() == 1
     {
-        args.args.insert(
-            0,
-            GenericArgument::Lifetime(Lifetime::new("'_", Span::call_site())),
-        );
+        let elided = || GenericArgument::Lifetime(Lifetime::new("'_", Span::call_site()));
+        match &mut seg.arguments {
+            PathArguments::None => {
+                seg.arguments =
+                    PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
+                        colon2_token: None,
+                        lt_token: Default::default(),
+                        args: std::iter::once(elided()).collect(),
+                        gt_token: Default::default(),
+                    });
+            }
+            PathArguments::AngleBracketed(args)
+                if args.args.len() == 1
+                    && matches!(args.args.first(), Some(GenericArgument::Type(_))) =>
+            {
+                args.args.insert(0, elided());
+            }
+            _ => {}
+        }
     }
     ty
 }

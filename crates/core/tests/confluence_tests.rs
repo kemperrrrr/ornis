@@ -2,7 +2,9 @@
 //!
 //! `sequential_smart_system_branching_is_deterministic` is not one of
 //! those checks. `#[smart_system]` walks entities on the calling thread,
-//! so that test compares two sequential runs.
+//! so that test compares two sequential runs. The R4 deferred-structural
+//! confluence gate lives in `confluence_structural.rs` (split out to stay
+//! under the SRP test-file length limit).
 
 // Strong Confluence Tests - Determinism across thread counts
 // Tests that parallel execution produces bitwise-identical results

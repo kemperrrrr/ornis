@@ -2,10 +2,11 @@
 //!
 //! Builds the per-parameter pieces of the generated system: the user
 //! parameters of the body function, the access contributions
-//! (`Res`/`ResMut`/event roles), and the run-time fetches with their call
-//! arguments and `#[config]` bindings. The lane side (field access, guards,
-//! the per-entity loop) lives in [`crate::smart_system_lanes`], and
-//! [`crate::smart_system_emit`] owns the surrounding emission.
+//! (`Res`/`ResMut`/event roles/`StructuralWriter`), and the run-time
+//! fetches with their call arguments and `#[config]` bindings. The lane
+//! side (field access, guards, the per-entity loop) lives in
+//! [`crate::smart_system_lanes`], and [`crate::smart_system_emit`] owns
+//! the surrounding emission.
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -14,8 +15,8 @@ use syn::Ident;
 use crate::smart_system::{ParamKind, TypedParam, with_elided_lifetime};
 
 /// Body-function parameters for the user's own parameters (after the lane
-/// parameters): `#[config]` by value, `#[entity]` as `Entity`, resource and
-/// event roles by their wrapper type.
+/// parameters): `#[config]` by value, `#[entity]` as `Entity`, resource,
+/// event, and structural-writer roles by their wrapper type.
 pub(crate) fn build_user_params(params: &[TypedParam]) -> Vec<TokenStream2> {
     params
         .iter()
@@ -34,14 +35,20 @@ pub(crate) fn build_user_params(params: &[TypedParam]) -> Vec<TokenStream2> {
                     let ty = with_elided_lifetime(param.wrapper.clone());
                     quote! { #name: #ty }
                 }
+                ParamKind::StructuralWriterFixed => {
+                    quote! { #name: ornis_core::StructuralWriter<'_, ornis_core::FixedStep> }
+                }
+                ParamKind::StructuralWriterFrame => {
+                    quote! { #name: ornis_core::StructuralWriter<'_, ornis_core::FrameStep> }
+                }
             }
         })
         .collect()
 }
 
-/// Per-parameter access contributions (`Res`/`ResMut`/event roles only;
-/// configs and entity handles contribute nothing). Event access follows
-/// the wrapper type, never the syntax of the function body.
+/// Per-parameter access contributions (`Res`/`ResMut`/event roles/
+/// `StructuralWriter` only; configs and entity handles contribute nothing).
+/// Access follows the wrapper type, never the syntax of the function body.
 pub(crate) fn build_access_stmts(params: &[TypedParam]) -> Vec<TokenStream2> {
     let mut access_stmts = Vec::new();
     for param in params {
@@ -68,6 +75,18 @@ pub(crate) fn build_access_stmts(params: &[TypedParam]) -> Vec<TokenStream2> {
             ParamKind::EventReader => {
                 access_stmts.push(quote! {
                     __access = __access.combine(ornis_core::EventReader::<#inner>::access());
+                });
+            }
+            ParamKind::StructuralWriterFixed => {
+                access_stmts.push(quote! {
+                    __access = __access
+                        .combine(ornis_core::StructuralWriter::<ornis_core::FixedStep>::access());
+                });
+            }
+            ParamKind::StructuralWriterFrame => {
+                access_stmts.push(quote! {
+                    __access = __access
+                        .combine(ornis_core::StructuralWriter::<ornis_core::FrameStep>::access());
                 });
             }
             ParamKind::Config | ParamKind::EntityHandle => {}
@@ -120,6 +139,24 @@ pub(crate) fn build_fetch_stmts(
                 let inner = &param.inner;
                 fetch_stmts.push(quote! {
                     let #name = ornis_core::EventReader::<#inner>::fetch(#resources_ident);
+                });
+                call_args.push(quote! { #name });
+            }
+            ParamKind::StructuralWriterFixed => {
+                fetch_stmts.push(quote! {
+                    let #name =
+                        ornis_core::StructuralWriter::<ornis_core::FixedStep>::fetch(
+                            #resources_ident,
+                        );
+                });
+                call_args.push(quote! { #name });
+            }
+            ParamKind::StructuralWriterFrame => {
+                fetch_stmts.push(quote! {
+                    let #name =
+                        ornis_core::StructuralWriter::<ornis_core::FrameStep>::fetch(
+                            #resources_ident,
+                        );
                 });
                 call_args.push(quote! { #name });
             }

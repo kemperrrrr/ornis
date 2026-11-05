@@ -5,7 +5,14 @@
 //! never from syntactic body analysis: [`Res`] declares a shared read,
 //! [`ResMut`] an exclusive-scheduler write (mutation itself goes through
 //! the resource's interior mutability), and [`EventWriter`]/[`EventReader`]
-//! declare event-queue access by role ([`events`] owns the queue itself).
+//! declare event-queue access by role ([`events`] owns the queue itself),
+//! while [`StructuralWriter`] declares deferred structural-queue access
+//! (`add`/`remove`/`spawn` applied at a schedule boundary). The writer's kind
+//! parameter picks the boundary and must match the stage:
+//! [`StructuralWriter<FixedStep>`](StructuralWriter) for
+//! [`Stage::Gameplay`](crate::Stage::Gameplay) (drained after every fixed
+//! tick) and [`StructuralWriter<FrameStep>`](StructuralWriter) for the
+//! once-per-frame plans (drained before [`Stage::Last`](crate::Stage::Last)).
 //! [`PlainResource`] keeps interior mutability out of [`Res`]:
 //! a `Mutex`/`RwLock`/`Atomic*` behind a shared read would be
 //! memory-safe but non-deterministic (see the commutativity contract in
@@ -30,8 +37,10 @@ use crate::schedule::{Resources, SystemAccess};
 use crate::{FixedTime, Time};
 
 mod events;
+mod structural;
 
 pub use events::{EventReader, EventStore, EventWriter, register_events};
+pub use structural::{FixedStep, FrameStep, Kind, PendingEntity, StructuralWriter};
 
 /// Marker for types that may be accessed through [`ResMut`].
 ///
