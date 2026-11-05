@@ -1,20 +1,26 @@
 //! R4 deferred structural ops end-to-end (RAT-57, issue #115): the
-//! `#[smart_system]` `StructuralWriter` parameter, the frame-boundary queue
-//! apply, and the engine stage contract.
+//! `#[smart_system]` `StructuralWriter` parameter, both apply boundaries, and
+//! the engine stage contract.
 //!
-//! Covers three issue criteria: parity with a manual lane loop (the queued
-//! path lands the same bits as direct store writes), deterministic queue
-//! order (registration-order level splits + FIFO apply + ordered spawns),
-//! and the engine contract (ops queue during `PostFrame` and become visible
-//! to `Stage::Last` systems).
+//! Covers the issue criteria plus the review findings:
+//!
+//! - parity with a manual lane loop (the queued path lands the same bits as
+//!   direct store writes);
+//! - deterministic queue order (registration-order level splits + FIFO);
+//! - `remove`/`despawn` through the writer and `spawn_deferred`.
+//!
+//! The tick-boundary determinism gates live in `structural_fixed_boundary.rs`
+//! and the frame/stage contract in `structural_frame_boundary.rs` (split to
+//! keep each file under the SRP test-file length limit).
 
 use ornis_core::{
-    Engine, Entity, Pack, Resources, Schedule, SmartStore, Stage, StructuralWriter, System,
-    SystemAccess,
-    mutation::{StructuralQueue, apply_structural_queue, register_structural_queue},
+    Entity, Pack, Resources, Schedule, SmartStore,
+    mutation::{
+        FixedStructuralQueue, StructuralQueue, apply_fixed_structural_queue,
+        register_structural_queues,
+    },
 };
 use ornis_macros::smart_system;
-use std::sync::{Arc, Mutex};
 
 /// Test bundle: one generated lane per field.
 #[derive(Clone, Debug, PartialEq, ornis_macros::Pack)]
@@ -28,10 +34,19 @@ struct Buff {
     amount: f32,
 }
 
-/// Generated writer: touches the bundle lane and queues a deferred insert
-/// whose payload depends on the very field the body mutates.
+/// Generated fixed writer: touches the bundle lane and queues a deferred
+/// insert whose payload depends on the very field the body mutates.
+/// Registered in `Stage::Gameplay`, so it addresses the fixed queue.
 #[smart_system]
 fn queue_buff(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter) {
+    u.hp += 0.5;
+    ops.insert(e, Buff { amount: u.hp * 2.0 });
+}
+
+/// Same body for the frame plan: registered in `PostFrame`, it addresses the
+/// frame queue.
+#[smart_system]
+fn queue_buff_frame(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter<FrameStep>) {
     u.hp += 0.5;
     ops.insert(e, Buff { amount: u.hp * 2.0 });
 }
@@ -92,7 +107,7 @@ fn seeded_resources(hps: &[f32]) -> (Resources, Vec<Entity>) {
         entities.push(entity);
     }
     resources.insert(store);
-    register_structural_queue(&mut resources);
+    register_structural_queues(&mut resources);
     (resources, entities)
 }
 
@@ -118,7 +133,7 @@ fn generated_structural_writer_matches_manual_lane_loop() {
     let mut schedule = Schedule::new();
     schedule.add_system(QueueBuffSystem::new());
     schedule.run(&generated);
-    apply_structural_queue(&mut generated);
+    apply_fixed_structural_queue(&mut generated);
 
     let (mut manual, manual_entities) = seeded_resources(&hps);
     {
@@ -172,7 +187,7 @@ fn queue_ops_apply_in_registration_order() {
     schedule.run(&resources);
     assert!(
         resources
-            .get::<StructuralQueue>()
+            .get::<FixedStructuralQueue>()
             .expect("queue registered")
             .len()
             == 3 * entities.len(),
@@ -183,7 +198,7 @@ fn queue_ops_apply_in_registration_order() {
         "not applied yet"
     );
 
-    apply_structural_queue(&mut resources);
+    apply_fixed_structural_queue(&mut resources);
 
     for (entity, &seed) in entities.iter().zip(&hps) {
         // Three FIFO insert ops of the same component: the last writer wins.
@@ -200,7 +215,7 @@ fn queue_ops_apply_in_registration_order() {
     }
     assert!(
         resources
-            .get::<StructuralQueue>()
+            .get::<FixedStructuralQueue>()
             .expect("queue registered")
             .is_empty()
     );
@@ -214,7 +229,7 @@ fn spawn_ops_land_in_queue_order() {
     let mut schedule = Schedule::new();
     schedule.add_system(SpawnWaveSystem::new());
     schedule.run(&resources);
-    apply_structural_queue(&mut resources);
+    apply_fixed_structural_queue(&mut resources);
 
     assert_eq!(hp_of(&resources, entities[0]).to_bits(), (2.0f32).to_bits());
     let store = resources.get::<SmartStore>().expect("store");
@@ -227,60 +242,6 @@ fn spawn_ops_land_in_queue_order() {
             .collect::<Vec<_>>(),
         vec![100.0, 200.0],
         "spawn queue order == dense lane append order"
-    );
-}
-
-/// Engine contract: a smart-system writer in `PostFrame` queues ops that
-/// apply between `PostFrame` and `Stage::Last`, where an observer reads the
-/// applied component (issue #115, engine integration).
-#[test]
-fn engine_applies_queued_ops_before_last_stage_systems() {
-    /// Reads the queued component inside `Stage::Last`.
-    struct ObserveBuff(Arc<Mutex<Option<Option<Buff>>>>);
-    impl System for ObserveBuff {
-        fn name(&self) -> &'static str {
-            "observe_buff"
-        }
-        fn access(&self) -> SystemAccess {
-            SystemAccess::new()
-                .reads::<SmartStore>()
-                .reads_lane::<Buff>()
-        }
-        fn run(&self, resources: &Resources) {
-            let store = resources.get::<SmartStore>().expect("store");
-            let value = store.read_lane::<Buff>().and_then(|lane| {
-                let entity = lane.entities.first().copied()?;
-                lane.get(entity).copied()
-            });
-            *self.0.lock().expect("probe lock") = Some(value);
-        }
-    }
-
-    let probe = Arc::new(Mutex::new(None));
-    let mut engine = Engine::new();
-    let entity = {
-        let store = engine.world_mut().store_mut().expect("world store");
-        Mote::pack_register(store);
-        let entity = store.create_entity();
-        Mote { hp: 2.0 }.pack_insert(store, entity);
-        entity
-    };
-    engine.add_stage_system(Stage::PostFrame, QueueBuffSystem::new());
-    engine.add_stage_system(Stage::Last, ObserveBuff(probe.clone()));
-
-    engine.run_frame(1.0 / 60.0);
-
-    // The PostFrame writer bumped hp to 2.5 and queued Buff { 5.0 }.
-    assert_eq!(
-        *probe.lock().expect("probe lock"),
-        Some(Some(Buff { amount: 5.0 })),
-        "Last sees the frame's deferred ops"
-    );
-    let store = engine.world().store().expect("world store");
-    assert_eq!(
-        Mote::pack_get(store, entity),
-        Some(Mote { hp: 2.5 }),
-        "PostFrame lane writes landed too"
     );
 }
 
@@ -299,7 +260,7 @@ fn queued_remove_lands_at_apply() {
         "the lane write lands during the run"
     );
 
-    apply_structural_queue(&mut resources);
+    apply_fixed_structural_queue(&mut resources);
 
     let store = resources.get::<SmartStore>().expect("store");
     let lane = store.read_lane::<Mote__hp__PackLane>().expect("hp lane");
@@ -326,10 +287,10 @@ fn queued_despawn_lands_at_apply() {
     let store = resources.get::<SmartStore>().expect("store");
     assert!(
         store.is_alive(entities[0]),
-        "despawn is deferred to the frame boundary"
+        "despawn is deferred to the boundary"
     );
 
-    apply_structural_queue(&mut resources);
+    apply_fixed_structural_queue(&mut resources);
 
     let store = resources.get::<SmartStore>().expect("store");
     for &entity in &entities {
