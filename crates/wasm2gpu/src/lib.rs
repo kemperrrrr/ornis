@@ -16,7 +16,8 @@
 //! rejected, including `br_if`, `br_table`, loop-carried copies of the id,
 //! any value defined in that region, and a continuation reached by only
 //! some invocations after an `if` whose arms take different labels or
-//! `return`. Ordered comparisons and memory
+//! `return`. An `if` whose condition is not proved does not stop the walk.
+//! Ordered comparisons and memory
 //! loads are not proved. A 1×1×1
 //! workgroup is not checked. `raw_read` and `texture_sample_2d` lower as before.
 //! Scalar `f32` arithmetic (`+ - * /`) and comparisons lower directly to

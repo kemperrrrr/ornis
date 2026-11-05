@@ -12,7 +12,9 @@
 //! `br_if` / `br_table`, or a counter in a loop whose trip count depends on
 //! the id. The same rule applies inside a helper. An `if` whose arms leave
 //! through different labels, or through `br` and `return`, keeps the split
-//! on the continuation that only some invocations reach.
+//! on the continuation that only some invocations reach. The same exits are
+//! still walked when the condition is not the id, so a later proved barrier
+//! is not skipped, and a `br` arm's locals meet the other arm at the label.
 //!
 //! A `br_table` whose index is uniform or unknown is explored as a branch to
 //! each target, so later proved divergence is not skipped. An index that is
@@ -173,11 +175,6 @@ enum Leave {
     Br {
         target: usize,
     },
-    /// Two `if` arms that leave toward different labels.
-    ///
-    /// The walk stops at `Gone`, so a divergent exit is forked into the
-    /// pending continuations instead of being collapsed into this variant.
-    Gone,
 }
 
 struct Lab {

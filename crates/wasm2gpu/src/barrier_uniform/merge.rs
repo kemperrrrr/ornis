@@ -2,7 +2,8 @@
 //!
 //! An invocation-dependent condition that takes only one arm past the `if`
 //! leaves the continuation split. A condition this pass did not prove
-//! invocation-dependent joins as if both arms were uniform.
+//! invocation-dependent does not open a split, but its `br` arm is still
+//! carried to the label and every exit is still walked.
 
 use super::Leave;
 use super::Split;
@@ -11,23 +12,38 @@ use super::exit;
 use super::tag;
 use crate::error::BarrierSite;
 
-pub(super) fn merge_if(
-    cond: tag::Tag,
-    parent: Option<Split>,
-    if_index: usize,
-    then_end: St,
-    else_end: St,
-) -> St {
-    let then_live = live_at(then_end.leave, if_index);
-    let else_live = live_at(else_end.leave, if_index);
-    if cond != tag::Tag::Inv {
-        return merge_unproven(parent, then_end, else_end, then_live, else_live);
-    }
+/// Both arms of one `if`, plus the condition that chose them.
+pub(super) struct IfEnds {
+    pub(super) cond: tag::Tag,
+    pub(super) parent: Option<Split>,
+    pub(super) index: usize,
+    pub(super) then_end: St,
+    pub(super) else_end: St,
+}
+
+/// The state after the `if`, and an arm that left by `br` or `return`.
+///
+/// The parked arm is carried to its label with its locals. Both arms are
+/// parked when neither falls through, even if the condition is not the
+/// invocation id: collapsing them used to stop the walk, so a later barrier
+/// was never checked. A parked `Return` stays in the pending list until the
+/// function ends and still meets every later label.
+pub(super) fn place_if(ends: IfEnds) -> (St, Option<St>) {
+    let then_live = live_at(ends.then_end.leave, ends.index);
+    let else_live = live_at(ends.else_end.leave, ends.index);
     match (then_live, else_live) {
-        (true, true) => joined(then_end, else_end, parent, true),
-        (true, false) => diverge_after(then_end, else_end.leave, parent),
-        (false, true) => diverge_after(else_end, then_end.leave, parent),
-        (false, false) => stopped(then_end, else_end, parent),
+        (true, true) => (
+            joined(
+                ends.then_end,
+                ends.else_end,
+                ends.parent,
+                ends.cond == tag::Tag::Inv,
+            ),
+            None,
+        ),
+        (true, false) => park(ends.cond, ends.parent, ends.then_end, ends.else_end),
+        (false, true) => park(ends.cond, ends.parent, ends.else_end, ends.then_end),
+        (false, false) => fork_both(ends),
     }
 }
 
@@ -36,22 +52,7 @@ pub(super) fn exits_loop(leave: Leave, loop_index: usize) -> bool {
     match leave {
         Leave::Return => true,
         Leave::Br { target } => target < loop_index,
-        Leave::Fall | Leave::Gone => false,
-    }
-}
-
-fn merge_unproven(
-    parent: Option<Split>,
-    then_end: St,
-    else_end: St,
-    then_live: bool,
-    else_live: bool,
-) -> St {
-    match (then_live, else_live) {
-        (true, true) => joined(then_end, else_end, parent, false),
-        (true, false) => fall_through(then_end, parent),
-        (false, true) => fall_through(else_end, parent),
-        (false, false) => stopped(then_end, else_end, parent),
+        Leave::Fall => false,
     }
 }
 
@@ -101,16 +102,11 @@ fn opened_by(dead: Leave, parent: Option<Split>) -> Split {
             site: parent.map(|item| item.site).unwrap_or(BarrierSite::Branch),
             at: Some(target),
         },
-        Leave::Fall | Leave::Gone => Split {
+        Leave::Fall => Split {
             site: parent.map(|item| item.site).unwrap_or(BarrierSite::Branch),
             at: None,
         },
     }
-}
-
-/// Both arms left the `if`. `true` when neither continues after it.
-pub(super) fn both_left(then_leave: Leave, else_leave: Leave, if_index: usize) -> bool {
-    !live_at(then_leave, if_index) && !live_at(else_leave, if_index)
 }
 
 /// Split carried by exits that do not meet again at the `if`.
@@ -142,29 +138,39 @@ pub(super) fn cover_exit(
     exit::wider_split(parent, extra)
 }
 
-fn stopped(mut then_end: St, else_end: St, parent: Option<Split>) -> St {
-    then_end.leave = outer_leave(then_end.leave, else_end.leave);
-    then_end.split = parent;
-    then_end
+fn park(cond: tag::Tag, parent: Option<Split>, live: St, mut dead: St) -> (St, Option<St>) {
+    let leave = dead.leave;
+    let split = if cond == tag::Tag::Inv {
+        Some(opened_by(leave, parent))
+    } else {
+        parent
+    };
+    dead.split = exit::wider_split(dead.split, split);
+    let cont = if cond == tag::Tag::Inv {
+        diverge_after(live, leave, parent)
+    } else {
+        fall_through(live, parent)
+    };
+    (cont, Some(dead))
 }
 
-fn outer_leave(then_leave: Leave, else_leave: Leave) -> Leave {
-    match (then_leave, else_leave) {
-        (Leave::Return, Leave::Return) => Leave::Return,
-        (Leave::Br { target: left }, Leave::Br { target: right }) if left == right => {
-            Leave::Br { target: left }
-        }
-        (Leave::Br { target }, Leave::Return) | (Leave::Return, Leave::Br { target }) => {
-            Leave::Br { target }
-        }
-        _ => Leave::Gone,
-    }
+fn fork_both(ends: IfEnds) -> (St, Option<St>) {
+    let split = if ends.cond == tag::Tag::Inv {
+        cover_exit(ends.parent, ends.then_end.leave, ends.else_end.leave)
+    } else {
+        ends.parent
+    };
+    let mut then_end = ends.then_end;
+    let mut else_end = ends.else_end;
+    then_end.split = exit::wider_split(then_end.split, split);
+    else_end.split = exit::wider_split(else_end.split, split);
+    (then_end, Some(else_end))
 }
 
 fn live_at(leave: Leave, if_index: usize) -> bool {
     match leave {
         Leave::Fall => true,
         Leave::Br { target } => target == if_index,
-        Leave::Return | Leave::Gone => false,
+        Leave::Return => false,
     }
 }

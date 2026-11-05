@@ -469,7 +469,7 @@ fn an_invocation_if_leaving_toward_different_labels_is_rejected() {
 }
 
 #[test]
-fn different_labels_that_meet_before_the_barrier_stay_uniform() {
+fn a_branch_to_the_if_meets_the_other_arm_before_the_barrier() {
     // `br 0` resumes after the `if` and falls out of the inner block, so it
     // meets `br 1` before the barrier.
     expect_uniform(

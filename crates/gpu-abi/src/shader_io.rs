@@ -231,7 +231,8 @@ pub fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
 /// a loop, or an early return, including copies, injective arithmetic, and
 /// any value defined in that region). Arms that leave through different
 /// labels, or through `br` and `return`, keep the split on a continuation
-/// only some invocations reach.
+/// only some invocations reach. Exits are still checked when the condition
+/// is not proved, so a later barrier is not skipped.
 /// Ordered comparisons (`id < n`) and values loaded from memory stay this
 /// precondition. A 1×1×1 workgroup is not checked.
 #[inline(always)]
@@ -248,7 +249,8 @@ pub fn workgroup_barrier() {
 /// a loop, or an early return, including copies, injective arithmetic, and
 /// any value defined in that region). Arms that leave through different
 /// labels, or through `br` and `return`, keep the split on a continuation
-/// only some invocations reach.
+/// only some invocations reach. Exits are still checked when the condition
+/// is not proved, so a later barrier is not skipped.
 /// Ordered comparisons (`id < n`) and values loaded from memory stay this
 /// precondition. A 1×1×1 workgroup is not checked.
 #[inline(always)]

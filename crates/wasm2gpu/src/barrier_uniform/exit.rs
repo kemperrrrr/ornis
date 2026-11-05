@@ -139,13 +139,14 @@ fn hold_split(split: Option<Split>, elsewhere: &[St], parent: Option<Split>) -> 
             continue;
         }
         match st.leave {
-            Leave::Return | Leave::Gone => {
+            Leave::Return => {
                 early = true;
                 at = None;
             }
             Leave::Br { target } if !early => {
                 at = Some(at.map(|cur| cur.min(target)).unwrap_or(target));
             }
+            // `Fall` stays at this label, so it is not in `elsewhere`.
             Leave::Br { .. } | Leave::Fall => {}
         }
     }
@@ -173,7 +174,7 @@ fn continues_here(leave: Leave, region: usize) -> bool {
     match leave {
         Leave::Fall => true,
         Leave::Br { target } => target == region,
-        Leave::Return | Leave::Gone => false,
+        Leave::Return => false,
     }
 }
 
@@ -183,7 +184,9 @@ fn join_cont(mut left: St, right: St, control: bool) -> St {
         left.locals = tag::control_join_vec(&left.locals, &right.locals);
     } else {
         left.stack = tag::join_vec(&left.stack, &right.stack);
-        left.locals = tag::join_vec(&left.locals, &right.locals);
+        // A `br` arm may carry the id while the fallthrough still has the
+        // uniform zero. `join_tag` would hide that proof.
+        left.locals = tag::widen_vec(&left.locals, &right.locals);
     }
     left.split = wider_split(left.split, right.split);
     left.leave = Leave::Fall;

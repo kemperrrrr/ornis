@@ -76,11 +76,17 @@ impl Uni<'_> {
             self.mark_disagreement(then_end.leave, else_end.leave);
         }
         self.labels.pop();
-        if cond == Tag::Inv && merge::both_left(then_end.leave, else_end.leave, index) {
-            self.fork_arm_exits(then_end, else_end, parent);
-        } else {
-            self.st = merge::merge_if(cond, parent, index, then_end, else_end);
+        let (cont, parked) = merge::place_if(merge::IfEnds {
+            cond,
+            parent,
+            index,
+            then_end,
+            else_end,
+        });
+        if let Some(parked) = parked {
+            self.pending.push(parked);
         }
+        self.st = cont;
         Ok(())
     }
 
@@ -181,19 +187,6 @@ impl Uni<'_> {
             Some(split) if split.at.is_none() => None,
             _ => Some(target),
         }
-    }
-
-    /// One arm leaves toward `pending`; the state keeps the other exit.
-    ///
-    /// Both arms of an invocation-dependent `if` have left. A later label
-    /// reached by only one of them keeps the split until the other exit
-    /// joins it, or until the function ends when that exit is a `return`.
-    fn fork_arm_exits(&mut self, mut then_end: St, mut else_end: St, parent: Option<Split>) {
-        let split = merge::cover_exit(parent, then_end.leave, else_end.leave);
-        then_end.split = split;
-        else_end.split = split;
-        self.pending.push(else_end);
-        self.st = then_end;
     }
 
     pub(super) fn target(&self, depth: u32) -> Result<usize, TranslateError> {
