@@ -948,19 +948,26 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   >   то же применение. Между тиками очередь пуста и в снимок не входит.
   > - `StructuralWriter<FrameStep>` → `FrameStructuralQueue`, дренируется
   >   раз за кадр между `PostFrame` и `Last` (новый вариант `Stage::Last`).
-  > - При регистрации системы проверяется пара «стадия ↔ вид writer'а»
-  >   (`Engine::add_stage_system`): fixed вне `Gameplay` и frame внутри
-  >   `Gameplay` — паника с именем системы. Иначе момент применения
-  >   зависел бы от кадровой сетки.
+  > - При регистрации системы проверяется пара «стадия ↔ вид writer'а»:
+  >   fixed вне `Gameplay` и frame внутри `Gameplay` — паника с именем
+  >   системы. Иначе момент применения зависел бы от кадровой сетки.
+  >   Проверка стоит в единственной точке входа
+  >   `Schedule::add_system`/`prepend_system` и читает `PlanRole`, которым
+  >   движок помечает каждое своё расписание, поэтому её не обходят ни
+  >   `add_fixed_system` (все три фазы + builder), ни
+  >   `*_schedule_mut(..).add_system(..)`, ни `prepend_system`. Вне движка
+  >   `Schedule::new()` — `PlanRole::Standalone` (границу выбирает хост).
   > - Порядок детерминирован: queue-writer-системы декларируют
   >   `writes::<своя очередь>()` → конфликт → уровни в порядке регистрации
   >   → строго последовательный enqueue. `Res`/`ResMut` очередей и
   >   дубликаты writer'а одного вида — ошибки компиляции (trybuild);
   >   fixed и frame writer в одной системе допустимы (разные singleton'ы).
-  > - `push`/`drain`/`restore` закрыты: `StructuralQueue` — sealed-трейт с
-  >   публичными `len`/`is_empty`, enqueue доступен только
-  >   `StructuralWriter`. Публичный `push` позволил бы обойти объявление
-  >   доступа. `Stage` помечен `#[non_exhaustive]`.
+  > - `enqueue`/`drain`/`restore` непубличны: `StructuralQueue` — sealed-трейт
+  >   с публичными `len`/`is_empty`, запись идёт через `QueueRef::enqueue`
+  >   (`pub(crate)`), который строит только `StructuralWriter`. Публичный
+  >   enqueue позволил бы обойти объявление доступа: система с `&Resources`
+  >   взяла бы очередь как ресурс и набила её без `writes::<…>()`.
+  >   `Stage` помечен `#[non_exhaustive]`.
   > - `remove::<T>()` паникует **на месте вызова**, если `T` — lock-free
   >   лейн (deferred-путь требует `write_lane`), а не при apply.
   > - Гейты: паритет «generated = ручной lane-цикл»,
