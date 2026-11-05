@@ -8,6 +8,7 @@
 
 use std::marker::PhantomData;
 
+use crate::schedule::PlanRole;
 use crate::typestate::{Building, FixedSteps, Frame, Phase, Running, Seconds, Tick};
 use crate::{InputState, Schedule, World};
 
@@ -336,41 +337,6 @@ impl Stage {
     }
 }
 
-/// Checks that a structural writer's queue kind matches the stage it runs in.
-///
-/// The fixed queue drains after every fixed tick and the frame queue once per
-/// frame; putting a writer in the wrong plan is what makes results depend on
-/// FPS (a frame-queued spawn from `Gameplay` would land at a frame boundary in
-/// the middle of the fixed schedule). Registration is the only cheap place to
-/// catch it — the access set names the queue, and the stage names the plan.
-///
-/// # Panics
-/// When a fixed writer sits outside `Stage::Gameplay`, or a frame writer
-/// inside it. Both are setup bugs, so this fails at registration instead of
-/// producing a plausible but frame-dependent simulation.
-fn assert_writer_stage_matches(stage: Stage, system: &'static str, access: &crate::SystemAccess) {
-    let writes = |id| access.writes.contains(&id);
-    let fixed_writer = writes(std::any::TypeId::of::<crate::mutation::FixedStructuralQueue>());
-    let frame_writer = writes(std::any::TypeId::of::<crate::mutation::FrameStructuralQueue>());
-    if fixed_writer && !stage.is_fixed() {
-        panic!(
-            "engine: system `{system}` declares `StructuralWriter<FixedStep>` but is registered in \
-             stage `{}` — the fixed queue drains after every fixed tick, so fixed writers belong \
-             only to `Stage::Gameplay` (use `StructuralWriter<FrameStep>` for once-per-frame stages)",
-            stage.name()
-        );
-    }
-    if frame_writer && stage.is_fixed() {
-        panic!(
-            "engine: system `{system}` declares `StructuralWriter<FrameStep>` but is registered in \
-             stage `{}` — the frame queue drains once per frame, so frame writers cannot live in \
-             the fixed plan; a spawn queued here would land at a frame-dependent moment. Use \
-             `StructuralWriter<FixedStep>`, which applies after this tick",
-            stage.name()
-        );
-    }
-}
-
 /// Owns a logical [`World`] and the systems that process its frames.
 ///
 /// The variable-rate schedule runs once per frame after zero or more runs of
@@ -593,11 +559,11 @@ impl<State: Phase> Engine<State> {
         let _ = world.insert(InputState::new());
         Self {
             world,
-            schedule: Schedule::new(),
-            fixed_schedule: Schedule::new(),
-            pre_update: Schedule::new(),
-            input: Schedule::new(),
-            last: Schedule::new(),
+            schedule: Schedule::new().with_plan_role(PlanRole::Frame),
+            fixed_schedule: Schedule::new().with_plan_role(PlanRole::Fixed),
+            pre_update: Schedule::new().with_plan_role(PlanRole::Frame),
+            input: Schedule::new().with_plan_role(PlanRole::Frame),
+            last: Schedule::new().with_plan_role(PlanRole::Frame),
             phase: PhantomData,
         }
     }
@@ -699,7 +665,6 @@ impl Engine<Building> {
         stage: Stage,
         system: S,
     ) -> &mut Self {
-        assert_writer_stage_matches(stage, system.name(), &system.access());
         self.stage_schedule_mut(stage).add_system(system);
         self
     }
@@ -772,7 +737,6 @@ impl Engine<Running> {
         stage: Stage,
         system: S,
     ) -> &mut Self {
-        assert_writer_stage_matches(stage, system.name(), &system.access());
         self.stage_schedule_mut(stage).add_system(system);
         self
     }
@@ -1288,17 +1252,11 @@ mod tests {
                     .writes::<crate::mutation::FrameStructuralQueue>()
             }
             fn run(&self, resources: &Resources) {
-                let queue = resources
-                    .get::<crate::mutation::FrameStructuralQueue>()
-                    .expect("queue registered by World");
                 let store = resources.get::<SmartStore>().expect("store");
                 let entity = store.create_entity();
-                crate::mutation::StructuralQueue::enqueue(
-                    queue,
-                    Box::new(move |store: &mut SmartStore| {
-                        store.insert(entity, 7_u32);
-                    }),
-                );
+                // Goes through the writer, like any real producer: the queue
+                // itself exposes no public enqueue.
+                crate::StructuralWriter::<crate::FrameStep>::fetch(resources).insert(entity, 7_u32);
             }
         }
         /// Observes the applied component inside the `Last` stage.
@@ -1351,17 +1309,9 @@ mod tests {
                     .writes::<crate::mutation::FrameStructuralQueue>()
             }
             fn run(&self, resources: &Resources) {
-                let queue = resources
-                    .get::<crate::mutation::FrameStructuralQueue>()
-                    .expect("queue registered by World");
                 let store = resources.get::<SmartStore>().expect("store");
                 let entity = store.create_entity();
-                crate::mutation::StructuralQueue::enqueue(
-                    queue,
-                    Box::new(move |store: &mut SmartStore| {
-                        store.insert(entity, 7_u32);
-                    }),
-                );
+                crate::StructuralWriter::<crate::FrameStep>::fetch(resources).insert(entity, 7_u32);
                 *self.0.lock().expect("count lock") += 1;
             }
         }
