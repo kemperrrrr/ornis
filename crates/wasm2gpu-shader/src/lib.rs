@@ -399,12 +399,13 @@ fn cull_plane_outside(
 /// source views must use distinct bindings/buffers. Binding 0 contains the
 /// six planes; binding 5 is a padded uniform array of active, source, and
 /// destination counts. Binding 3 is the five-word indirect-args buffer,
-/// where `instance_count` at word 1 is incremented atomically. The dense
-/// destination record words are at binding 2.
+/// where `instance_count` at word 1 reserves slots atomically and is clamped
+/// to destination capacity. The dense destination record words are at binding 2.
 ///
 /// TODO(#243): replace the count array and duplicated source with u32
-/// uniforms and read-only storage before Culler integration. Capacities must describe the
-/// bound buffers and remain exactly representable in f32.
+/// uniforms and read-only storage before Culler integration. The current lowering
+/// exposes storage imports as read-write, so the source views cannot alias safely.
+/// Until then, capacities must describe the bound buffers and stay at most 2^24.
 #[cfg(target_arch = "wasm32")]
 #[shader::compute(workgroup_size = 64)]
 // qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
@@ -445,6 +446,7 @@ pub fn cull_compact(id: u32) {
         CULL_COMPACT_COUNT_UNIFORM_LEN,
     >(CULL_COMPACT_DESTINATION_COUNT_INDEX);
     if (slot as f32) >= destination_count {
+        storage_atomic_add_u32::<CULL_GROUP, CULL_COMPACT_ARGS_BINDING>(1, u32::MAX);
         return;
     }
     let output = slot * CULL_COMPACT_RECORD_WORDS;

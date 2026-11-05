@@ -18,6 +18,7 @@ const COUNT_LANES: usize = 3;
 const SOURCE_VIEW_COUNT: usize = 2;
 const ARGS_BYTES: u64 = super::super::super::INDIRECT_ARGS_WORD_COUNT as u64
     * super::super::super::INDIRECT_ARGS_WORD_BYTES;
+const MAX_EXACT_F32_COUNT: usize = 16_777_216;
 const PLANE_BINDING: u32 = 0;
 const SOURCE_FLOAT_BINDING: u32 = 1;
 const DESTINATION_BINDING: u32 = 2;
@@ -237,6 +238,10 @@ fn compact_layout(session: &Session) -> wgpu::BindGroupLayout {
 }
 
 fn pack_counts(count: usize) -> Vec<u8> {
+    assert!(
+        count <= MAX_EXACT_F32_COUNT,
+        "active/source/destination counts must be exactly representable as f32"
+    );
     let mut bytes = vec![0u8; COUNT_LANES * UNIFORM_STRIDE];
     for index in 0..COUNT_LANES {
         let value = count as f32;

@@ -18,10 +18,11 @@ const MATERIAL_LAST_VISIBLE: u32 = 12;
 const MATERIAL_INACTIVE: u32 = 13;
 const MATERIAL_NAN_RADIUS: u32 = 14;
 const MATERIAL_NAN_AXIS: u32 = 15;
-const ACTIVE_COUNT: u32 = 5;
+const MATERIAL_SECOND_WORKGROUP: u32 = 16;
 const INDEX_COUNT: u32 = 36;
 const SOURCE_COUNT: usize = 65;
 const COUNT_UNIFORM_ELEMENTS: usize = 3;
+const MAX_EXACT_F32_COUNT: u32 = 16_777_216;
 const EXPECTED_WORKGROUP_SIZE: u32 = 64;
 const DESTINATION_CANARY: u32 = 0xdead_beef;
 const PLANES: usize = 6;
@@ -81,7 +82,7 @@ fn cull_compact_preserves_visible_records_and_updates_indirect_count() {
 
     let records = test_records();
     let counts = CullCounts {
-        active: ACTIVE_COUNT,
+        active: SOURCE_COUNT as u32,
         source: SOURCE_COUNT as u32,
         destination: SOURCE_COUNT as u32,
     };
@@ -121,6 +122,27 @@ fn cull_compact_guards_source_and_destination_capacity() {
     assert_capacity_guards(&bytes, &records);
 }
 
+#[test]
+fn cull_compact_count_uniform_accepts_the_exact_f32_integer_limit() {
+    let counts = CullCounts {
+        active: MAX_EXACT_F32_COUNT,
+        source: MAX_EXACT_F32_COUNT,
+        destination: MAX_EXACT_F32_COUNT,
+    };
+    assert_eq!(packed_counts(counts).len(), COUNT_UNIFORM_BYTES);
+}
+
+#[test]
+#[should_panic(expected = "exactly representable as f32")]
+fn cull_compact_count_uniform_rejects_inexact_f32_capacity() {
+    let counts = CullCounts {
+        active: MAX_EXACT_F32_COUNT + 1,
+        source: MAX_EXACT_F32_COUNT + 1,
+        destination: MAX_EXACT_F32_COUNT + 1,
+    };
+    let _ = packed_counts(counts);
+}
+
 fn test_records() -> [[u32; RECORD_WORDS]; SOURCE_COUNT] {
     let mut records =
         [object_record(MATERIAL_INACTIVE, 0, CULLED_CENTER, VISIBLE_RADIUS); SOURCE_COUNT];
@@ -138,6 +160,12 @@ fn test_records() -> [[u32; RECORD_WORDS]; SOURCE_COUNT] {
         1,
         CULLED_CENTER,
         [f32::NAN, VISIBLE_RADIUS, VISIBLE_RADIUS],
+    );
+    records[SOURCE_COUNT - 1] = object_record(
+        MATERIAL_SECOND_WORKGROUP,
+        1,
+        VISIBLE_CENTER_FAR,
+        FAR_VISIBLE_RADIUS,
     );
     records
 }
@@ -240,6 +268,10 @@ fn upload_inputs(
 
 fn packed_counts(counts: CullCounts) -> Vec<u8> {
     let values = [counts.active, counts.source, counts.destination];
+    assert!(
+        values.iter().all(|&count| count <= MAX_EXACT_F32_COUNT),
+        "active/source/destination counts must be exactly representable as f32"
+    );
     let mut bytes = vec![0; COUNT_UNIFORM_BYTES];
     for (index, value) in values.into_iter().enumerate() {
         let offset = index * UNIFORM_LANE_BYTES;
@@ -335,24 +367,33 @@ fn copy_outputs(encoder: &mut wgpu::CommandEncoder, gpu: &CullCompactGpu, readba
 fn assert_compacted_output(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
     let args_offset = SOURCE_COUNT * RECORD_BYTES;
     let instance_count = read_u32(bytes, args_offset + U32_BYTES);
-    assert_eq!(instance_count, 3, "indirect args visible count");
+    assert_eq!(instance_count, 4, "indirect args visible count across two workgroups");
     assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
 
-    let actual = compacted_records(bytes);
-    let expected = vec![
+    let mut actual = compacted_records(bytes);
+    let mut expected = vec![
         records[0].to_vec(),
         records[2].to_vec(),
         records[3].to_vec(),
+        records[SOURCE_COUNT - 1].to_vec(),
     ];
+    actual.sort_unstable_by_key(|record| record[MATERIAL_WORD]);
+    expected.sort_unstable_by_key(|record| record[MATERIAL_WORD]);
     assert_eq!(actual, expected, "compacted records must be bit-identical");
-    assert_eq!(actual[0][MOTION_VALID_WORD], 1);
+    assert!(
+        actual
+            .iter()
+            .any(|record| record[MATERIAL_WORD] == MATERIAL_SECOND_WORKGROUP),
+        "visible record 64 must be compacted by the second workgroup"
+    );
+    assert!(actual.iter().all(|record| record[MOTION_VALID_WORD] == 1));
     assert_canary_slots(bytes, instance_count as usize);
 }
 
 fn assert_capacity_guards(bytes: &[u8], records: &[[u32; RECORD_WORDS]; SOURCE_COUNT]) {
     let args_offset = SOURCE_COUNT * RECORD_BYTES;
     let instance_count = read_u32(bytes, args_offset + U32_BYTES);
-    assert_eq!(instance_count, 2, "count is bounded by source, not dst");
+    assert_eq!(instance_count, 1, "indirect count must be clamped to dst capacity");
     assert_eq!(read_u32(bytes, args_offset), INDEX_COUNT);
 
     let first = read_record(bytes, 0);
