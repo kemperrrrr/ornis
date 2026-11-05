@@ -801,6 +801,11 @@ impl Schedule {
         self.systems.is_empty()
     }
 
+    /// Declared accesses of every registered system, in registration order.
+    ///
+    /// Registration-time validation uses this (the engine checks that
+    /// structural-writer systems sit in the stage whose queue they write);
+    /// execution never reads it — the cached level plan is the hot path.
     /// Parallelism levels (system indices in registration order).
     /// One concept under one name on both engine frontends (mirrors
     /// render's `FrameLayout::levels`; canonical, backlog #19).
