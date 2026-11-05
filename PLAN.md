@@ -936,28 +936,49 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
   > pack-тело не может вставлять отсутствующие записи.
 - **R4 — структурные опсы** (`add`/`remove`/`spawn`) → auto-defer / ошибка
   в параллельном контексте.
-  > **Сделано (2026-11-04, #115).** Очередь `StructuralQueue`
-  > (`mutation.rs`, FIFO apply) + параметр `StructuralWriter` в
-  > `#[smart_system]`: `spawn`/`insert`/`remove`/`despawn` откладываются
-  > до стадии `Last` (новый вариант `Stage::Last`, `Engine::run_frame`
-  > применяет очередь между `PostFrame` и `Last`). Порядок детерминирован:
-  > все queue-writer-системы декларируют `writes::<StructuralQueue>()` →
-  > конфликт → уровни в порядке регистрации → строго последовательный
-  > enqueue; `Res`/`ResMut<StructuralQueue>` и дубликаты `StructuralWriter`
-  > — ошибки компиляции (trybuild). Гейты: паритет «generated = ручной
-  > lane-цикл» (`structural_defer.rs`), confluence 1-vs-32
-  > (`confluence_structural.rs::strong_confluence_structural_queue`),
-  > порядок/FIFO/`Last`-интеграция, `remove`/`despawn` через очередь.
-  > **Ограничение `spawn`:** id выдаёт аллокатор store под `&self` (внутри
-  > `RwLock`) в момент вызова, а не в порядке применения. Очередь
-  > сериализует системы, поэтому одиночный writer (и все системы одного
-  > уровня) получает id в порядке вызовов; но writer с бо́льшим приоритетом
-  > и system без очереди (`store.create_entity()` напрямую, на том же
-  > уровне) могут перемешать порядок id. Состав/порядок самих опк всегда
-  > FIFO по регистрации; для строгого порядка id — `writes::<SmartStore>()`
-  > у всех аллоцирующих систем либо отдельная стадия (см. PROJECT_REVIEW).
-  > Хендл жив сразу, батч приезжает в apply; `despawn` до apply отменяет
-  > вставку (проверка `is_alive`), сущность не воскресает.
+  > **Сделано (2026-11-04, #115), пересмотрено по ревью (2026-11-05).**
+  > Две очереди по границам расписаний + параметр `StructuralWriter<K>`:
+  > `spawn`/`insert`/`remove`/`despawn` откладываются, а применяются на
+  > границе своей стадии.
+  > - `StructuralWriter<FixedStep>` → `FixedStructuralQueue`, дренируется
+  >   **после каждого fixed-тика** (в цикле `run_frame` и в
+  >   `Engine::run_fixed_step`). Тик `k+1` видит опсы тика `k` при любой
+  >   нарезке кадров, поэтому результат не зависит от FPS и catch-up;
+  >   replay/rollback, которые гоняют только `run_fixed_step`, получают
+  >   то же применение. Между тиками очередь пуста и в снимок не входит.
+  > - `StructuralWriter<FrameStep>` → `FrameStructuralQueue`, дренируется
+  >   раз за кадр между `PostFrame` и `Last` (новый вариант `Stage::Last`).
+  > - При регистрации системы проверяется пара «стадия ↔ вид writer'а»
+  >   (`Engine::add_stage_system`): fixed вне `Gameplay` и frame внутри
+  >   `Gameplay` — паника с именем системы. Иначе момент применения
+  >   зависел бы от кадровой сетки.
+  > - Порядок детерминирован: queue-writer-системы декларируют
+  >   `writes::<своя очередь>()` → конфликт → уровни в порядке регистрации
+  >   → строго последовательный enqueue. `Res`/`ResMut` очередей и
+  >   дубликаты writer'а одного вида — ошибки компиляции (trybuild);
+  >   fixed и frame writer в одной системе допустимы (разные singleton'ы).
+  > - `push`/`drain`/`restore` закрыты: `StructuralQueue` — sealed-трейт с
+  >   публичными `len`/`is_empty`, enqueue доступен только
+  >   `StructuralWriter`. Публичный `push` позволил бы обойти объявление
+  >   доступа. `Stage` помечен `#[non_exhaustive]`.
+  > - `remove::<T>()` паникует **на месте вызова**, если `T` — lock-free
+  >   лейн (deferred-путь требует `write_lane`), а не при apply.
+  > - Гейты: паритет «generated = ручной lane-цикл»,
+  >   `structural_fixed_boundary.rs` (spawn виден следующему тику; нарезка
+  >   `1+1+1` vs `0+1+0+2` даёт одинаковую **потиковую** трассу;
+  >   `run_fixed_step` дренирует и совпадает с `run_frame`),
+  >   `structural_frame_boundary.rs` (граница кадра, `Last`-задержка,
+  >   стражи регистрации, `spawn_deferred`, `remove` на lock-free),
+  >   `structural_defer.rs` (порядок/FIFO/`remove`/`despawn`), confluence
+  >   1-vs-32 на отдельных `rayon::ThreadPool` с проверкой
+  >   `current_num_threads()`.
+  > - **Ограничение `spawn`:** id выдаёт аллокатор store под `&self` в
+  >   момент вызова, поэтому между вызовом и apply сущность живая, но
+  >   пустая, а id и generation зависят от того, в какой тик/кадр попал
+  >   вызов. Для строгого порядка — `spawn_deferred`, который резервирует
+  >   id при apply и отдаёт `PendingEntity` (резолвится после границы,
+  >   `resolve` до неё паникует). Обычный `spawn` оставлен для случаев,
+  >   когда хендл нужен сразу.
 - **R5 — захваченное изменяемое состояние** → `atomic`/`reduce`-трансформация
   (у удалённого макроса это был warning; на `#[smart_system]` не перенесено).
 - **R6 — `Send`/`Sync`-проверка компонентов.**

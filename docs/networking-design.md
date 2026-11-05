@@ -298,9 +298,10 @@ into master» и «Release & Publish 0.16» так и не закрыты, ре�
   Ограничение «fixed-систему вставляет только `ornis-app`» неверно.
 - `Engine::run_frame` (`crates/core/src/engine.rs`): публикует `Time` из
   дельты кадра, вызывает `begin_frame` этой же дельтой, затем гоняет
-  `PreUpdate` → `Input` → цикл `Gameplay` (`fixed_schedule`, N раз) →
-  `PostFrame` (хранилище `schedule`) → apply очереди отложенных
-  структурных опсов (#115) → `Last`, затем транзиенты сбрасываются. Туда
+  `PreUpdate` → `Input` → цикл `Gameplay` (`fixed_schedule`, N раз, после
+  каждого тика — apply fixed-очереди, #115) → `PostFrame` (хранилище
+  `schedule`) → apply frame-очереди → `Last`, затем транзиенты
+  сбрасываются. Туда
   же `install_gpu_resources` ставит `RenderSubmit` и `RenderPresent`
   (`crates/render/src/gpu_resources.rs:219-220`, через `schedule_mut`).
   Комментарий `GameApp::render_frame` (`crates/runner/src/lib.rs:326-329`)
@@ -585,8 +586,8 @@ SI-Single. Границы сетевых сцен (§4.4) отсюда и сле
 `crates/app/src/lib.rs:146`) на этот путь и остаются. Живой раннер с
 записью и L0 `run_frame` не зовут. Кадр у них тот же порядок, что у
 `run_frame`: `run_frame_begin`, затем пачка `run_fixed_step`, затем
-`run_frame_end` (§6.1). `run_frame_end` несёт `PostFrame`, apply очереди
-структурных опсов и `Last`, а в `PostFrame` — `RenderSubmit` /
+`run_frame_end` (§6.1). `run_frame_end` несёт `PostFrame`, apply
+frame-очереди и `Last`, а в `PostFrame` — `RenderSubmit` /
 `RenderPresent`, поэтому картинка этого кадра уходит
 на экран после тиков. Смешивать `run_frame` с `run_fixed_step` на одном
 `Engine` нельзя. В сессии с журналом ни `PostFrame`, ни `Last`, ни хост
@@ -884,20 +885,27 @@ footer: final_digest + tick_count
    Другой шаг — вне v1.
 5. **Ни одна стадия вне fixed-шага и ни хост не пишут то, что fixed-шаг
    читает в digest.** Стадии — `PreUpdate`, `Input`, `PostFrame`, `Last`
-   (`Stage`, `crates/core/src/engine.rs:265-290`). `Gameplay` — сам шаг,
+   (`Stage`, `crates/core/src/engine.rs:299`). `Gameplay` — сам шаг,
    его писатели остаются. Иначе живая запись (`run_frame_begin` /
    `run_frame_end`, в том числе кадр с `N = 0`) и headless-replay
    (только `run_fixed_step`) расходятся, а границ кадров в `.ornis-rec`
    нет и не будет: файл — один `InputBundle` на тик. Писать туда `N` и
    места `begin`/`end` нельзя. Это заморозило бы FPS записывающей
-   машины. Проверка при загрузке обходит расписания `PreUpdate`, `Input`
+   машины. Применение **fixed**-очереди структурных опсов (#115) этому
+   запрету не противоречит: она дренируется внутри `run_fixed_step`
+   (и в каждом тике `run_frame`), то есть на границе тика, а не кадра, и
+   между тиками пуста. Frame-очередь живёт вне fixed-пути и его лейнов не
+   пишет — за этим следит проверка при регистрации (`StructuralWriter<FrameStep>`
+   вне `Gameplay`, `StructuralWriter<FixedStep>` только в нём).
+   Проверка при загрузке обходит расписания `PreUpdate`, `Input`
    `PostFrame` и `Last`, не один `schedule_mut`. Системы туда ставят через
-   `Engine::stage_schedule_mut` (`engine.rs:470` на фазе сборки и
-   `:674-680` на `Engine<Running>`); `schedule_mut` — только `PostFrame`.
+   `Engine::stage_schedule_mut` (`engine.rs:549` на фазе сборки и
+   `:758` на `Engine<Running>`); `schedule_mut` — только `PostFrame`.
    У `Schedule` поля `systems` и `accesses` приватны
    (`crates/core/src/schedule.rs:510-511`). Наружу есть `system_index`
-   (`:707`), `len`, `levels` и `mermaid` (`:775`), но не набор
-   `SystemAccess`. `writes_lanes` у самого `SystemAccess` публичен
+   (`:756`), `len`, `levels` и `mermaid` (`:824`, `:841`). Срез доступа
+   (`accesses`) остаётся частью этого среза, а не #115. `writes_lanes` у
+   самого `SystemAccess` публичен
    (`:232-233`), дойти до него нельзя. Проверка по имени через
    `system_index` не годится: чужая система с новым именем, пишущая
    `TransformDesc`, в список имён не попадёт, а правило как раз про
@@ -1326,9 +1334,9 @@ pub fn run_fixed_step(&mut self, input: ornis_input::TickInput)
 `Schedule::accesses`. Ничего сверх.
 
 Кадр живого хоста — два метода вокруг тиков, в том порядке, в каком
-скобки уже стоят в `run_frame` (`engine.rs:794-833`: `PreUpdate`,
-`Input`, затем цикл fixed, затем `PostFrame`, apply очереди структурных
-опсов, `Last`, затем `clear_frame_transients`).
+скобки уже стоят в `run_frame` (`engine.rs:870`: `PreUpdate`, `Input`,
+затем цикл fixed с apply fixed-очереди после каждого тика, затем
+`PostFrame`, apply frame-очереди, `Last`, затем `clear_frame_transients`).
 
 Почему не «сначала шаги, потом один `run_variable_frame`». Тот вариант
 тоже уносит present за тики и короче на метод. Не берём его: метод —
@@ -1379,11 +1387,22 @@ pub fn run_frame_end(&mut self)
 чтобы `end` без `begin` не компилировался. В v1 два вызова, порядок
 держит хост. Fixed-цикл, `PostFrame`, `Last` и `clear_frame_transients`
 `begin` не трогает.
-`run_frame_end`: гоняет `PostFrame`, применяет очередь отложенных
-структурных опсов (#115) и гоняет `Last`, при наличии `InputState` зовёт
-`clear_frame_transients`. `Time`, `FixedTime` и `fixed_schedule` не
-трогает. Ввод тика — аргумент `run_fixed_step`. `PreUpdate` и `Input`
-не пишут хешируемые лейны: это запрет загрузки §4.4 п.5, не допущение.
+`run_frame_end`: гоняет `PostFrame`, применяет **frame**-очередь
+отложенных структурных опсов (#115) и гоняет `Last`, при наличии
+`InputState` зовёт `clear_frame_transients`. `Time`, `FixedTime` и
+`fixed_schedule` не трогает. Ввод тика — аргумент `run_fixed_step`.
+`PreUpdate` и `Input` не пишут хешируемые лейны: это запрет загрузки
+§4.4 п.5, не допущение.
+
+Фиксированная очередь опсов применяется **в `run_fixed_step`**, а не в
+`run_frame_end`: иначе headless-replay (только `run_fixed_step`) увидел бы
+другой мир, а очередь копилась бы без предела. По той же причине
+`run_frame` дренирует её после каждого fixed-шага, а не раз за кадр: иначе
+результат зависел бы от нарезки тиков на кадры (гейт §6). В `run_frame_end`
+остаётся только frame-очередь, потому что `PostFrame`/`Last` — это
+переменные стадии кадра, которых в журнале нет. `StructuralWriter<FixedStep>`
+разрешён только в `Gameplay`, `StructuralWriter<FrameStep>` — только вне
+его; несоответствие отклоняется при регистрации системы.
 
 Порядок кадра записи и L0: `run_frame_begin` один раз, затем
 `run_fixed_step` столько раз, сколько тиков в этой пачке, затем
