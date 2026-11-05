@@ -15,7 +15,7 @@
 //! `[tests].file_length` limit.
 
 use ornis_core::{
-    Pack, Resources, Schedule, SmartStore,
+    Pack, PlanRole, Resources, Schedule, SmartStore,
     mutation::{apply_fixed_structural_queue, register_structural_queues},
 };
 use ornis_macros::smart_system;
@@ -98,7 +98,8 @@ fn run_structural_with_threads(threads: usize) -> (Vec<(u32, u32)>, usize) {
         register_structural_queues(&mut resources);
         resources.insert(store);
 
-        let mut schedule = Schedule::new();
+        // Fixed writers require the fixed plan's role (registration guard).
+        let mut schedule = Schedule::new().with_plan_role(PlanRole::Fixed);
         schedule.add_system(BumpGaugeSystem::new());
         schedule.add_system(DriftLaneSystem::new());
         schedule.add_system(BumpGaugeAgainSystem::new());
