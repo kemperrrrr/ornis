@@ -83,10 +83,11 @@ impl<State: Phase> World<State> {
     pub(crate) fn new_in_phase() -> Self {
         let mut resources = Resources::new();
         resources.insert(SmartStore::new());
-        // The deferred structural queue rides along with the store: system
-        // bodies enqueue `add`/`remove`/`spawn` and `Engine::run_frame`
-        // applies them at the frame boundary.
-        crate::mutation::register_structural_queue(&mut resources);
+        // Both structural queues ride along with the store: `Gameplay`
+        // systems enqueue onto the fixed queue (drained per tick) and
+        // once-per-frame systems onto the frame queue (drained before
+        // `Stage::Last`).
+        crate::mutation::register_structural_queues(&mut resources);
         Self {
             resources,
             phase: PhantomData,

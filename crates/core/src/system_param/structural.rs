@@ -2,85 +2,147 @@
 //!
 //! [`StructuralWriter`] is the `#[smart_system]` parameter for `add` /
 //! `remove` / `spawn`: a body sees shared storage only, so those operations
-//! enqueue onto [`StructuralQueue`] and are applied at the frame boundary
-//! ([`apply_structural_queue`](crate::mutation::apply_structural_queue),
-//! before [`Stage::Last`](crate::Stage::Last)). The parameter declares a
-//! write to the queue, which serializes every queueing system across
-//! parallel levels in registration order — the source of the queue's
-//! deterministic FIFO (see [`StructuralQueue`] docs).
+//! enqueue onto a queue instead of applying inline.
+//!
+//! The type parameter selects *when* the queue drains, and that choice is
+//! what keeps simulation deterministic:
+//!
+//! - [`FixedStep`] targets [`FixedStructuralQueue`], drained after **every**
+//!   fixed tick. Use it from [`Stage::Gameplay`](crate::Stage::Gameplay)
+//!   systems: tick `k+1` then observes tick `k`'s ops no matter how the host
+//!   sliced frames into ticks, so results cannot depend on FPS or catch-up.
+//! - [`FrameStep`] targets [`FrameStructuralQueue`], drained once per frame before
+//!   [`Stage::Last`](crate::Stage::Last). Use it from the once-per-frame
+//!   stages (`PostFrame` and friends).
+//!
+//! The engine validates the pairing at registration: a fixed writer outside
+//! the `Gameplay` plan, or a frame writer inside it, is a configuration
+//! error ([`Engine::add_stage_system`](crate::Engine::add_stage_system)).
+//!
+//! Each writer declares a write to its queue, which serializes every
+//! queueing system across parallel levels in registration order — the source
+//! of the queues' deterministic FIFO.
+
+use std::sync::{Arc, OnceLock};
 
 use crate::Entity;
-use crate::mutation::StructuralQueue;
+use crate::mutation::{FixedStructuralQueue, FrameStructuralQueue, StructuralQueue};
 use crate::schedule::{Resources, SystemAccess};
 use crate::smart_store::{Pack, SmartStore};
 
 use super::SystemParam;
 
-/// Deferred structural-ops parameter: queues `add`/`remove`/`spawn` for the
-/// frame boundary instead of applying them inline.
+/// Queue kind marker: ops drain after every fixed tick.
 ///
-/// Its type always declares `writes::<StructuralQueue>()`, independent of
-/// which helpers are called in the function body — so all queueing systems
-/// conflict and run in registration order across parallel levels, and the
-/// FIFO apply reproduces that order bitwise for any thread count.
+/// A unit type with no state: it exists so the compiler — not a runtime flag —
+/// decides which queue a [`StructuralWriter`] addresses and which
+/// [`Stage`](crate::Stage) it belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FixedStep;
+
+/// Queue kind marker: ops drain once per frame, before
+/// [`Stage::Last`](crate::Stage::Last).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FrameStep;
+
+/// Maps a [`StructuralWriter`]'s kind parameter to its queue singleton.
+///
+/// Sealed: [`FixedStep`] and [`FrameStep`] are the only kinds, so the engine's
+/// stage/writer validation covers every writer that can exist.
+pub trait Kind: sealed::Sealed {
+    /// The queue resource this kind writes to.
+    type Queue: StructuralQueue + 'static + Send + Sync;
+
+    /// Whether writer systems of this kind belong to the fixed-step
+    /// (`Stage::Gameplay`) plan. The engine rejects a mismatch at
+    /// registration.
+    const IS_FIXED: bool;
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::FixedStep {}
+    impl Sealed for super::FrameStep {}
+}
+
+impl Kind for FixedStep {
+    type Queue = FixedStructuralQueue;
+    const IS_FIXED: bool = true;
+}
+
+impl Kind for FrameStep {
+    type Queue = FrameStructuralQueue;
+    const IS_FIXED: bool = false;
+}
+
+/// Deferred structural-ops parameter, generic over *when* it applies.
+///
+/// `StructuralWriter<FixedStep>`/`StructuralWriter<FrameStep>` queue `add` /
+/// `remove` / `spawn` for the matching boundary instead of applying them
+/// inline. The type always declares a write to that queue, independent of
+/// which helpers the body calls, so all queueing systems conflict and run in
+/// registration order — and the FIFO apply reproduces that order for any
+/// thread count.
 ///
 /// `Copy` (shared borrows only): the generated per-entity loop passes
 /// parameters by value, so they must survive more than one iteration.
-pub struct StructuralWriter<'a> {
-    queue: &'a StructuralQueue,
+pub struct StructuralWriter<'a, K: Kind = FixedStep> {
+    queue: &'a K::Queue,
     store: &'a SmartStore,
 }
 
-impl Clone for StructuralWriter<'_> {
+impl<K: Kind> Clone for StructuralWriter<'_, K> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl Copy for StructuralWriter<'_> {}
+impl<K: Kind> Copy for StructuralWriter<'_, K> {}
 
-impl<'a> StructuralWriter<'a> {
-    /// Fetches the queue and store singletons; panics when
-    /// [`register_structural_queue`](crate::mutation::register_structural_queue)
-    /// was not called (same missing-resource contract as
-    /// [`Res`](super::Res)). The store is fetched here so [`spawn`](Self::spawn)
-    /// can allocate the id up front and hand back a live [`Entity`].
+impl<'a, K: Kind> StructuralWriter<'a, K> {
+    /// Fetches the queue and store singletons; panics when the queue was not
+    /// registered (same missing-resource contract as [`Res`](super::Res)).
+    /// [`World`](crate::World) registers both queues at construction.
+    ///
+    /// # Panics
+    /// When the matching queue or the [`SmartStore`] is absent — a
+    /// registration bug, not a recoverable state.
     // qual:allow(complexity, error_handling) reason: "deliberate missing-resource contract — the queue must be registered before the schedule runs; mirrors the Res/EventWriter fetch panics"
     pub fn fetch(resources: &'a Resources) -> Self {
-        let queue = resources.get::<StructuralQueue>().unwrap_or_else(|| {
+        let queue = resources.get::<K::Queue>().unwrap_or_else(|| {
             panic!(
-                "smart_system: missing StructuralQueue resource — call \
-                 register_structural_queue() (or run inside a World/Engine) \
-                 before running the schedule"
+                "smart_system: missing structural queue — call \
+                 register_structural_queues() (or run inside a World/Engine) \
+                 before running the schedule; also check the writer kind matches \
+                 the stage (`FixedStep` for Gameplay, `FrameStep` for once-per-frame stages)"
             )
         });
         let store = resources
             .get::<SmartStore>()
-            .unwrap_or_else(|| panic!("smart_system: missing SmartStore resource"));
+            .expect("smart_system: missing SmartStore resource");
         Self { queue, store }
     }
 
-    /// Queues creation of an entity carrying `bundle` and returns its live
-    /// handle immediately.
+    /// Queues creation of an entity carrying `bundle` and returns its handle.
     ///
-    /// The id is allocated now through the store's interior allocator (the
-    /// only allocation route available under shared access), so handle
-    /// ordering follows *call* order, not apply order.
-    /// [`StructuralWriter`](Self) declares a queue write, which serializes
-    /// every queueing system in registration order — so all writers (and
-    /// every system on their levels) observe call order == id order. A
-    /// system that allocates directly (`SmartStore::create_entity` under a
-    /// plain read declaration) does not conflict with the queue and may
-    /// interleave ids; declare a write on the store from such systems when
-    /// id order matters.
+    /// The id is reserved now through the store's interior allocator (the
+    /// only allocation route available under shared access) and the bundle
+    /// lands at apply. Between the call and the apply the handle is **live
+    /// but empty**: `is_alive` says `true` while no lane has an entry for it.
+    /// Use [`spawn_deferred`](Self::spawn_deferred) when nothing may observe
+    /// the entity before its components exist.
     ///
-    /// The bundle lands at apply time — see
-    /// [`apply_structural_queue`](crate::mutation::apply_structural_queue).
-    /// A handle to an entity despawned before the apply is skipped there,
-    /// so a queued spawn can never resurrect a dead id.
+    /// Handle ordering follows *call* order. Because the writer serializes
+    /// all queueing systems, every writer observes call order == id order; a
+    /// system that allocates directly (`SmartStore::create_entity`) does not
+    /// conflict with the queue and may interleave ids — give such a system a
+    /// store write when id order matters.
+    ///
+    /// A handle to an entity despawned before the apply is skipped there, so
+    /// a queued spawn can never resurrect a dead id.
     pub fn spawn<P: Pack>(&self, bundle: P) -> Entity {
         let entity = self.store.create_entity();
-        self.queue.push(Box::new(move |store: &mut SmartStore| {
+        self.queue.enqueue(Box::new(move |store: &mut SmartStore| {
             if store.is_alive(entity) {
                 bundle.pack_insert(store, entity);
             }
@@ -88,11 +150,31 @@ impl<'a> StructuralWriter<'a> {
         entity
     }
 
+    /// Queues creation of an entity and resolves its handle at apply time.
+    ///
+    /// Unlike [`spawn`](Self::spawn) the id is drawn *when the op runs*, so
+    /// nothing is observable between the call and the boundary: no live
+    /// entity without components, and ids follow apply (FIFO) order rather
+    /// than call order. The returned [`PendingEntity`] resolves after the
+    /// boundary; calling [`resolve`](PendingEntity::resolve) before it panics
+    /// rather than handing out a nonexistent handle.
+    // qual:api — the non-observable spawn alternative for hosts that cannot use a live handle.
+    pub fn spawn_deferred<P: Pack>(&self, bundle: P) -> PendingEntity {
+        let slot = Arc::new(OnceLock::new());
+        let handle = PendingEntity(slot.clone());
+        self.queue.enqueue(Box::new(move |store: &mut SmartStore| {
+            let entity = store.create_entity();
+            bundle.pack_insert(store, entity);
+            let _ = slot.set(entity);
+        }));
+        handle
+    }
+
     /// Queues `component` for `entity` (upsert; the hot lane for `T` is
     /// created on first use). Skipped at apply when the entity is no longer
     /// alive.
     pub fn insert<T: 'static + Clone + Send + Sync>(&self, entity: Entity, component: T) {
-        self.queue.push(Box::new(move |store: &mut SmartStore| {
+        self.queue.enqueue(Box::new(move |store: &mut SmartStore| {
             if store.is_alive(entity) {
                 store.insert(entity, component);
             }
@@ -103,13 +185,20 @@ impl<'a> StructuralWriter<'a> {
     /// or the lane entry is already gone).
     ///
     /// # Panics
-    /// At apply time, if `T` was registered as a lock-free lane:
-    /// [`SmartStore::write_lane`](crate::SmartStore::write_lane) rejects
-    /// those, and this deferred path cannot use the snapshot API (it needs
-    /// `remove` under `&mut`). `#[smart_system]` has the same constraint
-    /// for field writes, so packed/system components stay `RwLock` lanes.
+    /// Immediately, at the call site, when `T` is a lock-free lane: the
+    /// deferred apply needs [`SmartStore::write_lane`], which rejects those,
+    /// and the snapshot API has no `remove`. Failing here instead of at the
+    /// boundary keeps the error next to the offending system.
     pub fn remove<T: 'static + Send + Sync>(&self, entity: Entity) {
-        self.queue.push(Box::new(move |store: &mut SmartStore| {
+        assert!(
+            !self.store.is_lock_free_lane::<T>(),
+            "smart_system: `remove::<{}>()` cannot target a lock-free lane — \
+             lock-free lanes expose only the closure snapshot API, which has no \
+             deferred remove; register `{}` as an RwLock lane",
+            std::any::type_name::<T>(),
+            std::any::type_name::<T>()
+        );
+        self.queue.enqueue(Box::new(move |store: &mut SmartStore| {
             if store.is_alive(entity)
                 && let Some(mut lane) = store.write_lane::<T>()
             {
@@ -121,205 +210,54 @@ impl<'a> StructuralWriter<'a> {
     /// Queues destruction of `entity`: components leave every hot and cold
     /// lane and the id returns to the allocator, in queue order.
     pub fn despawn(&self, entity: Entity) {
-        self.queue.push(Box::new(move |store: &mut SmartStore| {
+        self.queue.enqueue(Box::new(move |store: &mut SmartStore| {
             store.destroy_entity(entity);
         }));
     }
 
-    /// Declares exclusive access to the structural queue (the ordering key
-    /// that serializes queueing systems in registration order).
+    /// Declares exclusive access to this kind's queue — the ordering key that
+    /// serializes queueing systems in registration order.
     pub fn access() -> SystemAccess {
-        SystemAccess::new().writes::<StructuralQueue>()
+        SystemAccess::new().writes::<K::Queue>()
     }
 }
 
-impl SystemParam for StructuralWriter<'_> {
-    type Item<'a> = StructuralWriter<'a>;
+impl<K: Kind> SystemParam for StructuralWriter<'_, K> {
+    type Item<'a> = StructuralWriter<'a, K>;
 
     fn access() -> SystemAccess {
-        StructuralWriter::access()
+        StructuralWriter::<K>::access()
     }
 
     fn fetch(resources: &Resources) -> Self::Item<'_> {
-        StructuralWriter::fetch(resources)
+        StructuralWriter::<K>::fetch(resources)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mutation::register_structural_queue;
-    use crate::schedule::Schedule;
-    use std::any::TypeId;
+/// Handle reserved by [`StructuralWriter::spawn_deferred`], resolved at apply.
+///
+/// Cheap to clone; every clone observes the same resolution, mirroring how an
+/// `Entity` handle refers to one entity.
+#[derive(Clone, Debug)]
+pub struct PendingEntity(Arc<OnceLock<Entity>>);
 
-    /// Minimal hand-written `Pack` bundle (the derive lives in
-    /// `ornis-macros`, which core unit tests cannot use).
-    #[derive(Clone)]
-    struct One(u32);
-
-    impl Pack for One {
-        type PackMut<'a> = ();
-
-        fn pack_register(store: &mut SmartStore) {
-            store.register::<u32>();
-        }
-
-        fn pack_insert(&self, store: &mut SmartStore, entity: Entity) {
-            store.insert(entity, self.0);
-        }
-
-        fn pack_get(store: &SmartStore, entity: Entity) -> Option<Self> {
-            store
-                .read_lane::<u32>()?
-                .get(entity)
-                .map(|value| One(*value))
-        }
-
-        fn pack_get_mut<'a>(
-            _store: &'a mut SmartStore,
-            _entity: Entity,
-        ) -> Option<Self::PackMut<'a>> {
-            None
-        }
-
-        fn pack_put(&self, store: &SmartStore, entity: Entity) {
-            if let Some(mut lane) = store.write_lane::<u32>() {
-                lane.insert(entity, self.0);
-            }
-        }
-
-        fn pack_entities(store: &SmartStore) -> Vec<Entity> {
-            store
-                .read_lane::<u32>()
-                .map(|lane| lane.entities.clone())
-                .unwrap_or_default()
-        }
-
-        fn pack_lane_ids() -> Vec<TypeId> {
-            vec![TypeId::of::<u32>()]
-        }
+impl PendingEntity {
+    /// The resolved entity.
+    ///
+    /// # Panics
+    /// Before the queue applies the spawn — an unresolved handle must never
+    /// reach the world, so this is a hard error rather than a silent `None`.
+    // qual:allow(complexity, error_handling) reason: "the panic IS the contract: resolving an unapplied handle must fail loudly, and `# Panics` documents it; `try_resolve` is the soft variant"
+    pub fn resolve(&self) -> Entity {
+        self.0
+            .get()
+            .copied()
+            .expect("PendingEntity resolved before its structural op applied")
     }
 
-    fn resources_with_store() -> Resources {
-        let mut resources = Resources::new();
-        resources.insert(SmartStore::new());
-        register_structural_queue(&mut resources);
-        resources
-            .get_mut::<SmartStore>()
-            .expect("store")
-            .register::<u32>();
-        resources
-    }
-
-    #[test]
-    fn structural_writer_declares_queue_write() {
-        assert_eq!(
-            StructuralWriter::access(),
-            SystemAccess::new().writes::<StructuralQueue>()
-        );
-    }
-
-    #[test]
-    fn fetch_and_spawn_insert_despawn_queue_until_applied() {
-        let mut resources = resources_with_store();
-        let writer = StructuralWriter::fetch(&resources);
-        assert!(
-            resources
-                .get::<StructuralQueue>()
-                .expect("queue registered")
-                .is_empty()
-        );
-
-        let spawned = writer.spawn(One(7));
-        let untouched = resources
-            .get::<SmartStore>()
-            .expect("store")
-            .create_entity();
-        writer.insert(untouched, 9_u32);
-        writer.remove::<u32>(spawned);
-        writer.despawn(untouched);
-
-        {
-            let store = resources.get::<SmartStore>().expect("store");
-            assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(0));
-        }
-
-        crate::mutation::apply_structural_queue(&mut resources);
-
-        let store = resources.get::<SmartStore>().expect("store");
-        // spawn+remove of `spawned`: the lane entry was removed again but
-        // the entity itself stays alive; `untouched` was despawned after
-        // its insert, so its entry went with it.
-        assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(0));
-        assert!(store.is_alive(spawned));
-        assert!(!store.is_alive(untouched));
-    }
-
-    #[test]
-    fn spawn_returns_live_handle_and_lands_bundle_at_apply() {
-        let mut resources = resources_with_store();
-        let entity = StructuralWriter::fetch(&resources).spawn(One(11));
-        {
-            let store = resources.get::<SmartStore>().expect("store");
-            assert!(store.is_alive(entity));
-            assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(0));
-        }
-
-        crate::mutation::apply_structural_queue(&mut resources);
-
-        let store = resources.get::<SmartStore>().expect("store");
-        assert_eq!(store.read_lane::<u32>().map(|lane| lane.len()), Some(1));
-        assert_eq!(
-            store.read_lane::<u32>().expect("lane").get(entity).copied(),
-            Some(11)
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "missing StructuralQueue")]
-    fn fetch_panics_without_queue() {
-        let resources = Resources::new();
-        let _ = StructuralWriter::fetch(&resources);
-    }
-
-    #[test]
-    fn systems_declaring_the_writer_conflict_across_levels() {
-        struct Probe;
-        impl crate::System for Probe {
-            fn name(&self) -> &'static str {
-                "probe"
-            }
-            fn access(&self) -> SystemAccess {
-                StructuralWriter::access()
-            }
-            fn run(&self, resources: &Resources) {
-                StructuralWriter::fetch(resources).despawn(Entity::new(0));
-            }
-        }
-        let mut schedule = Schedule::new();
-        schedule.add_system(Probe);
-        schedule.add_system(Probe);
-        assert_eq!(schedule.levels(), vec![vec![0], vec![1]]);
-    }
-
-    /// Pins the documented `remove` constraint: the deferred path goes
-    /// through `write_lane`, which rejects lock-free lanes at apply time.
-    #[test]
-    #[should_panic(expected = "cannot access a lock-free lane")]
-    fn remove_panics_on_lock_free_lane() {
-        let mut resources = Resources::new();
-        resources.insert(SmartStore::new());
-        register_structural_queue(&mut resources);
-        resources
-            .get_mut::<SmartStore>()
-            .expect("store")
-            .register_lock_free::<u32>();
-        let entity = resources
-            .get::<SmartStore>()
-            .expect("store")
-            .create_entity();
-
-        StructuralWriter::fetch(&resources).remove::<u32>(entity);
-        crate::mutation::apply_structural_queue(&mut resources);
+    /// The resolved entity, or `None` while the spawn is still queued.
+    // qual:api — the non-panicking half of `resolve`, for hosts that may run before the boundary.
+    pub fn try_resolve(&self) -> Option<Entity> {
+        self.0.get().copied()
     }
 }

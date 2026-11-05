@@ -457,6 +457,18 @@ impl SmartStore {
         store
     }
 
+    /// Whether `T`'s hot lane exists and was registered through
+    /// [`register_lock_free`](Self::register_lock_free).
+    ///
+    /// An absent lane is not lock-free (`false`), so callers can use this as
+    /// the "will [`write_lane`](Self::write_lane) panic?" probe before
+    /// queuing deferred work that must not fail at a later boundary.
+    pub fn is_lock_free_lane<T: 'static>(&self) -> bool {
+        self.lanes
+            .get(&TypeId::of::<T>())
+            .is_some_and(|lane| lane.is_lock_free())
+    }
+
     /// Runs `f` against an epoch-pinned snapshot of the lock-free lane of
     /// `T`. Readers never block writers (and vice versa); the snapshot is
     /// consistent for the duration of the call. Returns `None` if `T` has
