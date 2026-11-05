@@ -375,15 +375,15 @@ impl OpQueue {
     }
 }
 
-/// Shared surface of the two concrete queues.
+/// Read-only surface of the two concrete queues.
 ///
-/// Exposes what callers legitimately need — inspection, and draining through
-/// [`apply_fixed_structural_queue`] / [`apply_frame_structural_queue`] — while
-/// keeping enqueueing reachable only from
-/// [`StructuralWriter`](crate::StructuralWriter): the trait is sealed, so
-/// neither `enqueue` nor the drain internals can be called by a system that
-/// only holds `&Resources` (which would bypass the declared write and break
-/// the registration-order FIFO).
+/// Inspection is public; enqueueing and draining are not. A public `enqueue`
+/// would let any `&Resources` holder push an op without declaring the queue
+/// write, silently breaking the registration-order FIFO that makes the
+/// outcome deterministic — sealing the trait does not help, because a sealed
+/// trait can still be *called*. Producers therefore go through
+/// [`StructuralWriter`](crate::StructuralWriter) and drains through the
+/// `apply_*_structural_queue` functions in this module.
 pub trait StructuralQueue: private::SealedQueue {
     /// Number of operations waiting for the next boundary.
     fn len(&self) -> usize;
@@ -392,20 +392,6 @@ pub trait StructuralQueue: private::SealedQueue {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-
-    /// Appends one op. Not public API: the trait is sealed, and
-    /// [`StructuralWriter`](crate::StructuralWriter) is the only producer,
-    /// so an enqueue always comes with the matching declared access.
-    #[doc(hidden)]
-    fn enqueue(&self, op: StructuralOp);
-
-    /// Takes every queued op in FIFO order, leaving the queue empty.
-    #[doc(hidden)]
-    fn drain_ops(&self) -> Vec<StructuralOp>;
-
-    /// Puts drained ops back at the front, preserving their order.
-    #[doc(hidden)]
-    fn restore_ops(&self, ops: Vec<StructuralOp>);
 }
 
 mod private {
@@ -414,21 +400,56 @@ mod private {
     impl SealedQueue for super::FrameStructuralQueue {}
 }
 
+/// Borrowed, type-erased handle to one of the structural queues.
+///
+/// Public because the writer's kind parameter names it, but its only writing
+/// operation — `enqueue` — is crate-private. That is the point: a
+/// system holding `&Resources` can fetch a queue for inspection, yet cannot
+/// push an op without going through [`StructuralWriter`](crate::StructuralWriter),
+/// which declares the matching access. A public `enqueue` on the queue type
+/// would let any caller bypass that declaration and break the
+/// registration-order FIFO.
+#[derive(Clone, Copy)]
+pub struct QueueRef<'a> {
+    inner: QueueRefInner<'a>,
+}
+
+#[derive(Clone, Copy)]
+enum QueueRefInner<'a> {
+    Fixed(&'a FixedStructuralQueue),
+    Frame(&'a FrameStructuralQueue),
+}
+
+impl<'a> QueueRef<'a> {
+    /// Wraps the fixed queue. Constructing a handle grants no write: enqueue
+    /// is crate-private.
+    pub fn fixed(queue: &'a FixedStructuralQueue) -> Self {
+        Self {
+            inner: QueueRefInner::Fixed(queue),
+        }
+    }
+
+    /// Wraps the frame queue; see [`QueueRef::fixed`].
+    pub fn frame(queue: &'a FrameStructuralQueue) -> Self {
+        Self {
+            inner: QueueRefInner::Frame(queue),
+        }
+    }
+
+    /// Appends one op. Crate-private: the only producers are
+    /// [`StructuralWriter`](crate::StructuralWriter) implementations, which
+    /// declare the matching queue access.
+    pub(crate) fn enqueue(&self, op: StructuralOp) {
+        match self.inner {
+            QueueRefInner::Fixed(queue) => queue.queue.push(op),
+            QueueRefInner::Frame(queue) => queue.queue.push(op),
+        }
+    }
+}
+
 impl StructuralQueue for FixedStructuralQueue {
     fn len(&self) -> usize {
         self.queue.len()
-    }
-
-    fn enqueue(&self, op: StructuralOp) {
-        self.queue.push(op);
-    }
-
-    fn drain_ops(&self) -> Vec<StructuralOp> {
-        self.queue.drain()
-    }
-
-    fn restore_ops(&self, ops: Vec<StructuralOp>) {
-        self.queue.restore(ops);
     }
 }
 
@@ -436,11 +457,44 @@ impl StructuralQueue for FrameStructuralQueue {
     fn len(&self) -> usize {
         self.queue.len()
     }
+}
 
-    fn enqueue(&self, op: StructuralOp) {
-        self.queue.push(op);
+/// Drains and applies one queue in FIFO order.
+///
+/// Returns how many operations ran. When the store is missing the drained ops
+/// go back at the front of `queue`, so an op is never silently dropped; each op
+/// sees the store state left by the previous one.
+fn apply_queue<Q: QueueDrain + StructuralQueue + Send + Sync + 'static>(
+    resources: &mut Resources,
+) -> usize {
+    // Drain through a scoped borrow: the owned ops end the borrow, so the
+    // store can be taken mutably below.
+    let Some(ops) = resources.get::<Q>().map(QueueDrain::drain_ops) else {
+        return 0;
+    };
+    if ops.is_empty() {
+        return 0;
     }
+    let Some(store) = resources.get_mut::<SmartStore>() else {
+        if let Some(queue) = resources.get::<Q>() {
+            queue.restore_ops(ops);
+        }
+        return 0;
+    };
+    let applied = ops.len();
+    for op in ops {
+        op(store);
+    }
+    applied
+}
 
+/// Drain/restore access to a concrete queue, kept private to this module.
+trait QueueDrain {
+    fn drain_ops(&self) -> Vec<StructuralOp>;
+    fn restore_ops(&self, ops: Vec<StructuralOp>);
+}
+
+impl QueueDrain for FixedStructuralQueue {
     fn drain_ops(&self) -> Vec<StructuralOp> {
         self.queue.drain()
     }
@@ -450,27 +504,14 @@ impl StructuralQueue for FrameStructuralQueue {
     }
 }
 
-/// Applies one drained queue in FIFO order.
-///
-/// `restore` re-queues `ops` at the front when the store is missing, so an op
-/// is never silently dropped; returns how many actually ran.
-fn apply_ops(
-    resources: &mut Resources,
-    ops: Vec<StructuralOp>,
-    restore: &dyn Fn(&mut Resources, Vec<StructuralOp>),
-) -> usize {
-    if ops.is_empty() {
-        return 0;
+impl QueueDrain for FrameStructuralQueue {
+    fn drain_ops(&self) -> Vec<StructuralOp> {
+        self.queue.drain()
     }
-    let Some(store) = resources.get_mut::<SmartStore>() else {
-        restore(resources, ops);
-        return 0;
-    };
-    let applied = ops.len();
-    for op in ops {
-        op(store);
+
+    fn restore_ops(&self, ops: Vec<StructuralOp>) {
+        self.queue.restore(ops);
     }
-    applied
 }
 
 /// Deferred structural ops queued by **fixed-step** (`Stage::Gameplay`)
@@ -542,25 +583,6 @@ pub fn register_structural_queues(resources: &mut Resources) {
     if resources.get::<FrameStructuralQueue>().is_none() {
         resources.insert(FrameStructuralQueue::new());
     }
-}
-
-/// Applies one queue singleton and reports how many ops ran.
-///
-/// The single implementation behind both public appliers: fetch, drain,
-/// apply FIFO, and restore at the front when the store is missing (ops are
-/// never silently dropped). Each op sees the store state left by the previous
-/// one, so a later `despawn` cancels an earlier queued insert for the same
-/// entity and vice versa.
-fn apply_queue<Q: StructuralQueue + Send + Sync + 'static>(resources: &mut Resources) -> usize {
-    let Some(queue) = resources.get::<Q>() else {
-        return 0;
-    };
-    let ops = queue.drain_ops();
-    apply_ops(resources, ops, &|resources, ops| {
-        if let Some(queue) = resources.get::<Q>() {
-            queue.restore_ops(ops);
-        }
-    })
 }
 
 /// Applies the fixed-step queue: called after **every** fixed tick.
@@ -1090,7 +1112,8 @@ mod tests {
             resources
                 .get::<FixedStructuralQueue>()
                 .expect("queue registered")
-                .enqueue(Box::new(move |store: &mut SmartStore| {
+                .queue
+                .push(Box::new(move |store: &mut SmartStore| {
                     let entity = store.create_entity();
                     store.insert(entity, value);
                     log.lock().expect("log").push(value);
@@ -1121,14 +1144,16 @@ mod tests {
             resources
                 .get::<FixedStructuralQueue>()
                 .expect("fixed queue")
-                .enqueue(Box::new(move |_store: &mut SmartStore| {
+                .queue
+                .push(Box::new(move |_store: &mut SmartStore| {
                     fixed_log.lock().expect("log").push("fixed");
                 }));
             let frame_log = frame_log.clone();
             resources
                 .get::<FrameStructuralQueue>()
                 .expect("frame queue")
-                .enqueue(Box::new(move |_store: &mut SmartStore| {
+                .queue
+                .push(Box::new(move |_store: &mut SmartStore| {
                     frame_log.lock().expect("log").push("frame");
                 }));
         }
@@ -1169,7 +1194,8 @@ mod tests {
             resources
                 .get::<FrameStructuralQueue>()
                 .expect("frame queue")
-                .enqueue(Box::new(move |_store: &mut SmartStore| {
+                .queue
+                .push(Box::new(move |_store: &mut SmartStore| {
                     log.lock().expect("log").push(1);
                 }));
         }
@@ -1199,14 +1225,12 @@ mod tests {
             .expect("store")
             .create_entity();
         let queue = resources.get::<FixedStructuralQueue>().expect("queue");
-        StructuralQueue::enqueue(
-            queue,
-            Box::new(move |store: &mut SmartStore| store.insert(entity, 7_u32)),
-        );
-        StructuralQueue::enqueue(
-            queue,
-            Box::new(move |store: &mut SmartStore| store.destroy_entity(entity)),
-        );
+        queue.queue.push(Box::new(move |store: &mut SmartStore| {
+            store.insert(entity, 7_u32)
+        }));
+        queue.queue.push(Box::new(move |store: &mut SmartStore| {
+            store.destroy_entity(entity)
+        }));
 
         assert_eq!(apply_fixed_structural_queue(&mut resources), 2);
         let store = resources.get::<SmartStore>().expect("store");

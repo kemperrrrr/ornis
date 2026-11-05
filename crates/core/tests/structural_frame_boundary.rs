@@ -1,12 +1,13 @@
 //! R4 frame boundary and registration contract (issue #115).
 //!
 //! The frame structural queue drains once per frame, between `PostFrame` and
-//! `Stage::Last`, and only accepts writers registered outside the fixed plan.
-//! The tick-boundary gates live in `structural_fixed_boundary.rs`.
+//! `Stage::Last`. The tick-boundary gates live in
+//! `structural_fixed_boundary.rs` and the registration guards (every
+//! registration path) in `structural_registration_guard.rs`.
 
 use ornis_core::{
-    Engine, Entity, FixedStep, Pack, Resources, Schedule, SmartStore, Stage, StructuralWriter,
-    System, SystemAccess,
+    Engine, Entity, FixedStep, FrameStep, Pack, PlanRole, Resources, Schedule, SmartStore, Stage,
+    StructuralWriter, System, SystemAccess,
     mutation::{
         FixedStructuralQueue, FrameStructuralQueue, StructuralQueue, apply_fixed_structural_queue,
         register_structural_queues,
@@ -141,17 +142,11 @@ fn ops_queued_in_last_stage_apply_on_the_next_frame() {
                 .writes::<FrameStructuralQueue>()
         }
         fn run(&self, resources: &Resources) {
-            let queue = resources
-                .get::<FrameStructuralQueue>()
-                .expect("queue registered by World");
             let store = resources.get::<SmartStore>().expect("store");
             let entity = store.create_entity();
-            ornis_core::mutation::StructuralQueue::enqueue(
-                queue,
-                Box::new(move |store: &mut SmartStore| {
-                    store.insert(entity, 7_u32);
-                }),
-            );
+            // Through the writer, like any real producer: the queue exposes no
+            // public enqueue, so a system cannot bypass its declared access.
+            StructuralWriter::<FrameStep>::fetch(resources).insert(entity, 7_u32);
             *self.0.lock().expect("count lock") += 1;
         }
     }
@@ -194,31 +189,6 @@ fn ops_queued_in_last_stage_apply_on_the_next_frame() {
         "the pending op applies at the next frame boundary"
     );
     assert_eq!(*runs.lock().expect("count lock"), 2);
-}
-
-/// Registration guard: a fixed writer in a once-per-frame stage panics with a
-/// message naming the system and the stage, instead of producing a
-/// frame-dependent simulation.
-#[test]
-#[should_panic(expected = "StructuralWriter<FixedStep>")]
-fn fixed_writer_outside_gameplay_is_rejected_at_registration() {
-    let mut engine = Engine::new();
-    engine.add_stage_system(Stage::PostFrame, QueueBuffFixedSystem::new());
-}
-
-/// Registration guard: a frame writer inside the fixed plan would apply at a
-/// frame-dependent moment, so it is rejected too.
-#[test]
-#[should_panic(expected = "StructuralWriter<FrameStep>")]
-fn frame_writer_inside_gameplay_is_rejected_at_registration() {
-    #[smart_system]
-    fn frame_writer(u: &mut Mote, #[entity] e: Entity, ops: StructuralWriter<FrameStep>) {
-        u.hp += 1.0;
-        ops.insert(e, Buff { amount: 1.0 });
-    }
-
-    let mut engine = Engine::new();
-    engine.add_stage_system(Stage::Gameplay, FrameWriterSystem::new());
 }
 
 /// The two kinds address different queues, so `PostFrame` frame writers and
@@ -269,7 +239,10 @@ fn spawn_deferred_reserves_the_id_at_apply() {
     let (mut resources, _entity) = seeded_one_mote();
     let probe = DeferredProbe(Arc::new(Mutex::new(None)));
     resources.insert(probe.clone());
-    let mut schedule = Schedule::new();
+    // The fixed queue's apply is what this test drives, so the schedule
+    // declares the fixed plan — the registration guard would reject a fixed
+    // writer on a frame-role schedule.
+    let mut schedule = Schedule::new().with_plan_role(PlanRole::Fixed);
     schedule.add_system(DeferredSpawnSystem::new(probe));
     schedule.run(&resources);
 

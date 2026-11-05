@@ -23,10 +23,11 @@
 //! queueing system across parallel levels in registration order — the source
 //! of the queues' deterministic FIFO.
 
+use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
 
 use crate::Entity;
-use crate::mutation::{FixedStructuralQueue, FrameStructuralQueue, StructuralQueue};
+use crate::mutation::{FixedStructuralQueue, FrameStructuralQueue, QueueRef, StructuralQueue};
 use crate::schedule::{Resources, SystemAccess};
 use crate::smart_store::{Pack, SmartStore};
 
@@ -57,6 +58,13 @@ pub trait Kind: sealed::Sealed {
     /// (`Stage::Gameplay`) plan. The engine rejects a mismatch at
     /// registration.
     const IS_FIXED: bool;
+
+    /// Builds the type-erased queue handle the writer enqueues through.
+    ///
+    /// `#[doc(hidden)]`: this is plumbing, not API. It is safe to expose
+    /// because [`QueueRef`] can only be *read* from outside the crate.
+    #[doc(hidden)]
+    fn queue_ref(queue: &Self::Queue) -> QueueRef<'_>;
 }
 
 mod sealed {
@@ -68,11 +76,19 @@ mod sealed {
 impl Kind for FixedStep {
     type Queue = FixedStructuralQueue;
     const IS_FIXED: bool = true;
+
+    fn queue_ref(queue: &Self::Queue) -> QueueRef<'_> {
+        QueueRef::fixed(queue)
+    }
 }
 
 impl Kind for FrameStep {
     type Queue = FrameStructuralQueue;
     const IS_FIXED: bool = false;
+
+    fn queue_ref(queue: &Self::Queue) -> QueueRef<'_> {
+        QueueRef::frame(queue)
+    }
 }
 
 /// Deferred structural-ops parameter, generic over *when* it applies.
@@ -87,8 +103,9 @@ impl Kind for FrameStep {
 /// `Copy` (shared borrows only): the generated per-entity loop passes
 /// parameters by value, so they must survive more than one iteration.
 pub struct StructuralWriter<'a, K: Kind = FixedStep> {
-    queue: &'a K::Queue,
+    queue: QueueRef<'a>,
     store: &'a SmartStore,
+    kind: PhantomData<K>,
 }
 
 impl<K: Kind> Clone for StructuralWriter<'_, K> {
@@ -120,7 +137,11 @@ impl<'a, K: Kind> StructuralWriter<'a, K> {
         let store = resources
             .get::<SmartStore>()
             .expect("smart_system: missing SmartStore resource");
-        Self { queue, store }
+        Self {
+            queue: K::queue_ref(queue),
+            store,
+            kind: PhantomData,
+        }
     }
 
     /// Queues creation of an entity carrying `bundle` and returns its handle.
