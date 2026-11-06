@@ -165,3 +165,26 @@ pub(crate) struct GbufferOutput {
     #[wgsl(location = 6)]
     pub previous_depth: u32,
 }
+
+/// Outline (editor selection/hover) vertex output: clip position plus the
+/// per-instance silhouette color.
+#[derive(Clone, Copy, Debug, WgslInterface)]
+#[wgsl(name = "OutlineVertexOutput")]
+pub(crate) struct OutlineVertexOutput {
+    /// Clip-space position of the expanded hull.
+    #[wgsl(builtin = "position")]
+    pub clip_position: [f32; 4],
+    /// Linear RGB silhouette color (same value for every vertex of an
+    /// instance; interpolation is a no-op).
+    #[wgsl(location = 0)]
+    pub color: [f32; 3],
+}
+
+/// Outline fragment input: the silhouette color from the vertex stage.
+#[derive(Clone, Copy, Debug, WgslInterface)]
+#[wgsl(name = "OutlineFragmentInput")]
+pub(crate) struct OutlineFragmentInput {
+    /// Linear RGB silhouette color.
+    #[wgsl(location = 0)]
+    pub color: [f32; 3],
+}

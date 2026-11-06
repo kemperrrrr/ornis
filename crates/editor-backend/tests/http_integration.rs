@@ -149,6 +149,18 @@ fn remote_editor_http_endpoints() {
     assert_eq!(ack["request_id"], 100);
     assert_eq!(ack["error"], "request body is not valid JSON");
 
+    // Typed selection posts follow the same ACK contract; the server
+    // allocates the next id when the client supplies none.
+    let (code, body) = http_post(
+        port,
+        "/api/command",
+        r#"{"type":"select","data":{"id":1,"generation":0}}"#,
+    );
+    assert_eq!(code, 200);
+    let ack: serde_json::Value = serde_json::from_str(&body).expect("select ack JSON");
+    assert_eq!(ack["accepted"], true);
+    assert_eq!(ack["request_id"], 101);
+
     // Unknown path → 404.
     let (status, _) = http_get(port, "/no-such-thing");
     assert_eq!(status, 404);
@@ -608,6 +620,39 @@ fn remote_editor_websocket_forwards_input_frames_to_game() {
     {
         UiCommand::Input { input } => assert_eq!(input.pressed_keys, vec![87]),
         _ => panic!("expected Input command"),
+    }
+
+    editor.stop();
+}
+
+#[test]
+fn remote_editor_websocket_forwards_select_frames_to_game() {
+    let port = free_port();
+    let (cmd_tx, cmd_rx) = unbounded::<UiCommand>();
+    let (_ev_tx, ev_rx) = unbounded::<GameEvent>();
+    let mut editor = RemoteEditor::start(port, cmd_tx, ev_rx);
+    std::thread::sleep(Duration::from_millis(200));
+
+    // The replica sends its picking result as a command envelope on the
+    // same bidirectional socket that carries input snapshots.
+    let mut stream = websocket_connect(port, "/api/events?after=0");
+    send_masked_client_frame(
+        &mut stream,
+        0x1,
+        br#"{"type":"select","data":{"id":4,"generation":2}}"#,
+    );
+    match cmd_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("select forwarded to game")
+    {
+        UiCommand::Select {
+            entity_id,
+            generation,
+        } => {
+            assert_eq!(entity_id, Some(4));
+            assert_eq!(generation, Some(2));
+        }
+        _ => panic!("expected Select command"),
     }
 
     editor.stop();

@@ -18,13 +18,13 @@ use crate::frame_passes::{
     CompositeDeferredBloom, CompositeForward, CompositeForwardBloom, CompositeHybrid,
     CompositeHybridBloom, Depth, EdgeFilterPass, FogPass, FogPlacement, FogWiring, Forward,
     FromDeferred, FromForward, GbufferMotionPass, GbufferPass, Hdr, HdrFwd, LdrLayer,
-    LightingAoPass, LightingPass, MaterialId, MaterialParams, Motion, Normal, OwnsDepth,
-    PreviousDepth, SharedDepth, TaaPass, Target, WorldPosition,
+    LightingAoPass, LightingPass, MaterialId, MaterialParams, Motion, Normal, OutlineState,
+    OwnsDepth, PreviousDepth, SharedDepth, TaaPass, Target, WorldPosition,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::gpu_resources::FrameCommandBuffers;
 use crate::mesh::Mesh;
-use crate::renderer::{CustomGbufferDraw, Renderer3D};
+use crate::renderer::{CustomGbufferDraw, Renderer3D, SINGLE_SAMPLE_COUNT};
 use crate::schedule_bridge::ProjectionError;
 use crate::system::{Frame, SystemSet};
 use crate::transient_pool::{
@@ -466,6 +466,9 @@ pub struct RenderFrame3D {
     /// against, whose pipelines and resolve targets are built for the same
     /// count. Single-sample resources stay 1x in all modes.
     sample_count: u32,
+    /// Opt-in editor outline flags (see [`OutlineState`]); `None` on plans
+    /// that do not overlay the outline in the composite pass.
+    outline: Option<Arc<OutlineState>>,
 }
 
 /// Which lighting technique the plan wires up. The choice is expressed
@@ -551,6 +554,7 @@ struct FramePassWiring {
     fog: Option<FogWiring>,
     ao: Option<crate::ao::AoWiring>,
     aa: Option<AaWiring>,
+    outline: Option<Arc<OutlineState>>,
 }
 
 impl RenderFrame3D {
@@ -755,6 +759,59 @@ impl RenderFrame3D {
         aa: AaWiring,
         sample_count: u32,
     ) -> Self {
+        Self::new_with_aa_impl(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            aa,
+            sample_count,
+            None,
+        )
+    }
+
+    /// Like [`new_with_aa`](Self::new_with_aa), plus the editor outline
+    /// (inverted-hull silhouettes driven by
+    /// [`set_outline_flags`](Self::set_outline_flags)).
+    ///
+    /// The outline is drawn inside the composite render pass, after the
+    /// fullscreen mix and before the AA pass, so the filter also smooths
+    /// the silhouette edges. Without flags the composite records no
+    /// outline commands (and keeps its depth-less attachment), leaving the
+    /// frame pixel-identical to [`new_with_aa`](Self::new_with_aa). The
+    /// overlay needs a single-sample present layer and depth, so it is not
+    /// wired for [`AntiAliasMode::Msaa`].
+    #[must_use]
+    pub fn new_with_aa_outline(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        aa: AaWiring,
+    ) -> Self {
+        Self::new_with_aa_impl(
+            surface_format,
+            surface_size,
+            technique,
+            bloom,
+            aa,
+            crate::renderer::SINGLE_SAMPLE_COUNT,
+            Some(Arc::new(OutlineState::new())),
+        )
+    }
+
+    /// Shared AA wiring: picks the presented layer ([`LdrLayer`] with AA,
+    /// [`Target`] without) and optionally overlays the outline in it.
+    // qual:allow(iosp) reason: "the runtime AA mode selects distinct generic target types in the typed render graph"
+    fn new_with_aa_impl(
+        surface_format: wgpu::TextureFormat,
+        surface_size: (u32, u32),
+        technique: Technique,
+        bloom: crate::flags::Bloom,
+        aa: AaWiring,
+        sample_count: u32,
+        outline: Option<Arc<OutlineState>>,
+    ) -> Self {
         let sample_count = match aa.mode {
             AntiAliasMode::Off => crate::renderer::SINGLE_SAMPLE_COUNT,
             AntiAliasMode::Msaa => crate::renderer::normalize_sample_count(sample_count),
@@ -770,6 +827,7 @@ impl RenderFrame3D {
                 bloom,
                 FramePassWiring {
                     aa: Some(aa),
+                    outline,
                     ..FramePassWiring::default()
                 },
                 sample_count,
@@ -782,10 +840,23 @@ impl RenderFrame3D {
                 bloom,
                 FramePassWiring {
                     aa: Some(aa),
+                    outline,
                     ..FramePassWiring::default()
                 },
                 sample_count,
             )
+        }
+    }
+
+    /// Replaces the per-instance outline flags for the next frame.
+    ///
+    /// One `u32` per uploaded instance: `0` = none, `1` = hover, `2` =
+    /// selected. Plans built without [`new_with_aa_outline`](Self::new_with_aa_outline)
+    /// ignore the call. The composite pass uploads them on its next
+    /// [`render`](Self::render).
+    pub fn set_outline_flags(&self, flags: &[u32]) {
+        if let Some(state) = &self.outline {
+            state.set_flags(flags);
         }
     }
 
@@ -877,30 +948,46 @@ impl RenderFrame3D {
         ids
     }
 
-    /// Register the technique- and bloom-specific composite node.
+    /// Composite pass with the optional outline overlay for this plan.
+    fn composite_system<M: crate::frame_passes::CompositeMode, O: crate::system::FrameResource>(
+        outline: &Option<(Arc<OutlineState>, wgpu::TextureFormat, u32)>,
+    ) -> Composite<M, O> {
+        match outline {
+            Some((state, format, sample_count)) => {
+                Composite::with_outline(Arc::clone(state), *format, *sample_count)
+            }
+            None => Composite::new(),
+        }
+    }
+
+    /// Register the technique- and bloom-specific composite node, optionally
+    /// with the editor outline overlay in the same pass.
     fn register_composite<O: crate::system::FrameResource>(
         systems: &mut SystemSet,
         technique: Technique,
         bloom: crate::flags::Bloom,
+        outline: Option<(Arc<OutlineState>, wgpu::TextureFormat, u32)>,
     ) {
         match (technique, bloom) {
             (Technique::Deferred, Bloom::On) => {
-                systems.add_system(Composite::<CompositeDeferredBloom, O>::new());
+                systems.add_system(Self::composite_system::<CompositeDeferredBloom, O>(
+                    &outline,
+                ));
             }
             (Technique::Deferred, Bloom::Off) => {
-                systems.add_system(Composite::<CompositeDeferred, O>::new());
+                systems.add_system(Self::composite_system::<CompositeDeferred, O>(&outline));
             }
             (Technique::Forward, Bloom::On) => {
-                systems.add_system(Composite::<CompositeForwardBloom, O>::new());
+                systems.add_system(Self::composite_system::<CompositeForwardBloom, O>(&outline));
             }
             (Technique::Forward, Bloom::Off) => {
-                systems.add_system(Composite::<CompositeForward, O>::new());
+                systems.add_system(Self::composite_system::<CompositeForward, O>(&outline));
             }
             (Technique::Hybrid, Bloom::On) => {
-                systems.add_system(Composite::<CompositeHybridBloom, O>::new());
+                systems.add_system(Self::composite_system::<CompositeHybridBloom, O>(&outline));
             }
             (Technique::Hybrid, Bloom::Off) => {
-                systems.add_system(Composite::<CompositeHybrid, O>::new());
+                systems.add_system(Self::composite_system::<CompositeHybrid, O>(&outline));
             }
         }
     }
@@ -917,7 +1004,12 @@ impl RenderFrame3D {
         passes: FramePassWiring,
         sample_count: u32,
     ) -> Self {
-        let FramePassWiring { fog, ao, aa } = passes;
+        let FramePassWiring {
+            fog,
+            ao,
+            aa,
+            outline,
+        } = passes;
         // Register resources by type in the plan's stable declaration order.
         let mut systems = SystemSet::new();
         systems.set_sample_count(sample_count);
@@ -961,7 +1053,11 @@ impl RenderFrame3D {
         {
             systems.add_system(FogPass::new(state));
         }
-        Self::register_composite::<O>(&mut systems, technique, bloom);
+        let outline_wiring = outline
+            .clone()
+            .filter(|_| sample_count == SINGLE_SAMPLE_COUNT)
+            .map(|state| (state, surface_format, sample_count));
+        Self::register_composite::<O>(&mut systems, technique, bloom, outline_wiring);
         // The AA pass filters the composite and presents the result.
         Self::register_anti_alias(&mut systems, aa);
         // After-composite fog writes the presented frame.
@@ -981,6 +1077,7 @@ impl RenderFrame3D {
             technique,
             anti_alias: aa.map_or(AntiAliasMode::Msaa, |wiring| wiring.mode),
             sample_count,
+            outline,
         }
     }
 
@@ -1393,6 +1490,16 @@ mod tests {
         assert_eq!(Technique::Hybrid.composite_mode(), 2);
     }
 
+    /// Pass names of a built plan (shared by the graph-shape tests).
+    fn pass_names_of(plan: &mut RenderFrame3D) -> Vec<String> {
+        plan.systems
+            .build()
+            .passes
+            .iter()
+            .map(|pass| pass.name.clone())
+            .collect()
+    }
+
     #[test]
     fn technique_wires_expected_passes() {
         let pass_names = |technique: Technique| {
@@ -1402,12 +1509,7 @@ mod tests {
                 technique,
                 Bloom::On,
             );
-            plan.systems
-                .build()
-                .passes
-                .iter()
-                .map(|p| p.name.clone())
-                .collect::<Vec<_>>()
+            pass_names_of(&mut plan)
         };
         assert_eq!(
             pass_names(Technique::Forward),
@@ -1747,6 +1849,36 @@ mod tests {
     }
 
     #[test]
+    fn outline_plan_shares_the_composite_pass() {
+        // The outline is drawn inside the composite pass, so the graph shape
+        // is identical to the plain plans; only the composite attachments
+        // change when flags are set. AA still filters the silhouette and TAA
+        // still reads the depth the composite pass preserves.
+        let names_of = |mode: AntiAliasMode| {
+            let mut plan = RenderFrame3D::new_with_aa_outline(
+                wgpu::TextureFormat::Rgba8Unorm,
+                (32, 32),
+                Technique::Hybrid,
+                Bloom::Off,
+                AaWiring::new(mode),
+            );
+            pass_names_of(&mut plan)
+        };
+        assert_eq!(
+            names_of(AntiAliasMode::Fxaa),
+            vec!["gbuffer", "lighting", "forward", "composite", "edge_filter"]
+        );
+        assert_eq!(
+            names_of(AntiAliasMode::Taa),
+            vec!["gbuffer", "lighting", "forward", "composite", "taa"]
+        );
+        assert_eq!(
+            names_of(AntiAliasMode::Off),
+            vec!["gbuffer", "lighting", "forward", "composite"]
+        );
+    }
+
+    #[test]
     fn anti_alias_plan_filters_the_composited_layer() {
         // The composite writes the intermediate layer, the anti-aliasing
         // pass reads it and presents the target: the presented image is
@@ -1869,11 +2001,8 @@ mod tests {
             .expect("composite exists");
         assert_eq!(
             composite.reads,
-            vec![forward.ids.hdr_fwd, forward.ids.target]
-                .into_iter()
-                .filter(|id| *id != forward.ids.target)
-                .collect::<Vec<_>>(),
-            "composite reads the live layers only"
+            vec![forward.ids.hdr_fwd, forward.ids.depth],
+            "composite reads the live layers and the preserved depth"
         );
         assert!(!composite.reads.contains(&forward.ids.hdr));
         // hdr and the gbuffer targets are never touched → not pooled.
@@ -2137,8 +2266,9 @@ mod tests {
             composite = composite.read(ids.hdr_fwd);
         }
         if bloom.is_on() {
-            composite.read(ids.bloom0);
+            composite = composite.read(ids.bloom0);
         }
+        composite.read(ids.depth);
     }
 
     /// The pre-S2 wiring, verbatim, as one plan: resources then passes.
@@ -2256,7 +2386,7 @@ mod tests {
             (rl.first_use, rl.last_use)
         };
         // gbuffer=0, lighting=1, forward=2, bloom chain 3..8, composite=8.
-        assert_eq!(window(ids.depth), (0, 2), "depth: gbuffer → forward");
+        assert_eq!(window(ids.depth), (0, 8), "depth: gbuffer → composite");
         assert_eq!(window(ids.hdr), (1, 8));
         assert_eq!(window(ids.hdr_fwd), (2, 8));
         assert_eq!(window(ids.bloom0), (3, 8));

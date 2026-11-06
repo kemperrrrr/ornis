@@ -512,6 +512,7 @@ impl GameApp {
             UiCommand::CreateEntity => EditorCommand::CreateEntity,
             UiCommand::DestroyEntity { .. } => EditorCommand::DestroyEntity,
             UiCommand::SetComponent { .. } => EditorCommand::SetComponent,
+            UiCommand::Select { .. } => EditorCommand::Select,
             UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
             UiCommand::Input { .. } => EditorCommand::Input,
             UiCommand::WithRequestId { command, .. } => Self::command_name(command),

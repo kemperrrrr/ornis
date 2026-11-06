@@ -37,7 +37,9 @@ use tungstenite::protocol::frame::coding::CloseCode;
 #[cfg(not(target_arch = "wasm32"))]
 use tungstenite::{Bytes, Message, Utf8Bytes, WebSocket, accept_hdr_with_config};
 
-use crate::ipc::{EditorCommand, EventSeq, GameEvent, RequestId, SetComponentPayload, UiCommand};
+use crate::ipc::{
+    EditorCommand, EventSeq, GameEvent, RequestId, SelectPayload, SetComponentPayload, UiCommand,
+};
 
 /// HTTP accept poll interval (ms).
 const HTTP_ACCEPT_POLL_MS: u64 = 100;
@@ -627,9 +629,10 @@ fn sniff_route(head: &[u8]) -> Option<ConnectionRoute> {
 
 /// Serve one WebSocket `/api/events` connection over our own `TcpStream`.
 /// Bidirectional: the server pushes replay records past the initial cursor
-/// and newly appended ones; client text/binary frames carry `BrowserInput`
-/// snapshots forwarded to the game thread. Idle connections get periodic
-/// pings; server shutdown sends close code 1001 (`Away`).
+/// and newly appended ones; client text/binary frames carry command
+/// envelopes or `BrowserInput` snapshots forwarded to the game thread.
+/// Idle connections get periodic pings; server shutdown sends close code
+/// 1001 (`Away`).
 ///
 /// `#[allow]` below: tungstenite's `Callback` fixes the handshake error
 /// type to `ErrorResponse` (a full HTTP response, inherently large), so no
@@ -706,18 +709,18 @@ fn serve_events_stream(
 }
 
 /// Read one inbound message without blocking the push loop (the socket has
-/// `WS_READ_TIMEOUT`): forward data frames as `BrowserInput`, drive
-/// tungstenite's automatic pong/close replies, and report whether serving
-/// should continue.
+/// `WS_READ_TIMEOUT`): forward data frames as commands or `BrowserInput`,
+/// drive tungstenite's automatic pong/close replies, and report whether
+/// serving should continue.
 #[cfg(not(target_arch = "wasm32"))]
 fn poll_inbound(ws: &mut EventsSocket, game_tx: &Sender<UiCommand>) -> ServeAction {
     match ws.read() {
         Ok(Message::Text(payload)) => {
-            forward_browser_input(payload.as_bytes(), game_tx);
+            forward_client_frame(payload.as_bytes(), game_tx);
             ServeAction::KeepServing
         }
         Ok(Message::Binary(payload)) => {
-            forward_browser_input(&payload, game_tx);
+            forward_client_frame(&payload, game_tx);
             ServeAction::KeepServing
         }
         // Pings are answered with a queued pong by tungstenite itself; the
@@ -743,13 +746,28 @@ fn poll_inbound(ws: &mut EventsSocket, game_tx: &Sender<UiCommand>) -> ServeActi
     }
 }
 
-/// Forward one client data frame as a `BrowserInput` snapshot. Garbage
-/// payloads are dropped like on the `POST /api/input` endpoint.
+/// Forward one client data frame to the game thread. Garbage payloads are
+/// dropped like on the POST endpoints.
 #[cfg(not(target_arch = "wasm32"))]
-fn forward_browser_input(payload: &[u8], game_tx: &Sender<UiCommand>) {
-    if let Some(input) = parse_browser_input(payload) {
-        let _ = game_tx.send(UiCommand::Input { input });
+fn forward_client_frame(payload: &[u8], game_tx: &Sender<UiCommand>) {
+    if let Some(command) = parse_client_frame(payload) {
+        let _ = game_tx.send(command);
     }
+}
+
+/// Parse one client WS data frame: a `{"type": …, "data": …}` command
+/// envelope takes precedence, otherwise the frame is a `BrowserInput`
+/// snapshot (the legacy, input-only shape). The update path is the same
+/// as `POST /api/command` / `POST /api/input`, so WS clients (`select`
+/// from the replica) are validated exactly like HTTP callers.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_client_frame(payload: &[u8]) -> Option<UiCommand> {
+    if let Ok(text) = std::str::from_utf8(payload)
+        && let Some(command) = parse_command_payload(text)
+    {
+        return Some(command);
+    }
+    parse_browser_input(payload).map(|input| UiCommand::Input { input })
 }
 
 /// Push replay records past `cursor` as one text frame. `Err` means the
@@ -1416,11 +1434,11 @@ pub fn parse_command_payload(body: &str) -> Option<UiCommand> {
     build_command(cmd_type, cmd.get("data"))
 }
 
-/// Route a posted command to its `UiCommand`: `set_component` is the typed
-/// generic lane (registry, via [`SetComponentPayload`]); anything else is a
-/// Custom pass-through keyed by the typed [`EditorCommand`] tag.
-/// Malformed `set_component` shapes are dropped (`None`) like any garbage
-/// on this endpoint.
+/// Route a posted command to its `UiCommand`: `set_component` and `select`
+/// are the typed lanes (via [`SetComponentPayload`]/[`SelectPayload`]);
+/// anything else is a Custom pass-through keyed by the typed
+/// [`EditorCommand`] tag. Malformed typed shapes are dropped (`None`) like
+/// any garbage on this endpoint.
 ///
 /// `save_scene`/`load_scene` additionally fail fast on sandbox violations:
 /// a `path` escaping `<workspace>/assets` or `<workspace>/editor` is
@@ -1430,6 +1448,9 @@ pub fn parse_command_payload(body: &str) -> Option<UiCommand> {
 fn build_command(cmd_type: &str, data: Option<&serde_json::Value>) -> Option<UiCommand> {
     if cmd_type == EditorCommand::SetComponent.as_str() {
         return parse_set_component(data);
+    }
+    if cmd_type == EditorCommand::Select.as_str() {
+        return parse_select(data);
     }
     if cmd_type == "save_scene" || cmd_type == "load_scene" {
         let raw = data
@@ -1457,6 +1478,18 @@ fn build_command(cmd_type: &str, data: Option<&serde_json::Value>) -> Option<UiC
 fn parse_set_component(data: Option<&serde_json::Value>) -> Option<UiCommand> {
     let data = data?;
     let payload: SetComponentPayload = serde_json::from_value(data.clone()).ok()?;
+    UiCommand::try_from(payload).ok()
+}
+
+/// Build the typed select from `data` of a `select` post:
+/// `{"id": u32, "generation"?: u32}`; an absent/`null` id clears the
+/// selection. `None` on any schema violation, like `set_component`.
+fn parse_select(data: Option<&serde_json::Value>) -> Option<UiCommand> {
+    let data = data
+        .cloned()
+        .filter(|value| !value.is_null())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let payload: SelectPayload = serde_json::from_value(data).ok()?;
     UiCommand::try_from(payload).ok()
 }
 
@@ -1844,6 +1877,50 @@ mod tests {
     }
 
     #[test]
+    fn build_command_select_lane() {
+        let data = serde_json::json!({"id": 7u32, "generation": 2u32});
+        match build_command("select", Some(&data)) {
+            Some(UiCommand::Select {
+                entity_id,
+                generation,
+            }) => {
+                assert_eq!(entity_id, Some(7));
+                assert_eq!(generation, Some(2));
+            }
+            other => panic!("expected typed select, got {other:?}"),
+        }
+        // Empty payload clears the selection; a generation alone is invalid.
+        assert!(matches!(
+            build_command("select", None),
+            Some(UiCommand::Select {
+                entity_id: None,
+                generation: None
+            })
+        ));
+        assert!(build_command("select", Some(&serde_json::json!({}))).is_some());
+        assert!(build_command("select", Some(&serde_json::json!({"generation": 3}))).is_none());
+        assert!(build_command("select", Some(&serde_json::json!({"id": "seven"}))).is_none());
+    }
+
+    #[test]
+    fn client_frame_routes_commands_and_input() {
+        let command = parse_client_frame(br#"{"type":"select","data":{"id":3,"generation":1}}"#);
+        assert!(matches!(
+            command,
+            Some(UiCommand::Select {
+                entity_id: Some(3),
+                generation: Some(1)
+            })
+        ));
+        let input = parse_client_frame(br#"{"pressed_keys":[87]}"#);
+        assert!(matches!(
+            input,
+            Some(UiCommand::Input { input }) if input.pressed_keys == vec![87]
+        ));
+        assert!(parse_client_frame(b"not json").is_none());
+    }
+
+    #[test]
     fn build_command_custom_passthrough() {
         let data = serde_json::json!({"foo": "bar"});
         let cmd = build_command("create_entity", Some(&data)).expect("custom");
@@ -1893,6 +1970,20 @@ mod tests {
         assert!(parse_command_payload(r#"{"foo":1}"#).is_none());
         assert!(parse_command_payload(r#"{"type":7}"#).is_none());
         assert!(parse_command_payload(r#"{"type":"set_component","data":{"id":1}}"#).is_none());
+        assert!(matches!(
+            parse_command_payload(r#"{"type":"select","data":{"id":1}}"#),
+            Some(UiCommand::Select {
+                entity_id: Some(1),
+                generation: None
+            })
+        ));
+        assert!(matches!(
+            parse_command_payload(r#"{"type":"select"}"#),
+            Some(UiCommand::Select {
+                entity_id: None,
+                generation: None
+            })
+        ));
     }
 
     // ── post_command ───────────────────────────────────────────────────────

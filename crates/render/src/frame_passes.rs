@@ -16,6 +16,7 @@ use crate::system::{
 };
 use crate::transient_pool::{SizePolicy, TextureSpec};
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 /// Default fog tint (linear RGB).
 const DEFAULT_FOG_RGB: [f32; 3] = [0.5, 0.6, 0.7];
 /// Default fog density (1/m).
@@ -789,6 +790,14 @@ impl<I: BrightInput> FramePass for BloomBright<I> {
 // ── composite: six modes = (technique) × (bloom on/off) ──────────────
 
 /// Which HDR layers exist and whether the bloom chain feeds the mix.
+///
+/// Every mode also reads [`Depth`]: the optional outline overlay attaches
+/// it in the composite pass. Plans without the overlay keep the same GPU
+/// work and passes, but the depth resource's lifetime extends to composite,
+/// so the transient pool cannot recycle it earlier (a full-res depth
+/// texture, 4x under MSAA). The alternative — six extra outline-only mode
+/// types — would duplicate the mode matrix for a read that costs no GPU
+/// work unless the overlay is active.
 pub trait CompositeMode: Sized + 'static {
     /// This mode's live layers (dead ones bind a zeroed view instead).
     type Reads: AccessSet + for<'a> ViewsFor<'a>;
@@ -812,7 +821,7 @@ pub trait CompositeMode: Sized + 'static {
 /// Deferred + bloom.
 pub struct CompositeDeferredBloom;
 impl CompositeMode for CompositeDeferredBloom {
-    type Reads = (Read<Hdr>, Read<Bloom0>);
+    type Reads = (Read<Hdr>, Read<Bloom0>, Read<Depth>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
     fn inputs<'a, P: FramePass>(
@@ -835,7 +844,7 @@ impl CompositeMode for CompositeDeferredBloom {
 /// Deferred, bloom culled.
 pub struct CompositeDeferred;
 impl CompositeMode for CompositeDeferred {
-    type Reads = (Read<Hdr>,);
+    type Reads = (Read<Hdr>, Read<Depth>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Deferred;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
     fn inputs<'a, P: FramePass>(
@@ -858,7 +867,7 @@ impl CompositeMode for CompositeDeferred {
 /// Hybrid + bloom: both HDR layers and the bloom chain are live.
 pub struct CompositeHybridBloom;
 impl CompositeMode for CompositeHybridBloom {
-    type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Bloom0>);
+    type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Bloom0>, Read<Depth>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
     fn inputs<'a, P: FramePass>(
@@ -882,7 +891,7 @@ impl CompositeMode for CompositeHybridBloom {
 /// Hybrid, bloom culled.
 pub struct CompositeHybrid;
 impl CompositeMode for CompositeHybrid {
-    type Reads = (Read<Hdr>, Read<HdrFwd>);
+    type Reads = (Read<Hdr>, Read<HdrFwd>, Read<Depth>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Hybrid;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
     fn inputs<'a, P: FramePass>(
@@ -907,7 +916,7 @@ impl CompositeMode for CompositeHybrid {
 /// Forward-only + bloom.
 pub struct CompositeForwardBloom;
 impl CompositeMode for CompositeForwardBloom {
-    type Reads = (Read<HdrFwd>, Read<Bloom0>);
+    type Reads = (Read<HdrFwd>, Read<Bloom0>, Read<Depth>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::On;
     fn inputs<'a, P: FramePass>(
@@ -932,7 +941,7 @@ impl CompositeMode for CompositeForwardBloom {
 /// Forward-only, bloom culled.
 pub struct CompositeForward;
 impl CompositeMode for CompositeForward {
-    type Reads = (Read<HdrFwd>,);
+    type Reads = (Read<HdrFwd>, Read<Depth>);
     const TECHNIQUE: crate::flags::CompositeTechnique = crate::flags::CompositeTechnique::Forward;
     const BLOOM: crate::flags::Bloom = crate::flags::Bloom::Off;
     fn inputs<'a, P: FramePass>(
@@ -1339,19 +1348,51 @@ impl FramePass for EdgeFilterPass {
 /// plans write the intermediate [`LdrLayer`] instead, so the
 /// anti-aliasing pass can filter the composited image before it reaches
 /// the screen.
-pub struct Composite<M: CompositeMode, O: FrameResource = Target>(PhantomData<fn() -> (M, O)>);
+pub struct Composite<M: CompositeMode, O: FrameResource = Target> {
+    outline: Option<CompositeOutline>,
+    _mode: PhantomData<fn() -> (M, O)>,
+}
+
+/// Outline wiring of a composite pass (selected only by outline plans).
+struct CompositeOutline {
+    state: Arc<OutlineState>,
+    format: wgpu::TextureFormat,
+    sample_count: u32,
+}
+
 impl<M: CompositeMode, O: FrameResource> Composite<M, O> {
-    /// Value constructor: a bare struct path is not a value (E0423).
+    /// Value constructor without the outline overlay.
     pub fn new() -> Self {
-        Self(PhantomData)
+        Self {
+            outline: None,
+            _mode: PhantomData,
+        }
+    }
+
+    /// Composite plus the editor outline overlay in the same render pass:
+    /// the fullscreen mix runs first, then the selected hulls draw over it.
+    pub fn with_outline(
+        state: Arc<OutlineState>,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        Self {
+            outline: Some(CompositeOutline {
+                state,
+                format,
+                sample_count,
+            }),
+            _mode: PhantomData,
+        }
     }
 }
 
 impl<M: CompositeMode, O: FrameResource> Default for Composite<M, O> {
     fn default() -> Self {
-        Self(PhantomData)
+        Self::new()
     }
 }
+
 impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
     type Reads = M::Reads;
     type Writes = (Write<O>,);
@@ -1365,13 +1406,76 @@ impl<M: CompositeMode, O: FrameResource> FramePass for Composite<M, O> {
         let Some(inputs) = M::inputs(&views, frame.renderer, target) else {
             return;
         };
-        frame.renderer.render_composite(
-            frame.device,
-            frame.queue,
-            frame.encoder,
-            inputs,
-            frame.renderer.frame_dt_seconds(),
-        );
+        let dt = frame.renderer.frame_dt_seconds();
+        if let Some(outline) = &self.outline {
+            let flags = outline.state.snapshot();
+            // A missing depth view must not leave the frame unpainted:
+            // fall through to the plain composite below.
+            if !flags.is_empty()
+                && let Some(depth) = views.get::<Depth>()
+            {
+                frame.renderer.render_composite_with_outline(
+                    frame.device,
+                    frame.queue,
+                    frame.encoder,
+                    inputs,
+                    crate::renderer::outline::OutlineCompositeInputs {
+                        depth,
+                        mesh: frame.mesh,
+                        instance_count: frame.instance_count,
+                        format: outline.format,
+                        sample_count: outline.sample_count,
+                        flags: &flags,
+                        dt_seconds: dt,
+                    },
+                );
+                return;
+            }
+        }
+        frame
+            .renderer
+            .render_composite(frame.device, frame.queue, frame.encoder, inputs, dt);
+    }
+}
+
+/// Per-instance outline flags shared between the host and the composite
+/// overlay.
+///
+/// One `u32` per uploaded instance, parallel to the per-object record order:
+/// `0` = no outline, `1` = hover, `2` = selected. The host replaces the set
+/// whenever selection, hover or the instance list changes; an empty set
+/// disables the overlay (the composite records no outline commands).
+#[derive(Debug, Default)]
+pub struct OutlineState {
+    /// Immutable snapshot shared with the pass (clone is an Arc bump).
+    flags: Mutex<Arc<[u32]>>,
+}
+
+impl OutlineState {
+    /// Empty flag set: the outline overlay is a no-op until the first
+    /// [`set_flags`](Self::set_flags).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replaces the flags used by the next frame.
+    pub fn set_flags(&self, flags: &[u32]) {
+        *self
+            .flags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::from(flags);
+    }
+
+    /// Snapshot of the current flags (the pass reads it once per frame;
+    /// the clone only bumps the shared reference count).
+    fn snapshot(&self) -> Arc<[u32]> {
+        Arc::clone(
+            &self
+                .flags
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
     }
 }
 
@@ -1391,6 +1495,20 @@ mod tests {
                 size,
             }
         );
+    }
+
+    /// The host replaces the outline flag set wholesale; the pass reads a
+    /// snapshot so a concurrent host update cannot tear a frame.
+    #[test]
+    fn outline_state_snapshots_the_last_flag_set() {
+        let state = OutlineState::new();
+        assert!(state.snapshot().is_empty(), "empty by default (pass off)");
+        state.set_flags(&[0, 2, 1]);
+        assert_eq!(&*state.snapshot(), &[0, 2, 1]);
+        state.set_flags(&[0, 0]);
+        assert_eq!(&*state.snapshot(), &[0, 0]);
+        state.set_flags(&[]);
+        assert!(state.snapshot().is_empty());
     }
 
     /// Specs mirror the imperative wiring (frame_exec parity test); the
@@ -1817,22 +1935,28 @@ mod tests {
 
         assert_eq!(
             reads_of::<Composite<CompositeDeferredBloom>>(),
-            vec!["hdr", "bloom0"]
+            vec!["hdr", "bloom0", "depth"]
         );
-        assert_eq!(reads_of::<Composite<CompositeDeferred>>(), vec!["hdr"]);
+        assert_eq!(
+            reads_of::<Composite<CompositeDeferred>>(),
+            vec!["hdr", "depth"]
+        );
         assert_eq!(
             reads_of::<Composite<CompositeHybridBloom>>(),
-            vec!["hdr", "hdr_fwd", "bloom0"]
+            vec!["hdr", "hdr_fwd", "bloom0", "depth"]
         );
         assert_eq!(
             reads_of::<Composite<CompositeHybrid>>(),
-            vec!["hdr", "hdr_fwd"]
+            vec!["hdr", "hdr_fwd", "depth"]
         );
         assert_eq!(
             reads_of::<Composite<CompositeForwardBloom>>(),
-            vec!["hdr_fwd", "bloom0"]
+            vec!["hdr_fwd", "bloom0", "depth"]
         );
-        assert_eq!(reads_of::<Composite<CompositeForward>>(), vec!["hdr_fwd"]);
+        assert_eq!(
+            reads_of::<Composite<CompositeForward>>(),
+            vec!["hdr_fwd", "depth"]
+        );
 
         // Every composite mode writes the swapchain target without a clear.
         assert_eq!(

@@ -86,7 +86,7 @@ use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
     ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, Seconds, SmartStore, World,
 };
-use ornis_editor::{EditorMarks, install_editor, is_editor_only};
+use ornis_editor::{EditorMarks, install_editor, is_editor_only, set_selection};
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
@@ -1036,6 +1036,10 @@ fn execute_command(
             type_name,
             json_data,
         } => handle_set_component(world, *entity_id, *generation, type_name, json_data, ev_tx),
+        UiCommand::Select {
+            entity_id,
+            generation,
+        } => handle_select(world, *entity_id, *generation, ev_tx),
         UiCommand::WithRequestId { .. } => {
             CommandOutcome::failure("nested request-id command is not supported")
         }
@@ -1051,6 +1055,7 @@ fn command_name(cmd: &UiCommand) -> EditorCommand {
         UiCommand::CreateEntity => EditorCommand::CreateEntity,
         UiCommand::DestroyEntity { .. } => EditorCommand::DestroyEntity,
         UiCommand::SetComponent { .. } => EditorCommand::SetComponent,
+        UiCommand::Select { .. } => EditorCommand::Select,
         UiCommand::Custom { cmd_type, .. } => cmd_type.clone(),
         UiCommand::Input { .. } => EditorCommand::Input,
         UiCommand::WithRequestId { command, .. } => command_name(command),
@@ -1103,6 +1108,40 @@ fn handle_set_component(
             CommandOutcome::failure(e)
         }
     }
+}
+
+/// Typed `Select` (remote maps the `select` POST/WS frame here): sets the
+/// exclusive [`Selected`](ornis_editor::Selected) mark (or clears it for
+/// `entity_id: None`). A dead id fails without touching the world; an
+/// unchanged selection succeeds without a version bump (nothing to
+/// replicate), a real change bumps the version and republishes snapshots.
+fn handle_select(
+    world: &mut EditorSession,
+    entity_id: Option<u32>,
+    generation: Option<u32>,
+    ev_tx: &Sender<GameEvent>,
+) -> CommandOutcome {
+    let wanted = match entity_id {
+        Some(id) => {
+            let entity = match resolve_alive(&world.alive, id, generation) {
+                Ok(entity) => entity,
+                Err(e) => return CommandOutcome::failure(e),
+            };
+            if !world.store().is_some_and(|store| store.is_alive(entity)) {
+                return CommandOutcome::failure(format!("entity {id} not found"));
+            }
+            Some(entity)
+        }
+        None => None,
+    };
+    let changed = world
+        .store()
+        .is_some_and(|store| set_selection(store, wanted));
+    if changed {
+        world.version.bump();
+        publish_state(world, ev_tx);
+    }
+    CommandOutcome::success()
 }
 
 /// Validate and apply the upsert through the shared [`Mutation`] path;
@@ -1763,6 +1802,14 @@ mod tests {
         }
     }
 
+    /// Typed viewport selection (remote maps `select` POSTs here).
+    fn select(entity_id: Option<u32>, generation: Option<u32>) -> UiCommand {
+        UiCommand::Select {
+            entity_id,
+            generation,
+        }
+    }
+
     /// Drain all pending events from the channel.
     fn drain_all(rx: &Receiver<GameEvent>) -> Vec<GameEvent> {
         std::iter::from_fn(|| rx.try_recv().ok()).collect()
@@ -2352,6 +2399,54 @@ mod tests {
         assert_eq!(world.version, 5);
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
         assert_eq!(scene["version"], 5);
+    }
+
+    /// Authoritative `select` is exclusive, reflected in `/api/scene`,
+    /// idempotent (no version bump on a repeat) and rejects dead ids
+    /// without touching the world.
+    #[test]
+    fn select_is_exclusive_and_reflected_in_snapshot() {
+        let (mut world, ev_tx, _ev_rx) = world_and_events();
+        world.handle_command(&UiCommand::CreateEntity, &ev_tx);
+        world.handle_command(&UiCommand::CreateEntity, &ev_tx);
+
+        let before = world.version;
+        world.handle_command(&select(Some(1), Some(0)), &ev_tx);
+        assert_eq!(world.version, before.bumped());
+        let selected: Vec<u64> =
+            serde_json::from_str::<Value>(&world.scene_json()).unwrap()["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entity| entity["editor"]["selected"] == true)
+                .map(|entity| entity["id"].as_u64().unwrap())
+                .collect();
+        assert_eq!(selected, vec![1]);
+
+        // Repeat: already selected, nothing to replicate.
+        let stable = world.version;
+        world.handle_command(&select(Some(1), Some(0)), &ev_tx);
+        assert_eq!(world.version, stable);
+
+        // Selecting another entity drops the previous mark.
+        world.handle_command(&select(Some(0), Some(0)), &ev_tx);
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        assert_eq!(scene["entities"][0]["editor"]["selected"], true);
+        assert_eq!(scene["entities"][1]["editor"]["selected"], false);
+
+        // Dead id: rejected, state and version untouched.
+        let stable = world.version;
+        world.handle_command(&select(Some(99), Some(0)), &ev_tx);
+        assert_eq!(world.version, stable);
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        assert_eq!(scene["entities"][0]["editor"]["selected"], true);
+
+        // Empty payload clears the selection.
+        world.handle_command(&select(None, None), &ev_tx);
+        assert_eq!(world.version, stable.bumped());
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        assert_eq!(scene["entities"][0]["editor"]["selected"], false);
+        assert_eq!(scene["entities"][1]["editor"]["selected"], false);
     }
 
     #[test]

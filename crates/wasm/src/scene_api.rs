@@ -16,6 +16,7 @@
 use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
+use ornis_editor::EditorMarks;
 use serde::Deserialize;
 
 /// Root object of the `/api/scene` response. Unknown fields
@@ -38,9 +39,21 @@ pub struct ApiScene {
     pub ambient: [f32; 3],
 }
 
-/// Entity entry: `id`/`generation` (ignored here) plus the components map.
+/// Entity entry: server identity, editor marks and the components map.
+///
+/// `id`/`generation` are kept so the replica can address the authoritative
+/// entity when it sends commands back (`select`); `editor.selected` is the
+/// server-side selection the replica mirrors. Both are optional on the
+/// wire: a missing id stays `None` instead of defaulting to `0`, which is
+/// a valid server entity and must never be invented.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiEntity {
+    #[serde(default)]
+    pub id: Option<u32>,
+    #[serde(default)]
+    pub generation: Option<u32>,
+    #[serde(default)]
+    pub editor: EditorMarks,
     pub components: RenderComponents,
 }
 
@@ -71,23 +84,60 @@ pub struct LiveScene {
     pub sequence: u64,
     /// Renderable scene description reconstructed from the snapshot.
     pub scene: Scene,
+    /// Server identity and editor marks, in the same order as
+    /// [`scene.entities`](Scene::entities). The replica applies the marks
+    /// to its local handles and uses the ids to address the server.
+    pub meta: Vec<LiveEntityMeta>,
+}
+
+/// Per-entity data the render path does not consume but the replica needs:
+/// the authoritative handle and the editor marks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct LiveEntityMeta {
+    /// Authoritative entity id; `None` when the snapshot omitted it.
+    #[serde(default)]
+    pub id: Option<u32>,
+    /// Authoritative entity generation; `None` when the snapshot omitted it.
+    #[serde(default)]
+    pub generation: Option<u32>,
+    /// Editor marks (`selected`/`hovered`/`editor_only`) from the server.
+    #[serde(default)]
+    pub editor: EditorMarks,
+}
+
+impl LiveEntityMeta {
+    /// Authoritative `(id, generation)` handle, only when the snapshot
+    /// carried both halves. A partial or missing identity is not an
+    /// address: the replica must not send commands for such an entity.
+    #[must_use]
+    pub fn server_handle(&self) -> Option<(u32, u32)> {
+        self.id.zip(self.generation)
+    }
 }
 
 impl ApiScene {
     fn into_live(self) -> LiveScene {
-        let entities = self
-            .entities
-            .into_iter()
-            .map(|e| {
-                let components = e.components;
-                EntityDesc {
-                    name: String::new(),
-                    transform: components.transform,
-                    mesh: components.mesh,
-                    material: components.material,
-                }
-            })
-            .collect();
+        let mut entities = Vec::with_capacity(self.entities.len());
+        let mut meta = Vec::with_capacity(self.entities.len());
+        for entity in self.entities {
+            let ApiEntity {
+                id,
+                generation,
+                editor,
+                components,
+            } = entity;
+            entities.push(EntityDesc {
+                name: String::new(),
+                transform: components.transform,
+                mesh: components.mesh,
+                material: components.material,
+            });
+            meta.push(LiveEntityMeta {
+                id,
+                generation,
+                editor,
+            });
+        }
         LiveScene {
             version: self.version,
             sequence: self.sequence,
@@ -98,6 +148,7 @@ impl ApiScene {
                 camera: self.camera,
                 ambient: self.ambient,
             },
+            meta,
         }
     }
 }
@@ -114,7 +165,8 @@ pub fn parse_scene_json(json: &str) -> Result<LiveScene, serde_json::Error> {
 pub(crate) const FULL_CONTRACT: &str = r#"{
     "version": 5, "sequence": 12, "entity_count": 2,
     "entities": [{
-        "id": 0, "generation": 0,
+        "id": 4, "generation": 2,
+        "editor": {"editor_only": false, "selected": true, "hovered": true},
         "components": {
             "Name": "Red Sphere",
             "Transform": {"translation":[-5.6,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
@@ -138,6 +190,18 @@ mod tests {
         assert_eq!(live.version, 5);
         assert_eq!(live.sequence, 12);
         assert_eq!(live.scene.entities.len(), 1);
+        assert_eq!(
+            live.meta,
+            vec![LiveEntityMeta {
+                id: Some(4),
+                generation: Some(2),
+                editor: EditorMarks {
+                    editor_only: false,
+                    selected: true,
+                    hovered: true,
+                },
+            }]
+        );
         assert_eq!(live.scene.lights.len(), 1);
         assert_eq!(live.scene.ambient, [0.10, 0.10, 0.15]);
         assert_eq!(live.scene.camera.position.to_array(), [0.0, 2.5, 9.0]);
@@ -156,6 +220,36 @@ mod tests {
             e.material,
             MaterialDesc::Dielectric { roughness, .. } if (roughness.get() - 0.5).abs() < f32::EPSILON
         ));
+    }
+
+    /// A missing `id`/`generation` must stay absent rather than turning
+    /// into the valid server handle `(0, 0)`; an explicit `0/0` and a
+    /// half-present identity are kept apart.
+    #[test]
+    fn missing_entity_id_is_not_server_entity_zero() {
+        let components = r#""components": {
+            "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+            "Mesh": {"Sphere": {"radius":1.0,"segments":8,"rings":6}},
+            "Material": {"Dielectric": {"base_color":[1,1,1],"roughness":0.5}}
+        }"#;
+        let json = format!(
+            r#"{{"version": 1, "entities": [
+                {{ {components} }},
+                {{"id": 0, "generation": 0, {components} }},
+                {{"id": 7, {components} }},
+                {{"generation": 3, {components} }}
+            ], "lights": [],
+            "camera": {{"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}} }}"#
+        );
+        let live = parse_scene_json(&json).expect("payload must parse");
+        let handles: Vec<_> = live
+            .meta
+            .iter()
+            .map(LiveEntityMeta::server_handle)
+            .collect();
+        assert_eq!(handles, vec![None, Some((0, 0)), None, None]);
+        assert_eq!(live.meta[0].id, None);
+        assert_eq!(live.meta[0].generation, None);
     }
 
     #[test]
@@ -199,6 +293,15 @@ mod tests {
         let live = parse_scene_json(json).expect("coat/metal payload must parse");
         assert_eq!(live.version, 7);
         assert_eq!(live.scene.entities.len(), 2);
+        // Missing identity/marks default instead of failing the parse.
+        assert_eq!(
+            live.meta,
+            vec![LiveEntityMeta::default(), LiveEntityMeta::default()]
+        );
+        assert!(
+            live.meta.iter().all(|meta| meta.server_handle().is_none()),
+            "a missing id must not become server entity 0"
+        );
         assert!(matches!(
             live.scene.entities[0].material,
             MaterialDesc::Coat {
