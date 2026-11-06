@@ -150,6 +150,29 @@ fn a_store_on_the_fallthrough_arm_is_still_rejected() {
 }
 
 #[test]
+fn an_invocation_if_whose_arms_branch_to_one_label_stays_uniform() {
+    let wb = symbols::WORKGROUP_BARRIER;
+    expect_uniform(&format!(
+        "(block local.get 0 if br 1 else br 1 end) call ${wb}"
+    ));
+    expect_uniform(&format!(
+        "(block (block local.get 0 if br 1 else br 1 end) call ${wb})"
+    ));
+    expect_uniform(&format!(
+        "(block (block (block local.get 0 if br 2 else br 2 end)) call ${wb})"
+    ));
+    expect_uniform(&format!(
+        "(block (block local.get 0 if br 1 else br 1 end)) call ${wb}"
+    ));
+    expect_uniform(&format!(
+        "(block (block (block local.get 0 if br 1 else br 1 end)) call ${wb})"
+    ));
+    expect_uniform(&format!(
+        "(block (block (block local.get 0 if br 2 else br 2 end))) call ${wb}"
+    ));
+}
+
+#[test]
 fn unproven_branches_that_meet_before_the_barrier_stay_uniform() {
     let wb = symbols::WORKGROUP_BARRIER;
     expect_uniform(&format!(

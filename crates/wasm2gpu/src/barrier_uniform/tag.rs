@@ -10,10 +10,13 @@
 //! `select`. Anything else is [`Tag::Unknown`]: ordered comparisons
 //! (`id < n`), multiplies, and memory loads do not prove divergence. Two
 //! [`Tag::Inv`] values joined together stay [`Tag::Inv`]. A uniform value
-//! joined with [`Tag::Inv`] on an unproven branch is [`Tag::Unknown`]. On a
-//! branch the id chose, [`control_join`] keeps the [`Tag::Inv`]. A `br` arm
-//! joined at its label uses [`widen_tag`], so that store is not wiped by the
-//! other arm's uniform zero. A loop back-edge uses [`widen_tag`] too, so a
+//! joined with [`Tag::Inv`] on an unproven branch is [`Tag::Unknown`]. That
+//! fallthrough join stays a precondition: both arms of such an `if` are
+//! still live, and this pass does not prove which one every invocation
+//! takes. On a branch the id chose, [`control_join`] keeps the [`Tag::Inv`].
+//! A `br` arm joined at its label uses [`widen_tag`], so that store is not
+//! wiped by the other arm's uniform zero. A loop back-edge uses
+//! [`widen_tag`] too, so a
 //! local that becomes the id on a later iteration stays [`Tag::Inv`].
 
 use super::St;

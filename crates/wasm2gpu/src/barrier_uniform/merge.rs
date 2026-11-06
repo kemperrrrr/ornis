@@ -140,30 +140,34 @@ pub(super) fn cover_exit(
 
 fn park(cond: tag::Tag, parent: Option<Split>, live: St, mut dead: St) -> (St, Option<St>) {
     let leave = dead.leave;
-    let split = if cond == tag::Tag::Inv {
-        Some(opened_by(leave, parent))
-    } else {
-        parent
-    };
-    dead.split = exit::wider_split(dead.split, split);
     let cont = if cond == tag::Tag::Inv {
+        // The arm's own split ends at this `if`, which has already been
+        // popped. Keep the split opened by the exit, not that stale one.
+        dead.split = Some(opened_by(leave, parent));
         diverge_after(live, leave, parent)
     } else {
+        dead.split = exit::wider_split(dead.split, parent);
         fall_through(live, parent)
     };
     (cont, Some(dead))
 }
 
 fn fork_both(ends: IfEnds) -> (St, Option<St>) {
-    let split = if ends.cond == tag::Tag::Inv {
-        cover_exit(ends.parent, ends.then_end.leave, ends.else_end.leave)
-    } else {
-        ends.parent
-    };
     let mut then_end = ends.then_end;
     let mut else_end = ends.else_end;
-    then_end.split = exit::wider_split(then_end.split, split);
-    else_end.split = exit::wider_split(else_end.split, split);
+    if ends.cond == tag::Tag::Inv {
+        // Both arms left. The same label is one destination: `cover_exit`
+        // returns the parent split, and a barrier after that label stays
+        // uniform. Different labels stay split until the outer one. The
+        // split opened for the arm body ends at this `if` and must not
+        // outlive it.
+        let split = cover_exit(ends.parent, then_end.leave, else_end.leave);
+        then_end.split = split;
+        else_end.split = split;
+    } else {
+        then_end.split = exit::wider_split(then_end.split, ends.parent);
+        else_end.split = exit::wider_split(else_end.split, ends.parent);
+    }
     (then_end, Some(else_end))
 }
 
