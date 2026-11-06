@@ -43,13 +43,15 @@ pub struct ApiScene {
 ///
 /// `id`/`generation` are kept so the replica can address the authoritative
 /// entity when it sends commands back (`select`); `editor.selected` is the
-/// server-side selection the replica mirrors.
+/// server-side selection the replica mirrors. Both are optional on the
+/// wire: a missing id stays `None` instead of defaulting to `0`, which is
+/// a valid server entity and must never be invented.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiEntity {
     #[serde(default)]
-    pub id: u32,
+    pub id: Option<u32>,
     #[serde(default)]
-    pub generation: u32,
+    pub generation: Option<u32>,
     #[serde(default)]
     pub editor: EditorMarks,
     pub components: RenderComponents,
@@ -92,15 +94,25 @@ pub struct LiveScene {
 /// the authoritative handle and the editor marks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 pub struct LiveEntityMeta {
-    /// Authoritative entity id.
+    /// Authoritative entity id; `None` when the snapshot omitted it.
     #[serde(default)]
-    pub id: u32,
-    /// Authoritative entity generation.
+    pub id: Option<u32>,
+    /// Authoritative entity generation; `None` when the snapshot omitted it.
     #[serde(default)]
-    pub generation: u32,
+    pub generation: Option<u32>,
     /// Editor marks (`selected`/`hovered`/`editor_only`) from the server.
     #[serde(default)]
     pub editor: EditorMarks,
+}
+
+impl LiveEntityMeta {
+    /// Authoritative `(id, generation)` handle, only when the snapshot
+    /// carried both halves. A partial or missing identity is not an
+    /// address: the replica must not send commands for such an entity.
+    #[must_use]
+    pub fn server_handle(&self) -> Option<(u32, u32)> {
+        self.id.zip(self.generation)
+    }
 }
 
 impl ApiScene {
@@ -181,8 +193,8 @@ mod tests {
         assert_eq!(
             live.meta,
             vec![LiveEntityMeta {
-                id: 4,
-                generation: 2,
+                id: Some(4),
+                generation: Some(2),
                 editor: EditorMarks {
                     editor_only: false,
                     selected: true,
@@ -208,6 +220,36 @@ mod tests {
             e.material,
             MaterialDesc::Dielectric { roughness, .. } if (roughness.get() - 0.5).abs() < f32::EPSILON
         ));
+    }
+
+    /// A missing `id`/`generation` must stay absent rather than turning
+    /// into the valid server handle `(0, 0)`; an explicit `0/0` and a
+    /// half-present identity are kept apart.
+    #[test]
+    fn missing_entity_id_is_not_server_entity_zero() {
+        let components = r#""components": {
+            "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+            "Mesh": {"Sphere": {"radius":1.0,"segments":8,"rings":6}},
+            "Material": {"Dielectric": {"base_color":[1,1,1],"roughness":0.5}}
+        }"#;
+        let json = format!(
+            r#"{{"version": 1, "entities": [
+                {{ {components} }},
+                {{"id": 0, "generation": 0, {components} }},
+                {{"id": 7, {components} }},
+                {{"generation": 3, {components} }}
+            ], "lights": [],
+            "camera": {{"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}} }}"#
+        );
+        let live = parse_scene_json(&json).expect("payload must parse");
+        let handles: Vec<_> = live
+            .meta
+            .iter()
+            .map(LiveEntityMeta::server_handle)
+            .collect();
+        assert_eq!(handles, vec![None, Some((0, 0)), None, None]);
+        assert_eq!(live.meta[0].id, None);
+        assert_eq!(live.meta[0].generation, None);
     }
 
     #[test]
@@ -255,6 +297,10 @@ mod tests {
         assert_eq!(
             live.meta,
             vec![LiveEntityMeta::default(), LiveEntityMeta::default()]
+        );
+        assert!(
+            live.meta.iter().all(|meta| meta.server_handle().is_none()),
+            "a missing id must not become server entity 0"
         );
         assert!(matches!(
             live.scene.entities[0].material,

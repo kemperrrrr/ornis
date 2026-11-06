@@ -418,70 +418,83 @@ impl InputSocket {
 ///
 /// Fallback when the WS socket is not open; see [`post_json`].
 fn post_input_snapshot(body: String) {
-    post_json("/api/input", "POST /api/input", body);
+    post_json("/api/input", "POST /api/input", body, |_| {});
 }
 
-/// Fire-and-forget `POST /api/command` (select fallback when the WS socket
-/// is not open).
-// qual:allow(test_quality, untested) reason: "browser fetch edge; the command body it posts is host-tested by select_command_is_exclusive_or_explicit_clear"
-fn post_select_command(body: String) {
-    post_json("/api/command", "POST /api/command", body);
+/// `POST /api/command` (select fallback when the WS socket is not open).
+/// The outcome settles the selection send `ticket`, so a failed post is
+/// retried instead of being taken as delivered.
+// qual:allow(test_quality, untested) reason: "browser fetch edge; the command body it posts is host-tested by select_command_is_exclusive_or_explicit_clear, the settle bookkeeping by selection_sync_acks_only_after_delivery"
+fn post_select_command(body: String, ticket: u64) {
+    post_json("/api/command", "POST /api/command", body, move |ok| {
+        settle_selection(ticket, ok);
+    });
 }
 
-/// Fire-and-forget JSON POST to `endpoint`.
+/// JSON POST to `endpoint`; `on_done` receives whether the server answered
+/// with a success status.
 ///
 /// The body is JSON and the header is `Content-Type: application/json`,
 /// matching `editor/editor.js`. Without that header the browser sends
 /// `text/plain` and the server answers 415. Network errors and non-success
-/// statuses are logged; the caller retries on the next dirty frame.
+/// statuses are logged and reported as `false`.
 // qual:allow(test_quality, untested) reason: "browser fetch edge; callers' JSON bodies are host-tested, the transport itself needs a window"
-fn post_json(endpoint: &'static str, label: &'static str, body: String) {
+fn post_json(
+    endpoint: &'static str,
+    label: &'static str,
+    body: String,
+    on_done: impl FnOnce(bool) + 'static,
+) {
     let Some(window) = web_sys::window() else {
+        on_done(false);
         return;
     };
-    let headers = match web_sys::Headers::new() {
-        Ok(headers) => headers,
-        Err(e) => {
-            console::warn_1(&format!("[ornis-wasm] {label} failed to build headers: {e:?}").into());
-            return;
-        }
-    };
-    if let Err(e) = headers.set("Content-Type", "application/json") {
-        console::warn_1(&format!("[ornis-wasm] {label} failed to set Content-Type: {e:?}").into());
-        return;
-    }
-    let init = web_sys::RequestInit::new();
-    init.set_method("POST");
-    init.set_headers(&headers);
-    init.set_body(&JsValue::from_str(&body));
-    let request = match web_sys::Request::new_with_str_and_init(endpoint, &init) {
+    let request = match json_post_request(endpoint, &body) {
         Ok(request) => request,
         Err(e) => {
             console::warn_1(&format!("[ornis-wasm] {label} failed to build request: {e:?}").into());
+            on_done(false);
             return;
         }
     };
     let promise = window.fetch_with_request(&request);
     wasm_bindgen_futures::spawn_local(async move {
-        match wasm_bindgen_futures::JsFuture::from(promise).await {
+        let delivered = match wasm_bindgen_futures::JsFuture::from(promise).await {
             Ok(value) => match value.dyn_into::<web_sys::Response>() {
                 Ok(resp) if !resp.ok() => {
                     console::warn_1(
                         &format!("[ornis-wasm] {label} failed: HTTP {}", resp.status()).into(),
                     );
+                    false
                 }
-                Ok(_) => {}
+                Ok(_) => true,
                 Err(value) => {
                     console::warn_1(
                         &format!("[ornis-wasm] {label} returned a non-response: {value:?}").into(),
                     );
+                    false
                 }
             },
             Err(e) => {
                 console::warn_1(&format!("[ornis-wasm] {label} failed: {e:?}").into());
+                false
             }
-        }
+        };
+        on_done(delivered);
     });
+}
+
+/// `POST` request for `endpoint` with a JSON `body` and the
+/// `Content-Type: application/json` header.
+// qual:allow(test_quality, untested) reason: "browser request construction edge; needs web_sys Request/Headers"
+fn json_post_request(endpoint: &str, body: &str) -> Result<web_sys::Request, JsValue> {
+    let headers = web_sys::Headers::new()?;
+    headers.set("Content-Type", "application/json")?;
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    init.set_headers(&headers);
+    init.set_body(&JsValue::from_str(body));
+    web_sys::Request::new_with_str_and_init(endpoint, &init)
 }
 
 /// Throttled dirty-driven `/api/input` poster state.
@@ -522,8 +535,102 @@ impl InputPoster {
 }
 
 thread_local! {
-    /// Last logged `Selected` entity ids (change-triggered console log).
-    static LAST_SELECTED: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+    /// Upstream delivery state of the replica selection (see
+    /// [`SelectionSync`]).
+    static LAST_SELECTED: RefCell<SelectionSync> = const { RefCell::new(SelectionSync::new()) };
+}
+
+/// Delivery bookkeeping for the replica's `Selected` set.
+///
+/// `acked` is the selection the server is known to hold: either mirrored
+/// from a snapshot or confirmed by a successful send. It moves only after
+/// delivery succeeds, so a failed WS send *and* failed `POST /api/command`
+/// leave it untouched and the next frame retries. At most one send is in
+/// flight; its ticket lets a late completion that a newer send or a fresh
+/// snapshot superseded be ignored.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SelectionSync {
+    acked: Vec<u32>,
+    in_flight: Option<(u64, Vec<u32>)>,
+    next_ticket: u64,
+}
+
+impl SelectionSync {
+    const fn new() -> Self {
+        Self {
+            acked: Vec::new(),
+            in_flight: None,
+            next_ticket: 0,
+        }
+    }
+
+    /// A snapshot was applied: the server holds `selected`, nothing local
+    /// is pending any more (the echo guard), and late completions of
+    /// earlier sends are stale.
+    fn mirror(&mut self, selected: Vec<u32>) {
+        self.acked = selected;
+        self.in_flight = None;
+    }
+
+    /// Starts delivering `current` when it differs from the acknowledged
+    /// selection and is not already in flight; returns the ticket to
+    /// [`settle`](Self::settle) with.
+    fn begin(&mut self, current: &[u32]) -> Option<u64> {
+        if self.acked == current {
+            return None;
+        }
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|(_, sent)| sent == current)
+        {
+            return None;
+        }
+        let ticket = self.next_ticket;
+        self.next_ticket = self.next_ticket.wrapping_add(1);
+        self.in_flight = Some((ticket, current.to_vec()));
+        Some(ticket)
+    }
+
+    /// Completes the send `ticket`: success acknowledges the sent
+    /// selection, failure keeps the previous one so the next frame
+    /// retries. Superseded tickets are ignored.
+    fn settle(&mut self, ticket: u64, delivered: bool) {
+        let Some((pending, _)) = &self.in_flight else {
+            return;
+        };
+        if *pending != ticket {
+            return;
+        }
+        if let Some((_, sent)) = self.in_flight.take()
+            && delivered
+        {
+            self.acked = sent;
+        }
+    }
+}
+
+/// Settles the selection send `ticket` in the thread-local tracker.
+fn settle_selection(ticket: u64, delivered: bool) {
+    LAST_SELECTED.with(|cell| cell.borrow_mut().settle(ticket, delivered));
+}
+
+/// Removes every entry of the hot lane `T` (bounded by its length).
+fn clear_lane<T: 'static + Send + Sync>(store: &SmartStore) {
+    let Some(mut lane) = store.write_lane::<T>() else {
+        return;
+    };
+    for _ in 0..lane.entities.len() {
+        let Some(entity) = lane.entities.last().copied() else {
+            break;
+        };
+        let before = lane.entities.len();
+        lane.remove(entity);
+        debug_assert!(
+            lane.entities.len() < before,
+            "remove must drop the lane entry"
+        );
+    }
 }
 
 /// Sorted `Selected` entity ids for the change-triggered selection log.
@@ -597,29 +704,25 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
             .into(),
         );
         set_selection(store, None);
-        if let Some(mut lane) = store.write_lane::<Hovered>() {
-            for _ in 0..lane.entities.len() {
-                let Some(entity) = lane.entities.last().copied() else {
-                    break;
-                };
-                let before = lane.entities.len();
-                lane.remove(entity);
-                debug_assert!(
-                    lane.entities.len() < before,
-                    "remove must drop the lane entry"
-                );
-            }
-        }
+        clear_lane::<Hovered>(store);
+        // Ids from an earlier snapshot are just as untrustworthy: drop them
+        // so a local click cannot address a stale server entity until a
+        // consistent snapshot arrives.
+        clear_lane::<ServerEntityId>(store);
         return Vec::new();
     }
     for (entity, meta) in handles.iter().zip(meta) {
-        store.insert(
-            *entity,
-            ServerEntityId {
-                id: meta.id,
-                generation: meta.generation,
-            },
-        );
+        match meta.server_handle() {
+            Some((id, generation)) => store.insert(*entity, ServerEntityId { id, generation }),
+            // No authoritative id in the snapshot: the entity is not
+            // addressable (never invent server entity 0), and any id left
+            // from an earlier snapshot is dropped.
+            None => {
+                if let Some(mut lane) = store.write_lane::<ServerEntityId>() {
+                    lane.remove(*entity);
+                }
+            }
+        }
     }
     let selected = handles
         .iter()
@@ -627,18 +730,8 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
         .find(|(_, meta)| meta.editor.selected)
         .map(|(entity, _)| *entity);
     set_selection(store, selected);
+    clear_lane::<Hovered>(store);
     if let Some(mut lane) = store.write_lane::<Hovered>() {
-        for _ in 0..lane.entities.len() {
-            let Some(entity) = lane.entities.last().copied() else {
-                break;
-            };
-            let before = lane.entities.len();
-            lane.remove(entity);
-            debug_assert!(
-                lane.entities.len() < before,
-                "remove must drop the lane entry"
-            );
-        }
         for (entity, meta) in handles.iter().zip(meta) {
             if meta.editor.hovered {
                 lane.insert(*entity, Hovered);
@@ -1047,7 +1140,7 @@ impl<'a> FrameState<'a> {
         // handles and remember them, so `sync_selection` does not echo the
         // snapshot back as a `select` command.
         let selected = apply_live_marks(&mut self.render_world, &live.meta);
-        LAST_SELECTED.with(|cell| *cell.borrow_mut() = selected);
+        LAST_SELECTED.with(|cell| cell.borrow_mut().mirror(selected));
         self.render_world.frame(0.0);
         let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
         if gpu.mesh_params != self.mesh_params {
@@ -1149,32 +1242,32 @@ impl<'a> FrameState<'a> {
     /// and logs it (`[ornis-wasm] selected …`).
     ///
     /// The change is sent on the frame that observes it (not per frame):
-    /// snapshots overwrite `LAST_SELECTED` when applied, so server-driven
+    /// snapshots mirror into `LAST_SELECTED` when applied, so server-driven
     /// selection never echoes back. Commands go over the WS socket with a
-    /// `POST /api/command` fallback, like the input poster.
-    // qual:allow(test_quality, untested) reason: "browser send/console edge over a thread-local; the command shape and server target are pinned by host tests"
+    /// `POST /api/command` fallback, like the input poster; the
+    /// acknowledged selection moves only once one of them delivered, so a
+    /// failed delivery is retried on a later frame.
+    // qual:allow(test_quality, untested) reason: "browser send/console edge over a thread-local; SelectionSync, the command shape and server target are pinned by host tests"
     fn sync_selection(&mut self) {
         let store = self.render_world.engine().world().store();
         let current = store.map_or_else(Vec::new, selected_snapshot);
-        let changed = LAST_SELECTED.with(|cell| {
-            let mut last = cell.borrow_mut();
-            if *last == current {
-                false
-            } else {
-                *last = current.clone();
-                true
-            }
-        });
-        if !changed {
+        let Some(ticket) = LAST_SELECTED.with(|cell| cell.borrow_mut().begin(&current)) else {
             return;
-        }
-        if let Some(target) = store.and_then(server_selection) {
-            let body = select_command_json(target);
-            if !self.socket.send(&body) {
-                post_select_command(body);
-            }
-        }
+        };
         console::log_1(&format!("[ornis-wasm] selected {current:?}").into());
+        let Some(target) = store.and_then(server_selection) else {
+            // The selected entity has no authoritative id: there is no
+            // command to deliver. Settle so the frame loop does not spin;
+            // the next consistent snapshot resynchronizes the selection.
+            settle_selection(ticket, true);
+            return;
+        };
+        let body = select_command_json(target);
+        if self.socket.send(&body) {
+            settle_selection(ticket, true);
+        } else {
+            post_select_command(body, ticket);
+        }
     }
 
     /// Maps the authoritative selection marks onto per-instance outline
@@ -1327,7 +1420,7 @@ fn init_editor_replica(
     // The initial snapshot carries the authoritative selection too: mirror
     // it before the first frame so the replica and tree agree immediately.
     let selected = apply_live_marks(render_world, meta);
-    LAST_SELECTED.with(|cell| *cell.borrow_mut() = selected);
+    LAST_SELECTED.with(|cell| cell.borrow_mut().mirror(selected));
     render_world.frame(0.0);
 }
 
@@ -1758,6 +1851,102 @@ mod integration_tests {
         let (mut world, entity) = selected_replica();
         assert!(apply_live_marks(&mut world, &[]).is_empty());
         assert_eq!(marks_of(&world, entity), (false, false));
+    }
+
+    /// A snapshot entity without `id`/`generation` gets no
+    /// `ServerEntityId` (and loses one from an earlier snapshot): a local
+    /// click on it must not invent a `select` for server entity `0`.
+    #[test]
+    fn live_marks_without_server_id_never_address_entity_zero() {
+        let (mut world, entity) = selected_replica();
+        let with_id = vec![LiveEntityMeta {
+            id: Some(4),
+            generation: Some(2),
+            ..LiveEntityMeta::default()
+        }];
+        apply_live_marks(&mut world, &with_id);
+        let store = world.engine().world().store().expect("store");
+        set_selection(store, Some(entity));
+        assert_eq!(server_selection(store), Some(Some((4, 2))), "precondition");
+
+        // Same handles, but the snapshot omits the identity.
+        apply_live_marks(&mut world, &[LiveEntityMeta::default()]);
+        let store = world.engine().world().store().expect("store");
+        set_selection(store, Some(entity));
+        assert!(
+            store
+                .read_lane::<ServerEntityId>()
+                .is_none_or(|lane| !lane.contains(entity)),
+            "an entity without an id must not keep a server id"
+        );
+        assert_eq!(
+            server_selection(store),
+            None,
+            "no authoritative id: no command, never select(0, 0)"
+        );
+    }
+
+    /// A length mismatch also drops `ServerEntityId`s from the previous
+    /// snapshot, so the next local click cannot address a stale entity.
+    #[test]
+    fn live_marks_mismatch_drops_stale_server_ids() {
+        let (mut world, entity) = selected_replica();
+        let with_id = vec![LiveEntityMeta {
+            id: Some(4),
+            generation: Some(2),
+            ..LiveEntityMeta::default()
+        }];
+        apply_live_marks(&mut world, &with_id);
+
+        let mismatched = vec![LiveEntityMeta::default(), LiveEntityMeta::default()];
+        assert!(apply_live_marks(&mut world, &mismatched).is_empty());
+        let store = world.engine().world().store().expect("store");
+        assert!(
+            store
+                .read_lane::<ServerEntityId>()
+                .is_none_or(|lane| lane.entities.is_empty()),
+            "a mismatched snapshot must clear every server id"
+        );
+        // A local click before the next consistent snapshot sends nothing.
+        set_selection(store, Some(entity));
+        assert_eq!(server_selection(store), None);
+    }
+
+    /// The acknowledged selection moves only after a successful delivery:
+    /// a failed send is retried, a pending send is not duplicated, and a
+    /// late completion superseded by a snapshot is ignored.
+    #[test]
+    fn selection_sync_acks_only_after_delivery() {
+        let mut sync = SelectionSync::new();
+        assert_eq!(sync.begin(&[]), None, "nothing changed");
+
+        // WS and POST both failed: still unacknowledged, next frame retries.
+        let first = sync.begin(&[3]).expect("change starts a send");
+        assert_eq!(sync.begin(&[3]), None, "one send in flight at a time");
+        sync.settle(first, false);
+        assert!(sync.acked.is_empty(), "failure must not acknowledge");
+        let retry = sync.begin(&[3]).expect("failed delivery is retried");
+        assert_ne!(retry, first);
+
+        // Success acknowledges; the same selection is not resent.
+        sync.settle(retry, true);
+        assert_eq!(sync.acked, vec![3]);
+        assert_eq!(sync.begin(&[3]), None);
+
+        // A newer selection supersedes an older pending send.
+        let older = sync.begin(&[5]).expect("send 5");
+        let newer = sync.begin(&[6]).expect("send 6");
+        sync.settle(older, true);
+        assert_eq!(sync.acked, vec![3], "superseded ticket is ignored");
+        sync.settle(newer, true);
+        assert_eq!(sync.acked, vec![6]);
+
+        // A snapshot mirrors the server state and drops the pending send.
+        let pending = sync.begin(&[8]).expect("send 8");
+        sync.mirror(vec![9]);
+        sync.settle(pending, true);
+        assert_eq!(sync.acked, vec![9], "late completion after a snapshot");
+        assert_eq!(sync.begin(&[9]), None, "no echo of the snapshot");
     }
 
     #[test]
