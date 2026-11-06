@@ -226,7 +226,15 @@ pub fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
 ///
 /// Every invocation in the workgroup must reach this barrier in the same
 /// order. Do not place it in non-uniform control flow or return from only a
-/// subset of invocations before reaching it.
+/// subset of invocations before reaching it. The translator rejects a call
+/// when the invocation id proves that divergence (`if`, `br_if`, `br_table`,
+/// a loop, or an early return, including copies, injective arithmetic, and
+/// any value defined in that region). Arms that leave through different
+/// labels, or through `br` and `return`, keep the split on a continuation
+/// only some invocations reach. Exits are still checked when the condition
+/// is not proved, so a later barrier is not skipped.
+/// Ordered comparisons (`id < n`) and values loaded from memory stay this
+/// precondition. A 1×1×1 workgroup is not checked.
 #[inline(always)]
 pub fn workgroup_barrier() {
     crate::gpu_abi::workgroup_barrier()
@@ -236,7 +244,15 @@ pub fn workgroup_barrier() {
 ///
 /// Every invocation in the workgroup must reach this barrier in the same
 /// order. Do not place it in non-uniform control flow or return from only a
-/// subset of invocations before reaching it.
+/// subset of invocations before reaching it. The translator rejects a call
+/// when the invocation id proves that divergence (`if`, `br_if`, `br_table`,
+/// a loop, or an early return, including copies, injective arithmetic, and
+/// any value defined in that region). Arms that leave through different
+/// labels, or through `br` and `return`, keep the split on a continuation
+/// only some invocations reach. Exits are still checked when the condition
+/// is not proved, so a later barrier is not skipped.
+/// Ordered comparisons (`id < n`) and values loaded from memory stay this
+/// precondition. A 1×1×1 workgroup is not checked.
 #[inline(always)]
 pub fn storage_barrier() {
     crate::gpu_abi::storage_barrier()

@@ -50,10 +50,14 @@ pub(super) fn check(
     imports: &[Import],
     structs: &[StructDef],
     funcs: &[Func],
+    workgroup: [u32; 3],
 ) -> Result<(), TranslateError> {
     let cfg = build(&func.body);
     let _ = edge_count(&cfg);
-    ai::check(func, imports, structs, funcs)
+    ai::check(func, imports, structs, funcs)?;
+    // Barrier uniformity is a second walk, and only when a barrier is imported.
+    // Shaders that never synchronize return before that walk.
+    crate::barrier_uniform::check(func, imports, funcs, workgroup)
 }
 
 fn edge_count(cfg: &Cfg) -> usize {
@@ -331,7 +335,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&func(body), &[storage()], &[], &[]).expect_err("phi");
+        let err = check(&func(body), &[storage()], &[], &[], [4, 1, 1]).expect_err("phi");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -351,7 +355,7 @@ mod tests {
             },
             Stmt::Op(Op::Call(0)),
         ];
-        check(&func(body), &[storage()], &[], &[]).expect("index phi");
+        check(&func(body), &[storage()], &[], &[], [4, 1, 1]).expect("index phi");
     }
 
     fn with_local(body: Vec<Stmt>) -> Func {
@@ -374,7 +378,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&with_local(body), &[storage()], &[], &[]).expect_err("zero");
+        let err = check(&with_local(body), &[storage()], &[], &[], [4, 1, 1]).expect_err("zero");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -396,7 +400,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&func(body), &[storage()], &[], &[]).expect_err("add");
+        let err = check(&func(body), &[storage()], &[], &[], [4, 1, 1]).expect_err("add");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -417,7 +421,7 @@ mod tests {
             Stmt::Op(Op::I32(0)),
             Stmt::Op(Op::Call(0)),
         ];
-        let err = check(&func(body), &[storage()], &[], &[]).expect_err("eqz");
+        let err = check(&func(body), &[storage()], &[], &[], [4, 1, 1]).expect_err("eqz");
         assert!(matches!(err, TranslateError::AmbiguousProvenance));
     }
 
@@ -427,7 +431,7 @@ mod tests {
             ty: empty(),
             body: vec![Stmt::Br(1)],
         }];
-        let err = check(&func(body), &[], &[], &[]).expect_err("return");
+        let err = check(&func(body), &[], &[], &[], [4, 1, 1]).expect_err("return");
         assert!(matches!(err, TranslateError::FunctionBranch));
     }
 }

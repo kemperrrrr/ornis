@@ -3,7 +3,7 @@
 use core::fmt;
 
 /// Why a wasm module was not lowered.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TranslateError {
     /// `wasmparser` rejected the bytes, or a section was not the toy subset.
     Wasm(String),
@@ -54,6 +54,39 @@ pub enum TranslateError {
     MissingEntry(&'static str),
     /// naga rejected the lowered module or a round-trip.
     Naga(String),
+    /// A workgroup or storage barrier is not reached by every invocation.
+    ///
+    /// `barrier` is the import name. [`BarrierSite`] is the construct the
+    /// analysis proved divergent. `function` and `position` name the call:
+    /// `position` is the 0-based preorder index of that statement in the
+    /// function. A predicate the analysis cannot prove (a memory load, an
+    /// ordered comparison such as `id < n`) stays the ABI precondition and
+    /// does not produce this error.
+    DivergentBarrier {
+        /// `workgroup_barrier` or `storage_barrier`.
+        barrier: &'static str,
+        /// The divergent construct that reaches the call.
+        site: BarrierSite,
+        /// Export name, or `func N` when the helper is not exported.
+        function: String,
+        /// 0-based preorder index of the barrier statement in `function`.
+        position: u32,
+    },
+}
+
+/// Where a barrier call sits when control flow is not uniform.
+///
+/// Uniform here means every invocation that entered the function is still
+/// together. The translator reports a site only when the compute invocation
+/// id proves that is no longer true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BarrierSite {
+    /// The call is inside a branch on an invocation-dependent condition.
+    Branch,
+    /// The call is inside a loop whose continue or exit depends on the invocation.
+    Loop,
+    /// An invocation-dependent `return` skips the call.
+    EarlyReturn,
 }
 
 impl fmt::Display for TranslateError {
@@ -71,6 +104,33 @@ impl fmt::Display for TranslateError {
             Self::UnsupportedType(msg) => f.write_str(msg),
             Self::EntryMetadata(msg) => write!(f, "entry metadata: {msg}"),
             Self::MissingEntry(name) => write!(f, "missing export {name}"),
+            Self::DivergentBarrier {
+                barrier,
+                site,
+                function,
+                position,
+            } => write!(f, "{}", site.message(barrier, function, *position)),
+        }
+    }
+}
+
+impl BarrierSite {
+    /// Sentence that names the call and why its control flow is not uniform.
+    ///
+    /// Branch and loop sites say the condition comes from
+    /// `global_invocation_id.x`.
+    pub fn message(self, barrier: &str, function: &str, position: u32) -> String {
+        let place = format!("{barrier} in {function} at position {position} is not uniform");
+        match self {
+            Self::Branch => {
+                format!("{place}: the call is inside a branch on global_invocation_id.x")
+            }
+            Self::Loop => {
+                format!("{place}: the call is inside a loop controlled by global_invocation_id.x")
+            }
+            Self::EarlyReturn => {
+                format!("{place}: a return on global_invocation_id.x skips the call")
+            }
         }
     }
 }
