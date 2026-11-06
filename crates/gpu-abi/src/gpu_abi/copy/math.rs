@@ -19,10 +19,12 @@ unsafe extern "C" {
     fn math_normalize3(x: f32, y: f32, z: f32) -> Word3;
 }
 
+#[inline(always)]
 pub(in crate::gpu_abi) fn call_math_dot3(a: GpuVec3, b: GpuVec3) -> f32 {
     call_gpu_import!(math_dot3(a.x, a.y, a.z, b.x, b.y, b.z))
 }
 
+#[inline(always)]
 pub(in crate::gpu_abi) fn call_math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
     let word = call_gpu_import!(math_cross3(a.x, a.y, a.z, b.x, b.y, b.z));
     GpuVec3 {
@@ -32,10 +34,12 @@ pub(in crate::gpu_abi) fn call_math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
     }
 }
 
+#[inline(always)]
 pub(in crate::gpu_abi) fn call_math_length3_xyz(x: f32, y: f32, z: f32) -> f32 {
     call_gpu_import!(math_length3(x, y, z))
 }
 
+#[inline(always)]
 pub(in crate::gpu_abi) fn call_math_normalize3(value: GpuVec3) -> GpuVec3 {
     let word = call_gpu_import!(math_normalize3(value.x, value.y, value.z));
     GpuVec3 {
