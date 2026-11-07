@@ -3,12 +3,27 @@
 //! The crate is a normal `no_std` library: cargo checks it on the host, while
 //! `cargo xtask build-shaders` compiles the same source for
 //! `wasm32-unknown-unknown` with `--emit=llvm-ir` and feeds the IR to
-//! `ornis-llvm2gpu`. Entry points use the scalar `cs_main` ABI for now;
-//! typed `Storage`/`Uniform` wrappers and `#[gpu_entry]` metadata come with
-//! the cull/compaction slice.
+//! `ornis-llvm2gpu`. `cs_main` is the stage-3 cull/compaction candidate:
+//! one invocation per source record, sphere-vs-frustum culling, one dense
+//! slot from the indirect-args atomic, and a bit-preserving 13×`vec4` copy.
 
 #![no_std]
 #![warn(missing_docs)]
+
+/// Four-word chunks in one `PerObject` record.
+const RECORD_CHUNKS: u32 = 13;
+/// Group-0 binding of the packed `CullParams` uniform.
+const PARAMS_BINDING: i32 = 0;
+/// Group-0 read-only source record binding.
+const SRC_BINDING: i32 = 1;
+/// Group-0 read-write destination record binding.
+const DST_BINDING: i32 = 2;
+/// Group-0 five-word indirect-args binding.
+const ARGS_BINDING: i32 = 3;
+/// Padded lane count of `CullParams`: six `vec4` planes plus the count lane.
+const PARAM_LANES: i32 = 25;
+/// Uniform lane that stores the active source count bits.
+const COUNT_LANE: i32 = 24;
 
 unsafe extern "C" {
     fn storage_len_u32x4(group: i32, binding: i32) -> i32;
@@ -21,27 +36,142 @@ unsafe extern "C" {
         dst_binding: i32,
         dst_index: i32,
     );
+    fn storage_atomic_add_u32(group: i32, binding: i32, index: i32, value: i32) -> i32;
+    fn uniform_read_f32(group: i32, binding: i32, len: i32, index: i32) -> f32;
+    fn gpu_length3_xyz(x: f32, y: f32, z: f32) -> f32;
 }
 
-/// Copy one 16-byte record chunk and read one lane through the vec4 ABI.
-///
-/// `cs_main` stores the returned bits at `storage_0_0[global_id.x]`, so the
-/// builder smoke test can inspect the lowered WGSL for a vec4 load/store,
-/// `arrayLength`, and a read-only source binding.
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(id: u32) -> f32 {
-    let index = id as i32;
-    // SAFETY: the import reads the array length of binding 1; the host
-    // binds it as a read-only storage buffer.
-    let len = unsafe { storage_len_u32x4(0, 1) };
-    if index < len {
-        // SAFETY: `index` is guarded by `len`; both bindings are vec4<u32>
-        // arrays with the same record layout.
-        unsafe {
-            storage_copy_u32x4(0, 1, index, 0, 2, index);
+/// One little-endian word of a source record.
+macro_rules! src_word {
+    ($record:expr, $word:literal) => {{
+        let index = $record * RECORD_CHUNKS + $word / 4;
+        let lane = $word % 4;
+        // SAFETY: the caller guards `$record` against the source length; the
+        // literal word picks a lane inside that record.
+        unsafe { storage_read_u32_lane(0, SRC_BINDING, index as i32, lane as i32) as u32 }
+    }};
+}
+
+/// One `f32` word of a source record (bit-preserving).
+macro_rules! src_f32 {
+    ($record:expr, $word:literal) => {
+        f32::from_bits(src_word!($record, $word))
+    };
+}
+
+/// One lane of the padded parameter uniform.
+macro_rules! param {
+    ($lane:expr) => {
+        // SAFETY: the lane index is a compile-time constant inside the
+        // 25-lane `CullParams` binding.
+        unsafe { uniform_read_f32(0, PARAMS_BINDING, PARAM_LANES, $lane) }
+    };
+}
+
+/// One plane test; `$plane` is a literal so the uniform indices are constants.
+macro_rules! plane_test {
+    ($plane:literal, $cx:expr, $cy:expr, $cz:expr, $radius:expr) => {{
+        let at = $plane * 4;
+        let px = param!(at);
+        let py = param!(at + 1);
+        let pz = param!(at + 2);
+        let pw = param!(at + 3);
+        if px * $cx + py * $cy + pz * $cz + pw < -$radius {
+            return false;
         }
+    }};
+}
+
+/// Six unrolled plane tests. A NaN radius skips them and stays visible.
+macro_rules! plane_tests {
+    ($cx:expr, $cy:expr, $cz:expr, $radius:expr) => {{
+        plane_test!(0, $cx, $cy, $cz, $radius);
+        plane_test!(1, $cx, $cy, $cz, $radius);
+        plane_test!(2, $cx, $cy, $cz, $radius);
+        plane_test!(3, $cx, $cy, $cz, $radius);
+        plane_test!(4, $cx, $cy, $cz, $radius);
+        plane_test!(5, $cx, $cy, $cz, $radius);
+    }};
+}
+
+fn length3(x: f32, y: f32, z: f32) -> f32 {
+    // SAFETY: the import is a pure `vec3` length and takes plain scalars.
+    unsafe { gpu_length3_xyz(x, y, z) }
+}
+
+/// Sphere against six planes; NaN/negative radii stay visible.
+fn sphere_visible(cx: f32, cy: f32, cz: f32, radius: f32) -> bool {
+    if radius >= 0.0 {
+        plane_tests!(cx, cy, cz, radius);
     }
-    // SAFETY: lane 3 of chunk 0 exists in every vec4<u32> record.
-    let word = unsafe { storage_read_u32_lane(0, 1, 0, 3) };
-    f32::from_bits(word as u32)
+    true
+}
+
+/// One 16-byte record chunk from source `$src` to destination `$dst`.
+macro_rules! copy_chunk {
+    ($src:expr, $dst:expr, $chunk:literal) => {
+        // SAFETY: both bases and the literal chunk stay inside the guarded
+        // source/destination record arrays.
+        unsafe {
+            storage_copy_u32x4(
+                0,
+                SRC_BINDING,
+                ($src + $chunk) as i32,
+                0,
+                DST_BINDING,
+                ($dst + $chunk) as i32,
+            );
+        }
+    };
+}
+
+/// Cull one instance and compact visible records into the dense destination.
+///
+/// Bindings: `0` padded `CullParams` uniform, `1` read-only source
+/// `array<vec4<u32>>`, `2` read-write destination of the same shape, `3`
+/// five-word indirect args with `instance_count` at word 1. The indirect
+/// count is read back by the host after the dispatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn cs_main(id: u32) {
+    // SAFETY: both imports read the vec4-array lengths of their bindings.
+    let src_len = unsafe { storage_len_u32x4(0, SRC_BINDING) } as u32 / RECORD_CHUNKS;
+    // SAFETY: same as above for the destination binding.
+    let dst_len = unsafe { storage_len_u32x4(0, DST_BINDING) } as u32 / RECORD_CHUNKS;
+    let count = param!(COUNT_LANE).to_bits();
+    if id >= count {
+        return;
+    }
+    if id >= src_len {
+        return;
+    }
+    let cx = src_f32!(id, 12);
+    let cy = src_f32!(id, 13);
+    let cz = src_f32!(id, 14);
+    let rx = length3(src_f32!(id, 0), src_f32!(id, 1), src_f32!(id, 2));
+    let ry = length3(src_f32!(id, 4), src_f32!(id, 5), src_f32!(id, 6));
+    let rz = length3(src_f32!(id, 8), src_f32!(id, 9), src_f32!(id, 10));
+    let rxy = if rx > ry { rx } else { ry };
+    let radius = if rxy > rz { rxy } else { rz };
+    if sphere_visible(cx, cy, cz, radius) {
+        // SAFETY: word 1 is `instance_count` in the five-word args array.
+        let slot = unsafe { storage_atomic_add_u32(0, ARGS_BINDING, 1, 1) } as u32;
+        if slot >= dst_len {
+            return;
+        }
+        let src = id * RECORD_CHUNKS;
+        let dst = slot * RECORD_CHUNKS;
+        copy_chunk!(src, dst, 0);
+        copy_chunk!(src, dst, 1);
+        copy_chunk!(src, dst, 2);
+        copy_chunk!(src, dst, 3);
+        copy_chunk!(src, dst, 4);
+        copy_chunk!(src, dst, 5);
+        copy_chunk!(src, dst, 6);
+        copy_chunk!(src, dst, 7);
+        copy_chunk!(src, dst, 8);
+        copy_chunk!(src, dst, 9);
+        copy_chunk!(src, dst, 10);
+        copy_chunk!(src, dst, 11);
+        copy_chunk!(src, dst, 12);
+    }
 }

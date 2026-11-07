@@ -45,7 +45,19 @@ pub fn translate_with_types(
     llvm_ir: &str,
     structs: &[&[u8]],
 ) -> Result<Translated, TranslateError> {
+    translate_with_types_and_workgroup(llvm_ir, structs, ornis_gpu_abi::symbols::CS_WORKGROUP)
+}
+
+/// Translate with uniform metadata and an explicit `@workgroup_size(x,y,z)`.
+///
+/// Production kernels choose their own workgroup (culling uses 64); the
+/// scalar toy entry keeps [`CS_WORKGROUP`](ornis_gpu_abi::symbols::CS_WORKGROUP).
+pub fn translate_with_types_and_workgroup(
+    llvm_ir: &str,
+    structs: &[&[u8]],
+    workgroup: [u32; 3],
+) -> Result<Translated, TranslateError> {
     let func = parse::parse(llvm_ir)?;
-    let module = lower::lower(&func, structs)?;
+    let module = lower::lower(&func, structs, workgroup)?;
     emit::emit(&module)
 }
