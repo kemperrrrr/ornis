@@ -44,10 +44,8 @@ pub fn build_shaders(raw: &[String]) {
             exit(2);
         }
     };
-    if args.entry != DEFAULT_ENTRY {
-        eprintln!(
-            "xtask build-shaders: only `{DEFAULT_ENTRY}` is supported until entry metadata lands"
-        );
+    if args.entry != DEFAULT_ENTRY && args.entry != "fs_main" {
+        eprintln!("xtask build-shaders: entry must be `{DEFAULT_ENTRY}` or `fs_main`");
         exit(2);
     }
     let root = super::workspace_root();

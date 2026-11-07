@@ -543,7 +543,14 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    `vec4` и struct 1). Один storage-биндинг — одна переменная: второй
    тип элемента отвергается, два read-only биндинга остаются
    `var<storage>` и могут алиаситься. Ядро `gtao_arc` (cos/sin)
-   переводится; марш горизонта ещё не перенесён.
+   переводится. Марш горизонта тоже: `fs_main` читает
+   `@location(0)` UV квада, глубину и нормаль, и опускает два цикла
+   (срез и шаг) с `acos`/`cross`/`normalize`. Центр пикселя
+   восстанавливается через `inv_view_proj`, взгляд — из `camera_pos`,
+   радиус шага — проекция `center + screen_x * radius` через
+   `view_proj`. Параметры лежат в тех же uniform, что у хоста.
+   Односэмпловый проход берёт этот модуль из
+   `gtao_generated.wgsl`. Четырёхсэмпловый путь остаётся рукописным.
 7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром, а
    `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>` (mip 0).
    Размеры той и другой — `textureDimensions`. `fs_main` пишет
@@ -552,8 +559,12 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    `array<atomic<u32>, 256>`: `workgroupBarrier`, `atomicAdd`,
    `atomicLoad`, `atomicStore`. Скалярная математика GTAO и гистограммы
    (`acos`, `clamp`, `mix`, `sign`, `abs`, `log2`, `cross`, `normalize`)
-   опускается в одноимённые builtin. Дальше — сам проход GTAO и
-   гистограмма на этих импортах.
+   опускается в одноимённые builtin. `fptoui`/`sitofp` переводят
+   пиксель в тексель и ширину текстуры во `f32`. Значение, рождённое
+   в цикле и прочитанное после него не только в блоке выхода, пишется
+   в локальную переменную. Гистограмма автоэкспозиции опускается:
+   `global_invocation_id`, `local_invocation_index`, `log2`, барьер и
+   атомики workgroup. Хост гистограммы пока на рукописном WGSL.
 
 **Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном

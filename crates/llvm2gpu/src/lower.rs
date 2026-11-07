@@ -443,6 +443,7 @@ struct Builders {
     /// `vec2<i32>` used as a `textureLoad` coordinate.
     ivec2: Option<naga::Handle<naga::Type>>,
     /// `vec4<f32>` shared by the fragment output and `fragment_store`.
+    vec2_f32: Option<naga::Handle<naga::Type>>,
     vec4_f32: Option<naga::Handle<naga::Type>>,
     /// Plain `array<u32, WORKGROUP_WORDS>` in workgroup memory.
     workgroup: Option<naga::Handle<naga::GlobalVariable>>,
@@ -463,6 +464,7 @@ impl Builders {
             struct_stack: Vec::new(),
             textures: HashMap::new(),
             ivec2: None,
+            vec2_f32: None,
             vec4_f32: None,
             workgroup: None,
             workgroup_atomic: None,
@@ -706,6 +708,27 @@ impl Builders {
             },
             naga::Span::default(),
         ))
+    }
+
+    fn vec2_f32(&mut self) -> naga::Handle<naga::Type> {
+        if let Some(ty) = self.vec2_f32 {
+            return ty;
+        }
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Vector {
+                    size: naga::VectorSize::Bi,
+                    scalar: naga::Scalar {
+                        kind: naga::ScalarKind::Float,
+                        width: SCALAR_WIDTH,
+                    },
+                },
+            },
+            naga::Span::default(),
+        );
+        self.vec2_f32 = Some(ty);
+        ty
     }
 
     fn vec4_f32(&mut self) -> naga::Handle<naga::Type> {
@@ -1023,12 +1046,16 @@ impl Builders {
             name: Some(entry.to_string()),
             ..Default::default()
         };
-        let id_x = if fragment {
-            None
+        let (global_id, id_x) = if fragment {
+            (None, None)
         } else {
-            Some(invocation_x(&mut self.module, &mut function))
+            let (global_id, id_x) = invocation_x(&mut self.module, &mut function);
+            (Some(global_id), Some(id_x))
         };
+        let local_index = (!fragment && uses_call(func, "local_invocation_index"))
+            .then(|| local_index_arg(&mut self.module, &mut function));
         let position = fragment.then(|| position_arg(self.vec4_f32(), &mut function));
+        let uv = (fragment && uses_uv(func)).then(|| uv_arg(self.vec2_f32(), &mut function));
         let fragment_out = fragment.then(|| {
             let ty = self.vec4_f32();
             function.local_variables.append(
@@ -1046,8 +1073,11 @@ impl Builders {
             cfg,
             func: function,
             id_x,
+            global_id,
+            local_index,
             fragment_out,
             position,
+            uv,
             phi_vars: HashMap::new(),
             spill: HashMap::new(),
             env: HashMap::new(),
@@ -1096,10 +1126,16 @@ struct Lowerer<'a, 'b> {
     cfg: &'b Cfg<'a>,
     func: naga::Function,
     id_x: Option<naga::Handle<naga::Expression>>,
+    /// `global_invocation_id` vector, when this entry is compute.
+    global_id: Option<naga::Handle<naga::Expression>>,
+    /// `@builtin(local_invocation_index)`, when the kernel reads it.
+    local_index: Option<naga::Handle<naga::Expression>>,
     /// `vec4` local returned from `fs_main` at `@location(0)`.
     fragment_out: Option<naga::Handle<naga::LocalVariable>>,
     /// `@builtin(position)` of `fs_main`, when this entry is a fragment.
     position: Option<naga::Handle<naga::Expression>>,
+    /// `@location(0)` vec2 interpolated from the vertex stage.
+    uv: Option<naga::Handle<naga::Expression>>,
     phi_vars: HashMap<String, naga::Handle<naga::LocalVariable>>,
     /// Loop values used after the loop, stored while the loop runs.
     spill: HashMap<String, naga::Handle<naga::LocalVariable>>,
@@ -1119,8 +1155,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     fn alloc_phis(&mut self) -> Result<(), TranslateError> {
-        for phis in self.cfg.phis.values() {
-            for phi in phis {
+        let mut labels: Vec<&str> = self.cfg.phis.keys().copied().collect();
+        labels.sort_unstable();
+        for label in labels {
+            for phi in &self.cfg.phis[label] {
                 let ty = self.ty(phi.ty)?;
                 let var = self.func.local_variables.append(
                     naga::LocalVariable {
@@ -1486,31 +1524,19 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if exits.len() != 1 {
             return Ok(Vec::new());
         }
-        let exit = *exits.iter().next().ok_or(TranslateError::Unsupported)?;
-        let block = *self
-            .cfg
-            .blocks
-            .get(exit)
-            .ok_or(TranslateError::Unsupported)?;
         let mut used = Vec::new();
-        for instr in &block.instrs {
-            if matches!(instr, Instr::Phi { .. }) {
-                continue;
-            }
-            instr.each_operand(|op| push_local(op, &mut used));
-        }
-        push_term_local(&block.term, &mut used);
-        // A phi outside the loop can name a value defined inside it. The
-        // edge store runs after the loop, so that value has to be spilled.
-        for (label, phis) in &self.cfg.phis {
+        // Anything defined in the loop and read after it has to be spilled:
+        // the exit block is not the only reader. Later blocks and their phis
+        // run once the loop's expressions are out of scope.
+        for label in &self.cfg.order {
             if body.contains(label) {
                 continue;
             }
-            for phi in phis {
-                for (value, _) in &phi.incoming {
-                    push_local(value, &mut used);
-                }
+            let block = self.cfg.blocks[label];
+            for instr in &block.instrs {
+                instr.each_operand(|op| push_local(op, &mut used));
             }
+            push_term_local(&block.term, &mut used);
         }
         let mut live = Vec::new();
         for name in used {
@@ -1762,16 +1788,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.bind(dst, v, out);
             }
             Instr::Uitofp { dst, a } => {
-                let src = self.operand(out, a)?;
-                let v = self.expr(
-                    out,
-                    naga::Expression::As {
-                        expr: src,
-                        kind: naga::ScalarKind::Float,
-                        convert: Some(SCALAR_WIDTH),
-                    },
-                );
-                self.bind(dst, v, out);
+                let value = self.cast(out, a, naga::ScalarKind::Float)?;
+                self.bind(dst, value, out);
+            }
+            Instr::Fptoui { dst, a } => {
+                let value = self.cast(out, a, naga::ScalarKind::Uint)?;
+                self.bind(dst, value, out);
             }
             Instr::Bitcast { dst, from, to, a } => {
                 if from == to {
@@ -1828,6 +1850,34 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         a: &Operand,
         b: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if pred == "uno" {
+            let left = self.operand(out, a)?;
+            let right = self.operand(out, b)?;
+            let left_nan = self.expr(
+                out,
+                naga::Expression::Binary {
+                    op: naga::BinaryOperator::NotEqual,
+                    left,
+                    right: left,
+                },
+            );
+            let right_nan = self.expr(
+                out,
+                naga::Expression::Binary {
+                    op: naga::BinaryOperator::NotEqual,
+                    left: right,
+                    right,
+                },
+            );
+            return Ok(self.expr(
+                out,
+                naga::Expression::Binary {
+                    op: naga::BinaryOperator::InclusiveOr,
+                    left: left_nan,
+                    right: right_nan,
+                },
+            ));
+        }
         let op = match pred {
             "oeq" | "ueq" | "eq" => naga::BinaryOperator::Equal,
             "one" | "une" | "ne" => naga::BinaryOperator::NotEqual,
@@ -1849,6 +1899,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if callee.contains("llvm.fptoui.sat") {
+            if args.len() != 1 {
+                return Err(TranslateError::Unsupported);
+            }
+            return self.cast(out, &args[0], naga::ScalarKind::Uint);
+        }
         if let Some(fun) = min_max(callee) {
             if args.len() != 2 {
                 return Err(TranslateError::Unsupported);
@@ -1865,6 +1921,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     arg3: None,
                 },
             ));
+        }
+        if callee.contains("global_invocation_lane") {
+            return self.global_invocation_lane(out, args);
+        }
+        if callee.contains("local_invocation_index") {
+            return self.local_index.ok_or(TranslateError::Unsupported);
+        }
+        if callee.contains("fragment_uv_lane") {
+            return self.fragment_uv(out, args);
         }
         if callee.contains("fragment_position_lane") {
             return self.fragment_position(out, args);
@@ -2194,6 +2259,46 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ))
     }
 
+    /// Lane of `@builtin(global_invocation_id)`. The axis is a constant `0..3`.
+    fn global_invocation_lane(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let axis = const_u32(args.first().ok_or(TranslateError::Unsupported)?)?;
+        if axis >= VEC3_LANES {
+            return Err(TranslateError::Unsupported);
+        }
+        let global_id = self.global_id.ok_or(TranslateError::Unsupported)?;
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: global_id,
+                index: axis,
+            },
+        ))
+    }
+
+    /// Lane of the `@location(0)` vec2. The lane index is a constant `0..2`.
+    fn fragment_uv(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let lane = const_u32(args.first().ok_or(TranslateError::Unsupported)?)?;
+        if lane >= VEC2_LANES {
+            return Err(TranslateError::Unsupported);
+        }
+        let uv = self.uv.ok_or(TranslateError::Unsupported)?;
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: uv,
+                index: lane,
+            },
+        ))
+    }
+
     /// Lane of `@builtin(position)`. The lane index is a constant `0..4`.
     fn fragment_position(
         &mut self,
@@ -2386,6 +2491,23 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Expression::AccessIndex {
                 base: size,
                 index: axis,
+            },
+        ))
+    }
+
+    fn cast(
+        &mut self,
+        out: &mut naga::Block,
+        value: &Operand,
+        kind: naga::ScalarKind,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let expr = self.operand(out, value)?;
+        Ok(self.expr(
+            out,
+            naga::Expression::As {
+                expr,
+                kind,
+                convert: Some(SCALAR_WIDTH),
             },
         ))
     }
@@ -2928,6 +3050,7 @@ fn unary_math(callee: &str) -> Option<naga::MathFunction> {
     // `acos` before `cos`, `log2` before `log`: the shorter name is a substring.
     const FNS: &[(&str, naga::MathFunction)] = &[
         ("sqrt", naga::MathFunction::Sqrt),
+        ("fract", naga::MathFunction::Fract),
         ("acos", naga::MathFunction::Acos),
         ("sin", naga::MathFunction::Sin),
         ("cos", naga::MathFunction::Cos),
@@ -2945,11 +3068,13 @@ fn unary_math(callee: &str) -> Option<naga::MathFunction> {
 fn min_max(callee: &str) -> Option<naga::MathFunction> {
     if callee.contains("llvm.umin")
         || callee.contains("llvm.smin")
+        || callee.contains("llvm.minimumnum")
         || callee.contains("llvm.minnum")
     {
         Some(naga::MathFunction::Min)
     } else if callee.contains("llvm.umax")
         || callee.contains("llvm.smax")
+        || callee.contains("llvm.maximumnum")
         || callee.contains("llvm.maxnum")
     {
         Some(naga::MathFunction::Max)
@@ -3027,7 +3152,10 @@ fn scalar(module: &mut naga::Module, kind: naga::ScalarKind) -> naga::Handle<nag
 fn invocation_x(
     module: &mut naga::Module,
     function: &mut naga::Function,
-) -> naga::Handle<naga::Expression> {
+) -> (
+    naga::Handle<naga::Expression>,
+    naga::Handle<naga::Expression>,
+) {
     let ty = module.types.insert(
         naga::Type {
             name: None,
@@ -3057,7 +3185,52 @@ fn invocation_x(
     let mut body = naga::Block::new();
     push_emit(function, &mut body, id_x);
     function.body = body;
-    id_x
+    (arg, id_x)
+}
+
+fn uses_call(func: &LlvmFunc, needle: &str) -> bool {
+    func.blocks.iter().any(|block| {
+        block.instrs.iter().any(|instr| match instr {
+            Instr::Call { callee, .. } | Instr::CallVoid { callee, .. } => callee.contains(needle),
+            _ => false,
+        })
+    })
+}
+
+fn local_index_arg(
+    module: &mut naga::Module,
+    function: &mut naga::Function,
+) -> naga::Handle<naga::Expression> {
+    let index = function.arguments.len() as u32;
+    function.arguments.push(naga::FunctionArgument {
+        name: Some("local_invocation_index".to_string()),
+        ty: scalar(module, naga::ScalarKind::Uint),
+        binding: Some(naga::Binding::BuiltIn(naga::BuiltIn::LocalInvocationIndex)),
+    });
+    append(function, naga::Expression::FunctionArgument(index))
+}
+
+fn uses_uv(func: &LlvmFunc) -> bool {
+    uses_call(func, "fragment_uv_lane")
+}
+
+fn uv_arg(
+    ty: naga::Handle<naga::Type>,
+    function: &mut naga::Function,
+) -> naga::Handle<naga::Expression> {
+    let index = function.arguments.len() as u32;
+    function.arguments.push(naga::FunctionArgument {
+        name: Some("uv".to_string()),
+        ty,
+        binding: Some(naga::Binding::Location {
+            location: 0,
+            interpolation: Some(naga::Interpolation::Perspective),
+            sampling: Some(naga::Sampling::Center),
+            blend_src: None,
+            per_primitive: false,
+        }),
+    });
+    append(function, naga::Expression::FunctionArgument(index))
 }
 
 fn position_arg(

@@ -13,6 +13,7 @@ members = [
     "crates/gpu-shader-macros",
     "crates/gpu-shaders",
     "crates/gpu-cluster",
+    "crates/gpu-gtao",
     "crates/wasm2gpu-shader",
     "crates/wasm2gpu-testkit",
     "crates/physics",

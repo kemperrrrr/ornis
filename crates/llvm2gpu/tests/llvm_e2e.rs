@@ -1,5 +1,5 @@
 //! E2E for the LLVM IR spike: embedded IR, a real rustc build, and GPU parity.
-use ornis_llvm2gpu::{translate, translate_with_types};
+use ornis_llvm2gpu::{translate, translate_with_meta, translate_with_types};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -748,7 +748,15 @@ fn compile_ir(source: &str) -> Option<String> {
 
 /// Same as [`compile_ir`] with an explicit `opt-level`. `s` keeps dynamic
 /// loops structured instead of fully unrolling them at `opt-level=3`.
+fn compile_lib_opt(source: &str, opt: &str) -> Option<String> {
+    compile_ir_opt_kind(source, opt, true)
+}
+
 fn compile_ir_opt(source: &str, opt: &str) -> Option<String> {
+    compile_ir_opt_kind(source, opt, false)
+}
+
+fn compile_ir_opt_kind(source: &str, opt: &str, library: bool) -> Option<String> {
     let dir = std::env::temp_dir().join(format!(
         "llvm2gpu-{}-{}",
         std::process::id(),
@@ -773,6 +781,18 @@ fn compile_ir_opt(source: &str, opt: &str) -> Option<String> {
             "target-cpu=mvp",
             "--emit=llvm-ir",
         ])
+        .args(
+            library
+                .then_some(["--edition", "2024"])
+                .into_iter()
+                .flatten(),
+        )
+        .args(
+            library
+                .then_some(["--crate-type", "lib"])
+                .into_iter()
+                .flatten(),
+        )
         .arg(&rs_path)
         .arg("--out-dir")
         .arg(&dir)
@@ -879,6 +899,141 @@ fn rustc_gtao_arc_to_wgsl() {
     assert!(translated.wgsl.contains("cos("), "{}", translated.wgsl);
     assert!(translated.wgsl.contains("sin("), "{}", translated.wgsl);
 }
+
+#[test]
+fn rustc_gtao_horizon_march_to_wgsl() {
+    let Some(ir) = compile_lib_opt(GTAO_MARCH_KERNEL_RS, "1") else {
+        panic!("gtao march: rustc produced no IR");
+    };
+    let translated = translate_with_meta(&ir).expect("gtao horizon march failed");
+    assert!(translated.wgsl.contains("@fragment"), "{}", translated.wgsl);
+    assert!(
+        translated.wgsl.contains("@builtin(position)"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("texture_depth_2d"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("texture_2d<f32>"),
+        "{}",
+        translated.wgsl
+    );
+    for needle in [
+        "textureLoad(",
+        "acos(",
+        "cross(",
+        "normalize(",
+        "loop",
+        "var<uniform>",
+        "@location(0)",
+    ] {
+        assert!(
+            translated.wgsl.contains(needle),
+            "{needle}\n{}",
+            translated.wgsl
+        );
+    }
+}
+
+#[test]
+fn rustc_histogram_to_wgsl() {
+    let Some(ir) = compile_ir_opt(HISTOGRAM_KERNEL_RS, "1") else {
+        panic!("histogram: rustc produced no IR");
+    };
+    let translated = translate_with_meta(&ir).expect("histogram");
+    for needle in [
+        "textureLoad(",
+        "texture_2d<f32>",
+        "log2(",
+        "workgroupBarrier()",
+        "atomicStore(",
+        "atomicLoad(",
+        "atomicAdd(",
+        "local_invocation_index",
+        "global_invocation_id",
+    ] {
+        assert!(
+            translated.wgsl.contains(needle),
+            "{needle}\n{}",
+            translated.wgsl
+        );
+    }
+}
+
+const HISTOGRAM_KERNEL_RS: &str = r#"
+#![allow(clippy::all)]
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" {
+    fn global_invocation_lane(axis: u32) -> u32;
+    fn local_invocation_index() -> u32;
+    fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
+    fn texture_width_2d_f32x4(group: u32, binding: u32) -> i32;
+    fn texture_height_2d_f32x4(group: u32, binding: u32) -> i32;
+    fn workgroup_atomic_store_u32(index: u32, value: u32);
+    fn workgroup_atomic_load_u32(index: u32) -> u32;
+    fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32;
+    fn workgroup_barrier();
+    fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
+    fn gpu_dot3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32;
+    fn gpu_log2(value: f32) -> f32;
+    fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
+}
+#[used]
+#[unsafe(link_section = "ornis_gpu.shader_meta")]
+#[unsafe(export_name = "ornis_gpu_shader_meta")]
+static ORNIS_GPU_SHADER_META: [u8; 44] = *b"entry=cs_main;workgroup=16,16,1;uniform=0:11";
+const BINS: u32 = 256;
+const FLOOR: f32 = 1.0e-6;
+
+#[no_mangle]
+pub extern "C" fn cs_main() {
+    unsafe {
+        let lid = local_invocation_index();
+        if lid < BINS {
+            workgroup_atomic_store_u32(lid, 0);
+        }
+        workgroup_barrier();
+        let x = global_invocation_lane(0);
+        let y = global_invocation_lane(1);
+        let width = texture_width_2d_f32x4(0, 0) as u32;
+        let height = texture_height_2d_f32x4(0, 0) as u32;
+        if x < width && y < height {
+            let red = texture_load_2d_f32x4(0, 0, x, y, 0);
+            let green = texture_load_2d_f32x4(0, 0, x, y, 1);
+            let blue = texture_load_2d_f32x4(0, 0, x, y, 2);
+            let luma = gpu_dot3(red, green, blue, 0.2126, 0.7152, 0.0722);
+            let safe = if luma != luma || f32::abs(luma) > 3.4e38 { FLOOR } else { f32::max(luma, FLOOR) };
+            let log_lum = gpu_log2(safe);
+            let min_log = uniform_field_f32(0, 1, 0, 0);
+            let inv_range = uniform_field_f32(0, 1, 0, 1);
+            let bin = if log_lum < min_log {
+                0
+            } else {
+                let t = f32::clamp((log_lum - min_log) * inv_range, 0.0, 1.0);
+                1 + (t * 254.0) as u32
+            };
+            let _ = workgroup_atomic_add_u32(bin, 1);
+        }
+        workgroup_barrier();
+        if lid < BINS {
+            let count = workgroup_atomic_load_u32(lid);
+            if count > 0 {
+                let _ = storage_atomic_add_u32(0, 2, lid, count);
+            }
+        }
+    }
+}
+"#;
+
+const GTAO_MARCH_KERNEL_RS: &str = include_str!("../../gpu-gtao/src/lib.rs");
 
 const GTAO_ARC_KERNEL_RS: &str = r#"
 #![allow(clippy::all)]

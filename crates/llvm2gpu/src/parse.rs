@@ -101,8 +101,10 @@ pub(super) enum Instr {
         a: Operand,
         b: Operand,
     },
-    /// `uitofp i32 %a to float`
+    /// `uitofp i32 %a to float` and `sitofp i32 %a to float`.
     Uitofp { dst: Name, a: Operand },
+    /// `fptoui float %a to i32`. Pixel coordinates arrive as `f32`.
+    Fptoui { dst: Name, a: Operand },
     /// `bitcast i32 %a to float` / `bitcast float %a to i32`
     Bitcast {
         dst: Name,
@@ -623,10 +625,14 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             let b = parse_operand(tokens[6].trim_end_matches(','))?;
             Ok(Some(Instr::Select { dst, c, a, b }))
         }
-        "uitofp" => {
+        "uitofp" | "sitofp" => {
             // `uitofp nneg i32 %a to float` — rustc marks unsigned casts `nneg`.
             let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
             Ok(Some(Instr::Uitofp { dst, a }))
+        }
+        "fptoui" => {
+            let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
+            Ok(Some(Instr::Fptoui { dst, a }))
         }
         "zext" => parse_zext(&dst, &tokens),
         "bitcast" => {
@@ -852,6 +858,7 @@ impl Instr {
             | Self::Icmp { a, b, .. } => visit_pair(a, b, &mut visit),
             Self::FNeg { a, .. }
             | Self::Uitofp { a, .. }
+            | Self::Fptoui { a, .. }
             | Self::Bitcast { a, .. }
             | Self::Ret { a } => {
                 visit(a);
@@ -893,6 +900,7 @@ impl Instr {
             | Self::Icmp { dst, .. }
             | Self::Select { dst, .. }
             | Self::Uitofp { dst, .. }
+            | Self::Fptoui { dst, .. }
             | Self::Bitcast { dst, .. }
             | Self::Call { dst, .. }
             | Self::Phi { dst, .. } => dst == name,
@@ -920,7 +928,8 @@ impl Instr {
             | Self::Xor { .. }
             | Self::Shl { .. }
             | Self::LShr { .. }
-            | Self::AShr { .. } => Some(Ty::I32),
+            | Self::AShr { .. }
+            | Self::Fptoui { .. } => Some(Ty::I32),
             Self::Fcmp { .. } | Self::Icmp { .. } => Some(Ty::I1),
             Self::Phi { ty, .. } => Some(*ty),
             Self::Bitcast { to, .. } => Some(*to),
@@ -950,10 +959,10 @@ fn visit_triple<'a>(
 fn call_value_ty(callee: &str) -> Option<Ty> {
     if int_call(callee) {
         Some(Ty::I32)
-    } else if float_call(callee) {
-        Some(Ty::Float)
     } else {
-        None
+        // Every other value call in this subset returns `f32`, including
+        // `llvm.maximumnum` and `gpu_clamp`, which the older name list missed.
+        Some(Ty::Float)
     }
 }
 
@@ -964,19 +973,9 @@ fn int_call(callee: &str) -> bool {
         || callee.contains("smax")
         || callee.contains("atomic")
         || callee.contains("_u32")
-}
-
-fn float_call(callee: &str) -> bool {
-    callee.contains("minnum")
-        || callee.contains("maxnum")
-        || callee.contains("dot3")
-        || callee.contains("length3")
-        || callee.contains("sqrt")
-        || callee.contains("sin")
-        || callee.contains("cos")
-        || callee.contains("exp")
-        || callee.contains("log")
-        || callee.contains("_f32")
+        || callee.contains("fptoui")
+        || callee.contains("texture_width_2d")
+        || callee.contains("texture_height_2d")
 }
 
 /// Split on `,` ignoring parentheses depth.

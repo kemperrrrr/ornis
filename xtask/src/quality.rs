@@ -161,7 +161,7 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// two artifacts, so each of those ids counts twice: the denominator
+    /// three artifacts, so that id counts three times: the denominator
     /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
@@ -169,8 +169,8 @@ impl QualityFlags {
             .iter()
             .filter(|id| self.enabled(id))
             .count();
-        // `build-shaders` checks two checked-in artifacts (cull and clusters).
-        let shader_checks = usize::from(self.ci && self.enabled("build-shaders"));
+        // `build-shaders` checks three checked-in artifacts (cull, clusters, gtao).
+        let shader_checks = 2 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2070,14 +2070,23 @@ fn ci_stages(stages: &mut StageList<'_>) {
     check_shader_artifact(
         stages,
         None,
+        None,
         "crates/render/src/gpu_culling/cull_generated.wgsl",
         "cargo xtask build-shaders --check (checked-in WGSL drift)",
     );
     check_shader_artifact(
         stages,
         Some("ornis-gpu-cluster"),
+        None,
         "crates/render/src/renderer/clusters/cluster_generated.wgsl",
         "cargo xtask build-shaders --check (cluster WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-gtao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/gtao_generated.wgsl",
+        "cargo xtask build-shaders --check (gtao WGSL drift)",
     );
 }
 
@@ -2086,6 +2095,7 @@ fn ci_stages(stages: &mut StageList<'_>) {
 fn check_shader_artifact(
     stages: &mut StageList<'_>,
     package: Option<&str>,
+    entry: Option<&str>,
     artifact: &str,
     desc: &str,
 ) {
@@ -2101,6 +2111,10 @@ fn check_shader_artifact(
     if let Some(package) = package {
         args.push("--package");
         args.push(package);
+    }
+    if let Some(entry) = entry {
+        args.push("--entry");
+        args.push(entry);
     }
     args.push("--artifact");
     args.push(artifact);
@@ -3595,7 +3609,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 2);
+        assert_eq!(only_shaders.total_stages(), 3);
     }
 
     #[test]

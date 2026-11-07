@@ -7,8 +7,8 @@
 //! → consts → helpers → entry), so naga plus the pixel probes pin the
 //! result like every other pass.
 //!
-//! Bodies stay raw WGSL (not `#[stage]`): the tap loops and the horizon
-//! march need indexed loops and `continue`, which the DSL does not cover.
+//! SSAO and the 4x raw pass stay raw WGSL. The 1x GTAO fragment is the
+//! checked-in llvm2gpu module `gtao_generated.wgsl`.
 //! The single-sample `textureLoad(…, 0)` call text serves both modes: at 1x
 //! it loads mip 0, at 4x it loads sample 0 (the lighting MSAA trick) — only
 //! the type declarations differ (see [`wgsl_source_raw_for_samples`]).
@@ -283,6 +283,9 @@ fn ao_blur_entry() -> String {
 /// the multisampled types (both stay per-sample: depth has no resolve
 /// target and the normal must not go through the hardware box filter).
 pub fn wgsl_source_raw_for_samples(method: crate::ao::AoMethod, sample_count: u32) -> String {
+    if !method.is_ssao() && sample_count == 1 {
+        return include_str!("gtao_generated.wgsl").to_string();
+    }
     let module = ShaderModule::new()
         .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
         .decl(wgsl_decl(AoUniform::WGSL_SOURCE))
@@ -391,21 +394,15 @@ mod tests {
         assert!(ssao.contains("i < 8u"), "ssao taps: {ssao}");
         assert!(!ssao.contains("horizon"), "ssao must not horizon-march");
         let gtao = wgsl_source_raw(AoMethod::Gtao);
-        assert!(gtao.contains("horizon_cos_pos"), "{gtao}");
-        assert!(gtao.contains("horizon_cos_neg"), "both slice sides: {gtao}");
-        assert!(gtao.contains("slice_dir"), "{gtao}");
-        assert!(gtao.contains("s < 2u"), "gtao slices: {gtao}");
-        assert!(gtao.contains("j <= 4u"), "gtao steps: {gtao}");
-        assert!(gtao.contains("fn gtao_arc("), "{gtao}");
-        assert!(
-            gtao.contains("0.25 * (-cos(2.0 * h - n) + cos(n) + 2.0 * h * sin(n))"),
-            "XeGTAO integral: {gtao}"
-        );
-        assert!(
-            gtao.contains("1.0 - r / max(radius, EPS)"),
-            "radius falloff: {gtao}"
-        );
-        assert!(gtao.contains("input.uv - off"), "negative horizon: {gtao}");
+        assert!(gtao.contains("@fragment"), "{gtao}");
+        assert!(gtao.contains("fn fs_main("), "{gtao}");
+        assert!(gtao.contains("@location(0)"), "{gtao}");
+        assert!(gtao.contains("texture_depth_2d"), "{gtao}");
+        assert!(gtao.contains("texture_2d<f32>"), "{gtao}");
+        assert!(gtao.contains("textureLoad("), "{gtao}");
+        assert!(gtao.contains("acos("), "{gtao}");
+        assert!(gtao.contains("cross("), "{gtao}");
+        assert!(gtao.contains("loop"), "gtao slices: {gtao}");
         assert!(!gtao.contains("ao_params.bias"), "gtao needs no depth bias");
         assert!(
             !ssao.contains("gtao_arc"),
@@ -435,9 +432,22 @@ mod tests {
     fn ao_resources_cover_shader_and_layout() {
         use super::super::{bgl_entry, resource_decl};
         assert_eq!(AO_RAW_RESOURCES.len(), 4);
+        let gtao = wgsl_source_raw(AoMethod::Gtao);
+        for (binding, token) in [
+            (0, "texture_depth_2d"),
+            (1, "texture_2d<f32>"),
+            (2, "var<uniform>"),
+            (3, "var<uniform>"),
+        ] {
+            assert!(
+                gtao.contains(&format!("@group(0) @binding({binding})")),
+                "missing binding {binding}: {gtao}"
+            );
+            assert!(gtao.contains(token), "missing {token}: {gtao}");
+        }
         for r in AO_RAW_RESOURCES {
             assert!(
-                wgsl_source_raw(AoMethod::Gtao).contains(&resource_decl(&r)),
+                wgsl_source_raw(AoMethod::Ssao).contains(&resource_decl(&r)),
                 "missing {}",
                 r.name
             );
