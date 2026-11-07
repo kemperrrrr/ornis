@@ -5,7 +5,14 @@
 // this file only boots it, keeps the 2D grid overlay in sync with
 // `viewport_state_json()` and mirrors the applied viewport mode on the
 // toolbar buttons. Same wire shape as `editor/viewport.js`.
-import init, { start_renderer, set_viewport_mode, viewport_state_json } from './pkg/ornis_wasm.js';
+import init, {
+    start_renderer,
+    set_viewport_mode,
+    set_gizmo_mode,
+    set_gizmo_space,
+    undo_gizmo,
+    viewport_state_json,
+} from './pkg/ornis_wasm.js';
 
 const canvasEl = document.getElementById('canvas');
 const viewportEl = document.getElementById('viewport');
@@ -39,6 +46,8 @@ const currentMode = () => {
 };
 
 let booted = false;
+let gizmoMode = 'move';
+let gizmoSpace = 'world';
 
 if (btn3d) btn3d.addEventListener('click', () => applyMode('perspective3d'));
 if (btn2d) btn2d.addEventListener('click', () => applyMode('plane2d'));
@@ -48,6 +57,23 @@ if (btn2d) btn2d.addEventListener('click', () => applyMode('plane2d'));
 function applyMode(mode) {
     if (!booted) return Promise.resolve();
     return set_viewport_mode(mode === 'plane2d' ? 'plane2d' : 'perspective3d');
+}
+
+// Gizmo tool/space live in the WASM thread-locals; the toolbar asks for a
+// change and keeps its own mirror for the button state.
+function applyGizmoMode(mode) {
+    const next = mode === 'rotate' || mode === 'scale' ? mode : mode === 'move' ? 'move' : 'off';
+    gizmoMode = next;
+    return booted ? set_gizmo_mode(next) : false;
+}
+
+function applyGizmoSpace(space) {
+    gizmoSpace = space === 'local' ? 'local' : 'world';
+    return booted ? set_gizmo_space(gizmoSpace) : false;
+}
+
+function undoGizmoDrag() {
+    return booted ? undo_gizmo() : false;
 }
 
 // Overlay: pointer-events:none div over the canvas, driven by
@@ -129,5 +155,14 @@ window.OrnisViewport = {
     },
     mode() {
         return currentMode();
+    },
+    setGizmoMode(mode) {
+        return applyGizmoMode(mode);
+    },
+    setGizmoSpace(space) {
+        return applyGizmoSpace(space);
+    },
+    undoGizmo() {
+        return undoGizmoDrag();
     },
 };

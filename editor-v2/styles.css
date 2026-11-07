@@ -189,6 +189,11 @@ button { font: inherit; color: inherit; }
 .viewport-gizmos .gizmo svg { width: 18px; height: 18px; }
 .viewport-gizmos .gizmo:hover { fill: var(--text); }
 .viewport-gizmos .gizmo.active { fill: var(--accent); }
+.viewport-gizmos .gizmo.space {
+  font: 600 12px/1 inherit; color: var(--muted); letter-spacing: 0;
+}
+.viewport-gizmos .gizmo.space:hover { color: var(--text); }
+.viewport-gizmos .gizmo.space.active { color: var(--accent); }
 .viewport-gizmos .gizmo[data-tool="select"] svg { fill: #fff; transform: rotate(-25deg); }
 .viewport-gizmos .gizmo.active[data-tool="select"] svg { fill: var(--accent); }
 .viewport-settings {
