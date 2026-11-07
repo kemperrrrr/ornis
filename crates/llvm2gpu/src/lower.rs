@@ -459,6 +459,94 @@ impl Builders {
             );
             return Ok(result);
         }
+        // Vec3 math via scalar composition (glam-like helpers).
+        if callee.contains("dot3") && args.len() == 6 {
+            let vec_ty = self.module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Vector {
+                        size: naga::VectorSize::Tri,
+                        scalar: naga::Scalar {
+                            kind: naga::ScalarKind::Float,
+                            width: 4,
+                        },
+                    },
+                },
+                naga::Span::default(),
+            );
+            let a0 = operand(func, &args[0], env)?;
+            let a1 = operand(func, &args[1], env)?;
+            let a2 = operand(func, &args[2], env)?;
+            let b0 = operand(func, &args[3], env)?;
+            let b1 = operand(func, &args[4], env)?;
+            let b2 = operand(func, &args[5], env)?;
+            let va = append(
+                func,
+                naga::Expression::Compose {
+                    ty: vec_ty,
+                    components: vec![a0, a1, a2],
+                },
+            );
+            push_emit(func, va);
+            let vb = append(
+                func,
+                naga::Expression::Compose {
+                    ty: vec_ty,
+                    components: vec![b0, b1, b2],
+                },
+            );
+            push_emit(func, vb);
+            let v = append(
+                func,
+                naga::Expression::Math {
+                    fun: naga::MathFunction::Dot,
+                    arg: va,
+                    arg1: Some(vb),
+                    arg2: None,
+                    arg3: None,
+                },
+            );
+            push_emit(func, v);
+            return Ok(v);
+        }
+        if callee.contains("length3") && args.len() == 3 {
+            let vec_ty = self.module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Vector {
+                        size: naga::VectorSize::Tri,
+                        scalar: naga::Scalar {
+                            kind: naga::ScalarKind::Float,
+                            width: 4,
+                        },
+                    },
+                },
+                naga::Span::default(),
+            );
+            let a0 = operand(func, &args[0], env)?;
+            let a1 = operand(func, &args[1], env)?;
+            let a2 = operand(func, &args[2], env)?;
+            let va = append(
+                func,
+                naga::Expression::Compose {
+                    ty: vec_ty,
+                    components: vec![a0, a1, a2],
+                },
+            );
+            push_emit(func, va);
+            let v = append(
+                func,
+                naga::Expression::Math {
+                    fun: naga::MathFunction::Length,
+                    arg: va,
+                    arg1: None,
+                    arg2: None,
+                    arg3: None,
+                },
+            );
+            push_emit(func, v);
+            return Ok(v);
+        }
         // Math intrinsics.
         if args.len() == 1 {
             let arg = operand(func, &args[0], env)?;
