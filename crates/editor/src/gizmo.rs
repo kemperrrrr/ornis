@@ -1,11 +1,12 @@
 //! Transform-gizmo domain (PLAN §i, slice E3): handle identity, layout and
 //! pointer drag math.
 //!
-//! The authoritative world owns the handles as ordinary [`EditorOnly`]
-//! entities carrying [`GizmoHandle`]; a host system lays them out around the
-//! selected entity. The viewport replica picks them before scene content and
-//! turns a drag into a [`TransformDesc`] preview, then commits the same value
-//! through the regular `set_component` mutation path.
+//! The authoritative world owns the handles as ordinary
+//! [`EditorOnly`](crate::EditorOnly) entities carrying [`GizmoHandle`]; a
+//! host system lays them out around the selected entity. The viewport
+//! replica picks them before scene content and turns a drag into a
+//! [`TransformDesc`] preview, then commits the same value through the
+//! regular `set_component` mutation path.
 //!
 //! The math here is pure (rays in, transforms out) so drag parity and axis
 //! conventions are unit-tested without a GPU.

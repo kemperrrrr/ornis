@@ -807,8 +807,8 @@ pub fn pick_closest_with_epsilon(
     pick_closest_filtered(store, ray, policy, eps, |_| true)
 }
 
-/// Gizmo-first pick: nearest `EditorOnly` entity whose [`GizmoHandle`]
-/// matches `mode`/`space`.
+/// Gizmo-first pick: nearest `EditorOnly` entity whose
+/// [`GizmoHandle`](crate::GizmoHandle) matches `mode`/`space`.
 ///
 /// Scene content never wins here; the viewport asks for gizmo hits before
 /// falling back to a normal scene pick. A missing handle lane or no
