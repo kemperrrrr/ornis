@@ -2,7 +2,8 @@
 //!
 //! The supported subset is reducible control flow after rustc's `SROA`:
 //! straight-line scalar arithmetic, `select`, diamond `if`s with `phi`
-//! merges, and a single natural loop per region. Phi values are destroyed
+//! merges, and natural loops, including a loop nested inside another.
+//! Phi values are destroyed
 //! into local variables on each incoming edge, which lets Naga's structured
 //! `If`/`Loop` carry the same values without a general SSA relooper.
 //! A value defined in a loop and used after it — LLVM skips the phi when the
@@ -11,9 +12,11 @@
 //! Storage and uniform accesses go through the `ornis_gpu` ABI exactly as
 //! `wasm2gpu` declares them. A scalar `-> float` result is written to
 //! `storage_0_0[id]`, mirroring the toy `compute` kernel; `-> void` kernels
-//! store through the ABI themselves. Irreducible control flow, nested loops,
-//! and loops without an exit are rejected as `Unsupported` so an unknown
-//! shape never silently becomes a wrong shader.
+//! store through the ABI themselves. Irreducible control flow, a loop with
+//! several exits, and a `break` that leaves more than the innermost loop
+//! are rejected as `Unsupported` so an unknown shape never silently becomes
+//! a wrong shader. A natural loop nested in another is emitted as a nested
+//! `loop` when each has one exit and the inner exit stays in the outer body.
 
 use crate::error::TranslateError;
 use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, Terminator, Ty};
@@ -185,7 +188,8 @@ impl<'a> Cfg<'a> {
     /// continuing arm is the merge: the branch becomes
     /// `if cond { return; }` and the rest follows the `if`. A plain
     /// post-dominator cannot see that (the returning arm never reaches
-    /// the continuation), so special-case the direct-return shape.
+    /// the continuation, and a loop on the other arm need not reach the
+    /// exit), so special-case the direct-return shape.
     fn branch_merge(
         &self,
         label: &str,
@@ -203,7 +207,9 @@ impl<'a> Cfg<'a> {
                 return Some(true_label);
             }
         }
-        if merge == Some(EXIT) {
+        // A loop on one arm never post-dominates the branch (the back
+        // edge need not reach the exit), so `merge` is `None` there too.
+        if merge.is_none() || merge == Some(EXIT) {
             let true_returns = self.returns_directly(true_label);
             let false_returns = self.returns_directly(false_label);
             if true_returns && !false_returns {
@@ -408,9 +414,16 @@ fn natural_loop<'a>(
 
 struct Builders {
     module: naga::Module,
-    storage_cache: HashMap<(u32, u32, Elem), naga::Handle<naga::GlobalVariable>>,
+    /// One storage variable per `(group, binding)`. A second element type is
+    /// rejected: two variables at one binding would alias, and a writable
+    /// binding must not alias anything.
+    storage_binding: HashMap<(u32, u32), (Elem, naga::Handle<naga::GlobalVariable>)>,
     uniform_cache: HashMap<(u32, u32), naga::Handle<naga::GlobalVariable>>,
     uniform_struct_cache: HashMap<(u32, u32, u32), naga::Handle<naga::GlobalVariable>>,
+    /// Built uniform struct types, keyed by struct id: type, byte size, align.
+    struct_types: HashMap<u32, (naga::Handle<naga::Type>, u32, u32)>,
+    /// Struct ids currently being laid out, to reject a recursive field.
+    struct_stack: Vec<u32>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
 }
@@ -419,9 +432,11 @@ impl Builders {
     fn new(structs: &[&[u8]]) -> Self {
         Self {
             module: naga::Module::default(),
-            storage_cache: HashMap::new(),
+            storage_binding: HashMap::new(),
             uniform_cache: HashMap::new(),
             uniform_struct_cache: HashMap::new(),
+            struct_types: HashMap::new(),
+            struct_stack: Vec::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
         }
     }
@@ -436,7 +451,7 @@ impl Builders {
         // uses the `-> float` shape; for `-> void` the body creates its
         // own globals lazily.
         if ret_ty == Ty::Float {
-            self.storage_global(0, 0, Elem::F32, true);
+            self.storage_global(0, 0, Elem::F32, true)?;
         }
         self.module.entry_points.push(naga::EntryPoint {
             name: ornis_gpu_abi::symbols::CS_MAIN.to_string(),
@@ -458,15 +473,9 @@ impl Builders {
         binding: u32,
         elem: Elem,
         write: bool,
-    ) -> naga::Handle<naga::GlobalVariable> {
-        if let Some(handle) = self.storage_cache.get(&(group, binding, elem)) {
-            if write
-                && let naga::AddressSpace::Storage { access } =
-                    &mut self.module.global_variables[*handle].space
-            {
-                *access |= naga::StorageAccess::STORE;
-            }
-            return *handle;
+    ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
+        if let Some(handle) = self.existing_storage(group, binding, elem, write)? {
+            return Ok(handle);
         }
         let base_ty = match elem {
             Elem::F32 => scalar(&mut self.module, naga::ScalarKind::Float),
@@ -530,8 +539,35 @@ impl Builders {
             },
             naga::Span::default(),
         );
-        self.storage_cache.insert((group, binding, elem), handle);
-        handle
+        self.storage_binding
+            .insert((group, binding), (elem, handle));
+        Ok(handle)
+    }
+
+    /// The variable already created for this binding, upgrading it to
+    /// writable when this use stores. A second element type is rejected.
+    fn existing_storage(
+        &mut self,
+        group: u32,
+        binding: u32,
+        elem: Elem,
+        write: bool,
+    ) -> Result<Option<naga::Handle<naga::GlobalVariable>>, TranslateError> {
+        let Some((existing, handle)) = self.storage_binding.get(&(group, binding)) else {
+            return Ok(None);
+        };
+        if *existing != elem {
+            return Err(TranslateError::UnsupportedType(format!(
+                "storage binding {group}:{binding} is used as two types"
+            )));
+        }
+        if write
+            && let naga::AddressSpace::Storage { access } =
+                &mut self.module.global_variables[*handle].space
+        {
+            *access |= naga::StorageAccess::STORE;
+        }
+        Ok(Some(*handle))
     }
 
     /// Uniform `array<scalar, len>` wrapped as `{ a: array<lane, len> }`.
@@ -625,6 +661,7 @@ impl Builders {
 
     /// Uniform struct `SID` at `(group, binding)`, laid out with
     /// `place_fields` in uniform mode.
+    // qual:allow(iosp) reason: "the binding is created only after the struct type has been laid out, and a repeat call must reuse it"
     fn uniform_struct_global(
         &mut self,
         group: u32,
@@ -634,44 +671,7 @@ impl Builders {
         if let Some(handle) = self.uniform_struct_cache.get(&(group, binding, sid)) {
             return Ok(*handle);
         }
-        let tags = self
-            .structs
-            .get(sid as usize)
-            .ok_or_else(|| {
-                TranslateError::UnsupportedType(format!(
-                    "uniform struct id {sid} has no ornis_gpu.types entry"
-                ))
-            })?
-            .clone();
-        if tags.is_empty() {
-            return Err(TranslateError::UnsupportedType(
-                "uniform struct has no fields".to_string(),
-            ));
-        }
-        let mut members = Vec::with_capacity(tags.len());
-        let mut specs = Vec::with_capacity(tags.len());
-        let mut offsets = vec![0u32; tags.len()];
-        for (index, tag) in tags.iter().enumerate() {
-            let (ty, size, align) = self.tag_type(*tag)?;
-            specs.push(ornis_gpu_abi::FieldLayout { size, align });
-            members.push(naga::StructMember {
-                name: Some(format!("f{index}")),
-                ty,
-                binding: None,
-                offset: 0,
-            });
-        }
-        let span = ornis_gpu_abi::place_fields(&specs, true, &mut offsets);
-        for (member, offset) in members.iter_mut().zip(offsets) {
-            member.offset = offset;
-        }
-        let struct_ty = self.module.types.insert(
-            naga::Type {
-                name: Some(format!("UniformStruct{sid}")),
-                inner: naga::TypeInner::Struct { members, span },
-            },
-            naga::Span::default(),
-        );
+        let (struct_ty, _, _) = self.struct_type(sid)?;
         let handle = self.module.global_variables.append(
             naga::GlobalVariable {
                 name: Some(format!("uniform_struct_{group}_{binding}_")),
@@ -688,10 +688,74 @@ impl Builders {
         Ok(handle)
     }
 
+    /// Type, byte size and alignment of uniform struct `sid`.
+    // qual:allow(iosp) reason: "laying a uniform struct out is the check of each field tag together with the naga type it becomes"
+    fn struct_type(
+        &mut self,
+        sid: u32,
+    ) -> Result<(naga::Handle<naga::Type>, u32, u32), TranslateError> {
+        if let Some(found) = self.struct_types.get(&sid) {
+            return Ok(*found);
+        }
+        if self.struct_stack.contains(&sid) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform struct {sid} contains itself"
+            )));
+        }
+        let tags = self
+            .structs
+            .get(sid as usize)
+            .ok_or_else(|| {
+                TranslateError::UnsupportedType(format!(
+                    "uniform struct id {sid} has no ornis_gpu.types entry"
+                ))
+            })?
+            .clone();
+        if tags.is_empty() {
+            return Err(TranslateError::UnsupportedType(
+                "uniform struct has no fields".to_string(),
+            ));
+        }
+        self.struct_stack.push(sid);
+        let mut members = Vec::with_capacity(tags.len());
+        let mut specs = Vec::with_capacity(tags.len());
+        let mut offsets = vec![0u32; tags.len()];
+        for (index, tag) in tags.iter().enumerate() {
+            let (ty, size, align) = self.tag_type(*tag)?;
+            specs.push(ornis_gpu_abi::FieldLayout { size, align });
+            members.push(naga::StructMember {
+                name: Some(format!("f{index}")),
+                ty,
+                binding: None,
+                offset: 0,
+            });
+        }
+        let span = ornis_gpu_abi::place_fields(&specs, true, &mut offsets);
+        for (member, offset) in members.iter_mut().zip(&offsets) {
+            member.offset = *offset;
+        }
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: Some(format!("UniformStruct{sid}")),
+                inner: naga::TypeInner::Struct { members, span },
+            },
+            naga::Span::default(),
+        );
+        self.struct_stack.pop();
+        let align = ornis_gpu_abi::UNIFORM_STRUCT_ALIGN;
+        let found = (ty, span, align);
+        self.struct_types.insert(sid, found);
+        Ok(found)
+    }
+
+    // qual:allow(iosp) reason: "a field tag either selects a scalar naga type or recurses into the nested struct it names"
     fn tag_type(
         &mut self,
         tag: u8,
     ) -> Result<(naga::Handle<naga::Type>, u32, u32), TranslateError> {
+        if tag >= ornis_gpu_abi::TYPE_TAG_NESTED {
+            return self.struct_type(u32::from(tag - ornis_gpu_abi::TYPE_TAG_NESTED));
+        }
         use ornis_gpu_abi::{
             F32_ALIGN, F32_SIZE, TYPE_TAG_F32, TYPE_TAG_I32, TYPE_TAG_U32, TYPE_TAG_VEC2,
             TYPE_TAG_VEC3, TYPE_TAG_VEC4, VEC2_ALIGN, VEC2_SIZE, VEC3_ALIGN, VEC3_SIZE, VEC4_ALIGN,
@@ -885,14 +949,14 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         match ctx {
             Ctx::Plain => {
                 if self.cfg.loops.contains_key(start) {
-                    return self.emit_loop(start, stop, out);
+                    return self.emit_loop(start, stop, out, Ctx::Plain);
                 }
             }
             Ctx::Loop { header, .. } => {
                 if start != header && self.cfg.loops.contains_key(start) {
-                    // Nested loops need multi-level break/continue recovery;
-                    // reject rather than emit a wrong nesting.
-                    return Err(TranslateError::Unsupported);
+                    // `break`/`continue` emitted for this header stay inside
+                    // its `Loop`; the caller context receives the exit.
+                    return self.emit_loop(start, stop, out, ctx);
                 }
             }
         }
@@ -1118,11 +1182,16 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     /// `naga::Loop` for a natural loop with one header and one exit target.
+    ///
+    /// `outer` is the region that contains this loop. The exit block is
+    /// emitted there, so a nested loop's `break` does not leave the outer
+    /// `loop` and a branch back to the outer header stays a `continue`.
     fn emit_loop(
         &mut self,
         header: &'a str,
         stop: Option<&'a str>,
         out: &mut naga::Block,
+        outer: Ctx<'a>,
     ) -> Result<Flow, TranslateError> {
         let body = self
             .cfg
@@ -1175,7 +1244,26 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if stop == Some(exit) {
             return Ok(Flow::Next);
         }
-        self.emit_region(exit, stop, out, Ctx::Plain)
+        if let Ctx::Loop {
+            header: outer_header,
+        } = outer
+        {
+            if exit == outer_header {
+                out.push(naga::Statement::Continue, naga::Span::default());
+                return Ok(Flow::Continue);
+            }
+            let stays = self
+                .cfg
+                .loops
+                .get(outer_header)
+                .is_some_and(|body| body.contains(exit));
+            if !stays {
+                // Leaving two loops at once needs a break past the inner
+                // `Loop`; one `break` would stop at the inner header.
+                return Err(TranslateError::Unsupported);
+            }
+        }
+        self.emit_region(exit, stop, out, outer)
     }
 
     /// Values the single exit reads that are defined inside the loop.
@@ -1201,6 +1289,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             instr.each_operand(|op| push_local(op, &mut used));
         }
         push_term_local(&block.term, &mut used);
+        // A phi outside the loop can name a value defined inside it. The
+        // edge store runs after the loop, so that value has to be spilled.
+        for (label, phis) in &self.cfg.phis {
+            if body.contains(label) {
+                continue;
+            }
+            for phi in phis {
+                for (value, _) in &phi.incoming {
+                    push_local(value, &mut used);
+                }
+            }
+        }
         let mut live = Vec::new();
         for name in used {
             self.spill_live(body, &name, &mut live)?;
@@ -1299,7 +1399,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<Flow, TranslateError> {
         if let Some(op) = value {
             let value = self.operand(out, op)?;
-            let global = self.builders.storage_global(0, 0, Elem::F32, true);
+            let global = self.builders.storage_global(0, 0, Elem::F32, true)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             let pointer = self.expr(
                 out,
@@ -1549,6 +1649,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
+        if callee.contains("uniform_nested_field_f32") {
+            return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
+        }
+        if callee.contains("uniform_nested_field_u32") {
+            return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_U32);
+        }
         if callee.contains("uniform_field_vec4_plane_dot") {
             return self.uniform_plane_dot(out, args);
         }
@@ -1589,7 +1695,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let binding = const_u32(&args[1])?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::F32, false);
+                .storage_global(group, binding, Elem::F32, false)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
@@ -1601,7 +1707,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let binding = const_u32(&args[1])?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::U32, false);
+                .storage_global(group, binding, Elem::U32, false)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
@@ -1613,7 +1719,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let binding = const_u32(&args[1])?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::Vec4U32, false);
+                .storage_global(group, binding, Elem::Vec4U32, false)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
         }
@@ -1627,7 +1733,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let lane = const_u32(&args[3])?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::Vec4U32, false);
+                .storage_global(group, binding, Elem::Vec4U32, false)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             let chunk = self.expr(out, naga::Expression::Access { base, index });
             let pointer = self.expr(
@@ -1643,14 +1749,14 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::F32, false);
+                .storage_global(group, binding, Elem::F32, false)?;
             return load_global(&mut self.func, out, global, index);
         }
         if callee.contains("storage_read_u32") {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::U32, false);
+                .storage_global(group, binding, Elem::U32, false)?;
             return load_global(&mut self.func, out, global, index);
         }
         if callee.contains("storage_atomic_add_u32") {
@@ -1663,7 +1769,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let value = self.operand(out, &args[3])?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::AtomicU32, true);
+                .storage_global(group, binding, Elem::AtomicU32, true)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             let pointer = self.expr(out, naga::Expression::Access { base, index });
             let ty = scalar(&mut self.builders.module, naga::ScalarKind::Uint);
@@ -1770,7 +1876,60 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Err(TranslateError::Unsupported)
     }
 
+    /// `uniform_nested_field_f32/u32(group, binding, sid, field, inner)`.
+    // qual:allow(iosp) reason: "the nested tag is checked, then the load is two AccessIndex steps into the uniform global"
+    fn uniform_nested_field(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        expect: u8,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let (group, binding, sid, field) = uniform_ids(args)?;
+        let inner = const_u32(
+            args.get(UNIFORM_PREFIX)
+                .ok_or(TranslateError::Unsupported)?,
+        )?;
+        let tag = self.field_tag(sid, field)?;
+        if tag < ornis_gpu_abi::TYPE_TAG_NESTED {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not a nested struct"
+            )));
+        }
+        let nested = u32::from(tag - ornis_gpu_abi::TYPE_TAG_NESTED);
+        let inner_tag = self.field_tag(nested, inner)?;
+        if inner_tag != expect {
+            return Err(TranslateError::UnsupportedType(format!(
+                "nested field {inner} of struct {nested} has tag {inner_tag}, expected {expect}"
+            )));
+        }
+        let global = self.builders.uniform_struct_global(group, binding, sid)?;
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let outer = self.expr(out, naga::Expression::AccessIndex { base, index: field });
+        let pointer = self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: outer,
+                index: inner,
+            },
+        );
+        Ok(self.expr(out, naga::Expression::Load { pointer }))
+    }
+
+    fn field_tag(&self, sid: u32, field: u32) -> Result<u8, TranslateError> {
+        self.builders
+            .structs
+            .get(sid as usize)
+            .and_then(|tags| tags.get(field as usize))
+            .copied()
+            .ok_or_else(|| {
+                TranslateError::UnsupportedType(format!(
+                    "uniform field {field} of struct {sid} is not declared"
+                ))
+            })
+    }
+
     /// `uniform_field_f32/u32(group, binding, sid, field)`.
+    // qual:allow(iosp) reason: "the declared tag is checked against the import, then the field is loaded from the uniform global"
     fn uniform_field(
         &mut self,
         out: &mut naga::Block,
@@ -1780,21 +1939,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if args.len() != 4 {
             return Err(TranslateError::Unsupported);
         }
-        let group = const_u32(&args[0])?;
-        let binding = const_u32(&args[1])?;
-        let sid = const_u32(&args[2])?;
-        let field = const_u32(&args[3])?;
-        let tag = self
-            .builders
-            .structs
-            .get(sid as usize)
-            .and_then(|tags| tags.get(field as usize))
-            .copied()
-            .ok_or_else(|| {
-                TranslateError::UnsupportedType(format!(
-                    "uniform field {field} of struct {sid} is not declared"
-                ))
-            })?;
+        let (group, binding, sid, field) = uniform_ids(args)?;
+        let tag = self.field_tag(sid, field)?;
         if tag != expect {
             return Err(TranslateError::UnsupportedType(format!(
                 "uniform field {field} of struct {sid} has tag {tag}, expected {expect}"
@@ -1811,6 +1957,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     /// Loads one `vec4` plane and returns `dot((x, y, z, 1), plane)`, the
     /// signed plane distance. One vector uniform load and one `dot`
     /// replace four scalar uniform loads and the scalar FMA chain.
+    // qual:allow(iosp) reason: "the vec4 tag is checked, then one uniform load and a dot replace four scalar loads"
     fn uniform_plane_dot(
         &mut self,
         out: &mut naga::Block,
@@ -1819,21 +1966,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if args.len() != 7 {
             return Err(TranslateError::Unsupported);
         }
-        let group = const_u32(&args[0])?;
-        let binding = const_u32(&args[1])?;
-        let sid = const_u32(&args[2])?;
-        let field = const_u32(&args[3])?;
-        let tag = self
-            .builders
-            .structs
-            .get(sid as usize)
-            .and_then(|tags| tags.get(field as usize))
-            .copied()
-            .ok_or_else(|| {
-                TranslateError::UnsupportedType(format!(
-                    "uniform field {field} of struct {sid} is not declared"
-                ))
-            })?;
+        let (group, binding, sid, field) = uniform_ids(args)?;
+        let tag = self.field_tag(sid, field)?;
         if tag != ornis_gpu_abi::TYPE_TAG_VEC4 {
             return Err(TranslateError::UnsupportedType(format!(
                 "uniform field {field} of struct {sid} is not a vec4"
@@ -1868,30 +2002,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     /// `uniform_field_vec4_component_f32(group, binding, sid, field, component)`.
+    // qual:allow(iosp) reason: "the vec4 tag is checked, then the lane is one AccessIndex on the loaded field"
     fn uniform_field_vec4_component(
         &mut self,
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        if args.len() != 5 {
-            return Err(TranslateError::Unsupported);
-        }
-        let group = const_u32(&args[0])?;
-        let binding = const_u32(&args[1])?;
-        let sid = const_u32(&args[2])?;
-        let field = const_u32(&args[3])?;
-        let component = const_u32(&args[4])?;
-        let tag = self
-            .builders
-            .structs
-            .get(sid as usize)
-            .and_then(|tags| tags.get(field as usize))
-            .copied()
-            .ok_or_else(|| {
-                TranslateError::UnsupportedType(format!(
-                    "uniform field {field} of struct {sid} is not declared"
-                ))
-            })?;
+        let (group, binding, sid, field) = uniform_ids(args)?;
+        let component = const_u32(
+            args.get(UNIFORM_PREFIX)
+                .ok_or(TranslateError::Unsupported)?,
+        )?;
+        let tag = self.field_tag(sid, field)?;
         if tag != ornis_gpu_abi::TYPE_TAG_VEC4 {
             return Err(TranslateError::UnsupportedType(format!(
                 "uniform field {field} of struct {sid} is not a vec4"
@@ -1960,7 +2082,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         );
         let global = self
             .builders
-            .storage_global(group, binding, Elem::Vec4U32, true);
+            .storage_global(group, binding, Elem::Vec4U32, true)?;
         let base = self.expr(out, naga::Expression::GlobalVariable(global));
         let pointer = self.expr(out, naga::Expression::Access { base, index });
         out.push(
@@ -1987,10 +2109,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let dst_index = self.operand(out, &args[5])?;
         let src = self
             .builders
-            .storage_global(src_group, src_binding, Elem::Vec4U32, false);
+            .storage_global(src_group, src_binding, Elem::Vec4U32, false)?;
         let dst = self
             .builders
-            .storage_global(dst_group, dst_binding, Elem::Vec4U32, true);
+            .storage_global(dst_group, dst_binding, Elem::Vec4U32, true)?;
         let src_base = self.expr(out, naga::Expression::GlobalVariable(src));
         let src_ptr = self.expr(
             out,
@@ -2031,7 +2153,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let binding = const_u32(&args[1])?;
         let index = self.operand(out, &args[2])?;
         let value = self.operand(out, &args[3])?;
-        let global = self.builders.storage_global(group, binding, elem, true);
+        let global = self.builders.storage_global(group, binding, elem, true)?;
         let base = self.expr(out, naga::Expression::GlobalVariable(global));
         let pointer = self.expr(out, naga::Expression::Access { base, index });
         out.push(
@@ -2200,6 +2322,22 @@ fn min_max(callee: &str) -> Option<naga::MathFunction> {
     } else {
         None
     }
+}
+
+/// How many leading operands every uniform import uses: group, binding, struct, field.
+const UNIFORM_PREFIX: usize = 4;
+
+/// `(group, binding, struct id, field)` shared by every uniform import.
+fn uniform_ids(args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError> {
+    if args.len() < UNIFORM_PREFIX {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok((
+        const_u32(&args[0])?,
+        const_u32(&args[1])?,
+        const_u32(&args[2])?,
+        const_u32(&args[3])?,
+    ))
 }
 
 fn const_u32(op: &Operand) -> Result<u32, TranslateError> {

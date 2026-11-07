@@ -42,6 +42,11 @@ pub const TYPE_TAG_VEC2: u8 = 4;
 pub const TYPE_TAG_VEC3: u8 = 5;
 /// `ornis_gpu.types` tag for a `vec4<f32>` field.
 pub const TYPE_TAG_VEC4: u8 = 6;
+/// Wire tag for a field that is another uniform struct. The next tag byte is
+/// that struct's id (one decimal digit).
+pub const TYPE_TAG_STRUCT: u8 = 7;
+/// Parsed form of a nested-struct field: [`TYPE_TAG_NESTED`] + the struct id.
+pub const TYPE_TAG_NESTED: u8 = 16;
 
 /// One struct field's size and alignment, in bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

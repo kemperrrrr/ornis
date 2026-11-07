@@ -46,10 +46,10 @@ pub use gpu_ref::{GpuRef, Storage, StorageSpace, Uniform, UniformSpace};
 pub use layout::encode_types_section;
 pub use layout::{
     F32_ALIGN, F32_SIZE, FieldLayout, GpuSafeLayout, GpuVec2, GpuVec3, GpuVec4, LayoutMismatch,
-    TYPE_TAG_F32, TYPE_TAG_I32, TYPE_TAG_U32, TYPE_TAG_VEC2, TYPE_TAG_VEC3, TYPE_TAG_VEC4,
-    UNIFORM_STRUCT_ALIGN, VEC2_ALIGN, VEC2_SIZE, VEC3_ALIGN, VEC3_SIZE, VEC4_ALIGN, VEC4_SIZE,
-    place_fields, round_up, storage_layout_mismatch, storage_stride, uniform_layout_mismatch,
-    uniform_stride,
+    TYPE_TAG_F32, TYPE_TAG_I32, TYPE_TAG_NESTED, TYPE_TAG_STRUCT, TYPE_TAG_U32, TYPE_TAG_VEC2,
+    TYPE_TAG_VEC3, TYPE_TAG_VEC4, UNIFORM_STRUCT_ALIGN, VEC2_ALIGN, VEC2_SIZE, VEC3_ALIGN,
+    VEC3_SIZE, VEC4_ALIGN, VEC4_SIZE, place_fields, round_up, storage_layout_mismatch,
+    storage_stride, uniform_layout_mismatch, uniform_stride,
 };
 pub use shader_io::{
     gpu_cross3, gpu_dot3, gpu_length3, gpu_normalize3, storage_at_f32, storage_at_u32,

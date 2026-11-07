@@ -13,6 +13,9 @@
 //!
 //! `types=` is the pre-typed form (one flat tag list for struct 0);
 //! `uniform=` is the current one, one `<id>:<tags>` entry per uniform binding.
+//! A nested struct field is the digit `7` followed by that struct's id digit
+//! (`671` is a `vec4` and then struct 1); the parsed tag is
+//! [`ornis_gpu_abi::TYPE_TAG_NESTED`] plus the id.
 
 use std::collections::BTreeMap;
 
@@ -211,25 +214,44 @@ fn parse_uniforms(value: &str, structs: &mut BTreeMap<u32, Vec<u8>>) -> Result<(
         if part.is_empty() {
             continue;
         }
-        let (id, tags) = part.split_once(':').ok_or_else(|| {
+        let (id, digits) = part.split_once(':').ok_or_else(|| {
             TranslateError::UnsupportedType(format!("uniform part `{part}` has no `:`"))
         })?;
         let id = id.parse::<u32>().map_err(|_| {
             TranslateError::UnsupportedType(format!("uniform struct id `{id}` is not a number"))
         })?;
-        let tags: Vec<u8> = tags
-            .bytes()
-            .map(|tag| {
-                if tag.is_ascii_digit() {
-                    Ok(tag - b'0')
-                } else {
-                    Err(TranslateError::UnsupportedType(format!(
+        // A `7` consumes the next digit as the nested struct id.
+        let bytes = digits.as_bytes();
+        let mut tags = Vec::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let tag = bytes[index];
+            index += 1;
+            if !tag.is_ascii_digit() {
+                return Err(TranslateError::UnsupportedType(format!(
+                    "uniform field tag `{}` is not a digit",
+                    char::from(tag)
+                )));
+            }
+            let tag = tag - b'0';
+            if tag == ornis_gpu_abi::TYPE_TAG_STRUCT {
+                let Some(id_byte) = bytes.get(index).copied() else {
+                    return Err(TranslateError::UnsupportedType(
+                        "nested struct tag needs an id".to_string(),
+                    ));
+                };
+                index += 1;
+                if !id_byte.is_ascii_digit() {
+                    return Err(TranslateError::UnsupportedType(format!(
                         "uniform field tag `{}` is not a digit",
-                        char::from(tag)
-                    )))
+                        char::from(id_byte)
+                    )));
                 }
-            })
-            .collect::<Result<_, _>>()?;
+                tags.push(ornis_gpu_abi::TYPE_TAG_NESTED + (id_byte - b'0'));
+            } else {
+                tags.push(tag);
+            }
+        }
         if tags.is_empty() {
             return Err(TranslateError::UnsupportedType(format!(
                 "uniform struct {id} has no fields"

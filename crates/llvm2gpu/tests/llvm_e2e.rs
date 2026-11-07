@@ -68,6 +68,68 @@ exit:
 }
 
 #[test]
+fn nested_uniform_struct_field_loads_the_inner_scalar() {
+    let ir = r#"
+@ornis_gpu_shader_meta = private constant [42 x i8] c"entry=cs_main;workgroup=1,1,1;uniform=0:671,1:1", section "ornis_gpu.shader_meta", align 1
+declare float @uniform_nested_field_f32(i32, i32, i32, i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %v = call float @uniform_nested_field_f32(i32 0, i32 0, i32 0, i32 1, i32 0)
+  call void @storage_write_f32(i32 0, i32 1, i32 %id, float %v)
+  ret void
+}
+"#;
+    let translated = ornis_llvm2gpu::translate_with_meta(ir).expect("nested struct");
+    assert!(
+        translated.wgsl.contains("UniformStruct1"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
+fn readonly_storage_bindings_stay_read_only() {
+    let ir = r#"
+declare float @storage_read_f32(i32, i32, i32)
+define dso_local float @cs_main(i32 %id) {
+start:
+  %a = call float @storage_read_f32(i32 0, i32 1, i32 %id)
+  %b = call float @storage_read_f32(i32 0, i32 2, i32 %id)
+  %sum = fadd float %a, %b
+  ret float %sum
+}
+"#;
+    let translated = translate(ir).expect("two readonly bindings");
+    let readonly = translated.wgsl.matches("var<storage> storage_0_").count();
+    assert!(readonly >= 2, "{}", translated.wgsl);
+    assert!(
+        !translated.wgsl.contains("storage_0_1_")
+            || !translated.wgsl.contains("read_write> storage_0_1_"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn one_storage_binding_cannot_have_two_types() {
+    let ir = r#"
+declare float @storage_read_f32(i32, i32, i32)
+declare i32 @storage_read_u32(i32, i32, i32)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %a = call float @storage_read_f32(i32 0, i32 1, i32 0)
+  %b = call i32 @storage_read_u32(i32 0, i32 1, i32 0)
+  ret void
+}
+"#;
+    let error = translate(ir).expect_err("two types at one binding");
+    let message = error.to_string();
+    assert!(message.contains("two types"), "{message}");
+}
+
+#[test]
 fn shader_meta_drives_workgroup_and_types() {
     let ir = r#"
 @ornis_gpu_shader_meta = private constant [47 x i8] c"entry=cs_main;workgroup=32,2,1;types=6,2", section "ornis_gpu.shader_meta", align 1
@@ -175,6 +237,45 @@ exit:
 "#;
     let translated = translate(ir).expect("while loop");
     assert!(translated.wgsl.contains("loop {"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
+fn nested_loops_lower_to_two_naga_loops() {
+    let ir = r#"
+define dso_local noundef float @cs_main(i32 noundef %id) {
+start:
+  br label %outer
+outer:
+  %i = phi i32 [ 0, %start ], [ %i.next, %outer.latch ]
+  %acc = phi float [ 0.000000e+00, %start ], [ %acc.out, %outer.latch ]
+  %o.done = icmp uge i32 %i, %id
+  br i1 %o.done, label %exit, label %inner
+inner:
+  %j = phi i32 [ 0, %outer ], [ %j.next, %inner.step ]
+  %acc.i = phi float [ %acc, %outer ], [ %acc.next, %inner.step ]
+  %i.done = icmp uge i32 %j, %id
+  br i1 %i.done, label %outer.latch, label %inner.step
+inner.step:
+  %acc.next = fadd float %acc.i, 1.000000e+00
+  %j.next = add i32 %j, 1
+  br label %inner
+outer.latch:
+  %acc.out = phi float [ %acc.i, %inner ]
+  %i.next = add i32 %i, 1
+  br label %outer
+exit:
+  %result = phi float [ %acc, %outer ]
+  ret float %result
+}
+"#;
+    let translated = translate(ir).expect("nested loops");
+    assert_eq!(
+        translated.wgsl.matches("loop {").count(),
+        2,
+        "{}",
+        translated.wgsl
+    );
     assert!(!translated.compute_spirv.is_empty());
 }
 
@@ -493,6 +594,81 @@ fn rustc_dynamic_loop_to_wgsl() {
     let translated = translate(&ir).expect("translate dynamic loop");
     assert!(translated.wgsl.contains("loop {"), "{}", translated.wgsl);
     assert!(!translated.compute_spirv.is_empty());
+}
+
+const NESTED_LOOP_KERNEL_RS: &str = r#"
+#![allow(clippy::all)]
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" {
+    fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32;
+}
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = 0.0f32;
+    let mut i = 0u32;
+    while i < id {
+        let mut j = 0u32;
+        while j < id {
+            // A call stops rustc from unrolling the inner loop at opt-level 1.
+            acc += unsafe { storage_read_f32(0, 0, j) };
+            j += 1;
+        }
+        i += 1;
+    }
+    acc
+}
+"#;
+
+#[test]
+fn rustc_gtao_arc_to_wgsl() {
+    let Some(ir) = compile_ir_opt(GTAO_ARC_KERNEL_RS, "1") else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("gtao arc");
+    assert!(translated.wgsl.contains("cos("), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("sin("), "{}", translated.wgsl);
+}
+
+const GTAO_ARC_KERNEL_RS: &str = r#"
+#![allow(clippy::all)]
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" {
+    fn gpu_cos(value: f32) -> f32;
+    fn gpu_sin(value: f32) -> f32;
+}
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    // XeGTAO cosine-weighted arc, the same closed form as `gtao_arc`.
+    // `no_std` has no `f32::cos`, so the kernel calls the imports the
+    // translator already lowers to WGSL `cos` / `sin`.
+    let horizon = (id as f32) * 0.01;
+    let normal = 0.0f32;
+    let two_h = 2.0 * horizon;
+    unsafe { 0.25 * (-gpu_cos(two_h - normal) + gpu_cos(normal) + two_h * gpu_sin(normal)) }
+}
+"#;
+
+#[test]
+fn rustc_nested_loop_to_wgsl() {
+    let Some(ir) = compile_ir_opt(NESTED_LOOP_KERNEL_RS, "1") else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("translate nested rustc loop");
+    assert!(
+        translated.wgsl.matches("loop {").count() >= 2,
+        "{}",
+        translated.wgsl
+    );
 }
 
 #[test]
