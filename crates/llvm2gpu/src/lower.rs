@@ -20,6 +20,22 @@ use std::collections::{HashMap, HashSet};
 /// Synthetic post-dominator sink used while structuring the CFG.
 const EXIT: &str = "$exit";
 
+/// Bytes in one 32-bit storage word.
+const WORD_BYTES: u32 = core::mem::size_of::<f32>() as u32;
+/// Naga's scalar width field.
+const SCALAR_WIDTH: u8 = core::mem::size_of::<f32>() as u8;
+/// Uniform (std140) lane stride for one scalar.
+const UNIFORM_LANE_BYTES: u32 = core::mem::size_of::<[f32; 4]>() as u32;
+/// Largest uniform binding accepted by the translator.
+const MAX_UNIFORM_BYTES: u32 = u16::MAX as u32 + 1;
+/// Lane counts of the GPU vector types.
+const VEC2_LANES: u32 = ornis_gpu_abi::VEC2_SIZE / WORD_BYTES;
+const VEC3_LANES: u32 = ornis_gpu_abi::VEC3_SIZE / WORD_BYTES;
+const VEC4_LANES: u32 = ornis_gpu_abi::VEC4_SIZE / WORD_BYTES;
+/// Byte offsets of the second, third, and fourth scalar words.
+const WORD_2: u32 = WORD_BYTES + WORD_BYTES;
+const WORD_3: u32 = WORD_2 + WORD_BYTES;
+
 /// Lower `func` (named `cs_main`) to a Naga module with one compute entry.
 ///
 /// Two entry shapes are supported:
@@ -340,7 +356,7 @@ impl Builders {
             name: ornis_gpu_abi::symbols::CS_MAIN.to_string(),
             stage: naga::ShaderStage::Compute,
             early_depth_test: None,
-            workgroup_size: [4, 1, 1],
+            workgroup_size: ornis_gpu_abi::symbols::CS_WORKGROUP,
             workgroup_size_overrides: None,
             function,
             mesh_info: None,
@@ -367,7 +383,7 @@ impl Builders {
                     name: None,
                     inner: naga::TypeInner::Atomic(naga::Scalar {
                         kind: naga::ScalarKind::Uint,
-                        width: 4,
+                        width: SCALAR_WIDTH,
                     }),
                 },
                 naga::Span::default(),
@@ -379,7 +395,7 @@ impl Builders {
                 inner: naga::TypeInner::Array {
                     base: base_ty,
                     size: naga::ArraySize::Dynamic,
-                    stride: 4,
+                    stride: WORD_BYTES,
                 },
             },
             naga::Span::default(),
@@ -431,22 +447,22 @@ impl Builders {
                             name: Some("p1".to_string()),
                             ty: scalar_ty,
                             binding: None,
-                            offset: 4,
+                            offset: WORD_BYTES,
                         },
                         naga::StructMember {
                             name: Some("p2".to_string()),
                             ty: scalar_ty,
                             binding: None,
-                            offset: 8,
+                            offset: WORD_2,
                         },
                         naga::StructMember {
                             name: Some("p3".to_string()),
                             ty: scalar_ty,
                             binding: None,
-                            offset: 12,
+                            offset: WORD_3,
                         },
                     ],
-                    span: 16,
+                    span: UNIFORM_LANE_BYTES,
                 },
             },
             naga::Span::default(),
@@ -457,10 +473,9 @@ impl Builders {
                 inner: naga::TypeInner::Array {
                     base: lane_ty,
                     size: naga::ArraySize::Constant(
-                        std::num::NonZeroU32::new(len)
-                            .unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
+                        std::num::NonZeroU32::new(len).unwrap_or(std::num::NonZeroU32::MIN),
                     ),
-                    stride: 16,
+                    stride: UNIFORM_LANE_BYTES,
                 },
             },
             naga::Span::default(),
@@ -475,7 +490,7 @@ impl Builders {
                         binding: None,
                         offset: 0,
                     }],
-                    span: 16 * len,
+                    span: UNIFORM_LANE_BYTES * len,
                 },
             },
             naga::Span::default(),
@@ -573,9 +588,9 @@ impl Builders {
             TYPE_TAG_F32 => (naga::ScalarKind::Float, 1, F32_SIZE, F32_ALIGN),
             TYPE_TAG_U32 => (naga::ScalarKind::Uint, 1, F32_SIZE, F32_ALIGN),
             TYPE_TAG_I32 => (naga::ScalarKind::Sint, 1, F32_SIZE, F32_ALIGN),
-            TYPE_TAG_VEC2 => (naga::ScalarKind::Float, 2, VEC2_SIZE, VEC2_ALIGN),
-            TYPE_TAG_VEC3 => (naga::ScalarKind::Float, 3, VEC3_SIZE, VEC3_ALIGN),
-            TYPE_TAG_VEC4 => (naga::ScalarKind::Float, 4, VEC4_SIZE, VEC4_ALIGN),
+            TYPE_TAG_VEC2 => (naga::ScalarKind::Float, VEC2_LANES, VEC2_SIZE, VEC2_ALIGN),
+            TYPE_TAG_VEC3 => (naga::ScalarKind::Float, VEC3_LANES, VEC3_SIZE, VEC3_ALIGN),
+            TYPE_TAG_VEC4 => (naga::ScalarKind::Float, VEC4_LANES, VEC4_SIZE, VEC4_ALIGN),
             _ => {
                 return Err(TranslateError::UnsupportedType(format!(
                     "unsupported uniform field tag {tag}"
@@ -583,16 +598,24 @@ impl Builders {
             }
         };
         let inner = if lanes == 1 {
-            naga::TypeInner::Scalar(naga::Scalar { kind, width: 4 })
+            naga::TypeInner::Scalar(naga::Scalar {
+                kind,
+                width: SCALAR_WIDTH,
+            })
         } else {
-            let size = match lanes {
-                2 => naga::VectorSize::Bi,
-                3 => naga::VectorSize::Tri,
-                _ => naga::VectorSize::Quad,
+            let size = if lanes == VEC2_LANES {
+                naga::VectorSize::Bi
+            } else if lanes == VEC3_LANES {
+                naga::VectorSize::Tri
+            } else {
+                naga::VectorSize::Quad
             };
             naga::TypeInner::Vector {
                 size,
-                scalar: naga::Scalar { kind, width: 4 },
+                scalar: naga::Scalar {
+                    kind,
+                    width: SCALAR_WIDTH,
+                },
             }
         };
         let ty = self
@@ -616,7 +639,7 @@ impl Builders {
                         size: naga::VectorSize::Tri,
                         scalar: naga::Scalar {
                             kind: naga::ScalarKind::Uint,
-                            width: 4,
+                            width: SCALAR_WIDTH,
                         },
                     },
                 },
@@ -1223,7 +1246,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     naga::Expression::As {
                         expr: src,
                         kind: naga::ScalarKind::Float,
-                        convert: Some(4),
+                        convert: Some(SCALAR_WIDTH),
                     },
                 );
                 self.env.insert(dst.clone(), v);
@@ -1295,7 +1318,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let group = const_u32(&args[0])?;
             let binding = const_u32(&args[1])?;
             let len = const_u32(&args[2])?;
-            if len == 0 || len.checked_mul(16).is_none_or(|b| b > 65536) {
+            if len == 0
+                || len
+                    .checked_mul(UNIFORM_LANE_BYTES)
+                    .is_none_or(|b| b > MAX_UNIFORM_BYTES)
+            {
                 return Err(TranslateError::UnsupportedType(
                     "uniform array exceeds 64KiB".to_string(),
                 ));
@@ -1531,7 +1558,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     size: naga::VectorSize::Tri,
                     scalar: naga::Scalar {
                         kind: naga::ScalarKind::Float,
-                        width: 4,
+                        width: SCALAR_WIDTH,
                     },
                 },
             },
@@ -1632,7 +1659,10 @@ fn scalar(module: &mut naga::Module, kind: naga::ScalarKind) -> naga::Handle<nag
     module.types.insert(
         naga::Type {
             name: None,
-            inner: naga::TypeInner::Scalar(naga::Scalar { kind, width: 4 }),
+            inner: naga::TypeInner::Scalar(naga::Scalar {
+                kind,
+                width: SCALAR_WIDTH,
+            }),
         },
         naga::Span::default(),
     )
