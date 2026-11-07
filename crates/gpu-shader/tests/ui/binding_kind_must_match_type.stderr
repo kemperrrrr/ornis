@@ -1,7 +1,7 @@
 error: a `uniform` parameter must be `Uniform`, not `Storage`
-  --> tests/ui/binding_kind_must_match_type.rs:21:52
+  --> tests/ui/binding_kind_must_match_type.rs:20:52
    |
-21 |     #[gpu(uniform, group = 0, binding = 0)] wrong: Storage<u32, ReadOnly>,
+20 |     #[gpu(uniform, group = 0, binding = 0)] wrong: Storage<u32, ReadOnly>,
    |                                                    ^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unused imports: `ReadOnly`, `Storage`, and `Uniform`

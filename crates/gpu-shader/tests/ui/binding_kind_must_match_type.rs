@@ -15,8 +15,7 @@ impl ornis_gpu_shader::GpuStruct for Params {
 }
 
 #[gpu_entry(compute(threads(1)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(
+pub fn cs_main(
     id: u32,
     #[gpu(uniform, group = 0, binding = 0)] wrong: Storage<u32, ReadOnly>,
     #[gpu(storage_buffer, group = 0, binding = 1)] also_wrong: Uniform<Params>,

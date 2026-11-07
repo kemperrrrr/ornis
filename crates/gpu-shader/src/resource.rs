@@ -34,19 +34,6 @@ pub struct Storage<T, const G: u32, const B: u32, A: StorageAccess = ReadOnly> {
 }
 
 impl<T, const G: u32, const B: u32, A: StorageAccess> Storage<T, G, B, A> {
-    /// Bind the parameter that `#[gpu_entry]` stripped from the signature.
-    ///
-    /// The attribute expansion is the only caller: a kernel never constructs a
-    /// binding value, which keeps the address a property of the attribute.
-    #[doc(hidden)]
-    #[inline(always)]
-    pub const fn __bind() -> Self {
-        Self {
-            element: core::marker::PhantomData,
-            access: core::marker::PhantomData,
-        }
-    }
-
     /// The `(group, binding)` pair, for diagnostics and tests.
     #[inline(always)]
     pub const fn address() -> (u32, u32) {

@@ -21,8 +21,7 @@ use proc_macro::TokenStream;
 ///
 /// ```ignore
 /// #[gpu_entry(compute(threads(64)))]
-/// #[unsafe(no_mangle)]
-/// pub extern "C" fn cs_main(
+/// pub fn cs_main(
 ///     id: u32,
 ///     #[gpu(uniform, group = 0, binding = 0)] params: Uniform<CullParams>,
 ///     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<f32>,
@@ -31,9 +30,15 @@ use proc_macro::TokenStream;
 /// }
 /// ```
 ///
-/// Each annotated parameter is removed from the exported signature and bound at
-/// the head of the body to `Type::__bind()`, so the kernel body keeps using the
-/// name it wrote while the translator sees a plain `cs_main(u32)`.
+/// Each annotated parameter stays in the signature, with the group, binding, and
+/// access mode written into its type. The type is zero-sized, so rustc drops the
+/// argument from the compiled entry: the translator sees the same
+/// `cs_main(i32)` it always did, and the body uses the parameter as an ordinary
+/// argument.
+///
+/// The attribute also attaches `#[unsafe(export_name = "<fn name>")]`, so a
+/// kernel is a plain safe `pub fn` — no `extern "C"` and no
+/// `#[unsafe(no_mangle)]`.
 ///
 /// The metadata global is named `ornis_gpu_shader_meta` and carries the record
 /// format of `ornis_gpu_shader::meta`: `entry=…;workgroup=x,y,z` plus one

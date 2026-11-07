@@ -16,7 +16,10 @@ use ornis_gpu_shader::Vec3;
 use ornis_gpu_shader::gpu_entry;
 
 /// One uniform struct with the `CullParams` shape.
-struct Params;
+///
+/// Public because it appears in `typed_kernel`'s signature: the resource
+/// parameters stay in the signature now, so their types are reachable too.
+pub struct Params;
 
 impl GpuStruct for Params {
     const ID: u32 = 0;
@@ -24,9 +27,10 @@ impl GpuStruct for Params {
 }
 
 /// A kernel whose body never runs on the host but must still type-check.
+///
+/// A plain safe `fn`: no `extern "C"`, no `#[unsafe(no_mangle)]`.
 #[gpu_entry(compute(threads(64)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn typed_kernel(
+pub fn typed_kernel(
     id: u32,
     #[gpu(uniform, group = 0, binding = 0)] params: Uniform<Params>,
     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<f32, ReadOnly>,
@@ -60,20 +64,24 @@ fn binding_resolution_writes_group_and_binding_once() {
 }
 
 #[test]
-fn entry_keeps_its_exported_signature() {
-    // The translator lowers `cs_main(u32)`; the same rule applies to any entry:
-    // the resource parameters are bound in the body, not passed in. The coercion
-    // below only compiles while the attribute strips every `#[gpu(…)]` argument,
-    // and the address assertion keeps the resource types in the test.
-    let entry: extern "C" fn(u32) = typed_kernel;
+fn resource_parameters_are_zero_sized() {
+    // A kernel is ordinary Rust: the resource parameters stay in the signature
+    // and the body uses them as arguments. What the translator sees is
+    // `cs_main(i32)` only because the binding types are zero-sized — rustc drops
+    // ZST arguments from the compiled entry. If one of these ever grew a field,
+    // the entry would start carrying an argument the translator cannot lower,
+    // so the invariant is asserted here and against real IR in `abi_parity`.
     assert_eq!(
         (
-            core::mem::size_of_val(&entry),
-            Storage::<u32, 0, 2, ReadWrite>::address()
+            core::mem::size_of::<Storage<f32, 0, 1, ReadOnly>>(),
+            core::mem::size_of::<Storage<u32, 0, 2, ReadWrite>>(),
+            core::mem::size_of::<Storage<AtomicU32, 0, 3, ReadWrite>>(),
+            core::mem::size_of::<Uniform<Params, 0, 0>>(),
         ),
-        (core::mem::size_of::<extern "C" fn(u32)>(), (0, 2)),
-        "the entry macro must keep the plain invocation-id signature"
+        (0, 0, 0, 0),
+        "resource parameters must be zero-sized so the entry stays `cs_main(i32)`"
     );
+    assert_eq!(Storage::<u32, 0, 2, ReadWrite>::address(), (0, 2));
 }
 
 #[test]

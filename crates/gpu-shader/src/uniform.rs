@@ -35,15 +35,6 @@ pub struct Uniform<T: GpuStruct, const G: u32, const B: u32> {
 }
 
 impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
-    /// Bind the parameter that `#[gpu_entry]` stripped from the signature.
-    #[doc(hidden)]
-    #[inline(always)]
-    pub const fn __bind() -> Self {
-        Self {
-            layout: core::marker::PhantomData,
-        }
-    }
-
     /// Fail the build when field `FIELD` is not declared with `tag`.
     const fn require_tag<const FIELD: usize>(tag: u8) {
         assert!(

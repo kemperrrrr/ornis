@@ -44,9 +44,11 @@ fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 use ornis_gpu_shader::{gpu_entry, ReadOnly, ReadWrite, Storage};
 
+// The whole point: a kernel is a plain safe `fn`. No `extern "C"`, no
+// `#[unsafe(no_mangle)]` — the attribute attaches the export name and the
+// zero-sized bindings vanish from the compiled signature.
 #[gpu_entry(compute(threads(64)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(
+pub fn cs_main(
     id: u32,
     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<f32, ReadOnly>,
     #[gpu(storage_buffer, group = 0, binding = 2)] dst: Storage<u32, ReadWrite>,
