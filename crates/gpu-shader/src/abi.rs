@@ -38,6 +38,8 @@ unsafe extern "C" {
     fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
     #[link_name = "uniform_field_u32"]
     fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
+    #[link_name = "uniform_nested_field_f32"]
+    fn uniform_nested_field_f32(group: u32, binding: u32, sid: u32, field: u32, inner: u32) -> f32;
     #[link_name = "uniform_field_vec4_component_f32"]
     fn uniform_field_vec4_component_f32(
         group: u32,
@@ -151,6 +153,13 @@ pub(crate) fn exp(value: f32) -> f32 {
 #[inline(always)]
 pub(crate) fn field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
     call!(uniform_field_u32(group, binding, sid, field))
+}
+
+/// `f32` field `inner` of the struct stored in field `field`.
+// qual:allow(test_quality, untested) reason: "wasm import shim; the nested-struct test translates the call in LLVM IR, and the host build never executes it"
+#[inline(always)]
+pub(crate) fn nested_field_f32(group: u32, binding: u32, sid: u32, field: u32, inner: u32) -> f32 {
+    call!(uniform_nested_field_f32(group, binding, sid, field, inner))
 }
 
 /// `dot((x, y, z, 1), plane)` for the `vec4` field `field`.

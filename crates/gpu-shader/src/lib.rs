@@ -94,6 +94,8 @@ pub const TYPE_TAG_VEC2: u8 = 4;
 pub const TYPE_TAG_VEC3: u8 = 5;
 /// Field tag of a `vec4<f32>` in `ornis_gpu.types`.
 pub const TYPE_TAG_VEC4: u8 = 6;
+/// Field tag of a nested uniform struct. The next `FIELD_TAGS` byte is its id.
+pub const TYPE_TAG_STRUCT: u8 = 7;
 
 /// Diverging stub behind every resource method outside `wasm32`.
 #[cfg(not(target_arch = "wasm32"))]

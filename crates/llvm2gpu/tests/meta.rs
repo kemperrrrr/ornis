@@ -33,6 +33,16 @@ fn current_record_lists_one_struct_per_uniform_binding() {
 }
 
 #[test]
+fn nested_struct_tag_consumes_the_following_id_digit() {
+    let meta = parse_meta("entry=cs_main;workgroup=1,1,1;uniform=0:671,1:1").expect("record");
+    assert_eq!(
+        meta.tags(0),
+        Some([6, ornis_gpu_abi::TYPE_TAG_NESTED + 1].as_slice())
+    );
+    assert_eq!(meta.tags(1), Some([1].as_slice()));
+}
+
+#[test]
 fn older_types_record_still_reads() {
     let ir = module("entry=cs_main;workgroup=64,1,1;types=6,2");
     let meta = extract_meta(&ir)
@@ -66,6 +76,7 @@ fn malformed_records_are_rejected() {
         "entry=cs_main;workgroup=8",
         "entry=cs_main",
         "entry=cs_main;workgroup=8,1,1;uniform=0:6a",
+        "entry=cs_main;workgroup=8,1,1;uniform=0:67",
         "entry=cs_main;workgroup=8,1,1;uniform=0",
         "entry=cs_main;workgroup=8,1,1;types=",
     ] {

@@ -13,7 +13,7 @@ note: inside `Uniform::<BadParams, 0, 0>::require_tag::<0>`
  ::: src/uniform.rs
   |
   | /         assert!(
-  | |             T::FIELD_TAGS[FIELD] == tag,
+  | |             logical_tag(T::FIELD_TAGS, FIELD) == tag,
   | |             "uniform field has a different declared tag"
   | |         );
   | |_________- in this macro invocation

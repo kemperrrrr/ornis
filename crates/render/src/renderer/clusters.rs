@@ -34,7 +34,7 @@ pub(crate) const CLUSTER_DEPTH_FAR: f32 = 400.0;
 /// Upper view depth of the last slice: beyond this nothing is clustered.
 /// The llvm2gpu kernel copies the value; the CPU reference and the
 /// constant pin are test-only, so the non-test lib does not read it.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) const CLUSTER_FAR_LIMIT: f32 = 1.0e9;
 /// Light records the cluster storage buffer holds (uniform window head
 /// + clustered point/spot records).
@@ -52,7 +52,7 @@ pub(crate) const CLUSTER_WORKGROUPS: u32 = CLUSTER_COUNT / CLUSTER_WORKGROUP_SIZ
 /// Outer-cone cosine below which the spot bound falls back to the plain
 /// point-light sphere (cone too wide to shrink). The llvm2gpu kernel
 /// copies the value; the CPU reference and the constant pin are test-only.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) const SPOT_BOUND_COS_FLOOR: f32 = 0.1;
 /// Slice-lookup epsilon: a depth that lands exactly on a slice boundary
 /// belongs to the slice it closes, but the `ln`/`exp` round trip drifts

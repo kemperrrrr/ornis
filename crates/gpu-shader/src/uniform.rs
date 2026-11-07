@@ -13,6 +13,7 @@
 //! lives in another crate (`ornis-render`) that the shader crate must not
 //! depend on.
 
+use crate::TYPE_TAG_STRUCT;
 use crate::TYPE_TAG_U32;
 use crate::TYPE_TAG_VEC4;
 
@@ -35,14 +36,10 @@ pub struct Uniform<T: GpuStruct, const G: u32, const B: u32> {
 }
 
 impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
-    /// Fail the build when field `FIELD` is not declared with `tag`.
+    /// Fail the build when logical field `FIELD` is not declared with `tag`.
     const fn require_tag<const FIELD: usize>(tag: u8) {
         assert!(
-            FIELD < T::FIELD_TAGS.len(),
-            "uniform field index is past the declared field count"
-        );
-        assert!(
-            T::FIELD_TAGS[FIELD] == tag,
+            logical_tag(T::FIELD_TAGS, FIELD) == tag,
             "uniform field has a different declared tag"
         );
     }
@@ -74,6 +71,23 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
         crate::host_unavailable()
     }
 
+    /// Scalar `f32` field `INNER` of the struct stored in field `FIELD`.
+    // qual:allow(test_quality, untested) reason: "shader method; the nested-struct test covers the lowered WGSL, and calling it on the host diverges"
+    #[inline(always)]
+    pub fn nested_field_f32<const FIELD: usize, const INNER: usize>(&self) -> f32 {
+        const { Self::require_tag::<FIELD>(TYPE_TAG_STRUCT) };
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::nested_field_f32(G, B, T::ID, FIELD as u32, INNER as u32)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = INNER;
+            crate::host_unavailable()
+        }
+    }
+
     /// Signed distance from `(x, y, z)` to `vec4` plane field `FIELD`:
     /// `dot((x, y, z, 1), field)`.
     ///
@@ -94,6 +108,30 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
             crate::host_unavailable()
         }
     }
+}
+
+/// Tag of logical field `field`. A [`TYPE_TAG_STRUCT`] byte consumes the next
+/// byte as the nested struct id, so the slice is not one tag per field.
+const fn logical_tag(tags: &[u8], field: usize) -> u8 {
+    let mut cursor = 0;
+    let mut seen = 0;
+    while seen < field {
+        assert!(
+            cursor < tags.len(),
+            "uniform field index is past the declared field count"
+        );
+        if tags[cursor] == TYPE_TAG_STRUCT {
+            cursor += 2;
+        } else {
+            cursor += 1;
+        }
+        seen += 1;
+    }
+    assert!(
+        cursor < tags.len(),
+        "uniform field index is past the declared field count"
+    );
+    tags[cursor]
 }
 
 impl<T: GpuStruct, const G: u32, const B: u32> Clone for Uniform<T, G, B> {
