@@ -2,7 +2,8 @@
 //! GPU-side span/index-list layout (`ClusterSpan`/`ClusterParams`), and
 //! the shared constants every consumer formats from — the shading
 //! lookup (`shaders::helpers::cluster_light_span`), the assignment
-//! compute pass ([`wgsl`]) and the CPU reference ([`cpu`], test-only).
+//! compute pass ([`gpu`], llvm2gpu `cs_main`) and the CPU reference
+//! ([`cpu`], test-only).
 //! The GPU owner lives in [`gpu`].
 use super::WgslStruct;
 
