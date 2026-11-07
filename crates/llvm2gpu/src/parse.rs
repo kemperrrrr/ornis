@@ -103,6 +103,13 @@ pub(super) enum Instr {
     },
     /// `uitofp i32 %a to float`
     Uitofp { dst: Name, a: Operand },
+    /// `bitcast i32 %a to float` / `bitcast float %a to i32`
+    Bitcast {
+        dst: Name,
+        from: Ty,
+        to: Ty,
+        a: Operand,
+    },
     /// `call float @name(...)`
     Call {
         dst: Name,
@@ -616,6 +623,13 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             // `uitofp i32 %a to float`
             let a = parse_operand(tokens[2].trim_end_matches(','))?;
             Ok(Some(Instr::Uitofp { dst, a }))
+        }
+        "bitcast" => {
+            // `bitcast i32 %a to float`
+            let from = parse_ty(&tokens[1])?;
+            let a = parse_operand(tokens[2].trim_end_matches(','))?;
+            let to = parse_ty(&tokens[4])?;
+            Ok(Some(Instr::Bitcast { dst, from, to, a }))
         }
         "br" | "switch" => Err(TranslateError::Unsupported),
         "load" | "store" | "getelementptr" => Err(TranslateError::Unsupported),

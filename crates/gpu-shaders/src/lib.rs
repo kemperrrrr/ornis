@@ -10,10 +10,38 @@
 #![no_std]
 #![warn(missing_docs)]
 
-/// Smoke compute entry: writes `id * 2 + 1` through the scalar return ABI.
+unsafe extern "C" {
+    fn storage_len_u32x4(group: i32, binding: i32) -> i32;
+    fn storage_read_u32_lane(group: i32, binding: i32, index: i32, lane: i32) -> i32;
+    fn storage_copy_u32x4(
+        src_group: i32,
+        src_binding: i32,
+        src_index: i32,
+        dst_group: i32,
+        dst_binding: i32,
+        dst_index: i32,
+    );
+}
+
+/// Copy one 16-byte record chunk and read one lane through the vec4 ABI.
 ///
-/// `ornis-llvm2gpu` stores the return value at `storage_0_0[global_id.x]`.
+/// `cs_main` stores the returned bits at `storage_0_0[global_id.x]`, so the
+/// builder smoke test can inspect the lowered WGSL for a vec4 load/store,
+/// `arrayLength`, and a read-only source binding.
 #[unsafe(no_mangle)]
 pub extern "C" fn cs_main(id: u32) -> f32 {
-    (id as f32) * 2.0 + 1.0
+    let index = id as i32;
+    // SAFETY: the import reads the array length of binding 1; the host
+    // binds it as a read-only storage buffer.
+    let len = unsafe { storage_len_u32x4(0, 1) };
+    if index < len {
+        // SAFETY: `index` is guarded by `len`; both bindings are vec4<u32>
+        // arrays with the same record layout.
+        unsafe {
+            storage_copy_u32x4(0, 1, index, 0, 2, index);
+        }
+    }
+    // SAFETY: lane 3 of chunk 0 exists in every vec4<u32> record.
+    let word = unsafe { storage_read_u32_lane(0, 1, 0, 3) };
+    f32::from_bits(word as u32)
 }
