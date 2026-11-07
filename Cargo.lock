@@ -2998,6 +2998,7 @@ dependencies = [
  "ornis-animation",
  "ornis-assets",
  "ornis-core",
+ "ornis-llvm2gpu",
  "ornis-macros",
  "ornis-mesh-editor",
  "ornis-schedule",

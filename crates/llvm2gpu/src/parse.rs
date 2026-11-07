@@ -654,6 +654,7 @@ fn is_flag(token: &str) -> bool {
             | "afn"
             | "reassoc"
             | "samesign"
+            | "disjoint"
     )
 }
 
