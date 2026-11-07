@@ -546,15 +546,23 @@ pub enum ChromePolicy {
     /// `EditorOnly` entities never win a pick (E1 behaviour).
     #[default]
     SkipChrome,
+    /// Only `EditorOnly` entities are pickable (gizmo-first priority).
+    OnlyChrome,
     /// `EditorOnly` entities compete like scene content (E3 preview seam).
     IncludeChrome,
 }
 
 impl ChromePolicy {
+    /// Whether scene (non-chrome) entities participate in picking.
+    #[must_use]
+    pub fn includes_scene(self) -> bool {
+        !matches!(self, Self::OnlyChrome)
+    }
+
     /// Whether chrome entities participate in picking.
     #[must_use]
     pub fn includes_chrome(self) -> bool {
-        matches!(self, Self::IncludeChrome)
+        matches!(self, Self::OnlyChrome | Self::IncludeChrome)
     }
 }
 
@@ -796,6 +804,46 @@ pub fn pick_closest_with_epsilon(
     policy: ChromePolicy,
     eps: PickEpsilon,
 ) -> Result<Option<PickHit>, PickError> {
+    pick_closest_filtered(store, ray, policy, eps, |_| true)
+}
+
+/// Gizmo-first pick: nearest `EditorOnly` entity whose [`GizmoHandle`]
+/// matches `mode`/`space`.
+///
+/// Scene content never wins here; the viewport asks for gizmo hits before
+/// falling back to a normal scene pick. A missing handle lane or no
+/// candidate reports [`PickError::EmptyScene`].
+pub fn pick_gizmo(
+    store: &SmartStore,
+    ray: &PickRay,
+    mode: crate::GizmoMode,
+    space: crate::GizmoSpace,
+) -> Result<Option<PickHit>, PickError> {
+    let Some(handles) = store.read_lane::<crate::GizmoHandle>() else {
+        return Err(PickError::EmptyScene);
+    };
+    pick_closest_filtered(
+        store,
+        ray,
+        ChromePolicy::OnlyChrome,
+        PickEpsilon::DEFAULT,
+        |entity| {
+            handles
+                .get(entity)
+                .is_some_and(|handle| handle.matches(mode, space))
+        },
+    )
+}
+
+/// Shared picker: policy filters chrome/scene, `filter` adds caller-side
+/// constraints (e.g. the active gizmo mode).
+fn pick_closest_filtered(
+    store: &SmartStore,
+    ray: &PickRay,
+    policy: ChromePolicy,
+    eps: PickEpsilon,
+    filter: impl Fn(Entity) -> bool,
+) -> Result<Option<PickHit>, PickError> {
     let Some(transforms) = store.read_lane::<TransformDesc>() else {
         return Err(PickError::EmptyScene);
     };
@@ -809,7 +857,13 @@ pub fn pick_closest_with_epsilon(
         let Some(mesh) = meshes.get(*entity) else {
             continue;
         };
-        if !policy.includes_chrome() && chrome.as_ref().is_some_and(|lane| lane.contains(*entity)) {
+        let is_chrome = chrome.as_ref().is_some_and(|lane| lane.contains(*entity));
+        let included = if is_chrome {
+            policy.includes_chrome()
+        } else {
+            policy.includes_scene()
+        };
+        if !included || !filter(*entity) {
             continue;
         }
         candidates += 1;
@@ -1130,8 +1184,17 @@ mod tests {
     fn chrome_policy_decides_selectability() {
         let mut engine = Engine::new();
         let store = store_with_lanes(&mut engine);
+        store.register::<crate::GizmoHandle>();
         let gizmo = spawn_sphere(store, [0.0, 0.0, 3.0], 1.0);
         store.insert(gizmo, crate::EditorOnly);
+        store.insert(
+            gizmo,
+            crate::GizmoHandle {
+                mode: crate::GizmoMode::Move,
+                space: crate::GizmoSpace::World,
+                axis: crate::GizmoAxis::X,
+            },
+        );
         let scene = spawn_sphere(store, [0.0, 0.0, 0.0], 1.0);
         let store = engine.world().store().expect("world store");
         let ray = pick_ray(&camera(), [100.0, 100.0]).expect("center ray");
@@ -1143,6 +1206,29 @@ mod tests {
             .expect("pickable scene")
             .expect("chrome hit");
         assert_eq!(included.entity(), gizmo);
+        let only = pick_closest(store, &ray, ChromePolicy::OnlyChrome)
+            .expect("pickable chrome")
+            .expect("chrome hit");
+        assert_eq!(only.entity(), gizmo);
+        let picked = pick_gizmo(
+            store,
+            &ray,
+            crate::GizmoMode::Move,
+            crate::GizmoSpace::World,
+        )
+        .expect("gizmo pick")
+        .expect("handle hit");
+        assert_eq!(picked.entity(), gizmo);
+        assert!(
+            pick_gizmo(
+                store,
+                &ray,
+                crate::GizmoMode::Rotate,
+                crate::GizmoSpace::World,
+            )
+            .is_err(),
+            "no matching-mode candidate reports an empty gizmo scene"
+        );
     }
 
     /// Empty stores and lane-less stores error instead of panicking.

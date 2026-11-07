@@ -86,7 +86,10 @@ use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
     ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, Seconds, SmartStore, World,
 };
-use ornis_editor::{EditorMarks, install_editor, is_editor_only, set_selection};
+use ornis_editor::{
+    EditorMarks, EditorOnly, GizmoAxis, GizmoHandle, Selected, install_editor,
+    install_gizmo_authoring, is_editor_only, set_selection,
+};
 use ornis_gameplay::{Position, Velocity, install_gameplay};
 use ornis_physics::RigidBody;
 
@@ -123,6 +126,7 @@ static REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(|| {
     registry.register::<ColliderDesc>("Collider");
     registry.register_component::<Velocity>();
     registry.register_component::<Position>();
+    registry.register::<GizmoHandle>("GizmoHandle");
     registry
 });
 
@@ -325,6 +329,10 @@ impl Default for EditorSession {
         // `load_scene` rebuilds through `new`), so editor entities always
         // have their lanes and filters.
         install_editor(engine);
+        // Authoritative gizmo handles: a layout system on the same world;
+        // the replica does not install it (it receives handles via the
+        // snapshot and positions them locally for its active mode).
+        install_gizmo_authoring(engine);
         // Audio mirrors the showcase runtime: real output when a device
         // exists, silent otherwise; the bridge is a no-op without a host.
         if let Some(audio) = AudioPlugin::try_default() {
@@ -571,15 +579,90 @@ impl EditorSession {
         entity
     }
 
+    /// Creates the full gizmo handle set (both spaces, all modes) around
+    /// the current selection. Returns whether anything was created.
+    ///
+    /// Handles are ordinary [`EditorOnly`] entities: they replicate through
+    /// `/api/scene`, never save (`to_scene` filters chrome) and have no
+    /// physics body. The layout system positions them each frame.
+    fn ensure_gizmo_handles(&mut self) -> bool {
+        let present = self.store().is_some_and(|store| {
+            store
+                .read_lane::<GizmoHandle>()
+                .is_some_and(|lane| !lane.entities.is_empty())
+        });
+        if present {
+            return false;
+        }
+        let Some(store) = self.store_mut() else {
+            return false;
+        };
+        let mut created = Vec::new();
+        for handle in GizmoHandle::all() {
+            let entity = store.create_entity();
+            store.insert(entity, Name(gizmo_name(handle)));
+            store.insert(entity, gizmo_hidden_transform());
+            // The replica draws one shared sphere for every instance and
+            // folds the radius into the model scale; a sphere desc keeps the
+            // pick volume identical to what the user sees (a box desc would
+            // pick at half the rendered extents).
+            store.insert(
+                entity,
+                MeshDesc::Sphere {
+                    radius: PositiveF32::expect_valid(1.0),
+                    segments: GIZMO_SEGMENTS,
+                    rings: GIZMO_RINGS,
+                },
+            );
+            store.insert(entity, gizmo_material(handle.axis));
+            store.insert(entity, EditorOnly);
+            store.insert(entity, handle);
+            created.push(entity);
+        }
+        self.alive.extend(created);
+        true
+    }
+
+    /// Removes every gizmo handle. Returns whether anything was removed.
+    fn clear_gizmo_handles(&mut self) -> bool {
+        let Some(store) = self.store() else {
+            return false;
+        };
+        let handles: Vec<Entity> = store
+            .read_lane::<GizmoHandle>()
+            .map(|lane| lane.entities.clone())
+            .unwrap_or_default();
+        if handles.is_empty() {
+            return false;
+        }
+        if let Some(store) = self.store_mut() {
+            for entity in &handles {
+                if store.is_alive(*entity) {
+                    store.destroy_entity(*entity);
+                }
+            }
+        }
+        self.alive.retain(|entity| !handles.contains(entity));
+        true
+    }
+
     /// Despawn by id/generation. Returns the entity if it was alive.
     pub fn despawn(&mut self, id: u32, generation: u32) -> Option<Entity> {
         let entity = Entity::new_with_gen(id, generation);
+        let was_selected = self.store().is_some_and(|store| {
+            store
+                .read_lane::<Selected>()
+                .is_some_and(|lane| lane.contains(entity))
+        });
         {
             let store = self.store()?;
             if !store.is_alive(entity) {
                 return None;
             }
             ornis_core::despawn_recursive(store, entity);
+        }
+        if was_selected {
+            self.clear_gizmo_handles();
         }
         let still_alive: Vec<Entity> = {
             let store = self.store();
@@ -1137,7 +1220,13 @@ fn handle_select(
     let changed = world
         .store()
         .is_some_and(|store| set_selection(store, wanted));
-    if changed {
+    // Handles follow the authoritative selection: create the full set on a
+    // first selection, drop it on clear. Both count as snapshot changes.
+    let handles_changed = match wanted {
+        Some(_) => world.ensure_gizmo_handles(),
+        None => world.clear_gizmo_handles(),
+    };
+    if changed || handles_changed {
         world.version.bump();
         publish_state(world, ev_tx);
     }
@@ -1462,6 +1551,49 @@ fn default_mesh() -> MeshDesc {
         radius: PositiveF32::expect_valid(1.0),
         segments: DEFAULT_SPHERE_SEGMENTS,
         rings: DEFAULT_SPHERE_RINGS,
+    }
+}
+
+/// Tessellation of the gizmo handle spheres (the shared batch takes the max).
+const GIZMO_SEGMENTS: u32 = 8;
+const GIZMO_RINGS: u32 = 6;
+/// Axis colours: X red, Y green, Z blue; plane handles use their normal.
+const GIZMO_X_COLOR: [f32; 3] = [0.85, 0.2, 0.2];
+const GIZMO_Y_COLOR: [f32; 3] = [0.25, 0.8, 0.3];
+const GIZMO_Z_COLOR: [f32; 3] = [0.25, 0.45, 0.95];
+/// Handle roughness and the fraction of the axis colour emitted.
+const GIZMO_ROUGHNESS: f32 = 0.35;
+const GIZMO_EMISSION: f32 = 0.25;
+
+/// Display name of a gizmo handle (session tree filters chrome, but names
+/// keep snapshots readable in tests and logs).
+fn gizmo_name(handle: GizmoHandle) -> String {
+    format!(
+        "Gizmo {:?} {:?} {:?}",
+        handle.mode, handle.space, handle.axis
+    )
+}
+
+/// Handles start collapsed; the layout system places them each frame.
+fn gizmo_hidden_transform() -> TransformDesc {
+    TransformDesc {
+        scale: Vec3::ZERO,
+        ..TransformDesc::IDENTITY
+    }
+}
+
+/// Axis colour of a handle (X/red, Y/green, Z/blue; planes by normal).
+fn gizmo_material(axis: GizmoAxis) -> MaterialDesc {
+    let color = match axis {
+        GizmoAxis::X | GizmoAxis::Yz => GIZMO_X_COLOR,
+        GizmoAxis::Y | GizmoAxis::Xz => GIZMO_Y_COLOR,
+        GizmoAxis::Z | GizmoAxis::Xy => GIZMO_Z_COLOR,
+    };
+    MaterialDesc::Dielectric {
+        base_color: color,
+        roughness: Clamped01::new(GIZMO_ROUGHNESS),
+        emission: color.map(|channel| channel * GIZMO_EMISSION),
+        metallic: ornis_core::Metallic::new(0.0),
     }
 }
 
@@ -2447,6 +2579,108 @@ mod tests {
         let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
         assert_eq!(scene["entities"][0]["editor"]["selected"], false);
         assert_eq!(scene["entities"][1]["editor"]["selected"], false);
+    }
+
+    /// Selecting authors the gizmo handle set as editor chrome: handles
+    /// replicate through the snapshot with their `GizmoHandle` marker, carry
+    /// no physics body, never save into the scene, and clearing the selection
+    /// despawns them.
+    #[test]
+    fn select_authors_editor_only_gizmo_handles() {
+        let (mut world, ev_tx, _ev_rx) = world_and_events();
+        world.handle_command(&UiCommand::CreateEntity, &ev_tx);
+        world.handle_command(&select(Some(0), Some(0)), &ev_tx);
+
+        let handle_count = GizmoHandle::all().len();
+        let store = world.store().expect("store");
+        let handles: Vec<Entity> = store
+            .read_lane::<GizmoHandle>()
+            .expect("handle lane")
+            .entities
+            .clone();
+        assert_eq!(handles.len(), handle_count);
+        for entity in &handles {
+            assert!(is_editor_only(store, *entity));
+            assert!(read_component::<RigidBody>(store, *entity).is_none());
+        }
+
+        let scene: Value = serde_json::from_str(&world.scene_json()).unwrap();
+        let entities = scene["entities"].as_array().expect("entities");
+        let chrome = entities
+            .iter()
+            .filter(|entity| entity["editor"]["editor_only"] == true)
+            .count();
+        assert_eq!(chrome, handle_count);
+        assert!(
+            entities
+                .iter()
+                .any(|entity| entity["components"]["GizmoHandle"].is_object())
+        );
+        // Chrome never persists.
+        assert_eq!(world.to_scene().entities.len(), 1);
+
+        world.handle_command(&select(None, None), &ev_tx);
+        let store = world.store().expect("store");
+        assert!(
+            store
+                .read_lane::<GizmoHandle>()
+                .is_none_or(|lane| lane.entities.is_empty())
+        );
+        assert_eq!(world.to_scene().entities.len(), 1);
+    }
+
+    /// A gizmo drag commits exactly like a manual `set_component`: the same
+    /// `Transform` value lands in the store with one version bump and one
+    /// `ComponentUpdated` event.
+    #[test]
+    fn gizmo_drag_commit_matches_manual_set_component() {
+        use ornis_editor::{GizmoDrag, GizmoMode, GizmoSpace, PickRay};
+
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        world.handle_command(&UiCommand::CreateEntity, &ev_tx);
+        world.handle_command(&select(Some(0), Some(0)), &ev_tx);
+        let entity = world.alive[0];
+        let start = world
+            .store()
+            .and_then(|store| read_component::<TransformDesc>(store, entity))
+            .expect("transform");
+        let drag = GizmoDrag::begin(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+            &PickRay::try_new(Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)).unwrap(),
+        )
+        .expect("drag starts");
+        let moved = drag
+            .update(&PickRay::try_new(Vec3::new(2.0, 0.0, 5.0), Vec3::new(0.0, 0.0, -1.0)).unwrap())
+            .expect("drag updates");
+        assert!((moved.translation - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-5);
+
+        drain_all(&ev_rx);
+        let before = world.version;
+        world.handle_command(
+            &set_component(
+                0,
+                Some(0),
+                "Transform",
+                &serde_json::to_string(&moved).expect("transform json"),
+            ),
+            &ev_tx,
+        );
+        assert_eq!(world.version, before.bumped());
+        let stored = world
+            .store()
+            .and_then(|store| read_component::<TransformDesc>(store, entity))
+            .expect("transform");
+        assert!((stored.translation - moved.translation).length() < 1e-6);
+        assert!(
+            drain_all(&ev_rx)
+                .iter()
+                .any(|event| matches!(event, GameEvent::ComponentUpdated { entity_id: 0, .. }))
+        );
     }
 
     #[test]
