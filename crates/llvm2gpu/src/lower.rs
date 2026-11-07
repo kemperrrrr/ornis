@@ -51,13 +51,18 @@ pub(super) fn lower(
     structs: &[&[u8]],
     workgroup: [u32; 3],
 ) -> Result<naga::Module, TranslateError> {
-    if func.name != "cs_main" {
+    let fragment = func.name == ornis_gpu_abi::symbols::FS_MAIN;
+    if func.name != ornis_gpu_abi::symbols::CS_MAIN && !fragment {
         return Err(TranslateError::Unsupported);
     }
-    if !matches!(func.ret_ty, Ty::Float | Ty::Void) {
+    if fragment {
+        // Color is written by `fragment_store_f32x4` and returned at location 0.
+        if func.ret_ty != Ty::Void || !func.params.is_empty() {
+            return Err(TranslateError::Unsupported);
+        }
+    } else if !matches!(func.ret_ty, Ty::Float | Ty::Void) {
         return Err(TranslateError::Unsupported);
-    }
-    if func.params.len() == 1 && func.params[0].0 == Ty::I32 {
+    } else if func.params.len() == 1 && func.params[0].0 == Ty::I32 {
         // `cs_main(i32)` — standard.
     } else if func.params.is_empty() {
         // `cs_main()` — allowed for kernels that read `global_invocation_id`
@@ -67,8 +72,15 @@ pub(super) fn lower(
     }
     let cfg = Cfg::new(func)?;
     let mut builders = Builders::new(structs);
-    let function = builders.build(func, &cfg)?;
-    builders.finish(function, func.ret_ty, workgroup)
+    let function = builders.build(func, &cfg, fragment)?;
+    builders.finish(function, func.ret_ty, workgroup, fragment)
+}
+
+/// Which `texture_*` binding a load addresses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextureKind {
+    /// `texture_depth_2d`. `textureLoad` returns `f32`.
+    Depth,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -424,6 +436,12 @@ struct Builders {
     struct_types: HashMap<u32, (naga::Handle<naga::Type>, u32, u32)>,
     /// Struct ids currently being laid out, to reject a recursive field.
     struct_stack: Vec<u32>,
+    /// `texture_2d` / `texture_depth_2d` globals, one per binding.
+    textures: HashMap<(u32, u32), (TextureKind, naga::Handle<naga::GlobalVariable>)>,
+    /// `vec2<i32>` used as a `textureLoad` coordinate.
+    ivec2: Option<naga::Handle<naga::Type>>,
+    /// `vec4<f32>` shared by the fragment output and `fragment_store`.
+    vec4_f32: Option<naga::Handle<naga::Type>>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
 }
@@ -437,15 +455,19 @@ impl Builders {
             uniform_struct_cache: HashMap::new(),
             struct_types: HashMap::new(),
             struct_stack: Vec::new(),
+            textures: HashMap::new(),
+            ivec2: None,
+            vec4_f32: None,
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
         }
     }
 
     fn finish(
         mut self,
-        function: naga::Function,
+        mut function: naga::Function,
         ret_ty: Ty,
         workgroup: [u32; 3],
+        fragment: bool,
     ) -> Result<naga::Module, TranslateError> {
         // Only create the implicit `storage_0_0` global when the kernel
         // uses the `-> float` shape; for `-> void` the body creates its
@@ -453,11 +475,35 @@ impl Builders {
         if ret_ty == Ty::Float {
             self.storage_global(0, 0, Elem::F32, true)?;
         }
+        let (name, stage, workgroup_size) = if fragment {
+            let ty = self.vec4_f32();
+            function.result = Some(naga::FunctionResult {
+                ty,
+                binding: Some(naga::Binding::Location {
+                    location: 0,
+                    interpolation: Some(naga::Interpolation::Perspective),
+                    sampling: Some(naga::Sampling::Center),
+                    blend_src: None,
+                    per_primitive: false,
+                }),
+            });
+            (
+                ornis_gpu_abi::symbols::FS_MAIN.to_string(),
+                naga::ShaderStage::Fragment,
+                [0, 0, 0],
+            )
+        } else {
+            (
+                ornis_gpu_abi::symbols::CS_MAIN.to_string(),
+                naga::ShaderStage::Compute,
+                workgroup,
+            )
+        };
         self.module.entry_points.push(naga::EntryPoint {
-            name: ornis_gpu_abi::symbols::CS_MAIN.to_string(),
-            stage: naga::ShaderStage::Compute,
+            name,
+            stage,
             early_depth_test: None,
-            workgroup_size: workgroup,
+            workgroup_size,
             workgroup_size_overrides: None,
             function,
             mesh_info: None,
@@ -542,6 +588,95 @@ impl Builders {
         self.storage_binding
             .insert((group, binding), (elem, handle));
         Ok(handle)
+    }
+
+    /// Depth texture at `(group, binding)`. A storage variable already there
+    /// would be a second resource at the same slot.
+    fn depth_texture(
+        &mut self,
+        group: u32,
+        binding: u32,
+    ) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
+        if self.storage_binding.contains_key(&(group, binding)) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "binding {group}:{binding} is both storage and a texture"
+            )));
+        }
+        if let Some((kind, handle)) = self.textures.get(&(group, binding)) {
+            if *kind != TextureKind::Depth {
+                return Err(TranslateError::UnsupportedType(format!(
+                    "texture binding {group}:{binding} is used as two kinds"
+                )));
+            }
+            return Ok(*handle);
+        }
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Image {
+                    dim: naga::ImageDimension::D2,
+                    arrayed: false,
+                    class: naga::ImageClass::Depth { multi: false },
+                },
+            },
+            naga::Span::default(),
+        );
+        let handle = self.module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some(format!("tex_{group}_{binding}_")),
+                space: naga::AddressSpace::Handle,
+                binding: Some(naga::ResourceBinding { group, binding }),
+                ty,
+                init: None,
+                memory_decorations: naga::MemoryDecorations::empty(),
+            },
+            naga::Span::default(),
+        );
+        self.textures
+            .insert((group, binding), (TextureKind::Depth, handle));
+        Ok(handle)
+    }
+
+    fn vec4_f32(&mut self) -> naga::Handle<naga::Type> {
+        if let Some(ty) = self.vec4_f32 {
+            return ty;
+        }
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Vector {
+                    size: naga::VectorSize::Quad,
+                    scalar: naga::Scalar {
+                        kind: naga::ScalarKind::Float,
+                        width: SCALAR_WIDTH,
+                    },
+                },
+            },
+            naga::Span::default(),
+        );
+        self.vec4_f32 = Some(ty);
+        ty
+    }
+
+    fn ivec2(&mut self) -> naga::Handle<naga::Type> {
+        if let Some(ty) = self.ivec2 {
+            return ty;
+        }
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Vector {
+                    size: naga::VectorSize::Bi,
+                    scalar: naga::Scalar {
+                        kind: naga::ScalarKind::Sint,
+                        width: SCALAR_WIDTH,
+                    },
+                },
+            },
+            naga::Span::default(),
+        );
+        self.ivec2 = Some(ty);
+        ty
     }
 
     /// The variable already created for this binding, upgrading it to
@@ -802,51 +937,78 @@ impl Builders {
         Ok((ty, size, align))
     }
 
-    fn build(&mut self, func: &LlvmFunc, cfg: &Cfg<'_>) -> Result<naga::Function, TranslateError> {
+    fn build(
+        &mut self,
+        func: &LlvmFunc,
+        cfg: &Cfg<'_>,
+        fragment: bool,
+    ) -> Result<naga::Function, TranslateError> {
+        let entry = if fragment {
+            ornis_gpu_abi::symbols::FS_MAIN
+        } else {
+            ornis_gpu_abi::symbols::CS_MAIN
+        };
         let mut function = naga::Function {
-            name: Some(ornis_gpu_abi::symbols::CS_MAIN.to_string()),
+            name: Some(entry.to_string()),
             ..Default::default()
         };
-        function.arguments.push(naga::FunctionArgument {
-            name: Some("global_invocation_id".to_string()),
-            ty: self.module.types.insert(
-                naga::Type {
-                    name: None,
-                    inner: naga::TypeInner::Vector {
-                        size: naga::VectorSize::Tri,
-                        scalar: naga::Scalar {
-                            kind: naga::ScalarKind::Uint,
-                            width: SCALAR_WIDTH,
+        let id_x = if fragment {
+            None
+        } else {
+            function.arguments.push(naga::FunctionArgument {
+                name: Some("global_invocation_id".to_string()),
+                ty: self.module.types.insert(
+                    naga::Type {
+                        name: None,
+                        inner: naga::TypeInner::Vector {
+                            size: naga::VectorSize::Tri,
+                            scalar: naga::Scalar {
+                                kind: naga::ScalarKind::Uint,
+                                width: SCALAR_WIDTH,
+                            },
                         },
                     },
+                    naga::Span::default(),
+                ),
+                binding: Some(naga::Binding::BuiltIn(naga::BuiltIn::GlobalInvocationId)),
+            });
+            let arg = append(&mut function, naga::Expression::FunctionArgument(0));
+            let id_x = append(
+                &mut function,
+                naga::Expression::AccessIndex {
+                    base: arg,
+                    index: 0,
+                },
+            );
+            let mut body = naga::Block::new();
+            push_emit(&mut function, &mut body, id_x);
+            function.body = body;
+            Some(id_x)
+        };
+        let fragment_out = fragment.then(|| {
+            let ty = self.vec4_f32();
+            function.local_variables.append(
+                naga::LocalVariable {
+                    name: Some("fragment_out".to_string()),
+                    ty,
+                    init: None,
                 },
                 naga::Span::default(),
-            ),
-            binding: Some(naga::Binding::BuiltIn(naga::BuiltIn::GlobalInvocationId)),
+            )
         });
-        let arg = append(&mut function, naga::Expression::FunctionArgument(0));
-        let id_x = append(
-            &mut function,
-            naga::Expression::AccessIndex {
-                base: arg,
-                index: 0,
-            },
-        );
-        let mut body = naga::Block::new();
-        push_emit(&mut function, &mut body, id_x);
-        function.body = body;
 
         let mut lowerer = Lowerer {
             builders: self,
             cfg,
             func: function,
             id_x,
+            fragment_out,
             phi_vars: HashMap::new(),
             spill: HashMap::new(),
             env: HashMap::new(),
             saw_return: false,
         };
-        if let Some((_, name)) = func.params.first() {
+        if let Some((id_x, (_, name))) = id_x.zip(func.params.first()) {
             lowerer.env.insert(name.clone(), id_x);
         }
         lowerer.alloc_phis()?;
@@ -888,7 +1050,9 @@ struct Lowerer<'a, 'b> {
     builders: &'b mut Builders,
     cfg: &'b Cfg<'a>,
     func: naga::Function,
-    id_x: naga::Handle<naga::Expression>,
+    id_x: Option<naga::Handle<naga::Expression>>,
+    /// `vec4` local returned from `fs_main` at `@location(0)`.
+    fragment_out: Option<naga::Handle<naga::LocalVariable>>,
     phi_vars: HashMap<String, naga::Handle<naga::LocalVariable>>,
     /// Loop values used after the loop, stored while the loop runs.
     spill: HashMap<String, naga::Handle<naga::LocalVariable>>,
@@ -1397,17 +1561,23 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         value: Option<&Operand>,
         out: &mut naga::Block,
     ) -> Result<Flow, TranslateError> {
+        if self.fragment_out.is_some() {
+            let var = self.fragment_out.ok_or(TranslateError::Unsupported)?;
+            let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+            let value = self.expr(out, naga::Expression::Load { pointer });
+            out.push(
+                naga::Statement::Return { value: Some(value) },
+                naga::Span::default(),
+            );
+            self.saw_return = true;
+            return Ok(Flow::Returned);
+        }
         if let Some(op) = value {
             let value = self.operand(out, op)?;
             let global = self.builders.storage_global(0, 0, Elem::F32, true)?;
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
-            let pointer = self.expr(
-                out,
-                naga::Expression::Access {
-                    base,
-                    index: self.id_x,
-                },
-            );
+            let index = self.id_x.ok_or(TranslateError::Unsupported)?;
+            let pointer = self.expr(out, naga::Expression::Access { base, index });
             out.push(
                 naga::Statement::Store { pointer, value },
                 naga::Span::default(),
@@ -1649,6 +1819,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
+        if callee.contains("texture_load_2d_f32") {
+            return self.texture_load_f32(out, args);
+        }
+        if callee.contains("texture_width_2d") {
+            return self.texture_size(out, args, 0);
+        }
+        if callee.contains("texture_height_2d") {
+            return self.texture_size(out, args, 1);
+        }
         if callee.contains("uniform_nested_field_f32") {
             return self.uniform_nested_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
@@ -1876,6 +2055,96 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Err(TranslateError::Unsupported)
     }
 
+    /// `texture_load_2d_f32(group, binding, x, y)` at mip 0. Depth textures
+    /// return the scalar WGSL `textureLoad` gives them.
+    // qual:allow(iosp) reason: "the binding is resolved, then the coordinate and the mip level are composed into one ImageLoad"
+    fn texture_load_f32(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let (group, binding, x, y) = texture_xy(args)?;
+        let image = self.builders.depth_texture(group, binding)?;
+        let coordinate = self.texel_coord(out, x, y)?;
+        let level = self.expr(out, naga::Expression::Literal(naga::Literal::I32(0)));
+        let handle = self.expr(out, naga::Expression::GlobalVariable(image));
+        Ok(self.expr(
+            out,
+            naga::Expression::ImageLoad {
+                image: handle,
+                coordinate,
+                array_index: None,
+                sample: None,
+                level: Some(level),
+            },
+        ))
+    }
+
+    /// `texture_width_2d` / `texture_height_2d(group, binding)`.
+    // qual:allow(iosp) reason: "the binding is resolved, then one lane of textureDimensions is loaded"
+    fn texture_size(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        axis: u32,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != 2 {
+            return Err(TranslateError::Unsupported);
+        }
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let image = self.builders.depth_texture(group, binding)?;
+        let handle = self.expr(out, naga::Expression::GlobalVariable(image));
+        let size = self.expr(
+            out,
+            naga::Expression::ImageQuery {
+                image: handle,
+                query: naga::ImageQuery::Size { level: None },
+            },
+        );
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: size,
+                index: axis,
+            },
+        ))
+    }
+
+    fn texel_coord(
+        &mut self,
+        out: &mut naga::Block,
+        x: &Operand,
+        y: &Operand,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let x = self.operand(out, x)?;
+        let y = self.operand(out, y)?;
+        let x = self.expr(
+            out,
+            naga::Expression::As {
+                expr: x,
+                kind: naga::ScalarKind::Sint,
+                convert: None,
+            },
+        );
+        let y = self.expr(
+            out,
+            naga::Expression::As {
+                expr: y,
+                kind: naga::ScalarKind::Sint,
+                convert: None,
+            },
+        );
+        let ty = self.builders.ivec2();
+        Ok(self.expr(
+            out,
+            naga::Expression::Compose {
+                ty,
+                components: vec![x, y],
+            },
+        ))
+    }
+
     /// `uniform_nested_field_f32/u32(group, binding, sid, field, inner)`.
     // qual:allow(iosp) reason: "the nested tag is checked, then the load is two AccessIndex steps into the uniform global"
     fn uniform_nested_field(
@@ -2038,6 +2307,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<(), TranslateError> {
+        if callee.contains("fragment_store_f32x4") {
+            return self.fragment_store(out, args);
+        }
         if callee.contains("storage_write_u32x4") {
             return self.storage_write_vec4(out, args);
         }
@@ -2054,6 +2326,35 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             return Ok(());
         }
         Err(TranslateError::Unsupported)
+    }
+
+    /// `fragment_store_f32x4(r, g, b, a)` into the `fs_main` output.
+    // qual:allow(iosp) reason: "the four lanes are composed into the location-0 vec4 and stored for the fragment return"
+    fn fragment_store(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<(), TranslateError> {
+        let var = self.fragment_out.ok_or(TranslateError::Unsupported)?;
+        let (r, g, b, a) = rgba(args)?;
+        let r = self.operand(out, r)?;
+        let g = self.operand(out, g)?;
+        let b = self.operand(out, b)?;
+        let a = self.operand(out, a)?;
+        let ty = self.builders.vec4_f32();
+        let value = self.expr(
+            out,
+            naga::Expression::Compose {
+                ty,
+                components: vec![r, g, b, a],
+            },
+        );
+        let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+        out.push(
+            naga::Statement::Store { pointer, value },
+            naga::Span::default(),
+        );
+        Ok(())
     }
 
     /// `storage_write_u32x4(group, binding, index, x, y, z, w)`.
@@ -2326,6 +2627,27 @@ fn min_max(callee: &str) -> Option<naga::MathFunction> {
 
 /// How many leading operands every uniform import uses: group, binding, struct, field.
 const UNIFORM_PREFIX: usize = 4;
+
+/// `fragment_store_f32x4(r, g, b, a)`.
+fn rgba(args: &[Operand]) -> Result<(&Operand, &Operand, &Operand, &Operand), TranslateError> {
+    if args.len() != UNIFORM_PREFIX {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok((&args[0], &args[1], &args[2], &args[3]))
+}
+
+/// `texture_load_2d_f32(group, binding, x, y)`.
+fn texture_xy(args: &[Operand]) -> Result<(u32, u32, &Operand, &Operand), TranslateError> {
+    if args.len() != UNIFORM_PREFIX {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok((
+        const_u32(&args[0])?,
+        const_u32(&args[1])?,
+        &args[2],
+        &args[3],
+    ))
+}
 
 /// `(group, binding, struct id, field)` shared by every uniform import.
 fn uniform_ids(args: &[Operand]) -> Result<(u32, u32, u32, u32), TranslateError> {

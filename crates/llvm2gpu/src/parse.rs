@@ -170,14 +170,18 @@ pub(super) struct LlvmFunc {
     pub(super) blocks: Vec<BasicBlock>,
 }
 
-/// Parse the whole textual IR, returning the first defined function whose
-/// name is `cs_main` (the spike entry). Declarations are skipped.
+/// Parse the whole textual IR, returning `cs_main` or `fs_main`.
+/// Declarations are skipped.
 pub(super) fn parse(text: &str) -> Result<LlvmFunc, TranslateError> {
     let header = parse_header(text)?;
-    let Some(func) = header.into_iter().find(|f| f.name == "cs_main") else {
+    let Some(func) = header.into_iter().find(|f| is_entry(&f.name)) else {
         return Err(TranslateError::Unsupported);
     };
     Ok(func)
+}
+
+fn is_entry(name: &str) -> bool {
+    name == "cs_main" || name == "fs_main"
 }
 
 /// Parse every `define ... { ... }` block.
@@ -190,9 +194,9 @@ fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
             continue;
         }
         let (name, ret_ty, params) = parse_define_header(trimmed)?;
-        // Only `cs_main` is of interest; other defines (`rust_begin_unwind`, …)
-        // may use trap/ptr shapes that are not part of the subset.
-        if name != "cs_main" {
+        // Only the shader entry is of interest; other defines
+        // (`rust_begin_unwind`, …) may use trap/ptr shapes outside the subset.
+        if !is_entry(&name) {
             loop {
                 let Some(inner) = lines.next() else {
                     return Err(TranslateError::Parse("unterminated function".to_string()));

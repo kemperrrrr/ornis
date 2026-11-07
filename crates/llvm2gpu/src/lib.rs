@@ -43,7 +43,9 @@ pub fn translate_with_meta(llvm_ir: &str) -> Result<Translated, TranslateError> 
     let func = parse::parse(llvm_ir)?;
     let (meta, workgroup) = match meta::extract(llvm_ir)? {
         Some(meta) => {
-            if meta.entry != ornis_gpu_abi::symbols::CS_MAIN {
+            if meta.entry != ornis_gpu_abi::symbols::CS_MAIN
+                && meta.entry != ornis_gpu_abi::symbols::FS_MAIN
+            {
                 return Err(TranslateError::Unsupported);
             }
             let workgroup = meta.workgroup;

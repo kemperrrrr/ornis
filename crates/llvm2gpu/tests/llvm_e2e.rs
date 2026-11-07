@@ -68,6 +68,68 @@ exit:
 }
 
 #[test]
+fn fragment_entry_returns_location_zero_vec4() {
+    let ir = r#"
+declare void @fragment_store_f32x4(float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  call void @fragment_store_f32x4(float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("fragment entry");
+    assert!(translated.wgsl.contains("@fragment"), "{}", translated.wgsl);
+    assert!(
+        translated.wgsl.contains("@location(0)"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(translated.wgsl.contains("vec4<f32>"), "{}", translated.wgsl);
+    assert!(
+        translated.wgsl.contains("fn fs_main"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn depth_texture_load_and_dimensions_lower() {
+    let ir = r#"
+declare float @texture_load_2d_f32(i32, i32, i32, i32)
+declare i32 @texture_width_2d(i32, i32)
+declare i32 @texture_height_2d(i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %w = call i32 @texture_width_2d(i32 0, i32 1)
+  %h = call i32 @texture_height_2d(i32 0, i32 1)
+  %d = call float @texture_load_2d_f32(i32 0, i32 1, i32 %id, i32 0)
+  %span = add i32 %w, %h
+  %span_f = uitofp nneg i32 %span to float
+  %sum = fadd float %d, %span_f
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %sum)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("depth textureLoad");
+    assert!(
+        translated.wgsl.contains("textureLoad("),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("textureDimensions("),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("texture_depth_2d"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
 fn nested_uniform_struct_field_loads_the_inner_scalar() {
     let ir = r#"
 @ornis_gpu_shader_meta = private constant [42 x i8] c"entry=cs_main;workgroup=1,1,1;uniform=0:671,1:1", section "ornis_gpu.shader_meta", align 1

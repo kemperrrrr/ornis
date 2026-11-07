@@ -544,8 +544,11 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    тип элемента отвергается, два read-only биндинга остаются
    `var<storage>` и могут алиаситься. Ядро `gtao_arc` (cos/sin)
    переводится; марш горизонта ещё ждёт `textureLoad` и fragment entry.
-7. Дальше: `textureLoad`, fragment entry, workgroup и барьер — полный
-   GTAO и автоэкспозиция.
+7. `texture_load_2d_f32` / `texture_width_2d` / `texture_height_2d`
+   опускаются в `textureLoad` и `textureDimensions` для
+   `texture_depth_2d` (mip 0). `fs_main` без параметров пишет
+   `fragment_store_f32x4` в `@location(0) vec4<f32>`. Дальше: вход
+   `@builtin(position)`, workgroup и барьер — полный GTAO и автоэкспозиция.
 
 **Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном
