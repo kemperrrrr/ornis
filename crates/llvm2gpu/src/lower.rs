@@ -67,6 +67,8 @@ enum Elem {
     F32,
     U32,
     AtomicU32,
+    /// Bit-preserving four-word record chunk (`array<vec4<u32>>`).
+    Vec4U32,
 }
 
 /// One `phi` result and the `(value, predecessor)` pairs feeding it.
@@ -350,7 +352,7 @@ impl Builders {
         // uses the `-> float` shape; for `-> void` the body creates its
         // own globals lazily.
         if ret_ty == Ty::Float {
-            self.storage_global(0, 0, Elem::F32);
+            self.storage_global(0, 0, Elem::F32, true);
         }
         self.module.entry_points.push(naga::EntryPoint {
             name: ornis_gpu_abi::symbols::CS_MAIN.to_string(),
@@ -371,8 +373,15 @@ impl Builders {
         group: u32,
         binding: u32,
         elem: Elem,
+        write: bool,
     ) -> naga::Handle<naga::GlobalVariable> {
         if let Some(handle) = self.storage_cache.get(&(group, binding, elem)) {
+            if write
+                && let naga::AddressSpace::Storage { access } =
+                    &mut self.module.global_variables[*handle].space
+            {
+                *access |= naga::StorageAccess::STORE;
+            }
             return *handle;
         }
         let base_ty = match elem {
@@ -388,6 +397,24 @@ impl Builders {
                 },
                 naga::Span::default(),
             ),
+            Elem::Vec4U32 => self.module.types.insert(
+                naga::Type {
+                    name: None,
+                    inner: naga::TypeInner::Vector {
+                        size: naga::VectorSize::Quad,
+                        scalar: naga::Scalar {
+                            kind: naga::ScalarKind::Uint,
+                            width: SCALAR_WIDTH,
+                        },
+                    },
+                },
+                naga::Span::default(),
+            ),
+        };
+        let stride = if elem == Elem::Vec4U32 {
+            UNIFORM_LANE_BYTES
+        } else {
+            WORD_BYTES
         };
         let array_ty = self.module.types.insert(
             naga::Type {
@@ -395,7 +422,7 @@ impl Builders {
                 inner: naga::TypeInner::Array {
                     base: base_ty,
                     size: naga::ArraySize::Dynamic,
-                    stride: WORD_BYTES,
+                    stride,
                 },
             },
             naga::Span::default(),
@@ -404,12 +431,14 @@ impl Builders {
             Elem::AtomicU32 => format!("atomic_storage_{group}_{binding}_"),
             _ => format!("storage_{group}_{binding}_"),
         };
+        let mut access = naga::StorageAccess::LOAD;
+        if write {
+            access |= naga::StorageAccess::STORE;
+        }
         let handle = self.module.global_variables.append(
             naga::GlobalVariable {
                 name: Some(name),
-                space: naga::AddressSpace::Storage {
-                    access: naga::StorageAccess::LOAD | naga::StorageAccess::STORE,
-                },
+                space: naga::AddressSpace::Storage { access },
                 binding: Some(naga::ResourceBinding { group, binding }),
                 ty: array_ty,
                 init: None,
@@ -1094,7 +1123,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<Flow, TranslateError> {
         if let Some(op) = value {
             let value = self.operand(out, op)?;
-            let global = self.builders.storage_global(0, 0, Elem::F32);
+            let global = self.builders.storage_global(0, 0, Elem::F32, true);
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             let pointer = self.expr(
                 out,
@@ -1251,6 +1280,28 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 );
                 self.env.insert(dst.clone(), v);
             }
+            Instr::Bitcast { dst, from, to, a } => {
+                if from == to {
+                    let value = self.operand(out, a)?;
+                    self.env.insert(dst.clone(), value);
+                } else {
+                    let kind = match (from, to) {
+                        (Ty::I32, Ty::Float) => naga::ScalarKind::Float,
+                        (Ty::Float, Ty::I32) => naga::ScalarKind::Uint,
+                        _ => return Err(TranslateError::Unsupported),
+                    };
+                    let expr = self.operand(out, a)?;
+                    let value = self.expr(
+                        out,
+                        naga::Expression::As {
+                            expr,
+                            kind,
+                            convert: None,
+                        },
+                    );
+                    self.env.insert(dst.clone(), value);
+                }
+            }
             Instr::Call { dst, callee, args } => {
                 let v = self.call_value(out, callee, args)?;
                 self.env.insert(dst.clone(), v);
@@ -1331,14 +1382,52 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let global = self.builders.uniform_global(group, binding, len);
             return load_uniform(&mut self.func, out, global, index);
         }
+        if callee.contains("storage_len_u32x4") {
+            if args.len() != 2 {
+                return Err(TranslateError::Unsupported);
+            }
+            let group = const_u32(&args[0])?;
+            let binding = const_u32(&args[1])?;
+            let global = self
+                .builders
+                .storage_global(group, binding, Elem::Vec4U32, false);
+            let base = self.expr(out, naga::Expression::GlobalVariable(global));
+            return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
+        }
+        if callee.contains("storage_read_u32_lane") {
+            if args.len() != 4 {
+                return Err(TranslateError::Unsupported);
+            }
+            let group = const_u32(&args[0])?;
+            let binding = const_u32(&args[1])?;
+            let index = self.operand(out, &args[2])?;
+            let lane = const_u32(&args[3])?;
+            let global = self
+                .builders
+                .storage_global(group, binding, Elem::Vec4U32, false);
+            let base = self.expr(out, naga::Expression::GlobalVariable(global));
+            let chunk = self.expr(out, naga::Expression::Access { base, index });
+            let pointer = self.expr(
+                out,
+                naga::Expression::AccessIndex {
+                    base: chunk,
+                    index: lane,
+                },
+            );
+            return Ok(self.expr(out, naga::Expression::Load { pointer }));
+        }
         if callee.contains("storage_read_f32") {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
-            let global = self.builders.storage_global(group, binding, Elem::F32);
+            let global = self
+                .builders
+                .storage_global(group, binding, Elem::F32, false);
             return load_global(&mut self.func, out, global, index);
         }
         if callee.contains("storage_read_u32") {
             let (group, binding, index) = self.storage_args(out, args, 3)?;
-            let global = self.builders.storage_global(group, binding, Elem::U32);
+            let global = self
+                .builders
+                .storage_global(group, binding, Elem::U32, false);
             return load_global(&mut self.func, out, global, index);
         }
         if callee.contains("storage_atomic_add_u32") {
@@ -1351,7 +1440,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let value = self.operand(out, &args[3])?;
             let global = self
                 .builders
-                .storage_global(group, binding, Elem::AtomicU32);
+                .storage_global(group, binding, Elem::AtomicU32, true);
             let base = self.expr(out, naga::Expression::GlobalVariable(global));
             let pointer = self.expr(out, naga::Expression::Access { base, index });
             let ty = scalar(&mut self.builders.module, naga::ScalarKind::Uint);
@@ -1500,6 +1589,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<(), TranslateError> {
+        if callee.contains("storage_copy_u32x4") {
+            return self.storage_copy(out, args);
+        }
         if callee.contains("storage_write_f32") {
             return self.store_void(out, args, Elem::F32);
         }
@@ -1510,6 +1602,54 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             return Ok(());
         }
         Err(TranslateError::Unsupported)
+    }
+
+    /// Bit-preserving copy of one 16-byte record chunk.
+    fn storage_copy(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<(), TranslateError> {
+        if args.len() != 6 {
+            return Err(TranslateError::Unsupported);
+        }
+        let src_group = const_u32(&args[0])?;
+        let src_binding = const_u32(&args[1])?;
+        let src_index = self.operand(out, &args[2])?;
+        let dst_group = const_u32(&args[3])?;
+        let dst_binding = const_u32(&args[4])?;
+        let dst_index = self.operand(out, &args[5])?;
+        let src = self
+            .builders
+            .storage_global(src_group, src_binding, Elem::Vec4U32, false);
+        let dst = self
+            .builders
+            .storage_global(dst_group, dst_binding, Elem::Vec4U32, true);
+        let src_base = self.expr(out, naga::Expression::GlobalVariable(src));
+        let src_ptr = self.expr(
+            out,
+            naga::Expression::Access {
+                base: src_base,
+                index: src_index,
+            },
+        );
+        let value = self.expr(out, naga::Expression::Load { pointer: src_ptr });
+        let dst_base = self.expr(out, naga::Expression::GlobalVariable(dst));
+        let dst_ptr = self.expr(
+            out,
+            naga::Expression::Access {
+                base: dst_base,
+                index: dst_index,
+            },
+        );
+        out.push(
+            naga::Statement::Store {
+                pointer: dst_ptr,
+                value,
+            },
+            naga::Span::default(),
+        );
+        Ok(())
     }
 
     fn store_void(
@@ -1525,7 +1665,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let binding = const_u32(&args[1])?;
         let index = self.operand(out, &args[2])?;
         let value = self.operand(out, &args[3])?;
-        let global = self.builders.storage_global(group, binding, elem);
+        let global = self.builders.storage_global(group, binding, elem, true);
         let base = self.expr(out, naga::Expression::GlobalVariable(global));
         let pointer = self.expr(out, naga::Expression::Access { base, index });
         out.push(

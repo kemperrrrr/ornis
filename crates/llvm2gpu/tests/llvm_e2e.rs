@@ -227,6 +227,48 @@ start:
 }
 
 #[test]
+fn vec4_copy_lane_read_and_len_lower() {
+    let ir = r#"
+declare i32 @storage_len_u32x4(i32 noundef, i32 noundef)
+declare i32 @storage_read_u32_lane(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+declare void @storage_copy_u32x4(i32 noundef, i32 noundef, i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %len = call i32 @storage_len_u32x4(i32 0, i32 1)
+  %word = call i32 @storage_read_u32_lane(i32 0, i32 1, i32 %id, i32 3)
+  %value = bitcast i32 %word to float
+  %ok = icmp ult i32 %id, %len
+  br i1 %ok, label %copy, label %done
+
+copy:
+  call void @storage_copy_u32x4(i32 0, i32 1, i32 %id, i32 0, i32 2, i32 %id)
+  br label %done
+
+done:
+  %result = phi float [ 0.000000e+00, %start ], [ %value, %copy ]
+  ret float %result
+}
+"#;
+    let translated = translate(ir).expect("vec4 ABI");
+    assert!(
+        translated.wgsl.contains("arrayLength"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("bitcast<f32>"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("storage_0_1_"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
 fn uniform_field_uses_place_fields_layout() {
     use ornis_gpu_abi::{TYPE_TAG_F32, TYPE_TAG_U32, TYPE_TAG_VEC3};
     // vec3 at 0, f32 at 12, u32 at 16 (uniform span 32).
