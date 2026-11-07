@@ -23,6 +23,12 @@
 > пока отвергаются). Не сделано: билдер `xtask build-shaders` (§3.1.3,
 > спайк C-инфраструктура), миграция `cull`/`gtao`, readonly storage и
 > nested loops/структуры.
+>
+> **2026-11-07 (pivot):** wasm2gpu больше не производственный путь;
+> эксперименты остановлены на draft #255. Миграция GPU-кода продолжается
+> на llvm2gpu (stable rustc, без nightly). Целевой уровень эргономики —
+> идеи rust-gpu (`no_std` shader-крейт, cargo-сборка, атрибуты entry и
+> типизированные ресурсы) на стабильном тулчейне; маппинг и этапы — §3.1.6.
 
 Статус на 2026-09-10: 11 stage-entry пишутся на Rust через `#[stage]`
 и собираются в WGSL.base. Свободных идентификаторов в entry нет;
@@ -453,6 +459,44 @@ rust-gpu (спайк C), LLVM SPIR-V backend (проба B) и любой дру
 SPIR-V-фронтенд за короткое время. Состояние `wasm2spirv` в 2026 не
 установлено. Прямая генерация naga IR из staged-builder'а (спайк A) от
 этой границы не зависит.
+
+### 3.1.6 Stable Rust→GPU: цель rust-gpu без nightly (2026-11-07)
+
+**Решение.** wasm2gpu и macro-DSL не производственный путь: wasm теряет
+типы, а DSL не масштабируется на модули/дженерики. Производственная
+миграция продолжается на `llvm2gpu` — стабильный rustc → LLVM IR →
+naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gpu: обычный
+`no_std`-крейт, cargo-сборка, атрибуты entry и типизированные ресурсы,
+но без nightly и без `spirv-builder`.
+
+**Маппинг идей rust-gpu на stable:**
+
+| rust-gpu (nightly) | ornis (stable) |
+|---|---|
+| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(workgroup_size = N)]` (proc-macro) |
+| `#[spirv(global_invocation_id)]` | `GlobalInvocationId` (newtype) |
+| `#[spirv(storage_buffer, descriptor_set, binding)]` | `Storage<T, ReadOnly/ReadWrite>` / `Uniform<T>` в bind-group-структуре; метаданные из макроса |
+| `spirv-std` | `gpu-shader` SDK (`no_std`, те же `glam`-типы) |
+| `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V + кэш) |
+| shader-крейт под nightly | обычный `no_std`-крейт workspace; host — `no_std`-lib, GPU — `wasm32-unknown-unknown` + LLVM IR |
+
+**Этапы:**
+
+1. Билдер `xtask build-shaders`: one-shot rustc → llvm2gpu → артефакты,
+   кэш по hash; общий GPU-харнесс с `wasm2gpu-testkit` для паритета.
+2. ABI под #243: `vec4` storage read/write (13×`vec4` вместо 52 скаляров),
+   readonly access из метаданных binding'а, `arrayLength`; кернел
+   `cull_compact` на Rust, паритет с production WGSL и M1-бенч без
+   регрессии >5%.
+3. Эргономика: `#[gpu_entry]`, типизированные `Storage`/`Uniform`,
+   извлечение entry/binding-метаданных из LLVM IR; шейдерный крейт
+   собирается обычным cargo.
+4. Расширение подмножества: nested loops, nested structs, readonly
+   aliasing; затем `gtao`/остальной compute, позже vertex/fragment.
+
+**Ограничения:** stable rustc; nested loops/структуры и readonly пока
+отвергаются явно; runtime-материалы остаются на staged Shader IR;
+`wasm2gpu` не возвращается в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)
 
