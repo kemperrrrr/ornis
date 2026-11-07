@@ -63,6 +63,25 @@ pub use resource::Storage;
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
 
+/// Base-e exponential, lowered to WGSL `exp`.
+///
+/// `no_std` has no `f32::exp`, and a software series would not match the GPU
+/// instruction. On the host this diverges: a kernel crate is type-checked
+/// there, not executed.
+#[inline(always)]
+#[must_use]
+pub fn exp(value: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::exp(value)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        host_unavailable()
+    }
+}
+
 /// Field tag of an `f32` in `ornis_gpu.types` (mirrors `ornis_gpu_abi`).
 pub const TYPE_TAG_F32: u8 = 1;
 /// Field tag of a `u32` in `ornis_gpu.types`.

@@ -531,8 +531,13 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    извлечение entry/workgroup/uniform-метаданных из LLVM IR; шейдерный крейт
    собирается обычным cargo, кернел `cull_compact` переписан на типизированный
    SDK без изменения WGSL.
-4. Расширение подмножества: nested loops, nested structs, readonly
-   aliasing; затем `gtao`/остальной compute, позже vertex/fragment.
+4. Кластерное назначение (`ornis-gpu-cluster`) на том же пути: checked-in
+   `cluster_generated.wgsl`, entry `cs_main`. Подмножество дополнительно
+   принимает `llvm.umin`/`umax`, `uitofp nneg`, hex-литералы `f32`,
+   `zext i1` в 0/1 и значение, определённое в цикле и прочитанное после
+   единственного выхода.
+5. Дальше: nested loops, nested structs, readonly aliasing; затем
+   `gtao`/остальной compute, позже vertex/fragment.
 
 **Ограничения:** stable rustc; readonly storage в трансляторе пока не
 используется (readonly-биндинг кернела читается, но запись в него

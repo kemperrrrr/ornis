@@ -37,6 +37,37 @@ start:
 "#;
 
 #[test]
+fn loop_value_used_after_exit_and_umin_lower() {
+    let ir = r#"
+declare i32 @llvm.umin.i32(i32, i32)
+define dso_local float @cs_main(i32 %id) {
+start:
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %next = add i32 %i, 1
+  %done = icmp ugt i32 %next, %id
+  br i1 %done, label %exit, label %latch
+latch:
+  br label %header
+exit:
+  %capped = call i32 @llvm.umin.i32(i32 %next, i32 4)
+  %flag = icmp ult i32 %id, 2
+  %wide = zext i1 %flag to i32
+  %as_float = uitofp nneg i32 %wide to float
+  %scaled = fmul float %as_float, 0x3FB99999A0000000
+  %mixed = fadd float %scaled, %as_float
+  %from_cap = uitofp i32 %capped to float
+  %out = fadd float %mixed, %from_cap
+  ret float %out
+}
+"#;
+    let translated = translate(ir).expect("loop live-out lowers");
+    assert!(translated.wgsl.contains("min("), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("select("), "{}", translated.wgsl);
+}
+
+#[test]
 fn shader_meta_drives_workgroup_and_types() {
     let ir = r#"
 @ornis_gpu_shader_meta = private constant [47 x i8] c"entry=cs_main;workgroup=32,2,1;types=6,2", section "ornis_gpu.shader_meta", align 1

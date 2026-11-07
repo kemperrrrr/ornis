@@ -5,6 +5,8 @@
 //! merges, and a single natural loop per region. Phi values are destroyed
 //! into local variables on each incoming edge, which lets Naga's structured
 //! `If`/`Loop` carry the same values without a general SSA relooper.
+//! A value defined in a loop and used after it — LLVM skips the phi when the
+//! exit has one predecessor — is spilled to a local and reloaded at the exit.
 //!
 //! Storage and uniform accesses go through the `ornis_gpu` ABI exactly as
 //! `wasm2gpu` declares them. A scalar `-> float` result is written to
@@ -244,6 +246,40 @@ impl<'a> Cfg<'a> {
             return Some(EXIT);
         }
         best
+    }
+}
+
+fn loop_exits<'a>(cfg: &Cfg<'a>, body: &HashSet<&'a str>) -> HashSet<&'a str> {
+    body.iter()
+        .flat_map(|block| cfg.succs.get(block).into_iter().flatten())
+        .filter(|target| !body.contains(*target))
+        .copied()
+        .collect()
+}
+
+fn def_ty(cfg: &Cfg<'_>, body: &HashSet<&str>, name: &str) -> Option<Ty> {
+    for label in body {
+        let block = cfg.blocks.get(label)?;
+        for instr in &block.instrs {
+            if instr.defines(name) {
+                return instr.value_ty();
+            }
+        }
+    }
+    None
+}
+
+fn push_local(op: &Operand, used: &mut Vec<String>) {
+    if let Operand::Local(name) = op {
+        used.push(name.clone());
+    }
+}
+
+fn push_term_local(term: &Terminator, used: &mut Vec<String>) {
+    match term {
+        Terminator::BrCond { cond, .. } => push_local(cond, used),
+        Terminator::Ret(Some(value)) => push_local(value, used),
+        Terminator::BrUncond(_) | Terminator::Ret(None) => {}
     }
 }
 
@@ -742,6 +778,7 @@ impl Builders {
             func: function,
             id_x,
             phi_vars: HashMap::new(),
+            spill: HashMap::new(),
             env: HashMap::new(),
             saw_return: false,
         };
@@ -789,6 +826,8 @@ struct Lowerer<'a, 'b> {
     func: naga::Function,
     id_x: naga::Handle<naga::Expression>,
     phi_vars: HashMap<String, naga::Handle<naga::LocalVariable>>,
+    /// Loop values used after the loop, stored while the loop runs.
+    spill: HashMap<String, naga::Handle<naga::LocalVariable>>,
     env: Env,
     saw_return: bool,
 }
@@ -1091,6 +1130,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .get(header)
             .ok_or(TranslateError::Unsupported)?
             .clone();
+        let exits = loop_exits(self.cfg, &body);
+        let live = self.loop_live_outs(&body, &exits)?;
         let ctx = Ctx::Loop { header };
         let outer_env = self.env.clone();
         let mut loop_body = naga::Block::new();
@@ -1101,12 +1142,6 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if flow == Flow::Continue {
             return Err(TranslateError::Unsupported);
         }
-        let exits: HashSet<&'a str> = body
-            .iter()
-            .flat_map(|block| self.cfg.succs.get(block).into_iter().flatten())
-            .filter(|target| !body.contains(*target))
-            .copied()
-            .collect();
         if exits.is_empty() {
             if flow == Flow::Returned {
                 out.push(
@@ -1136,10 +1171,100 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if flow == Flow::Returned {
             return Ok(Flow::Returned);
         }
+        self.reload_live(&live, out)?;
         if stop == Some(exit) {
             return Ok(Flow::Next);
         }
         self.emit_region(exit, stop, out, Ctx::Plain)
+    }
+
+    /// Values the single exit reads that are defined inside the loop.
+    fn loop_live_outs(
+        &mut self,
+        body: &HashSet<&'a str>,
+        exits: &HashSet<&'a str>,
+    ) -> Result<Vec<String>, TranslateError> {
+        if exits.len() != 1 {
+            return Ok(Vec::new());
+        }
+        let exit = *exits.iter().next().ok_or(TranslateError::Unsupported)?;
+        let block = *self
+            .cfg
+            .blocks
+            .get(exit)
+            .ok_or(TranslateError::Unsupported)?;
+        let mut used = Vec::new();
+        for instr in &block.instrs {
+            if matches!(instr, Instr::Phi { .. }) {
+                continue;
+            }
+            instr.each_operand(|op| push_local(op, &mut used));
+        }
+        push_term_local(&block.term, &mut used);
+        let mut live = Vec::new();
+        for name in used {
+            self.spill_live(body, &name, &mut live)?;
+        }
+        Ok(live)
+    }
+
+    fn spill_live(
+        &mut self,
+        body: &HashSet<&str>,
+        name: &str,
+        live: &mut Vec<String>,
+    ) -> Result<(), TranslateError> {
+        if live.iter().any(|found| found == name) {
+            return Ok(());
+        }
+        if self.env.contains_key(name) {
+            return Ok(());
+        }
+        if self.spill.contains_key(name) {
+            live.push(name.to_string());
+            return Ok(());
+        }
+        let Some(ty) = def_ty(self.cfg, body, name) else {
+            return Ok(());
+        };
+        let ty = self.ty(ty)?;
+        let var = self.func.local_variables.append(
+            naga::LocalVariable {
+                name: Some(format!("out.{name}")),
+                ty,
+                init: None,
+            },
+            naga::Span::default(),
+        );
+        self.spill.insert(name.to_string(), var);
+        live.push(name.to_string());
+        Ok(())
+    }
+
+    fn reload_live(
+        &mut self,
+        names: &[String],
+        out: &mut naga::Block,
+    ) -> Result<(), TranslateError> {
+        for name in names {
+            let var = *self.spill.get(name).ok_or(TranslateError::Unsupported)?;
+            let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+            let value = self.expr(out, naga::Expression::Load { pointer });
+            self.env.insert(name.clone(), value);
+        }
+        Ok(())
+    }
+
+    /// Record `dst` and, when the exit reads it, keep the value past the loop.
+    fn bind(&mut self, dst: &str, value: naga::Handle<naga::Expression>, out: &mut naga::Block) {
+        if let Some(&var) = self.spill.get(dst) {
+            let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+            out.push(
+                naga::Statement::Store { pointer, value },
+                naga::Span::default(),
+            );
+        }
+        self.env.insert(dst.to_string(), value);
     }
 
     fn emit_block(
@@ -1153,7 +1278,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     let var = *self.phi_vars.get(dst).ok_or(TranslateError::Unsupported)?;
                     let ptr = self.expr(out, naga::Expression::LocalVariable(var));
                     let value = self.expr(out, naga::Expression::Load { pointer: ptr });
-                    self.env.insert(dst.clone(), value);
+                    self.bind(dst, value, out);
                 }
                 Instr::Ret { a } => {
                     self.emit_ret(Some(a), out)?;
@@ -1299,11 +1424,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                         expr: src,
                     },
                 );
-                self.env.insert(dst.clone(), v);
+                self.bind(dst, v, out);
             }
             Instr::Fcmp { dst, pred, a, b } | Instr::Icmp { dst, pred, a, b } => {
                 let v = self.compare(out, pred, a, b)?;
-                self.env.insert(dst.clone(), v);
+                self.bind(dst, v, out);
             }
             Instr::Select { dst, c, a, b } => {
                 let condition = self.operand(out, c)?;
@@ -1317,7 +1442,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                         reject,
                     },
                 );
-                self.env.insert(dst.clone(), v);
+                self.bind(dst, v, out);
             }
             Instr::Uitofp { dst, a } => {
                 let src = self.operand(out, a)?;
@@ -1329,12 +1454,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                         convert: Some(SCALAR_WIDTH),
                     },
                 );
-                self.env.insert(dst.clone(), v);
+                self.bind(dst, v, out);
             }
             Instr::Bitcast { dst, from, to, a } => {
                 if from == to {
                     let value = self.operand(out, a)?;
-                    self.env.insert(dst.clone(), value);
+                    self.bind(dst, value, out);
                 } else {
                     let kind = match (from, to) {
                         (Ty::I32, Ty::Float) => naga::ScalarKind::Float,
@@ -1350,12 +1475,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                             convert: None,
                         },
                     );
-                    self.env.insert(dst.clone(), value);
+                    self.bind(dst, value, out);
                 }
             }
             Instr::Call { dst, callee, args } => {
                 let v = self.call_value(out, callee, args)?;
-                self.env.insert(dst.clone(), v);
+                self.bind(dst, v, out);
             }
             Instr::CallVoid { callee, args } => self.call_void(out, callee, args)?,
             Instr::Phi { .. } => return Err(TranslateError::Unsupported),
@@ -1375,7 +1500,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let left = self.operand(out, a)?;
         let right = self.operand(out, b)?;
         let v = self.expr(out, naga::Expression::Binary { op, left, right });
-        self.env.insert(dst.to_string(), v);
+        self.bind(dst, v, out);
         Ok(())
     }
 
@@ -1407,6 +1532,23 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if let Some(fun) = min_max(callee) {
+            if args.len() != 2 {
+                return Err(TranslateError::Unsupported);
+            }
+            let arg = self.operand(out, &args[0])?;
+            let arg1 = self.operand(out, &args[1])?;
+            return Ok(self.expr(
+                out,
+                naga::Expression::Math {
+                    fun,
+                    arg,
+                    arg1: Some(arg1),
+                    arg2: None,
+                    arg3: None,
+                },
+            ));
+        }
         if callee.contains("uniform_field_vec4_plane_dot") {
             return self.uniform_plane_dot(out, args);
         }
@@ -2040,6 +2182,24 @@ fn load_uniform(
     let v = append(func, naga::Expression::Load { pointer: lane });
     push_emit(func, out, v);
     Ok(v)
+}
+
+/// `llvm.umin` / `minnum` / `umax` / `maxnum` — the forms rustc emits for
+/// `Ord::min`/`max`. WGSL `min`/`max` have the same NaN rule as `minnum`.
+fn min_max(callee: &str) -> Option<naga::MathFunction> {
+    if callee.contains("llvm.umin")
+        || callee.contains("llvm.smin")
+        || callee.contains("llvm.minnum")
+    {
+        Some(naga::MathFunction::Min)
+    } else if callee.contains("llvm.umax")
+        || callee.contains("llvm.smax")
+        || callee.contains("llvm.maxnum")
+    {
+        Some(naga::MathFunction::Max)
+    } else {
+        None
+    }
 }
 
 fn const_u32(op: &Operand) -> Result<u32, TranslateError> {

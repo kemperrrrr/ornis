@@ -38,6 +38,16 @@ unsafe extern "C" {
     fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
     #[link_name = "uniform_field_u32"]
     fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
+    #[link_name = "uniform_field_vec4_component_f32"]
+    fn uniform_field_vec4_component_f32(
+        group: u32,
+        binding: u32,
+        sid: u32,
+        field: u32,
+        component: u32,
+    ) -> f32;
+    #[link_name = "gpu_exp"]
+    fn gpu_exp(value: f32) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -115,6 +125,26 @@ pub(crate) fn write_u32(group: u32, binding: u32, index: u32, value: u32) {
 #[inline(always)]
 pub(crate) fn atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
     call!(storage_atomic_add_u32(group, binding, index, value))
+}
+
+/// Lane `component` of `vec4` field `field`.
+#[inline(always)]
+pub(crate) fn vec4_component(
+    group: u32,
+    binding: u32,
+    sid: u32,
+    field: u32,
+    component: u32,
+) -> f32 {
+    call!(uniform_field_vec4_component_f32(
+        group, binding, sid, field, component
+    ))
+}
+
+/// `exp(value)` — one WGSL `exp`.
+#[inline(always)]
+pub(crate) fn exp(value: f32) -> f32 {
+    call!(gpu_exp(value))
 }
 
 /// `u32` field `field` of the uniform struct `sid`.

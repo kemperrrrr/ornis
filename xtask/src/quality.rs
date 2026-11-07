@@ -160,16 +160,18 @@ impl QualityFlags {
     /// With `--only` the total is the filtered count.
     ///
     /// The clippy stage runs two commands (the workspace lint and the
-    /// render-bench lint under `test-util`), so it counts twice: the
-    /// denominator has to be right before the first stage prints its
-    /// header, not after the clippy stage already ran.
+    /// render-bench lint under `test-util`), and `build-shaders` checks
+    /// two artifacts, so each of those ids counts twice: the denominator
+    /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
             .active_ids()
             .iter()
             .filter(|id| self.enabled(id))
             .count();
-        stages + usize::from(self.enabled("clippy"))
+        // `build-shaders` checks two checked-in artifacts (cull and clusters).
+        let shader_checks = usize::from(self.ci && self.enabled("build-shaders"));
+        stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
 
@@ -2065,31 +2067,51 @@ fn ci_stages(stages: &mut StageList<'_>) {
         );
     }
 
-    if wasm_target_installed() {
-        stages.run(
-            "build-shaders",
-            "build-shaders",
-            "cargo xtask build-shaders --check (checked-in WGSL drift)",
-            stages.cargo(&[
-                "run",
-                "-q",
-                "--package",
-                "xtask",
-                "--",
-                "build-shaders",
-                "--artifact",
-                "crates/render/src/gpu_culling/cull_generated.wgsl",
-                "--check",
-            ]),
-            false,
-        );
-    } else {
+    check_shader_artifact(
+        stages,
+        None,
+        "crates/render/src/gpu_culling/cull_generated.wgsl",
+        "cargo xtask build-shaders --check (checked-in WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-cluster"),
+        "crates/render/src/renderer/clusters/cluster_generated.wgsl",
+        "cargo xtask build-shaders --check (cluster WGSL drift)",
+    );
+}
+
+/// One checked-in WGSL artifact. `package` is omitted for the default crate.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    artifact: &str,
+    desc: &str,
+) {
+    if !wasm_target_installed() {
         stages.skip(
             "build-shaders",
             "build-shaders",
             "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
         );
+        return;
     }
+    let mut args = vec!["run", "-q", "--package", "xtask", "--", "build-shaders"];
+    if let Some(package) = package {
+        args.push("--package");
+        args.push(package);
+    }
+    args.push("--artifact");
+    args.push(artifact);
+    args.push("--check");
+    stages.run(
+        "build-shaders",
+        "build-shaders",
+        desc,
+        stages.cargo(&args),
+        false,
+    );
 }
 
 /// ── Deep static analysis (--everything) ────────────────────
@@ -3571,6 +3593,9 @@ mod tests {
         assert_eq!(only_fmt_clippy.total_stages(), 3);
         let only_fmt = QualityFlags::parse(&["--only=fmt".to_string()]);
         assert_eq!(only_fmt.total_stages(), 1);
+        let only_shaders =
+            QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
+        assert_eq!(only_shaders.total_stages(), 2);
     }
 
     #[test]

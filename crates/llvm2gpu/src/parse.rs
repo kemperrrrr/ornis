@@ -620,10 +620,11 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             Ok(Some(Instr::Select { dst, c, a, b }))
         }
         "uitofp" => {
-            // `uitofp i32 %a to float`
-            let a = parse_operand(tokens[2].trim_end_matches(','))?;
+            // `uitofp nneg i32 %a to float` — rustc marks unsigned casts `nneg`.
+            let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
             Ok(Some(Instr::Uitofp { dst, a }))
         }
+        "zext" => parse_zext(&dst, &tokens),
         "bitcast" => {
             // `bitcast i32 %a to float`
             let from = parse_ty(&tokens[1])?;
@@ -655,6 +656,7 @@ fn is_flag(token: &str) -> bool {
             | "reassoc"
             | "samesign"
             | "disjoint"
+            | "nneg"
     )
 }
 
@@ -760,6 +762,9 @@ fn parse_operand(word: &str) -> Result<Operand, TranslateError> {
     if w == "false" {
         return Ok(Operand::Bool(false));
     }
+    if let Some(value) = llvm_hex_f32(w) {
+        return Ok(Operand::F32(value));
+    }
     if let Ok(value) = w.parse::<f32>()
         && (w.contains('.') || w.contains('e') || w.contains('E'))
     {
@@ -770,6 +775,204 @@ fn parse_operand(word: &str) -> Result<Operand, TranslateError> {
         return Ok(Operand::U32(value as u32));
     }
     Err(TranslateError::Parse(format!("unknown operand {w}")))
+}
+
+/// Hex digits in the `f64` pattern LLVM prints for an `f32` immediate.
+const LLVM_F32_HEX_DIGITS: usize = 16;
+/// Radix of that pattern.
+const HEX_RADIX: u32 = 16;
+
+/// Token index of the source type in `zext <ty> <value> to <ty>`.
+const ZEXT_FROM: usize = 1;
+/// Token index of the widened value.
+const ZEXT_VALUE: usize = 2;
+/// Token index of the destination type (`to` sits between the value and it).
+const ZEXT_TO: usize = 4;
+
+/// `zext i1 %c to i32`: rustc counts a bool by widening it to 0 or 1.
+fn parse_zext(dst: &str, tokens: &[String]) -> Result<Option<Instr>, TranslateError> {
+    let (Some(from_tok), Some(value_tok), Some(to_tok)) = (
+        tokens.get(ZEXT_FROM),
+        tokens.get(ZEXT_VALUE),
+        tokens.get(ZEXT_TO),
+    ) else {
+        return Err(TranslateError::Parse("zext".to_string()));
+    };
+    let from = parse_ty(from_tok)?;
+    let value = parse_operand(value_tok.trim_end_matches(','))?;
+    let to = parse_ty(to_tok)?;
+    if from != Ty::I1 || to != Ty::I32 {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok(Some(Instr::Select {
+        dst: dst.to_string(),
+        c: value,
+        a: Operand::U32(1),
+        b: Operand::U32(0),
+    }))
+}
+
+/// LLVM prints an `f32` immediate as the 64-bit pattern of that value widened
+/// to `f64` (`0x401ABD0AE0000000`). Narrowing recovers the original `f32`.
+fn llvm_hex_f32(word: &str) -> Option<f32> {
+    let hex = word.strip_prefix("0x")?;
+    if hex.len() != LLVM_F32_HEX_DIGITS || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bits = u64::from_str_radix(hex, HEX_RADIX).ok()?;
+    Some(f64::from_bits(bits) as f32)
+}
+
+impl Instr {
+    /// Every value this instruction reads.
+    pub(super) fn each_operand<'a>(&'a self, mut visit: impl FnMut(&'a Operand)) {
+        match self {
+            Self::FAdd { a, b, .. }
+            | Self::FMul { a, b, .. }
+            | Self::FSub { a, b, .. }
+            | Self::FDiv { a, b, .. }
+            | Self::Add { a, b, .. }
+            | Self::Sub { a, b, .. }
+            | Self::Mul { a, b, .. }
+            | Self::UDiv { a, b, .. }
+            | Self::SDiv { a, b, .. }
+            | Self::URem { a, b, .. }
+            | Self::SRem { a, b, .. }
+            | Self::And { a, b, .. }
+            | Self::Or { a, b, .. }
+            | Self::Xor { a, b, .. }
+            | Self::Shl { a, b, .. }
+            | Self::LShr { a, b, .. }
+            | Self::AShr { a, b, .. }
+            | Self::Fcmp { a, b, .. }
+            | Self::Icmp { a, b, .. } => visit_pair(a, b, &mut visit),
+            Self::FNeg { a, .. }
+            | Self::Uitofp { a, .. }
+            | Self::Bitcast { a, .. }
+            | Self::Ret { a } => {
+                visit(a);
+            }
+            Self::Select { c, a, b, .. } => visit_triple(c, a, b, &mut visit),
+            Self::Call { args, .. } | Self::CallVoid { args, .. } => {
+                args.iter().for_each(&mut visit);
+            }
+            Self::Phi { incoming, .. } => {
+                incoming.iter().for_each(|(value, _)| visit(value));
+            }
+            Self::RetVoid => {}
+        }
+    }
+
+    /// Whether this instruction writes `name`.
+    pub(super) fn defines(&self, name: &str) -> bool {
+        match self {
+            Self::CallVoid { .. } | Self::Ret { .. } | Self::RetVoid => false,
+            Self::FAdd { dst, .. }
+            | Self::FMul { dst, .. }
+            | Self::FSub { dst, .. }
+            | Self::FDiv { dst, .. }
+            | Self::FNeg { dst, .. }
+            | Self::Add { dst, .. }
+            | Self::Sub { dst, .. }
+            | Self::Mul { dst, .. }
+            | Self::UDiv { dst, .. }
+            | Self::SDiv { dst, .. }
+            | Self::URem { dst, .. }
+            | Self::SRem { dst, .. }
+            | Self::And { dst, .. }
+            | Self::Or { dst, .. }
+            | Self::Xor { dst, .. }
+            | Self::Shl { dst, .. }
+            | Self::LShr { dst, .. }
+            | Self::AShr { dst, .. }
+            | Self::Fcmp { dst, .. }
+            | Self::Icmp { dst, .. }
+            | Self::Select { dst, .. }
+            | Self::Uitofp { dst, .. }
+            | Self::Bitcast { dst, .. }
+            | Self::Call { dst, .. }
+            | Self::Phi { dst, .. } => dst == name,
+        }
+    }
+
+    /// Result type, when the opcode determines it.
+    pub(super) fn value_ty(&self) -> Option<Ty> {
+        match self {
+            Self::FAdd { .. }
+            | Self::FMul { .. }
+            | Self::FSub { .. }
+            | Self::FDiv { .. }
+            | Self::FNeg { .. }
+            | Self::Uitofp { .. } => Some(Ty::Float),
+            Self::Add { .. }
+            | Self::Sub { .. }
+            | Self::Mul { .. }
+            | Self::UDiv { .. }
+            | Self::SDiv { .. }
+            | Self::URem { .. }
+            | Self::SRem { .. }
+            | Self::And { .. }
+            | Self::Or { .. }
+            | Self::Xor { .. }
+            | Self::Shl { .. }
+            | Self::LShr { .. }
+            | Self::AShr { .. } => Some(Ty::I32),
+            Self::Fcmp { .. } | Self::Icmp { .. } => Some(Ty::I1),
+            Self::Phi { ty, .. } => Some(*ty),
+            Self::Bitcast { to, .. } => Some(*to),
+            Self::Select { .. } => None,
+            Self::Call { callee, .. } => call_value_ty(callee),
+            Self::CallVoid { .. } | Self::Ret { .. } | Self::RetVoid => None,
+        }
+    }
+}
+
+fn visit_pair<'a>(a: &'a Operand, b: &'a Operand, visit: &mut impl FnMut(&'a Operand)) {
+    visit(a);
+    visit(b);
+}
+
+fn visit_triple<'a>(
+    a: &'a Operand,
+    b: &'a Operand,
+    c: &'a Operand,
+    visit: &mut impl FnMut(&'a Operand),
+) {
+    visit(a);
+    visit(b);
+    visit(c);
+}
+
+fn call_value_ty(callee: &str) -> Option<Ty> {
+    if int_call(callee) {
+        Some(Ty::I32)
+    } else if float_call(callee) {
+        Some(Ty::Float)
+    } else {
+        None
+    }
+}
+
+fn int_call(callee: &str) -> bool {
+    callee.contains("umin")
+        || callee.contains("umax")
+        || callee.contains("smin")
+        || callee.contains("smax")
+        || callee.contains("atomic")
+        || callee.contains("_u32")
+}
+
+fn float_call(callee: &str) -> bool {
+    callee.contains("minnum")
+        || callee.contains("maxnum")
+        || callee.contains("dot3")
+        || callee.contains("length3")
+        || callee.contains("sqrt")
+        || callee.contains("sin")
+        || callee.contains("cos")
+        || callee.contains("exp")
+        || callee.contains("log")
+        || callee.contains("_f32")
 }
 
 /// Split on `,` ignoring parentheses depth.

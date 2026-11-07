@@ -60,6 +60,20 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
         crate::host_unavailable()
     }
 
+    /// Lane `COMPONENT` (`0..4`) of `vec4` field `FIELD`.
+    #[inline(always)]
+    pub fn vec4_lane<const FIELD: usize, const COMPONENT: usize>(&self) -> f32 {
+        const { Self::require_tag::<FIELD>(TYPE_TAG_VEC4) };
+        const { assert!(COMPONENT < 4, "a vec4 has four lanes") };
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::vec4_component(G, B, T::ID, FIELD as u32, COMPONENT as u32)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::host_unavailable()
+    }
+
     /// Signed distance from `(x, y, z)` to `vec4` plane field `FIELD`:
     /// `dot((x, y, z, 1), field)`.
     ///
