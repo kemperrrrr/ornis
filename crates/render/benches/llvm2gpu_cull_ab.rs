@@ -8,12 +8,11 @@
 //!     --bench llvm2gpu_cull_ab --features test-util
 //! ```
 
-use std::path::Path;
-use std::process::Command;
 use std::time::Instant;
 
 use ornis_render::gpu_culling::{
     CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, CULL_WORKGROUP_SIZE, INSTANCE_COUNT_WORD,
+    LEGACY_CULL_COMPUTE_WGSL,
 };
 use ornis_render::renderer::{MaterialIdx, PerObjectGpu};
 use ornis_wasm2gpu_testkit::{entry, gpu_buffer, map_bytes, storage_buffer};
@@ -51,23 +50,21 @@ fn main() {
         }
         return;
     };
-    let wgsl = match llvm2gpu_wgsl() {
-        Ok(Some(wgsl)) => wgsl,
-        Ok(None) => return,
-        Err(error) => {
-            eprintln!("llvm2gpu_cull_ab: {error}");
-            std::process::exit(1);
-        }
-    };
     let bgl = layout(&device.device);
-    let production = pipeline(
+    let legacy = pipeline(
         &device.device,
         &bgl,
-        "production cull",
-        CULL_COMPUTE_WGSL,
+        "legacy cull",
+        LEGACY_CULL_COMPUTE_WGSL,
         "cull_instances",
     );
-    let llvm2gpu = pipeline(&device.device, &bgl, "llvm2gpu cull", &wgsl, "cs_main");
+    let llvm2gpu = pipeline(
+        &device.device,
+        &bgl,
+        "llvm2gpu cull",
+        CULL_COMPUTE_WGSL,
+        "cs_main",
+    );
     let scenes = [
         Scene {
             name: "few",
@@ -100,10 +97,10 @@ fn main() {
     );
     println!(
         "{:<12} {:>6} {:>7} {:>10} {:>10} {:>8}",
-        "scene", "n", "visible", "prod us", "llvm2gpu", "delta"
+        "scene", "n", "visible", "legacy us", "llvm2gpu", "delta"
     );
     for scene in &scenes {
-        let (prod, llvm) = run_scene(&device, &bgl, &production, &llvm2gpu, scene);
+        let (prod, llvm) = run_scene(&device, &bgl, &legacy, &llvm2gpu, scene);
         let delta = (llvm / prod - 1.0) * 100.0;
         println!(
             "{:<12} {:>6} {:>7} {:>10.2} {:>10.2} {:>7.1}%",
@@ -151,42 +148,6 @@ fn device() -> Option<Device> {
         device,
         queue,
     })
-}
-
-fn llvm2gpu_wgsl() -> Result<Option<String>, String> {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gpu-shaders/src/lib.rs");
-    let dir = std::env::temp_dir().join(format!("ornis-llvm2gpu-ab-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    let ll = dir.join("cull.ll");
-    let status = Command::new("rustc")
-        .args([
-            "--edition=2024",
-            "--crate-type=lib",
-            "--target",
-            "wasm32-unknown-unknown",
-            "-C",
-            "opt-level=s",
-            "-C",
-            "panic=abort",
-            "-C",
-            "target-cpu=mvp",
-            "--emit=llvm-ir",
-        ])
-        .arg(&source)
-        .arg("-o")
-        .arg(&ll)
-        .status()
-        .map_err(|error| format!("spawn rustc: {error}"))?;
-    if !status.success() {
-        eprintln!("llvm2gpu_cull_ab: SKIPPED (wasm32 target missing)");
-        return Ok(None);
-    }
-    let ir =
-        std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let tags: &[u8] = &[6, 6, 6, 6, 6, 6, 2];
-    let translated = ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &[tags], [64, 1, 1])
-        .map_err(|error| format!("translate: {error}"))?;
-    Ok(Some(translated.wgsl))
 }
 
 fn pipeline(
@@ -288,26 +249,34 @@ fn run_scene(
         ],
     });
     let groups = (records.len() as u32).div_ceil(CULL_WORKGROUP_SIZE);
-    let prod = measure(device, production, &bind, &args, groups, scene.visible);
-    let llvm = measure(device, llvm2gpu, &bind, &args, groups, scene.visible);
-    (prod, llvm)
+    measure_pair(
+        device,
+        production,
+        llvm2gpu,
+        &bind,
+        &args,
+        groups,
+        scene.visible,
+    )
 }
 
-fn measure(
+fn measure_pair(
     device: &Device,
-    pipeline: &wgpu::ComputePipeline,
+    legacy: &wgpu::ComputePipeline,
+    llvm2gpu: &wgpu::ComputePipeline,
     bind: &wgpu::BindGroup,
     args: &wgpu::Buffer,
     groups: u32,
     visible: usize,
-) -> f64 {
+) -> (f64, f64) {
     for _ in 0..WARMUP {
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cull warmup"),
             });
-        encode_run(&mut encoder, pipeline, bind, args, groups, None, 0);
+        encode_run(&mut encoder, legacy, bind, args, groups, None, 0);
+        encode_run(&mut encoder, llvm2gpu, bind, args, groups, None, 0);
         device.queue.submit([encoder.finish()]);
     }
     let _ = device.device.poll(wgpu::PollType::Wait {
@@ -315,9 +284,12 @@ fn measure(
         timeout: None,
     });
     let times = if device.timestamps {
-        measure_gpu(device, pipeline, bind, args, groups)
+        measure_pair_gpu(device, legacy, llvm2gpu, bind, args, groups)
     } else {
-        measure_wall(device, pipeline, bind, args, groups)
+        (
+            measure_wall(device, legacy, bind, args, groups),
+            measure_wall(device, llvm2gpu, bind, args, groups),
+        )
     };
     let count = read_count(device, args);
     assert_eq!(
@@ -334,7 +306,7 @@ fn encode_run(
     args: &wgpu::Buffer,
     groups: u32,
     stamps: Option<&wgpu::QuerySet>,
-    run: usize,
+    stamp_index: u32,
 ) {
     encoder.clear_buffer(
         args,
@@ -343,8 +315,8 @@ fn encode_run(
     );
     let timestamp_writes = stamps.map(|queries| wgpu::ComputePassTimestampWrites {
         query_set: queries,
-        beginning_of_pass_write_index: Some(2 * run as u32),
-        end_of_pass_write_index: Some(2 * run as u32 + 1),
+        beginning_of_pass_write_index: Some(stamp_index),
+        end_of_pass_write_index: Some(stamp_index + 1),
     });
     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("cull ab"),
@@ -355,28 +327,34 @@ fn encode_run(
     pass.dispatch_workgroups(groups, 1, 1);
 }
 
-fn measure_gpu(
+/// Interleave one legacy and one llvm2gpu pass per sample so clock/thermal
+/// drift hits both sides equally; the pass timestamps bracket only the
+/// dispatch, with the args reset outside the window.
+fn measure_pair_gpu(
     device: &Device,
-    pipeline: &wgpu::ComputePipeline,
+    legacy: &wgpu::ComputePipeline,
+    llvm2gpu: &wgpu::ComputePipeline,
     bind: &wgpu::BindGroup,
     args: &wgpu::Buffer,
     groups: u32,
-) -> f64 {
+) -> (f64, f64) {
+    let slots = 4 * RUNS;
     let queries = device.device.create_query_set(&wgpu::QuerySetDescriptor {
         label: Some("cull stamps"),
         ty: wgpu::QueryType::Timestamp,
-        count: (2 * RUNS) as u32,
+        count: slots as u32,
     });
+    let bytes = (slots * std::mem::size_of::<u64>()) as u64;
     let resolve = gpu_buffer(
         &device.device,
         "cull resolve",
-        (2 * RUNS * std::mem::size_of::<u64>()) as u64,
+        bytes,
         wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
     );
     let readback = gpu_buffer(
         &device.device,
         "cull stamps readback",
-        (2 * RUNS * std::mem::size_of::<u64>()) as u64,
+        bytes,
         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
     );
     let mut encoder = device
@@ -385,24 +363,28 @@ fn measure_gpu(
             label: Some("cull stamps"),
         });
     for run in 0..RUNS {
+        let base = (4 * run) as u32;
         encode_run(
             &mut encoder,
-            pipeline,
+            legacy,
             bind,
             args,
             groups,
             Some(&queries),
-            run,
+            base,
+        );
+        encode_run(
+            &mut encoder,
+            llvm2gpu,
+            bind,
+            args,
+            groups,
+            Some(&queries),
+            base + 2,
         );
     }
-    encoder.resolve_query_set(&queries, 0..(2 * RUNS) as u32, &resolve, 0);
-    encoder.copy_buffer_to_buffer(
-        &resolve,
-        0,
-        &readback,
-        0,
-        (2 * RUNS * std::mem::size_of::<u64>()) as u64,
-    );
+    encoder.resolve_query_set(&queries, 0..slots as u32, &resolve, 0);
+    encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, bytes);
     device.queue.submit([encoder.finish()]);
     let _ = device.device.poll(wgpu::PollType::Wait {
         submission_index: None,
@@ -413,11 +395,22 @@ fn measure_gpu(
         .chunks_exact(std::mem::size_of::<u64>())
         .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("timestamp word")))
         .collect();
-    let mut samples: Vec<f64> = words
-        .chunks_exact(2)
-        .map(|pair| (pair[1].saturating_sub(pair[0])) as f64 * device.period_ns as f64 / 1000.0)
-        .filter(|sample| *sample > 0.0)
-        .collect();
+    let mut legacy_samples = Vec::with_capacity(RUNS);
+    let mut llvm_samples = Vec::with_capacity(RUNS);
+    for run in 0..RUNS {
+        let base = 4 * run;
+        legacy_samples.push(delta_us(&words, base, device.period_ns));
+        llvm_samples.push(delta_us(&words, base + 2, device.period_ns));
+    }
+    (median(&mut legacy_samples), median(&mut llvm_samples))
+}
+
+fn delta_us(words: &[u64], at: usize, period_ns: f32) -> f64 {
+    (words[at + 1].saturating_sub(words[at])) as f64 * period_ns as f64 / 1000.0
+}
+
+fn median(samples: &mut Vec<f64>) -> f64 {
+    samples.retain(|sample| *sample > 0.0);
     samples.sort_by(f64::total_cmp);
     samples.get(samples.len() / 2).copied().unwrap_or_default()
 }
@@ -434,8 +427,8 @@ fn measure_wall(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("cull wall"),
         });
-    for run in 0..RUNS {
-        encode_run(&mut encoder, pipeline, bind, args, groups, None, run);
+    for _ in 0..RUNS {
+        encode_run(&mut encoder, pipeline, bind, args, groups, None, 0);
     }
     let started = Instant::now();
     device.queue.submit([encoder.finish()]);

@@ -28,6 +28,8 @@ const SRC_BINDING: u32 = 1;
 const DST_BINDING: u32 = 2;
 /// Binding slot of the indirect-args words.
 const ARGS_BINDING: u32 = 3;
+/// Read-only scalar `f32` view of the same source buffer (sphere math).
+const MATH_BINDING: u32 = 4;
 
 /// Errors from [`Culler`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -203,6 +205,10 @@ impl Culler {
                     ARGS_BINDING,
                     wgpu::BufferBindingType::Storage { read_only: false },
                 ),
+                cull_bind_entry(
+                    MATH_BINDING,
+                    wgpu::BufferBindingType::Storage { read_only: true },
+                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -214,7 +220,7 @@ impl Culler {
             label: Some("culler pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("cull_instances"),
+            entry_point: Some("cs_main"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -237,6 +243,10 @@ impl Culler {
                 wgpu::BindGroupEntry {
                     binding: ARGS_BINDING,
                     resource: args_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: MATH_BINDING,
+                    resource: src_buffer.as_entire_binding(),
                 },
             ],
         });
