@@ -732,13 +732,15 @@ uniform-микробенч (пейпер: divergent проигрывает 16 т
 
 ### i. Editor as a game (модель Godot) — план
 
-> Зафиксировано 2026-09-28. **Статус 2026-11-03:** E0 (`crates/editor`:
+> Зафиксировано 2026-09-28. **Статус 2026-11-07:** E0 (`crates/editor`:
 > маркеры, `install_editor`, фильтры, метки в снапшоте), E1 (picking
 > click/hover в реплике), K2 (2D-камера, сетка, орто-пиккинг, режим
-> вьюпорта) и E2 (команда `select`, единый выбор дерево/вьюпорт,
-> outline-оверлей в composite-пассе реплики) готовы. Следующий срез — E3
-> (transform-gizmo), затем E4 (play/edit, сетка, привязки). Outline
-> регистрируется только в single-sample планах: в MSAA-плане нет
+> вьюпорта), E2 (команда `select`, единый выбор дерево/вьюпорт,
+> outline-оверлей в composite-пассе реплики) и E3 (ручки гизмо как
+> `EditorOnly`-сущности, gizmo-first picking, drag с локальным preview и
+> commit через `set_component`/`Mutation`, move/rotate/scale в world/local,
+> один шаг undo) готовы. Следующий срез — E4 (play/edit, сетка, привязки).
+> Outline регистрируется только в single-sample планах: в MSAA-плане нет
 > single-sample depth, поэтому выбор там не подсвечивается (wasm работает
 > на Fxaa). Тезис ниже — исторический; фронтенд по умолчанию —
 > `editor-v2/` (issue #214), `editor/` остаётся легаси.

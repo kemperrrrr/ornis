@@ -14,17 +14,20 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use ornis_core::{Entity, InputState, SmartStore};
+use ornis_core::{Entity, InputState, MouseButton, SmartStore};
 use wasm_bindgen::prelude::*;
 use web_sys::console;
 
 use ornis_app::ReplicaGameWorld;
-use ornis_assets::scene::Scene;
+use ornis_assets::scene::{Scene, TransformDesc};
 #[cfg(test)]
 use ornis_editor::EditorMarks;
+#[cfg(test)]
+use ornis_editor::GizmoAxis;
 use ornis_editor::{
-    Hovered, PlaneCamera, Selected, install_editor, install_plane_camera, read_plane_camera,
-    set_selection,
+    GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoSpace, Hovered, PlaneCamera, Selected,
+    ViewportCamera, apply_gizmo_visibility, install_editor, install_plane_camera, pick_gizmo,
+    pick_ray, read_plane_camera, set_selection,
 };
 use ornis_render::{
     AntiAliasMode, CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D,
@@ -39,8 +42,8 @@ pub mod viewport;
 
 use scene_api::{LiveEntityMeta, LiveScene};
 use viewport::{
-    PENDING_MODE, VIEWPORT_MODE, apply_mode_request, refresh_viewport_state_json,
-    sync_picking_camera,
+    PENDING_MODE, VIEWPORT_MODE, apply_mode_request, apply_pending_gizmo, gizmo_mode, gizmo_space,
+    refresh_viewport_state_json, sync_picking_camera, take_pending_undo,
 };
 
 /// Shared handle to the requestAnimationFrame closure (self-rescheduling
@@ -679,8 +682,9 @@ struct ServerEntityId {
 }
 
 /// Applies one snapshot's editor marks to the freshly rebuilt replica:
-/// attaches [`ServerEntityId`], mirrors `Selected`/`Hovered`, and returns
-/// the sorted selected local ids (for the echo guard in `LAST_SELECTED`).
+/// attaches [`ServerEntityId`] and the chrome's [`GizmoHandle`], mirrors
+/// `Selected`/`Hovered`, and returns the sorted selected local ids (for the
+/// echo guard in `LAST_SELECTED`).
 ///
 /// The authoritative world owns the selection: the replica takes the first
 /// `selected` mark as the exclusive choice, so a malformed multi-selected
@@ -722,6 +726,15 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
                     lane.remove(*entity);
                 }
             }
+        }
+    }
+    // Editor chrome: attach the handle identity so the viewport can show
+    // only the active tool set and pick handles before scene content.
+    for (entity, meta) in handles.iter().zip(meta) {
+        if let Some(handle) = meta.gizmo {
+            store.insert(*entity, handle);
+        } else if let Some(mut lane) = store.write_lane::<GizmoHandle>() {
+            lane.remove(*entity);
         }
     }
     let selected = handles
@@ -770,6 +783,25 @@ fn select_command_json(target: Option<(u32, u32)>) -> String {
         .to_string(),
         None => serde_json::json!({"type": "select", "data": {}}).to_string(),
     }
+}
+
+/// `set_component` envelope for a gizmo drag commit / undo.
+///
+/// Same wire shape as the editor protocol's typed `set_component` command;
+/// the authoritative side applies it through the shared `Mutation` path, so
+/// a drag and a manual inspector edit cannot diverge.
+fn transform_command_json(id: u32, generation: u32, transform: &TransformDesc) -> String {
+    let value = serde_json::to_value(transform).unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "type": "set_component",
+        "data": {
+            "id": id,
+            "generation": generation,
+            "component": "Transform",
+            "value": value,
+        },
+    })
+    .to_string()
 }
 
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
@@ -1066,6 +1098,42 @@ async fn load_initial_scene() -> Result<LiveScene, JsValue> {
     ))
 }
 
+/// Pre-drag transform kept for the one-step undo.
+#[derive(Debug, Clone)]
+struct UndoTransform {
+    id: u32,
+    generation: u32,
+    transform: TransformDesc,
+}
+
+/// Replica-side gizmo interaction state.
+#[derive(Default)]
+struct GizmoRuntime {
+    /// Left-button level observed on the previous frame (press edge).
+    prev_pressed: bool,
+    /// In-progress drag, if any.
+    drag: Option<GizmoDrag>,
+    /// Local entity being dragged.
+    selected: Option<Entity>,
+    /// Whether the drag actually changed the transform (a click on a handle
+    /// without motion must not commit a `set_component`).
+    moved: bool,
+    /// One-step undo payload from the last drag.
+    undo: Option<UndoTransform>,
+}
+
+impl GizmoRuntime {
+    /// Drops an in-flight drag (the selection handle may have been rebuilt).
+    ///
+    /// The one-step undo survives: it addresses the server id and holds the
+    /// pre-drag transform, both independent of the rebuilt replica.
+    fn cancel(&mut self) {
+        self.drag = None;
+        self.selected = None;
+        self.moved = false;
+    }
+}
+
 /// Mutable state carried across animation frames by the render loop.
 struct FrameState<'a> {
     surface: wgpu::Surface<'a>,
@@ -1083,6 +1151,8 @@ struct FrameState<'a> {
     instance_entities: Vec<Entity>,
     /// Flags last pushed to the render plan (idle frames skip the update).
     last_outline_flags: Vec<u32>,
+    /// Gizmo tool state, drag and one-step undo.
+    gizmo: GizmoRuntime,
     input: Rc<RefCell<InputState>>,
     poster: InputPoster,
     socket: InputSocket,
@@ -1141,6 +1211,13 @@ impl<'a> FrameState<'a> {
         // snapshot back as a `select` command.
         let selected = apply_live_marks(&mut self.render_world, &live.meta);
         LAST_SELECTED.with(|cell| cell.borrow_mut().mirror(selected));
+        // Handles are rebuilt with the scene, so an in-flight drag refers to
+        // dead entities; cancel it and re-apply the active tool's layout.
+        self.gizmo.cancel();
+        self.set_gizmo_grab(false);
+        if let Some(store) = self.render_world.engine_mut().world_mut().store_mut() {
+            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        }
         self.render_world.frame(0.0);
         let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
         if gpu.mesh_params != self.mesh_params {
@@ -1267,6 +1344,244 @@ impl<'a> FrameState<'a> {
             settle_selection(ticket, true);
         } else {
             post_select_command(body, ticket);
+        }
+    }
+
+    /// Applies queued toolbar requests (tool/space changes, one-step undo).
+    // qual:allow(test_quality, untested) reason: "toolbar queue + undo; drag math and the command body are host-tested"
+    fn apply_gizmo_requests(&mut self) {
+        if apply_pending_gizmo(self.render_world.engine_mut()) {
+            // A tool switch ends an in-flight drag instead of committing a
+            // preview the user no longer sees.
+            if self.gizmo.drag.is_some() {
+                self.gizmo.cancel();
+                self.set_gizmo_grab(false);
+            }
+            // Handle visibility moved: show it in the same frame instead of
+            // waiting for the next snapshot.
+            self.upload_replica_instances();
+        }
+        if !take_pending_undo() {
+            return;
+        }
+        let Some(undo) = self.gizmo.undo.take() else {
+            return;
+        };
+        self.send_transform_command(undo.id, undo.generation, &undo.transform);
+        // Immediate local preview when the same entity is still selected
+        // (the snapshot confirmation follows).
+        let local = {
+            let engine = self.render_world.engine();
+            let store = engine.world().store();
+            store.and_then(|store| {
+                let selected = store.read_lane::<Selected>()?.entities.first().copied()?;
+                let server = store
+                    .read_lane::<ServerEntityId>()?
+                    .get(selected)
+                    .copied()?;
+                (server.id == undo.id).then_some((selected, undo.transform))
+            })
+        };
+        if let Some((selected, transform)) = local
+            && let Some(store) = self.render_world.engine_mut().world_mut().store_mut()
+        {
+            if let Some(mut lane) = store.write_lane::<TransformDesc>() {
+                lane.insert(selected, transform);
+            }
+            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            self.upload_replica_instances();
+        }
+    }
+
+    /// Turns press/move/release of the pointer into a gizmo drag preview and
+    /// one `set_component` commit on release.
+    // qual:allow(test_quality, untested) reason: "press/move/release edge wiring; the math it calls is host-tested"
+    fn update_gizmo(&mut self) {
+        let (pressed, pointer) = {
+            let engine = self.render_world.engine();
+            let input = engine.world().resources().get::<InputState>();
+            (
+                input.is_some_and(|input| input.button_down(MouseButton::Left)),
+                input.map_or([0.0, 0.0], |input| input.pointer_position()),
+            )
+        };
+        let edge = pressed && !self.gizmo.prev_pressed;
+        self.gizmo.prev_pressed = pressed;
+        let mode = gizmo_mode();
+        let space = gizmo_space();
+        if edge && mode != GizmoMode::Off && self.gizmo.drag.is_none() {
+            let _ = self.begin_gizmo_drag(pointer, mode, space);
+        }
+        if self.gizmo.drag.is_none() {
+            return;
+        }
+        if pressed {
+            self.preview_gizmo_drag(pointer);
+        } else {
+            self.commit_gizmo_drag();
+        }
+    }
+
+    /// Picks a matching handle and arms a drag (also suppresses the scene
+    /// click for this press).
+    // qual:allow(test_quality, untested) reason: "browser frame edge: picks through host-tested pick_gizmo and GizmoDrag"
+    fn begin_gizmo_drag(&mut self, pointer: [f32; 2], mode: GizmoMode, space: GizmoSpace) -> bool {
+        let prepared = {
+            let engine = self.render_world.engine();
+            let Some(store) = engine.world().store() else {
+                return false;
+            };
+            let Some(camera) = engine.world().resources().get::<ViewportCamera>() else {
+                return false;
+            };
+            let Ok(ray) = pick_ray(camera, pointer) else {
+                return false;
+            };
+            let Ok(Some(hit)) = pick_gizmo(store, &ray, mode, space) else {
+                return false;
+            };
+            let Some(handle) = store
+                .read_lane::<GizmoHandle>()
+                .and_then(|lane| lane.get(hit.entity()).copied())
+            else {
+                return false;
+            };
+            let Some(selected) = store
+                .read_lane::<Selected>()
+                .and_then(|lane| lane.entities.first().copied())
+            else {
+                return false;
+            };
+            let Some(transform) = store
+                .read_lane::<TransformDesc>()
+                .and_then(|lane| lane.get(selected).cloned())
+            else {
+                return false;
+            };
+            let Some(drag) = GizmoDrag::begin(&transform, handle, &ray) else {
+                return false;
+            };
+            let undo = store
+                .read_lane::<ServerEntityId>()
+                .and_then(|lane| lane.get(selected).copied())
+                .map(|server| UndoTransform {
+                    id: server.id,
+                    generation: server.generation,
+                    transform,
+                });
+            Some((drag, selected, undo))
+        };
+        let Some((drag, selected, undo)) = prepared else {
+            return false;
+        };
+        self.gizmo.drag = Some(drag);
+        self.gizmo.selected = Some(selected);
+        self.gizmo.moved = false;
+        self.gizmo.undo = undo;
+        self.set_gizmo_grab(true);
+        true
+    }
+
+    /// Writes the drag preview onto the replica and moves the handles.
+    // qual:allow(test_quality, untested) reason: "browser frame edge: writes the host-tested GizmoDrag preview"
+    fn preview_gizmo_drag(&mut self, pointer: [f32; 2]) {
+        let (Some(selected), Some(drag)) = (self.gizmo.selected, self.gizmo.drag.clone()) else {
+            return;
+        };
+        let Some(ray) = self.gizmo_ray(pointer) else {
+            return;
+        };
+        let start = drag.start.clone();
+        let Some(transform) = drag.update(&ray) else {
+            return;
+        };
+        self.gizmo.moved |= transform != start;
+        let Some(store) = self.render_world.engine_mut().world_mut().store_mut() else {
+            return;
+        };
+        if let Some(mut lane) = store.write_lane::<TransformDesc>() {
+            lane.insert(selected, transform);
+        }
+        apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        self.upload_replica_instances();
+    }
+
+    /// Re-extracts the replica and uploads instance transforms.
+    ///
+    /// Drag previews and tool switches write the local store directly; the
+    /// shared renderer only re-uploads on a snapshot by default, so without
+    /// this the viewport would show the drag one poll later.
+    // qual:allow(test_quality, untested) reason: "browser GPU edge: reuses the host-tested extraction canon"
+    fn upload_replica_instances(&mut self) {
+        let extracted = self.render_world.frame_upload();
+        self.renderer
+            .upload_instances(&self.device, &self.queue, &extracted.instances);
+        self.instance_count = extracted.instances.len() as u32;
+        self.instance_entities = extracted.instance_entities;
+    }
+
+    /// Sends the released transform through `set_component` and clears the
+    /// grab state (keeps the undo snapshot).
+    // qual:allow(test_quality, untested) reason: "browser frame edge: sends the host-tested set_component envelope"
+    fn commit_gizmo_drag(&mut self) {
+        self.gizmo.drag = None;
+        let moved = std::mem::take(&mut self.gizmo.moved);
+        let Some(selected) = self.gizmo.selected.take() else {
+            self.set_gizmo_grab(false);
+            return;
+        };
+        if !moved {
+            // A click on a handle without motion commits nothing.
+            self.gizmo.undo = None;
+            self.set_gizmo_grab(false);
+            return;
+        }
+        let committed = {
+            let engine = self.render_world.engine();
+            let store = engine.world().store();
+            store.and_then(|store| {
+                let transform = store.read_lane::<TransformDesc>()?.get(selected).cloned()?;
+                let server = store
+                    .read_lane::<ServerEntityId>()?
+                    .get(selected)
+                    .copied()?;
+                Some((server, transform))
+            })
+        };
+        if let Some((server, transform)) = committed {
+            self.send_transform_command(server.id, server.generation, &transform);
+        }
+        self.set_gizmo_grab(false);
+    }
+
+    /// Ray through `pointer` from the replica picking camera.
+    // qual:allow(test_quality, untested) reason: "browser frame edge: thin wrapper over host-tested pick_ray"
+    fn gizmo_ray(&self, pointer: [f32; 2]) -> Option<ornis_editor::PickRay> {
+        let engine = self.render_world.engine();
+        let camera = engine.world().resources().get::<ViewportCamera>()?;
+        pick_ray(camera, pointer).ok()
+    }
+
+    /// Sets the click-pipeline suppression flag.
+    // qual:allow(test_quality, untested) reason: "browser frame edge: one resource flag write"
+    fn set_gizmo_grab(&mut self, grabbed: bool) {
+        if let Some(grab) = self
+            .render_world
+            .engine_mut()
+            .world_mut()
+            .resources_mut()
+            .get_mut::<GizmoGrab>()
+        {
+            grab.0 = grabbed;
+        }
+    }
+
+    /// Fire-and-forget `set_component` of one Transform (drag commit/undo).
+    // qual:allow(test_quality, untested) reason: "browser transport edge: the envelope itself is host-tested"
+    fn send_transform_command(&self, id: u32, generation: u32, transform: &TransformDesc) {
+        let body = transform_command_json(id, generation, transform);
+        if !self.socket.send(&body) {
+            post_json("/api/command", "POST /api/command", body, |_| {});
         }
     }
 
@@ -1421,6 +1736,10 @@ fn init_editor_replica(
     // it before the first frame so the replica and tree agree immediately.
     let selected = apply_live_marks(render_world, meta);
     LAST_SELECTED.with(|cell| cell.borrow_mut().mirror(selected));
+    // Show only the active tool's handle set from the first frame.
+    if let Some(store) = render_world.engine_mut().world_mut().store_mut() {
+        apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+    }
     render_world.frame(0.0);
 }
 
@@ -1542,6 +1861,7 @@ fn spawn_render_loop(
         instance_count: gpu_scene.extracted.instances.len() as u32,
         instance_entities: gpu_scene.extracted.instance_entities.clone(),
         last_outline_flags: Vec::new(),
+        gizmo: GizmoRuntime::default(),
         input,
         poster: InputPoster::new(),
         socket,
@@ -1575,6 +1895,8 @@ fn spawn_render_loop(
         // stays a browser-only console edge.
         let size = (frame.config.width, frame.config.height);
         sync_picking_camera(frame.render_world.engine_mut(), size);
+        frame.apply_gizmo_requests();
+        frame.update_gizmo();
         frame.sync_selection();
         frame.render_world.frame(DT);
 
@@ -1789,6 +2111,79 @@ mod integration_tests {
         assert_eq!(server_selection(store), Some(None));
     }
 
+    /// Gizmo chrome from the snapshot reaches the replica: the
+    /// `GizmoHandle` lane is attached positionally and the active
+    /// mode/space set is laid out while the rest collapses.
+    #[test]
+    fn live_marks_attach_gizmo_handles_and_apply_active_visibility() {
+        let json = r#"{
+            "version": 1,
+            "entities": [
+                {
+                    "id": 0, "generation": 0,
+                    "editor": {"editor_only": false, "selected": true, "hovered": false},
+                    "components": {
+                        "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+                        "Mesh": {"Sphere": {"radius":1.0,"segments":8,"rings":6}},
+                        "Material": {"Dielectric": {"base_color":[1,1,1],"roughness":0.5}}
+                    }
+                },
+                {
+                    "id": 1, "generation": 0,
+                    "editor": {"editor_only": true, "selected": false, "hovered": false},
+                    "components": {
+                        "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[0,0,0]},
+                        "Mesh": {"Box": {"size": [1.0, 1.0, 1.0]}},
+                        "Material": {"Dielectric": {"base_color":[0.85,0.2,0.2],"roughness":0.5}},
+                        "GizmoHandle": {"mode": "move", "space": "world", "axis": "x"}
+                    }
+                },
+                {
+                    "id": 2, "generation": 0,
+                    "editor": {"editor_only": true, "selected": false, "hovered": false},
+                    "components": {
+                        "Transform": {"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[0,0,0]},
+                        "Mesh": {"Box": {"size": [1.0, 1.0, 1.0]}},
+                        "Material": {"Dielectric": {"base_color":[0.25,0.8,0.3],"roughness":0.5}},
+                        "GizmoHandle": {"mode": "rotate", "space": "world", "axis": "y"}
+                    }
+                }
+            ],
+            "lights": [],
+            "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}
+        }"#;
+        let live = scene_api::parse_scene_json(json).expect("gizmo snapshot must parse");
+        let mut world = ReplicaGameWorld::new_replica();
+        install_editor(world.engine_mut());
+        world.replace_scene(&live.scene);
+        let entities: Vec<Entity> = world.scene_entities().iter().copied().collect();
+        apply_live_marks(&mut world, &live.meta);
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+
+        {
+            let handles = store.read_lane::<GizmoHandle>().expect("handle lane");
+            assert_eq!(
+                handles.get(entities[1]).copied(),
+                Some(GizmoHandle {
+                    mode: GizmoMode::Move,
+                    space: GizmoSpace::World,
+                    axis: GizmoAxis::X,
+                })
+            );
+            assert_eq!(
+                handles.get(entities[2]).map(|handle| handle.mode),
+                Some(GizmoMode::Rotate)
+            );
+        }
+
+        apply_gizmo_visibility(store, GizmoMode::Move, GizmoSpace::World);
+        let transforms = store.read_lane::<TransformDesc>().expect("transform lane");
+        let active = transforms.get(entities[1]).expect("active handle");
+        assert!((active.translation - glam::Vec3::new(0.55, 0.0, 0.0)).length() < 1e-5);
+        let hidden = transforms.get(entities[2]).expect("hidden handle");
+        assert_eq!(hidden.scale, glam::Vec3::ZERO);
+    }
+
     /// A replica with one entity pre-selected and pre-hovered.
     fn selected_replica() -> (ReplicaGameWorld, Entity) {
         let live = scene_api::parse_scene_json(scene_api::FULL_CONTRACT)
@@ -1982,6 +2377,26 @@ mod integration_tests {
             serde_json::from_str(&select_command_json(None)).expect("valid JSON");
         assert_eq!(clear["type"], "select");
         assert_eq!(clear["data"], serde_json::json!({}));
+    }
+
+    /// The gizmo commit body is the same typed `set_component` an inspector
+    /// edit sends: id, generation, `Transform` and the full value.
+    #[test]
+    fn transform_command_uses_the_set_component_envelope() {
+        let transform = TransformDesc {
+            translation: glam::Vec3::new(1.0, 2.0, 3.0),
+            ..TransformDesc::IDENTITY
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&transform_command_json(7, 3, &transform)).expect("valid JSON");
+        assert_eq!(body["type"], "set_component");
+        assert_eq!(body["data"]["id"], 7);
+        assert_eq!(body["data"]["generation"], 3);
+        assert_eq!(body["data"]["component"], "Transform");
+        assert_eq!(
+            body["data"]["value"],
+            serde_json::to_value(&transform).expect("transform JSON")
+        );
     }
 
     #[test]
