@@ -481,7 +481,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only doc,wasm-check 2>&1 | tee target/quality-docs.log
+          cargo xtask quality --ci --only doc,wasm-check,build-shaders 2>&1 | tee target/quality-docs.log
 
       - name: Upload shard log
         if: always()

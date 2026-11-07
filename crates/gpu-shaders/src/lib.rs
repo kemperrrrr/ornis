@@ -11,6 +11,8 @@
 #![no_std]
 #![warn(missing_docs)]
 
+use ornis_gpu_shader::gpu_entry;
+
 /// Group-0 binding of the packed `CullParams` uniform.
 const PARAMS_BINDING: i32 = 0;
 /// `ornis_gpu.types` struct id of `CullParams`.
@@ -97,6 +99,7 @@ fn length3(x: f32, y: f32, z: f32) -> f32 {
 /// Bindings: `0` padded `CullParams` uniform, `1` read-only `f32` source
 /// view, `2` read-write compacted `u32` indices, `3` five-word indirect
 /// args with `instance_count` at word 1.
+#[gpu_entry(compute(threads(64)), uniform_tags = [6, 6, 6, 6, 6, 6, 2])]
 #[unsafe(no_mangle)]
 pub extern "C" fn cs_main(id: u32) {
     // SAFETY: both imports only read array lengths of their bindings.

@@ -54,9 +54,9 @@ fn usage(code: i32) -> ! {
          with the remote editor at http://127.0.0.1:3420\n      \
          --skip-wasm    reuse the existing editor-v2/pkg build\n      \
           --editor-dir   editor frontend directory (default: <workspace>/editor-v2)\n  \
-           build-shaders [--source <path>] [--entry cs_main] [--opt 1] [--out target/shaders]\n                         [--workgroup 64,1,1] [--types 6,6,6,6,6,6,2]\n      \
-          Compile a no_std shader source to LLVM IR and translate it to\n      \
-          WGSL/SPIR-V through ornis-llvm2gpu (content-addressed cache)\n  \
+           build-shaders [--package ornis-gpu-shaders] [--entry cs_main]\n                         [--opt 1] [--out target/shaders]\n                         [--artifact <wgsl>] [--check]\n      \
+          Compile a no_std shader crate with cargo, translate its LLVM IR\n      \
+          to WGSL/SPIR-V, and write/check the checked-in renderer artifact\n  \
            e2e [--port 3420] [--out <dir>]\n      \
           Manual live-pixel e2e for the WASM viewport (honest SKIP\n      \
           without a browser/WebGPU adapter; see docs/WASM_PIXEL_E2E.md)\n  \

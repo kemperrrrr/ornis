@@ -37,6 +37,28 @@ start:
 "#;
 
 #[test]
+fn shader_meta_drives_workgroup_and_types() {
+    let ir = r#"
+@ornis_gpu_shader_meta = private constant [47 x i8] c"entry=cs_main;workgroup=32,2,1;types=6,2", section "ornis_gpu.shader_meta", align 1
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %x = uitofp i32 %id to float
+  ret float %x
+}
+"#;
+    let meta = ornis_llvm2gpu::extract_meta(ir).expect("metadata");
+    assert_eq!(meta.entry, "cs_main");
+    assert_eq!(meta.workgroup, [32, 2, 1]);
+    assert_eq!(meta.types, vec![6, 2]);
+    let translated = ornis_llvm2gpu::translate_with_meta(ir).expect("translate");
+    assert!(
+        translated.wgsl.contains("@workgroup_size(32, 2, 1)"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
 fn scalar_subset_lowesr_and_validates() {
     let translated = translate(SCALAR_IR).expect("translate scalar kernel");
     assert!(translated.wgsl.contains("@compute"), "{}", translated.wgsl);
