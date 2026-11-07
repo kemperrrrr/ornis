@@ -58,10 +58,10 @@ fn main() {
         LEGACY_CULL_COMPUTE_WGSL,
         "cull_instances",
     );
-    let llvm2gpu = pipeline(
+    let index = pipeline(
         &device.device,
         &bgl,
-        "llvm2gpu cull",
+        "llvm2gpu index cull",
         CULL_COMPUTE_WGSL,
         "cs_main",
     );
@@ -100,11 +100,11 @@ fn main() {
         "scene", "n", "visible", "legacy us", "llvm2gpu", "delta"
     );
     for scene in &scenes {
-        let (prod, llvm) = run_scene(&device, &bgl, &legacy, &llvm2gpu, scene);
-        let delta = (llvm / prod - 1.0) * 100.0;
+        let times = run_scene(&device, &bgl, &[&legacy, &index], scene);
+        let delta = (times[1] / times[0] - 1.0) * 100.0;
         println!(
             "{:<12} {:>6} {:>7} {:>10.2} {:>10.2} {:>7.1}%",
-            scene.name, scene.records, scene.visible, prod, llvm, delta
+            scene.name, scene.records, scene.visible, times[0], times[1], delta
         );
     }
 }
@@ -206,10 +206,9 @@ fn buffer_entry(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLay
 fn run_scene(
     device: &Device,
     bgl: &wgpu::BindGroupLayout,
-    production: &wgpu::ComputePipeline,
-    llvm2gpu: &wgpu::ComputePipeline,
+    pipelines: &[&wgpu::ComputePipeline],
     scene: &Scene,
-) -> (f64, f64) {
+) -> Vec<f64> {
     let records = scene_records(scene);
     let params = pack_params(scene.records as u32);
     let params_buffer = gpu_buffer(
@@ -249,59 +248,7 @@ fn run_scene(
         ],
     });
     let groups = (records.len() as u32).div_ceil(CULL_WORKGROUP_SIZE);
-    measure_pair(
-        device,
-        production,
-        llvm2gpu,
-        &bind,
-        &args,
-        groups,
-        scene.visible,
-    )
-}
-
-fn measure_pair(
-    device: &Device,
-    legacy: &wgpu::ComputePipeline,
-    llvm2gpu: &wgpu::ComputePipeline,
-    bind: &wgpu::BindGroup,
-    args: &wgpu::Buffer,
-    groups: u32,
-    visible: usize,
-) -> (f64, f64) {
-    for warmup in 0..WARMUP {
-        let mut encoder = device
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("cull warmup"),
-            });
-        let (first, second) = if warmup % 2 == 0 {
-            (legacy, llvm2gpu)
-        } else {
-            (llvm2gpu, legacy)
-        };
-        encode_run(&mut encoder, first, bind, args, groups, None, 0);
-        encode_run(&mut encoder, second, bind, args, groups, None, 0);
-        device.queue.submit([encoder.finish()]);
-    }
-    let _ = device.device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-    let times = if device.timestamps {
-        measure_pair_gpu(device, legacy, llvm2gpu, bind, args, groups)
-    } else {
-        (
-            measure_wall(device, legacy, bind, args, groups),
-            measure_wall(device, llvm2gpu, bind, args, groups),
-        )
-    };
-    let count = read_count(device, args);
-    assert_eq!(
-        count as usize, visible,
-        "scene count mismatch: gpu {count} expected {visible}"
-    );
-    times
+    measure_set(device, pipelines, &bind, &args, groups, scene.visible)
 }
 
 fn encode_run(
@@ -332,18 +279,59 @@ fn encode_run(
     pass.dispatch_workgroups(groups, 1, 1);
 }
 
-/// Interleave one legacy and one llvm2gpu pass per sample so clock/thermal
-/// drift hits both sides equally; the pass timestamps bracket only the
-/// dispatch, with the args reset outside the window.
-fn measure_pair_gpu(
+fn measure_set(
     device: &Device,
-    legacy: &wgpu::ComputePipeline,
-    llvm2gpu: &wgpu::ComputePipeline,
+    pipelines: &[&wgpu::ComputePipeline],
     bind: &wgpu::BindGroup,
     args: &wgpu::Buffer,
     groups: u32,
-) -> (f64, f64) {
-    let slots = 4 * RUNS;
+    visible: usize,
+) -> Vec<f64> {
+    let count = pipelines.len();
+    for warmup in 0..WARMUP {
+        let mut encoder = device
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("cull warmup"),
+            });
+        for order in 0..count {
+            let pipeline = pipelines[(warmup + order) % count];
+            encode_run(&mut encoder, pipeline, bind, args, groups, None, 0);
+        }
+        device.queue.submit([encoder.finish()]);
+    }
+    let _ = device.device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    let times = if device.timestamps {
+        measure_set_gpu(device, pipelines, bind, args, groups)
+    } else {
+        pipelines
+            .iter()
+            .map(|pipeline| measure_wall(device, pipeline, bind, args, groups))
+            .collect()
+    };
+    let count = read_count(device, args);
+    assert_eq!(
+        count as usize, visible,
+        "scene count mismatch: gpu {count} expected {visible}"
+    );
+    times
+}
+
+/// Rotate the pipeline order every sample so clock/thermal drift hits all
+/// sides equally; pass timestamps bracket only the dispatch, with the args
+/// reset outside the measured window.
+fn measure_set_gpu(
+    device: &Device,
+    pipelines: &[&wgpu::ComputePipeline],
+    bind: &wgpu::BindGroup,
+    args: &wgpu::Buffer,
+    groups: u32,
+) -> Vec<f64> {
+    let count = pipelines.len();
+    let slots = 2 * count * RUNS;
     let queries = device.device.create_query_set(&wgpu::QuerySetDescriptor {
         label: Some("cull stamps"),
         ty: wgpu::QueryType::Timestamp,
@@ -368,30 +356,19 @@ fn measure_pair_gpu(
             label: Some("cull stamps"),
         });
     for run in 0..RUNS {
-        let base = (4 * run) as u32;
-        let (first, second) = if run % 2 == 0 {
-            (legacy, llvm2gpu)
-        } else {
-            (llvm2gpu, legacy)
-        };
-        encode_run(
-            &mut encoder,
-            first,
-            bind,
-            args,
-            groups,
-            Some(&queries),
-            base,
-        );
-        encode_run(
-            &mut encoder,
-            second,
-            bind,
-            args,
-            groups,
-            Some(&queries),
-            base + 2,
-        );
+        for order in 0..count {
+            let pipeline = pipelines[(run + order) % count];
+            let stamp = (2 * count * run + 2 * order) as u32;
+            encode_run(
+                &mut encoder,
+                pipeline,
+                bind,
+                args,
+                groups,
+                Some(&queries),
+                stamp,
+            );
+        }
     }
     encoder.resolve_query_set(&queries, 0..slots as u32, &resolve, 0);
     encoder.copy_buffer_to_buffer(&resolve, 0, &readback, 0, bytes);
@@ -405,19 +382,15 @@ fn measure_pair_gpu(
         .chunks_exact(std::mem::size_of::<u64>())
         .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("timestamp word")))
         .collect();
-    let mut legacy_samples = Vec::with_capacity(RUNS);
-    let mut llvm_samples = Vec::with_capacity(RUNS);
+    let mut samples: Vec<Vec<f64>> = (0..count).map(|_| Vec::with_capacity(RUNS)).collect();
     for run in 0..RUNS {
-        let base = 4 * run;
-        let (legacy_at, llvm_at) = if run % 2 == 0 {
-            (base, base + 2)
-        } else {
-            (base + 2, base)
-        };
-        legacy_samples.push(delta_us(&words, legacy_at, device.period_ns));
-        llvm_samples.push(delta_us(&words, llvm_at, device.period_ns));
+        for order in 0..count {
+            let pipeline_index = (run + order) % count;
+            let at = 2 * count * run + 2 * order;
+            samples[pipeline_index].push(delta_us(&words, at, device.period_ns));
+        }
     }
-    (median(&mut legacy_samples), median(&mut llvm_samples))
+    samples.iter_mut().map(median).collect()
 }
 
 fn delta_us(words: &[u64], at: usize, period_ns: f32) -> f64 {

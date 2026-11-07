@@ -37,6 +37,14 @@ const TRANSLATION_OFFSET: u32 = MODEL_OFFSET + 3 * MODEL_COLUMN_BYTES;
 /// `args` holds `array<atomic<u32>, 5>`; word 1 is the compacted count.
 const ARGS_WORDS: usize = 5;
 
+#[derive(Clone, Copy)]
+enum CullOutput {
+    /// Dense `PerObject` records (legacy oracle).
+    Record,
+    /// Dense `u32` source indices (llvm2gpu production).
+    Index,
+}
+
 /// Dispatch the legacy oracle once and read back the compacted set:
 /// `material_index` of every entry below the atomic count, sorted.
 fn run_legacy(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
@@ -46,6 +54,7 @@ fn run_legacy(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
         "legacy cull",
         LEGACY_CULL_COMPUTE_WGSL,
         "cull_instances",
+        CullOutput::Record,
     )
 }
 
@@ -57,6 +66,7 @@ fn run_cull(
     label: &str,
     wgsl: &str,
     entry_point: &str,
+    output: CullOutput,
 ) -> (Vec<u32>, u32) {
     let bgl = production_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -99,7 +109,6 @@ fn run_cull(
             entry(1, &src),
             entry(2, &dst),
             entry(3, &args),
-            entry(4, &src),
         ],
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -121,18 +130,44 @@ fn run_cull(
     if count == 0 {
         return (Vec::new(), count);
     }
-    let bytes = read_bytes(device, queue, &dst, count as u64 * OBJECT_BYTES as u64);
     let mut visible = Vec::with_capacity(count as usize);
-    let mut entry = 0u32;
-    while entry < count {
-        let at = entry as usize * OBJECT_BYTES + MATERIAL_OFFSET;
-        visible.push(u32::from_le_bytes([
-            bytes[at],
-            bytes[at + 1],
-            bytes[at + 2],
-            bytes[at + 3],
-        ]));
-        entry += 1;
+    match output {
+        CullOutput::Record => {
+            let bytes = read_bytes(device, queue, &dst, count as u64 * OBJECT_BYTES as u64);
+            let mut entry = 0u32;
+            while entry < count {
+                let at = entry as usize * OBJECT_BYTES + MATERIAL_OFFSET;
+                visible.push(u32::from_le_bytes([
+                    bytes[at],
+                    bytes[at + 1],
+                    bytes[at + 2],
+                    bytes[at + 3],
+                ]));
+                entry += 1;
+            }
+        }
+        CullOutput::Index => {
+            let bytes = read_bytes(device, queue, &dst, count as u64 * 4);
+            let source = pack_prod_objects();
+            let mut entry = 0u32;
+            while entry < count {
+                let word = entry as usize * 4;
+                let index = u32::from_le_bytes([
+                    bytes[word],
+                    bytes[word + 1],
+                    bytes[word + 2],
+                    bytes[word + 3],
+                ]) as usize;
+                let at = index * OBJECT_BYTES + MATERIAL_OFFSET;
+                visible.push(u32::from_le_bytes([
+                    source[at],
+                    source[at + 1],
+                    source[at + 2],
+                    source[at + 3],
+                ]));
+                entry += 1;
+            }
+        }
     }
     visible.sort_unstable();
     (visible, count)
@@ -150,7 +185,6 @@ fn production_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
             buffer_entry(2, mutable),
             buffer_entry(3, mutable),
-            buffer_entry(4, wgpu::BufferBindingType::Storage { read_only: true }),
         ],
     })
 }
@@ -253,6 +287,7 @@ fn llvm2gpu_cull_matches_legacy_oracle() {
                 "llvm2gpu cull",
                 CULL_COMPUTE_WGSL,
                 "cs_main",
+                CullOutput::Index,
             );
             assert_eq!(llvm_count, legacy_count, "atomic count");
             assert_eq!(llvm_visible, legacy_visible, "compacted set");

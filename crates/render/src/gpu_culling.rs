@@ -392,6 +392,11 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
 /// Rust source in `crates/gpu-shaders` through stable rustc LLVM IR and
 /// `ornis-llvm2gpu`.
 ///
+/// One invocation per source record: the sphere-vs-six-planes test runs
+/// against the record, the indirect-args atomic reserves a dense slot,
+/// and the slot stores the source index (`u32`). The vertex stage
+/// resolves `per_objects[visible_indices[instance_index]]`.
+///
 /// The build script writes the WGSL into `OUT_DIR`; this `include_str!`
 /// keeps the shipped kernel and its Rust source from drifting.
 pub const CULL_COMPUTE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/cull.wgsl"));
@@ -730,8 +735,12 @@ mod tests {
         .validate(&module)
         .expect("cull compute shader must validate");
         assert!(
-            CULL_COMPUTE_WGSL.contains("array<vec4<u32>>"),
-            "the llvm2gpu cull kernel keeps PerObject opaque and copies vec4 chunks"
+            CULL_COMPUTE_WGSL.contains("array<f32>"),
+            "the llvm2gpu cull kernel reads the source through an f32 view"
+        );
+        assert!(
+            CULL_COMPUTE_WGSL.contains("array<u32>"),
+            "the llvm2gpu cull kernel writes compacted indices"
         );
         assert!(CULL_COMPUTE_WGSL.contains("array<atomic<u32>>"));
         assert!(CULL_COMPUTE_WGSL.contains("arrayLength"));
@@ -796,24 +805,6 @@ mod tests {
         crate::read_bytes_back(device, queue, src, bytes)
     }
 
-    /// First `count` compacted records read back from the destination
-    /// buffer (`None` when the headless readback fails — the caller
-    /// skips instead of failing).
-    fn cull_test_read_records(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        dst: &wgpu::Buffer,
-        count: usize,
-    ) -> Option<Vec<PerObjectGpu>> {
-        let bytes = (std::mem::size_of::<PerObjectGpu>() * count) as u64;
-        let raw = cull_test_read_bytes(device, queue, dst, bytes)?;
-        Some(
-            raw.chunks_exact(std::mem::size_of::<PerObjectGpu>())
-                .map(bytemuck::pod_read_unaligned::<PerObjectGpu>)
-                .collect(),
-        )
-    }
-
     /// GPU output set comparison: sort the model translations and line
     /// them up against the CPU reference (GPU compaction order is
     /// intentionally unchecked — atomics are nondeterministic, see the
@@ -830,20 +821,42 @@ mod tests {
     /// `dst` and checks the leading `expected.len()` against the CPU
     /// reference (order unchecked — atomics are nondeterministic, see
     /// module docs).
-    fn assert_visible_records_match(
+    fn assert_visible_indices_match(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        dst: &wgpu::Buffer,
-        count: usize,
+        culler: &Culler,
+        instances: &[InstanceData],
         expected: &[[f32; 4]],
     ) {
-        let records =
-            cull_test_read_records(device, queue, dst, count).expect("dst readback succeeds");
-        let got = records[..expected.len()]
+        let indices =
+            cull_test_read_indices(device, queue, &culler.visible_indices, expected.len())
+                .expect("index readback succeeds");
+        assert!(
+            indices
+                .iter()
+                .all(|index| (*index as usize) < instances.len()),
+            "compacted indices must stay inside the source records"
+        );
+        let got = indices
             .iter()
-            .map(|record| record.model[3])
+            .map(|index| instances[*index as usize].model_matrix.w_axis.to_array())
             .collect::<Vec<[f32; 4]>>();
         assert_same_visible_set(&got, expected);
+    }
+
+    fn cull_test_read_indices(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        src: &wgpu::Buffer,
+        count: usize,
+    ) -> Option<Vec<u32>> {
+        let bytes = (std::mem::size_of::<u32>() * count) as u64;
+        let raw = cull_test_read_bytes(device, queue, src, bytes)?;
+        Some(
+            raw.chunks_exact(std::mem::size_of::<u32>())
+                .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte index")))
+                .collect(),
+        )
     }
 
     /// Mesh index-count placeholder for the culler tests: carried
@@ -884,7 +897,7 @@ mod tests {
     fn gpu_compaction_matches_cpu_across_frames() {
         // End-to-end through the production `Culler`, two frames back
         // to back: the args counter must equal the CPU reference count,
-        // the compacted `visible_buffer` content must match the CPU
+        // the compacted `visible_indices` content must match the CPU
         // visible set (order is intentionally unchecked — atomics are
         // nondeterministic, see module docs), and frame two must not
         // accumulate over frame one.
@@ -939,13 +952,7 @@ mod tests {
                 expected.len() as u32,
                 "frame {frame}: the counter must restart at zero each frame"
             );
-            assert_visible_records_match(
-                &device,
-                &queue,
-                &culler.visible_buffer,
-                instances.len(),
-                &expected,
-            );
+            assert_visible_indices_match(&device, &queue, &culler, &instances, &expected);
         }
     }
 
@@ -1270,13 +1277,7 @@ mod tests {
         let args_compact = read_args(&from_instances, &device, &queue);
         assert_eq!(args_records, args_compact);
         assert_eq!(args_records.instance_count, expected.len() as u32);
-        assert_visible_records_match(
-            &device,
-            &queue,
-            &from_records.visible_buffer,
-            instances.len(),
-            &expected,
-        );
+        assert_visible_indices_match(&device, &queue, &from_records, &instances, &expected);
     }
 
     /// Capping the staged record count at one workgroup —
@@ -1323,13 +1324,7 @@ mod tests {
                 args.instance_count, size,
                 "size {size}: every visible instance must reach the cull pass"
             );
-            assert_visible_records_match(
-                &device,
-                &queue,
-                &culler.visible_buffer,
-                instances.len(),
-                &expected,
-            );
+            assert_visible_indices_match(&device, &queue, &culler, &instances, &expected);
         }
     }
 
@@ -1436,13 +1431,7 @@ mod tests {
             expected.len() as u32,
             "frame 1 instance_count must match the CPU reference"
         );
-        assert_visible_records_match(
-            device,
-            queue,
-            &culler.visible_buffer,
-            instances.len(),
-            &expected,
-        );
+        assert_visible_indices_match(device, queue, &culler, &instances, &expected);
 
         // Frame 2: move index 0, an index above zero and an adjacent pair.
         hide(&mut instances, &[0, 3, 4]);
@@ -1451,13 +1440,7 @@ mod tests {
         let args = cull_test_read_args(device, queue, &culler.args_buffer)
             .expect("args readback succeeds");
         assert_eq!(args.instance_count, expected.len() as u32);
-        assert_visible_records_match(
-            device,
-            queue,
-            &culler.visible_buffer,
-            instances.len(),
-            &expected,
-        );
+        assert_visible_indices_match(device, queue, &culler, &instances, &expected);
     }
 
     /// [`Culler::compact`] — converts then diffs — must track the move.
@@ -1512,13 +1495,7 @@ mod tests {
         cull_test_dispatch(&device, &queue, &culler);
         let args = read_args(&culler, &device, &queue);
         assert_eq!(args.instance_count, expected.len() as u32);
-        assert_visible_records_match(
-            &device,
-            &queue,
-            &culler.visible_buffer,
-            instances.len(),
-            &expected,
-        );
+        assert_visible_indices_match(&device, &queue, &culler, &instances, &expected);
 
         // Frame 2: move 0, 3 and 4 offscreen, report exactly those runs —
         // the patched records must follow into the visible set.
@@ -1544,13 +1521,7 @@ mod tests {
             expected_moved.len() as u32,
             "frame 2: the patched records must reach the cull pass"
         );
-        assert_visible_records_match(
-            &device,
-            &queue,
-            &culler.visible_buffer,
-            instances.len(),
-            &expected_moved,
-        );
+        assert_visible_indices_match(&device, &queue, &culler, &instances, &expected_moved);
 
         // Frame 3: grow by one in-frustum instance and report no runs —
         // the count change must upload everything, the new record
@@ -1568,13 +1539,7 @@ mod tests {
             expected_grown.len() as u32,
             "frame 3: a grown frame must upload everything, runs or not"
         );
-        assert_visible_records_match(
-            &device,
-            &queue,
-            &culler.visible_buffer,
-            instances.len(),
-            &expected_grown,
-        );
+        assert_visible_indices_match(&device, &queue, &culler, &instances, &expected_grown);
     }
 
     /// The byte-diff entries keep a staging history [`Culler::compact_changed`]
@@ -1617,12 +1582,6 @@ mod tests {
             expected.len() as u32,
             "the base frame must fully re-upload after the runs entry"
         );
-        assert_visible_records_match(
-            &device,
-            &queue,
-            &culler.visible_buffer,
-            instances.len(),
-            &expected,
-        );
+        assert_visible_indices_match(&device, &queue, &culler, &instances, &expected);
     }
 }

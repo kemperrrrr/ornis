@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.7032303458653227,
-  "iosp_score": 0.9503225806451613,
+  "quality_score": 0.7034731113062507,
+  "iosp_score": 0.9503353973168215,
   "violations": 385,
-  "total": 11748,
+  "total": 11751,
   "complexity_warnings": 78,
-  "magic_number_warnings": 167,
+  "magic_number_warnings": 164,
   "nesting_depth_warnings": 21,
-  "function_length_warnings": 130,
+  "function_length_warnings": 129,
   "unsafe_warnings": 12,
-  "error_handling_warnings": 24,
-  "duplicate_groups": 93,
-  "dead_code_warnings": 412,
+  "error_handling_warnings": 25,
+  "duplicate_groups": 91,
+  "dead_code_warnings": 413,
   "dead_type_warnings": 0,
-  "fragment_groups": 722,
-  "boilerplate_warnings": 328,
+  "fragment_groups": 724,
+  "boilerplate_warnings": 329,
   "srp_struct_warnings": 23,
   "srp_module_warnings": 106,
   "wildcard_import_warnings": 48,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2987,
+  "total_findings": 2986,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -173,17 +173,17 @@
     {
       "name": "Renderer3D::ensure_instance_capacity",
       "file": "crates/render/src/renderer/buffers.rs",
-      "line": 295
+      "line": 296
     },
     {
       "name": "Renderer3D::ensure_material_capacity",
       "file": "crates/render/src/renderer/buffers.rs",
-      "line": 315
+      "line": 316
     },
     {
       "name": "Renderer3D::ensure_palette_capacity",
       "file": "crates/render/src/renderer/buffers.rs",
-      "line": 483
+      "line": 484
     },
     {
       "name": "build_lighting_uniform",

@@ -338,6 +338,9 @@ impl Renderer3D {
     ) -> (
         wgpu::RenderPipeline,
         wgpu::RenderPipeline,
+        wgpu::RenderPipeline,
+        wgpu::RenderPipeline,
+        wgpu::BindGroupLayout,
         wgpu::BindGroupLayout,
         wgpu::BindGroup,
     ) {
@@ -351,6 +354,16 @@ impl Renderer3D {
             label: Some("gbuffer bind group layout"),
             entries: &bgl_entries,
         });
+        let indices_entries: Vec<wgpu::BindGroupLayoutEntry> =
+            shaders::gbuffer_generated::GBUFFER_INDICES_RESOURCES
+                .iter()
+                .map(|r| shaders::bgl_entry(r, sample_count > 1))
+                .collect();
+        let indices_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("gbuffer indices layout"),
+                entries: &indices_entries,
+            });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gbuffer bind group"),
@@ -376,6 +389,12 @@ impl Renderer3D {
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
+        let indirect_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gbuffer indirect pipeline layout"),
+                bind_group_layouts: &[Some(&bind_group_layout), Some(&indices_bind_group_layout)],
+                immediate_size: 0,
+            });
 
         let mut targets = vec![
             gbuffer_float_target(wgpu::TextureFormat::Rgba8Unorm),
@@ -386,13 +405,16 @@ impl Renderer3D {
             None,
             None,
         ];
-        let create_pipeline = |label: &'static str, targets: &[Option<wgpu::ColorTargetState>]| {
+        let create_pipeline = |label: &'static str,
+                               targets: &[Option<wgpu::ColorTargetState>],
+                               layout: &wgpu::PipelineLayout,
+                               vertex_entry: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&pipeline_layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &vs_module,
-                    entry_point: Some(shaders::gbuffer_generated::vs_main::entry_point()),
+                    entry_point: Some(vertex_entry),
                     buffers: &[Some(Vertex::desc())],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
@@ -427,12 +449,42 @@ impl Renderer3D {
                 cache: None,
             })
         };
-        let pipeline = create_pipeline("gbuffer pipeline", &targets);
+        let pipeline = create_pipeline(
+            "gbuffer pipeline",
+            &targets,
+            &pipeline_layout,
+            shaders::gbuffer_generated::vs_main::entry_point(),
+        );
+        let indirect_pipeline = create_pipeline(
+            "gbuffer indirect pipeline",
+            &targets,
+            &indirect_pipeline_layout,
+            shaders::gbuffer_generated::vs_main_indirect::entry_point(),
+        );
         targets[5] = gbuffer_float_target(wgpu::TextureFormat::Rg16Float);
         targets[6] = gbuffer_integer_target(wgpu::TextureFormat::R16Uint);
-        let motion_pipeline = create_pipeline("gbuffer motion pipeline", &targets);
+        let motion_pipeline = create_pipeline(
+            "gbuffer motion pipeline",
+            &targets,
+            &pipeline_layout,
+            shaders::gbuffer_generated::vs_main::entry_point(),
+        );
+        let motion_indirect_pipeline = create_pipeline(
+            "gbuffer motion indirect pipeline",
+            &targets,
+            &indirect_pipeline_layout,
+            shaders::gbuffer_generated::vs_main_indirect::entry_point(),
+        );
 
-        (pipeline, motion_pipeline, bind_group_layout, bind_group)
+        (
+            pipeline,
+            motion_pipeline,
+            indirect_pipeline,
+            motion_indirect_pipeline,
+            bind_group_layout,
+            indices_bind_group_layout,
+            bind_group,
+        )
     }
 
     /// Resolve target for one MSAA g-buffer float color layer: the stored
@@ -486,9 +538,10 @@ impl Renderer3D {
     /// Record the gbuffer pass drawing the culler's compacted batch with
     /// one
     /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect):
-    /// `culler.visible_buffer` binds as `per_objects` and
-    /// `culler.args_buffer` carries the draw (prepared by
-    /// [`Culler::compact`](crate::gpu_culling::Culler::compact)). The
+    /// `culler.src_buffer` binds as `per_objects`, `culler.visible_indices`
+    /// binds at group 1, and `culler.args_buffer` carries the draw (prepared
+    /// by [`Culler::compact`](crate::gpu_culling::Culler::compact)). The
+    /// vertex stage resolves `per_objects[visible_indices[instance]]`. The
     /// CPU fallback is [`render_gbuffer`](Self::render_gbuffer) (direct
     /// `draw_indexed` over the staged range).
     pub fn render_gbuffer_indirect(
@@ -744,6 +797,17 @@ impl Renderer3D {
     /// after a culler rebuild or a material-table growth); the
     /// never-taken miss race below builds uncached rather than failing
     /// the frame.
+    fn indices_bind_group(&self, device: &wgpu::Device, indices: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gbuffer indices bind group"),
+            layout: &self.gbuffer_indices_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: indices.as_entire_binding(),
+            }],
+        })
+    }
+
     fn draw_shared_batch(
         &self,
         device: &wgpu::Device,
@@ -752,39 +816,58 @@ impl Renderer3D {
         batch: BatchDraw<'_>,
         motion: bool,
     ) {
-        rpass.set_pipeline(if motion {
-            &self.gbuffer_motion_pipeline
-        } else {
-            &self.gbuffer_pipeline
+        let indirect = matches!(batch, BatchDraw::Indirect { .. });
+        rpass.set_pipeline(match (motion, indirect) {
+            (true, true) => &self.gbuffer_motion_indirect_pipeline,
+            (true, false) => &self.gbuffer_motion_pipeline,
+            (false, true) => &self.gbuffer_indirect_pipeline,
+            (false, false) => &self.gbuffer_pipeline,
         });
         let cached = read_lock(&self.gbuffer_bind_group);
         let uncached;
         let cached_indirect;
-        let bind_group = match batch {
-            BatchDraw::Direct { .. } => &*cached,
+        let cached_indices;
+        let uncached_indices;
+        let (bind_group, indices_group) = match batch {
+            BatchDraw::Direct { .. } => (&*cached, None),
             BatchDraw::Indirect { culler } => {
                 if read_lock(&self.indirect_bind_group).is_none() {
                     let group = self.gbuffer_bind_group_with(
                         device,
                         &self.camera_buffer,
-                        &culler.visible_buffer,
+                        &culler.src_buffer,
                     );
                     *write_lock(&self.indirect_bind_group) = Some(group);
                 }
                 cached_indirect = read_lock(&self.indirect_bind_group);
-                if let Some(group) = cached_indirect.as_ref() {
+                let source = if let Some(group) = cached_indirect.as_ref() {
                     group
                 } else {
                     uncached = self.gbuffer_bind_group_with(
                         device,
                         &self.camera_buffer,
-                        &culler.visible_buffer,
+                        &culler.src_buffer,
                     );
                     &uncached
+                };
+                if read_lock(&self.indirect_indices_bind_group).is_none() {
+                    let group = self.indices_bind_group(device, &culler.visible_indices);
+                    *write_lock(&self.indirect_indices_bind_group) = Some(group);
                 }
+                cached_indices = read_lock(&self.indirect_indices_bind_group);
+                let indices = if let Some(group) = cached_indices.as_ref() {
+                    group
+                } else {
+                    uncached_indices = self.indices_bind_group(device, &culler.visible_indices);
+                    &uncached_indices
+                };
+                (source, Some(indices))
             }
         };
         rpass.set_bind_group(0, bind_group, &[]);
+        if let Some(indices) = indices_group {
+            rpass.set_bind_group(1, indices, &[]);
+        }
         rpass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rpass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         match batch {
