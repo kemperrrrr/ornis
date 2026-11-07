@@ -1,7 +1,8 @@
 //! Shader metadata the builder reads back out of the LLVM IR.
 //!
 //! `#[gpu_entry]` writes one ASCII record into a `#[used]` global named
-//! [`GLOBAL`]. The record carries the entry name, the workgroup size, and the
+//! `ornis_gpu_shader_meta`. The record carries the entry name, the workgroup
+//! size, and the
 //! field tags of every uniform struct the signature names, so
 //! `xtask build-shaders` needs no CLI flags for any of them.
 //!

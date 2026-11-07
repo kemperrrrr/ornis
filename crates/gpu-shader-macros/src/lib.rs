@@ -38,9 +38,8 @@ use proc_macro::TokenStream;
 /// The metadata global is named `ornis_gpu_shader_meta` and carries the record
 /// format of `ornis_gpu_shader::meta`: `entry=…;workgroup=x,y,z` plus one
 /// `uniform=<id>:<tags>` entry per uniform parameter, with the tags taken from
-/// the parameter's [`GpuStruct`](ornis_gpu_shader::GpuStruct) type, not from the
-/// attribute. A kernel therefore cannot publish tags that disagree with the
-/// fields it reads.
+/// the parameter's `GpuStruct` type, not from the attribute. A kernel therefore
+/// cannot publish tags that disagree with the fields it reads.
 #[proc_macro_attribute]
 pub fn gpu_entry(attr: TokenStream, item: TokenStream) -> TokenStream {
     match entry::expand(attr.into(), item.into()) {
