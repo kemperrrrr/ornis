@@ -22,7 +22,7 @@ const OBJECT_BYTES: usize = std::mem::size_of::<PerObjectGpu>();
 /// Words in the indirect-args buffer.
 const ARGS_WORDS: usize = 5;
 /// Measured dispatches per shader and scene.
-const RUNS: usize = 30;
+const RUNS: usize = 100;
 /// Warmup dispatches per shader and scene.
 const WARMUP: usize = 5;
 /// Six normalized planes: identity cube around the origin.
@@ -269,14 +269,19 @@ fn measure_pair(
     groups: u32,
     visible: usize,
 ) -> (f64, f64) {
-    for _ in 0..WARMUP {
+    for warmup in 0..WARMUP {
         let mut encoder = device
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("cull warmup"),
             });
-        encode_run(&mut encoder, legacy, bind, args, groups, None, 0);
-        encode_run(&mut encoder, llvm2gpu, bind, args, groups, None, 0);
+        let (first, second) = if warmup % 2 == 0 {
+            (legacy, llvm2gpu)
+        } else {
+            (llvm2gpu, legacy)
+        };
+        encode_run(&mut encoder, first, bind, args, groups, None, 0);
+        encode_run(&mut encoder, second, bind, args, groups, None, 0);
         device.queue.submit([encoder.finish()]);
     }
     let _ = device.device.poll(wgpu::PollType::Wait {
@@ -364,9 +369,14 @@ fn measure_pair_gpu(
         });
     for run in 0..RUNS {
         let base = (4 * run) as u32;
+        let (first, second) = if run % 2 == 0 {
+            (legacy, llvm2gpu)
+        } else {
+            (llvm2gpu, legacy)
+        };
         encode_run(
             &mut encoder,
-            legacy,
+            first,
             bind,
             args,
             groups,
@@ -375,7 +385,7 @@ fn measure_pair_gpu(
         );
         encode_run(
             &mut encoder,
-            llvm2gpu,
+            second,
             bind,
             args,
             groups,
@@ -399,8 +409,13 @@ fn measure_pair_gpu(
     let mut llvm_samples = Vec::with_capacity(RUNS);
     for run in 0..RUNS {
         let base = 4 * run;
-        legacy_samples.push(delta_us(&words, base, device.period_ns));
-        llvm_samples.push(delta_us(&words, base + 2, device.period_ns));
+        let (legacy_at, llvm_at) = if run % 2 == 0 {
+            (base, base + 2)
+        } else {
+            (base + 2, base)
+        };
+        legacy_samples.push(delta_us(&words, legacy_at, device.period_ns));
+        llvm_samples.push(delta_us(&words, llvm_at, device.period_ns));
     }
     (median(&mut legacy_samples), median(&mut llvm_samples))
 }

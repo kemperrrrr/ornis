@@ -177,6 +177,49 @@ impl<'a> Cfg<'a> {
         self.order[0]
     }
 
+    /// Merge label of a conditional branch.
+    ///
+    /// When one arm returns directly and the other continues, the
+    /// continuing arm is the merge: the branch becomes
+    /// `if cond { return; }` and the rest follows the `if`. A plain
+    /// post-dominator cannot see that (the returning arm never reaches
+    /// the continuation), so special-case the direct-return shape.
+    fn branch_merge(
+        &self,
+        label: &str,
+        true_label: &'a str,
+        false_label: &'a str,
+    ) -> Option<&'a str> {
+        let merge = self.merge(label);
+        if let Some(merge_label) = merge
+            && self.returns_directly(merge_label)
+        {
+            if true_label == merge_label && false_label != merge_label {
+                return Some(false_label);
+            }
+            if false_label == merge_label && true_label != merge_label {
+                return Some(true_label);
+            }
+        }
+        if merge == Some(EXIT) {
+            let true_returns = self.returns_directly(true_label);
+            let false_returns = self.returns_directly(false_label);
+            if true_returns && !false_returns {
+                return self.blocks.get(false_label).map(|_| false_label);
+            }
+            if false_returns && !true_returns {
+                return self.blocks.get(true_label).map(|_| true_label);
+            }
+        }
+        merge
+    }
+
+    fn returns_directly(&self, label: &str) -> bool {
+        self.blocks
+            .get(label)
+            .is_some_and(|block| matches!(block.term, Terminator::Ret(_)))
+    }
+
     /// Closest common post-dominator of a conditional branch, or `None`
     /// when the branch has no common successor inside the function.
     fn merge(&self, label: &str) -> Option<&'a str> {
@@ -896,7 +939,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         ctx: Ctx<'a>,
     ) -> Result<Flow, TranslateError> {
-        let merge = self.cfg.merge(label).ok_or(TranslateError::Unsupported)?;
+        let merge = self
+            .cfg
+            .branch_merge(label, true_label, false_label)
+            .ok_or(TranslateError::Unsupported)?;
         if let Ctx::Loop { header } = ctx {
             let merges_in_loop = self
                 .cfg
@@ -1361,6 +1407,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if callee.contains("uniform_field_vec4_plane_dot") {
+            return self.uniform_plane_dot(out, args);
+        }
         if callee.contains("uniform_field_vec4_component_f32") {
             return self.uniform_field_vec4_component(out, args);
         }
@@ -1591,6 +1640,67 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Ok(self.expr(out, naga::Expression::Load { pointer }))
     }
 
+    /// `uniform_field_vec4_plane_dot(group, binding, sid, field, x, y, z)`.
+    ///
+    /// Loads one `vec4` plane and returns `dot((x, y, z, 1), plane)`, the
+    /// signed plane distance. One vector uniform load and one `dot`
+    /// replace four scalar uniform loads and the scalar FMA chain.
+    fn uniform_plane_dot(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != 7 {
+            return Err(TranslateError::Unsupported);
+        }
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let sid = const_u32(&args[2])?;
+        let field = const_u32(&args[3])?;
+        let tag = self
+            .builders
+            .structs
+            .get(sid as usize)
+            .and_then(|tags| tags.get(field as usize))
+            .copied()
+            .ok_or_else(|| {
+                TranslateError::UnsupportedType(format!(
+                    "uniform field {field} of struct {sid} is not declared"
+                ))
+            })?;
+        if tag != ornis_gpu_abi::TYPE_TAG_VEC4 {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not a vec4"
+            )));
+        }
+        let x = self.operand(out, &args[4])?;
+        let y = self.operand(out, &args[5])?;
+        let z = self.operand(out, &args[6])?;
+        let global = self.builders.uniform_struct_global(group, binding, sid)?;
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let field_ptr = self.expr(out, naga::Expression::AccessIndex { base, index: field });
+        let plane = self.expr(out, naga::Expression::Load { pointer: field_ptr });
+        let one = self.expr(out, naga::Expression::Literal(naga::Literal::F32(1.0)));
+        let center_ty = self.vec4_f32_type();
+        let center = self.expr(
+            out,
+            naga::Expression::Compose {
+                ty: center_ty,
+                components: vec![x, y, z, one],
+            },
+        );
+        Ok(self.expr(
+            out,
+            naga::Expression::Math {
+                fun: naga::MathFunction::Dot,
+                arg: center,
+                arg1: Some(plane),
+                arg2: None,
+                arg3: None,
+            },
+        ))
+    }
+
     /// `uniform_field_vec4_component_f32(group, binding, sid, field, component)`.
     fn uniform_field_vec4_component(
         &mut self,
@@ -1640,6 +1750,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<(), TranslateError> {
+        if callee.contains("storage_write_u32x4") {
+            return self.storage_write_vec4(out, args);
+        }
         if callee.contains("storage_copy_u32x4") {
             return self.storage_copy(out, args);
         }
@@ -1653,6 +1766,42 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             return Ok(());
         }
         Err(TranslateError::Unsupported)
+    }
+
+    /// `storage_write_u32x4(group, binding, index, x, y, z, w)`.
+    fn storage_write_vec4(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<(), TranslateError> {
+        if args.len() != 7 {
+            return Err(TranslateError::Unsupported);
+        }
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let index = self.operand(out, &args[2])?;
+        let x = self.operand(out, &args[3])?;
+        let y = self.operand(out, &args[4])?;
+        let z = self.operand(out, &args[5])?;
+        let w = self.operand(out, &args[6])?;
+        let vec_ty = self.vec4_u32_type();
+        let value = self.expr(
+            out,
+            naga::Expression::Compose {
+                ty: vec_ty,
+                components: vec![x, y, z, w],
+            },
+        );
+        let global = self
+            .builders
+            .storage_global(group, binding, Elem::Vec4U32, true);
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let pointer = self.expr(out, naga::Expression::Access { base, index });
+        out.push(
+            naga::Statement::Store { pointer, value },
+            naga::Span::default(),
+        );
+        Ok(())
     }
 
     /// Bit-preserving copy of one 16-byte record chunk.
@@ -1739,6 +1888,38 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let binding = const_u32(&args[1])?;
         let index = self.operand(out, &args[2])?;
         Ok((group, binding, index))
+    }
+
+    fn vec4_f32_type(&mut self) -> naga::Handle<naga::Type> {
+        self.builders.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Vector {
+                    size: naga::VectorSize::Quad,
+                    scalar: naga::Scalar {
+                        kind: naga::ScalarKind::Float,
+                        width: SCALAR_WIDTH,
+                    },
+                },
+            },
+            naga::Span::default(),
+        )
+    }
+
+    fn vec4_u32_type(&mut self) -> naga::Handle<naga::Type> {
+        self.builders.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Vector {
+                    size: naga::VectorSize::Quad,
+                    scalar: naga::Scalar {
+                        kind: naga::ScalarKind::Uint,
+                        width: SCALAR_WIDTH,
+                    },
+                },
+            },
+            naga::Span::default(),
+        )
     }
 
     fn vec3_type(&mut self) -> naga::Handle<naga::Type> {

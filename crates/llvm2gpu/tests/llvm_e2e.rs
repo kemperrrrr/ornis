@@ -269,6 +269,27 @@ done:
 }
 
 #[test]
+fn vec4_scalar_write_lowers_to_one_store() {
+    let ir = r#"
+declare void @storage_write_u32x4(i32 noundef, i32 noundef, i32 noundef, i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+define dso_local void @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %x = and i32 %id, 7
+  call void @storage_write_u32x4(i32 0, i32 2, i32 %id, i32 %x, i32 %x, i32 %x, i32 %x)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("vec4 scalar write");
+    assert!(
+        translated.wgsl.contains("storage_0_2_"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(translated.wgsl.contains("vec4<u32>"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
 fn uniform_field_uses_place_fields_layout() {
     use ornis_gpu_abi::{TYPE_TAG_F32, TYPE_TAG_U32, TYPE_TAG_VEC3};
     // vec3 at 0, f32 at 12, u32 at 16 (uniform span 32).

@@ -40,13 +40,16 @@ unsafe extern "C" {
         dst_binding: i32,
         dst_index: i32,
     );
+    fn storage_write_u32x4(group: i32, binding: i32, index: i32, x: u32, y: u32, z: u32, w: u32);
     fn storage_atomic_add_u32(group: i32, binding: i32, index: i32, value: i32) -> i32;
-    fn uniform_field_vec4_component_f32(
+    fn uniform_field_vec4_plane_dot(
         group: i32,
         binding: i32,
         sid: i32,
         field: i32,
-        component: i32,
+        x: f32,
+        y: f32,
+        z: f32,
     ) -> f32;
     fn uniform_field_u32(group: i32, binding: i32, sid: i32, field: i32) -> u32;
     fn gpu_length3_xyz(x: f32, y: f32, z: f32) -> f32;
@@ -62,31 +65,27 @@ macro_rules! src_f32 {
     }};
 }
 
-/// One component of a `vec4` plane field in `CullParams`.
-macro_rules! plane_component {
-    ($plane:expr, $component:expr) => {
-        // SAFETY: both indices are compile-time constants inside the
+/// Signed distance from one point to a `vec4` plane field in `CullParams`.
+macro_rules! plane_distance {
+    ($plane:expr, $x:expr, $y:expr, $z:expr) => {
+        // SAFETY: the plane index is a compile-time constant inside the
         // declared `CullParams` metadata.
-        unsafe {
-            uniform_field_vec4_component_f32(0, PARAMS_BINDING, PARAMS_SID, $plane, $component)
-        }
+        unsafe { uniform_field_vec4_plane_dot(0, PARAMS_BINDING, PARAMS_SID, $plane, $x, $y, $z) }
     };
 }
 
 /// One plane test; `$plane` is a literal so the uniform indices are constants.
 macro_rules! plane_test {
     ($plane:literal, $cx:expr, $cy:expr, $cz:expr, $radius:expr) => {{
-        let px = plane_component!($plane, 0);
-        let py = plane_component!($plane, 1);
-        let pz = plane_component!($plane, 2);
-        let pw = plane_component!($plane, 3);
-        if px * $cx + py * $cy + pz * $cz + pw < -$radius {
-            return false;
+        if $radius >= 0.0 {
+            if plane_distance!($plane, $cx, $cy, $cz) < -$radius {
+                return;
+            }
         }
     }};
 }
 
-/// Six unrolled plane tests. A NaN radius skips them and stays visible.
+/// Six unrolled plane tests; each culled plane returns from the entry.
 macro_rules! plane_tests {
     ($cx:expr, $cy:expr, $cz:expr, $radius:expr) => {{
         plane_test!(0, $cx, $cy, $cz, $radius);
@@ -103,12 +102,23 @@ fn length3(x: f32, y: f32, z: f32) -> f32 {
     unsafe { gpu_length3_xyz(x, y, z) }
 }
 
-/// Sphere against six planes; NaN/negative radii stay visible.
-fn sphere_visible(cx: f32, cy: f32, cz: f32, radius: f32) -> bool {
-    if radius >= 0.0 {
-        plane_tests!(cx, cy, cz, radius);
-    }
-    true
+/// Write one 16-byte model chunk from four already-read `f32` words.
+macro_rules! store_chunk {
+    ($dst:expr, $chunk:literal, $a:expr, $b:expr, $c:expr, $d:expr) => {
+        // SAFETY: the destination base and literal chunk stay inside the
+        // guarded destination record array.
+        unsafe {
+            storage_write_u32x4(
+                0,
+                DST_BINDING,
+                ($dst + $chunk) as i32,
+                $a.to_bits(),
+                $b.to_bits(),
+                $c.to_bits(),
+                $d.to_bits(),
+            );
+        }
+    };
 }
 
 /// One 16-byte record chunk from source `$src` to destination `$dst`.
@@ -149,34 +159,46 @@ pub extern "C" fn cs_main(id: u32) {
     if id >= src_len {
         return;
     }
-    let cx = src_f32!(id, 12);
-    let cy = src_f32!(id, 13);
-    let cz = src_f32!(id, 14);
-    let rx = length3(src_f32!(id, 0), src_f32!(id, 1), src_f32!(id, 2));
-    let ry = length3(src_f32!(id, 4), src_f32!(id, 5), src_f32!(id, 6));
-    let rz = length3(src_f32!(id, 8), src_f32!(id, 9), src_f32!(id, 10));
+    let m0 = src_f32!(id, 0);
+    let m1 = src_f32!(id, 1);
+    let m2 = src_f32!(id, 2);
+    let m3 = src_f32!(id, 3);
+    let m4 = src_f32!(id, 4);
+    let m5 = src_f32!(id, 5);
+    let m6 = src_f32!(id, 6);
+    let m7 = src_f32!(id, 7);
+    let m8 = src_f32!(id, 8);
+    let m9 = src_f32!(id, 9);
+    let m10 = src_f32!(id, 10);
+    let m11 = src_f32!(id, 11);
+    let m12 = src_f32!(id, 12);
+    let m13 = src_f32!(id, 13);
+    let m14 = src_f32!(id, 14);
+    let m15 = src_f32!(id, 15);
+    let rx = length3(m0, m1, m2);
+    let ry = length3(m4, m5, m6);
+    let rz = length3(m8, m9, m10);
     let rxy = if rx > ry { rx } else { ry };
     let radius = if rxy > rz { rxy } else { rz };
-    if sphere_visible(cx, cy, cz, radius) {
-        // SAFETY: word 1 is `instance_count` in the five-word args array.
-        let slot = unsafe { storage_atomic_add_u32(0, ARGS_BINDING, 1, 1) } as u32;
-        if slot >= dst_len {
-            return;
-        }
-        let src = id * RECORD_CHUNKS;
-        let dst = slot * RECORD_CHUNKS;
-        copy_chunk!(src, dst, 0);
-        copy_chunk!(src, dst, 1);
-        copy_chunk!(src, dst, 2);
-        copy_chunk!(src, dst, 3);
-        copy_chunk!(src, dst, 4);
-        copy_chunk!(src, dst, 5);
-        copy_chunk!(src, dst, 6);
-        copy_chunk!(src, dst, 7);
-        copy_chunk!(src, dst, 8);
-        copy_chunk!(src, dst, 9);
-        copy_chunk!(src, dst, 10);
-        copy_chunk!(src, dst, 11);
-        copy_chunk!(src, dst, 12);
+    plane_tests!(m12, m13, m14, radius);
+    // SAFETY: word 1 is `instance_count` in the five-word args array.
+    let slot = unsafe { storage_atomic_add_u32(0, ARGS_BINDING, 1, 1) } as u32;
+    if slot >= dst_len {
+        return;
     }
+    let src = id * RECORD_CHUNKS;
+    let dst = slot * RECORD_CHUNKS;
+    store_chunk!(dst, 0, m0, m1, m2, m3);
+    store_chunk!(dst, 1, m4, m5, m6, m7);
+    store_chunk!(dst, 2, m8, m9, m10, m11);
+    store_chunk!(dst, 3, m12, m13, m14, m15);
+    copy_chunk!(src, dst, 4);
+    copy_chunk!(src, dst, 5);
+    copy_chunk!(src, dst, 6);
+    copy_chunk!(src, dst, 7);
+    copy_chunk!(src, dst, 8);
+    copy_chunk!(src, dst, 9);
+    copy_chunk!(src, dst, 10);
+    copy_chunk!(src, dst, 11);
+    copy_chunk!(src, dst, 12);
 }
