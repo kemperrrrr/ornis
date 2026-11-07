@@ -1,0 +1,13 @@
+error: a `uniform` parameter must be `Uniform`, not `Storage`
+  --> tests/ui/binding_kind_must_match_type.rs:21:52
+   |
+21 |     #[gpu(uniform, group = 0, binding = 0)] wrong: Storage<u32, ReadOnly>,
+   |                                                    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ReadOnly`, `Storage`, and `Uniform`
+ --> tests/ui/binding_kind_must_match_type.rs:8:35
+  |
+8 | use ornis_gpu_shader::{gpu_entry, ReadOnly, Storage, Uniform};
+  |                                   ^^^^^^^^  ^^^^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

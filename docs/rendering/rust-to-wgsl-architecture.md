@@ -471,14 +471,39 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 
 **Маппинг идей rust-gpu на stable:**
 
-| rust-gpu (nightly) | ornis (stable) |
+| rust-gpu (nightly) | ornis (stable), реализовано |
 |---|---|
-| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(workgroup_size = N)]` (proc-macro) |
-| `#[spirv(global_invocation_id)]` | `GlobalInvocationId` (newtype) |
-| `#[spirv(storage_buffer, descriptor_set, binding)]` | `Storage<T, ReadOnly/ReadWrite>` / `Uniform<T>` в bind-group-структуре; метаданные из макроса |
-| `spirv-std` | `gpu-shader` SDK (`no_std`, те же `glam`-типы) |
-| `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V + кэш) |
+| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]` (`ornis-gpu-shader-macros`) |
+| `#[spirv(global_invocation_id)]` | первый `u32` параметр entry (`global_invocation_id.x`) |
+| `#[spirv(global_invocation_id)]` newtype | ещё нет; нужен для entry, читающих несколько builtins |
+| `#[spirv(storage_buffer, descriptor_set, binding)]` | `#[gpu(storage_buffer, group = G, binding = B, read_only)] Storage<T>`; `group`/`binding` живут в атрибуте, а макрос вписывает их в тип |
+| `#[spirv(uniform, descriptor_set, binding)]` | `#[gpu(uniform, group = G, binding = B)] Uniform<S: GpuStruct>` |
+| `spirv-std` resource methods | `Storage::load/store/len/is_empty`, `Uniform::field_f32/field_u32/vec4_lane/plane_distance`, `Vec3::dot/length` |
+| теги uniform-структур (руками) | `impl GpuStruct for S { const ID; const FIELD_TAGS }` — макрос читает их из типа и пишет в метаданные |
+| `spirv-std` math | `Vec3` с `dot`/`length`; остальное — прямые `ornis_gpu` импорты |
+| `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (cargo rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V; `--check` в CI) |
 | shader-крейт под nightly | обычный `no_std`-крейт workspace; host — `no_std`-lib, GPU — `wasm32-unknown-unknown` + LLVM IR |
+
+Типизированный слой — **write-time только**: методы `Storage`/`Uniform`
+инлайнятся в те же `ornis_gpu` импорты, что писались руками, поэтому WGSL
+типизированного кернела байт-в-байт равен WGSL варианта с `extern "C"`
+(это пинит `crates/gpu-shader/tests/abi_parity.rs` на паре одинаковых
+кернелов). Проверки, которые даёт типы:
+
+- `Storage<T, ReadOnly>` не имеет `store` — попытка записи в readonly
+  биндинг не компилируется (`tests/ui/read_only_storage_has_no_store.rs`);
+- `Uniform::field_u32::<F>()` сверяет тег поля `F` с `FIELD_TAGS` в `const`
+  контексте — чтение `u32` из `vec4`-поля не компилируется
+  (`tests/ui/uniform_field_tag_mismatch.rs`);
+- вид биндинга в атрибуте обязан совпадать с типом параметра
+  (`tests/ui/binding_kind_must_match_type.rs`).
+
+**Формат метаданных.** `#[gpu_entry]` пишет в `#[used]`-глобал
+`ornis_gpu_shader_meta` запись
+`entry=<name>;workgroup=x,y,z[;uniform=<id>:<tags>[,<id>:<tags>]]`;
+`ornis-llvm2gpu::meta` читает её и больше не требует `--workgroup`/`--types`.
+Формат прежней формы (`types=6,6,2`, один список для struct 0) тоже
+читается, чтобы старые артефакты не ломались.
 
 **Этапы:**
 
@@ -493,15 +518,20 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
    Паритет с legacy WGSL и indirect-vs-direct пиксельные гейты зелёные;
    M1 A/B (GPU timestamps, 100 сэмплов): few −55%, many −82%,
    all-visible −80%, late-reject −75% против прежнего WGSL.
-3. Эргономика: `#[gpu_entry]`, типизированные `Storage`/`Uniform`,
-   извлечение entry/binding-метаданных из LLVM IR; шейдерный крейт
-   собирается обычным cargo.
+3. Эргономика (сделано): `#[gpu_entry(compute(threads(N)))]`, типизированные
+   `Storage`/`Uniform`/`Vec3`, `GpuStruct` с самопубликующимися тегами,
+   извлечение entry/workgroup/uniform-метаданных из LLVM IR; шейдерный крейт
+   собирается обычным cargo, кернел `cull_compact` переписан на типизированный
+   SDK без изменения WGSL.
 4. Расширение подмножества: nested loops, nested structs, readonly
    aliasing; затем `gtao`/остальной compute, позже vertex/fragment.
 
-**Ограничения:** stable rustc; nested loops/структуры и readonly пока
-отвергаются явно; runtime-материалы остаются на staged Shader IR;
-`wasm2gpu` не возвращается в производство.
+**Ограничения:** stable rustc; readonly storage в трансляторе пока не
+используется (readonly-биндинг кернела читается, но запись в него
+запрещена типом, а не транслятором); nested loops/структуры отвергаются
+явно; `Vec3::cross`/`normalize` не реализованы, потому что транслятор их
+не знает; entry только compute и только `cs_main`; runtime-материалы
+остаются на staged Shader IR; `wasm2gpu` не возвращается в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)
 
