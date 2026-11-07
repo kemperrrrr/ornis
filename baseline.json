@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.7293471456089657,
-  "iosp_score": 0.9657921810699589,
+  "quality_score": 0.7292599532659104,
+  "iosp_score": 0.9657833804990995,
   "violations": 266,
-  "total": 11844,
+  "total": 11840,
   "complexity_warnings": 78,
   "magic_number_warnings": 164,
   "nesting_depth_warnings": 21,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2867,
+  "total_findings": 2865,
   "violation_details": [
     {
       "name": "showcase_engine",
