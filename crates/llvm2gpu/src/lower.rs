@@ -46,6 +46,7 @@ enum Elem {
 struct Builders {
     module: naga::Module,
     storage_cache: HashMap<(u32, u32, Elem), naga::Handle<naga::GlobalVariable>>,
+    uniform_cache: HashMap<(u32, u32), naga::Handle<naga::GlobalVariable>>,
 }
 
 impl Builders {
@@ -53,6 +54,7 @@ impl Builders {
         Self {
             module: naga::Module::default(),
             storage_cache: HashMap::new(),
+            uniform_cache: HashMap::new(),
         }
     }
 
@@ -133,6 +135,96 @@ impl Builders {
             naga::Span::default(),
         );
         self.storage_cache.insert((group, binding, elem), handle);
+        handle
+    }
+
+    /// Uniform `array<scalar, len>` wrapped as `{ a: array<lane, len> }`.
+    fn uniform_global(
+        &mut self,
+        group: u32,
+        binding: u32,
+        len: u32,
+    ) -> naga::Handle<naga::GlobalVariable> {
+        if let Some(handle) = self.uniform_cache.get(&(group, binding)) {
+            return *handle;
+        }
+        let scalar_ty = scalar(&mut self.module, naga::ScalarKind::Float);
+        let lane_ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Struct {
+                    members: vec![
+                        naga::StructMember {
+                            name: Some("v".to_string()),
+                            ty: scalar_ty,
+                            binding: None,
+                            offset: 0,
+                        },
+                        naga::StructMember {
+                            name: Some("p1".to_string()),
+                            ty: scalar_ty,
+                            binding: None,
+                            offset: 4,
+                        },
+                        naga::StructMember {
+                            name: Some("p2".to_string()),
+                            ty: scalar_ty,
+                            binding: None,
+                            offset: 8,
+                        },
+                        naga::StructMember {
+                            name: Some("p3".to_string()),
+                            ty: scalar_ty,
+                            binding: None,
+                            offset: 12,
+                        },
+                    ],
+                    span: 16,
+                },
+            },
+            naga::Span::default(),
+        );
+        let array_ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Array {
+                    base: lane_ty,
+                    size: naga::ArraySize::Constant(
+                        std::num::NonZeroU32::new(len)
+                            .unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
+                    ),
+                    stride: 16,
+                },
+            },
+            naga::Span::default(),
+        );
+        let outer = self.module.types.insert(
+            naga::Type {
+                name: Some(format!("U{len}")),
+                inner: naga::TypeInner::Struct {
+                    members: vec![naga::StructMember {
+                        name: Some("a".to_string()),
+                        ty: array_ty,
+                        binding: None,
+                        offset: 0,
+                    }],
+                    span: 16 * len,
+                },
+            },
+            naga::Span::default(),
+        );
+        let handle = self.module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some(format!("uniform_{group}_{binding}_")),
+                space: naga::AddressSpace::Uniform,
+                binding: Some(naga::ResourceBinding { group, binding }),
+                ty: outer,
+                init: None,
+                memory_decorations: naga::MemoryDecorations::empty(),
+            },
+            naga::Span::default(),
+        );
+        self.uniform_cache.insert((group, binding), handle);
         handle
     }
 
@@ -306,6 +398,23 @@ impl Builders {
         args: &[Operand],
         env: &HashMap<String, naga::Handle<naga::Expression>>,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        // Uniform array reads (f32 lanes, stride 16).
+        if callee.contains("uniform_read_f32") {
+            if args.len() != 4 {
+                return Err(TranslateError::Unsupported);
+            }
+            let group = const_u32(func, &args[0], env)?;
+            let binding = const_u32(func, &args[1], env)?;
+            let len = const_u32(func, &args[2], env)?;
+            if len == 0 || len.checked_mul(16).is_none_or(|b| b > 65536) {
+                return Err(TranslateError::UnsupportedType(
+                    "uniform array exceeds 64KiB".to_string(),
+                ));
+            }
+            let index = operand(func, &args[3], env)?;
+            let global = self.uniform_global(group, binding, len);
+            return load_uniform(func, global, index);
+        }
         // Storage reads.
         if callee.contains("storage_read_f32") {
             let (group, binding, index) = storage_args(func, args, env, 3)?;
@@ -440,6 +549,31 @@ fn load_global(
     let pointer = append(func, naga::Expression::Access { base, index });
     push_emit(func, pointer);
     let v = append(func, naga::Expression::Load { pointer });
+    push_emit(func, v);
+    Ok(v)
+}
+
+/// Load `uniform_0_{b}.a[index].v` through the lane wrapper.
+fn load_uniform(
+    func: &mut naga::Function,
+    global: naga::Handle<naga::GlobalVariable>,
+    index: naga::Handle<naga::Expression>,
+) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+    let base = append(func, naga::Expression::GlobalVariable(global));
+    push_emit(func, base);
+    let field = append(func, naga::Expression::AccessIndex { base, index: 0 });
+    push_emit(func, field);
+    let elem = append(func, naga::Expression::Access { base: field, index });
+    push_emit(func, elem);
+    let lane = append(
+        func,
+        naga::Expression::AccessIndex {
+            base: elem,
+            index: 0,
+        },
+    );
+    push_emit(func, lane);
+    let v = append(func, naga::Expression::Load { pointer: lane });
     push_emit(func, v);
     Ok(v)
 }
