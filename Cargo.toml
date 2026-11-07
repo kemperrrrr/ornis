@@ -15,6 +15,7 @@ members = [
     "crates/gpu-cluster",
     "crates/gpu-gtao",
     "crates/gpu-histogram",
+    "crates/gpu-adapt",
     "crates/wasm2gpu-shader",
     "crates/wasm2gpu-testkit",
     "crates/physics",

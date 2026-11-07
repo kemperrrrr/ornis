@@ -612,7 +612,7 @@ impl AutoExposure {
             "auto-exposure adapt",
             &adapt_layout,
             &adapt_shader,
-            "adapt_exposure",
+            "cs_main",
         );
 
         let default_settings = AutoExposureSettings::default();

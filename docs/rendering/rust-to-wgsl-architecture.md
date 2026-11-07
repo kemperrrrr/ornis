@@ -565,7 +565,9 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    в локальную переменную. Гистограмма автоэкспозиции — `cs_main`
    workgroup 8×8 из `ornis-gpu-histogram`: те же биндинги и
    `HistogramParams`, что у прохода, и модуль
-   `histogram_generated.wgsl`. Адаптация пока на рукописном WGSL.
+   `histogram_generated.wgsl`. Адаптация — один поток `cs_main` из
+   `ornis-gpu-adapt`: тот же histogram storage, `AdaptParams` и
+   exposure, модуль `adapt_generated.wgsl`.
 
 **Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном

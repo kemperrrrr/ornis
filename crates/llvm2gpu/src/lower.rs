@@ -3054,6 +3054,7 @@ fn unary_math(callee: &str) -> Option<naga::MathFunction> {
         ("acos", naga::MathFunction::Acos),
         ("sin", naga::MathFunction::Sin),
         ("cos", naga::MathFunction::Cos),
+        ("exp2", naga::MathFunction::Exp2),
         ("exp", naga::MathFunction::Exp),
         ("log2", naga::MathFunction::Log2),
         ("log", naga::MathFunction::Log),

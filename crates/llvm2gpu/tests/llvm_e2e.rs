@@ -966,6 +966,30 @@ fn rustc_histogram_to_wgsl() {
 
 const HISTOGRAM_KERNEL_RS: &str = include_str!("../../gpu-histogram/src/lib.rs");
 
+const ADAPT_KERNEL_RS: &str = include_str!("../../gpu-adapt/src/lib.rs");
+
+#[test]
+fn rustc_adapt_to_wgsl() {
+    let Some(ir) = compile_lib_opt(ADAPT_KERNEL_RS, "1") else {
+        panic!("adapt: rustc produced no IR");
+    };
+    let translated = translate_with_meta(&ir).expect("adapt");
+    for needle in [
+        "exp2(",
+        "log2(",
+        "array<u32, 256>",
+        "var<workgroup>",
+        "@workgroup_size(1, 1, 1)",
+        "loop {",
+    ] {
+        assert!(
+            translated.wgsl.contains(needle),
+            "{needle}\n{}",
+            translated.wgsl
+        );
+    }
+}
+
 const GTAO_MARCH_KERNEL_RS: &str = include_str!("../../gpu-gtao/src/lib.rs");
 
 const GTAO_ARC_KERNEL_RS: &str = r#"

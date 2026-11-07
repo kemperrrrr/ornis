@@ -50,12 +50,13 @@ fn params_layouts_match_their_wgsl() {
     assert!(hist.contains("fn cs_main("));
     assert!(hist.contains("@workgroup_size(8, 8, 1)"));
     let adapt = adapt_wgsl();
-    assert!(adapt.contains("brighten_speed: f32"));
-    assert!(adapt.contains("darken_speed: f32"));
-    assert!(adapt.contains("array<u32, 256u>"));
-    assert!(adapt.contains("exposure_out.exposure"));
-    // Bin 0 is excluded from the reduction.
-    assert!(adapt.contains("var i = 1u; i < HISTOGRAM_BINS"));
+    assert!(adapt.contains("f7_: f32"));
+    assert!(adapt.contains("f8_: f32"));
+    assert!(adapt.contains("array<u32, 256>"));
+    assert!(adapt.contains("storage_0_2_[0u]"));
+    assert!(adapt.contains("exp2("));
+    // Bin 0 is excluded from the reduction: the weighted loop starts at 1.
+    assert!(adapt.contains("index_u002e_sroa_u002e_0_u002e_0_u002e_i6_ = 1u"));
 }
 
 #[test]

@@ -2909,6 +2909,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-adapt"
+version = "0.1.0"
+
+[[package]]
 name = "ornis-gpu-cluster"
 version = "0.1.0"
 dependencies = [
