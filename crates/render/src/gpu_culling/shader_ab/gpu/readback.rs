@@ -81,7 +81,7 @@ fn word_is_visible(word: &[u8]) -> bool {
     load_u32(word, 0) == FLAG_VISIBLE
 }
 
-fn load_u32(bytes: &[u8], at: usize) -> u32 {
+pub(super) fn load_u32(bytes: &[u8], at: usize) -> u32 {
     let mut word = [0u8; U32_BYTES];
     copy_lane(bytes, at, &mut word);
     u32::from_le_bytes(word)

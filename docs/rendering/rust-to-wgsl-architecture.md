@@ -8,6 +8,21 @@
 > **2026-10-18:** rust-gpu пересмотрен — равный кандидат, спайк C
 > (§3.1.3, §4); добавлен вариант «LLVM IR → LLVM SPIR-V backend → naga»
 > (§3.1.2) и SPIR-V как общая граница с харнессом сравнения (§3.1.4).
+>
+> **2026-11-07 (llvm2gpu, спайк B):** крейт `crates/llvm2gpu` переводит
+> LLVM IR стабильного rustc в naga/WGSL/SPIR-V. Закрыты: scalar-подмножество
+> (`SROA`, `select`, `sqrt`/`sin`), ABI storage (`storage_*`,
+> `storage_atomic_add_u32`), uniform-массивы (`uniform_read_f32`),
+> **structured control flow** (`phi` через локальные переменные, diamond
+> `if` с postdominator-merge, natural `loop` с `continue`/`break`) и
+> **uniform-поля** (`uniform_field_f32/u32` по таблице `ornis_gpu.types`,
+> раскладка `place_fields`). Vec3 в uniform-структуре получает WGSL-offset
+> 12/align 16; тест пинит offsets `[0, 12, 16]` и span 32. Динамические
+> циклы собираются с `-C opt-level=s`: `opt-level=3` разворачивает их в CFG
+> шире структурного подмножества (вложенные циклы/несколько head-блоков
+> пока отвергаются). Не сделано: билдер `xtask build-shaders` (§3.1.3,
+> спайк C-инфраструктура), миграция `cull`/`gtao`, readonly storage и
+> nested loops/структуры.
 
 Статус на 2026-09-10: 11 stage-entry пишутся на Rust через `#[stage]`
 и собираются в WGSL.base. Свободных идентификаторов в entry нет;
@@ -438,6 +453,23 @@ rust-gpu (спайк C), LLVM SPIR-V backend (проба B) и любой дру
 SPIR-V-фронтенд за короткое время. Состояние `wasm2spirv` в 2026 не
 установлено. Прямая генерация naga IR из staged-builder'а (спайк A) от
 этой границы не зависит.
+
+### 3.1.5 Runtime-материалы: граф как данные → Shader IR через Mutation/рефлексию (2026-11-06)
+
+Решение: runtime-шейдер не компилируем из произвольного Rust (для этого
+нужен LLVM IR / rust-gpu) и не склеиваем напрямую в WGSL-строки через
+`format!` (костыль). Граф материалов — сериализованный декларативный
+код: его перевод в код идёт через рефлексию без полного LLVM IR.
+Парсер MaterialX уже даёт AST; `Mutation` + `RegisterComponent` дают
+перечисление узлов/полей (`FieldMeta`) и единый протокол правок
+(`Set`/`SetField`); staged-билдер собирает из них `Shader IR`
+(`IrExpr`/`IrStmt`) → `writer` → WGSL → `naga`. Параметрические правки
+(float/цвет) обновляют uniform-значение, а не шейдер; рекомпиляция только
+при структурных мутациях (новый/удаленный узел), с кэшем пайплайнов по
+хэшу графа. Выбранный фаворит отменяет текущий GPU стек (macro-DSL с
+`format!`-шаблонами) в пользу этого стека, а не живёт параллельно с ним.
+Статические ядра (`cull`/`gtao` и т.п.) остаются за спайками LLVM IR /
+rust-gpu; для материалов LLVM IR не требуется.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)
 

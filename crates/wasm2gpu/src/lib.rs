@@ -55,6 +55,7 @@ mod locals;
 mod lower;
 mod ops;
 mod parse;
+mod peephole;
 mod ret;
 mod storage;
 mod struct_members;
@@ -77,6 +78,7 @@ pub use error::TranslateError;
 /// rejected.
 pub fn translate(wasm: &[u8]) -> Result<Translated, TranslateError> {
     let module = parse::parse(wasm)?;
-    let lowered = lower::lower(&module)?;
+    let mut lowered = lower::lower(&module)?;
+    peephole::coalesce(&mut lowered);
     emit::emit(&lowered)
 }

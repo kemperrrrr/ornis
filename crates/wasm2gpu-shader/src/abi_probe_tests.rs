@@ -46,6 +46,13 @@ const STORAGE_OUTPUT_WORKGROUP_ATOMIC_NEXT: u32 = 3;
 const INITIAL_ATOMIC_VALUE: u32 = 10;
 const STORAGE_ATOMIC_RESULT: u32 = INITIAL_ATOMIC_VALUE + STORAGE_ATOMIC_VALUE;
 const WORKGROUP_ATOMIC_OLD: u32 = 0;
+const CULL_STORAGE_INPUT: [f32; 3] = [3.0, 4.0, 0.0];
+const CULL_STORAGE_LENGTH: f32 = 5.0;
+const CULL_TEST_OUTSIDE_CENTER: f32 = -2.0;
+const CULL_TEST_INSIDE_CENTER: f32 = 0.5;
+const CULL_TEST_RADIUS: f32 = 0.25;
+const CULL_TEST_BOUNDARY_CENTER: f32 = -CULL_TEST_RADIUS;
+const CULL_TEST_PLANE: u32 = 0;
 const FLOATS: [u32; 8] = [
     0,
     0x3f80_0000,
@@ -175,4 +182,102 @@ fn compute_texture_and_atomic_imports_match_the_host_shadow() {
         memory.read_storage::<ABI_GROUP, ATOMIC_INPUT_BINDING, [u32; 1]>(),
         [STORAGE_ATOMIC_RESULT]
     );
+}
+
+#[test]
+fn cull_helpers_read_storage_length_and_test_uniform_planes() {
+    let mut memory = HostMemory::new();
+    memory.bind_storage::<{ super::CULL_GROUP }, { super::SPHERE_BINDING }, [f32; 3]>();
+    memory.write_storage::<{ super::CULL_GROUP }, { super::SPHERE_BINDING }, [f32; 3]>(
+        &CULL_STORAGE_INPUT,
+    );
+    let uniform_values: [super::UniformF32Lane; super::PLANE_LEN as usize] =
+        std::array::from_fn(|index| super::UniformF32Lane {
+            value: if index == 0 { 1.0 } else { 0.0 },
+            pad0: 0,
+            pad1: 0,
+            pad2: 0,
+        });
+    memory.bind_uniform::<
+        { super::CULL_GROUP },
+        { super::PLANE_BINDING },
+        [super::UniformF32Lane; super::PLANE_LEN as usize],
+    >();
+    memory.write_uniform::<
+        { super::CULL_GROUP },
+        { super::PLANE_BINDING },
+        [super::UniformF32Lane; super::PLANE_LEN as usize],
+    >(&uniform_values);
+
+    let (
+        radius,
+        outside,
+        inside,
+        boundary,
+        boundary_visible,
+        nan_axes_visible,
+        mixed_nan_axis_visible,
+        negative_radius_visible,
+    ) = with_host(&mut memory, || {
+        (
+            super::cull_storage_length(0),
+            super::cull_plane_outside(
+                CULL_TEST_OUTSIDE_CENTER,
+                0.0,
+                0.0,
+                CULL_TEST_RADIUS,
+                CULL_TEST_PLANE,
+            ),
+            super::cull_plane_outside(
+                CULL_TEST_INSIDE_CENTER,
+                0.0,
+                0.0,
+                CULL_TEST_RADIUS,
+                CULL_TEST_PLANE,
+            ),
+            super::cull_plane_outside(
+                CULL_TEST_BOUNDARY_CENTER,
+                0.0,
+                0.0,
+                CULL_TEST_RADIUS,
+                CULL_TEST_PLANE,
+            ),
+            super::cull_record_visible(
+                CULL_TEST_BOUNDARY_CENTER,
+                0.0,
+                0.0,
+                CULL_TEST_RADIUS,
+                CULL_TEST_RADIUS,
+                CULL_TEST_RADIUS,
+            ),
+            super::cull_record_visible(
+                CULL_TEST_OUTSIDE_CENTER,
+                0.0,
+                0.0,
+                f32::NAN,
+                f32::NAN,
+                f32::NAN,
+            ),
+            super::cull_record_visible(
+                CULL_TEST_OUTSIDE_CENTER,
+                0.0,
+                0.0,
+                f32::NAN,
+                CULL_TEST_RADIUS,
+                CULL_TEST_RADIUS,
+            ),
+            super::cull_record_visible(CULL_TEST_OUTSIDE_CENTER, 0.0, 0.0, -1.0, -1.0, -1.0),
+        )
+    });
+    assert_eq!(radius, CULL_STORAGE_LENGTH);
+    assert!(outside);
+    assert!(!inside);
+    assert!(!boundary, "touching a plane remains visible");
+    assert!(boundary_visible);
+    assert!(nan_axes_visible);
+    assert!(!mixed_nan_axis_visible);
+    assert!(negative_radius_visible);
+    assert!(super::cull_radius_invalid(f32::NAN));
+    assert!(super::cull_radius_invalid(-1.0));
+    assert!(!super::cull_radius_invalid(2.0));
 }

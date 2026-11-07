@@ -166,6 +166,7 @@ pub(crate) fn texture_height_2d(group: u32, binding: u32) -> u32 {
     }
 }
 
+#[inline(always)]
 pub(crate) fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -177,6 +178,7 @@ pub(crate) fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value
     }
 }
 
+#[inline(always)]
 pub(crate) fn workgroup_load_u32(index: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -188,6 +190,7 @@ pub(crate) fn workgroup_load_u32(index: u32) -> u32 {
     }
 }
 
+#[inline(always)]
 pub(crate) fn workgroup_store_u32(index: u32, value: u32) {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -199,6 +202,7 @@ pub(crate) fn workgroup_store_u32(index: u32, value: u32) {
     }
 }
 
+#[inline(always)]
 pub(crate) fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -210,6 +214,7 @@ pub(crate) fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32 {
     }
 }
 
+#[inline(always)]
 pub(crate) fn workgroup_barrier() {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -221,6 +226,7 @@ pub(crate) fn workgroup_barrier() {
     }
 }
 
+#[inline(always)]
 pub(crate) fn storage_barrier() {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -232,6 +238,7 @@ pub(crate) fn storage_barrier() {
     }
 }
 
+#[inline(always)]
 pub(crate) fn math_dot3(a: GpuVec3, b: GpuVec3) -> f32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -243,6 +250,7 @@ pub(crate) fn math_dot3(a: GpuVec3, b: GpuVec3) -> f32 {
     }
 }
 
+#[inline(always)]
 pub(crate) fn math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -258,17 +266,24 @@ pub(crate) fn math_cross3(a: GpuVec3, b: GpuVec3) -> GpuVec3 {
     }
 }
 
+#[inline(always)]
 pub(crate) fn math_length3(value: GpuVec3) -> f32 {
+    math_length3_xyz(value.x, value.y, value.z)
+}
+
+#[inline(always)]
+pub(crate) fn math_length3_xyz(x: f32, y: f32, z: f32) -> f32 {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        math_dot3(value, value).sqrt()
+        (x * x + y * y + z * z).sqrt()
     }
     #[cfg(target_arch = "wasm32")]
     {
-        copy::call_math_length3(value)
+        copy::call_math_length3_xyz(x, y, z)
     }
 }
 
+#[inline(always)]
 pub(crate) fn math_normalize3(value: GpuVec3) -> GpuVec3 {
     #[cfg(not(target_arch = "wasm32"))]
     {

@@ -1,10 +1,11 @@
-//! A/B of the wasm2gpu `cull` kernel against [`crate::CULL_COMPUTE_WGSL`].
+//! A/B of the wasm2gpu flag and compaction kernels against [`crate::CULL_COMPUTE_WGSL`].
 //!
-//! Release build, warmup, then thirty dispatches per shader per scene.
+//! Release build, warmup, then thirty dispatches per shader per scene. The
+//! compaction row includes the current duplicated float/word source views.
 //! Reproduce with:
 //!
 //! ```text
-//! cargo bench -p ornis-render --bench wasm2gpu_cull_ab --features test-util
+//! ORNIS_REQUIRE_GPU=1 cargo bench -p ornis-render --bench wasm2gpu_cull_ab --features test-util
 //! ```
 //!
 //! The header names the adapter. A software device (lavapipe / llvmpipe)

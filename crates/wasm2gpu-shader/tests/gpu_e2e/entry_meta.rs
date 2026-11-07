@@ -46,6 +46,8 @@ fn every_guest_entry_declares_its_stage_and_workgroup() {
         assert_eq!(entry(&entries, export).stage, Stage::Compute, "{export}");
         assert_eq!(entry(&entries, export).workgroup, [4, 1, 1], "{export}");
     }
+    assert_eq!(entry(&entries, "cull_compact").stage, Stage::Compute);
+    assert_eq!(entry(&entries, "cull_compact").workgroup, [64, 1, 1]);
     assert_eq!(entry(&entries, "ae_log_luma").stage, Stage::Compute);
     assert_eq!(entry(&entries, "ae_histogram").stage, Stage::Compute);
     assert_eq!(entry(&entries, "shade").stage, Stage::Fragment);

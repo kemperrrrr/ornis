@@ -1,3 +1,4 @@
+// qual:allow(srp, max_independent_clusters=3) reason: "The shader DSL requires exported kernels and translator-visible scalar helpers in one source module; pin the current three independent clusters rather than relocating entry points."
 //! Shader body compiled to wasm32 and lowered by `ornis-wasm2gpu`.
 //!
 //! The host build of [`shade`] is the CPU reference. On `wasm32` the same
@@ -12,6 +13,8 @@
 #![cfg_attr(target_arch = "wasm32", no_std)]
 #![warn(missing_docs)]
 
+#[cfg(any(target_arch = "wasm32", test))]
+use ornis_gpu_abi::gpu_length3_xyz;
 use ornis_gpu_abi::gpu_struct;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::shader;
@@ -35,6 +38,8 @@ mod skinning;
 use ornis_gpu_abi::Storage;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_at_u32;
+#[cfg(target_arch = "wasm32")]
+use ornis_gpu_abi::storage_atomic_add_u32;
 #[cfg(target_arch = "wasm32")]
 use ornis_gpu_abi::storage_store_u32;
 
@@ -92,7 +97,7 @@ pub const PLANE_COUNT: u32 = 6;
 pub const PLANE_LEN: u32 = PLANE_COUNT * 4;
 
 /// Lanes of one sphere: center xyz plus the radius.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 const LANES: u32 = 4;
 
 /// Index of the last lane: a sphere's radius, a plane's `w`.
@@ -113,6 +118,39 @@ pub const FLAG_BINDING: u32 = 2;
 
 /// Storage binding whose element 0 is the guarded sphere count.
 pub const COUNT_BINDING: u32 = 3;
+
+/// Storage binding of the dense destination record words.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_DST_BINDING: u32 = 2;
+
+/// Storage binding of source record words for bit-preserving copies.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_SOURCE_WORDS_BINDING: u32 = 4;
+
+/// Storage binding of the indirect draw's atomic instance counter.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_ARGS_BINDING: u32 = 3;
+
+/// Four matrices plus four metadata/padding words in `PerObjectGpu`.
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_RECORD_WORDS: u32 = 52;
+
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_MODEL_CENTER_OFFSET: u32 = 12;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_MODEL_COLUMN_STRIDE: u32 = 4;
+#[cfg(any(target_arch = "wasm32", test))]
+const CULL_COMPACT_PLANE_DISTANCE_LANE: u32 = 3;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_COUNT_UNIFORM_BINDING: u32 = 5;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_COUNT_UNIFORM_LEN: u32 = 3;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_ACTIVE_COUNT_INDEX: u32 = 0;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_SOURCE_COUNT_INDEX: u32 = 1;
+#[cfg(target_arch = "wasm32")]
+const CULL_COMPACT_DESTINATION_COUNT_INDEX: u32 = 2;
 
 /// Value the wasm `compute` export stores at invocation `id`.
 ///
@@ -277,6 +315,245 @@ pub fn cull(id: u32) {
         }
         storage_store_u32::<CULL_GROUP, FLAG_BINDING>(id, visible);
     }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_storage_length(base: u32) -> f32 {
+    let x = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base);
+    let y = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 1);
+    let z = storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + 2);
+    gpu_length3_xyz(x, y, z)
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_radius_invalid(radius: f32) -> bool {
+    radius.is_nan() || radius < 0.0
+}
+
+// Mirror WGSL `max`: a single NaN axis yields the finite other axis; all-NaN
+// radii stay NaN and are handled fail-open by `cull_radius_invalid`.
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_max(left: f32, right: f32) -> f32 {
+    if left.is_nan() {
+        right
+    } else if right.is_nan() || left > right {
+        left
+    } else {
+        right
+    }
+}
+
+// qual:allow(srp, max_parameters=6) reason: "The wasm2gpu shader ABI only supports scalar arguments; this helper mirrors the WGSL sphere test without a translated aggregate."
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_record_visible(
+    center_x: f32,
+    center_y: f32,
+    center_z: f32,
+    x_radius: f32,
+    y_radius: f32,
+    z_radius: f32,
+) -> bool {
+    let radius = cull_max(x_radius, cull_max(y_radius, z_radius));
+    if cull_radius_invalid(radius) {
+        return true;
+    }
+    let mut plane = 0u32;
+    while plane < PLANE_COUNT {
+        if cull_plane_outside(center_x, center_y, center_z, radius, plane) {
+            return false;
+        }
+        plane += 1;
+    }
+    true
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+#[inline(always)]
+fn cull_plane_outside(
+    center_x: f32,
+    center_y: f32,
+    center_z: f32,
+    radius: f32,
+    plane: u32,
+) -> bool {
+    let at = plane * LANES;
+    let normal_x = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at);
+    let normal_y = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 1);
+    let normal_z = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(at + 2);
+    let distance = uniform_array_f32::<CULL_GROUP, PLANE_BINDING, PLANE_LEN>(
+        at + CULL_COMPACT_PLANE_DISTANCE_LANE,
+    );
+    normal_x * center_x + normal_y * center_y + normal_z * center_z + distance < -radius
+}
+
+/// Wasm compute export for the production culling compaction ABI.
+///
+/// The source record is the 52-word `PerObjectGpu` layout. Binding 1
+/// supplies its `f32` values for the model-matrix sphere test; binding 4
+/// supplies the same record bytes as `u32` words for bit-preserving copies.
+/// The current lowering declares storage imports writable, so the two
+/// source views must use distinct bindings/buffers. Binding 0 contains the
+/// six planes; binding 5 is a padded uniform array of active, source, and
+/// destination counts. Binding 3 is the five-word indirect-args buffer,
+/// where `instance_count` at word 1 reserves slots atomically and is clamped
+/// to destination capacity. The dense destination record words are at binding 2.
+///
+/// TODO(#243): replace the count array and duplicated source with u32
+/// uniforms and read-only storage before Culler integration. The current lowering
+/// exposes storage imports as read-write, so the source views cannot alias safely.
+/// Until then, capacities must describe the bound buffers and stay at most 2^24.
+#[cfg(target_arch = "wasm32")]
+#[shader::compute(workgroup_size = 64)]
+// qual:api — wasm export declared by the shader macro; rustqual sees only the source attribute.
+pub fn cull_compact(id: u32) {
+    let id_f32 = id as f32;
+    let active_count = uniform_array_f32::<
+        CULL_GROUP,
+        CULL_COMPACT_COUNT_UNIFORM_BINDING,
+        CULL_COMPACT_COUNT_UNIFORM_LEN,
+    >(CULL_COMPACT_ACTIVE_COUNT_INDEX);
+    let source_count = uniform_array_f32::<
+        CULL_GROUP,
+        CULL_COMPACT_COUNT_UNIFORM_BINDING,
+        CULL_COMPACT_COUNT_UNIFORM_LEN,
+    >(CULL_COMPACT_SOURCE_COUNT_INDEX);
+    if id_f32 >= active_count || id_f32 >= source_count {
+        return;
+    }
+
+    let base = id * CULL_COMPACT_RECORD_WORDS;
+    let center_x =
+        storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET);
+    let center_y =
+        storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET + 1);
+    let center_z =
+        storage_at_f32::<CULL_GROUP, SPHERE_BINDING>(base + CULL_COMPACT_MODEL_CENTER_OFFSET + 2);
+    let x_radius = cull_storage_length(base);
+    let y_radius = cull_storage_length(base + CULL_COMPACT_MODEL_COLUMN_STRIDE);
+    let z_radius = cull_storage_length(base + 2 * CULL_COMPACT_MODEL_COLUMN_STRIDE);
+    if !cull_record_visible(center_x, center_y, center_z, x_radius, y_radius, z_radius) {
+        return;
+    }
+
+    let slot = storage_atomic_add_u32::<CULL_GROUP, CULL_COMPACT_ARGS_BINDING>(1, 1);
+    let destination_count = uniform_array_f32::<
+        CULL_GROUP,
+        CULL_COMPACT_COUNT_UNIFORM_BINDING,
+        CULL_COMPACT_COUNT_UNIFORM_LEN,
+    >(CULL_COMPACT_DESTINATION_COUNT_INDEX);
+    if (slot as f32) >= destination_count {
+        storage_atomic_add_u32::<CULL_GROUP, CULL_COMPACT_ARGS_BINDING>(1, u32::MAX);
+        return;
+    }
+    let output = slot * CULL_COMPACT_RECORD_WORDS;
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 1u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 1u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 2u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 2u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 3u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 3u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 4u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 4u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 5u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 5u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 6u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 6u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 7u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 7u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 8u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 8u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 9u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 9u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 10u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 10u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 11u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 11u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 12u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 12u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 13u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 13u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 14u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 14u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 15u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 15u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 16u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 16u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 17u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 17u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 18u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 18u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 19u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 19u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 20u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 20u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 21u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 21u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 22u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 22u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 23u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 23u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 24u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 24u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 25u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 25u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 26u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 26u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 27u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 27u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 28u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 28u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 29u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 29u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 30u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 30u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 31u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 31u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 32u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 32u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 33u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 33u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 34u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 34u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 35u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 35u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 36u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 36u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 37u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 37u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 38u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 38u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 39u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 39u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 40u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 40u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 41u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 41u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 42u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 42u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 43u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 43u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 44u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 44u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 45u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 45u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 46u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 46u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 47u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 47u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 48u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 48u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 49u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 49u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 50u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 50u32, value);
+    let value = storage_at_u32::<CULL_GROUP, CULL_COMPACT_SOURCE_WORDS_BINDING>(base + 51u32);
+    storage_store_u32::<CULL_GROUP, CULL_COMPACT_DST_BINDING>(output + 51u32, value);
 }
 
 /// Lanes of one vertex output: clip `x y z w`, then uv (32-byte stride).

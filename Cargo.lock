@@ -2913,6 +2913,16 @@ name = "ornis-input"
 version = "0.1.0"
 
 [[package]]
+name = "ornis-llvm2gpu"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "ornis-gpu-abi",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "ornis-macros"
 version = "0.1.0"
 dependencies = [
