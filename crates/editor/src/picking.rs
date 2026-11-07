@@ -837,6 +837,7 @@ pub fn pick_gizmo(
 
 /// Shared picker: policy filters chrome/scene, `filter` adds caller-side
 /// constraints (e.g. the active gizmo mode).
+// qual:allow(iosp) reason: "one pass over the render lanes: policy/chrome gating and the caller filter cannot be split without a second traversal"
 fn pick_closest_filtered(
     store: &SmartStore,
     ray: &PickRay,
