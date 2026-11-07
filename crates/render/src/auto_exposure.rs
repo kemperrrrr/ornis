@@ -605,7 +605,7 @@ impl AutoExposure {
             "auto-exposure histogram",
             &histogram_layout,
             &histogram_shader,
-            "build_histogram",
+            "cs_main",
         );
         let adapt_pipeline = compute_pipeline(
             device,

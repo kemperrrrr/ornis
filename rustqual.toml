@@ -87,6 +87,7 @@ paths = [
     "crates/gpu-shaders/**",
     "crates/gpu-cluster/**",
     "crates/gpu-gtao/**",
+    "crates/gpu-histogram/**",
     "crates/gpu-shader/**",
     "crates/gpu-shader-macros/**",
     "crates/gltf/**",
@@ -135,6 +136,7 @@ ornis_llvm2gpu = "foundation"
 ornis_gpu_shaders = "foundation"
 ornis_gpu_cluster = "foundation"
 ornis_gpu_gtao = "foundation"
+ornis_gpu_histogram = "foundation"
 ornis_gpu_shader = "foundation"
 ornis_gpu_shader_macros = "foundation"
 ornis_gltf = "foundation"

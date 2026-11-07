@@ -161,7 +161,7 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// three artifacts, so that id counts three times: the denominator
+    /// four artifacts, so that id counts four times: the denominator
     /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
@@ -169,8 +169,8 @@ impl QualityFlags {
             .iter()
             .filter(|id| self.enabled(id))
             .count();
-        // `build-shaders` checks three checked-in artifacts (cull, clusters, gtao).
-        let shader_checks = 2 * usize::from(self.ci && self.enabled("build-shaders"));
+        // `build-shaders` checks four checked-in artifacts (cull, clusters, gtao, histogram).
+        let shader_checks = 3 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2088,6 +2088,13 @@ fn ci_stages(stages: &mut StageList<'_>) {
         "crates/render/src/shaders/gtao_generated.wgsl",
         "cargo xtask build-shaders --check (gtao WGSL drift)",
     );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-histogram"),
+        Some("cs_main"),
+        "crates/render/src/shaders/histogram_generated.wgsl",
+        "cargo xtask build-shaders --check (histogram WGSL drift)",
+    );
 }
 
 /// One checked-in WGSL artifact. `package` is omitted for the default crate.
@@ -3609,7 +3616,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 3);
+        assert_eq!(only_shaders.total_stages(), 4);
     }
 
     #[test]

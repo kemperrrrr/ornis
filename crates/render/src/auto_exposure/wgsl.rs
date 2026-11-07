@@ -1,100 +1,22 @@
 //! WGSL sources of the auto-exposure compute passes (histogram + reduction).
 
 use super::HISTOGRAM_BINS;
-use super::HISTOGRAM_WORKGROUP_SIZE;
-
-/// Threads per histogram workgroup (`8×8`).
-const HISTOGRAM_THREADS: u32 = HISTOGRAM_WORKGROUP_SIZE * HISTOGRAM_WORKGROUP_SIZE;
 
 /// WGSL compute pass building the log-luminance histogram of the HDR mix.
 ///
-/// Bindings: `0` the deferred HDR texture, `1` the forward HDR texture
-/// (both `texture_2d<f32>`, sampled by load), `2` the atomic histogram
-/// (`array<atomic<u32>, HISTOGRAM_BINS>`, read-write), `3` the histogram
-/// params uniform. The selected layer mix matches the composite tone-mapper,
-/// so the histogram meters the same HDR that is tone-mapped. Each workgroup
-/// accumulates into a shared histogram and flushes one `atomicAdd` per bin,
-/// bounding global atomics. Bin `0` collects texels below the window.
+/// The source is the checked-in llvm2gpu module. Bindings match the host
+/// pass: `0` the deferred HDR texture, `1` the forward HDR texture (both
+/// `texture_2d<f32>`, sampled by load), `2` the atomic histogram, `3` the
+/// histogram params uniform (`min_log_lum`, `inv_log_range`, `bin_count`,
+/// `mode`). The selected layer mix matches the composite tone-mapper, so
+/// the histogram meters the same HDR that is tone-mapped. Each 8×8
+/// workgroup accumulates into a shared histogram and flushes one
+/// `atomicAdd` per occupied bin. Bin `0` collects texels below the window.
 ///
-/// The shader guards the ragged tail against `textureDimensions`.
+/// The shader guards the ragged tail against `textureDimensions`. The
+/// entry point is `cs_main`.
 pub(crate) fn histogram_wgsl() -> String {
-    format!(
-        r#"//! GPU log-luminance histogram (auto-exposure, ornis #125).
-const HISTOGRAM_BINS: u32 = {bins}u;
-const HISTOGRAM_THREADS: u32 = {threads}u;
-const LUMINANCE_FLOOR: f32 = 1e-6;
-
-struct HistogramParams {{
-    min_log_lum: f32,
-    inv_log_range: f32,
-    bin_count: f32,
-    mode: u32,
-}};
-
-@group(0) @binding(0) var deferred_tex: texture_2d<f32>;
-@group(0) @binding(1) var forward_tex: texture_2d<f32>;
-@group(0) @binding(2) var<storage, read_write> histogram: array<atomic<u32>, {bins}u>;
-@group(0) @binding(3) var<uniform> params: HistogramParams;
-
-var<workgroup> histogram_shared: array<atomic<u32>, {bins}u>;
-
-fn log_luminance(color: vec3<f32>) -> f32 {{
-    let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    // A non-finite luminance (NaN from a bad texel, or an infinity from a
-    // blown-out source) is floored to black, so it lands in the reserved
-    // bin 0 exactly like the CPU reference does. `x != x` is true only for
-    // NaN and the magnitude test catches ±Inf; together they replace the
-    // `isFinite` builtin, which this WGSL frontend does not expose.
-    let non_finite = luma != luma || abs(luma) > 3.4e38;
-    let safe = select(luma, LUMINANCE_FLOOR, non_finite);
-    return log2(max(safe, LUMINANCE_FLOOR));
-}}
-
-fn histogram_bin(log_lum: f32) -> u32 {{
-    if (log_lum < params.min_log_lum) {{
-        return 0u;
-    }}
-    let t = saturate((log_lum - params.min_log_lum) * params.inv_log_range);
-    return u32(t * (params.bin_count - 2.0) + 1.0);
-}}
-
-@compute @workgroup_size({wg}, {wg}, 1)
-fn build_histogram(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-    @builtin(local_invocation_index) lid: u32,
-) {{
-    for (var i = lid; i < HISTOGRAM_BINS; i = i + HISTOGRAM_THREADS) {{
-        atomicStore(&histogram_shared[i], 0u);
-    }}
-    workgroupBarrier();
-
-    let dims = textureDimensions(deferred_tex);
-    if (gid.x < dims.x && gid.y < dims.y) {{
-        let coord = vec2<i32>(gid.xy);
-        var color = textureLoad(deferred_tex, coord, 0).rgb;
-        if (params.mode == 1u) {{
-            let fwd = textureLoad(forward_tex, coord, 0);
-            color = fwd.rgb * fwd.a;
-        }} else if (params.mode == 2u) {{
-            let fwd = textureLoad(forward_tex, coord, 0);
-            color = color + fwd.rgb * fwd.a;
-        }}
-        atomicAdd(&histogram_shared[histogram_bin(log_luminance(color))], 1u);
-    }}
-    workgroupBarrier();
-
-    for (var i = lid; i < HISTOGRAM_BINS; i = i + HISTOGRAM_THREADS) {{
-        let count = atomicLoad(&histogram_shared[i]);
-        if (count > 0u) {{
-            atomicAdd(&histogram[i], count);
-        }}
-    }}
-}}
-"#,
-        bins = HISTOGRAM_BINS,
-        threads = HISTOGRAM_THREADS,
-        wg = HISTOGRAM_WORKGROUP_SIZE,
-    )
+    include_str!("../shaders/histogram_generated.wgsl").to_string()
 }
 
 /// WGSL compute pass reducing the histogram to the adapted exposure.

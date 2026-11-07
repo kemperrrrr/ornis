@@ -43,10 +43,12 @@ fn params_layouts_match_their_wgsl() {
     assert_eq!(std::mem::offset_of!(AdaptParams, transition_distance), 36);
     assert_eq!(std::mem::offset_of!(AdaptParams, dt), 40);
     let hist = histogram_wgsl();
-    assert!(hist.contains("mode: u32"));
-    assert!(hist.contains("array<atomic<u32>, 256u>"));
-    assert!(hist.contains("var<workgroup> histogram_shared"));
-    assert!(hist.contains("forward_tex"));
+    assert!(hist.contains("f3_: u32"));
+    assert!(hist.contains("array<atomic<u32>, 256>"));
+    assert!(hist.contains("var<workgroup> workgroup_atomics"));
+    assert!(hist.contains("tex_0_1_"));
+    assert!(hist.contains("fn cs_main("));
+    assert!(hist.contains("@workgroup_size(8, 8, 1)"));
     let adapt = adapt_wgsl();
     assert!(adapt.contains("brighten_speed: f32"));
     assert!(adapt.contains("darken_speed: f32"));

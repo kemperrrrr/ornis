@@ -1,0 +1,14 @@
+[package]
+name = "ornis-gpu-histogram"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Auto-exposure log-luminance histogram for the llvm2gpu path"
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
