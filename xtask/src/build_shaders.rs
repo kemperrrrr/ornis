@@ -16,7 +16,7 @@ const DEFAULT_SOURCE: &str = "crates/gpu-shaders/src/lib.rs";
 /// Entry extracted by the translator.
 const DEFAULT_ENTRY: &str = "cs_main";
 /// LLVM optimisation level used for the shader crate.
-const DEFAULT_OPT: &str = "s";
+const DEFAULT_OPT: &str = "1";
 /// Artifact directory below the workspace root.
 const DEFAULT_OUT: &str = "target/shaders";
 /// Workgroup size of the cull kernel (one invocation per source record).

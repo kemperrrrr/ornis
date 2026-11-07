@@ -37,7 +37,7 @@ fn compile(source: &Path, ll: &Path) {
             "--target",
             "wasm32-unknown-unknown",
             "-C",
-            "opt-level=s",
+            "opt-level=1",
             "-C",
             "panic=abort",
             "-C",
