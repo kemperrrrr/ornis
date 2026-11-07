@@ -41,7 +41,11 @@ const WORD_3: u32 = WORD_2 + WORD_BYTES;
 /// Two entry shapes are supported:
 /// - `cs_main(i32) -> float`: result is stored to `storage_0_0[id]`.
 /// - `cs_main(i32) -> void`: the body stores through ABI calls.
-pub(super) fn lower(func: &LlvmFunc, structs: &[&[u8]]) -> Result<naga::Module, TranslateError> {
+pub(super) fn lower(
+    func: &LlvmFunc,
+    structs: &[&[u8]],
+    workgroup: [u32; 3],
+) -> Result<naga::Module, TranslateError> {
     if func.name != "cs_main" {
         return Err(TranslateError::Unsupported);
     }
@@ -59,7 +63,7 @@ pub(super) fn lower(func: &LlvmFunc, structs: &[&[u8]]) -> Result<naga::Module, 
     let cfg = Cfg::new(func)?;
     let mut builders = Builders::new(structs);
     let function = builders.build(func, &cfg)?;
-    builders.finish(function, func.ret_ty)
+    builders.finish(function, func.ret_ty, workgroup)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -347,6 +351,7 @@ impl Builders {
         mut self,
         function: naga::Function,
         ret_ty: Ty,
+        workgroup: [u32; 3],
     ) -> Result<naga::Module, TranslateError> {
         // Only create the implicit `storage_0_0` global when the kernel
         // uses the `-> float` shape; for `-> void` the body creates its
@@ -358,7 +363,7 @@ impl Builders {
             name: ornis_gpu_abi::symbols::CS_MAIN.to_string(),
             stage: naga::ShaderStage::Compute,
             early_depth_test: None,
-            workgroup_size: ornis_gpu_abi::symbols::CS_WORKGROUP,
+            workgroup_size: workgroup,
             workgroup_size_overrides: None,
             function,
             mesh_info: None,
@@ -1870,7 +1875,7 @@ start:
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
-        let module = lower(&func, structs).expect("lower");
+        let module = lower(&func, structs, ornis_gpu_abi::symbols::CS_WORKGROUP).expect("lower");
         let ty = module
             .types
             .iter()

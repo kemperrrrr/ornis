@@ -19,6 +19,8 @@ const DEFAULT_ENTRY: &str = "cs_main";
 const DEFAULT_OPT: &str = "s";
 /// Artifact directory below the workspace root.
 const DEFAULT_OUT: &str = "target/shaders";
+/// Workgroup size of the cull kernel (one invocation per source record).
+const DEFAULT_WORKGROUP: [u32; 3] = [64, 1, 1];
 /// Bumped when the translator's output changes without the IR changing.
 const CACHE_TAG: &str = "llvm2gpu-v1";
 
@@ -27,6 +29,7 @@ struct Args {
     entry: String,
     opt: String,
     out: PathBuf,
+    workgroup: [u32; 3],
 }
 
 pub fn build_shaders(raw: &[String]) {
@@ -58,6 +61,7 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         entry: DEFAULT_ENTRY.to_string(),
         opt: DEFAULT_OPT.to_string(),
         out: PathBuf::from(DEFAULT_OUT),
+        workgroup: DEFAULT_WORKGROUP,
     };
     let mut iter = raw.iter();
     while let Some(flag) = iter.next() {
@@ -67,10 +71,33 @@ fn parse(raw: &[String]) -> Result<Args, String> {
             "--entry" => args.entry = value.clone(),
             "--opt" => args.opt = value.clone(),
             "--out" => args.out = PathBuf::from(value),
+            "--workgroup" => args.workgroup = parse_workgroup(value)?,
             other => return Err(format!("unknown argument {other}")),
         }
     }
     Ok(args)
+}
+
+fn parse_workgroup(value: &str) -> Result<[u32; 3], String> {
+    let mut parts = value.split(',');
+    let mut next = |default: u32| -> Result<u32, String> {
+        match parts.next() {
+            Some(text) => text
+                .parse::<u32>()
+                .map_err(|error| format!("invalid workgroup size `{text}`: {error}")),
+            None => Ok(default),
+        }
+    };
+    let x = next(0)?;
+    let y = next(1)?;
+    let z = next(1)?;
+    if parts.next().is_some() {
+        return Err("workgroup size has more than three components".to_string());
+    }
+    if x == 0 || y == 0 || z == 0 {
+        return Err("workgroup size components must be positive".to_string());
+    }
+    Ok([x, y, z])
 }
 
 fn build(source: &Path, out: &Path, args: &Args) -> Result<(), String> {
@@ -82,7 +109,7 @@ fn build(source: &Path, out: &Path, args: &Args) -> Result<(), String> {
     compile(source, &args.opt, &ll)?;
     let ir =
         std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let hash = cache_key(&ir, &args.entry, &args.opt);
+    let hash = cache_key(&ir, &args.entry, &args.opt, args.workgroup);
     let stem = format!("{}-{hash:016x}", args.entry);
     let cached =
         out.join(format!("{stem}.wgsl")).is_file() && out.join(format!("{stem}.spv")).is_file();
@@ -90,7 +117,7 @@ fn build(source: &Path, out: &Path, args: &Args) -> Result<(), String> {
         None
     } else {
         Some(
-            ornis_llvm2gpu::translate_with_types(&ir, &[])
+            ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &[], args.workgroup)
                 .map_err(|error| format!("translate {}: {error}", source.display()))?,
         )
     };
@@ -133,12 +160,13 @@ fn compile(source: &Path, opt: &str, ll: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn cache_key(ir: &str, entry: &str, opt: &str) -> u64 {
+fn cache_key(ir: &str, entry: &str, opt: &str, workgroup: [u32; 3]) -> u64 {
     let mut hasher = DefaultHasher::new();
     CACHE_TAG.hash(&mut hasher);
     ir.hash(&mut hasher);
     entry.hash(&mut hasher);
     opt.hash(&mut hasher);
+    workgroup.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -187,6 +215,7 @@ mod tests {
         let args = parse(&[]).expect("defaults");
         assert_eq!(args.entry, DEFAULT_ENTRY);
         assert_eq!(args.opt, DEFAULT_OPT);
+        assert_eq!(args.workgroup, DEFAULT_WORKGROUP);
     }
 
     #[test]
@@ -200,18 +229,22 @@ mod tests {
             "3".to_string(),
             "--out".to_string(),
             "artifacts".to_string(),
+            "--workgroup".to_string(),
+            "32,2".to_string(),
         ];
         let args = parse(&raw).expect("overrides");
         assert_eq!(args.source, PathBuf::from("kernel.rs"));
         assert_eq!(args.opt, "3");
         assert_eq!(args.out, PathBuf::from("artifacts"));
+        assert_eq!(args.workgroup, [32, 2, 1]);
     }
 
     #[test]
     fn cache_key_tracks_ir_and_flags() {
-        let base = cache_key("ir", "cs_main", "s");
-        assert_eq!(base, cache_key("ir", "cs_main", "s"));
-        assert_ne!(base, cache_key("ir2", "cs_main", "s"));
-        assert_ne!(base, cache_key("ir", "cs_main", "3"));
+        let base = cache_key("ir", "cs_main", "s", [64, 1, 1]);
+        assert_eq!(base, cache_key("ir", "cs_main", "s", [64, 1, 1]));
+        assert_ne!(base, cache_key("ir2", "cs_main", "s", [64, 1, 1]));
+        assert_ne!(base, cache_key("ir", "cs_main", "3", [64, 1, 1]));
+        assert_ne!(base, cache_key("ir", "cs_main", "s", [32, 1, 1]));
     }
 }
