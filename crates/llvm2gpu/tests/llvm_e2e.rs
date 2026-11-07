@@ -110,6 +110,29 @@ start:
     );
 }
 
+#[test]
+fn uniform_f32_array_lowes_to_lane_struct() {
+    let ir = r#"
+declare float @uniform_read_f32(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+declare void @storage_write_f32(i32 noundef, i32 noundef, i32 noundef, float noundef)
+define dso_local void @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %v = call float @uniform_read_f32(i32 0, i32 0, i32 24, i32 %id)
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %v)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("uniform");
+    assert!(
+        translated.wgsl.contains("uniform_0_0_"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(translated.wgsl.contains("a["), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains(".v"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
+}
+
 const KERNEL_RS: &str = r#"
 #![allow(clippy::all)]
 #![no_std]
