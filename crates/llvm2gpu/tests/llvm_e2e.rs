@@ -61,6 +61,55 @@ start:
     assert!(translated.wgsl.contains("sqrt("), "{}", translated.wgsl);
 }
 
+#[test]
+fn storage_f32_copy_lowes_to_two_globals() {
+    let ir = r#"
+declare float @storage_read_f32(i32 noundef, i32 noundef, i32 noundef)
+declare void @storage_write_f32(i32 noundef, i32 noundef, i32 noundef, float noundef)
+define dso_local void @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %v = call float @storage_read_f32(i32 0, i32 1, i32 %id)
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %v)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("copy");
+    assert!(
+        translated.wgsl.contains("storage_0_1_"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("storage_0_2_"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
+fn storage_u32_and_atomic_lowes() {
+    let ir = r#"
+declare i32 @storage_read_u32(i32 noundef, i32 noundef, i32 noundef)
+declare i32 @storage_atomic_add_u32(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+declare void @storage_write_u32(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+define dso_local void @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %c = call i32 @storage_read_u32(i32 0, i32 4, i32 0)
+  %slot = call i32 @storage_atomic_add_u32(i32 0, i32 3, i32 1, i32 1)
+  call void @storage_write_u32(i32 0, i32 2, i32 %slot, i32 %c)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("u32/atomic");
+    assert!(translated.wgsl.contains("atomic"), "{}", translated.wgsl);
+    assert!(
+        translated.wgsl.contains("storage_0_2_"),
+        "{}",
+        translated.wgsl
+    );
+}
+
 const KERNEL_RS: &str = r#"
 #![allow(clippy::all)]
 #![no_std]

@@ -88,8 +88,12 @@ pub(super) enum Instr {
         callee: String,
         args: Vec<Operand>,
     },
+    /// `call void @name(...)` without assignment.
+    CallVoid { callee: String, args: Vec<Operand> },
     /// `ret float %a`
     Ret { a: Operand },
+    /// `ret void`
+    RetVoid,
 }
 
 /// One LLVM function definition.
@@ -168,7 +172,7 @@ fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
                 continue;
             }
             if let Some(instr) = parse_instr(inner)? {
-                if matches!(instr, Instr::Ret { .. }) {
+                if matches!(instr, Instr::Ret { .. } | Instr::RetVoid) {
                     saw_ret = true;
                 }
                 body.push(instr);
@@ -280,12 +284,16 @@ fn parse_ty(word: &str) -> Result<Ty, TranslateError> {
 }
 
 fn parse_ret(rhs: &str) -> Result<Instr, TranslateError> {
+    let rhs = rhs.trim();
+    if rhs == "void" {
+        return Ok(Instr::RetVoid);
+    }
     let mut parts = rhs.splitn(2, ' ');
     let ty = parts
         .next()
         .ok_or(TranslateError::Parse("ret without type".to_string()))?;
     if ty == "void" {
-        return Err(TranslateError::Unsupported);
+        return Ok(Instr::RetVoid);
     }
     let _ = parse_ty(ty)?;
     let rest = parts
@@ -297,6 +305,12 @@ fn parse_ret(rhs: &str) -> Result<Instr, TranslateError> {
 }
 
 fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
+    // `call void @name(...)` without assignment.
+    let stripped = line.strip_prefix("tail ").unwrap_or(line).trim();
+    if stripped.starts_with("call ") {
+        let (callee, args) = parse_call(stripped)?;
+        return Ok(Some(Instr::CallVoid { callee, args }));
+    }
     // `%dst = ...`
     let Some((lhs, rhs)) = line.split_once('=') else {
         // Non-assignment lines: reject stores/loads/traces.
