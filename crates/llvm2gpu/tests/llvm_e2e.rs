@@ -62,6 +62,23 @@ start:
 }
 
 #[test]
+fn dot_and_length_via_compose() {
+    let ir = r#"
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %_4 = uitofp i32 %id to float
+  %d = call float @gpu_dot3(float %_4, float %_4, float %_4, float %_4, float %_4, float %_4)
+  %l = call float @gpu_length3_xyz(float %_4, float %_4, float %_4)
+  %s = fadd float %d, %l
+  ret float %s
+}
+"#;
+    let translated = translate(ir).expect("dot/length");
+    assert!(translated.wgsl.contains("dot("), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("length("), "{}", translated.wgsl);
+}
+
+#[test]
 fn storage_f32_copy_lowes_to_two_globals() {
     let ir = r#"
 declare float @storage_read_f32(i32 noundef, i32 noundef, i32 noundef)
