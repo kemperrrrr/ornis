@@ -48,6 +48,7 @@ proptest = "1"
 wgpu = "30"
 glam = "0.34"
 ornis-shader-lang = { path = "../shader-lang", version = "0.1.0" }
+ornis-llvm2gpu = { path = "../llvm2gpu", version = "0.1.0" }
 ornis-wasm2gpu-testkit = { path = "../wasm2gpu-testkit", version = "0.1.0" }
 criterion = { version = "0.8", features = ["rayon"] }
 # The in-crate GPU gates block on the headless bootstrap; the poller is
@@ -80,6 +81,11 @@ required-features = ["test-util"]
 
 [[bench]]
 name = "wasm2gpu_skin_ab"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "llvm2gpu_cull_ab"
 harness = false
 required-features = ["test-util"]
 

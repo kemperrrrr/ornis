@@ -1361,6 +1361,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if callee.contains("uniform_field_vec4_component_f32") {
+            return self.uniform_field_vec4_component(out, args);
+        }
         if callee.contains("uniform_field_f32") {
             return self.uniform_field(out, args, ornis_gpu_abi::TYPE_TAG_F32);
         }
@@ -1586,6 +1589,49 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let base = self.expr(out, naga::Expression::GlobalVariable(global));
         let pointer = self.expr(out, naga::Expression::AccessIndex { base, index: field });
         Ok(self.expr(out, naga::Expression::Load { pointer }))
+    }
+
+    /// `uniform_field_vec4_component_f32(group, binding, sid, field, component)`.
+    fn uniform_field_vec4_component(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != 5 {
+            return Err(TranslateError::Unsupported);
+        }
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let sid = const_u32(&args[2])?;
+        let field = const_u32(&args[3])?;
+        let component = const_u32(&args[4])?;
+        let tag = self
+            .builders
+            .structs
+            .get(sid as usize)
+            .and_then(|tags| tags.get(field as usize))
+            .copied()
+            .ok_or_else(|| {
+                TranslateError::UnsupportedType(format!(
+                    "uniform field {field} of struct {sid} is not declared"
+                ))
+            })?;
+        if tag != ornis_gpu_abi::TYPE_TAG_VEC4 {
+            return Err(TranslateError::UnsupportedType(format!(
+                "uniform field {field} of struct {sid} is not a vec4"
+            )));
+        }
+        let global = self.builders.uniform_struct_global(group, binding, sid)?;
+        let base = self.expr(out, naga::Expression::GlobalVariable(global));
+        let vector = self.expr(out, naga::Expression::AccessIndex { base, index: field });
+        let lane = self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: vector,
+                index: component,
+            },
+        );
+        Ok(self.expr(out, naga::Expression::Load { pointer: lane }))
     }
 
     fn call_void(

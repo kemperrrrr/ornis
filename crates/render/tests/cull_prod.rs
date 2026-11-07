@@ -17,6 +17,8 @@ use ornis_wasm2gpu_testkit::cull::{
 use ornis_wasm2gpu_testkit::{
     device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer,
 };
+use std::path::Path;
+use std::process::Command;
 
 /// Production object-record stride, derived from the Rust ABI type.
 const OBJECT_BYTES: usize = std::mem::size_of::<PerObjectGpu>();
@@ -88,21 +90,39 @@ fn cull_kernel_matches_the_production_wgsl() {
 /// Dispatch the shipped kernel once and read back the compacted set:
 /// `material_index` of every entry below the atomic count, sorted.
 fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
+    run_cull(
+        device,
+        queue,
+        "production cull",
+        CULL_COMPUTE_WGSL,
+        "cull_instances",
+    )
+}
+
+/// Dispatch any cull WGSL with the shipped compaction bindings and read
+/// back the sorted `material_index` set plus the atomic count.
+fn run_cull(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    wgsl: &str,
+    entry_point: &str,
+) -> (Vec<u32>, u32) {
     let bgl = production_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("production cull"),
-        source: wgpu::ShaderSource::Wgsl(CULL_COMPUTE_WGSL.into()),
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("production cull"),
+        label: Some(label),
         bind_group_layouts: &[Some(&bgl)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("production cull"),
+        label: Some(label),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: Some("cull_instances"),
+        entry_point: Some(entry_point),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -129,6 +149,7 @@ fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32)
             entry(1, &src),
             entry(2, &dst),
             entry(3, &args),
+            entry(4, &src),
         ],
     });
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -179,6 +200,7 @@ fn production_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
             buffer_entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
             buffer_entry(2, mutable),
             buffer_entry(3, mutable),
+            buffer_entry(4, wgpu::BufferBindingType::Storage { read_only: true }),
         ],
     })
 }
@@ -257,4 +279,73 @@ fn read_bytes(
     encoder.copy_buffer_to_buffer(src, 0, &read, 0, size);
     queue.submit([encoder.finish()]);
     map_bytes(device, &read)
+}
+
+/// Compile the no_std cull kernel with stable rustc and translate it.
+///
+/// `Ok(None)` means the wasm32 target is unavailable; a translation error
+/// is a test failure, not a skip.
+fn llvm2gpu_cull_wgsl() -> Result<Option<String>, String> {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gpu-shaders/src/lib.rs");
+    let dir = std::env::temp_dir().join(format!("ornis-llvm2gpu-cull-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let ll = dir.join("cull.ll");
+    let status = Command::new("rustc")
+        .args([
+            "--edition=2024",
+            "--crate-type=lib",
+            "--target",
+            "wasm32-unknown-unknown",
+            "-C",
+            "opt-level=s",
+            "-C",
+            "panic=abort",
+            "-C",
+            "target-cpu=mvp",
+            "--emit=llvm-ir",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(&ll)
+        .status()
+        .map_err(|error| format!("spawn rustc: {error}"))?;
+    if !status.success() {
+        eprintln!("llvm2gpu cull: SKIPPED (wasm32 target missing)");
+        return Ok(None);
+    }
+    let ir =
+        std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
+    let tags: &[u8] = &[6, 6, 6, 6, 6, 6, 2];
+    let translated = ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &[tags], [64, 1, 1])
+        .map_err(|error| format!("translate: {error}"))?;
+    Ok(Some(translated.wgsl))
+}
+
+#[test]
+fn llvm2gpu_cull_matches_production() {
+    let wgsl = match llvm2gpu_cull_wgsl() {
+        Ok(Some(wgsl)) => wgsl,
+        Ok(None) => return,
+        Err(error) => panic!("{error}"),
+    };
+    let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
+        .filter(|slot| EXPECTED[*slot as usize] == 1)
+        .collect();
+    match device() {
+        Some((device, queue)) => {
+            let (prod_visible, prod_count) = run_production(&device, &queue);
+            let (llvm_visible, llvm_count) =
+                run_cull(&device, &queue, "llvm2gpu cull", &wgsl, "cs_main");
+            assert_eq!(llvm_count, prod_count, "atomic count");
+            assert_eq!(llvm_visible, prod_visible, "compacted set");
+            assert_eq!(llvm_visible, expected, "expected set");
+            eprintln!(
+                "llvm2gpu cull parity: production {prod_visible:?} == llvm2gpu {llvm_visible:?}"
+            );
+        }
+        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+            panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
+        }
+        None => eprintln!("llvm2gpu_cull_matches_production: no wgpu adapter — skipped"),
+    }
 }

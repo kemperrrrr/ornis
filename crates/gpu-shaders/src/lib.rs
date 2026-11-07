@@ -14,20 +14,24 @@
 const RECORD_CHUNKS: u32 = 13;
 /// Group-0 binding of the packed `CullParams` uniform.
 const PARAMS_BINDING: i32 = 0;
+/// `ornis_gpu.types` struct id of `CullParams`.
+const PARAMS_SID: i32 = 0;
+/// Field index of the `u32` count in `CullParams` (after six vec4 planes).
+const COUNT_FIELD: i32 = 6;
 /// Group-0 read-only source record binding.
 const SRC_BINDING: i32 = 1;
 /// Group-0 read-write destination record binding.
 const DST_BINDING: i32 = 2;
 /// Group-0 five-word indirect-args binding.
 const ARGS_BINDING: i32 = 3;
-/// Padded lane count of `CullParams`: six `vec4` planes plus the count lane.
-const PARAM_LANES: i32 = 25;
-/// Uniform lane that stores the active source count bits.
-const COUNT_LANE: i32 = 24;
+/// Group-0 read-only scalar `f32` view of the same source buffer.
+const MATH_BINDING: i32 = 4;
+/// `f32` words in one source record (the 52-word `PerObject` layout).
+const RECORD_WORDS: u32 = 52;
 
 unsafe extern "C" {
     fn storage_len_u32x4(group: i32, binding: i32) -> i32;
-    fn storage_read_u32_lane(group: i32, binding: i32, index: i32, lane: i32) -> i32;
+    fn storage_read_f32(group: i32, binding: i32, index: i32) -> f32;
     fn storage_copy_u32x4(
         src_group: i32,
         src_binding: i32,
@@ -37,45 +41,45 @@ unsafe extern "C" {
         dst_index: i32,
     );
     fn storage_atomic_add_u32(group: i32, binding: i32, index: i32, value: i32) -> i32;
-    fn uniform_read_f32(group: i32, binding: i32, len: i32, index: i32) -> f32;
+    fn uniform_field_vec4_component_f32(
+        group: i32,
+        binding: i32,
+        sid: i32,
+        field: i32,
+        component: i32,
+    ) -> f32;
+    fn uniform_field_u32(group: i32, binding: i32, sid: i32, field: i32) -> u32;
     fn gpu_length3_xyz(x: f32, y: f32, z: f32) -> f32;
 }
 
-/// One little-endian word of a source record.
-macro_rules! src_word {
+/// One `f32` word of a source record through the read-only scalar view.
+macro_rules! src_f32 {
     ($record:expr, $word:literal) => {{
-        let index = $record * RECORD_CHUNKS + $word / 4;
-        let lane = $word % 4;
+        let index = $record * RECORD_WORDS + $word;
         // SAFETY: the caller guards `$record` against the source length; the
-        // literal word picks a lane inside that record.
-        unsafe { storage_read_u32_lane(0, SRC_BINDING, index as i32, lane as i32) as u32 }
+        // literal word stays inside the 52-word record.
+        unsafe { storage_read_f32(0, MATH_BINDING, index as i32) }
     }};
 }
 
-/// One `f32` word of a source record (bit-preserving).
-macro_rules! src_f32 {
-    ($record:expr, $word:literal) => {
-        f32::from_bits(src_word!($record, $word))
-    };
-}
-
-/// One lane of the padded parameter uniform.
-macro_rules! param {
-    ($lane:expr) => {
-        // SAFETY: the lane index is a compile-time constant inside the
-        // 25-lane `CullParams` binding.
-        unsafe { uniform_read_f32(0, PARAMS_BINDING, PARAM_LANES, $lane) }
+/// One component of a `vec4` plane field in `CullParams`.
+macro_rules! plane_component {
+    ($plane:expr, $component:expr) => {
+        // SAFETY: both indices are compile-time constants inside the
+        // declared `CullParams` metadata.
+        unsafe {
+            uniform_field_vec4_component_f32(0, PARAMS_BINDING, PARAMS_SID, $plane, $component)
+        }
     };
 }
 
 /// One plane test; `$plane` is a literal so the uniform indices are constants.
 macro_rules! plane_test {
     ($plane:literal, $cx:expr, $cy:expr, $cz:expr, $radius:expr) => {{
-        let at = $plane * 4;
-        let px = param!(at);
-        let py = param!(at + 1);
-        let pz = param!(at + 2);
-        let pw = param!(at + 3);
+        let px = plane_component!($plane, 0);
+        let py = plane_component!($plane, 1);
+        let pz = plane_component!($plane, 2);
+        let pw = plane_component!($plane, 3);
         if px * $cx + py * $cy + pz * $cz + pw < -$radius {
             return false;
         }
@@ -137,7 +141,8 @@ pub extern "C" fn cs_main(id: u32) {
     let src_len = unsafe { storage_len_u32x4(0, SRC_BINDING) } as u32 / RECORD_CHUNKS;
     // SAFETY: same as above for the destination binding.
     let dst_len = unsafe { storage_len_u32x4(0, DST_BINDING) } as u32 / RECORD_CHUNKS;
-    let count = param!(COUNT_LANE).to_bits();
+    // SAFETY: field 6 is the u32 count in the declared CullParams metadata.
+    let count = unsafe { uniform_field_u32(0, PARAMS_BINDING, PARAMS_SID, COUNT_FIELD) };
     if id >= count {
         return;
     }
