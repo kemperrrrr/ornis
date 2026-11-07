@@ -8,6 +8,21 @@
 > **2026-10-18:** rust-gpu пересмотрен — равный кандидат, спайк C
 > (§3.1.3, §4); добавлен вариант «LLVM IR → LLVM SPIR-V backend → naga»
 > (§3.1.2) и SPIR-V как общая граница с харнессом сравнения (§3.1.4).
+>
+> **2026-11-07 (llvm2gpu, спайк B):** крейт `crates/llvm2gpu` переводит
+> LLVM IR стабильного rustc в naga/WGSL/SPIR-V. Закрыты: scalar-подмножество
+> (`SROA`, `select`, `sqrt`/`sin`), ABI storage (`storage_*`,
+> `storage_atomic_add_u32`), uniform-массивы (`uniform_read_f32`),
+> **structured control flow** (`phi` через локальные переменные, diamond
+> `if` с postdominator-merge, natural `loop` с `continue`/`break`) и
+> **uniform-поля** (`uniform_field_f32/u32` по таблице `ornis_gpu.types`,
+> раскладка `place_fields`). Vec3 в uniform-структуре получает WGSL-offset
+> 12/align 16; тест пинит offsets `[0, 12, 16]` и span 32. Динамические
+> циклы собираются с `-C opt-level=s`: `opt-level=3` разворачивает их в CFG
+> шире структурного подмножества (вложенные циклы/несколько head-блоков
+> пока отвергаются). Не сделано: билдер `xtask build-shaders` (§3.1.3,
+> спайк C-инфраструктура), миграция `cull`/`gtao`, readonly storage и
+> nested loops/структуры.
 
 Статус на 2026-09-10: 11 stage-entry пишутся на Rust через `#[stage]`
 и собираются в WGSL.base. Свободных идентификаторов в entry нет;

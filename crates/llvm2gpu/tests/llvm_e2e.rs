@@ -1,7 +1,22 @@
 //! E2E for the LLVM IR spike: embedded IR, a real rustc build, and GPU parity.
-use ornis_llvm2gpu::translate;
+use ornis_llvm2gpu::{translate, translate_with_types};
 use std::path::PathBuf;
 use std::process::Command;
+
+const UNIFORM_FIELD_IR: &str = r#"
+declare float @uniform_field_f32(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+declare i32 @uniform_field_u32(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+declare void @storage_write_f32(i32 noundef, i32 noundef, i32 noundef, float noundef)
+declare void @storage_write_u32(i32 noundef, i32 noundef, i32 noundef, i32 noundef)
+define dso_local void @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %f = call float @uniform_field_f32(i32 0, i32 0, i32 0, i32 1)
+  %u = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 2)
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %f)
+  call void @storage_write_u32(i32 0, i32 3, i32 %id, i32 %u)
+  ret void
+}
+"#;
 
 const SCALAR_IR: &str = r#"
 ; ModuleID = 'toy'
@@ -35,16 +50,77 @@ fn scalar_subset_lowesr_and_validates() {
 }
 
 #[test]
-fn loops_are_rejected_not_mistranslated() {
-    let phi_ir = r#"
+fn infinite_loop_is_rejected_not_mistranslated() {
+    let ir = r#"
 define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
 start:
-  %x = phi float [ 0.000000e+00, %start ]
-  br label %start
-  ret float %x
+  br label %loop
+loop:
+  br label %loop
+exit:
+  ret float 0.000000e+00
 }
 "#;
-    assert!(translate(phi_ir).is_err());
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn diamond_if_with_phi_lowers() {
+    let ir = r#"
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %x = uitofp i32 %id to float
+  %c = fcmp olt float %x, 5.000000e+00
+  br i1 %c, label %then, label %otherwise
+
+then:
+  %a = fadd float %x, 1.000000e+00
+  br label %merge
+
+otherwise:
+  %b = fsub float %x, 1.000000e+00
+  br label %merge
+
+merge:
+  %p = phi float [ %a, %then ], [ %b, %otherwise ]
+  ret float %p
+}
+"#;
+    let translated = translate(ir).expect("diamond");
+    assert!(translated.wgsl.contains("if "), "{}", translated.wgsl);
+    assert!(!translated.wgsl.contains("loop {"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
+fn while_loop_with_phi_lowers_to_naga_loop() {
+    let ir = r#"
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %x0 = uitofp i32 %id to float
+  %n = and i32 %id, 7
+  br label %header
+
+header:
+  %x = phi float [ %x0, %start ], [ %next, %body ]
+  %i = phi i32 [ 0, %start ], [ %i.next, %body ]
+  %c = icmp ult i32 %i, %n
+  br i1 %c, label %body, label %exit
+
+body:
+  %m = fmul float %x, 1.500000e+00
+  %next = fadd float %m, 2.000000e+00
+  %i.next = add nuw i32 %i, 1
+  br label %header
+
+exit:
+  %result = phi float [ %x, %header ]
+  ret float %result
+}
+"#;
+    let translated = translate(ir).expect("while loop");
+    assert!(translated.wgsl.contains("loop {"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
 }
 
 #[test]
@@ -150,6 +226,36 @@ start:
     assert!(!translated.compute_spirv.is_empty());
 }
 
+#[test]
+fn uniform_field_uses_place_fields_layout() {
+    use ornis_gpu_abi::{TYPE_TAG_F32, TYPE_TAG_U32, TYPE_TAG_VEC3};
+    // vec3 at 0, f32 at 12, u32 at 16 (uniform span 32).
+    let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
+    let translated = translate_with_types(UNIFORM_FIELD_IR, structs).expect("uniform fields");
+    assert!(
+        translated.wgsl.contains("uniform_struct_0_0_"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(translated.wgsl.contains("vec3<f32>"), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("f1_: f32"), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("f2_: u32"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+#[test]
+fn uniform_field_requires_types_metadata() {
+    assert!(translate(UNIFORM_FIELD_IR).is_err());
+}
+
+#[test]
+fn uniform_field_rejects_type_mismatch() {
+    use ornis_gpu_abi::TYPE_TAG_VEC3;
+    // Field 1 is declared as vec3 but read through uniform_field_f32.
+    let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_VEC3, TYPE_TAG_VEC3]];
+    assert!(translate_with_types(UNIFORM_FIELD_IR, structs).is_err());
+}
+
 const KERNEL_RS: &str = r#"
 #![allow(clippy::all)]
 #![no_std]
@@ -172,6 +278,12 @@ pub extern "C" fn cs_main(id: u32) -> f32 {
 /// Compile a `no_std` kernel with `rustc --emit=llvm-ir`; skip when the
 /// wasm32 target is missing (CI without the target still passes).
 fn compile_ir(source: &str) -> Option<String> {
+    compile_ir_opt(source, "3")
+}
+
+/// Same as [`compile_ir`] with an explicit `opt-level`. `s` keeps dynamic
+/// loops structured instead of fully unrolling them at `opt-level=3`.
+fn compile_ir_opt(source: &str, opt: &str) -> Option<String> {
     let dir = std::env::temp_dir().join(format!(
         "llvm2gpu-{}-{}",
         std::process::id(),
@@ -189,7 +301,7 @@ fn compile_ir(source: &str) -> Option<String> {
             "--target",
             "wasm32-unknown-unknown",
             "-C",
-            "opt-level=3",
+            &format!("opt-level={opt}"),
             "-C",
             "panic=abort",
             "-C",
@@ -230,6 +342,38 @@ fn rustc_to_llvm_ir_to_wgsl() {
     };
     let translated = translate(&ir).expect("translate rustc output");
     assert!(translated.wgsl.contains("@compute"), "{}", translated.wgsl);
+    assert!(!translated.compute_spirv.is_empty());
+}
+
+const LOOP_KERNEL_RS: &str = r#"
+#![allow(clippy::all)]
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" { fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32; }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut x = id as f32;
+    let mut i = 0u32;
+    let n = unsafe { storage_read_u32(0, 4, 0) };
+    while i < n {
+        x = x * 1.5 + 2.0;
+        i += 1;
+    }
+    x
+}
+"#;
+
+#[test]
+fn rustc_dynamic_loop_to_wgsl() {
+    let Some(ir) = compile_ir_opt(LOOP_KERNEL_RS, "s") else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("translate dynamic loop");
+    assert!(translated.wgsl.contains("loop {"), "{}", translated.wgsl);
     assert!(!translated.compute_spirv.is_empty());
 }
 
