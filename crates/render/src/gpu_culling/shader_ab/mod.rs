@@ -1,5 +1,5 @@
 //! Measurements for the wasm2gpu `cull` kernel against the shipped
-//! [`super::CULL_COMPUTE_WGSL`] pass (issue #201).
+//! [`super::LEGACY_CULL_COMPUTE_WGSL`] pass (issue #201).
 //!
 //! The frame path does not include this module. Unit tests cover the
 //! scene packing, the quartile summary, and the naga IR walk. The GPU

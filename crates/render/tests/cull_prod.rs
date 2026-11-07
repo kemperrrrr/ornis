@@ -1,24 +1,22 @@
-//! A/B the lowered `cull` kernel against the shipped production WGSL.
+//! Parity of the generated llvm2gpu cull kernel with the legacy WGSL.
 //!
-//! [`CULL_COMPUTE_WGSL`] (`render/src/gpu_culling.rs`) compacts
-//! `PerObject` copies through `atomicAdd` and a `count` guard. This test
-//! feeds it the same frustum and the same eight spheres the wasm2gpu
-//! kernel reads — encoded as model matrices, so `instance_sphere` reads
-//! the center from column 3 and the radius from the column lengths — and
-//! compares the visible object sets the two shaders produce. Compaction
-//! order is scheduler-dependent, so the contract is a sorted set of
-//! `material_index` values plus the atomic count, not byte order.
+//! [`CULL_COMPUTE_WGSL`] is the production artifact generated at build
+//! time from `crates/gpu-shaders`; [`LEGACY_CULL_COMPUTE_WGSL`] is the
+//! hand-written oracle kept test-only until the gates pass. Both read the
+//! same frustum and the same eight spheres encoded as `PerObject` model
+//! matrices, so `instance_sphere` reads the center from column 3 and the
+//! radius from the column lengths. Compaction order is scheduler
+//! dependent, so the contract is a sorted set of `material_index` values
+//! plus the atomic count, not byte order.
 
-use ornis_render::gpu_culling::{CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD};
-use ornis_render::renderer::PerObjectGpu;
-use ornis_wasm2gpu_testkit::cull::{
-    ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
+use ornis_render::gpu_culling::{
+    CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD, LEGACY_CULL_COMPUTE_WGSL,
 };
+use ornis_render::renderer::PerObjectGpu;
+use ornis_wasm2gpu_testkit::cull::{ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry};
 use ornis_wasm2gpu_testkit::{
     device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer,
 };
-use std::path::Path;
-use std::process::Command;
 
 /// Production object-record stride, derived from the Rust ABI type.
 const OBJECT_BYTES: usize = std::mem::size_of::<PerObjectGpu>();
@@ -39,62 +37,14 @@ const TRANSLATION_OFFSET: u32 = MODEL_OFFSET + 3 * MODEL_COLUMN_BYTES;
 /// `args` holds `array<atomic<u32>, 5>`; word 1 is the compacted count.
 const ARGS_WORDS: usize = 5;
 
-/// The translated kernel and the production kernel must cull the same
-/// objects from the same bytes — the review's "A/B against the real
-/// shader" instead of a CPU re-implementation of the formula.
-#[test]
-fn cull_kernel_matches_the_production_wgsl() {
-    let nan_radius_slot = SPHERES
-        .iter()
-        .position(|sphere| sphere[3].is_nan())
-        .expect("test scene has a NaN radius");
-    assert_eq!(
-        EXPECTED[nan_radius_slot], 1,
-        "a NaN radius must fail open and remain visible"
-    );
-    let wgsl = lowered_kernel();
-    let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
-        .filter(|slot| EXPECTED[*slot as usize] == 1)
-        .collect();
-    match device() {
-        Some((device, queue)) => {
-            let (flags, _) = run(&device, &queue, &wgsl);
-            let wasm_visible: Vec<u32> = flags
-                .iter()
-                .enumerate()
-                .filter(|(_, flag)| **flag == 1)
-                .map(|(slot, _)| slot as u32)
-                .collect();
-            let (prod_visible, prod_count) = run_production(&device, &queue);
-            let nan_slot = nan_radius_slot as u32;
-            assert!(
-                wasm_visible.contains(&nan_slot),
-                "wasm2gpu NaN radius fails open"
-            );
-            assert!(
-                prod_visible.contains(&nan_slot),
-                "production NaN radius fails open"
-            );
-            assert_eq!(wasm_visible, expected, "wasm set vs EXPECTED");
-            assert_eq!(prod_visible, expected, "production set vs EXPECTED");
-            assert_eq!(prod_count as usize, expected.len(), "args count");
-            eprintln!("cull A/B: production {prod_visible:?} == wasm2gpu {wasm_visible:?}");
-        }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
-            panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
-        }
-        None => eprintln!("cull_kernel_matches_the_production_wgsl: no wgpu adapter — skipped"),
-    }
-}
-
-/// Dispatch the shipped kernel once and read back the compacted set:
+/// Dispatch the legacy oracle once and read back the compacted set:
 /// `material_index` of every entry below the atomic count, sorted.
-fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
+fn run_legacy(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
     run_cull(
         device,
         queue,
-        "production cull",
-        CULL_COMPUTE_WGSL,
+        "legacy cull",
+        LEGACY_CULL_COMPUTE_WGSL,
         "cull_instances",
     )
 }
@@ -281,71 +231,44 @@ fn read_bytes(
     map_bytes(device, &read)
 }
 
-/// Compile the no_std cull kernel with stable rustc and translate it.
-///
-/// `Ok(None)` means the wasm32 target is unavailable; a translation error
-/// is a test failure, not a skip.
-fn llvm2gpu_cull_wgsl() -> Result<Option<String>, String> {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gpu-shaders/src/lib.rs");
-    let dir = std::env::temp_dir().join(format!("ornis-llvm2gpu-cull-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    let ll = dir.join("cull.ll");
-    let status = Command::new("rustc")
-        .args([
-            "--edition=2024",
-            "--crate-type=lib",
-            "--target",
-            "wasm32-unknown-unknown",
-            "-C",
-            "opt-level=s",
-            "-C",
-            "panic=abort",
-            "-C",
-            "target-cpu=mvp",
-            "--emit=llvm-ir",
-        ])
-        .arg(&source)
-        .arg("-o")
-        .arg(&ll)
-        .status()
-        .map_err(|error| format!("spawn rustc: {error}"))?;
-    if !status.success() {
-        eprintln!("llvm2gpu cull: SKIPPED (wasm32 target missing)");
-        return Ok(None);
-    }
-    let ir =
-        std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let tags: &[u8] = &[6, 6, 6, 6, 6, 6, 2];
-    let translated = ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &[tags], [64, 1, 1])
-        .map_err(|error| format!("translate: {error}"))?;
-    Ok(Some(translated.wgsl))
-}
-
 #[test]
-fn llvm2gpu_cull_matches_production() {
-    let wgsl = match llvm2gpu_cull_wgsl() {
-        Ok(Some(wgsl)) => wgsl,
-        Ok(None) => return,
-        Err(error) => panic!("{error}"),
-    };
+fn llvm2gpu_cull_matches_legacy_oracle() {
+    let nan_radius_slot = SPHERES
+        .iter()
+        .position(|sphere| sphere[3].is_nan())
+        .expect("test scene has a NaN radius");
+    assert_eq!(
+        EXPECTED[nan_radius_slot], 1,
+        "a NaN radius must fail open and remain visible"
+    );
     let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
         .filter(|slot| EXPECTED[*slot as usize] == 1)
         .collect();
     match device() {
         Some((device, queue)) => {
-            let (prod_visible, prod_count) = run_production(&device, &queue);
-            let (llvm_visible, llvm_count) =
-                run_cull(&device, &queue, "llvm2gpu cull", &wgsl, "cs_main");
-            assert_eq!(llvm_count, prod_count, "atomic count");
-            assert_eq!(llvm_visible, prod_visible, "compacted set");
+            let (legacy_visible, legacy_count) = run_legacy(&device, &queue);
+            let (llvm_visible, llvm_count) = run_cull(
+                &device,
+                &queue,
+                "llvm2gpu cull",
+                CULL_COMPUTE_WGSL,
+                "cs_main",
+            );
+            assert_eq!(llvm_count, legacy_count, "atomic count");
+            assert_eq!(llvm_visible, legacy_visible, "compacted set");
             assert_eq!(llvm_visible, expected, "expected set");
+            let nan_slot = nan_radius_slot as u32;
+            assert!(
+                llvm_visible.contains(&nan_slot),
+                "llvm2gpu NaN radius fails open"
+            );
             eprintln!(
-                "llvm2gpu cull parity: production {prod_visible:?} == llvm2gpu {llvm_visible:?}"
+                "llvm2gpu cull parity: legacy {legacy_visible:?} == llvm2gpu {llvm_visible:?}"
             );
         }
         None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
             panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
         }
-        None => eprintln!("llvm2gpu_cull_matches_production: no wgpu adapter — skipped"),
+        None => eprintln!("llvm2gpu_cull_matches_legacy_oracle: no wgpu adapter — skipped"),
     }
 }

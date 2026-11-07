@@ -388,11 +388,19 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
     instance_count.div_ceil(CULL_WORKGROUP_SIZE)
 }
 
-/// WGSL compute pass compacting visible instances: one thread per source
-/// instance runs the same sphere-vs-six-planes test as
-/// [`compact_visible_indices`] (IEEE comparisons fail open on NaN, like
-/// the CPU path), claims a dense slot with `atomicAdd` on indirect-args
-/// word [`INSTANCE_COUNT_WORD`], and copies the full `PerObject` record.
+/// Production cull kernel, generated at build time from the `no_std`
+/// Rust source in `crates/gpu-shaders` through stable rustc LLVM IR and
+/// `ornis-llvm2gpu`.
+///
+/// The build script writes the WGSL into `OUT_DIR`; this `include_str!`
+/// keeps the shipped kernel and its Rust source from drifting.
+pub const CULL_COMPUTE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/cull.wgsl"));
+
+/// Hand-written WGSL oracle from the previous production path.
+///
+/// Test/bench only: the culler and the shipped renderer use
+/// [`CULL_COMPUTE_WGSL`]. Kept as the A/B reference until the llvm2gpu
+/// kernel has passed the parity and M1 gates, then removed.
 ///
 /// Bindings: `0` [`CullParams`] uniform, `1` source `PerObject` array
 /// (read), `2` dense destination (read-write), `3` five-word indirect
@@ -401,7 +409,7 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
 /// the [`crate::renderer::PerObjectGpu`] layout (three `mat4x4`, two `u32`
 /// fields, and two pad words) so the existing vertex stages index the
 /// compacted buffer unchanged.
-pub const CULL_COMPUTE_WGSL: &str = r#"
+pub const LEGACY_CULL_COMPUTE_WGSL: &str = r#"
 struct CullParams {
     planes: array<vec4<f32>, 6>,
     count: u32,
@@ -711,56 +719,24 @@ mod tests {
         assert_eq!(cull_workgroup_count(CULL_WORKGROUP_SIZE + 1), 2);
     }
 
-    fn assert_per_object_shader_layout(module: &naga::Module) {
-        let Some((_, ty)) = module
-            .types
-            .iter()
-            .find(|(_, ty)| ty.name.as_deref() == Some("PerObject"))
-        else {
-            panic!("cull shader must declare PerObject");
-        };
-        let naga::TypeInner::Struct { members, span } = &ty.inner else {
-            panic!("cull shader PerObject must be a struct");
-        };
-        let motion_valid_at = std::mem::offset_of!(PerObjectGpu, motion_valid);
-        let padding_at = motion_valid_at + std::mem::size_of::<u32>();
-        let expected = [
-            ("model", std::mem::offset_of!(PerObjectGpu, model)),
-            (
-                "normal_matrix",
-                std::mem::offset_of!(PerObjectGpu, normal_matrix),
-            ),
-            (
-                "previous_model",
-                std::mem::offset_of!(PerObjectGpu, previous_model),
-            ),
-            (
-                "material_index",
-                std::mem::offset_of!(PerObjectGpu, material_index),
-            ),
-            ("motion_valid", motion_valid_at),
-            ("pad0", padding_at),
-            ("pad1", padding_at + std::mem::size_of::<u32>()),
-        ];
-        assert_eq!(*span as usize, std::mem::size_of::<PerObjectGpu>());
-        assert_eq!(members.len(), expected.len());
-        for (member, (name, offset)) in members.iter().zip(expected) {
-            assert_eq!(member.name.as_deref(), Some(name));
-            assert_eq!(member.offset as usize, offset);
-        }
-    }
-
     #[test]
     fn compute_shader_validates_with_naga() {
         let module = naga::front::wgsl::parse_str(CULL_COMPUTE_WGSL)
             .expect("cull compute shader must parse");
-        assert_per_object_shader_layout(&module);
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
         )
         .validate(&module)
         .expect("cull compute shader must validate");
+        assert!(
+            CULL_COMPUTE_WGSL.contains("array<vec4<u32>>"),
+            "the llvm2gpu cull kernel keeps PerObject opaque and copies vec4 chunks"
+        );
+        assert!(CULL_COMPUTE_WGSL.contains("array<atomic<u32>>"));
+        assert!(CULL_COMPUTE_WGSL.contains("arrayLength"));
+        assert!(CULL_COMPUTE_WGSL.contains("@workgroup_size(64, 1, 1)"));
+        assert!(CULL_COMPUTE_WGSL.contains("fn cs_main"));
     }
 
     /// Adapter handle, or `None` on headless hosts without a GPU — the
