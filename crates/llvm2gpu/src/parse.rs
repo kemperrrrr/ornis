@@ -1,11 +1,12 @@
 //! Textual LLVM IR -> small AST covering the spike-B subset.
 //!
-//! The parser only needs the shape stable `rustc` emits for a scalar
-//! compute kernel after `SROA` at `opt-level=3`: one `define` with a few
-//! operations and a `ret`. Anything with control flow (`phi`, `br`,
-//! `load`, `store`, `getelementptr`, trap/assume calls) parses but is
-//! rejected by the lowerer with `Unsupported`, so a failed spike never
-//! silently becomes a wrong shader.
+//! The parser accepts the shape stable `rustc` emits for a scalar compute
+//! kernel after `SROA`: basic blocks, `phi`, conditional/unconditional
+//! branches, scalar arithmetic/comparisons, and `ornis_gpu` ABI calls.
+//! `phi`/`br` are structured by the lowerer into Naga `If`/`Loop`; linear
+//! memory (`load`, `store`, `getelementptr`) and unsupported opcodes are
+//! rejected with `Unsupported`, so an unknown shape never silently becomes
+//! a wrong shader.
 
 use crate::error::TranslateError;
 
@@ -59,6 +60,26 @@ pub(super) enum Instr {
     Sub { dst: Name, a: Operand, b: Operand },
     /// `mul i32 %a, %b`
     Mul { dst: Name, a: Operand, b: Operand },
+    /// `udiv i32 %a, %b`
+    UDiv { dst: Name, a: Operand, b: Operand },
+    /// `sdiv i32 %a, %b`
+    SDiv { dst: Name, a: Operand, b: Operand },
+    /// `urem i32 %a, %b`
+    URem { dst: Name, a: Operand, b: Operand },
+    /// `srem i32 %a, %b`
+    SRem { dst: Name, a: Operand, b: Operand },
+    /// `and i32 %a, %b`
+    And { dst: Name, a: Operand, b: Operand },
+    /// `or i32 %a, %b`
+    Or { dst: Name, a: Operand, b: Operand },
+    /// `xor i32 %a, %b`
+    Xor { dst: Name, a: Operand, b: Operand },
+    /// `shl i32 %a, %b`
+    Shl { dst: Name, a: Operand, b: Operand },
+    /// `lshr i32 %a, %b`
+    LShr { dst: Name, a: Operand, b: Operand },
+    /// `ashr i32 %a, %b`
+    AShr { dst: Name, a: Operand, b: Operand },
     /// `fcmp <pred> float %a, %b`
     Fcmp {
         dst: Name,
@@ -90,10 +111,43 @@ pub(super) enum Instr {
     },
     /// `call void @name(...)` without assignment.
     CallVoid { callee: String, args: Vec<Operand> },
-    /// `ret float %a`
+    /// `ret float %a` (kept only for single-block compatibility; actual
+    /// function exit is the block terminator)
     Ret { a: Operand },
     /// `ret void`
     RetVoid,
+    /// `%x = phi float [ %a, %pred1 ], [ %b, %pred2 ]`
+    Phi {
+        dst: Name,
+        ty: Ty,
+        incoming: Vec<(Operand, String)>,
+    },
+}
+
+/// Block terminator.
+#[derive(Clone, Debug)]
+pub(super) enum Terminator {
+    /// Return with optional scalar value.
+    Ret(Option<Operand>),
+    /// Unconditional branch to a label.
+    BrUncond(String),
+    /// Conditional branch.
+    BrCond {
+        cond: Operand,
+        true_label: String,
+        false_label: String,
+    },
+}
+
+/// One basic block.
+#[derive(Clone, Debug)]
+pub(super) struct BasicBlock {
+    /// Label without the trailing `:` (e.g. `start`, `bb2`).
+    pub(super) label: String,
+    /// Instructions before the terminator (including `phi` at the head).
+    pub(super) instrs: Vec<Instr>,
+    /// Terminator; `None` until closed (fallthrough to next block).
+    pub(super) term: Terminator,
 }
 
 /// One LLVM function definition.
@@ -105,8 +159,8 @@ pub(super) struct LlvmFunc {
     pub(super) ret_ty: Ty,
     /// Parameters: (type, name without `%`).
     pub(super) params: Vec<(Ty, Name)>,
-    /// Body instructions in order, no labels.
-    pub(super) body: Vec<Instr>,
+    /// Basic blocks in declaration order.
+    pub(super) blocks: Vec<BasicBlock>,
 }
 
 /// Parse the whole textual IR, returning the first defined function whose
@@ -142,41 +196,62 @@ fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
             }
             continue;
         }
-        let mut body = Vec::new();
+        let mut blocks: Vec<BasicBlock> = Vec::new();
+        let mut cur_label = "start".to_string();
+        let mut cur_instrs: Vec<Instr> = Vec::new();
+        let mut cur_term: Option<Terminator> = None;
         let mut saw_ret = false;
         loop {
             let Some(inner) = lines.next() else {
                 return Err(TranslateError::Parse("unterminated function".to_string()));
             };
-            let inner = inner.trim();
+            // Strip an inline comment (`; preds = %a, %b`) before parsing.
+            let inner = inner.split(';').next().unwrap_or("").trim();
             if inner == "}" {
                 break;
             }
-            if inner.is_empty() || inner.starts_with(';') {
+            if inner.is_empty() {
                 continue;
             }
             // A basic-block label.
-            if inner.ends_with(':') && !inner.contains('=') && !inner.contains(" preds") {
+            if inner.ends_with(':') && !inner.contains('=') {
+                // Close previous block if needed.
+                if cur_term.is_some() {
+                    // previous block already terminated; start new
+                    blocks.push(BasicBlock {
+                        label: cur_label.clone(),
+                        instrs: std::mem::take(&mut cur_instrs),
+                        term: cur_term.take().unwrap(),
+                    });
+                } else if !cur_instrs.is_empty() {
+                    // Fallthrough without explicit terminator: synthesize ret.
+                    return Err(TranslateError::Unsupported);
+                }
+                cur_label = inner.trim_end_matches(':').to_string();
                 continue;
             }
-            if inner.starts_with("phi ") || inner.contains(" = phi ") {
-                return Err(TranslateError::Unsupported);
-            }
-            if inner.starts_with("br ") || inner == "unreachable" || inner.starts_with("switch") {
-                return Err(TranslateError::Unsupported);
-            }
-            if inner.starts_with("ret ") {
-                let (_, rhs) = inner.split_once("ret ").unwrap_or(("", ""));
-                body.push(parse_ret(rhs)?);
-                saw_ret = true;
+            if let Some(term) = parse_term(inner)? {
+                cur_term = Some(term);
+                saw_ret |= matches!(cur_term, Some(Terminator::Ret(_)));
+                // Terminator closes the block; the next label begins a new one.
                 continue;
             }
             if let Some(instr) = parse_instr(inner)? {
-                if matches!(instr, Instr::Ret { .. } | Instr::RetVoid) {
-                    saw_ret = true;
-                }
-                body.push(instr);
+                cur_instrs.push(instr);
             }
+        }
+        // Close the last block.
+        if let Some(term) = cur_term.take() {
+            saw_ret |= matches!(term, Terminator::Ret(_));
+            blocks.push(BasicBlock {
+                label: cur_label,
+                instrs: cur_instrs,
+                term,
+            });
+        } else if !cur_instrs.is_empty() {
+            return Err(TranslateError::Parse(
+                "block without terminator".to_string(),
+            ));
         }
         if !saw_ret {
             return Err(TranslateError::Parse("function without ret".to_string()));
@@ -185,7 +260,7 @@ fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
             name,
             ret_ty,
             params,
-            body,
+            blocks,
         });
     }
     if out.is_empty() {
@@ -304,6 +379,82 @@ fn parse_ret(rhs: &str) -> Result<Instr, TranslateError> {
     })
 }
 
+/// Parse a terminator line: `ret ...`, `br label ...`, `br i1 ..., label ..., label ...`.
+fn parse_term(line: &str) -> Result<Option<Terminator>, TranslateError> {
+    let trimmed = line.trim();
+    if let Some(rhs) = trimmed.strip_prefix("ret ") {
+        let instr = parse_ret(rhs)?;
+        let value = match instr {
+            Instr::Ret { a } => Some(a),
+            Instr::RetVoid => None,
+            _ => return Err(TranslateError::Unsupported),
+        };
+        return Ok(Some(Terminator::Ret(value)));
+    }
+    if let Some(rest) = trimmed.strip_prefix("br ") {
+        let rest = rest.trim();
+        // `br label %merge`
+        if let Some(label) = rest.strip_prefix("label %") {
+            let label = label.trim().trim_matches(',').to_string();
+            return Ok(Some(Terminator::BrUncond(label)));
+        }
+        // `br i1 %c, label %then, label %else`
+        let mut parts = rest.split(',');
+        let cond_part = parts
+            .next()
+            .ok_or(TranslateError::Parse("br cond".to_string()))?;
+        let cond_tokens: Vec<&str> = cond_part.split_whitespace().collect();
+        if cond_tokens.len() < 2 || cond_tokens[0] != "i1" {
+            return Err(TranslateError::Parse("br cond type".to_string()));
+        }
+        let cond = parse_operand(cond_tokens[1].trim())?;
+        let true_part = parts
+            .next()
+            .ok_or(TranslateError::Parse("br true".to_string()))?;
+        let false_part = parts
+            .next()
+            .ok_or(TranslateError::Parse("br false".to_string()))?;
+        let parse_label = |s: &str| -> Result<String, TranslateError> {
+            let t = s.trim();
+            let t = t.strip_prefix("label %").unwrap_or(t);
+            Ok(t.trim().trim_matches('"').to_string())
+        };
+        return Ok(Some(Terminator::BrCond {
+            cond,
+            true_label: parse_label(true_part)?,
+            false_label: parse_label(false_part)?,
+        }));
+    }
+    if trimmed == "unreachable" || trimmed.starts_with("switch") {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok(None)
+}
+
+/// `%x = phi float [ %a, %pred ], [ 1.0, %pred2 ]`
+fn parse_phi(rhs: &str) -> Result<Vec<(Operand, String)>, TranslateError> {
+    let mut out = Vec::new();
+    for part in split_top(rhs) {
+        let part = part.trim().trim_start_matches('[').trim_end_matches(']');
+        if part.is_empty() {
+            continue;
+        }
+        let mut sub = part.split(',');
+        let value = sub
+            .next()
+            .ok_or(TranslateError::Parse("phi val".to_string()))?;
+        let pred = sub
+            .next()
+            .ok_or(TranslateError::Parse("phi pred".to_string()))?;
+        let pred = pred.trim().trim_start_matches('%').trim().to_string();
+        out.push((parse_operand(value.trim())?, pred));
+    }
+    if out.is_empty() {
+        return Err(TranslateError::Parse("phi without incoming".to_string()));
+    }
+    Ok(out)
+}
+
 fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
     // `call void @name(...)` without assignment.
     let stripped = line.strip_prefix("tail ").unwrap_or(line).trim();
@@ -337,70 +488,121 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
         return Err(TranslateError::Parse("empty instruction".to_string()));
     }
     match tokens[0].as_str() {
+        "phi" => {
+            let ty = parse_ty(&tokens[1])?;
+            // `parse_phi` expects the tail after `phi <type>`.
+            let tail = rhs.split_whitespace().skip(2).collect::<Vec<_>>().join(" ");
+            let incoming = parse_phi(&tail)?;
+            Ok(Some(Instr::Phi { dst, ty, incoming }))
+        }
         "fadd" | "fmul" | "fsub" | "fdiv" => {
-            // `fadd float %a, %b`
-            let a = parse_operand(tokens[2].trim_end_matches(','))?;
-            let b = parse_operand(tokens[3].trim_end_matches(','))?;
-            let instr = match tokens[0].as_str() {
+            let (a, b) = parse_bin_operands(&tokens)?;
+            let op = |a: Operand, b: Operand| match tokens[0].as_str() {
                 "fadd" => Instr::FAdd {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
                     b,
                 },
                 "fmul" => Instr::FMul {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
                     b,
                 },
                 "fsub" => Instr::FSub {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
                     b,
                 },
                 _ => Instr::FDiv {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
                     b,
                 },
             };
-            Ok(Some(instr))
+            Ok(Some(op(a, b)))
         }
         "fneg" => {
-            let a = parse_operand(tokens[2].trim_end_matches(','))?;
+            let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
             Ok(Some(Instr::FNeg { dst, a }))
         }
-        "add" | "sub" | "mul" => {
-            let a = parse_operand(tokens[2].trim_end_matches(','))?;
-            let b = parse_operand(tokens[3].trim_end_matches(','))?;
-            let instr = match tokens[0].as_str() {
+        "add" | "sub" | "mul" | "udiv" | "sdiv" | "urem" | "srem" | "and" | "or" | "xor"
+        | "shl" | "lshr" | "ashr" => {
+            let (a, b) = parse_bin_operands(&tokens)?;
+            let op = |a: Operand, b: Operand| match tokens[0].as_str() {
                 "add" => Instr::Add {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
                     b,
                 },
                 "sub" => Instr::Sub {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
                     b,
                 },
-                _ => Instr::Mul {
+                "mul" => Instr::Mul {
                     dst: dst.clone(),
-                    a: a.clone(),
+                    a,
+                    b,
+                },
+                "udiv" => Instr::UDiv {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "sdiv" => Instr::SDiv {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "urem" => Instr::URem {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "srem" => Instr::SRem {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "and" => Instr::And {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "or" => Instr::Or {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "xor" => Instr::Xor {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "shl" => Instr::Shl {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                "lshr" => Instr::LShr {
+                    dst: dst.clone(),
+                    a,
+                    b,
+                },
+                _ => Instr::AShr {
+                    dst: dst.clone(),
+                    a,
                     b,
                 },
             };
-            Ok(Some(instr))
+            Ok(Some(op(a, b)))
         }
         "fcmp" => {
-            let pred = tokens[1].clone();
-            let a = parse_operand(tokens[3].trim_end_matches(','))?;
-            let b = parse_operand(tokens[4].trim_end_matches(','))?;
+            let (pred, a, b) = parse_compare(&tokens)?;
             Ok(Some(Instr::Fcmp { dst, pred, a, b }))
         }
         "icmp" => {
-            let pred = tokens[1].clone();
-            let a = parse_operand(tokens[3].trim_end_matches(','))?;
-            let b = parse_operand(tokens[4].trim_end_matches(','))?;
+            let (pred, a, b) = parse_compare(&tokens)?;
             Ok(Some(Instr::Icmp { dst, pred, a, b }))
         }
         "select" => {
@@ -415,11 +617,94 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             let a = parse_operand(tokens[2].trim_end_matches(','))?;
             Ok(Some(Instr::Uitofp { dst, a }))
         }
-        "phi" | "br" | "switch" => Err(TranslateError::Unsupported),
+        "br" | "switch" => Err(TranslateError::Unsupported),
         "load" | "store" | "getelementptr" => Err(TranslateError::Unsupported),
-        // Any other opcode (and, or, shl, …) is out of the spike subset.
+        // Any other opcode is outside the translated subset.
         _ => Err(TranslateError::Unsupported),
     }
+}
+
+/// Instruction flags rustc/LLVM may print between an opcode and its type.
+fn is_flag(token: &str) -> bool {
+    matches!(
+        token.trim_end_matches(','),
+        "nuw"
+            | "nsw"
+            | "exact"
+            | "fast"
+            | "nnan"
+            | "ninf"
+            | "nsz"
+            | "arcp"
+            | "contract"
+            | "afn"
+            | "reassoc"
+            | "samesign"
+    )
+}
+
+fn is_type_token(token: &str) -> bool {
+    matches!(
+        token.trim_end_matches(','),
+        "float" | "i1" | "i32" | "void" | "ptr"
+    )
+}
+
+/// Index of the first operand token after `from`, skipping flags and types.
+fn operand_index(tokens: &[String], from: usize) -> Result<usize, TranslateError> {
+    let mut index = from;
+    while index < tokens.len() && (is_flag(&tokens[index]) || is_type_token(&tokens[index])) {
+        index += 1;
+    }
+    if index >= tokens.len() {
+        return Err(TranslateError::Parse(
+            "instruction without operand".to_string(),
+        ));
+    }
+    Ok(index)
+}
+
+fn parse_bin_operands(tokens: &[String]) -> Result<(Operand, Operand), TranslateError> {
+    let index = operand_index(tokens, 1)?;
+    let a = parse_operand(tokens[index].trim_end_matches(','))?;
+    let b = parse_operand(
+        tokens
+            .get(index + 1)
+            .ok_or(TranslateError::Parse("binary without rhs".to_string()))?
+            .trim_end_matches(','),
+    )?;
+    Ok((a, b))
+}
+
+/// `fcmp <flags> <pred> <type> %a, %b` / `icmp <flags> <pred> <type> …`.
+fn parse_compare(tokens: &[String]) -> Result<(String, Operand, Operand), TranslateError> {
+    let mut index = 1;
+    while index < tokens.len() && is_flag(&tokens[index]) {
+        index += 1;
+    }
+    let pred = tokens
+        .get(index)
+        .ok_or(TranslateError::Parse(
+            "compare without predicate".to_string(),
+        ))?
+        .clone();
+    index += 1;
+    while index < tokens.len() && (is_flag(&tokens[index]) || is_type_token(&tokens[index])) {
+        index += 1;
+    }
+    let a = parse_operand(
+        tokens
+            .get(index)
+            .ok_or(TranslateError::Parse("compare without lhs".to_string()))?
+            .trim_end_matches(','),
+    )?;
+    let b = parse_operand(
+        tokens
+            .get(index + 1)
+            .ok_or(TranslateError::Parse("compare without rhs".to_string()))?
+            .trim_end_matches(','),
+    )?;
+    Ok((pred, a, b))
 }
 
 /// Parse `call float @name(float %a, float %b)`.
@@ -441,10 +726,8 @@ fn parse_call(rhs: &str) -> Result<(String, Vec<Operand>), TranslateError> {
         return Ok((callee, args));
     }
     for arg in split_top(inner) {
-        let arg = arg.trim();
-        let mut parts = arg.split_whitespace();
-        let _ty = parts.next();
-        if let Some(value) = parts.next() {
+        // `i32 noundef %id` and `float 1.0`: the value is the last token.
+        if let Some(value) = arg.split_whitespace().next_back() {
             args.push(parse_operand(value)?);
         }
     }
@@ -468,9 +751,7 @@ fn parse_operand(word: &str) -> Result<Operand, TranslateError> {
         return Ok(Operand::F32(value));
     }
     if let Ok(value) = w.parse::<i64>() {
-        if value < 0 {
-            return Err(TranslateError::Parse(format!("negative literal {w}")));
-        }
+        // LLVM prints i32 masks as negative decimal; keep the bit pattern.
         return Ok(Operand::U32(value as u32));
     }
     Err(TranslateError::Parse(format!("unknown operand {w}")))
@@ -483,11 +764,11 @@ fn split_top(text: &str) -> Vec<String> {
     let mut current = String::new();
     for ch in text.chars() {
         match ch {
-            '(' | '<' => {
+            '(' | '<' | '[' => {
                 depth += 1;
                 current.push(ch);
             }
-            ')' | '>' => {
+            ')' | '>' | ']' => {
                 depth -= 1;
                 current.push(ch);
             }
