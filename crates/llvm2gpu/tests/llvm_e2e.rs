@@ -68,6 +68,80 @@ exit:
 }
 
 #[test]
+fn fragment_position_is_a_builtin() {
+    let ir = r#"
+declare float @fragment_position_lane(i32)
+declare void @fragment_store_f32x4(float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  %x = call float @fragment_position_lane(i32 0)
+  %y = call float @fragment_position_lane(i32 1)
+  call void @fragment_store_f32x4(float %x, float %y, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("fragment position");
+    assert!(
+        translated.wgsl.contains("@builtin(position)"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(translated.wgsl.contains(".x"), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains(".y"), "{}", translated.wgsl);
+}
+
+#[test]
+fn workgroup_memory_barrier_and_atomic() {
+    let ir = r#"
+declare void @workgroup_store_u32(i32, i32)
+declare i32 @workgroup_load_u32(i32)
+declare void @workgroup_barrier()
+declare i32 @workgroup_atomic_add_u32(i32, i32)
+declare void @workgroup_atomic_store_u32(i32, i32)
+declare i32 @workgroup_atomic_load_u32(i32)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define dso_local void @cs_main(i32 %id) {
+start:
+  call void @workgroup_store_u32(i32 0, i32 %id)
+  call void @workgroup_atomic_store_u32(i32 2, i32 0)
+  call void @workgroup_barrier()
+  %word = call i32 @workgroup_load_u32(i32 0)
+  %old = call i32 @workgroup_atomic_add_u32(i32 1, i32 %word)
+  %seen = call i32 @workgroup_atomic_load_u32(i32 2)
+  %sum = add i32 %old, %seen
+  call void @storage_write_u32(i32 0, i32 0, i32 %id, i32 %sum)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("workgroup");
+    assert!(
+        translated.wgsl.contains("var<workgroup>"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("workgroupBarrier()"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("atomicAdd("),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("atomicStore("),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("atomicLoad("),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
 fn fragment_entry_returns_location_zero_vec4() {
     let ir = r#"
 declare void @fragment_store_f32x4(float, float, float, float)
@@ -127,6 +201,116 @@ start:
         "{}",
         translated.wgsl
     );
+}
+
+#[test]
+fn sampled_texture_load_reads_one_lane() {
+    let ir = r#"
+declare float @texture_load_2d_f32x4(i32, i32, i32, i32, i32)
+declare i32 @texture_width_2d_f32x4(i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %w = call i32 @texture_width_2d_f32x4(i32 0, i32 1)
+  %r = call float @texture_load_2d_f32x4(i32 0, i32 1, i32 %id, i32 0, i32 0)
+  %g = call float @texture_load_2d_f32x4(i32 0, i32 1, i32 %id, i32 0, i32 1)
+  %wf = uitofp nneg i32 %w to float
+  %sum = fadd float %r, %g
+  %out = fadd float %sum, %wf
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %out)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("sampled textureLoad");
+    assert!(
+        translated.wgsl.contains("texture_2d<f32>"),
+        "{}",
+        translated.wgsl
+    );
+    assert!(
+        translated.wgsl.contains("textureLoad("),
+        "{}",
+        translated.wgsl
+    );
+    assert!(translated.wgsl.contains(".x"), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains(".y"), "{}", translated.wgsl);
+    assert!(
+        !translated.wgsl.contains("texture_depth_2d"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn one_texture_binding_cannot_be_depth_and_sampled() {
+    let ir = r#"
+declare float @texture_load_2d_f32(i32, i32, i32, i32)
+declare float @texture_load_2d_f32x4(i32, i32, i32, i32, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %d = call float @texture_load_2d_f32(i32 0, i32 1, i32 %id, i32 0)
+  %r = call float @texture_load_2d_f32x4(i32 0, i32 1, i32 %id, i32 0, i32 0)
+  %sum = fadd float %d, %r
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %sum)
+  ret void
+}
+"#;
+    let err = translate(ir).expect_err("two texture kinds");
+    let text = err.to_string();
+    assert!(text.contains("two kinds"), "{text}");
+}
+
+#[test]
+fn gtao_math_and_log2_lower() {
+    let ir = r#"
+declare float @gpu_acos(float)
+declare float @gpu_clamp(float, float, float)
+declare float @gpu_mix(float, float, float)
+declare float @gpu_sign(float)
+declare float @gpu_abs(float)
+declare float @gpu_log2(float)
+declare float @gpu_cross3_lane(float, float, float, float, float, float, i32)
+declare float @gpu_normalize3_lane(float, float, float, i32)
+declare void @storage_write_f32(i32, i32, i32, float)
+define dso_local void @cs_main(i32 %id) {
+start:
+  %a = call float @gpu_acos(float 1.000000e+00)
+  %c = call float @gpu_clamp(float 2.000000e+00, float 0.000000e+00, float 1.000000e+00)
+  %m = call float @gpu_mix(float 0.000000e+00, float 1.000000e+00, float 5.000000e-01)
+  %s = call float @gpu_sign(float -1.000000e+00)
+  %b = call float @gpu_abs(float -2.000000e+00)
+  %l = call float @gpu_log2(float 2.000000e+00)
+  %x = call float @gpu_cross3_lane(float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, i32 2)
+  %n = call float @gpu_normalize3_lane(float 0.000000e+00, float 1.000000e+00, float 0.000000e+00, i32 1)
+  %sum = fadd float %a, %c
+  %sum2 = fadd float %sum, %m
+  %sum3 = fadd float %sum2, %s
+  %sum4 = fadd float %sum3, %b
+  %sum5 = fadd float %sum4, %l
+  %sum6 = fadd float %sum5, %x
+  %out = fadd float %sum6, %n
+  call void @storage_write_f32(i32 0, i32 2, i32 %id, float %out)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("gtao math");
+    for needle in [
+        "acos(",
+        "clamp(",
+        "mix(",
+        "sign(",
+        "abs(",
+        "log2(",
+        "cross(",
+        "normalize(",
+    ] {
+        assert!(
+            translated.wgsl.contains(needle),
+            "{needle}\n{}",
+            translated.wgsl
+        );
+    }
 }
 
 #[test]

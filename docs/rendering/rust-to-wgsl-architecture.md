@@ -543,12 +543,17 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    `vec4` и struct 1). Один storage-биндинг — одна переменная: второй
    тип элемента отвергается, два read-only биндинга остаются
    `var<storage>` и могут алиаситься. Ядро `gtao_arc` (cos/sin)
-   переводится; марш горизонта ещё ждёт `textureLoad` и fragment entry.
-7. `texture_load_2d_f32` / `texture_width_2d` / `texture_height_2d`
-   опускаются в `textureLoad` и `textureDimensions` для
-   `texture_depth_2d` (mip 0). `fs_main` без параметров пишет
-   `fragment_store_f32x4` в `@location(0) vec4<f32>`. Дальше: вход
-   `@builtin(position)`, workgroup и барьер — полный GTAO и автоэкспозиция.
+   переводится; марш горизонта ещё не перенесён.
+7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром, а
+   `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>` (mip 0).
+   Размеры той и другой — `textureDimensions`. `fs_main` пишет
+   `fragment_store_f32x4` в `@location(0) vec4<f32>` и читает
+   `@builtin(position)`. Compute держит `array<u32, 256>` и
+   `array<atomic<u32>, 256>`: `workgroupBarrier`, `atomicAdd`,
+   `atomicLoad`, `atomicStore`. Скалярная математика GTAO и гистограммы
+   (`acos`, `clamp`, `mix`, `sign`, `abs`, `log2`, `cross`, `normalize`)
+   опускается в одноимённые builtin. Дальше — сам проход GTAO и
+   гистограмма на этих импортах.
 
 **Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном
