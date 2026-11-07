@@ -7,8 +7,7 @@
 use ornis_gpu_shader::{gpu_entry, ReadOnly, Storage};
 
 #[gpu_entry(compute(threads(1)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(
+pub fn cs_main(
     id: u32,
     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<u32, ReadOnly>,
 ) {

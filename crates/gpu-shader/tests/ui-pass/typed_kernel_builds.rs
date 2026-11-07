@@ -16,8 +16,7 @@ impl GpuStruct for Params {
 }
 
 #[gpu_entry(compute(threads(32)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(
+pub fn cs_main(
     id: u32,
     #[gpu(uniform, group = 0, binding = 0)] params: Uniform<Params>,
     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<f32, ReadOnly>,

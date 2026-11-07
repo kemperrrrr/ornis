@@ -473,7 +473,7 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 
 | rust-gpu (nightly) | ornis (stable), реализовано |
 |---|---|
-| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]` (`ornis-gpu-shader-macros`) |
+| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]` (`ornis-gpu-shader-macros`); кернел — обычная безопасная `pub fn`, без `extern "C"` и `no_mangle` |
 | `#[spirv(global_invocation_id)]` | первый `u32` параметр entry (`global_invocation_id.x`) |
 | `#[spirv(global_invocation_id)]` newtype | ещё нет; нужен для entry, читающих несколько builtins |
 | `#[spirv(storage_buffer, descriptor_set, binding)]` | `#[gpu(storage_buffer, group = G, binding = B, read_only)] Storage<T>`; `group`/`binding` живут в атрибуте, а макрос вписывает их в тип |
@@ -488,7 +488,15 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 инлайнятся в те же `ornis_gpu` импорты, что писались руками, поэтому WGSL
 типизированного кернела байт-в-байт равен WGSL варианта с `extern "C"`
 (это пинит `crates/gpu-shader/tests/abi_parity.rs` на паре одинаковых
-кернелов). Проверки, которые даёт типы:
+кернелов).
+
+Ресурсные параметры **остаются в сигнатуре**, а не вырезаются макросом:
+`Storage`/`Uniform` — ZST, и rustc сам выбрасывает их из
+скомпилированного entry, поэтому в IR остаётся прежний `cs_main(i32)`.
+Это проверено на `opt-level` 0/1/2/s/3. Обратная сторона: с `extern "C"`
+rustc ругается `improper_ctypes_definitions` на ZST-параметр, а с
+`no_mangle` — на конфликт с `export_name`, поэтому и то и другое из
+кернела убрано, а `export_name` ставит макрос. Проверки, которые даёт типы:
 
 - `Storage<T, ReadOnly>` не имеет `store` — попытка записи в readonly
   биндинг не компилируется (`tests/ui/read_only_storage_has_no_store.rs`);

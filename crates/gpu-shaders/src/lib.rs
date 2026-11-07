@@ -96,9 +96,13 @@ macro_rules! plane_tests {
 /// Bindings: `0` padded `CullParams` uniform, `1` read-only `f32` source
 /// view of `PerObject` records, `2` read-write compacted `u32` indices, `3`
 /// five-word indirect args with `instance_count` at word 1.
+///
+/// A plain safe `fn`: `#[gpu_entry]` attaches the export name, and the resource
+/// parameters are zero-sized, so the compiled entry is still `cs_main(i32)`.
 #[gpu_entry(compute(threads(64)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(
+// qual:api — wasm export declared by `#[gpu_entry]`; rustqual reads the source
+// attribute, not the macro's `#[unsafe(export_name = "cs_main")]`.
+pub fn cs_main(
     id: u32,
     #[gpu(uniform, group = 0, binding = 0)] params: Uniform<CullParams>,
     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<f32, ReadOnly>,

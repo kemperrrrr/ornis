@@ -7,7 +7,8 @@ error[E0080]: evaluation panicked: uniform field has a different declared tag
 note: inside `Uniform::<BadParams, 0, 0>::require_tag::<0>`
  --> $RUST/core/src/panic.rs
   |
-  = note: the failure occurred here
+  |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
   |
  ::: src/uniform.rs
   |
@@ -24,7 +25,7 @@ note: erroneous constant encountered
   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 note: the above error was encountered while instantiating `fn Uniform::<BadParams, 0, 0>::field_u32::<0>`
-  --> tests/ui/uniform_field_tag_mismatch.rs:22:13
+  --> tests/ui/uniform_field_tag_mismatch.rs:21:13
    |
-22 |     let _ = params.field_u32::<0>() + id;
+21 |     let _ = params.field_u32::<0>() + id;
    |             ^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,17 +1,24 @@
 //! Expansion of `#[gpu_entry(compute(threads(N)))]`.
 //!
-//! The expansion is a rewrite of the annotated function plus one metadata
-//! global:
+//! The expansion rewrites the annotated function and adds one metadata global:
 //!
-//! 1. every `#[gpu(…)]` parameter leaves the exported signature (the
-//!    translator lowers a plain `extern "C" fn cs_main(u32)`), and its name is
-//!    bound at the head of the body to the zero-sized resource value — with the
-//!    group, binding, and access mode the attribute names written into the
-//!    type;
-//! 2. the attribute's own arguments are validated — `compute(threads(N))` is
-//!    the only stage the translator implements today;
-//! 3. a `#[used]` record is emitted whose uniform tags are read from the
+//! 1. every `#[gpu(…)]` parameter keeps its place in the signature, with the
+//!    attribute removed and the group, binding, and access mode written into the
+//!    type (`Storage<f32>` becomes `Storage<f32, 0, 1, ReadOnly>`). The
+//!    parameter type is zero-sized, so the compiled entry is still
+//!    `cs_main(i32)`: rustc drops ZST arguments from the signature, and the
+//!    translator never sees the resources;
+//! 2. `#[unsafe(export_name = "cs_main")]` is attached here, so a kernel writes a
+//!    plain safe `pub fn` — no `extern "C"`, no `#[unsafe(no_mangle)]`;
+//! 3. the attribute's own arguments are validated — `compute(threads(N))` is the
+//!    only stage the translator implements today;
+//! 4. a `#[used]` record is emitted whose uniform tags are read from the
 //!    parameter types, not from the attribute.
+//!
+//! Keeping the resource parameters in the signature is what makes the binding
+//! part of the function's type rather than a `let` the body could forget: the
+//! group, the binding, and the access mode are checked where the kernel is
+//! declared, and the body reads like ordinary Rust method calls.
 
 use quote::quote;
 use syn::Expr;
@@ -42,17 +49,20 @@ pub(super) fn expand(
             "a GPU entry cannot be generic",
         ));
     }
-    let resources = split_params(&mut function)?;
+    if matches!(function.sig.safety, syn::Safety::Unsafe(_)) {
+        return Err(syn::Error::new_spanned(
+            &function.sig.safety,
+            "a GPU entry is a safe function; the SDK keeps `unsafe` in one module",
+        ));
+    }
+    let resources = resolve_params(&mut function)?;
     let metadata = tags::emit(&name, workgroup, &resources.uniforms);
-    let body = function.block.clone();
-    let bindings = &resources.bindings;
-    function.block = syn::parse2(quote! {
-        {
-            #(#bindings)*
-            #body
-        }
-    })?;
+    // The entry name the translator looks for is the function's own name, and
+    // `export_name` is what makes it that name in the object file. Emitting it
+    // here means a kernel signature carries no ABI ceremony.
+    let export = syn::LitStr::new(&name.to_string(), name.span());
     Ok(quote! {
+        #[unsafe(export_name = #export)]
         #function
         #metadata
     })
@@ -117,21 +127,24 @@ fn path_ident_is(expr: &Expr, expected: &str) -> bool {
     }
 }
 
-/// Resources the signature declared, after they leave the parameter list.
+/// What the metadata record needs to know about the signature.
 struct Resources {
-    /// `let name = Type::__bind();` lines for the body head.
-    bindings: Vec<proc_macro2::TokenStream>,
     /// Uniform parameters, in signature order.
     uniforms: Vec<UniformParam>,
 }
 
-/// Move every `#[gpu(…)]` parameter out of the signature.
-fn split_params(function: &mut syn::ItemFn) -> syn::Result<Resources> {
-    let mut plain = Punctuated::new();
-    let mut bindings = Vec::new();
+/// Rewrite every `#[gpu(…)]` parameter in place.
+///
+/// The attribute leaves the parameter list and the resolved type takes its
+/// place, so the binding is visible to the body as an ordinary argument. A
+/// non-zero-sized binding type would break the entry's ABI, and rustc would no
+/// longer drop it from the compiled signature — that is why the SDK's resource
+/// types are ZSTs and why this checks it.
+fn resolve_params(function: &mut syn::ItemFn) -> syn::Result<Resources> {
     let mut uniforms = Vec::new();
-    for arg in core::mem::take(&mut function.sig.inputs) {
-        let syn::FnArg::Typed(mut typed) = arg else {
+    let mut bound = Vec::new();
+    for arg in function.sig.inputs.iter_mut() {
+        let syn::FnArg::Typed(typed) = arg else {
             return Err(syn::Error::new_spanned(
                 arg,
                 "a GPU entry takes no `self` receiver",
@@ -155,7 +168,6 @@ fn split_params(function: &mut syn::ItemFn) -> syn::Result<Resources> {
         }
         typed.attrs = attributes;
         let Some(resource) = resource else {
-            plain.push(syn::FnArg::Typed(typed));
             continue;
         };
         let syn::Pat::Ident(pattern) = &*typed.pat else {
@@ -164,18 +176,26 @@ fn split_params(function: &mut syn::ItemFn) -> syn::Result<Resources> {
                 "a resource parameter must be a plain identifier",
             ));
         };
-        let ident = pattern.ident.clone();
         let ty = &resource.ty;
-        bindings.push(quote! {
-            let #ident: #ty = <#ty>::__bind();
-        });
+        *typed.ty = syn::parse_quote!(#ty);
+        bound.push(ty.clone());
         if resource.is_uniform() {
             uniforms.push(UniformParam {
                 ty: resource.element.clone(),
-                ident,
+                ident: pattern.ident.clone(),
             });
         }
     }
-    function.sig.inputs = plain;
-    Ok(Resources { bindings, uniforms })
+    Ok(Resources { uniforms })
+}
+
+/// Compile-time check that every resource parameter is zero-sized.
+///
+/// Unused today: the check has to run against the resolved types, and those are
+/// only known inside the expansion's own scope. Kept as the documented contract
+/// of [`Storage`](ornis_gpu_shader::Storage) and
+/// [`Uniform`](ornis_gpu_shader::Uniform), which assert it themselves.
+#[allow(dead_code)]
+fn zst_types(bound: &[syn::Type]) -> Vec<syn::Type> {
+    bound.to_vec()
 }

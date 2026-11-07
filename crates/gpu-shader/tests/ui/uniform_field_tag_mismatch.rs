@@ -14,8 +14,7 @@ impl GpuStruct for BadParams {
 }
 
 #[gpu_entry(compute(threads(1)))]
-#[unsafe(no_mangle)]
-pub extern "C" fn cs_main(
+pub fn cs_main(
     id: u32,
     #[gpu(uniform, group = 0, binding = 0)] params: Uniform<BadParams>,
 ) {

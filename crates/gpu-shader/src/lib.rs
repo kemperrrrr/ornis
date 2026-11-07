@@ -16,8 +16,7 @@
 //! }
 //!
 //! #[gpu_entry(compute(threads(64)))]
-//! #[unsafe(no_mangle)]
-//! pub extern "C" fn cs_main(
+//! pub fn cs_main(
 //!     id: u32,
 //!     #[gpu(uniform, group = 0, binding = 0)] params: Uniform<CullParams>,
 //!     #[gpu(storage_buffer, group = 0, binding = 1, read_only)] src: Storage<f32>,
@@ -30,10 +29,11 @@
 //! }
 //! ```
 //!
-//! The attribute strips the annotated parameters from the exported signature —
-//! the translator only sees the plain `extern "C"` entry it already knows — and
-//! binds each name to a zero-sized value that carries the group and binding in
-//! its type. Field reads are checked against [`GpuStruct::FIELD_TAGS`] at
+//! The annotated parameters stay in the signature and carry the group and
+//! binding in their types. They are zero-sized, so rustc drops them from the
+//! compiled entry: the translator still lowers `cs_main(i32)`. The attribute
+//! also attaches the export name, so the kernel is a plain safe `fn` with no
+//! `extern "C"` and no `#[unsafe(no_mangle)]`. Field reads are checked against [`GpuStruct::FIELD_TAGS`] at
 //! compile time, and a read-only [`Storage`] has no `store` method, so a
 //! mismatched use fails the build instead of producing invalid WGSL.
 //!
