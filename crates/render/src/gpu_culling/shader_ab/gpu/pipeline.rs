@@ -1,8 +1,8 @@
 //! Pipelines for the production cull shader and the flag ABI shared by the
 //! lowered kernel and the hand twin.
 
-use super::super::super::CULL_COMPUTE_WGSL;
 use super::super::super::CULL_WORKGROUP_SIZE;
+use super::super::super::LEGACY_CULL_COMPUTE_WGSL;
 
 /// Binding 0: params uniform (production) or plane uniform (flag ABI).
 pub(super) const BIND_PARAMS: u32 = 0;
@@ -78,7 +78,7 @@ pub(super) fn build(device: &wgpu::Device, wgsl: &str, entry: &str, production: 
 }
 
 pub(super) fn prod() -> &'static str {
-    CULL_COMPUTE_WGSL
+    LEGACY_CULL_COMPUTE_WGSL
 }
 
 pub(super) fn groups(count: usize, wgsl: &str) -> u32 {

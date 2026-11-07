@@ -8,7 +8,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use super::super::CULL_COMPUTE_WGSL;
+use super::super::LEGACY_CULL_COMPUTE_WGSL;
 use super::ir::IrStats;
 use super::ir::ir_stats;
 
@@ -63,7 +63,7 @@ fn remember_lowered(wgsl: &str) -> String {
 }
 
 fn static_report(lowered: &Lowered) -> String {
-    let production = ir_stats(CULL_COMPUTE_WGSL);
+    let production = ir_stats(LEGACY_CULL_COMPUTE_WGSL);
     let wasm = ir_stats(&lowered.wgsl);
     let twin = ir_stats(pipeline::TWIN_WGSL);
     format!(
@@ -149,7 +149,7 @@ fn opt_ratio(left: Option<u32>, right: Option<u32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::run_cull_ab;
-    use crate::gpu_culling::CULL_COMPUTE_WGSL;
+    use crate::gpu_culling::LEGACY_CULL_COMPUTE_WGSL;
     use crate::gpu_culling::shader_ab::ir::ir_stats;
 
     /// Keeps the bench entry in the call graph. Ignored because it builds
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     #[ignore = "full GPU A/B; use the wasm2gpu_cull_ab bench"]
     fn run_cull_ab_reaches_the_timing_path() {
-        let stats = ir_stats(CULL_COMPUTE_WGSL);
+        let stats = ir_stats(LEGACY_CULL_COMPUTE_WGSL);
         assert!(stats.atomics >= 1);
         run_cull_ab();
     }

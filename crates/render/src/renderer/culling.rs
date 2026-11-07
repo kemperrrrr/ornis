@@ -55,6 +55,7 @@ impl Renderer3D {
         if let Ok(culler) = Culler::try_new(device, grown) {
             *write_lock(&self.culler) = Some(culler);
             *write_lock(&self.indirect_bind_group) = None;
+            *write_lock(&self.indirect_indices_bind_group) = None;
         }
     }
 

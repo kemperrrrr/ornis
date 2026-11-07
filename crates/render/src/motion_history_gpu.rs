@@ -197,10 +197,29 @@ fn compacted_records(
     culler: &Culler,
     visible: usize,
 ) -> Vec<PerObjectGpu> {
-    let bytes = (visible * std::mem::size_of::<PerObjectGpu>()) as u64;
-    let raw =
-        crate::read_bytes_back(device, queue, &culler.visible_buffer, bytes).expect("readback");
-    bytemuck::cast_slice(&raw).to_vec()
+    let raw = crate::read_bytes_back(
+        device,
+        queue,
+        &culler.visible_indices,
+        (visible * std::mem::size_of::<u32>()) as u64,
+    )
+    .expect("index readback");
+    let indices: Vec<u32> = raw
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|word| u32::from_le_bytes(word.try_into().expect("four-byte index")))
+        .collect();
+    let source = crate::read_bytes_back(
+        device,
+        queue,
+        &culler.src_buffer,
+        u64::from(culler.capacity) * std::mem::size_of::<PerObjectGpu>() as u64,
+    )
+    .expect("source readback");
+    let records: &[PerObjectGpu] = bytemuck::cast_slice(&source);
+    indices
+        .iter()
+        .map(|index| records[*index as usize])
+        .collect()
 }
 
 /// The record of the instance standing at `position`.

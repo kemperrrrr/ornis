@@ -1,19 +1,19 @@
-//! A/B the lowered `cull` kernel against the shipped production WGSL.
+//! Parity of the generated llvm2gpu cull kernel with the legacy WGSL.
 //!
-//! [`CULL_COMPUTE_WGSL`] (`render/src/gpu_culling.rs`) compacts
-//! `PerObject` copies through `atomicAdd` and a `count` guard. This test
-//! feeds it the same frustum and the same eight spheres the wasm2gpu
-//! kernel reads — encoded as model matrices, so `instance_sphere` reads
-//! the center from column 3 and the radius from the column lengths — and
-//! compares the visible object sets the two shaders produce. Compaction
-//! order is scheduler-dependent, so the contract is a sorted set of
-//! `material_index` values plus the atomic count, not byte order.
+//! [`CULL_COMPUTE_WGSL`] is the production artifact generated at build
+//! time from `crates/gpu-shaders`; [`LEGACY_CULL_COMPUTE_WGSL`] is the
+//! hand-written oracle kept test-only until the gates pass. Both read the
+//! same frustum and the same eight spheres encoded as `PerObject` model
+//! matrices, so `instance_sphere` reads the center from column 3 and the
+//! radius from the column lengths. Compaction order is scheduler
+//! dependent, so the contract is a sorted set of `material_index` values
+//! plus the atomic count, not byte order.
 
-use ornis_render::gpu_culling::{CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD};
-use ornis_render::renderer::PerObjectGpu;
-use ornis_wasm2gpu_testkit::cull::{
-    ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry, lowered_kernel, run,
+use ornis_render::gpu_culling::{
+    CULL_COMPUTE_WGSL, CULL_PARAMS_BYTE_SIZE, INSTANCE_COUNT_WORD, LEGACY_CULL_COMPUTE_WGSL,
 };
+use ornis_render::renderer::PerObjectGpu;
+use ornis_wasm2gpu_testkit::cull::{ACTIVE_COUNT, EXPECTED, PLANES, SPHERES, buffer_entry};
 use ornis_wasm2gpu_testkit::{
     device, entry, gpu_buffer, map_bytes, put_f32, put_u32, storage_buffer,
 };
@@ -37,72 +37,52 @@ const TRANSLATION_OFFSET: u32 = MODEL_OFFSET + 3 * MODEL_COLUMN_BYTES;
 /// `args` holds `array<atomic<u32>, 5>`; word 1 is the compacted count.
 const ARGS_WORDS: usize = 5;
 
-/// The translated kernel and the production kernel must cull the same
-/// objects from the same bytes — the review's "A/B against the real
-/// shader" instead of a CPU re-implementation of the formula.
-#[test]
-fn cull_kernel_matches_the_production_wgsl() {
-    let nan_radius_slot = SPHERES
-        .iter()
-        .position(|sphere| sphere[3].is_nan())
-        .expect("test scene has a NaN radius");
-    assert_eq!(
-        EXPECTED[nan_radius_slot], 1,
-        "a NaN radius must fail open and remain visible"
-    );
-    let wgsl = lowered_kernel();
-    let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
-        .filter(|slot| EXPECTED[*slot as usize] == 1)
-        .collect();
-    match device() {
-        Some((device, queue)) => {
-            let (flags, _) = run(&device, &queue, &wgsl);
-            let wasm_visible: Vec<u32> = flags
-                .iter()
-                .enumerate()
-                .filter(|(_, flag)| **flag == 1)
-                .map(|(slot, _)| slot as u32)
-                .collect();
-            let (prod_visible, prod_count) = run_production(&device, &queue);
-            let nan_slot = nan_radius_slot as u32;
-            assert!(
-                wasm_visible.contains(&nan_slot),
-                "wasm2gpu NaN radius fails open"
-            );
-            assert!(
-                prod_visible.contains(&nan_slot),
-                "production NaN radius fails open"
-            );
-            assert_eq!(wasm_visible, expected, "wasm set vs EXPECTED");
-            assert_eq!(prod_visible, expected, "production set vs EXPECTED");
-            assert_eq!(prod_count as usize, expected.len(), "args count");
-            eprintln!("cull A/B: production {prod_visible:?} == wasm2gpu {wasm_visible:?}");
-        }
-        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
-            panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
-        }
-        None => eprintln!("cull_kernel_matches_the_production_wgsl: no wgpu adapter — skipped"),
-    }
+#[derive(Clone, Copy)]
+enum CullOutput {
+    /// Dense `PerObject` records (legacy oracle).
+    Record,
+    /// Dense `u32` source indices (llvm2gpu production).
+    Index,
 }
 
-/// Dispatch the shipped kernel once and read back the compacted set:
+/// Dispatch the legacy oracle once and read back the compacted set:
 /// `material_index` of every entry below the atomic count, sorted.
-fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
+fn run_legacy(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32) {
+    run_cull(
+        device,
+        queue,
+        "legacy cull",
+        LEGACY_CULL_COMPUTE_WGSL,
+        "cull_instances",
+        CullOutput::Record,
+    )
+}
+
+/// Dispatch any cull WGSL with the shipped compaction bindings and read
+/// back the sorted `material_index` set plus the atomic count.
+fn run_cull(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    wgsl: &str,
+    entry_point: &str,
+    output: CullOutput,
+) -> (Vec<u32>, u32) {
     let bgl = production_layout(device);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("production cull"),
-        source: wgpu::ShaderSource::Wgsl(CULL_COMPUTE_WGSL.into()),
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("production cull"),
+        label: Some(label),
         bind_group_layouts: &[Some(&bgl)],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("production cull"),
+        label: Some(label),
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: Some("cull_instances"),
+        entry_point: Some(entry_point),
         compilation_options: Default::default(),
         cache: None,
     });
@@ -150,18 +130,44 @@ fn run_production(device: &wgpu::Device, queue: &wgpu::Queue) -> (Vec<u32>, u32)
     if count == 0 {
         return (Vec::new(), count);
     }
-    let bytes = read_bytes(device, queue, &dst, count as u64 * OBJECT_BYTES as u64);
     let mut visible = Vec::with_capacity(count as usize);
-    let mut entry = 0u32;
-    while entry < count {
-        let at = entry as usize * OBJECT_BYTES + MATERIAL_OFFSET;
-        visible.push(u32::from_le_bytes([
-            bytes[at],
-            bytes[at + 1],
-            bytes[at + 2],
-            bytes[at + 3],
-        ]));
-        entry += 1;
+    match output {
+        CullOutput::Record => {
+            let bytes = read_bytes(device, queue, &dst, count as u64 * OBJECT_BYTES as u64);
+            let mut entry = 0u32;
+            while entry < count {
+                let at = entry as usize * OBJECT_BYTES + MATERIAL_OFFSET;
+                visible.push(u32::from_le_bytes([
+                    bytes[at],
+                    bytes[at + 1],
+                    bytes[at + 2],
+                    bytes[at + 3],
+                ]));
+                entry += 1;
+            }
+        }
+        CullOutput::Index => {
+            let bytes = read_bytes(device, queue, &dst, count as u64 * 4);
+            let source = pack_prod_objects();
+            let mut entry = 0u32;
+            while entry < count {
+                let word = entry as usize * 4;
+                let index = u32::from_le_bytes([
+                    bytes[word],
+                    bytes[word + 1],
+                    bytes[word + 2],
+                    bytes[word + 3],
+                ]) as usize;
+                let at = index * OBJECT_BYTES + MATERIAL_OFFSET;
+                visible.push(u32::from_le_bytes([
+                    source[at],
+                    source[at + 1],
+                    source[at + 2],
+                    source[at + 3],
+                ]));
+                entry += 1;
+            }
+        }
     }
     visible.sort_unstable();
     (visible, count)
@@ -257,4 +263,47 @@ fn read_bytes(
     encoder.copy_buffer_to_buffer(src, 0, &read, 0, size);
     queue.submit([encoder.finish()]);
     map_bytes(device, &read)
+}
+
+#[test]
+fn llvm2gpu_cull_matches_legacy_oracle() {
+    let nan_radius_slot = SPHERES
+        .iter()
+        .position(|sphere| sphere[3].is_nan())
+        .expect("test scene has a NaN radius");
+    assert_eq!(
+        EXPECTED[nan_radius_slot], 1,
+        "a NaN radius must fail open and remain visible"
+    );
+    let expected: Vec<u32> = (0..ACTIVE_COUNT as u32)
+        .filter(|slot| EXPECTED[*slot as usize] == 1)
+        .collect();
+    match device() {
+        Some((device, queue)) => {
+            let (legacy_visible, legacy_count) = run_legacy(&device, &queue);
+            let (llvm_visible, llvm_count) = run_cull(
+                &device,
+                &queue,
+                "llvm2gpu cull",
+                CULL_COMPUTE_WGSL,
+                "cs_main",
+                CullOutput::Index,
+            );
+            assert_eq!(llvm_count, legacy_count, "atomic count");
+            assert_eq!(llvm_visible, legacy_visible, "compacted set");
+            assert_eq!(llvm_visible, expected, "expected set");
+            let nan_slot = nan_radius_slot as u32;
+            assert!(
+                llvm_visible.contains(&nan_slot),
+                "llvm2gpu NaN radius fails open"
+            );
+            eprintln!(
+                "llvm2gpu cull parity: legacy {legacy_visible:?} == llvm2gpu {llvm_visible:?}"
+            );
+        }
+        None if std::env::var_os("ORNIS_REQUIRE_GPU").is_some() => {
+            panic!("ORNIS_REQUIRE_GPU is set and no wgpu adapter was found");
+        }
+        None => eprintln!("llvm2gpu_cull_matches_legacy_oracle: no wgpu adapter — skipped"),
+    }
 }

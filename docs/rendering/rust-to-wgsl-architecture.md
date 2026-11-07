@@ -8,6 +8,27 @@
 > **2026-10-18:** rust-gpu пересмотрен — равный кандидат, спайк C
 > (§3.1.3, §4); добавлен вариант «LLVM IR → LLVM SPIR-V backend → naga»
 > (§3.1.2) и SPIR-V как общая граница с харнессом сравнения (§3.1.4).
+>
+> **2026-11-07 (llvm2gpu, спайк B):** крейт `crates/llvm2gpu` переводит
+> LLVM IR стабильного rustc в naga/WGSL/SPIR-V. Закрыты: scalar-подмножество
+> (`SROA`, `select`, `sqrt`/`sin`), ABI storage (`storage_*`,
+> `storage_atomic_add_u32`), uniform-массивы (`uniform_read_f32`),
+> **structured control flow** (`phi` через локальные переменные, diamond
+> `if` с postdominator-merge, natural `loop` с `continue`/`break`) и
+> **uniform-поля** (`uniform_field_f32/u32` по таблице `ornis_gpu.types`,
+> раскладка `place_fields`). Vec3 в uniform-структуре получает WGSL-offset
+> 12/align 16; тест пинит offsets `[0, 12, 16]` и span 32. Динамические
+> циклы собираются с `-C opt-level=s`: `opt-level=3` разворачивает их в CFG
+> шире структурного подмножества (вложенные циклы/несколько head-блоков
+> пока отвергаются). Не сделано: билдер `xtask build-shaders` (§3.1.3,
+> спайк C-инфраструктура), миграция `cull`/`gtao`, readonly storage и
+> nested loops/структуры.
+>
+> **2026-11-07 (pivot):** wasm2gpu больше не производственный путь;
+> эксперименты остановлены на draft #255. Миграция GPU-кода продолжается
+> на llvm2gpu (stable rustc, без nightly). Целевой уровень эргономики —
+> идеи rust-gpu (`no_std` shader-крейт, cargo-сборка, атрибуты entry и
+> типизированные ресурсы) на стабильном тулчейне; маппинг и этапы — §3.1.6.
 
 Статус на 2026-09-10: 11 stage-entry пишутся на Rust через `#[stage]`
 и собираются в WGSL.base. Свободных идентификаторов в entry нет;
@@ -438,6 +459,103 @@ rust-gpu (спайк C), LLVM SPIR-V backend (проба B) и любой дру
 SPIR-V-фронтенд за короткое время. Состояние `wasm2spirv` в 2026 не
 установлено. Прямая генерация naga IR из staged-builder'а (спайк A) от
 этой границы не зависит.
+
+### 3.1.6 Stable Rust→GPU: цель rust-gpu без nightly (2026-11-07)
+
+**Решение.** wasm2gpu и macro-DSL не производственный путь: wasm теряет
+типы, а DSL не масштабируется на модули/дженерики. Производственная
+миграция продолжается на `llvm2gpu` — стабильный rustc → LLVM IR →
+naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gpu: обычный
+`no_std`-крейт, cargo-сборка, атрибуты entry и типизированные ресурсы,
+но без nightly и без `spirv-builder`.
+
+**Маппинг идей rust-gpu на stable:**
+
+| rust-gpu (nightly) | ornis (stable), реализовано |
+|---|---|
+| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]` (`ornis-gpu-shader-macros`); кернел — обычная безопасная `pub fn`, без `extern "C"` и `no_mangle` |
+| `#[spirv(global_invocation_id)]` | первый `u32` параметр entry (`global_invocation_id.x`) |
+| `#[spirv(global_invocation_id)]` newtype | ещё нет; нужен для entry, читающих несколько builtins |
+| `#[spirv(storage_buffer, descriptor_set, binding)]` | `#[gpu(storage_buffer, group = G, binding = B, read_only)] Storage<T>`; `group`/`binding` живут в атрибуте, а макрос вписывает их в тип |
+| `#[spirv(uniform, descriptor_set, binding)]` | `#[gpu(uniform, group = G, binding = B)] Uniform<S: GpuStruct>` |
+| `spirv-std` resource methods | `Storage::load/store/len/is_empty`, `Uniform::field_f32/field_u32/vec4_lane/plane_distance`, `Vec3::dot/length` |
+| теги uniform-структур (руками) | `impl GpuStruct for S { const ID; const FIELD_TAGS }` — макрос читает их из типа и пишет в метаданные |
+| `spirv-std` math | `Vec3` с `dot`/`length`; остальное — прямые `ornis_gpu` импорты |
+| `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (cargo rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V; `--check` в CI) |
+| shader-крейт под nightly | обычный `no_std`-крейт workspace; host — `no_std`-lib, GPU — `wasm32-unknown-unknown` + LLVM IR |
+
+Типизированный слой — **write-time только**: методы `Storage`/`Uniform`
+инлайнятся в те же `ornis_gpu` импорты, что писались руками, поэтому WGSL
+типизированного кернела байт-в-байт равен WGSL варианта с `extern "C"`
+(это пинит `crates/gpu-shader/tests/abi_parity.rs` на паре одинаковых
+кернелов).
+
+Ресурсные параметры **остаются в сигнатуре**, а не вырезаются макросом:
+`Storage`/`Uniform` — ZST, и rustc сам выбрасывает их из
+скомпилированного entry, поэтому в IR остаётся прежний `cs_main(i32)`.
+Это проверено на `opt-level` 0/1/2/s/3. Обратная сторона: с `extern "C"`
+rustc ругается `improper_ctypes_definitions` на ZST-параметр, а с
+`no_mangle` — на конфликт с `export_name`, поэтому и то и другое из
+кернела убрано, а `export_name` ставит макрос. Проверки, которые даёт типы:
+
+- `Storage<T, ReadOnly>` не имеет `store` — попытка записи в readonly
+  биндинг не компилируется (`tests/ui/read_only_storage_has_no_store.rs`);
+- `Uniform::field_u32::<F>()` сверяет тег поля `F` с `FIELD_TAGS` в `const`
+  контексте — чтение `u32` из `vec4`-поля не компилируется
+  (`tests/ui/uniform_field_tag_mismatch.rs`);
+- вид биндинга в атрибуте обязан совпадать с типом параметра
+  (`tests/ui/binding_kind_must_match_type.rs`).
+
+**Формат метаданных.** `#[gpu_entry]` пишет в `#[used]`-глобал
+`ornis_gpu_shader_meta` запись
+`entry=<name>;workgroup=x,y,z[;uniform=<id>:<tags>[,<id>:<tags>]]`;
+`ornis-llvm2gpu::meta` читает её и больше не требует `--workgroup`/`--types`.
+Формат прежней формы (`types=6,6,2`, один список для struct 0) тоже
+читается, чтобы старые артефакты не ломались.
+
+**Этапы:**
+
+1. Билдер `xtask build-shaders`: one-shot rustc → llvm2gpu → артефакты,
+   кэш по hash; общий GPU-харнесс с `wasm2gpu-testkit` для паритета.
+2. ABI под #243: readonly storage, `arrayLength`, `vec4` storage и
+   uniform-plane dot; кернел `cull_compact` на Rust. `xtask build-shaders`
+   собирает shader-крейт через cargo и пишет checked-in WGSL; entry,
+   workgroup и uniform-теги идут из `#[gpu_entry]`, `--check` ловит дрейф.
+   Выбран **index compaction**: compute пишет compacted `u32`-индексы,
+   indirect vertex stage делает `per_objects[visible_indices[instance]]`.
+   Паритет с legacy WGSL и indirect-vs-direct пиксельные гейты зелёные;
+   M1 A/B (GPU timestamps, 100 сэмплов): few −55%, many −82%,
+   all-visible −80%, late-reject −75% против прежнего WGSL.
+3. Эргономика (сделано): `#[gpu_entry(compute(threads(N)))]`, типизированные
+   `Storage`/`Uniform`/`Vec3`, `GpuStruct` с самопубликующимися тегами,
+   извлечение entry/workgroup/uniform-метаданных из LLVM IR; шейдерный крейт
+   собирается обычным cargo, кернел `cull_compact` переписан на типизированный
+   SDK без изменения WGSL.
+4. Кластерное назначение (`ornis-gpu-cluster`) на том же пути: checked-in
+   `cluster_generated.wgsl`, entry `cs_main`. Подмножество дополнительно
+   принимает `llvm.umin`/`umax`, `uitofp nneg`, hex-литералы `f32`,
+   `zext i1` в 0/1 и значение, определённое в цикле и прочитанное после
+   единственного выхода.
+5. Вложенные natural loop с одним выходом каждый: внутренний `break`
+   остаётся внутри своего `loop`, выход внутреннего цикла продолжается
+   во внешнем. `break`, покидающий сразу два цикла, по-прежнему отвергается.
+6. Вложенное поле uniform — тег `7` и следом id структуры (`671` это
+   `vec4` и struct 1). Один storage-биндинг — одна переменная: второй
+   тип элемента отвергается, два read-only биндинга остаются
+   `var<storage>` и могут алиаситься. Ядро `gtao_arc` (cos/sin)
+   переводится; марш горизонта ещё ждёт `textureLoad` и fragment entry.
+7. Дальше: `textureLoad`, fragment entry, workgroup и барьер — полный
+   GTAO и автоэкспозиция.
+
+**Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
+а запись в тот же биндинг повышает его до `read_write` (два типа на одном
+биндинге отвергаются; запись в `Storage<_, ReadOnly>` по-прежнему
+запрещена типом);
+`break` сразу из двух циклов отвергается явно, вложенный natural loop
+с одним выходом и вложенное uniform-поле принимаются;
+`Vec3::cross`/`normalize` не реализованы, потому что транслятор их
+не знает; entry только compute и только `cs_main`; runtime-материалы
+остаются на staged Shader IR; `wasm2gpu` не возвращается в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)
 

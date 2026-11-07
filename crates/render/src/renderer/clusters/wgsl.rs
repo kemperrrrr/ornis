@@ -2,12 +2,14 @@
 //! assembled from the shared derives and the same Rust constants the
 //! CPU reference and the fragment consts block use, so no layout can
 //! drift between the three.
+#[cfg(test)]
 use super::{
     CLUSTER_COUNT, CLUSTER_DEPTH_NEAR, CLUSTER_FAR_LIMIT, CLUSTER_INDEX_LIST_LEN,
     CLUSTER_SLICE_COUNT, CLUSTER_TILE_COUNT_X, CLUSTER_TILE_COUNT_Y, CLUSTER_WORKGROUP_SIZE,
     ClusterParams, ClusterSpan, MAX_LIGHTS_PER_CLUSTER, SPOT_BOUND_COS_FLOOR, cluster_log_ratio,
     cluster_slice_scale,
 };
+#[cfg(test)]
 use crate::renderer::{CameraUniform, GpuLight, LIGHT_KIND_SPOT};
 
 /// Cluster-pass binding numbers (private to this pass).
@@ -18,10 +20,9 @@ pub(super) const BINDING_GRID: u32 = 3;
 pub(super) const BINDING_INDICES: u32 = 4;
 pub(super) const BINDING_COUNTERS: u32 = 5;
 
-/// Compute shader source for the cluster assignment: one thread per
-/// cluster builds its six frustum planes from the camera `view_proj`,
-/// tests every packed light's bounding sphere against them and claims a
-/// span of the shared index list through one atomic counter.
+/// Hand-written assignment shader kept as the naga oracle for the shared
+/// derives. The pass itself runs `cluster_generated.wgsl` (`cs_main`).
+#[cfg(test)]
 pub(crate) fn cluster_compute_wgsl() -> String {
     let f = crate::shaders::f32_lit;
     [
@@ -182,5 +183,51 @@ mod tests {
         .expect("cluster compute must validate");
         assert!(source.contains("fn assign_lights_to_clusters"));
         assert!(source.contains("array<atomic<u32>, 2>"));
+    }
+
+    #[test]
+    fn generated_cluster_shader_validates_with_naga() {
+        let source = include_str!("cluster_generated.wgsl");
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("generated cluster shader must parse: {e}"));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("generated cluster shader must validate");
+        assert!(source.contains("fn cs_main"));
+        assert!(source.contains(&format!("@workgroup_size({CLUSTER_WORKGROUP_SIZE}")));
+        assert!(source.contains("atomicAdd"));
+        assert!(source.contains("min("));
+    }
+
+    #[test]
+    fn gpu_cluster_constants_match_the_host() {
+        use crate::renderer::LIGHT_KIND_SPOT;
+
+        assert_eq!(ornis_gpu_cluster::TILES_X, CLUSTER_TILE_COUNT_X);
+        assert_eq!(ornis_gpu_cluster::TILES_Y, CLUSTER_TILE_COUNT_Y);
+        assert_eq!(ornis_gpu_cluster::SLICES, CLUSTER_SLICE_COUNT);
+        assert_eq!(ornis_gpu_cluster::CLUSTER_COUNT, CLUSTER_COUNT);
+        assert_eq!(ornis_gpu_cluster::MAX_LIGHTS, MAX_LIGHTS_PER_CLUSTER);
+        assert_eq!(ornis_gpu_cluster::INDEX_CAP, CLUSTER_INDEX_LIST_LEN);
+        assert_eq!(
+            ornis_gpu_cluster::DEPTH_NEAR.to_bits(),
+            CLUSTER_DEPTH_NEAR.to_bits()
+        );
+        assert_eq!(
+            ornis_gpu_cluster::FAR_LIMIT.to_bits(),
+            CLUSTER_FAR_LIMIT.to_bits()
+        );
+        assert_eq!(
+            ornis_gpu_cluster::COS_FLOOR.to_bits(),
+            SPOT_BOUND_COS_FLOOR.to_bits()
+        );
+        assert_eq!(ornis_gpu_cluster::SPOT.to_bits(), LIGHT_KIND_SPOT.to_bits());
+        assert_eq!(
+            ornis_gpu_cluster::LOG_RATIO.to_bits(),
+            cluster_log_ratio().to_bits()
+        );
     }
 }

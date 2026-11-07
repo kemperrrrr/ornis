@@ -33,6 +33,13 @@ pub(crate) struct GbufferVertexContext {
     pub camera: CameraUniform,
 }
 
+/// Index-compaction side table for the indirect vertex entry.
+#[allow(dead_code)]
+#[derive(ornis_macros::ShaderContext)]
+pub(crate) struct GbufferIndicesContext {
+    pub visible_indices: Vec<u32>,
+}
+
 /// G-buffer vertex entry, translated by [`stage`](ornis_macros::stage):
 /// instance transform + world-space varying. DSL-only — `per_objects` /
 /// `camera` globals declared via `#[wgsl(global)]`.
@@ -64,6 +71,35 @@ fn vs_main(
     return output;
 }
 
+/// Indirect g-buffer vertex entry: the compacted index list selects the
+/// source `PerObject` record before the shared transform.
+#[stage(vertex)]
+fn vs_main_indirect(
+    input: VertexInput,
+    instance_index: super::InstanceIndex,
+    ctx: Context<GbufferVertexContext>,
+    indices: Context<GbufferIndicesContext>,
+) -> VertexOutput {
+    let scene_index = indices.visible_indices[instance_index];
+    let obj = ctx.per_objects[scene_index];
+    let world_pos = obj.model * Vec4::new(input.position, 1.0);
+    let mut previous_world_pos = obj.previous_model * Vec4::new(input.position, 1.0);
+    if obj.motion_valid == 0 {
+        previous_world_pos = Vec4::new(previous_world_pos.xyz, 0.0);
+    }
+    let mut world_normal = normalize((obj.normal_matrix * Vec4::new(input.normal, 0.0)).xyz);
+    let mut world_tangent = normalize((obj.model * Vec4::new(input.tangent, 0.0)).xyz);
+    let mut output: VertexOutput;
+    output.clip_position = ctx.camera.view_proj * world_pos;
+    output.world_position = world_pos.xyz;
+    output.previous_world_position = previous_world_pos;
+    output.world_normal = world_normal;
+    output.uv = input.uv;
+    output.world_tangent = world_tangent;
+    output.material_index = obj.material_index;
+    return output;
+}
+
 /// G-buffer vertex shader: instance transforms + world position.
 ///
 /// Assembled from the derived `Camera`/`PerObject` layouts plus the vertex
@@ -80,9 +116,11 @@ pub fn wgsl_vertex_source() -> String {
         .decl(CameraUniform::WGSL_SOURCE)
         .decl(PerObjectGpu::WGSL_SOURCE)
         .resources(&GBUFFER_RESOURCES, &[0, 1])
+        .resources(GBUFFER_INDICES_RESOURCES, &[0])
         .decl(wgsl_decl(VertexInput::WGSL_SOURCE))
         .decl(wgsl_decl(VertexOutput::WGSL_SOURCE))
         .entry(vs_main::wgsl_source())
+        .entry(vs_main_indirect::wgsl_source())
         .emit()
 }
 
@@ -202,6 +240,16 @@ pub const GBUFFER_RESOURCES: [Resource; 3] = [
         min_size: None,
     },
 ];
+
+/// Group-1 compacted source indices for the indirect vertex entry.
+pub(crate) const GBUFFER_INDICES_RESOURCES: &[Resource] = &[Resource {
+    group: 1,
+    binding: 0,
+    visibility: wgpu::ShaderStages::VERTEX,
+    name: "visible_indices",
+    kind: ResourceKind::StorageReadArray("u32"),
+    min_size: None,
+}];
 
 #[cfg(test)]
 mod tests {

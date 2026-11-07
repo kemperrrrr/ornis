@@ -14,6 +14,7 @@
 //! remote editor server. Cross-platform: everything goes through
 //! std::process::Command without a shell.
 
+mod build_shaders;
 mod e2e;
 mod prepush;
 mod quality;
@@ -28,6 +29,7 @@ fn main() {
     };
     match cmd.as_str() {
         "editor" => editor(&args[1..]),
+        "build-shaders" => build_shaders::build_shaders(&args[1..]),
         "e2e" => e2e::e2e(&args[1..]),
         "quality" => quality::quality(&args[1..]),
         "fuzz" => quality::fuzz(&args[1..]),
@@ -52,6 +54,9 @@ fn usage(code: i32) -> ! {
          with the remote editor at http://127.0.0.1:3420\n      \
          --skip-wasm    reuse the existing editor-v2/pkg build\n      \
           --editor-dir   editor frontend directory (default: <workspace>/editor-v2)\n  \
+           build-shaders [--package ornis-gpu-shaders] [--entry cs_main]\n                         [--opt 1] [--out target/shaders]\n                         [--artifact <wgsl>] [--check]\n      \
+          Compile a no_std shader crate with cargo, translate its LLVM IR\n      \
+          to WGSL/SPIR-V, and write/check the checked-in renderer artifact\n  \
            e2e [--port 3420] [--out <dir>]\n      \
           Manual live-pixel e2e for the WASM viewport (honest SKIP\n      \
           without a browser/WebGPU adapter; see docs/WASM_PIXEL_E2E.md)\n  \
