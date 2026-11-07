@@ -2913,6 +2913,16 @@ name = "ornis-input"
 version = "0.1.0"
 
 [[package]]
+name = "ornis-llvm2gpu"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "ornis-gpu-abi",
+ "pollster 0.4.0",
+ "wgpu",
+]
+
+[[package]]
 name = "ornis-macros"
 version = "0.1.0"
 dependencies = [
@@ -2921,7 +2931,7 @@ dependencies = [
  "naga",
  "ornis-core",
  "ornis-shader-lang",
- "pollster",
+ "pollster 1.0.1",
  "proc-macro2",
  "quote",
  "syn 3.0.10",
@@ -2964,7 +2974,7 @@ dependencies = [
  "ornis-core",
  "ornis-macros",
  "ornis-schedule",
- "pollster",
+ "pollster 1.0.1",
  "rayon",
  "ron",
  "rustc-hash 2.1.3",
@@ -2991,7 +3001,7 @@ dependencies = [
  "ornis-texture",
  "ornis-wasm2gpu-testkit",
  "png",
- "pollster",
+ "pollster 1.0.1",
  "proptest",
  "ron",
  "serde",
@@ -3009,7 +3019,7 @@ dependencies = [
  "ornis-core",
  "ornis-render",
  "ornis-schedule",
- "pollster",
+ "pollster 1.0.1",
  "wgpu",
  "winit",
 ]
@@ -3104,7 +3114,7 @@ version = "0.1.0"
 dependencies = [
  "ornis-gpu-abi",
  "ornis-wasm2gpu",
- "pollster",
+ "pollster 1.0.1",
  "wasmparser",
  "wat",
  "wgpu",
@@ -3119,7 +3129,7 @@ dependencies = [
  "dirs",
  "ornis-core",
  "ornis-macros",
- "pollster",
+ "pollster 1.0.1",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -3361,6 +3371,12 @@ dependencies = [
  "rustix 1.1.6",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "pollster"
