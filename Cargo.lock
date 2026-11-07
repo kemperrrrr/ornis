@@ -2909,8 +2909,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-shader"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-shader-macros",
+]
+
+[[package]]
+name = "ornis-gpu-shader-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "ornis-gpu-shaders"
 version = "0.1.0"
+dependencies = [
+ "ornis-gpu-shader",
+]
 
 [[package]]
 name = "ornis-input"
@@ -2998,7 +3017,6 @@ dependencies = [
  "ornis-animation",
  "ornis-assets",
  "ornis-core",
- "ornis-llvm2gpu",
  "ornis-macros",
  "ornis-mesh-editor",
  "ornis-schedule",

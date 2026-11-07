@@ -388,8 +388,8 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
     instance_count.div_ceil(CULL_WORKGROUP_SIZE)
 }
 
-/// Production cull kernel, generated at build time from the `no_std`
-/// Rust source in `crates/gpu-shaders` through stable rustc LLVM IR and
+/// Production cull kernel, generated from the `no_std` Rust source in
+/// `crates/gpu-shaders` through stable rustc LLVM IR and
 /// `ornis-llvm2gpu`.
 ///
 /// One invocation per source record: the sphere-vs-six-planes test runs
@@ -397,9 +397,10 @@ pub fn cull_workgroup_count(instance_count: u32) -> u32 {
 /// and the slot stores the source index (`u32`). The vertex stage
 /// resolves `per_objects[visible_indices[instance_index]]`.
 ///
-/// The build script writes the WGSL into `OUT_DIR`; this `include_str!`
-/// keeps the shipped kernel and its Rust source from drifting.
-pub const CULL_COMPUTE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/cull.wgsl"));
+/// `cargo xtask build-shaders --artifact <this file>` regenerates the
+/// WGSL; CI runs the same command with `--check` so the checked-in
+/// artifact cannot drift from the shader crate.
+pub const CULL_COMPUTE_WGSL: &str = include_str!("gpu_culling/cull_generated.wgsl");
 
 /// Hand-written WGSL oracle from the previous production path.
 ///

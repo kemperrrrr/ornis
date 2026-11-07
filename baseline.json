@@ -1,20 +1,20 @@
 {
   "version": 2,
-  "quality_score": 0.7034731113062507,
-  "iosp_score": 0.9503353973168215,
+  "quality_score": 0.7033083633065993,
+  "iosp_score": 0.9503289898077667,
   "violations": 385,
   "total": 11751,
   "complexity_warnings": 78,
-  "magic_number_warnings": 164,
+  "magic_number_warnings": 166,
   "nesting_depth_warnings": 21,
-  "function_length_warnings": 129,
+  "function_length_warnings": 130,
   "unsafe_warnings": 12,
-  "error_handling_warnings": 25,
+  "error_handling_warnings": 22,
   "duplicate_groups": 91,
   "dead_code_warnings": 413,
   "dead_type_warnings": 0,
   "fragment_groups": 724,
-  "boilerplate_warnings": 329,
+  "boilerplate_warnings": 331,
   "srp_struct_warnings": 23,
   "srp_module_warnings": 106,
   "wildcard_import_warnings": 48,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2986,
+  "total_findings": 2988,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -1948,7 +1948,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 2132
+      "line": 2158
     },
     {
       "name": "showcase_engine",

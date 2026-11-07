@@ -69,7 +69,7 @@ const LEVEL1_IDS: [&str; 15] = [
     "machete",
     "typos",
 ];
-const CI_IDS: [&str; 2] = ["doc", "wasm-check"];
+const CI_IDS: [&str; 3] = ["doc", "wasm-check", "build-shaders"];
 const FULL_IDS: [&str; 3] = ["coverage", "bench-compile", "hack-check"];
 const BENCH_IDS: [&str; 1] = ["criterion"];
 const DEEP_IDS: [&str; 3] = ["mutants", "fuzz-scene", "fuzz-editor"];
@@ -2061,6 +2061,32 @@ fn ci_stages(stages: &mut StageList<'_>) {
         stages.skip(
             "wasm-check",
             "wasm-check",
+            "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
+        );
+    }
+
+    if wasm_target_installed() {
+        stages.run(
+            "build-shaders",
+            "build-shaders",
+            "cargo xtask build-shaders --check (checked-in WGSL drift)",
+            stages.cargo(&[
+                "run",
+                "-q",
+                "--package",
+                "xtask",
+                "--",
+                "build-shaders",
+                "--artifact",
+                "crates/render/src/gpu_culling/cull_generated.wgsl",
+                "--check",
+            ]),
+            false,
+        );
+    } else {
+        stages.skip(
+            "build-shaders",
+            "build-shaders",
             "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
         );
     }

@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "no_std GPU kernels compiled to LLVM IR for ornis-llvm2gpu"
 
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+
 [lib]
 crate-type = ["rlib"]
 
