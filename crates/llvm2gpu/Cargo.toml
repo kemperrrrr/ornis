@@ -13,7 +13,7 @@ naga = { version = "30", features = ["wgsl-in", "wgsl-out", "spv-in", "spv-out"]
 
 [dev-dependencies]
 wgpu = "30"
-pollster = "0.4"
+pollster = "1.0"
 
 [lints]
 workspace = true

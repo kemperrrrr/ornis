@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2982,
+  "total_findings": 2983,
   "violation_details": [
     {
       "name": "EventLog::push",
