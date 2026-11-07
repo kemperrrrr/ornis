@@ -7,9 +7,8 @@
 //! trait impls plus the import it needs.
 //!
 //! Host builds compile these too (a kernel crate is checked with
-//! `cargo check`), and every method diverges there through
-//! [`crate::host_unavailable`]: a binding has no bytes to touch outside a
-//! dispatched shader.
+//! `cargo check`), and every method diverges there: a binding has no bytes to
+//! touch outside a dispatched shader.
 
 /// Element whose binding has a length the shader can read.
 pub trait StorageLen {
