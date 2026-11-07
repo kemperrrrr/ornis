@@ -36,18 +36,8 @@ unsafe extern "C" {
     fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
     #[link_name = "storage_atomic_add_u32"]
     fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
-    #[link_name = "uniform_field_f32"]
-    fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
     #[link_name = "uniform_field_u32"]
     fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
-    #[link_name = "uniform_field_vec4_component_f32"]
-    fn uniform_field_vec4_component_f32(
-        group: u32,
-        binding: u32,
-        sid: u32,
-        field: u32,
-        component: u32,
-    ) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -127,33 +117,10 @@ pub(crate) fn atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -
     call!(storage_atomic_add_u32(group, binding, index, value))
 }
 
-/// Field `field` of the uniform struct `sid`.
-// qual:api — every wrapper here is one `ornis_gpu` import; the kernels that
-// reach them live in another crate, so no in-crate caller can exist.
-#[inline(always)]
-pub(crate) fn field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32 {
-    call!(uniform_field_f32(group, binding, sid, field))
-}
-
 /// `u32` field `field` of the uniform struct `sid`.
 #[inline(always)]
 pub(crate) fn field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
     call!(uniform_field_u32(group, binding, sid, field))
-}
-
-/// Lane `component` of the `vec4` field `field`.
-// qual:api — see `field_f32`: the caller is a kernel in another crate.
-#[inline(always)]
-pub(crate) fn vec4_component(
-    group: u32,
-    binding: u32,
-    sid: u32,
-    field: u32,
-    component: u32,
-) -> f32 {
-    call!(uniform_field_vec4_component_f32(
-        group, binding, sid, field, component
-    ))
 }
 
 /// `dot((x, y, z, 1), plane)` for the `vec4` field `field`.

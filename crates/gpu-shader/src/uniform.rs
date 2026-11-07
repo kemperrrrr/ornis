@@ -13,7 +13,6 @@
 //! lives in another crate (`ornis-render`) that the shader crate must not
 //! depend on.
 
-use crate::TYPE_TAG_F32;
 use crate::TYPE_TAG_U32;
 use crate::TYPE_TAG_VEC4;
 
@@ -57,20 +56,6 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
         );
     }
 
-    /// Read scalar `f32` field `FIELD`.
-    // qual:api — shader-facing; the kernel crate that reads an `f32` field owns the caller.
-    #[inline(always)]
-    pub fn field_f32<const FIELD: usize>(&self) -> f32 {
-        const { Self::require_tag::<FIELD>(TYPE_TAG_F32) };
-        let _ = self;
-        #[cfg(target_arch = "wasm32")]
-        {
-            crate::abi::field_f32(G, B, T::ID, FIELD as u32)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::host_unavailable()
-    }
-
     /// Read scalar `u32` field `FIELD`.
     #[inline(always)]
     pub fn field_u32<const FIELD: usize>(&self) -> u32 {
@@ -79,21 +64,6 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
         #[cfg(target_arch = "wasm32")]
         {
             crate::abi::field_u32(G, B, T::ID, FIELD as u32)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        crate::host_unavailable()
-    }
-
-    /// Read one lane (`COMPONENT` in `0..4`) of `vec4<f32>` field `FIELD`.
-    // qual:api — shader-facing; `plane_distance` covers the frustum case, this is the escape hatch.
-    #[inline(always)]
-    pub fn vec4_lane<const FIELD: usize, const COMPONENT: usize>(&self) -> f32 {
-        const { Self::require_tag::<FIELD>(TYPE_TAG_VEC4) };
-        const { assert!(COMPONENT < 4, "a vec4 has four lanes") };
-        let _ = self;
-        #[cfg(target_arch = "wasm32")]
-        {
-            crate::abi::vec4_component(G, B, T::ID, FIELD as u32, COMPONENT as u32)
         }
         #[cfg(not(target_arch = "wasm32"))]
         crate::host_unavailable()
