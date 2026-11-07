@@ -83,6 +83,7 @@ paths = [
     "crates/wasm2gpu/**",
     "crates/wasm2gpu-shader/**",
     "crates/wasm2gpu-testkit/**",
+    "crates/llvm2gpu/**",
     "crates/gltf/**",
     "crates/texture/**",
 ]
@@ -125,6 +126,7 @@ ornis_gpu_abi_macros = "foundation"
 ornis_wasm2gpu = "foundation"
 ornis_wasm2gpu_shader = "foundation"
 ornis_wasm2gpu_testkit = "foundation"
+ornis_llvm2gpu = "foundation"
 ornis_gltf = "foundation"
 ornis_texture = "foundation"
 ornis_core = "domain"
