@@ -12,3 +12,6 @@ ornis-gpu-shader-macros = { path = "../gpu-shader-macros", version = "0.1.0" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+trybuild = "1"

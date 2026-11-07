@@ -46,10 +46,12 @@ start:
   ret float %x
 }
 "#;
-    let meta = ornis_llvm2gpu::extract_meta(ir).expect("metadata");
+    let meta = ornis_llvm2gpu::extract_meta(ir)
+        .expect("metadata parses")
+        .expect("metadata present");
     assert_eq!(meta.entry, "cs_main");
     assert_eq!(meta.workgroup, [32, 2, 1]);
-    assert_eq!(meta.types, vec![6, 2]);
+    assert_eq!(meta.tags(0), Some([6, 2].as_slice()));
     let translated = ornis_llvm2gpu::translate_with_meta(ir).expect("translate");
     assert!(
         translated.wgsl.contains("@workgroup_size(32, 2, 1)"),

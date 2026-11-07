@@ -118,15 +118,17 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
     let ll = compile(root, args)?;
     let ir =
         std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let translated = if ornis_llvm2gpu::extract_meta(&ir).is_some() {
-        ornis_llvm2gpu::translate_with_meta(&ir)
-    } else {
-        let structs: Vec<&[u8]> = if args.types.is_empty() {
-            Vec::new()
-        } else {
-            vec![args.types.as_slice()]
-        };
-        ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
+    let translated = match ornis_llvm2gpu::extract_meta(&ir) {
+        Ok(None) => {
+            let structs: Vec<&[u8]> = if args.types.is_empty() {
+                Vec::new()
+            } else {
+                vec![args.types.as_slice()]
+            };
+            ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
+        }
+        Ok(Some(_)) => ornis_llvm2gpu::translate_with_meta(&ir),
+        Err(error) => Err(error),
     }
     .map_err(|error| format!("translate {}: {error}", args.package))?;
 

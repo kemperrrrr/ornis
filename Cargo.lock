@@ -2913,6 +2913,7 @@ name = "ornis-gpu-shader"
 version = "0.1.0"
 dependencies = [
  "ornis-gpu-shader-macros",
+ "trybuild",
 ]
 
 [[package]]
@@ -2941,6 +2942,7 @@ version = "0.1.0"
 dependencies = [
  "naga",
  "ornis-gpu-abi",
+ "ornis-gpu-shader",
  "pollster",
  "wgpu",
 ]
