@@ -9,6 +9,7 @@ members = [
     "crates/gpu-abi-macros",
     "crates/wasm2gpu",
     "crates/llvm2gpu",
+    "crates/gpu-shaders",
     "crates/wasm2gpu-shader",
     "crates/wasm2gpu-testkit",
     "crates/physics",

@@ -8,6 +8,7 @@ description = "Build and task automation (cargo-xtask pattern)"
 publish = false
 
 [dependencies]
+ornis-llvm2gpu = { path = "../crates/llvm2gpu", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
