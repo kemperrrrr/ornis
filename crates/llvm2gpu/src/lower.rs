@@ -1439,6 +1439,30 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let global = self.builders.uniform_global(group, binding, len);
             return load_uniform(&mut self.func, out, global, index);
         }
+        if callee.contains("storage_len_f32") {
+            if args.len() != 2 {
+                return Err(TranslateError::Unsupported);
+            }
+            let group = const_u32(&args[0])?;
+            let binding = const_u32(&args[1])?;
+            let global = self
+                .builders
+                .storage_global(group, binding, Elem::F32, false);
+            let base = self.expr(out, naga::Expression::GlobalVariable(global));
+            return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
+        }
+        if callee.contains("storage_len_u32") && !callee.contains("storage_len_u32x4") {
+            if args.len() != 2 {
+                return Err(TranslateError::Unsupported);
+            }
+            let group = const_u32(&args[0])?;
+            let binding = const_u32(&args[1])?;
+            let global = self
+                .builders
+                .storage_global(group, binding, Elem::U32, false);
+            let base = self.expr(out, naga::Expression::GlobalVariable(global));
+            return Ok(self.expr(out, naga::Expression::ArrayLength(base)));
+        }
         if callee.contains("storage_len_u32x4") {
             if args.len() != 2 {
                 return Err(TranslateError::Unsupported);

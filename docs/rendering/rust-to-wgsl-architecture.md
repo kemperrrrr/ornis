@@ -484,10 +484,13 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 
 1. Билдер `xtask build-shaders`: one-shot rustc → llvm2gpu → артефакты,
    кэш по hash; общий GPU-харнесс с `wasm2gpu-testkit` для паритета.
-2. ABI под #243: `vec4` storage read/write (13×`vec4` вместо 52 скаляров),
-   readonly access из метаданных binding'а, `arrayLength`; кернел
-   `cull_compact` на Rust, паритет с production WGSL и M1-бенч без
-   регрессии >5%.
+2. ABI под #243: readonly storage, `arrayLength`, `vec4` storage и
+   uniform-plane dot; кернел `cull_compact` на Rust + build-time WGSL.
+   Выбран **index compaction**: compute пишет compacted `u32`-индексы,
+   indirect vertex stage делает `per_objects[visible_indices[instance]]`.
+   Паритет с legacy WGSL и indirect-vs-direct пиксельные гейты зелёные;
+   M1 A/B (GPU timestamps, 100 сэмплов): few −55%, many −82%,
+   all-visible −80%, late-reject −75% против прежнего WGSL.
 3. Эргономика: `#[gpu_entry]`, типизированные `Storage`/`Uniform`,
    извлечение entry/binding-метаданных из LLVM IR; шейдерный крейт
    собирается обычным cargo.

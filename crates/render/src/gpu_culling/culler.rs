@@ -28,8 +28,6 @@ const SRC_BINDING: u32 = 1;
 const DST_BINDING: u32 = 2;
 /// Binding slot of the indirect-args words.
 const ARGS_BINDING: u32 = 3;
-/// Read-only scalar `f32` view of the same source buffer (sphere math).
-const MATH_BINDING: u32 = 4;
 
 /// Errors from [`Culler`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -54,18 +52,18 @@ pub enum CullerError {
 /// [`Self::compact`] stages one frame of instances and pre-writes the
 /// indirect args with a zero counter; [`Self::record_compact`] records
 /// the compaction dispatch into the caller's encoder (no extra submit),
-/// leaving the result in [`Self::visible_buffer`] (dense
-/// [`PerObjectGpu`](crate::renderer::PerObjectGpu) records) and
+/// leaving the result in [`Self::visible_indices`] (dense source
+/// indices) and
 /// [`Self::args_buffer`] (a
 /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)-ready
 /// [`DrawIndexedIndirectArgs`] carrying the caller's `index_count`).
 /// The gbuffer pass renders through it when armed (see
 /// `Renderer3D::prepare_indirect_batch`); shadows always draw directly.
 pub struct Culler {
-    /// Dense compacted destination: `PerObject` records of the visible
-    /// instances, in dispatch order — the buffer the future indirect
-    /// draw binds as `per_objects`.
-    pub visible_buffer: wgpu::Buffer,
+    /// Dense compacted source indices of the visible instances, in
+    /// dispatch order. The indirect vertex stage resolves
+    /// `per_objects[visible_indices[instance_index]]`.
+    pub visible_indices: wgpu::Buffer,
     /// The indirect-args buffer: after [`Self::compact`] it is ready
     /// for
     /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
@@ -76,7 +74,7 @@ pub struct Culler {
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
-    src_buffer: wgpu::Buffer,
+    pub(crate) src_buffer: wgpu::Buffer,
     /// Resident CPU-side staging: `prev` is the last uploaded frame,
     /// `next` is reused across frames (no per-frame allocation), so a
     /// static scene re-uploads nothing — only the dirty runs tracked
@@ -147,12 +145,12 @@ fn culler_buffers(
         device,
         "culler src",
         record_bytes,
-        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
     );
     let dst_buffer = cull_storage_buffer(
         device,
         "culler dst",
-        record_bytes,
+        u64::from(capacity) * std::mem::size_of::<u32>() as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     );
     let args_buffer = cull_storage_buffer(
@@ -205,10 +203,6 @@ impl Culler {
                     ARGS_BINDING,
                     wgpu::BufferBindingType::Storage { read_only: false },
                 ),
-                cull_bind_entry(
-                    MATH_BINDING,
-                    wgpu::BufferBindingType::Storage { read_only: true },
-                ),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -244,14 +238,10 @@ impl Culler {
                     binding: ARGS_BINDING,
                     resource: args_buffer.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding: MATH_BINDING,
-                    resource: src_buffer.as_entire_binding(),
-                },
             ],
         });
         Ok(Self {
-            visible_buffer: dst_buffer,
+            visible_indices: dst_buffer,
             args_buffer,
             capacity,
             pipeline,
@@ -453,7 +443,7 @@ impl Culler {
     /// Records the compaction dispatch into the caller's encoder (no
     /// submit — the frame submits once, downstream): one compute pass
     /// over the [`Culler::compact`] staging, compacting the visible
-    /// instances into [`Culler::visible_buffer`] and counting them into
+    /// instances into [`Culler::visible_indices`] and counting them into
     /// [`Culler::args_buffer`]. The `queue.write_buffer` uploads of
     /// `compact` are ordered before any later submit, so recording here
     /// always sees the staged frame.

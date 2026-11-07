@@ -128,8 +128,9 @@ pub(crate) enum BatchDraw<'a> {
     },
     /// One
     /// [`draw_indexed_indirect`](wgpu::RenderPass::draw_indexed_indirect)
-    /// over the culler's compacted batch: `visible_buffer` binds as
-    /// `per_objects`, `args_buffer` carries the draw.
+    /// over the culler's compacted batch: `src_buffer` binds as
+    /// `per_objects`, `visible_indices` as the group-1 indirection, and
+    /// `args_buffer` carries the draw.
     Indirect {
         /// Culler that compacted this frame's batch.
         culler: &'a Culler,
@@ -388,15 +389,21 @@ pub struct Renderer3D {
     /// Motion-vector variant of the g-buffer pipeline; only runs for TAA
     /// plans, which provide the extra frame-graph attachment.
     gbuffer_motion_pipeline: wgpu::RenderPipeline,
+    /// Indirect vertex variants: `per_objects[visible_indices[instance]]`.
+    gbuffer_indirect_pipeline: wgpu::RenderPipeline,
+    gbuffer_motion_indirect_pipeline: wgpu::RenderPipeline,
     gbuffer_bind_group_layout: wgpu::BindGroupLayout,
+    gbuffer_indices_bind_group_layout: wgpu::BindGroupLayout,
     gbuffer_bind_group: std::sync::RwLock<wgpu::BindGroup>,
-    /// Cached gbuffer bind group binding the culler's `visible_buffer`
+    /// Cached gbuffer bind group binding the culler's `src_buffer`
     /// as `per_objects` (built by `gbuffer_bind_group_with`): the
     /// culler buffers never move without recreating the culler, so one
     /// cached group serves every indirect draw instead of allocating per
     /// frame. Cleared when the culler is (re)created or the material
     /// table grows (see `rebind_storage_buffers`).
     indirect_bind_group: std::sync::RwLock<Option<wgpu::BindGroup>>,
+    /// Group-1 compacted indices for the indirect vertex stage.
+    indirect_indices_bind_group: std::sync::RwLock<Option<wgpu::BindGroup>>,
     /// Skinned g-buffer pipeline: [`wgsl_vertex_source_skinned`] vertex
     /// stage (palette blend) with the classic fragment stage and the same
     /// five MRT targets. Draws interleaved [`SkinnedVertex`] buffers; bind
@@ -739,7 +746,10 @@ impl Renderer3D {
         let (
             gbuffer_pipeline,
             gbuffer_motion_pipeline,
+            gbuffer_indirect_pipeline,
+            gbuffer_motion_indirect_pipeline,
             gbuffer_bind_group_layout,
+            gbuffer_indices_bind_group_layout,
             gbuffer_bind_group,
         ) = Self::create_gbuffer_pipeline(
             device,
@@ -751,7 +761,10 @@ impl Renderer3D {
         );
         self.gbuffer_pipeline = gbuffer_pipeline;
         self.gbuffer_motion_pipeline = gbuffer_motion_pipeline;
+        self.gbuffer_indirect_pipeline = gbuffer_indirect_pipeline;
+        self.gbuffer_motion_indirect_pipeline = gbuffer_motion_indirect_pipeline;
         self.gbuffer_bind_group_layout = gbuffer_bind_group_layout;
+        self.gbuffer_indices_bind_group_layout = gbuffer_indices_bind_group_layout;
         *write_lock(&self.gbuffer_bind_group) = gbuffer_bind_group;
 
         self.lighting_pass =

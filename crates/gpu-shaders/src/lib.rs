@@ -1,46 +1,36 @@
-//! no_std GPU kernels for the stable Rust → LLVM IR → WGSL path.
+//! Index-compaction cull kernel for the stable Rust → LLVM IR path.
 //!
-//! The crate is a normal `no_std` library: cargo checks it on the host, while
-//! `cargo xtask build-shaders` compiles the same source for
+//! The crate is a normal `no_std` library: cargo checks it on the host,
+//! while the renderer build compiles the same source for
 //! `wasm32-unknown-unknown` with `--emit=llvm-ir` and feeds the IR to
-//! `ornis-llvm2gpu`. `cs_main` is the stage-3 cull/compaction candidate:
-//! one invocation per source record, sphere-vs-frustum culling, one dense
-//! slot from the indirect-args atomic, and a bit-preserving 13×`vec4` copy.
+//! `ornis-llvm2gpu`. One invocation per source record runs the
+//! sphere-vs-six-planes test, reserves a dense slot with the indirect-args
+//! atomic, and stores the source index (`u32`). The vertex stage resolves
+//! `per_objects[visible_indices[instance_index]]`.
 
 #![no_std]
 #![warn(missing_docs)]
 
-/// Four-word chunks in one `PerObject` record.
-const RECORD_CHUNKS: u32 = 13;
 /// Group-0 binding of the packed `CullParams` uniform.
 const PARAMS_BINDING: i32 = 0;
 /// `ornis_gpu.types` struct id of `CullParams`.
 const PARAMS_SID: i32 = 0;
 /// Field index of the `u32` count in `CullParams` (after six vec4 planes).
 const COUNT_FIELD: i32 = 6;
-/// Group-0 read-only source record binding.
+/// Group-0 read-only scalar `f32` view of the source record binding.
 const SRC_BINDING: i32 = 1;
-/// Group-0 read-write destination record binding.
+/// Group-0 read-write compacted `u32` index binding.
 const DST_BINDING: i32 = 2;
 /// Group-0 five-word indirect-args binding.
 const ARGS_BINDING: i32 = 3;
-/// Group-0 read-only scalar `f32` view of the same source buffer.
-const MATH_BINDING: i32 = 4;
 /// `f32` words in one source record (the 52-word `PerObject` layout).
 const RECORD_WORDS: u32 = 52;
 
 unsafe extern "C" {
-    fn storage_len_u32x4(group: i32, binding: i32) -> i32;
+    fn storage_len_f32(group: i32, binding: i32) -> i32;
+    fn storage_len_u32(group: i32, binding: i32) -> i32;
     fn storage_read_f32(group: i32, binding: i32, index: i32) -> f32;
-    fn storage_copy_u32x4(
-        src_group: i32,
-        src_binding: i32,
-        src_index: i32,
-        dst_group: i32,
-        dst_binding: i32,
-        dst_index: i32,
-    );
-    fn storage_write_u32x4(group: i32, binding: i32, index: i32, x: u32, y: u32, z: u32, w: u32);
+    fn storage_write_u32(group: i32, binding: i32, index: i32, value: u32);
     fn storage_atomic_add_u32(group: i32, binding: i32, index: i32, value: i32) -> i32;
     fn uniform_field_vec4_plane_dot(
         group: i32,
@@ -61,7 +51,7 @@ macro_rules! src_f32 {
         let index = $record * RECORD_WORDS + $word;
         // SAFETY: the caller guards `$record` against the source length; the
         // literal word stays inside the 52-word record.
-        unsafe { storage_read_f32(0, MATH_BINDING, index as i32) }
+        unsafe { storage_read_f32(0, SRC_BINDING, index as i32) }
     }};
 }
 
@@ -102,79 +92,37 @@ fn length3(x: f32, y: f32, z: f32) -> f32 {
     unsafe { gpu_length3_xyz(x, y, z) }
 }
 
-/// Write one 16-byte model chunk from four already-read `f32` words.
-macro_rules! store_chunk {
-    ($dst:expr, $chunk:literal, $a:expr, $b:expr, $c:expr, $d:expr) => {
-        // SAFETY: the destination base and literal chunk stay inside the
-        // guarded destination record array.
-        unsafe {
-            storage_write_u32x4(
-                0,
-                DST_BINDING,
-                ($dst + $chunk) as i32,
-                $a.to_bits(),
-                $b.to_bits(),
-                $c.to_bits(),
-                $d.to_bits(),
-            );
-        }
-    };
-}
-
-/// One 16-byte record chunk from source `$src` to destination `$dst`.
-macro_rules! copy_chunk {
-    ($src:expr, $dst:expr, $chunk:literal) => {
-        // SAFETY: both bases and the literal chunk stay inside the guarded
-        // source/destination record arrays.
-        unsafe {
-            storage_copy_u32x4(
-                0,
-                SRC_BINDING,
-                ($src + $chunk) as i32,
-                0,
-                DST_BINDING,
-                ($dst + $chunk) as i32,
-            );
-        }
-    };
-}
-
-/// Cull one instance and compact visible records into the dense destination.
+/// Cull one instance and append its source index to the dense output.
 ///
-/// Bindings: `0` padded `CullParams` uniform, `1` read-only source
-/// `array<vec4<u32>>`, `2` read-write destination of the same shape, `3`
-/// five-word indirect args with `instance_count` at word 1. The indirect
-/// count is read back by the host after the dispatch.
+/// Bindings: `0` padded `CullParams` uniform, `1` read-only `f32` source
+/// view, `2` read-write compacted `u32` indices, `3` five-word indirect
+/// args with `instance_count` at word 1.
 #[unsafe(no_mangle)]
 pub extern "C" fn cs_main(id: u32) {
-    // SAFETY: both imports read the vec4-array lengths of their bindings.
-    let src_len = unsafe { storage_len_u32x4(0, SRC_BINDING) } as u32 / RECORD_CHUNKS;
-    // SAFETY: same as above for the destination binding.
-    let dst_len = unsafe { storage_len_u32x4(0, DST_BINDING) } as u32 / RECORD_CHUNKS;
+    // SAFETY: both imports only read array lengths of their bindings.
+    let src_records = unsafe { storage_len_f32(0, SRC_BINDING) } as u32 / RECORD_WORDS;
+    // SAFETY: same as above for the index destination.
+    let dst_slots = unsafe { storage_len_u32(0, DST_BINDING) } as u32;
     // SAFETY: field 6 is the u32 count in the declared CullParams metadata.
     let count = unsafe { uniform_field_u32(0, PARAMS_BINDING, PARAMS_SID, COUNT_FIELD) };
     if id >= count {
         return;
     }
-    if id >= src_len {
+    if id >= src_records {
         return;
     }
     let m0 = src_f32!(id, 0);
     let m1 = src_f32!(id, 1);
     let m2 = src_f32!(id, 2);
-    let m3 = src_f32!(id, 3);
     let m4 = src_f32!(id, 4);
     let m5 = src_f32!(id, 5);
     let m6 = src_f32!(id, 6);
-    let m7 = src_f32!(id, 7);
     let m8 = src_f32!(id, 8);
     let m9 = src_f32!(id, 9);
     let m10 = src_f32!(id, 10);
-    let m11 = src_f32!(id, 11);
     let m12 = src_f32!(id, 12);
     let m13 = src_f32!(id, 13);
     let m14 = src_f32!(id, 14);
-    let m15 = src_f32!(id, 15);
     let rx = length3(m0, m1, m2);
     let ry = length3(m4, m5, m6);
     let rz = length3(m8, m9, m10);
@@ -183,22 +131,9 @@ pub extern "C" fn cs_main(id: u32) {
     plane_tests!(m12, m13, m14, radius);
     // SAFETY: word 1 is `instance_count` in the five-word args array.
     let slot = unsafe { storage_atomic_add_u32(0, ARGS_BINDING, 1, 1) } as u32;
-    if slot >= dst_len {
+    if slot >= dst_slots {
         return;
     }
-    let src = id * RECORD_CHUNKS;
-    let dst = slot * RECORD_CHUNKS;
-    store_chunk!(dst, 0, m0, m1, m2, m3);
-    store_chunk!(dst, 1, m4, m5, m6, m7);
-    store_chunk!(dst, 2, m8, m9, m10, m11);
-    store_chunk!(dst, 3, m12, m13, m14, m15);
-    copy_chunk!(src, dst, 4);
-    copy_chunk!(src, dst, 5);
-    copy_chunk!(src, dst, 6);
-    copy_chunk!(src, dst, 7);
-    copy_chunk!(src, dst, 8);
-    copy_chunk!(src, dst, 9);
-    copy_chunk!(src, dst, 10);
-    copy_chunk!(src, dst, 11);
-    copy_chunk!(src, dst, 12);
+    // SAFETY: `slot` is below the guarded index capacity.
+    unsafe { storage_write_u32(0, DST_BINDING, slot as i32, id) };
 }
