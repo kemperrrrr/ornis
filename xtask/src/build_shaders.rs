@@ -8,7 +8,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
-use std::time::SystemTime;
 
 /// Shader crate compiled when `--package` is omitted.
 const DEFAULT_PACKAGE: &str = "ornis-gpu-shaders";
@@ -167,6 +166,56 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
 }
 
 fn compile(root: &Path, args: &Args) -> Result<PathBuf, String> {
+    let ir = resolve(root, &args.out).join("ir");
+    std::fs::create_dir_all(&ir).map_err(|error| format!("create {}: {error}", ir.display()))?;
+    // The emit path is part of cargo's fingerprint, so a unique name forces
+    // rustc to run and write the IR. A fixed name would let a cached build
+    // answer without producing anything, and `cargo clean -p` does not remove
+    // per-target artifacts here.
+    let ll = ir.join(format!("{}-{}.ll", args.package, fingerprint()));
+    run_cargo_rustc(root, args, &ll)?;
+    if !ll.exists() {
+        return Err(format!(
+            "no LLVM IR for `{}` at {} — is the wasm32 target installed?",
+            args.package,
+            ll.display()
+        ));
+    }
+    // Keep only this run's IR so the directory does not grow without bound.
+    remove_stale_ir(&ir, &args.package, &ll);
+    Ok(ll)
+}
+
+/// Unique suffix that changes on every run, including within the same process.
+fn fingerprint() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default()
+}
+
+fn remove_stale_ir(ir: &Path, package: &str, keep: &Path) {
+    let prefix = format!("{package}-");
+    let Ok(entries) = std::fs::read_dir(ir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with(&prefix) && path.extension().and_then(|ext| ext.to_str()) == Some("ll")
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+fn run_cargo_rustc(root: &Path, args: &Args, ll: &Path) -> Result<(), String> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let status = Command::new(cargo)
         .current_dir(root)
@@ -182,53 +231,13 @@ fn compile(root: &Path, args: &Args) -> Result<PathBuf, String> {
             "-C",
             "codegen-units=1",
         ])
-        .arg("--emit=llvm-ir")
+        .arg(format!("--emit=llvm-ir={}", ll.display()))
         .status()
         .map_err(|error| format!("spawn cargo: {error}"))?;
     if !status.success() {
         return Err(format!("cargo rustc failed with {status}"));
     }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .map(|path| {
-            if path.is_absolute() {
-                path
-            } else {
-                root.join(path)
-            }
-        })
-        .unwrap_or_else(|| root.join("target"));
-    let deps = target.join(DEFAULT_TARGET).join("release").join("deps");
-    let prefix = args.package.replace('-', "_");
-    let mut newest: Option<(SystemTime, PathBuf)> = None;
-    let entries =
-        std::fs::read_dir(&deps).map_err(|error| format!("read {}: {error}", deps.display()))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|error| format!("read dir entry: {error}"))?
-            .path();
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
-        if !name.starts_with(&prefix) || path.extension().and_then(|ext| ext.to_str()) != Some("ll")
-        {
-            continue;
-        }
-        let modified = std::fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        if newest.as_ref().is_none_or(|(best, _)| modified > *best) {
-            newest = Some((modified, path));
-        }
-    }
-    newest.map(|(_, path)| path).ok_or_else(|| {
-        format!(
-            "no LLVM IR for `{}` under {} — is the wasm32 target installed?",
-            args.package,
-            deps.display()
-        )
-    })
+    Ok(())
 }
 
 fn parse_types(value: &str) -> Result<Vec<u8>, String> {
