@@ -57,8 +57,8 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
         let _e42 = ((1f - abs(_e29.x)) - abs(_e36.y));
         let _e45 = max(-(_e42), 0f);
         let _e48 = -(_e45);
-        let _e50 = (_e29.x + select(_e45, _e48, (_e29.x < 0f)));
-        let _e54 = (_e36.y + select(_e45, _e48, (_e36.y < 0f)));
+        let _e50 = (_e29.x + select(_e48, _e45, (_e29.x < 0f)));
+        let _e54 = (_e36.y + select(_e48, _e45, (_e36.y < 0f)));
         let _e67 = ((uv.x * 2f) + -1f);
         let _e71 = (1f - (uv.y * 2f));
         let _e75 = uniform_struct_0_2_.f4_.x;

@@ -36,7 +36,7 @@ const FLOOR: f32 = 1.0e-6;
 const MIN_TRANSITION: f32 = 1.0e-3;
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "bin centre is (index - 0.5) / (bins - 2), matching the host reduction"
+// qual:allow(complexity, magic_numbers) reason: "bin centre is (index - 0.5) / (bins - 2), matching the host reduction"
 fn bin_log_luminance(params: Uniform<AdaptParams, 0, 1>, index: u32) -> f32 {
     let t = clamp((index as f32 - 0.5) / (BINS as f32 - 2.0), 0.0, 1.0);
     params.field_f32::<0>() + t * params.field_f32::<1>()
@@ -59,7 +59,7 @@ fn snapshot(histogram: Storage<u32, 0, 0, ReadWrite>) -> u32 {
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "the reduction starts at bin 1; bin 0 is the below-range reserve"
+// qual:allow(complexity, magic_numbers) reason: "the reduction starts at bin 1; bin 0 is the below-range reserve"
 fn reduce(total: u32, params: Uniform<AdaptParams, 0, 1>, exposure: Storage<f32, 0, 2, ReadWrite>) {
     let low = (total as f32) * params.field_f32::<2>();
     let high = (total as f32) * params.field_f32::<3>();
@@ -82,7 +82,7 @@ fn reduce(total: u32, params: Uniform<AdaptParams, 0, 1>, exposure: Storage<f32,
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "AdaptParams fields 4..10 are the EV window and the step"
+// qual:allow(complexity, magic_numbers) reason: "AdaptParams fields 4..10 are the EV window and the step"
 fn adapted_ev(
     params: Uniform<AdaptParams, 0, 1>,
     exposure: Storage<f32, 0, 2, ReadWrite>,

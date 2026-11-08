@@ -47,7 +47,6 @@ const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "Rec.709 luma and the host non-finite floor"
 fn log_luminance(red: f32, green: f32, blue: f32) -> f32 {
     let luma = dot3(red, green, blue, LUMA_R, LUMA_G, LUMA_B);
     let non_finite = luma != luma || abs(luma) > INF_GUARD;
@@ -60,7 +59,6 @@ fn log_luminance(red: f32, green: f32, blue: f32) -> f32 {
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "HistogramParams field order: min_log, inv_range, bin_count"
 fn histogram_bin(params: Uniform<HistogramParams, 0, 3>, log_lum: f32) -> u32 {
     let min_log = params.field_f32::<0>();
     let inv_range = params.field_f32::<1>();
@@ -74,7 +72,6 @@ fn histogram_bin(params: Uniform<HistogramParams, 0, 3>, log_lum: f32) -> u32 {
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "mode 0 deferred, 1 forward premultiplied, 2 additive mix"
 fn mixed_lane(deferred: f32, forward: f32, alpha: f32, mode: u32) -> f32 {
     let premultiplied = forward * alpha;
     // Two single comparisons, not an if/else chain: rustc turns the chain
@@ -106,7 +103,7 @@ fn flush_shared(lid: u32, histogram: Storage<AtomicU32, 0, 2, ReadWrite>) {
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers, complexity) reason: "one texel of the host histogram; bindings are the pass layout"
+// qual:allow(complexity, magic_numbers) reason: "one texel of the host histogram; bindings are the pass layout"
 fn meter_texel(
     x: u32,
     y: u32,
@@ -134,7 +131,6 @@ fn meter_texel(
 }
 
 #[gpu_entry(compute(threads(8, 8)))]
-// qual:allow(magic_numbers) reason: "workgroup axes 0 and 1 are the texel coordinate"
 pub fn cs_main(
     #[gpu(texture_2d, group = 0, binding = 0)] deferred: Texture2d,
     #[gpu(texture_2d, group = 0, binding = 1)] forward: Texture2d,

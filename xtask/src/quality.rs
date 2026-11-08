@@ -161,7 +161,7 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// five artifacts, so that id counts five times: the denominator
+    /// nine artifacts, so that id counts nine times: the denominator
     /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
@@ -169,9 +169,10 @@ impl QualityFlags {
             .iter()
             .filter(|id| self.enabled(id))
             .count();
-        // `build-shaders` checks five checked-in artifacts
-        // (cull, clusters, gtao, histogram, adapt).
-        let shader_checks = 4 * usize::from(self.ci && self.enabled("build-shaders"));
+        // `build-shaders` runs the base id plus one extra per remaining
+        // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
+        // ssao 4x, and the AO blur.
+        let shader_checks = 8 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2103,6 +2104,34 @@ fn ci_stages(stages: &mut StageList<'_>) {
         "crates/render/src/shaders/adapt_generated.wgsl",
         "cargo xtask build-shaders --check (adapt WGSL drift)",
     );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-ssao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/ssao_generated.wgsl",
+        "cargo xtask build-shaders --check (ssao WGSL drift)",
+    );
+    check_shader_artifact_multisampled(
+        stages,
+        Some("ornis-gpu-gtao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/gtao_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (gtao 4x WGSL drift)",
+    );
+    check_shader_artifact_multisampled(
+        stages,
+        Some("ornis-gpu-ssao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/ssao_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (ssao 4x WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-blur"),
+        Some("fs_main"),
+        "crates/render/src/shaders/ao_blur_generated.wgsl",
+        "cargo xtask build-shaders --check (ao blur WGSL drift)",
+    );
 }
 
 /// One checked-in WGSL artifact. `package` is omitted for the default crate.
@@ -2113,6 +2142,30 @@ fn check_shader_artifact(
     entry: Option<&str>,
     artifact: &str,
     desc: &str,
+) {
+    check_shader_artifact_sampling(stages, package, entry, artifact, desc, false);
+}
+
+/// Like [`check_shader_artifact`], with the 4x MSAA texture declarations.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_multisampled(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+) {
+    check_shader_artifact_sampling(stages, package, entry, artifact, desc, true);
+}
+
+// qual:allow(test_quality, untested, max_parameters=6) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_sampling(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+    multisampled: bool,
 ) {
     if !wasm_target_installed() {
         stages.skip(
@@ -2130,6 +2183,9 @@ fn check_shader_artifact(
     if let Some(entry) = entry {
         args.push("--entry");
         args.push(entry);
+    }
+    if multisampled {
+        args.push("--multisampled");
     }
     args.push("--artifact");
     args.push(artifact);

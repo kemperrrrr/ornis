@@ -28,6 +28,8 @@ pub(super) enum Kind {
     Texture2d,
     /// `texture_depth_2d`.
     DepthTexture2d,
+    /// Filtering sampler (`sampler`).
+    Sampler,
 }
 
 impl Kind {
@@ -38,12 +40,13 @@ impl Kind {
             Self::StorageBuffer => "Storage",
             Self::Texture2d => "Texture2d",
             Self::DepthTexture2d => "DepthTexture2d",
+            Self::Sampler => "Sampler",
         }
     }
 
-    /// Whether the binding is a texture. Textures carry only group and binding.
-    fn is_texture(self) -> bool {
-        matches!(self, Self::Texture2d | Self::DepthTexture2d)
+    /// Whether the binding carries only group and binding, no element type.
+    fn is_binding_only(self) -> bool {
+        matches!(self, Self::Texture2d | Self::DepthTexture2d | Self::Sampler)
     }
 }
 
@@ -91,6 +94,9 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
         if meta.path.is_ident("depth_texture_2d") {
             return set_kind(&mut kind, Kind::DepthTexture2d, &meta);
         }
+        if meta.path.is_ident("sampler") {
+            return set_kind(&mut kind, Kind::Sampler, &meta);
+        }
         if meta.path.is_ident("read_only") {
             read_only = true;
             return Ok(());
@@ -104,21 +110,21 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
             return Ok(());
         }
         Err(meta.error(
-            "expected `uniform`, `storage_buffer`, `texture_2d`, `depth_texture_2d`, \
+            "expected `uniform`, `storage_buffer`, `texture_2d`, `depth_texture_2d`, `sampler`, \
              `read_only`, `group = N`, or `binding = N`",
         ))
     })?;
     let kind = kind.ok_or_else(|| {
         syn::Error::new_spanned(
             attr,
-            "expected `uniform`, `storage_buffer`, `texture_2d`, or `depth_texture_2d` \
-             in the gpu attribute",
+            "expected `uniform`, `storage_buffer`, `texture_2d`, `depth_texture_2d`, or \
+             `sampler` in the gpu attribute",
         )
     })?;
     if read_only && kind != Kind::StorageBuffer {
         return Err(syn::Error::new_spanned(
             attr,
-            "`read_only` applies to `storage_buffer`; a uniform or a texture is already read-only",
+            "`read_only` applies to `storage_buffer`; a uniform, a texture, or a sampler is already read-only",
         ));
     }
     let group = group
@@ -126,7 +132,7 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
     let binding = binding.ok_or_else(|| {
         syn::Error::new_spanned(attr, "missing `binding = N` in the gpu attribute")
     })?;
-    let (ty, element) = if kind.is_texture() {
+    let (ty, element) = if kind.is_binding_only() {
         resolve_texture(ty, kind, group, binding)?
     } else {
         resolve(ty, kind, group, binding, read_only)?
@@ -184,6 +190,7 @@ fn resolve(
                     Kind::StorageBuffer => "storage_buffer",
                     Kind::Texture2d => "texture_2d",
                     Kind::DepthTexture2d => "depth_texture_2d",
+                    Kind::Sampler => "sampler",
                 },
                 kind.type_name(),
                 segment.ident
@@ -216,10 +223,10 @@ fn resolve(
     let arguments = match kind {
         Kind::Uniform => syn::parse_quote!(<#element, #group, #binding>),
         Kind::StorageBuffer => syn::parse_quote!(<#element, #group, #binding, #access>),
-        Kind::Texture2d | Kind::DepthTexture2d => {
+        Kind::Texture2d | Kind::DepthTexture2d | Kind::Sampler => {
             return Err(syn::Error::new_spanned(
                 ty,
-                "a texture binding has no element type",
+                "a texture or sampler binding has no element type",
             ));
         }
     };
@@ -246,6 +253,7 @@ fn resolve_texture(ty: &Type, kind: Kind, group: u32, binding: u32) -> syn::Resu
                 match kind {
                     Kind::Texture2d => "texture_2d",
                     Kind::DepthTexture2d => "depth_texture_2d",
+                    Kind::Sampler => "sampler",
                     Kind::Uniform | Kind::StorageBuffer => kind.type_name(),
                 },
                 kind.type_name(),

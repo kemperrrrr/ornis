@@ -29,6 +29,25 @@ pub use emit::Translated;
 pub use error::TranslateError;
 pub use meta::{ShaderMeta, extract as extract_meta, parse as parse_meta};
 
+/// How the translator declares texture bindings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextureSampling {
+    /// `texture_2d<f32>` / `texture_depth_2d`; `textureLoad` reads mip 0.
+    #[default]
+    SingleSample,
+    /// `texture_multisampled_2d<f32>` / `texture_depth_multisampled_2d`;
+    /// `textureLoad` reads sample 0. This is the 4x MSAA build of the same
+    /// kernel: the body is unchanged, only the declared texture type is.
+    Multisampled,
+}
+
+impl TextureSampling {
+    /// Whether bindings lower to multisampled image types.
+    fn multisampled(self) -> bool {
+        self == Self::Multisampled
+    }
+}
+
 /// Translate using the metadata emitted by `#[gpu_entry]`.
 ///
 /// Falls back to the scalar toy defaults when the shader has no metadata
@@ -40,6 +59,22 @@ pub use meta::{ShaderMeta, extract as extract_meta, parse as parse_meta};
 /// leaves the translated subset, and [`TranslateError::UnsupportedType`] when
 /// the metadata names a uniform struct the translator cannot lay out.
 pub fn translate_with_meta(llvm_ir: &str) -> Result<Translated, TranslateError> {
+    translate_with_meta_and_sampling(llvm_ir, TextureSampling::SingleSample)
+}
+
+/// Translate using `#[gpu_entry]` metadata and an explicit texture sampling.
+///
+/// [`TextureSampling::Multisampled`] turns every texture binding into its
+/// multisampled counterpart and reads sample 0, which is how the 4x AO pass
+/// binds its g-buffer.
+///
+/// # Errors
+///
+/// Same as [`translate_with_meta`].
+pub fn translate_with_meta_and_sampling(
+    llvm_ir: &str,
+    sampling: TextureSampling,
+) -> Result<Translated, TranslateError> {
     let func = parse::parse(llvm_ir)?;
     let (meta, workgroup) = match meta::extract(llvm_ir)? {
         Some(meta) => {
@@ -58,7 +93,7 @@ pub fn translate_with_meta(llvm_ir: &str) -> Result<Translated, TranslateError> 
         None => Vec::new(),
     };
     let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
-    let module = lower::lower(&func, &refs, workgroup)?;
+    let module = lower::lower(&func, &refs, workgroup, sampling.multisampled())?;
     emit::emit(&module)
 }
 
@@ -114,6 +149,6 @@ pub fn translate_with_types_and_workgroup(
     workgroup: [u32; 3],
 ) -> Result<Translated, TranslateError> {
     let func = parse::parse(llvm_ir)?;
-    let module = lower::lower(&func, structs, workgroup)?;
+    let module = lower::lower(&func, structs, workgroup, false)?;
     emit::emit(&module)
 }

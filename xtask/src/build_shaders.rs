@@ -4,7 +4,9 @@
 //! `wasm32-unknown-unknown` (so path and proc-macro dependencies resolve),
 //! translates the emitted LLVM IR through `ornis-llvm2gpu`, and writes
 //! WGSL/SPIR-V. `--artifact <file>` writes the WGSL the renderer includes;
-//! `--check` compares it instead and fails on drift.
+//! `--check` compares it instead and fails on drift. `--multisampled`
+//! translates the same kernel with multisampled texture bindings (sample-0
+//! loads), which is the 4x MSAA variant of an AO kernel.
 
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
@@ -33,6 +35,7 @@ struct Args {
     check: bool,
     workgroup: [u32; 3],
     types: Vec<u8>,
+    multisampled: bool,
 }
 
 pub fn build_shaders(raw: &[String]) {
@@ -64,11 +67,16 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         check: false,
         workgroup: DEFAULT_WORKGROUP,
         types: DEFAULT_TYPES.to_vec(),
+        multisampled: false,
     };
     let mut iter = raw.iter();
     while let Some(flag) = iter.next() {
         if flag == "--check" {
             args.check = true;
+            continue;
+        }
+        if flag == "--multisampled" {
+            args.multisampled = true;
             continue;
         }
         let value = iter.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -117,6 +125,9 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
         std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
     let translated = match ornis_llvm2gpu::extract_meta(&ir) {
         Ok(None) => {
+            if args.multisampled {
+                return Err("--multisampled needs a kernel with entry metadata".to_string());
+            }
             let structs: Vec<&[u8]> = if args.types.is_empty() {
                 Vec::new()
             } else {
@@ -124,7 +135,14 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
             };
             ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
         }
-        Ok(Some(_)) => ornis_llvm2gpu::translate_with_meta(&ir),
+        Ok(Some(_)) => {
+            let sampling = if args.multisampled {
+                ornis_llvm2gpu::TextureSampling::Multisampled
+            } else {
+                ornis_llvm2gpu::TextureSampling::SingleSample
+            };
+            ornis_llvm2gpu::translate_with_meta_and_sampling(&ir, sampling)
+        }
         Err(error) => Err(error),
     }
     .map_err(|error| format!("translate {}: {error}", args.package))?;
@@ -313,5 +331,15 @@ mod tests {
     #[test]
     fn check_requires_artifact() {
         assert!(parse(&["--check".to_string()]).is_err());
+    }
+
+    #[test]
+    fn multisampled_is_a_flag_not_a_value() {
+        let raw = vec!["--multisampled".to_string(), "--package".to_string()];
+        // `--package` still needs its value, so parsing must fail after the
+        // flag is consumed without swallowing the next argument.
+        assert!(parse(&raw).is_err());
+        let args = parse(&["--multisampled".to_string()]).expect("flag");
+        assert!(args.multisampled);
     }
 }

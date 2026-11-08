@@ -12,7 +12,7 @@ pub struct Texture2d<const G: u32, const B: u32> {
 }
 
 impl<const G: u32, const B: u32> Texture2d<G, B> {
-    /// Lane `LANE` (`0..4`) of `textureLoad` at mip 0.
+    /// One lane of `textureLoad` at mip 0.
     ///
     /// The lane is a const generic: the translator only accepts a literal.
     #[inline(always)]
@@ -22,6 +22,29 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         #[cfg(target_arch = "wasm32")]
         {
             crate::abi::texture_load_f32x4(G, B, x, y, LANE)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y);
+            crate::host_unavailable()
+        }
+    }
+
+    /// Red lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
+    ///
+    /// Level 0 is explicit: a fragment has no implicit derivatives here, and
+    /// the blur samples a half-res target whose mips do not exist.
+    #[inline(always)]
+    pub fn sample_r<const SG: u32, const SB: u32>(
+        &self,
+        sampler: Sampler<SG, SB>,
+        x: f32,
+        y: f32,
+    ) -> f32 {
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_level_f32x4(G, B, SG, SB, x, y, 0)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -119,7 +142,25 @@ impl<const G: u32, const B: u32> Clone for DepthTexture2d<G, B> {
 
 impl<const G: u32, const B: u32> Copy for DepthTexture2d<G, B> {}
 
+/// Filtering sampler at `(G, B)`.
+///
+/// The sampler address/filter modes live on the host; the kernel only passes
+/// it to [`Texture2d::sample_r`].
+pub struct Sampler<const G: u32, const B: u32> {
+    _binding: core::marker::PhantomData<fn() -> u32>,
+}
+
+impl<const G: u32, const B: u32> Clone for Sampler<G, B> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<const G: u32, const B: u32> Copy for Sampler<G, B> {}
+
 const _: () = {
     assert!(core::mem::size_of::<Texture2d<0, 0>>() == 0);
     assert!(core::mem::size_of::<DepthTexture2d<0, 0>>() == 0);
+    assert!(core::mem::size_of::<Sampler<0, 0>>() == 0);
 };

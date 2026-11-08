@@ -50,6 +50,7 @@ pub(super) fn lower(
     func: &LlvmFunc,
     structs: &[&[u8]],
     workgroup: [u32; 3],
+    multisampled: bool,
 ) -> Result<naga::Module, TranslateError> {
     let fragment = func.name == ornis_gpu_abi::symbols::FS_MAIN;
     if func.name != ornis_gpu_abi::symbols::CS_MAIN && !fragment {
@@ -71,7 +72,7 @@ pub(super) fn lower(
         return Err(TranslateError::Unsupported);
     }
     let cfg = Cfg::new(func)?;
-    let mut builders = Builders::new(structs);
+    let mut builders = Builders::new(structs, multisampled);
     let function = builders.build(func, &cfg, fragment)?;
     builders.finish(function, func.ret_ty, workgroup, fragment)
 }
@@ -440,6 +441,8 @@ struct Builders {
     struct_stack: Vec<u32>,
     /// `texture_2d` / `texture_depth_2d` globals, one per binding.
     textures: HashMap<(u32, u32), (TextureKind, naga::Handle<naga::GlobalVariable>)>,
+    /// Filtering samplers, one per binding.
+    samplers: HashMap<(u32, u32), naga::Handle<naga::GlobalVariable>>,
     /// `vec2<i32>` used as a `textureLoad` coordinate.
     ivec2: Option<naga::Handle<naga::Type>>,
     /// `vec4<f32>` shared by the fragment output and `fragment_store`.
@@ -451,10 +454,12 @@ struct Builders {
     workgroup_atomic: Option<naga::Handle<naga::GlobalVariable>>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
+    /// Declare textures as multisampled and load sample 0 instead of mip 0.
+    multisampled: bool,
 }
 
 impl Builders {
-    fn new(structs: &[&[u8]]) -> Self {
+    fn new(structs: &[&[u8]], multisampled: bool) -> Self {
         Self {
             module: naga::Module::default(),
             storage_binding: HashMap::new(),
@@ -463,12 +468,14 @@ impl Builders {
             struct_types: HashMap::new(),
             struct_stack: Vec::new(),
             textures: HashMap::new(),
+            samplers: HashMap::new(),
             ivec2: None,
             vec2_f32: None,
             vec4_f32: None,
             workgroup: None,
             workgroup_atomic: None,
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
+            multisampled,
         }
     }
 
@@ -627,7 +634,7 @@ impl Builders {
                 inner: naga::TypeInner::Image {
                     dim: naga::ImageDimension::D2,
                     arrayed: false,
-                    class: image_class(want),
+                    class: image_class(want, self.multisampled),
                 },
             },
             naga::Span::default(),
@@ -645,6 +652,36 @@ impl Builders {
         );
         self.textures.insert((group, binding), (want, handle));
         Ok(handle)
+    }
+
+    /// A filtering `sampler` global at `(group, binding)`.
+    ///
+    /// Samplers carry no data the kernel can read, so nothing checks the
+    /// address or filter modes here; the renderer's bind group owns them.
+    fn sampler(&mut self, group: u32, binding: u32) -> naga::Handle<naga::GlobalVariable> {
+        if let Some(handle) = self.samplers.get(&(group, binding)) {
+            return *handle;
+        }
+        let ty = self.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Sampler { comparison: false },
+            },
+            naga::Span::default(),
+        );
+        let handle = self.module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some(format!("sampler_{group}_{binding}_")),
+                space: naga::AddressSpace::Handle,
+                binding: Some(naga::ResourceBinding { group, binding }),
+                ty,
+                init: None,
+                memory_decorations: naga::MemoryDecorations::empty(),
+            },
+            naga::Span::default(),
+        );
+        self.samplers.insert((group, binding), handle);
+        handle
     }
 
     fn workgroup_words(&mut self) -> Result<naga::Handle<naga::GlobalVariable>, TranslateError> {
@@ -1943,6 +1980,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("workgroup_load_u32") {
             return self.workgroup_load(out, args, false);
         }
+        if callee.contains("texture_sample_level_2d_f32x4") {
+            return self.texture_sample_lane(out, args);
+        }
         if callee.contains("texture_load_2d_f32x4") {
             return self.texture_load_lane(out, args);
         }
@@ -2411,9 +2451,66 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         self.image_load(out, image, x, y)
     }
 
+    /// `texture_sample_level_2d_f32x4(group, binding, sampler_group,
+    /// sampler_binding, x, y, lane)`: one lane of `textureSampleLevel(…, 0.0)`.
+    fn texture_sample_lane(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if args.len() != 7 {
+            return Err(TranslateError::Unsupported);
+        }
+        let lane = const_u32(&args[6])?;
+        if lane >= VEC4_LANES {
+            return Err(TranslateError::Unsupported);
+        }
+        let group = const_u32(&args[0])?;
+        let binding = const_u32(&args[1])?;
+        let sampler_group = const_u32(&args[2])?;
+        let sampler_binding = const_u32(&args[3])?;
+        let x = self.operand(out, &args[4])?;
+        let y = self.operand(out, &args[5])?;
+        let coord_ty = self.builders.vec2_f32();
+        let coordinate = self.expr(
+            out,
+            naga::Expression::Compose {
+                ty: coord_ty,
+                components: vec![x, y],
+            },
+        );
+        let image = self
+            .builders
+            .texture(group, binding, TextureKind::Sampled)?;
+        let image = self.expr(out, naga::Expression::GlobalVariable(image));
+        let sampler = self.builders.sampler(sampler_group, sampler_binding);
+        let sampler = self.expr(out, naga::Expression::GlobalVariable(sampler));
+        let level = self.expr(out, naga::Expression::Literal(naga::Literal::F32(0.0)));
+        let texel = self.expr(
+            out,
+            naga::Expression::ImageSample {
+                image,
+                sampler,
+                gather: None,
+                coordinate,
+                array_index: None,
+                offset: None,
+                level: naga::SampleLevel::Exact(level),
+                depth_ref: None,
+                clamp_to_edge: false,
+            },
+        );
+        Ok(self.expr(
+            out,
+            naga::Expression::AccessIndex {
+                base: texel,
+                index: lane,
+            },
+        ))
+    }
+
     /// `texture_load_2d_f32x4(group, binding, x, y, lane)` at mip 0.
     /// One lane of the `vec4<f32>` a sampled `texture_2d<f32>` returns.
-    // qual:allow(iosp) reason: "the lane is checked, then one component of the sampled textureLoad is taken"
     fn texture_load_lane(
         &mut self,
         out: &mut naga::Block,
@@ -2449,7 +2546,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         y: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let coordinate = self.texel_coord(out, x, y)?;
-        let level = self.expr(out, naga::Expression::Literal(naga::Literal::I32(0)));
+        let (sample, level) = if self.builders.multisampled {
+            // A multisampled image has samples, not mip levels. Sample 0 is
+            // what the renderer binds for the 4x AO pass.
+            let sample = self.expr(out, naga::Expression::Literal(naga::Literal::U32(0)));
+            (Some(sample), None)
+        } else {
+            let level = self.expr(out, naga::Expression::Literal(naga::Literal::I32(0)));
+            (None, Some(level))
+        };
         let handle = self.expr(out, naga::Expression::GlobalVariable(image));
         Ok(self.expr(
             out,
@@ -2457,14 +2562,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 image: handle,
                 coordinate,
                 array_index: None,
-                sample: None,
-                level: Some(level),
+                sample,
+                level,
             },
         ))
     }
 
     /// `texture_width_2d` / `texture_height_2d(group, binding)`.
-    // qual:allow(iosp) reason: "the binding is resolved, then one lane of textureDimensions is loaded"
     fn texture_size(
         &mut self,
         out: &mut naga::Block,
@@ -2743,7 +2847,6 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     /// `fragment_store_f32x4(r, g, b, a)` into the `fs_main` output.
-    // qual:allow(iosp) reason: "the four lanes are composed into the location-0 vec4 and stored for the fragment return"
     fn fragment_store(
         &mut self,
         out: &mut naga::Block,
@@ -3023,12 +3126,14 @@ fn load_uniform(
 
 /// `llvm.umin` / `minnum` / `umax` / `maxnum` — the forms rustc emits for
 /// `Ord::min`/`max`. WGSL `min`/`max` have the same NaN rule as `minnum`.
-fn image_class(kind: TextureKind) -> naga::ImageClass {
+fn image_class(kind: TextureKind, multisampled: bool) -> naga::ImageClass {
     match kind {
-        TextureKind::Depth => naga::ImageClass::Depth { multi: false },
+        TextureKind::Depth => naga::ImageClass::Depth {
+            multi: multisampled,
+        },
         TextureKind::Sampled => naga::ImageClass::Sampled {
             kind: naga::ScalarKind::Float,
-            multi: false,
+            multi: multisampled,
         },
     }
 }
@@ -3311,7 +3416,8 @@ start:
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
-        let module = lower(&func, structs, ornis_gpu_abi::symbols::CS_WORKGROUP).expect("lower");
+        let module =
+            lower(&func, structs, ornis_gpu_abi::symbols::CS_WORKGROUP, false).expect("lower");
         let ty = module
             .types
             .iter()

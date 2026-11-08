@@ -94,6 +94,16 @@ unsafe extern "C" {
     fn texture_load_2d_f32(group: u32, binding: u32, x: u32, y: u32) -> f32;
     #[link_name = "texture_load_2d_f32x4"]
     fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
+    #[link_name = "texture_sample_level_2d_f32x4"]
+    fn texture_sample_level_2d_f32x4(
+        group: u32,
+        binding: u32,
+        sampler_group: u32,
+        sampler_binding: u32,
+        x: f32,
+        y: f32,
+        lane: u32,
+    ) -> f32;
     #[link_name = "texture_width_2d"]
     fn texture_width_2d(group: u32, binding: u32) -> i32;
     #[link_name = "texture_height_2d"]
@@ -339,6 +349,30 @@ pub(crate) fn texture_load_depth(group: u32, binding: u32, x: u32, y: u32) -> f3
 #[inline(always)]
 pub(crate) fn texture_load_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32 {
     call!(texture_load_2d_f32x4(group, binding, x, y, lane))
+}
+
+/// One lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
+// qual:allow(srp, max_parameters=7) reason: "one operand per import argument: texture binding, sampler binding, uv, and the lane"
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn texture_sample_level_f32x4(
+    group: u32,
+    binding: u32,
+    sampler_group: u32,
+    sampler_binding: u32,
+    x: f32,
+    y: f32,
+    lane: u32,
+) -> f32 {
+    call!(texture_sample_level_2d_f32x4(
+        group,
+        binding,
+        sampler_group,
+        sampler_binding,
+        x,
+        y,
+        lane
+    ))
 }
 
 /// Width of a depth texture.

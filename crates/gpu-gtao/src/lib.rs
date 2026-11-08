@@ -60,7 +60,7 @@ type CameraUniform = Uniform<Camera, 0, 2>;
 type Depth = DepthTexture2d<0, 0>;
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "view_proj is Camera fields 0..3; the indices are the host layout"
+// qual:allow(complexity, magic_numbers) reason: "view_proj is Camera fields 0..3; the indices are the host layout"
 fn view_lane<const LANE: usize>(camera: CameraUniform, x: f32, y: f32, z: f32) -> f32 {
     camera.vec4_lane::<0, LANE>() * x
         + camera.vec4_lane::<1, LANE>() * y
@@ -69,7 +69,7 @@ fn view_lane<const LANE: usize>(camera: CameraUniform, x: f32, y: f32, z: f32) -
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "inv_view_proj is Camera fields 4..7; the indices are the host layout"
+// qual:allow(complexity, magic_numbers) reason: "inv_view_proj is Camera fields 4..7; the indices are the host layout"
 fn inv_view_lane<const LANE: usize>(camera: CameraUniform, x: f32, y: f32, z: f32) -> f32 {
     camera.vec4_lane::<4, LANE>() * x
         + camera.vec4_lane::<5, LANE>() * y
@@ -78,7 +78,7 @@ fn inv_view_lane<const LANE: usize>(camera: CameraUniform, x: f32, y: f32, z: f3
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "NDC remap of a depth sample, matching reconstruct_world_pos"
+// qual:allow(complexity, magic_numbers) reason: "NDC remap of a depth sample, matching reconstruct_world_pos"
 fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, depth: f32) -> f32 {
     let nx = uvx * 2.0 - 1.0;
     let ny = 1.0 - uvy * 2.0;
@@ -88,7 +88,7 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers, complexity, max_parameters=14) reason: "one horizon tap; the closed form is the XeGTAO sample and the resources stay arguments so the body does not restate bindings"
+// qual:allow(srp, max_parameters=14) reason: "one horizon tap; the closed form is the XeGTAO sample and the resources stay arguments so the body does not restate bindings"
 fn horizon(
     depth_tex: Depth,
     camera: CameraUniform,
@@ -130,7 +130,8 @@ fn horizon(
 
 /// Fragment entry. The vertex quad passes UV at `@location(0)`.
 #[gpu_entry(fragment)]
-// qual:allow(magic_numbers, complexity, max_function_lines=400) reason: "the GTAO march is one fragment; splitting it would hide the slice loop"
+// qual:allow(complexity, magic_numbers) reason: "the GTAO march is one fragment; splitting it would hide the slice loop"
+// qual:allow(complexity, max_function_lines=150) reason: "the GTAO march is one fragment; splitting it would hide the slice loop"
 pub fn fs_main(
     #[gpu(depth_texture_2d, group = 0, binding = 0)] depth_tex: DepthTexture2d,
     #[gpu(texture_2d, group = 0, binding = 1)] normal_tex: Texture2d,
@@ -152,8 +153,10 @@ pub fn fs_main(
     let enc_y = normal_tex.load::<1>(xi, yi);
     let nz = 1.0 - abs(enc_x) - abs(enc_y);
     let fold = f32::max(-nz, 0.0);
-    let nx = enc_x + if enc_x >= 0.0 { fold } else { -fold };
-    let ny = enc_y + if enc_y >= 0.0 { fold } else { -fold };
+    // Same fold as the renderer's `octahedral_decode`: the positive lanes
+    // shift by `-t`, the negative ones by `+t`.
+    let nx = enc_x + if enc_x >= 0.0 { -fold } else { fold };
+    let ny = enc_y + if enc_y >= 0.0 { -fold } else { fold };
     let nnx = normalize_lane::<0>(nx, ny, nz);
     let nny = normalize_lane::<1>(nx, ny, nz);
     let nnz = normalize_lane::<2>(nx, ny, nz);

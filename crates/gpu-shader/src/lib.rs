@@ -73,7 +73,7 @@ pub use math::{
 };
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;
-pub use texture::{DepthTexture2d, Texture2d};
+pub use texture::{DepthTexture2d, Sampler, Texture2d};
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
 pub use workgroup::{WorkgroupAtomicU32, WorkgroupU32, workgroup_barrier};

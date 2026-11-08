@@ -9,7 +9,6 @@ mod aa_common;
 pub mod aa_edge_generated;
 pub mod aa_taa_generated;
 pub mod ao_generated;
-mod ao_gtao;
 pub mod bloom_generated;
 pub mod composite_generated;
 pub mod fog_generated;
