@@ -5,10 +5,9 @@
 //! the translator turns into WGSL `dot`/`length`, so a length is one GPU
 //! instruction rather than three multiplies and a libm call.
 //!
-//! Only `dot` and `length` exist on purpose; `cross` and `normalize` are not
-//! lowered by `ornis-llvm2gpu` yet, and a method that cannot be translated is
-//! worse than a missing one because it fails at translation time instead of at
-//! compile time.
+//! `cross` and `normalize` are lane functions ([`crate::cross_lane`],
+//! [`crate::normalize_lane`]): the translator returns one component, not a
+//! vector.
 
 /// Three `f32` lanes, laid out exactly like a WGSL `vec3<f32>` payload.
 #[repr(C)]

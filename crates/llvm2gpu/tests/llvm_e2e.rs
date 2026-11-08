@@ -748,8 +748,72 @@ fn compile_ir(source: &str) -> Option<String> {
 
 /// Same as [`compile_ir`] with an explicit `opt-level`. `s` keeps dynamic
 /// loops structured instead of fully unrolling them at `opt-level=3`.
-fn compile_lib_opt(source: &str, opt: &str) -> Option<String> {
-    compile_ir_opt_kind(source, opt, true)
+/// Compile a workspace shader crate the way `xtask build-shaders` does.
+///
+/// The kernel depends on `ornis-gpu-shader`, so a lone `rustc` of its source
+/// cannot see the SDK. The IR goes to an explicit, unique path: the emit path
+/// is part of cargo's fingerprint, so rustc always runs and always writes it,
+/// and the test never has to guess which `.ll` in `deps` is current.
+fn compile_package(package: &str) -> String {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root");
+    let ll = std::env::temp_dir().join(format!("llvm2gpu-e2e-{package}-{}.ll", std::process::id()));
+    let ll = unique_ir_path(&ll);
+    cargo_rustc_llvm_ir(root, package, &ll);
+    assert!(
+        ll.exists(),
+        "cargo produced no LLVM IR for {package} at {}",
+        ll.display()
+    );
+    let text = std::fs::read_to_string(&ll)
+        .unwrap_or_else(|error| panic!("read {}: {error}", ll.display()));
+    let _ = std::fs::remove_file(&ll);
+    text
+}
+
+/// Adds a per-run suffix so cargo cannot reuse an earlier build of this crate.
+fn unique_ir_path(base: &std::path::Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let stem = base
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("kernel");
+    base.with_file_name(format!("{stem}-{nanos}.ll"))
+}
+
+/// Runs `cargo rustc` and asks rustc to emit LLVM IR at `ll`.
+fn cargo_rustc_llvm_ir(root: &std::path::Path, package: &str, ll: &std::path::Path) {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .current_dir(root)
+        .env("CARGO_BUILD_RUSTC_WRAPPER", "/usr/bin/env")
+        .args([
+            "rustc",
+            "-p",
+            package,
+            "--target",
+            "wasm32-unknown-unknown",
+            "--release",
+            "--",
+            "-C",
+            "opt-level=1",
+            "-C",
+            "panic=abort",
+            "-C",
+            "target-cpu=mvp",
+            "-C",
+            "codegen-units=1",
+        ])
+        .arg(format!("--emit=llvm-ir={}", ll.display()))
+        .status()
+        .unwrap_or_else(|error| panic!("spawn cargo rustc -p {package}: {error}"));
+    assert!(status.success(), "cargo rustc -p {package} failed");
 }
 
 fn compile_ir_opt(source: &str, opt: &str) -> Option<String> {
@@ -902,9 +966,7 @@ fn rustc_gtao_arc_to_wgsl() {
 
 #[test]
 fn rustc_gtao_horizon_march_to_wgsl() {
-    let Some(ir) = compile_lib_opt(GTAO_MARCH_KERNEL_RS, "1") else {
-        panic!("gtao march: rustc produced no IR");
-    };
+    let ir = compile_package("ornis-gpu-gtao");
     let translated = translate_with_meta(&ir).expect("gtao horizon march failed");
     assert!(translated.wgsl.contains("@fragment"), "{}", translated.wgsl);
     assert!(
@@ -941,9 +1003,7 @@ fn rustc_gtao_horizon_march_to_wgsl() {
 
 #[test]
 fn rustc_histogram_to_wgsl() {
-    let Some(ir) = compile_lib_opt(HISTOGRAM_KERNEL_RS, "1") else {
-        panic!("histogram: rustc produced no IR");
-    };
+    let ir = compile_package("ornis-gpu-histogram");
     let translated = translate_with_meta(&ir).expect("histogram");
     for needle in [
         "textureLoad(",
@@ -964,15 +1024,26 @@ fn rustc_histogram_to_wgsl() {
     }
 }
 
-const HISTOGRAM_KERNEL_RS: &str = include_str!("../../gpu-histogram/src/lib.rs");
-
-const ADAPT_KERNEL_RS: &str = include_str!("../../gpu-adapt/src/lib.rs");
+#[test]
+fn shader_kernels_do_not_declare_extern_imports() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for relative in [
+        "../gpu-histogram/src/lib.rs",
+        "../gpu-adapt/src/lib.rs",
+        "../gpu-gtao/src/lib.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(relative))
+            .unwrap_or_else(|error| panic!("read {relative}: {error}"));
+        assert!(
+            !source.contains("extern \"C\" {"),
+            "{relative} declares an import; add the operation to ornis-gpu-shader instead"
+        );
+    }
+}
 
 #[test]
 fn rustc_adapt_to_wgsl() {
-    let Some(ir) = compile_lib_opt(ADAPT_KERNEL_RS, "1") else {
-        panic!("adapt: rustc produced no IR");
-    };
+    let ir = compile_package("ornis-gpu-adapt");
     let translated = translate_with_meta(&ir).expect("adapt");
     for needle in [
         "exp2(",
@@ -989,8 +1060,6 @@ fn rustc_adapt_to_wgsl() {
         );
     }
 }
-
-const GTAO_MARCH_KERNEL_RS: &str = include_str!("../../gpu-gtao/src/lib.rs");
 
 const GTAO_ARC_KERNEL_RS: &str = r#"
 #![allow(clippy::all)]

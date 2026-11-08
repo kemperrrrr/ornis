@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "GTAO horizon-march fragment kernel for the llvm2gpu path"
 
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+
 [lib]
 crate-type = ["rlib"]
 

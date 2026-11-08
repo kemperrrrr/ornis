@@ -21,7 +21,7 @@
 )]
 pub(crate) fn unavailable() -> ! {
     panic!(
-        "ornis-gpu-shader: storage and uniform access requires a wasm32 shader build; \
-         the host build of a kernel crate cannot touch a binding"
+        "ornis-gpu-shader: a shader operation requires a wasm32 shader build; \
+         the host build of a kernel crate cannot run it"
     )
 }

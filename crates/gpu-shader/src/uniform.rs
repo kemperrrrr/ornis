@@ -13,6 +13,7 @@
 //! lives in another crate (`ornis-render`) that the shader crate must not
 //! depend on.
 
+use crate::TYPE_TAG_F32;
 use crate::TYPE_TAG_STRUCT;
 use crate::TYPE_TAG_U32;
 use crate::TYPE_TAG_VEC4;
@@ -42,6 +43,19 @@ impl<T: GpuStruct, const G: u32, const B: u32> Uniform<T, G, B> {
             logical_tag(T::FIELD_TAGS, FIELD) == tag,
             "uniform field has a different declared tag"
         );
+    }
+
+    /// Read scalar `f32` field `FIELD`.
+    #[inline(always)]
+    pub fn field_f32<const FIELD: usize>(&self) -> f32 {
+        const { Self::require_tag::<FIELD>(TYPE_TAG_F32) };
+        let _ = self;
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::field_f32(G, B, T::ID, FIELD as u32)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::host_unavailable()
     }
 
     /// Read scalar `u32` field `FIELD`.

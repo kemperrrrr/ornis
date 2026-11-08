@@ -10,8 +10,8 @@
 //!    translator never sees the resources;
 //! 2. `#[unsafe(export_name = "cs_main")]` is attached here, so a kernel writes a
 //!    plain safe `pub fn` — no `extern "C"`, no `#[unsafe(no_mangle)]`;
-//! 3. the attribute's own arguments are validated — `compute(threads(N))` is the
-//!    only stage the translator implements today;
+//! 3. the attribute's own arguments are validated — `compute(threads(N))`,
+//!    `compute(threads(X, Y))`, `compute(threads(X, Y, Z))`, or `fragment`;
 //! 4. a `#[used]` record is emitted whose uniform tags are read from the
 //!    parameter types, not from the attribute.
 //!
@@ -68,56 +68,101 @@ pub(super) fn expand(
     })
 }
 
-/// Parse `compute(threads(N))` into an `@workgroup_size` triple.
+/// Parse `compute(threads(..))` or `fragment` into an `@workgroup_size` triple.
+///
+/// One thread count is `(N, 1, 1)`. Two are `(X, Y, 1)`. Three are the full
+/// triple. A fragment has no workgroup; the record still carries `1,1,1`,
+/// which is what the translator stores for `fs_main`.
 fn parse_attr(attr: proc_macro2::TokenStream, name: &syn::Ident) -> syn::Result<[u32; 3]> {
     let parser = Punctuated::<Expr, syn::Token![,]>::parse_terminated;
     let exprs = parser.parse2(attr)?;
-    let mut threads = None;
+    let mut stage = None;
     for expr in exprs {
-        let Expr::Call(call) = expr else {
+        if stage.is_some() {
             return Err(syn::Error::new_spanned(
                 expr,
-                "expected `compute(threads(N))`",
-            ));
-        };
-        if !path_ident_is(&call.func, "compute") {
-            return Err(syn::Error::new_spanned(
-                call.func,
-                "only `compute(threads(N))` is supported; vertex and fragment entries follow",
+                "a GPU entry declares one stage",
             ));
         }
-        let Some(Expr::Call(inner)) = call.args.first() else {
-            return Err(syn::Error::new_spanned(call.args, "expected `threads(N)`"));
-        };
-        if !path_ident_is(&inner.func, "threads") {
+        stage = Some(parse_stage(&expr)?);
+    }
+    stage.ok_or_else(|| {
+        syn::Error::new_spanned(name, "missing `compute(threads(..))` or `fragment`")
+    })
+}
+
+/// One stage expression: `fragment` or `compute(threads(..))`.
+fn parse_stage(expr: &Expr) -> syn::Result<[u32; 3]> {
+    if let Expr::Path(path) = expr
+        && path.path.is_ident("fragment")
+    {
+        return Ok([1, 1, 1]);
+    }
+    let Expr::Call(call) = expr else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "expected `compute(threads(..))` or `fragment`",
+        ));
+    };
+    if !path_ident_is(&call.func, "compute") {
+        return Err(syn::Error::new_spanned(
+            &call.func,
+            "expected `compute(threads(..))` or `fragment`",
+        ));
+    }
+    let Some(Expr::Call(inner)) = call.args.first() else {
+        return Err(syn::Error::new_spanned(
+            &call.args,
+            "expected `threads(N)`, `threads(X, Y)`, or `threads(X, Y, Z)`",
+        ));
+    };
+    if call.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            &call.args,
+            "compute takes only `threads(..)`",
+        ));
+    }
+    if !path_ident_is(&inner.func, "threads") {
+        return Err(syn::Error::new_spanned(
+            &inner.func,
+            "expected `threads(N)`, `threads(X, Y)`, or `threads(X, Y, Z)`",
+        ));
+    }
+    threads_of(inner)
+}
+
+/// One, two, or three positive thread counts.
+fn threads_of(inner: &syn::ExprCall) -> syn::Result<[u32; 3]> {
+    let mut sizes = [1u32, 1, 1];
+    if inner.args.is_empty() || inner.args.len() > 3 {
+        return Err(syn::Error::new_spanned(
+            &inner.args,
+            "threads takes one, two, or three positive sizes",
+        ));
+    }
+    for (slot, arg) in sizes.iter_mut().zip(inner.args.iter()) {
+        let Expr::Lit(lit) = arg else {
             return Err(syn::Error::new_spanned(
-                &inner.func,
-                "expected `threads(N)`",
-            ));
-        }
-        let Some(Expr::Lit(lit)) = inner.args.first() else {
-            return Err(syn::Error::new_spanned(
-                &inner.args,
-                "threads size must be an integer literal",
+                arg,
+                "a thread size must be an integer literal",
             ));
         };
         let Lit::Int(value) = &lit.lit else {
             return Err(syn::Error::new_spanned(
                 lit,
-                "threads size must be an integer literal",
+                "a thread size must be an integer literal",
             ));
         };
-        threads = Some(value.base10_parse::<u32>()?);
+        let size = value.base10_parse::<u32>()?;
+        if size == 0 {
+            return Err(syn::Error::new_spanned(
+                lit,
+                "a thread size must be positive",
+            ));
+        }
+        *slot = size;
     }
-    let threads =
-        threads.ok_or_else(|| syn::Error::new_spanned(name, "missing `compute(threads(N))`"))?;
-    if threads == 0 {
-        return Err(syn::Error::new_spanned(
-            name,
-            "threads size must be positive",
-        ));
-    }
-    Ok([threads, 1, 1])
+    Ok(sizes)
 }
 
 fn path_ident_is(expr: &Expr, expected: &str) -> bool {

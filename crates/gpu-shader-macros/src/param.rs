@@ -24,6 +24,10 @@ pub(super) enum Kind {
     Uniform,
     /// `var<storage>` — an array, read or read-write.
     StorageBuffer,
+    /// Sampled `texture_2d<f32>`.
+    Texture2d,
+    /// `texture_depth_2d`.
+    DepthTexture2d,
 }
 
 impl Kind {
@@ -32,7 +36,14 @@ impl Kind {
         match self {
             Self::Uniform => "Uniform",
             Self::StorageBuffer => "Storage",
+            Self::Texture2d => "Texture2d",
+            Self::DepthTexture2d => "DepthTexture2d",
         }
+    }
+
+    /// Whether the binding is a texture. Textures carry only group and binding.
+    fn is_texture(self) -> bool {
+        matches!(self, Self::Texture2d | Self::DepthTexture2d)
     }
 }
 
@@ -74,6 +85,12 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
         if meta.path.is_ident("storage_buffer") {
             return set_kind(&mut kind, Kind::StorageBuffer, &meta);
         }
+        if meta.path.is_ident("texture_2d") {
+            return set_kind(&mut kind, Kind::Texture2d, &meta);
+        }
+        if meta.path.is_ident("depth_texture_2d") {
+            return set_kind(&mut kind, Kind::DepthTexture2d, &meta);
+        }
         if meta.path.is_ident("read_only") {
             read_only = true;
             return Ok(());
@@ -87,19 +104,21 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
             return Ok(());
         }
         Err(meta.error(
-            "expected `uniform`, `storage_buffer`, `read_only`, `group = N`, or `binding = N`",
+            "expected `uniform`, `storage_buffer`, `texture_2d`, `depth_texture_2d`, \
+             `read_only`, `group = N`, or `binding = N`",
         ))
     })?;
     let kind = kind.ok_or_else(|| {
         syn::Error::new_spanned(
             attr,
-            "expected `uniform` or `storage_buffer` in the gpu attribute",
+            "expected `uniform`, `storage_buffer`, `texture_2d`, or `depth_texture_2d` \
+             in the gpu attribute",
         )
     })?;
-    if read_only && kind == Kind::Uniform {
+    if read_only && kind != Kind::StorageBuffer {
         return Err(syn::Error::new_spanned(
             attr,
-            "`read_only` applies to `storage_buffer`; a uniform is already read-only",
+            "`read_only` applies to `storage_buffer`; a uniform or a texture is already read-only",
         ));
     }
     let group = group
@@ -107,8 +126,11 @@ pub(super) fn parse(attr: &Attribute, ty: &Type) -> syn::Result<Option<Param>> {
     let binding = binding.ok_or_else(|| {
         syn::Error::new_spanned(attr, "missing `binding = N` in the gpu attribute")
     })?;
-    let (ty, element) = resolve(ty, kind, group, binding, read_only)?;
-    let _ = (group, binding);
+    let (ty, element) = if kind.is_texture() {
+        resolve_texture(ty, kind, group, binding)?
+    } else {
+        resolve(ty, kind, group, binding, read_only)?
+    };
     Ok(Some(Param { kind, ty, element }))
 }
 
@@ -118,7 +140,7 @@ fn set_kind(
     meta: &syn::meta::ParseNestedMeta<'_>,
 ) -> syn::Result<()> {
     if slot.is_some_and(|existing| existing != kind) {
-        return Err(meta.error("a binding is either `uniform` or `storage_buffer`, not both"));
+        return Err(meta.error("a parameter declares one binding kind"));
     }
     *slot = Some(kind);
     Ok(())
@@ -160,6 +182,8 @@ fn resolve(
                 match kind {
                     Kind::Uniform => "uniform",
                     Kind::StorageBuffer => "storage_buffer",
+                    Kind::Texture2d => "texture_2d",
+                    Kind::DepthTexture2d => "depth_texture_2d",
                 },
                 kind.type_name(),
                 segment.ident
@@ -189,11 +213,63 @@ fn resolve(
     let Some(segment) = resolved.path.segments.last_mut() else {
         return Err(syn::Error::new_spanned(ty, "empty parameter type"));
     };
-    segment.arguments = syn::PathArguments::AngleBracketed(match kind {
+    let arguments = match kind {
         Kind::Uniform => syn::parse_quote!(<#element, #group, #binding>),
         Kind::StorageBuffer => syn::parse_quote!(<#element, #group, #binding, #access>),
-    });
+        Kind::Texture2d | Kind::DepthTexture2d => {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "a texture binding has no element type",
+            ));
+        }
+    };
+    segment.arguments = syn::PathArguments::AngleBracketed(arguments);
     Ok((Type::Path(resolved), element))
+}
+
+/// Fill the group and binding of a texture parameter that names no generics.
+fn resolve_texture(ty: &Type, kind: Kind, group: u32, binding: u32) -> syn::Result<(Type, Type)> {
+    let Type::Path(path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!("a gpu parameter must be `{}`", kind.type_name()),
+        ));
+    };
+    let Some(segment) = path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(ty, "empty parameter type"));
+    };
+    if segment.ident != kind.type_name() {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "a `{}` parameter must be `{}`, not `{}`",
+                match kind {
+                    Kind::Texture2d => "texture_2d",
+                    Kind::DepthTexture2d => "depth_texture_2d",
+                    Kind::Uniform | Kind::StorageBuffer => kind.type_name(),
+                },
+                kind.type_name(),
+                segment.ident
+            ),
+        ));
+    }
+    if !matches!(segment.arguments, PathArguments::None) {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "`{}` takes no generic arguments; `group` and `binding` belong to the gpu attribute",
+                kind.type_name()
+            ),
+        ));
+    }
+    let group = syn::Index::from(group as usize);
+    let binding = syn::Index::from(binding as usize);
+    let mut resolved = path.clone();
+    let Some(segment) = resolved.path.segments.last_mut() else {
+        return Err(syn::Error::new_spanned(ty, "empty parameter type"));
+    };
+    segment.arguments = syn::PathArguments::AngleBracketed(syn::parse_quote!(<#group, #binding>));
+    Ok((Type::Path(resolved), ty.clone()))
 }
 
 /// Access-mode token of a storage parameter.

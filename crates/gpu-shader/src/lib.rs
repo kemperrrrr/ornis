@@ -37,8 +37,12 @@
 //! compile time, and a read-only [`Storage`] has no `store` method, so a
 //! mismatched use fails the build instead of producing invalid WGSL.
 //!
-//! Resource methods only exist on `wasm32`; on the host they compile and panic,
-//! because the host build of a kernel crate has no bindings to read.
+//! A new GPU operation is added here, as a method or a function. Kernel crates
+//! do not declare `extern "C"` and do not name an `ornis_gpu` import: that
+//! block lives only in the private `abi` module, and `#[inline(always)]`
+//! methods lower to it. Resource methods only exist on `wasm32`; on the host
+//! they compile and panic, because the host build of a kernel crate has no
+//! bindings to read.
 
 #![no_std]
 #![warn(missing_docs)]
@@ -46,22 +50,33 @@
 #[cfg(target_arch = "wasm32")]
 mod abi;
 mod access;
+mod builtin;
 /// Element types of a storage binding and the import each lowers to.
 pub mod elements;
 #[cfg(not(target_arch = "wasm32"))]
 mod host;
+mod math;
 /// Entry metadata format shared with `ornis-llvm2gpu`.
 pub mod meta;
 mod resource;
+mod texture;
 mod uniform;
 mod vec3;
+mod workgroup;
 
 pub use access::{ReadOnly, ReadWrite, StorageAccess};
+pub use builtin::{fragment_store, fragment_uv, global_invocation_lane, local_invocation_index};
 pub use elements::{AtomicU32, Vec4U32};
+pub use math::{
+    abs, acos, clamp, cos, cross_lane, dot3, exp2, fract, length3, log2, mix, normalize_lane, sign,
+    sin,
+};
 pub use ornis_gpu_shader_macros::gpu_entry;
 pub use resource::Storage;
+pub use texture::{DepthTexture2d, Texture2d};
 pub use uniform::{GpuStruct, Uniform};
 pub use vec3::Vec3;
+pub use workgroup::{WorkgroupAtomicU32, WorkgroupU32, workgroup_barrier};
 
 /// Base-e exponential, lowered to WGSL `exp`.
 ///

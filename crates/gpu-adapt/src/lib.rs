@@ -3,58 +3,53 @@
 //! One thread snapshots the 256-bin histogram, clears it for the next
 //! frame, and writes the smoothed exposure. Bindings match the host
 //! pass: histogram storage `0`, `AdaptParams` uniform `1`, exposure
-//! storage `2`. The translator only has scalar imports, so the exposure
-//! block is the `f32` at index 0.
+//! storage `2`. The kernel is a safe `fn` on the shader SDK.
 
 #![no_std]
 #![allow(clippy::all)]
-#![allow(unsafe_op_in_unsafe_fn)]
 
-unsafe extern "C" {
-    fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32;
-    fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
-    fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32;
-    fn storage_write_f32(group: u32, binding: u32, index: u32, value: f32);
-    fn workgroup_load_u32(index: u32) -> u32;
-    fn workgroup_store_u32(index: u32, value: u32);
-    fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
-    fn gpu_log2(value: f32) -> f32;
-    fn gpu_exp2(value: f32) -> f32;
-    fn gpu_clamp(value: f32, low: f32, high: f32) -> f32;
-    fn gpu_abs(value: f32) -> f32;
-    fn gpu_sign(value: f32) -> f32;
+use ornis_gpu_shader::GpuStruct;
+use ornis_gpu_shader::ReadWrite;
+use ornis_gpu_shader::Storage;
+use ornis_gpu_shader::TYPE_TAG_F32;
+use ornis_gpu_shader::Uniform;
+use ornis_gpu_shader::WorkgroupU32;
+use ornis_gpu_shader::abs;
+use ornis_gpu_shader::clamp;
+use ornis_gpu_shader::exp2;
+use ornis_gpu_shader::gpu_entry;
+use ornis_gpu_shader::log2;
+use ornis_gpu_shader::sign;
+
+/// Host `AdaptParams`: twelve `f32`s, the last one pad.
+pub struct AdaptParams;
+
+impl GpuStruct for AdaptParams {
+    /// The adapt uniform is struct 0.
+    const ID: u32 = 0;
+    /// `min_log_lum` through `dt`, then the pad word.
+    const FIELD_TAGS: &'static [u8] = &[TYPE_TAG_F32; 12];
 }
-
-#[used]
-#[cfg_attr(target_arch = "wasm32", unsafe(link_section = "ornis_gpu.shader_meta"))]
-#[unsafe(export_name = "ornis_gpu_shader_meta")]
-static ORNIS_GPU_SHADER_META: [u8; 52] = *b"entry=cs_main;workgroup=1,1,1;uniform=0:111111111111";
 
 const BINS: u32 = 256;
 const FLOOR: f32 = 1.0e-6;
 const MIN_TRANSITION: f32 = 1.0e-3;
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "AdaptParams field order matches the host uniform"
-unsafe fn param(field: u32) -> f32 {
-    uniform_field_f32(0, 1, 0, field)
+// qual:allow(magic_numbers) reason: "bin centre is (index - 0.5) / (bins - 2), matching the host reduction"
+fn bin_log_luminance(params: Uniform<AdaptParams, 0, 1>, index: u32) -> f32 {
+    let t = clamp((index as f32 - 0.5) / (BINS as f32 - 2.0), 0.0, 1.0);
+    params.field_f32::<0>() + t * params.field_f32::<1>()
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers) reason: "bin centre is (index - 0.5) / (bins - 2), matching adapt_wgsl"
-unsafe fn bin_log_luminance(index: u32) -> f32 {
-    let t = gpu_clamp((index as f32 - 0.5) / (BINS as f32 - 2.0), 0.0, 1.0);
-    param(0) + t * param(1)
-}
-
-#[inline(always)]
-unsafe fn snapshot() -> u32 {
+fn snapshot(histogram: Storage<u32, 0, 0, ReadWrite>) -> u32 {
     let mut total = 0u32;
     let mut index = 0u32;
     while index < BINS {
-        let count = storage_read_u32(0, 0, index);
-        workgroup_store_u32(index, count);
-        storage_write_u32(0, 0, index, 0);
+        let count = histogram.load(index);
+        WorkgroupU32::store(index, count);
+        histogram.store(index, 0);
         if index > 0 {
             total += count;
         }
@@ -65,56 +60,61 @@ unsafe fn snapshot() -> u32 {
 
 #[inline(always)]
 // qual:allow(magic_numbers) reason: "the reduction starts at bin 1; bin 0 is the below-range reserve"
-unsafe fn reduce(total: u32) {
-    let low = (total as f32) * param(2);
-    let high = (total as f32) * param(3);
+fn reduce(total: u32, params: Uniform<AdaptParams, 0, 1>, exposure: Storage<f32, 0, 2, ReadWrite>) {
+    let low = (total as f32) * params.field_f32::<2>();
+    let high = (total as f32) * params.field_f32::<3>();
     let mut cumulative = 0u32;
     let mut sum = 0.0f32;
     let mut sum_weight = 0.0f32;
     let mut index = 1u32;
     while index < BINS {
-        let count = workgroup_load_u32(index);
+        let count = WorkgroupU32::load(index);
         let before = cumulative;
         cumulative += count;
-        let weight = gpu_clamp(cumulative as f32, low, high) - gpu_clamp(before as f32, low, high);
-        sum += weight * bin_log_luminance(index);
+        let weight = clamp(cumulative as f32, low, high) - clamp(before as f32, low, high);
+        sum += weight * bin_log_luminance(params, index);
         sum_weight += weight;
         index += 1;
     }
     if sum_weight > 0.0 {
-        storage_write_f32(0, 2, 0, gpu_exp2(adapted_ev(sum / sum_weight)));
+        exposure.store(0, exp2(adapted_ev(params, exposure, sum / sum_weight)));
     }
 }
 
 #[inline(always)]
 // qual:allow(magic_numbers) reason: "AdaptParams fields 4..10 are the EV window and the step"
-unsafe fn adapted_ev(avg_log_lum: f32) -> f32 {
-    let exposure = storage_read_f32(0, 2, 0);
-    let min_ev = param(5);
-    let max_ev = param(6);
-    let prev_ev = gpu_clamp(gpu_log2(f32::max(exposure, FLOOR)), min_ev, max_ev);
-    let target_ev = gpu_clamp(param(4) - avg_log_lum, min_ev, max_ev);
+fn adapted_ev(
+    params: Uniform<AdaptParams, 0, 1>,
+    exposure: Storage<f32, 0, 2, ReadWrite>,
+    avg_log_lum: f32,
+) -> f32 {
+    let previous = exposure.load(0);
+    let min_ev = params.field_f32::<5>();
+    let max_ev = params.field_f32::<6>();
+    let prev_ev = clamp(log2(f32::max(previous, FLOOR)), min_ev, max_ev);
+    let target_ev = clamp(params.field_f32::<4>() - avg_log_lum, min_ev, max_ev);
     let delta = target_ev - prev_ev;
-    // Both fields stay constant indices. A `select` of the index becomes a
+    // Both speeds are constant field indices. Selecting the index would be a
     // dynamic uniform access, which the translator rejects.
-    let brighten = param(7);
-    let darken = param(8);
+    let brighten = params.field_f32::<7>();
+    let darken = params.field_f32::<8>();
     let speed = if delta > 0.0 { brighten } else { darken };
-    let max_step = speed * param(10);
-    let distance = f32::max(param(9), MIN_TRANSITION);
-    let step = f32::min(max_step, gpu_abs(delta) * max_step / distance);
-    let clamped = f32::min(step, gpu_abs(delta));
-    let moved = prev_ev + gpu_sign(delta) * clamped;
+    let max_step = speed * params.field_f32::<10>();
+    let distance = f32::max(params.field_f32::<9>(), MIN_TRANSITION);
+    let step = f32::min(max_step, abs(delta) * max_step / distance);
+    let clamped = f32::min(step, abs(delta));
+    let moved = prev_ev + sign(delta) * clamped;
     if delta == 0.0 { prev_ev } else { moved }
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn cs_main() {
-    // SAFETY: these calls are the translator's GPU imports, not host memory.
-    unsafe {
-        let total = snapshot();
-        if total != 0 {
-            reduce(total);
-        }
+#[gpu_entry(compute(threads(1)))]
+pub fn cs_main(
+    #[gpu(storage_buffer, group = 0, binding = 0)] histogram: Storage<u32, ReadWrite>,
+    #[gpu(uniform, group = 0, binding = 1)] params: Uniform<AdaptParams>,
+    #[gpu(storage_buffer, group = 0, binding = 2)] exposure: Storage<f32, ReadWrite>,
+) {
+    let total = snapshot(histogram);
+    if total != 0 {
+        reduce(total, params, exposure);
     }
 }

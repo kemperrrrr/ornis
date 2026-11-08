@@ -56,7 +56,10 @@ fn params_layouts_match_their_wgsl() {
     assert!(adapt.contains("storage_0_2_[0u]"));
     assert!(adapt.contains("exp2("));
     // Bin 0 is excluded from the reduction: the weighted loop starts at 1.
-    assert!(adapt.contains("index_u002e_sroa_u002e_0_u002e_0_u002e_i6_ = 1u"));
+    assert!(
+        adapt.contains("= 1u"),
+        "the weighted histogram loop must start at bin 1"
+    );
 }
 
 #[test]

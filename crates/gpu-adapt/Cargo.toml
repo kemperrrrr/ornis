@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Auto-exposure histogram reduction for the llvm2gpu path"
 
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+
 [lib]
 crate-type = ["rlib"]
 

@@ -469,18 +469,32 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 `no_std`-крейт, cargo-сборка, атрибуты entry и типизированные ресурсы,
 но без nightly и без `spirv-builder`.
 
+**SDK, не сырой импорт.** Новая операция GPU добавляется типом или
+функцией `ornis-gpu-shader` (`Storage`, `Uniform`, `Texture2d`,
+`DepthTexture2d`, workgroup, builtins, скалярная математика). Кернел —
+безопасная `pub fn` с `#[gpu_entry]`. Он не объявляет `extern "C"` и не
+зовёт `ornis_gpu` по имени: единственный `unsafe extern` живёт в
+приватном `abi` SDK, а методы с `#[inline(always)]` инлайнятся в него.
+`ornis-gpu-histogram`, `ornis-gpu-adapt` и `ornis-gpu-gtao` собраны так.
+Тест `shader_kernels_do_not_declare_extern_imports` не даёт вернуть
+ручной импорт в эти три крейта.
+
 **Маппинг идей rust-gpu на stable:**
 
 | rust-gpu (nightly) | ornis (stable), реализовано |
 |---|---|
-| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]` (`ornis-gpu-shader-macros`); кернел — обычная безопасная `pub fn`, без `extern "C"` и `no_mangle` |
+| `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]`, `threads(X, Y)` и `threads(X, Y, Z)`; кернел — обычная безопасная `pub fn`, без `extern "C"` и `no_mangle` |
+| `#[spirv(fragment)]` | `#[gpu_entry(fragment)]`; entry — имя функции (`fs_main`) |
 | `#[spirv(global_invocation_id)]` | первый `u32` параметр entry (`global_invocation_id.x`) |
 | `#[spirv(global_invocation_id)]` newtype | ещё нет; нужен для entry, читающих несколько builtins |
 | `#[spirv(storage_buffer, descriptor_set, binding)]` | `#[gpu(storage_buffer, group = G, binding = B, read_only)] Storage<T>`; `group`/`binding` живут в атрибуте, а макрос вписывает их в тип |
 | `#[spirv(uniform, descriptor_set, binding)]` | `#[gpu(uniform, group = G, binding = B)] Uniform<S: GpuStruct>` |
 | `spirv-std` resource methods | `Storage::load/store/len/is_empty`, `Uniform::field_f32/field_u32/vec4_lane/plane_distance`, `Vec3::dot/length` |
 | теги uniform-структур (руками) | `impl GpuStruct for S { const ID; const FIELD_TAGS }` — макрос читает их из типа и пишет в метаданные |
-| `spirv-std` math | `Vec3` с `dot`/`length`; остальное — прямые `ornis_gpu` импорты |
+| `spirv-std` math | `log2`, `exp2`, `abs`, `sign`, `clamp`, `mix`, `fract`, `sin`/`cos`/`acos`, `dot3`, `length3`, `cross_lane`, `normalize_lane` |
+| текстура / depth | `#[gpu(texture_2d)] Texture2d`, `#[gpu(depth_texture_2d)] DepthTexture2d`: `load` на mip 0, `width`/`height` |
+| workgroup и барьер | `WorkgroupU32`, `WorkgroupAtomicU32`, `workgroup_barrier` |
+| builtins | `global_invocation_lane::<AXIS>`, `local_invocation_index`, `fragment_uv::<LANE>`, `fragment_store` |
 | `spirv-builder` / `cargo-gpu` | `xtask build-shaders` (cargo rustc `--emit=llvm-ir` → llvm2gpu → WGSL/SPIR-V; `--check` в CI) |
 | shader-крейт под nightly | обычный `no_std`-крейт workspace; host — `no_std`-lib, GPU — `wasm32-unknown-unknown` + LLVM IR |
 
@@ -550,7 +564,8 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    радиус шага — проекция `center + screen_x * radius` через
    `view_proj`. Параметры лежат в тех же uniform, что у хоста.
    Односэмпловый проход берёт этот модуль из
-   `gtao_generated.wgsl`. Четырёхсэмпловый путь остаётся рукописным.
+   `gtao_generated.wgsl`; сам кернел — `#[gpu_entry(fragment)]` на SDK.
+   Четырёхсэмпловый путь остаётся рукописным.
 7. `texture_load_2d_f32` читает `texture_depth_2d` скаляром, а
    `texture_load_2d_f32x4` — одну компоненту `texture_2d<f32>` (mip 0).
    Размеры той и другой — `textureDimensions`. `fs_main` пишет
@@ -562,12 +577,13 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    опускается в одноимённые builtin. `fptoui`/`sitofp` переводят
    пиксель в тексель и ширину текстуры во `f32`. Значение, рождённое
    в цикле и прочитанное после него не только в блоке выхода, пишется
-   в локальную переменную. Гистограмма автоэкспозиции — `cs_main`
-   workgroup 8×8 из `ornis-gpu-histogram`: те же биндинги и
-   `HistogramParams`, что у прохода, и модуль
-   `histogram_generated.wgsl`. Адаптация — один поток `cs_main` из
-   `ornis-gpu-adapt`: тот же histogram storage, `AdaptParams` и
-   exposure, модуль `adapt_generated.wgsl`.
+   в локальную переменную. Гистограмма автоэкспозиции — `#[gpu_entry(compute(threads(8, 8)))]`
+   из `ornis-gpu-histogram`: те же биндинги и `HistogramParams`, что у
+   прохода, и модуль `histogram_generated.wgsl`. Адаптация —
+   `#[gpu_entry(compute(threads(1)))]` из `ornis-gpu-adapt`: тот же
+   histogram storage, `AdaptParams` и exposure, модуль
+   `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
+   собственного `extern "C"`.
 
 **Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном
@@ -576,7 +592,8 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
 `break` сразу из двух циклов отвергается явно, вложенный natural loop
 с одним выходом и вложенное uniform-поле принимаются;
 `switch` отвергается (смешение mode гистограммы записано двумя
-сравнениями); entry — `cs_main` и `fs_main`; runtime-материалы
+сравнениями); entry — `#[gpu_entry(compute(..))]` и
+`#[gpu_entry(fragment)]`; runtime-материалы
 остаются на staged Shader IR; `wasm2gpu` не возвращается в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)

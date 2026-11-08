@@ -3238,6 +3238,7 @@ fn position_arg(
     ty: naga::Handle<naga::Type>,
     function: &mut naga::Function,
 ) -> naga::Handle<naga::Expression> {
+    let index = function.arguments.len() as u32;
     function.arguments.push(naga::FunctionArgument {
         name: Some("position".to_string()),
         ty,
@@ -3245,7 +3246,7 @@ fn position_arg(
             invariant: false,
         })),
     });
-    append(function, naga::Expression::FunctionArgument(0))
+    append(function, naga::Expression::FunctionArgument(index))
 }
 
 fn append(func: &mut naga::Function, expr: naga::Expression) -> naga::Handle<naga::Expression> {

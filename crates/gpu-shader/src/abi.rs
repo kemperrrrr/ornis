@@ -36,6 +36,8 @@ unsafe extern "C" {
     fn storage_write_u32(group: u32, binding: u32, index: u32, value: u32);
     #[link_name = "storage_atomic_add_u32"]
     fn storage_atomic_add_u32(group: u32, binding: u32, index: u32, value: u32) -> u32;
+    #[link_name = "uniform_field_f32"]
+    fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
     #[link_name = "uniform_field_u32"]
     fn uniform_field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32;
     #[link_name = "uniform_nested_field_f32"]
@@ -64,6 +66,62 @@ unsafe extern "C" {
     fn gpu_dot3_xyz(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32;
     #[link_name = "gpu_length3_xyz"]
     fn gpu_length3_xyz(x: f32, y: f32, z: f32) -> f32;
+    #[link_name = "gpu_log2"]
+    fn gpu_log2(value: f32) -> f32;
+    #[link_name = "gpu_exp2"]
+    fn gpu_exp2(value: f32) -> f32;
+    #[link_name = "gpu_abs"]
+    fn gpu_abs(value: f32) -> f32;
+    #[link_name = "gpu_sign"]
+    fn gpu_sign(value: f32) -> f32;
+    #[link_name = "gpu_clamp"]
+    fn gpu_clamp(value: f32, low: f32, high: f32) -> f32;
+    #[link_name = "gpu_mix"]
+    fn gpu_mix(start: f32, end: f32, factor: f32) -> f32;
+    #[link_name = "gpu_fract"]
+    fn gpu_fract(value: f32) -> f32;
+    #[link_name = "gpu_cos"]
+    fn gpu_cos(value: f32) -> f32;
+    #[link_name = "gpu_sin"]
+    fn gpu_sin(value: f32) -> f32;
+    #[link_name = "gpu_acos"]
+    fn gpu_acos(value: f32) -> f32;
+    #[link_name = "gpu_cross3_lane"]
+    fn gpu_cross3_lane(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, lane: u32) -> f32;
+    #[link_name = "gpu_normalize3_lane"]
+    fn gpu_normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32;
+    #[link_name = "texture_load_2d_f32"]
+    fn texture_load_2d_f32(group: u32, binding: u32, x: u32, y: u32) -> f32;
+    #[link_name = "texture_load_2d_f32x4"]
+    fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
+    #[link_name = "texture_width_2d"]
+    fn texture_width_2d(group: u32, binding: u32) -> i32;
+    #[link_name = "texture_height_2d"]
+    fn texture_height_2d(group: u32, binding: u32) -> i32;
+    #[link_name = "texture_width_2d_f32x4"]
+    fn texture_width_2d_f32x4(group: u32, binding: u32) -> i32;
+    #[link_name = "texture_height_2d_f32x4"]
+    fn texture_height_2d_f32x4(group: u32, binding: u32) -> i32;
+    #[link_name = "workgroup_load_u32"]
+    fn workgroup_load_u32(index: u32) -> u32;
+    #[link_name = "workgroup_store_u32"]
+    fn workgroup_store_u32(index: u32, value: u32);
+    #[link_name = "workgroup_atomic_load_u32"]
+    fn workgroup_atomic_load_u32(index: u32) -> u32;
+    #[link_name = "workgroup_atomic_store_u32"]
+    fn workgroup_atomic_store_u32(index: u32, value: u32);
+    #[link_name = "workgroup_atomic_add_u32"]
+    fn workgroup_atomic_add_u32(index: u32, value: u32) -> u32;
+    #[link_name = "workgroup_barrier"]
+    fn import_workgroup_barrier();
+    #[link_name = "global_invocation_lane"]
+    fn import_global_invocation_lane(axis: u32) -> u32;
+    #[link_name = "local_invocation_index"]
+    fn import_local_invocation_index() -> u32;
+    #[link_name = "fragment_uv_lane"]
+    fn import_fragment_uv_lane(lane: u32) -> f32;
+    #[link_name = "fragment_store_f32x4"]
+    fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
 }
 
 /// Call one declared import.
@@ -149,6 +207,12 @@ pub(crate) fn exp(value: f32) -> f32 {
     call!(gpu_exp(value))
 }
 
+/// `f32` field `field` of the uniform struct `sid`.
+#[inline(always)]
+pub(crate) fn field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32 {
+    call!(uniform_field_f32(group, binding, sid, field))
+}
+
 /// `u32` field `field` of the uniform struct `sid`.
 #[inline(always)]
 pub(crate) fn field_u32(group: u32, binding: u32, sid: u32, field: u32) -> u32 {
@@ -190,4 +254,173 @@ pub(crate) fn dot3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32 
 #[inline(always)]
 pub(crate) fn length3(x: f32, y: f32, z: f32) -> f32 {
     call!(gpu_length3_xyz(x, y, z))
+}
+
+/// `log2(value)`.
+#[inline(always)]
+pub(crate) fn log2(value: f32) -> f32 {
+    call!(gpu_log2(value))
+}
+
+/// `exp2(value)`.
+#[inline(always)]
+pub(crate) fn exp2(value: f32) -> f32 {
+    call!(gpu_exp2(value))
+}
+
+/// Absolute value.
+#[inline(always)]
+pub(crate) fn abs(value: f32) -> f32 {
+    call!(gpu_abs(value))
+}
+
+/// Sign of `value`: `-1`, `0`, or `1`.
+#[inline(always)]
+pub(crate) fn sign(value: f32) -> f32 {
+    call!(gpu_sign(value))
+}
+
+/// Clamp `value` into `low..=high`.
+#[inline(always)]
+pub(crate) fn clamp(value: f32, low: f32, high: f32) -> f32 {
+    call!(gpu_clamp(value, low, high))
+}
+
+/// Linear interpolation `start + (end - start) * factor`.
+#[inline(always)]
+pub(crate) fn mix(start: f32, end: f32, factor: f32) -> f32 {
+    call!(gpu_mix(start, end, factor))
+}
+
+/// Fractional part of `value`.
+#[inline(always)]
+pub(crate) fn fract(value: f32) -> f32 {
+    call!(gpu_fract(value))
+}
+
+/// Cosine.
+#[inline(always)]
+pub(crate) fn cos(value: f32) -> f32 {
+    call!(gpu_cos(value))
+}
+
+/// Sine.
+#[inline(always)]
+pub(crate) fn sin(value: f32) -> f32 {
+    call!(gpu_sin(value))
+}
+
+/// Arccosine.
+#[inline(always)]
+pub(crate) fn acos(value: f32) -> f32 {
+    call!(gpu_acos(value))
+}
+
+/// Lane `lane` of `cross(a, b)`.
+// qual:allow(srp, max_parameters=7) reason: "one operand per import argument: six vector lanes and the result lane; a Vec3 argument would reintroduce the struct the translator does not see"
+#[inline(always)]
+pub(crate) fn cross3_lane(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, lane: u32) -> f32 {
+    call!(gpu_cross3_lane(ax, ay, az, bx, by, bz, lane))
+}
+
+/// Lane `lane` of `normalize(x, y, z)`.
+#[inline(always)]
+pub(crate) fn normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32 {
+    call!(gpu_normalize3_lane(x, y, z, lane))
+}
+
+/// Scalar load of a depth texture at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_depth(group: u32, binding: u32, x: u32, y: u32) -> f32 {
+    call!(texture_load_2d_f32(group, binding, x, y))
+}
+
+/// One lane of a sampled `texture_2d<f32>` load at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32 {
+    call!(texture_load_2d_f32x4(group, binding, x, y, lane))
+}
+
+/// Width of a depth texture.
+#[inline(always)]
+pub(crate) fn texture_width_depth(group: u32, binding: u32) -> i32 {
+    call!(texture_width_2d(group, binding))
+}
+
+/// Height of a depth texture.
+#[inline(always)]
+pub(crate) fn texture_height_depth(group: u32, binding: u32) -> i32 {
+    call!(texture_height_2d(group, binding))
+}
+
+/// Width of a sampled `texture_2d<f32>`.
+#[inline(always)]
+pub(crate) fn texture_width_f32x4(group: u32, binding: u32) -> i32 {
+    call!(texture_width_2d_f32x4(group, binding))
+}
+
+/// Height of a sampled `texture_2d<f32>`.
+#[inline(always)]
+pub(crate) fn texture_height_f32x4(group: u32, binding: u32) -> i32 {
+    call!(texture_height_2d_f32x4(group, binding))
+}
+
+/// Load one word of the non-atomic workgroup array.
+#[inline(always)]
+pub(crate) fn workgroup_load(index: u32) -> u32 {
+    call!(workgroup_load_u32(index))
+}
+
+/// Store one word of the non-atomic workgroup array.
+#[inline(always)]
+pub(crate) fn workgroup_store(index: u32, value: u32) {
+    call!(workgroup_store_u32(index, value));
+}
+
+/// Load one word of the workgroup atomic array.
+#[inline(always)]
+pub(crate) fn workgroup_atomic_load(index: u32) -> u32 {
+    call!(workgroup_atomic_load_u32(index))
+}
+
+/// Store one word of the workgroup atomic array.
+#[inline(always)]
+pub(crate) fn workgroup_atomic_store(index: u32, value: u32) {
+    call!(workgroup_atomic_store_u32(index, value));
+}
+
+/// `atomicAdd` into the workgroup atomic array. Returns the previous word.
+#[inline(always)]
+pub(crate) fn workgroup_atomic_add(index: u32, value: u32) -> u32 {
+    call!(workgroup_atomic_add_u32(index, value))
+}
+
+/// Workgroup execution barrier.
+#[inline(always)]
+pub(crate) fn workgroup_barrier() {
+    call!(import_workgroup_barrier());
+}
+
+/// Lane `axis` of `@builtin(global_invocation_id)`.
+#[inline(always)]
+pub(crate) fn global_invocation_lane(axis: u32) -> u32 {
+    call!(import_global_invocation_lane(axis))
+}
+
+/// `@builtin(local_invocation_index)`.
+#[inline(always)]
+pub(crate) fn local_invocation_index() -> u32 {
+    call!(import_local_invocation_index())
+}
+
+/// Lane of the fragment's `@location(0)` UV.
+#[inline(always)]
+pub(crate) fn fragment_uv_lane(lane: u32) -> f32 {
+    call!(import_fragment_uv_lane(lane))
+}
+
+/// Write the fragment's `@location(0)` color.
+#[inline(always)]
+pub(crate) fn fragment_store(r: f32, g: f32, b: f32, a: f32) {
+    call!(fragment_store_f32x4(r, g, b, a));
 }

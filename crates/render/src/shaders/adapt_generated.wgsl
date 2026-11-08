@@ -23,12 +23,12 @@ var<storage, read_write> storage_0_2_: array<f32>;
 
 @compute @workgroup_size(1, 1, 1) 
 fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
-    var total_u002e_sroa_u002e_0_u002e_0_u002e_i5_: u32;
-    var index_u002e_sroa_u002e_0_u002e_0_u002e_i14_: u32;
-    var cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i9_: u32;
-    var sum_u002e_sroa_u002e_0_u002e_0_u002e_i8_: f32;
-    var sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i7_: f32;
-    var index_u002e_sroa_u002e_0_u002e_0_u002e_i6_: u32;
+    var total_u002e_sroa_u002e_0_u002e_0_u002e_i20_: u32;
+    var index_u002e_sroa_u002e_0_u002e_0_u002e_i119_: u32;
+    var cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i24_: u32;
+    var sum_u002e_sroa_u002e_0_u002e_0_u002e_i23_: f32;
+    var sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i22_: f32;
+    var index_u002e_sroa_u002e_0_u002e_0_u002e_i21_: u32;
     var out_u002e_spec_u002e_select_u002e_i: u32;
     var out_u002e_4_: f32;
     var out_u002e_3_: f32;
@@ -36,11 +36,11 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let _e5 = storage_0_0_[0u];
     workgroup_scratch[0u] = _e5;
     storage_0_0_[0u] = 0u;
-    total_u002e_sroa_u002e_0_u002e_0_u002e_i5_ = 0u;
-    index_u002e_sroa_u002e_0_u002e_0_u002e_i14_ = 1u;
+    total_u002e_sroa_u002e_0_u002e_0_u002e_i20_ = 0u;
+    index_u002e_sroa_u002e_0_u002e_0_u002e_i119_ = 1u;
     loop {
-        let _e18 = total_u002e_sroa_u002e_0_u002e_0_u002e_i5_;
-        let _e20 = index_u002e_sroa_u002e_0_u002e_0_u002e_i14_;
+        let _e18 = total_u002e_sroa_u002e_0_u002e_0_u002e_i20_;
+        let _e20 = index_u002e_sroa_u002e_0_u002e_0_u002e_i119_;
         let _e23 = storage_0_0_[_e20];
         workgroup_scratch[_e20] = _e23;
         storage_0_0_[_e20] = 0u;
@@ -50,8 +50,8 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         if (_e32 == 256u) {
             break;
         } else {
-            total_u002e_sroa_u002e_0_u002e_0_u002e_i5_ = _e29;
-            index_u002e_sroa_u002e_0_u002e_0_u002e_i14_ = _e32;
+            total_u002e_sroa_u002e_0_u002e_0_u002e_i20_ = _e29;
+            index_u002e_sroa_u002e_0_u002e_0_u002e_i119_ = _e32;
             continue;
         }
     }
@@ -64,15 +64,15 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let _e45 = (_e44 * _e41);
     let _e48 = uniform_struct_0_1_.f3_;
     let _e49 = (_e48 * _e41);
-    cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i9_ = 0u;
-    sum_u002e_sroa_u002e_0_u002e_0_u002e_i8_ = 0f;
-    sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i7_ = 0f;
-    index_u002e_sroa_u002e_0_u002e_0_u002e_i6_ = 1u;
+    cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i24_ = 0u;
+    sum_u002e_sroa_u002e_0_u002e_0_u002e_i23_ = 0f;
+    sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i22_ = 0f;
+    index_u002e_sroa_u002e_0_u002e_0_u002e_i21_ = 1u;
     loop {
-        let _e59 = cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i9_;
-        let _e61 = sum_u002e_sroa_u002e_0_u002e_0_u002e_i8_;
-        let _e63 = sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i7_;
-        let _e65 = index_u002e_sroa_u002e_0_u002e_0_u002e_i6_;
+        let _e59 = cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i24_;
+        let _e61 = sum_u002e_sroa_u002e_0_u002e_0_u002e_i23_;
+        let _e63 = sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i22_;
+        let _e65 = index_u002e_sroa_u002e_0_u002e_0_u002e_i21_;
         let _e68 = workgroup_scratch[_e65];
         let _e69 = (_e68 + _e59);
         let _e74 = (clamp(f32(_e69), _e45, _e49) - clamp(f32(_e59), _e45, _e49));
@@ -86,10 +86,10 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         if (_e97 == 256u) {
             break;
         } else {
-            cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i9_ = _e69;
-            sum_u002e_sroa_u002e_0_u002e_0_u002e_i8_ = _e92;
-            sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i7_ = _e94;
-            index_u002e_sroa_u002e_0_u002e_0_u002e_i6_ = _e97;
+            cumulative_u002e_sroa_u002e_0_u002e_0_u002e_i24_ = _e69;
+            sum_u002e_sroa_u002e_0_u002e_0_u002e_i23_ = _e92;
+            sum_weight_u002e_sroa_u002e_0_u002e_0_u002e_i22_ = _e94;
+            index_u002e_sroa_u002e_0_u002e_0_u002e_i21_ = _e97;
             continue;
         }
     }

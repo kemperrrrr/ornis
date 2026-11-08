@@ -5,9 +5,10 @@
 //! builder reads the entry name, workgroup size, and uniform field tags from
 //! the shader crate itself instead of CLI flags.
 //!
-//! The attribute is the stable stand-in for rust-gpu's `#[spirv(…)]`: the same
-//! `compute(threads(N))` shape, `global_invocation_id` as the one plain
-//! argument, and resources bound by their buffer attributes.
+//! The attribute is the stable stand-in for rust-gpu's `#[spirv(…)]`:
+//! `compute(threads(N))`, `compute(threads(X, Y))`, `compute(threads(X, Y, Z))`,
+//! or `fragment`. Resources are bound by their attributes. A kernel does not
+//! declare `extern "C"`; a missing operation is added to `ornis-gpu-shader`.
 
 mod entry;
 mod param;

@@ -19,16 +19,16 @@ var<storage, read_write> atomic_storage_0_2_: array<atomic<u32>>;
 fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @builtin(local_invocation_index) local_invocation_index: u32) {
     var _0_u002e_sroa_u002e_0_u002e_0_u002e_i: u32;
     var safe_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
-    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i13_: u32;
-    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i315_: u32;
+    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_: u32;
+    var lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_: u32;
 
     if (local_invocation_index < 256u) {
-        lid_u002e_sroa_u002e_0_u002e_0_u002e_i13_ = local_invocation_index;
+        lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_ = local_invocation_index;
         loop {
-            let _e7 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i13_;
+            let _e7 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_;
             atomicStore((&workgroup_atomics[_e7]), 0u);
             if (_e7 < 192u) {
-                lid_u002e_sroa_u002e_0_u002e_0_u002e_i13_ = (_e7 + 64u);
+                lid_u002e_sroa_u002e_0_u002e_0_u002e_i27_ = (_e7 + 64u);
                 continue;
             } else {
                 break;
@@ -74,19 +74,19 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
     }
     workgroupBarrier();
     if (local_invocation_index < 256u) {
-        lid_u002e_sroa_u002e_0_u002e_0_u002e_i315_ = local_invocation_index;
+        lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = local_invocation_index;
     } else {
         return;
     }
     loop {
-        let _e158 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i315_;
+        let _e158 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
         let _e161 = atomicLoad((&workgroup_atomics[_e158]));
         if (_e161 == 0u) {
         } else {
             let _e166 = atomicAdd((&atomic_storage_0_2_[_e158]), _e161);
         }
         if (_e158 < 192u) {
-            lid_u002e_sroa_u002e_0_u002e_0_u002e_i315_ = (_e158 + 64u);
+            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e158 + 64u);
             continue;
         } else {
             break;

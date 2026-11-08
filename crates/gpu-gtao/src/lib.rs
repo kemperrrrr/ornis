@@ -2,75 +2,96 @@
 //!
 //! One fragment reads the fullscreen-quad UV, the g-buffer depth and
 //! octahedral normal, and the same `Camera` / `AoParams` uniforms the
-//! renderer uploads. The translator only has scalar imports, so the
-//! matrices are columns of `vec4` and each sample stays three lanes.
+//! renderer uploads. The kernel is a safe `fn` on the shader SDK: the
+//! fragment entry, the textures, and the uniforms are parameters, and the
+//! math is SDK functions. It does not declare `extern "C"`.
 
 #![no_std]
 #![allow(clippy::all)]
-#![allow(unsafe_op_in_unsafe_fn)]
 
-unsafe extern "C" {
-    fn fragment_uv_lane(lane: u32) -> f32;
-    fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
-    fn texture_load_2d_f32(group: u32, binding: u32, x: u32, y: u32) -> f32;
-    fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
-    fn texture_width_2d(group: u32, binding: u32) -> i32;
-    fn texture_height_2d(group: u32, binding: u32) -> i32;
-    fn gpu_cos(value: f32) -> f32;
-    fn gpu_sin(value: f32) -> f32;
-    fn gpu_acos(value: f32) -> f32;
-    fn gpu_clamp(value: f32, low: f32, high: f32) -> f32;
-    fn gpu_mix(start: f32, end: f32, factor: f32) -> f32;
-    fn gpu_sign(value: f32) -> f32;
-    fn gpu_dot3(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32;
-    fn gpu_length3(x: f32, y: f32, z: f32) -> f32;
-    fn gpu_cross3_lane(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32, lane: u32) -> f32;
-    fn gpu_normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32;
-    fn gpu_fract(value: f32) -> f32;
-    fn uniform_field_f32(group: u32, binding: u32, sid: u32, field: u32) -> f32;
-    fn uniform_field_vec4_component_f32(
-        group: u32,
-        binding: u32,
-        sid: u32,
-        field: u32,
-        lane: u32,
-    ) -> f32;
+use ornis_gpu_shader::DepthTexture2d;
+use ornis_gpu_shader::GpuStruct;
+use ornis_gpu_shader::TYPE_TAG_F32;
+use ornis_gpu_shader::TYPE_TAG_VEC4;
+use ornis_gpu_shader::Texture2d;
+use ornis_gpu_shader::Uniform;
+use ornis_gpu_shader::abs;
+use ornis_gpu_shader::acos;
+use ornis_gpu_shader::clamp;
+use ornis_gpu_shader::cos;
+use ornis_gpu_shader::cross_lane;
+use ornis_gpu_shader::dot3;
+use ornis_gpu_shader::fract;
+use ornis_gpu_shader::fragment_store;
+use ornis_gpu_shader::fragment_uv;
+use ornis_gpu_shader::gpu_entry;
+use ornis_gpu_shader::length3;
+use ornis_gpu_shader::mix;
+use ornis_gpu_shader::normalize_lane;
+use ornis_gpu_shader::sign;
+use ornis_gpu_shader::sin;
+
+/// Host camera uniform: thirteen `vec4` columns.
+pub struct Camera;
+
+impl GpuStruct for Camera {
+    /// The camera uniform is struct 0.
+    const ID: u32 = 0;
+    /// `view_proj`, `inv_view_proj`, `camera_pos`, `previous_view_proj`.
+    const FIELD_TAGS: &'static [u8] = &[TYPE_TAG_VEC4; 13];
 }
-#[used]
-#[cfg_attr(
-    target_arch = "wasm32",
-    unsafe(link_section = "ornis_gpu.shader_meta")
-)]
-#[unsafe(export_name = "ornis_gpu_shader_meta")]
-static ORNIS_GPU_SHADER_META: [u8; 60] =
-    *b"entry=fs_main;workgroup=1,1,1;uniform=0:6666666666666,1:1111";
+
+/// Host `AoParams`: radius, intensity, bias, blur sigma.
+pub struct AoParams;
+
+impl GpuStruct for AoParams {
+    /// The AO uniform is struct 1.
+    const ID: u32 = 1;
+    /// Four `f32` fields.
+    const FIELD_TAGS: &'static [u8] = &[TYPE_TAG_F32; 4];
+}
+
 const CLEAR_DEPTH: f32 = 1.0;
 const EPS: f32 = 1.0e-6;
 const PI: f32 = 3.1415927;
 const HALF_PI: f32 = 1.5707964;
 
+type CameraUniform = Uniform<Camera, 0, 2>;
+type Depth = DepthTexture2d<0, 0>;
+
 #[inline(always)]
-// qual:allow(magic_numbers, complexity) reason: "column lane of a host mat4; the indices are the Camera field layout"
-unsafe fn mat_lane(base: u32, lane: u32, x: f32, y: f32, z: f32) -> f32 {
-    uniform_field_vec4_component_f32(0, 2, 0, base, lane) * x
-        + uniform_field_vec4_component_f32(0, 2, 0, base + 1, lane) * y
-        + uniform_field_vec4_component_f32(0, 2, 0, base + 2, lane) * z
-        + uniform_field_vec4_component_f32(0, 2, 0, base + 3, lane)
+// qual:allow(magic_numbers) reason: "view_proj is Camera fields 0..3; the indices are the host layout"
+fn view_lane<const LANE: usize>(camera: CameraUniform, x: f32, y: f32, z: f32) -> f32 {
+    camera.vec4_lane::<0, LANE>() * x
+        + camera.vec4_lane::<1, LANE>() * y
+        + camera.vec4_lane::<2, LANE>() * z
+        + camera.vec4_lane::<3, LANE>()
+}
+
+#[inline(always)]
+// qual:allow(magic_numbers) reason: "inv_view_proj is Camera fields 4..7; the indices are the host layout"
+fn inv_view_lane<const LANE: usize>(camera: CameraUniform, x: f32, y: f32, z: f32) -> f32 {
+    camera.vec4_lane::<4, LANE>() * x
+        + camera.vec4_lane::<5, LANE>() * y
+        + camera.vec4_lane::<6, LANE>() * z
+        + camera.vec4_lane::<7, LANE>()
 }
 
 #[inline(always)]
 // qual:allow(magic_numbers) reason: "NDC remap of a depth sample, matching reconstruct_world_pos"
-unsafe fn world_lane(lane: u32, uvx: f32, uvy: f32, depth: f32) -> f32 {
+fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, depth: f32) -> f32 {
     let nx = uvx * 2.0 - 1.0;
     let ny = 1.0 - uvy * 2.0;
-    let value = mat_lane(4, lane, nx, ny, depth);
-    let w = f32::max(mat_lane(4, 3, nx, ny, depth), EPS);
+    let value = inv_view_lane::<LANE>(camera, nx, ny, depth);
+    let w = f32::max(inv_view_lane::<3>(camera, nx, ny, depth), EPS);
     value / w
 }
 
 #[inline(always)]
-// qual:allow(magic_numbers, complexity, unsafe) reason: "one horizon tap; the closed form is the XeGTAO sample"
-unsafe fn horizon(
+// qual:allow(magic_numbers, complexity, max_parameters=14) reason: "one horizon tap; the closed form is the XeGTAO sample and the resources stay arguments so the body does not restate bindings"
+fn horizon(
+    depth_tex: Depth,
+    camera: CameraUniform,
     uvx: f32,
     uvy: f32,
     dims_x: f32,
@@ -88,19 +109,19 @@ unsafe fn horizon(
     if uvx >= 0.0 && uvy >= 0.0 && uvx <= 1.0 && uvy <= 1.0 {
         let x = (uvx * dims_x) as u32;
         let y = (uvy * dims_y) as u32;
-        let sample_depth = texture_load_2d_f32(0, 0, x, y);
+        let sample_depth = depth_tex.load(x, y);
         if sample_depth < CLEAR_DEPTH {
-            let sx = world_lane(0, uvx, uvy, sample_depth);
-            let sy = world_lane(1, uvx, uvy, sample_depth);
-            let sz = world_lane(2, uvx, uvy, sample_depth);
+            let sx = world_lane::<0>(camera, uvx, uvy, sample_depth);
+            let sy = world_lane::<1>(camera, uvx, uvy, sample_depth);
+            let sz = world_lane::<2>(camera, uvx, uvy, sample_depth);
             let dx = sx - cx;
             let dy = sy - cy;
             let dz = sz - cz;
-            let distance = gpu_length3(dx, dy, dz);
+            let distance = length3(dx, dy, dz);
             if distance > EPS && distance < radius {
-                let falloff = gpu_clamp(1.0 - distance / f32::max(radius, EPS), 0.0, 1.0);
-                let along = gpu_dot3(dx / distance, dy / distance, dz / distance, vvx, vvy, vvz);
-                cos_h = gpu_mix(min_cos, along, falloff);
+                let falloff = clamp(1.0 - distance / f32::max(radius, EPS), 0.0, 1.0);
+                let along = dot3(dx / distance, dy / distance, dz / distance, vvx, vvy, vvz);
+                cos_h = mix(min_cos, along, falloff);
             }
         }
     }
@@ -108,152 +129,154 @@ unsafe fn horizon(
 }
 
 /// Fragment entry. The vertex quad passes UV at `@location(0)`.
-#[unsafe(export_name = "fs_main")]
-// qual:allow(magic_numbers, complexity, max_function_lines=400, unsafe) reason: "the GTAO march is one fragment; splitting it would hide the slice loop"
-pub extern "C" fn fs_main() {
-    // SAFETY: these calls are the translator's GPU imports, not host memory.
-    unsafe {
-        let uvx = fragment_uv_lane(0);
-        let uvy = fragment_uv_lane(1);
-        let dims_x = texture_width_2d(0, 0) as f32;
-        let dims_y = texture_height_2d(0, 0) as f32;
-        let xi = (uvx * dims_x) as u32;
-        let yi = (uvy * dims_y) as u32;
-        let depth = texture_load_2d_f32(0, 0, xi, yi);
-        if depth >= CLEAR_DEPTH {
-            fragment_store_f32x4(1.0, 1.0, 1.0, 1.0);
-            return;
-        }
-        let enc_x = texture_load_2d_f32x4(0, 1, xi, yi, 0);
-        let enc_y = texture_load_2d_f32x4(0, 1, xi, yi, 1);
-        let nz = 1.0 - f32::abs(enc_x) - f32::abs(enc_y);
-        let fold = f32::max(-nz, 0.0);
-        let nx = enc_x + if enc_x >= 0.0 { fold } else { -fold };
-        let ny = enc_y + if enc_y >= 0.0 { fold } else { -fold };
-        let nnx = gpu_normalize3_lane(nx, ny, nz, 0);
-        let nny = gpu_normalize3_lane(nx, ny, nz, 1);
-        let nnz = gpu_normalize3_lane(nx, ny, nz, 2);
-        let cx = world_lane(0, uvx, uvy, depth);
-        let cy = world_lane(1, uvx, uvy, depth);
-        let cz = world_lane(2, uvx, uvy, depth);
-        let eye_x = uniform_field_vec4_component_f32(0, 2, 0, 8, 0);
-        let eye_y = uniform_field_vec4_component_f32(0, 2, 0, 8, 1);
-        let eye_z = uniform_field_vec4_component_f32(0, 2, 0, 8, 2);
-        let vlen = f32::max(gpu_length3(eye_x - cx, eye_y - cy, eye_z - cz), EPS);
-        let vvx = (eye_x - cx) / vlen;
-        let vvy = (eye_y - cy) / vlen;
-        let vvz = (eye_z - cz) / vlen;
-        let rx = world_lane(0, uvx + 1.0 / dims_x, uvy, depth);
-        let ry = world_lane(1, uvx + 1.0 / dims_x, uvy, depth);
-        let rz = world_lane(2, uvx + 1.0 / dims_x, uvy, depth);
-        let ux = world_lane(0, uvx, uvy + 1.0 / dims_y, depth);
-        let uy = world_lane(1, uvx, uvy + 1.0 / dims_y, depth);
-        let uz = world_lane(2, uvx, uvy + 1.0 / dims_y, depth);
-        let sxx = gpu_normalize3_lane(rx - cx + EPS, ry - cy, rz - cz, 0);
-        let sxy = gpu_normalize3_lane(rx - cx + EPS, ry - cy, rz - cz, 1);
-        let sxz = gpu_normalize3_lane(rx - cx + EPS, ry - cy, rz - cz, 2);
-        let syx = gpu_normalize3_lane(ux - cx, uy - cy + EPS, uz - cz, 0);
-        let syy = gpu_normalize3_lane(ux - cx, uy - cy + EPS, uz - cz, 1);
-        let syz = gpu_normalize3_lane(ux - cx, uy - cy + EPS, uz - cz, 2);
-        let radius = uniform_field_f32(0, 3, 1, 0);
-        let intensity = uniform_field_f32(0, 3, 1, 1);
-        let edge_x = cx + sxx * radius;
-        let edge_y = cy + sxy * radius;
-        let edge_z = cz + sxz * radius;
-        let clip_x = mat_lane(0, 0, edge_x, edge_y, edge_z);
-        let clip_y = mat_lane(0, 1, edge_x, edge_y, edge_z);
-        let clip_w = f32::max(mat_lane(0, 3, edge_x, edge_y, edge_z), EPS);
-        let edge_u = clip_x / clip_w * 0.5 + 0.5;
-        let edge_v = 0.5 - clip_y / clip_w * 0.5;
-        let uv_radius = f32::max(gpu_length3(edge_u - uvx, edge_v - uvy, 0.0), 1.0 / dims_x);
-        let hash =
-            gpu_fract(52.9829189 * gpu_fract((xi as f32) * 0.06711056 + (yi as f32) * 0.00583715));
-        let mut visibility = 0.0f32;
-        let mut slice = 0u32;
-        while slice < 2 {
-            let phi = hash * PI + (slice as f32) * HALF_PI;
-            let cphi = gpu_cos(phi);
-            let sphi = gpu_sin(phi);
-            let dir_x = sxx * cphi + syx * sphi;
-            let dir_y = sxy * cphi + syy * sphi;
-            let dir_z = sxz * cphi + syz * sphi;
-            let sdx = gpu_normalize3_lane(dir_x, dir_y, dir_z, 0);
-            let sdy = gpu_normalize3_lane(dir_x, dir_y, dir_z, 1);
-            let sdz = gpu_normalize3_lane(dir_x, dir_y, dir_z, 2);
-            let raw_x = gpu_cross3_lane(sdx, sdy, sdz, vvx, vvy, vvz, 0) + EPS;
-            let raw_y = gpu_cross3_lane(sdx, sdy, sdz, vvx, vvy, vvz, 1);
-            let raw_z = gpu_cross3_lane(sdx, sdy, sdz, vvx, vvy, vvz, 2);
-            let ax = gpu_normalize3_lane(raw_x, raw_y, raw_z, 0);
-            let ay = gpu_normalize3_lane(raw_x, raw_y, raw_z, 1);
-            let az = gpu_normalize3_lane(raw_x, raw_y, raw_z, 2);
-            let along = gpu_dot3(nnx, nny, nnz, ax, ay, az);
-            let proj_x = nnx - ax * along;
-            let proj_y = nny - ay * along;
-            let proj_z = nnz - az * along;
-            let proj_len = f32::max(gpu_length3(proj_x, proj_y, proj_z), EPS);
-            let cos_norm = gpu_clamp(
-                gpu_dot3(proj_x, proj_y, proj_z, vvx, vvy, vvz) / proj_len,
-                0.0,
-                1.0,
-            );
-            let normal_angle =
-                gpu_sign(gpu_dot3(sdx, sdy, sdz, proj_x, proj_y, proj_z)) * gpu_acos(cos_norm);
-            let min_pos = gpu_cos(normal_angle + HALF_PI);
-            let min_neg = gpu_cos(normal_angle - HALF_PI);
-            let mut horizon_pos = min_pos;
-            let mut horizon_neg = min_neg;
-            let mut step = 1u32;
-            while step <= 4 {
-                let off = uv_radius * (step as f32) / 4.0;
-                let ox = cphi * off;
-                let oy = sphi * off;
-                horizon_pos = f32::max(
-                    horizon_pos,
-                    horizon(
-                        uvx + ox,
-                        uvy + oy,
-                        dims_x,
-                        dims_y,
-                        cx,
-                        cy,
-                        cz,
-                        vvx,
-                        vvy,
-                        vvz,
-                        min_pos,
-                        radius,
-                    ),
-                );
-                horizon_neg = f32::max(
-                    horizon_neg,
-                    horizon(
-                        uvx - ox,
-                        uvy - oy,
-                        dims_x,
-                        dims_y,
-                        cx,
-                        cy,
-                        cz,
-                        vvx,
-                        vvy,
-                        vvz,
-                        min_neg,
-                        radius,
-                    ),
-                );
-                step += 1;
-            }
-            let h_pos = gpu_acos(gpu_clamp(horizon_pos, -1.0, 1.0));
-            let h_neg = -gpu_acos(gpu_clamp(horizon_neg, -1.0, 1.0));
-            let n = normal_angle;
-            let arc_pos =
-                0.25 * (-gpu_cos(2.0 * h_pos - n) + gpu_cos(n) + 2.0 * h_pos * gpu_sin(n));
-            let arc_neg =
-                0.25 * (-gpu_cos(2.0 * h_neg - n) + gpu_cos(n) + 2.0 * h_neg * gpu_sin(n));
-            visibility += proj_len * (arc_pos + arc_neg);
-            slice += 1;
-        }
-        let ao = gpu_clamp(gpu_mix(1.0, visibility / 2.0, intensity), 0.0, 1.0);
-        fragment_store_f32x4(ao, ao, ao, 1.0);
+#[gpu_entry(fragment)]
+// qual:allow(magic_numbers, complexity, max_function_lines=400) reason: "the GTAO march is one fragment; splitting it would hide the slice loop"
+pub fn fs_main(
+    #[gpu(depth_texture_2d, group = 0, binding = 0)] depth_tex: DepthTexture2d,
+    #[gpu(texture_2d, group = 0, binding = 1)] normal_tex: Texture2d,
+    #[gpu(uniform, group = 0, binding = 2)] camera: Uniform<Camera>,
+    #[gpu(uniform, group = 0, binding = 3)] ao: Uniform<AoParams>,
+) {
+    let uvx = fragment_uv::<0>();
+    let uvy = fragment_uv::<1>();
+    let dims_x = depth_tex.width() as f32;
+    let dims_y = depth_tex.height() as f32;
+    let xi = (uvx * dims_x) as u32;
+    let yi = (uvy * dims_y) as u32;
+    let depth = depth_tex.load(xi, yi);
+    if depth >= CLEAR_DEPTH {
+        fragment_store(1.0, 1.0, 1.0, 1.0);
+        return;
     }
+    let enc_x = normal_tex.load::<0>(xi, yi);
+    let enc_y = normal_tex.load::<1>(xi, yi);
+    let nz = 1.0 - abs(enc_x) - abs(enc_y);
+    let fold = f32::max(-nz, 0.0);
+    let nx = enc_x + if enc_x >= 0.0 { fold } else { -fold };
+    let ny = enc_y + if enc_y >= 0.0 { fold } else { -fold };
+    let nnx = normalize_lane::<0>(nx, ny, nz);
+    let nny = normalize_lane::<1>(nx, ny, nz);
+    let nnz = normalize_lane::<2>(nx, ny, nz);
+    let cx = world_lane::<0>(camera, uvx, uvy, depth);
+    let cy = world_lane::<1>(camera, uvx, uvy, depth);
+    let cz = world_lane::<2>(camera, uvx, uvy, depth);
+    let eye_x = camera.vec4_lane::<8, 0>();
+    let eye_y = camera.vec4_lane::<8, 1>();
+    let eye_z = camera.vec4_lane::<8, 2>();
+    let vlen = f32::max(length3(eye_x - cx, eye_y - cy, eye_z - cz), EPS);
+    let vvx = (eye_x - cx) / vlen;
+    let vvy = (eye_y - cy) / vlen;
+    let vvz = (eye_z - cz) / vlen;
+    let rx = world_lane::<0>(camera, uvx + 1.0 / dims_x, uvy, depth);
+    let ry = world_lane::<1>(camera, uvx + 1.0 / dims_x, uvy, depth);
+    let rz = world_lane::<2>(camera, uvx + 1.0 / dims_x, uvy, depth);
+    let ux = world_lane::<0>(camera, uvx, uvy + 1.0 / dims_y, depth);
+    let uy = world_lane::<1>(camera, uvx, uvy + 1.0 / dims_y, depth);
+    let uz = world_lane::<2>(camera, uvx, uvy + 1.0 / dims_y, depth);
+    let sxx = normalize_lane::<0>(rx - cx + EPS, ry - cy, rz - cz);
+    let sxy = normalize_lane::<1>(rx - cx + EPS, ry - cy, rz - cz);
+    let sxz = normalize_lane::<2>(rx - cx + EPS, ry - cy, rz - cz);
+    let syx = normalize_lane::<0>(ux - cx, uy - cy + EPS, uz - cz);
+    let syy = normalize_lane::<1>(ux - cx, uy - cy + EPS, uz - cz);
+    let syz = normalize_lane::<2>(ux - cx, uy - cy + EPS, uz - cz);
+    let radius = ao.field_f32::<0>();
+    let intensity = ao.field_f32::<1>();
+    let edge_x = cx + sxx * radius;
+    let edge_y = cy + sxy * radius;
+    let edge_z = cz + sxz * radius;
+    let clip_x = view_lane::<0>(camera, edge_x, edge_y, edge_z);
+    let clip_y = view_lane::<1>(camera, edge_x, edge_y, edge_z);
+    let clip_w = f32::max(view_lane::<3>(camera, edge_x, edge_y, edge_z), EPS);
+    let edge_u = clip_x / clip_w * 0.5 + 0.5;
+    let edge_v = 0.5 - clip_y / clip_w * 0.5;
+    let uv_radius = f32::max(length3(edge_u - uvx, edge_v - uvy, 0.0), 1.0 / dims_x);
+    let hash = fract(52.9829189 * fract((xi as f32) * 0.06711056 + (yi as f32) * 0.00583715));
+    let mut visibility = 0.0f32;
+    let mut slice = 0u32;
+    while slice < 2 {
+        let phi = hash * PI + (slice as f32) * HALF_PI;
+        let cphi = cos(phi);
+        let sphi = sin(phi);
+        let dir_x = sxx * cphi + syx * sphi;
+        let dir_y = sxy * cphi + syy * sphi;
+        let dir_z = sxz * cphi + syz * sphi;
+        let sdx = normalize_lane::<0>(dir_x, dir_y, dir_z);
+        let sdy = normalize_lane::<1>(dir_x, dir_y, dir_z);
+        let sdz = normalize_lane::<2>(dir_x, dir_y, dir_z);
+        let raw_x = cross_lane::<0>(sdx, sdy, sdz, vvx, vvy, vvz) + EPS;
+        let raw_y = cross_lane::<1>(sdx, sdy, sdz, vvx, vvy, vvz);
+        let raw_z = cross_lane::<2>(sdx, sdy, sdz, vvx, vvy, vvz);
+        let ax = normalize_lane::<0>(raw_x, raw_y, raw_z);
+        let ay = normalize_lane::<1>(raw_x, raw_y, raw_z);
+        let az = normalize_lane::<2>(raw_x, raw_y, raw_z);
+        let along = dot3(nnx, nny, nnz, ax, ay, az);
+        let proj_x = nnx - ax * along;
+        let proj_y = nny - ay * along;
+        let proj_z = nnz - az * along;
+        let proj_len = f32::max(length3(proj_x, proj_y, proj_z), EPS);
+        let cos_norm = clamp(
+            dot3(proj_x, proj_y, proj_z, vvx, vvy, vvz) / proj_len,
+            0.0,
+            1.0,
+        );
+        let normal_angle = sign(dot3(sdx, sdy, sdz, proj_x, proj_y, proj_z)) * acos(cos_norm);
+        let min_pos = cos(normal_angle + HALF_PI);
+        let min_neg = cos(normal_angle - HALF_PI);
+        let mut horizon_pos = min_pos;
+        let mut horizon_neg = min_neg;
+        let mut step = 1u32;
+        while step <= 4 {
+            let off = uv_radius * (step as f32) / 4.0;
+            let ox = cphi * off;
+            let oy = sphi * off;
+            horizon_pos = f32::max(
+                horizon_pos,
+                horizon(
+                    depth_tex,
+                    camera,
+                    uvx + ox,
+                    uvy + oy,
+                    dims_x,
+                    dims_y,
+                    cx,
+                    cy,
+                    cz,
+                    vvx,
+                    vvy,
+                    vvz,
+                    min_pos,
+                    radius,
+                ),
+            );
+            horizon_neg = f32::max(
+                horizon_neg,
+                horizon(
+                    depth_tex,
+                    camera,
+                    uvx - ox,
+                    uvy - oy,
+                    dims_x,
+                    dims_y,
+                    cx,
+                    cy,
+                    cz,
+                    vvx,
+                    vvy,
+                    vvz,
+                    min_neg,
+                    radius,
+                ),
+            );
+            step += 1;
+        }
+        let h_pos = acos(clamp(horizon_pos, -1.0, 1.0));
+        let h_neg = -acos(clamp(horizon_neg, -1.0, 1.0));
+        let n = normal_angle;
+        let arc_pos = 0.25 * (-cos(2.0 * h_pos - n) + cos(n) + 2.0 * h_pos * sin(n));
+        let arc_neg = 0.25 * (-cos(2.0 * h_neg - n) + cos(n) + 2.0 * h_neg * sin(n));
+        visibility += proj_len * (arc_pos + arc_neg);
+        slice += 1;
+    }
+    let occlusion = clamp(mix(1.0, visibility / 2.0, intensity), 0.0, 1.0);
+    fragment_store(occlusion, occlusion, occlusion, 1.0);
 }
