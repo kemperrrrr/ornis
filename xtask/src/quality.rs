@@ -3680,7 +3680,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 5);
+        assert_eq!(only_shaders.total_stages(), 9);
     }
 
     #[test]

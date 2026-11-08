@@ -48,7 +48,11 @@ const MIN_DARK_FRACTION: f64 = 0.005;
 /// Minimum fraction of non-black pixels: the corner must be visible.
 const MIN_LIT_FRACTION: f64 = 0.2;
 /// How many golden pixels may exceed [`TOL`] (driver edges, not a new kernel).
-const GOLDEN_BUDGET: usize = 64;
+///
+/// The SSAO taps compare eye distances, so a contraction difference between
+/// Metal and lavapipe flips a tap on one silhouette: at most 80 pixels
+/// (0.14% of the frame) moved by ≤7 with the llvm2gpu kernel.
+const GOLDEN_BUDGET: usize = 96;
 /// Camera of the corner scene (shared by the upload and the region probe).
 const EYE: [f32; 3] = [3.0, 2.2, 3.0];
 /// Look-at target of the corner scene.
