@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.7329956106821289,
-  "iosp_score": 0.966320587490504,
+  "quality_score": 0.7353373187635524,
+  "iosp_score": 0.9666457680250784,
   "violations": 266,
-  "total": 12057,
+  "total": 12165,
   "complexity_warnings": 78,
   "magic_number_warnings": 162,
   "nesting_depth_warnings": 20,
@@ -23,12 +23,12 @@
   "coupling_cycles": 0,
   "tq_no_assertion_warnings": 0,
   "tq_no_sut_warnings": 5,
-  "tq_untested_warnings": 158,
+  "tq_untested_warnings": 159,
   "tq_uncovered_warnings": 0,
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2880,
+  "total_findings": 2881,
   "violation_details": [
     {
       "name": "EventLog::push",
@@ -83,7 +83,7 @@
     {
       "name": "EditorSession::default",
       "file": "crates/app/src/session.rs",
-      "line": 315
+      "line": 319
     },
     {
       "name": "PhysicsRuntime::sync_soft_in",
@@ -1343,12 +1343,12 @@
     {
       "name": "pick_closest_with_epsilon",
       "file": "crates/editor/src/picking.rs",
-      "line": 793
+      "line": 801
     },
     {
       "name": "intersect_entity",
       "file": "crates/editor/src/picking.rs",
-      "line": 832
+      "line": 895
     },
     {
       "name": "quality",
