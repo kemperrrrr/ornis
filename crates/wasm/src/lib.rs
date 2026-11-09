@@ -713,6 +713,11 @@ fn apply_live_marks(world: &mut ReplicaGameWorld, meta: &[LiveEntityMeta]) -> Ve
         // so a local click cannot address a stale server entity until a
         // consistent snapshot arrives.
         clear_lane::<ServerEntityId>(store);
+        // The chrome markers are untrustworthy for the same reason: a stale
+        // `GizmoHandle` keeps a handle of a previous snapshot pickable, and
+        // the gizmo-first pick would grab a chrome the snapshot no longer
+        // describes.
+        clear_lane::<GizmoHandle>(store);
         return Vec::new();
     }
     for (entity, meta) in handles.iter().zip(meta) {
@@ -2303,6 +2308,40 @@ mod integration_tests {
         // A local click before the next consistent snapshot sends nothing.
         set_selection(store, Some(entity));
         assert_eq!(server_selection(store), None);
+    }
+
+    /// A length mismatch also drops the chrome markers of the previous
+    /// snapshot: a stale `GizmoHandle` would keep a vanished handle pickable
+    /// until the next consistent snapshot arrives.
+    #[test]
+    fn live_marks_mismatch_drops_stale_gizmo_handles() {
+        let (mut world, entity) = selected_replica();
+        let store = world.engine_mut().world_mut().store_mut().expect("store");
+        store.insert(
+            entity,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+        );
+        assert!(
+            store
+                .read_lane::<GizmoHandle>()
+                .is_some_and(|lane| lane.contains(entity)),
+            "precondition: the handle is marked"
+        );
+
+        // No marks at all for a replica that holds entities: the snapshot and
+        // the replica disagree.
+        assert!(apply_live_marks(&mut world, &[]).is_empty());
+        let store = world.engine().world().store().expect("store");
+        assert!(
+            store
+                .read_lane::<GizmoHandle>()
+                .is_none_or(|lane| lane.entities.is_empty()),
+            "a mismatched snapshot must clear every gizmo handle"
+        );
     }
 
     /// The acknowledged selection moves only after a successful delivery:
