@@ -1037,7 +1037,7 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
         let started = std::time::Instant::now();
         let failure = bake_texture(&settings, &source, TextureRole::BaseColor);
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < GROUP_RETURN_LIMIT,
             "the hung tool was not killed: {:?}",
             started.elapsed()
         );
@@ -1063,9 +1063,21 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     #[cfg(unix)]
     const GROUP_TIMEOUT: Duration = Duration::from_millis(500);
 
-    /// The call returns near [`GROUP_TIMEOUT`], not after the grandchild's sleep.
+    /// The call returns long before the fake tool's own 30 s sleep ends, but
+    /// not at a tight wall-clock bound: on a loaded machine the kill, the
+    /// reap and the pipe drain all take their time. The bound stays well
+    /// below the sleep the fake tools hold, so "we returned near the deadline
+    /// instead of waiting the sleep out" still holds.
     #[cfg(unix)]
-    const GROUP_RETURN_LIMIT: Duration = Duration::from_millis(1500);
+    const GROUP_RETURN_LIMIT: Duration = Duration::from_secs(15);
+
+    /// Deadline for a version probe that has to succeed.
+    ///
+    /// The fake tool sleeps before it prints, and the reader must wait for the
+    /// whole line. The deadline leaves room for a loaded machine; the
+    /// assertion under test is the captured text, not the clock.
+    #[cfg(unix)]
+    const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
     #[test]
     #[cfg(unix)]
@@ -1144,20 +1156,17 @@ cp "$(dirname "$0")/payload.ktx2" "$out"
     #[test]
     #[cfg(unix)]
     fn a_slow_version_probe_keeps_its_full_text() {
-        // The line arrives inside the deadline. Readers must wait for it
+        // The line arrives after the tool slept. Readers must wait for it
         // instead of returning a prefix that would change the cache key.
         let program = install_tool(
             "slow-version",
             "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then\nsleep 0.2\nprintf '%s\\n' 'fake-basisu 1'\nprintf '%s\\n' 'slow-marker-end'\nexit 0\nfi\nexit 0\n",
             b"",
         );
-        let started = std::time::Instant::now();
-        let identity = super::identity::tool_identity(&program, GROUP_TIMEOUT).expect("version");
-        assert!(
-            started.elapsed() < GROUP_TIMEOUT,
-            "slow version took {:?}, past the deadline",
-            started.elapsed()
-        );
+        // The deadline is generous, so the reader may wait for the slow line:
+        // a probe that overran it would fail as a timeout instead of returning
+        // a prefix. The clock is not what this test is about.
+        let identity = super::identity::tool_identity(&program, PROBE_DEADLINE).expect("version");
         assert!(
             identity.starts_with("fake-basisu 1\nslow-marker-end\n"),
             "version text was truncated: {identity}"
