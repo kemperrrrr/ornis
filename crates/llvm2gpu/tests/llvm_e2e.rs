@@ -916,7 +916,6 @@ fn uniform_field_rejects_type_mismatch() {
 }
 
 const KERNEL_RS: &str = r#"
-#![allow(clippy::all)]
 #![no_std]
 #![no_main]
 use core::panic::PanicInfo;
@@ -1089,7 +1088,6 @@ fn rustc_to_llvm_ir_to_wgsl() {
 }
 
 const LOOP_KERNEL_RS: &str = r#"
-#![allow(clippy::all)]
 #![no_std]
 #![no_main]
 use core::panic::PanicInfo;
@@ -1121,7 +1119,6 @@ fn rustc_dynamic_loop_to_wgsl() {
 }
 
 const NESTED_LOOP_KERNEL_RS: &str = r#"
-#![allow(clippy::all)]
 #![no_std]
 #![no_main]
 use core::panic::PanicInfo;
@@ -1256,7 +1253,6 @@ fn rustc_adapt_to_wgsl() {
 }
 
 const GTAO_ARC_KERNEL_RS: &str = r#"
-#![allow(clippy::all)]
 #![no_std]
 #![no_main]
 use core::panic::PanicInfo;

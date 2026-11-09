@@ -105,12 +105,14 @@ jobs:
   #   fast   — fmt, audit, deny, outdated, upgrade-check, rustqual, machete, typos (no compilation)
   #   clippy — clippy-physics, clippy
   #   test   — test, test-lockfree (workspace + ornis-core lock-free lanes)
-  #   gpu    — test-physics, test-wasm2gpu, smoke (all need lavapipe; the
-  #            default-suite determinism gates run inside test-physics,
-  #            the ignored ones stay in Determinism Nightly).
+  #   gpu    — test-physics, test-wasm2gpu, test-render-gpu, smoke (all need
+  #            lavapipe; the default-suite determinism gates run inside
+  #            test-physics, the ignored ones stay in Determinism Nightly).
   #            test-wasm2gpu also needs the wasm32 target. This job sets
   #            ORNIS_REQUIRE_GPU so a missing adapter fails the wasm2gpu
-  #            GPU half; the xtask stage itself does not force that variable.
+  #            GPU half and the render `try_device` gates (which the test
+  #            shard skips without an adapter); the xtask stages themselves
+  #            do not force that variable.
   #   docs   — doc, wasm-check
   fast:
     runs-on: ubuntu-latest
@@ -421,7 +423,7 @@ jobs:
           RUSTDOCFLAGS: -C link-arg=-fuse-ld=mold
         run: |
           mkdir -p target
-          cargo xtask quality --ci --only test-physics,test-wasm2gpu,smoke 2>&1 | tee target/quality-gpu.log
+          cargo xtask quality --ci --only test-physics,test-wasm2gpu,test-render-gpu,smoke 2>&1 | tee target/quality-gpu.log
 
       - name: Upload shard log
         if: always()

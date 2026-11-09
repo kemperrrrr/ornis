@@ -44,9 +44,11 @@ fn params_layouts_match_their_wgsl() {
     assert_eq!(std::mem::offset_of!(AdaptParams, dt), 40);
     // Only the contract shape is asserted here. Generated identifiers
     // (`f3_`, `tex_0_1_`, ...) change with any naming tweak in llvm2gpu, so
-    // they are not a test of the shader; behaviour (bins, bin-0 exclusion,
-    // exposure step) is covered by the GPU parity tests below and by
-    // `below_range_texels_are_excluded_from_the_average`.
+    // they are not a test of the shader. Behaviour (bins, bin-0 exclusion,
+    // exposure step) is covered by the GPU parity test below, which compares
+    // these generated production pipelines against the wasm guest and the
+    // CPU reference; the CI `gpu` shard runs it as `test-render-gpu` with
+    // ORNIS_REQUIRE_GPU=1, so it cannot skip for want of an adapter.
     let hist = histogram_wgsl();
     assert!(hist.contains("array<atomic<u32>, 256>"));
     assert!(hist.contains("var<workgroup> workgroup_atomics"));

@@ -52,11 +52,12 @@ struct StageResult {
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
 /// sharding; the default (no `--only`) runs everything implied by the
 /// level flags, exactly as before.
-const LEVEL1_IDS: [&str; 15] = [
+const LEVEL1_IDS: [&str; 16] = [
     "fmt",
     "clippy-physics",
     "test-physics",
     "test-wasm2gpu",
+    "test-render-gpu",
     "clippy",
     "rustqual",
     "smoke",
@@ -1430,6 +1431,31 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // Render GPU gates. `cargo test --workspace` in the `test` shard has no
+    // adapter, so every `try_device` test skips silently there; the gpu CI
+    // job runs this stage with ORNIS_REQUIRE_GPU=1 (a missing lavapipe then
+    // panics). The filter keeps the pass whose generated WGSL this branch
+    // migrated and whose bin-0/exposure contract used to be asserted on
+    // generated identifiers: the parity test compares production
+    // histogram + adapt against the wasm guest and the CPU reference.
+    stages.run(
+        "test-render-gpu",
+        "test (render gpu)",
+        "cargo test -p ornis-render --features test-util --lib auto_exposure:: -- --test-threads=1",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-render",
+            "--features",
+            "test-util",
+            "--lib",
+            "auto_exposure::",
+            "--",
+            "--test-threads=1",
+        ]),
+        false,
+    );
+
     // No `determinism-fast` stage (removed, RAT-26): it re-ran the
     // default-suite determinism filters (`solver_is_deterministic`,
     // `determinism_snapshot`, `avbd_determinism`) that `test-physics`
@@ -2353,7 +2379,7 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, test-wasm2gpu, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
+          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, test-wasm2gpu, test-render-gpu, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage ratchet (llvm-cov --workspace vs coverage-baseline.json), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
