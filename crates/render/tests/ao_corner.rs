@@ -415,6 +415,9 @@ fn assert_matches_golden(name: &str, pixels: &[u8]) {
         worst = worst.max(delta);
         bad += usize::from(delta > TOL);
     }
+    // The gate verdict alone does not say how close the run was; the CI log
+    // needs the actual edge to justify or shrink `GOLDEN_BUDGET`.
+    eprintln!("{name}: bad={bad} (budget {GOLDEN_BUDGET}) worst={worst} (limit 16)");
     assert!(
         bad <= GOLDEN_BUDGET && worst <= 16,
         "{name}: {bad} pixels differ by >{TOL} (budget {GOLDEN_BUDGET}), worst {worst}"

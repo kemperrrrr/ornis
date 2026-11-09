@@ -204,11 +204,18 @@ fn scenes() -> Vec<Scene> {
     non_finite[0] = [f32::NAN, 0.0, 0.0, 1.0];
     non_finite[1] = [f32::INFINITY, 0.0, 0.0, 1.0];
     non_finite[2] = [f32::NEG_INFINITY, 0.0, 0.0, 1.0];
+    // Non-finite samples in the layer the mode does *not* select must not
+    // reach the chosen texel: multiply-masking (`NaN * 0.0`) would poison it
+    // and silently drop a valid sample into bin 0.
+    let mut bad_unselected_forward = forward.clone();
+    bad_unselected_forward[0] = [f32::NAN, 0.0, 0.0, 1.0];
+    bad_unselected_forward[1] = [f32::INFINITY, 0.0, 0.0, 1.0];
+    bad_unselected_forward[2] = [f32::NEG_INFINITY, 0.0, 0.0, 1.0];
     vec![
         Scene {
             name: "deferred HDR with non-finite guards",
             mode: 0,
-            deferred: non_finite,
+            deferred: non_finite.clone(),
             forward: forward.clone(),
         },
         Scene {
@@ -220,8 +227,20 @@ fn scenes() -> Vec<Scene> {
         Scene {
             name: "hybrid clipped HDR highlights",
             mode: 2,
+            deferred: deferred.clone(),
+            forward: forward.clone(),
+        },
+        Scene {
+            name: "forward mode ignores non-finite deferred",
+            mode: 1,
+            deferred: non_finite,
+            forward: forward.clone(),
+        },
+        Scene {
+            name: "deferred mode ignores non-finite forward",
+            mode: 0,
             deferred,
-            forward,
+            forward: bad_unselected_forward,
         },
     ]
 }

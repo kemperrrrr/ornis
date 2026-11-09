@@ -76,11 +76,19 @@ fn histogram_bin(params: Uniform<HistogramParams, 0, 3>, log_lum: f32) -> u32 {
 #[inline(always)]
 fn mixed_lane(deferred: f32, forward: f32, alpha: f32, mode: u32) -> f32 {
     let premultiplied = forward * alpha;
-    // Two single comparisons, not an if/else chain: rustc turns the chain
-    // into `switch`, which the translator does not lower.
-    let keep_deferred = if mode == 1 { 0.0 } else { 1.0 };
-    let add_forward = if mode == 0 { 0.0 } else { 1.0 };
-    deferred * keep_deferred + premultiplied * add_forward
+    // Select the layer, never multiply-mask it: `NaN * 0.0` is NaN, so a
+    // non-finite texel in the unselected HDR target would poison the chosen
+    // one (master's shader only read the selected layer). Two single
+    // comparisons, not an if/else chain: rustc turns the chain into
+    // `switch`, which the translator does not lower.
+    let mut mixed = deferred;
+    if mode == 1 {
+        mixed = premultiplied;
+    }
+    if mode == 2 {
+        mixed = deferred + premultiplied;
+    }
+    mixed
 }
 
 #[inline(always)]

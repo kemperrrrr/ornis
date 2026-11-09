@@ -47,30 +47,33 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
         let _e67 = textureLoad(tex_0_1_, vec2<i32>(bitcast<i32>(global_invocation_id.x), bitcast<i32>(global_invocation_id.y)), 0i);
         let _e74 = textureLoad(tex_0_1_, vec2<i32>(bitcast<i32>(global_invocation_id.x), bitcast<i32>(global_invocation_id.y)), 0i);
         let _e78 = uniform_struct_0_3_.f3_;
-        let _e83 = select(1f, 0f, (_e78 == 1u));
-        let _e88 = select(1f, 0f, (_e78 == 0u));
-        let _e106 = dot(vec3<f32>(((_e32.x * _e83) + ((_e53.x * _e74.w) * _e88)), ((_e39.y * _e83) + ((_e60.y * _e74.w) * _e88)), ((_e46.z * _e83) + ((_e67.z * _e74.w) * _e88))), vec3<f32>(0.2126f, 0.7152f, 0.0722f));
-        if !(((_e106 <= _e106) && (0f <= 0f))) {
+        let _e79 = (_e53.x * _e74.w);
+        let _e81 = (_e78 == 1u);
+        let _e84 = (_e78 == 2u);
+        let _e87 = (_e60.y * _e74.w);
+        let _e91 = (_e67.z * _e74.w);
+        let _e100 = dot(vec3<f32>(select(select(_e32.x, _e79, _e81), (_e32.x + _e79), _e84), select(select(_e39.y, _e87, _e81), (_e39.y + _e87), _e84), select(select(_e46.z, _e91, _e81), (_e46.z + _e91), _e84)), vec3<f32>(0.2126f, 0.7152f, 0.0722f));
+        if !(((_e100 <= _e100) && (0f <= 0f))) {
             safe_u002e_sroa_u002e_0_u002e_0_u002e_i = 0.000001f;
         } else {
-            if (abs(_e106) > 340000000000000000000000000000000000000f) {
+            if (abs(_e100) > 340000000000000000000000000000000000000f) {
                 safe_u002e_sroa_u002e_0_u002e_0_u002e_i = 0.000001f;
             } else {
-                safe_u002e_sroa_u002e_0_u002e_0_u002e_i = max(_e106, 0.000001f);
+                safe_u002e_sroa_u002e_0_u002e_0_u002e_i = max(_e100, 0.000001f);
             }
         }
-        let _e123 = safe_u002e_sroa_u002e_0_u002e_0_u002e_i;
-        let _e124 = log2(_e123);
-        let _e127 = uniform_struct_0_3_.f0_;
-        let _e130 = uniform_struct_0_3_.f1_;
-        let _e133 = uniform_struct_0_3_.f2_;
-        if (_e124 < _e127) {
+        let _e117 = safe_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        let _e118 = log2(_e117);
+        let _e121 = uniform_struct_0_3_.f0_;
+        let _e124 = uniform_struct_0_3_.f1_;
+        let _e127 = uniform_struct_0_3_.f2_;
+        if (_e118 < _e121) {
             _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0u;
         } else {
-            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = u32((((_e133 + -2f) * clamp(((_e124 - _e127) * _e130), 0f, 1f)) + 1f));
+            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = u32((((_e127 + -2f) * clamp(((_e118 - _e121) * _e124), 0f, 1f)) + 1f));
         }
-        let _e150 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
-        let _e154 = atomicAdd((&workgroup_atomics[_e150]), 1u);
+        let _e144 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        let _e148 = atomicAdd((&workgroup_atomics[_e144]), 1u);
     }
     workgroupBarrier();
     if (local_invocation_index < 256u) {
@@ -79,14 +82,14 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
         return;
     }
     loop {
-        let _e159 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
-        let _e162 = atomicLoad((&workgroup_atomics[_e159]));
-        if (_e162 == 0u) {
+        let _e153 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
+        let _e156 = atomicLoad((&workgroup_atomics[_e153]));
+        if (_e156 == 0u) {
         } else {
-            let _e167 = atomicAdd((&atomic_storage_0_2_[_e159]), _e162);
+            let _e161 = atomicAdd((&atomic_storage_0_2_[_e153]), _e156);
         }
-        if (_e159 < 192u) {
-            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e159 + 64u);
+        if (_e153 < 192u) {
+            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e153 + 64u);
             continue;
         } else {
             break;
