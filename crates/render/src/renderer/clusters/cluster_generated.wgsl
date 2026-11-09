@@ -153,112 +153,112 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
                             if ((_e158 + dot(vec3<f32>(_e81, _e85, _e89), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e81, _e85, _e89))))) {
                                 _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = 0u;
                             } else {
-                                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = select(0u, 1u, ((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e250, _e252, _e254))) >= (_e256 * -(length(vec3<f32>(_e159, _e160, _e161))))));
+                                _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i = select(0u, 1u, !(((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e250, _e252, _e254))) < (_e256 * -(length(vec3<f32>(_e159, _e160, _e161)))))));
                             }
                         }
                     }
                 }
             }
-            let _e326 = _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i;
-            let _e327 = (_e326 + _e170);
-            out_u002e_spec_u002e_select_u002e_i = _e327;
-            let _e330 = (_e168 + 1u);
-            if (_e330 == _e6) {
+            let _e327 = _0_u002e_sroa_u002e_0_u002e_0_u002e_off0_u002e_i;
+            let _e328 = (_e327 + _e170);
+            out_u002e_spec_u002e_select_u002e_i = _e328;
+            let _e331 = (_e168 + 1u);
+            if (_e331 == _e6) {
                 break;
             } else {
-                head_u002e_sroa_u002e_0_u002e_0_u002e_i8473_ = _e330;
-                count_u002e_sroa_u002e_0_u002e_0_u002e_i472_ = _e327;
+                head_u002e_sroa_u002e_0_u002e_0_u002e_i8473_ = _e331;
+                count_u002e_sroa_u002e_0_u002e_0_u002e_i472_ = _e328;
                 continue;
             }
         }
-        let _e335 = out_u002e_spec_u002e_select_u002e_i;
-        count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = min(_e335, 128u);
+        let _e336 = out_u002e_spec_u002e_select_u002e_i;
+        count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = min(_e336, 128u);
     } else {
         count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa = 0u;
     }
-    let _e342 = count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
-    let _e346 = atomicAdd((&atomic_storage_0_5_[0u]), _e342);
-    if ((_e346 + _e342) > 442368u) {
-        let _e355 = select((442368u - _e346), 0u, (_e346 > 442367u));
-        let _e360 = atomicAdd((&atomic_storage_0_5_[1u]), (_e342 - _e355));
-        span_u002e_sroa_u002e_0_u002e_0_ = _e355;
+    let _e343 = count_u002e_sroa_u002e_0_u002e_0_u002e_i_u002e_lcssa;
+    let _e347 = atomicAdd((&atomic_storage_0_5_[0u]), _e343);
+    if ((_e347 + _e343) > 442368u) {
+        let _e356 = select((442368u - _e347), 0u, (_e347 > 442367u));
+        let _e361 = atomicAdd((&atomic_storage_0_5_[1u]), (_e343 - _e356));
+        span_u002e_sroa_u002e_0_u002e_0_ = _e356;
     } else {
-        span_u002e_sroa_u002e_0_u002e_0_ = _e342;
+        span_u002e_sroa_u002e_0_u002e_0_ = _e343;
     }
-    let _e364 = span_u002e_sroa_u002e_0_u002e_0_;
-    let _e366 = (global_invocation_id.x << 1u);
-    storage_0_3_[_e366] = _e346;
-    storage_0_3_[(_e366 | 1u)] = _e364;
-    if ((_e9 >= _e6) | (_e364 == 0u)) {
+    let _e365 = span_u002e_sroa_u002e_0_u002e_0_;
+    let _e367 = (global_invocation_id.x << 1u);
+    storage_0_3_[_e367] = _e347;
+    storage_0_3_[(_e367 | 1u)] = _e365;
+    if ((_e9 >= _e6) | (_e365 == 0u)) {
         return;
     } else {
         head_u002e_sroa_u002e_0_u002e_0_u002e_i478_ = _e9;
         cursor_u002e_sroa_u002e_0_u002e_0_u002e_i477_ = 0u;
     }
     loop {
-        let _e381 = head_u002e_sroa_u002e_0_u002e_0_u002e_i478_;
-        let _e383 = cursor_u002e_sroa_u002e_0_u002e_0_u002e_i477_;
-        let _e385 = (_e381 * 36u);
-        let _e390 = storage_0_2_[(_e385 + 8u)];
-        let _e395 = storage_0_2_[(_e385 + 9u)];
-        let _e400 = storage_0_2_[(_e385 + 10u)];
-        let _e405 = storage_0_2_[(_e385 + 16u)];
-        let _e410 = storage_0_2_[(_e385 + 18u)];
-        let _e413 = storage_0_2_[_e385];
-        if ((_e410 < 0.1f) | (_e413 < 2f)) {
-            _15_u002e_i_u002e_sroa_u002e_0_u002e_0_ = _e390;
-            _15_u002e_i_u002e_sroa_u002e_5_u002e_0_ = _e395;
-            _15_u002e_i_u002e_sroa_u002e_6_u002e_0_ = _e400;
-            _15_u002e_i_u002e_sroa_u002e_7_u002e_0_ = _e405;
+        let _e382 = head_u002e_sroa_u002e_0_u002e_0_u002e_i478_;
+        let _e384 = cursor_u002e_sroa_u002e_0_u002e_0_u002e_i477_;
+        let _e386 = (_e382 * 36u);
+        let _e391 = storage_0_2_[(_e386 + 8u)];
+        let _e396 = storage_0_2_[(_e386 + 9u)];
+        let _e401 = storage_0_2_[(_e386 + 10u)];
+        let _e406 = storage_0_2_[(_e386 + 16u)];
+        let _e411 = storage_0_2_[(_e386 + 18u)];
+        let _e414 = storage_0_2_[_e386];
+        if ((_e411 < 0.1f) | (_e414 < 2f)) {
+            _15_u002e_i_u002e_sroa_u002e_0_u002e_0_ = _e391;
+            _15_u002e_i_u002e_sroa_u002e_5_u002e_0_ = _e396;
+            _15_u002e_i_u002e_sroa_u002e_6_u002e_0_ = _e401;
+            _15_u002e_i_u002e_sroa_u002e_7_u002e_0_ = _e406;
         } else {
-            let _e423 = (_e410 * _e410);
-            let _e431 = ((_e405 * (((1f - _e423) / _e423) + 1f)) * 0.5f);
-            let _e436 = storage_0_2_[(_e385 + 4u)];
-            let _e441 = storage_0_2_[(_e385 + 5u)];
-            let _e446 = storage_0_2_[(_e385 + 6u)];
-            let _e448 = length(vec3<f32>(_e436, _e441, _e446));
-            _15_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (_e390 + (_e431 * (_e436 / _e448)));
-            _15_u002e_i_u002e_sroa_u002e_5_u002e_0_ = (_e395 + (_e431 * (_e441 / _e448)));
-            _15_u002e_i_u002e_sroa_u002e_6_u002e_0_ = (_e400 + (_e431 * (_e446 / _e448)));
-            _15_u002e_i_u002e_sroa_u002e_7_u002e_0_ = _e431;
+            let _e424 = (_e411 * _e411);
+            let _e432 = ((_e406 * (((1f - _e424) / _e424) + 1f)) * 0.5f);
+            let _e437 = storage_0_2_[(_e386 + 4u)];
+            let _e442 = storage_0_2_[(_e386 + 5u)];
+            let _e447 = storage_0_2_[(_e386 + 6u)];
+            let _e449 = length(vec3<f32>(_e437, _e442, _e447));
+            _15_u002e_i_u002e_sroa_u002e_0_u002e_0_ = (_e391 + (_e432 * (_e437 / _e449)));
+            _15_u002e_i_u002e_sroa_u002e_5_u002e_0_ = (_e396 + (_e432 * (_e442 / _e449)));
+            _15_u002e_i_u002e_sroa_u002e_6_u002e_0_ = (_e401 + (_e432 * (_e447 / _e449)));
+            _15_u002e_i_u002e_sroa_u002e_7_u002e_0_ = _e432;
         }
-        let _e463 = _15_u002e_i_u002e_sroa_u002e_0_u002e_0_;
-        let _e465 = _15_u002e_i_u002e_sroa_u002e_5_u002e_0_;
-        let _e467 = _15_u002e_i_u002e_sroa_u002e_6_u002e_0_;
-        let _e469 = _15_u002e_i_u002e_sroa_u002e_7_u002e_0_;
-        if ((_e133 + dot(vec3<f32>(_e127, _e129, _e131), vec3<f32>(_e463, _e465, _e467))) < (_e469 * -(length(vec3<f32>(_e127, _e129, _e131))))) {
-            cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e383;
+        let _e464 = _15_u002e_i_u002e_sroa_u002e_0_u002e_0_;
+        let _e466 = _15_u002e_i_u002e_sroa_u002e_5_u002e_0_;
+        let _e468 = _15_u002e_i_u002e_sroa_u002e_6_u002e_0_;
+        let _e470 = _15_u002e_i_u002e_sroa_u002e_7_u002e_0_;
+        if ((_e133 + dot(vec3<f32>(_e127, _e129, _e131), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e127, _e129, _e131))))) {
+            cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
         } else {
-            if ((_e141 + dot(vec3<f32>(_e135, _e137, _e139), vec3<f32>(_e463, _e465, _e467))) < (_e469 * -(length(vec3<f32>(_e135, _e137, _e139))))) {
-                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e383;
+            if ((_e141 + dot(vec3<f32>(_e135, _e137, _e139), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e135, _e137, _e139))))) {
+                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
             } else {
-                if ((_e149 + dot(vec3<f32>(_e143, _e145, _e147), vec3<f32>(_e463, _e465, _e467))) < (_e469 * -(length(vec3<f32>(_e143, _e145, _e147))))) {
-                    cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e383;
+                if ((_e149 + dot(vec3<f32>(_e143, _e145, _e147), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e143, _e145, _e147))))) {
+                    cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
                 } else {
-                    if ((_e157 + dot(vec3<f32>(_e151, _e153, _e155), vec3<f32>(_e463, _e465, _e467))) < (_e469 * -(length(vec3<f32>(_e151, _e153, _e155))))) {
-                        cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e383;
+                    if ((_e157 + dot(vec3<f32>(_e151, _e153, _e155), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e151, _e153, _e155))))) {
+                        cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
                     } else {
-                        if ((_e158 + dot(vec3<f32>(_e81, _e85, _e89), vec3<f32>(_e463, _e465, _e467))) < (_e469 * -(length(vec3<f32>(_e81, _e85, _e89))))) {
-                            cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e383;
+                        if ((_e158 + dot(vec3<f32>(_e81, _e85, _e89), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e81, _e85, _e89))))) {
+                            cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
                         } else {
-                            if ((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e463, _e465, _e467))) < (_e469 * -(length(vec3<f32>(_e159, _e160, _e161))))) {
-                                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e383;
+                            if ((_e162 + dot(vec3<f32>(_e159, _e160, _e161), vec3<f32>(_e464, _e466, _e468))) < (_e470 * -(length(vec3<f32>(_e159, _e160, _e161))))) {
+                                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = _e384;
                             } else {
-                                storage_0_4_[(_e383 + _e346)] = _e381;
-                                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = (_e383 + 1u);
+                                storage_0_4_[(_e384 + _e347)] = _e382;
+                                cursor_u002e_sroa_u002e_0_u002e_1_u002e_i = (_e384 + 1u);
                             }
                         }
                     }
                 }
             }
         }
-        let _e537 = cursor_u002e_sroa_u002e_0_u002e_1_u002e_i;
-        let _e539 = (_e381 + 1u);
-        if select((_e537 >= _e364), true, (_e539 >= _e6)) {
+        let _e538 = cursor_u002e_sroa_u002e_0_u002e_1_u002e_i;
+        let _e540 = (_e382 + 1u);
+        if select((_e538 >= _e365), true, (_e540 >= _e6)) {
             break;
         } else {
-            head_u002e_sroa_u002e_0_u002e_0_u002e_i478_ = _e539;
-            cursor_u002e_sroa_u002e_0_u002e_0_u002e_i477_ = _e537;
+            head_u002e_sroa_u002e_0_u002e_0_u002e_i478_ = _e540;
+            cursor_u002e_sroa_u002e_0_u002e_0_u002e_i477_ = _e538;
             continue;
         }
     }

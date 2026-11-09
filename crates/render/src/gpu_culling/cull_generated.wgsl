@@ -42,45 +42,45 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     let _e79 = length(vec3<f32>(_e48, _e53, _e58));
     let _e81 = select(_e77, _e75, (_e75 > _e77));
     let _e83 = select(_e79, _e81, (_e81 > _e79));
-    if (_e83 < 0f) {
-        let _e90 = atomicAdd((&atomic_storage_0_3_[1u]), 1u);
-        if (_e90 < _e7) {
+    if !((_e83 >= 0f)) {
+        let _e91 = atomicAdd((&atomic_storage_0_3_[1u]), 1u);
+        if (_e91 < _e7) {
         } else {
             return;
         }
-        storage_0_2_[_e90] = global_invocation_id.x;
+        storage_0_2_[_e91] = global_invocation_id.x;
     } else {
-        let _e96 = uniform_struct_0_0_.f0_;
-        let _e100 = -(_e83);
-        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e96) < _e100) {
+        let _e97 = uniform_struct_0_0_.f0_;
+        let _e101 = -(_e83);
+        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e97) < _e101) {
             return;
         }
-        let _e104 = uniform_struct_0_0_.f1_;
-        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e104) < _e100) {
+        let _e105 = uniform_struct_0_0_.f1_;
+        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e105) < _e101) {
             return;
         }
-        let _e111 = uniform_struct_0_0_.f2_;
-        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e111) < _e100) {
+        let _e112 = uniform_struct_0_0_.f2_;
+        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e112) < _e101) {
             return;
         }
-        let _e118 = uniform_struct_0_0_.f3_;
-        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e118) < _e100) {
+        let _e119 = uniform_struct_0_0_.f3_;
+        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e119) < _e101) {
             return;
         }
-        let _e125 = uniform_struct_0_0_.f4_;
-        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e125) < _e100) {
+        let _e126 = uniform_struct_0_0_.f4_;
+        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e126) < _e101) {
             return;
         }
-        let _e132 = uniform_struct_0_0_.f5_;
-        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e132) < _e100) {
+        let _e133 = uniform_struct_0_0_.f5_;
+        if (dot(vec4<f32>(_e63, _e68, _e73, 1f), _e133) < _e101) {
             return;
         }
-        let _e141 = atomicAdd((&atomic_storage_0_3_[1u]), 1u);
-        if (_e141 < _e7) {
+        let _e142 = atomicAdd((&atomic_storage_0_3_[1u]), 1u);
+        if (_e142 < _e7) {
         } else {
             return;
         }
-        storage_0_2_[_e141] = global_invocation_id.x;
+        storage_0_2_[_e142] = global_invocation_id.x;
     }
     return;
 }
