@@ -136,6 +136,11 @@ async function boot() {
     await start_renderer('canvas');
     booted = true;
     console.log('[ornis-editor] renderer started');
+    // The toolbar mirror may have changed before the WASM module was ready
+    // (the clicks only updated the JS state then). Apply it now, otherwise
+    // the button shows Rotate while Move is actually active.
+    set_gizmo_mode(gizmoMode);
+    set_gizmo_space(gizmoSpace);
     requestAnimationFrame(overlayLoop);
 }
 

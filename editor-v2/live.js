@@ -34,6 +34,16 @@
   var lastInspectorKey = "";
   var lastEntityCount = -1;
 
+  // Whether a keystroke targets a text field: viewport shortcuts must not
+  // hijack the browser undo/redo inside inputs, textareas and rich-text
+  // surfaces.
+  function isEditingTarget(target) {
+    if (!target) return false;
+    var tag = target.tagName ? target.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    return !!target.isContentEditable;
+  }
+
   // ── DOM ────────────────────────────────────────────────────────────
   var tree = document.getElementById("tree");
   var treeFilter = document.getElementById("tree-filter");
@@ -779,7 +789,10 @@
       } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "s") {
         ev.preventDefault();
         saveScene();
-      } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "z") {
+      } else if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === "z") {
+        // The gizmo undo is a viewport shortcut: it must not hijack the
+        // browser undo inside text fields (and Shift+Z is redo, not undo).
+        if (isEditingTarget(ev.target)) return;
         ev.preventDefault();
         var api = window.OrnisViewport;
         if (api && api.undoGizmo) api.undoGizmo();
