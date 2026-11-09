@@ -34,6 +34,16 @@
   var lastInspectorKey = "";
   var lastEntityCount = -1;
 
+  // Whether a keystroke targets a text field: viewport shortcuts must not
+  // hijack the browser undo/redo inside inputs, textareas and rich-text
+  // surfaces.
+  function isEditingTarget(target) {
+    if (!target) return false;
+    var tag = target.tagName ? target.tagName.toLowerCase() : "";
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    return !!target.isContentEditable;
+  }
+
   // ── DOM ────────────────────────────────────────────────────────────
   var tree = document.getElementById("tree");
   var treeFilter = document.getElementById("tree-filter");
@@ -205,6 +215,9 @@
       return;
     }
     entities.forEach(function (entity) {
+      // Editor chrome (gizmo handles) lives in the same snapshot but is not
+      // scene content: keep it out of the hierarchy and inspector.
+      if (entity.editor && entity.editor.editor_only) return;
       var key = entityKey(entity);
       var label = entityLabel(entity);
       if (q && label.toLowerCase().indexOf(q) < 0) return;
@@ -719,14 +732,30 @@
     });
   }
 
-  document.querySelectorAll(".viewport-gizmos .gizmo").forEach(function (button) {
+  document.querySelectorAll(".viewport-gizmos .gizmo[data-tool]").forEach(function (button) {
     button.addEventListener("click", function () {
-      document.querySelectorAll(".viewport-gizmos .gizmo").forEach(function (other) {
+      document.querySelectorAll(".viewport-gizmos .gizmo[data-tool]").forEach(function (other) {
         other.classList.toggle("active", other === button);
       });
-      log("gizmo: " + button.dataset.tool + " (E3)");
+      var api = window.OrnisViewport;
+      if (api && api.setGizmoMode) api.setGizmoMode(button.dataset.tool);
+      log("gizmo: " + button.dataset.tool);
     });
   });
+
+  var spaceButton = document.getElementById("gizmo-space");
+  if (spaceButton) {
+    spaceButton.addEventListener("click", function () {
+      var local = spaceButton.dataset.space !== "local";
+      spaceButton.dataset.space = local ? "local" : "world";
+      spaceButton.textContent = local ? "L" : "W";
+      spaceButton.title = (local ? "Local" : "World") + " space (click to switch)";
+      spaceButton.classList.toggle("active", local);
+      var api = window.OrnisViewport;
+      if (api && api.setGizmoSpace) api.setGizmoSpace(local ? "local" : "world");
+      log("gizmo space: " + (local ? "local" : "world"));
+    });
+  }
 
   var btnPlay = document.getElementById("btn-play");
   var btnPause = document.getElementById("btn-pause");
@@ -760,6 +789,13 @@
       } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "s") {
         ev.preventDefault();
         saveScene();
+      } else if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && ev.key.toLowerCase() === "z") {
+        // The gizmo undo is a viewport shortcut: it must not hijack the
+        // browser undo inside text fields (and Shift+Z is redo, not undo).
+        if (isEditingTarget(ev.target)) return;
+        ev.preventDefault();
+        var api = window.OrnisViewport;
+        if (api && api.undoGizmo) api.undoGizmo();
       } else if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === "o") {
         ev.preventDefault();
         promptOpenScene();

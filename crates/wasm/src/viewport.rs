@@ -14,7 +14,8 @@ use std::sync::Mutex;
 
 use ornis_core::{Engine, InputState, PositiveF32};
 use ornis_editor::{
-    PlaneCamera, PlaneGrid, ViewportMode, install_plane_camera, plane_grid, read_plane_camera,
+    GizmoMode, GizmoSpace, PlaneCamera, PlaneGrid, ViewportMode, apply_gizmo_visibility,
+    install_plane_camera, plane_grid, read_plane_camera,
 };
 use ornis_render::{OrbitCamera, install_orbit_camera, read_orbit_camera};
 use wasm_bindgen::prelude::*;
@@ -30,6 +31,99 @@ thread_local! {
     /// Latest viewport-state wire JSON, refreshed every frame.
     static LAST_STATE_JSON: RefCell<String> =
         const { RefCell::new(String::new()) };
+    /// Active gizmo mode (select tool = `Off`).
+    pub(crate) static GIZMO_MODE: Cell<GizmoMode> = const { Cell::new(GizmoMode::Move) };
+    /// Active gizmo axis space.
+    pub(crate) static GIZMO_SPACE: Cell<GizmoSpace> = const { Cell::new(GizmoSpace::World) };
+    /// Pending gizmo mode/space request from the toolbar.
+    pub(crate) static PENDING_GIZMO: Cell<Option<(GizmoMode, GizmoSpace)>> =
+        const { Cell::new(None) };
+    /// One-step undo request from the toolbar.
+    pub(crate) static PENDING_UNDO: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Active gizmo mode (read by the frame loop's drag/picking step).
+pub(crate) fn gizmo_mode() -> GizmoMode {
+    GIZMO_MODE.with(Cell::get)
+}
+
+/// Active gizmo space (read by the frame loop's drag step).
+pub(crate) fn gizmo_space() -> GizmoSpace {
+    GIZMO_SPACE.with(Cell::get)
+}
+
+/// Applies a queued toolbar request: updates the active mode/space and
+/// repositions/hides the replica handles. Returns whether a request was
+/// applied.
+pub(crate) fn apply_pending_gizmo(engine: &mut Engine) -> bool {
+    let Some((mode, space)) = PENDING_GIZMO.with(Cell::take) else {
+        return false;
+    };
+    GIZMO_MODE.with(|cell| cell.set(mode));
+    GIZMO_SPACE.with(|cell| cell.set(space));
+    if let Some(store) = engine.world_mut().store_mut() {
+        apply_gizmo_visibility(store, mode, space);
+    }
+    true
+}
+
+/// Takes the pending one-step undo request.
+pub(crate) fn take_pending_undo() -> bool {
+    PENDING_UNDO.with(Cell::take)
+}
+
+/// Selects the gizmo tool: `"move"`, `"rotate"`, `"scale"`, or `"off"`
+/// (the select tool hides the handles and disables gizmo dragging).
+///
+/// The loop applies it on the next frame (same single-threaded queue as
+/// [`set_viewport_mode`]); returns `false` on an unknown tool.
+// qual:api — wasm-bindgen export; called from the browser toolbar.
+#[wasm_bindgen]
+pub fn set_gizmo_mode(mode: &str) -> bool {
+    let parsed = match mode {
+        "move" => GizmoMode::Move,
+        "rotate" => GizmoMode::Rotate,
+        "scale" => GizmoMode::Scale,
+        "off" | "select" => GizmoMode::Off,
+        _ => return false,
+    };
+    PENDING_GIZMO.with(|cell| {
+        // The queued request is the base, not the applied state: two
+        // requests in one frame (space, then mode) must not lose the
+        // space change.
+        let (_, space) = cell.get().unwrap_or((gizmo_mode(), gizmo_space()));
+        cell.set(Some((parsed, space)));
+    });
+    true
+}
+
+/// Selects world or local gizmo axes: `"world"` or `"local"`; the loop
+/// applies it on the next frame. Returns `false` on an unknown space.
+// qual:api — wasm-bindgen export; called from the browser toolbar.
+#[wasm_bindgen]
+pub fn set_gizmo_space(space: &str) -> bool {
+    let parsed = match space {
+        "world" => GizmoSpace::World,
+        "local" => GizmoSpace::Local,
+        _ => return false,
+    };
+    PENDING_GIZMO.with(|cell| {
+        // The queued request is the base, not the applied state: two
+        // requests in one frame (space, then mode) must not lose the
+        // space change.
+        let (mode, _) = cell.get().unwrap_or((gizmo_mode(), gizmo_space()));
+        cell.set(Some((mode, parsed)));
+    });
+    true
+}
+
+/// Queues one-step undo of the last gizmo drag. The loop sends the stored
+/// pre-drag transform through `set_component`.
+// qual:api — wasm-bindgen export; called from the browser toolbar/shortcut.
+#[wasm_bindgen]
+pub fn undo_gizmo() -> bool {
+    PENDING_UNDO.with(|cell| cell.set(true));
+    true
 }
 
 /// Mode request queued by [`set_viewport_mode`] for the frame loop.
@@ -428,6 +522,95 @@ mod tests {
         assert!(!set_viewport_mode(""));
         // A queued request does not rewrite the cached wire JSON by itself.
         PENDING_MODE.with(|cell| cell.set(None));
+    }
+
+    /// Toolbar exports parse only known tool/space names and queue the
+    /// request for the next frame (host-safe: no engine access here).
+    #[test]
+    fn gizmo_exports_accept_known_tools_spaces_and_undo() {
+        assert!(set_gizmo_mode("move"));
+        assert!(set_gizmo_mode("rotate"));
+        assert!(set_gizmo_mode("scale"));
+        assert!(set_gizmo_mode("select"));
+        assert!(!set_gizmo_mode("pan"));
+        PENDING_GIZMO.with(|cell| cell.set(None));
+
+        assert!(set_gizmo_space("world"));
+        assert!(set_gizmo_space("local"));
+        assert!(!set_gizmo_space("screen"));
+        PENDING_GIZMO.with(|cell| cell.set(None));
+
+        assert!(!take_pending_undo());
+        assert!(undo_gizmo());
+        assert!(take_pending_undo());
+        assert!(!take_pending_undo());
+    }
+
+    /// Two queued requests in one frame compose: a space change followed by
+    /// a mode change keeps the space (the queued request is the base, not
+    /// the applied state).
+    #[test]
+    fn queued_gizmo_requests_compose_within_one_frame() {
+        PENDING_GIZMO.with(|cell| cell.set(None));
+        assert!(set_gizmo_space("local"));
+        assert!(set_gizmo_mode("rotate"));
+        let queued = PENDING_GIZMO.with(Cell::get).expect("a queued request");
+        assert_eq!(queued, (GizmoMode::Rotate, GizmoSpace::Local));
+        PENDING_GIZMO.with(|cell| cell.set(None));
+    }
+
+    /// A queued toolbar request is applied by the frame loop: the active
+    /// mode/space update and the store shows only the matching handle set.
+    #[test]
+    fn pending_gizmo_request_updates_mode_and_handle_visibility() {
+        use ornis_assets::scene::TransformDesc;
+        use ornis_editor::{EditorOnly, GizmoAxis, GizmoHandle, set_selection};
+
+        let mut engine = Engine::new();
+        ornis_editor::install_editor(&mut engine);
+        let store = engine.world_mut().store_mut().expect("store");
+        let scene = store.create_entity();
+        store.insert(scene, TransformDesc::from_translation(glam::Vec3::ONE));
+        let move_x = store.create_entity();
+        store.insert(
+            move_x,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+        );
+        store.insert(move_x, EditorOnly);
+        let rotate_x = store.create_entity();
+        store.insert(
+            rotate_x,
+            GizmoHandle {
+                mode: GizmoMode::Rotate,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+        );
+        store.insert(rotate_x, EditorOnly);
+        set_selection(store, Some(scene));
+
+        PENDING_GIZMO.with(|cell| cell.set(Some((GizmoMode::Rotate, GizmoSpace::World))));
+        assert!(apply_pending_gizmo(&mut engine));
+        assert_eq!(gizmo_mode(), GizmoMode::Rotate);
+        assert_eq!(gizmo_space(), GizmoSpace::World);
+        {
+            let store = engine.world().store().expect("store");
+            let transforms = store.read_lane::<TransformDesc>().expect("lane");
+            assert_eq!(
+                transforms.get(move_x).expect("move handle").scale,
+                glam::Vec3::ZERO
+            );
+            assert!(transforms.get(rotate_x).expect("rotate handle").scale.x > 0.0);
+        }
+
+        // Restore the defaults for the other tests on this thread.
+        GIZMO_MODE.with(|cell| cell.set(GizmoMode::Move));
+        GIZMO_SPACE.with(|cell| cell.set(GizmoSpace::World));
+        assert!(!apply_pending_gizmo(&mut engine));
     }
 
     #[test]

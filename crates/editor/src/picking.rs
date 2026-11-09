@@ -546,15 +546,23 @@ pub enum ChromePolicy {
     /// `EditorOnly` entities never win a pick (E1 behaviour).
     #[default]
     SkipChrome,
+    /// Only `EditorOnly` entities are pickable (gizmo-first priority).
+    OnlyChrome,
     /// `EditorOnly` entities compete like scene content (E3 preview seam).
     IncludeChrome,
 }
 
 impl ChromePolicy {
+    /// Whether scene (non-chrome) entities participate in picking.
+    #[must_use]
+    pub fn includes_scene(self) -> bool {
+        !matches!(self, Self::OnlyChrome)
+    }
+
     /// Whether chrome entities participate in picking.
     #[must_use]
     pub fn includes_chrome(self) -> bool {
-        matches!(self, Self::IncludeChrome)
+        matches!(self, Self::OnlyChrome | Self::IncludeChrome)
     }
 }
 
@@ -796,6 +804,58 @@ pub fn pick_closest_with_epsilon(
     policy: ChromePolicy,
     eps: PickEpsilon,
 ) -> Result<Option<PickHit>, PickError> {
+    let (best, candidates) = scan_candidates(store, ray, policy, eps, |_| true)?;
+    if candidates == 0 {
+        return Err(PickError::EmptyScene);
+    }
+    Ok(best)
+}
+
+/// Gizmo-first pick: nearest `EditorOnly` entity whose
+/// [`GizmoHandle`](crate::GizmoHandle) matches `mode`/`space`.
+///
+/// Scene content never wins here; the viewport asks for gizmo hits before
+/// falling back to a normal scene pick. A missing handle lane reports
+/// [`PickError::EmptyScene`]; a ray that hits no matching handle is a clean
+/// miss (`Ok(None)`) — the caller then falls back to the scene pick.
+pub fn pick_gizmo(
+    store: &SmartStore,
+    ray: &PickRay,
+    mode: crate::GizmoMode,
+    space: crate::GizmoSpace,
+) -> Result<Option<PickHit>, PickError> {
+    let Some(handles) = store.read_lane::<crate::GizmoHandle>() else {
+        return Err(PickError::EmptyScene);
+    };
+    let (best, _candidates) = scan_candidates(
+        store,
+        ray,
+        ChromePolicy::OnlyChrome,
+        PickEpsilon::DEFAULT,
+        |entity| {
+            handles
+                .get(entity)
+                .is_some_and(|handle| handle.matches(mode, space))
+        },
+    )?;
+    Ok(best)
+}
+
+/// Shared picker: policy filters chrome/scene, `filter` adds caller-side
+/// constraints (e.g. the active gizmo mode).
+///
+/// Returns the nearest hit together with the number of candidates that
+/// passed the policy and the filter: the caller decides whether "nothing
+/// to pick" is an error (`Err(EmptyScene)`) or a clean miss.
+#[allow(clippy::type_complexity)]
+// qual:allow(iosp) reason: "one pass over the render lanes: policy/chrome gating and the caller filter cannot be split without a second traversal"
+fn scan_candidates(
+    store: &SmartStore,
+    ray: &PickRay,
+    policy: ChromePolicy,
+    eps: PickEpsilon,
+    filter: impl Fn(Entity) -> bool,
+) -> Result<(Option<PickHit>, u32), PickError> {
     let Some(transforms) = store.read_lane::<TransformDesc>() else {
         return Err(PickError::EmptyScene);
     };
@@ -809,7 +869,13 @@ pub fn pick_closest_with_epsilon(
         let Some(mesh) = meshes.get(*entity) else {
             continue;
         };
-        if !policy.includes_chrome() && chrome.as_ref().is_some_and(|lane| lane.contains(*entity)) {
+        let is_chrome = chrome.as_ref().is_some_and(|lane| lane.contains(*entity));
+        let included = if is_chrome {
+            policy.includes_chrome()
+        } else {
+            policy.includes_scene()
+        };
+        if !included || !filter(*entity) {
             continue;
         }
         candidates += 1;
@@ -819,10 +885,7 @@ pub fn pick_closest_with_epsilon(
             best = Some(PickHit::new(*entity, distance));
         }
     }
-    if candidates == 0 {
-        return Err(PickError::EmptyScene);
-    }
-    Ok(best)
+    Ok((best, candidates))
 }
 
 /// Intersects one renderable entity: analytic sphere, triangulated unit
@@ -1130,8 +1193,17 @@ mod tests {
     fn chrome_policy_decides_selectability() {
         let mut engine = Engine::new();
         let store = store_with_lanes(&mut engine);
+        store.register::<crate::GizmoHandle>();
         let gizmo = spawn_sphere(store, [0.0, 0.0, 3.0], 1.0);
         store.insert(gizmo, crate::EditorOnly);
+        store.insert(
+            gizmo,
+            crate::GizmoHandle {
+                mode: crate::GizmoMode::Move,
+                space: crate::GizmoSpace::World,
+                axis: crate::GizmoAxis::X,
+            },
+        );
         let scene = spawn_sphere(store, [0.0, 0.0, 0.0], 1.0);
         let store = engine.world().store().expect("world store");
         let ray = pick_ray(&camera(), [100.0, 100.0]).expect("center ray");
@@ -1143,6 +1215,74 @@ mod tests {
             .expect("pickable scene")
             .expect("chrome hit");
         assert_eq!(included.entity(), gizmo);
+        let only = pick_closest(store, &ray, ChromePolicy::OnlyChrome)
+            .expect("pickable chrome")
+            .expect("chrome hit");
+        assert_eq!(only.entity(), gizmo);
+        let picked = pick_gizmo(
+            store,
+            &ray,
+            crate::GizmoMode::Move,
+            crate::GizmoSpace::World,
+        )
+        .expect("gizmo pick")
+        .expect("handle hit");
+        assert_eq!(picked.entity(), gizmo);
+        assert_eq!(
+            pick_gizmo(
+                store,
+                &ray,
+                crate::GizmoMode::Rotate,
+                crate::GizmoSpace::World,
+            ),
+            Ok(None),
+            "no matching-mode candidate is a clean miss, not an error"
+        );
+    }
+
+    /// A gizmo handle: a chrome sphere carrying a move handle on the world
+    /// X axis.
+    fn spawn_handle(store: &mut SmartStore, translation: [f32; 3]) -> Entity {
+        let entity = spawn_sphere(store, translation, 1.0);
+        store.insert(entity, crate::EditorOnly);
+        store.insert(
+            entity,
+            crate::GizmoHandle {
+                mode: crate::GizmoMode::Move,
+                space: crate::GizmoSpace::World,
+                axis: crate::GizmoAxis::X,
+            },
+        );
+        entity
+    }
+
+    /// Gizmo-first picking: with a handle and a scene object on the same
+    /// ray, the handle wins the gizmo query and the scene keeps the scene
+    /// query — the viewport asks for the handle first.
+    #[test]
+    fn a_handle_wins_the_gizmo_pick_on_the_same_ray() {
+        let mut engine = Engine::new();
+        let store = store_with_lanes(&mut engine);
+        store.register::<crate::GizmoHandle>();
+        let scene = spawn_sphere(store, [0.0, 0.0, 0.0], 1.0);
+        let handle = spawn_handle(store, [0.0, 0.0, 3.0]);
+        let store = engine.world().store().expect("world store");
+        let ray = pick_ray(&camera(), [100.0, 100.0]).expect("center ray");
+
+        let gizmo_hit = pick_gizmo(
+            store,
+            &ray,
+            crate::GizmoMode::Move,
+            crate::GizmoSpace::World,
+        )
+        .expect("gizmo pick")
+        .expect("handle hit");
+        assert_eq!(gizmo_hit.entity(), handle);
+
+        let scene_hit = pick_closest(store, &ray, ChromePolicy::SkipChrome)
+            .expect("pickable scene")
+            .expect("scene hit");
+        assert_eq!(scene_hit.entity(), scene);
     }
 
     /// Empty stores and lane-less stores error instead of panicking.

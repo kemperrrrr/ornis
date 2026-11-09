@@ -16,7 +16,7 @@
 use ornis_assets::scene::{
     CameraDesc, EntityDesc, LightDesc, MaterialDesc, MeshDesc, Scene, TransformDesc,
 };
-use ornis_editor::EditorMarks;
+use ornis_editor::{EditorMarks, GizmoHandle};
 use serde::Deserialize;
 
 /// Root object of the `/api/scene` response. Unknown fields
@@ -69,6 +69,9 @@ pub struct RenderComponents {
     pub mesh: MeshDesc,
     #[serde(rename = "Material")]
     pub material: MaterialDesc,
+    /// Gizmo handle identity, present only on editor chrome.
+    #[serde(rename = "GizmoHandle", default)]
+    pub gizmo: Option<GizmoHandle>,
 }
 
 /// A successfully parsed `/api/scene` payload converted into the render
@@ -103,6 +106,9 @@ pub struct LiveEntityMeta {
     /// Editor marks (`selected`/`hovered`/`editor_only`) from the server.
     #[serde(default)]
     pub editor: EditorMarks,
+    /// Gizmo handle identity for E3 chrome (absent on scene entities).
+    #[serde(default)]
+    pub gizmo: Option<GizmoHandle>,
 }
 
 impl LiveEntityMeta {
@@ -136,6 +142,7 @@ impl ApiScene {
                 id,
                 generation,
                 editor,
+                gizmo: components.gizmo,
             });
         }
         LiveScene {
@@ -200,6 +207,7 @@ mod tests {
                     selected: true,
                     hovered: true,
                 },
+                gizmo: None,
             }]
         );
         assert_eq!(live.scene.lights.len(), 1);
@@ -220,6 +228,41 @@ mod tests {
             e.material,
             MaterialDesc::Dielectric { roughness, .. } if (roughness.get() - 0.5).abs() < f32::EPSILON
         ));
+    }
+
+    /// Editor chrome carries its `GizmoHandle` marker through the same
+    /// components map: the replica needs the mode/space/axis to show only
+    /// the active handle set and to pick it before scene content.
+    #[test]
+    fn parses_gizmo_handle_meta() {
+        use ornis_editor::{GizmoAxis, GizmoMode, GizmoSpace};
+
+        let json = r#"{
+            "version": 1,
+            "entities": [{
+                "id": 9, "generation": 0,
+                "editor": {"editor_only": true, "selected": false, "hovered": false},
+                "components": {
+                    "Transform": {"translation":[0.55,0,0],"rotation":[0,0,0,1],"scale":[0.7,0.045,0.045]},
+                    "Mesh": {"Box": {"size": [1.0, 1.0, 1.0]}},
+                    "Material": {"Dielectric": {"base_color":[0.85,0.2,0.2],"roughness":0.5}},
+                    "GizmoHandle": {"mode": "move", "space": "world", "axis": "x"}
+                }
+            }],
+            "lights": [],
+            "camera": {"position":[0,0,5],"target":[0,0,0],"up":[0,1,0],"fov":60.0,"near":0.1,"far":100.0}
+        }"#;
+        let live = parse_scene_json(json).expect("gizmo payload must parse");
+        assert_eq!(
+            live.meta[0].gizmo,
+            Some(GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            })
+        );
+        assert!(live.meta[0].editor.editor_only);
+        assert_eq!(live.meta[0].server_handle(), Some((9, 0)));
     }
 
     /// A missing `id`/`generation` must stay absent rather than turning

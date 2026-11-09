@@ -66,10 +66,10 @@
           <button id="mode-2d" aria-pressed="false">2D</button>
         </div>
         <div class="viewport-gizmos" role="toolbar" aria-label="Transform tools">
-          <button class="gizmo active" data-tool="select" title="Select">
+          <button class="gizmo" data-tool="select" title="Select">
             <svg viewBox="0 0 24 24"><use href="icons/hand-pointer.svg#icon" /></svg>
           </button>
-          <button class="gizmo" data-tool="move" title="Move">
+          <button class="gizmo active" data-tool="move" title="Move">
             <svg viewBox="0 0 24 24"><use href="icons/transform-gizmo.svg#icon" /></svg>
           </button>
           <button class="gizmo" data-tool="rotate" title="Rotate">
@@ -78,6 +78,7 @@
           <button class="gizmo" data-tool="scale" title="Scale">
             <svg viewBox="0 0 24 24"><use href="icons/scale-gizmo.svg#icon" /></svg>
           </button>
+          <button class="gizmo space" id="gizmo-space" title="World space (click for local)">W</button>
         </div>
       </div>
     </div>

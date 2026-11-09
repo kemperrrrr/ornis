@@ -1,4 +1,4 @@
-//! Viewport domain of the editor as engine systems (PLAN §i, slices E0–E1).
+//! Viewport domain of the editor as engine systems (PLAN §i, slices E0–E3).
 //!
 //! Selection, hover and chrome (gizmos, grid) live in the authoritative
 //! world as ordinary entities carrying the marker components below, so the
@@ -20,9 +20,9 @@
 //! camera-agnostic, while each viewport side holds a [`ViewportCamera`]
 //! resource (converted from its orbit camera) and the `editor_maintain`
 //! system turns press edges into [`Selected`] and pointer rest into
-//! [`Hovered`]. Chrome ([`EditorOnly`]) replicates for drawing but is not
-//! clickable in E1 — gizmo picking arrives with E3 (see
-//! [`ChromePolicy`]).
+//! [`Hovered`]. Chrome ([`EditorOnly`]) replicates for drawing and never
+//! wins a scene pick; gizmo handles are picked separately by
+//! [`pick_gizmo`] before scene content (see [`ChromePolicy`]).
 //!
 //! Plane editing (K2) adds the 2D sheet on top: [`PlaneCamera`] pans and
 //! zooms over `z = 0` (the left button keeps selecting, never moves the
@@ -44,6 +44,20 @@ use ornis_core::{
 /// Viewport picking: rays, hits and store intersection (slices E1, K2).
 pub mod picking;
 
+/// Transform-gizmo handles: identity and layout (slice E3).
+pub mod gizmo;
+
+/// Gizmo pointer-drag math: press/move rays to a preview transform.
+pub mod gizmo_drag;
+
+/// Replica-side gizmo drag state machine: press → preview → commit, plus
+/// the one-step undo bookkeeping.
+pub mod gizmo_runtime;
+
+/// Gizmo host wiring: the authoritative layout system and replica
+/// visibility (reads [`crate::gizmo`] and writes `TransformDesc`).
+mod gizmo_host;
+
 /// 2D grid numbers for the web overlay (slice K2).
 pub mod grid;
 
@@ -53,10 +67,18 @@ pub mod plane;
 /// Plane-engine seam: resource install/read and the 2D input frame system.
 pub mod plane_input;
 
+pub use gizmo::{
+    GizmoAxis, GizmoHandle, GizmoHandlePose, GizmoMode, GizmoSpace, axis_direction,
+    layout as gizmo_layout, plane_directions,
+};
+pub use gizmo_drag::GizmoDrag;
+pub use gizmo_host::{apply_gizmo_visibility, install_gizmo_authoring};
+pub use gizmo_runtime::{GizmoRuntime, GizmoTarget, PressEdge};
 pub use grid::{PlaneGrid, plane_grid};
 pub use picking::{
     ChromePolicy, PickEpsilon, PickError, PickHit, PickOutcome, PickProjection, PickRay,
-    ViewportCamera, WorkPlane, pick_closest, pick_ray, pointer_on_plane, ray_plane_point,
+    ViewportCamera, WorkPlane, pick_closest, pick_gizmo, pick_ray, pointer_on_plane,
+    ray_plane_point,
 };
 pub use plane::{PlaneCamera, ViewportMode};
 pub use plane_input::{install_plane_camera, read_plane_camera};
@@ -88,6 +110,15 @@ pub struct Selected;
 /// from the pointer rest position (no press needed).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Hovered;
+
+/// Replica-side pointer ownership: a gizmo drag is active.
+///
+/// While set, the click pipeline must not change the scene selection (a
+/// handle press is a drag, not a select); the drag manager clears it on
+/// release. The authoritative world never sets it, so its host keeps the
+/// normal selection behaviour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GizmoGrab(pub bool);
 
 /// Snapshot view of one entity's editor marks for `GET /api/scene`.
 ///
@@ -177,6 +208,12 @@ fn lock_pick_state(state: &Mutex<EditorPickState>) -> std::sync::MutexGuard<'_, 
 /// selection. A hit selects exclusively, a miss clears the selection.
 /// Chrome never wins (see [`ChromePolicy`]); near/far clip comes from the
 /// viewport camera.
+///
+/// A held handle ([`GizmoGrab`]) suppresses the scene click, but the press
+/// edge still follows the button: the grab may be dropped while the button
+/// is held (a tool switch, a rebuilt replica), and that must not look like
+/// a fresh press — otherwise the scene selection changes under a held
+/// pointer.
 pub fn editor_pick_click(resources: &Resources) -> Option<Result<PickOutcome, PickError>> {
     let Some(input) = resources.get::<InputState>() else {
         return Some(Err(PickError::NoInput));
@@ -188,6 +225,9 @@ pub fn editor_pick_click(resources: &Resources) -> Option<Result<PickOutcome, Pi
         .is_some_and(|state| lock_pick_state(state).prev_pressed);
     if let Some(state) = resources.get::<Mutex<EditorPickState>>() {
         lock_pick_state(state).prev_pressed = pressed;
+    }
+    if resources.get::<GizmoGrab>().is_some_and(|grab| grab.0) {
+        return None;
     }
     if !pressed || previous {
         return None;
@@ -384,6 +424,7 @@ pub fn install_editor(engine: &mut Engine) {
         store.register::<EditorOnly>();
         store.register::<Selected>();
         store.register::<Hovered>();
+        store.register::<GizmoHandle>();
     }
     if engine
         .world()
@@ -394,6 +435,9 @@ pub fn install_editor(engine: &mut Engine) {
         let _ = engine
             .world_mut()
             .insert(Mutex::new(EditorPickState::default()));
+    }
+    if engine.world().resources().get::<GizmoGrab>().is_none() {
+        let _ = engine.world_mut().insert(GizmoGrab(false));
     }
     engine.schedule_mut().add_system(EditorMaintain);
 }
@@ -425,6 +469,7 @@ impl System for EditorMaintain {
             .reads::<InputState>()
             .reads::<ViewportCamera>()
             .reads::<SmartStore>()
+            .reads::<GizmoGrab>()
             .writes::<Mutex<EditorPickState>>()
             .reads_lane::<TransformDesc>()
             .reads_lane::<MeshDesc>()
@@ -506,6 +551,16 @@ mod tests {
             input.set_pointer_position(pointer);
         }
         engine.run_frame(1.0 / 60.0);
+    }
+
+    /// Sets the click-pipeline suppression flag (a held handle).
+    fn set_grab(engine: &mut Engine, grabbed: bool) {
+        engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<GizmoGrab>()
+            .expect("grab resource")
+            .0 = grabbed;
     }
 
     /// Whether `entity` currently carries the marker lane `T`.
@@ -682,6 +737,49 @@ mod tests {
         click_frame(&mut engine, true, [100.0, 100.0]);
         assert!(has::<Selected>(&engine, scene));
         assert!(!has::<Selected>(&engine, gizmo));
+    }
+
+    /// A held handle (a gizmo drag) suppresses the scene click: the press
+    /// on a handle must not change the selection.
+    #[test]
+    fn a_held_handle_suppresses_the_scene_click() {
+        let mut engine = pick_engine();
+        let scene = spawn_scene(&mut engine, [0.0, 0.0, 0.0]);
+        set_grab(&mut engine, true);
+
+        click_frame(&mut engine, true, [100.0, 100.0]);
+        assert!(
+            !has::<Selected>(&engine, scene),
+            "a held handle must not select the scene"
+        );
+    }
+
+    /// A grab dropped while the button is still held must not look like a
+    /// fresh press: the scene selection stays untouched (otherwise the
+    /// server would drop the selection under a held pointer).
+    #[test]
+    fn a_grab_dropped_while_held_does_not_click_the_scene() {
+        let mut engine = pick_engine();
+        let scene = spawn_scene(&mut engine, [0.0, 0.0, 0.0]);
+        {
+            let store = engine.world().store().expect("world store");
+            set_selection(store, Some(scene));
+        }
+
+        // The press starts on a handle (grabbed), the pointer is off the
+        // object.
+        set_grab(&mut engine, true);
+        click_frame(&mut engine, true, [10.0, 10.0]);
+        assert!(has::<Selected>(&engine, scene));
+
+        // The handle is dropped (tool switch, rebuilt replica) while the
+        // button is still held: no new press edge may fire.
+        set_grab(&mut engine, false);
+        click_frame(&mut engine, true, [10.0, 10.0]);
+        assert!(
+            has::<Selected>(&engine, scene),
+            "a dropped grab must not clear the selection under a held button"
+        );
     }
 
     /// Hover follows the pointer rest position without any press and never
