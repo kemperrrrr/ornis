@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.7353373187635524,
-  "iosp_score": 0.9666457680250784,
+  "quality_score": 0.7353612910076608,
+  "iosp_score": 0.9666499498495487,
   "violations": 266,
-  "total": 12165,
+  "total": 12166,
   "complexity_warnings": 78,
   "magic_number_warnings": 162,
   "nesting_depth_warnings": 20,
@@ -1353,7 +1353,7 @@
     {
       "name": "quality",
       "file": "xtask/src/quality.rs",
-      "line": 2265
+      "line": 2291
     },
     {
       "name": "showcase_engine",
