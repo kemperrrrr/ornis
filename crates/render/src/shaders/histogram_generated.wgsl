@@ -50,7 +50,7 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
         let _e83 = select(1f, 0f, (_e78 == 1u));
         let _e88 = select(1f, 0f, (_e78 == 0u));
         let _e106 = dot(vec3<f32>(((_e32.x * _e83) + ((_e53.x * _e74.w) * _e88)), ((_e39.y * _e83) + ((_e60.y * _e74.w) * _e88)), ((_e46.z * _e83) + ((_e67.z * _e74.w) * _e88))), vec3<f32>(0.2126f, 0.7152f, 0.0722f));
-        if ((_e106 != _e106) | (0f != 0f)) {
+        if !(((_e106 <= _e106) && (0f <= 0f))) {
             safe_u002e_sroa_u002e_0_u002e_0_u002e_i = 0.000001f;
         } else {
             if (abs(_e106) > 340000000000000000000000000000000000000f) {
@@ -59,18 +59,18 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
                 safe_u002e_sroa_u002e_0_u002e_0_u002e_i = max(_e106, 0.000001f);
             }
         }
-        let _e122 = safe_u002e_sroa_u002e_0_u002e_0_u002e_i;
-        let _e123 = log2(_e122);
-        let _e126 = uniform_struct_0_3_.f0_;
-        let _e129 = uniform_struct_0_3_.f1_;
-        let _e132 = uniform_struct_0_3_.f2_;
-        if (_e123 < _e126) {
+        let _e123 = safe_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        let _e124 = log2(_e123);
+        let _e127 = uniform_struct_0_3_.f0_;
+        let _e130 = uniform_struct_0_3_.f1_;
+        let _e133 = uniform_struct_0_3_.f2_;
+        if (_e124 < _e127) {
             _0_u002e_sroa_u002e_0_u002e_0_u002e_i = 0u;
         } else {
-            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = u32((((_e132 + -2f) * clamp(((_e123 - _e126) * _e129), 0f, 1f)) + 1f));
+            _0_u002e_sroa_u002e_0_u002e_0_u002e_i = u32((((_e133 + -2f) * clamp(((_e124 - _e127) * _e130), 0f, 1f)) + 1f));
         }
-        let _e149 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
-        let _e153 = atomicAdd((&workgroup_atomics[_e149]), 1u);
+        let _e150 = _0_u002e_sroa_u002e_0_u002e_0_u002e_i;
+        let _e154 = atomicAdd((&workgroup_atomics[_e150]), 1u);
     }
     workgroupBarrier();
     if (local_invocation_index < 256u) {
@@ -79,14 +79,14 @@ fn cs_main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>, @buil
         return;
     }
     loop {
-        let _e158 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
-        let _e161 = atomicLoad((&workgroup_atomics[_e158]));
-        if (_e161 == 0u) {
+        let _e159 = lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_;
+        let _e162 = atomicLoad((&workgroup_atomics[_e159]));
+        if (_e162 == 0u) {
         } else {
-            let _e166 = atomicAdd((&atomic_storage_0_2_[_e158]), _e161);
+            let _e167 = atomicAdd((&atomic_storage_0_2_[_e159]), _e162);
         }
-        if (_e158 < 192u) {
-            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e158 + 64u);
+        if (_e159 < 192u) {
+            lid_u002e_sroa_u002e_0_u002e_0_u002e_i529_ = (_e159 + 64u);
             continue;
         } else {
             break;

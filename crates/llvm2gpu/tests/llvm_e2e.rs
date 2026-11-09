@@ -243,6 +243,13 @@ fn float_compare_masks_follow_ieee_on_gpu() {
         ("ordered", finite_operands, 206.0),
     ] {
         let translated = translate(&compare_mask_ir(operands)).expect("fcmp comparisons lower");
+        // naga lowers float `!=` to `OpFOrdNotEqual` (false for NaN), so the
+        // mask must be built from ordered comparisons on every backend.
+        assert!(
+            !translated.wgsl.contains(" != "),
+            "{label} compares must not use float `!=`:\n{}",
+            translated.wgsl
+        );
         let Some(outputs) = gpu_outputs(&translated) else {
             return;
         };

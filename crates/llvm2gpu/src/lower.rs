@@ -2008,8 +2008,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
 
     /// `fcmp`: ordered predicates are WGSL comparisons. Unordered (`u*`)
     /// predicates must also be true when either operand is NaN, so they lower
-    /// to the negation of the opposite ordered comparison; `one` is the
-    /// ordered not-equal and is false for NaN.
+    /// through [`Self::float_ordered`]; `one` is the ordered not-equal and is
+    /// false for NaN.
+    ///
+    /// Float `!=` is not used: naga's SPIR-V backend emits `OpFOrdNotEqual`
+    /// for it, which is false for NaN, so both `une` and the usual `x != x`
+    /// NaN test would silently break on Vulkan (Metal treats `!=` as
+    /// unordered, which is why the difference shows only on lavapipe).
     fn compare_float(
         &mut self,
         out: &mut naga::Block,
@@ -2030,13 +2035,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 let gt = self.binary(out, naga::BinaryOperator::Greater, left, right);
                 self.binary(out, naga::BinaryOperator::InclusiveOr, lt, gt)
             }
-            // IEEE `!=` is already true when unordered.
-            "une" => self.binary(out, naga::BinaryOperator::NotEqual, left, right),
+            "une" => {
+                let ordered = self.float_ordered(out, left, right);
+                let equal = self.binary(out, naga::BinaryOperator::Equal, left, right);
+                let ordered_equal =
+                    self.binary(out, naga::BinaryOperator::LogicalAnd, ordered, equal);
+                self.negate(out, ordered_equal)
+            }
             "ueq" => {
-                let lt = self.binary(out, naga::BinaryOperator::Less, left, right);
-                let gt = self.binary(out, naga::BinaryOperator::Greater, left, right);
-                let ne = self.binary(out, naga::BinaryOperator::InclusiveOr, lt, gt);
-                self.negate(out, ne)
+                let ordered = self.float_ordered(out, left, right);
+                let unordered = self.negate(out, ordered);
+                let equal = self.binary(out, naga::BinaryOperator::Equal, left, right);
+                self.binary(out, naga::BinaryOperator::LogicalOr, unordered, equal)
             }
             "ult" => {
                 let ge = self.binary(out, naga::BinaryOperator::GreaterEqual, left, right);
@@ -2055,19 +2065,30 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.negate(out, lt)
             }
             "uno" | "ord" => {
-                let left_nan = self.binary(out, naga::BinaryOperator::NotEqual, left, left);
-                let right_nan = self.binary(out, naga::BinaryOperator::NotEqual, right, right);
-                let unordered =
-                    self.binary(out, naga::BinaryOperator::InclusiveOr, left_nan, right_nan);
+                let ordered = self.float_ordered(out, left, right);
                 if pred == "ord" {
-                    self.negate(out, unordered)
+                    ordered
                 } else {
-                    unordered
+                    self.negate(out, ordered)
                 }
             }
             _ => return Err(TranslateError::Unsupported),
         };
         Ok(value)
+    }
+
+    /// Whether both operands are comparable (`a <= a && b <= b`), i.e. not
+    /// NaN. `<=` is ordered on every backend; `a != a` is not (see
+    /// [`Self::compare_float`]).
+    fn float_ordered(
+        &mut self,
+        out: &mut naga::Block,
+        a: naga::Handle<naga::Expression>,
+        b: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        let left = self.binary(out, naga::BinaryOperator::LessEqual, a, a);
+        let right = self.binary(out, naga::BinaryOperator::LessEqual, b, b);
+        self.binary(out, naga::BinaryOperator::LogicalAnd, left, right)
     }
 
     /// `icmp`: `s*` predicates reinterpret the stored `u32` as `i32`;
