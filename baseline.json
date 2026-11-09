@@ -1,9 +1,9 @@
 {
   "version": 2,
-  "quality_score": 0.7324617823307009,
-  "iosp_score": 0.9662992525022172,
+  "quality_score": 0.7329956106821289,
+  "iosp_score": 0.966320587490504,
   "violations": 266,
-  "total": 12041,
+  "total": 12057,
   "complexity_warnings": 78,
   "magic_number_warnings": 162,
   "nesting_depth_warnings": 20,
@@ -14,7 +14,7 @@
   "dead_code_warnings": 419,
   "dead_type_warnings": 0,
   "fragment_groups": 718,
-  "boilerplate_warnings": 330,
+  "boilerplate_warnings": 329,
   "srp_struct_warnings": 24,
   "srp_module_warnings": 108,
   "wildcard_import_warnings": 48,
@@ -28,7 +28,7 @@
   "tq_untested_logic_warnings": 0,
   "structural_srp_warnings": 40,
   "structural_coupling_warnings": 23,
-  "total_findings": 2883,
+  "total_findings": 2880,
   "violation_details": [
     {
       "name": "EventLog::push",
