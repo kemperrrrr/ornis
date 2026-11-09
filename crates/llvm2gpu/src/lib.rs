@@ -1,14 +1,28 @@
 //! Offline translator from LLVM IR (stable `rustc`) to WGSL and SPIR-V.
 //!
-//! The translator covers the compute subset of `3.1.2`: a scalar compute entry
-//! (`cs_main`) built from `SROA`-scalarized arithmetic, comparisons, `select`,
-//! integer bit/arithmetic ops, the `sqrt`/`sin` family, the `ornis_gpu`
-//! storage/uniform ABI, structured `if`/`loop` control flow with `phi` values,
-//! and uniform struct fields with metadata from `ornis_gpu.types`. A scalar
-//! `-> f32` result is stored to `storage_0_0` at the invocation id, exactly like
-//! the toy `compute` kernel `wasm2gpu` already tests. Linear memory
-//! (`load`/`store`/`getelementptr`), irreducible CFGs, nested loops, and nested
-//! uniform structs are rejected so an unknown shape never becomes a wrong
+//! The translator covers the compute and fragment subset of `3.1.2`: `cs_main`
+//! and `fs_main` built from `SROA`-scalarized arithmetic, comparisons,
+//! `select`, signed and unsigned integer bit/arithmetic ops, the
+//! `sqrt`/`sin` family, the `ornis_gpu` storage/uniform/texture ABI,
+//! structured `if`/`loop` control flow with `phi` values (nested loops and
+//! early returns included), nested uniform struct fields with metadata from
+//! `ornis_gpu.types`, and workgroup memory/atomics. A scalar `-> f32` result is
+//! stored to `storage_0_0` at the invocation id, exactly like the toy
+//! `compute` kernel `wasm2gpu` already tests. `TextureSampling::Multisampled`
+//! re-declares the same kernel's textures as multisampled images with
+//! sample-0 loads, which is the 4x AO variant.
+//!
+//! Values keep their LLVM bit pattern: `i32` lives as WGSL `u32`, and signed
+//! operators bitcast around the operation, so `ashr`/`sdiv`/`srem`/`sitofp`/
+//! `icmp s*`/`llvm.smin`/`llvm.smax` keep two's-complement semantics. `fcmp`
+//! unordered predicates (`u*`, `uno`) stay true for NaN while `ord`/`one` are
+//! ordered. A workgroup barrier is accepted only in straight-line code: the
+//! lowerer does not prove branch or trip-count uniformity, so a barrier inside
+//! an `if`/`loop` or after an arm that returned is rejected instead of
+//! emitting WGSL Tint refuses (or native UB).
+//!
+//! Linear memory (`load`/`store`/`getelementptr`), irreducible CFGs, and
+//! multi-exit loops are rejected so an unknown shape never becomes a wrong
 //! shader.
 //!
 //! Kernels written against the typed SDK (`ornis-gpu-shader`) lower to the same
@@ -101,8 +115,9 @@ pub fn translate_with_meta_and_sampling(
 ///
 /// Requires stable `rustc` with the `wasm32-unknown-unknown` target,
 /// `panic=abort`, and a `#[no_mangle] cs_main(i32) -> f32` export compiled
-/// with `--emit=llvm-ir`. Prefer `opt-level=s` for dynamic loops: `3` may
-/// unroll them into a CFG shape this translator rejects.
+/// with `--emit=llvm-ir`. `xtask build-shaders` builds the checked-in
+/// production artifacts at `opt-level=1`, which keeps dynamic loops
+/// structured; `3` may unroll them into a CFG shape this translator rejects.
 ///
 /// Uniform struct fields need layout metadata; use
 /// [`translate_with_types`] for kernels that call `uniform_field_*`.

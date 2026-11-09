@@ -1119,6 +1119,8 @@ impl Builders {
             spill: HashMap::new(),
             env: HashMap::new(),
             saw_return: false,
+            branch_depth: 0,
+            diverged: false,
         };
         if let Some((id_x, (_, name))) = id_x.zip(func.params.first()) {
             lowerer.env.insert(name.clone(), id_x);
@@ -1178,6 +1180,14 @@ struct Lowerer<'a, 'b> {
     spill: HashMap<String, naga::Handle<naga::LocalVariable>>,
     env: Env,
     saw_return: bool,
+    /// Enclosing `if`/`loop` regions while their bodies are emitted. A
+    /// workgroup barrier inside any of them is rejected: the lowerer does not
+    /// prove branch or trip-count uniformity, and a divergent barrier is UB
+    /// on native GPUs (Tint rejects that WGSL outright).
+    branch_depth: u32,
+    /// An arm returned and the region merged afterwards may therefore run on
+    /// a subset of invocations. Sticky for the rest of the entry.
+    diverged: bool,
 }
 
 impl<'a, 'b> Lowerer<'a, 'b> {
@@ -1346,6 +1356,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
+        let outer_depth = self.branch_depth;
+        self.branch_depth += 1;
         let mut accept = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(label, true_label, &outer_env, &mut accept)?;
@@ -1354,7 +1366,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         self.env = outer_env.clone();
         self.store_edge_into(label, false_label, &outer_env, &mut reject)?;
         let reject_flow = self.emit_region(false_label, Some(merge), &mut reject, ctx)?;
+        self.branch_depth = outer_depth;
         self.env = outer_env;
+        if accept_flow == Flow::Returned || reject_flow == Flow::Returned {
+            // The merge block only sees the invocations whose arm fell
+            // through; a barrier there would not be reached by all lanes.
+            self.diverged = true;
+        }
         if accept_flow != Flow::Next && accept_flow != Flow::Returned {
             return Err(TranslateError::Unsupported);
         }
@@ -1401,6 +1419,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         };
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
+        let outer_depth = self.branch_depth;
+        self.branch_depth += 1;
         let mut inside_block = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, inside, &outer_env, &mut inside_block)?;
@@ -1412,6 +1432,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let ctx = Ctx::Loop { header };
             self.emit_region(inside, None, &mut inside_block, ctx)?
         };
+        self.branch_depth = outer_depth;
         if !matches!(inside_flow, Flow::Continue | Flow::Break | Flow::Returned) {
             return Err(TranslateError::Unsupported);
         }
@@ -1489,8 +1510,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let live = self.loop_live_outs(&body, &exits)?;
         let ctx = Ctx::Loop { header };
         let outer_env = self.env.clone();
+        let outer_depth = self.branch_depth;
+        self.branch_depth += 1;
         let mut loop_body = naga::Block::new();
         let flow = self.emit_region(header, None, &mut loop_body, ctx)?;
+        self.branch_depth = outer_depth;
         // Expressions created inside the loop body are out of scope after
         // `Loop`; the exit block reloads whatever its phis need.
         self.env = outer_env;
@@ -1772,13 +1796,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.assign_binary(dst, naga::BinaryOperator::Divide, a, b, out)?
             }
             Instr::SDiv { dst, a, b } => {
-                self.assign_binary(dst, naga::BinaryOperator::Divide, a, b, out)?
+                self.assign_signed(dst, naga::BinaryOperator::Divide, a, b, out)?
             }
             Instr::URem { dst, a, b } => {
                 self.assign_binary(dst, naga::BinaryOperator::Modulo, a, b, out)?
             }
             Instr::SRem { dst, a, b } => {
-                self.assign_binary(dst, naga::BinaryOperator::Modulo, a, b, out)?
+                self.assign_signed(dst, naga::BinaryOperator::Modulo, a, b, out)?
             }
             Instr::And { dst, a, b } => {
                 self.assign_binary(dst, naga::BinaryOperator::And, a, b, out)?
@@ -1792,8 +1816,25 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             Instr::Shl { dst, a, b } => {
                 self.assign_binary(dst, naga::BinaryOperator::ShiftLeft, a, b, out)?
             }
-            Instr::LShr { dst, a, b } | Instr::AShr { dst, a, b } => {
+            Instr::LShr { dst, a, b } => {
                 self.assign_binary(dst, naga::BinaryOperator::ShiftRight, a, b, out)?
+            }
+            Instr::AShr { dst, a, b } => {
+                // Arithmetic shift: only the shifted value is signed; WGSL
+                // keeps the shift amount unsigned.
+                let left = self.operand(out, a)?;
+                let right = self.operand(out, b)?;
+                let left = self.bitcast_sint(out, left);
+                let value = self.expr(
+                    out,
+                    naga::Expression::Binary {
+                        op: naga::BinaryOperator::ShiftRight,
+                        left,
+                        right,
+                    },
+                );
+                let value = self.bitcast_uint(out, value);
+                self.bind(dst, value, out);
             }
             Instr::FNeg { dst, a } => {
                 let src = self.operand(out, a)?;
@@ -1806,8 +1847,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 );
                 self.bind(dst, v, out);
             }
-            Instr::Fcmp { dst, pred, a, b } | Instr::Icmp { dst, pred, a, b } => {
-                let v = self.compare(out, pred, a, b)?;
+            Instr::Fcmp { dst, pred, a, b } => {
+                let v = self.compare_float(out, pred, a, b)?;
+                self.bind(dst, v, out);
+            }
+            Instr::Icmp { dst, pred, a, b } => {
+                let v = self.compare_int(out, pred, a, b)?;
                 self.bind(dst, v, out);
             }
             Instr::Select { dst, c, a, b } => {
@@ -1826,6 +1871,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             }
             Instr::Uitofp { dst, a } => {
                 let value = self.cast(out, a, naga::ScalarKind::Float)?;
+                self.bind(dst, value, out);
+            }
+            Instr::Sitofp { dst, a } => {
+                let value = self.cast_signed(out, a, naga::ScalarKind::Float)?;
                 self.bind(dst, value, out);
             }
             Instr::Fptoui { dst, a } => {
@@ -1880,53 +1929,188 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Ok(())
     }
 
-    fn compare(
+    /// Signed `i32` binary op: bitcast the operands to `i32`, apply the
+    /// operator (WGSL picks `sdiv`/`srem` from the operand type), and cast the
+    /// result back to the stored `u32` representation.
+    fn assign_signed(
+        &mut self,
+        dst: &str,
+        op: naga::BinaryOperator,
+        a: &Operand,
+        b: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<(), TranslateError> {
+        let left = self.operand(out, a)?;
+        let right = self.operand(out, b)?;
+        let left = self.bitcast_sint(out, left);
+        let right = self.bitcast_sint(out, right);
+        let value = self.binary(out, op, left, right);
+        let value = self.bitcast_uint(out, value);
+        self.bind(dst, value, out);
+        Ok(())
+    }
+
+    /// Bitcast the stored `u32` to `i32` (`bitcast<i32>(x)`).
+    fn bitcast_sint(
+        &mut self,
+        out: &mut naga::Block,
+        value: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(
+            out,
+            naga::Expression::As {
+                expr: value,
+                kind: naga::ScalarKind::Sint,
+                convert: None,
+            },
+        )
+    }
+
+    /// Bitcast an `i32`-typed result back to the stored `u32` type.
+    fn bitcast_uint(
+        &mut self,
+        out: &mut naga::Block,
+        value: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(
+            out,
+            naga::Expression::As {
+                expr: value,
+                kind: naga::ScalarKind::Uint,
+                convert: None,
+            },
+        )
+    }
+
+    fn binary(
+        &mut self,
+        out: &mut naga::Block,
+        op: naga::BinaryOperator,
+        left: naga::Handle<naga::Expression>,
+        right: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(out, naga::Expression::Binary { op, left, right })
+    }
+
+    fn negate(
+        &mut self,
+        out: &mut naga::Block,
+        expr: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(
+            out,
+            naga::Expression::Unary {
+                op: naga::UnaryOperator::LogicalNot,
+                expr,
+            },
+        )
+    }
+
+    /// `fcmp`: ordered predicates are WGSL comparisons. Unordered (`u*`)
+    /// predicates must also be true when either operand is NaN, so they lower
+    /// to the negation of the opposite ordered comparison; `one` is the
+    /// ordered not-equal and is false for NaN.
+    fn compare_float(
         &mut self,
         out: &mut naga::Block,
         pred: &str,
         a: &Operand,
         b: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        if pred == "uno" {
-            let left = self.operand(out, a)?;
-            let right = self.operand(out, b)?;
-            let left_nan = self.expr(
-                out,
-                naga::Expression::Binary {
-                    op: naga::BinaryOperator::NotEqual,
-                    left,
-                    right: left,
-                },
-            );
-            let right_nan = self.expr(
-                out,
-                naga::Expression::Binary {
-                    op: naga::BinaryOperator::NotEqual,
-                    left: right,
-                    right,
-                },
-            );
-            return Ok(self.expr(
-                out,
-                naga::Expression::Binary {
-                    op: naga::BinaryOperator::InclusiveOr,
-                    left: left_nan,
-                    right: right_nan,
-                },
-            ));
-        }
-        let op = match pred {
-            "oeq" | "ueq" | "eq" => naga::BinaryOperator::Equal,
-            "one" | "une" | "ne" => naga::BinaryOperator::NotEqual,
-            "olt" | "ult" | "slt" => naga::BinaryOperator::Less,
-            "ole" | "ule" | "sle" => naga::BinaryOperator::LessEqual,
-            "ogt" | "ugt" | "sgt" => naga::BinaryOperator::Greater,
-            "oge" | "uge" | "sge" => naga::BinaryOperator::GreaterEqual,
-            _ => return Err(TranslateError::Unsupported),
-        };
         let left = self.operand(out, a)?;
         let right = self.operand(out, b)?;
-        Ok(self.expr(out, naga::Expression::Binary { op, left, right }))
+        let value = match pred {
+            "oeq" => self.binary(out, naga::BinaryOperator::Equal, left, right),
+            "olt" => self.binary(out, naga::BinaryOperator::Less, left, right),
+            "ole" => self.binary(out, naga::BinaryOperator::LessEqual, left, right),
+            "ogt" => self.binary(out, naga::BinaryOperator::Greater, left, right),
+            "oge" => self.binary(out, naga::BinaryOperator::GreaterEqual, left, right),
+            "one" => {
+                let lt = self.binary(out, naga::BinaryOperator::Less, left, right);
+                let gt = self.binary(out, naga::BinaryOperator::Greater, left, right);
+                self.binary(out, naga::BinaryOperator::InclusiveOr, lt, gt)
+            }
+            // IEEE `!=` is already true when unordered.
+            "une" => self.binary(out, naga::BinaryOperator::NotEqual, left, right),
+            "ueq" => {
+                let lt = self.binary(out, naga::BinaryOperator::Less, left, right);
+                let gt = self.binary(out, naga::BinaryOperator::Greater, left, right);
+                let ne = self.binary(out, naga::BinaryOperator::InclusiveOr, lt, gt);
+                self.negate(out, ne)
+            }
+            "ult" => {
+                let ge = self.binary(out, naga::BinaryOperator::GreaterEqual, left, right);
+                self.negate(out, ge)
+            }
+            "ule" => {
+                let gt = self.binary(out, naga::BinaryOperator::Greater, left, right);
+                self.negate(out, gt)
+            }
+            "ugt" => {
+                let le = self.binary(out, naga::BinaryOperator::LessEqual, left, right);
+                self.negate(out, le)
+            }
+            "uge" => {
+                let lt = self.binary(out, naga::BinaryOperator::Less, left, right);
+                self.negate(out, lt)
+            }
+            "uno" | "ord" => {
+                let left_nan = self.binary(out, naga::BinaryOperator::NotEqual, left, left);
+                let right_nan = self.binary(out, naga::BinaryOperator::NotEqual, right, right);
+                let unordered =
+                    self.binary(out, naga::BinaryOperator::InclusiveOr, left_nan, right_nan);
+                if pred == "ord" {
+                    self.negate(out, unordered)
+                } else {
+                    unordered
+                }
+            }
+            _ => return Err(TranslateError::Unsupported),
+        };
+        Ok(value)
+    }
+
+    /// `icmp`: `s*` predicates reinterpret the stored `u32` as `i32`;
+    /// unsigned and equality predicates compare the bit pattern directly.
+    fn compare_int(
+        &mut self,
+        out: &mut naga::Block,
+        pred: &str,
+        a: &Operand,
+        b: &Operand,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let left = self.operand(out, a)?;
+        let right = self.operand(out, b)?;
+        let (left, right, op) = match pred {
+            "slt" => (
+                self.bitcast_sint(out, left),
+                self.bitcast_sint(out, right),
+                naga::BinaryOperator::Less,
+            ),
+            "sle" => (
+                self.bitcast_sint(out, left),
+                self.bitcast_sint(out, right),
+                naga::BinaryOperator::LessEqual,
+            ),
+            "sgt" => (
+                self.bitcast_sint(out, left),
+                self.bitcast_sint(out, right),
+                naga::BinaryOperator::Greater,
+            ),
+            "sge" => (
+                self.bitcast_sint(out, left),
+                self.bitcast_sint(out, right),
+                naga::BinaryOperator::GreaterEqual,
+            ),
+            "eq" => (left, right, naga::BinaryOperator::Equal),
+            "ne" => (left, right, naga::BinaryOperator::NotEqual),
+            "ult" => (left, right, naga::BinaryOperator::Less),
+            "ule" => (left, right, naga::BinaryOperator::LessEqual),
+            "ugt" => (left, right, naga::BinaryOperator::Greater),
+            "uge" => (left, right, naga::BinaryOperator::GreaterEqual),
+            _ => return Err(TranslateError::Unsupported),
+        };
+        Ok(self.binary(out, op, left, right))
     }
 
     /// Value-returning call: math or storage read / atomic add.
@@ -1946,9 +2130,16 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             if args.len() != 2 {
                 return Err(TranslateError::Unsupported);
             }
-            let arg = self.operand(out, &args[0])?;
-            let arg1 = self.operand(out, &args[1])?;
-            return Ok(self.expr(
+            // `llvm.smin`/`smax` compare signed values; WGSL picks the
+            // signed overload from the operand type.
+            let signed = callee.contains("llvm.smin") || callee.contains("llvm.smax");
+            let mut arg = self.operand(out, &args[0])?;
+            let mut arg1 = self.operand(out, &args[1])?;
+            if signed {
+                arg = self.bitcast_sint(out, arg);
+                arg1 = self.bitcast_sint(out, arg1);
+            }
+            let value = self.expr(
                 out,
                 naga::Expression::Math {
                     fun,
@@ -1957,7 +2148,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     arg2: None,
                     arg3: None,
                 },
-            ));
+            );
+            return Ok(if signed {
+                self.bitcast_uint(out, value)
+            } else {
+                value
+            });
         }
         if callee.contains("global_invocation_lane") {
             return self.global_invocation_lane(out, args);
@@ -2616,6 +2812,26 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ))
     }
 
+    /// `sitofp`: reinterpret the stored `u32` as `i32`, then convert to
+    /// `kind`; a plain `As` from `u32` would convert the unsigned value.
+    fn cast_signed(
+        &mut self,
+        out: &mut naga::Block,
+        value: &Operand,
+        kind: naga::ScalarKind,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let expr = self.operand(out, value)?;
+        let expr = self.bitcast_sint(out, expr);
+        Ok(self.expr(
+            out,
+            naga::Expression::As {
+                expr,
+                kind,
+                convert: Some(SCALAR_WIDTH),
+            },
+        ))
+    }
+
     fn texel_coord(
         &mut self,
         out: &mut naga::Block,
@@ -2819,6 +3035,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             return self.workgroup_store(out, args, false);
         }
         if callee.contains("workgroup_barrier") {
+            // Uniformity is not proved: every invocation of a workgroup must
+            // reach a barrier together, so any enclosing `if`/`loop`, or a
+            // merge that a returning arm can skip, is rejected instead of
+            // emitting WGSL Tint refuses (or native UB).
+            if self.branch_depth > 0 || self.diverged {
+                return Err(TranslateError::Unsupported);
+            }
             out.push(
                 naga::Statement::ControlBarrier(naga::Barrier::WORK_GROUP),
                 naga::Span::default(),

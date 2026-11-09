@@ -141,6 +141,193 @@ start:
     );
 }
 
+/// Signed `i32` path: `sub 0, id` then `ashr`/`sdiv`/`smin`/`sitofp`/`icmp slt`
+/// must keep the two's-complement sign instead of reinterpreting as `u32`.
+const SIGNED_IR: &str = r#"
+declare i32 @llvm.smin.i32(i32, i32)
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %neg = sub i32 0, %id
+  %shift = ashr i32 %neg, 1
+  %div = sdiv i32 %neg, 2
+  %low = call i32 @llvm.smin.i32(i32 %neg, i32 0)
+  %cmp = icmp slt i32 %neg, 0
+  %flag = select i1 %cmp, float 1.000000e+00, float 0.000000e+00
+  %shift_f = sitofp i32 %shift to float
+  %div_f = sitofp i32 %div to float
+  %low_f = sitofp i32 %low to float
+  %a = fmul float %shift_f, 1.000000e+01
+  %b = fmul float %div_f, 1.000000e+02
+  %c = fmul float %low_f, 1.000000e+03
+  %d = fadd float %a, %b
+  %e = fadd float %d, %c
+  %out = fadd float %e, %flag
+  ret float %out
+}
+"#;
+
+fn signed_reference(id: u32) -> f32 {
+    let neg = 0i32.wrapping_sub(id as i32);
+    let shift = neg >> 1;
+    let div = neg / 2;
+    let low = neg.min(0);
+    let flag = f32::from(u8::from(neg < 0));
+    shift as f32 * 10.0 + div as f32 * 100.0 + low as f32 * 1000.0 + flag
+}
+
+#[test]
+fn signed_integer_ops_match_the_cpu_on_gpu() {
+    let translated = translate(SIGNED_IR).expect("signed ops lower");
+    assert!(
+        translated.wgsl.contains("bitcast<i32>"),
+        "signed ops must bitcast to i32:\n{}",
+        translated.wgsl
+    );
+    let Some(outputs) = gpu_outputs(&translated) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let expected = signed_reference(id as u32);
+        assert!(
+            (actual - expected).abs() < 1e-3,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+/// Encode nine comparison results into one bit mask (bits 0..8).
+fn compare_mask_ir(operands: &str) -> String {
+    let mut ir = String::from(
+        "define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {\nstart:\n",
+    );
+    ir.push_str(operands);
+    const PREDS: [&str; 9] = [
+        "ueq", "une", "ult", "ule", "ugt", "uge", "one", "ord", "uno",
+    ];
+    let mut accum: Option<String> = None;
+    for (bit, pred) in PREDS.iter().enumerate() {
+        let name = format!("%{pred}");
+        ir.push_str(&format!(
+            "  {name} = fcmp {pred} float %a, %b\n  %{pred}_i = zext i1 {name} to i32\n"
+        ));
+        accum = Some(match accum {
+            None => format!("%{pred}_i"),
+            Some(prev) => {
+                let shifted = format!("%{pred}_s");
+                ir.push_str(&format!(
+                    "  {shifted} = shl i32 %{pred}_i, {bit}\n  %{pred}_or = or i32 {prev}, {shifted}\n"
+                ));
+                format!("%{pred}_or")
+            }
+        });
+    }
+    let mask = accum.expect("at least one predicate");
+    ir.push_str(&format!(
+        "  %mask_f = uitofp i32 {mask} to float\n  ret float %mask_f\n}}\n"
+    ));
+    ir
+}
+
+/// `fcmp` masks follow IEEE: on NaN every unordered predicate is true, so
+/// bits 0,1,2,3,4,5,8 set (1+2+4+8+16+32+256 = 319) while `one`/`ord` stay
+/// false; on finite `1 < 2` only `une`, `ult`, `ule`, `one`, `ord` hold
+/// (2+4+8+64+128 = 206).
+#[test]
+fn float_compare_masks_follow_ieee_on_gpu() {
+    // NaN is derived at runtime: a literal `0f / 0f` is constant-folded into
+    // a rejected `nan` literal by naga's WGSL front end.
+    let nan_operands = "  %x = uitofp i32 %id to float\n  %zero = fsub float %x, %x\n  %a = fdiv float %zero, %zero\n  %b = fadd float 1.000000e+00, %zero\n";
+    let finite_operands = "  %a = fadd float 1.000000e+00, 0.000000e+00\n  %b = fadd float 2.000000e+00, 0.000000e+00\n";
+    for (label, operands, expected) in [
+        ("NaN", nan_operands, 319.0),
+        ("ordered", finite_operands, 206.0),
+    ] {
+        let translated = translate(&compare_mask_ir(operands)).expect("fcmp comparisons lower");
+        let Some(outputs) = gpu_outputs(&translated) else {
+            return;
+        };
+        for (id, actual) in outputs.iter().enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "id {id}: {label} mask {actual}"
+            );
+        }
+    }
+}
+
+#[test]
+fn barrier_inside_a_branch_is_rejected() {
+    let ir = r#"
+declare void @workgroup_barrier()
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %lt = icmp ult i32 %id, 3
+  br i1 %lt, label %inside, label %outside
+inside:
+  call void @workgroup_barrier()
+  br label %merge
+outside:
+  br label %merge
+merge:
+  ret void
+}
+"#;
+    assert!(
+        translate(ir).is_err(),
+        "a barrier only some invocations reach must be rejected"
+    );
+}
+
+#[test]
+fn barrier_inside_a_loop_is_rejected() {
+    let ir = r#"
+declare void @workgroup_barrier()
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %next = add i32 %i, 1
+  call void @workgroup_barrier()
+  %done = icmp ugt i32 %next, %id
+  br i1 %done, label %exit, label %latch
+latch:
+  br label %header
+exit:
+  ret void
+}
+"#;
+    assert!(
+        translate(ir).is_err(),
+        "a barrier in a loop is rejected until trip-count uniformity is proved"
+    );
+}
+
+#[test]
+fn barrier_after_a_reconverged_diamond_is_allowed() {
+    let ir = r#"
+declare void @workgroup_barrier()
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %lt = icmp ult i32 %id, 3
+  br i1 %lt, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  call void @workgroup_barrier()
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("a top-level barrier after reconvergence lowers");
+    assert!(
+        translated.wgsl.contains("workgroupBarrier()"),
+        "{}",
+        translated.wgsl
+    );
+}
+
 #[test]
 fn fragment_entry_returns_location_zero_vec4() {
     let ir = r#"
@@ -1105,15 +1292,9 @@ fn llvm_ir_scalar_matches_cpu_reference_on_gpu() {
         return;
     };
     let translated = translate(&ir).expect("translate");
-    let Some((device, queue)) = device() else {
-        assert!(
-            std::env::var_os("ORNIS_REQUIRE_GPU").is_none(),
-            "ORNIS_REQUIRE_GPU is set but no wgpu device"
-        );
-        eprintln!("SKIPPED (no wgpu device)");
+    let Some(outputs) = gpu_outputs(&translated) else {
         return;
     };
-    let outputs = run_compute(&device, &queue, &translated.wgsl);
     for (id, actual) in outputs.iter().enumerate() {
         let expected = cpu_reference(id as u32);
         // FMA contraction differs between CPU Rust and Metal WGSL;
@@ -1136,6 +1317,22 @@ fn cpu_reference(id: u32) -> f32 {
         i += 1;
     }
     (if x < 10.0 { x } else { 0.0 }) + x
+}
+
+/// Run a translated compute entry and return the four `storage_0_0` lanes.
+///
+/// `None` when the host has no adapter, unless `ORNIS_REQUIRE_GPU` turns the
+/// skip into a failure (the CI GPU shard sets it).
+fn gpu_outputs(translated: &ornis_llvm2gpu::Translated) -> Option<Vec<f32>> {
+    let Some((device, queue)) = device() else {
+        assert!(
+            std::env::var_os("ORNIS_REQUIRE_GPU").is_none(),
+            "ORNIS_REQUIRE_GPU is set but no wgpu device"
+        );
+        eprintln!("SKIPPED (no wgpu device)");
+        return None;
+    };
+    Some(run_compute(&device, &queue, &translated.wgsl))
 }
 
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {

@@ -101,8 +101,10 @@ pub(super) enum Instr {
         a: Operand,
         b: Operand,
     },
-    /// `uitofp i32 %a to float` and `sitofp i32 %a to float`.
+    /// `uitofp i32 %a to float`.
     Uitofp { dst: Name, a: Operand },
+    /// `sitofp i32 %a to float` — the value is a two's-complement `i32`.
+    Sitofp { dst: Name, a: Operand },
     /// `fptoui float %a to i32`. Pixel coordinates arrive as `f32`.
     Fptoui { dst: Name, a: Operand },
     /// `bitcast i32 %a to float` / `bitcast float %a to i32`
@@ -628,6 +630,9 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
         "uitofp" | "sitofp" => {
             // `uitofp nneg i32 %a to float` — rustc marks unsigned casts `nneg`.
             let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
+            if tokens[0] == "sitofp" {
+                return Ok(Some(Instr::Sitofp { dst, a }));
+            }
             Ok(Some(Instr::Uitofp { dst, a }))
         }
         "fptoui" => {
@@ -858,6 +863,7 @@ impl Instr {
             | Self::Icmp { a, b, .. } => visit_pair(a, b, &mut visit),
             Self::FNeg { a, .. }
             | Self::Uitofp { a, .. }
+            | Self::Sitofp { a, .. }
             | Self::Fptoui { a, .. }
             | Self::Bitcast { a, .. }
             | Self::Ret { a } => {
@@ -900,6 +906,7 @@ impl Instr {
             | Self::Icmp { dst, .. }
             | Self::Select { dst, .. }
             | Self::Uitofp { dst, .. }
+            | Self::Sitofp { dst, .. }
             | Self::Fptoui { dst, .. }
             | Self::Bitcast { dst, .. }
             | Self::Call { dst, .. }
@@ -915,7 +922,8 @@ impl Instr {
             | Self::FSub { .. }
             | Self::FDiv { .. }
             | Self::FNeg { .. }
-            | Self::Uitofp { .. } => Some(Ty::Float),
+            | Self::Uitofp { .. }
+            | Self::Sitofp { .. } => Some(Ty::Float),
             Self::Add { .. }
             | Self::Sub { .. }
             | Self::Mul { .. }
