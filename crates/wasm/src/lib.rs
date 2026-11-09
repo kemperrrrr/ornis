@@ -25,9 +25,9 @@ use ornis_editor::EditorMarks;
 #[cfg(test)]
 use ornis_editor::GizmoAxis;
 use ornis_editor::{
-    GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoSpace, Hovered, PlaneCamera, Selected,
-    ViewportCamera, apply_gizmo_visibility, install_editor, install_plane_camera, pick_gizmo,
-    pick_ray, read_plane_camera, set_selection,
+    GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoRuntime, GizmoSpace, GizmoTarget, Hovered,
+    PlaneCamera, PressEdge, Selected, ViewportCamera, apply_gizmo_visibility, install_editor,
+    install_plane_camera, pick_gizmo, pick_ray, read_plane_camera, set_selection,
 };
 use ornis_render::{
     AntiAliasMode, CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D,
@@ -790,18 +790,24 @@ fn select_command_json(target: Option<(u32, u32)>) -> String {
 /// Same wire shape as the editor protocol's typed `set_component` command;
 /// the authoritative side applies it through the shared `Mutation` path, so
 /// a drag and a manual inspector edit cannot diverge.
-fn transform_command_json(id: u32, generation: u32, transform: &TransformDesc) -> String {
-    let value = serde_json::to_value(transform).unwrap_or(serde_json::Value::Null);
-    serde_json::json!({
-        "type": "set_component",
-        "data": {
-            "id": id,
-            "generation": generation,
-            "component": "Transform",
-            "value": value,
-        },
-    })
-    .to_string()
+///
+/// `None` when the transform is not serializable (a non-finite component):
+/// the command is dropped instead of sending a `null` value the server
+/// could not interpret.
+fn transform_command_json(id: u32, generation: u32, transform: &TransformDesc) -> Option<String> {
+    let value = serde_json::to_value(transform).ok()?;
+    Some(
+        serde_json::json!({
+            "type": "set_component",
+            "data": {
+                "id": id,
+                "generation": generation,
+                "component": "Transform",
+                "value": value,
+            },
+        })
+        .to_string(),
+    )
 }
 
 /// Look up the canvas element by id and cast it to `HtmlCanvasElement`.
@@ -1098,42 +1104,6 @@ async fn load_initial_scene() -> Result<LiveScene, JsValue> {
     ))
 }
 
-/// Pre-drag transform kept for the one-step undo.
-#[derive(Debug, Clone)]
-struct UndoTransform {
-    id: u32,
-    generation: u32,
-    transform: TransformDesc,
-}
-
-/// Replica-side gizmo interaction state.
-#[derive(Default)]
-struct GizmoRuntime {
-    /// Left-button level observed on the previous frame (press edge).
-    prev_pressed: bool,
-    /// In-progress drag, if any.
-    drag: Option<GizmoDrag>,
-    /// Local entity being dragged.
-    selected: Option<Entity>,
-    /// Whether the drag actually changed the transform (a click on a handle
-    /// without motion must not commit a `set_component`).
-    moved: bool,
-    /// One-step undo payload from the last drag.
-    undo: Option<UndoTransform>,
-}
-
-impl GizmoRuntime {
-    /// Drops an in-flight drag (the selection handle may have been rebuilt).
-    ///
-    /// The one-step undo survives: it addresses the server id and holds the
-    /// pre-drag transform, both independent of the rebuilt replica.
-    fn cancel(&mut self) {
-        self.drag = None;
-        self.selected = None;
-        self.moved = false;
-    }
-}
-
 /// Mutable state carried across animation frames by the render loop.
 struct FrameState<'a> {
     surface: wgpu::Surface<'a>,
@@ -1153,6 +1123,8 @@ struct FrameState<'a> {
     last_outline_flags: Vec<u32>,
     /// Gizmo tool state, drag and one-step undo.
     gizmo: GizmoRuntime,
+    /// Pointer press edge (only a fresh press may start a gizmo drag).
+    press: PressEdge,
     input: Rc<RefCell<InputState>>,
     poster: InputPoster,
     socket: InputSocket,
@@ -1348,12 +1320,16 @@ impl<'a> FrameState<'a> {
     }
 
     /// Applies queued toolbar requests (tool/space changes, one-step undo).
-    // qual:allow(test_quality, untested) reason: "toolbar queue + undo; drag math and the command body are host-tested"
+    // qual:allow(test_quality, untested) reason: "toolbar queue + undo; the drag machine and the command body are host-tested"
     fn apply_gizmo_requests(&mut self) {
         if apply_pending_gizmo(self.render_world.engine_mut()) {
             // A tool switch ends an in-flight drag instead of committing a
-            // preview the user no longer sees.
-            if self.gizmo.drag.is_some() {
+            // preview the user no longer sees — and the preview goes back
+            // to the pre-drag transform: the server never saw it, so
+            // leaving it on the replica would strand the object in an
+            // intermediate pose.
+            if self.gizmo.is_dragging() {
+                self.rollback_gizmo_preview();
                 self.gizmo.cancel();
                 self.set_gizmo_grab(false);
             }
@@ -1364,7 +1340,13 @@ impl<'a> FrameState<'a> {
         if !take_pending_undo() {
             return;
         }
-        let Some(undo) = self.gizmo.undo.take() else {
+        // An undo during an active drag would restore the transform the
+        // drag started from — but the drag continues and commits
+        // afterwards, so the undo would be silently overwritten. Ignore it.
+        if self.gizmo.is_dragging() {
+            return;
+        }
+        let Some(undo) = self.gizmo.take_undo() else {
             return;
         };
         self.send_transform_command(undo.id, undo.generation, &undo.transform);
@@ -1405,14 +1387,13 @@ impl<'a> FrameState<'a> {
                 input.map_or([0.0, 0.0], |input| input.pointer_position()),
             )
         };
-        let edge = pressed && !self.gizmo.prev_pressed;
-        self.gizmo.prev_pressed = pressed;
+        let edge = self.press.edge(pressed);
         let mode = gizmo_mode();
         let space = gizmo_space();
-        if edge && mode != GizmoMode::Off && self.gizmo.drag.is_none() {
+        if edge && mode != GizmoMode::Off && !self.gizmo.is_dragging() {
             let _ = self.begin_gizmo_drag(pointer, mode, space);
         }
-        if self.gizmo.drag.is_none() {
+        if !self.gizmo.is_dragging() {
             return;
         }
         if pressed {
@@ -1464,7 +1445,7 @@ impl<'a> FrameState<'a> {
             let undo = store
                 .read_lane::<ServerEntityId>()
                 .and_then(|lane| lane.get(selected).copied())
-                .map(|server| UndoTransform {
+                .map(|server| GizmoTarget {
                     id: server.id,
                     generation: server.generation,
                     transform,
@@ -1474,10 +1455,7 @@ impl<'a> FrameState<'a> {
         let Some((drag, selected, undo)) = prepared else {
             return false;
         };
-        self.gizmo.drag = Some(drag);
-        self.gizmo.selected = Some(selected);
-        self.gizmo.moved = false;
-        self.gizmo.undo = undo;
+        self.gizmo.begin(drag, selected, undo);
         self.set_gizmo_grab(true);
         true
     }
@@ -1485,17 +1463,15 @@ impl<'a> FrameState<'a> {
     /// Writes the drag preview onto the replica and moves the handles.
     // qual:allow(test_quality, untested) reason: "browser frame edge: writes the host-tested GizmoDrag preview"
     fn preview_gizmo_drag(&mut self, pointer: [f32; 2]) {
-        let (Some(selected), Some(drag)) = (self.gizmo.selected, self.gizmo.drag.clone()) else {
+        let Some(selected) = self.gizmo.selected() else {
             return;
         };
         let Some(ray) = self.gizmo_ray(pointer) else {
             return;
         };
-        let start = drag.start.clone();
-        let Some(transform) = drag.update(&ray) else {
+        let Some(transform) = self.gizmo.preview_transform(&ray) else {
             return;
         };
-        self.gizmo.moved |= transform != start;
         let Some(store) = self.render_world.engine_mut().world_mut().store_mut() else {
             return;
         };
@@ -1504,6 +1480,24 @@ impl<'a> FrameState<'a> {
         }
         apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
         self.upload_replica_instances();
+    }
+
+    /// Rolls the local preview back to the transform the drag started from.
+    ///
+    /// The preview was written to the replica lane but never committed, so
+    /// abandoning the drag must restore the pre-drag transform (and re-lay
+    /// the handles out) — otherwise the object stays in a pose the server
+    /// never saw.
+    fn rollback_gizmo_preview(&mut self) {
+        let Some((selected, transform)) = self.gizmo.rollback() else {
+            return;
+        };
+        if let Some(store) = self.render_world.engine_mut().world_mut().store_mut() {
+            if let Some(mut lane) = store.write_lane::<TransformDesc>() {
+                lane.insert(selected, transform);
+            }
+            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        }
     }
 
     /// Re-extracts the replica and uploads instance transforms.
@@ -1524,15 +1518,15 @@ impl<'a> FrameState<'a> {
     /// grab state (keeps the undo snapshot).
     // qual:allow(test_quality, untested) reason: "browser frame edge: sends the host-tested set_component envelope"
     fn commit_gizmo_drag(&mut self) {
-        self.gizmo.drag = None;
-        let moved = std::mem::take(&mut self.gizmo.moved);
-        let Some(selected) = self.gizmo.selected.take() else {
+        let selected = self.gizmo.selected();
+        // A click on a handle without motion commits nothing: the machine
+        // promotes the undo candidate only for a drag that really moved.
+        let moved = self.gizmo.commit().is_some();
+        let Some(selected) = selected else {
             self.set_gizmo_grab(false);
             return;
         };
         if !moved {
-            // A click on a handle without motion commits nothing.
-            self.gizmo.undo = None;
             self.set_gizmo_grab(false);
             return;
         }
@@ -1579,7 +1573,10 @@ impl<'a> FrameState<'a> {
     /// Fire-and-forget `set_component` of one Transform (drag commit/undo).
     // qual:allow(test_quality, untested) reason: "browser transport edge: the envelope itself is host-tested"
     fn send_transform_command(&self, id: u32, generation: u32, transform: &TransformDesc) {
-        let body = transform_command_json(id, generation, transform);
+        let Some(body) = transform_command_json(id, generation, transform) else {
+            console::log_1(&"[ornis-wasm] transform is not serializable — command dropped".into());
+            return;
+        };
         if !self.socket.send(&body) {
             post_json("/api/command", "POST /api/command", body, |_| {});
         }
@@ -1862,6 +1859,7 @@ fn spawn_render_loop(
         instance_entities: gpu_scene.extracted.instance_entities.clone(),
         last_outline_flags: Vec::new(),
         gizmo: GizmoRuntime::default(),
+        press: PressEdge::default(),
         input,
         poster: InputPoster::new(),
         socket,
@@ -2387,8 +2385,10 @@ mod integration_tests {
             translation: glam::Vec3::new(1.0, 2.0, 3.0),
             ..TransformDesc::IDENTITY
         };
-        let body: serde_json::Value =
-            serde_json::from_str(&transform_command_json(7, 3, &transform)).expect("valid JSON");
+        let body: serde_json::Value = serde_json::from_str(
+            &transform_command_json(7, 3, &transform).expect("serializable transform"),
+        )
+        .expect("valid JSON");
         assert_eq!(body["type"], "set_component");
         assert_eq!(body["data"]["id"], 7);
         assert_eq!(body["data"]["generation"], 3);
@@ -2396,6 +2396,25 @@ mod integration_tests {
         assert_eq!(
             body["data"]["value"],
             serde_json::to_value(&transform).expect("transform JSON")
+        );
+    }
+
+    /// A transform command never carries a `null` value: a serializable
+    /// transform is sent as the full object — the command is dropped
+    /// instead of being sent half-empty.
+    #[test]
+    fn a_transform_command_never_carries_a_null_value() {
+        let transform = TransformDesc {
+            translation: glam::Vec3::new(1.0, 2.0, 3.0),
+            ..TransformDesc::IDENTITY
+        };
+        let body: serde_json::Value = serde_json::from_str(
+            &transform_command_json(7, 3, &transform).expect("serializable transform"),
+        )
+        .expect("valid JSON");
+        assert!(
+            body["data"]["value"].is_object(),
+            "the value must be the transform, not null"
         );
     }
 

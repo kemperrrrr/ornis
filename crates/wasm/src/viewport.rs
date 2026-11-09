@@ -87,7 +87,13 @@ pub fn set_gizmo_mode(mode: &str) -> bool {
         "off" | "select" => GizmoMode::Off,
         _ => return false,
     };
-    PENDING_GIZMO.with(|cell| cell.set(Some((parsed, gizmo_space()))));
+    PENDING_GIZMO.with(|cell| {
+        // The queued request is the base, not the applied state: two
+        // requests in one frame (space, then mode) must not lose the
+        // space change.
+        let (_, space) = cell.get().unwrap_or((gizmo_mode(), gizmo_space()));
+        cell.set(Some((parsed, space)));
+    });
     true
 }
 
@@ -101,7 +107,13 @@ pub fn set_gizmo_space(space: &str) -> bool {
         "local" => GizmoSpace::Local,
         _ => return false,
     };
-    PENDING_GIZMO.with(|cell| cell.set(Some((gizmo_mode(), parsed))));
+    PENDING_GIZMO.with(|cell| {
+        // The queued request is the base, not the applied state: two
+        // requests in one frame (space, then mode) must not lose the
+        // space change.
+        let (mode, _) = cell.get().unwrap_or((gizmo_mode(), gizmo_space()));
+        cell.set(Some((mode, parsed)));
+    });
     true
 }
 
@@ -532,6 +544,19 @@ mod tests {
         assert!(undo_gizmo());
         assert!(take_pending_undo());
         assert!(!take_pending_undo());
+    }
+
+    /// Two queued requests in one frame compose: a space change followed by
+    /// a mode change keeps the space (the queued request is the base, not
+    /// the applied state).
+    #[test]
+    fn queued_gizmo_requests_compose_within_one_frame() {
+        PENDING_GIZMO.with(|cell| cell.set(None));
+        assert!(set_gizmo_space("local"));
+        assert!(set_gizmo_mode("rotate"));
+        let queued = PENDING_GIZMO.with(Cell::get).expect("a queued request");
+        assert_eq!(queued, (GizmoMode::Rotate, GizmoSpace::Local));
+        PENDING_GIZMO.with(|cell| cell.set(None));
     }
 
     /// A queued toolbar request is applied by the frame loop: the active
