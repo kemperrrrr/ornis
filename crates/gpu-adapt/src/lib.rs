@@ -6,7 +6,6 @@
 //! storage `2`. The kernel is a safe `fn` on the shader SDK.
 
 #![no_std]
-#![allow(clippy::all)]
 
 use ornis_gpu_shader::GpuStruct;
 use ornis_gpu_shader::ReadWrite;

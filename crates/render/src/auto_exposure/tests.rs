@@ -42,24 +42,21 @@ fn params_layouts_match_their_wgsl() {
     assert_eq!(std::mem::offset_of!(AdaptParams, min_log_lum), 0);
     assert_eq!(std::mem::offset_of!(AdaptParams, transition_distance), 36);
     assert_eq!(std::mem::offset_of!(AdaptParams, dt), 40);
+    // Only the contract shape is asserted here. Generated identifiers
+    // (`f3_`, `tex_0_1_`, ...) change with any naming tweak in llvm2gpu, so
+    // they are not a test of the shader; behaviour (bins, bin-0 exclusion,
+    // exposure step) is covered by the GPU parity tests below and by
+    // `below_range_texels_are_excluded_from_the_average`.
     let hist = histogram_wgsl();
-    assert!(hist.contains("f3_: u32"));
     assert!(hist.contains("array<atomic<u32>, 256>"));
     assert!(hist.contains("var<workgroup> workgroup_atomics"));
-    assert!(hist.contains("tex_0_1_"));
+    assert!(hist.contains("@group(0) @binding(1)"));
     assert!(hist.contains("fn cs_main("));
     assert!(hist.contains("@workgroup_size(8, 8, 1)"));
     let adapt = adapt_wgsl();
-    assert!(adapt.contains("f7_: f32"));
-    assert!(adapt.contains("f8_: f32"));
     assert!(adapt.contains("array<u32, 256>"));
-    assert!(adapt.contains("storage_0_2_[0u]"));
+    assert!(adapt.contains("@group(0) @binding(2)"));
     assert!(adapt.contains("exp2("));
-    // Bin 0 is excluded from the reduction: the weighted loop starts at 1.
-    assert!(
-        adapt.contains("= 1u"),
-        "the weighted histogram loop must start at bin 1"
-    );
 }
 
 #[test]

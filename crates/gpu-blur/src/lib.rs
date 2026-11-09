@@ -9,7 +9,6 @@
 //! world reconstruction, exactly like the raw AO kernels.
 
 #![no_std]
-#![allow(clippy::all)]
 
 use ornis_gpu_shader::DepthTexture2d;
 use ornis_gpu_shader::GpuStruct;

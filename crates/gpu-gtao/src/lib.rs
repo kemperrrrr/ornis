@@ -7,7 +7,6 @@
 //! math is SDK functions. It does not declare `extern "C"`.
 
 #![no_std]
-#![allow(clippy::all)]
 
 use ornis_gpu_shader::DepthTexture2d;
 use ornis_gpu_shader::GpuStruct;
@@ -53,8 +52,10 @@ impl GpuStruct for AoParams {
 
 const CLEAR_DEPTH: f32 = 1.0;
 const EPS: f32 = 1.0e-6;
-const PI: f32 = 3.1415927;
-const HALF_PI: f32 = 1.5707964;
+/// π at `f32` precision (same value the kernel used as a literal).
+const PI: f32 = core::f32::consts::PI;
+/// π/2 at `f32` precision.
+const HALF_PI: f32 = core::f32::consts::FRAC_PI_2;
 
 type CameraUniform = Uniform<Camera, 0, 2>;
 type Depth = DepthTexture2d<0, 0>;
@@ -89,6 +90,9 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
 
 #[inline(always)]
 // qual:allow(srp, max_parameters=14) reason: "one horizon tap; the closed form is the XeGTAO sample and the resources stay arguments so the body does not restate bindings"
+// A struct here would need layout lowering the translator does not need for
+// inlined helpers; the kernel keeps one flat signature like the WGSL.
+#[allow(clippy::too_many_arguments)]
 fn horizon(
     depth_tex: Depth,
     camera: CameraUniform,
@@ -193,7 +197,7 @@ pub fn fs_main(
     let edge_u = clip_x / clip_w * 0.5 + 0.5;
     let edge_v = 0.5 - clip_y / clip_w * 0.5;
     let uv_radius = f32::max(length3(edge_u - uvx, edge_v - uvy, 0.0), 1.0 / dims_x);
-    let hash = fract(52.9829189 * fract((xi as f32) * 0.06711056 + (yi as f32) * 0.00583715));
+    let hash = fract(52.982_918 * fract((xi as f32) * 0.06711056 + (yi as f32) * 0.00583715));
     let mut visibility = 0.0f32;
     let mut slice = 0u32;
     while slice < 2 {

@@ -11,7 +11,6 @@
 //! `texture_multisampled_2d`.
 
 #![no_std]
-#![allow(clippy::all)]
 
 use ornis_gpu_shader::DepthTexture2d;
 use ornis_gpu_shader::GpuStruct;
@@ -54,7 +53,7 @@ impl GpuStruct for AoParams {
 const CLEAR_DEPTH: f32 = 1.0;
 const EPS: f32 = 1.0e-6;
 /// One full turn in radians, matching the former hand-written literal.
-const TURN: f32 = 6.28318530718;
+const TURN: f32 = core::f32::consts::TAU;
 /// Golden-angle spiral step of the eight taps.
 const GOLDEN_ANGLE: f32 = 2.399963;
 /// Taps per pixel.
@@ -64,7 +63,7 @@ const HEMISPHERE_Z: f32 = 0.75;
 /// `ao_interleaved_gradient` weights: 0.06711056, 0.00583715, 52.9829189.
 const HASH_X: f32 = 0.06711056;
 const HASH_Y: f32 = 0.00583715;
-const HASH_Z: f32 = 52.9829189;
+const HASH_Z: f32 = 52.982_918;
 
 type CameraUniform = Uniform<Camera, 0, 2>;
 type Depth = DepthTexture2d<0, 0>;
@@ -104,6 +103,10 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
 /// returns are the former `continue`s of the hand-written loop; inlining turns
 /// them into branches of the caller.
 #[inline(always)]
+// Explicit comparisons, not `RangeInclusive::contains`: a NaN UV must keep
+// falling through (both comparisons false), exactly like the hand-written
+// shader, while `contains` would treat it as off-screen.
+#[allow(clippy::manual_range_contains)]
 // qual:allow(complexity, magic_numbers) reason: "one tap; the arguments are the loop's live values, and splitting it would restate the reprojection"
 // qual:allow(srp, max_parameters=21) reason: "one tap; the arguments are the loop's live values, and splitting it would restate the reprojection"
 #[allow(clippy::too_many_arguments)]

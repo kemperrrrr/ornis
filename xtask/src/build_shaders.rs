@@ -16,6 +16,12 @@ const DEFAULT_PACKAGE: &str = "ornis-gpu-shaders";
 /// Entry extracted by the translator.
 const DEFAULT_ENTRY: &str = "cs_main";
 /// LLVM optimisation level used for the shader crate.
+///
+/// `1` is the canonical level for the checked-in artifacts: it inlines the
+/// typed SDK wrappers, keeps dynamic loops as loops (the translator rejects
+/// some `opt-level=3` unroll shapes), and is what `quality --ci` compares
+/// against. `--opt` exists for experiments only; production WGSL is rebuilt
+/// at this level.
 const DEFAULT_OPT: &str = "1";
 /// Cargo target of the shader crate.
 const DEFAULT_TARGET: &str = "wasm32-unknown-unknown";

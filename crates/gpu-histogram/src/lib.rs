@@ -8,7 +8,6 @@
 //! methods, and those methods inline to the translator's imports.
 
 #![no_std]
-#![allow(clippy::all)]
 
 use ornis_gpu_shader::AtomicU32;
 use ornis_gpu_shader::GpuStruct;
@@ -47,6 +46,9 @@ const LUMA_G: f32 = 0.7152;
 const LUMA_B: f32 = 0.0722;
 
 #[inline(always)]
+// NaN self-comparison, not `is_nan()`: the translator lowers this to `fcmp`
+// and the shader SDK has no `is_nan` yet.
+#[allow(clippy::eq_op)]
 fn log_luminance(red: f32, green: f32, blue: f32) -> f32 {
     let luma = dot3(red, green, blue, LUMA_R, LUMA_G, LUMA_B);
     let non_finite = luma != luma || abs(luma) > INF_GUARD;
