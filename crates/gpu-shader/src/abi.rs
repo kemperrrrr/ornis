@@ -62,6 +62,8 @@ unsafe extern "C" {
         y: f32,
         z: f32,
     ) -> f32;
+    #[link_name = "gpu_dot2_xy"]
+    fn gpu_dot2_xy(ax: f32, ay: f32, bx: f32, by: f32) -> f32;
     #[link_name = "gpu_dot3_xyz"]
     fn gpu_dot3_xyz(ax: f32, ay: f32, az: f32, bx: f32, by: f32, bz: f32) -> f32;
     #[link_name = "gpu_length3_xyz"]
@@ -251,6 +253,13 @@ pub(crate) fn plane_distance(
     call!(uniform_field_vec4_plane_dot(
         group, binding, sid, field, x, y, z
     ))
+}
+
+/// Dot product of two `vec2<f32>` values.
+// qual:allow(srp, max_parameters=4) reason: "four scalar lanes of a vec2 dot; the translator maps them positionally onto dot(vec2, vec2)"
+#[inline(always)]
+pub(crate) fn dot2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    call!(gpu_dot2_xy(ax, ay, bx, by))
 }
 
 /// Dot product of two `vec3<f32>` values.

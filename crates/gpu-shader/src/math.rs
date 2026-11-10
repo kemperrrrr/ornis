@@ -90,6 +90,26 @@ pub fn mix(start: f32, end: f32, factor: f32) -> f32 {
     }
 }
 
+/// Dot product of two scalar `vec2`s.
+///
+/// Lowers to WGSL `dot(vec2, vec2)`. The host value is
+/// `fma(ay, by, ax * bx)`, the contraction a `vec2` dot uses when the
+/// second lane is the fused addend. A scalar `ax * bx + ay * by` is the
+/// opposite contraction.
+// qual:allow(srp, max_parameters=4) reason: "four lanes of a vec2 dot, the same operands as the import"
+#[inline(always)]
+#[must_use]
+pub fn dot2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::dot2(ax, ay, bx, by)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ay.mul_add(by, ax * bx)
+    }
+}
+
 /// Dot product of two scalar `vec3`s.
 // qual:allow(srp, max_parameters=6) reason: "six lanes, the same operands as the import; a Vec3 argument would be a second copy of crate::Vec3::dot"
 #[inline(always)]

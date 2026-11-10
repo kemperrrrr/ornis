@@ -2366,6 +2366,20 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("normalize3") {
             return self.normalize3_lane(out, args);
         }
+        if callee.contains("dot2") && args.len() == VEC2_LANES as usize + VEC2_LANES as usize {
+            let va = self.vec2_of(out, args, 0)?;
+            let vb = self.vec2_of(out, args, VEC2_LANES)?;
+            return Ok(self.expr(
+                out,
+                naga::Expression::Math {
+                    fun: naga::MathFunction::Dot,
+                    arg: va,
+                    arg1: Some(vb),
+                    arg2: None,
+                    arg3: None,
+                },
+            ));
+        }
         if callee.contains("dot3") && args.len() == VEC3_LANES as usize + VEC3_LANES as usize {
             let va = self.vec3_of(out, args, 0)?;
             let vb = self.vec3_of(out, args, VEC3_LANES)?;
@@ -2492,6 +2506,25 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Expression::AccessIndex {
                 base: unit,
                 index: lane,
+            },
+        ))
+    }
+
+    fn vec2_of(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        at: u32,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let start = at as usize;
+        let ty = self.builders.vec2_f32();
+        let x = self.operand(out, args.get(start).ok_or(TranslateError::Unsupported)?)?;
+        let y = self.operand(out, args.get(start + 1).ok_or(TranslateError::Unsupported)?)?;
+        Ok(self.expr(
+            out,
+            naga::Expression::Compose {
+                ty,
+                components: vec![x, y],
             },
         ))
     }

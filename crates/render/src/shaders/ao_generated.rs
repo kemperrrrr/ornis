@@ -270,6 +270,10 @@ mod tests {
                 source.contains("min(u32("),
                 "{label} must clamp uv=1 to the last texel, like master min(u32(uv * dims), dims - 1)"
             );
+            assert!(
+                source.contains("dot(vec2"),
+                "{label} IGN must be dot(vec2(pixel), magic.xy), not a scalar sum"
+            );
         }
         // Master SSAO has no such min: `suv == 1` stays an out-of-bounds index.
         let ssao = wgsl_source_raw(AoMethod::Ssao);

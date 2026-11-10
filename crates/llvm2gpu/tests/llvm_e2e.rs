@@ -751,6 +751,24 @@ start:
 }
 
 #[test]
+fn dot2_lowers_to_vec2_dot() {
+    let ir = r#"
+define dso_local noundef float @cs_main(i32 noundef %id) unnamed_addr #1 {
+start:
+  %_4 = uitofp i32 %id to float
+  %d = call float @gpu_dot2_xy(float %_4, float 2.000000e+00, float 3.000000e+00, float 4.000000e+00)
+  ret float %d
+}
+"#;
+    let translated = translate(ir).expect("dot2");
+    assert!(
+        translated.wgsl.contains("dot(vec2"),
+        "vec2 dot must stay a builtin, not a scalar sum: {}",
+        translated.wgsl
+    );
+}
+
+#[test]
 fn storage_f32_copy_lowes_to_two_globals() {
     let ir = r#"
 declare float @storage_read_f32(i32 noundef, i32 noundef, i32 noundef)
@@ -1177,6 +1195,7 @@ fn rustc_gtao_horizon_march_to_wgsl() {
     );
     for needle in [
         "textureLoad(",
+        "dot(vec2",
         "acos(",
         "cross(",
         "normalize(",

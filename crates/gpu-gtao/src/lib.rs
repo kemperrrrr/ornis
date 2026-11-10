@@ -1,4 +1,4 @@
-// qual:allow(srp, file_length=340) reason: "the horizon texel clamp belongs in this march; the master min(u32(uv * dims), dims - 1) formula is the load the rest of the kernel samples"
+// qual:allow(srp, file_length=360) reason: "one GTAO march: the horizon clamp, the vec2 IGN dot, and the raw homogeneous divide stay next to the slice loop"
 //! GTAO horizon march for the stable Rust to WGSL path.
 //!
 //! One fragment reads the fullscreen-quad UV, the g-buffer depth and
@@ -20,6 +20,7 @@ use ornis_gpu_shader::acos;
 use ornis_gpu_shader::clamp;
 use ornis_gpu_shader::cos;
 use ornis_gpu_shader::cross_lane;
+use ornis_gpu_shader::dot2;
 use ornis_gpu_shader::dot3;
 use ornis_gpu_shader::fract;
 use ornis_gpu_shader::fragment_store;
@@ -53,6 +54,10 @@ impl GpuStruct for AoParams {
 
 const CLEAR_DEPTH: f32 = 1.0;
 const EPS: f32 = 1.0e-6;
+/// `ao_interleaved_gradient` weights: `dot(pixel, (x, y))` then `fract(z * fract(.))`.
+const HASH_X: f32 = 0.06711056;
+const HASH_Y: f32 = 0.00583715;
+const HASH_Z: f32 = 52.982_918;
 /// π at `f32` precision (same value the kernel used as a literal).
 const PI: f32 = core::f32::consts::PI;
 /// π/2 at `f32` precision.
@@ -85,8 +90,30 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
     let nx = uvx * 2.0 - 1.0;
     let ny = 1.0 - uvy * 2.0;
     let value = inv_view_lane::<LANE>(camera, nx, ny, depth);
-    let w = f32::max(inv_view_lane::<3>(camera, nx, ny, depth), EPS);
+    let w = inv_view_lane::<3>(camera, nx, ny, depth);
+    // Master divides by the raw homogeneous w, including w < EPS and w < 0.
+    homogeneous_divide(value, w)
+}
+
+/// `value / w` with the sign and magnitude of `w` left unchanged.
+///
+/// The hand-written `reconstruct_world_pos` returns `view.xyz / view.w`.
+/// Clamping `w` up to [`EPS`] moves any reconstruction whose denominator
+/// is smaller than that, including a negative denominator.
+#[inline(always)]
+#[must_use]
+pub fn homogeneous_divide(value: f32, w: f32) -> f32 {
     value / w
+}
+
+/// Master's `fract(magic.z * fract(dot(vec2(pixel), magic.xy)))`.
+///
+/// The dot is the `vec2` builtin. A scalar `x * cx + y * cy` contracts in
+/// the opposite order and changes the slice angle.
+#[inline(always)]
+fn interleaved_gradient(pixel_x: u32, pixel_y: u32) -> f32 {
+    let dot = dot2(pixel_x as f32, pixel_y as f32, HASH_X, HASH_Y);
+    fract(HASH_Z * fract(dot))
 }
 
 #[inline(always)]
@@ -215,7 +242,7 @@ pub fn fs_main(
     let edge_u = clip_x / clip_w * 0.5 + 0.5;
     let edge_v = 0.5 - clip_y / clip_w * 0.5;
     let uv_radius = f32::max(length3(edge_u - uvx, edge_v - uvy, 0.0), 1.0 / dims_x);
-    let hash = fract(52.982_918 * fract((xi as f32) * 0.06711056 + (yi as f32) * 0.00583715));
+    let hash = interleaved_gradient(xi, yi);
     let mut visibility = 0.0f32;
     let mut slice = 0u32;
     while slice < 2 {

@@ -38,6 +38,10 @@ pub struct Shot {
     /// the near plane so UV = 1 is a horizon hit; the bottom row is far;
     /// `x >= W/2` is an interior step.
     pub depth: Vec<f32>,
+    /// Scale applied to `view_proj`, with the inverse scaled by the
+    /// reciprocal. `1` leaves the camera unchanged. A large scale makes
+    /// the reconstruction `w` smaller than `1e-6`.
+    pub proj_scale: f32,
 }
 
 /// 8-bit channel diff of two RGBA images, in the review's units.
@@ -154,7 +158,7 @@ fn depth_image(plane: f32, step: f32, edge: f32) -> Vec<f32> {
     depth
 }
 
-/// Border scene: step 4 of pixel (0, 0) is UV x = 1, on the far last column.
+/// Border scene: step 1 of pixel (0, 0) lands on UV x = 1.
 pub fn border_shot() -> Shot {
     let vp = view_proj();
     let plane = ndc_z(vp, glam::Vec3::ZERO);
@@ -168,6 +172,7 @@ pub fn border_shot() -> Shot {
         bias: DEFAULT_AO_BIAS,
         blur_sigma: DEFAULT_AO_BLUR_SIGMA,
         depth: depth_image(plane, step, edge),
+        proj_scale: 1.0,
     }
 }
 
@@ -181,13 +186,17 @@ pub fn local_shot() -> Shot {
 /// `CameraUniform` bytes: view-projection, inverse, eye, previous matrix.
 pub fn camera_bytes(shot: &Shot) -> Vec<u8> {
     let vp = glam::Mat4::from_cols_array_2d(&shot.view_proj);
+    let inv = vp.inverse();
+    let scale = shot.proj_scale;
     let mut bytes = Vec::with_capacity(208);
-    push_mat(&mut bytes, shot.view_proj);
-    push_mat(&mut bytes, vp.inverse().to_cols_array_2d());
+    // Scale the projection and the inverse by reciprocal factors. Inverting
+    // the scaled matrix again would not be the same bits.
+    push_mat(&mut bytes, (vp * scale).to_cols_array_2d());
+    push_mat(&mut bytes, (inv * scale.recip()).to_cols_array_2d());
     for value in [shot.eye[0], shot.eye[1], shot.eye[2], 1.0] {
         bytes.extend(value.to_le_bytes());
     }
-    push_mat(&mut bytes, shot.view_proj);
+    push_mat(&mut bytes, (vp * scale).to_cols_array_2d());
     bytes
 }
 

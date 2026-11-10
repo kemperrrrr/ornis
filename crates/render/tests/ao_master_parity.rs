@@ -127,6 +127,18 @@ fn ssao_local_matches_master_wgsl() {
 }
 
 #[test]
+fn gtao_scaled_camera_matches_master_below_eps() {
+    let mut shot = scene::local_shot();
+    // Reconstruction w scales by 1e-7, below the old `max(w, 1e-6)` guard.
+    shot.proj_scale = 1.0e7;
+    let diff = raw_pair(&shot, AoMethod::Gtao, false);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("gtao scaled w", &diff);
+}
+
+#[test]
 fn blur_border_matches_master_wgsl() {
     let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
         return;
