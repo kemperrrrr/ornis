@@ -256,7 +256,6 @@ pub(crate) fn plane_distance(
 }
 
 /// Dot product of two `vec2<f32>` values.
-// qual:allow(srp, max_parameters=4) reason: "four scalar lanes of a vec2 dot; the translator maps them positionally onto dot(vec2, vec2)"
 #[inline(always)]
 pub(crate) fn dot2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     call!(gpu_dot2_xy(ax, ay, bx, by))

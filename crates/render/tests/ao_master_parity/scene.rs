@@ -7,6 +7,8 @@
 
 use ornis_render::ao::{DEFAULT_AO_BIAS, DEFAULT_AO_BLUR_SIGMA, DEFAULT_AO_RADIUS};
 
+use crate::common::world::reconstruct;
+
 /// Depth and AO extent. A power of two keeps the pixel-centre UV exact.
 pub const W: u32 = 64;
 /// Depth and AO extent.
@@ -79,12 +81,6 @@ fn view_proj() -> glam::Mat4 {
     ortho_dx() * view
 }
 
-fn reconstruct(inv: glam::Mat4, uv: glam::Vec2, depth: f32) -> glam::Vec3 {
-    let ndc = glam::Vec4::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
-    let world = inv * ndc;
-    world.truncate() / world.w
-}
-
 fn project_uv(vp: glam::Mat4, point: glam::Vec3) -> glam::Vec2 {
     let clip = vp * point.extend(1.0);
     let w = clip.w.max(EPS);
@@ -136,23 +132,27 @@ fn radius_for_border(vp: glam::Mat4, plane_depth: f32) -> f32 {
     radius
 }
 
+/// Depth of one texel in the synthetic border scene.
+fn depth_at(x: u32, y: u32, plane: f32, step: f32, edge: f32) -> f32 {
+    if y + 1 == H {
+        edge
+    } else if x + 1 == W {
+        // Same surface as the left side, so the UV=1 tap is a hit
+        // a quarter-radius away. Depth 0 (an out-of-bounds load)
+        // reconstructs somewhere else.
+        plane
+    } else if x >= W / 2 {
+        step
+    } else {
+        plane
+    }
+}
+
 fn depth_image(plane: f32, step: f32, edge: f32) -> Vec<f32> {
     let mut depth = vec![plane; (W * H) as usize];
     for y in 0..H {
         for x in 0..W {
-            let value = if y + 1 == H {
-                edge
-            } else if x + 1 == W {
-                // Same surface as the left side, so the UV=1 tap is a hit
-                // a quarter-radius away. Depth 0 (an out-of-bounds load)
-                // reconstructs somewhere else.
-                plane
-            } else if x >= W / 2 {
-                step
-            } else {
-                plane
-            };
-            depth[(y * W + x) as usize] = value;
+            depth[(y * W + x) as usize] = depth_at(x, y, plane, step, edge);
         }
     }
     depth
@@ -313,4 +313,56 @@ fn border_step_lands_on_uv_one() {
     let index = (sample.x * W as f32) as u32;
     assert_eq!(index, W, "unclamped uv=1 is the out-of-bounds index");
     assert_eq!(index.min(W - 1), W - 1);
+}
+
+#[test]
+fn scaled_camera_reconstruction_divides_by_raw_w() {
+    let mut shot = local_shot();
+    shot.proj_scale = 1.0e7;
+    let vp = glam::Mat4::from_cols_array_2d(&shot.view_proj);
+    let inv = vp.inverse();
+    let uv = pixel_uv(0, 0);
+    let depth = shot.depth[0];
+    let expected = reconstruct(inv, uv, depth);
+    let scaled_inv = inv * shot.proj_scale.recip();
+    let raw = reconstruct(scaled_inv, uv, depth);
+    for (got, want) in raw.to_array().into_iter().zip(expected.to_array()) {
+        assert!(
+            (got - want).abs() <= 1.0e-5,
+            "raw w reconstruction {got} vs unscaled {want}"
+        );
+    }
+    let ndc = glam::Vec4::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
+    let view = scaled_inv * ndc;
+    assert!(
+        view.w.abs() < EPS && view.w > 0.0,
+        "scaled w should be in (0, EPS), got {}",
+        view.w
+    );
+    let clamped = view.truncate() / view.w.max(EPS);
+    let ratio = expected.length() / clamped.length();
+    assert!(
+        (ratio - 10.0).abs() < 0.05,
+        "clamping w to EPS should shrink the position ~10x, ratio {ratio}"
+    );
+
+    let negative_inv = inv * (-shot.proj_scale.recip());
+    let same = reconstruct(negative_inv, uv, depth);
+    for (got, want) in same.to_array().into_iter().zip(expected.to_array()) {
+        assert!(
+            (got - want).abs() <= 1.0e-5,
+            "a negative inverse scale still cancels in xyz/w, {got} vs {want}"
+        );
+    }
+    let neg_view = negative_inv * ndc;
+    assert!(
+        neg_view.w < 0.0 && neg_view.w.abs() < EPS,
+        "negative scale should make w < 0 and |w| < EPS, got {}",
+        neg_view.w
+    );
+    let neg_clamped = neg_view.truncate() / neg_view.w.max(EPS);
+    assert!(
+        neg_clamped.dot(same) < 0.0,
+        "max(w, EPS) flips the sign of a negative denominator"
+    );
 }

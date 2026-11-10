@@ -1,4 +1,3 @@
-// qual:allow(srp, file_length=360) reason: "one GTAO march: the horizon clamp, the vec2 IGN dot, and the raw homogeneous divide stay next to the slice loop"
 //! GTAO horizon march for the stable Rust to WGSL path.
 //!
 //! One fragment reads the fullscreen-quad UV, the g-buffer depth and

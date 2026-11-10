@@ -126,26 +126,50 @@ fn ssao_local_matches_master_wgsl() {
     assert_identical("ssao 1x local", &diff);
 }
 
-#[test]
-fn gtao_scaled_camera_matches_master_below_eps() {
+fn assert_scaled_raw_matches_master(method: AoMethod, multisampled: bool, label: &str) {
     let mut shot = scene::local_shot();
     // Reconstruction w scales by 1e-7, below the old `max(w, 1e-6)` guard.
     shot.proj_scale = 1.0e7;
-    let diff = raw_pair(&shot, AoMethod::Gtao, false);
+    let diff = raw_pair(&shot, method, multisampled);
     if diff.pixels == 0 {
         return;
     }
-    assert_identical("gtao scaled w", &diff);
+    assert_identical(label, &diff);
+}
+
+#[test]
+fn gtao_scaled_camera_matches_master_below_eps() {
+    assert_scaled_raw_matches_master(AoMethod::Gtao, false, "gtao scaled w");
+}
+
+#[test]
+fn ssao_scaled_camera_matches_master_below_eps() {
+    assert_scaled_raw_matches_master(AoMethod::Ssao, false, "ssao scaled w");
+}
+
+#[test]
+fn ssao_4x_scaled_camera_matches_master_below_eps() {
+    assert_scaled_raw_matches_master(AoMethod::Ssao, true, "ssao 4x scaled w");
+}
+
+fn assert_blur_matches_master(shot: &scene::Shot, label: &str) {
+    let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
+        return;
+    };
+    let raw = scene::ao_raw_rgba();
+    let master_px = pass::draw_blur(&device, &queue, shot, &master("blur", false), &raw);
+    let new_px = pass::draw_blur(&device, &queue, shot, &wgsl_source_blur(), &raw);
+    assert_identical(label, &scene::level_diff(&master_px, &new_px));
 }
 
 #[test]
 fn blur_border_matches_master_wgsl() {
-    let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
-        return;
-    };
-    let shot = scene::border_shot();
-    let raw = scene::ao_raw_rgba();
-    let master_px = pass::draw_blur(&device, &queue, &shot, &master("blur", false), &raw);
-    let new_px = pass::draw_blur(&device, &queue, &shot, &wgsl_source_blur(), &raw);
-    assert_identical("blur", &scene::level_diff(&master_px, &new_px));
+    assert_blur_matches_master(&scene::border_shot(), "blur");
+}
+
+#[test]
+fn blur_scaled_camera_matches_master_below_eps() {
+    let mut shot = scene::local_shot();
+    shot.proj_scale = 1.0e7;
+    assert_blur_matches_master(&shot, "blur scaled w");
 }

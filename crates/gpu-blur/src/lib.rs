@@ -22,6 +22,7 @@ use ornis_gpu_shader::exp;
 use ornis_gpu_shader::fragment_store;
 use ornis_gpu_shader::fragment_uv;
 use ornis_gpu_shader::gpu_entry;
+use ornis_gpu_shader::homogeneous_divide;
 use ornis_gpu_shader::length3;
 
 /// Host camera uniform: thirteen `vec4` columns.
@@ -66,8 +67,9 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
     let nx = uvx * 2.0 - 1.0;
     let ny = 1.0 - uvy * 2.0;
     let value = inv_view_lane::<LANE>(camera, nx, ny, depth);
-    let w = f32::max(inv_view_lane::<3>(camera, nx, ny, depth), EPS);
-    value / w
+    let w = inv_view_lane::<3>(camera, nx, ny, depth);
+    // Master divides by the raw homogeneous w, including w < EPS and w < 0.
+    homogeneous_divide(value, w)
 }
 
 /// Eye distance of the depth sample at `(uvx, uvy)`.

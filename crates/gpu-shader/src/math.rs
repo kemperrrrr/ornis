@@ -96,7 +96,6 @@ pub fn mix(start: f32, end: f32, factor: f32) -> f32 {
 /// `fma(ay, by, ax * bx)`, the contraction a `vec2` dot uses when the
 /// second lane is the fused addend. A scalar `ax * bx + ay * by` is the
 /// opposite contraction.
-// qual:allow(srp, max_parameters=4) reason: "four lanes of a vec2 dot, the same operands as the import"
 #[inline(always)]
 #[must_use]
 pub fn dot2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -108,6 +107,19 @@ pub fn dot2(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     {
         ay.mul_add(by, ax * bx)
     }
+}
+
+/// `value / w` with the sign and magnitude of `w` left unchanged.
+///
+/// The hand-written `reconstruct_world_pos` returns `view.xyz / view.w`.
+/// AO reconstruction divides by the raw homogeneous `w` the same way,
+/// including when `|w|` is below `1e-6` or `w` is negative. Clamping `w`
+/// up to `EPS` would move those reconstructions and would flip a negative
+/// denominator.
+#[inline(always)]
+#[must_use]
+pub fn homogeneous_divide(value: f32, w: f32) -> f32 {
+    value / w
 }
 
 /// Dot product of two scalar `vec3`s.

@@ -14,6 +14,8 @@
 pub mod gtao_cpu;
 /// Sized (non-square) render/readback helpers for the 320×180 gates.
 pub mod sized;
+/// Shared world-space reconstruction for AO CPU and parity tests.
+pub mod world;
 
 use glam::{Mat4, Quat, Vec3};
 use ornis_assets::scene::ShadowCast;

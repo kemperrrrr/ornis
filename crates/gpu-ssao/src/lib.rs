@@ -22,10 +22,12 @@ use ornis_gpu_shader::abs;
 use ornis_gpu_shader::clamp;
 use ornis_gpu_shader::cos;
 use ornis_gpu_shader::cross_lane;
+use ornis_gpu_shader::dot2;
 use ornis_gpu_shader::fract;
 use ornis_gpu_shader::fragment_store;
 use ornis_gpu_shader::fragment_uv;
 use ornis_gpu_shader::gpu_entry;
+use ornis_gpu_shader::homogeneous_divide;
 use ornis_gpu_shader::length3;
 use ornis_gpu_shader::normalize_lane;
 use ornis_gpu_shader::sin;
@@ -60,7 +62,7 @@ const GOLDEN_ANGLE: f32 = 2.399963;
 const TAPS: u32 = 8;
 /// Upward pull of the tap direction so the hemisphere never lies in the plane.
 const HEMISPHERE_Z: f32 = 0.75;
-/// `ao_interleaved_gradient` weights: 0.06711056, 0.00583715, 52.9829189.
+/// `ao_interleaved_gradient` weights: `dot(pixel, (x, y))` then `fract(z * fract(.))`.
 const HASH_X: f32 = 0.06711056;
 const HASH_Y: f32 = 0.00583715;
 const HASH_Z: f32 = 52.982_918;
@@ -92,8 +94,19 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
     let nx = uvx * 2.0 - 1.0;
     let ny = 1.0 - uvy * 2.0;
     let value = inv_view_lane::<LANE>(camera, nx, ny, depth);
-    let w = f32::max(inv_view_lane::<3>(camera, nx, ny, depth), EPS);
-    value / w
+    let w = inv_view_lane::<3>(camera, nx, ny, depth);
+    // Master divides by the raw homogeneous w, including w < EPS and w < 0.
+    homogeneous_divide(value, w)
+}
+
+/// Master's `fract(magic.z * fract(dot(vec2(pixel), magic.xy)))`.
+///
+/// The dot is the `vec2` builtin. A scalar `x * cx + y * cy` contracts in
+/// the opposite order and changes the tap angle.
+#[inline(always)]
+fn interleaved_gradient(pixel_x: u32, pixel_y: u32) -> f32 {
+    let dot = dot2(pixel_x as f32, pixel_y as f32, HASH_X, HASH_Y);
+    fract(HASH_Z * fract(dot))
 }
 
 /// Occlusion contributed by tap `index`.
@@ -229,7 +242,7 @@ pub fn fs_main(
     let bx = cross_lane::<0>(nnx, nny, nnz, tx, ty, tz);
     let by = cross_lane::<1>(nnx, nny, nnz, tx, ty, tz);
     let bz = cross_lane::<2>(nnx, nny, nnz, tx, ty, tz);
-    let hash = fract(HASH_Z * fract((xi as f32) * HASH_X + (yi as f32) * HASH_Y));
+    let hash = interleaved_gradient(xi, yi);
     let angle = hash * TURN;
     let cos_a = cos(angle);
     let sin_a = sin(angle);
