@@ -159,6 +159,9 @@ fn tap(
     if suv_x < 0.0 || suv_x > 1.0 || suv_y < 0.0 || suv_y > 1.0 {
         return 0.0;
     }
+    // Master loads `vec2<u32>(suv * dims)` with no min. `suv == 1` passes
+    // the `> 1` rejection, so the index is `dim` and the load is out of
+    // bounds on both shaders. Clamping to the last texel would diverge.
     let sx = (suv_x * dims_x) as u32;
     let sy = (suv_y * dims_y) as u32;
     let sample_depth = depth_tex.load(sx, sy);

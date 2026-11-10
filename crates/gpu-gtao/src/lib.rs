@@ -1,3 +1,4 @@
+// qual:allow(srp, file_length=340) reason: "the horizon texel clamp belongs in this march; the master min(u32(uv * dims), dims - 1) formula is the load the rest of the kernel samples"
 //! GTAO horizon march for the stable Rust to WGSL path.
 //!
 //! One fragment reads the fullscreen-quad UV, the g-buffer depth and
@@ -89,6 +90,23 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
 }
 
 #[inline(always)]
+fn min_u32(a: u32, b: u32) -> u32 {
+    if a < b { a } else { b }
+}
+
+/// Texel index of `uv` in a texture of `dim` texels.
+///
+/// `uv == 1` truncates to `dim`, one past the last texel. The hand-written
+/// `gtao_horizon_cos` clamps with `min(u32(uv * dims), dims - 1)` so the
+/// load reads that edge texel. An unclamped `textureLoad` is out of bounds;
+/// a backend zero is not the last texel.
+#[inline(always)]
+#[must_use]
+pub fn clamped_texel(uv: f32, dim: f32) -> u32 {
+    min_u32((uv * dim) as u32, (dim - 1.0) as u32)
+}
+
+#[inline(always)]
 // qual:allow(srp, max_parameters=14) reason: "one horizon tap; the closed form is the XeGTAO sample and the resources stay arguments so the body does not restate bindings"
 // A struct here would need layout lowering the translator does not need for
 // inlined helpers; the kernel keeps one flat signature like the WGSL.
@@ -111,8 +129,8 @@ fn horizon(
 ) -> f32 {
     let mut cos_h = -1.0f32;
     if uvx >= 0.0 && uvy >= 0.0 && uvx <= 1.0 && uvy <= 1.0 {
-        let x = (uvx * dims_x) as u32;
-        let y = (uvy * dims_y) as u32;
+        let x = clamped_texel(uvx, dims_x);
+        let y = clamped_texel(uvy, dims_y);
         let sample_depth = depth_tex.load(x, y);
         if sample_depth < CLEAR_DEPTH {
             let sx = world_lane::<0>(camera, uvx, uvy, sample_depth);

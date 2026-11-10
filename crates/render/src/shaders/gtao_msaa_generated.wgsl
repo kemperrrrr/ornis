@@ -35,11 +35,11 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
     var fragment_out: vec4<f32>;
     var cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
     var cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_: f32;
-    var visibility_u002e_sroa_u002e_0_u002e_0565_: f32;
-    var slice_u002e_sroa_u002e_0_u002e_0564_: u32;
-    var horizon_pos_u002e_sroa_u002e_0_u002e_0563_: f32;
-    var horizon_neg_u002e_sroa_u002e_0_u002e_0562_: f32;
-    var step_u002e_sroa_u002e_0_u002e_0561_: u32;
+    var visibility_u002e_sroa_u002e_0_u002e_0577_: f32;
+    var slice_u002e_sroa_u002e_0_u002e_0576_: u32;
+    var horizon_pos_u002e_sroa_u002e_0_u002e_0575_: f32;
+    var horizon_neg_u002e_sroa_u002e_0_u002e_0574_: f32;
+    var step_u002e_sroa_u002e_0_u002e_0573_: u32;
     var out_u002e_17_: f32;
     var out_u002e_22_: f32;
     var out_u002e_26_: f32;
@@ -173,73 +173,73 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
         let _e634 = uniform_struct_0_2_.f2_.w;
         let _e640 = uniform_struct_0_2_.f3_.w;
         let _e643 = max((_e640 + (((_e571 * _e623) + (_e573 * _e628)) + (_e575 * _e634))), 0.000001f);
-        visibility_u002e_sroa_u002e_0_u002e_0565_ = 0f;
-        slice_u002e_sroa_u002e_0_u002e_0564_ = 0u;
+        visibility_u002e_sroa_u002e_0_u002e_0577_ = 0f;
+        slice_u002e_sroa_u002e_0_u002e_0576_ = 0u;
         loop {
-            let _e682 = visibility_u002e_sroa_u002e_0_u002e_0565_;
-            let _e684 = slice_u002e_sroa_u002e_0_u002e_0564_;
-            let _e688 = ((fract((fract(((f32(_e15) * 0.06711056f) + (f32(_e17) * 0.00583715f))) * 52.982918f)) * 3.1415927f) + (f32(_e684) * 1.5707964f));
-            let _e689 = cos(_e688);
-            let _e690 = sin(_e688);
-            let _e693 = ((normalize(vec3<f32>(_e538, _e539, _e540)).x * _e689) + (normalize(vec3<f32>(_e550, _e553, _e554)).x * _e690));
-            let _e696 = ((normalize(vec3<f32>(_e538, _e539, _e540)).y * _e689) + (normalize(vec3<f32>(_e550, _e553, _e554)).y * _e690));
-            let _e699 = ((normalize(vec3<f32>(_e538, _e539, _e540)).z * _e689) + (normalize(vec3<f32>(_e550, _e553, _e554)).z * _e690));
-            let _e714 = (cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).x + 0.000001f);
-            let _e734 = dot(vec3<f32>(normalize(vec3<f32>(_e54, _e59, _e45)).x, normalize(vec3<f32>(_e54, _e59, _e45)).y, normalize(vec3<f32>(_e54, _e59, _e45)).z), vec3<f32>(normalize(vec3<f32>(_e714, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).z)).x, normalize(vec3<f32>(_e714, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).z)).y, normalize(vec3<f32>(_e714, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).z)).z));
-            let _e736 = (normalize(vec3<f32>(_e54, _e59, _e45)).x - (normalize(vec3<f32>(_e714, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).z)).x * _e734));
-            let _e738 = (normalize(vec3<f32>(_e54, _e59, _e45)).y - (normalize(vec3<f32>(_e714, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).z)).y * _e734));
-            let _e740 = (normalize(vec3<f32>(_e54, _e59, _e45)).z - (normalize(vec3<f32>(_e714, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e237, _e238, _e239)).z)).z * _e734));
-            let _e744 = max(length(vec3<f32>(_e736, _e738, _e740)), 0.000001f);
-            let _e757 = (sign(dot(vec3<f32>(normalize(vec3<f32>(_e693, _e696, _e699)).x, normalize(vec3<f32>(_e693, _e696, _e699)).y, normalize(vec3<f32>(_e693, _e696, _e699)).z), vec3<f32>(_e736, _e738, _e740))) * acos(clamp((dot(vec3<f32>(_e736, _e738, _e740), vec3<f32>(_e237, _e238, _e239)) / _e744), 0f, 1f)));
-            let _e760 = cos((_e757 + 1.5707964f));
-            let _e763 = cos((_e757 + -1.5707964f));
-            horizon_pos_u002e_sroa_u002e_0_u002e_0563_ = _e760;
-            horizon_neg_u002e_sroa_u002e_0_u002e_0562_ = _e763;
-            step_u002e_sroa_u002e_0_u002e_0561_ = 1u;
+            let _e694 = visibility_u002e_sroa_u002e_0_u002e_0577_;
+            let _e696 = slice_u002e_sroa_u002e_0_u002e_0576_;
+            let _e700 = ((fract((fract(((f32(_e15) * 0.06711056f) + (f32(_e17) * 0.00583715f))) * 52.982918f)) * 3.1415927f) + (f32(_e696) * 1.5707964f));
+            let _e701 = cos(_e700);
+            let _e702 = sin(_e700);
+            let _e705 = ((normalize(vec3<f32>(_e538, _e539, _e540)).x * _e701) + (normalize(vec3<f32>(_e550, _e553, _e554)).x * _e702));
+            let _e708 = ((normalize(vec3<f32>(_e538, _e539, _e540)).y * _e701) + (normalize(vec3<f32>(_e550, _e553, _e554)).y * _e702));
+            let _e711 = ((normalize(vec3<f32>(_e538, _e539, _e540)).z * _e701) + (normalize(vec3<f32>(_e550, _e553, _e554)).z * _e702));
+            let _e726 = (cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).x + 0.000001f);
+            let _e746 = dot(vec3<f32>(normalize(vec3<f32>(_e54, _e59, _e45)).x, normalize(vec3<f32>(_e54, _e59, _e45)).y, normalize(vec3<f32>(_e54, _e59, _e45)).z), vec3<f32>(normalize(vec3<f32>(_e726, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).z)).x, normalize(vec3<f32>(_e726, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).z)).y, normalize(vec3<f32>(_e726, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).z)).z));
+            let _e748 = (normalize(vec3<f32>(_e54, _e59, _e45)).x - (normalize(vec3<f32>(_e726, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).z)).x * _e746));
+            let _e750 = (normalize(vec3<f32>(_e54, _e59, _e45)).y - (normalize(vec3<f32>(_e726, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).z)).y * _e746));
+            let _e752 = (normalize(vec3<f32>(_e54, _e59, _e45)).z - (normalize(vec3<f32>(_e726, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).y, cross(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e237, _e238, _e239)).z)).z * _e746));
+            let _e756 = max(length(vec3<f32>(_e748, _e750, _e752)), 0.000001f);
+            let _e769 = (sign(dot(vec3<f32>(normalize(vec3<f32>(_e705, _e708, _e711)).x, normalize(vec3<f32>(_e705, _e708, _e711)).y, normalize(vec3<f32>(_e705, _e708, _e711)).z), vec3<f32>(_e748, _e750, _e752))) * acos(clamp((dot(vec3<f32>(_e748, _e750, _e752), vec3<f32>(_e237, _e238, _e239)) / _e756), 0f, 1f)));
+            let _e772 = cos((_e769 + 1.5707964f));
+            let _e775 = cos((_e769 + -1.5707964f));
+            horizon_pos_u002e_sroa_u002e_0_u002e_0575_ = _e772;
+            horizon_neg_u002e_sroa_u002e_0_u002e_0574_ = _e775;
+            step_u002e_sroa_u002e_0_u002e_0573_ = 1u;
             loop {
-                let _e769 = horizon_pos_u002e_sroa_u002e_0_u002e_0563_;
-                let _e771 = horizon_neg_u002e_sroa_u002e_0_u002e_0562_;
-                let _e773 = step_u002e_sroa_u002e_0_u002e_0561_;
-                let _e777 = ((max(length(vec3<f32>((((((_e596 + (((_e579 * _e571) + (_e573 * _e584)) + (_e575 * _e590))) / _e643) * 0.5f) + 0.5f) - uv.x), ((0.5f - (((_e618 + (((_e571 * _e601) + (_e573 * _e606)) + (_e575 * _e612))) / _e643) * 0.5f)) - uv.y), 0f)), _e241) * f32(_e773)) * 0.25f);
-                let _e778 = (_e689 * _e777);
-                let _e779 = (_e690 * _e777);
-                let _e780 = (uv.x + _e778);
-                let _e781 = (uv.y + _e779);
-                if ((_e781 <= 1f) & ((_e780 <= 1f) & ((_e780 >= 0f) & (_e781 >= 0f)))) {
-                    let _e802 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(u32((_e780 * _e8))), bitcast<i32>(u32((_e781 * _e13)))), 0u);
-                    if (_e802 < 1f) {
-                        let _e808 = ((_e780 * 2f) + -1f);
-                        let _e812 = (1f - (_e781 * 2f));
-                        let _e816 = uniform_struct_0_2_.f4_.x;
-                        let _e821 = uniform_struct_0_2_.f5_.x;
-                        let _e827 = uniform_struct_0_2_.f6_.x;
-                        let _e833 = uniform_struct_0_2_.f7_.x;
-                        let _e838 = uniform_struct_0_2_.f4_.w;
-                        let _e843 = uniform_struct_0_2_.f5_.w;
-                        let _e849 = uniform_struct_0_2_.f6_.w;
-                        let _e855 = uniform_struct_0_2_.f7_.w;
-                        let _e863 = uniform_struct_0_2_.f4_.y;
-                        let _e868 = uniform_struct_0_2_.f5_.y;
-                        let _e874 = uniform_struct_0_2_.f6_.y;
-                        let _e880 = uniform_struct_0_2_.f7_.y;
-                        let _e885 = uniform_struct_0_2_.f4_.w;
-                        let _e890 = uniform_struct_0_2_.f5_.w;
-                        let _e896 = uniform_struct_0_2_.f6_.w;
-                        let _e902 = uniform_struct_0_2_.f7_.w;
-                        let _e910 = uniform_struct_0_2_.f4_.z;
-                        let _e915 = uniform_struct_0_2_.f5_.z;
-                        let _e921 = uniform_struct_0_2_.f6_.z;
-                        let _e927 = uniform_struct_0_2_.f7_.z;
-                        let _e932 = uniform_struct_0_2_.f4_.w;
-                        let _e937 = uniform_struct_0_2_.f5_.w;
-                        let _e943 = uniform_struct_0_2_.f6_.w;
-                        let _e949 = uniform_struct_0_2_.f7_.w;
-                        let _e954 = (((_e833 + (((_e808 * _e816) + (_e812 * _e821)) + (_e802 * _e827))) / max((_e855 + (((_e808 * _e838) + (_e812 * _e843)) + (_e802 * _e849))), 0.000001f)) - _e123);
-                        let _e955 = (((_e880 + (((_e808 * _e863) + (_e812 * _e868)) + (_e802 * _e874))) / max((_e902 + (((_e808 * _e885) + (_e812 * _e890)) + (_e802 * _e896))), 0.000001f)) - _e170);
-                        let _e956 = (((_e927 + (((_e808 * _e910) + (_e812 * _e915)) + (_e802 * _e921))) / max((_e949 + (((_e808 * _e932) + (_e812 * _e937)) + (_e802 * _e943))), 0.000001f)) - _e217);
-                        let _e958 = length(vec3<f32>(_e954, _e955, _e956));
-                        if ((_e958 > 0.000001f) & (_e958 < _e566)) {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_ = mix(_e760, dot(vec3<f32>((_e954 / _e958), (_e955 / _e958), (_e956 / _e958)), vec3<f32>(_e237, _e238, _e239)), clamp((1f - (_e958 / max(_e566, 0.000001f))), 0f, 1f));
+                let _e781 = horizon_pos_u002e_sroa_u002e_0_u002e_0575_;
+                let _e783 = horizon_neg_u002e_sroa_u002e_0_u002e_0574_;
+                let _e785 = step_u002e_sroa_u002e_0_u002e_0573_;
+                let _e789 = ((max(length(vec3<f32>((((((_e596 + (((_e579 * _e571) + (_e573 * _e584)) + (_e575 * _e590))) / _e643) * 0.5f) + 0.5f) - uv.x), ((0.5f - (((_e618 + (((_e571 * _e601) + (_e573 * _e606)) + (_e575 * _e612))) / _e643) * 0.5f)) - uv.y), 0f)), _e241) * f32(_e785)) * 0.25f);
+                let _e790 = (_e701 * _e789);
+                let _e791 = (_e702 * _e789);
+                let _e792 = (uv.x + _e790);
+                let _e793 = (uv.y + _e791);
+                if ((_e793 <= 1f) & ((_e792 <= 1f) & ((_e792 >= 0f) & (_e793 >= 0f)))) {
+                    let _e816 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(min(u32((_e792 * _e8)), u32((_e8 + -1f)))), bitcast<i32>(min(u32((_e793 * _e13)), u32((_e13 + -1f))))), 0u);
+                    if (_e816 < 1f) {
+                        let _e822 = ((_e792 * 2f) + -1f);
+                        let _e826 = (1f - (_e793 * 2f));
+                        let _e830 = uniform_struct_0_2_.f4_.x;
+                        let _e835 = uniform_struct_0_2_.f5_.x;
+                        let _e841 = uniform_struct_0_2_.f6_.x;
+                        let _e847 = uniform_struct_0_2_.f7_.x;
+                        let _e852 = uniform_struct_0_2_.f4_.w;
+                        let _e857 = uniform_struct_0_2_.f5_.w;
+                        let _e863 = uniform_struct_0_2_.f6_.w;
+                        let _e869 = uniform_struct_0_2_.f7_.w;
+                        let _e877 = uniform_struct_0_2_.f4_.y;
+                        let _e882 = uniform_struct_0_2_.f5_.y;
+                        let _e888 = uniform_struct_0_2_.f6_.y;
+                        let _e894 = uniform_struct_0_2_.f7_.y;
+                        let _e899 = uniform_struct_0_2_.f4_.w;
+                        let _e904 = uniform_struct_0_2_.f5_.w;
+                        let _e910 = uniform_struct_0_2_.f6_.w;
+                        let _e916 = uniform_struct_0_2_.f7_.w;
+                        let _e924 = uniform_struct_0_2_.f4_.z;
+                        let _e929 = uniform_struct_0_2_.f5_.z;
+                        let _e935 = uniform_struct_0_2_.f6_.z;
+                        let _e941 = uniform_struct_0_2_.f7_.z;
+                        let _e946 = uniform_struct_0_2_.f4_.w;
+                        let _e951 = uniform_struct_0_2_.f5_.w;
+                        let _e957 = uniform_struct_0_2_.f6_.w;
+                        let _e963 = uniform_struct_0_2_.f7_.w;
+                        let _e968 = (((_e847 + (((_e822 * _e830) + (_e826 * _e835)) + (_e816 * _e841))) / max((_e869 + (((_e822 * _e852) + (_e826 * _e857)) + (_e816 * _e863))), 0.000001f)) - _e123);
+                        let _e969 = (((_e894 + (((_e822 * _e877) + (_e826 * _e882)) + (_e816 * _e888))) / max((_e916 + (((_e822 * _e899) + (_e826 * _e904)) + (_e816 * _e910))), 0.000001f)) - _e170);
+                        let _e970 = (((_e941 + (((_e822 * _e924) + (_e826 * _e929)) + (_e816 * _e935))) / max((_e963 + (((_e822 * _e946) + (_e826 * _e951)) + (_e816 * _e957))), 0.000001f)) - _e217);
+                        let _e972 = length(vec3<f32>(_e968, _e969, _e970));
+                        if ((_e972 > 0.000001f) & (_e972 < _e566)) {
+                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_ = mix(_e772, dot(vec3<f32>((_e968 / _e972), (_e969 / _e972), (_e970 / _e972)), vec3<f32>(_e237, _e238, _e239)), clamp((1f - (_e972 / max(_e566, 0.000001f))), 0f, 1f));
                         } else {
                             cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_ = -1f;
                         }
@@ -249,46 +249,46 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                 } else {
                     cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_ = -1f;
                 }
-                let _e984 = cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_;
-                let _e985 = max(_e769, _e984);
-                out_u002e_22_ = _e985;
-                let _e987 = (uv.x - _e778);
-                let _e988 = (uv.y - _e779);
-                if ((_e988 <= 1f) & ((_e987 <= 1f) & ((_e987 >= 0f) & (_e988 >= 0f)))) {
-                    let _e1009 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(u32((_e987 * _e8))), bitcast<i32>(u32((_e988 * _e13)))), 0u);
-                    if (_e1009 < 1f) {
-                        let _e1015 = ((_e987 * 2f) + -1f);
-                        let _e1019 = (1f - (_e988 * 2f));
-                        let _e1023 = uniform_struct_0_2_.f4_.x;
-                        let _e1028 = uniform_struct_0_2_.f5_.x;
-                        let _e1034 = uniform_struct_0_2_.f6_.x;
-                        let _e1040 = uniform_struct_0_2_.f7_.x;
-                        let _e1045 = uniform_struct_0_2_.f4_.w;
-                        let _e1050 = uniform_struct_0_2_.f5_.w;
-                        let _e1056 = uniform_struct_0_2_.f6_.w;
-                        let _e1062 = uniform_struct_0_2_.f7_.w;
-                        let _e1070 = uniform_struct_0_2_.f4_.y;
-                        let _e1075 = uniform_struct_0_2_.f5_.y;
-                        let _e1081 = uniform_struct_0_2_.f6_.y;
-                        let _e1087 = uniform_struct_0_2_.f7_.y;
-                        let _e1092 = uniform_struct_0_2_.f4_.w;
-                        let _e1097 = uniform_struct_0_2_.f5_.w;
-                        let _e1103 = uniform_struct_0_2_.f6_.w;
-                        let _e1109 = uniform_struct_0_2_.f7_.w;
-                        let _e1117 = uniform_struct_0_2_.f4_.z;
-                        let _e1122 = uniform_struct_0_2_.f5_.z;
-                        let _e1128 = uniform_struct_0_2_.f6_.z;
-                        let _e1134 = uniform_struct_0_2_.f7_.z;
-                        let _e1139 = uniform_struct_0_2_.f4_.w;
-                        let _e1144 = uniform_struct_0_2_.f5_.w;
-                        let _e1150 = uniform_struct_0_2_.f6_.w;
-                        let _e1156 = uniform_struct_0_2_.f7_.w;
-                        let _e1161 = (((_e1040 + (((_e1015 * _e1023) + (_e1019 * _e1028)) + (_e1009 * _e1034))) / max((_e1062 + (((_e1015 * _e1045) + (_e1019 * _e1050)) + (_e1009 * _e1056))), 0.000001f)) - _e123);
-                        let _e1162 = (((_e1087 + (((_e1015 * _e1070) + (_e1019 * _e1075)) + (_e1009 * _e1081))) / max((_e1109 + (((_e1015 * _e1092) + (_e1019 * _e1097)) + (_e1009 * _e1103))), 0.000001f)) - _e170);
-                        let _e1163 = (((_e1134 + (((_e1015 * _e1117) + (_e1019 * _e1122)) + (_e1009 * _e1128))) / max((_e1156 + (((_e1015 * _e1139) + (_e1019 * _e1144)) + (_e1009 * _e1150))), 0.000001f)) - _e217);
-                        let _e1165 = length(vec3<f32>(_e1161, _e1162, _e1163));
-                        if ((_e1165 > 0.000001f) & (_e1165 < _e566)) {
-                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = mix(_e763, dot(vec3<f32>((_e1161 / _e1165), (_e1162 / _e1165), (_e1163 / _e1165)), vec3<f32>(_e237, _e238, _e239)), clamp((1f - (_e1165 / max(_e566, 0.000001f))), 0f, 1f));
+                let _e998 = cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i415_;
+                let _e999 = max(_e781, _e998);
+                out_u002e_22_ = _e999;
+                let _e1001 = (uv.x - _e790);
+                let _e1002 = (uv.y - _e791);
+                if ((_e1002 <= 1f) & ((_e1001 <= 1f) & ((_e1001 >= 0f) & (_e1002 >= 0f)))) {
+                    let _e1025 = textureLoad(tex_0_0_, vec2<i32>(bitcast<i32>(min(u32((_e1001 * _e8)), u32((_e8 + -1f)))), bitcast<i32>(min(u32((_e1002 * _e13)), u32((_e13 + -1f))))), 0u);
+                    if (_e1025 < 1f) {
+                        let _e1031 = ((_e1001 * 2f) + -1f);
+                        let _e1035 = (1f - (_e1002 * 2f));
+                        let _e1039 = uniform_struct_0_2_.f4_.x;
+                        let _e1044 = uniform_struct_0_2_.f5_.x;
+                        let _e1050 = uniform_struct_0_2_.f6_.x;
+                        let _e1056 = uniform_struct_0_2_.f7_.x;
+                        let _e1061 = uniform_struct_0_2_.f4_.w;
+                        let _e1066 = uniform_struct_0_2_.f5_.w;
+                        let _e1072 = uniform_struct_0_2_.f6_.w;
+                        let _e1078 = uniform_struct_0_2_.f7_.w;
+                        let _e1086 = uniform_struct_0_2_.f4_.y;
+                        let _e1091 = uniform_struct_0_2_.f5_.y;
+                        let _e1097 = uniform_struct_0_2_.f6_.y;
+                        let _e1103 = uniform_struct_0_2_.f7_.y;
+                        let _e1108 = uniform_struct_0_2_.f4_.w;
+                        let _e1113 = uniform_struct_0_2_.f5_.w;
+                        let _e1119 = uniform_struct_0_2_.f6_.w;
+                        let _e1125 = uniform_struct_0_2_.f7_.w;
+                        let _e1133 = uniform_struct_0_2_.f4_.z;
+                        let _e1138 = uniform_struct_0_2_.f5_.z;
+                        let _e1144 = uniform_struct_0_2_.f6_.z;
+                        let _e1150 = uniform_struct_0_2_.f7_.z;
+                        let _e1155 = uniform_struct_0_2_.f4_.w;
+                        let _e1160 = uniform_struct_0_2_.f5_.w;
+                        let _e1166 = uniform_struct_0_2_.f6_.w;
+                        let _e1172 = uniform_struct_0_2_.f7_.w;
+                        let _e1177 = (((_e1056 + (((_e1031 * _e1039) + (_e1035 * _e1044)) + (_e1025 * _e1050))) / max((_e1078 + (((_e1031 * _e1061) + (_e1035 * _e1066)) + (_e1025 * _e1072))), 0.000001f)) - _e123);
+                        let _e1178 = (((_e1103 + (((_e1031 * _e1086) + (_e1035 * _e1091)) + (_e1025 * _e1097))) / max((_e1125 + (((_e1031 * _e1108) + (_e1035 * _e1113)) + (_e1025 * _e1119))), 0.000001f)) - _e170);
+                        let _e1179 = (((_e1150 + (((_e1031 * _e1133) + (_e1035 * _e1138)) + (_e1025 * _e1144))) / max((_e1172 + (((_e1031 * _e1155) + (_e1035 * _e1160)) + (_e1025 * _e1166))), 0.000001f)) - _e217);
+                        let _e1181 = length(vec3<f32>(_e1177, _e1178, _e1179));
+                        if ((_e1181 > 0.000001f) & (_e1181 < _e566)) {
+                            cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = mix(_e775, dot(vec3<f32>((_e1177 / _e1181), (_e1178 / _e1181), (_e1179 / _e1181)), vec3<f32>(_e237, _e238, _e239)), clamp((1f - (_e1181 / max(_e566, 0.000001f))), 0f, 1f));
                         } else {
                             cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = -1f;
                         }
@@ -298,39 +298,39 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
                 } else {
                     cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i = -1f;
                 }
-                let _e1191 = cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i;
-                let _e1192 = max(_e771, _e1191);
-                out_u002e_26_ = _e1192;
-                let _e1195 = (_e773 + 1u);
-                if (_e1195 == 5u) {
+                let _e1207 = cos_h_u002e_sroa_u002e_0_u002e_0_u002e_i;
+                let _e1208 = max(_e783, _e1207);
+                out_u002e_26_ = _e1208;
+                let _e1211 = (_e785 + 1u);
+                if (_e1211 == 5u) {
                     break;
                 } else {
-                    horizon_pos_u002e_sroa_u002e_0_u002e_0563_ = _e985;
-                    horizon_neg_u002e_sroa_u002e_0_u002e_0562_ = _e1192;
-                    step_u002e_sroa_u002e_0_u002e_0561_ = _e1195;
+                    horizon_pos_u002e_sroa_u002e_0_u002e_0575_ = _e999;
+                    horizon_neg_u002e_sroa_u002e_0_u002e_0574_ = _e1208;
+                    step_u002e_sroa_u002e_0_u002e_0573_ = _e1211;
                     continue;
                 }
             }
-            let _e1204 = out_u002e_22_;
-            let _e1206 = out_u002e_26_;
-            let _e1216 = (acos(clamp(_e1204, -1f, 1f)) * 2f);
-            let _e1227 = (acos(clamp(_e1206, -1f, 1f)) * -2f);
-            let _e1239 = (_e682 + (_e744 * ((((cos(_e757) - cos((_e1216 - _e757))) + (_e1216 * sin(_e757))) * 0.25f) + (((cos(_e757) - cos((_e1227 - _e757))) + (_e1227 * sin(_e757))) * 0.25f))));
-            out_u002e_17_ = _e1239;
-            if (_e684 == 0u) {
-                visibility_u002e_sroa_u002e_0_u002e_0565_ = _e1239;
-                slice_u002e_sroa_u002e_0_u002e_0564_ = (_e684 + 1u);
+            let _e1220 = out_u002e_22_;
+            let _e1222 = out_u002e_26_;
+            let _e1232 = (acos(clamp(_e1220, -1f, 1f)) * 2f);
+            let _e1243 = (acos(clamp(_e1222, -1f, 1f)) * -2f);
+            let _e1255 = (_e694 + (_e756 * ((((cos(_e769) - cos((_e1232 - _e769))) + (_e1232 * sin(_e769))) * 0.25f) + (((cos(_e769) - cos((_e1243 - _e769))) + (_e1243 * sin(_e769))) * 0.25f))));
+            out_u002e_17_ = _e1255;
+            if (_e696 == 0u) {
+                visibility_u002e_sroa_u002e_0_u002e_0577_ = _e1255;
+                slice_u002e_sroa_u002e_0_u002e_0576_ = (_e696 + 1u);
                 continue;
             } else {
                 break;
             }
         }
-        let _e1248 = out_u002e_17_;
-        let _e1255 = clamp(mix(1f, (_e1248 * 0.5f), _e569), 0f, 1f);
-        fragment_out = vec4<f32>(_e1255, _e1255, _e1255, 1f);
+        let _e1264 = out_u002e_17_;
+        let _e1271 = clamp(mix(1f, (_e1264 * 0.5f), _e569), 0f, 1f);
+        fragment_out = vec4<f32>(_e1271, _e1271, _e1271, 1f);
     } else {
         fragment_out = vec4<f32>(1f, 1f, 1f, 1f);
     }
-    let _e1266 = fragment_out;
-    return _e1266;
+    let _e1282 = fragment_out;
+    return _e1282;
 }

@@ -261,6 +261,25 @@ mod tests {
     }
 
     #[test]
+    fn gtao_horizon_clamps_the_edge_texel() {
+        for (label, source) in [
+            ("gtao", wgsl_source_raw(AoMethod::Gtao)),
+            ("gtao-4x", wgsl_source_raw_for_samples(AoMethod::Gtao, 4)),
+        ] {
+            assert!(
+                source.contains("min(u32("),
+                "{label} must clamp uv=1 to the last texel, like master min(u32(uv * dims), dims - 1)"
+            );
+        }
+        // Master SSAO has no such min: `suv == 1` stays an out-of-bounds index.
+        let ssao = wgsl_source_raw(AoMethod::Ssao);
+        assert!(
+            !ssao.contains("min(u32("),
+            "ssao must keep master's unclamped tap index: {ssao}"
+        );
+    }
+
+    #[test]
     fn ao_blur_is_depth_aware() {
         let blur = wgsl_source_blur();
         assert!(blur.contains("textureSampleLevel("), "{blur}");
