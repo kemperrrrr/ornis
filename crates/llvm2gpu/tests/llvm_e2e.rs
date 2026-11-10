@@ -195,6 +195,96 @@ fn signed_integer_ops_match_the_cpu_on_gpu() {
     }
 }
 
+/// Build runtime operands for the four-lane harness. Exceptional integer
+/// divisions are legal WGSL at runtime but rejected as constant expressions.
+fn integer_div_rem_ir(op: &str, numerators: [i32; 4], divisors: [i32; 4]) -> String {
+    let mut ir = String::from("define float @cs_main(i32 %id) {\nstart:\n");
+    ir.push_str(&format!(
+        "  %a0 = add i32 %id, {}\n  %b0 = add i32 %id, {}\n",
+        numerators[0], divisors[0]
+    ));
+    // Override every lane, including lane 0, so operands remain runtime SSA
+    // values without relying on arithmetic to synthesize zero or INT_MIN.
+    let mut a = String::from("%a0");
+    let mut b = String::from("%b0");
+    for lane in 0..4 {
+        ir.push_str(&format!(
+            "  %lane{lane} = icmp eq i32 %id, {lane}\n  %a{lane}_selected = select i1 %lane{lane}, i32 {}, i32 {a}\n  %b{lane}_selected = select i1 %lane{lane}, i32 {}, i32 {b}\n",
+            numerators[lane], divisors[lane]
+        ));
+        a = format!("%a{lane}_selected");
+        b = format!("%b{lane}_selected");
+    }
+    let cast = if op.starts_with('s') {
+        "sitofp"
+    } else {
+        "uitofp"
+    };
+    ir.push_str(&format!(
+        "  %result = {op} i32 {a}, {b}\n  %out = {cast} i32 %result to float\n  ret float %out\n}}\n"
+    ));
+    ir
+}
+
+/// LLVM leaves zero divisors and signed division overflow undefined. The
+/// translator deliberately emits WGSL operators: quotient is the numerator
+/// for zero/overflow, remainder is zero, not Rust's panicking `/` or `%`.
+#[test]
+fn signed_div_rem_corner_cases_match_wgsl_on_gpu() {
+    for (numerators, divisors) in [
+        ([i32::MIN, -7, 0, 7], [-1, 0, 0, 0]),
+        ([i32::MIN, -7, 7, -7], [1, 2, -2, -2]),
+    ] {
+        for op in ["sdiv", "srem"] {
+            let translated = translate(&integer_div_rem_ir(op, numerators, divisors))
+                .expect("signed corner cases lower to WGSL");
+            assert!(
+                translated.wgsl.contains("bitcast<i32>"),
+                "{}",
+                translated.wgsl
+            );
+            let operator = if op == "sdiv" { " / " } else { " % " };
+            assert!(translated.wgsl.contains(operator), "{}", translated.wgsl);
+            let Some(outputs) = gpu_outputs(&translated) else {
+                return;
+            };
+            for (lane, actual) in outputs.iter().enumerate() {
+                let (a, b) = (numerators[lane], divisors[lane]);
+                let expected = if op == "sdiv" {
+                    a.checked_div(b).unwrap_or(a)
+                } else {
+                    a.checked_rem(b).unwrap_or(0)
+                } as f32;
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "lane {lane}: {op} {a}, {b}: GPU {actual}, WGSL {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unsigned_div_rem_by_zero_matches_wgsl_on_gpu() {
+    let numerators = [0, 1, 7, 65535];
+    for op in ["udiv", "urem"] {
+        let translated = translate(&integer_div_rem_ir(op, numerators, [0; 4]))
+            .expect("unsigned zero divisors lower to WGSL");
+        let Some(outputs) = gpu_outputs(&translated) else {
+            return;
+        };
+        for (lane, actual) in outputs.iter().enumerate() {
+            let expected = if op == "udiv" { numerators[lane] } else { 0 } as f32;
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "lane {lane}: {op} by zero: GPU {actual}, WGSL {expected}"
+            );
+        }
+    }
+}
+
 /// Encode nine comparison results into one bit mask (bits 0..8).
 fn compare_mask_ir(operands: &str) -> String {
     let mut ir = String::from(
@@ -283,6 +373,36 @@ merge:
         translate(ir).is_err(),
         "a barrier only some invocations reach must be rejected"
     );
+}
+
+#[test]
+fn barrier_after_a_nonuniform_return_is_rejected() {
+    for (true_label, false_label) in [("early", "merge"), ("merge", "early")] {
+        let ir = format!(
+            r#"
+declare void @workgroup_barrier()
+define void @cs_main(i32 %id) {{
+start:
+  %lt = icmp ult i32 %id, 3
+  br i1 %lt, label %{true_label}, label %{false_label}
+early:
+  ret void
+merge:
+  call void @workgroup_barrier()
+  ret void
+}}
+"#
+        );
+        let without_barrier = ir.replace("  call void @workgroup_barrier()", "");
+        translate(&without_barrier).expect("the early-return CFG itself is supported");
+        assert!(
+            matches!(
+                translate(&ir),
+                Err(ornis_llvm2gpu::TranslateError::Unsupported)
+            ),
+            "a top-level barrier skipped by a returning arm must be rejected"
+        );
+    }
 }
 
 #[test]

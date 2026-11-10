@@ -16,7 +16,10 @@
 //! operators bitcast around the operation, so `ashr`/`sdiv`/`srem`/`sitofp`/
 //! `icmp s*`/`llvm.smin`/`llvm.smax` keep two's-complement semantics. `fcmp`
 //! unordered predicates (`u*`, `uno`) stay true for NaN while `ord`/`one` are
-//! ordered. A workgroup barrier is accepted only in straight-line code: the
+//! ordered. Integer division/remainder use WGSL's runtime contract where LLVM
+//! would be undefined: a zero divisor or `i32::MIN / -1` returns the numerator
+//! for division and zero for remainder (not Rust's panicking operators).
+//! A workgroup barrier is accepted only in straight-line code: the
 //! lowerer does not prove branch or trip-count uniformity, so a barrier inside
 //! an `if`/`loop` or after an arm that returned is rejected instead of
 //! emitting WGSL Tint refuses (or native UB).
