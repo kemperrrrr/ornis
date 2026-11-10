@@ -98,8 +98,9 @@ fn world_lane<const LANE: usize>(camera: CameraUniform, uvx: f32, uvy: f32, dept
 /// `value / w` with the sign and magnitude of `w` left unchanged.
 ///
 /// The hand-written `reconstruct_world_pos` returns `view.xyz / view.w`.
-/// Clamping `w` up to [`EPS`] moves any reconstruction whose denominator
-/// is smaller than that, including a negative denominator.
+/// This path divides by the raw homogeneous `w` the same way, including
+/// when `|w|` is below `EPS` or `w` is negative. Clamping `w` up to `EPS`
+/// would move those reconstructions and would flip a negative denominator.
 #[inline(always)]
 #[must_use]
 pub fn homogeneous_divide(value: f32, w: f32) -> f32 {
