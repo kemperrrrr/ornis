@@ -53,7 +53,9 @@ mod parse;
 
 pub use emit::Translated;
 pub use error::TranslateError;
-pub use meta::{ShaderMeta, extract as extract_meta, parse as parse_meta};
+pub use meta::{
+    ShaderMeta, extract as extract_meta, extract_entry as extract_meta_for, parse as parse_meta,
+};
 
 /// How the translator declares texture bindings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -76,15 +78,18 @@ impl TextureSampling {
 
 /// Translate using the metadata emitted by `#[gpu_entry]`.
 ///
-/// Falls back to the scalar toy defaults when the shader has no metadata
-/// global (older kernels).
+/// Every entry point the module defines goes into one WGSL module, in the
+/// order the IR declares them: a pass ships `vs_main` and `fs_main` together,
+/// sharing the bindings both stages read. A shader without a metadata record
+/// (older kernels) falls back to the scalar toy defaults.
 ///
 /// # Errors
 ///
-/// [`TranslateError::Unsupported`] when the entry is not `cs_main`, `vs_main`,
-/// or `fs_main`, or the body leaves the translated subset, and
+/// [`TranslateError::Unsupported`] when an entry is not `cs_main`, `vs_main`,
+/// or `fs_main`, or a body leaves the translated subset, and
 /// [`TranslateError::UnsupportedType`] when the metadata names a uniform
-/// struct the translator cannot lay out.
+/// struct the translator cannot lay out, or two entries declare the same
+/// struct id with different tags.
 pub fn translate_with_meta(llvm_ir: &str) -> Result<Translated, TranslateError> {
     translate_with_meta_and_sampling(llvm_ir, TextureSampling::SingleSample)
 }
@@ -102,27 +107,73 @@ pub fn translate_with_meta_and_sampling(
     llvm_ir: &str,
     sampling: TextureSampling,
 ) -> Result<Translated, TranslateError> {
-    let func = parse::parse(llvm_ir)?;
-    let (meta, workgroup) = match meta::extract(llvm_ir)? {
-        Some(meta) => {
-            if meta.entry != ornis_gpu_abi::symbols::CS_MAIN
-                && meta.entry != ornis_gpu_abi::symbols::VS_MAIN
-                && meta.entry != ornis_gpu_abi::symbols::FS_MAIN
-            {
-                return Err(TranslateError::Unsupported);
-            }
-            let workgroup = meta.workgroup;
-            (Some(meta), workgroup)
-        }
-        None => (None, ornis_gpu_abi::symbols::CS_WORKGROUP),
+    translate_entries(llvm_ir, None, sampling)
+}
+
+/// Translate one named entry: the single-entry form `xtask build-shaders
+/// --entry …` uses, so the other entries stay out of the emitted module.
+///
+/// # Errors
+///
+/// Same as [`translate_with_meta`], plus [`TranslateError::Unsupported`] when
+/// the module defines no entry called `entry`.
+pub fn translate_entry_with_sampling(
+    llvm_ir: &str,
+    entry: &str,
+    sampling: TextureSampling,
+) -> Result<Translated, TranslateError> {
+    translate_entries(llvm_ir, Some(entry), sampling)
+}
+
+/// Translate every entry, or only `entry` when one is named.
+fn translate_entries(
+    llvm_ir: &str,
+    only: Option<&str>,
+    sampling: TextureSampling,
+) -> Result<Translated, TranslateError> {
+    let funcs = match only {
+        Some(entry) => vec![parse::parse(llvm_ir, entry)?],
+        None => parse::parse_all(llvm_ir)?,
     };
-    let structs = match &meta {
-        Some(meta) => meta.table(),
-        None => Vec::new(),
-    };
+    let metas = meta::extract(llvm_ir)?;
+    let structs = merge_tables(&metas)?;
     let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
-    let module = lower::lower(&func, &refs, workgroup, sampling.multisampled())?;
-    emit::emit(&module)
+    let mut lowering = lower::Lowering::new(&refs, sampling.multisampled());
+    for func in &funcs {
+        let workgroup = metas
+            .iter()
+            .find(|meta| meta.entry == func.name)
+            .map_or(ornis_gpu_abi::symbols::CS_WORKGROUP, |meta| meta.workgroup);
+        lowering.push(func, workgroup)?;
+    }
+    emit::emit(&lowering.finish())
+}
+
+/// Merge the uniform-struct tables of every entry record.
+///
+/// Struct ids are assigned by the kernel author and shared per crate, so two
+/// entries that use the same id must agree on it. Disagreeing tags would make
+/// one entry read the other's layout, so that is an error rather than a
+/// last-one-wins merge.
+fn merge_tables(metas: &[meta::ShaderMeta]) -> Result<Vec<Vec<u8>>, TranslateError> {
+    let mut merged: Vec<Vec<u8>> = Vec::new();
+    for meta in metas {
+        for (id, tags) in meta.structs.iter() {
+            let index = *id as usize;
+            if merged.len() <= index {
+                merged.resize(index + 1, Vec::new());
+            }
+            let slot = &mut merged[index];
+            if slot.is_empty() {
+                *slot = tags.clone();
+            } else if slot != tags {
+                return Err(TranslateError::UnsupportedType(format!(
+                    "uniform struct {id} has different fields in two entries"
+                )));
+            }
+        }
+    }
+    Ok(merged)
 }
 
 /// Parse textual LLVM IR and lower the entry point it defines.
@@ -177,7 +228,10 @@ pub fn translate_with_types_and_workgroup(
     structs: &[&[u8]],
     workgroup: [u32; 3],
 ) -> Result<Translated, TranslateError> {
-    let func = parse::parse(llvm_ir)?;
-    let module = lower::lower(&func, structs, workgroup, false)?;
-    emit::emit(&module)
+    let funcs = parse::parse_all(llvm_ir)?;
+    let mut lowering = lower::Lowering::new(structs, false);
+    for func in &funcs {
+        lowering.push(func, workgroup)?;
+    }
+    emit::emit(&lowering.finish())
 }

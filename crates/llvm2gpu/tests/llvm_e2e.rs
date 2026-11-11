@@ -906,6 +906,7 @@ start:
 "#;
     let meta = ornis_llvm2gpu::extract_meta(ir)
         .expect("metadata parses")
+        .pop()
         .expect("metadata present");
     assert_eq!(meta.entry, "cs_main");
     assert_eq!(meta.workgroup, [32, 2, 1]);
@@ -1428,6 +1429,137 @@ fn rustc_to_llvm_ir_to_wgsl() {
     let translated = translate(&ir).expect("translate rustc output");
     assert!(translated.wgsl.contains("@compute"), "{}", translated.wgsl);
     assert!(!translated.compute_spirv.is_empty());
+}
+
+/// One crate, two entry points: a vertex and a fragment stage of one pass.
+const RASTER_PASS_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" {
+    fn vertex_index() -> u32;
+    fn vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    fn vertex_position(x: f32, y: f32, z: f32, w: f32);
+    fn vertex_store_f32x2(location: u32, x: f32, y: f32);
+    fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
+}
+#[no_mangle]
+pub extern "C" fn vs_main() {
+    let index = unsafe { vertex_index() };
+    let x = unsafe { vertex_input_lane(0, 2, 0) };
+    let y = unsafe { vertex_input_lane(0, 2, 1) };
+    unsafe {
+        vertex_position(index as f32, x, y, 1.0);
+        vertex_store_f32x2(0, x, y);
+    }
+}
+#[no_mangle]
+pub extern "C" fn fs_main() {
+    let u = unsafe { fragment_input_lane(0, 2, 0) };
+    let v = unsafe { fragment_input_lane(0, 2, 1) };
+    unsafe { fragment_store_f32x4(u, v, 0.0, 1.0) };
+}
+"#;
+
+/// Both entries of one crate lower into one module and share its bindings.
+#[test]
+fn rustc_two_raster_entries_lower_into_one_module() {
+    let Some(ir) = compile_ir(RASTER_PASS_RS) else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("translate both entries");
+    // rustc emits the two entries in its own order; both have to be there.
+    let mut entries = translated.entries.clone();
+    entries.sort();
+    assert_eq!(entries, ["fs_main", "vs_main"]);
+    assert!(translated.wgsl.contains("@vertex"), "{}", translated.wgsl);
+    assert!(
+        translated.wgsl.contains("fn fs_main"),
+        "{}",
+        translated.wgsl
+    );
+    // One translation per entry still works on the same IR.
+    let only = ornis_llvm2gpu::translate_entry_with_sampling(
+        &ir,
+        "fs_main",
+        ornis_llvm2gpu::TextureSampling::SingleSample,
+    )
+    .expect("fragment only");
+    assert_eq!(only.entries, ["fs_main"]);
+    assert!(!only.wgsl.contains("@vertex"), "{}", only.wgsl);
+    assert!(
+        ornis_llvm2gpu::translate_entry_with_sampling(
+            &ir,
+            "cs_main",
+            ornis_llvm2gpu::TextureSampling::SingleSample,
+        )
+        .is_err(),
+        "a missing entry is an error, not an empty module"
+    );
+}
+
+/// A `switch`-terminated block: rustc emits one for `match` on integers.
+const SWITCH_IR: &str = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  switch i32 %id, label %other [ i32 0, label %zero i32 1, label %one i32 2, label %zero ]
+zero:
+  br label %merge
+one:
+  br label %merge
+other:
+  br label %merge
+merge:
+  %value = phi float [ 1.000000e+00, %zero ], [ 2.000000e+00, %one ], [ 3.000000e+00, %other ]
+  ret float %value
+}
+"#;
+
+#[test]
+fn switch_lowers_to_a_naga_switch() {
+    let translated = translate(SWITCH_IR).expect("switch entry");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("switch "), "{wgsl}");
+    assert!(wgsl.contains("default"), "{wgsl}");
+    // The two values that share a target share one body: naga prints them as
+    // one case label list.
+    assert!(
+        wgsl.contains("case 0u, 2u") || wgsl.contains("case 0, 2"),
+        "{wgsl}"
+    );
+    assert!(wgsl.contains("case 1"), "{wgsl}");
+}
+
+#[test]
+fn switch_lowers_through_rustc_match() {
+    const MATCH_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    // Sparse values keep rustc on a `switch` instead of a lookup table.
+    match id {
+        0 => 1.0,
+        10 => 2.0,
+        20 | 30 => 4.0,
+        _ => 0.5,
+    }
+}
+"#;
+    let Some(ir) = compile_ir_opt(MATCH_RS, "s") else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("match lowers");
+    assert!(translated.wgsl.contains("switch "), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("20u, 30u"), "{}", translated.wgsl);
 }
 
 const LOOP_KERNEL_RS: &str = r#"

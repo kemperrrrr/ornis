@@ -148,6 +148,18 @@ pub(super) enum Terminator {
         true_label: String,
         false_label: String,
     },
+    /// `switch i32 %x, label %default [ i32 0, label %a i32 1, label %b ]`
+    ///
+    /// The selector is an `i32` whose bits the lowerer keeps as `u32`, so the
+    /// case values are the same bits.
+    Switch {
+        /// Value the switch dispatches on.
+        selector: Operand,
+        /// Label taken when no case matches.
+        default: String,
+        /// Case value and its label, in IR order.
+        cases: Vec<(u32, String)>,
+    },
 }
 
 /// One basic block.
@@ -174,14 +186,29 @@ pub(super) struct LlvmFunc {
     pub(super) blocks: Vec<BasicBlock>,
 }
 
-/// Parse the whole textual IR, returning `cs_main`, `vs_main`, or `fs_main`.
-/// Declarations are skipped.
-pub(super) fn parse(text: &str) -> Result<LlvmFunc, TranslateError> {
-    let header = parse_header(text)?;
-    let Some(func) = header.into_iter().find(|f| is_entry(&f.name)) else {
+/// Parse the whole textual IR, returning every entry point it defines.
+///
+/// Declarations and helper functions are skipped: only `cs_main`, `vs_main`,
+/// and `fs_main` are entries, and a module with none of them is not a shader.
+/// A module may define several of them (a pass ships a vertex and a fragment
+/// entry), and they come back in declaration order.
+pub(super) fn parse_all(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
+    let entries: Vec<LlvmFunc> = parse_header(text)?
+        .into_iter()
+        .filter(|func| is_entry(&func.name))
+        .collect();
+    if entries.is_empty() {
         return Err(TranslateError::Unsupported);
-    };
-    Ok(func)
+    }
+    Ok(entries)
+}
+
+/// Parse the whole textual IR, returning the entry called `entry`.
+pub(super) fn parse(text: &str, entry: &str) -> Result<LlvmFunc, TranslateError> {
+    parse_all(text)?
+        .into_iter()
+        .find(|func| func.name == entry)
+        .ok_or(TranslateError::Unsupported)
 }
 
 fn is_entry(name: &str) -> bool {
@@ -247,7 +274,19 @@ fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
                 cur_label = inner.trim_end_matches(':').to_string();
                 continue;
             }
-            if let Some(term) = parse_term(inner)? {
+            // A `switch` case list may span lines; collect until it closes so
+            // the terminator parser sees one line.
+            let mut term_line = inner.to_string();
+            if term_line.starts_with("switch ") {
+                while !term_line.contains(']') {
+                    let Some(next) = lines.next() else {
+                        return Err(TranslateError::Parse("unterminated switch".to_string()));
+                    };
+                    term_line.push(' ');
+                    term_line.push_str(next.split(';').next().unwrap_or("").trim());
+                }
+            }
+            if let Some(term) = parse_term(&term_line)? {
                 cur_term = Some(term);
                 saw_ret |= matches!(cur_term, Some(Terminator::Ret(_)));
                 // Terminator closes the block; the next label begins a new one.
@@ -442,10 +481,79 @@ fn parse_term(line: &str) -> Result<Option<Terminator>, TranslateError> {
             false_label: parse_label(false_part)?,
         }));
     }
-    if trimmed == "unreachable" || trimmed.starts_with("switch") {
+    if let Some(rest) = trimmed.strip_prefix("switch ") {
+        return Ok(Some(parse_switch(rest)?));
+    }
+    if trimmed == "unreachable" {
         return Err(TranslateError::Unsupported);
     }
     Ok(None)
+}
+
+/// `i32 %x, label %default [ i32 0, label %a i32 1, label %b ]`.
+///
+/// The case list is scanned token by token: `i32 <value>, label %<name>`
+/// pairs are separated by whitespace, and the last one may or may not carry a
+/// trailing comma, which is how rustc and hand-written IR both spell it.
+fn parse_switch(rest: &str) -> Result<Terminator, TranslateError> {
+    let (head, cases) = rest
+        .split_once('[')
+        .ok_or_else(|| TranslateError::Parse("switch without case list".to_string()))?;
+    let cases = cases
+        .trim_end()
+        .strip_suffix(']')
+        .ok_or_else(|| TranslateError::Parse("switch case list is not closed".to_string()))?;
+    let mut head = head.trim().splitn(2, ',');
+    let selector = head
+        .next()
+        .and_then(|part| part.split_whitespace().nth(1))
+        .ok_or_else(|| TranslateError::Parse("switch selector".to_string()))?;
+    let selector = parse_operand(selector)?;
+    let default = head
+        .next()
+        .ok_or_else(|| TranslateError::Parse("switch default".to_string()))?;
+    let mut parsed = Vec::new();
+    let mut tokens = cases.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token != "i32" {
+            return Err(TranslateError::Parse(format!(
+                "switch case starts with `{token}`"
+            )));
+        }
+        let value = tokens
+            .next()
+            .ok_or_else(|| TranslateError::Parse("switch case value".to_string()))?;
+        let value: i32 = value
+            .trim_end_matches(',')
+            .parse()
+            .map_err(|_| TranslateError::Parse(format!("switch case value `{value}`")))?;
+        if tokens.next() != Some("label") {
+            return Err(TranslateError::Parse(
+                "switch case target is not a label".to_string(),
+            ));
+        }
+        let label = tokens
+            .next()
+            .ok_or_else(|| TranslateError::Parse("switch case label".to_string()))?;
+        let label = label
+            .strip_prefix('%')
+            .ok_or_else(|| TranslateError::Parse("switch case label".to_string()))?;
+        parsed.push((value as u32, label.to_string()));
+    }
+    Ok(Terminator::Switch {
+        selector,
+        default: switch_label(default)?,
+        cases: parsed,
+    })
+}
+
+/// `label %name` → `name`.
+fn switch_label(text: &str) -> Result<String, TranslateError> {
+    let label = text
+        .trim()
+        .strip_prefix("label %")
+        .ok_or_else(|| TranslateError::Parse("switch label".to_string()))?;
+    Ok(label.trim().to_string())
 }
 
 /// `%x = phi float [ %a, %pred ], [ 1.0, %pred2 ]`
