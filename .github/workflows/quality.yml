@@ -249,18 +249,7 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 20
         run: |
-          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
-            /etc/apt/sources.list.d/*.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          # Diagnostics: which mirrors apt actually uses.
-          cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          grep -rhE '^(URIs|deb) ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
-          sudo apt-get update \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            -o Acquire::ForceIPv4=true
-          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
-            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
+          .github/scripts/apt-install.sh --no-install-recommends libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
@@ -318,18 +307,7 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 20
         run: |
-          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
-            /etc/apt/sources.list.d/*.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          # Diagnostics: which mirrors apt actually uses.
-          cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          grep -rhE '^(URIs|deb) ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
-          sudo apt-get update \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            -o Acquire::ForceIPv4=true
-          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
-            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
+          .github/scripts/apt-install.sh --no-install-recommends libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
             libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
@@ -398,19 +376,8 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 20
         run: |
-          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
-            /etc/apt/sources.list.d/*.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          # Diagnostics: which mirrors apt actually uses.
-          cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          grep -rhE '^(URIs|deb) ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
-          sudo apt-get update \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            -o Acquire::ForceIPv4=true
-          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
-            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold spirv-tools \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          .github/scripts/apt-install.sh --no-install-recommends libasound2-dev libudev-dev pkg-config mesa-vulkan-drivers mold \
+            spirv-tools libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
@@ -462,19 +429,8 @@ jobs:
       - name: Install system dependencies
         timeout-minutes: 20
         run: |
-          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources \
-            /etc/apt/sources.list.d/*.list /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          # Diagnostics: which mirrors apt actually uses.
-          cat /etc/apt/apt-mirrors.txt 2>/dev/null || true
-          grep -rhE '^(URIs|deb) ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true
-          sudo apt-get update \
-            -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            -o Acquire::ForceIPv4=true
-          sudo apt-get install -y --no-install-recommends -o Acquire::ForceIPv4=true \
-            -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
-            libasound2-dev libudev-dev pkg-config mold \
-            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+          .github/scripts/apt-install.sh --no-install-recommends libasound2-dev libudev-dev pkg-config mold libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 
       - uses: dtolnay/rust-toolchain@9ca9f0b320e19763058bc9531663c225d20db487 # 1.97
         with:
