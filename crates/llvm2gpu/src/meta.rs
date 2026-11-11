@@ -1,9 +1,14 @@
-//! Reader for the `ornis_gpu_shader_meta` record.
+//! Reader for the `ornis_gpu_shader_meta*` records.
 //!
 //! `#[gpu_entry]` (the `ornis-gpu-shader-macros` attribute) writes one ASCII
 //! record into a `#[used]` global, and `xtask build-shaders` translates the IR
 //! without any CLI flags for the entry, the workgroup size, or the uniform
-//! field tags. The format is defined by `ornis_gpu_shader::meta`; this module
+//! field tags. The global's name carries the entry
+//! (`ornis_gpu_shader_meta_vs_main`), so a crate holds a vertex and a fragment
+//! entry side by side and [`extract`] returns both records; the record body
+//! repeats the entry name, which is what [`extract_entry`] matches on.
+//!
+//! The format is defined by `ornis_gpu_shader::meta`; this module
 //! only reads it, so an artifact produced by an older attribute still
 //! translates as long as it carries the parts it knew about:
 //!
@@ -66,32 +71,53 @@ impl ShaderMeta {
     }
 }
 
-/// Read the metadata global out of textual LLVM IR.
+/// Read every metadata record out of textual LLVM IR.
 ///
-/// Returns `None` when the shader has no record at all (a kernel written
-/// against the raw `ornis_gpu` imports); returns an error when a record exists
-/// but does not parse, because translating it with guessed metadata would
-/// silently produce a different shader.
-pub fn extract(llvm_ir: &str) -> Result<Option<ShaderMeta>, TranslateError> {
-    let Some(text) = record_text(llvm_ir) else {
-        return Ok(None);
-    };
-    parse(&text).map(Some)
+/// An empty vector means the shader has no record at all (a kernel written
+/// against the raw `ornis_gpu` imports); a record that does not parse is an
+/// error, because translating it with guessed metadata would silently produce a
+/// different shader.
+pub fn extract(llvm_ir: &str) -> Result<Vec<ShaderMeta>, TranslateError> {
+    let mut records = Vec::new();
+    for text in record_texts(llvm_ir)? {
+        records.push(parse(&text)?);
+    }
+    Ok(records)
 }
 
-/// The record's contents, unescaped, from the global's initializer.
-fn record_text(llvm_ir: &str) -> Option<String> {
-    let initializer = global_initializer(llvm_ir)?;
-    unescape(initializer)
+/// The record of entry `entry`, when the module carries one.
+///
+/// # Errors
+///
+/// Same as [`extract`]: an unparsable record is never skipped.
+pub fn extract_entry(llvm_ir: &str, entry: &str) -> Result<Option<ShaderMeta>, TranslateError> {
+    Ok(extract(llvm_ir)?
+        .into_iter()
+        .find(|meta| meta.entry == entry))
 }
 
-/// The `c"…"` literal of the metadata global, quotes included.
-fn global_initializer(llvm_ir: &str) -> Option<&str> {
-    let line = llvm_ir
+/// The unescaped contents of every metadata global, in IR order.
+fn record_texts(llvm_ir: &str) -> Result<Vec<String>, TranslateError> {
+    let mut texts = Vec::new();
+    for initializer in global_initializers(llvm_ir) {
+        let text = unescape(initializer).ok_or_else(|| {
+            TranslateError::UnsupportedType("shader metadata is not a byte string".to_string())
+        })?;
+        texts.push(text);
+    }
+    Ok(texts)
+}
+
+/// The `c"…"` literals of the metadata globals, quotes included.
+fn global_initializers(llvm_ir: &str) -> Vec<&str> {
+    llvm_ir
         .lines()
-        .find(|line| line.contains(ornis_gpu_shader::meta::GLOBAL))?;
-    let start = line.find("c\"")?;
-    Some(&line[start..])
+        .filter(|line| line.contains(ornis_gpu_shader::meta::GLOBAL))
+        .filter_map(|line| {
+            let start = line.find("c\"")?;
+            Some(&line[start..])
+        })
+        .collect()
 }
 
 /// Decode the `\\XX` escapes of one LLVM string constant.

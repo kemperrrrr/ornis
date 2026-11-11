@@ -19,6 +19,11 @@
 //! kernel reads.
 
 /// Name of the global the entry attribute emits.
+///
+/// The attribute appends the entry name (`ornis_gpu_shader_meta_vs_main`), so a
+/// crate with a vertex and a fragment entry publishes two records and the
+/// translator can pick either. A record that predates the suffix reads as
+/// [`GLOBAL`] itself.
 pub const GLOBAL: &str = "ornis_gpu_shader_meta";
 
 /// Key of the workgroup-size part.

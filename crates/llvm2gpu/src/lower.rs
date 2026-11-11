@@ -51,35 +51,67 @@ const VEC4_LANES: u32 = ornis_gpu_abi::VEC4_SIZE / WORD_BYTES;
 const WORD_2: u32 = WORD_BYTES + WORD_BYTES;
 const WORD_3: u32 = WORD_2 + WORD_BYTES;
 
-/// Lower `func` (named `cs_main`, `vs_main`, or `fs_main`) to a Naga module.
+/// One Naga module under construction: entries share its globals.
 ///
-/// Entry shapes:
+/// Entry shapes, per pushed function:
 /// - `cs_main(i32) -> float`: result is stored to `storage_0_0[id]`.
 /// - `cs_main(i32) -> void` / `cs_main() -> void`: the body stores through ABI
 ///   calls.
 /// - `vs_main() -> void` / `fs_main() -> void`: builtins and stage interface
 ///   values come from ABI calls, and the lowerer returns the output it stored.
-pub(super) fn lower(
-    func: &LlvmFunc,
-    structs: &[&[u8]],
-    workgroup: [u32; 3],
-    multisampled: bool,
-) -> Result<naga::Module, TranslateError> {
-    let stage = Stage::of(&func.name).ok_or(TranslateError::Unsupported)?;
-    if stage == Stage::Compute {
-        match (func.ret_ty, func.params.as_slice()) {
-            (Ty::Float | Ty::Void, [] | [(Ty::I32, _)]) => {}
-            _ => return Err(TranslateError::Unsupported),
+///
+/// Resources are cached per `(group, binding)` in [`Builders`], so a vertex and
+/// a fragment entry of the same pass share one set of globals — which is what a
+/// pipeline needs: both stages read the same bind group. Each call to
+/// [`Self::push`] adds one entry point.
+pub(super) struct Lowering {
+    builders: Builders,
+}
+
+impl Lowering {
+    /// Start a module with the given uniform-struct tables.
+    pub(super) fn new(structs: &[&[u8]], multisampled: bool) -> Self {
+        Self {
+            builders: Builders::new(structs, multisampled),
         }
-    } else if func.ret_ty != Ty::Void || !func.params.is_empty() {
-        // A raster entry reads its builtins and writes its outputs through the
-        // stage-IO imports, so the compiled signature is bare.
-        return Err(TranslateError::Unsupported);
     }
-    let cfg = Cfg::new(func)?;
-    let mut builders = Builders::new(structs, multisampled);
-    let function = builders.build(func, &cfg, stage)?;
-    builders.finish(function, func.ret_ty, workgroup, stage)
+
+    /// Lower one entry function into the module.
+    ///
+    /// `workgroup` is the `@workgroup_size` of a compute entry and ignored by a
+    /// raster one.
+    ///
+    /// # Errors
+    ///
+    /// [`TranslateError::Unsupported`] for an entry shape outside the subset
+    /// (an unknown name, a raster entry with parameters, a compute entry that
+    /// is neither `(i32)` nor `()`), and whatever the body lowers to.
+    pub(super) fn push(
+        &mut self,
+        func: &LlvmFunc,
+        workgroup: [u32; 3],
+    ) -> Result<(), TranslateError> {
+        let stage = entry_stage(func)?;
+        self.lower_entry(func, stage, workgroup)
+    }
+
+    /// Structure the body and register the entry point.
+    fn lower_entry(
+        &mut self,
+        func: &LlvmFunc,
+        stage: Stage,
+        workgroup: [u32; 3],
+    ) -> Result<(), TranslateError> {
+        let cfg = Cfg::new(func)?;
+        let function = self.builders.build(func, &cfg, stage)?;
+        self.builders
+            .finish(function, func.ret_ty, workgroup, stage)
+    }
+
+    /// The finished module, with every entry point pushed so far.
+    pub(super) fn finish(self) -> naga::Module {
+        self.builders.module
+    }
 }
 
 /// Shader stage the entry function belongs to.
@@ -519,19 +551,7 @@ impl<'a> Cfg<'a> {
         let mut preds: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
         let mut phis: HashMap<&'a str, Vec<Phi>> = HashMap::new();
         for block in &func.blocks {
-            let mut out = Vec::new();
-            match &block.term {
-                Terminator::Ret(_) => {}
-                Terminator::BrUncond(target) => out.push(target.as_str()),
-                Terminator::BrCond {
-                    true_label,
-                    false_label,
-                    ..
-                } => {
-                    out.push(true_label.as_str());
-                    out.push(false_label.as_str());
-                }
-            }
+            let out = successors(&block.term);
             for target in &out {
                 if !blocks.contains_key(target) {
                     return Err(TranslateError::Parse(format!(
@@ -687,6 +707,7 @@ fn push_local(op: &Operand, used: &mut Vec<String>) {
 fn push_term_local(term: &Terminator, used: &mut Vec<String>) {
     match term {
         Terminator::BrCond { cond, .. } => push_local(cond, used),
+        Terminator::Switch { selector, .. } => push_local(selector, used),
         Terminator::Ret(Some(value)) => push_local(value, used),
         Terminator::BrUncond(_) | Terminator::Ret(None) => {}
     }
@@ -862,13 +883,14 @@ impl Builders {
         }
     }
 
+    /// Add the lowered function as this module's next entry point.
     fn finish(
-        mut self,
+        &mut self,
         function: naga::Function,
         ret_ty: Ty,
         workgroup: [u32; 3],
         stage: Stage,
-    ) -> Result<naga::Module, TranslateError> {
+    ) -> Result<(), TranslateError> {
         // Only create the implicit `storage_0_0` global when the kernel
         // uses the `-> float` shape; for `-> void` the body creates its
         // own globals lazily.
@@ -903,7 +925,7 @@ impl Builders {
             task_payload: None,
             incoming_ray_payload: None,
         });
-        Ok(self.module)
+        Ok(())
     }
 
     fn storage_global(
@@ -1451,6 +1473,70 @@ impl Builders {
     }
 }
 
+/// One `switch` case; the value comes from the IR, the body was just emitted.
+fn switch_case(
+    value: naga::SwitchValue,
+    body: naga::Block,
+    fall_through: bool,
+) -> naga::SwitchCase {
+    naga::SwitchCase {
+        value,
+        body,
+        fall_through,
+    }
+}
+
+/// Whether a `switch` case returns, after rejecting flows that cannot surface.
+///
+/// A case either falls through to the merge or returns from the entry; a
+/// `continue`/`break` belongs to a region inside the case.
+fn case_flow_returns(flow: Flow) -> Result<bool, TranslateError> {
+    match flow {
+        Flow::Returned => Ok(true),
+        Flow::Next => Ok(false),
+        Flow::Continue | Flow::Break => Err(TranslateError::Unsupported),
+    }
+}
+
+/// Blocks control can leave `term` for, in the order the IR names them.
+fn successors(term: &Terminator) -> Vec<&str> {
+    match term {
+        Terminator::Ret(_) => Vec::new(),
+        Terminator::BrUncond(target) => vec![target.as_str()],
+        Terminator::BrCond {
+            true_label,
+            false_label,
+            ..
+        } => vec![true_label.as_str(), false_label.as_str()],
+        Terminator::Switch { default, cases, .. } => {
+            let mut out = vec![default.as_str()];
+            out.extend(cases.iter().map(|(_, label)| label.as_str()));
+            out
+        }
+    }
+}
+
+/// Stage of `func`, after checking the shape rustc compiles for it.
+///
+/// A compute entry takes nothing or one `i32` (its invocation id) and may
+/// return `f32`; a raster entry is `void` with no parameters, because its
+/// builtins and interface come from the stage-IO imports.
+fn entry_stage(func: &LlvmFunc) -> Result<Stage, TranslateError> {
+    let stage = Stage::of(&func.name).ok_or(TranslateError::Unsupported)?;
+    let shape_ok = match stage {
+        Stage::Compute => matches!(
+            (func.ret_ty, func.params.as_slice()),
+            (Ty::Float | Ty::Void, [] | [(Ty::I32, _)])
+        ),
+        Stage::Vertex | Stage::Fragment => func.ret_ty == Ty::Void && func.params.is_empty(),
+    };
+    if shape_ok {
+        Ok(stage)
+    } else {
+        Err(TranslateError::Unsupported)
+    }
+}
+
 /// `vecN<f32>` of a stage-interface value, or `None` for a width the
 /// translator does not declare.
 fn vec_f32_type(module: &mut naga::Module, lanes: u32) -> Option<naga::Handle<naga::Type>> {
@@ -1832,7 +1918,31 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 }
                 self.emit_if(start, cond, true_label, false_label, stop, out, ctx)
             }
+            Terminator::Switch {
+                selector,
+                default,
+                cases,
+            } => self.emit_switch(start, selector, default, cases, stop, out, ctx),
         }
+    }
+
+    /// Emit one arm of a branch: enter it from `from`, run it until `merge`.
+    ///
+    /// The caller sets `self.env` before calling; the arm's phi stores are
+    /// written from `env`, which is the environment at the branch.
+    fn emit_arm(
+        &mut self,
+        from: &'a str,
+        enter: &'a str,
+        merge: &'a str,
+        env: &Env,
+        ctx: Ctx<'a>,
+    ) -> Result<(naga::Block, Flow), TranslateError> {
+        let mut body = naga::Block::new();
+        self.env = env.clone();
+        self.store_edge_into(from, enter, env, &mut body)?;
+        let flow = self.emit_region(enter, Some(merge), &mut body, ctx)?;
+        Ok((body, flow))
     }
 
     /// Diamond `if`: both arms run until the closest common post-dominator.
@@ -1858,8 +1968,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 .get(header)
                 .is_some_and(|body| body.contains(merge));
             if merge != EXIT && !merges_in_loop {
-                // An arm that leaves the loop through a shared merge would
-                // need `break` with per-arm edge phis; not supported yet.
+                // A natural loop cannot have a merge outside it that both arms
+                // reach: any block on the way to the back edge belongs to the
+                // loop. Reject rather than guess.
                 return Err(TranslateError::Unsupported);
             }
         }
@@ -1867,14 +1978,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let outer_env = self.env.clone();
         let outer_depth = self.branch_depth;
         self.branch_depth += 1;
-        let mut accept = naga::Block::new();
-        self.env = outer_env.clone();
-        self.store_edge_into(label, true_label, &outer_env, &mut accept)?;
-        let accept_flow = self.emit_region(true_label, Some(merge), &mut accept, ctx)?;
-        let mut reject = naga::Block::new();
-        self.env = outer_env.clone();
-        self.store_edge_into(label, false_label, &outer_env, &mut reject)?;
-        let reject_flow = self.emit_region(false_label, Some(merge), &mut reject, ctx)?;
+        let (accept, accept_flow) = self.emit_arm(label, true_label, merge, &outer_env, ctx)?;
+        let (reject, reject_flow) = self.emit_arm(label, false_label, merge, &outer_env, ctx)?;
         self.branch_depth = outer_depth;
         self.env = outer_env;
         if accept_flow == Flow::Returned || reject_flow == Flow::Returned {
@@ -1900,6 +2005,84 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             if accept_flow == Flow::Returned && reject_flow == Flow::Returned {
                 return Ok(Flow::Returned);
             }
+            return Err(TranslateError::Unsupported);
+        }
+        if stop == Some(merge) {
+            return Ok(Flow::Next);
+        }
+        self.emit_region(merge, stop, out, ctx)
+    }
+
+    /// `switch`: every case runs until the closest common post-dominator.
+    ///
+    /// Cases that share a target label share one body (the first values fall
+    /// through into it), which is what Rust emits for `x | y => …` arms.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_switch(
+        &mut self,
+        label: &'a str,
+        selector: &Operand,
+        default: &'a str,
+        cases: &'a [(u32, String)],
+        stop: Option<&'a str>,
+        out: &mut naga::Block,
+        ctx: Ctx<'a>,
+    ) -> Result<Flow, TranslateError> {
+        let merge = self.cfg.merge(label).ok_or(TranslateError::Unsupported)?;
+        if let Ctx::Loop { header } = ctx {
+            let merges_in_loop = self
+                .cfg
+                .loops
+                .get(header)
+                .is_some_and(|body| body.contains(merge));
+            if merge != EXIT && !merges_in_loop {
+                return Err(TranslateError::Unsupported);
+            }
+        }
+        let selector = self.operand(out, selector)?;
+        let outer_env = self.env.clone();
+        let outer_depth = self.branch_depth;
+        self.branch_depth += 1;
+        let mut targets: Vec<(&'a str, Vec<u32>)> = Vec::new();
+        for (value, target) in cases {
+            let target = target.as_str();
+            match targets.iter_mut().find(|(label, _)| *label == target) {
+                Some((_, values)) => values.push(*value),
+                None => targets.push((target, vec![*value])),
+            }
+        }
+        let mut naga_cases = Vec::new();
+        let mut returned = false;
+        for (target, values) in targets {
+            let (mut body, flow) = self.emit_arm(label, target, merge, &outer_env, ctx)?;
+            returned |= case_flow_returns(flow)?;
+            for (index, value) in values.iter().enumerate() {
+                let last = index + 1 == values.len();
+                let filled = if last {
+                    std::mem::take(&mut body)
+                } else {
+                    naga::Block::new()
+                };
+                naga_cases.push(switch_case(naga::SwitchValue::U32(*value), filled, !last));
+            }
+        }
+        let (default_body, default_flow) = self.emit_arm(label, default, merge, &outer_env, ctx)?;
+        returned |= case_flow_returns(default_flow)?;
+        naga_cases.push(switch_case(naga::SwitchValue::Default, default_body, false));
+        self.branch_depth = outer_depth;
+        self.env = outer_env;
+        if returned {
+            // The merge only runs on the lanes whose case fell through.
+            self.diverged = true;
+        }
+        out.push(
+            naga::Statement::Switch {
+                selector,
+                cases: naga_cases,
+            },
+            naga::Span::default(),
+        );
+        if merge == EXIT {
             return Err(TranslateError::Unsupported);
         }
         if stop == Some(merge) {
@@ -4294,12 +4477,15 @@ start:
   ret void
 }
 "#;
-        let func = crate::parse::parse(ir).expect("parse");
+        let func = crate::parse::parse(ir, ornis_gpu_abi::symbols::CS_MAIN).expect("parse");
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
-        let module =
-            lower(&func, structs, ornis_gpu_abi::symbols::CS_WORKGROUP, false).expect("lower");
+        let mut lowering = Lowering::new(structs, false);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        let module = lowering.finish();
         let ty = module
             .types
             .iter()

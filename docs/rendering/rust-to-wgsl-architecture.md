@@ -533,11 +533,13 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
   (`tests/ui/binding_kind_must_match_type.rs`).
 
 **Формат метаданных.** `#[gpu_entry]` пишет в `#[used]`-глобал
-`ornis_gpu_shader_meta` запись
+`ornis_gpu_shader_meta_<entry>` запись
 `entry=<name>;workgroup=x,y,z[;uniform=<id>:<tags>[,<id>:<tags>]]`;
-`ornis-llvm2gpu::meta` читает её и больше не требует `--workgroup`/`--types`.
-Формат прежней формы (`types=6,6,2`, один список для struct 0) тоже
-читается, чтобы старые артефакты не ломались.
+имя глобала несёт entry, поэтому в одном крейте помещается vertex и
+fragment (пасс собирает их в один модуль), а `ornis-llvm2gpu::meta` читает
+все записи и больше не требует `--workgroup`/`--types`. Прежняя форма без
+суффикса в имени (`ornis_gpu_shader_meta`) и прежний `types=6,6,2` тоже
+читаются, чтобы старые артефакты не ломались.
 
 **Этапы:**
 
@@ -597,20 +599,21 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
-**Ограничения control flow (на 2026-11-11, после #259).** Всё, что вне
+**Ограничения control flow (на 2026-11-12, после #267).** Всё, что вне
 подмножества, отвергается при трансляции (`TranslateError::Unsupported` /
 `Parse`), а не транслируется молча неверно.
 
 - Поддерживается: diamond `if`/`else` с `phi`, ранний `return`
-  (`if cond { return; }`), natural `loop` с одним заголовком и одним
-  выходом (`while`, `for` по индексу, `break`/`continue`), вложенные такие
-  циклы, LLVM `select`.
-- `switch` отвергается. rustc строит его из `match` по целому/enum и из
-  цепочки `if / else if`; обход — независимые `if` (как mode гистограммы).
-- Цикл с несколькими выходами и `break 'outer` (выход сразу из двух
-  циклов) отвергаются.
-- Ветка `if` внутри цикла, выходящая через общий merge, пока не
-  поддерживается.
+  (`if cond { return; }`), `switch` (в том числе из `match` по целому:
+  несколько значений на один `case` — одна ветка, `phi` на общем merge
+  получает присваивание на каждое ребро), natural `loop` с одним
+  заголовком и одним выходом (`while`, `for` по индексу,
+  `break`/`continue`), вложенные такие циклы, LLVM `select`.
+  Список `case` может занимать несколько строк — так его печатает rustc.
+- Цикл, у которого выходы ведут в **разные** блоки, и `break 'outer`
+  (выход сразу из двух циклов) отвергаются: один `break` в Naga
+  заканчивает только ближайший `Loop`, а выход из двух сразу требует
+  флага и повторов `break` на каждом уровне.
 - Irreducible CFG отвергается; бесконечный цикл без выхода — тоже
   (`infinite_loop_is_rejected_not_mistranslated`).
 - Барьеры: uniformity условия и числа итераций не доказывается, поэтому
@@ -622,18 +625,24 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
 - Не control flow, но рядом: линейная память (`for x in slice`,
   `getelementptr` по указателю, `phi ptr`) и `unreachable` (паника)
   отвергаются; `opt-level=3` может развернуть циклы вне подмножества.
+  `unreachable` — это путь паники: с `panic=abort` он тянет ещё и вызов
+  внутренней функции (`panic_bounds_check`), а вызовы не-ABI функций в
+  подмножество не входят.
 
 **Прочие ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном
 биндинге отвергаются; запись в `Storage<_, ReadOnly>` по-прежнему
-запрещена типом);
-`break` сразу из двух циклов отвергается явно, вложенный natural loop
-с одним выходом и вложенное uniform-поле принимаются;
-`switch` отвергается (смешение mode гистограммы записано двумя
-сравнениями); entry — `#[gpu_entry(compute(..))]`, `#[gpu_entry(vertex)]`
-и `#[gpu_entry(fragment)]`; один шейдерный крейт содержит ровно один
-entry (у глобала метаданных фиксированное export-имя); runtime-материалы
-остаются на staged Shader IR; `wasm2gpu` не возвращается в производство.
+запрещена типом); вложенный natural loop с одним выходом и вложенное
+uniform-поле принимаются; entry — `#[gpu_entry(compute(..))]`,
+`#[gpu_entry(vertex)]` и `#[gpu_entry(fragment)]`; в одном шейдерном крейте
+может быть несколько entry — у каждой свой глобал метаданных
+(`ornis_gpu_shader_meta_<entry>`), и `llvm2gpu` опускает все найденные
+entry в один модуль, поэтому пасс с vs+fs — это один крейт и один WGSL
+(общие биндинги дедуплицируются по `(group, binding)`, а одинаковый id
+uniform-структуры обязан совпадать по тегам); `xtask build-shaders --entry
+all` собирает такой модуль, `--entry <name>` оставляет один entry;
+runtime-материалы остаются на staged Shader IR; `wasm2gpu` не возвращается
+в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)
 

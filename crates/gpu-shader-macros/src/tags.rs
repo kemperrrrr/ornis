@@ -10,6 +10,16 @@
 use quote::quote;
 use syn::Ident;
 
+/// Prefix of the metadata global's export name; the entry name follows it.
+///
+/// The attribute cannot read `ornis_gpu_shader::meta::GLOBAL` here (that path
+/// belongs to the generated crate, not to this macro), and both sides need the
+/// same spelling: the translator finds a record by looking for `GLOBAL` in the
+/// global's name, so the prefix has to start with it. `gpu-shader`'s
+/// `raster_entry` test pins the resulting symbols against the reader's
+/// expectations.
+const META_PREFIX: &str = "ornis_gpu_shader_meta_";
+
 /// A uniform parameter the record must describe.
 pub(super) struct UniformParam {
     /// The struct type the parameter is a `Uniform` of.
@@ -75,6 +85,15 @@ pub(super) fn emit(
             )
         };
     }
+    // One symbol per entry, so a shader crate can carry a vertex and a fragment
+    // entry (a pass assembles them into one module) and the builder can tell
+    // their records apart. The record itself still names its entry.
+    let static_name = Ident::new(
+        &format!("ORNIS_GPU_SHADER_META_{}", entry.to_string().to_uppercase()),
+        entry.span(),
+    );
+    let export_name = format!("{META_PREFIX}{entry}");
+    let export_name = syn::LitStr::new(&export_name, entry.span());
     quote! {
         #(#definitions)*
 
@@ -83,7 +102,7 @@ pub(super) fn emit(
             target_arch = "wasm32",
             unsafe(link_section = "ornis_gpu.shader_meta")
         )]
-        #[unsafe(export_name = "ornis_gpu_shader_meta")]
-        static ORNIS_GPU_SHADER_META: [u8; { #total }] = #record;
+        #[unsafe(export_name = #export_name)]
+        static #static_name: [u8; { #total }] = #record;
     }
 }

@@ -2,13 +2,16 @@
 
 use crate::error::TranslateError;
 
-/// WGSL text and SPIR-V words for the compute entry.
+/// WGSL text and SPIR-V words for the module's compute entry.
 #[derive(Debug)]
 pub struct Translated {
     /// Whole module in WGSL.
     pub wgsl: String,
-    /// SPIR-V words for `cs_main`. Empty when there is no compute entry.
+    /// SPIR-V words for the module's compute entry. Empty when the module has
+    /// none, or has several.
     pub compute_spirv: Vec<u32>,
+    /// Entry point names in the module, in the order the IR declared them.
+    pub entries: Vec<String>,
 }
 
 /// Validate `module`, print WGSL, and emit compute SPIR-V.
@@ -34,12 +37,23 @@ pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> 
     )
     .validate(&parsed)
     .map_err(|err| TranslateError::Naga(naga_chain(&err)))?;
-    let compute_spirv = match module
+    let entries: Vec<String> = module
         .entry_points
         .iter()
-        .find(|entry| entry.stage == naga::ShaderStage::Compute)
-    {
-        Some(entry) => {
+        .map(|entry| entry.name.clone())
+        .collect();
+    // SPIR-V names one entry point, and `xtask` builds one artifact per
+    // compute entry; a module with several compute entries therefore reports
+    // no single word list instead of an arbitrary one.
+    let compute_entries = module
+        .entry_points
+        .iter()
+        .filter(|entry| entry.stage == naga::ShaderStage::Compute);
+    let compute_spirv = match (
+        compute_entries.clone().count(),
+        compute_entries.clone().next(),
+    ) {
+        (1, Some(entry)) => {
             let words = spirv(module, &info, &entry.name)?;
             // Naga's SPIR-V parser rejects the atomic workgroup initializer
             // that Native mode emits, so this round-trip stops at WGSL.
@@ -48,11 +62,12 @@ pub(super) fn emit(module: &naga::Module) -> Result<Translated, TranslateError> 
             }
             words
         }
-        None => Vec::new(),
+        _ => Vec::new(),
     };
     Ok(Translated {
         wgsl,
         compute_spirv,
+        entries,
     })
 }
 

@@ -13,8 +13,10 @@ use std::process::{exit, Command};
 
 /// Shader crate compiled when `--package` is omitted.
 const DEFAULT_PACKAGE: &str = "ornis-gpu-shaders";
-/// Entry extracted by the translator.
+/// Entry extracted by the translator when `--entry` is omitted.
 const DEFAULT_ENTRY: &str = "cs_main";
+/// `--entry all`: translate every entry point into one module.
+const ALL_ENTRIES: &str = "all";
 /// Raster entries the translator also accepts.
 const RASTER_ENTRIES: [&str; 2] = ["fs_main", "vs_main"];
 /// LLVM optimisation level used for the shader crate.
@@ -36,7 +38,8 @@ const DEFAULT_TYPES: [u8; 7] = [6, 6, 6, 6, 6, 6, 2];
 
 struct Args {
     package: String,
-    entry: String,
+    /// Entry to translate; `None` keeps every entry the crate defines.
+    entry: Option<String>,
     opt: String,
     out: PathBuf,
     artifact: Option<PathBuf>,
@@ -54,12 +57,14 @@ pub fn build_shaders(raw: &[String]) {
             exit(2);
         }
     };
-    if args.entry != DEFAULT_ENTRY && !RASTER_ENTRIES.contains(&args.entry.as_str()) {
-        eprintln!(
-            "xtask build-shaders: entry must be `{DEFAULT_ENTRY}`, `{}`, or `{}`",
-            RASTER_ENTRIES[0], RASTER_ENTRIES[1]
-        );
-        exit(2);
+    if let Some(entry) = &args.entry {
+        if entry != DEFAULT_ENTRY && !RASTER_ENTRIES.contains(&entry.as_str()) {
+            eprintln!(
+                "xtask build-shaders: entry must be `{DEFAULT_ENTRY}`, `{}`, `{}`, or `{ALL_ENTRIES}`",
+                RASTER_ENTRIES[0], RASTER_ENTRIES[1]
+            );
+            exit(2);
+        }
     }
     let root = super::workspace_root();
     if let Err(message) = build(&root, &args) {
@@ -71,7 +76,7 @@ pub fn build_shaders(raw: &[String]) {
 fn parse(raw: &[String]) -> Result<Args, String> {
     let mut args = Args {
         package: DEFAULT_PACKAGE.to_string(),
-        entry: DEFAULT_ENTRY.to_string(),
+        entry: Some(DEFAULT_ENTRY.to_string()),
         opt: DEFAULT_OPT.to_string(),
         out: PathBuf::from(DEFAULT_OUT),
         artifact: None,
@@ -93,7 +98,8 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         let value = iter.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--package" => args.package = value.clone(),
-            "--entry" => args.entry = value.clone(),
+            "--entry" if value == ALL_ENTRIES => args.entry = None,
+            "--entry" => args.entry = Some(value.clone()),
             "--opt" => args.opt = value.clone(),
             "--out" => args.out = PathBuf::from(value),
             "--artifact" => args.artifact = Some(PathBuf::from(value)),
@@ -134,33 +140,34 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
     let ll = compile(root, args)?;
     let ir =
         std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let translated = match ornis_llvm2gpu::extract_meta(&ir) {
-        Ok(None) => {
-            if args.multisampled {
-                return Err("--multisampled needs a kernel with entry metadata".to_string());
-            }
-            let structs: Vec<&[u8]> = if args.types.is_empty() {
-                Vec::new()
-            } else {
-                vec![args.types.as_slice()]
-            };
-            ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
+    let sampling = if args.multisampled {
+        ornis_llvm2gpu::TextureSampling::Multisampled
+    } else {
+        ornis_llvm2gpu::TextureSampling::SingleSample
+    };
+    let records = ornis_llvm2gpu::extract_meta(&ir)
+        .map_err(|error| format!("translate {}: {error}", args.package))?;
+    let translated = if records.is_empty() {
+        if args.multisampled {
+            return Err("--multisampled needs a kernel with entry metadata".to_string());
         }
-        Ok(Some(_)) => {
-            let sampling = if args.multisampled {
-                ornis_llvm2gpu::TextureSampling::Multisampled
-            } else {
-                ornis_llvm2gpu::TextureSampling::SingleSample
-            };
-            ornis_llvm2gpu::translate_with_meta_and_sampling(&ir, sampling)
-        }
-        Err(error) => Err(error),
+        let structs: Vec<&[u8]> = if args.types.is_empty() {
+            Vec::new()
+        } else {
+            vec![args.types.as_slice()]
+        };
+        ornis_llvm2gpu::translate_with_types_and_workgroup(&ir, &structs, args.workgroup)
+    } else if let Some(entry) = &args.entry {
+        ornis_llvm2gpu::translate_entry_with_sampling(&ir, entry, sampling)
+    } else {
+        ornis_llvm2gpu::translate_with_meta_and_sampling(&ir, sampling)
     }
     .map_err(|error| format!("translate {}: {error}", args.package))?;
 
     let out = resolve(root, &args.out);
     std::fs::create_dir_all(&out).map_err(|error| format!("create {}: {error}", out.display()))?;
-    let wgsl = out.join(format!("{}.wgsl", args.entry));
+    let stem = args.entry.as_deref().unwrap_or("module");
+    let wgsl = out.join(format!("{stem}.wgsl"));
     std::fs::write(&wgsl, &translated.wgsl)
         .map_err(|error| format!("write {}: {error}", wgsl.display()))?;
     // The translator emits SPIR-V for the compute entry only; a raster artifact
@@ -171,7 +178,7 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
             .iter()
             .flat_map(|word| word.to_le_bytes())
             .collect();
-        let spv = out.join(format!("{}.spv", args.entry));
+        let spv = out.join(format!("{stem}.spv"));
         std::fs::write(&spv, bytes).map_err(|error| format!("write {}: {error}", spv.display()))?;
     }
 
@@ -194,7 +201,11 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
             eprintln!("xtask build-shaders: wrote {}", artifact.display());
         }
     }
-    eprintln!("xtask build-shaders: {} -> {}", args.entry, wgsl.display());
+    eprintln!(
+        "xtask build-shaders: {} -> {}",
+        translated.entries.join("+"),
+        wgsl.display()
+    );
     Ok(())
 }
 
@@ -303,7 +314,7 @@ mod tests {
     fn parse_defaults() {
         let args = parse(&[]).expect("defaults");
         assert_eq!(args.package, DEFAULT_PACKAGE);
-        assert_eq!(args.entry, DEFAULT_ENTRY);
+        assert_eq!(args.entry.as_deref(), Some(DEFAULT_ENTRY));
         assert_eq!(args.opt, DEFAULT_OPT);
         assert!(!args.check);
         assert!(args.artifact.is_none());
@@ -346,6 +357,14 @@ mod tests {
     #[test]
     fn check_requires_artifact() {
         assert!(parse(&["--check".to_string()]).is_err());
+    }
+
+    #[test]
+    fn entry_all_translates_every_entry_point() {
+        let args = parse(&["--entry".to_string(), "all".to_string()]).expect("all");
+        assert!(args.entry.is_none());
+        let args = parse(&["--entry".to_string(), "vs_main".to_string()]).expect("vertex");
+        assert_eq!(args.entry.as_deref(), Some("vs_main"));
     }
 
     #[test]
