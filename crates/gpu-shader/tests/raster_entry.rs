@@ -51,3 +51,38 @@ fn vertex_entry_is_a_plain_safe_function() {
 fn fragment_stage_io_type_checks() {
     fragment_body();
 }
+
+/// A fragment entry next to the vertex one: both live in this crate.
+///
+/// The metadata global's export name carries the entry, so the two records do
+/// not collide and the builder can translate both into one module — which is
+/// what a pass with a vertex and a fragment stage needs.
+#[gpu_entry(fragment)]
+pub fn fs_main() {
+    let u = fragment_input_lane::<0, 3, 0>();
+    let v = fragment_input_lane::<0, 3, 1>();
+    fragment_store_at::<0>(u, v, 0.0, 1.0);
+}
+
+/// Byte length of one record here: `entry=<name>;workgroup=1,1,1`, no NUL.
+const RECORD_LEN: usize = "entry=vs_main;workgroup=1,1,1".len();
+
+// SAFETY: the two statics are the `[u8; N]` metadata records `#[gpu_entry]`
+// emits for this crate's entries. They are plain immutable bytes, and the
+// lengths below are the exact record lengths asserted by the test.
+unsafe extern "C" {
+    static ornis_gpu_shader_meta_vs_main: [u8; RECORD_LEN];
+    static ornis_gpu_shader_meta_fs_main: [u8; RECORD_LEN];
+}
+
+#[test]
+fn each_entry_publishes_its_own_record() {
+    let record = |bytes: &'static [u8]| std::str::from_utf8(bytes).expect("ASCII");
+    // SAFETY: see the declaration above: both are readable immutable arrays of
+    // `RECORD_LEN` bytes, and the borrow ends with this statement.
+    let vertex = unsafe { record(&ornis_gpu_shader_meta_vs_main) };
+    // SAFETY: same contract as above, one static at a time.
+    let fragment = unsafe { record(&ornis_gpu_shader_meta_fs_main) };
+    assert_eq!(vertex, "entry=vs_main;workgroup=1,1,1");
+    assert_eq!(fragment, "entry=fs_main;workgroup=1,1,1");
+}
