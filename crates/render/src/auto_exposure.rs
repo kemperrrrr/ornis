@@ -605,14 +605,14 @@ impl AutoExposure {
             "auto-exposure histogram",
             &histogram_layout,
             &histogram_shader,
-            "build_histogram",
+            "cs_main",
         );
         let adapt_pipeline = compute_pipeline(
             device,
             "auto-exposure adapt",
             &adapt_layout,
             &adapt_shader,
-            "adapt_exposure",
+            "cs_main",
         );
 
         let default_settings = AutoExposureSettings::default();

@@ -1,0 +1,204 @@
+//! Shader-only parity of the llvm2gpu AO kernels against master's WGSL.
+//!
+//! The scene is a 64×64 depth image with an interior step and a far last
+//! row. GTAO's radius puts pixel (0, 0) step 1 on UV x = 1, where master
+//! clamps the texel to `width - 1` and an unclamped cast is out of bounds.
+//! `ORNIS_REQUIRE_GPU=1` panics when no adapter exists.
+
+#[allow(dead_code)]
+mod common;
+
+#[path = "ao_master_parity/pass.rs"]
+mod pass;
+#[path = "ao_master_parity/scene.rs"]
+mod scene;
+
+use ornis_render::AoMethod;
+use ornis_render::shaders::ao_generated::{wgsl_source_blur, wgsl_source_raw_for_samples};
+use scene::LevelDiff;
+
+fn master(name: &str, multisampled: bool) -> String {
+    let source = match name {
+        "gtao" => include_str!("ao_master_parity/master_gtao.wgsl"),
+        "ssao" => include_str!("ao_master_parity/master_ssao.wgsl"),
+        "blur" => include_str!("ao_master_parity/master_blur.wgsl"),
+        other => panic!("unknown master shader {other}"),
+    };
+    if multisampled {
+        source
+            .replace("texture_depth_2d", "texture_depth_multisampled_2d")
+            .replace("texture_2d<f32>", "texture_multisampled_2d<f32>")
+    } else {
+        source.to_string()
+    }
+}
+
+fn report(label: &str, diff: &LevelDiff) {
+    eprintln!(
+        "{label}: max {}/255  over5 {}/{}  mae {:.6}",
+        diff.max_level, diff.over_5, diff.pixels, diff.mae
+    );
+}
+
+fn assert_identical(label: &str, diff: &LevelDiff) {
+    report(label, diff);
+    assert_eq!(
+        diff.max_level, 0,
+        "{label}: max {}/255, {} px > 5 levels, mae {:.6}",
+        diff.max_level, diff.over_5, diff.mae
+    );
+}
+
+fn raw_pair(shot: &scene::Shot, method: AoMethod, multisampled: bool) -> LevelDiff {
+    let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
+        return LevelDiff {
+            max_level: 0,
+            over_5: 0,
+            mae: 0.0,
+            pixels: 0,
+        };
+    };
+    let name = if method.is_ssao() { "ssao" } else { "gtao" };
+    let samples = if multisampled { 4 } else { 1 };
+    let master_px = pass::draw_raw(
+        &device,
+        &queue,
+        shot,
+        &master(name, multisampled),
+        multisampled,
+    );
+    let generated = wgsl_source_raw_for_samples(method, samples);
+    let new_px = pass::draw_raw(&device, &queue, shot, &generated, multisampled);
+    scene::level_diff(&master_px, &new_px)
+}
+
+#[test]
+fn gtao_border_matches_master_wgsl() {
+    let diff = raw_pair(&scene::border_shot(), AoMethod::Gtao, false);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("gtao 1x border", &diff);
+}
+
+#[test]
+fn gtao_border_4x_matches_master_wgsl() {
+    let diff = raw_pair(&scene::border_shot(), AoMethod::Gtao, true);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("gtao 4x border", &diff);
+}
+
+#[test]
+fn ssao_border_matches_master_wgsl() {
+    let diff = raw_pair(&scene::border_shot(), AoMethod::Ssao, false);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("ssao 1x border", &diff);
+}
+
+#[test]
+fn ssao_border_4x_matches_master_wgsl() {
+    let diff = raw_pair(&scene::border_shot(), AoMethod::Ssao, true);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("ssao 4x border", &diff);
+}
+
+#[test]
+fn gtao_local_matches_master_wgsl() {
+    let diff = raw_pair(&scene::local_shot(), AoMethod::Gtao, false);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("gtao 1x local", &diff);
+}
+
+#[test]
+fn ssao_local_matches_master_wgsl() {
+    let diff = raw_pair(&scene::local_shot(), AoMethod::Ssao, false);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical("ssao 1x local", &diff);
+}
+
+fn assert_scaled_raw_matches_master(method: AoMethod, multisampled: bool, label: &str) {
+    let mut shot = scene::local_shot();
+    // Reconstruction w scales by 1e-7, below the old `max(w, 1e-6)` guard.
+    shot.proj_scale = 1.0e7;
+    let diff = raw_pair(&shot, method, multisampled);
+    if diff.pixels == 0 {
+        return;
+    }
+    assert_identical(label, &diff);
+}
+
+#[test]
+fn gtao_scaled_camera_matches_master_below_eps() {
+    let Some((adapter, device, queue)) = common::adapter_or_skip() else {
+        return;
+    };
+    let mut shot = scene::local_shot();
+    shot.proj_scale = 1.0e7;
+    let draw = |wgsl: &str| pass::draw_raw(&device, &queue, &shot, wgsl, false);
+    let master_px = draw(&master("gtao", false));
+    let new_px = draw(&wgsl_source_raw_for_samples(AoMethod::Gtao, 1));
+    let diff = scene::level_diff(&master_px, &new_px);
+    // WGSL permits FMA contraction: Metal folds the direction mix differently
+    // by 1 ULP, amplified by this ill-conditioned tiny-w (~1e-7) camera.
+    // M1: max 9/255, 2 pixels >5 levels, 4 changed / 4096; lavapipe: exact.
+    const MAX_LEVEL: u8 = 10;
+    const MAX_CHANGED_PIXELS: usize = 4;
+    let (max_level, max_changed_pixels) =
+        matches!(adapter.get_info().backend, wgpu::Backend::Metal)
+            .then_some((MAX_LEVEL, MAX_CHANGED_PIXELS))
+            .unwrap_or_default();
+    let changed = master_px
+        .chunks_exact(4)
+        .zip(new_px.chunks_exact(4))
+        .filter(|(a, b)| a[..3] != b[..3])
+        .count();
+    report("gtao scaled w", &diff);
+    assert!(
+        diff.max_level <= max_level && changed <= max_changed_pixels,
+        "gtao scaled w: max {}/255, {changed}/{} changed pixels",
+        diff.max_level,
+        diff.pixels
+    );
+}
+
+#[test]
+fn ssao_scaled_camera_matches_master_below_eps() {
+    assert_scaled_raw_matches_master(AoMethod::Ssao, false, "ssao scaled w");
+}
+
+#[test]
+fn ssao_4x_scaled_camera_matches_master_below_eps() {
+    assert_scaled_raw_matches_master(AoMethod::Ssao, true, "ssao 4x scaled w");
+}
+
+fn assert_blur_matches_master(shot: &scene::Shot, label: &str) {
+    let Some((_adapter, device, queue)) = common::adapter_or_skip() else {
+        return;
+    };
+    let raw = scene::ao_raw_rgba();
+    let master_px = pass::draw_blur(&device, &queue, shot, &master("blur", false), &raw);
+    let new_px = pass::draw_blur(&device, &queue, shot, &wgsl_source_blur(), &raw);
+    assert_identical(label, &scene::level_diff(&master_px, &new_px));
+}
+
+#[test]
+fn blur_border_matches_master_wgsl() {
+    assert_blur_matches_master(&scene::border_shot(), "blur");
+}
+
+#[test]
+fn blur_scaled_camera_matches_master_below_eps() {
+    let mut shot = scene::local_shot();
+    shot.proj_scale = 1.0e7;
+    assert_blur_matches_master(&shot, "blur scaled w");
+}

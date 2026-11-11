@@ -11,6 +11,8 @@ use crate::auto_exposure::wasm2gpu::lower_guest;
 
 use super::build_histogram;
 use super::hdr_texture_from_rgba;
+use super::histogram_bin;
+use super::log_luminance;
 use super::read_exposure;
 use super::read_histogram;
 use super::try_device;
@@ -204,11 +206,24 @@ fn scenes() -> Vec<Scene> {
     non_finite[0] = [f32::NAN, 0.0, 0.0, 1.0];
     non_finite[1] = [f32::INFINITY, 0.0, 0.0, 1.0];
     non_finite[2] = [f32::NEG_INFINITY, 0.0, 0.0, 1.0];
+    // Non-finite samples in the layer the mode does *not* select must not
+    // reach the chosen texel: multiply-masking (`NaN * 0.0`) would poison it
+    // and silently drop a valid sample into bin 0.
+    // Pixel 3 has non-black deferred RGB and non-zero forward RGB/alpha.
+    // Pixel 0 does not: NaN poisoning there would still produce bin 0,
+    // allowing a broken multiply-mask to pass the histogram comparison.
+    let mut bad_unselected_deferred = non_finite.clone();
+    bad_unselected_deferred[0] = deferred[0];
+    bad_unselected_deferred[3] = [f32::NAN, 0.0, 0.0, 1.0];
+    let mut bad_unselected_forward = forward.clone();
+    bad_unselected_forward[3] = [f32::NAN, 0.0, 0.0, 1.0];
+    bad_unselected_forward[1] = [f32::INFINITY, 0.0, 0.0, 1.0];
+    bad_unselected_forward[2] = [f32::NEG_INFINITY, 0.0, 0.0, 1.0];
     vec![
         Scene {
             name: "deferred HDR with non-finite guards",
             mode: 0,
-            deferred: non_finite,
+            deferred: non_finite.clone(),
             forward: forward.clone(),
         },
         Scene {
@@ -220,8 +235,20 @@ fn scenes() -> Vec<Scene> {
         Scene {
             name: "hybrid clipped HDR highlights",
             mode: 2,
+            deferred: deferred.clone(),
+            forward: forward.clone(),
+        },
+        Scene {
+            name: "forward mode ignores non-finite deferred",
+            mode: 1,
+            deferred: bad_unselected_deferred,
+            forward: forward.clone(),
+        },
+        Scene {
+            name: "deferred mode ignores non-finite forward",
+            mode: 0,
             deferred,
-            forward,
+            forward: bad_unselected_forward,
         },
     ]
 }
@@ -241,4 +268,32 @@ fn settings() -> AutoExposureSettings {
         exponential_transition_distance: 1.25,
     }
     .sanitized()
+}
+
+/// Keep the NaN regression independent of the infinity guards: poisoning the
+/// selected sample must change its histogram bin in *both* selection modes.
+#[test]
+fn unselected_nan_faces_a_nonzero_histogram_bin() {
+    let settings = settings();
+    let mut modes = Vec::new();
+    for scene in scenes() {
+        let selected = selected_rgb(&scene);
+        let unselected = match scene.mode {
+            0 => &scene.forward,
+            1 => &scene.deferred,
+            _ => continue,
+        };
+        for (index, texel) in unselected.iter().enumerate() {
+            if texel[..3].iter().any(|value| value.is_nan()) {
+                assert!(
+                    histogram_bin(log_luminance(selected[index]), &settings) > 0,
+                    "{} pixel {index}: NaN poisoning must not also land in bin 0",
+                    scene.name
+                );
+                modes.push(scene.mode);
+            }
+        }
+    }
+    modes.sort_unstable();
+    assert_eq!(modes, [0, 1], "each selection mode needs a NaN regression");
 }

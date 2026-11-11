@@ -1,6 +1,7 @@
 //! GPU owner of the clustered-light buffers and the assignment compute
-//! pass (#130). The shader source lives in [`super::wgsl`], the CPU
-//! reference in [`super::cpu`].
+//! pass (#130). The assignment entry is the checked-in llvm2gpu artifact
+//! `cluster_generated.wgsl` (`cs_main`); binding numbers live in
+//! [`super::wgsl`], the CPU reference in [`super::cpu`].
 use super::wgsl::{
     BINDING_CAMERA, BINDING_COUNTERS, BINDING_GRID, BINDING_INDICES, BINDING_LIGHTS, BINDING_PARAMS,
 };
@@ -98,7 +99,7 @@ impl ClusteredLights {
         ] = Self::assignment_buffers(device);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cluster assignment shader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Owned(super::wgsl::cluster_compute_wgsl())),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("cluster_generated.wgsl"))),
         });
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cluster assignment bind group layout"),
@@ -120,7 +121,7 @@ impl ClusteredLights {
             label: Some("cluster assignment pipeline"),
             layout: Some(&pipeline_layout),
             module: &module,
-            entry_point: Some("assign_lights_to_clusters"),
+            entry_point: Some("cs_main"),
             compilation_options: Default::default(),
             cache: None,
         });

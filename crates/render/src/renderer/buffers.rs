@@ -214,6 +214,7 @@ impl Renderer3D {
         let per_object = read_lock(&self.per_object_buffer);
         let material = read_lock(&self.material_buffer);
         *write_lock(&self.indirect_bind_group) = None;
+        *write_lock(&self.indirect_indices_bind_group) = None;
         *write_lock(&self.gbuffer_bind_group) =
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gbuffer bind group (grown)"),

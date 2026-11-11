@@ -42,18 +42,23 @@ fn params_layouts_match_their_wgsl() {
     assert_eq!(std::mem::offset_of!(AdaptParams, min_log_lum), 0);
     assert_eq!(std::mem::offset_of!(AdaptParams, transition_distance), 36);
     assert_eq!(std::mem::offset_of!(AdaptParams, dt), 40);
+    // Only the contract shape is asserted here. Generated identifiers
+    // (`f3_`, `tex_0_1_`, ...) change with any naming tweak in llvm2gpu, so
+    // they are not a test of the shader. Behaviour (bins, bin-0 exclusion,
+    // exposure step) is covered by the GPU parity test below, which compares
+    // these generated production pipelines against the wasm guest and the
+    // CPU reference; the CI `gpu` shard runs it as `test-render-gpu` with
+    // ORNIS_REQUIRE_GPU=1, so it cannot skip for want of an adapter.
     let hist = histogram_wgsl();
-    assert!(hist.contains("mode: u32"));
-    assert!(hist.contains("array<atomic<u32>, 256u>"));
-    assert!(hist.contains("var<workgroup> histogram_shared"));
-    assert!(hist.contains("forward_tex"));
+    assert!(hist.contains("array<atomic<u32>, 256>"));
+    assert!(hist.contains("var<workgroup> workgroup_atomics"));
+    assert!(hist.contains("@group(0) @binding(1)"));
+    assert!(hist.contains("fn cs_main("));
+    assert!(hist.contains("@workgroup_size(8, 8, 1)"));
     let adapt = adapt_wgsl();
-    assert!(adapt.contains("brighten_speed: f32"));
-    assert!(adapt.contains("darken_speed: f32"));
-    assert!(adapt.contains("array<u32, 256u>"));
-    assert!(adapt.contains("exposure_out.exposure"));
-    // Bin 0 is excluded from the reduction.
-    assert!(adapt.contains("var i = 1u; i < HISTOGRAM_BINS"));
+    assert!(adapt.contains("array<u32, 256>"));
+    assert!(adapt.contains("@group(0) @binding(2)"));
+    assert!(adapt.contains("exp2("));
 }
 
 #[test]

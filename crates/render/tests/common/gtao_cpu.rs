@@ -11,6 +11,8 @@
 
 use ornis_render::ao::DEFAULT_AO_BLUR_SIGMA;
 
+use super::world::reconstruct;
+
 /// Full-frame width the ledge gate renders at.
 const FRAME_W: f32 = 320.0;
 /// Full-frame height the ledge gate renders at.
@@ -76,12 +78,6 @@ pub fn expected_ao(
         }
     }
     acc
-}
-
-fn reconstruct(inv: glam::Mat4, uv: glam::Vec2, depth: f32) -> glam::Vec3 {
-    let ndc = glam::Vec4::new(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
-    let world = inv * ndc;
-    world.truncate() / world.w
 }
 
 fn project_uv(vp: glam::Mat4, point: glam::Vec3) -> glam::Vec2 {

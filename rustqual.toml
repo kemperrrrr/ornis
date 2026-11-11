@@ -83,6 +83,16 @@ paths = [
     "crates/wasm2gpu/**",
     "crates/wasm2gpu-shader/**",
     "crates/wasm2gpu-testkit/**",
+    "crates/llvm2gpu/**",
+    "crates/gpu-shaders/**",
+    "crates/gpu-cluster/**",
+    "crates/gpu-gtao/**",
+    "crates/gpu-histogram/**",
+    "crates/gpu-adapt/**",
+    "crates/gpu-ssao/**",
+    "crates/gpu-blur/**",
+    "crates/gpu-shader/**",
+    "crates/gpu-shader-macros/**",
     "crates/gltf/**",
     "crates/texture/**",
 ]
@@ -125,6 +135,16 @@ ornis_gpu_abi_macros = "foundation"
 ornis_wasm2gpu = "foundation"
 ornis_wasm2gpu_shader = "foundation"
 ornis_wasm2gpu_testkit = "foundation"
+ornis_llvm2gpu = "foundation"
+ornis_gpu_shaders = "foundation"
+ornis_gpu_cluster = "foundation"
+ornis_gpu_gtao = "foundation"
+ornis_gpu_histogram = "foundation"
+ornis_gpu_adapt = "foundation"
+ornis_gpu_ssao = "foundation"
+ornis_gpu_blur = "foundation"
+ornis_gpu_shader = "foundation"
+ornis_gpu_shader_macros = "foundation"
 ornis_gltf = "foundation"
 ornis_texture = "foundation"
 ornis_core = "domain"

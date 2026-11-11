@@ -1,0 +1,7 @@
+error[E0599]: no method named `store` found for struct `Storage<u32, 0, 1>` in the current scope
+  --> tests/ui/read_only_storage_has_no_store.rs:14:9
+   |
+14 |     src.store(id, 0);
+   |         ^^^^^ method not found in `Storage<u32, 0, 1>`
+   |
+   = note: the method was found for `Storage<T, G, B, ReadWrite>`

@@ -144,11 +144,11 @@ fn encoded_ops(words: &[u32]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::ir_stats;
-    use crate::gpu_culling::CULL_COMPUTE_WGSL;
+    use crate::gpu_culling::LEGACY_CULL_COMPUTE_WGSL;
 
     #[test]
     fn production_cull_has_a_loop_an_atomic_and_spirv() {
-        let stats = ir_stats(CULL_COMPUTE_WGSL);
+        let stats = ir_stats(LEGACY_CULL_COMPUTE_WGSL);
         assert!(stats.bytes > 1, "source bytes");
         assert!(stats.functions >= 1, "{stats:?}");
         assert!(stats.loops >= 1, "sphere_visible for-loop: {stats:?}");

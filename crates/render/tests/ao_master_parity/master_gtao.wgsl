@@ -1,19 +1,56 @@
-//! GTAO slice march for the raw AO pass (XeGTAO / Bevy 0.14).
-//!
-//! Split out of [`super::ao_generated`] so that module stays inside the
-//! file-length gate. SSAO never includes these strings: the horizon helper
-//! would be dead code in that kernel.
+// Hand-written GTAO from master `ao_gtao.rs` / `ao_generated.rs`.
+// The horizon texel is `min(u32(uv * dims), dims - 1)`.
 
-/// XeGTAO arc (`gtao_arc`, the same closed form as
-/// [`crate::ao::gtao_sample`]) and one horizon sample.
-///
-/// A miss, or a hit at/past `radius`, returns `-1` rather than the
-/// hemisphere floor. That floor is the horizon's starting cosine
-/// (`min_cos` in the march). Returning it from a miss would make the
-/// start dead: deleting the clamp would not change a pixel, because every
-/// empty tap would put the floor back. `max` with the start still ignores
-/// `-1`, so a correct march is unchanged.
-pub(super) const AO_GTAO_HELPER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    camera_pos: vec4<f32>,
+    previous_view_proj: mat4x4<f32>,
+}
+
+struct AoParams {
+    radius: f32,
+    intensity: f32,
+    bias: f32,
+    blur_sigma: f32,
+}
+
+struct QuadVertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@group(0) @binding(0) var depth_tex: texture_depth_2d;
+@group(0) @binding(1) var normal_tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> camera: Camera;
+@group(0) @binding(3) var<uniform> ao_params: AoParams;
+
+const CLEAR_DEPTH: f32 = 1.0;
+const EPS: f32 = 1e-6;
+
+fn octahedral_decode(p: vec2<f32>) -> vec3<f32> {
+    var n = vec3<f32>(p.x, p.y, 1.0 - abs(p.x) - abs(p.y));
+    let t = max(-n.z, 0.0);
+    let neg = vec2<f32>(0.0 - t, 0.0 - t);
+    let pos = vec2<f32>(t, t);
+    let offset = select(pos, neg, n.xy >= vec2<f32>(0.0));
+    n.x = n.x + offset.x;
+    n.y = n.y + offset.y;
+    return normalize(n);
+}
+
+fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec3<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth);
+    let clip = vec4<f32>(ndc, 1.0);
+    let view = camera.inv_view_proj * clip;
+    return view.xyz / view.w;
+}
+
+fn ao_interleaved_gradient(pixel: vec2<u32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(vec2<f32>(pixel), magic.xy)));
+}
+
 fn gtao_arc(horizon: f32, normal_angle: f32) -> f32 {
     let h = horizon;
     let n = normal_angle;
@@ -30,7 +67,7 @@ fn gtao_horizon_cos(uv: vec2<f32>, dims: vec2<f32>, center: vec3<f32>, view_vec:
     if (sdepth >= CLEAR_DEPTH) {
         return -1.0;
     }
-    let sample_pos = reconstruct_world_pos(uv, sdepth, camera);
+    let sample_pos = reconstruct_world_pos(uv, sdepth);
     let delta = sample_pos - center;
     let r = length(delta);
     if (r <= EPS || r >= radius) {
@@ -40,19 +77,24 @@ fn gtao_horizon_cos(uv: vec2<f32>, dims: vec2<f32>, center: vec3<f32>, view_vec:
     let cos_h = dot(delta / r, view_vec);
     return mix(min_cos, cos_h, falloff);
 }
-"#;
 
-/// Two slices by four steps, each step sampling both directions. The normal
-/// is projected onto the slice and both horizons feed the arc above.
-/// Matches Bevy 0.14 `gtao.wgsl` / Intel XeGTAO (no bent normals, no depth
-/// mips — the g-buffer is a single hardware depth).
-pub(super) const AO_GTAO_BODY: &str = r#"
+@fragment
+fn fs_main(input: QuadVertexOutput) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(depth_tex));
+    let coord = vec2<u32>(input.uv * dims);
+    let depth = textureLoad(depth_tex, coord, 0);
+    if (depth >= CLEAR_DEPTH) {
+        return vec4<f32>(1.0);
+    }
+    let normal_enc = textureLoad(normal_tex, coord, 0);
+    let n = octahedral_decode(normal_enc.rg);
+    let center = reconstruct_world_pos(input.uv, depth);
     let to_eye = camera.camera_pos.xyz - center;
     let view_vec = to_eye / max(length(to_eye), EPS);
     let texel_x = vec2<f32>(1.0 / dims.x, 0.0);
     let texel_y = vec2<f32>(0.0, 1.0 / dims.y);
-    let screen_x = normalize(reconstruct_world_pos(input.uv + texel_x, depth, camera) - center + vec3<f32>(EPS, 0.0, 0.0));
-    let screen_y = normalize(reconstruct_world_pos(input.uv + texel_y, depth, camera) - center + vec3<f32>(0.0, EPS, 0.0));
+    let screen_x = normalize(reconstruct_world_pos(input.uv + texel_x, depth) - center + vec3<f32>(EPS, 0.0, 0.0));
+    let screen_y = normalize(reconstruct_world_pos(input.uv + texel_y, depth) - center + vec3<f32>(0.0, EPS, 0.0));
     let edge = center + screen_x * ao_params.radius;
     let edge_clip = camera.view_proj * vec4<f32>(edge, 1.0);
     let edge_w = max(edge_clip.w, EPS);
@@ -86,4 +128,4 @@ pub(super) const AO_GTAO_BODY: &str = r#"
     }
     let ao = clamp(mix(1.0, visibility / 2.0, ao_params.intensity), 0.0, 1.0);
     return vec4<f32>(ao, ao, ao, 1.0);
-"#;
+}

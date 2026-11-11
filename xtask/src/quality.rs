@@ -52,11 +52,12 @@ struct StageResult {
 /// Canonical stage ids in gate order. `--only` selects a subset for CI
 /// sharding; the default (no `--only`) runs everything implied by the
 /// level flags, exactly as before.
-const LEVEL1_IDS: [&str; 15] = [
+const LEVEL1_IDS: [&str; 16] = [
     "fmt",
     "clippy-physics",
     "test-physics",
     "test-wasm2gpu",
+    "test-render-gpu",
     "clippy",
     "rustqual",
     "smoke",
@@ -69,7 +70,7 @@ const LEVEL1_IDS: [&str; 15] = [
     "machete",
     "typos",
 ];
-const CI_IDS: [&str; 2] = ["doc", "wasm-check"];
+const CI_IDS: [&str; 3] = ["doc", "wasm-check", "build-shaders"];
 const FULL_IDS: [&str; 3] = ["coverage", "bench-compile", "hack-check"];
 const BENCH_IDS: [&str; 1] = ["criterion"];
 const DEEP_IDS: [&str; 3] = ["mutants", "fuzz-scene", "fuzz-editor"];
@@ -160,16 +161,20 @@ impl QualityFlags {
     /// With `--only` the total is the filtered count.
     ///
     /// The clippy stage runs two commands (the workspace lint and the
-    /// render-bench lint under `test-util`), so it counts twice: the
-    /// denominator has to be right before the first stage prints its
-    /// header, not after the clippy stage already ran.
+    /// render-bench lint under `test-util`), and `build-shaders` checks
+    /// nine artifacts, so that id counts nine times: the denominator
+    /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
             .active_ids()
             .iter()
             .filter(|id| self.enabled(id))
             .count();
-        stages + usize::from(self.enabled("clippy"))
+        // `build-shaders` runs the base id plus one extra per remaining
+        // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
+        // ssao 4x, and the AO blur.
+        let shader_checks = 8 * usize::from(self.ci && self.enabled("build-shaders"));
+        stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
 
@@ -1426,6 +1431,31 @@ fn level1(stages: &mut StageList<'_>) {
         false,
     );
 
+    // Render GPU gates. `cargo test --workspace` in the `test` shard has no
+    // adapter, so every `try_device` test skips silently there; the gpu CI
+    // job runs this stage with ORNIS_REQUIRE_GPU=1 (a missing lavapipe then
+    // panics). The filter keeps the pass whose generated WGSL this branch
+    // migrated and whose bin-0/exposure contract used to be asserted on
+    // generated identifiers: the parity test compares production
+    // histogram + adapt against the wasm guest and the CPU reference.
+    stages.run(
+        "test-render-gpu",
+        "test (render gpu)",
+        "cargo test -p ornis-render --features test-util --lib auto_exposure:: -- --test-threads=1",
+        stages.cargo(&[
+            "test",
+            "-p",
+            "ornis-render",
+            "--features",
+            "test-util",
+            "--lib",
+            "auto_exposure::",
+            "--",
+            "--test-threads=1",
+        ]),
+        false,
+    );
+
     // No `determinism-fast` stage (removed, RAT-26): it re-ran the
     // default-suite determinism filters (`solver_is_deterministic`,
     // `determinism_snapshot`, `avbd_determinism`) that `test-physics`
@@ -2064,6 +2094,135 @@ fn ci_stages(stages: &mut StageList<'_>) {
             "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
         );
     }
+
+    check_shader_artifact(
+        stages,
+        None,
+        None,
+        "crates/render/src/gpu_culling/cull_generated.wgsl",
+        "cargo xtask build-shaders --check (checked-in WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-cluster"),
+        None,
+        "crates/render/src/renderer/clusters/cluster_generated.wgsl",
+        "cargo xtask build-shaders --check (cluster WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-gtao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/gtao_generated.wgsl",
+        "cargo xtask build-shaders --check (gtao WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-histogram"),
+        Some("cs_main"),
+        "crates/render/src/shaders/histogram_generated.wgsl",
+        "cargo xtask build-shaders --check (histogram WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-adapt"),
+        Some("cs_main"),
+        "crates/render/src/shaders/adapt_generated.wgsl",
+        "cargo xtask build-shaders --check (adapt WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-ssao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/ssao_generated.wgsl",
+        "cargo xtask build-shaders --check (ssao WGSL drift)",
+    );
+    check_shader_artifact_multisampled(
+        stages,
+        Some("ornis-gpu-gtao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/gtao_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (gtao 4x WGSL drift)",
+    );
+    check_shader_artifact_multisampled(
+        stages,
+        Some("ornis-gpu-ssao"),
+        Some("fs_main"),
+        "crates/render/src/shaders/ssao_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (ssao 4x WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-blur"),
+        Some("fs_main"),
+        "crates/render/src/shaders/ao_blur_generated.wgsl",
+        "cargo xtask build-shaders --check (ao blur WGSL drift)",
+    );
+}
+
+/// One checked-in WGSL artifact. `package` is omitted for the default crate.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+) {
+    check_shader_artifact_sampling(stages, package, entry, artifact, desc, false);
+}
+
+/// Like [`check_shader_artifact`], with the 4x MSAA texture declarations.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_multisampled(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+) {
+    check_shader_artifact_sampling(stages, package, entry, artifact, desc, true);
+}
+
+// qual:allow(test_quality, untested, max_parameters=6) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_sampling(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+    multisampled: bool,
+) {
+    if !wasm_target_installed() {
+        stages.skip(
+            "build-shaders",
+            "build-shaders",
+            "wasm32-unknown-unknown target not installed:  rustup target add wasm32-unknown-unknown",
+        );
+        return;
+    }
+    let mut args = vec!["run", "-q", "--package", "xtask", "--", "build-shaders"];
+    if let Some(package) = package {
+        args.push("--package");
+        args.push(package);
+    }
+    if let Some(entry) = entry {
+        args.push("--entry");
+        args.push(entry);
+    }
+    if multisampled {
+        args.push("--multisampled");
+    }
+    args.push("--artifact");
+    args.push(artifact);
+    args.push("--check");
+    stages.run(
+        "build-shaders",
+        "build-shaders",
+        desc,
+        stages.cargo(&args),
+        false,
+    );
 }
 
 /// ── Deep static analysis (--everything) ────────────────────
@@ -2220,7 +2379,7 @@ fn quality_usage(code: i32) -> ! {
         "xtask quality — the Ornis quality gate\n\
          \n\
          USAGE:\n  \
-          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, test-wasm2gpu, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
+          cargo xtask quality           quick set (level 1): fmt, clippy-physics, test-physics, test-wasm2gpu, test-render-gpu, clippy, rustqual, smoke, test, test-lockfree, audit, deny, outdated, upgrade-check, machete, typos\n  \
          cargo xtask quality --ci      + rustdoc and wasm32 check (same set GitHub Actions runs)\n  \
          cargo xtask quality --full    + coverage ratchet (llvm-cov --workspace vs coverage-baseline.json), bench compile-check and the cargo-hack feature matrix\n  \
          cargo xtask quality --bench   + full criterion benchmark run (slow)\n  \
@@ -3545,6 +3704,9 @@ mod tests {
         assert_eq!(only_fmt_clippy.total_stages(), 3);
         let only_fmt = QualityFlags::parse(&["--only=fmt".to_string()]);
         assert_eq!(only_fmt.total_stages(), 1);
+        let only_shaders =
+            QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
+        assert_eq!(only_shaders.total_stages(), 9);
     }
 
     #[test]

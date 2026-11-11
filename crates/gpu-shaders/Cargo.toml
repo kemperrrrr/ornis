@@ -1,0 +1,17 @@
+[package]
+name = "ornis-gpu-shaders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "no_std GPU kernels compiled to LLVM IR for ornis-llvm2gpu"
+
+[dependencies]
+ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
