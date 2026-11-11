@@ -45,12 +45,9 @@ use_fallback() {
   [[ $switched -eq 1 ]] && return 0
   switched=1
   echo "::warning title=apt mirror fallback::$1; switching to independent Ubuntu mirrors"
-  local old=""
-  [[ -f "$MIRRORS_FILE" ]] && old=$(grep -oE '^https?://[^[:space:]]+' "$MIRRORS_FILE" || true)
-  {
-    printf '%s\n' "${FALLBACK_MIRRORS[@]}"
-    if [[ -n "$old" ]]; then printf '%s\n' "$old"; fi
-  } | sudo tee "$MIRRORS_FILE" >/dev/null
+  # Only the independent mirrors: keeping the broken *.ubuntu.com entries makes
+  # apt retry them with timeouts on every index and blows the update timeout.
+  printf '%s\n' "${FALLBACK_MIRRORS[@]}" | sudo tee "$MIRRORS_FILE" >/dev/null
   # Sources that bypass the mirror list (e.g. security.ubuntu.com) also move.
   sudo sed -i -E \
     "s#https?://(azure\.archive|archive|security)\.ubuntu\.com/ubuntu/?#${FALLBACK_MIRRORS[0]}#g" \
