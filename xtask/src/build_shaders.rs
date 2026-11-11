@@ -15,6 +15,8 @@ use std::process::{exit, Command};
 const DEFAULT_PACKAGE: &str = "ornis-gpu-shaders";
 /// Entry extracted by the translator.
 const DEFAULT_ENTRY: &str = "cs_main";
+/// Raster entries the translator also accepts.
+const RASTER_ENTRIES: [&str; 2] = ["fs_main", "vs_main"];
 /// LLVM optimisation level used for the shader crate.
 ///
 /// `1` is the canonical level for the checked-in artifacts: it inlines the
@@ -52,8 +54,11 @@ pub fn build_shaders(raw: &[String]) {
             exit(2);
         }
     };
-    if args.entry != DEFAULT_ENTRY && args.entry != "fs_main" {
-        eprintln!("xtask build-shaders: entry must be `{DEFAULT_ENTRY}` or `fs_main`");
+    if args.entry != DEFAULT_ENTRY && !RASTER_ENTRIES.contains(&args.entry.as_str()) {
+        eprintln!(
+            "xtask build-shaders: entry must be `{DEFAULT_ENTRY}`, `{}`, or `{}`",
+            RASTER_ENTRIES[0], RASTER_ENTRIES[1]
+        );
         exit(2);
     }
     let root = super::workspace_root();
@@ -158,13 +163,17 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
     let wgsl = out.join(format!("{}.wgsl", args.entry));
     std::fs::write(&wgsl, &translated.wgsl)
         .map_err(|error| format!("write {}: {error}", wgsl.display()))?;
-    let bytes: Vec<u8> = translated
-        .compute_spirv
-        .iter()
-        .flat_map(|word| word.to_le_bytes())
-        .collect();
-    let spv = out.join(format!("{}.spv", args.entry));
-    std::fs::write(&spv, bytes).map_err(|error| format!("write {}: {error}", spv.display()))?;
+    // The translator emits SPIR-V for the compute entry only; a raster artifact
+    // is WGSL-only, so no empty `.spv` is left behind for it.
+    if !translated.compute_spirv.is_empty() {
+        let bytes: Vec<u8> = translated
+            .compute_spirv
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let spv = out.join(format!("{}.spv", args.entry));
+        std::fs::write(&spv, bytes).map_err(|error| format!("write {}: {error}", spv.display()))?;
+    }
 
     if let Some(artifact) = &args.artifact {
         let artifact = resolve(root, artifact);

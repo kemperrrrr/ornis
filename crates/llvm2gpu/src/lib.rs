@@ -1,6 +1,6 @@
 //! Offline translator from LLVM IR (stable `rustc`) to WGSL and SPIR-V.
 //!
-//! The translator covers the compute and fragment subset of `3.1.2`: `cs_main`
+//! The translator covers the compute and raster subset: `cs_main`, `vs_main`,
 //! and `fs_main` built from `SROA`-scalarized arithmetic, comparisons,
 //! `select`, signed and unsigned integer bit/arithmetic ops, the
 //! `sqrt`/`sin` family, the `ornis_gpu` storage/uniform/texture ABI,
@@ -11,6 +11,15 @@
 //! `compute` kernel `wasm2gpu` already tests. `TextureSampling::Multisampled`
 //! re-declares the same kernel's textures as multisampled images with
 //! sample-0 loads, which is the 4x AO variant.
+//!
+//! A raster entry has no parameters: builtins and `@location` values are
+//! `ornis_gpu` imports (`vertex_index`, `instance_index`,
+//! `vertex_input_lane`, `fragment_input_lane`) and outputs are stores
+//! (`vertex_position`, `vertex_store_*`, `fragment_store_location`). The lowerer
+//! reads the interface back out of those calls, so the declared `vecN` width of
+//! each location is the highest lane the body touches. A vertex entry returns
+//! a struct with `@builtin(position)`; a fragment entry returns the bare
+//! `@location(0) vec4<f32>` when that is its only target.
 //!
 //! Values keep their LLVM bit pattern: `i32` lives as WGSL `u32`, and signed
 //! operators bitcast around the operation, so `ashr`/`sdiv`/`srem`/`sitofp`/
@@ -72,9 +81,10 @@ impl TextureSampling {
 ///
 /// # Errors
 ///
-/// [`TranslateError::Unsupported`] when the entry is not `cs_main` or the body
-/// leaves the translated subset, and [`TranslateError::UnsupportedType`] when
-/// the metadata names a uniform struct the translator cannot lay out.
+/// [`TranslateError::Unsupported`] when the entry is not `cs_main`, `vs_main`,
+/// or `fs_main`, or the body leaves the translated subset, and
+/// [`TranslateError::UnsupportedType`] when the metadata names a uniform
+/// struct the translator cannot lay out.
 pub fn translate_with_meta(llvm_ir: &str) -> Result<Translated, TranslateError> {
     translate_with_meta_and_sampling(llvm_ir, TextureSampling::SingleSample)
 }
@@ -96,6 +106,7 @@ pub fn translate_with_meta_and_sampling(
     let (meta, workgroup) = match meta::extract(llvm_ir)? {
         Some(meta) => {
             if meta.entry != ornis_gpu_abi::symbols::CS_MAIN
+                && meta.entry != ornis_gpu_abi::symbols::VS_MAIN
                 && meta.entry != ornis_gpu_abi::symbols::FS_MAIN
             {
                 return Err(TranslateError::Unsupported);
@@ -114,10 +125,10 @@ pub fn translate_with_meta_and_sampling(
     emit::emit(&module)
 }
 
-/// Parse textual LLVM IR and lower the `cs_main` compute entry.
+/// Parse textual LLVM IR and lower the entry point it defines.
 ///
 /// Requires stable `rustc` with the `wasm32-unknown-unknown` target,
-/// `panic=abort`, and a `#[no_mangle] cs_main(i32) -> f32` export compiled
+/// `panic=abort`, and an exported `cs_main`, `vs_main`, or `fs_main` compiled
 /// with `--emit=llvm-ir`. `xtask build-shaders` builds the checked-in
 /// production artifacts at `opt-level=1`, which keeps dynamic loops
 /// structured; `3` may unroll them into a CFG shape this translator rejects.

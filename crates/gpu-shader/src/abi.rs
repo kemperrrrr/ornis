@@ -134,6 +134,22 @@ unsafe extern "C" {
     fn import_fragment_uv_lane(lane: u32) -> f32;
     #[link_name = "fragment_store_f32x4"]
     fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
+    #[link_name = "vertex_index"]
+    fn import_vertex_index() -> u32;
+    #[link_name = "instance_index"]
+    fn import_instance_index() -> u32;
+    #[link_name = "vertex_input_lane"]
+    fn import_vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "vertex_position"]
+    fn import_vertex_position(x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "vertex_store_f32x2"]
+    fn import_vertex_store_f32x2(location: u32, x: f32, y: f32);
+    #[link_name = "vertex_store_f32x4"]
+    fn import_vertex_store_f32x4(location: u32, x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "fragment_input_lane"]
+    fn import_fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "fragment_store_location"]
+    fn import_fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32);
 }
 
 /// Call one declared import.
@@ -465,4 +481,52 @@ pub(crate) fn fragment_uv_lane(lane: u32) -> f32 {
 #[inline(always)]
 pub(crate) fn fragment_store(r: f32, g: f32, b: f32, a: f32) {
     call!(fragment_store_f32x4(r, g, b, a));
+}
+
+/// `@builtin(vertex_index)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn vertex_index() -> u32 {
+    call!(import_vertex_index())
+}
+
+/// `@builtin(instance_index)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn instance_index() -> u32 {
+    call!(import_instance_index())
+}
+
+/// Lane `lane` of the vertex `@location(location)` input of `lanes` lanes.
+#[inline(always)]
+pub(crate) fn vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
+    call!(import_vertex_input_lane(location, lanes, lane))
+}
+
+/// Write the clip-space `@builtin(position)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn vertex_position(x: f32, y: f32, z: f32, w: f32) {
+    call!(import_vertex_position(x, y, z, w));
+}
+
+/// Write a `vec2<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_2(location: u32, x: f32, y: f32) {
+    call!(import_vertex_store_f32x2(location, x, y));
+}
+
+/// Write a `vec4<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_4(location: u32, x: f32, y: f32, z: f32, w: f32) {
+    call!(import_vertex_store_f32x4(location, x, y, z, w));
+}
+
+/// Lane `lane` of the fragment `@location(location)` input of `lanes` lanes.
+#[inline(always)]
+pub(crate) fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
+    call!(import_fragment_input_lane(location, lanes, lane))
+}
+
+/// Write the fragment output at `location`: a `vec4<f32>` of RGBA lanes.
+#[inline(always)]
+pub(crate) fn fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32) {
+    call!(import_fragment_store_location(location, r, g, b, a));
 }

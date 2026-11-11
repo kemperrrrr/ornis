@@ -494,6 +494,7 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 |---|---|
 | `#[spirv(compute(threads(N)))]` | `#[gpu_entry(compute(threads(N)))]`, `threads(X, Y)` и `threads(X, Y, Z)`; кернел — обычная безопасная `pub fn`, без `extern "C"` и `no_mangle` |
 | `#[spirv(fragment)]` | `#[gpu_entry(fragment)]`; entry — имя функции (`fs_main`) |
+| `#[spirv(vertex)]` | `#[gpu_entry(vertex)]`; entry — имя функции (`vs_main`); всегда возвращает struct с `@builtin(position)` |
 | `#[spirv(global_invocation_id)]` | первый `u32` параметр entry (`global_invocation_id.x`) |
 | `#[spirv(global_invocation_id)]` newtype | ещё нет; нужен для entry, читающих несколько builtins |
 | `#[spirv(storage_buffer, descriptor_set, binding)]` | `#[gpu(storage_buffer, group = G, binding = B, read_only)] Storage<T>`; `group`/`binding` живут в атрибуте, а макрос вписывает их в тип |
@@ -501,6 +502,8 @@ naga/WGSL/SPIR-V. Целевой уровень эргономики — rust-gp
 | `spirv-std` resource methods | `Storage::load/store/len/is_empty`, `Uniform::field_f32/field_u32/vec4_lane/plane_distance`, `Vec3::dot/length` |
 | теги uniform-структур (руками) | `impl GpuStruct for S { const ID; const FIELD_TAGS }` — макрос читает их из типа и пишет в метаданные |
 | `spirv-std` math | `log2`, `exp2`, `abs`, `sign`, `clamp`, `mix`, `fract`, `sin`/`cos`/`acos`, `dot3`, `length3`, `cross_lane`, `normalize_lane` |
+| `#[spirv(vertex_index)]`, `#[spirv(instance_index)]` | `vertex_index()`, `instance_index()` — импорты, а не параметры entry: скомпилированная сигнатура остаётся `vs_main()` |
+| `#[spirv(location = N)]` входы/выходы | `vertex_input_lane::<LOC, LANES, LANE>()`, `vertex_store_2::<LOC>`/`vertex_store_4::<LOC>`, `fragment_input_lane::<LOC, LANES, LANE>()`, `fragment_store_at::<LOC>`; тело читает и пишет интерфейс через них, а объявляет его транслятор |
 | текстура / depth | `#[gpu(texture_2d)] Texture2d`, `#[gpu(depth_texture_2d)] DepthTexture2d`: `load` на mip 0, `width`/`height` |
 | workgroup и барьер | `WorkgroupU32`, `WorkgroupAtomicU32`, `workgroup_barrier` |
 | builtins | `global_invocation_lane::<AXIS>`, `local_invocation_index`, `fragment_uv::<LANE>`, `fragment_store` |
@@ -627,8 +630,9 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
 `break` сразу из двух циклов отвергается явно, вложенный natural loop
 с одним выходом и вложенное uniform-поле принимаются;
 `switch` отвергается (смешение mode гистограммы записано двумя
-сравнениями); entry — `#[gpu_entry(compute(..))]` и
-`#[gpu_entry(fragment)]`; runtime-материалы
+сравнениями); entry — `#[gpu_entry(compute(..))]`, `#[gpu_entry(vertex)]`
+и `#[gpu_entry(fragment)]`; один шейдерный крейт содержит ровно один
+entry (у глобала метаданных фиксированное export-имя); runtime-материалы
 остаются на staged Shader IR; `wasm2gpu` не возвращается в производство.
 
 ## 3.2 Что взять у Slang (идеи, не зависимость)

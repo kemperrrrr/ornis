@@ -174,7 +174,7 @@ pub(super) struct LlvmFunc {
     pub(super) blocks: Vec<BasicBlock>,
 }
 
-/// Parse the whole textual IR, returning `cs_main` or `fs_main`.
+/// Parse the whole textual IR, returning `cs_main`, `vs_main`, or `fs_main`.
 /// Declarations are skipped.
 pub(super) fn parse(text: &str) -> Result<LlvmFunc, TranslateError> {
     let header = parse_header(text)?;
@@ -185,7 +185,9 @@ pub(super) fn parse(text: &str) -> Result<LlvmFunc, TranslateError> {
 }
 
 fn is_entry(name: &str) -> bool {
-    name == "cs_main" || name == "fs_main"
+    name == ornis_gpu_abi::symbols::CS_MAIN
+        || name == ornis_gpu_abi::symbols::VS_MAIN
+        || name == ornis_gpu_abi::symbols::FS_MAIN
 }
 
 /// Parse every `define ... { ... }` block.

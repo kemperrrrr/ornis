@@ -455,6 +455,211 @@ merge:
     );
 }
 
+/// Stage interface of the first entry point of `wgsl`.
+///
+/// The assertions read the parsed module, not the printed text: naga's writer
+/// renames identifiers (a trailing digit grows an underscore), so matching
+/// strings would pin the writer instead of the interface.
+fn stage_interface(wgsl: &str) -> StageInterface {
+    use naga::TypeInner;
+    let module = naga::front::wgsl::parse_str(wgsl).expect("emitted WGSL parses");
+    let entry = module.entry_points.first().expect("one entry point");
+    let args = entry
+        .function
+        .arguments
+        .iter()
+        .map(|argument| {
+            let lanes = match &module.types[argument.ty].inner {
+                TypeInner::Vector { size, .. } => *size as u32,
+                _ => 1,
+            };
+            (argument.binding.clone().expect("bound argument"), lanes)
+        })
+        .collect();
+    StageInterface {
+        stage: entry.stage,
+        inputs: args,
+        outputs: result_members(&module, &entry.function),
+    }
+}
+
+/// Result members of `function`: binding, lane count, and byte offset.
+fn result_members(
+    module: &naga::Module,
+    function: &naga::Function,
+) -> Vec<(naga::Binding, (u32, u32))> {
+    use naga::TypeInner;
+    let Some(result) = &function.result else {
+        return Vec::new();
+    };
+    let TypeInner::Struct { members, .. } = &module.types[result.ty].inner else {
+        return Vec::new();
+    };
+    members
+        .iter()
+        .map(|member| {
+            let binding = member.binding.clone().expect("bound output");
+            let lanes = match &module.types[member.ty].inner {
+                TypeInner::Vector { size, .. } => *size as u32,
+                _ => 1,
+            };
+            (binding, (lanes, member.offset))
+        })
+        .collect()
+}
+
+/// Stage interface of one entry point.
+struct StageInterface {
+    /// Stage of the entry point.
+    stage: naga::ShaderStage,
+    /// Entry arguments: binding and declared lane count.
+    inputs: Vec<(naga::Binding, u32)>,
+    /// Result members: binding, lane count, and byte offset.
+    outputs: Vec<(naga::Binding, (u32, u32))>,
+}
+
+/// Whether `binding` is `@location(location)`.
+fn at_location(binding: &naga::Binding, location: u32) -> bool {
+    matches!(binding, naga::Binding::Location { location: at, .. } if *at == location)
+}
+
+/// Whether `binding` is the named builtin.
+fn at_builtin(binding: &naga::Binding, built_in: naga::BuiltIn) -> bool {
+    matches!(binding, naga::Binding::BuiltIn(found) if *found == built_in)
+}
+
+#[test]
+fn vertex_entry_declares_position_builtins_and_locations() {
+    let ir = r#"
+declare i32 @vertex_index()
+declare i32 @instance_index()
+declare float @vertex_input_lane(i32, i32, i32)
+declare void @vertex_position(float, float, float, float)
+declare void @vertex_store_f32x2(i32, float, float)
+define dso_local void @vs_main() {
+start:
+  %vi = call i32 @vertex_index()
+  %ii = call i32 @instance_index()
+  %ux = call float @vertex_input_lane(i32 0, i32 2, i32 0)
+  %uy = call float @vertex_input_lane(i32 0, i32 2, i32 1)
+  %vif = uitofp i32 %vi to float
+  %iif = uitofp i32 %ii to float
+  %x = fadd float %vif, %iif
+  call void @vertex_position(float %x, float %ux, float %uy, float 1.000000e+00)
+  call void @vertex_store_f32x2(i32 0, float %ux, float %uy)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("vertex entry");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("@vertex"), "{wgsl}");
+    let interface = stage_interface(wgsl);
+    assert_eq!(interface.stage, naga::ShaderStage::Vertex);
+    let args = &interface.inputs;
+    let outputs = &interface.outputs;
+    assert_eq!(args.len(), 3, "{wgsl}");
+    assert!(at_builtin(&args[0].0, naga::BuiltIn::VertexIndex), "{wgsl}");
+    assert!(
+        at_builtin(&args[1].0, naga::BuiltIn::InstanceIndex),
+        "{wgsl}"
+    );
+    assert!(at_location(&args[2].0, 0), "{wgsl}");
+    assert_eq!(args[2].1, 2, "{wgsl}");
+    // A vertex result must carry the clip position, and the two `vec2` lanes
+    // the body wrote become one located `vec2` member.
+    assert_eq!(outputs.len(), 2, "{wgsl}");
+    assert!(
+        at_builtin(&outputs[0].0, naga::BuiltIn::Position { invariant: false }),
+        "{wgsl}"
+    );
+    assert!(at_location(&outputs[1].0, 0), "{wgsl}");
+    assert_eq!(outputs[1].1.0, 2, "{wgsl}");
+}
+
+#[test]
+fn fragment_entry_infers_interface_widths_from_the_lanes_used() {
+    let ir = r#"
+declare float @fragment_input_lane(i32, i32, i32)
+declare void @fragment_store_location(i32, float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  %a = call float @fragment_input_lane(i32 0, i32 3, i32 0)
+  %b = call float @fragment_input_lane(i32 0, i32 3, i32 1)
+  %c = call float @fragment_input_lane(i32 0, i32 3, i32 2)
+  call void @fragment_store_location(i32 0, float %a, float %b, float %c, float 1.000000e+00)
+  call void @fragment_store_location(i32 1, float %b, float %a, float %c, float 1.000000e+00)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("fragment entry");
+    let wgsl = &translated.wgsl;
+    // Two targets become an output struct instead of the bare location-0 vec4.
+    assert!(wgsl.contains("-> FragmentOut"), "{wgsl}");
+    let interface = stage_interface(wgsl);
+    assert_eq!(interface.stage, naga::ShaderStage::Fragment);
+    let args = &interface.inputs;
+    let outputs = &interface.outputs;
+    // The fragment's `@builtin(position)` is always declared, then the inputs.
+    assert_eq!(args.len(), 2, "{wgsl}");
+    assert!(at_builtin(
+        &args[0].0,
+        naga::BuiltIn::Position { invariant: false }
+    ));
+    assert!(at_location(&args[1].0, 0), "{wgsl}");
+    assert_eq!(args[1].1, 3, "{wgsl}");
+    assert_eq!(outputs.len(), 2, "{wgsl}");
+    assert!(at_location(&outputs[0].0, 0), "{wgsl}");
+    assert!(at_location(&outputs[1].0, 1), "{wgsl}");
+    assert_eq!(outputs[0].1.0, 4, "{wgsl}");
+    assert!(outputs[1].1.1 >= outputs[0].1.1 + 16, "{wgsl}");
+}
+
+#[test]
+fn one_location_cannot_have_two_widths() {
+    let ir = r#"
+declare float @vertex_input_lane(i32, i32, i32)
+declare void @vertex_position(float, float, float, float)
+define dso_local void @vs_main() {
+start:
+  %ux = call float @vertex_input_lane(i32 0, i32 2, i32 0)
+  %uz = call float @vertex_input_lane(i32 0, i32 2)
+  call void @vertex_position(float %ux, float %uz, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    // Location 0 is declared two-wide and three-wide by the same body; a shader
+    // that disagrees with itself is rejected instead of padded.
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn vertex_entry_rejects_fragment_io() {
+    let ir = r#"
+declare void @fragment_store_f32x4(float, float, float, float)
+define dso_local void @vs_main() {
+start:
+  call void @fragment_store_f32x4(float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn vertex_entry_without_position_is_rejected() {
+    let ir = r#"
+declare void @vertex_store_f32x2(i32, float, float)
+define dso_local void @vs_main() {
+start:
+  call void @vertex_store_f32x2(i32 0, float 1.000000e+00, float 0.000000e+00)
+  ret void
+}
+"#;
+    // A vertex result must carry `@builtin(position)`; guessing it would emit
+    // a module naga refuses.
+    assert!(translate(ir).is_err());
+}
+
 #[test]
 fn fragment_entry_returns_location_zero_vec4() {
     let ir = r#"
@@ -1427,6 +1632,219 @@ fn rustc_nested_loop_to_wgsl() {
     );
 }
 
+/// Screen quad from `vertex_index` alone: positions and UVs are `select`s.
+const QUAD_VERTEX_IR: &str = r#"
+declare i32 @vertex_index()
+declare void @vertex_position(float, float, float, float)
+declare void @vertex_store_f32x2(i32, float, float)
+define dso_local void @vs_main() {
+start:
+  %vi = call i32 @vertex_index()
+  %right = icmp ugt i32 %vi, 1
+  %is_one = icmp eq i32 %vi, 1
+  %is_three = icmp eq i32 %vi, 3
+  %top_or_bottom = select i1 %is_one, float 1.000000e+00, float -1.000000e+00
+  %y = select i1 %is_three, float 1.000000e+00, float %top_or_bottom
+  %x = select i1 %right, float 1.000000e+00, float -1.000000e+00
+  %u = select i1 %right, float 1.000000e+00, float 0.000000e+00
+  %odd_v = select i1 %is_one, float 0.000000e+00, float 1.000000e+00
+  %v = select i1 %is_three, float 0.000000e+00, float %odd_v
+  call void @vertex_position(float %x, float %y, float 0.000000e+00, float 1.000000e+00)
+  call void @vertex_store_f32x2(i32 0, float %u, float %v)
+  ret void
+}
+"#;
+
+/// Fragment stage that writes the interpolated UV into the color target.
+const UV_FRAGMENT_IR: &str = r#"
+declare float @fragment_input_lane(i32, i32, i32)
+declare void @fragment_store_location(i32, float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  %u = call float @fragment_input_lane(i32 0, i32 2, i32 0)
+  %v = call float @fragment_input_lane(i32 0, i32 2, i32 1)
+  call void @fragment_store_location(i32 0, float %u, float %v, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+
+/// Both raster stages translated from IR, then drawn as one pipeline.
+///
+/// The vertex module alone is not proof: the location the vertex stage writes
+/// and the one the fragment stage reads have to agree, and the clip position
+/// has to land where `@builtin(vertex_index)` said it would. Reading the UV
+/// back from the color target pins all three at once.
+#[test]
+fn translated_vertex_and_fragment_stages_draw_the_screen_uv() {
+    let vs = translate(QUAD_VERTEX_IR).expect("vertex stage");
+    let fs = translate(UV_FRAGMENT_IR).expect("fragment stage");
+    // Two independent modules: the vertex one declares no globals, so the two
+    // WGSL texts concatenate into one module with both entry points.
+    let wgsl = format!("{}\n{}", vs.wgsl, fs.wgsl);
+    let Some((device, queue)) = device() else {
+        assert!(
+            std::env::var_os("ORNIS_REQUIRE_GPU").is_none(),
+            "ORNIS_REQUIRE_GPU is set but no wgpu device"
+        );
+        eprintln!("SKIPPED (no wgpu device)");
+        return;
+    };
+    const SIZE: u32 = 8;
+    let pixels = render_quad(&device, &queue, &wgsl, SIZE);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let index = ((y * SIZE + x) * 4) as usize;
+            let expected_u = ((x as f32 + 0.5) / SIZE as f32 * 255.0).round() as u8;
+            let expected_v = ((y as f32 + 0.5) / SIZE as f32 * 255.0).round() as u8;
+            assert_eq!(
+                (pixels[index], pixels[index + 1], pixels[index + 2]),
+                (expected_u, expected_v, 0),
+                "pixel ({x}, {y})"
+            );
+        }
+    }
+}
+
+/// Draw a `TriangleStrip` quad from `wgsl` into an `Rgba8Unorm` target.
+fn render_quad(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str, size: u32) -> Vec<u8> {
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("llvm2gpu raster"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("llvm2gpu raster"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("llvm2gpu target"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("quad"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.draw(0..4, 0..1);
+    }
+    read_back(device, queue, encoder, &target, size)
+}
+
+/// Copy the rendered target into host memory, one unpadded RGBA row per line.
+fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mut encoder: wgpu::CommandEncoder,
+    target: &wgpu::Texture,
+    size: u32,
+) -> Vec<u8> {
+    /// `copy_texture_to_buffer` row alignment.
+    const ROW_ALIGN: u32 = 256;
+    let unpadded = size * 4;
+    let padded = unpadded.div_ceil(ROW_ALIGN) * ROW_ALIGN;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: u64::from(padded * size),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(size),
+            },
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    let data = map_bytes(device, &readback);
+    let mut pixels = vec![0u8; (unpadded * size) as usize];
+    for row in 0..size as usize {
+        pixels[row * unpadded as usize..][..unpadded as usize]
+            .copy_from_slice(&data[row * padded as usize..][..unpadded as usize]);
+    }
+    pixels
+}
+
+/// Map `buffer` for reading and return its contents.
+fn map_bytes(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    rx.recv().expect("map callback").expect("map buffer");
+    let data = slice.get_mapped_range().expect("mapped range");
+    data.to_vec()
+}
+
 #[test]
 fn llvm_ir_scalar_matches_cpu_reference_on_gpu() {
     let Some(ir) = compile_ir(KERNEL_RS) else {
@@ -1570,20 +1988,7 @@ fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f3
     }
     encoder.copy_buffer_to_buffer(&storage, 0, &readback, 0, 16);
     queue.submit([encoder.finish()]);
-    let slice = readback.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-    rx.recv().expect("map callback").expect("map buffer");
-    let guard = slice.get_mapped_range().expect("mapped range");
-    let bytes = guard.to_vec();
-    drop(guard);
-    readback.unmap();
+    let bytes = map_bytes(device, &readback);
     let mut out = vec![0f32; 4];
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {
         out[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
