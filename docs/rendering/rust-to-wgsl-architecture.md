@@ -9,7 +9,8 @@
 > (§3.1.3, §4); добавлен вариант «LLVM IR → LLVM SPIR-V backend → naga»
 > (§3.1.2) и SPIR-V как общая граница с харнессом сравнения (§3.1.4).
 >
-> **2026-11-07 (llvm2gpu, спайк B):** крейт `crates/llvm2gpu` переводит
+> **2026-11-07 (llvm2gpu, спайк B, исторический снимок — см. запись
+> 2026-11-11 ниже):** крейт `crates/llvm2gpu` переводит
 > LLVM IR стабильного rustc в naga/WGSL/SPIR-V. Закрыты: scalar-подмножество
 > (`SROA`, `select`, `sqrt`/`sin`), ABI storage (`storage_*`,
 > `storage_atomic_add_u32`), uniform-массивы (`uniform_read_f32`),
@@ -29,6 +30,14 @@
 > на llvm2gpu (stable rustc, без nightly). Целевой уровень эргономики —
 > идеи rust-gpu (`no_std` shader-крейт, cargo-сборка, атрибуты entry и
 > типизированные ресурсы) на стабильном тулчейне; маппинг и этапы — §3.1.6.
+>
+> **2026-11-11 (этап 1 #263 влит, #259):** запись 2026-11-07 выше
+> устарела в части control flow и сборки. Вложенные natural loop с одним
+> выходом поддерживаются; канонический уровень сборки — `opt-level=1`
+> (`xtask build-shaders`), а не `s`; билдер `xtask build-shaders`,
+> миграция culling, кластеров, histogram/auto-exposure и AO (GTAO/SSAO/blur)
+> сделаны. Актуальный список ограничений — §3.1.6 «Ограничения» и
+> `crates/llvm2gpu/src/lib.rs`.
 
 Статус на 2026-09-10: 11 stage-entry пишутся на Rust через `#[stage]`
 и собираются в WGSL.base. Свободных идентификаторов в entry нет;
@@ -585,7 +594,33 @@ rustc ругается `improper_ctypes_definitions` на ZST-параметр, 
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
-**Ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
+**Ограничения control flow (на 2026-11-11, после #259).** Всё, что вне
+подмножества, отвергается при трансляции (`TranslateError::Unsupported` /
+`Parse`), а не транслируется молча неверно.
+
+- Поддерживается: diamond `if`/`else` с `phi`, ранний `return`
+  (`if cond { return; }`), natural `loop` с одним заголовком и одним
+  выходом (`while`, `for` по индексу, `break`/`continue`), вложенные такие
+  циклы, LLVM `select`.
+- `switch` отвергается. rustc строит его из `match` по целому/enum и из
+  цепочки `if / else if`; обход — независимые `if` (как mode гистограммы).
+- Цикл с несколькими выходами и `break 'outer` (выход сразу из двух
+  циклов) отвергаются.
+- Ветка `if` внутри цикла, выходящая через общий merge, пока не
+  поддерживается.
+- Irreducible CFG отвергается; бесконечный цикл без выхода — тоже
+  (`infinite_loop_is_rejected_not_mistranslated`).
+- Барьеры: uniformity условия и числа итераций не доказывается, поэтому
+  барьер внутри любого `if`/`loop` и барьер после раннего `return`
+  отвергаются, даже если ветка заведомо однородна. Барьер на верхнем
+  уровне после сошедшегося diamond разрешён. Алгоритмы с барьером в цикле
+  (Hi-Z mip-chain в одном dispatch, prefix-scan, bitonic sort в shared
+  memory) пока разносятся на отдельные dispatch по фазам.
+- Не control flow, но рядом: линейная память (`for x in slice`,
+  `getelementptr` по указателю, `phi ptr`) и `unreachable` (паника)
+  отвергаются; `opt-level=3` может развернуть циклы вне подмножества.
+
+**Прочие ограничения:** stable rustc; read-only storage остаётся `var<storage>`,
 а запись в тот же биндинг повышает его до `read_write` (два типа на одном
 биндинге отвергаются; запись в `Storage<_, ReadOnly>` по-прежнему
 запрещена типом);
