@@ -65,7 +65,11 @@ mod vec3;
 mod workgroup;
 
 pub use access::{ReadOnly, ReadWrite, StorageAccess};
-pub use builtin::{fragment_store, fragment_uv, global_invocation_lane, local_invocation_index};
+pub use builtin::{
+    fragment_input_lane, fragment_store, fragment_store_at, fragment_uv, global_invocation_lane,
+    instance_index, local_invocation_index, vertex_index, vertex_input_lane, vertex_position,
+    vertex_store_2, vertex_store_4,
+};
 pub use elements::{AtomicU32, Vec4U32};
 pub use math::{
     abs, acos, clamp, cos, cross_lane, dot2, dot3, exp2, fract, homogeneous_divide, length3, log2,
