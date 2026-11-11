@@ -48,11 +48,12 @@ const MIN_DARK_FRACTION: f64 = 0.005;
 /// Minimum fraction of non-black pixels: the corner must be visible.
 const MIN_LIT_FRACTION: f64 = 0.2;
 /// How many golden pixels may exceed [`TOL`] (driver edges, not a new kernel).
-///
-/// The SSAO taps compare eye distances, so a contraction difference between
-/// Metal and lavapipe flips a tap on one silhouette: at most 80 pixels
-/// (0.14% of the frame) moved by ≤7 with the llvm2gpu kernel.
-const GOLDEN_BUDGET: usize = 96;
+/// Fresh M1/Metal: GTAO bad=1, worst=5; AO-off bad=0, worst=0.
+const GOLDEN_BUDGET: usize = 64;
+/// Only SSAO on Metal needs the wider silhouette budget: fresh M1 bad=80,
+/// worst=7 (of 57600 pixels). FMA contraction flips an eye-distance tap;
+/// GTAO, AO-off and every other backend keep [`GOLDEN_BUDGET`].
+const METAL_SSAO_GOLDEN_BUDGET: usize = 96;
 /// Camera of the corner scene (shared by the upload and the region probe).
 const EYE: [f32; 3] = [3.0, 2.2, 3.0];
 /// Look-at target of the corner scene.
@@ -180,19 +181,27 @@ fn wiring(method: AoMethod, intensity: f32) -> AoWiring {
     AoWiring::new(AoSettings::new(method, 0.75, intensity, 0.025).expect("valid AO settings"))
 }
 
-/// Adapter, corner scene, and the AO-free reference frame. `None` when no
+/// Adapter backend, corner scene, and the AO-free reference frame. `None` when no
 /// adapter exists (the gate skips, same contract as the other headless tests).
 fn prepared_corner() -> Option<(
+    wgpu::Backend,
     wgpu::Device,
     wgpu::Queue,
     Renderer3D,
     ornis_render::Mesh,
     Vec<u8>,
 )> {
-    let (_adapter, device, queue) = common::adapter_or_skip()?;
+    let (adapter, device, queue) = common::adapter_or_skip()?;
     let (renderer, mesh) = build_corner(&device, &queue);
     let reference = render_pixels(&device, &queue, &renderer, &mesh, None);
-    Some((device, queue, renderer, mesh, reference))
+    Some((
+        adapter.get_info().backend,
+        device,
+        queue,
+        renderer,
+        mesh,
+        reference,
+    ))
 }
 
 /// Fraction of texels whose RGB sum clears the near-black cutoff.
@@ -206,7 +215,7 @@ fn lit_fraction(pixels: &[u8]) -> f64 {
 
 #[test]
 fn ao_disabled_is_bit_identical_to_no_ao() {
-    let Some((device, queue, renderer, mesh, reference)) = prepared_corner() else {
+    let Some((_, device, queue, renderer, mesh, reference)) = prepared_corner() else {
         return;
     };
     // Zero intensity collapses both kernels to the white factor on the
@@ -222,7 +231,7 @@ fn ao_disabled_is_bit_identical_to_no_ao() {
 
 #[test]
 fn ao_darkens_the_corner_and_never_brightens() {
-    let Some((device, queue, renderer, mesh, reference)) = prepared_corner() else {
+    let Some((backend, device, queue, renderer, mesh, reference)) = prepared_corner() else {
         return;
     };
     let lit = lit_fraction(&reference);
@@ -252,7 +261,7 @@ fn ao_darkens_the_corner_and_never_brightens() {
             "{method:?} darkened too little: {fraction:.4} < {MIN_DARK_FRACTION}"
         );
         assert_contacts(method, &reference, &pixels);
-        assert_golden(method, &pixels);
+        assert_golden(method, backend, &pixels);
     }
     assert_golden_off(&reference);
 }
@@ -401,7 +410,7 @@ fn wants_golden_write() -> bool {
     std::env::var_os("ORNIS_WRITE_AO_GOLDEN").is_some()
 }
 
-fn assert_matches_golden(name: &str, pixels: &[u8]) {
+fn assert_matches_golden(name: &str, pixels: &[u8], budget: usize) {
     if wants_golden_write() {
         write_golden(name, pixels);
         return;
@@ -417,28 +426,31 @@ fn assert_matches_golden(name: &str, pixels: &[u8]) {
     }
     // The gate verdict alone does not say how close the run was; the CI log
     // needs the actual edge to justify or shrink `GOLDEN_BUDGET`.
-    eprintln!("{name}: bad={bad} (budget {GOLDEN_BUDGET}) worst={worst} (limit 16)");
+    eprintln!("{name}: bad={bad} (budget {budget}) worst={worst} (limit 16)");
     assert!(
-        bad <= GOLDEN_BUDGET && worst <= 16,
-        "{name}: {bad} pixels differ by >{TOL} (budget {GOLDEN_BUDGET}), worst {worst}"
+        bad <= budget && worst <= 16,
+        "{name}: {bad} pixels differ by >{TOL} (budget {budget}), worst {worst}"
     );
 }
 
-fn assert_golden(method: AoMethod, pixels: &[u8]) {
+fn assert_golden(method: AoMethod, backend: wgpu::Backend, pixels: &[u8]) {
     let name = match method {
         AoMethod::Ssao => "ao_corner_ssao.png",
         AoMethod::Gtao => "ao_corner_gtao.png",
     };
-    assert_matches_golden(name, pixels);
+    let budget = matches!((method, backend), (AoMethod::Ssao, wgpu::Backend::Metal))
+        .then_some(METAL_SSAO_GOLDEN_BUDGET)
+        .unwrap_or(GOLDEN_BUDGET);
+    assert_matches_golden(name, pixels, budget);
 }
 
 fn assert_golden_off(pixels: &[u8]) {
-    assert_matches_golden("ao_corner_off.png", pixels);
+    assert_matches_golden("ao_corner_off.png", pixels, GOLDEN_BUDGET);
 }
 
 #[test]
 fn ao_leaves_direct_light_bit_identical() {
-    let Some((device, queue, renderer, mesh, _)) = prepared_corner() else {
+    let Some((_, device, queue, renderer, mesh, _)) = prepared_corner() else {
         return;
     };
     let light = DirectionalLight::default();
@@ -465,7 +477,7 @@ fn ao_leaves_direct_light_bit_identical() {
 /// frames undarkened, so the darkening assert is what kills it.
 #[test]
 fn ao_with_csm_darkens_ambient_and_leaves_direct() {
-    let Some((device, queue, renderer, mesh, _)) = prepared_corner() else {
+    let Some((_, device, queue, renderer, mesh, _)) = prepared_corner() else {
         return;
     };
     engage_corner_csm(&queue, &renderer, [0.0, 0.0, 0.0]);
