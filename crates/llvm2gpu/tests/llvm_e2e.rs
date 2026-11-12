@@ -2006,6 +2006,12 @@ fn cpu_reference(id: u32) -> f32 {
     (if x < 10.0 { x } else { 0.0 }) + x
 }
 
+/// Compile `source` and translate it, or skip when the target is missing.
+fn translate_source(source: &str) -> Option<ornis_llvm2gpu::Translated> {
+    let ir = compile_ir(source)?;
+    Some(translate(&ir).expect("translate"))
+}
+
 /// Compile `source`, translate it, and run it on the GPU.
 ///
 /// `None` when the wasm32 target or a GPU is missing; the CI GPU shard sets
@@ -2060,22 +2066,44 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
 }
 
 fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f32> {
+    run_compute_with_input(device, queue, wgsl, &[0; 4])
+}
+
+/// Run a compute entry with a read-only `u32` input at binding 1.
+fn run_compute_with_input(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    input: &[u32],
+) -> Vec<f32> {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("llvm2gpu"),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("llvm2gpu layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
     });
     let storage = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("storage"),
@@ -2086,13 +2114,27 @@ fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f3
         mapped_at_creation: false,
     });
     queue.write_buffer(&storage, 0, &[0u8; 16]);
+    let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("input"),
+        size: 4 * input.len() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let input_bytes: Vec<u8> = input.iter().flat_map(|word| word.to_le_bytes()).collect();
+    queue.write_buffer(&input_buffer, 0, &input_bytes);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("llvm2gpu bg"),
         layout: &layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: storage.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: input_buffer.as_entire_binding(),
+            },
+        ],
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("llvm2gpu pl"),
@@ -2368,11 +2410,9 @@ pub extern "C" fn cs_main(id: u32) -> f32 {
 
 #[test]
 fn constant_table_and_local_array_lower_through_memory() {
-    let Some(ir) = compile_ir(MEMORY_RS) else {
-        eprintln!("SKIPPED (wasm32 target missing)");
+    let Some(translated) = translate_source(MEMORY_RS) else {
         return;
     };
-    let translated = translate(&ir).expect("memory kernel");
     let wgsl = &translated.wgsl;
     // The constant becomes a private word array; the local array is a function
     // scope one; both are indexed by the loop counter and the invocation id.
@@ -2422,11 +2462,9 @@ pub extern "C" fn cs_main(id: u32) -> f32 {
 
 #[test]
 fn local_array_lowers_through_alloca_and_gep() {
-    let Some(ir) = compile_ir(LOCAL_ARRAY_RS) else {
-        eprintln!("SKIPPED (wasm32 target missing)");
+    let Some(translated) = translate_source(LOCAL_ARRAY_RS) else {
         return;
     };
-    let translated = translate(&ir).expect("local array");
     let wgsl = &translated.wgsl;
     assert!(wgsl.contains("var acc: array<u32, 4>;"), "{wgsl}");
     assert!(wgsl.contains("bitcast<f32>"), "{wgsl}");
@@ -2466,4 +2504,211 @@ ok:
 "#;
     let translated = translate(ir).expect("unreachable path");
     assert!(translated.wgsl.contains("return;"), "{}", translated.wgsl);
+}
+
+/// A local array zeroed by `llvm.memset` and filled in a dynamic loop.
+const DYNAMIC_ARRAY_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" { fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32; }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = [0.0f32; 4];
+    let n = unsafe { storage_read_u32(0, 1, 0) };
+    let mut i = 0u32;
+    while i < n {
+        let slot = (i & 3) as usize;
+        acc[slot] = acc[slot] + (i as f32);
+        i += 1;
+    }
+    acc[0] + acc[1] + acc[2] + acc[3]
+}
+"#;
+
+#[test]
+fn memset_zeroes_a_local_array_before_a_dynamic_loop() {
+    let Some(translated) = translate_source(DYNAMIC_ARRAY_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // `[0.0; 4]` becomes four word stores, and the loop indexes the array.
+    assert!(wgsl.contains("var acc: array<u32, 4>;"), "{wgsl}");
+    assert!(wgsl.contains("acc[0u] = 0u;"), "{wgsl}");
+    assert!(wgsl.contains("acc[(0u + 3u)] = 0u;"), "{wgsl}");
+}
+
+#[test]
+fn memset_zeroed_array_matches_the_cpu_on_gpu() {
+    let Some(ir) = compile_ir(DYNAMIC_ARRAY_RS) else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("dynamic array");
+    let Some((device, queue)) = device() else {
+        assert!(
+            std::env::var_os("ORNIS_REQUIRE_GPU").is_none(),
+            "ORNIS_REQUIRE_GPU is set but no wgpu device"
+        );
+        eprintln!("SKIPPED (no wgpu device)");
+        return;
+    };
+    for n in [0u32, 1, 3, 4, 7, 9] {
+        let outputs = run_compute_with_input(&device, &queue, &translated.wgsl, &[n, 0, 0, 0]);
+        for (id, actual) in outputs.iter().enumerate() {
+            let mut acc = [0.0f32; 4];
+            for i in 0..n {
+                let slot = (i & 3) as usize;
+                acc[slot] += i as f32;
+            }
+            let expected = acc.iter().sum::<f32>();
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "n {n} id {id}: gpu {actual} cpu {expected}"
+            );
+        }
+    }
+}
+
+/// Two helpers the entry calls; `#[inline(never)]` keeps them as calls.
+const HELPER_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+#[inline(never)]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+#[inline(never)]
+fn square(x: f32) -> f32 {
+    x * x
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let t = (id & 3) as f32 * 0.25;
+    square(lerp(1.0, 9.0, t))
+}
+"#;
+
+#[test]
+fn helper_functions_lower_into_module_functions() {
+    let Some(translated) = translate_source(HELPER_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // Two `fn`s before the entry and two calls in its body.
+    assert_eq!(wgsl.matches("-> f32 {").count(), 2, "{wgsl}");
+    assert_eq!(wgsl.matches("lerp(").count(), 2, "{wgsl}");
+    assert!(wgsl.contains("square("), "{wgsl}");
+    assert!(wgsl.contains("fn cs_main"), "{wgsl}");
+}
+
+#[test]
+fn helper_functions_match_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(HELPER_RS) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let t = (id as u32 & 3) as f32 * 0.25;
+        let mixed = 1.0 + (9.0 - 1.0) * t;
+        let expected = mixed * mixed;
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+#[test]
+fn recursive_helpers_are_rejected() {
+    let ir = r#"
+define internal float @down(i32 %n) {
+start:
+  %done = icmp ult i32 %n, 1
+  br i1 %done, label %one, label %more
+one:
+  ret float 1.000000e+00
+more:
+  %next = sub i32 %n, 1
+  %rest = call float @down(i32 %next)
+  %value = fadd float %rest, 1.000000e+00
+  ret float %value
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %value = call float @down(i32 %id)
+  ret float %value
+}
+"#;
+    // A shader cannot recurse, so the dependency order never resolves.
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn pointer_phi_walks_one_allocation() {
+    // `p = phi(ptr)` over the same `alloca`: the lowerer keeps the base and
+    // phis the word offset, so a pointer chase stays a single array access.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %one = getelementptr inbounds nuw i8, ptr %buf, i32 4
+  store float 2.000000e+00, ptr %one, align 4
+  %two = getelementptr inbounds nuw i8, ptr %buf, i32 8
+  store float 3.000000e+00, ptr %two, align 4
+  %three = getelementptr inbounds nuw i8, ptr %buf, i32 12
+  store float 4.000000e+00, ptr %three, align 4
+  br label %header
+header:
+  %p = phi ptr [ %buf, %start ], [ %next_ptr, %latch ]
+  %i = phi i32 [ 0, %start ], [ %step, %latch ]
+  %done = icmp ugt i32 %i, 2
+  br i1 %done, label %exit, label %body
+body:
+  %value = load float, ptr %p, align 4
+  %next_ptr = getelementptr inbounds nuw float, ptr %p, i32 1
+  br label %latch
+latch:
+  %step = add i32 %i, 1
+  br label %header
+exit:
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("pointer phi");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var buf: array<u32, 4>;"), "{wgsl}");
+    // The chase is an offset phi, not a second pointer value.
+    assert!(wgsl.contains("loop {"), "{wgsl}");
+}
+
+#[test]
+fn pointer_phi_across_two_allocations_is_rejected() {
+    // Two different bases would need a pointer value Naga does not have.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %left = alloca [4 x float], align 4
+  %right = alloca [4 x float], align 4
+  %pick = icmp eq i32 %id, 0
+  br i1 %pick, label %a, label %b
+a:
+  br label %merge
+b:
+  br label %merge
+merge:
+  %p = phi ptr [ %left, %a ], [ %right, %b ]
+  %value = load float, ptr %p, align 4
+  ret float %value
+}
+"#;
+    assert!(translate(ir).is_err());
 }
