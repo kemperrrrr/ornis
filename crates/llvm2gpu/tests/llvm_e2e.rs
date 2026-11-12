@@ -1979,12 +1979,7 @@ fn map_bytes(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
 
 #[test]
 fn llvm_ir_scalar_matches_cpu_reference_on_gpu() {
-    let Some(ir) = compile_ir(KERNEL_RS) else {
-        eprintln!("SKIPPED (wasm32 target missing)");
-        return;
-    };
-    let translated = translate(&ir).expect("translate");
-    let Some(outputs) = gpu_outputs(&translated) else {
+    let Some((_, outputs)) = gpu_run(KERNEL_RS) else {
         return;
     };
     for (id, actual) in outputs.iter().enumerate() {
@@ -2009,6 +2004,17 @@ fn cpu_reference(id: u32) -> f32 {
         i += 1;
     }
     (if x < 10.0 { x } else { 0.0 }) + x
+}
+
+/// Compile `source`, translate it, and run it on the GPU.
+///
+/// `None` when the wasm32 target or a GPU is missing; the CI GPU shard sets
+/// `ORNIS_REQUIRE_GPU`, which turns a missing device into a failure.
+fn gpu_run(source: &str) -> Option<(ornis_llvm2gpu::Translated, Vec<f32>)> {
+    let ir = compile_ir(source)?;
+    let translated = translate(&ir).expect("translate");
+    let outputs = gpu_outputs(&translated)?;
+    Some((translated, outputs))
 }
 
 /// Run a translated compute entry and return the four `storage_0_0` lanes.
@@ -2126,4 +2132,338 @@ fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f3
         out[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     out
+}
+
+#[test]
+fn barrier_in_uniform_control_flow_is_allowed() {
+    // The condition is a uniform field, so every invocation takes the same
+    // arm and the barrier is reached by the whole workgroup.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %mode = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 0)
+  %enter = icmp eq i32 %mode, 1
+  br i1 %enter, label %inside, label %outside
+inside:
+  call void @workgroup_barrier()
+  br label %merge
+outside:
+  br label %merge
+merge:
+  call void @storage_write_u32(i32 0, i32 1, i32 %id, i32 %mode)
+  ret void
+}
+"#;
+    let translated = translate_with_types(ir, &[&[2]]).expect("uniform barrier");
+    assert!(
+        translated.wgsl.contains("workgroupBarrier()"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn barrier_in_a_uniform_loop_is_allowed() {
+    // `for i in 0..4`-shaped loop: the counter is a phi of uniform values and
+    // the bound came from a uniform field, so the trip count is the same for
+    // every invocation.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare i32 @workgroup_load_u32(i32)
+declare void @workgroup_store_u32(i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %n = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 1)
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  call void @workgroup_store_u32(i32 0, i32 %i)
+  call void @workgroup_barrier()
+  %seen = call i32 @workgroup_load_u32(i32 0)
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  ret void
+}
+"#;
+    let translated = translate_with_types(ir, &[&[2, 2]]).expect("uniform loop barrier");
+    assert!(
+        translated.wgsl.contains("workgroupBarrier()"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn barrier_in_a_nonuniform_loop_is_rejected() {
+    // The bound is a storage read: invocations may iterate a different number
+    // of times, so a barrier inside would split the workgroup.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @storage_read_u32(i32, i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %n = call i32 @storage_read_u32(i32 0, i32 1, i32 0)
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  call void @workgroup_barrier()
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  ret void
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn barrier_after_a_nonuniform_break_stays_rejected() {
+    // One invocation can leave the loop early, so a barrier in the loop body
+    // is divergent even though the counted condition is uniform.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare i32 @storage_read_u32(i32, i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %n = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 1)
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  %flag = call i32 @storage_read_u32(i32 0, i32 1, i32 %id)
+  %stop = icmp eq i32 %flag, 0
+  br i1 %stop, label %exit, label %latch
+latch:
+  %next = add i32 %i, 1
+  call void @workgroup_barrier()
+  br label %header
+exit:
+  ret void
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+/// A loop with two exits to different blocks that rejoin afterwards.
+const LOOP_TWO_EXITS_IR: &str = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %id
+  br i1 %more, label %body, label %exit_a
+body:
+  %hit = icmp eq i32 %i, 3
+  br i1 %hit, label %exit_b, label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit_a:
+  br label %merge
+exit_b:
+  br label %merge
+merge:
+  %value = phi float [ 1.000000e+00, %exit_a ], [ 2.000000e+00, %exit_b ]
+  ret float %value
+}
+"#;
+
+#[test]
+fn loop_with_two_exits_dispatches_on_the_selector() {
+    let translated = translate(LOOP_TWO_EXITS_IR).expect("two exits");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var exit_id: u32;"), "{wgsl}");
+    // One selector store per exit edge, and the code after the loop once.
+    assert_eq!(wgsl.matches("exit_id = ").count(), 2, "{wgsl}");
+    assert_eq!(wgsl.matches("value = 1f;").count(), 1, "{wgsl}");
+    assert_eq!(wgsl.matches("value = 2f;").count(), 1, "{wgsl}");
+    assert!(wgsl.contains("loop {"), "{wgsl}");
+}
+
+/// `break 'outer`: the inner loop's exit leaves the outer loop as well.
+const BREAK_OUTER_IR: &str = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  br label %outer
+outer:
+  %i = phi i32 [ 0, %start ], [ %next_outer, %outer_latch ]
+  %more_outer = icmp ult i32 %i, %id
+  br i1 %more_outer, label %outer_body, label %done
+outer_body:
+  br label %inner
+inner:
+  %j = phi i32 [ 0, %outer_body ], [ %next_inner, %inner_latch ]
+  %more_inner = icmp ult i32 %j, 4
+  br i1 %more_inner, label %inner_body, label %inner_exit
+inner_body:
+  %hit = icmp eq i32 %j, 2
+  br i1 %hit, label %done, label %inner_latch
+inner_latch:
+  %next_inner = add i32 %j, 1
+  br label %inner
+inner_exit:
+  br label %outer_latch
+outer_latch:
+  %next_outer = add i32 %i, 1
+  br label %outer
+done:
+  ret float 1.000000e+00
+}
+"#;
+
+#[test]
+fn break_out_of_two_loops_breaks_each_level() {
+    let translated = translate(BREAK_OUTER_IR).expect("break 'outer");
+    let wgsl = &translated.wgsl;
+    // Two `loop` statements and a `break` for each level the edge unwinds.
+    assert_eq!(wgsl.matches("loop {").count(), 2, "{wgsl}");
+    assert!(wgsl.contains("exit_id ="), "{wgsl}");
+}
+
+/// A module constant table plus a local array, both indexed dynamically.
+const MEMORY_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+static QUAD: [[f32; 4]; 4] = [
+    [-1.0, -1.0, 0.0, 1.0],
+    [-1.0, 1.0, 0.0, 1.0],
+    [1.0, -1.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0, 1.0],
+];
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = [0.0f32; 4];
+    let mut i = 0u32;
+    while i < 4 {
+        acc[i as usize] = QUAD[id as usize & 3][i as usize] * 2.0;
+        i += 1;
+    }
+    acc[0] + acc[1] + acc[2] + acc[3]
+}
+"#;
+
+#[test]
+fn constant_table_and_local_array_lower_through_memory() {
+    let Some(ir) = compile_ir(MEMORY_RS) else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("memory kernel");
+    let wgsl = &translated.wgsl;
+    // The constant becomes a private word array; the local array is a function
+    // scope one; both are indexed by the loop counter and the invocation id.
+    assert!(wgsl.contains("var<private> const_"), "{wgsl}");
+    assert!(wgsl.contains("array<u32"), "{wgsl}");
+    assert!(wgsl.contains("bitcast<f32>"), "{wgsl}");
+}
+
+/// The same kernel on the GPU: the constant table and the local array have to
+/// produce the value the CPU reference computes.
+#[test]
+fn constant_table_and_local_array_match_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(MEMORY_RS) else {
+        return;
+    };
+    let quad = [
+        [-1.0f32, -1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+    ];
+    for (id, actual) in outputs.iter().enumerate() {
+        let row = quad[id & 3];
+        let expected: f32 = row.iter().map(|value| value * 2.0).sum();
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+/// A local array that survives `SROA`: `alloca` + dynamic `getelementptr`.
+const LOCAL_ARRAY_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = [1.0f32, 2.0, 3.0, 4.0];
+    let i = (id & 3) as usize;
+    acc[i] = acc[i] * 2.0;
+    acc[0] + acc[1] + acc[2] + acc[3] + acc[i]
+}
+"#;
+
+#[test]
+fn local_array_lowers_through_alloca_and_gep() {
+    let Some(ir) = compile_ir(LOCAL_ARRAY_RS) else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("local array");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var acc: array<u32, 4>;"), "{wgsl}");
+    assert!(wgsl.contains("bitcast<f32>"), "{wgsl}");
+}
+
+#[test]
+fn local_array_matches_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(LOCAL_ARRAY_RS) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let mut acc = [1.0f32, 2.0, 3.0, 4.0];
+        let i = id & 3;
+        acc[i] *= 2.0;
+        let expected = acc[0] + acc[1] + acc[2] + acc[3] + acc[i];
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+#[test]
+fn unreachable_ends_the_invocation_instead_of_failing() {
+    // The panic path of a kernel: LLVM calls it undefined behaviour, so the
+    // translator ends the invocation there.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %bad = icmp eq i32 %id, 0
+  br i1 %bad, label %panic, label %ok
+panic:
+  unreachable
+ok:
+  ret float 1.000000e+00
+}
+"#;
+    let translated = translate(ir).expect("unreachable path");
+    assert!(translated.wgsl.contains("return;"), "{}", translated.wgsl);
 }

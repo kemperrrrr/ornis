@@ -29,7 +29,7 @@
 //! struct otherwise.
 
 use crate::error::TranslateError;
-use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, Terminator, Ty};
+use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, PtrBase, Terminator, Ty};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Synthetic post-dominator sink used while structuring the CFG.
@@ -462,6 +462,31 @@ fn output_local(
     )
 }
 
+/// Word count of `bytes`, which must be a multiple of four.
+fn word_count(bytes: u32) -> Result<u32, TranslateError> {
+    if bytes == 0 || !bytes.is_multiple_of(WORD_BYTES) {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok(bytes / WORD_BYTES)
+}
+
+/// Where a memory value lives and how far into it the pointer is.
+struct MemoryPointer {
+    /// Base of the pointer.
+    base: MemoryBase,
+    /// Offset from the base, in 4-byte words.
+    words: naga::Handle<naga::Expression>,
+}
+
+/// What a [`MemoryPointer`] starts at.
+#[derive(Clone, Copy)]
+enum MemoryBase {
+    /// A function-scope allocation (`alloca`).
+    Local(naga::Handle<naga::LocalVariable>),
+    /// A module constant, lowered to a private array of words.
+    Constant(naga::Handle<naga::GlobalVariable>),
+}
+
 /// Where the entry writes its stage output.
 struct StageOut {
     /// Local variable the entry returns.
@@ -709,7 +734,7 @@ fn push_term_local(term: &Terminator, used: &mut Vec<String>) {
         Terminator::BrCond { cond, .. } => push_local(cond, used),
         Terminator::Switch { selector, .. } => push_local(selector, used),
         Terminator::Ret(Some(value)) => push_local(value, used),
-        Terminator::BrUncond(_) | Terminator::Ret(None) => {}
+        Terminator::BrUncond(_) | Terminator::Ret(None) | Terminator::Unreachable => {}
     }
 }
 
@@ -858,6 +883,8 @@ struct Builders {
     workgroup: Option<naga::Handle<naga::GlobalVariable>>,
     /// `array<atomic<u32>, WORKGROUP_WORDS>` in workgroup memory.
     workgroup_atomic: Option<naga::Handle<naga::GlobalVariable>>,
+    /// Module constants by symbol name, raw little-endian contents.
+    module_constants: HashMap<String, Vec<u8>>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
     /// Declare textures as multisampled and load sample 0 instead of mip 0.
@@ -878,6 +905,7 @@ impl Builders {
             ivec2: None,
             workgroup: None,
             workgroup_atomic: None,
+            module_constants: HashMap::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
             multisampled,
         }
@@ -1435,6 +1463,12 @@ impl Builders {
             ..Default::default()
         };
         let io = scan_io(func, stage)?;
+        let uniform = uniform_values(func);
+        self.module_constants = func
+            .globals
+            .iter()
+            .map(|global| (global.name.clone(), global.bytes.clone()))
+            .collect();
         let args = stage_arguments(&mut self.module, func, stage, &io, &mut function)?;
         let stage_out = stage_output(&mut self.module, stage, &io, &mut function)?;
         let mut lowerer = Lowerer {
@@ -1454,7 +1488,12 @@ impl Builders {
             spill: HashMap::new(),
             env: HashMap::new(),
             saw_return: false,
-            branch_depth: 0,
+            divergent_depth: 0,
+            uniform,
+            exit_ids: HashMap::new(),
+            exit_id_var: None,
+            pointers: HashMap::new(),
+            constants: HashMap::new(),
             diverged: false,
         };
         if let Some((id_x, (_, name))) = args.id_x.zip(func.params.first()) {
@@ -1470,6 +1509,15 @@ impl Builders {
             ));
         }
         Ok(function)
+    }
+}
+
+/// A `loop` with no continuing block and no `break if`.
+fn loop_statement(body: naga::Block) -> naga::Statement {
+    naga::Statement::Loop {
+        body,
+        continuing: naga::Block::new(),
+        break_if: None,
     }
 }
 
@@ -1498,10 +1546,83 @@ fn case_flow_returns(flow: Flow) -> Result<bool, TranslateError> {
     }
 }
 
+/// Values that are the same for every invocation of the workgroup.
+///
+/// Greatest fixpoint: every value starts uniform and is dropped as soon as it
+/// depends on a non-uniform source. The sources are the invocation id, the
+/// local index, storage and workgroup reads, atomics, and texture loads;
+/// uniform struct fields, literals, and arithmetic over uniform values stay
+/// uniform. A `phi` is uniform only when every incoming value is, which is what
+/// makes a loop counter (`i = phi(0, i + 1)`) uniform.
+fn uniform_values(func: &LlvmFunc) -> HashSet<String> {
+    let mut uniform: HashSet<String> = func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .filter_map(|instr| instr.defined().map(str::to_string))
+        .collect();
+    loop {
+        let mut changed = false;
+        for block in &func.blocks {
+            for instr in &block.instrs {
+                let Some(name) = instr.defined() else {
+                    continue;
+                };
+                if !uniform.contains(name) || instruction_is_uniform(instr, &uniform) {
+                    continue;
+                }
+                uniform.remove(name);
+                changed = true;
+            }
+        }
+        if !changed {
+            return uniform;
+        }
+    }
+}
+
+/// Whether `instr` produces the same value in every invocation.
+fn instruction_is_uniform(instr: &Instr, uniform: &HashSet<String>) -> bool {
+    let operands_uniform = {
+        let mut all = true;
+        instr.each_operand(|op| {
+            if let Operand::Local(name) = op
+                && !uniform.contains(name)
+            {
+                all = false;
+            }
+        });
+        all
+    };
+    if !operands_uniform {
+        return false;
+    }
+    match instr {
+        Instr::Call { callee, .. } => uniform_callee(callee),
+        _ => true,
+    }
+}
+
+/// Whether an import returns the same value in every invocation.
+///
+/// Uniform struct fields, array lengths, texture dimensions, and the scalar
+/// math builtins do; the invocation id, workgroup memory, storage reads, and
+/// texture fetches do not.
+fn uniform_callee(callee: &str) -> bool {
+    const UNIFORM: [&str; 5] = [
+        "uniform_",
+        "storage_len",
+        "texture_width",
+        "texture_height",
+        "gpu_",
+    ];
+    UNIFORM.iter().any(|prefix| callee.contains(prefix)) || callee.contains("llvm.")
+}
+
 /// Blocks control can leave `term` for, in the order the IR names them.
 fn successors(term: &Terminator) -> Vec<&str> {
     match term {
-        Terminator::Ret(_) => Vec::new(),
+        Terminator::Ret(_) | Terminator::Unreachable => Vec::new(),
         Terminator::BrUncond(target) => vec![target.as_str()],
         Terminator::BrCond {
             true_label,
@@ -1775,11 +1896,24 @@ struct Lowerer<'a, 'b> {
     spill: HashMap<String, naga::Handle<naga::LocalVariable>>,
     env: Env,
     saw_return: bool,
-    /// Enclosing `if`/`loop` regions while their bodies are emitted. A
-    /// workgroup barrier inside any of them is rejected: the lowerer does not
-    /// prove branch or trip-count uniformity, and a divergent barrier is UB
-    /// on native GPUs (Tint rejects that WGSL outright).
-    branch_depth: u32,
+    /// Enclosing `if`/`loop`/`switch` regions whose condition or trip count is
+    /// not proven uniform. A workgroup barrier inside any of them is rejected:
+    /// a divergent barrier is UB on native GPUs (Tint rejects that WGSL).
+    divergent_depth: u32,
+    /// Values that are the same for every invocation in the workgroup.
+    uniform: HashSet<String>,
+    /// Exit block -> selector value, for loops whose exits go to more than one
+    /// block (or leave more than one loop).
+    ///
+    /// A `break` in Naga leaves only the innermost `Loop`, so the selector says
+    /// where control has to resume once the loop statements have unwound.
+    exit_ids: HashMap<&'a str, u32>,
+    /// Local the selector is stored in, created on first use.
+    exit_id_var: Option<naga::Handle<naga::LocalVariable>>,
+    /// Pointer SSA values: their base and their offset in 4-byte words.
+    pointers: HashMap<String, MemoryPointer>,
+    /// Module constants turned into private globals: handle and word count.
+    constants: HashMap<String, (naga::Handle<naga::GlobalVariable>, u32)>,
     /// An arm returned and the region merged afterwards may therefore run on
     /// a subset of invocations. Sticky for the rest of the entry.
     diverged: bool,
@@ -1859,6 +1993,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         self.emit_block(block, out)?;
         match &block.term {
             Terminator::Ret(value) => self.emit_ret(value.as_ref(), out),
+            // The panic path: LLVM calls it undefined behaviour, so the shader
+            // ends the invocation here instead of pretending it cannot happen.
+            Terminator::Unreachable => self.emit_ret(None, out),
             Terminator::BrUncond(target) => {
                 let target = target.as_str();
                 self.store_edge(start, target, out)?;
@@ -1873,6 +2010,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                         .get(header)
                         .is_none_or(|body| !body.contains(target));
                     if leaves_loop {
+                        self.store_exit_id(out, target)?;
                         out.push(naga::Statement::Break, naga::Span::default());
                         return Ok(Flow::Break);
                     }
@@ -1926,6 +2064,327 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
     }
 
+    /// `alloca`: a function-scope array of 4-byte words.
+    fn alloca(&mut self, dst: &str, bytes: u32) -> Result<(), TranslateError> {
+        let words = word_count(bytes)?;
+        let ty = self.word_array_type(words);
+        let var = self.func.local_variables.append(
+            naga::LocalVariable {
+                name: Some(dst.to_string()),
+                ty,
+                init: None,
+            },
+            naga::Span::default(),
+        );
+        let zero = self.u32_literal(&mut naga::Block::new(), 0);
+        self.pointers.insert(
+            dst.to_string(),
+            MemoryPointer {
+                base: MemoryBase::Local(var),
+                words: zero,
+            },
+        );
+        Ok(())
+    }
+
+    /// `getelementptr`: move a pointer by `index * stride` bytes.
+    fn getelementptr(
+        &mut self,
+        dst: &str,
+        base: &PtrBase,
+        stride: u32,
+        index: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<(), TranslateError> {
+        let (base, words) = match base {
+            PtrBase::Local(name) => {
+                let pointer = self.pointers.get(name).ok_or(TranslateError::Unsupported)?;
+                (pointer.base, pointer.words)
+            }
+            PtrBase::Global(symbol) => {
+                let (var, _) = self.constant_array(symbol)?;
+                let zero = self.u32_literal(out, 0);
+                (MemoryBase::Constant(var), zero)
+            }
+        };
+        let step = self.pointer_step(stride, index, out)?;
+        let words = self.binary(out, naga::BinaryOperator::Add, words, step);
+        self.pointers
+            .insert(dst.to_string(), MemoryPointer { base, words });
+        Ok(())
+    }
+
+    /// Words one `getelementptr` index step covers.
+    ///
+    /// A stride that is not a multiple of four is only accepted for a constant
+    /// index that is: LLVM emits `i8` GEPs for field offsets, and those are
+    /// always word-aligned in this subset.
+    fn pointer_step(
+        &mut self,
+        stride: u32,
+        index: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if stride.is_multiple_of(WORD_BYTES) {
+            let index = self.operand(out, index)?;
+            let step = stride / WORD_BYTES;
+            if step == 1 {
+                return Ok(index);
+            }
+            let step = self.u32_literal(out, step);
+            return Ok(self.binary(out, naga::BinaryOperator::Multiply, index, step));
+        }
+        let Operand::U32(offset) = index else {
+            return Err(TranslateError::Unsupported);
+        };
+        if !offset.is_multiple_of(WORD_BYTES) {
+            return Err(TranslateError::Unsupported);
+        }
+        Ok(self.u32_literal(out, offset / WORD_BYTES))
+    }
+
+    /// `load`: read one 4-byte word and reinterpret it as `ty`.
+    fn load(
+        &mut self,
+        ptr: &str,
+        ty: Ty,
+        out: &mut naga::Block,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let pointer = self.pointers.get(ptr).ok_or(TranslateError::Unsupported)?;
+        let (base, words) = (pointer.base, pointer.words);
+        let base = self.memory_base(base, out);
+        let slot = self.expr(out, naga::Expression::Access { base, index: words });
+        let word = self.expr(out, naga::Expression::Load { pointer: slot });
+        match ty {
+            Ty::I32 => Ok(word),
+            Ty::Float => Ok(self.bitcast_float(out, word)),
+            _ => Err(TranslateError::Unsupported),
+        }
+    }
+
+    /// `store`: write one 4-byte word.
+    fn store(
+        &mut self,
+        ptr: &str,
+        value: &Operand,
+        ty: Ty,
+        out: &mut naga::Block,
+    ) -> Result<(), TranslateError> {
+        let pointer = self.pointers.get(ptr).ok_or(TranslateError::Unsupported)?;
+        let (base, words) = (pointer.base, pointer.words);
+        let value = self.operand(out, value)?;
+        let value = match ty {
+            Ty::I32 => value,
+            Ty::Float => self.bitcast_uint(out, value),
+            _ => return Err(TranslateError::Unsupported),
+        };
+        let base = self.memory_base(base, out);
+        let slot = self.expr(out, naga::Expression::Access { base, index: words });
+        out.push(
+            naga::Statement::Store {
+                pointer: slot,
+                value,
+            },
+            naga::Span::default(),
+        );
+        Ok(())
+    }
+
+    /// Pointer expression of a memory base.
+    fn memory_base(
+        &mut self,
+        base: MemoryBase,
+        out: &mut naga::Block,
+    ) -> naga::Handle<naga::Expression> {
+        match base {
+            MemoryBase::Local(var) => self.expr(out, naga::Expression::LocalVariable(var)),
+            MemoryBase::Constant(var) => self.expr(out, naga::Expression::GlobalVariable(var)),
+        }
+    }
+
+    /// `array<u32, words>`.
+    fn word_array_type(&mut self, words: u32) -> naga::Handle<naga::Type> {
+        let base = scalar(&mut self.builders.module, naga::ScalarKind::Uint);
+        let size = std::num::NonZeroU32::new(words).unwrap_or(std::num::NonZeroU32::MIN);
+        self.builders.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Array {
+                    base,
+                    size: naga::ArraySize::Constant(size),
+                    stride: WORD_BYTES,
+                },
+            },
+            naga::Span::default(),
+        )
+    }
+
+    /// A module constant as a private `array<u32, N>` global.
+    ///
+    /// The words are the constant's bytes, so an integer table and a float
+    /// table both keep their exact bit patterns; a float load bitcasts.
+    fn constant_array(
+        &mut self,
+        symbol: &str,
+    ) -> Result<(naga::Handle<naga::GlobalVariable>, u32), TranslateError> {
+        if let Some(found) = self.constants.get(symbol) {
+            return Ok(*found);
+        }
+        let bytes = self
+            .builders
+            .module_constants
+            .get(symbol)
+            .ok_or(TranslateError::Unsupported)?
+            .clone();
+        let words = word_count(bytes.len() as u32)?;
+        let ty = self.word_array_type(words);
+        let mut components = Vec::with_capacity(words as usize);
+        for chunk in bytes.chunks_exact(WORD_BYTES as usize) {
+            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            components.push(self.builders.module.global_expressions.append(
+                naga::Expression::Literal(naga::Literal::U32(word)),
+                naga::Span::default(),
+            ));
+        }
+        let init = self.builders.module.global_expressions.append(
+            naga::Expression::Compose { ty, components },
+            naga::Span::default(),
+        );
+        let var = self.builders.module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some(format!("const_{}", symbol.replace(['.', '-'], "_"))),
+                space: naga::AddressSpace::Private,
+                binding: None,
+                ty,
+                init: Some(init),
+                memory_decorations: naga::MemoryDecorations::empty(),
+            },
+            naga::Span::default(),
+        );
+        self.constants.insert(symbol.to_string(), (var, words));
+        Ok((var, words))
+    }
+
+    /// Selector value for `target`, assigned the first time it is needed.
+    fn exit_id(&mut self, target: &'a str) -> u32 {
+        if let Some(id) = self.exit_ids.get(target) {
+            return *id;
+        }
+        let id = self.exit_ids.len() as u32 + 1;
+        self.exit_ids.insert(target, id);
+        id
+    }
+
+    /// Record that the current `break` leaves the loop towards `target`.
+    ///
+    /// Loops with a single exit never assign ids, so their WGSL keeps the plain
+    /// `break` it always had.
+    fn store_exit_id(
+        &mut self,
+        out: &mut naga::Block,
+        target: &'a str,
+    ) -> Result<(), TranslateError> {
+        let Some(id) = self.exit_ids.get(target).copied() else {
+            return Ok(());
+        };
+        let var = match self.exit_id_var {
+            Some(var) => var,
+            None => {
+                let var = self.func.local_variables.append(
+                    naga::LocalVariable {
+                        name: Some("exit_id".to_string()),
+                        ty: scalar(&mut self.builders.module, naga::ScalarKind::Uint),
+                        init: None,
+                    },
+                    naga::Span::default(),
+                );
+                self.exit_id_var = Some(var);
+                var
+            }
+        };
+        let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+        let value = self.u32_literal(out, id);
+        out.push(
+            naga::Statement::Store { pointer, value },
+            naga::Span::default(),
+        );
+        Ok(())
+    }
+
+    /// Mark the control region a condition opens, returning the depth to restore.
+    ///
+    /// A proven-uniform condition keeps the region uniform, so a barrier inside
+    /// it stays valid; anything else makes the enclosing region divergent.
+    fn enter_control(&mut self, cond: &Operand) -> u32 {
+        let outer = self.divergent_depth;
+        if !self.is_uniform(cond) {
+            self.divergent_depth += 1;
+        }
+        outer
+    }
+
+    /// Whether `op` has the same value in every invocation of the workgroup.
+    fn is_uniform(&self, op: &Operand) -> bool {
+        match op {
+            Operand::Local(name) => self.uniform.contains(name),
+            Operand::Bool(_) | Operand::F32(_) | Operand::U32(_) => true,
+        }
+    }
+
+    /// Whether a loop runs the same number of iterations for every invocation.
+    ///
+    /// Conservative: every edge that leaves the loop must come from a
+    /// conditional whose condition is uniform, and the loop must not leave
+    /// unconditionally. A `break` behind a non-uniform branch, or a plain
+    /// `break`, therefore makes the loop divergent — a barrier inside it is
+    /// rejected rather than assumed safe.
+    fn loop_is_uniform(&self, header: &str, body: &HashSet<&'a str>) -> bool {
+        body.iter().all(|label| {
+            let block = self.cfg.blocks[label];
+            let leaves: Vec<&str> = self
+                .cfg
+                .succs
+                .get(label)
+                .into_iter()
+                .flatten()
+                .filter(|target| !body.contains(*target))
+                .copied()
+                .collect();
+            let exits_all = !leaves.is_empty();
+            if !exits_all {
+                // Still check a conditional that can reach the header again.
+                return match &block.term {
+                    Terminator::BrCond { cond, .. } if *label == header => self.is_uniform(cond),
+                    _ => true,
+                };
+            }
+            match &block.term {
+                Terminator::BrCond { cond, .. } => self.is_uniform(cond),
+                _ => false,
+            }
+        })
+    }
+
+    /// Reject a merge that lies outside the enclosing loop.
+    ///
+    /// A natural loop cannot have a merge outside it that both arms reach: any
+    /// block on the way to the back edge belongs to the loop. Rejecting keeps
+    /// the structurer from guessing.
+    fn check_merge_in_loop(&self, merge: &str, ctx: Ctx<'a>) -> Result<(), TranslateError> {
+        let Ctx::Loop { header } = ctx else {
+            return Ok(());
+        };
+        let merges_in_loop = self
+            .cfg
+            .loops
+            .get(header)
+            .is_some_and(|body| body.contains(merge));
+        if merge != EXIT && !merges_in_loop {
+            return Err(TranslateError::Unsupported);
+        }
+        Ok(())
+    }
+
     /// Emit one arm of a branch: enter it from `from`, run it until `merge`.
     ///
     /// The caller sets `self.env` before calling; the arm's phi stores are
@@ -1961,26 +2420,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .cfg
             .branch_merge(label, true_label, false_label)
             .ok_or(TranslateError::Unsupported)?;
-        if let Ctx::Loop { header } = ctx {
-            let merges_in_loop = self
-                .cfg
-                .loops
-                .get(header)
-                .is_some_and(|body| body.contains(merge));
-            if merge != EXIT && !merges_in_loop {
-                // A natural loop cannot have a merge outside it that both arms
-                // reach: any block on the way to the back edge belongs to the
-                // loop. Reject rather than guess.
-                return Err(TranslateError::Unsupported);
-            }
-        }
+        self.check_merge_in_loop(merge, ctx)?;
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
+        let outer_depth = self.enter_control(cond);
         let (accept, accept_flow) = self.emit_arm(label, true_label, merge, &outer_env, ctx)?;
         let (reject, reject_flow) = self.emit_arm(label, false_label, merge, &outer_env, ctx)?;
-        self.branch_depth = outer_depth;
+        self.divergent_depth = outer_depth;
         self.env = outer_env;
         if accept_flow == Flow::Returned || reject_flow == Flow::Returned {
             // The merge block only sees the invocations whose arm fell
@@ -2029,20 +2475,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ctx: Ctx<'a>,
     ) -> Result<Flow, TranslateError> {
         let merge = self.cfg.merge(label).ok_or(TranslateError::Unsupported)?;
-        if let Ctx::Loop { header } = ctx {
-            let merges_in_loop = self
-                .cfg
-                .loops
-                .get(header)
-                .is_some_and(|body| body.contains(merge));
-            if merge != EXIT && !merges_in_loop {
-                return Err(TranslateError::Unsupported);
-            }
-        }
-        let selector = self.operand(out, selector)?;
+        self.check_merge_in_loop(merge, ctx)?;
+        let selector_expr = self.operand(out, selector)?;
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
+        let outer_depth = self.enter_control(selector);
         let mut targets: Vec<(&'a str, Vec<u32>)> = Vec::new();
         for (value, target) in cases {
             let target = target.as_str();
@@ -2069,7 +2505,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let (default_body, default_flow) = self.emit_arm(label, default, merge, &outer_env, ctx)?;
         returned |= case_flow_returns(default_flow)?;
         naga_cases.push(switch_case(naga::SwitchValue::Default, default_body, false));
-        self.branch_depth = outer_depth;
+        self.divergent_depth = outer_depth;
         self.env = outer_env;
         if returned {
             // The merge only runs on the lanes whose case fell through.
@@ -2077,7 +2513,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         out.push(
             naga::Statement::Switch {
-                selector,
+                selector: selector_expr,
                 cases: naga_cases,
             },
             naga::Span::default(),
@@ -2111,8 +2547,6 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         };
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
         let mut inside_block = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, inside, &outer_env, &mut inside_block)?;
@@ -2124,13 +2558,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let ctx = Ctx::Loop { header };
             self.emit_region(inside, None, &mut inside_block, ctx)?
         };
-        self.branch_depth = outer_depth;
-        if !matches!(inside_flow, Flow::Continue | Flow::Break | Flow::Returned) {
+        // `Next` means the arm ended at a nested exit branch inside the loop,
+        // which already emitted its own `break`/`continue`.
+        if !matches!(
+            inside_flow,
+            Flow::Next | Flow::Continue | Flow::Break | Flow::Returned
+        ) {
             return Err(TranslateError::Unsupported);
         }
         let mut outside_block = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, outside, &outer_env, &mut outside_block)?;
+        self.store_exit_id(&mut outside_block, outside)?;
         outside_block.push(naga::Statement::Break, naga::Span::default());
         self.env = outer_env;
         let (accept, reject) = if true_in {
@@ -2154,8 +2593,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         &mut self,
         start: &'a str,
         cond: &Operand,
-        true_label: &str,
-        false_label: &str,
+        true_label: &'a str,
+        false_label: &'a str,
         out: &mut naga::Block,
     ) -> Result<Flow, TranslateError> {
         let condition = self.operand(out, cond)?;
@@ -2163,10 +2602,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let mut accept = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, true_label, &outer_env, &mut accept)?;
+        self.store_exit_id(&mut accept, true_label)?;
         accept.push(naga::Statement::Break, naga::Span::default());
         let mut reject = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, false_label, &outer_env, &mut reject)?;
+        self.store_exit_id(&mut reject, false_label)?;
         reject.push(naga::Statement::Break, naga::Span::default());
         self.env = outer_env;
         out.push(
@@ -2180,11 +2621,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Ok(Flow::Next)
     }
 
-    /// `naga::Loop` for a natural loop with one header and one exit target.
+    /// `naga::Loop` for a natural loop with one header.
     ///
     /// `outer` is the region that contains this loop. The exit block is
     /// emitted there, so a nested loop's `break` does not leave the outer
     /// `loop` and a branch back to the outer header stays a `continue`.
+    ///
+    /// A loop with one exit keeps the plain `break` shape. Several exits, or an
+    /// exit that leaves more than one loop (`break 'outer`), record which block
+    /// control has to resume at in a selector local: each `break` unwinds one
+    /// `Loop`, and the dispatch after it either resumes the exit block or
+    /// breaks the next loop out.
     fn emit_loop(
         &mut self,
         header: &'a str,
@@ -2198,15 +2645,25 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .get(header)
             .ok_or(TranslateError::Unsupported)?
             .clone();
-        let exits = loop_exits(self.cfg, &body);
-        let live = self.loop_live_outs(&body, &exits)?;
+        let mut exits: Vec<&'a str> = loop_exits(self.cfg, &body).into_iter().collect();
+        exits.sort_unstable();
+        let live = self.loop_live_outs(&body)?;
+        // A single exit that stays in the enclosing region needs no selector.
+        let single = exits.len() == 1 && !self.leaves_outer(exits[0], outer);
+        if !single {
+            for exit in &exits {
+                self.exit_id(exit);
+            }
+        }
         let ctx = Ctx::Loop { header };
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
+        let outer_depth = self.divergent_depth;
+        if !self.loop_is_uniform(header, &body) {
+            self.divergent_depth += 1;
+        }
         let mut loop_body = naga::Block::new();
         let flow = self.emit_region(header, None, &mut loop_body, ctx)?;
-        self.branch_depth = outer_depth;
+        self.divergent_depth = outer_depth;
         // Expressions created inside the loop body are out of scope after
         // `Loop`; the exit block reloads whatever its phis need.
         self.env = outer_env;
@@ -2215,34 +2672,41 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if exits.is_empty() {
             if flow == Flow::Returned {
-                out.push(
-                    naga::Statement::Loop {
-                        body: loop_body,
-                        continuing: naga::Block::new(),
-                        break_if: None,
-                    },
-                    naga::Span::default(),
-                );
+                out.push(loop_statement(loop_body), naga::Span::default());
                 return Ok(Flow::Returned);
             }
             return Err(TranslateError::Unsupported);
         }
-        if exits.len() != 1 {
-            return Err(TranslateError::Unsupported);
-        }
-        let exit = *exits.iter().next().ok_or(TranslateError::Unsupported)?;
-        out.push(
-            naga::Statement::Loop {
-                body: loop_body,
-                continuing: naga::Block::new(),
-                break_if: None,
-            },
-            naga::Span::default(),
-        );
+        out.push(loop_statement(loop_body), naga::Span::default());
         if flow == Flow::Returned {
             return Ok(Flow::Returned);
         }
         self.reload_live(&live, out)?;
+        if single {
+            return self.resume_after_loop(exits[0], stop, out, outer);
+        }
+        self.dispatch_exits(header, &exits, stop, out, outer)
+    }
+
+    /// Whether `target` is outside the loop that contains this region.
+    fn leaves_outer(&self, target: &'a str, outer: Ctx<'a>) -> bool {
+        let Ctx::Loop { header } = outer else {
+            return false;
+        };
+        self.cfg
+            .loops
+            .get(header)
+            .is_none_or(|body| !body.contains(target))
+    }
+
+    /// Continue at `exit` after its `Loop`, in the enclosing region.
+    fn resume_after_loop(
+        &mut self,
+        exit: &'a str,
+        stop: Option<&'a str>,
+        out: &mut naga::Block,
+        outer: Ctx<'a>,
+    ) -> Result<Flow, TranslateError> {
         if stop == Some(exit) {
             return Ok(Flow::Next);
         }
@@ -2254,29 +2718,77 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 out.push(naga::Statement::Continue, naga::Span::default());
                 return Ok(Flow::Continue);
             }
-            let stays = self
-                .cfg
-                .loops
-                .get(outer_header)
-                .is_some_and(|body| body.contains(exit));
-            if !stays {
-                // Leaving two loops at once needs a break past the inner
-                // `Loop`; one `break` would stop at the inner header.
-                return Err(TranslateError::Unsupported);
+            if self.leaves_outer(exit, outer) {
+                // `break 'outer`: this `break` leaves the enclosing loop too.
+                out.push(naga::Statement::Break, naga::Span::default());
+                return Ok(Flow::Break);
             }
         }
         self.emit_region(exit, stop, out, outer)
     }
 
-    /// Values the single exit reads that are defined inside the loop.
-    fn loop_live_outs(
+    /// Resume at whichever exit the selector names, after the loop unwound.
+    ///
+    /// Every exit runs until the loop's merge, so the code after the loop is
+    /// emitted once, after the dispatch. An exit that leaves the enclosing loop
+    /// breaks it instead, and the enclosing loop's own dispatch resumes there.
+    fn dispatch_exits(
         &mut self,
-        body: &HashSet<&'a str>,
-        exits: &HashSet<&'a str>,
-    ) -> Result<Vec<String>, TranslateError> {
-        if exits.len() != 1 {
-            return Ok(Vec::new());
+        header: &'a str,
+        exits: &[&'a str],
+        stop: Option<&'a str>,
+        out: &mut naga::Block,
+        outer: Ctx<'a>,
+    ) -> Result<Flow, TranslateError> {
+        let merge = self.cfg.merge(header).unwrap_or(EXIT);
+        let selector = self.exit_id_var.ok_or(TranslateError::Unsupported)?;
+        let mut returned = 0usize;
+        for exit in exits {
+            let id = self.exit_id(exit);
+            let pointer = self.expr(out, naga::Expression::LocalVariable(selector));
+            let value = self.expr(out, naga::Expression::Load { pointer });
+            let expected = self.u32_literal(out, id);
+            let condition = self.binary(out, naga::BinaryOperator::Equal, value, expected);
+            let mut accept = naga::Block::new();
+            if self.leaves_outer(exit, outer) {
+                accept.push(naga::Statement::Break, naga::Span::default());
+            } else {
+                let flow = self.emit_region(exit, Some(merge), &mut accept, outer)?;
+                // `Continue`/`Break` leave the enclosing loop from inside the
+                // case, which is a terminal flow for this dispatch too.
+                if flow == Flow::Returned {
+                    returned += 1;
+                }
+            }
+            out.push(
+                naga::Statement::If {
+                    condition,
+                    accept,
+                    reject: naga::Block::new(),
+                },
+                naga::Span::default(),
+            );
         }
+        if merge == EXIT {
+            if returned == exits.len() {
+                return Ok(Flow::Returned);
+            }
+            return Err(TranslateError::Unsupported);
+        }
+        if self.leaves_outer(merge, outer) {
+            // The merge is past the enclosing loop: break it and let its own
+            // dispatch resume there.
+            out.push(naga::Statement::Break, naga::Span::default());
+            return Ok(Flow::Break);
+        }
+        if stop == Some(merge) {
+            return Ok(Flow::Next);
+        }
+        self.emit_region(merge, stop, out, outer)
+    }
+
+    /// Values the exits read that are defined inside the loop.
+    fn loop_live_outs(&mut self, body: &HashSet<&'a str>) -> Result<Vec<String>, TranslateError> {
         let mut used = Vec::new();
         // Anything defined in the loop and read after it has to be spilled:
         // the exit block is not the only reader. Later blocks and their phis
@@ -2599,6 +3111,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.bind(dst, v, out);
             }
             Instr::CallVoid { callee, args } => self.call_void(out, callee, args)?,
+            Instr::Alloca { dst, bytes } => self.alloca(dst, *bytes)?,
+            Instr::GetElementPtr {
+                dst,
+                base,
+                stride,
+                index,
+            } => self.getelementptr(dst, base, *stride, index, out)?,
+            Instr::Load { dst, ptr, ty } => {
+                let value = self.load(ptr, *ty, out)?;
+                self.bind(dst, value, out);
+            }
+            Instr::Store { ptr, value, ty } => self.store(ptr, value, *ty, out)?,
             Instr::Phi { .. } => return Err(TranslateError::Unsupported),
             Instr::Ret { .. } | Instr::RetVoid => return Err(TranslateError::Unsupported),
         }
@@ -2668,6 +3192,27 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Expression::As {
                 expr: value,
                 kind: naga::ScalarKind::Uint,
+                convert: None,
+            },
+        )
+    }
+
+    /// A `u32` literal expression.
+    fn u32_literal(&mut self, out: &mut naga::Block, value: u32) -> naga::Handle<naga::Expression> {
+        self.expr(out, naga::Expression::Literal(naga::Literal::U32(value)))
+    }
+
+    /// Bitcast a stored `u32` word to `f32`.
+    fn bitcast_float(
+        &mut self,
+        out: &mut naga::Block,
+        value: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(
+            out,
+            naga::Expression::As {
+                expr: value,
+                kind: naga::ScalarKind::Float,
                 convert: None,
             },
         )
@@ -3809,7 +4354,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             // reach a barrier together, so any enclosing `if`/`loop`, or a
             // merge that a returning arm can skip, is rejected instead of
             // emitting WGSL Tint refuses (or native UB).
-            if self.branch_depth > 0 || self.diverged {
+            if self.divergent_depth > 0 || self.diverged {
                 return Err(TranslateError::Unsupported);
             }
             out.push(
