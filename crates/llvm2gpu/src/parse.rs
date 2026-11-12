@@ -231,32 +231,17 @@ pub(super) struct LlvmFunc {
     pub(super) globals: Vec<GlobalConst>,
 }
 
-/// Parse the whole textual IR, returning every entry point it defines.
+/// Parse every function the module defines, entries and helpers alike.
 ///
-/// Declarations and helper functions are skipped: only `cs_main`, `vs_main`,
-/// and `fs_main` are entries, and a module with none of them is not a shader.
-/// A module may define several of them (a pass ships a vertex and a fragment
-/// entry), and they come back in declaration order.
-pub(super) fn parse_all(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
+/// A helper the kernel calls is lowered into the same Naga module; one that is
+/// outside the subset is skipped here and only reported if a kernel calls it.
+pub(super) fn parse_module(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
     let globals = parse_globals(text);
-    let entries: Vec<LlvmFunc> = parse_header(text, &globals)?
-        .into_iter()
-        .filter(|func| is_entry(&func.name))
-        .collect();
-    (!entries.is_empty())
-        .then_some(entries)
-        .ok_or(TranslateError::Unsupported)
+    parse_header(text, &globals)
 }
 
-/// Parse the whole textual IR, returning the entry called `entry`.
-pub(super) fn parse(text: &str, entry: &str) -> Result<LlvmFunc, TranslateError> {
-    parse_all(text)?
-        .into_iter()
-        .find(|func| func.name == entry)
-        .ok_or(TranslateError::Unsupported)
-}
-
-fn is_entry(name: &str) -> bool {
+/// Whether `name` is a shader entry point rather than a helper.
+pub(super) fn is_entry(name: &str) -> bool {
     name == ornis_gpu_abi::symbols::CS_MAIN
         || name == ornis_gpu_abi::symbols::VS_MAIN
         || name == ornis_gpu_abi::symbols::FS_MAIN
@@ -311,6 +296,10 @@ fn parse_globals(text: &str) -> Vec<GlobalConst> {
 }
 
 /// Parse every `define ... { ... }` block.
+///
+/// A function outside the subset is skipped unless it is an entry point: a
+/// helper the kernel never calls (`rust_begin_unwind`, a panic shim) must not
+/// fail the module, while an entry that does not parse is an error.
 fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Vec<LlvmFunc>, TranslateError> {
     let mut out = Vec::new();
     let mut lines = text.lines().peekable();
@@ -320,103 +309,123 @@ fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Vec<LlvmFunc>, Tr
             continue;
         }
         let (name, ret_ty, params) = parse_define_header(trimmed)?;
-        // Only the shader entry is of interest; other defines
-        // (`rust_begin_unwind`, …) may use trap/ptr shapes outside the subset.
-        if !is_entry(&name) {
-            loop {
-                let Some(inner) = lines.next() else {
-                    return Err(TranslateError::Parse("unterminated function".to_string()));
-                };
-                if inner.trim() == "}" {
-                    break;
-                }
-            }
-            continue;
-        }
-        let mut blocks: Vec<BasicBlock> = Vec::new();
-        let mut cur_label = "start".to_string();
-        let mut cur_instrs: Vec<Instr> = Vec::new();
-        let mut cur_term: Option<Terminator> = None;
-        let mut saw_ret = false;
+        let mut body = Vec::new();
         loop {
             let Some(inner) = lines.next() else {
                 return Err(TranslateError::Parse("unterminated function".to_string()));
             };
-            // Strip an inline comment (`; preds = %a, %b`) before parsing.
-            let inner = inner.split(';').next().unwrap_or("").trim();
-            if inner == "}" {
+            if inner.trim() == "}" {
                 break;
             }
-            if inner.is_empty() {
-                continue;
-            }
-            // A basic-block label.
-            if inner.ends_with(':') && !inner.contains('=') {
-                // Close previous block if needed.
-                if cur_term.is_some() {
-                    // previous block already terminated; start new
-                    blocks.push(BasicBlock {
-                        label: cur_label.clone(),
-                        instrs: std::mem::take(&mut cur_instrs),
-                        term: cur_term.take().unwrap(),
-                    });
-                } else if !cur_instrs.is_empty() {
-                    // Fallthrough without explicit terminator: synthesize ret.
-                    return Err(TranslateError::Unsupported);
-                }
-                cur_label = inner.trim_end_matches(':').to_string();
-                continue;
-            }
-            // A `switch` case list may span lines; collect until it closes so
-            // the terminator parser sees one line.
-            let mut term_line = inner.to_string();
-            if term_line.starts_with("switch ") {
-                while !term_line.contains(']') {
-                    let Some(next) = lines.next() else {
-                        return Err(TranslateError::Parse("unterminated switch".to_string()));
-                    };
-                    term_line.push(' ');
-                    term_line.push_str(next.split(';').next().unwrap_or("").trim());
-                }
-            }
-            if let Some(term) = parse_term(&term_line)? {
-                cur_term = Some(term);
-                saw_ret |= matches!(cur_term, Some(Terminator::Ret(_)));
-                // Terminator closes the block; the next label begins a new one.
-                continue;
-            }
-            if let Some(instr) = parse_instr(inner)? {
-                cur_instrs.push(instr);
-            }
+            body.push(inner.to_string());
         }
-        // Close the last block.
-        if let Some(term) = cur_term.take() {
-            saw_ret |= matches!(term, Terminator::Ret(_));
-            blocks.push(BasicBlock {
-                label: cur_label,
-                instrs: cur_instrs,
-                term,
-            });
-        } else if !cur_instrs.is_empty() {
-            return Err(TranslateError::Parse(
-                "block without terminator".to_string(),
-            ));
+        match parse_body(&name, ret_ty, &params, &body, globals) {
+            Ok(func) => out.push(func),
+            Err(error) if is_entry(&name) => return Err(error),
+            Err(_) => continue,
         }
-        if !saw_ret {
-            return Err(TranslateError::Parse("function without ret".to_string()));
-        }
-        out.push(LlvmFunc {
-            name,
-            ret_ty,
-            params,
-            blocks,
-            globals: globals.to_vec(),
-        });
     }
     if out.is_empty() {
         return Err(TranslateError::Parse("no define in llvm ir".to_string()));
     }
     Ok(out)
+}
+
+/// One terminator line, joining a `switch` case list that spans lines.
+///
+/// The list has to reach the parser as one line: rustc prints one `case` per
+/// line and the closing `]` on the last one.
+fn collect_terminator<'a>(
+    first: &str,
+    lines: &mut impl Iterator<Item = &'a String>,
+) -> Result<String, TranslateError> {
+    let mut term_line = first.to_string();
+    if !term_line.starts_with("switch ") {
+        return Ok(term_line);
+    }
+    while !term_line.contains(']') {
+        let Some(next) = lines.next() else {
+            return Err(TranslateError::Parse("unterminated switch".to_string()));
+        };
+        term_line.push(' ');
+        term_line.push_str(next.split(';').next().unwrap_or("").trim());
+    }
+    Ok(term_line)
+}
+
+/// Parse one function body: blocks, instructions, and terminators.
+fn parse_body(
+    name: &str,
+    ret_ty: Ty,
+    params: &[(Ty, Name)],
+    body: &[String],
+    globals: &[GlobalConst],
+) -> Result<LlvmFunc, TranslateError> {
+    let mut blocks: Vec<BasicBlock> = Vec::new();
+    let mut cur_label = "start".to_string();
+    let mut cur_instrs: Vec<Instr> = Vec::new();
+    let mut cur_term: Option<Terminator> = None;
+    let mut saw_ret = false;
+    let mut lines = body.iter();
+    while let Some(line) = lines.next() {
+        // Strip an inline comment (`; preds = %a, %b`) before parsing.
+        let inner = line.split(';').next().unwrap_or("").trim();
+        if inner.is_empty() {
+            continue;
+        }
+        // A basic-block label.
+        if inner.ends_with(':') && !inner.contains('=') {
+            // Close previous block if needed.
+            if let Some(term) = cur_term.take() {
+                // previous block already terminated; start new
+                blocks.push(BasicBlock {
+                    label: cur_label.clone(),
+                    instrs: std::mem::take(&mut cur_instrs),
+                    term,
+                });
+            } else if !cur_instrs.is_empty() {
+                // Fallthrough without explicit terminator: synthesize ret.
+                return Err(TranslateError::Unsupported);
+            }
+            cur_label = inner.trim_end_matches(':').to_string();
+            continue;
+        }
+        let term_line = collect_terminator(inner, &mut lines)?;
+        if let Some(term) = parse_term(&term_line)? {
+            cur_term = Some(term);
+            // `unreachable` ends a path just like `ret`: the panic shim is a
+            // function whose only terminator is `unreachable`.
+            saw_ret |= matches!(cur_term, Some(Terminator::Ret(_) | Terminator::Unreachable));
+            // Terminator closes the block; the next label begins a new one.
+            continue;
+        }
+        if let Some(instr) = parse_instr(inner)? {
+            cur_instrs.push(instr);
+        }
+    }
+    // Close the last block.
+    if let Some(term) = cur_term.take() {
+        saw_ret |= matches!(term, Terminator::Ret(_) | Terminator::Unreachable);
+        blocks.push(BasicBlock {
+            label: cur_label,
+            instrs: cur_instrs,
+            term,
+        });
+    } else if !cur_instrs.is_empty() {
+        return Err(TranslateError::Parse(
+            "block without terminator".to_string(),
+        ));
+    }
+    if !saw_ret {
+        return Err(TranslateError::Parse("function without ret".to_string()));
+    }
+    Ok(LlvmFunc {
+        name: name.to_string(),
+        ret_ty,
+        params: params.to_vec(),
+        blocks,
+        globals: globals.to_vec(),
+    })
 }
 
 /// `define dso_local noundef float @cs_main(i32 noundef %id) ... {`
