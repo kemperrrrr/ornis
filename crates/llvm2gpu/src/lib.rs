@@ -131,14 +131,29 @@ fn translate_entries(
     only: Option<&str>,
     sampling: TextureSampling,
 ) -> Result<Translated, TranslateError> {
-    let funcs = match only {
-        Some(entry) => vec![parse::parse(llvm_ir, entry)?],
-        None => parse::parse_all(llvm_ir)?,
+    // Every define is parsed: a kernel may call a function of its own crate,
+    // and those helpers are lowered into the same module.
+    let module = parse::parse_module(llvm_ir)?;
+    let funcs: Vec<&parse::LlvmFunc> = match only {
+        Some(entry) => vec![
+            module
+                .iter()
+                .find(|func| func.name == entry)
+                .ok_or(TranslateError::Unsupported)?,
+        ],
+        None => module
+            .iter()
+            .filter(|func| parse::is_entry(&func.name))
+            .collect(),
     };
+    if funcs.is_empty() {
+        return Err(TranslateError::Unsupported);
+    }
     let metas = meta::extract(llvm_ir)?;
     let structs = merge_tables(&metas)?;
     let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
     let mut lowering = lower::Lowering::new(&refs, sampling.multisampled());
+    lowering.add_helpers(&module)?;
     for func in &funcs {
         let workgroup = metas
             .iter()
@@ -228,9 +243,10 @@ pub fn translate_with_types_and_workgroup(
     structs: &[&[u8]],
     workgroup: [u32; 3],
 ) -> Result<Translated, TranslateError> {
-    let funcs = parse::parse_all(llvm_ir)?;
+    let module = parse::parse_module(llvm_ir)?;
     let mut lowering = lower::Lowering::new(structs, false);
-    for func in &funcs {
+    lowering.add_helpers(&module)?;
+    for func in module.iter().filter(|func| parse::is_entry(&func.name)) {
         lowering.push(func, workgroup)?;
     }
     emit::emit(&lowering.finish())

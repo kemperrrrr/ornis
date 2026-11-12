@@ -76,6 +76,84 @@ impl Lowering {
         }
     }
 
+    /// Lower every helper the entries can call.
+    ///
+    /// Helpers may call each other, so they are lowered in dependency order:
+    /// each round lowers the functions whose callees are already in the module.
+    /// A helper whose body is outside the subset (the panic shim takes a `ptr`,
+    /// for instance) is skipped rather than failing the module: only a call that
+    /// actually reaches it is an error. A cycle is never resolved, so recursion
+    /// is rejected.
+    ///
+    /// # Errors
+    ///
+    /// [`TranslateError::Unsupported`] when the helpers call each other in a
+    /// cycle, which a shader cannot express.
+    pub(super) fn add_helpers(&mut self, funcs: &[LlvmFunc]) -> Result<(), TranslateError> {
+        let mut pending: Vec<&LlvmFunc> = funcs
+            .iter()
+            .filter(|func| Stage::of(&func.name).is_none())
+            .collect();
+        let mut skipped: Vec<&str> = Vec::new();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut deferred = Vec::new();
+            for func in pending {
+                if self.callees_ready(func, &skipped) {
+                    self.lower_or_skip(func, &mut skipped);
+                } else {
+                    deferred.push(func);
+                }
+            }
+            if deferred.len() == before {
+                return Err(TranslateError::Unsupported);
+            }
+            pending = deferred;
+        }
+        Ok(())
+    }
+
+    /// Lower `func`, or remember it as unusable when its body leaves the subset.
+    fn lower_or_skip<'f>(&mut self, func: &'f LlvmFunc, skipped: &mut Vec<&'f str>) {
+        let lowered = self.lower_helper(func);
+        if lowered.is_err() {
+            skipped.push(func.name.as_str());
+        }
+    }
+
+    /// Whether every helper `func` calls is already lowered or skipped.
+    fn callees_ready(&self, func: &LlvmFunc, skipped: &[&str]) -> bool {
+        func.blocks.iter().all(|block| {
+            block.instrs.iter().all(|instr| match instr {
+                Instr::Call { callee, .. } | Instr::CallVoid { callee, .. } => {
+                    !is_helper_name(callee)
+                        || self.builders.helpers.contains_key(callee)
+                        || skipped.contains(&callee.as_str())
+                }
+                _ => true,
+            })
+        })
+    }
+
+    /// Lower one helper into a Naga function.
+    fn lower_helper(&mut self, func: &LlvmFunc) -> Result<(), TranslateError> {
+        let cfg = Cfg::new(func)?;
+        let function = self.builders.build_helper(func, &cfg)?;
+        let handle = self
+            .builders
+            .module
+            .functions
+            .append(function, naga::Span::default());
+        self.builders.helpers.insert(
+            func.name.clone(),
+            Helper {
+                function: handle,
+                ret: func.ret_ty,
+            },
+        );
+        Ok(())
+    }
+
     /// Lower one entry function into the module.
     ///
     /// `workgroup` is the `@workgroup_size` of a compute entry and ignored by a
@@ -462,6 +540,68 @@ fn output_local(
     )
 }
 
+/// Operands of a `memset`/`memcpy` call: destination/source, value, size.
+const MEMORY_INTRINSIC_ARGS: usize = 3;
+
+/// Bits in one byte, the unit a `memset` fill value repeats with.
+const BYTE_BITS: u32 = 8;
+/// Bits in one word.
+const WORD_BITS: u32 = 32;
+/// Mask of one byte.
+const BYTE_MASK: u32 = 0xFF;
+
+/// Whether `callee` names a function the module defines rather than an import.
+///
+/// Imports are the `ornis_gpu` ABI and the `llvm.*` intrinsics; everything else
+/// is a helper the kernel calls.
+fn is_helper_name(callee: &str) -> bool {
+    const IMPORT_PREFIXES: [&str; 8] = [
+        "llvm.",
+        "ornis_gpu",
+        "storage_",
+        "uniform_",
+        "texture_",
+        "workgroup_",
+        "fragment_",
+        "vertex_",
+    ];
+    const IMPORT_NAMES: [&str; 3] = ["instance_index", "gpu_", "global_invocation"];
+    !IMPORT_PREFIXES
+        .iter()
+        .chain(IMPORT_NAMES.iter())
+        .any(|prefix| callee.contains(prefix))
+        && !callee.contains("local_invocation")
+}
+
+/// A helper function lowered into the module.
+#[derive(Clone, Copy)]
+struct Helper {
+    /// The Naga function to call.
+    function: naga::Handle<naga::Function>,
+    /// Its result type, `Ty::Void` for a function that returns nothing.
+    ret: Ty,
+}
+
+/// Naga scalar type of a helper's `f32`/`i32` value.
+fn scalar_of(module: &mut naga::Module, ty: Ty) -> Option<naga::Handle<naga::Type>> {
+    match ty {
+        Ty::Float => Some(scalar(module, naga::ScalarKind::Float)),
+        Ty::I32 => Some(scalar(module, naga::ScalarKind::Uint)),
+        _ => None,
+    }
+}
+
+/// One word made of `byte` repeated, the word a `memset` writes.
+fn repeated_byte(byte: u32) -> u32 {
+    let mut word = 0u32;
+    let mut shift = 0u32;
+    while shift < WORD_BITS {
+        word |= byte << shift;
+        shift += BYTE_BITS;
+    }
+    word
+}
+
 /// Word count of `bytes`, which must be a multiple of four.
 fn word_count(bytes: u32) -> Result<u32, TranslateError> {
     if bytes == 0 || !bytes.is_multiple_of(WORD_BYTES) {
@@ -471,6 +611,7 @@ fn word_count(bytes: u32) -> Result<u32, TranslateError> {
 }
 
 /// Where a memory value lives and how far into it the pointer is.
+#[derive(Clone, Copy)]
 struct MemoryPointer {
     /// Base of the pointer.
     base: MemoryBase,
@@ -479,7 +620,7 @@ struct MemoryPointer {
 }
 
 /// What a [`MemoryPointer`] starts at.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum MemoryBase {
     /// A function-scope allocation (`alloca`).
     Local(naga::Handle<naga::LocalVariable>),
@@ -885,6 +1026,8 @@ struct Builders {
     workgroup_atomic: Option<naga::Handle<naga::GlobalVariable>>,
     /// Module constants by symbol name, raw little-endian contents.
     module_constants: HashMap<String, Vec<u8>>,
+    /// Helper functions lowered into the module, by IR name.
+    helpers: HashMap<String, Helper>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
     /// Declare textures as multisampled and load sample 0 instead of mip 0.
@@ -906,6 +1049,7 @@ impl Builders {
             workgroup: None,
             workgroup_atomic: None,
             module_constants: HashMap::new(),
+            helpers: HashMap::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
             multisampled,
         }
@@ -1493,11 +1637,95 @@ impl Builders {
             exit_ids: HashMap::new(),
             exit_id_var: None,
             pointers: HashMap::new(),
+            ptr_bases: HashMap::new(),
             constants: HashMap::new(),
             diverged: false,
+            returns_value: false,
         };
         if let Some((id_x, (_, name))) = args.id_x.zip(func.params.first()) {
             lowerer.env.insert(name.clone(), id_x);
+        }
+        lowerer.alloc_phis()?;
+        lowerer.emit_top()?;
+        let saw_return = lowerer.saw_return;
+        let function = lowerer.func;
+        if !saw_return {
+            return Err(TranslateError::Parse(
+                "function without lowered ret".to_string(),
+            ));
+        }
+        Ok(function)
+    }
+
+    /// Lower a helper function: scalar parameters, scalar or void result.
+    ///
+    /// A helper has no stage interface and no invocation id; its body is the
+    /// same subset as an entry's, and `ret` returns the value instead of
+    /// storing it.
+    fn build_helper(
+        &mut self,
+        func: &LlvmFunc,
+        cfg: &Cfg<'_>,
+    ) -> Result<naga::Function, TranslateError> {
+        let mut function = naga::Function {
+            name: Some(func.name.clone()),
+            ..Default::default()
+        };
+        let mut args = Vec::new();
+        for (index, (ty, name)) in func.params.iter().enumerate() {
+            let ty = match ty {
+                Ty::Float => scalar(&mut self.module, naga::ScalarKind::Float),
+                Ty::I32 => scalar(&mut self.module, naga::ScalarKind::Uint),
+                _ => return Err(TranslateError::Unsupported),
+            };
+            function.arguments.push(naga::FunctionArgument {
+                name: Some(name.clone()),
+                ty,
+                binding: None,
+            });
+            let arg = append(
+                &mut function,
+                naga::Expression::FunctionArgument(index as u32),
+            );
+            push_emit(&mut function, &mut naga::Block::new(), arg);
+            args.push((name.clone(), arg));
+        }
+        function.result = match func.ret_ty {
+            Ty::Void => None,
+            ret => Some(naga::FunctionResult {
+                ty: scalar_of(&mut self.module, ret).ok_or(TranslateError::Unsupported)?,
+                binding: None,
+            }),
+        };
+        let mut lowerer = Lowerer {
+            builders: self,
+            cfg,
+            func: function,
+            io: StageIo::default(),
+            id_x: None,
+            global_id: None,
+            local_index: None,
+            vertex_index: None,
+            instance_index: None,
+            stage_out: None,
+            position: None,
+            inputs: BTreeMap::new(),
+            phi_vars: HashMap::new(),
+            spill: HashMap::new(),
+            env: HashMap::new(),
+            saw_return: false,
+            divergent_depth: 0,
+            uniform: HashSet::new(),
+            exit_ids: HashMap::new(),
+            exit_id_var: None,
+            pointers: HashMap::new(),
+            ptr_bases: HashMap::new(),
+            constants: HashMap::new(),
+            diverged: false,
+            returns_value: true,
+        };
+        for (name, arg) in args {
+            lowerer.env.insert(name, arg);
         }
         lowerer.alloc_phis()?;
         lowerer.emit_top()?;
@@ -1912,11 +2140,16 @@ struct Lowerer<'a, 'b> {
     exit_id_var: Option<naga::Handle<naga::LocalVariable>>,
     /// Pointer SSA values: their base and their offset in 4-byte words.
     pointers: HashMap<String, MemoryPointer>,
+    /// Base a pointer `phi` walks; every incoming pointer must share it.
+    ptr_bases: HashMap<String, MemoryBase>,
     /// Module constants turned into private globals: handle and word count.
     constants: HashMap<String, (naga::Handle<naga::GlobalVariable>, u32)>,
     /// An arm returned and the region merged afterwards may therefore run on
     /// a subset of invocations. Sticky for the rest of the entry.
     diverged: bool,
+    /// Whether `ret` returns a value (a helper) instead of storing it (the
+    /// `cs_main(i32) -> f32` toy shape).
+    returns_value: bool,
 }
 
 impl<'a, 'b> Lowerer<'a, 'b> {
@@ -1954,6 +2187,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let kind = match ty {
             Ty::Float => naga::ScalarKind::Float,
             Ty::I32 => naga::ScalarKind::Uint,
+            // A pointer phi carries the offset in words; the base is the same
+            // for every incoming edge.
+            Ty::Ptr => naga::ScalarKind::Uint,
             Ty::I1 => naga::ScalarKind::Bool,
             _ => return Err(TranslateError::Unsupported),
         };
@@ -2150,11 +2386,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ty: Ty,
         out: &mut naga::Block,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        let pointer = self.pointers.get(ptr).ok_or(TranslateError::Unsupported)?;
-        let (base, words) = (pointer.base, pointer.words);
-        let base = self.memory_base(base, out);
-        let slot = self.expr(out, naga::Expression::Access { base, index: words });
-        let word = self.expr(out, naga::Expression::Load { pointer: slot });
+        let pointer = self.pointer(ptr)?;
+        let word = self.load_word(out, pointer.base, pointer.words);
         match ty {
             Ty::I32 => Ok(word),
             Ty::Float => Ok(self.bitcast_float(out, word)),
@@ -2170,24 +2403,133 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ty: Ty,
         out: &mut naga::Block,
     ) -> Result<(), TranslateError> {
-        let pointer = self.pointers.get(ptr).ok_or(TranslateError::Unsupported)?;
-        let (base, words) = (pointer.base, pointer.words);
+        let pointer = self.pointer(ptr)?;
         let value = self.operand(out, value)?;
         let value = match ty {
             Ty::I32 => value,
             Ty::Float => self.bitcast_uint(out, value),
             _ => return Err(TranslateError::Unsupported),
         };
+        self.store_word(out, pointer.base, pointer.words, value);
+        Ok(())
+    }
+
+    /// Pointer SSA value `name`.
+    fn pointer(&self, name: &str) -> Result<MemoryPointer, TranslateError> {
+        self.pointers
+            .get(name)
+            .map(|pointer| MemoryPointer {
+                base: pointer.base,
+                words: pointer.words,
+            })
+            .ok_or(TranslateError::Unsupported)
+    }
+
+    /// Write `word` at `base + words`.
+    fn store_word(
+        &mut self,
+        out: &mut naga::Block,
+        base: MemoryBase,
+        words: naga::Handle<naga::Expression>,
+        word: naga::Handle<naga::Expression>,
+    ) {
         let base = self.memory_base(base, out);
         let slot = self.expr(out, naga::Expression::Access { base, index: words });
         out.push(
             naga::Statement::Store {
                 pointer: slot,
-                value,
+                value: word,
             },
             naga::Span::default(),
         );
+    }
+
+    /// Read the word at `base + words`.
+    fn load_word(
+        &mut self,
+        out: &mut naga::Block,
+        base: MemoryBase,
+        words: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        let base = self.memory_base(base, out);
+        let slot = self.expr(out, naga::Expression::Access { base, index: words });
+        self.expr(out, naga::Expression::Load { pointer: slot })
+    }
+
+    /// `(destination, fill, byte count)` of a `memset`-shaped call.
+    fn intrinsic_target<'o>(
+        &self,
+        args: &'o [Operand],
+    ) -> Result<(MemoryPointer, &'o Operand, u32), TranslateError> {
+        if args.len() < MEMORY_INTRINSIC_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
+        let Operand::Local(name) = &args[0] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let Operand::U32(bytes) = args[2] else {
+            return Err(TranslateError::Unsupported);
+        };
+        Ok((self.pointer(name)?, &args[1], bytes))
+    }
+
+    /// `llvm.memset(ptr, fill, size, …)`: fill whole words with one byte.
+    ///
+    /// The size and the fill byte must be immediates and the size a multiple of
+    /// four, which is what `[value; N]` initialization and rustc's array
+    /// zeroing produce.
+    fn memset(&mut self, out: &mut naga::Block, args: &[Operand]) -> Result<(), TranslateError> {
+        let (pointer, fill, bytes) = self.intrinsic_target(args)?;
+        let byte = match fill {
+            Operand::U32(value) => *value & BYTE_MASK,
+            Operand::Bool(value) => u32::from(*value),
+            Operand::F32(_) | Operand::Local(_) => return Err(TranslateError::Unsupported),
+        };
+        let word = self.u32_literal(out, repeated_byte(byte));
+        for offset in 0..word_count(bytes)? {
+            let index = self.offset_words(out, pointer.words, offset);
+            self.store_word(out, pointer.base, index, word);
+        }
         Ok(())
+    }
+
+    /// `llvm.memcpy(dst, src, size, …)`: copy whole words.
+    fn memcpy(&mut self, out: &mut naga::Block, args: &[Operand]) -> Result<(), TranslateError> {
+        if args.len() < MEMORY_INTRINSIC_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
+        let Operand::Local(dst) = &args[0] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let Operand::Local(src) = &args[1] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let Operand::U32(bytes) = args[2] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let dst = self.pointer(dst)?;
+        let src = self.pointer(src)?;
+        for offset in 0..word_count(bytes)? {
+            let from = self.offset_words(out, src.words, offset);
+            let word = self.load_word(out, src.base, from);
+            let to = self.offset_words(out, dst.words, offset);
+            self.store_word(out, dst.base, to, word);
+        }
+        Ok(())
+    }
+
+    /// `words + offset`.
+    fn offset_words(
+        &mut self,
+        out: &mut naga::Block,
+        words: naga::Handle<naga::Expression>,
+        offset: u32,
+    ) -> naga::Handle<naga::Expression> {
+        if offset == 0 {
+            return words;
+        }
+        let step = self.u32_literal(out, offset);
+        self.binary(out, naga::BinaryOperator::Add, words, step)
     }
 
     /// Pointer expression of a memory base.
@@ -2876,11 +3218,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<(), TranslateError> {
         for instr in &block.instrs {
             match instr {
-                Instr::Phi { dst, .. } => {
+                Instr::Phi { dst, ty, .. } => {
                     let var = *self.phi_vars.get(dst).ok_or(TranslateError::Unsupported)?;
                     let ptr = self.expr(out, naga::Expression::LocalVariable(var));
                     let value = self.expr(out, naga::Expression::Load { pointer: ptr });
-                    self.bind(dst, value, out);
+                    if *ty == Ty::Ptr {
+                        let base = *self.ptr_bases.get(dst).ok_or(TranslateError::Unsupported)?;
+                        self.pointers
+                            .insert(dst.clone(), MemoryPointer { base, words: value });
+                    } else {
+                        self.bind(dst, value, out);
+                    }
                 }
                 Instr::Ret { a } => {
                     self.emit_ret(Some(a), out)?;
@@ -2906,6 +3254,15 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 naga::Statement::Return { value: Some(value) },
                 naga::Span::default(),
             );
+            self.saw_return = true;
+            return Ok(Flow::Returned);
+        }
+        if self.returns_value {
+            let value = match value {
+                Some(op) => Some(self.operand(out, op)?),
+                None => None,
+            };
+            out.push(naga::Statement::Return { value }, naga::Span::default());
             self.saw_return = true;
             return Ok(Flow::Returned);
         }
@@ -2955,7 +3312,24 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 .iter()
                 .find_map(|(value, pred)| (pred == from).then_some(value))
                 .ok_or(TranslateError::Unsupported)?;
-            let value = operand(&mut self.func, out, incoming, env)?;
+            let value = if phi.ty == Ty::Ptr {
+                let Operand::Local(name) = incoming else {
+                    return Err(TranslateError::Unsupported);
+                };
+                let pointer = *self.pointers.get(name).ok_or(TranslateError::Unsupported)?;
+                match self.ptr_bases.get(&phi.dst) {
+                    Some(base) if *base != pointer.base => {
+                        return Err(TranslateError::Unsupported);
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.ptr_bases.insert(phi.dst.clone(), pointer.base);
+                    }
+                }
+                pointer.words
+            } else {
+                operand(&mut self.func, out, incoming, env)?
+            };
             let var = *self
                 .phi_vars
                 .get(&phi.dst)
@@ -3371,12 +3745,98 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     /// Value-returning call: math or storage read / atomic add.
+    /// Handle the void calls that are not ABI imports: a helper of this crate
+    /// and the memory intrinsics. Returns whether the call was consumed.
+    fn staged_void_call(
+        &mut self,
+        out: &mut naga::Block,
+        callee: &str,
+        args: &[Operand],
+    ) -> Result<bool, TranslateError> {
+        if let Some(helper) = self.builders.helpers.get(callee).copied() {
+            self.call_helper_void(out, helper, args)?;
+            return Ok(true);
+        }
+        if callee.contains("llvm.memset") {
+            self.memset(out, args)?;
+            return Ok(true);
+        }
+        if callee.contains("llvm.memcpy") {
+            self.memcpy(out, args)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Call a helper function and return its result expression.
+    fn call_helper(
+        &mut self,
+        out: &mut naga::Block,
+        helper: Helper,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        // The result expression is defined by the `Call` statement and must not
+        // appear in an `Emit` range, so it is appended outside `Self::expr`.
+        let result = self.func.expressions.append(
+            naga::Expression::CallResult(helper.function),
+            naga::Span::default(),
+        );
+        let arguments = self.helper_arguments(out, args)?;
+        out.push(
+            naga::Statement::Call {
+                function: helper.function,
+                arguments,
+                result: Some(result),
+            },
+            naga::Span::default(),
+        );
+        if helper.ret == Ty::Void {
+            return Err(TranslateError::Unsupported);
+        }
+        Ok(result)
+    }
+
+    /// Call a helper that returns nothing.
+    fn call_helper_void(
+        &mut self,
+        out: &mut naga::Block,
+        helper: Helper,
+        args: &[Operand],
+    ) -> Result<(), TranslateError> {
+        let arguments = self.helper_arguments(out, args)?;
+        out.push(
+            naga::Statement::Call {
+                function: helper.function,
+                arguments,
+                result: None,
+            },
+            naga::Span::default(),
+        );
+        Ok(())
+    }
+
+    /// Operands of a helper call, in signature order.
+    fn helper_arguments(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<Vec<naga::Handle<naga::Expression>>, TranslateError> {
+        let mut arguments = Vec::with_capacity(args.len());
+        for arg in args {
+            arguments.push(self.operand(out, arg)?);
+        }
+        Ok(arguments)
+    }
+
     fn call_value(
         &mut self,
         out: &mut naga::Block,
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if let Some(helper) = self.builders.helpers.get(callee).copied() {
+            return self.call_helper(out, helper, args);
+        }
         if callee.contains("llvm.fptoui.sat") {
             if args.len() != 1 {
                 return Err(TranslateError::Unsupported);
@@ -4343,6 +4803,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<(), TranslateError> {
+        if self.staged_void_call(out, callee, args)? {
+            return Ok(());
+        }
         if callee.contains("workgroup_atomic_store_u32") {
             return self.workgroup_store(out, args, true);
         }
@@ -4685,10 +5148,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         expr: naga::Expression,
     ) -> naga::Handle<naga::Expression> {
         let handle = self.func.expressions.append(expr, naga::Span::default());
-        if !self.func.expressions[handle].needs_pre_emit() {
-            let range = self.func.expressions.range_from(handle.index());
-            out.push(naga::Statement::Emit(range), naga::Span::default());
-        }
+        push_emit(&mut self.func, out, handle);
         handle
     }
 }
@@ -4974,7 +5434,10 @@ fn push_emit(
     handle: naga::Handle<naga::Expression>,
 ) {
     if !func.expressions[handle].needs_pre_emit() {
-        let range = func.expressions.range_from(handle.index());
+        // The range is closed on purpose: an open-ended one would also cover
+        // the `CallResult` of a helper call, which Naga rejects because a call
+        // statement defines it.
+        let range = naga::Range::new_from_bounds(handle, handle);
         out.push(naga::Statement::Emit(range), naga::Span::default());
     }
 }
@@ -5022,7 +5485,11 @@ start:
   ret void
 }
 "#;
-        let func = crate::parse::parse(ir, ornis_gpu_abi::symbols::CS_MAIN).expect("parse");
+        let func = crate::parse::parse_module(ir)
+            .expect("parse")
+            .into_iter()
+            .find(|func| func.name == ornis_gpu_abi::symbols::CS_MAIN)
+            .expect("entry");
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
