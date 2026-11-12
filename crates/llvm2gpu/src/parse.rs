@@ -41,6 +41,24 @@ pub(super) enum Ty {
     Ptr,
 }
 
+/// Where a pointer value starts.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum PtrBase {
+    /// A module-level constant, by symbol name without `@`.
+    Global(String),
+    /// A local `alloca`, by SSA name.
+    Local(Name),
+}
+
+/// One internal constant the module indexes through memory.
+#[derive(Clone, Debug)]
+pub(super) struct GlobalConst {
+    /// Symbol name without `@`.
+    pub(super) name: String,
+    /// Raw contents, little-endian.
+    pub(super) bytes: Vec<u8>,
+}
+
 /// One supported instruction.
 #[derive(Clone, Debug)]
 pub(super) enum Instr {
@@ -133,6 +151,26 @@ pub(super) enum Instr {
         ty: Ty,
         incoming: Vec<(Operand, String)>,
     },
+    /// `%p = alloca [4 x float], align 4` — `bytes` is the allocation size.
+    ///
+    /// The allocation becomes a private array of 4-byte words; `bytes` is
+    /// therefore a multiple of four.
+    Alloca { dst: Name, bytes: u32 },
+    /// `%p = getelementptr <ty>, ptr <base>, i32 <index>`.
+    ///
+    /// `stride` is the size of `<ty>` in bytes, so the pointer moves
+    /// `index * stride` bytes. An aggregate type with an unknown layout is
+    /// rejected at parse time.
+    GetElementPtr {
+        dst: Name,
+        base: PtrBase,
+        stride: u32,
+        index: Operand,
+    },
+    /// `%x = load float, ptr %p`
+    Load { dst: Name, ptr: Name, ty: Ty },
+    /// `store float %v, ptr %p`
+    Store { ptr: Name, value: Operand, ty: Ty },
 }
 
 /// Block terminator.
@@ -148,6 +186,11 @@ pub(super) enum Terminator {
         true_label: String,
         false_label: String,
     },
+    /// `unreachable`: the panic path of the kernel.
+    ///
+    /// The path is undefined behaviour in LLVM; the translator ends it with a
+    /// `return` instead of pretending it cannot happen.
+    Unreachable,
     /// `switch i32 %x, label %default [ i32 0, label %a i32 1, label %b ]`
     ///
     /// The selector is an `i32` whose bits the lowerer keeps as `u32`, so the
@@ -184,6 +227,8 @@ pub(super) struct LlvmFunc {
     pub(super) params: Vec<(Ty, Name)>,
     /// Basic blocks in declaration order.
     pub(super) blocks: Vec<BasicBlock>,
+    /// Module-level constants the function can index.
+    pub(super) globals: Vec<GlobalConst>,
 }
 
 /// Parse the whole textual IR, returning every entry point it defines.
@@ -193,14 +238,14 @@ pub(super) struct LlvmFunc {
 /// A module may define several of them (a pass ships a vertex and a fragment
 /// entry), and they come back in declaration order.
 pub(super) fn parse_all(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
-    let entries: Vec<LlvmFunc> = parse_header(text)?
+    let globals = parse_globals(text);
+    let entries: Vec<LlvmFunc> = parse_header(text, &globals)?
         .into_iter()
         .filter(|func| is_entry(&func.name))
         .collect();
-    if entries.is_empty() {
-        return Err(TranslateError::Unsupported);
-    }
-    Ok(entries)
+    (!entries.is_empty())
+        .then_some(entries)
+        .ok_or(TranslateError::Unsupported)
 }
 
 /// Parse the whole textual IR, returning the entry called `entry`.
@@ -217,8 +262,56 @@ fn is_entry(name: &str) -> bool {
         || name == ornis_gpu_abi::symbols::FS_MAIN
 }
 
+/// Decode one `c"…"` LLVM byte string, escapes included.
+fn decode_byte_string(line: &str) -> Option<Vec<u8>> {
+    let rest = line.strip_prefix("c\"")?;
+    let mut bytes = Vec::new();
+    let mut chars = rest.bytes();
+    loop {
+        match chars.next()? {
+            b'"' => return Some(bytes),
+            b'\\' => {
+                let high = chars.next()?;
+                let low = chars.next()?;
+                let text = [high, low];
+                let text = core::str::from_utf8(&text).ok()?;
+                bytes.push(u8::from_str_radix(text, HEX_RADIX).ok()?);
+            }
+            byte => bytes.push(byte),
+        }
+    }
+}
+
+/// Module-level constants that hold a byte initializer.
+fn parse_globals(text: &str) -> Vec<GlobalConst> {
+    let mut globals = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('@') else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once('=') else {
+            continue;
+        };
+        if !tail.contains("constant ") {
+            continue;
+        }
+        let Some(start) = line.find("c\"") else {
+            continue;
+        };
+        let Some(bytes) = decode_byte_string(&line[start..]) else {
+            continue;
+        };
+        globals.push(GlobalConst {
+            name: name.trim().trim_matches('"').to_string(),
+            bytes,
+        });
+    }
+    globals
+}
+
 /// Parse every `define ... { ... }` block.
-fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
+fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Vec<LlvmFunc>, TranslateError> {
     let mut out = Vec::new();
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
@@ -317,6 +410,7 @@ fn parse_header(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
             ret_ty,
             params,
             blocks,
+            globals: globals.to_vec(),
         });
     }
     if out.is_empty() {
@@ -485,7 +579,7 @@ fn parse_term(line: &str) -> Result<Option<Terminator>, TranslateError> {
         return Ok(Some(parse_switch(rest)?));
     }
     if trimmed == "unreachable" {
-        return Err(TranslateError::Unsupported);
+        return Ok(Some(Terminator::Unreachable));
     }
     Ok(None)
 }
@@ -556,6 +650,203 @@ fn switch_label(text: &str) -> Result<String, TranslateError> {
     Ok(label.trim().to_string())
 }
 
+/// `alloca [4 x float], align 4` → the allocation size in bytes.
+fn parse_alloca(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
+    let rest = rhs
+        .strip_prefix("alloca ")
+        .ok_or_else(|| TranslateError::Parse("alloca without a type".to_string()))?;
+    let ty = rest.split(',').next().unwrap_or(rest).trim();
+    let bytes = type_bytes(ty)?;
+    Ok(Instr::Alloca {
+        dst: dst.to_string(),
+        bytes,
+    })
+}
+
+/// `getelementptr inbounds nuw [4 x float], ptr @G, i32 %i`.
+fn parse_gep(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
+    let (ty, base, index) = split_gep(rhs)?;
+    Ok(Instr::GetElementPtr {
+        dst: dst.to_string(),
+        base: pointer_base(&base)?,
+        stride: type_bytes(&ty)?,
+        index: parse_operand(&index)?,
+    })
+}
+
+/// `(source type, base, index)` of a `getelementptr`.
+fn split_gep(rhs: &str) -> Result<(String, String, String), TranslateError> {
+    let rest = rhs
+        .strip_prefix("getelementptr")
+        .ok_or_else(|| TranslateError::Parse("getelementptr".to_string()))?;
+    // Drop the `inbounds`/`nuw`/`nusw` markers before the source type.
+    let rest = rest.trim();
+    let rest = rest
+        .strip_prefix("inbounds ")
+        .unwrap_or(rest)
+        .trim_start_matches("nuw ")
+        .trim_start_matches("nusw ")
+        .trim();
+    let (ty, tail) = rest
+        .split_once(',')
+        .ok_or_else(|| TranslateError::Parse("getelementptr without a base".to_string()))?;
+    let tail = tail.trim();
+    let tail = tail
+        .strip_prefix("ptr ")
+        .ok_or_else(|| TranslateError::Parse("getelementptr base is not a pointer".to_string()))?;
+    let (base, index) = tail
+        .split_once(',')
+        .ok_or_else(|| TranslateError::Parse("getelementptr without an index".to_string()))?;
+    let index = index
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| TranslateError::Parse("getelementptr index".to_string()))?;
+    Ok((
+        ty.trim().to_string(),
+        base.trim().to_string(),
+        index.to_string(),
+    ))
+}
+
+/// `@name` / `%name` of a `getelementptr` base.
+fn pointer_base(base: &str) -> Result<PtrBase, TranslateError> {
+    if let Some(name) = base.strip_prefix('@') {
+        return Ok(PtrBase::Global(name.trim_matches('"').to_string()));
+    }
+    if let Some(name) = base.strip_prefix('%') {
+        return Ok(PtrBase::Local(name.to_string()));
+    }
+    Err(TranslateError::Parse(format!(
+        "getelementptr base `{base}` is not a symbol"
+    )))
+}
+
+/// A line without a result: `store`, `call void`, or nothing this subset knows.
+fn parse_void_line(line: &str) -> Result<Option<Instr>, TranslateError> {
+    if let Some(rest) = line.strip_prefix("store ") {
+        return Ok(Some(parse_store(rest)?));
+    }
+    if line.starts_with("call ") {
+        let (callee, args) = parse_call(line)?;
+        return Ok(Some(Instr::CallVoid { callee, args }));
+    }
+    if line.starts_with("load ") || line.contains("getelementptr") || line.contains("call") {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok(None)
+}
+
+/// `load float, ptr %p, align 4`.
+fn parse_load(dst: &str, rhs: &str) -> Result<Instr, TranslateError> {
+    let rest = rhs
+        .strip_prefix("load ")
+        .ok_or_else(|| TranslateError::Parse("load".to_string()))?;
+    let (ty, tail) = rest
+        .split_once(',')
+        .ok_or_else(|| TranslateError::Parse("load without a pointer".to_string()))?;
+    let ty = parse_ty(ty.trim())?;
+    let ptr = tail
+        .trim()
+        .strip_prefix("ptr ")
+        .ok_or_else(|| TranslateError::Parse("load source is not a pointer".to_string()))?;
+    let ptr = ptr
+        .split(',')
+        .next()
+        .unwrap_or(ptr)
+        .trim()
+        .trim_start_matches('%')
+        .to_string();
+    Ok(Instr::Load {
+        dst: dst.to_string(),
+        ptr,
+        ty,
+    })
+}
+
+/// `store float %v, ptr %p, align 4`.
+fn parse_store(rhs: &str) -> Result<Instr, TranslateError> {
+    let (ty, tail) = rhs
+        .split_once(',')
+        .ok_or_else(|| TranslateError::Parse("store without a pointer".to_string()))?;
+    let mut parts = ty.split_whitespace();
+    let ty = parse_ty(
+        parts
+            .next()
+            .ok_or_else(|| TranslateError::Parse("store without a type".to_string()))?,
+    )?;
+    let value = parts
+        .next()
+        .ok_or_else(|| TranslateError::Parse("store without a value".to_string()))?;
+    let ptr = tail
+        .trim()
+        .strip_prefix("ptr ")
+        .ok_or_else(|| TranslateError::Parse("store target is not a pointer".to_string()))?;
+    let ptr = ptr
+        .split(',')
+        .next()
+        .unwrap_or(ptr)
+        .trim()
+        .trim_start_matches('%')
+        .to_string();
+    Ok(Instr::Store {
+        ptr,
+        value: parse_operand(value)?,
+        ty,
+    })
+}
+
+/// Byte size of the scalar types the memory subset accepts.
+const WORD_BYTES: u32 = 4;
+/// Byte size of a 16-bit scalar.
+const HALF_WORD_BYTES: u32 = 2;
+/// Byte size of an 8-bit scalar.
+const BYTE_BYTES: u32 = 1;
+
+/// Size of a type the translator can lay out, in bytes.
+///
+/// Scalars are one, two, or four bytes, `[N x T]` is `N` times `T`, and
+/// `<N x T>` is a vector of `N` lanes. A struct or an opaque pointer has no
+/// layout here. The loop walks nested aggregates without recursing, so a
+/// deeply nested type cannot overflow the stack.
+fn type_bytes(ty: &str) -> Result<u32, TranslateError> {
+    let mut rest = ty.trim();
+    let mut total = 1u32;
+    loop {
+        let (inner, close) = match rest.strip_prefix('[') {
+            Some(inner) => (inner, ']'),
+            None => match rest.strip_prefix('<') {
+                Some(inner) => (inner, '>'),
+                None => {
+                    let size = match rest {
+                        "float" | "i32" | "u32" => WORD_BYTES,
+                        "i16" | "u16" => HALF_WORD_BYTES,
+                        "i8" | "u8" => BYTE_BYTES,
+                        _ => return Err(TranslateError::Unsupported),
+                    };
+                    return total
+                        .checked_mul(size)
+                        .ok_or_else(|| TranslateError::Parse(format!("type `{ty}` overflows")));
+                }
+            },
+        };
+        let (count, element) = inner
+            .split_once(" x ")
+            .ok_or_else(|| TranslateError::Parse(format!("aggregate type `{ty}`")))?;
+        let count: u32 = count
+            .trim()
+            .parse()
+            .map_err(|_| TranslateError::Parse(format!("length in `{ty}`")))?;
+        total = total
+            .checked_mul(count)
+            .ok_or_else(|| TranslateError::Parse(format!("type `{ty}` overflows")))?;
+        rest = element
+            .trim_end()
+            .strip_suffix(close)
+            .ok_or_else(|| TranslateError::Parse(format!("aggregate type `{ty}`")))?
+            .trim();
+    }
+}
+
 /// `%x = phi float [ %a, %pred ], [ 1.0, %pred2 ]`
 fn parse_phi(rhs: &str) -> Result<Vec<(Operand, String)>, TranslateError> {
     let mut out = Vec::new();
@@ -589,16 +880,7 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
     }
     // `%dst = ...`
     let Some((lhs, rhs)) = line.split_once('=') else {
-        // Non-assignment lines: reject stores/loads/traces.
-        if line.starts_with("store ") || line.starts_with("load ") || line.contains("getelementptr")
-        {
-            return Err(TranslateError::Unsupported);
-        }
-        // `tail call` without a result is a trap/assume; reject.
-        if line.contains("call") {
-            return Err(TranslateError::Unsupported);
-        }
-        return Ok(None);
+        return parse_void_line(stripped);
     };
     let dst = lhs.trim().trim_start_matches('%').to_string();
     let rhs = rhs.trim();
@@ -613,6 +895,9 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
         return Err(TranslateError::Parse("empty instruction".to_string()));
     }
     match tokens[0].as_str() {
+        "alloca" => Ok(Some(parse_alloca(&dst, rhs)?)),
+        "getelementptr" => Ok(Some(parse_gep(&dst, rhs)?)),
+        "load" => Ok(Some(parse_load(&dst, rhs)?)),
         "phi" => {
             let ty = parse_ty(&tokens[1])?;
             // `parse_phi` expects the tail after `phi <type>`.
@@ -758,7 +1043,6 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             Ok(Some(Instr::Bitcast { dst, from, to, a }))
         }
         "br" | "switch" => Err(TranslateError::Unsupported),
-        "load" | "store" | "getelementptr" => Err(TranslateError::Unsupported),
         // Any other opcode is outside the translated subset.
         _ => Err(TranslateError::Unsupported),
     }
@@ -980,6 +1264,9 @@ impl Instr {
                 visit(a);
             }
             Self::Select { c, a, b, .. } => visit_triple(c, a, b, &mut visit),
+            Self::GetElementPtr { index, .. } => visit(index),
+            Self::Store { value, .. } => visit(value),
+            Self::Alloca { .. } | Self::Load { .. } => {}
             Self::Call { args, .. } | Self::CallVoid { args, .. } => {
                 args.iter().for_each(&mut visit);
             }
@@ -990,10 +1277,10 @@ impl Instr {
         }
     }
 
-    /// Whether this instruction writes `name`.
-    pub(super) fn defines(&self, name: &str) -> bool {
+    /// Name this instruction writes, when it writes one.
+    pub(super) fn defined(&self) -> Option<&str> {
         match self {
-            Self::CallVoid { .. } | Self::Ret { .. } | Self::RetVoid => false,
+            Self::CallVoid { .. } | Self::Store { .. } | Self::Ret { .. } | Self::RetVoid => None,
             Self::FAdd { dst, .. }
             | Self::FMul { dst, .. }
             | Self::FSub { dst, .. }
@@ -1020,7 +1307,47 @@ impl Instr {
             | Self::Fptoui { dst, .. }
             | Self::Bitcast { dst, .. }
             | Self::Call { dst, .. }
-            | Self::Phi { dst, .. } => dst == name,
+            | Self::Phi { dst, .. }
+            | Self::Alloca { dst, .. }
+            | Self::GetElementPtr { dst, .. }
+            | Self::Load { dst, .. } => Some(dst),
+        }
+    }
+
+    /// Whether this instruction writes `name`.
+    pub(super) fn defines(&self, name: &str) -> bool {
+        match self {
+            Self::CallVoid { .. } | Self::Store { .. } | Self::Ret { .. } | Self::RetVoid => false,
+            Self::FAdd { dst, .. }
+            | Self::FMul { dst, .. }
+            | Self::FSub { dst, .. }
+            | Self::FDiv { dst, .. }
+            | Self::FNeg { dst, .. }
+            | Self::Add { dst, .. }
+            | Self::Sub { dst, .. }
+            | Self::Mul { dst, .. }
+            | Self::UDiv { dst, .. }
+            | Self::SDiv { dst, .. }
+            | Self::URem { dst, .. }
+            | Self::SRem { dst, .. }
+            | Self::And { dst, .. }
+            | Self::Or { dst, .. }
+            | Self::Xor { dst, .. }
+            | Self::Shl { dst, .. }
+            | Self::LShr { dst, .. }
+            | Self::AShr { dst, .. }
+            | Self::Fcmp { dst, .. }
+            | Self::Icmp { dst, .. }
+            | Self::Select { dst, .. }
+            | Self::Uitofp { dst, .. }
+            | Self::Sitofp { dst, .. }
+            | Self::Fptoui { dst, .. }
+            | Self::Bitcast { dst, .. }
+            | Self::Call { dst, .. }
+            | Self::Phi { dst, .. }
+            | Self::Alloca { dst, .. }
+            | Self::GetElementPtr { dst, .. }
+            | Self::Load { dst, .. } => dst == name,
         }
     }
 
@@ -1053,6 +1380,8 @@ impl Instr {
             Self::Bitcast { to, .. } => Some(*to),
             Self::Select { .. } => None,
             Self::Call { callee, .. } => call_value_ty(callee),
+            Self::Load { ty, .. } => Some(*ty),
+            Self::Alloca { .. } | Self::GetElementPtr { .. } | Self::Store { .. } => None,
             Self::CallVoid { .. } | Self::Ret { .. } | Self::RetVoid => None,
         }
     }
