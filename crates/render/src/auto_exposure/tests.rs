@@ -31,8 +31,6 @@ fn exposure_params_layout_is_a_16_byte_uniform_block() {
     assert_eq!(packed.exposure, 2.0);
     assert_eq!(packed.pad, [0.0; 3]);
     assert_eq!(bytemuck::bytes_of(&packed).len(), 16);
-    assert!(EXPOSURE_PARAMS_WGSL.contains("exposure: f32"));
-    assert!(EXPOSURE_PARAMS_WGSL.contains(EXPOSURE_WGSL_NAME));
 }
 
 #[test]

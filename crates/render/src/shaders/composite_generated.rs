@@ -90,15 +90,14 @@ mod tests {
         let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
         // The module keeps the IR's declaration order, so the entries are
         // matched by name and stage rather than by position.
-        let stage_of = |name: &str| {
-            module
-                .entry_points
-                .iter()
-                .find(|entry| entry.name == name)
-                .map(|entry| entry.stage)
-        };
-        assert_eq!(stage_of(VS_ENTRY), Some(naga::ShaderStage::Vertex));
-        assert_eq!(stage_of(FS_ENTRY), Some(naga::ShaderStage::Fragment));
+        assert_eq!(
+            super::super::entry_stage(&module, VS_ENTRY),
+            Some(naga::ShaderStage::Vertex)
+        );
+        assert_eq!(
+            super::super::entry_stage(&module, FS_ENTRY),
+            Some(naga::ShaderStage::Fragment)
+        );
         assert_eq!(module.entry_points.len(), 2);
     }
 
@@ -106,12 +105,7 @@ mod tests {
     #[test]
     fn composite_resources_cover_shader_and_layout() {
         let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
-        let bindings: Vec<(u32, u32)> = module
-            .global_variables
-            .iter()
-            .filter_map(|(_, global)| global.binding)
-            .map(|binding| (binding.group, binding.binding))
-            .collect();
+        let bindings = super::super::declared_bindings(&module);
         assert_eq!(COMPOSITE_RESOURCES.len(), 4);
         for resource in COMPOSITE_RESOURCES {
             assert!(
