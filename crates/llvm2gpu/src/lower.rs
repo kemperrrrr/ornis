@@ -76,6 +76,14 @@ impl Lowering {
         }
     }
 
+    /// Remember the functions the parser skipped, so a call that reaches one
+    /// reports what is wrong with it instead of a generic rejection.
+    pub(super) fn reserve_skipped(&mut self, skipped: Vec<(String, String)>) {
+        for (name, reason) in skipped {
+            self.builders.skipped_helpers.insert(name, reason);
+        }
+    }
+
     /// Lower every helper the entries can call.
     ///
     /// Helpers may call each other, so they are lowered in dependency order:
@@ -1028,6 +1036,8 @@ struct Builders {
     module_constants: HashMap<String, Vec<u8>>,
     /// Helper functions lowered into the module, by IR name.
     helpers: HashMap<String, Helper>,
+    /// Helpers outside the subset, with the reason a call cannot lower them.
+    skipped_helpers: HashMap<String, String>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
     /// Declare textures as multisampled and load sample 0 instead of mip 0.
@@ -1050,6 +1060,7 @@ impl Builders {
             workgroup_atomic: None,
             module_constants: HashMap::new(),
             helpers: HashMap::new(),
+            skipped_helpers: HashMap::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
             multisampled,
         }
@@ -2414,6 +2425,51 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Ok(())
     }
 
+    /// `select i1 %c, ptr %a, ptr %b`: pick the offset of one of two pointers.
+    ///
+    /// Both have to start at the same base, the same rule `phi ptr` follows:
+    /// Naga has no pointer value, so the selection happens on the word offset.
+    /// Returns `None` when the operands are not pointers.
+    fn pointer_select(
+        &mut self,
+        dst: &str,
+        cond: &Operand,
+        accept: &Operand,
+        reject: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<Option<MemoryPointer>, TranslateError> {
+        let (Operand::Local(accept), Operand::Local(reject)) = (accept, reject) else {
+            return Ok(None);
+        };
+        let (Some(accept), Some(reject)) = (
+            self.pointers.get(accept).copied(),
+            self.pointers.get(reject).copied(),
+        ) else {
+            return Ok(None);
+        };
+        if accept.base != reject.base {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`select` of two pointers from different allocations: `{}` picks between                  memory this translator cannot name at runtime",
+                dst
+            )));
+        }
+        let condition = self.operand(out, cond)?;
+        let words = self.expr(
+            out,
+            naga::Expression::Select {
+                condition,
+                accept: accept.words,
+                reject: reject.words,
+            },
+        );
+        let pointer = MemoryPointer {
+            base: accept.base,
+            words,
+        };
+        self.pointers.insert(dst.to_string(), pointer);
+        Ok(Some(pointer))
+    }
+
     /// Pointer SSA value `name`.
     fn pointer(&self, name: &str) -> Result<MemoryPointer, TranslateError> {
         self.pointers
@@ -3433,6 +3489,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.bind(dst, v, out);
             }
             Instr::Select { dst, c, a, b } => {
+                if let Some(pointer) = self.pointer_select(dst, c, a, b, out)? {
+                    let _ = pointer;
+                    return Ok(());
+                }
                 let condition = self.operand(out, c)?;
                 let accept = self.operand(out, a)?;
                 let reject = self.operand(out, b)?;
@@ -3753,6 +3813,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<bool, TranslateError> {
+        if let Some(reason) = self.builders.skipped_helpers.get(callee) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`{callee}` cannot be lowered ({reason}); mark it `#[inline(always)]` so its body \
+                 is compiled into the caller, or keep the pointer out of the helper's signature"
+            )));
+        }
         if let Some(helper) = self.builders.helpers.get(callee).copied() {
             self.call_helper_void(out, helper, args)?;
             return Ok(true);
@@ -3834,6 +3900,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if let Some(reason) = self.builders.skipped_helpers.get(callee) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`{callee}` cannot be lowered ({reason}); mark it `#[inline(always)]` so its body \
+                 is compiled into the caller, or keep the pointer out of the helper's signature"
+            )));
+        }
         if let Some(helper) = self.builders.helpers.get(callee).copied() {
             return self.call_helper(out, helper, args);
         }
@@ -5487,6 +5559,7 @@ start:
 "#;
         let func = crate::parse::parse_module(ir)
             .expect("parse")
+            .funcs
             .into_iter()
             .find(|func| func.name == ornis_gpu_abi::symbols::CS_MAIN)
             .expect("entry");

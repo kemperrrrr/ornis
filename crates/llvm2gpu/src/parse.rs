@@ -13,6 +13,23 @@ use crate::error::TranslateError;
 /// One LLVM operation result name without the leading `%`.
 pub(super) type Name = String;
 
+/// A local name after inlining's renaming and parameter substitution.
+///
+/// The name is deliberately not `local`: the analyzer collects nested functions
+/// into the project scope by name, and a short generic name there would make
+/// unrelated call sites look like project calls.
+fn namespaced(
+    name: &str,
+    prefix: &str,
+    subst: &std::collections::HashMap<String, Operand>,
+) -> Result<String, TranslateError> {
+    match subst.get(name) {
+        Some(Operand::Local(replacement)) => Ok(replacement.clone()),
+        Some(_) => Err(TranslateError::Unsupported),
+        None => Ok(format!("{prefix}{name}")),
+    }
+}
+
 /// A scalar operand: a `%local` or a literal.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Operand {
@@ -231,11 +248,20 @@ pub(super) struct LlvmFunc {
     pub(super) globals: Vec<GlobalConst>,
 }
 
+/// Everything one module's functions say about themselves.
+pub(super) struct Module {
+    /// Functions that parsed, entries and helpers alike.
+    pub(super) funcs: Vec<LlvmFunc>,
+    /// Functions outside the subset and why, so a call can name the fix.
+    pub(super) skipped: Vec<(String, String)>,
+}
+
 /// Parse every function the module defines, entries and helpers alike.
 ///
 /// A helper the kernel calls is lowered into the same Naga module; one that is
-/// outside the subset is skipped here and only reported if a kernel calls it.
-pub(super) fn parse_module(text: &str) -> Result<Vec<LlvmFunc>, TranslateError> {
+/// outside the subset is skipped here, with the reason, and only reported if a
+/// kernel calls it.
+pub(super) fn parse_module(text: &str) -> Result<Module, TranslateError> {
     let globals = parse_globals(text);
     parse_header(text, &globals)
 }
@@ -300,15 +326,17 @@ fn parse_globals(text: &str) -> Vec<GlobalConst> {
 /// A function outside the subset is skipped unless it is an entry point: a
 /// helper the kernel never calls (`rust_begin_unwind`, a panic shim) must not
 /// fail the module, while an entry that does not parse is an error.
-fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Vec<LlvmFunc>, TranslateError> {
+fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Module, TranslateError> {
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     let mut lines = text.lines().peekable();
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if !trimmed.starts_with("define") {
             continue;
         }
-        let (name, ret_ty, params) = parse_define_header(trimmed)?;
+        // The body is read first: it has to be consumed even when the header
+        // is outside the subset.
         let mut body = Vec::new();
         loop {
             let Some(inner) = lines.next() else {
@@ -319,16 +347,21 @@ fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Vec<LlvmFunc>, Tr
             }
             body.push(inner.to_string());
         }
-        match parse_body(&name, ret_ty, &params, &body, globals) {
+        let parsed = parse_define_header(trimmed)
+            .and_then(|(name, ret_ty, params)| parse_body(&name, ret_ty, &params, &body, globals));
+        match parsed {
             Ok(func) => out.push(func),
-            Err(error) if is_entry(&name) => return Err(error),
-            Err(_) => continue,
+            Err(error) if is_entry(&define_name(trimmed)) => return Err(error),
+            Err(error) => skipped.push((define_name(trimmed), error.to_string())),
         }
     }
     if out.is_empty() {
         return Err(TranslateError::Parse("no define in llvm ir".to_string()));
     }
-    Ok(out)
+    Ok(Module {
+        funcs: out,
+        skipped,
+    })
 }
 
 /// One terminator line, joining a `switch` case list that spans lines.
@@ -354,6 +387,15 @@ fn collect_terminator<'a>(
 }
 
 /// Parse one function body: blocks, instructions, and terminators.
+/// Close a basic block: its label, the instructions collected so far, its term.
+fn closed_block(label: String, instrs: Vec<Instr>, term: Terminator) -> BasicBlock {
+    BasicBlock {
+        label,
+        instrs,
+        term,
+    }
+}
+
 fn parse_body(
     name: &str,
     ret_ty: Ty,
@@ -378,11 +420,8 @@ fn parse_body(
             // Close previous block if needed.
             if let Some(term) = cur_term.take() {
                 // previous block already terminated; start new
-                blocks.push(BasicBlock {
-                    label: cur_label.clone(),
-                    instrs: std::mem::take(&mut cur_instrs),
-                    term,
-                });
+                let instrs = std::mem::take(&mut cur_instrs);
+                blocks.push(closed_block(cur_label.clone(), instrs, term));
             } else if !cur_instrs.is_empty() {
                 // Fallthrough without explicit terminator: synthesize ret.
                 return Err(TranslateError::Unsupported);
@@ -406,11 +445,7 @@ fn parse_body(
     // Close the last block.
     if let Some(term) = cur_term.take() {
         saw_ret |= matches!(term, Terminator::Ret(_) | Terminator::Unreachable);
-        blocks.push(BasicBlock {
-            label: cur_label,
-            instrs: cur_instrs,
-            term,
-        });
+        blocks.push(closed_block(cur_label, cur_instrs, term));
     } else if !cur_instrs.is_empty() {
         return Err(TranslateError::Parse(
             "block without terminator".to_string(),
@@ -426,6 +461,22 @@ fn parse_body(
         blocks,
         globals: globals.to_vec(),
     })
+}
+
+/// Name a `define` declares, without the `@`.
+///
+/// Best effort: a header the parser rejects still has to be reported by name.
+fn define_name(line: &str) -> String {
+    let Some(at) = line.find('@') else {
+        return line.to_string();
+    };
+    let after = &line[at + 1..];
+    after
+        .find('(')
+        .map_or(after, |open| &after[..open])
+        .trim()
+        .trim_matches('"')
+        .to_string()
 }
 
 /// `define dso_local noundef float @cs_main(i32 noundef %id) ... {`
@@ -857,7 +908,7 @@ fn type_bytes(ty: &str) -> Result<u32, TranslateError> {
 }
 
 /// `%x = phi float [ %a, %pred ], [ 1.0, %pred2 ]`
-fn parse_phi(rhs: &str) -> Result<Vec<(Operand, String)>, TranslateError> {
+fn parse_phi(rhs: &str, ty: Ty) -> Result<Vec<(Operand, String)>, TranslateError> {
     let mut out = Vec::new();
     for part in split_top(rhs) {
         let part = part.trim().trim_start_matches('[').trim_end_matches(']');
@@ -872,7 +923,7 @@ fn parse_phi(rhs: &str) -> Result<Vec<(Operand, String)>, TranslateError> {
             .next()
             .ok_or(TranslateError::Parse("phi pred".to_string()))?;
         let pred = pred.trim().trim_start_matches('%').trim().to_string();
-        out.push((parse_operand(value.trim())?, pred));
+        out.push((parse_typed_operand(value.trim(), ty)?, pred));
     }
     if out.is_empty() {
         return Err(TranslateError::Parse("phi without incoming".to_string()));
@@ -911,7 +962,7 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             let ty = parse_ty(&tokens[1])?;
             // `parse_phi` expects the tail after `phi <type>`.
             let tail = rhs.split_whitespace().skip(2).collect::<Vec<_>>().join(" ");
-            let incoming = parse_phi(&tail)?;
+            let incoming = parse_phi(&tail, ty)?;
             Ok(Some(Instr::Phi { dst, ty, incoming }))
         }
         "fadd" | "fmul" | "fsub" | "fdiv" => {
@@ -1026,9 +1077,10 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
         }
         "select" => {
             // `select i1 %c, float %a, float %b`
+            let value_ty = parse_ty(&tokens[3])?;
             let c = parse_operand(tokens[2].trim_end_matches(','))?;
-            let a = parse_operand(tokens[4].trim_end_matches(','))?;
-            let b = parse_operand(tokens[6].trim_end_matches(','))?;
+            let a = parse_typed_operand(tokens[4].trim_end_matches(','), value_ty)?;
+            let b = parse_typed_operand(tokens[6].trim_end_matches(','), value_ty)?;
             Ok(Some(Instr::Select { dst, c, a, b }))
         }
         "uitofp" | "sitofp" => {
@@ -1052,6 +1104,11 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             Ok(Some(Instr::Bitcast { dst, from, to, a }))
         }
         "br" | "switch" => Err(TranslateError::Unsupported),
+        "ptrtoint" | "inttoptr" => Err(TranslateError::UnsupportedType(
+            "a GPU buffer address is not a number: `ptrtoint`/`inttoptr` are outside the \
+             subset; index the buffer by element instead of casting a pointer"
+                .to_string(),
+        )),
         // Any other opcode is outside the translated subset.
         _ => Err(TranslateError::Unsupported),
     }
@@ -1169,6 +1226,23 @@ fn parse_call(rhs: &str) -> Result<(String, Vec<Operand>), TranslateError> {
     Ok((callee, args))
 }
 
+/// An operand whose `poison`/`undef` becomes a zero of the expected type.
+///
+/// LLVM marks values it proved unobservable as `poison`; a shader has to pick
+/// something, and any value is as good as another because observing one is
+/// undefined behaviour in LLVM too.
+fn parse_typed_operand(word: &str, ty: Ty) -> Result<Operand, TranslateError> {
+    let word = word.trim().trim_matches(',');
+    if word != "poison" && word != "undef" {
+        return parse_operand(word);
+    }
+    Ok(match ty {
+        Ty::Float => Operand::F32(0.0),
+        Ty::I1 => Operand::Bool(false),
+        _ => Operand::U32(0),
+    })
+}
+
 fn parse_operand(word: &str) -> Result<Operand, TranslateError> {
     let w = word.trim().trim_matches(',');
     if let Some(name) = w.strip_prefix('%') {
@@ -1242,6 +1316,109 @@ fn llvm_hex_f32(word: &str) -> Option<f32> {
 }
 
 impl Instr {
+    /// Rewrite the names an inlined body defines and the values it reads.
+    ///
+    /// `prefix` namespaces every local of the inlined function so it cannot
+    /// collide with the caller's, and `subst` replaces the inlined parameters
+    /// with the arguments at the call site (a parameter is never reassigned, so
+    /// substitution is sound).
+    ///
+    /// # Errors
+    ///
+    /// [`TranslateError::Unsupported`] when a parameter the body dereferences
+    /// was passed as something other than a local name, because only a name can
+    /// be a pointer here.
+    // qual:allow(srp, nms) reason: "the method rewrites the instruction it is called on; the mutation happens through the destructured fields, which the needless-&mut-self check does not see"
+    pub(super) fn inline_rename(
+        &mut self,
+        prefix: &str,
+        subst: &std::collections::HashMap<String, Operand>,
+    ) -> Result<(), TranslateError> {
+        let mut apply = |operand: &mut Operand| -> Result<(), TranslateError> {
+            let Operand::Local(name) = operand else {
+                return Ok(());
+            };
+            *name = namespaced(name, prefix, subst)?;
+            Ok(())
+        };
+        let define = |dst: &mut String| *dst = format!("{prefix}{dst}");
+        let pointer = |name: &mut String| -> Result<(), TranslateError> {
+            *name = namespaced(name, prefix, subst)?;
+            Ok(())
+        };
+        match self {
+            Self::FAdd { dst, a, b }
+            | Self::FMul { dst, a, b }
+            | Self::FSub { dst, a, b }
+            | Self::FDiv { dst, a, b }
+            | Self::Add { dst, a, b }
+            | Self::Sub { dst, a, b }
+            | Self::Mul { dst, a, b }
+            | Self::UDiv { dst, a, b }
+            | Self::SDiv { dst, a, b }
+            | Self::URem { dst, a, b }
+            | Self::SRem { dst, a, b }
+            | Self::And { dst, a, b }
+            | Self::Or { dst, a, b }
+            | Self::Xor { dst, a, b }
+            | Self::Shl { dst, a, b }
+            | Self::LShr { dst, a, b }
+            | Self::AShr { dst, a, b }
+            | Self::Fcmp { dst, a, b, .. }
+            | Self::Icmp { dst, a, b, .. } => {
+                define(dst);
+                apply(a)?;
+                apply(b)?;
+            }
+            Self::FNeg { dst, a }
+            | Self::Uitofp { dst, a }
+            | Self::Sitofp { dst, a }
+            | Self::Fptoui { dst, a }
+            | Self::Bitcast { dst, a, .. } => {
+                define(dst);
+                apply(a)?;
+            }
+            Self::Select { dst, c, a, b } => {
+                define(dst);
+                apply(c)?;
+                apply(a)?;
+                apply(b)?;
+            }
+            Self::Call { dst, args, .. } => {
+                define(dst);
+                args.iter_mut().try_for_each(&mut apply)?;
+            }
+            Self::CallVoid { args, .. } => args.iter_mut().try_for_each(&mut apply)?,
+            Self::Ret { a } => apply(a)?,
+            Self::RetVoid => {}
+            Self::Phi { dst, incoming, .. } => {
+                define(dst);
+                for (value, _) in incoming {
+                    apply(value)?;
+                }
+            }
+            Self::Alloca { dst, .. } => define(dst),
+            Self::GetElementPtr {
+                dst, base, index, ..
+            } => {
+                define(dst);
+                apply(index)?;
+                if let PtrBase::Local(name) = base {
+                    pointer(name)?;
+                }
+            }
+            Self::Load { dst, ptr, .. } => {
+                define(dst);
+                pointer(ptr)?;
+            }
+            Self::Store { ptr, value, .. } => {
+                pointer(ptr)?;
+                apply(value)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Every value this instruction reads.
     pub(super) fn each_operand<'a>(&'a self, mut visit: impl FnMut(&'a Operand)) {
         match self {

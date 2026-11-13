@@ -47,6 +47,7 @@
 
 mod emit;
 mod error;
+mod inline;
 mod lower;
 pub mod meta;
 mod parse;
@@ -132,8 +133,12 @@ fn translate_entries(
     sampling: TextureSampling,
 ) -> Result<Translated, TranslateError> {
     // Every define is parsed: a kernel may call a function of its own crate,
-    // and those helpers are lowered into the same module.
-    let module = parse::parse_module(llvm_ir)?;
+    // and those helpers are lowered into the same module. A helper whose
+    // signature carries a pointer is inlined first — WGSL has no pointer
+    // parameters — so its body is lowered where the pointer's base is known.
+    let parsed = parse::parse_module(llvm_ir)?;
+    let skipped = parsed.skipped;
+    let module = inline::inline_pointer_calls(parsed.funcs)?;
     let funcs: Vec<&parse::LlvmFunc> = match only {
         Some(entry) => vec![
             module
@@ -153,6 +158,7 @@ fn translate_entries(
     let structs = merge_tables(&metas)?;
     let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
     let mut lowering = lower::Lowering::new(&refs, sampling.multisampled());
+    lowering.reserve_skipped(skipped);
     lowering.add_helpers(&module)?;
     for func in &funcs {
         let workgroup = metas
@@ -243,8 +249,11 @@ pub fn translate_with_types_and_workgroup(
     structs: &[&[u8]],
     workgroup: [u32; 3],
 ) -> Result<Translated, TranslateError> {
-    let module = parse::parse_module(llvm_ir)?;
+    let parsed = parse::parse_module(llvm_ir)?;
+    let skipped = parsed.skipped;
+    let module = inline::inline_pointer_calls(parsed.funcs)?;
     let mut lowering = lower::Lowering::new(structs, false);
+    lowering.reserve_skipped(skipped);
     lowering.add_helpers(&module)?;
     for func in module.iter().filter(|func| parse::is_entry(&func.name)) {
         lowering.push(func, workgroup)?;
