@@ -60,6 +60,24 @@ unary!(
     fract
 );
 
+/// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
+///
+/// Expanding it by hand (`clamp((x - low) / (high - low))³`) rounds differently
+/// from the instruction, so the shader calls `smoothstep` itself.
+#[inline(always)]
+#[must_use]
+pub fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::smoothstep(low, high, x)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (low, high, x);
+        crate::host_unavailable()
+    }
+}
+
 /// `pow(base, exponent)` — one WGSL `pow`.
 ///
 /// `exp2(exponent * log2(base))` would round twice and drift from the GPU

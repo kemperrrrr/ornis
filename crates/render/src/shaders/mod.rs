@@ -880,7 +880,6 @@ mod tests {
             ),
         ];
         let entries: &[String] = &[
-            bloom_generated::vs_main::wgsl_source().to_string(),
             lighting_generated::vs_main::wgsl_source().to_string(),
             gbuffer_generated::vs_main::wgsl_source().to_string(),
         ];
@@ -901,7 +900,7 @@ mod tests {
         // The remaining DSL vertex entries construct varyings positionally
         // today (the translated passes build their own interface); zero hits
         // would mean the constructors vanished and the test passes vacuously.
-        assert!(checked >= 2, "expected struct literals, found {checked}");
+        assert!(checked >= 1, "expected struct literals, found {checked}");
     }
 
     /// Every context-bundle / `#[wgsl(global)]` name an entry reads must
@@ -912,7 +911,6 @@ mod tests {
     /// undeclared — an unused declaration would pass silently).
     #[test]
     fn stage_globals_declared() {
-        let bloom = bloom_generated::wgsl_source();
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
@@ -924,11 +922,7 @@ mod tests {
         // assemblies carrying the quad constants (the translated composite pass
         // keeps its own quad in the kernel crate).
         let pairs: &[(&[&str], Vec<String>)] = &[
-            (
-                QuadConsts::GLOBALS,
-                vec![bloom.clone(), lighting_vertex.clone()],
-            ),
-            (bloom_generated::BloomContext::GLOBALS, vec![bloom]),
+            (QuadConsts::GLOBALS, vec![lighting_vertex.clone()]),
             (
                 lighting_generated::LightingContext::GLOBALS,
                 vec![lighting.clone()],
@@ -977,8 +971,8 @@ mod tests {
     fn entry_points_match_pass_abi() {
         assert_eq!(hdr_composite_generated::VS_ENTRY, "vs_main");
         assert_eq!(hdr_composite_generated::FS_ENTRY, "fs_main");
-        assert_eq!(bloom_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(bloom_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(bloom_generated::VS_ENTRY, "vs_main");
+        assert_eq!(bloom_generated::FS_ENTRY, "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
         assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
         assert_eq!(composite_generated::VS_ENTRY, "vs_main");
@@ -1083,8 +1077,7 @@ mod tests {
     #[test]
     fn stage_field_uses_resolve() {
         use super::interface::{
-            BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
-            GbufferVertexOutput,
+            GbufferFragmentInput, GbufferOutput, GbufferVertexInput, GbufferVertexOutput,
         };
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
@@ -1115,16 +1108,6 @@ mod tests {
             Entry {
                 src: material_textures::fs_main_textured::wgsl_source(),
                 input: Some(GbufferFragmentInput::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
-                src: bloom_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: bloom_generated::fs_main::wgsl_source(),
-                input: Some(BloomVertexOut::WGSL_FIELDS),
                 output: None,
             },
             Entry {
@@ -1249,7 +1232,6 @@ mod tests {
         ];
         const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
         // (entry source, its assembled shader)
-        let bloom = bloom_generated::wgsl_source();
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
@@ -1270,8 +1252,6 @@ mod tests {
                 material_textures::fs_main_textured::wgsl_source(),
                 textured.as_str(),
             ),
-            (bloom_generated::vs_main::wgsl_source(), bloom.as_str()),
-            (bloom_generated::fs_main::wgsl_source(), bloom.as_str()),
             (
                 lighting_generated::vs_main::wgsl_source(),
                 lighting_vertex.as_str(),
@@ -1349,11 +1329,6 @@ mod tests {
                 QuadConsts::GLOBALS,
                 &bloom_generated::BLOOM_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                bloom_generated::BloomContext::GLOBALS,
-                &bloom_generated::BLOOM_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 QuadConsts::GLOBALS,

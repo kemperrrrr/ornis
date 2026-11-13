@@ -1009,11 +1009,6 @@ mod tests {
             super::super::f32_lit(REC709_LUMA_R)
         );
         let passes = [
-            (
-                "bloom",
-                crate::shaders::bloom_generated::wgsl_source(),
-                true,
-            ),
             ("pbr", crate::shaders::pbr_generated::wgsl_source(), true),
             (
                 "lighting",
@@ -1047,11 +1042,19 @@ mod tests {
             "composite missing the sRGB cutoff value"
         );
         assert_valid_wgsl("composite", &composite);
+        // The translated bloom pass keeps its own luminance weights and knee.
         let bloom = crate::shaders::bloom_generated::wgsl_source();
-        assert!(bloom.contains(&format!(
-            "const BLOOM_SOFT_KNEE: f32 = {};",
-            super::super::f32_lit(crate::shaders::bloom_generated::BLOOM_SOFT_KNEE)
-        )));
+        assert!(
+            bloom.contains(&super::super::f32_lit(REC709_LUMA_R)),
+            "bloom missing the luminance weights"
+        );
+        assert!(
+            bloom.contains(&super::super::f32_lit(
+                crate::shaders::bloom_generated::BLOOM_SOFT_KNEE
+            )),
+            "bloom missing the soft knee"
+        );
+        assert_valid_wgsl("bloom", &bloom);
         let pbr = crate::shaders::pbr_generated::wgsl_source();
         assert!(pbr.contains("const POINT_OR_SPOT_KIND_EDGE: f32"));
         assert!(pbr.contains("const SHADOW_CUBE_NEAR: f32"));

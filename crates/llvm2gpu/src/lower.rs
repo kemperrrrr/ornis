@@ -5354,6 +5354,8 @@ fn ternary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
     }
     if callee.contains("clamp") {
         Some(naga::MathFunction::Clamp)
+    } else if callee.contains(ornis_gpu_abi::symbols::GPU_SMOOTHSTEP) {
+        Some(naga::MathFunction::SmoothStep)
     } else if callee.contains("mix") {
         Some(naga::MathFunction::Mix)
     } else {
