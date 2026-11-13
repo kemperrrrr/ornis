@@ -282,7 +282,13 @@ fn walk_call(v: &mut BodyVisitor<'_>, expr: &Expr) {
         }
         let name = BodyVisitor::extract_call_name(func)?;
         let recursive = s.config.allow_recursion && s.is_recursive_call(&name);
-        (!recursive && s.scope.is_own_function(&name)).then(|| CallOccurrence {
+        // Without a scope key the caller's lexical scope is unknown, so only
+        // project-wide functions count as own calls.
+        let own = match s.scope_key.as_deref() {
+            Some(key) => s.scope.is_own_function_in_scope(&name, Some(key)),
+            None => s.scope.is_own_function(&name),
+        };
+        (!recursive && own).then(|| CallOccurrence {
             name,
             line: func.span().start().line,
         })

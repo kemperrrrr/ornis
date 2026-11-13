@@ -15,6 +15,7 @@ mod complexity_and_metadata;
 mod dispatch_and_getters;
 mod is_test;
 mod metrics_exact;
+mod nested_function_scope;
 mod own_call_resolution;
 mod own_calls_a;
 mod own_calls_b;
@@ -28,6 +29,39 @@ pub(super) fn parse_and_analyze(code: &str) -> Vec<FunctionAnalysis> {
     let analyzer = Analyzer::new(&config, &scope);
     let mut results = analyzer.analyze_file(&syntax, "test.rs");
     let parsed = vec![("test.rs".to_string(), code.to_string(), syntax)];
+    let recursive_lines = crate::adapters::source::filesystem::collect_recursive_lines(&parsed);
+    crate::app::warnings::apply_recursive_annotations(&mut results, &recursive_lines);
+    crate::app::warnings::apply_leaf_reclassification(&mut results);
+    results
+}
+
+/// Helper: parse several files, build one project scope from them, analyze
+/// every file against that scope.
+///
+/// The scope spans the whole project, so a declaration in one file can leak
+/// into another — the regression this helper exists for.
+pub(super) fn parse_and_analyze_files(files: &[(&str, &str)]) -> Vec<FunctionAnalysis> {
+    let parsed: Vec<(String, String, syn::File)> = files
+        .iter()
+        .map(|(path, code)| {
+            (
+                (*path).to_string(),
+                (*code).to_string(),
+                syn::parse_file(code).expect("Failed to parse test code"),
+            )
+        })
+        .collect();
+    let scope_files: Vec<(&str, &syn::File)> = parsed
+        .iter()
+        .map(|(path, _, file)| (path.as_str(), file))
+        .collect();
+    let scope = ProjectScope::from_files(&scope_files);
+    let config = Config::default();
+    let analyzer = Analyzer::new(&config, &scope);
+    let mut results: Vec<FunctionAnalysis> = parsed
+        .iter()
+        .flat_map(|(path, _, syntax)| analyzer.analyze_file(syntax, path))
+        .collect();
     let recursive_lines = crate::adapters::source::filesystem::collect_recursive_lines(&parsed);
     crate::app::warnings::apply_recursive_annotations(&mut results, &recursive_lines);
     crate::app::warnings::apply_leaf_reclassification(&mut results);

@@ -23,6 +23,36 @@ pub enum Classification {
 
 pub use crate::domain::Severity;
 
+/// Identity of the function under analysis.
+///
+/// `scope_key` names the lexical scope of the function (`<file>::<fn>`); it
+/// decides which nested functions are visible inside it, and therefore which
+/// single-segment calls count as own calls.
+#[derive(Debug, Clone, Default)]
+pub struct FunctionContext<'a> {
+    /// Name of the analysed function.
+    pub fn_name: Option<&'a str>,
+    /// Type the analysed function belongs to (`None` for a free function).
+    pub parent_type: Option<&'a str>,
+    /// Scope key of the analysed function.
+    pub scope_key: Option<&'a str>,
+}
+
+impl<'a> FunctionContext<'a> {
+    /// Context of a function with the given name, parent type and scope.
+    pub fn new(
+        fn_name: Option<&'a str>,
+        parent_type: Option<&'a str>,
+        scope_key: Option<&'a str>,
+    ) -> Self {
+        Self {
+            fn_name,
+            parent_type,
+            scope_key,
+        }
+    }
+}
+
 /// A location where deep nesting contributes to complexity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, derive_more::Display)]
 #[display("{construct} at nesting {nesting_depth} (line {line})")]

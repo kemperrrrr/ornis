@@ -13,6 +13,7 @@ pub mod declared_type;
 pub mod file_to_module;
 pub mod file_visitor;
 pub mod fragment_match;
+pub(crate) mod impl_type_name;
 pub(crate) mod item_shape;
 pub mod macro_expansion;
 pub mod macro_params;
@@ -23,6 +24,7 @@ pub mod project_scope;
 pub(crate) mod reachability;
 pub mod test_references;
 pub(crate) mod text_names;
+pub(crate) mod trivial_body;
 pub mod use_tree;
 
 #[cfg(test)]

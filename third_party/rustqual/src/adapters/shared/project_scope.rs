@@ -3,14 +3,42 @@ use std::collections::{HashMap, HashSet};
 use syn::visit::Visit;
 use syn::{File, ImplItem, TraitItem};
 
+use super::trivial_body::{has_trivial_self_signature, is_trivial_accessor_body};
+
+/// Scope key of a function: `<file>::<name>` for a free function,
+/// `<file>::<Type>::<name>` for a method.
+///
+/// The key names the lexical scope a function lives in. Nested functions are
+/// only visible inside their enclosing function, so their declarations are
+/// filed under the enclosing scope instead of the project-wide function set.
+pub fn function_scope_key(file_path: &str, parent_type: Option<&str>, name: &str) -> String {
+    match parent_type {
+        Some(parent) => format!("{file_path}::{parent}::{name}"),
+        None => format!("{file_path}::{name}"),
+    }
+}
+
 /// Collects all declared function/method/type names across a project.
 ///
 /// Used in a two-pass analysis: first pass builds the scope, second pass
 /// uses it to distinguish own calls from external ones.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectScope {
-    /// Free functions: `classify_function`, `collect_rust_files`, …
+    /// Free functions declared at module level: `classify_function`, `collect_rust_files`, …
+    ///
+    /// Functions nested inside another function are *not* here — they are
+    /// only visible inside their enclosing function and live in
+    /// [`ProjectScope::nested_functions`].
     pub functions: HashSet<String>,
+    /// Every free function name, nested ones included: used by reachability
+    /// lookups where the declaration site does not matter.
+    pub all_functions: HashSet<String>,
+    /// Functions nested inside another function, grouped by the scope they
+    /// belong to: `"src/lib.rs::outer"` → `{"inner"}`.
+    ///
+    /// A nested function is an own call only inside the scopes that enclose
+    /// it, so a same-named closure in another module is not an own call.
+    pub nested_functions: HashMap<String, HashSet<String>>,
     /// Methods from impl/trait blocks: `analyze_file`, `load`, …
     pub methods: HashSet<String>,
     /// Struct/enum/trait names: `Analyzer`, `Config`, `Summary`, …
@@ -34,6 +62,8 @@ impl ProjectScope {
         let defined_types = collect_defined_types(files);
         let mut collector = ScopeCollector {
             functions: HashSet::new(),
+            all_functions: HashSet::new(),
+            nested_functions: HashMap::new(),
             methods: HashSet::new(),
             types: HashSet::new(),
             trivial_candidates: HashSet::new(),
@@ -42,12 +72,18 @@ impl ProjectScope {
             concrete_method_names: HashSet::new(),
             methods_by_type: HashMap::new(),
             defined_types,
+            file: String::new(),
+            fn_scopes: Vec::new(),
+            parent_type: None,
         };
-        files
-            .iter()
-            .for_each(|(_, file)| collector.visit_file(file));
+        files.iter().for_each(|(path, file)| {
+            collector.file = (*path).to_string();
+            collector.visit_file(file);
+        });
         ProjectScope {
             functions: collector.functions,
+            all_functions: collector.all_functions,
+            nested_functions: collector.nested_functions,
             methods: collector.methods,
             types: collector.types,
             trivial_methods: collector
@@ -73,6 +109,19 @@ impl ProjectScope {
     ///
     /// Operation: if-let + comparison logic, no own calls.
     pub fn is_own_function(&self, name: &str) -> bool {
+        self.is_own_function_in_scope(name, None)
+    }
+
+    /// Is `name` an own function call, resolved inside `scope_key`?
+    ///
+    /// A single-segment name is an own call when it is a module-level
+    /// function of the project, or a function nested in the scope of the
+    /// calling function. Nested functions of *other* scopes are not visible
+    /// from here — a closure that happens to share their name is not an own
+    /// call.
+    ///
+    /// Operation: if-let + comparison logic, no own calls.
+    pub fn is_own_function_in_scope(&self, name: &str, scope_key: Option<&str>) -> bool {
         if let Some((prefix, method)) = name.split_once("::") {
             if prefix == "Self" {
                 return self.methods.contains(method) && !self.trait_only_methods.contains(method);
@@ -82,6 +131,11 @@ impl ProjectScope {
                 && !self.trait_only_methods.contains(method)
         } else {
             self.functions.contains(name)
+                || scope_key.is_some_and(|key| {
+                    self.nested_functions
+                        .get(key)
+                        .is_some_and(|nested| nested.contains(name))
+                })
         }
     }
 
@@ -107,89 +161,11 @@ impl ProjectScope {
     }
 }
 
-/// Check if a method signature has only `self`/`&self`/`&mut self` with no other parameters.
-/// Operation: iteration + pattern matching logic, no own calls.
-fn has_trivial_self_signature(sig: &syn::Signature) -> bool {
-    let has_receiver = sig
-        .inputs
-        .iter()
-        .any(|arg| matches!(arg, syn::FnArg::Receiver(_)));
-    let typed_count = sig
-        .inputs
-        .iter()
-        .filter(|arg| matches!(arg, syn::FnArg::Typed(_)))
-        .count();
-    has_receiver && typed_count == 0
-}
-
-/// Check if a method call is a trivial accessor call (no-arg stdlib accessor or `.get()` with
-/// a trivial argument like a literal or self field access).
-/// Operation: if/match logic with inlined arg check, no own calls.
-fn is_trivial_method_call(mc: &syn::ExprMethodCall) -> bool {
-    let method_name = mc.method.to_string();
-    if mc.args.is_empty() {
-        return matches!(
-            method_name.as_str(),
-            "len"
-                | "is_empty"
-                | "clone"
-                | "as_ref"
-                | "as_mut"
-                | "as_str"
-                | "to_owned"
-                | "to_string"
-                | "borrow"
-                | "borrow_mut"
-        );
-    }
-    if mc.args.len() != 1 || !matches!(method_name.as_str(), "get") {
-        return false;
-    }
-    // Inline trivial-arg check: self field access, literal, or reference thereof
-    let mut current = &mc.args[0];
-    loop {
-        match current {
-            syn::Expr::Lit(_) => return true,
-            syn::Expr::Field(f) => current = &f.base,
-            syn::Expr::Path(p) if p.path.is_ident("self") => return true,
-            syn::Expr::Reference(r) => current = &r.expr,
-            _ => return false,
-        }
-    }
-}
-
-/// Check if a method body is a trivial accessor (single expression accessing self fields).
-/// Handles: `self.x`, `&self.x`, `self.x.clone()`, `self.x.len()`, `self.x as f64`,
-/// `self.items.get(self.index)`, etc.
-/// Operation: iterative loop with pattern matching, no own calls (closure hides helper).
-fn is_trivial_accessor_body(block: &syn::Block) -> bool {
-    if block.stmts.len() != 1 {
-        return false;
-    }
-    let expr = match &block.stmts[0] {
-        syn::Stmt::Expr(e, _) => e,
-        _ => return false,
-    };
-    let check_call = |mc: &syn::ExprMethodCall| is_trivial_method_call(mc);
-    let mut current = expr;
-    loop {
-        match current {
-            syn::Expr::Field(_) => return true,
-            syn::Expr::Reference(r) => current = &r.expr,
-            syn::Expr::Cast(c) => current = &c.expr,
-            syn::Expr::Unary(u) => current = &u.expr,
-            syn::Expr::Paren(p) => current = &p.expr,
-            syn::Expr::MethodCall(mc) if check_call(mc) => {
-                current = &mc.receiver;
-            }
-            _ => return false,
-        }
-    }
-}
-
 /// AST visitor that collects declarations (functions, methods, types).
 struct ScopeCollector {
     functions: HashSet<String>,
+    all_functions: HashSet<String>,
+    nested_functions: HashMap<String, HashSet<String>>,
     methods: HashSet<String>,
     types: HashSet<String>,
     trivial_candidates: HashSet<String>,
@@ -203,6 +179,12 @@ struct ScopeCollector {
     /// Type names with an item definition in the project (pre-pass).
     /// Guards `types` against blanket impls over external generics.
     defined_types: HashSet<String>,
+    /// Path of the file being visited — the first part of every scope key.
+    file: String,
+    /// Scope keys of the functions currently being visited (outermost first).
+    fn_scopes: Vec<String>,
+    /// Type of the enclosing impl/trait block — part of a method's scope key.
+    parent_type: Option<String>,
 }
 
 /// Pre-pass visitor: only type definitions, no impls or functions.
@@ -241,8 +223,39 @@ fn collect_defined_types(files: &[(&str, &File)]) -> HashSet<String> {
 
 impl<'ast> Visit<'ast> for ScopeCollector {
     fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        self.functions.insert(node.sig.ident.to_string());
+        let name = node.sig.ident.to_string();
+        self.all_functions.insert(name.clone());
+        if self.fn_scopes.is_empty() {
+            // Module-level function: visible to the whole project.
+            self.functions.insert(name.clone());
+        } else {
+            // Nested function: visible only inside the enclosing functions,
+            // so it is filed under their scopes instead of `functions`.
+            for scope in &self.fn_scopes {
+                self.nested_functions
+                    .entry(scope.clone())
+                    .or_default()
+                    .insert(name.clone());
+            }
+        }
+        let scope = self.scope_key_for(&name);
+        self.fn_scopes.push(scope);
         syn::visit::visit_item_fn(self, node);
+        self.fn_scopes.pop();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let scope = self.method_scope_key(&node.sig.ident.to_string());
+        self.fn_scopes.push(scope);
+        syn::visit::visit_impl_item_fn(self, node);
+        self.fn_scopes.pop();
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        let scope = self.method_scope_key(&node.sig.ident.to_string());
+        self.fn_scopes.push(scope);
+        syn::visit::visit_trait_item_fn(self, node);
+        self.fn_scopes.pop();
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
@@ -287,7 +300,13 @@ impl<'ast> Visit<'ast> for ScopeCollector {
                 }
             }
         }
+        // The scope key of a method spells its parent type the same way the
+        // IOSP analyzer does, so both sides address the same scope.
+        let previous_parent = self.parent_type.replace(
+            crate::adapters::shared::impl_type_name::impl_type_name(node).unwrap_or_default(),
+        );
         syn::visit::visit_item_impl(self, node);
+        self.parent_type = previous_parent;
     }
 
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
@@ -299,7 +318,9 @@ impl<'ast> Visit<'ast> for ScopeCollector {
                 self.trait_method_names.insert(name);
             }
         }
+        let previous_parent = self.parent_type.replace(node.ident.to_string());
         syn::visit::visit_item_trait(self, node);
+        self.parent_type = previous_parent;
     }
 
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
@@ -315,5 +336,25 @@ impl<'ast> Visit<'ast> for ScopeCollector {
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         // Recurse into inline modules to collect their declarations too
         syn::visit::visit_item_mod(self, node);
+    }
+}
+
+impl ScopeCollector {
+    /// Scope key of a function declared in the current scope.
+    fn scope_key_for(&self, name: &str) -> String {
+        match self.fn_scopes.last() {
+            Some(parent) => format!("{parent}::{name}"),
+            None => function_scope_key(&self.file, None, name),
+        }
+    }
+
+    /// Scope key of a method: `<file>::<Type>::<method>`.
+    fn method_scope_key(&self, name: &str) -> String {
+        match self.parent_type.as_deref() {
+            Some(parent) if !parent.is_empty() => {
+                function_scope_key(&self.file, Some(parent), name)
+            }
+            _ => function_scope_key(&self.file, None, name),
+        }
     }
 }

@@ -27,7 +27,7 @@ pub(crate) fn detect_no_sut_tests(
         for test_fn in &test_fns {
             let calls_prod = test_fn.call_targets.iter().any(|target| {
                 prod_fn_names.contains(target.as_str())
-                    || scope.functions.contains(target)
+                    || scope.all_functions.contains(target)
                     || scope.methods.contains(target)
                     || reaches_prod.contains(target)
             }) || test_fn
