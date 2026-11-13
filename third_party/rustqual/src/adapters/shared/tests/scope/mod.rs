@@ -5,6 +5,7 @@
 pub(super) use crate::adapters::shared::project_scope::*;
 
 mod collection_and_ownership;
+mod nested_functions;
 mod trivial_and_edge_cases;
 
 pub(super) fn build_scope(code: &str) -> ProjectScope {

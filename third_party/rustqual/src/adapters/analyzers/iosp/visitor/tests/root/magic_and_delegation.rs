@@ -52,7 +52,12 @@ fn test_magic_number_detection_disabled() {
     let mut config = Config::default();
     config.complexity.detect_magic_numbers = false;
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, Some("test_fn"), None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(Some("test_fn"), None, None),
+        HashMap::new(),
+    );
     let block: syn::Block = syn::parse_str("{ let x = 42; }").unwrap();
     block.stmts.iter().for_each(|stmt| visitor.visit_stmt(stmt));
     assert!(visitor.magic_numbers.is_empty());

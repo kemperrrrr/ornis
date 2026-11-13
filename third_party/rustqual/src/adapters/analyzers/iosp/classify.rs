@@ -4,7 +4,9 @@ use syn::ItemImpl;
 use crate::adapters::shared::project_scope::ProjectScope;
 use crate::config::Config;
 
-use super::types::{CallOccurrence, Classification, ComplexityMetrics, LogicOccurrence};
+use super::types::{
+    CallOccurrence, Classification, ComplexityMetrics, FunctionContext, LogicOccurrence,
+};
 use super::visitor::BodyVisitor;
 
 /// Check if a body is trivial (empty body only — no logic, no calls).
@@ -82,13 +84,12 @@ pub fn classify_function(
     body: &syn::Block,
     config: &Config,
     scope: &ProjectScope,
-    fn_name: &str,
-    type_context: (Option<&str>, &syn::Signature),
+    context: &FunctionContext,
+    sig: &syn::Signature,
 ) -> (Classification, Option<ComplexityMetrics>, Vec<String>) {
     is_trivial_body(body).unwrap_or_else(|| {
-        let param_types = crate::adapters::analyzers::iosp::extract_param_types(type_context.1);
-        let mut visitor =
-            BodyVisitor::new(config, scope, Some(fn_name), type_context.0, param_types);
+        let param_types = crate::adapters::analyzers::iosp::extract_param_types(sig);
+        let mut visitor = BodyVisitor::new(config, scope, context, param_types);
         body.stmts.iter().for_each(|stmt| visitor.visit_stmt(stmt));
         let logic = visitor.logic;
         let own_calls = visitor.own_calls;
@@ -125,22 +126,5 @@ pub fn classify_function(
 /// Extract the type name from an impl block, including generic parameters.
 /// Operation: if-let logic.
 pub(crate) fn extract_type_name(item_impl: &ItemImpl) -> Option<String> {
-    if let syn::Type::Path(tp) = &*item_impl.self_ty {
-        tp.path.segments.last().map(|s| {
-            let name = s.ident.to_string();
-            match &s.arguments {
-                syn::PathArguments::AngleBracketed(args) => {
-                    let params: Vec<String> = args
-                        .args
-                        .iter()
-                        .map(|a| quote::quote!(#a).to_string())
-                        .collect();
-                    format!("{name}<{}>", params.join(","))
-                }
-                _ => name,
-            }
-        })
-    } else {
-        None
-    }
+    crate::adapters::shared::impl_type_name::impl_type_name(item_impl)
 }

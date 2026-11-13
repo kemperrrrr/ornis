@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use crate::adapters::shared::project_scope::ProjectScope;
 use crate::config::Config;
 
-use super::types::{CallOccurrence, ComplexityHotspot, LogicOccurrence, MagicNumberOccurrence};
+use super::types::{
+    CallOccurrence, ComplexityHotspot, FunctionContext, LogicOccurrence, MagicNumberOccurrence,
+};
 
 /// Nesting depth at which a complexity hotspot is recorded.
 pub(crate) const HOTSPOT_NESTING_DEPTH: usize = 3;
@@ -26,6 +28,9 @@ pub(crate) struct BodyVisitor<'a> {
     pub max_nesting: usize,
     /// Current function name (for recursion detection)
     pub(super) current_fn_name: Option<String>,
+    /// Scope key of the analysed function (`<file>::<fn>`): functions nested
+    /// in this scope are own calls, functions nested elsewhere are not.
+    pub(super) scope_key: Option<String>,
     /// Whether we're inside an async block
     pub(super) async_block_depth: usize,
     /// Cognitive complexity score (SonarSource-style).
@@ -62,8 +67,7 @@ impl<'a> BodyVisitor<'a> {
     pub fn new(
         config: &'a Config,
         scope: &'a ProjectScope,
-        fn_name: Option<&str>,
-        parent_type: Option<&str>,
+        context: &FunctionContext,
         param_types: HashMap<String, String>,
     ) -> Self {
         Self {
@@ -75,7 +79,8 @@ impl<'a> BodyVisitor<'a> {
             in_for_iter: false,
             nesting_depth: 0,
             max_nesting: 0,
-            current_fn_name: fn_name.map(String::from),
+            current_fn_name: context.fn_name.map(String::from),
+            scope_key: context.scope_key.map(String::from),
             async_block_depth: 0,
             cognitive_complexity: 0,
             cyclomatic_complexity: 1, // base path
@@ -89,7 +94,7 @@ impl<'a> BodyVisitor<'a> {
             expect_count: 0,
             panic_count: 0,
             todo_count: 0,
-            parent_type: parent_type.map(String::from),
+            parent_type: context.parent_type.map(String::from),
             param_types,
         }
     }

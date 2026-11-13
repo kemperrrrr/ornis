@@ -6,7 +6,7 @@ pub use classify::classify_function;
 use syn::{File, ImplItem, Item, ItemFn, TraitItem};
 pub use types::*;
 
-use crate::adapters::shared::project_scope::ProjectScope;
+use crate::adapters::shared::project_scope::{function_scope_key, ProjectScope};
 use crate::config::Config;
 
 use classify::extract_type_name;
@@ -183,9 +183,10 @@ impl<'a> Analyzer<'a> {
         parent_type: Option<String>,
         sig: &syn::Signature,
     ) -> FunctionAnalysis {
-        let type_ctx = (parent_type.as_deref(), sig);
+        let scope_key = function_scope_key(file_path, parent_type.as_deref(), &name);
+        let context = FunctionContext::new(Some(&name), parent_type.as_deref(), Some(&scope_key));
         let (classification, complexity, own_calls) =
-            classify_function(body, self.config, self.scope, &name, type_ctx);
+            classify_function(body, self.config, self.scope, &context, sig);
         let line = sig.ident.span().start().line;
         build_function_analysis(FunctionParts {
             name,

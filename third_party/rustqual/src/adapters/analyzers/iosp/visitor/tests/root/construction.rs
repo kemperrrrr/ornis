@@ -4,7 +4,12 @@ use super::*;
 fn test_new_defaults() {
     let config = Config::default();
     let scope = empty_scope();
-    let visitor = BodyVisitor::new(&config, &scope, Some("test_fn"), None, HashMap::new());
+    let visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(Some("test_fn"), None, None),
+        HashMap::new(),
+    );
     assert!(visitor.logic.is_empty());
     assert!(visitor.own_calls.is_empty());
     assert_eq!(visitor.max_nesting, 0);
@@ -24,7 +29,12 @@ fn test_new_defaults() {
 fn test_new_without_fn_name() {
     let config = Config::default();
     let scope = empty_scope();
-    let visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     assert!(visitor.current_fn_name.is_none());
 }
 
@@ -32,7 +42,12 @@ fn test_new_without_fn_name() {
 fn test_in_lenient_nested_context_closure() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     assert!(!visitor.in_lenient_nested_context());
     visitor.closure_depth = 1;
     assert!(visitor.in_lenient_nested_context());
@@ -43,7 +58,12 @@ fn test_in_lenient_nested_context_strict_mode() {
     let mut config = Config::default();
     config.strict_closures = true;
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     visitor.closure_depth = 1;
     assert!(!visitor.in_lenient_nested_context());
 }
@@ -52,7 +72,12 @@ fn test_in_lenient_nested_context_strict_mode() {
 fn test_in_lenient_nested_context_async_block() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     visitor.async_block_depth = 1;
     assert!(visitor.in_lenient_nested_context());
 }
@@ -79,7 +104,12 @@ fn test_is_iterator_method_unknown() {
 fn test_is_recursive_call_match() {
     let config = Config::default();
     let scope = empty_scope();
-    let visitor = BodyVisitor::new(&config, &scope, Some("my_func"), None, HashMap::new());
+    let visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(Some("my_func"), None, None),
+        HashMap::new(),
+    );
     assert!(visitor.is_recursive_call("my_func"));
 }
 
@@ -87,7 +117,12 @@ fn test_is_recursive_call_match() {
 fn test_is_recursive_call_qualified() {
     let config = Config::default();
     let scope = empty_scope();
-    let visitor = BodyVisitor::new(&config, &scope, Some("bar"), None, HashMap::new());
+    let visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(Some("bar"), None, None),
+        HashMap::new(),
+    );
     assert!(visitor.is_recursive_call("Foo::bar"));
 }
 
@@ -95,7 +130,12 @@ fn test_is_recursive_call_qualified() {
 fn test_is_recursive_call_no_fn_name() {
     let config = Config::default();
     let scope = empty_scope();
-    let visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     assert!(!visitor.is_recursive_call("anything"));
 }
 
@@ -103,7 +143,12 @@ fn test_is_recursive_call_no_fn_name() {
 fn test_enter_exit_nesting() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     assert_eq!(visitor.nesting_depth, 0);
     assert_eq!(visitor.max_nesting, 0);
 
@@ -152,7 +197,12 @@ fn test_extract_call_name_non_path() {
 fn test_record_logic_normal() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     visitor.record_logic("if", proc_macro2::Span::call_site());
     assert_eq!(visitor.logic.len(), 1);
     assert_eq!(visitor.logic[0].kind, "if");
@@ -162,7 +212,12 @@ fn test_record_logic_normal() {
 fn test_record_logic_skipped_in_closure() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     visitor.closure_depth = 1;
     visitor.record_logic("if", proc_macro2::Span::call_site());
     assert!(visitor.logic.is_empty());
@@ -172,7 +227,12 @@ fn test_record_logic_skipped_in_closure() {
 fn test_record_logic_in_for_iter() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     visitor.in_for_iter = true;
     visitor.record_logic("comparison", proc_macro2::Span::call_site());
     assert!(visitor.logic.is_empty());
@@ -182,7 +242,12 @@ fn test_record_logic_in_for_iter() {
 fn test_record_logic_in_async_block_lenient() {
     let config = Config::default();
     let scope = empty_scope();
-    let mut visitor = BodyVisitor::new(&config, &scope, None, None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        &config,
+        &scope,
+        &FunctionContext::new(None, None, None),
+        HashMap::new(),
+    );
     visitor.async_block_depth = 1;
     visitor.record_logic("if", proc_macro2::Span::call_site());
     assert!(visitor.logic.is_empty());

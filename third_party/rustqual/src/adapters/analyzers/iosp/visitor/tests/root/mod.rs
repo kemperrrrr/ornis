@@ -4,6 +4,7 @@
 //! imports + the `empty_scope`/`visit_code`/`parse_match_arms` helpers live
 //! here and reach the sub-modules via `use super::*`.
 
+pub(super) use crate::adapters::analyzers::iosp::types::FunctionContext;
 pub(super) use crate::adapters::analyzers::iosp::visitor::*;
 pub(super) use crate::adapters::shared::project_scope::ProjectScope;
 pub(super) use crate::config::Config;
@@ -22,7 +23,12 @@ pub(super) fn visit_code(code: &str) -> BodyVisitor<'static> {
     // Leak config and scope to satisfy lifetime requirements
     let config: &'static Config = Box::leak(Box::default());
     let scope: &'static ProjectScope = Box::leak(Box::default());
-    let mut visitor = BodyVisitor::new(config, scope, Some("test_fn"), None, HashMap::new());
+    let mut visitor = BodyVisitor::new(
+        config,
+        scope,
+        &FunctionContext::new(Some("test_fn"), None, None),
+        HashMap::new(),
+    );
     let block: syn::Block = syn::parse_str(&format!("{{ {code} }}")).unwrap();
     block.stmts.iter().for_each(|stmt| visitor.visit_stmt(stmt));
     visitor

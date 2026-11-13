@@ -1,8 +1,8 @@
 use crate::adapters::analyzers::iosp::classify::*;
 use crate::adapters::analyzers::iosp::types::{
-    CallOccurrence, Classification, ComplexityMetrics, LogicOccurrence,
+    CallOccurrence, Classification, ComplexityMetrics, FunctionContext, LogicOccurrence,
 };
-use crate::adapters::shared::project_scope::ProjectScope;
+use crate::adapters::shared::project_scope::{function_scope_key, ProjectScope};
 use crate::config::Config;
 use syn::ItemImpl;
 
@@ -22,7 +22,9 @@ fn classify_named_fn(code: &str, fn_name: &str) -> Classification {
             _ => None,
         })
         .unwrap_or_else(|| panic!("fn `{fn_name}` not found"));
-    let (class, _, _) = classify_function(&f_fn.block, &config, &scope, fn_name, (None, &f_fn.sig));
+    let scope_key = function_scope_key("test.rs", None, fn_name);
+    let context = FunctionContext::new(Some(fn_name), None, Some(&scope_key));
+    let (class, _, _) = classify_function(&f_fn.block, &config, &scope, &context, &f_fn.sig);
     class
 }
 
