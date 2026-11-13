@@ -56,6 +56,8 @@ unsafe extern "C" {
     fn gpu_pow(base: f32, exponent: f32) -> f32;
     #[link_name = "gpu_atan2"]
     fn gpu_atan2(y: f32, x: f32) -> f32;
+    #[link_name = "gpu_smoothstep"]
+    fn gpu_smoothstep(low: f32, high: f32, x: f32) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -231,6 +233,12 @@ pub(crate) fn vec4_component(
     call!(uniform_field_vec4_component_f32(
         group, binding, sid, field, component
     ))
+}
+
+/// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
+#[inline(always)]
+pub(crate) fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+    call!(gpu_smoothstep(low, high, x))
 }
 
 /// `pow(base, exponent)` — one WGSL `pow`.
