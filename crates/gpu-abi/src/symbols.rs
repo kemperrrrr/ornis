@@ -281,6 +281,13 @@ pub const GPU_POW: &str = "gpu_pow";
 /// `(param f32 f32) (result f32)` — `atan2(y, x)`, one WGSL `atan2`.
 pub const GPU_ATAN2: &str = "gpu_atan2";
 
+/// `(param f32 f32 f32) (result f32)` — `smoothstep(low, high, x)`, one WGSL
+/// `smoothstep`.
+///
+/// Spelling it as `clamp((x - low) / (high - low))³` would round differently
+/// from the instruction the DSL path used, so the operation is an import.
+pub const GPU_SMOOTHSTEP: &str = "gpu_smoothstep";
+
 /// Compute entry. Optional: a module without this export still lowers.
 ///
 /// The translator binds the function's single `i32` parameter to

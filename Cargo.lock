@@ -2902,6 +2902,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ornis-gpu-bloom"
+version = "0.1.0"
+dependencies = [
+ "ornis-gpu-quad",
+ "ornis-gpu-shader",
+]
+
+[[package]]
 name = "ornis-gpu-blur"
 version = "0.1.0"
 dependencies = [
