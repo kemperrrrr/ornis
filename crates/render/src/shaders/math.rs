@@ -1014,11 +1014,6 @@ mod tests {
                 crate::shaders::bloom_generated::wgsl_source(),
                 true,
             ),
-            (
-                "hdr",
-                crate::shaders::hdr_composite_generated::wgsl_source(),
-                true,
-            ),
             ("pbr", crate::shaders::pbr_generated::wgsl_source(), true),
             (
                 "lighting",
@@ -1037,8 +1032,15 @@ mod tests {
             }
             assert_valid_wgsl(name, &src);
         }
-        // The translated composite pass keeps its own copy of the sRGB decode,
-        // so it carries the constant's *value* rather than the DSL declaration.
+        // The translated passes keep their own copy of the math their DSL kernel
+        // used to splice in, so they carry the constants' *values* rather than
+        // the declarations.
+        let hdr = crate::shaders::hdr_composite_generated::wgsl_source();
+        assert!(
+            hdr.contains(&super::super::f32_lit(ACES_FIT_A)),
+            "hdr composite missing the ACES fit"
+        );
+        assert_valid_wgsl("hdr", &hdr);
         let composite = crate::shaders::composite_generated::wgsl_source();
         assert!(
             composite.contains(&super::super::f32_lit(SRGB_LINEAR_CUTOFF)),

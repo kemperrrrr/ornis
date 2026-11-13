@@ -86,6 +86,7 @@ paths = [
     "crates/llvm2gpu/**",
     "crates/gpu-shaders/**",
     "crates/gpu-composite/**",
+    "crates/gpu-hdr-composite/**",
     "crates/gpu-cluster/**",
     "crates/gpu-gtao/**",
     "crates/gpu-histogram/**",
