@@ -862,7 +862,6 @@ mod tests {
             hdr_composite_generated::vs_main::wgsl_source().to_string(),
             bloom_generated::vs_main::wgsl_source().to_string(),
             lighting_generated::vs_main::wgsl_source().to_string(),
-            composite_generated::vs_main::wgsl_source().to_string(),
             gbuffer_generated::vs_main::wgsl_source().to_string(),
         ];
         let mut checked = 0;
@@ -898,14 +897,14 @@ mod tests {
         let bloom = bloom_generated::wgsl_source();
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let composite = composite_generated::wgsl_source();
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
         let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
         let textured = material_textures::wgsl_source_textured();
         // (bundle/entry globals, assemblies containing them). QuadConsts is
-        // shared by five vertex entries, so it pins against all five
-        // assemblies carrying the quad constants.
+        // shared by the DSL vertex entries, so it pins against all the
+        // assemblies carrying the quad constants (the translated composite pass
+        // keeps its own quad in the kernel crate).
         let pairs: &[(&[&str], Vec<String>)] = &[
             (
                 QuadConsts::GLOBALS,
@@ -914,7 +913,6 @@ mod tests {
                     hdr_fragment.clone(),
                     bloom.clone(),
                     lighting_vertex.clone(),
-                    composite.clone(),
                 ],
             ),
             (
@@ -927,10 +925,6 @@ mod tests {
                 vec![lighting.clone()],
             ),
             (lighting_generated::LightingMaps::GLOBALS, vec![lighting]),
-            (
-                composite_generated::CompositeContext::GLOBALS,
-                vec![composite],
-            ),
             (
                 gbuffer_generated::GbufferVertexContext::GLOBALS,
                 vec![gbuffer_vertex],
@@ -978,8 +972,8 @@ mod tests {
         assert_eq!(bloom_generated::fs_main::entry_point(), "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
         assert_eq!(lighting_generated::fs_main::entry_point(), "fs_main");
-        assert_eq!(composite_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(composite_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(composite_generated::VS_ENTRY, "vs_main");
+        assert_eq!(composite_generated::FS_ENTRY, "fs_main");
         assert_eq!(gbuffer_generated::vs_main::entry_point(), "vs_main");
         assert_eq!(gbuffer_generated::fs_main::entry_point(), "fs_main");
         assert_eq!(pbr_generated::fs_main::entry_point(), "fs_main");
@@ -1081,7 +1075,7 @@ mod tests {
     fn stage_field_uses_resolve() {
         use super::interface::{
             BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
-            GbufferVertexOutput, HdrFragmentOut, UiCompositeOut,
+            GbufferVertexOutput, HdrFragmentOut,
         };
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
@@ -1094,16 +1088,6 @@ mod tests {
             output: Option<&'static [&'static str]>,
         }
         let entries = [
-            Entry {
-                src: composite_generated::vs_main::wgsl_source(),
-                input: None,
-                output: Some(UiCompositeOut::WGSL_FIELDS),
-            },
-            Entry {
-                src: composite_generated::fs_main::wgsl_source(),
-                input: Some(UiCompositeOut::WGSL_FIELDS),
-                output: None,
-            },
             Entry {
                 src: gbuffer_generated::vs_main::wgsl_source(),
                 input: Some(GbufferVertexInput::WGSL_FIELDS),
@@ -1271,20 +1255,11 @@ mod tests {
         let bloom = bloom_generated::wgsl_source();
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
-        let composite = composite_generated::wgsl_source();
         let gbuffer_vertex = gbuffer_generated::wgsl_vertex_source();
         let gbuffer_fragment = gbuffer_generated::wgsl_source();
         let pbr = pbr_generated::wgsl_source();
         let textured = material_textures::wgsl_source_textured();
         let pairs: &[(&str, &str)] = &[
-            (
-                composite_generated::vs_main::wgsl_source(),
-                composite.as_str(),
-            ),
-            (
-                composite_generated::fs_main::wgsl_source(),
-                composite.as_str(),
-            ),
             (
                 gbuffer_generated::vs_main::wgsl_source(),
                 gbuffer_vertex.as_str(),
@@ -1355,11 +1330,6 @@ mod tests {
                 QuadConsts::GLOBALS,
                 &composite_generated::COMPOSITE_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                composite_generated::CompositeContext::GLOBALS,
-                &composite_generated::COMPOSITE_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 gbuffer_generated::GbufferVertexContext::GLOBALS,

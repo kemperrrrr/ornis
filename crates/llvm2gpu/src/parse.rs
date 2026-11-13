@@ -41,6 +41,11 @@ pub(super) enum Operand {
     U32(u32),
     /// Iota of one bit.
     Bool(bool),
+    /// A module symbol (`@alloc_…`, a string constant).
+    ///
+    /// It only appears as the location argument of a panic call, which the
+    /// translator drops: a shader has no diagnostic buffer to write it to.
+    Symbol(String),
 }
 
 /// Value type of an operand.
@@ -254,6 +259,8 @@ pub(super) struct Module {
     pub(super) funcs: Vec<LlvmFunc>,
     /// Functions outside the subset and why, so a call can name the fix.
     pub(super) skipped: Vec<(String, String)>,
+    /// Declared functions LLVM marks `noreturn` (the panic shims).
+    pub(super) noreturn: Vec<String>,
 }
 
 /// Parse every function the module defines, entries and helpers alike.
@@ -263,7 +270,41 @@ pub(super) struct Module {
 /// kernel calls it.
 pub(super) fn parse_module(text: &str) -> Result<Module, TranslateError> {
     let globals = parse_globals(text);
-    parse_header(text, &globals)
+    let mut module = parse_header(text, &globals)?;
+    module.noreturn = parse_noreturn(text);
+    Ok(module)
+}
+
+/// Names of declared functions LLVM marks `noreturn`.
+///
+/// Rust's panic shims are external declarations with a `ptr` argument, so the
+/// translator cannot lower them; `noreturn` is what says a call never comes
+/// back, which is enough to drop the call and let the caller's `unreachable`
+/// end the invocation.
+fn parse_noreturn(text: &str) -> Vec<String> {
+    let groups: Vec<(&str, bool)> = text
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("attributes #")?;
+            let (group, body) = rest.split_once('=')?;
+            Some((group.trim(), body.contains("noreturn")))
+        })
+        .collect();
+    text.lines()
+        .filter(|line| line.trim_start().starts_with("declare "))
+        .filter_map(|line| {
+            let name = line.find('@').map(|at| &line[at + 1..])?;
+            let name = name.split('(').next()?.trim().trim_matches('"').to_string();
+            let inline = line.rsplit(')').next().unwrap_or("").contains("noreturn");
+            let group = line
+                .split_whitespace()
+                .last()
+                .and_then(|last| last.strip_prefix('#'))
+                .and_then(|id| groups.iter().find(|(group, _)| *group == id))
+                .is_some_and(|(_, noreturn)| *noreturn);
+            (inline || group).then_some(name)
+        })
+        .collect()
 }
 
 /// Whether `name` is a shader entry point rather than a helper.
@@ -361,6 +402,7 @@ fn parse_header(text: &str, globals: &[GlobalConst]) -> Result<Module, Translate
     Ok(Module {
         funcs: out,
         skipped,
+        noreturn: Vec::new(),
     })
 }
 
@@ -1247,6 +1289,9 @@ fn parse_operand(word: &str) -> Result<Operand, TranslateError> {
     let w = word.trim().trim_matches(',');
     if let Some(name) = w.strip_prefix('%') {
         return Ok(Operand::Local(name.to_string()));
+    }
+    if let Some(name) = w.strip_prefix('@') {
+        return Ok(Operand::Symbol(name.trim_matches('"').to_string()));
     }
     if w == "true" {
         return Ok(Operand::Bool(true));

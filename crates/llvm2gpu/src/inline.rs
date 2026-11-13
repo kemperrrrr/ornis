@@ -49,7 +49,7 @@ const MAX_INLINED_CALLS: usize = 256;
 pub(super) fn inline_pointer_calls(funcs: Vec<LlvmFunc>) -> Result<Vec<LlvmFunc>, TranslateError> {
     let bodies: HashMap<String, LlvmFunc> = funcs
         .iter()
-        .filter(|func| has_pointer_signature(func))
+        .filter(|func| has_pointer_signature(func) && func.returns_a_value_or_nothing())
         .map(|func| (func.name.clone(), func.clone()))
         .collect();
     if bodies.is_empty() {
@@ -72,6 +72,16 @@ impl LlvmFunc {
         self.blocks
             .iter()
             .any(|block| matches!(block.term, Terminator::Ret(Some(_))))
+    }
+
+    /// Whether the function can return at all.
+    ///
+    /// `false` for a panic shim: every path ends in `unreachable`, so a call to
+    /// it never comes back and there is nothing to inline.
+    fn returns_a_value_or_nothing(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|block| matches!(block.term, Terminator::Ret(_)))
     }
 }
 
