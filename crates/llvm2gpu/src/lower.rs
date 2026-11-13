@@ -70,9 +70,9 @@ pub(super) struct Lowering {
 
 impl Lowering {
     /// Start a module with the given uniform-struct tables.
-    pub(super) fn new(structs: &[&[u8]], multisampled: bool) -> Self {
+    pub(super) fn new(structs: &[&[u8]], sampling: crate::TextureSampling) -> Self {
         Self {
-            builders: Builders::new(structs, multisampled),
+            builders: Builders::new(structs, sampling),
         }
     }
 
@@ -1066,12 +1066,12 @@ struct Builders {
     diverging: HashSet<String>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
-    /// Declare textures as multisampled and load sample 0 instead of mip 0.
-    multisampled: bool,
+    /// Which textures declare the multisampled type (and load sample 0).
+    sampling: crate::TextureSampling,
 }
 
 impl Builders {
-    fn new(structs: &[&[u8]], multisampled: bool) -> Self {
+    fn new(structs: &[&[u8]], sampling: crate::TextureSampling) -> Self {
         Self {
             module: naga::Module::default(),
             storage_binding: HashMap::new(),
@@ -1089,7 +1089,7 @@ impl Builders {
             skipped_helpers: HashMap::new(),
             diverging: HashSet::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
-            multisampled,
+            sampling,
         }
     }
 
@@ -1242,7 +1242,7 @@ impl Builders {
                 inner: naga::TypeInner::Image {
                     dim: naga::ImageDimension::D2,
                     arrayed: false,
-                    class: image_class(want, self.multisampled),
+                    class: image_class(want, self.sampling.multisampled_at(group, binding)),
                 },
             },
             naga::Span::default(),
@@ -4538,7 +4538,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let (group, binding, x, y) = texture_xy(args)?;
         let image = self.builders.texture(group, binding, TextureKind::Depth)?;
-        self.image_load(out, image, x, y)
+        let multisampled = self.builders.sampling.multisampled_at(group, binding);
+        self.image_load(out, image, multisampled, x, y)
     }
 
     /// `texture_sample_level_2d_f32x4(group, binding, sampler_group,
@@ -4618,7 +4619,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let image = self
             .builders
             .texture(group, binding, TextureKind::Sampled)?;
-        let texel = self.image_load(out, image, x, y)?;
+        let multisampled = self.builders.sampling.multisampled_at(group, binding);
+        let texel = self.image_load(out, image, multisampled, x, y)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -4633,11 +4635,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         &mut self,
         out: &mut naga::Block,
         image: naga::Handle<naga::GlobalVariable>,
+        multisampled: bool,
         x: &Operand,
         y: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let coordinate = self.texel_coord(out, x, y)?;
-        let (sample, level) = if self.builders.multisampled {
+        let (sample, level) = if multisampled {
             // A multisampled image has samples, not mip levels. Sample 0 is
             // what the renderer binds for the 4x AO pass.
             let sample = self.expr(out, naga::Expression::Literal(naga::Literal::U32(0)));
@@ -5640,7 +5643,7 @@ start:
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
-        let mut lowering = Lowering::new(structs, false);
+        let mut lowering = Lowering::new(structs, crate::TextureSampling::SingleSample);
         lowering
             .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
             .expect("lower");

@@ -14,6 +14,8 @@ members = [
     "crates/gpu-shaders",
     "crates/gpu-composite",
     "crates/gpu-hdr-composite",
+    "crates/gpu-fog",
+    "crates/gpu-quad",
     "crates/gpu-cluster",
     "crates/gpu-gtao",
     "crates/gpu-ssao",

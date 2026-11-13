@@ -417,13 +417,13 @@ impl Renderer3D {
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &vertex_module,
-                entry_point: Some(shaders::fog_generated::vs_main::entry_point()),
+                entry_point: Some(shaders::fog_generated::VS_ENTRY),
                 buffers: &[],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &fog_module,
-                entry_point: Some(shaders::fog_generated::fs_main::entry_point()),
+                entry_point: Some(shaders::fog_generated::FS_ENTRY),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
