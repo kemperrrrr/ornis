@@ -2712,3 +2712,267 @@ merge:
 "#;
     assert!(translate(ir).is_err());
 }
+
+/// Helpers that take pointers, which WGSL cannot put in a function signature.
+const POINTER_HELPER_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+#[inline(never)]
+fn add(a: &f32, b: &f32) -> f32 {
+    *a + *b
+}
+
+#[inline(never)]
+fn scale(value: &mut f32, factor: f32) {
+    *value = *value * factor;
+}
+
+#[inline(never)]
+fn clamped(value: f32) -> f32 {
+    if value > 8.0 {
+        return 8.0;
+    }
+    if value < 0.0 {
+        return 0.0;
+    }
+    value
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut left = 1.0f32;
+    let right = 2.0f32;
+    scale(&mut left, id as f32);
+    clamped(add(&left, &right))
+}
+"#;
+
+#[test]
+fn pointer_helpers_are_inlined() {
+    let Some(translated) = translate_source(POINTER_HELPER_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // rustc may already inline the helpers at this level; either way the
+    // pointer never crosses a function boundary, and the early returns of
+    // `clamped` collapse into selects.
+    assert!(wgsl.contains("fn cs_main"), "{wgsl}");
+    assert!(wgsl.contains("select("), "{wgsl}");
+}
+
+#[test]
+fn pointer_helper_with_a_gep_is_inlined_at_the_call_site() {
+    // Hand-written IR keeps the pointer in the signature, which is the shape
+    // WGSL cannot express: the body has to run in the caller.
+    let ir = r#"
+define internal float @first(ptr %p, i32 %offset) {
+start:
+  %at = getelementptr inbounds nuw float, ptr %p, i32 %offset
+  %value = load float, ptr %at, align 4
+  ret float %value
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %one = getelementptr inbounds nuw i8, ptr %buf, i32 4
+  store float 2.000000e+00, ptr %one, align 4
+  %two = getelementptr inbounds nuw i8, ptr %buf, i32 8
+  store float 3.000000e+00, ptr %two, align 4
+  %three = getelementptr inbounds nuw i8, ptr %buf, i32 12
+  store float 4.000000e+00, ptr %three, align 4
+  %slot = and i32 %id, 3
+  %value = call float @first(ptr %buf, i32 %slot)
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("pointer helper");
+    let wgsl = &translated.wgsl;
+    // The helper is gone and its load indexes the caller's array.
+    assert!(!wgsl.contains("fn first"), "{wgsl}");
+    assert!(wgsl.contains("var buf: array<u32, 4>;"), "{wgsl}");
+    assert!(wgsl.contains("buf["), "{wgsl}");
+}
+
+#[test]
+fn pointer_helpers_match_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(POINTER_HELPER_RS) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let left = 1.0f32 * id as f32;
+        let expected = (left + 2.0).clamp(0.0, 8.0);
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+/// A slice parameter: rustc passes the data pointer, the length is constant.
+const SLICE_HELPER_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" { fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32; }
+
+#[inline(never)]
+fn sum(values: &[f32]) -> f32 {
+    let mut total = 0.0f32;
+    for value in values {
+        total += *value;
+    }
+    total
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut values = [0.0f32; 4];
+    let mut i = 0u32;
+    while i < 4 {
+        values[i as usize] = unsafe { storage_read_f32(0, 1, i) };
+        i += 1;
+    }
+    let _ = id;
+    sum(&values)
+}
+"#;
+
+#[test]
+fn slice_helper_inlines_over_the_callers_array() {
+    let Some(translated) = translate_source(SLICE_HELPER_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var values: array<u32, 4>;"), "{wgsl}");
+    assert!(!wgsl.contains("fn _R"), "{wgsl}");
+}
+
+#[test]
+fn slice_helper_matches_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(SLICE_HELPER_RS) else {
+        return;
+    };
+    // The harness does not fill binding 1, so the slice sums zeros.
+    for (id, actual) in outputs.iter().enumerate() {
+        assert!(actual.abs() < 1e-6, "id {id}: gpu {actual}");
+    }
+}
+
+#[test]
+fn recursive_pointer_helper_reports_recursion() {
+    let ir = r#"
+define internal float @walk(ptr %p, i32 %n) {
+start:
+  %done = icmp ult i32 %n, 1
+  br i1 %done, label %one, label %more
+one:
+  %head = load float, ptr %p, align 4
+  ret float %head
+more:
+  %next = getelementptr inbounds nuw float, ptr %p, i32 1
+  %step = sub i32 %n, 1
+  %rest = call float @walk(ptr %next, i32 %step)
+  ret float %rest
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  %value = call float @walk(ptr %buf, i32 %id)
+  ret float %value
+}
+"#;
+    let error = translate(ir).expect_err("recursion is not representable");
+    let message = format!("{error}");
+    assert!(message.contains("recurse"), "{message}");
+}
+
+#[test]
+fn pointer_select_picks_an_offset_in_one_allocation() {
+    // `select i1, ptr, ptr` over the same `alloca`: the words are selected and
+    // the base stays, which is the shape a slice walk produces.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [8 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %one = getelementptr inbounds nuw i8, ptr %buf, i32 4
+  store float 2.000000e+00, ptr %one, align 4
+  %pick = icmp eq i32 %id, 0
+  %chosen = select i1 %pick, ptr %buf, ptr %one
+  %value = load float, ptr %chosen, align 4
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("pointer select");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("select("), "{wgsl}");
+    assert!(wgsl.contains("var buf: array<u32, 8>;"), "{wgsl}");
+}
+
+#[test]
+fn poison_becomes_a_zero_of_the_expected_type() {
+    // LLVM marks values it proved unobservable as `poison`; a phi still has to
+    // carry something, and any value is as good as another.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %skip = icmp eq i32 %id, 0
+  br i1 %skip, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  %value = phi float [ poison, %left ], [ 2.000000e+00, %right ]
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("poison phi");
+    assert!(translated.wgsl.contains("0f"), "{}", translated.wgsl);
+}
+
+#[test]
+fn a_helper_outside_the_subset_names_the_fix() {
+    // A helper the translator cannot lower is only an error where it is called,
+    // and the message says what to do about it.
+    let ir = r#"
+define internal float @opaque(i64 %wide) {
+start:
+  ret float 1.000000e+00
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %value = call float @opaque(i64 7)
+  ret float %value
+}
+"#;
+    let error = translate(ir).expect_err("helper outside the subset");
+    let message = format!("{error}");
+    assert!(message.contains("cannot be lowered"), "{message}");
+    assert!(message.contains("#[inline(always)]"), "{message}");
+}
+
+#[test]
+fn pointer_casts_name_the_fix() {
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  %addr = ptrtoint ptr %buf to i32
+  %back = inttoptr i32 %addr to ptr
+  %value = load float, ptr %back, align 4
+  ret float %value
+}
+"#;
+    let error = translate(ir).expect_err("pointer cast");
+    let message = format!("{error}");
+    assert!(message.contains("ptrtoint"), "{message}");
+    assert!(message.contains("index the buffer"), "{message}");
+}
