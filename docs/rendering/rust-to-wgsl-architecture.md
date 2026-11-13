@@ -599,6 +599,21 @@ fragment (пасс собирает их в один модуль), а `ornis-ll
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
+**Перевод пассов (этап 3, начат).** Composite-пасс переехал целиком:
+`crates/gpu-composite` — обычный `no_std`-крейт на SDK (`#[gpu_entry(vertex)]`
+рисует квад из двух констант модуля по `vertex_index`,
+`#[gpu_entry(fragment)]` семплирует два слоя, декодирует UI из sRGB и
+смешивает по альфе); `xtask build-shaders --package ornis-gpu-composite
+--entry all` пишет checked-in `crates/render/src/shaders/composite_generated.wgsl`,
+а `crates/render/src/shaders/composite_generated.rs` держит его через
+`include_str!` и таблицу ресурсов. Паритет — `crates/render/tests/
+composite_parity.rs`: переведённый шейдер и DSL-версия (заморожена в
+`tests/data/composite_dsl.wgsl`) рисуются в один таргет с одними текстурами,
+пиксели совпадают (допуск ±1 на округление). Дрейф артефакта ловит
+`quality --ci` (`build-shaders --check`). Так же переводятся остальные пассы:
+крейт-кернел → артефакт → `include_str!` + таблица ресурсов → пиксельный
+гейт против DSL-версии.
+
 **Ограничения control flow (на 2026-11-12, после #267).** Всё, что вне
 подмножества, отвергается при трансляции (`TranslateError::Unsupported` /
 `Parse`), а не транслируется молча неверно.

@@ -60,6 +60,39 @@ unary!(
     fract
 );
 
+/// `pow(base, exponent)` — one WGSL `pow`.
+///
+/// `exp2(exponent * log2(base))` would round twice and drift from the GPU
+/// instruction, so the shader calls `pow` itself.
+#[inline(always)]
+#[must_use]
+pub fn pow(base: f32, exponent: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::pow(base, exponent)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (base, exponent);
+        crate::host_unavailable()
+    }
+}
+
+/// `atan2(y, x)` — one WGSL `atan2`.
+#[inline(always)]
+#[must_use]
+pub fn atan2(y: f32, x: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::atan2(y, x)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (y, x);
+        crate::host_unavailable()
+    }
+}
+
 /// Clamp `value` into `low..=high`.
 #[inline(always)]
 #[must_use]

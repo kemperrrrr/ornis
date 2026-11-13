@@ -162,7 +162,7 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// nine artifacts, so that id counts nine times: the denominator
+    /// ten artifacts, so that id counts ten times: the denominator
     /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
@@ -172,8 +172,8 @@ impl QualityFlags {
             .count();
         // `build-shaders` runs the base id plus one extra per remaining
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
-        // ssao 4x, and the AO blur.
-        let shader_checks = 8 * usize::from(self.ci && self.enabled("build-shaders"));
+        // ssao 4x, the AO blur, and the translated composite pass.
+        let shader_checks = 9 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2104,6 +2104,13 @@ fn ci_stages(stages: &mut StageList<'_>) {
     );
     check_shader_artifact(
         stages,
+        Some("ornis-gpu-composite"),
+        Some("all"),
+        "crates/render/src/shaders/composite_generated.wgsl",
+        "cargo xtask build-shaders --check (composite WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
         Some("ornis-gpu-cluster"),
         None,
         "crates/render/src/renderer/clusters/cluster_generated.wgsl",
@@ -3706,7 +3713,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 9);
+        assert_eq!(only_shaders.total_stages(), 10);
     }
 
     #[test]
