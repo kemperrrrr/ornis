@@ -1008,10 +1008,6 @@ mod tests {
             "const REC709_LUMA_R: f32 = {};",
             super::super::f32_lit(REC709_LUMA_R)
         );
-        let srgb_decl = format!(
-            "const SRGB_LINEAR_CUTOFF: f32 = {};",
-            super::super::f32_lit(SRGB_LINEAR_CUTOFF)
-        );
         let passes = [
             (
                 "bloom",
@@ -1034,20 +1030,21 @@ mod tests {
                 crate::shaders::material_textures::wgsl_source_textured(),
                 true,
             ),
-            (
-                "composite",
-                crate::shaders::composite_generated::wgsl_source(),
-                false,
-            ),
         ];
         for (name, src, wants_luma) in passes {
             if wants_luma {
                 assert!(src.contains(&decl), "{name} missing {decl}");
-            } else {
-                assert!(src.contains(&srgb_decl), "{name} missing {srgb_decl}");
             }
             assert_valid_wgsl(name, &src);
         }
+        // The translated composite pass keeps its own copy of the sRGB decode,
+        // so it carries the constant's *value* rather than the DSL declaration.
+        let composite = crate::shaders::composite_generated::wgsl_source();
+        assert!(
+            composite.contains(&super::super::f32_lit(SRGB_LINEAR_CUTOFF)),
+            "composite missing the sRGB cutoff value"
+        );
+        assert_valid_wgsl("composite", &composite);
         let bloom = crate::shaders::bloom_generated::wgsl_source();
         assert!(bloom.contains(&format!(
             "const BLOOM_SOFT_KNEE: f32 = {};",

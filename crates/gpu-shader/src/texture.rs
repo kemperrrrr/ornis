@@ -30,10 +30,32 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         }
     }
 
-    /// Red lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
+    /// Lane `LANE` of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
     ///
     /// Level 0 is explicit: a fragment has no implicit derivatives here, and
-    /// the blur samples a half-res target whose mips do not exist.
+    /// the blur samples a half-res target whose mips do not exist. The sampler
+    /// carries its own binding, so only the lane is a const generic.
+    #[inline(always)]
+    pub fn sample_lane<const SG: u32, const SB: u32, const LANE: u32>(
+        &self,
+        sampler: Sampler<SG, SB>,
+        x: f32,
+        y: f32,
+    ) -> f32 {
+        const { assert!(LANE < 4, "a texel is a vec4") };
+        let _ = (self, sampler);
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::abi::texture_sample_level_f32x4(G, B, SG, SB, x, y, LANE)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = (x, y);
+            crate::host_unavailable()
+        }
+    }
+
+    /// Red lane of `textureSampleLevel(tex, sampler, vec2(x, y), 0.0)`.
     #[inline(always)]
     pub fn sample_r<const SG: u32, const SB: u32>(
         &self,
@@ -41,16 +63,7 @@ impl<const G: u32, const B: u32> Texture2d<G, B> {
         x: f32,
         y: f32,
     ) -> f32 {
-        let _ = (self, sampler);
-        #[cfg(target_arch = "wasm32")]
-        {
-            crate::abi::texture_sample_level_f32x4(G, B, SG, SB, x, y, 0)
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = (x, y);
-            crate::host_unavailable()
-        }
+        self.sample_lane::<SG, SB, 0>(sampler, x, y)
     }
 
     /// Texture width in texels.

@@ -272,6 +272,15 @@ pub const FRAGMENT_POSITION_LANE: &str = "fragment_position_lane";
 /// that one target returns a bare `vec4<f32>`.
 pub const FRAGMENT_STORE_F32X4: &str = "fragment_store_f32x4";
 
+/// `(param f32 f32) (result f32)` — `pow(base, exponent)`, one WGSL `pow`.
+///
+/// A software `exp2(y * log2(x))` would round twice and drift from the GPU
+/// instruction the DSL path used, so the operation is an import of its own.
+pub const GPU_POW: &str = "gpu_pow";
+
+/// `(param f32 f32) (result f32)` — `atan2(y, x)`, one WGSL `atan2`.
+pub const GPU_ATAN2: &str = "gpu_atan2";
+
 /// Compute entry. Optional: a module without this export still lowers.
 ///
 /// The translator binds the function's single `i32` parameter to

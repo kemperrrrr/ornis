@@ -138,6 +138,7 @@ fn translate_entries(
     // parameters — so its body is lowered where the pointer's base is known.
     let parsed = parse::parse_module(llvm_ir)?;
     let skipped = parsed.skipped;
+    let noreturn = parsed.noreturn;
     let module = inline::inline_pointer_calls(parsed.funcs)?;
     let funcs: Vec<&parse::LlvmFunc> = match only {
         Some(entry) => vec![
@@ -159,6 +160,8 @@ fn translate_entries(
     let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
     let mut lowering = lower::Lowering::new(&refs, sampling.multisampled());
     lowering.reserve_skipped(skipped);
+    lowering.reserve_noreturn(noreturn);
+    lowering.reserve_diverging(&module);
     lowering.add_helpers(&module)?;
     for func in &funcs {
         let workgroup = metas
@@ -251,9 +254,12 @@ pub fn translate_with_types_and_workgroup(
 ) -> Result<Translated, TranslateError> {
     let parsed = parse::parse_module(llvm_ir)?;
     let skipped = parsed.skipped;
+    let noreturn = parsed.noreturn;
     let module = inline::inline_pointer_calls(parsed.funcs)?;
     let mut lowering = lower::Lowering::new(structs, false);
     lowering.reserve_skipped(skipped);
+    lowering.reserve_noreturn(noreturn);
+    lowering.reserve_diverging(&module);
     lowering.add_helpers(&module)?;
     for func in module.iter().filter(|func| parse::is_entry(&func.name)) {
         lowering.push(func, workgroup)?;

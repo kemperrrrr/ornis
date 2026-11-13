@@ -52,6 +52,10 @@ unsafe extern "C" {
     ) -> f32;
     #[link_name = "gpu_exp"]
     fn gpu_exp(value: f32) -> f32;
+    #[link_name = "gpu_pow"]
+    fn gpu_pow(base: f32, exponent: f32) -> f32;
+    #[link_name = "gpu_atan2"]
+    fn gpu_atan2(y: f32, x: f32) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -227,6 +231,18 @@ pub(crate) fn vec4_component(
     call!(uniform_field_vec4_component_f32(
         group, binding, sid, field, component
     ))
+}
+
+/// `pow(base, exponent)` — one WGSL `pow`.
+#[inline(always)]
+pub(crate) fn pow(base: f32, exponent: f32) -> f32 {
+    call!(gpu_pow(base, exponent))
+}
+
+/// `atan2(y, x)` — one WGSL `atan2`.
+#[inline(always)]
+pub(crate) fn atan2(y: f32, x: f32) -> f32 {
+    call!(gpu_atan2(y, x))
 }
 
 /// `exp(value)` — one WGSL `exp`.

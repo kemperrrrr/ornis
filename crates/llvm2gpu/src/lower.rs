@@ -78,6 +78,26 @@ impl Lowering {
 
     /// Remember the functions the parser skipped, so a call that reaches one
     /// reports what is wrong with it instead of a generic rejection.
+    /// Remember the functions that never return, so their call sites can be
+    /// dropped instead of translated.
+    pub(super) fn reserve_diverging(&mut self, funcs: &[LlvmFunc]) {
+        for func in funcs {
+            if !func
+                .blocks
+                .iter()
+                .any(|block| matches!(block.term, Terminator::Ret(_)))
+            {
+                self.builders.diverging.insert(func.name.clone());
+            }
+        }
+    }
+
+    /// Remember the declared functions LLVM marks `noreturn`: a call to one
+    /// never returns, so its call site is dropped.
+    pub(super) fn reserve_noreturn(&mut self, names: Vec<String>) {
+        self.builders.diverging.extend(names);
+    }
+
     pub(super) fn reserve_skipped(&mut self, skipped: Vec<(String, String)>) {
         for (name, reason) in skipped {
             self.builders.skipped_helpers.insert(name, reason);
@@ -1038,6 +1058,12 @@ struct Builders {
     helpers: HashMap<String, Helper>,
     /// Helpers outside the subset, with the reason a call cannot lower them.
     skipped_helpers: HashMap<String, String>,
+    /// Functions whose every path ends in `unreachable` (the panic shims).
+    ///
+    /// A call to one never returns, so the translator drops it and lets the
+    /// caller's own `unreachable` end the invocation: a shader has no place to
+    /// report a panic to.
+    diverging: HashSet<String>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
     /// Declare textures as multisampled and load sample 0 instead of mip 0.
@@ -1061,6 +1087,7 @@ impl Builders {
             module_constants: HashMap::new(),
             helpers: HashMap::new(),
             skipped_helpers: HashMap::new(),
+            diverging: HashSet::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
             multisampled,
         }
@@ -2539,7 +2566,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let byte = match fill {
             Operand::U32(value) => *value & BYTE_MASK,
             Operand::Bool(value) => u32::from(*value),
-            Operand::F32(_) | Operand::Local(_) => return Err(TranslateError::Unsupported),
+            Operand::F32(_) | Operand::Local(_) | Operand::Symbol(_) => {
+                return Err(TranslateError::Unsupported);
+            }
         };
         let word = self.u32_literal(out, repeated_byte(byte));
         for offset in 0..word_count(bytes)? {
@@ -2725,7 +2754,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     fn is_uniform(&self, op: &Operand) -> bool {
         match op {
             Operand::Local(name) => self.uniform.contains(name),
-            Operand::Bool(_) | Operand::F32(_) | Operand::U32(_) => true,
+            Operand::Bool(_) | Operand::F32(_) | Operand::U32(_) | Operand::Symbol(_) => true,
         }
     }
 
@@ -3813,6 +3842,11 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<bool, TranslateError> {
+        if self.builders.diverging.contains(callee) {
+            // The panic path: the caller's own `unreachable` ends the
+            // invocation, so the call itself has nothing to translate.
+            return Ok(true);
+        }
         if let Some(reason) = self.builders.skipped_helpers.get(callee) {
             return Err(TranslateError::UnsupportedType(format!(
                 "`{callee}` cannot be lowered ({reason}); mark it `#[inline(always)]` so its body \
@@ -4182,6 +4216,20 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                     fun: naga::MathFunction::Length,
                     arg: va,
                     arg1: None,
+                    arg2: None,
+                    arg3: None,
+                },
+            ));
+        }
+        if let Some(fun) = binary_math(callee, args.len()) {
+            let arg = self.operand(out, &args[0])?;
+            let arg1 = self.operand(out, &args[1])?;
+            return Ok(self.expr(
+                out,
+                naga::Expression::Math {
+                    fun,
+                    arg,
+                    arg1: Some(arg1),
                     arg2: None,
                     arg3: None,
                 },
@@ -5209,6 +5257,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             Operand::Bool(value) => {
                 self.expr(out, naga::Expression::Literal(naga::Literal::Bool(*value)))
             }
+            // A module symbol is a panic location; the call carrying it is
+            // dropped, and a zero keeps the value well-typed if one surfaces.
+            Operand::Symbol(_) => self.u32_literal(out, 0),
         };
         Ok(v)
     }
@@ -5277,6 +5328,20 @@ fn image_class(kind: TextureKind, multisampled: bool) -> naga::ImageClass {
             kind: naga::ScalarKind::Float,
             multi: multisampled,
         },
+    }
+}
+
+/// Two-operand math builtins the shader SDK imports.
+fn binary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
+    if argc != VEC2_LANES as usize {
+        return None;
+    }
+    if callee.contains(ornis_gpu_abi::symbols::GPU_POW) {
+        Some(naga::MathFunction::Pow)
+    } else if callee.contains(ornis_gpu_abi::symbols::GPU_ATAN2) {
+        Some(naga::MathFunction::Atan2)
+    } else {
+        None
     }
 }
 
@@ -5372,7 +5437,9 @@ fn const_u32(op: &Operand) -> Result<u32, TranslateError> {
         Operand::U32(value) => Ok(*value),
         // A local is not materialised; group/binding must be immediates
         // (same rule as `wasm2gpu`).
-        Operand::Local(_) | Operand::F32(_) | Operand::Bool(_) => Err(TranslateError::Unsupported),
+        Operand::Local(_) | Operand::F32(_) | Operand::Bool(_) | Operand::Symbol(_) => {
+            Err(TranslateError::Unsupported)
+        }
     }
 }
 
@@ -5534,6 +5601,13 @@ fn operand(
         }
         Operand::Bool(value) => {
             let handle = append(func, naga::Expression::Literal(naga::Literal::Bool(*value)));
+            push_emit(func, out, handle);
+            Ok(handle)
+        }
+        // A module symbol is a panic location, and the call that carried it is
+        // dropped; a zero keeps the value well-typed if one ever surfaces.
+        Operand::Symbol(_) => {
+            let handle = append(func, naga::Expression::Literal(naga::Literal::U32(0)));
             push_emit(func, out, handle);
             Ok(handle)
         }
