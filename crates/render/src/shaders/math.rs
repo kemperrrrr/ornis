@@ -1055,14 +1055,13 @@ mod tests {
         let pbr = crate::shaders::pbr_generated::wgsl_source();
         assert!(pbr.contains("const POINT_OR_SPOT_KIND_EDGE: f32"));
         assert!(pbr.contains("const SHADOW_CUBE_NEAR: f32"));
-        // Fog replaces the composite on the swapchain and runs the same
-        // ACES kernel, so it needs the coefficient block too.
+        // Fog replaces the composite on the swapchain and runs the same ACES
+        // kernel: the translated pass carries the coefficients as literals.
         let fog = crate::shaders::fog_generated::wgsl_source();
-        let aces_decl = format!(
-            "const ACES_FIT_A: f32 = {};",
-            super::super::f32_lit(ACES_FIT_A)
+        assert!(
+            fog.contains(&super::super::f32_lit(ACES_FIT_A)),
+            "fog missing the ACES fit"
         );
-        assert!(fog.contains(&aces_decl), "fog missing {aces_decl}");
         assert_valid_wgsl("fog", &fog);
     }
 }

@@ -599,7 +599,7 @@ fragment (пасс собирает их в один модуль), а `ornis-ll
    `adapt_generated.wgsl`. Оба кернела и марш GTAO идут через SDK, без
    собственного `extern "C"`.
 
-**Перевод пассов (этап 3).** Composite и HDR composite переехали целиком:
+**Перевод пассов (этап 3).** Composite, HDR composite и fog переехали целиком:
 `crates/gpu-composite` — обычный `no_std`-крейт на SDK (`#[gpu_entry(vertex)]`
 рисует квад из двух констант модуля по `vertex_index`,
 `#[gpu_entry(fragment)]` семплирует два слоя, декодирует UI из sRGB и
@@ -613,9 +613,16 @@ composite_parity.rs`: переведённый шейдер и DSL-версия 
 `quality --ci` (`build-shaders --check`). HDR composite (`crates/gpu-hdr-composite`) добавляет к тому же шаблону
 uniform-поля (`BloomParams`: threshold/intensity/mode/pad, `ExposureParams`),
 `switch` из `if/else if` по mode и ACES в ядре; паритет гоняется по всем трём
-mode (`crates/render/tests/hdr_composite_parity.rs`). Общая обвязка паритетных
-гейтов (генератор изображений, загрузка текстуры, подсчёт расхождений) —
-`crates/render/tests/common/parity.rs`. Так же переводятся
+mode (`crates/render/tests/hdr_composite_parity.rs`). Fog (`crates/gpu-fog`) — первый пасс с depth-текстурой и матрицей из
+uniform-полей: `inv_view_proj` читается по колонкам (`vec4_lane` по слоту 4..8),
+восстановление мира — `m · clip` с делением на `w`, дальше `length`/`exp` и та же
+ACES-кривая. 4x-вариант отличается **одной** декларацией (глубина —
+`texture_depth_multisampled_2d`), поэтому у транспорта появился
+`TextureSampling::Listed` и флаг `--multisampled-textures 0:2`; два артефакта
+(`fog_generated.wgsl`, `fog_msaa_generated.wgsl`) проверяются оба.
+Общая обвязка паритетных
+гейтов (генератор изображений, загрузка текстуры, рендер depth-рампы, подсчёт
+расхождений) — `crates/render/tests/common/parity.rs`. Так же переводятся
 остальные пассы: крейт-кернел → артефакт → `include_str!` + таблица ресурсов →
 пиксельный гейт против DSL-версии.
 

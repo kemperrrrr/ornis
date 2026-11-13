@@ -8,6 +8,7 @@ repository.workspace = true
 description = "HDR composite pass (deferred/forward mix + bloom + ACES) on the llvm2gpu SDK"
 
 [dependencies]
+ornis-gpu-quad = { path = "../gpu-quad", version = "0.1.0" }
 ornis-gpu-shader = { path = "../gpu-shader", version = "0.1.0" }
 
 [lib]

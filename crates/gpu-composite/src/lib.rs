@@ -13,6 +13,7 @@
 #![no_std]
 #![warn(missing_docs)]
 
+use ornis_gpu_quad::ui_quad;
 use ornis_gpu_shader::Sampler;
 use ornis_gpu_shader::Texture2d;
 use ornis_gpu_shader::fragment_input_lane;
@@ -20,9 +21,6 @@ use ornis_gpu_shader::fragment_store_at;
 use ornis_gpu_shader::gpu_entry;
 use ornis_gpu_shader::mix;
 use ornis_gpu_shader::pow;
-use ornis_gpu_shader::vertex_index;
-use ornis_gpu_shader::vertex_position;
-use ornis_gpu_shader::vertex_store_2;
 
 /// Group-0 binding of the scene colour sampler.
 ///
@@ -36,9 +34,6 @@ const UI_SAMPLER: u32 = 3;
 /// Lane of the UI alpha, the mix weight.
 const ALPHA_LANE: u32 = 3;
 
-/// Vertex index of the quad's first corner, and the corner count.
-const QUAD_CORNERS: usize = 4;
-
 /// sRGB decode threshold (IEC 61966-2-1 OETF inverse).
 const SRGB_LINEAR_CUTOFF: f32 = 0.04045;
 /// Slope of the linear segment below the threshold.
@@ -49,20 +44,6 @@ const SRGB_OFFSET: f32 = 0.055;
 const SRGB_SCALE: f32 = 1.055;
 /// Exponent of the power segment.
 const SRGB_GAMMA: f32 = 2.4;
-
-/// Quad corner of the composite pass, by vertex index.
-///
-/// The winding differs from the shared standard quad: the UI layer is drawn
-/// with this corner order, so the constants belong to the pass.
-static QUAD: [[f32; 4]; 4] = [
-    [-1.0, -1.0, 0.0, 1.0],
-    [-1.0, 1.0, 0.0, 1.0],
-    [1.0, -1.0, 0.0, 1.0],
-    [1.0, 1.0, 0.0, 1.0],
-];
-
-/// UV of the same corner, in the same order.
-static UVS: [[f32; 2]; 4] = [[0.0, 1.0], [0.0, 0.0], [1.0, 1.0], [1.0, 0.0]];
 
 /// One lane of the sRGB → linear decode.
 #[inline(always)]
@@ -79,14 +60,7 @@ fn srgb_lane(value: f32) -> f32 {
 // attribute, not the macro's `#[unsafe(export_name = "vs_main")]`.
 #[gpu_entry(vertex)]
 pub fn vs_main() {
-    let index = vertex_index() as usize;
-    if index >= QUAD_CORNERS {
-        return;
-    }
-    let corner = QUAD[index];
-    vertex_position(corner[0], corner[1], corner[2], corner[3]);
-    let uv = UVS[index];
-    vertex_store_2::<0>(uv[0], uv[1]);
+    ui_quad();
 }
 
 /// Composite fragment stage: UI over the PBR layer, sRGB-decoded.

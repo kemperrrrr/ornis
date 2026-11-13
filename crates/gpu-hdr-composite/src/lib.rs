@@ -13,6 +13,7 @@
 #![no_std]
 #![warn(missing_docs)]
 
+use ornis_gpu_quad::standard_quad;
 use ornis_gpu_shader::GpuStruct;
 use ornis_gpu_shader::Sampler;
 use ornis_gpu_shader::Texture2d;
@@ -20,9 +21,6 @@ use ornis_gpu_shader::Uniform;
 use ornis_gpu_shader::fragment_input_lane;
 use ornis_gpu_shader::fragment_store_at;
 use ornis_gpu_shader::gpu_entry;
-use ornis_gpu_shader::vertex_index;
-use ornis_gpu_shader::vertex_position;
-use ornis_gpu_shader::vertex_store_2;
 
 /// Composite sampler binding.
 const COMPOSITE_SAMPLER: u32 = 2;
@@ -53,20 +51,6 @@ const ACES_FIT_E: f32 = 0.14;
 const BLOOM_MODE_FORWARD: u32 = 1;
 /// Bloom mode: deferred plus the forward layer.
 const BLOOM_MODE_ADDITIVE: u32 = 2;
-
-/// Corners of the fullscreen quad.
-const QUAD_CORNERS: usize = 4;
-
-/// Quad corner of the shared fullscreen quad, by vertex index.
-static QUAD: [[f32; 4]; 4] = [
-    [-1.0, -1.0, 0.0, 1.0],
-    [1.0, -1.0, 0.0, 1.0],
-    [-1.0, 1.0, 0.0, 1.0],
-    [1.0, 1.0, 0.0, 1.0],
-];
-
-/// UV of the same corner, in the same order.
-static UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
 
 /// `BloomParams`: threshold, intensity, mode word, pad.
 ///
@@ -126,14 +110,7 @@ fn tone_map(combined: f32, bloom: f32, intensity: f32, exposure: f32) -> f32 {
 // attribute, not the macro's `#[unsafe(export_name = "vs_main")]`.
 #[gpu_entry(vertex)]
 pub fn vs_main() {
-    let index = vertex_index() as usize;
-    if index >= QUAD_CORNERS {
-        return;
-    }
-    let corner = QUAD[index];
-    vertex_position(corner[0], corner[1], corner[2], corner[3]);
-    let uv = UVS[index];
-    vertex_store_2::<0>(uv[0], uv[1]);
+    standard_quad();
 }
 
 /// HDR composite fragment stage: layer mix, bloom, exposure, ACES.
