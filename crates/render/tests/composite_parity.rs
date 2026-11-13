@@ -9,6 +9,7 @@
 #[allow(dead_code)]
 mod common;
 
+use common::parity::{gradient, mismatched_pixels, upload_rgba8};
 use common::sized::{FrameSpec, render_and_readback};
 
 /// The DSL shader this pass was assembled from before the migration.
@@ -25,37 +26,21 @@ fn translated_composite_matches_the_dsl_pixels() {
     let translated = ornis_render::shaders::composite_generated::wgsl_source();
     // A scene texel and a UI texel per channel, including both sides of the
     // sRGB cutoff and the alpha ramp the pass mixes by.
-    let pbr = gradient(|x, y| [(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]);
-    let ui = gradient(|x, y| {
+    let pbr = gradient(SIZE.0, SIZE.1, |x, y| {
+        [(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255]
+    });
+    let ui = gradient(SIZE.0, SIZE.1, |x, y| {
         // Below the linear cutoff (0.04045 → 10), at it, and well above it.
         let level = [0u8, 8, 10, 11, 128, 255][(x + y) as usize % 6];
         [level, level / 2, 255 - level, (x * 4) as u8]
     });
     let dsl = render(&device, &queue, DSL_WGSL, &pbr, &ui);
     let new = render(&device, &queue, &translated, &pbr, &ui);
-    assert_eq!(dsl.len(), new.len(), "read-back size");
-    let mismatches = dsl
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(new.as_chunks::<4>().0.iter())
-        .filter(|(a, b)| a.iter().zip(b.iter()).any(|(&a, &b)| a.abs_diff(b) > 1))
-        .count();
+    let mismatches = mismatched_pixels(&dsl, &new);
     assert_eq!(
         mismatches, 0,
         "{mismatches} pixels differ from the DSL pass"
     );
-}
-
-/// One `SIZE`×`SIZE` RGBA8 image from a per-texel function.
-fn gradient(fill: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity((SIZE.0 * SIZE.1 * 4) as usize);
-    for y in 0..SIZE.1 {
-        for x in 0..SIZE.0 {
-            pixels.extend_from_slice(&fill(x, y));
-        }
-    }
-    pixels
 }
 
 /// Draw the fullscreen quad through `wgsl` and return the read-back pixels.
@@ -98,8 +83,8 @@ fn render(
         multiview_mask: None,
         cache: None,
     });
-    let pbr_view = upload(device, queue, "pbr", pbr);
-    let ui_view = upload(device, queue, "ui", ui);
+    let pbr_view = upload_rgba8(device, queue, "pbr", SIZE, pbr);
+    let ui_view = upload_rgba8(device, queue, "ui", SIZE, ui);
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("composite parity"),
         mag_filter: wgpu::FilterMode::Linear,
@@ -157,46 +142,4 @@ fn render(
             pass.draw(0..4, 0..1);
         },
     )
-}
-
-/// Upload one RGBA8 image and return its sampled view.
-fn upload(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: &str,
-    pixels: &[u8],
-) -> wgpu::TextureView {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width: SIZE.0,
-            height: SIZE.1,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        pixels,
-        wgpu::TexelCopyBufferLayout {
-            bytes_per_row: Some(SIZE.0 * 4),
-            ..Default::default()
-        },
-        wgpu::Extent3d {
-            width: SIZE.0,
-            height: SIZE.1,
-            ..Default::default()
-        },
-    );
-    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }

@@ -12,6 +12,8 @@
 
 /// CPU GTAO march used to check the ledge gate against `gtao_sample`.
 pub mod gtao_cpu;
+/// Setup shared by the translated-shader pixel-parity gates.
+pub mod parity;
 /// Sized (non-square) render/readback helpers for the 320×180 gates.
 pub mod sized;
 /// Shared world-space reconstruction for AO CPU and parity tests.

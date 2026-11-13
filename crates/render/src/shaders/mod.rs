@@ -510,6 +510,27 @@ pub(crate) const STANDARD_QUAD: [[f32; 4]; 4] = [
 /// Fullscreen-quad UVs shared by the bloom/hdr/lighting passes, as Rust data.
 pub(crate) const STANDARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [0.0, 0.0], [1.0, 0.0]];
 
+/// Stage of `name` in a translated module, for the per-pass artifact tests.
+#[cfg(test)]
+pub(crate) fn entry_stage(module: &naga::Module, name: &str) -> Option<naga::ShaderStage> {
+    module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == name)
+        .map(|entry| entry.stage)
+}
+
+/// `(group, binding)` pairs a module declares, for artifact versus table checks.
+#[cfg(test)]
+pub(crate) fn declared_bindings(module: &naga::Module) -> Vec<(u32, u32)> {
+    module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| global.binding)
+        .map(|binding| (binding.group, binding.binding))
+        .collect()
+}
+
 /// DSL-only GPU handle markers: nominal field types for stage-entry context
 /// bundles (`ctx: LightingContext`). The Rust functions are never compiled,
 /// so these are never instantiated — they exist so context structs are real,
@@ -859,7 +880,6 @@ mod tests {
             ),
         ];
         let entries: &[String] = &[
-            hdr_composite_generated::vs_main::wgsl_source().to_string(),
             bloom_generated::vs_main::wgsl_source().to_string(),
             lighting_generated::vs_main::wgsl_source().to_string(),
             gbuffer_generated::vs_main::wgsl_source().to_string(),
@@ -878,10 +898,10 @@ mod tests {
                 checked += 1;
             }
         }
-        // Three vertex entries construct varyings positionally today (the
-        // rest use the `var`-out form); zero hits would mean the comments
-        // vanished and the test passes vacuously.
-        assert!(checked >= 3, "expected struct literals, found {checked}");
+        // The remaining DSL vertex entries construct varyings positionally
+        // today (the translated passes build their own interface); zero hits
+        // would mean the constructors vanished and the test passes vacuously.
+        assert!(checked >= 2, "expected struct literals, found {checked}");
     }
 
     /// Every context-bundle / `#[wgsl(global)]` name an entry reads must
@@ -892,8 +912,6 @@ mod tests {
     /// undeclared — an unused declaration would pass silently).
     #[test]
     fn stage_globals_declared() {
-        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
-        let hdr_fragment = hdr_composite_generated::wgsl_source();
         let bloom = bloom_generated::wgsl_source();
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
@@ -908,16 +926,7 @@ mod tests {
         let pairs: &[(&[&str], Vec<String>)] = &[
             (
                 QuadConsts::GLOBALS,
-                vec![
-                    hdr_vertex.clone(),
-                    hdr_fragment.clone(),
-                    bloom.clone(),
-                    lighting_vertex.clone(),
-                ],
-            ),
-            (
-                hdr_composite_generated::HdrContext::GLOBALS,
-                vec![hdr_fragment],
+                vec![bloom.clone(), lighting_vertex.clone()],
             ),
             (bloom_generated::BloomContext::GLOBALS, vec![bloom]),
             (
@@ -966,8 +975,8 @@ mod tests {
     /// the names below are the external ABI (pipeline caches, snapshots).
     #[test]
     fn entry_points_match_pass_abi() {
-        assert_eq!(hdr_composite_generated::vs_main::entry_point(), "vs_main");
-        assert_eq!(hdr_composite_generated::fs_main::entry_point(), "fs_main");
+        assert_eq!(hdr_composite_generated::VS_ENTRY, "vs_main");
+        assert_eq!(hdr_composite_generated::FS_ENTRY, "fs_main");
         assert_eq!(bloom_generated::vs_main::entry_point(), "vs_main");
         assert_eq!(bloom_generated::fs_main::entry_point(), "fs_main");
         assert_eq!(lighting_generated::vs_main::entry_point(), "vs_main");
@@ -1075,7 +1084,7 @@ mod tests {
     fn stage_field_uses_resolve() {
         use super::interface::{
             BloomVertexOut, GbufferFragmentInput, GbufferOutput, GbufferVertexInput,
-            GbufferVertexOutput, HdrFragmentOut,
+            GbufferVertexOutput,
         };
         use crate::renderer::{
             BloomUniform, CameraUniform, CsmBlock, GpuLight, LightingUniform, PerObjectGpu,
@@ -1109,16 +1118,6 @@ mod tests {
                 output: None,
             },
             Entry {
-                src: hdr_composite_generated::vs_main::wgsl_source(),
-                input: None,
-                output: None,
-            },
-            Entry {
-                src: hdr_composite_generated::fs_main::wgsl_source(),
-                input: Some(HdrFragmentOut::WGSL_FIELDS),
-                output: None,
-            },
-            Entry {
                 src: bloom_generated::vs_main::wgsl_source(),
                 input: None,
                 output: None,
@@ -1135,7 +1134,7 @@ mod tests {
             },
             Entry {
                 src: lighting_generated::fs_main::wgsl_source(),
-                input: Some(HdrFragmentOut::WGSL_FIELDS),
+                input: Some(interface::HdrFragmentOut::WGSL_FIELDS),
                 output: None,
             },
         ];
@@ -1250,8 +1249,6 @@ mod tests {
         ];
         const KEYWORDS: &[&str] = &["if", "for", "while", "return", "loop"];
         // (entry source, its assembled shader)
-        let hdr_vertex = hdr_composite_generated::wgsl_vertex_source();
-        let hdr_fragment = hdr_composite_generated::wgsl_source();
         let bloom = bloom_generated::wgsl_source();
         let lighting = lighting_generated::wgsl_source();
         let lighting_vertex = lighting_generated::wgsl_vertex_source();
@@ -1272,14 +1269,6 @@ mod tests {
             (
                 material_textures::fs_main_textured::wgsl_source(),
                 textured.as_str(),
-            ),
-            (
-                hdr_composite_generated::vs_main::wgsl_source(),
-                hdr_vertex.as_str(),
-            ),
-            (
-                hdr_composite_generated::fs_main::wgsl_source(),
-                hdr_fragment.as_str(),
             ),
             (bloom_generated::vs_main::wgsl_source(), bloom.as_str()),
             (bloom_generated::fs_main::wgsl_source(), bloom.as_str()),
@@ -1355,11 +1344,6 @@ mod tests {
                 QuadConsts::GLOBALS,
                 &hdr_composite_generated::HDR_RESOURCES,
                 ShaderStages::VERTEX,
-            ),
-            (
-                hdr_composite_generated::HdrContext::GLOBALS,
-                &hdr_composite_generated::HDR_RESOURCES,
-                ShaderStages::FRAGMENT,
             ),
             (
                 QuadConsts::GLOBALS,

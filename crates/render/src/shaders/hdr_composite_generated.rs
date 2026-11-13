@@ -1,86 +1,36 @@
-//! HDR composite shader generated from Rust (Render path 2).
+//! HDR composite pass: translated from Rust through LLVM IR.
 //!
-//! Canonical source is the Rust code in this module: the quad-vertex
-//! boilerplate and the HDR-mix fragment skeleton live here as Rust strings,
-//! and the `aces_tonemap` / `luminance` kernels are spliced in from
-//! [`crate::shaders::math`] (single source of truth via `#[kernel]`).
-//! The former handwritten `shaders/wgsl/composite_*.wgsl` sources were
-//! deleted after the `#[stage]` translation; the `hdr_*_matches_legacy_shape`
-//! tests pin the entry shapes.
+//! The shader lives in `crates/gpu-hdr-composite`: `#[gpu_entry(vertex)]` draws
+//! the shared fullscreen quad, and `#[gpu_entry(fragment)]` mixes the deferred
+//! and forward layers by the bloom mode word, adds the bloom layer scaled by its
+//! intensity, applies the auto-exposure multiplier, and tone maps with the ACES
+//! fit. `xtask build-shaders --package ornis-gpu-hdr-composite --entry all`
+//! compiles the crate and writes the checked-in [`hdr_composite_generated.wgsl`]
+//! beside this file; `--check` in CI catches drift.
+//!
+//! The resource table below is still the single source of truth for the bind
+//! group layout, and it matches the `#[gpu(...)]` attributes in the kernel.
 
-use super::interface::{
-    HdrFragmentOut as QuadVertexOutput, HdrVertexOutput as CompositeVertexOutput,
-};
-use super::wgsl_decl;
-use super::{
-    Resource, ResourceKind, STANDARD_QUAD, STANDARD_UVS, Sampler, ShaderModule, Texture2d, naga_ir,
-};
-use crate::auto_exposure::{EXPOSURE_PARAMS_WGSL, EXPOSURE_WGSL_NAME, ExposureParams};
-use crate::renderer::{BloomUniform, CameraUniform};
-use crate::shaders::math::{aces_tonemap, luminance};
-use ornis_macros::stage;
+use super::{Resource, ResourceKind};
+use crate::auto_exposure::{EXPOSURE_WGSL_NAME, ExposureParams};
+use crate::renderer::BloomUniform;
 
-/// HDR composite vertex entry, written in Rust and translated to WGSL by
-/// [`stage`](ornis_macros::stage): fullscreen-quad corner passthrough.
-/// DSL-only (`QUAD`/`UVS` globals declared via `#[wgsl(global)]`) — replaced by
-/// `vs_main::wgsl_source()`, never compiled as Rust.
-#[stage(vertex)]
-fn vs_main(
-    vertex_index: super::VertexIndex,
-    consts: Context<super::QuadConsts>,
-) -> CompositeVertexOutput {
-    return CompositeVertexOutput {
-        clip_position: consts.quad[vertex_index],
-        uv: consts.uvs[vertex_index],
-    };
-}
+/// Vertex entry point of the translated module.
+pub const VS_ENTRY: &str = "vs_main";
 
-/// HDR composite vertex shader: fullscreen quad from `vertex_index`.
-///
-/// Assembled from the quad constants, the derived `CompositeVertexOutput`
-/// layout and the translated [`vs_main`] body. Structurally
-/// identical to the former handwritten vertex (same signature and
-/// constructor call; the generated entry is single-line) — pinned by
-/// `hdr_vertex_entry_matches_legacy_shape` plus naga and the pixel probes.
-pub fn wgsl_vertex_source() -> String {
-    ShaderModule::new()
-        .consts(vertex_quad())
-        .decl(wgsl_decl(CompositeVertexOutput::WGSL_SOURCE))
-        .entry(vs_main::wgsl_source())
-        .emit()
-}
+/// Fragment entry point of the translated module.
+pub const FS_ENTRY: &str = "fs_main";
 
-/// Group-0 `@binding` indices the HDR composite fragment stage declares.
-const HDR_FRAGMENT_BINDINGS: &[u32] = &[0, 1, 2, 3, 4, 5];
-
-/// HDR composite fragment shader: deferred/forward layer mix + bloom.
-///
-/// Assembled from the derived `Camera`/`BloomParams` layouts, the exposure
-/// uniform ([`crate::auto_exposure`]), the shared `QuadVertexOutput`
-/// varying, the two translated entries and the ACES/luminance kernels;
-/// entry point `fs_main` is kept.
+/// Full WGSL source of the pass: the translated module.
+#[must_use]
 pub fn wgsl_source() -> String {
-    ShaderModule::new()
-        .decl(wgsl_decl(CameraUniform::WGSL_SOURCE))
-        .decl(wgsl_decl(BloomUniform::WGSL_SOURCE))
-        .decl(EXPOSURE_PARAMS_WGSL)
-        .resources(&HDR_RESOURCES, HDR_FRAGMENT_BINDINGS)
-        .consts(vertex_quad())
-        .consts(crate::shaders::math::wgsl_consts())
-        .decl(wgsl_decl(QuadVertexOutput::WGSL_SOURCE))
-        .entry(fs_main::wgsl_source())
-        .helpers([aces_tonemap::wgsl_source(), luminance::wgsl_source()])
-        .emit()
+    include_str!("hdr_composite_generated.wgsl").to_owned()
 }
 
-/// Static view for naga validation in tests.
-pub fn wgsl_source_static() -> String {
+/// The same module serves the vertex stage: both entries live in it.
+#[must_use]
+pub fn wgsl_vertex_source() -> String {
     wgsl_source()
-}
-
-/// Quad constants shared by both HDR assemblies, via IR.
-fn vertex_quad() -> String {
-    naga_ir::const_block(&STANDARD_QUAD, &STANDARD_UVS)
 }
 
 /// Resource layout of the HDR composite pass (what `create_composite_pass`
@@ -137,37 +87,6 @@ pub const HDR_RESOURCES: [Resource; 6] = [
     },
 ];
 
-/// HDR composite fragment entry, translated by [`stage`](ornis_macros::stage):
-/// deferred/forward layer mix + bloom. DSL-only — resource bundle
-/// (`ctx: HdrContext`). `==` on the mode uniform selects the layer mix.
-/// HDR layer-mix resources as a context bundle (`ctx.deferred_tex`, …).
-#[allow(dead_code)]
-#[derive(ornis_macros::ShaderContext)]
-pub(crate) struct HdrContext {
-    pub deferred_tex: Texture2d,
-    pub forward_tex: Texture2d,
-    pub bloom_tex: Texture2d,
-    pub composite_sampler: Sampler,
-    pub bloom_params: BloomUniform,
-    pub exposure_params: ExposureParams,
-}
-
-#[stage(fragment)]
-fn fs_main(input: QuadVertexOutput, ctx: Context<HdrContext>) -> super::Location<0, glam::Vec4> {
-    let deferred_color = textureSample(ctx.deferred_tex, ctx.composite_sampler, input.uv).rgb;
-    let forward_color = textureSample(ctx.forward_tex, ctx.composite_sampler, input.uv).rgba;
-    let mut combined = deferred_color;
-    if ctx.bloom_params.mode == 1u {
-        combined = forward_color.rgb * forward_color.a;
-    } else if ctx.bloom_params.mode == 2u {
-        combined = deferred_color + forward_color.rgb * forward_color.a;
-    }
-    let bloom = textureSample(ctx.bloom_tex, ctx.composite_sampler, input.uv).rgb;
-    let hdr = (combined + bloom * ctx.bloom_params.intensity) * ctx.exposure_params.exposure;
-    let tonemapped = aces_tonemap(hdr);
-    return glam::Vec4::new(tonemapped, 1.0);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,83 +105,46 @@ mod tests {
 
     #[test]
     fn hdr_composite_generated_validates_with_naga() {
-        assert_valid_wgsl("hdr_composite_vertex", &wgsl_vertex_source());
-        assert_valid_wgsl("hdr_composite_fragment", &wgsl_source());
+        assert_valid_wgsl("hdr_composite_generated", &wgsl_source());
     }
 
     #[test]
-    fn hdr_composite_generated_contains_expected_bindings() {
+    fn hdr_composite_generated_contains_both_entries() {
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        assert_eq!(
+            super::super::entry_stage(&module, VS_ENTRY),
+            Some(naga::ShaderStage::Vertex)
+        );
+        assert_eq!(
+            super::super::entry_stage(&module, FS_ENTRY),
+            Some(naga::ShaderStage::Fragment)
+        );
+        assert_eq!(module.entry_points.len(), 2);
+    }
+
+    /// The mode word, the exposure multiplier and the bloom intensity are read
+    /// from their uniforms, and the ACES fit is inline.
+    #[test]
+    fn hdr_composite_generated_reads_its_uniforms() {
         let src = wgsl_source();
-        assert!(src.contains("@group(0) @binding(0) var deferred_tex"));
-        assert!(src.contains("@group(0) @binding(4) var<uniform> bloom_params"));
-        assert!(src.contains("@group(0) @binding(5) var<uniform> exposure_params"));
-        assert!(src.contains("struct ExposureParams"));
-        assert!(src.contains("fn fs_main("));
-        assert!(src.contains("fn aces_tonemap"));
-        assert!(src.contains("fn luminance"));
-        // The vertex entry lives in the vertex assembly (the fragment
-        // module no longer carries the dead second `vs_main`).
-        assert!(wgsl_vertex_source().contains("fn vs_main("));
+        assert!(src.contains("switch "), "{src}");
+        assert!(src.contains("2.51f"), "{src}");
+        assert!(src.contains("2.43f"), "{src}");
     }
 
-    /// The translated vertex entry must keep the legacy shape: same entry
-    /// name and signature, same constructor call on the same globals.
-    /// (Byte-parity no longer applies — the generated entry is single-line.)
-    #[test]
-    fn hdr_vertex_entry_matches_legacy_shape() {
-        let entry = vs_main::wgsl_source();
-        assert!(entry.starts_with("@vertex\nfn vs_main(@builtin(vertex_index) vertex_index: u32)"));
-        assert!(entry.contains("-> CompositeVertexOutput"));
-        assert!(entry.contains(
-            "return CompositeVertexOutput(quad[vertex_index], uvs[vertex_index]) /* clip_position, uv */;"
-        ));
-    }
-
-    /// The translated fragment entry must keep the legacy shape: same
-    /// signature, same sampling/mix/tonemap calls. Formatting differs
-    /// (single-line, `else { if }` nesting, normalized int suffixes —
-    /// all semantics-preserving, naga-validated).
-    #[test]
-    fn fs_main_matches_legacy_shape() {
-        let entry = fs_main::wgsl_source();
-        assert!(entry.starts_with("@fragment\nfn fs_main(input: QuadVertexOutput)"));
-        assert!(entry.contains("-> @location(0) vec4<f32>"));
-        assert!(entry.contains(
-            "let deferred_color = textureSample(deferred_tex, composite_sampler, input.uv).rgb;"
-        ));
-        assert!(entry.contains("if (bloom_params.mode =="));
-        assert!(entry.contains("combined = forward_color.rgb * forward_color.a;"));
-        assert!(entry.contains("combined = deferred_color + forward_color.rgb * forward_color.a;"));
-        assert!(entry.contains(
-            "let hdr = (combined + bloom * bloom_params.intensity) * exposure_params.exposure;"
-        ));
-        assert!(entry.contains("let tonemapped = aces_tonemap(hdr);"));
-        assert!(entry.contains("return vec4<f32>(tonemapped, 1.0);"));
-    }
-
-    #[test]
-    fn hdr_generated_parity_with_legacy_assembly() {
-        // Layouts still splice the derived declarations (entries are
-        // translated — see above). The `_pad` line is gone: skipped
-        // padding is not shader-visible.
-        let src = wgsl_source();
-        assert!(src.contains(&wgsl_decl(CameraUniform::WGSL_SOURCE)));
-        assert!(src.contains(&wgsl_decl(BloomUniform::WGSL_SOURCE)));
-        assert!(src.contains(&wgsl_decl(QuadVertexOutput::WGSL_SOURCE)));
-        assert!(!src.contains("_pad"));
-    }
-
-    /// Every table row's declaration appears in the assembled shader, and
-    /// every row maps to a layout entry: shader and pipeline agree.
+    /// Every table row's declaration appears in the shader, and every row maps
+    /// to a layout entry: shader and pipeline agree.
     #[test]
     fn hdr_resources_cover_shader_and_layout() {
-        use super::super::{bgl_entry, resource_decl};
-        let src = wgsl_source();
+        let module = naga::front::wgsl::parse_str(&wgsl_source()).expect("parse");
+        let bindings = super::super::declared_bindings(&module);
         assert_eq!(HDR_RESOURCES.len(), 6);
-        for r in HDR_RESOURCES {
-            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
-            let e = bgl_entry(&r, false);
-            assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
+        for resource in HDR_RESOURCES {
+            assert!(
+                bindings.contains(&(resource.group, resource.binding)),
+                "missing {}",
+                resource.name
+            );
         }
     }
 }
