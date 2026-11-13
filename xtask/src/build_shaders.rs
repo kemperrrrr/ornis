@@ -47,6 +47,9 @@ struct Args {
     workgroup: [u32; 3],
     types: Vec<u8>,
     multisampled: bool,
+    /// `(group, binding)` pairs to declare multisampled when `--multisampled`
+    /// would mark every texture.
+    multisampled_textures: Vec<(u32, u32)>,
 }
 
 pub fn build_shaders(raw: &[String]) {
@@ -84,6 +87,7 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         workgroup: DEFAULT_WORKGROUP,
         types: DEFAULT_TYPES.to_vec(),
         multisampled: false,
+        multisampled_textures: Vec::new(),
     };
     let mut iter = raw.iter();
     while let Some(flag) = iter.next() {
@@ -104,6 +108,7 @@ fn parse(raw: &[String]) -> Result<Args, String> {
             "--out" => args.out = PathBuf::from(value),
             "--artifact" => args.artifact = Some(PathBuf::from(value)),
             "--workgroup" => args.workgroup = parse_workgroup(value)?,
+            "--multisampled-textures" => args.multisampled_textures = parse_bindings(value)?,
             "--types" => args.types = parse_types(value)?,
             other => return Err(format!("unknown argument {other}")),
         }
@@ -140,10 +145,12 @@ fn build(root: &Path, args: &Args) -> Result<(), String> {
     let ll = compile(root, args)?;
     let ir =
         std::fs::read_to_string(&ll).map_err(|error| format!("read {}: {error}", ll.display()))?;
-    let sampling = if args.multisampled {
-        ornis_llvm2gpu::TextureSampling::Multisampled
-    } else {
-        ornis_llvm2gpu::TextureSampling::SingleSample
+    let sampling = match (&args.multisampled_textures, args.multisampled) {
+        (bindings, _) if !bindings.is_empty() => {
+            ornis_llvm2gpu::TextureSampling::Listed(bindings.clone())
+        }
+        (_, true) => ornis_llvm2gpu::TextureSampling::Multisampled,
+        (_, false) => ornis_llvm2gpu::TextureSampling::SingleSample,
     };
     let records = ornis_llvm2gpu::extract_meta(&ir)
         .map_err(|error| format!("translate {}: {error}", args.package))?;
@@ -284,6 +291,27 @@ fn run_cargo_rustc(root: &Path, args: &Args, ll: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `0:2,1:0` → `[(0, 2), (1, 0)]`.
+fn parse_bindings(value: &str) -> Result<Vec<(u32, u32)>, String> {
+    value
+        .split(',')
+        .map(|pair| {
+            let (group, binding) = pair
+                .split_once(':')
+                .ok_or_else(|| format!("binding `{pair}` is not `<group>:<binding>`"))?;
+            let group = group
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid group in `{pair}`: {error}"))?;
+            let binding = binding
+                .trim()
+                .parse::<u32>()
+                .map_err(|error| format!("invalid binding in `{pair}`: {error}"))?;
+            Ok((group, binding))
+        })
+        .collect()
+}
+
 fn parse_types(value: &str) -> Result<Vec<u8>, String> {
     if value.is_empty() {
         return Ok(Vec::new());
@@ -357,6 +385,14 @@ mod tests {
     #[test]
     fn check_requires_artifact() {
         assert!(parse(&["--check".to_string()]).is_err());
+    }
+
+    #[test]
+    fn multisampled_textures_parse_group_binding_pairs() {
+        let args = parse(&["--multisampled-textures".to_string(), "0:2,1:0".to_string()])
+            .expect("bindings");
+        assert_eq!(args.multisampled_textures, [(0, 2), (1, 0)]);
+        assert!(parse(&["--multisampled-textures".to_string(), "0".to_string()]).is_err());
     }
 
     #[test]

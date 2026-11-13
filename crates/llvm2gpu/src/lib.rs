@@ -59,7 +59,7 @@ pub use meta::{
 };
 
 /// How the translator declares texture bindings.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum TextureSampling {
     /// `texture_2d<f32>` / `texture_depth_2d`; `textureLoad` reads mip 0.
     #[default]
@@ -68,12 +68,22 @@ pub enum TextureSampling {
     /// `textureLoad` reads sample 0. This is the 4x MSAA build of the same
     /// kernel: the body is unchanged, only the declared texture type is.
     Multisampled,
+    /// Only the listed `(group, binding)` textures are multisampled.
+    ///
+    /// A pass can bind a resolved colour target next to an unresolved
+    /// multisampled depth buffer (fog reads HDR at 1x and g-buffer depth at
+    /// 4x), so the sampling mode belongs to the binding, not to the module.
+    Listed(Vec<(u32, u32)>),
 }
 
 impl TextureSampling {
-    /// Whether bindings lower to multisampled image types.
-    fn multisampled(self) -> bool {
-        self == Self::Multisampled
+    /// Whether the texture at `(group, binding)` lowers to a multisampled type.
+    fn multisampled_at(&self, group: u32, binding: u32) -> bool {
+        match self {
+            Self::SingleSample => false,
+            Self::Multisampled => true,
+            Self::Listed(bindings) => bindings.contains(&(group, binding)),
+        }
     }
 }
 
@@ -158,7 +168,7 @@ fn translate_entries(
     let metas = meta::extract(llvm_ir)?;
     let structs = merge_tables(&metas)?;
     let refs: Vec<&[u8]> = structs.iter().map(Vec::as_slice).collect();
-    let mut lowering = lower::Lowering::new(&refs, sampling.multisampled());
+    let mut lowering = lower::Lowering::new(&refs, sampling);
     lowering.reserve_skipped(skipped);
     lowering.reserve_noreturn(noreturn);
     lowering.reserve_diverging(&module);
@@ -256,7 +266,7 @@ pub fn translate_with_types_and_workgroup(
     let skipped = parsed.skipped;
     let noreturn = parsed.noreturn;
     let module = inline::inline_pointer_calls(parsed.funcs)?;
-    let mut lowering = lower::Lowering::new(structs, false);
+    let mut lowering = lower::Lowering::new(structs, TextureSampling::SingleSample);
     lowering.reserve_skipped(skipped);
     lowering.reserve_noreturn(noreturn);
     lowering.reserve_diverging(&module);

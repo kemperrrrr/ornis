@@ -29,8 +29,6 @@ var<uniform> uniform_struct_0_5_: UniformStruct1_;
 var tex_0_0_: texture_2d<f32>;
 @group(0) @binding(3) 
 var tex_0_3_: texture_2d<f32>;
-var<private> const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite4QUAD: array<u32, 16> = array<u32, 16>(3212836864u, 3212836864u, 0u, 1065353216u, 1065353216u, 3212836864u, 0u, 1065353216u, 3212836864u, 1065353216u, 0u, 1065353216u, 1065353216u, 1065353216u, 0u, 1065353216u);
-var<private> const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite3UVS: array<u32, 8> = array<u32, 8>(0u, 1065353216u, 1065353216u, 1065353216u, 0u, 0u, 1065353216u, 0u);
 
 @fragment 
 fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
@@ -78,21 +76,34 @@ fn fs_main(@builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32>) -
 @vertex 
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     var vertex_out: VertexOut;
+    var _11_u002e_sroa_u002e_0_u002e_0_u002e_i: f32;
+    var _10_u002e_sroa_u002e_0_u002e_2_u002e_i: f32;
 
-    if (vertex_index > 3u) {
-        let _e4 = vertex_out;
-        return _e4;
+    let _e6 = ((vertex_index & 2u) == 0u);
+    if ((vertex_index & 1u) == 0u) {
+        if _e6 {
+            vertex_out.position = vec4<f32>(-1f, -1f, 0f, 1f);
+            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 1f;
+            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 0f;
+        } else {
+            vertex_out.position = vec4<f32>(-1f, 1f, 0f, 1f);
+            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 0f;
+        }
+    } else {
+        if _e6 {
+            vertex_out.position = vec4<f32>(1f, -1f, 0f, 1f);
+            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 1f;
+            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 1f;
+        } else {
+            vertex_out.position = vec4<f32>(1f, 1f, 0f, 1f);
+            _11_u002e_sroa_u002e_0_u002e_0_u002e_i = 0f;
+            _10_u002e_sroa_u002e_0_u002e_2_u002e_i = 1f;
+        }
     }
-    let _e8 = (0u + (vertex_index * 4u));
-    let _e11 = const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite4QUAD[_e8];
-    let _e17 = const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite4QUAD[(_e8 + 1u)];
-    let _e23 = const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite4QUAD[(_e8 + 2u)];
-    let _e29 = const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite4QUAD[(_e8 + 3u)];
-    vertex_out.position = vec4<f32>(bitcast<f32>(_e11), bitcast<f32>(_e17), bitcast<f32>(_e23), bitcast<f32>(_e29));
-    let _e37 = (0u + (vertex_index * 2u));
-    let _e40 = const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite3UVS[_e37];
-    let _e46 = const_RNvCschBiAFVR4iQ_23ornis_gpu_hdr_composite3UVS[(_e37 + 1u)];
-    vertex_out.o0_ = vec2<f32>(bitcast<f32>(_e40), bitcast<f32>(_e46));
-    let _e52 = vertex_out;
-    return _e52;
+    let _e54 = _11_u002e_sroa_u002e_0_u002e_0_u002e_i;
+    let _e56 = _10_u002e_sroa_u002e_0_u002e_2_u002e_i;
+    vertex_out.o0_ = vec2<f32>(_e56, _e54);
+    let _e61 = vertex_out;
+    return _e61;
 }
