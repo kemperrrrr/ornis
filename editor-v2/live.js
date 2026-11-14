@@ -847,6 +847,8 @@
       // The welcome surfaces own their own shortcuts while visible.
       if (document.querySelector(".wl-screen.wl-on")) return;
       if (ev.key === "F5") {
+        // Ctrl/Cmd+F5 is the browser's hard refresh — leave it to the browser.
+        if (ev.ctrlKey || ev.metaKey) return;
         ev.preventDefault();
         // Holding F5 auto-repeats keydown; toggle only on the first press
         // so a held key does not flap play/stop.

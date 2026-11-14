@@ -143,6 +143,18 @@ impl GizmoRuntime {
         self.candidate = None;
     }
 
+    /// Drops *all* drag state, including the one-step undo of the last
+    /// commit (unlike [`GizmoRuntime::cancel`], which keeps it).
+    ///
+    /// Called when the authoritative mode returns to Edit (Stop): a drag
+    /// committed in Paused addresses the simulated world, so its undo must
+    /// not survive into the Edit world Stop restores — applying it would
+    /// write a simulated pose the snapshot never contained.
+    pub fn reset(&mut self) {
+        self.cancel();
+        self.undo = None;
+    }
+
     /// The preview to roll back when the drag is abandoned: the dragged
     /// entity and the transform it had before the drag started.
     pub fn rollback(&self) -> Option<(Entity, TransformDesc)> {
@@ -307,6 +319,39 @@ mod tests {
         assert_eq!(undo.transform, TransformDesc::IDENTITY);
     }
 
+    /// `reset` (Stop back to Edit) drops the promoted one-step undo, unlike
+    /// `cancel`: a drag committed in Paused addresses the simulated world, so
+    /// its undo must not survive into the Edit world the snapshot restores.
+    #[test]
+    fn reset_drops_the_undo_a_mode_change_invalidates() {
+        let mut runtime = armed();
+        runtime
+            .preview_transform(&release_ray())
+            .expect("a preview");
+        runtime.commit();
+        runtime.reset();
+        assert!(!runtime.is_dragging());
+        assert!(runtime.rollback().is_none());
+        assert!(
+            runtime.take_undo().is_none(),
+            "reset must drop the undo so a Paused drag cannot write into Edit"
+        );
+    }
+
+    /// `reset` also abandons an in-flight drag and its undo candidate.
+    #[test]
+    fn reset_abandons_an_in_flight_drag() {
+        let mut runtime = armed();
+        runtime
+            .preview_transform(&release_ray())
+            .expect("a preview");
+        runtime.reset();
+        assert!(!runtime.is_dragging());
+        assert!(runtime.rollback().is_none());
+        assert!(runtime.commit().is_none(), "no candidate survives reset");
+        assert!(runtime.take_undo().is_none());
+    }
+
     /// With snap on, the preview translation lands on a multiple of the
     /// step (E4): a 0.37-unit drag quantizes to 0.5.
     #[test]
@@ -361,7 +406,7 @@ mod tests {
         let preview = runtime.preview_transform(&release).expect("a preview");
         for c in preview.translation.to_array() {
             assert!(
-                (c / 0.5).round() * 0.5 - c < 1e-6,
+                ((c / 0.5).round() * 0.5 - c).abs() < 1e-6,
                 "{c} not a multiple of the step"
             );
         }
@@ -415,7 +460,7 @@ mod tests {
             "38° must snap to 45°, got {degrees}"
         );
         assert!(
-            (degrees.abs() / 15.0).round() * 15.0 - degrees.abs() < 1e-3,
+            ((degrees.abs() / 15.0).round() * 15.0 - degrees.abs()).abs() < 1e-3,
             "{degrees} not a multiple of 15°"
         );
         assert_eq!(

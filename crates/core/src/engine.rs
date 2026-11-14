@@ -257,6 +257,16 @@ impl FixedTime {
         self.update_alpha();
     }
 
+    /// Records a frame whose fixed plan is gated off: the simulation clock
+    /// freezes. No time is accumulated or consumed, `tick`/`elapsed_seconds`
+    /// and the accumulator stay put, and there is no catch-up burst when the
+    /// gate reopens — only the per-frame step counters reset to zero. Frame
+    /// [`Time`] is unaffected; it is the render clock, not simulation time.
+    fn skip_frame(&mut self) {
+        self.steps_this_frame = 0;
+        self.current_step = 0;
+    }
+
     /// Advances one replay/journal tick: no accumulator, no `begin_frame`.
     ///
     /// Implements the `run_fixed_step` clock contract from
@@ -824,6 +834,22 @@ impl Engine<Running> {
     /// fixed update then receives the same snapshot, and the `PostFrame`
     /// (legacy variable) schedule runs once after the fixed loop.
     ///
+    /// # Gated fixed plan and the simulation clock
+    ///
+    /// When the fixed ([`Stage::Gameplay`]) plan carries a
+    /// [`schedule condition`](Schedule::set_schedule_condition) that evaluates
+    /// `false`, the simulation clock **freezes** for that frame: neither
+    /// `begin_frame` nor `start_step` runs, so [`FixedTime::tick`],
+    /// [`FixedTime::elapsed_seconds`] and the accumulator stay put and
+    /// `steps_this_frame` reads `0`. Time is neither consumed nor banked — a
+    /// closed gate is a true no-op, and reopening it triggers no catch-up
+    /// burst. This keeps a gated replay tick ([`Engine::run_fixed_step`])
+    /// identical to a gated live frame, preserving the snapshot contract
+    /// (`docs/networking-design.md`). Frame [`Time`] still advances: it is the
+    /// render clock, not simulation time. The gate is read once at the frame
+    /// boundary, so the gated resource must be frame-stable (see
+    /// [`crate::RunCondition`]); hosts that install no condition are unaffected.
+    ///
     /// Two structural boundaries, matching the two schedules:
     /// [`FixedStructuralQueue`](crate::mutation::FixedStructuralQueue) is
     /// drained after **every** fixed tick (so tick `k+1` sees tick `k`'s
@@ -871,13 +897,22 @@ impl Engine<Running> {
         if self.world.resources().get::<FixedTime>().is_none() {
             let _ = self.world.insert(FixedTime::default());
         }
-        let Some(fixed_steps) = self
-            .world
-            .resources_mut()
-            .get_mut::<FixedTime>()
-            .map(|fixed| fixed.begin_frame(delta_seconds))
-        else {
-            return;
+        // A gated fixed plan freezes the simulation clock. The gate is read
+        // once here at the frame boundary — the gated resource is frame-stable
+        // (see [`RunCondition`]) — and when it is closed both `begin_frame` and
+        // `start_step` are skipped, so no tick/elapsed is consumed and there is
+        // no catch-up burst when the plan reopens.
+        let fixed_steps = if self.fixed_schedule.schedule_permits(self.world.resources()) {
+            self.world
+                .resources_mut()
+                .get_mut::<FixedTime>()
+                .map(|fixed| fixed.begin_frame(delta_seconds))
+                .unwrap_or(0)
+        } else {
+            if let Some(fixed) = self.world.resources_mut().get_mut::<FixedTime>() {
+                fixed.skip_frame();
+            }
+            0
         };
 
         self.world.run(&self.pre_update);
@@ -929,11 +964,17 @@ impl Engine<Running> {
         if self.world.resources().get::<FixedTime>().is_none() {
             let _ = self.world.insert(FixedTime::default());
         }
-        if let Some(fixed) = self.world.resources_mut().get_mut::<FixedTime>() {
-            fixed.start_replay_step();
+        // A gated fixed plan is a true no-op for replay: the clock does not
+        // advance, so a gated replay tick matches a gated live frame (the
+        // snapshot contract from `docs/networking-design.md`). No systems run
+        // and nothing is queued, so the structural apply is skipped too.
+        if self.fixed_schedule.schedule_permits(self.world.resources()) {
+            if let Some(fixed) = self.world.resources_mut().get_mut::<FixedTime>() {
+                fixed.start_replay_step();
+            }
+            self.world.run(&self.fixed_schedule);
+            crate::mutation::apply_fixed_structural_queue(self.world.resources_mut());
         }
-        self.world.run(&self.fixed_schedule);
-        crate::mutation::apply_fixed_structural_queue(self.world.resources_mut());
         let tick = self
             .world
             .resources()
@@ -1194,6 +1235,119 @@ mod tests {
         assert_eq!(fixed_time.current_step(), 1);
         assert_eq!(fixed_time.tick(), 1);
         assert!(fixed_time.alpha() < 0.01);
+    }
+
+    /// A closed fixed-plan gate freezes the simulation clock: closed frames
+    /// run no systems and consume no tick/elapsed/accumulator, and reopening
+    /// the gate triggers no catch-up burst for the frozen frames.
+    #[test]
+    fn gated_fixed_plan_freezes_simulation_clock() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::new();
+        let _ = engine.world_mut().insert(false);
+        engine
+            .fixed_schedule_mut()
+            .add_system(CaptureFixedTime(captured.clone()));
+        engine
+            .fixed_schedule_mut()
+            .set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+
+        let delta = FixedTime::default().delta_seconds();
+        for _ in 0..5 {
+            engine.run_frame(delta);
+        }
+        assert!(captured.lock().expect("capture lock").is_empty());
+        let frozen = *engine
+            .world()
+            .resources()
+            .get::<FixedTime>()
+            .expect("fixed");
+        assert_eq!(frozen.tick(), 0, "closed gate must not advance tick");
+        assert_eq!(frozen.elapsed_seconds(), 0.0);
+        assert_eq!(frozen.accumulator_seconds(), 0.0);
+        assert_eq!(frozen.steps_this_frame(), 0);
+
+        // Reopen: one step from this frame's delta only, no catch-up.
+        *engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<bool>()
+            .unwrap() = true;
+        engine.run_frame(delta);
+        assert_eq!(captured.lock().expect("capture lock").len(), 1);
+        let resumed = *engine
+            .world()
+            .resources()
+            .get::<FixedTime>()
+            .expect("fixed");
+        assert_eq!(resumed.tick(), 1);
+        assert_eq!(resumed.steps_this_frame(), 1);
+    }
+
+    /// A closed fixed-plan gate makes a replay tick a true no-op: the clock
+    /// does not advance and the unchanged tick index is returned.
+    #[test]
+    fn gated_replay_tick_is_a_noop() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::new();
+        let _ = engine.world_mut().insert(false);
+        engine
+            .fixed_schedule_mut()
+            .add_system(CaptureFixedTime(captured.clone()));
+        engine
+            .fixed_schedule_mut()
+            .set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+
+        assert_eq!(engine.run_fixed_step(), Tick::new(0));
+        assert!(captured.lock().expect("capture lock").is_empty());
+        let frozen = *engine
+            .world()
+            .resources()
+            .get::<FixedTime>()
+            .expect("fixed");
+        assert_eq!(frozen.tick(), 0);
+        assert_eq!(frozen.elapsed_seconds(), 0.0);
+        assert_eq!(frozen.accumulator_seconds(), 0.0);
+        assert_eq!(frozen.steps_this_frame(), 0);
+
+        *engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<bool>()
+            .unwrap() = true;
+        assert_eq!(engine.run_fixed_step(), Tick::new(1));
+        assert_eq!(captured.lock().expect("capture lock").len(), 1);
+    }
+
+    /// Snapshot contract: with the gate closed, a live frame and a replay
+    /// tick leave `FixedTime` identical (both frozen), so a gated replay tick
+    /// matches a gated live frame (`docs/networking-design.md`).
+    #[test]
+    fn gated_fixed_clock_matches_between_live_and_replay() {
+        let mut live = Engine::new();
+        let mut replay = Engine::new();
+        for engine in [&mut live, &mut replay] {
+            let _ = engine.world_mut().insert(false);
+            engine
+                .fixed_schedule_mut()
+                .set_schedule_condition(Arc::new(|r| *r.get::<bool>().unwrap()));
+        }
+        let delta = FixedTime::default().delta_seconds();
+        for _ in 0..3 {
+            live.run_frame(delta);
+            replay.run_fixed_step();
+        }
+        let live_time = *live.world().resources().get::<FixedTime>().expect("fixed");
+        let replay_time = *replay
+            .world()
+            .resources()
+            .get::<FixedTime>()
+            .expect("fixed");
+        assert_eq!(
+            live_time, replay_time,
+            "gated clock must match live vs replay"
+        );
+        assert_eq!(live_time.tick(), 0);
     }
 
     #[test]

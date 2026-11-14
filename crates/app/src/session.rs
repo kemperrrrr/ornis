@@ -462,8 +462,11 @@ impl EditorSession {
     /// Enter Play, or resume from Paused. On the Edit→Play edge the
     /// authoritative world is captured in memory (never on disk) so
     /// [`Self::stop`] can restore it; simulation systems start ticking.
-    /// Idempotent in Play.
+    /// A no-op in Play (no version bump, no spurious snapshot publish).
     pub fn play(&mut self) {
+        if self.mode().is_play() {
+            return;
+        }
         if self.mode().is_edit()
             && let Some(store) = self.store()
         {
@@ -3794,6 +3797,86 @@ mod tests {
         );
     }
 
+    /// Stop restores the components authored in Edit through `set_component`
+    /// (Collider/Velocity/Position), not just the lossy `Scene` fields, and
+    /// does not renumber entities: the full `SmartStore` snapshot swaps back
+    /// in place, so a Play-era stray entity and overwritten intent vanish
+    /// while the Edit overrides and the original handle survive (E4 review).
+    #[test]
+    fn stop_restores_components_set_in_edit() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let hero = world.spawn(Some("Hero".into()));
+        let (id, generation) = (hero.id(), hero.generation());
+        world.handle_command(
+            &set_component(id, Some(generation), "Velocity", "[3,0,4]"),
+            &ev_tx,
+        );
+        world.handle_command(
+            &set_component(id, Some(generation), "Position", "[1,2,3]"),
+            &ev_tx,
+        );
+        world.handle_command(
+            &set_component(
+                id,
+                Some(generation),
+                "Collider",
+                r#"{"Sphere":{"radius":0.75}}"#,
+            ),
+            &ev_tx,
+        );
+        drain_all(&ev_rx);
+
+        let alive_before = world.alive.clone();
+        let (velocity_before, position_before, collider_before) = {
+            let store = world.store().expect("store");
+            (
+                read_component::<Velocity>(store, hero).expect("Velocity set"),
+                read_component::<Position>(store, hero).expect("Position set"),
+                read_component::<ColliderDesc>(store, hero).expect("Collider set"),
+            )
+        };
+
+        world.play();
+        // A dynamic body falls, a stray entity perturbs numbering, and
+        // gameplay overwrites the Edit intent during Play.
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(hero, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+        for _ in 0..30 {
+            world.tick(1.0 / 60.0);
+        }
+        world.spawn(Some("Temporary".into()));
+        {
+            let store = world.world_mut().store_mut().expect("store");
+            store.insert(hero, Velocity(Vec3::new(9.0, 9.0, 9.0)));
+            store.insert(hero, Position(Vec3::new(9.0, 9.0, 9.0)));
+        }
+        drain_all(&ev_rx);
+
+        world.stop();
+        assert_eq!(world.mode(), EditorMode::Edit);
+        assert_eq!(world.alive, alive_before, "Stop must not renumber entities");
+        assert_eq!(world.entity_count(), 1, "the Play-era entity is gone");
+        let store = world.store().expect("store");
+        assert_eq!(
+            read_component::<Velocity>(store, hero).expect("Velocity restored"),
+            velocity_before,
+            "the Edit Velocity override survives Stop"
+        );
+        assert_eq!(
+            read_component::<Position>(store, hero).expect("Position restored"),
+            position_before,
+            "the Edit Position override survives Stop"
+        );
+        assert_eq!(
+            read_component::<ColliderDesc>(store, hero).expect("Collider restored"),
+            collider_before,
+            "the Edit Collider override survives Stop"
+        );
+    }
+
     /// Stop restores the body config and resets the solver, so a second
     /// Play falls exactly like the first (the lossy `Scene` round-trip used
     /// to replace the dynamic body with a zero-mass default and resume the
@@ -3972,14 +4055,22 @@ mod tests {
         assert_eq!(world.mode(), EditorMode::Edit, "pause is a no-op in Edit");
         world.stop();
         assert_eq!(world.mode(), EditorMode::Edit, "stop is a no-op in Edit");
+        assert_eq!(world.version, 0, "no-op transitions must not bump");
         world.play();
         assert_eq!(world.mode(), EditorMode::Play);
+        let play_version = world.version;
         world.play();
         assert_eq!(world.mode(), EditorMode::Play, "play is idempotent");
+        assert_eq!(world.version, play_version, "play in Play must not bump");
         world.pause();
         assert_eq!(world.mode(), EditorMode::Paused);
+        let pause_version = world.version;
         world.pause();
         assert_eq!(world.mode(), EditorMode::Paused, "pause is idempotent");
+        assert_eq!(
+            world.version, pause_version,
+            "pause in Paused must not bump"
+        );
         world.stop();
         assert_eq!(world.mode(), EditorMode::Edit);
     }
@@ -4085,6 +4176,45 @@ mod tests {
             "hot-reload in Play must announce the return to Edit"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An asset reload drained inside the tick during Play rebuilds the
+    /// world in Edit and the loop announces the reset (E4 review):
+    /// `drain_assets` itself only rebuilds, so `publish_after_tick` compares
+    /// the mode against the pre-tick value and emits `mode_changed`.
+    #[test]
+    fn drain_assets_in_play_announces_mode_reset() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let a = world
+            .world
+            .assets_mut()
+            .load_scene_ron("Scene(name: \"a\", entities: [], lights: [], camera: (position: (0.0, 2.5, 9.0), target: (0.0, 0.0, 0.0), up: (0.0, 1.0, 0.0), fov: 60.0, near: 0.1, far: 100.0), ambient: (0.1, 0.1, 0.1))")
+            .expect("scene a loads");
+        world.play();
+        assert_eq!(world.mode(), EditorMode::Play);
+        assert!(world.world.assets_mut().request_reload(a));
+        drain_all(&ev_rx);
+
+        let mode_before = world.mode();
+        assert!(world.tick_secs(Seconds::new(1.0 / 60.0)).changed());
+        assert_eq!(
+            world.mode(),
+            EditorMode::Edit,
+            "drain_assets returns to Edit"
+        );
+        assert!(
+            world.play_snapshot.is_none(),
+            "drain_assets drops the snapshot"
+        );
+
+        publish_after_tick(&world, mode_before, &ev_tx);
+        let events = drain_all(&ev_rx);
+        assert!(
+            custom_events(&events, "mode_changed")
+                .iter()
+                .any(|payload| payload.contains("\"edit\"")),
+            "drain_assets in Play must announce the return to Edit"
+        );
     }
 
     // ── glTF animation wiring ────────────────────────────────────────────

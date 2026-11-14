@@ -4,8 +4,9 @@
 //! Pure over `Vec3` and angles: the replica owns the settings (a UI
 //! preference, not scene content — same footing as the gizmo mode/space) and
 //! applies them to the preview's active channel before it is written and
-//! committed. Disabled by default; a non-positive step leaves that channel
-//! unquantized even when snap is on.
+//! committed. Disabled by default; a step that is not finite and positive —
+//! or so tiny that dividing by it overflows — leaves that channel unquantized
+//! even when snap is on.
 
 use glam::Vec3;
 
@@ -41,35 +42,43 @@ impl Default for SnapSettings {
 
 impl SnapSettings {
     /// Rounds a translation to the translate step (world units). Snap off or
-    /// a non-positive step returns `v` unchanged.
+    /// an unusable step returns `v` unchanged.
     #[must_use]
     pub fn snap_translate(&self, v: Vec3) -> Vec3 {
-        if !self.enabled || self.translate <= 0.0 {
+        if !self.enabled || !usable_step(self.translate) {
             return v;
         }
         snap_vec3(v, self.translate)
     }
 
     /// Rounds a scale to the scale step (factor) and floors it at
-    /// `MIN_SCALE`. Snap off or a non-positive step returns `v` unchanged.
+    /// `MIN_SCALE`. Snap off or an unusable step returns `v` unchanged.
     #[must_use]
     pub fn snap_scale(&self, v: Vec3) -> Vec3 {
-        if !self.enabled || self.scale <= 0.0 {
+        if !self.enabled || !usable_step(self.scale) {
             return v;
         }
         floor_scale(snap_vec3(v, self.scale))
     }
 
     /// Rounds a swept angle (radians) to the rotate step (degrees). Snap off
-    /// or a non-positive step returns `angle` unchanged.
+    /// or an unusable step returns `angle` unchanged.
     #[must_use]
     pub fn snap_angle(&self, angle: f32) -> f32 {
-        if !self.enabled || self.rotate_deg <= 0.0 {
+        if !self.enabled || !usable_step(self.rotate_deg) {
             return angle;
         }
         let step = self.rotate_deg.to_radians();
         (angle / step).round() * step
     }
+}
+
+/// Whether a snap step can quantize without overflow: finite, positive, and
+/// large enough that its reciprocal stays finite. A denormal step (e.g.
+/// `1e-45`) passes `> 0.0` but overflows `v / step` to infinity, so it is
+/// rejected just like a non-finite or non-positive step.
+fn usable_step(step: f32) -> bool {
+    step.is_finite() && step > 0.0 && (1.0 / step).is_finite()
 }
 
 /// Rounds each component to the nearest multiple of `step` (`step > 0`).
@@ -119,7 +128,10 @@ mod tests {
         let t = snap.snap_translate(Vec3::new(0.37, 1.23, -2.71));
         assert!((t - Vec3::new(0.5, 1.0, -2.5)).length() < 1e-6);
         for c in t.to_array() {
-            assert!((c / 0.5).round() * 0.5 - c < 1e-6, "{c} not a multiple");
+            assert!(
+                ((c / 0.5).round() * 0.5 - c).abs() < 1e-6,
+                "{c} not a multiple"
+            );
         }
     }
 
@@ -158,6 +170,43 @@ mod tests {
             translate: 0.0,
             rotate_deg: 0.0,
             scale: 0.0,
+        };
+        let v = Vec3::new(0.37, 1.23, -2.71);
+        assert_eq!(snap.snap_translate(v), v);
+        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_angle(0.38), 0.38);
+    }
+
+    /// A non-finite step (NaN/±inf) leaves every channel unquantized: the
+    /// browser can relay one through `set_snap`, and dividing by it would
+    /// poison the preview with NaN (E4 review).
+    #[test]
+    fn non_finite_step_skips_its_channel() {
+        let v = Vec3::new(0.37, 1.23, -2.71);
+        for step in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let snap = SnapSettings {
+                enabled: true,
+                translate: step,
+                rotate_deg: step,
+                scale: step,
+            };
+            assert_eq!(snap.snap_translate(v), v, "translate step {step}");
+            assert_eq!(snap.snap_scale(v), v, "scale step {step}");
+            assert_eq!(snap.snap_angle(0.38), 0.38, "rotate step {step}");
+        }
+    }
+
+    /// A denormal step (e.g. `1e-45`) is finite and positive but overflows
+    /// `v / step` to infinity, so it must skip the channel rather than emit
+    /// an infinite preview (E4 review).
+    #[test]
+    fn denormal_step_skips_its_channel() {
+        let tiny = f32::from_bits(1); // smallest positive denormal
+        let snap = SnapSettings {
+            enabled: true,
+            translate: tiny,
+            rotate_deg: tiny,
+            scale: tiny,
         };
         let v = Vec3::new(0.37, 1.23, -2.71);
         assert_eq!(snap.snap_translate(v), v);

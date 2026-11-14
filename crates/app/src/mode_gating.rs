@@ -16,12 +16,14 @@
 //! so freezing the fixed plan (including transform propagation) does not
 //! stale the editor's visuals.
 //!
-//! Gating skips systems; it does not stop the clock. `Engine::run_frame`
-//! advances `Time` and `FixedTime` every tick regardless of mode, so in
-//! `Edit`/`Paused` the fixed accumulator still drains its steps (in vain —
-//! the gated systems skip) and `Time::elapsed` keeps growing. Gameplay that
-//! reads `elapsed` therefore sees a jump at the Edit→Play boundary; this is
-//! expected, not a freeze of the clock itself.
+//! Gating skips systems, and because the fixed plan is gated wholesale it
+//! also freezes the simulation clock: `Engine::run_frame` reads the fixed
+//! schedule condition at the frame boundary and, when it is closed, skips
+//! `FixedTime::begin_frame`/`start_step`, so `tick`/`elapsed`/accumulator stay
+//! put in `Edit`/`Paused` and there is no catch-up burst when `Play` resumes
+//! (a gated replay `run_fixed_step` is likewise a no-op). Frame `Time` is the
+//! render clock and still advances every tick regardless of mode; gameplay
+//! that reads simulation time should read `FixedTime`, not `Time`.
 
 use std::sync::Arc;
 

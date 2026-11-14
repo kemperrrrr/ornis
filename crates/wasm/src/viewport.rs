@@ -52,6 +52,18 @@ pub(crate) fn gizmo_space() -> GizmoSpace {
     GIZMO_SPACE.with(Cell::get)
 }
 
+/// Gizmo mode for handle *visibility*: `Off` in Play (chrome off), so every
+/// handle collapses; otherwise the active tool. The drag step still reads
+/// [`gizmo_mode`] — this only governs what the replica draws, so a Play
+/// session never shows authoring handles over the simulating scene.
+pub(crate) fn visible_gizmo_mode() -> GizmoMode {
+    if crate::mode::editor_mode().chrome_runs() {
+        gizmo_mode()
+    } else {
+        GizmoMode::Off
+    }
+}
+
 /// Applies a queued toolbar request: updates the active mode/space and
 /// repositions/hides the replica handles. Returns whether a request was
 /// applied.
@@ -62,7 +74,7 @@ pub(crate) fn apply_pending_gizmo(engine: &mut Engine) -> bool {
     GIZMO_MODE.with(|cell| cell.set(mode));
     GIZMO_SPACE.with(|cell| cell.set(space));
     if let Some(store) = engine.world_mut().store_mut() {
-        apply_gizmo_visibility(store, mode, space);
+        apply_gizmo_visibility(store, visible_gizmo_mode(), space);
     }
     true
 }
@@ -611,6 +623,63 @@ mod tests {
         GIZMO_MODE.with(|cell| cell.set(GizmoMode::Move));
         GIZMO_SPACE.with(|cell| cell.set(GizmoSpace::World));
         assert!(!apply_pending_gizmo(&mut engine));
+    }
+
+    /// In Play the replica collapses every gizmo handle (chrome off): the
+    /// visible mode is `Off` regardless of the active tool, so a simulating
+    /// scene never shows authoring handles (E4 review).
+    #[test]
+    fn play_collapses_every_gizmo_handle() {
+        use ornis_assets::scene::TransformDesc;
+        use ornis_editor::{EditorOnly, GizmoAxis, GizmoHandle, set_selection};
+
+        let mut engine = Engine::new();
+        ornis_editor::install_editor(&mut engine);
+        let store = engine.world_mut().store_mut().expect("store");
+        let scene = store.create_entity();
+        store.insert(scene, TransformDesc::from_translation(glam::Vec3::ONE));
+        let move_x = store.create_entity();
+        store.insert(
+            move_x,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+        );
+        store.insert(move_x, EditorOnly);
+        set_selection(store, Some(scene));
+        let handle_scale = |engine: &Engine| {
+            engine
+                .world()
+                .store()
+                .expect("store")
+                .read_lane::<TransformDesc>()
+                .expect("lane")
+                .get(move_x)
+                .expect("handle")
+                .scale
+        };
+
+        // Edit shows the active tool's handle.
+        crate::mode::set_editor_mode("edit");
+        GIZMO_MODE.with(|cell| cell.set(GizmoMode::Move));
+        assert_eq!(visible_gizmo_mode(), GizmoMode::Move);
+        PENDING_GIZMO.with(|cell| cell.set(Some((GizmoMode::Move, GizmoSpace::World))));
+        assert!(apply_pending_gizmo(&mut engine));
+        assert!(handle_scale(&engine).x > 0.0);
+
+        // Play collapses it: the visible mode is Off and the handle hides.
+        crate::mode::set_editor_mode("play");
+        assert_eq!(visible_gizmo_mode(), GizmoMode::Off);
+        PENDING_GIZMO.with(|cell| cell.set(Some((GizmoMode::Move, GizmoSpace::World))));
+        assert!(apply_pending_gizmo(&mut engine));
+        assert_eq!(handle_scale(&engine), glam::Vec3::ZERO);
+
+        // Restore the defaults for the other tests on this thread.
+        crate::mode::set_editor_mode("edit");
+        GIZMO_MODE.with(|cell| cell.set(GizmoMode::Move));
+        GIZMO_SPACE.with(|cell| cell.set(GizmoSpace::World));
     }
 
     #[test]

@@ -69,4 +69,22 @@ mod tests {
         // Restore the default for the other tests on this thread.
         set_snap(false, 0.5, 15.0, 0.25);
     }
+
+    /// A non-finite step relayed from the browser (NaN/inf, or a denormal
+    /// that overflows division) reaches `SnapSettings` verbatim and leaves
+    /// every channel unquantized rather than poisoning the preview (E4
+    /// review).
+    #[test]
+    fn non_finite_steps_relay_through_and_disable_their_channel() {
+        let v = glam::Vec3::new(0.37, 1.23, -2.71);
+        for step in [f32::NAN, f32::INFINITY, f32::from_bits(1)] {
+            set_snap(true, step, step, step);
+            let snap = snap_settings();
+            assert_eq!(snap.snap_translate(v), v, "translate step {step}");
+            assert_eq!(snap.snap_scale(v), v, "scale step {step}");
+            assert_eq!(snap.snap_angle(0.38), 0.38, "rotate step {step}");
+        }
+        // Restore the default for the other tests on this thread.
+        set_snap(false, 0.5, 15.0, 0.25);
+    }
 }

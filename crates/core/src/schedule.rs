@@ -944,6 +944,27 @@ impl Schedule {
         Ok(self)
     }
 
+    /// Removes the run condition from system `name`, restoring unconditional
+    /// execution. Unlike replacing it with `|_| true`, this returns the slot
+    /// to `None`, so `Schedule::run_system` pays no predicate call at all.
+    ///
+    /// # Errors
+    /// [`OrderError::UnknownNode`] when no system is registered under `name`
+    /// — same fail-fast contract as [`Self::set_run_condition`].
+    pub fn clear_run_condition(
+        &mut self,
+        name: impl Into<SystemName>,
+    ) -> Result<&mut Self, OrderError> {
+        let name = name.into();
+        let index =
+            self.try_system_index(name.as_str())
+                .ok_or_else(|| OrderError::UnknownNode {
+                    name: name.as_str().to_owned(),
+                })?;
+        self.conditions[index] = None;
+        Ok(self)
+    }
+
     /// Gates the whole schedule behind `condition`: when it returns `false`,
     /// [`Schedule::run`] skips every system (see [`RunCondition`]).
     ///
@@ -951,9 +972,33 @@ impl Schedule {
     /// runs only in `Play` (PLAN §i, E4) — this is more robust than gating
     /// each member: systems added later inherit the gate automatically.
     /// Per-system conditions still apply on frames where this gate passes.
+    ///
+    /// When this gates the fixed ([`crate::Stage::Gameplay`]) plan, the engine
+    /// also freezes the simulation clock on closed frames — see
+    /// [`crate::Engine::run_frame`] for the `FixedTime` contract.
     pub fn set_schedule_condition(&mut self, condition: RunCondition) -> &mut Self {
         self.schedule_condition = Some(condition);
         self
+    }
+
+    /// Removes the whole-schedule condition, restoring unconditional
+    /// execution. Unlike replacing it with `|_| true`, this returns the gate
+    /// to `None`, so [`Schedule::run`] pays no predicate call at all.
+    pub fn clear_schedule_condition(&mut self) -> &mut Self {
+        self.schedule_condition = None;
+        self
+    }
+
+    /// Whether the whole-schedule condition currently permits running:
+    /// `true` when no condition is set, otherwise the predicate's result.
+    /// Reads resources exactly as [`Schedule::run`] does, so the engine can
+    /// query the gate once at the frame boundary (e.g. to freeze the fixed
+    /// clock) without running the plan.
+    #[must_use]
+    pub fn schedule_permits(&self, resources: &Resources) -> bool {
+        self.schedule_condition
+            .as_ref()
+            .is_none_or(|condition| condition(resources))
     }
 
     /// Parallel (default) or strictly sequential (bit-identical
@@ -1051,9 +1096,7 @@ impl Schedule {
 
     /// Executes the schedule over the world.
     pub fn run(&self, resources: &Resources) {
-        if let Some(condition) = &self.schedule_condition
-            && !condition(resources)
-        {
+        if !self.schedule_permits(resources) {
             return;
         }
         // Sequential mode does not compute the plan at all (as before).
@@ -1388,6 +1431,49 @@ mod tests {
             *res.get::<Log>().unwrap().lock().unwrap(),
             vec!["a", "b", "a"]
         );
+    }
+
+    /// Clearing a condition returns the slot to `None` (unconditional, no
+    /// predicate call), and `schedule_permits` mirrors the gate without
+    /// running the plan. Clearing an unknown name fails fast.
+    #[test]
+    fn clear_conditions_restore_unconditional_execution() {
+        let mut res = Resources::new();
+        res.insert(Log::default());
+        let mut sched = Schedule::new();
+        sched.set_parallel(false);
+        sched.add_system(Bump {
+            name: "a",
+            access: SystemAccess::new().reads::<Log>(),
+            target: "a",
+        });
+        sched.set_schedule_condition(Arc::new(|_| false));
+        sched
+            .set_run_condition("a", Arc::new(|_| false))
+            .expect("system exists");
+
+        // Both gates closed: nothing runs, and the query agrees.
+        assert!(!sched.schedule_permits(&res));
+        sched.run(&res);
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        // Clearing the schedule gate opens the plan; the per-system gate
+        // still holds until it is cleared too.
+        sched.clear_schedule_condition();
+        assert!(sched.schedule_permits(&res));
+        sched.run(&res);
+        assert!(res.get::<Log>().unwrap().lock().unwrap().is_empty());
+
+        sched.clear_run_condition("a").expect("system exists");
+        sched.run(&res);
+        assert_eq!(*res.get::<Log>().unwrap().lock().unwrap(), vec!["a"]);
+
+        // A cleared schedule gate stays open with no condition installed.
+        assert!(sched.schedule_permits(&res));
+        assert!(matches!(
+            sched.clear_run_condition("ghost"),
+            Err(OrderError::UnknownNode { .. })
+        ));
     }
 
     /// Strong Confluence: a parallel run produces the same result as a

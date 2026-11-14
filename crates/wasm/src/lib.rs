@@ -25,9 +25,9 @@ use ornis_editor::EditorMarks;
 #[cfg(test)]
 use ornis_editor::GizmoAxis;
 use ornis_editor::{
-    GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoRuntime, GizmoSpace, GizmoTarget, Hovered,
-    PlaneCamera, PressEdge, Selected, ViewportCamera, apply_gizmo_visibility, install_editor,
-    install_plane_camera, pick_gizmo, pick_ray, read_plane_camera, set_selection,
+    EditorMode, GizmoDrag, GizmoGrab, GizmoHandle, GizmoMode, GizmoRuntime, GizmoSpace,
+    GizmoTarget, Hovered, PlaneCamera, PressEdge, Selected, ViewportCamera, apply_gizmo_visibility,
+    install_editor, install_plane_camera, pick_gizmo, pick_ray, read_plane_camera, set_selection,
 };
 use ornis_render::{
     AntiAliasMode, CameraView, FrameUpload, OrbitCamera, PointerDpr, RenderContext, RenderFrame3D,
@@ -53,7 +53,7 @@ use scene_api::{LiveEntityMeta, LiveScene};
 use snap::snap_settings;
 use viewport::{
     PENDING_MODE, VIEWPORT_MODE, apply_mode_request, apply_pending_gizmo, gizmo_mode, gizmo_space,
-    refresh_viewport_state_json, sync_picking_camera, take_pending_undo,
+    refresh_viewport_state_json, sync_picking_camera, take_pending_undo, visible_gizmo_mode,
 };
 
 /// Shared handle to the requestAnimationFrame closure (self-rescheduling
@@ -1138,6 +1138,10 @@ struct FrameState<'a> {
     last_outline_flags: Vec<u32>,
     /// Gizmo tool state, drag and one-step undo.
     gizmo: GizmoRuntime,
+    /// Authoritative mode observed on the previous frame; the gizmo undo is
+    /// reset when the mode returns to Edit (Stop) so a Paused drag cannot
+    /// write a simulated pose into the restored Edit world.
+    last_mode: EditorMode,
     /// Pointer press edge (only a fresh press may start a gizmo drag).
     press: PressEdge,
     input: Rc<RefCell<InputState>>,
@@ -1203,7 +1207,7 @@ impl<'a> FrameState<'a> {
         self.gizmo.cancel();
         self.set_gizmo_grab(false);
         if let Some(store) = self.render_world.engine_mut().world_mut().store_mut() {
-            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
         }
         self.render_world.frame(0.0);
         let gpu = build_gpu_scene(&self.device, &self.render_world, &live.scene);
@@ -1355,6 +1359,11 @@ impl<'a> FrameState<'a> {
         if !take_pending_undo() {
             return;
         }
+        // Undo is editor chrome: in Play the server simulates and Stop
+        // discards its mutations, so a queued undo must not write a pose.
+        if !editor_mode().chrome_runs() {
+            return;
+        }
         // An undo during an active drag would restore the transform the
         // drag started from — but the drag continues and commits
         // afterwards, so the undo would be silently overwritten. Ignore it.
@@ -1385,9 +1394,36 @@ impl<'a> FrameState<'a> {
             if let Some(mut lane) = store.write_lane::<TransformDesc>() {
                 lane.insert(selected, transform);
             }
-            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
             self.upload_replica_instances();
         }
+    }
+
+    /// Reconciles the gizmo with an authoritative mode change. Returning to
+    /// Edit (Stop) resets the drag/undo state: a drag committed in Paused
+    /// addresses the simulated world, so its one-step undo must not survive
+    /// into the Edit world the snapshot restores (an in-flight preview is
+    /// rolled back first). Any mode change also re-lays the handles in the
+    /// same frame — Play collapses them (chrome off), Edit/Paused shows the
+    /// active tool again.
+    // qual:allow(test_quality, untested) reason: "browser mode-edge wiring; the reset invariant is host-tested on GizmoRuntime"
+    fn sync_gizmo_mode(&mut self) {
+        let mode = editor_mode();
+        if mode == self.last_mode {
+            return;
+        }
+        self.last_mode = mode;
+        if mode.is_edit() {
+            if self.gizmo.is_dragging() {
+                self.rollback_gizmo_preview();
+            }
+            self.gizmo.reset();
+            self.set_gizmo_grab(false);
+        }
+        if let Some(store) = self.render_world.engine_mut().world_mut().store_mut() {
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
+        }
+        self.upload_replica_instances();
     }
 
     /// Turns press/move/release of the pointer into a gizmo drag preview and
@@ -1506,7 +1542,7 @@ impl<'a> FrameState<'a> {
         if let Some(mut lane) = store.write_lane::<TransformDesc>() {
             lane.insert(selected, transform);
         }
-        apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
         self.upload_replica_instances();
     }
 
@@ -1524,7 +1560,7 @@ impl<'a> FrameState<'a> {
             if let Some(mut lane) = store.write_lane::<TransformDesc>() {
                 lane.insert(selected, transform);
             }
-            apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+            apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
         }
     }
 
@@ -1766,7 +1802,7 @@ fn init_editor_replica(
     LAST_SELECTED.with(|cell| cell.borrow_mut().mirror(selected));
     // Show only the active tool's handle set from the first frame.
     if let Some(store) = render_world.engine_mut().world_mut().store_mut() {
-        apply_gizmo_visibility(store, gizmo_mode(), gizmo_space());
+        apply_gizmo_visibility(store, visible_gizmo_mode(), gizmo_space());
     }
     render_world.frame(0.0);
 }
@@ -1890,6 +1926,7 @@ fn spawn_render_loop(
         instance_entities: gpu_scene.extracted.instance_entities.clone(),
         last_outline_flags: Vec::new(),
         gizmo: GizmoRuntime::default(),
+        last_mode: EditorMode::Edit,
         press: PressEdge::default(),
         input,
         poster: InputPoster::new(),
@@ -1924,6 +1961,7 @@ fn spawn_render_loop(
         // stays a browser-only console edge.
         let size = (frame.config.width, frame.config.height);
         sync_picking_camera(frame.render_world.engine_mut(), size);
+        frame.sync_gizmo_mode();
         frame.apply_gizmo_requests();
         frame.update_gizmo();
         frame.sync_selection();

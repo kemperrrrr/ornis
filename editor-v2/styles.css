@@ -79,7 +79,7 @@ button { font: inherit; color: inherit; }
 }
 .transport button svg { width: 14px; height: 14px; }
 .transport button:hover { background: #45454b; }
-.transport button.paused, .transport button.paused:hover { fill: var(--accent); } /* only the icon turns blue */
+.transport button.active, .transport button.active:hover { fill: var(--accent); }
 .transport button:disabled { opacity: 0.4; cursor: default; }
 .transport button:disabled:hover { background: var(--panel-2); }
 .transport button.playing { fill: var(--accent); }
@@ -88,8 +88,8 @@ button { font: inherit; color: inherit; }
   font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
   border: 1px solid var(--line); color: var(--muted); background: var(--panel-2);
 }
-.mode-indicator[data-mode="play"] { color: #7ee787; border-color: #2ea04366; }
-.mode-indicator[data-mode="paused"] { color: #f0c674; border-color: #d2992266; }
+.mode-indicator[data-mode="play"] { color: var(--accent); border-color: var(--accent); }
+.mode-indicator[data-mode="paused"] { color: var(--good); border-color: var(--good); }
 /* Layout: side panels span full height; center column stacks transport/viewport/browser */
 .layout {
   flex: 1; min-height: 0;
