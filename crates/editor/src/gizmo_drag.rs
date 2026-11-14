@@ -21,7 +21,8 @@ const RADIAL_EPS: f32 = 1e-8;
 const ROTATION_EPS: f32 = 1e-7;
 /// Scale factors at or below this are ignored (press too close to centre).
 const SCALE_FACTOR_EPS: f32 = 1e-4;
-/// Floor applied to a dragged component scale (never zero or negative).
+/// Floor applied to the magnitude of a dragged component scale (never zero;
+/// a mirrored component keeps its sign).
 const MIN_SCALE: f32 = 1e-3;
 /// Ray/plane and ray/axis parallel tolerance.
 const PARALLEL_EPS: f32 = 1e-6;
@@ -97,11 +98,11 @@ impl GizmoDrag {
         Some(transform)
     }
 
-    /// Quantizes only the active drag channel (E4): Move snaps the offset
-    /// swept along the handle axis (or the two in-plane axes), Scale snaps
-    /// the dragged component, Rotate snaps the swept angle around the handle
-    /// axis. Every other channel is returned bit-exact; snap off returns the
-    /// preview unchanged.
+    /// Quantizes only the active drag channel (E4): Move snaps the dragged
+    /// coordinate to the absolute world grid along the handle axis (or the
+    /// two in-plane axes), Scale snaps the dragged component, Rotate snaps
+    /// the swept angle around the handle axis. Every other channel is
+    /// returned bit-exact; snap off returns the preview unchanged.
     // qual:allow(iosp) reason: "one dispatch over the handle axis/mode mirroring update; the channel leaves live in snap_axis_move/snap_plane_move/snap_rotate"
     #[must_use]
     pub fn apply_snap(&self, mut transform: TransformDesc, snap: &SnapSettings) -> TransformDesc {
@@ -129,24 +130,28 @@ impl GizmoDrag {
         transform
     }
 
-    /// Snaps the offset swept along the handle axis since the press, keeping
-    /// the perpendicular components at their start values. `axis` is already
-    /// world-space in both spaces (`R·e` for Local), so the offset is
-    /// measured in the handle's own frame and a Local drag stays on its axis.
+    /// Snaps the dragged coordinate to the absolute world grid along the
+    /// handle axis, keeping the perpendicular components at their start
+    /// values. `axis` is already world-space in both spaces (`R·e` for
+    /// Local), so the grid is measured in the handle's own frame and a Local
+    /// drag stays on its axis. The grid is anchored at the world origin, not
+    /// at the press point: an object at `x = 0.1` dragged by `1.0` with step
+    /// `0.5` lands on `1.0`, not `1.1`.
     fn snap_axis_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
-        let offset = (translation - self.start.translation).dot(self.axis);
-        self.start.translation + self.axis * snap.snap_offset(offset)
+        let start = self.start.translation;
+        let snapped = snap.snap_offset(translation.dot(self.axis));
+        start + self.axis * (snapped - start.dot(self.axis))
     }
 
-    /// Snaps both in-plane offsets of a plane handle since the press,
-    /// independently and in the handle's own (World/Local) basis, keeping the
-    /// out-of-plane component at its start value.
+    /// Snaps both in-plane coordinates of a plane handle to the absolute
+    /// world grid, independently and in the handle's own (World/Local)
+    /// basis, keeping the out-of-plane component at its start value.
     fn snap_plane_move(&self, translation: Vec3, snap: &SnapSettings) -> Vec3 {
         let (a, b) = plane_directions(&self.start, self.handle);
-        let delta = translation - self.start.translation;
-        self.start.translation
-            + a * snap.snap_offset(delta.dot(a))
-            + b * snap.snap_offset(delta.dot(b))
+        let start = self.start.translation;
+        start
+            + a * (snap.snap_offset(translation.dot(a)) - start.dot(a))
+            + b * (snap.snap_offset(translation.dot(b)) - start.dot(b))
     }
 
     /// Snaps the swept rotation angle around the handle axis relative to the
@@ -217,7 +222,8 @@ impl GizmoDrag {
             return Some(());
         }
         let index = axis_index(self.handle.axis);
-        transform.scale[index] = (self.start.scale[index] * factor).max(MIN_SCALE);
+        let scaled = self.start.scale[index] * factor;
+        transform.scale[index] = scaled.abs().max(MIN_SCALE).copysign(scaled);
         Some(())
     }
 }
@@ -576,6 +582,48 @@ mod tests {
             (scaled.scale - Vec3::new(2.0, 1.0, 1.0)).length() < TEST_EPS,
             "world scale multiplies the local component, got {:?}",
             scaled.scale
+        );
+    }
+
+    /// A mirrored axis keeps its sign under a Scale drag (E4 review): the
+    /// floor applies to the magnitude, so dragging X of `scale.x = -1`
+    /// towards the centre lands on `-MIN_SCALE` instead of collapsing to
+    /// `+MIN_SCALE`, and dragging it out grows the mirror.
+    #[test]
+    fn scale_drag_preserves_the_sign_of_a_mirrored_axis() {
+        let mirrored = TransformDesc {
+            scale: Vec3::new(-1.0, 1.0, 1.0),
+            ..identity()
+        };
+        let handle = GizmoHandle {
+            mode: GizmoMode::Scale,
+            space: GizmoSpace::World,
+            axis: GizmoAxis::X,
+        };
+        let press = ray_from(Vec3::new(1.0, 0.0, 5.0), Vec3::new(1.0, 0.0, 0.0));
+
+        let shrunk = drag_preview(
+            &mirrored,
+            handle,
+            press,
+            ray_from(Vec3::new(0.0005, 0.0, 5.0), Vec3::new(0.0005, 0.0, 0.0)),
+        );
+        assert!(
+            (shrunk.scale - Vec3::new(-MIN_SCALE, 1.0, 1.0)).length() < TEST_EPS,
+            "the floor must keep the mirror, got {:?}",
+            shrunk.scale
+        );
+
+        let grown = drag_preview(
+            &mirrored,
+            handle,
+            press,
+            ray_from(Vec3::new(2.0, 0.0, 5.0), Vec3::new(2.0, 0.0, 0.0)),
+        );
+        assert!(
+            (grown.scale - Vec3::new(-2.0, 1.0, 1.0)).length() < TEST_EPS,
+            "dragging out must grow the mirror, got {:?}",
+            grown.scale
         );
     }
 }

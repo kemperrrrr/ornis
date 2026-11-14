@@ -8,10 +8,11 @@
 //! or so tiny that dividing by it overflows — leaves that channel unquantized
 //! even when snap is on.
 //!
-//! Every entry point quantizes ONE scalar: the offset along the dragged axis
-//! (or one in-plane axis) for Move, the dragged scale component for Scale,
-//! the swept angle for Rotate. The caller keeps every other component
-//! bit-exact, so a single-axis drag never moves the axes it did not grab.
+//! Every entry point quantizes ONE scalar: the world coordinate along the
+//! dragged axis (or one in-plane axis) for Move, the dragged scale component
+//! for Scale, the swept angle for Rotate. The caller keeps every other
+//! component bit-exact, so a single-axis drag never moves the axes it did
+//! not grab.
 
 /// Floor for a snapped scale component's magnitude (never zero), matching
 /// the drag math's `MIN_SCALE`.
@@ -44,15 +45,16 @@ impl Default for SnapSettings {
 }
 
 impl SnapSettings {
-    /// Rounds a translation offset (world units) measured along the dragged
-    /// axis, or along one in-plane axis of a plane handle. Snap off or an
-    /// unusable step returns `offset` unchanged.
+    /// Rounds a translation coordinate (world units) measured along the
+    /// dragged axis, or along one in-plane axis of a plane handle, to the
+    /// absolute grid anchored at the world origin. Snap off or an unusable
+    /// step returns `coordinate` unchanged.
     #[must_use]
-    pub fn snap_offset(&self, offset: f32) -> f32 {
+    pub fn snap_offset(&self, coordinate: f32) -> f32 {
         if !self.enabled || !usable_step(self.translate) {
-            return offset;
+            return coordinate;
         }
-        (offset / self.translate).round() * self.translate
+        (coordinate / self.translate).round() * self.translate
     }
 
     /// Rounds one dragged scale component to the scale step and floors its

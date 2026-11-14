@@ -846,9 +846,11 @@ impl Engine<Running> {
     /// burst. This keeps a gated replay tick ([`Engine::run_fixed_step`])
     /// identical to a gated live frame, preserving the snapshot contract
     /// (`docs/networking-design.md`). Frame [`Time`] still advances: it is the
-    /// render clock, not simulation time. The gate is read once at the frame
-    /// boundary, so the gated resource must be frame-stable (see
-    /// [`crate::RunCondition`]); hosts that install no condition are unaffected.
+    /// render clock, not simulation time. The plan's conditions are evaluated
+    /// once at the frame boundary and reused by every fixed tick of that
+    /// frame ([`Schedule::evaluate_gates`]), so each predicate is called once
+    /// per frame and every tick sees the same decision; hosts that install no
+    /// condition are unaffected.
     ///
     /// Two structural boundaries, matching the two schedules:
     /// [`FixedStructuralQueue`](crate::mutation::FixedStructuralQueue) is
@@ -898,11 +900,12 @@ impl Engine<Running> {
             let _ = self.world.insert(FixedTime::default());
         }
         // A gated fixed plan freezes the simulation clock. The gate is read
-        // once here at the frame boundary — the gated resource is frame-stable
-        // (see [`RunCondition`]) — and when it is closed both `begin_frame` and
-        // `start_step` are skipped, so no tick/elapsed is consumed and there is
-        // no catch-up burst when the plan reopens.
-        let fixed_steps = if self.fixed_schedule.schedule_permits(self.world.resources()) {
+        // once here at the frame boundary and reused by every fixed tick, so
+        // the predicate runs once per frame; when it is closed both
+        // `begin_frame` and `start_step` are skipped, so no tick/elapsed is
+        // consumed and there is no catch-up burst when the plan reopens.
+        let fixed_gates = self.fixed_schedule.evaluate_gates(self.world.resources());
+        let fixed_steps = if fixed_gates.permits() {
             self.world
                 .resources_mut()
                 .get_mut::<FixedTime>()
@@ -921,7 +924,8 @@ impl Engine<Running> {
             if let Some(fixed) = self.world.resources_mut().get_mut::<FixedTime>() {
                 fixed.start_step();
             }
-            self.world.run(&self.fixed_schedule);
+            self.world
+                .run_with_gates(&self.fixed_schedule, &fixed_gates);
             // Fixed boundary: tick k+1 must see tick k's structural ops, so
             // the outcome cannot depend on how the frame sliced its ticks.
             crate::mutation::apply_fixed_structural_queue(self.world.resources_mut());
@@ -968,11 +972,12 @@ impl Engine<Running> {
         // advance, so a gated replay tick matches a gated live frame (the
         // snapshot contract from `docs/networking-design.md`). No systems run
         // and nothing is queued, so the structural apply is skipped too.
-        if self.fixed_schedule.schedule_permits(self.world.resources()) {
+        let gates = self.fixed_schedule.evaluate_gates(self.world.resources());
+        if gates.permits() {
             if let Some(fixed) = self.world.resources_mut().get_mut::<FixedTime>() {
                 fixed.start_replay_step();
             }
-            self.world.run(&self.fixed_schedule);
+            self.world.run_with_gates(&self.fixed_schedule, &gates);
             crate::mutation::apply_fixed_structural_queue(self.world.resources_mut());
         }
         let tick = self
@@ -989,6 +994,7 @@ mod tests {
     use super::*;
     use crate::mutation::StructuralQueue as _;
     use crate::{InputState, KeyCode, Resources, SmartStore, System, SystemAccess};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
     struct CaptureTime(Arc<Mutex<Vec<Time>>>);
@@ -1348,6 +1354,76 @@ mod tests {
             "gated clock must match live vs replay"
         );
         assert_eq!(live_time.tick(), 0);
+    }
+
+    /// Run conditions are evaluated once per frame (E4 review): a frame that
+    /// slices into several fixed ticks calls the whole-plan predicate and
+    /// each per-system predicate exactly once, not once per tick, and a
+    /// closed plan never reaches the per-system predicates at all.
+    #[test]
+    fn run_conditions_are_evaluated_once_per_frame() {
+        let plan_calls = Arc::new(AtomicU64::new(0));
+        let system_calls = Arc::new(AtomicU64::new(0));
+        let mut engine = Engine::new();
+        let _ = engine.world_mut().insert(true);
+        engine
+            .fixed_schedule_mut()
+            .add_system(CaptureFixedTime(Arc::new(Mutex::new(Vec::new()))));
+        let plan = plan_calls.clone();
+        engine
+            .fixed_schedule_mut()
+            .set_schedule_condition(Some(Arc::new(move |r| {
+                plan.fetch_add(1, Ordering::Relaxed);
+                *r.get::<bool>().unwrap()
+            })));
+        let per_system = system_calls.clone();
+        engine
+            .fixed_schedule_mut()
+            .set_run_condition(
+                "capture_fixed_time",
+                Some(Arc::new(move |r| {
+                    per_system.fetch_add(1, Ordering::Relaxed);
+                    *r.get::<bool>().unwrap()
+                })),
+            )
+            .expect("registered system name");
+
+        let delta = FixedTime::default().delta_seconds() * 3.0;
+        engine.run_frame(delta);
+        assert_eq!(
+            engine
+                .world()
+                .resources()
+                .get::<FixedTime>()
+                .expect("fixed")
+                .steps_this_frame(),
+            3,
+            "the frame must slice into three ticks for this to prove anything"
+        );
+        assert_eq!(plan_calls.load(Ordering::Relaxed), 1, "whole-plan gate");
+        assert_eq!(system_calls.load(Ordering::Relaxed), 1, "per-system gate");
+
+        *engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<bool>()
+            .unwrap() = false;
+        engine.run_frame(delta);
+        assert_eq!(plan_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            system_calls.load(Ordering::Relaxed),
+            1,
+            "a closed plan must not ask the per-system predicates"
+        );
+
+        *engine
+            .world_mut()
+            .resources_mut()
+            .get_mut::<bool>()
+            .unwrap() = true;
+        engine.run_fixed_step();
+        assert_eq!(plan_calls.load(Ordering::Relaxed), 3, "replay gate");
+        assert_eq!(system_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

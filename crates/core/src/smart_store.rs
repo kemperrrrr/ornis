@@ -316,6 +316,9 @@ impl SmartStore {
     /// `live` issued, before `self` (an older snapshot) replaces it — see
     /// [`EntityAllocator::advance_generations_past`]. Entities alive here
     /// keep their handles; only ids this store may still hand out advance.
+    ///
+    /// Generations wrap at `u32::MAX`, so the guarantee holds until a single
+    /// slot has been recycled 2^32 times.
     pub fn advance_generations_past(&self, live: &Self) {
         let live_allocator = read_lock(&live.allocator).clone();
         write_lock(&self.allocator).advance_generations_past(&live_allocator);

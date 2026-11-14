@@ -580,21 +580,50 @@ fn assert_writer_matches_role(role: PlanRole, system: &'static str, access: &Sys
 /// host installs one predicate over a group of systems (e.g. "simulation
 /// runs only in `Play`") without the systems themselves knowing about the
 /// mode. Evaluated before the access frame, so a condition may read any
-/// resource; it must be cheap and side-effect-free (it runs every frame,
-/// possibly on a worker thread).
+/// resource; it must be cheap and side-effect-free.
 ///
-/// # Frame-stability invariant
+/// # Evaluated once per frame
 ///
-/// Each system evaluates its own condition independently in
-/// `Schedule::run_system`, outside the access frame — there is no single
-/// per-frame snapshot. In parallel mode the systems of one frame run on
-/// different workers, so if a system of the same schedule *writes* the
-/// resource a condition reads, sibling systems may observe different values
-/// within the frame: a race and non-determinism. The gated resource must
-/// therefore stay constant for the whole frame and change only between
-/// ticks. The editor's `EditorMode` satisfies this: the session flips it
-/// only on the play/pause/stop commands, never from a scheduled system.
+/// [`Schedule::evaluate_gates`] evaluates every condition of a plan once
+/// and [`Schedule::run_with_gates`] reuses the result, so a frame runs each
+/// predicate exactly once no matter how many fixed ticks it slices into,
+/// and every system of that frame sees the same decision. A closed
+/// whole-plan gate short-circuits: the per-system predicates are not called
+/// at all. [`Schedule::run`] is the single-shot form — it evaluates and
+/// executes in one call.
 pub type RunCondition = Arc<dyn Fn(&Resources) -> bool + Send + Sync>;
+
+/// Bits per word of the per-system gate bitset.
+const GATE_WORD_BITS: usize = u64::BITS as usize;
+
+/// One frame's run-condition decisions for a [`Schedule`], produced by
+/// [`Schedule::evaluate_gates`] and consumed by
+/// [`Schedule::run_with_gates`].
+///
+/// Holding the decisions outside the schedule is what lets the engine read
+/// the gate at the frame boundary (to freeze the fixed clock) and then run
+/// several fixed ticks against that same reading, instead of re-asking the
+/// predicate per tick.
+pub struct ScheduleGates {
+    permits: bool,
+    /// One bit per system (set = may run), or `None` when the plan installs
+    /// no per-system condition — the ungated path allocates nothing.
+    systems: Option<Vec<u64>>,
+}
+
+impl ScheduleGates {
+    /// Whether the whole-plan gate permits running this frame.
+    #[must_use]
+    pub fn permits(&self) -> bool {
+        self.permits
+    }
+
+    fn permits_system(&self, index: usize) -> bool {
+        self.systems.as_ref().is_none_or(|bits| {
+            bits[index / GATE_WORD_BITS] & (1u64 << (index % GATE_WORD_BITS)) != 0
+        })
+    }
+}
 
 /// System schedule: registration order is the conflict tie-break.
 pub struct Schedule {
@@ -602,8 +631,9 @@ pub struct Schedule {
     accesses: Vec<SystemAccess>,
     /// Optional per-system run predicates (registration-indexed, parallel to
     /// `systems`). `None` runs unconditionally; `Some` skips the system when
-    /// the predicate returns `false`. Evaluated in [`Schedule::run_system`]
-    /// before the access frame, so a condition reads resources unrestricted.
+    /// the predicate returns `false`. Evaluated once per frame by
+    /// [`Schedule::evaluate_gates`], before any access frame, so a condition
+    /// reads resources unrestricted.
     conditions: Vec<Option<RunCondition>>,
     /// Optional whole-schedule gate: when `Some` and it returns `false`,
     /// [`Schedule::run`] skips every system. Used to gate a plan that is
@@ -1069,9 +1099,52 @@ impl Schedule {
             .get_or_compute(|| bitset_level_plan(&reads, &writes, &self.ordering))
     }
 
+    /// Evaluates every run condition of this plan once for the coming frame.
+    ///
+    /// The engine calls this at the frame boundary and passes the result to
+    /// [`Schedule::run_with_gates`] for each fixed tick, so a predicate is
+    /// called once per frame rather than once per tick, and all systems of
+    /// the frame share one decision. A closed whole-plan gate short-circuits
+    /// before the per-system predicates. A plan with no per-system condition
+    /// allocates nothing.
+    #[must_use]
+    pub fn evaluate_gates(&self, resources: &Resources) -> ScheduleGates {
+        if !self.schedule_permits(resources) {
+            return ScheduleGates {
+                permits: false,
+                systems: None,
+            };
+        }
+        let systems = if self.conditions.iter().any(Option::is_some) {
+            let mut bits = vec![0u64; self.conditions.len().div_ceil(GATE_WORD_BITS)];
+            for (index, condition) in self.conditions.iter().enumerate() {
+                if condition
+                    .as_ref()
+                    .is_none_or(|condition| condition(resources))
+                {
+                    bits[index / GATE_WORD_BITS] |= 1u64 << (index % GATE_WORD_BITS);
+                }
+            }
+            Some(bits)
+        } else {
+            None
+        };
+        ScheduleGates {
+            permits: true,
+            systems,
+        }
+    }
+
     /// Executes the schedule over the world.
     pub fn run(&self, resources: &Resources) {
-        if !self.schedule_permits(resources) {
+        self.run_with_gates(resources, &self.evaluate_gates(resources));
+    }
+
+    /// Executes the schedule with the conditions already evaluated by
+    /// [`Schedule::evaluate_gates`], so several runs in one frame (the fixed
+    /// ticks) reuse a single reading of the gated resources.
+    pub fn run_with_gates(&self, resources: &Resources, gates: &ScheduleGates) {
+        if !gates.permits {
             return;
         }
         // Sequential mode does not compute the plan at all (as before).
@@ -1087,19 +1160,17 @@ impl Schedule {
                 self.systems.len(),
                 self.mode.is_parallel(),
                 timings,
-                |i| self.run_system(i, resources),
+                |i| self.run_system(i, resources, gates),
             );
             return;
         }
         run_levels(&levels, self.systems.len(), self.mode.is_parallel(), |i| {
-            self.run_system(i, resources);
+            self.run_system(i, resources, gates);
         });
     }
 
-    fn run_system(&self, i: usize, resources: &Resources) {
-        if let Some(condition) = &self.conditions[i]
-            && !condition(resources)
-        {
+    fn run_system(&self, i: usize, resources: &Resources, gates: &ScheduleGates) {
+        if !gates.permits_system(i) {
             return;
         }
         let system = &self.systems[i];

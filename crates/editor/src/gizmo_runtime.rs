@@ -431,12 +431,12 @@ mod tests {
         );
     }
 
-    /// A Move drag with snap quantizes the offset swept along the handle
-    /// axis — not the absolute world coordinates — and leaves the other
-    /// translation components, rotation and scale bit-exact (E4 review):
-    /// an X drag must not shift Y/Z, and the step is measured from the press.
+    /// A Move drag with snap binds the dragged coordinate to the absolute
+    /// world grid — not to the offset swept from the press — and leaves the
+    /// other translation components, rotation and scale bit-exact (E4
+    /// review): an X drag must not shift Y/Z, and 0.74 lands on 0.5.
     #[test]
-    fn move_snap_quantizes_the_axis_offset_only() {
+    fn move_snap_binds_to_the_absolute_world_grid() {
         let start = TransformDesc {
             translation: Vec3::new(0.37, 1.23, -2.71),
             rotation: UnitQuat::normalize(Quat::from_rotation_y(38.0_f32.to_radians()))
@@ -459,8 +459,8 @@ mod tests {
             },
         );
         assert!(
-            (preview.translation.x - 0.87).abs() < 1e-6,
-            "the 0.37 offset must snap to 0.5 from the press, got {:?}",
+            (preview.translation.x - 0.5).abs() < 1e-6,
+            "0.74 must land on the 0.5 grid line, not on press + 0.5, got {:?}",
             preview.translation
         );
         assert_eq!(
@@ -478,9 +478,41 @@ mod tests {
         assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
     }
 
+    /// The grid is anchored at the world origin, so the press position does
+    /// not shift it (E4 review, Editor repro): an object at `x = 0.1` dragged
+    /// one unit with step `0.5` lands on `1.0`, not on `1.1`.
+    #[test]
+    fn move_snap_ignores_the_press_position() {
+        let start = TransformDesc {
+            translation: Vec3::new(0.1, 0.0, 0.0),
+            ..TransformDesc::IDENTITY
+        };
+        let preview = snapped_preview(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+            down_ray(Vec3::new(0.1, 0.0, 5.0)),
+            down_ray(Vec3::new(1.1, 0.0, 5.0)),
+            SnapSettings {
+                enabled: true,
+                translate: 0.5,
+                ..SnapSettings::default()
+            },
+        );
+        assert!(
+            (preview.translation.x - 1.0).abs() < 1e-6,
+            "the drag must land on a multiple of the step, got {:?}",
+            preview.translation
+        );
+    }
+
     /// A Local Move drag snaps along the *rotated* handle axis and stays on
-    /// it (E4 review): rounding world coordinates would slide the object off
-    /// its own axis. Rotation and scale stay bit-exact.
+    /// it (E4 review): the coordinate measured along that axis sits on the
+    /// absolute grid, and rounding world components instead would slide the
+    /// object off its own axis. Rotation and scale stay bit-exact.
     #[test]
     fn local_move_snap_stays_on_the_rotated_axis() {
         let start = TransformDesc {
@@ -505,11 +537,12 @@ mod tests {
                 ..SnapSettings::default()
             },
         );
-        let delta = preview.translation - start.translation;
+        let along = preview.translation.dot(axis);
         assert!(
-            (delta.length() - 0.5).abs() < 1e-5,
-            "the 0.37 offset along the local axis must snap to 0.5, got {delta:?}"
+            (along - 1.5).abs() < 1e-4,
+            "1.154 along the local axis plus a 0.37 drag must land on 1.5, got {along}"
         );
+        let delta = preview.translation - start.translation;
         assert!(
             delta.cross(axis).length() < 1e-5,
             "the drag left the local axis: {delta:?} vs {axis:?}"
@@ -521,11 +554,11 @@ mod tests {
         assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
     }
 
-    /// A plane Move drag snaps both in-plane offsets independently, in the
-    /// handle's own basis (World *and* Local), and never leaves the plane
-    /// (E4 review). Rotation and scale stay bit-exact.
+    /// A plane Move drag binds both in-plane coordinates to the absolute
+    /// grid independently, in the handle's own basis (World *and* Local), and
+    /// never leaves the plane (E4 review). Rotation and scale stay bit-exact.
     #[test]
-    fn plane_snap_quantizes_both_in_plane_offsets() {
+    fn plane_snap_binds_both_in_plane_axes_to_the_grid() {
         // A rotation around Z leaves the XY plane world-aligned but turns
         // the Local in-plane basis, so the two spaces must differ.
         let start = TransformDesc {
@@ -533,6 +566,7 @@ mod tests {
             rotation: UnitQuat::normalize(Quat::from_rotation_z(0.3)).expect("unit"),
             scale: Vec3::new(1.13, 0.87, 2.42),
         };
+        let step = 0.5;
         for space in [GizmoSpace::World, GizmoSpace::Local] {
             let handle = GizmoHandle {
                 mode: GizmoMode::Move,
@@ -548,16 +582,19 @@ mod tests {
                 down_ray(Vec3::new(swept.x, swept.y, 5.0)),
                 SnapSettings {
                     enabled: true,
-                    translate: 0.5,
+                    translate: step,
                     ..SnapSettings::default()
                 },
             );
-            let expected = start.translation + (a + b) * 0.5;
-            assert!(
-                (preview.translation - expected).length() < 1e-5,
-                "{space:?}: both in-plane offsets must snap to 0.5, got {:?}",
-                preview.translation
-            );
+            for (direction, name) in [(a, "a"), (b, "b")] {
+                let along = preview.translation.dot(direction);
+                let grid = (swept.dot(direction) / step).round() * step;
+                assert!(
+                    (along - grid).abs() < 1e-5,
+                    "{space:?}/{name}: the in-plane coordinate must sit on the \
+                     absolute grid {grid}, got {along}"
+                );
+            }
             let normal = axis_direction(&start, handle);
             assert!(
                 (preview.translation - start.translation).dot(normal).abs() < 1e-5,
@@ -611,6 +648,61 @@ mod tests {
             preview.rotation, start.rotation,
             "rotation must be bit-exact"
         );
+    }
+
+    /// Dragging the mirrored axis itself keeps the mirror (E4 review): with
+    /// snap on, Scale-X of `scale.x = -1` quantizes the magnitude and restores
+    /// the sign, both when dragged out and when dragged towards the centre.
+    #[test]
+    fn scale_snap_keeps_the_sign_of_the_dragged_mirrored_axis() {
+        let start = TransformDesc {
+            scale: Vec3::new(-1.0, 1.0, 1.0),
+            ..TransformDesc::IDENTITY
+        };
+        let handle = GizmoHandle {
+            mode: GizmoMode::Scale,
+            space: GizmoSpace::World,
+            axis: GizmoAxis::X,
+        };
+        let snap = SnapSettings {
+            enabled: true,
+            scale: 0.25,
+            ..SnapSettings::default()
+        };
+        let press = down_ray(Vec3::new(1.0, 0.0, 2.0));
+
+        let grown = snapped_preview(
+            &start,
+            handle,
+            press,
+            down_ray(Vec3::new(1.3, 0.0, 2.0)),
+            snap,
+        );
+        assert!(
+            (grown.scale.x - -1.25).abs() < 1e-6,
+            "-1·1.3 must snap to -1.25, got {:?}",
+            grown.scale
+        );
+
+        let shrunk = snapped_preview(
+            &start,
+            handle,
+            press,
+            down_ray(Vec3::new(0.0005, 0.0, 2.0)),
+            snap,
+        );
+        assert!(
+            (shrunk.scale.x - -1e-3).abs() < 1e-6,
+            "the floor must keep the mirror, got {:?}",
+            shrunk.scale
+        );
+
+        for preview in [grown, shrunk] {
+            assert_eq!(preview.scale.y, 1.0, "an X drag must not touch Y");
+            assert_eq!(preview.scale.z, 1.0, "an X drag must not touch Z");
+            assert_eq!(preview.translation, start.translation);
+            assert_eq!(preview.rotation, start.rotation);
+        }
     }
 
     /// A Rotate drag with snap quantizes the swept angle around the handle

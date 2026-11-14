@@ -189,11 +189,19 @@ impl Entity {
 /// Freed ids go onto a free list and are recycled on the next allocate;
 /// each recycle bumps the stored generation so previously issued handles
 /// for that id stop reporting as alive ([`is_alive`](Self::is_alive)).
+/// Generations are `u32` and wrap at `u32::MAX`, so a handle can only be
+/// re-issued after 2^32 recycles of the same slot.
 #[derive(Default, Clone)]
 pub struct EntityAllocator {
     next_id: u32,
     free_list: Vec<u32>,
     generations: Vec<u32>,
+    /// Per-slot lower bound on the generation [`Self::allocate`] may issue,
+    /// indexed like `generations` but sparse: empty (and unallocated) until
+    /// [`Self::advance_generations_past`] raises a floor. A slot alive in a
+    /// restored allocator keeps its current generation, so the bound that
+    /// protects its *next* recycle cannot live in `generations`.
+    min_next_generation: Vec<u32>,
 }
 
 impl EntityAllocator {
@@ -203,6 +211,10 @@ impl EntityAllocator {
     }
 
     /// Allocates a fresh entity, recycling a freed id when available.
+    ///
+    /// The generation issued is at least the slot's floor, so a restored
+    /// allocator never re-issues a handle a newer one already handed out
+    /// (see [`Self::advance_generations_past`]).
     pub fn allocate(&mut self) -> Entity {
         let id = if let Some(recycled) = self.free_list.pop() {
             recycled
@@ -214,7 +226,10 @@ impl EntityAllocator {
             }
             id
         };
-        let generation = self.generations[id as usize];
+        let idx = id as usize;
+        let floor = self.min_next_generation.get(idx).copied().unwrap_or(0);
+        let generation = self.generations[idx].max(floor);
+        self.generations[idx] = generation;
         Entity {
             id: EntityId::from_raw(id),
             generation: Generation::from_raw(generation),
@@ -240,33 +255,44 @@ impl EntityAllocator {
 
     /// Returns `true` if the handle matches the current live generation
     /// for its id — i.e. the entity was allocated and not yet freed.
+    ///
+    /// Ids at or past the allocation frontier are never alive, even when a
+    /// restored allocator reserved a generation floor for them.
     pub fn is_alive(&self, entity: Entity) -> bool {
         let idx = entity.id.index();
-        if idx >= self.generations.len() {
+        if idx >= self.next_id as usize {
             return false;
         }
         self.generations[idx] == entity.generation.as_u32()
     }
 
-    /// Advances the generations this allocator may still hand out past
-    /// every generation `live` issued for the same id, so restoring an
-    /// older allocator (E4 Stop) can never re-issue an `(id, generation)`
-    /// pair that already named a different entity.
+    /// Raises the generation floor of every slot `live` has used past every
+    /// generation `live` issued for it, so restoring an older allocator
+    /// (E4 Stop) can never re-issue an `(id, generation)` pair that already
+    /// named a different entity.
     ///
-    /// Slots alive here keep their generation — the restored handles must
-    /// stay valid. Only freed ids and ids `live` allocated beyond this
-    /// allocator's frontier advance; the latter are reserved so a fresh
-    /// allocate skips the generations `live` used instead of restarting
-    /// at 0.
+    /// Handles alive here stay alive: the floor bounds what the *next*
+    /// allocate of a slot may issue, not its current generation. That covers
+    /// all three cases — a slot alive here that `live` recycled, a slot freed
+    /// here, and a slot `live` created beyond this allocator's frontier
+    /// (which stays unallocated, so it never reports as alive).
+    ///
+    /// A slot already freed here has no handle left to preserve, so its
+    /// generation moves to the floor outright: a handle `live` issued for it
+    /// stops reporting as alive immediately, not just on the next allocate.
+    ///
+    /// Generations wrap at `u32::MAX` just as [`Self::deallocate`] does, so
+    /// the guarantee holds until a single slot has been recycled 2^32 times.
     pub fn advance_generations_past(&mut self, live: &Self) {
+        let len = self.min_next_generation.len().max(live.generations.len());
+        self.min_next_generation.resize(len, 0);
+        for (idx, &issued) in live.generations.iter().enumerate() {
+            let floor = issued.wrapping_add(1);
+            self.min_next_generation[idx] = self.min_next_generation[idx].max(floor);
+        }
         for &id in &self.free_list {
             let idx = id as usize;
-            if let Some(&issued) = live.generations.get(idx) {
-                self.generations[idx] = self.generations[idx].max(issued.wrapping_add(1));
-            }
-        }
-        for idx in self.generations.len()..live.generations.len() {
-            self.generations.push(live.generations[idx].wrapping_add(1));
+            self.generations[idx] = self.generations[idx].max(self.min_next_generation[idx]);
         }
     }
 }
@@ -359,5 +385,82 @@ mod tests {
             );
             issued.push(next);
         }
+    }
+
+    /// A slot alive in the snapshot needs a floor too (E4 review): Play
+    /// despawns it and recycles the id, and after Stop the restored handle
+    /// is live again — retiring it in Edit must not hand out the recycled
+    /// handle Play used.
+    #[test]
+    fn advance_generations_past_floors_a_slot_alive_in_the_snapshot() {
+        let mut snapshot = EntityAllocator::new();
+        let hero = snapshot.allocate();
+
+        let mut live = snapshot.clone();
+        live.deallocate(hero);
+        let recycled = live.allocate();
+        assert_eq!(recycled.id(), hero.id());
+        assert_ne!(recycled.generation(), hero.generation());
+
+        snapshot.advance_generations_past(&live);
+        assert!(
+            snapshot.is_alive(hero),
+            "the restored handle must stay valid"
+        );
+        snapshot.deallocate(hero);
+        let next = snapshot.allocate();
+        assert_eq!(next.id(), hero.id());
+        assert_ne!(next, recycled, "{next:?} already named a Play entity");
+        assert_ne!(next, hero);
+    }
+
+    /// A Play handle for a slot the snapshot had already freed must be dead
+    /// after the restore (E4 review): such a slot has no live handle to
+    /// preserve, so its generation advances outright, not just its floor.
+    #[test]
+    fn advance_generations_past_kills_play_handles_of_freed_slots() {
+        let mut snapshot = EntityAllocator::new();
+        let kept = snapshot.allocate();
+        let freed = snapshot.allocate();
+        snapshot.deallocate(freed);
+
+        let mut live = snapshot.clone();
+        let play_handle = live.allocate();
+        assert_eq!(play_handle.id(), freed.id());
+
+        snapshot.advance_generations_past(&live);
+        assert!(snapshot.is_alive(kept));
+        assert!(
+            !snapshot.is_alive(play_handle),
+            "{play_handle:?} named a Play entity, not a restored one"
+        );
+        let next = snapshot.allocate();
+        assert_eq!(next.id(), freed.id());
+        assert_ne!(next, play_handle);
+    }
+
+    /// Ids `live` created past the snapshot frontier are reserved, not
+    /// allocated: no handle for them may report as alive until this
+    /// allocator actually hands the id out.
+    #[test]
+    fn reserved_ids_past_the_frontier_are_not_alive() {
+        let mut snapshot = EntityAllocator::new();
+        let kept = snapshot.allocate();
+        let mut live = snapshot.clone();
+        let created = live.allocate();
+
+        snapshot.advance_generations_past(&live);
+        assert!(snapshot.is_alive(kept));
+        for generation in 0..4 {
+            let phantom = Entity::new_with_gen(created.id(), generation);
+            assert!(
+                !snapshot.is_alive(phantom),
+                "{phantom:?} was never allocated here"
+            );
+        }
+        let issued = snapshot.allocate();
+        assert_eq!(issued.id(), created.id());
+        assert!(snapshot.is_alive(issued));
+        assert_ne!(issued, created);
     }
 }

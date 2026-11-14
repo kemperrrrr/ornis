@@ -87,7 +87,8 @@ use ornis_core::mutation::{
 };
 use ornis_core::units::{Clamped01, PositiveF32};
 use ornis_core::{
-    ComponentMeta, ComponentRegistry, Entity, InputState, SceneVersion, Seconds, SmartStore, World,
+    ComponentMeta, ComponentRegistry, Entity, FixedTime, InputState, SceneVersion, Seconds,
+    SmartStore, Time, World,
 };
 use ornis_editor::{
     EditorMarks, EditorMode, EditorOnly, GizmoAxis, GizmoHandle, Selected, install_editor,
@@ -288,6 +289,8 @@ impl Default for SceneEnvironment {
 /// `Scene` round-trip: the full [`SmartStore`] clone keeps animation wiring
 /// (skeleton roots, clip playlists, players), `RigidBody` configs and the
 /// allocator's generations, none of which a `Scene`/`EntityDesc` carries.
+/// The frame and simulation clocks are captured too, so Stop rewinds them
+/// to their pre-Play readings instead of leaving them at the end of Play.
 /// Never written to disk.
 struct PlaySnapshot {
     /// Deep copy of every component lane and the entity allocator.
@@ -298,6 +301,10 @@ struct PlaySnapshot {
     scene_name: String,
     /// Lights/camera/ambient at Play start.
     environment: SceneEnvironment,
+    /// Frame clock at Play start.
+    time: Time,
+    /// Simulation clock at Play start (tick, elapsed and accumulator).
+    fixed_time: FixedTime,
 }
 
 /// Live renderable scene: the single [`GameWorld`] plus editor-side
@@ -470,11 +477,14 @@ impl EditorSession {
         if self.mode().is_edit()
             && let Some(store) = self.store()
         {
+            let resources = self.world().resources();
             self.play_snapshot = Some(PlaySnapshot {
                 store: store.clone(),
                 alive: self.alive.clone(),
                 scene_name: self.scene_name.clone(),
                 environment: self.environment().cloned().unwrap_or_default(),
+                time: resources.get::<Time>().copied().unwrap_or_default(),
+                fixed_time: resources.get::<FixedTime>().copied().unwrap_or_default(),
             });
         }
         self.set_mode_resource(EditorMode::Play);
@@ -493,7 +503,9 @@ impl EditorSession {
     /// Stop: restore the world captured at Play start and return to Edit,
     /// discarding every simulation mutation made during Play. A no-op in
     /// Edit. The restore swaps the snapshot back in place — entity handles
-    /// survive and no file is touched.
+    /// survive and no file is touched. `Time` and `FixedTime` rewind to their
+    /// Play-start readings, so the next Play starts on the same clocks as
+    /// the first one.
     pub fn stop(&mut self) {
         if self.mode().is_edit() {
             return;
@@ -1100,9 +1112,11 @@ fn snapshot_to_scene(snapshot: &PlaySnapshot) -> Scene {
 /// the domain state that accumulated during Play — the physics solver (so
 /// the next Play re-binds bodies from the restored `RigidBody` lane instead
 /// of resuming fallen poses) and the pending mutation/structural queues (so
-/// Play-era writes never land on the restored world). The restored
-/// allocator is first advanced past every handle Play issued, so a recycled
-/// id can never name a different entity than it did during Play. The engine
+/// Play-era writes never land on the restored world). The frame and
+/// simulation clocks go back to their Play-start readings, so gameplay does
+/// not see the time Play burned. The restored allocator is first advanced
+/// past every handle Play issued, so a recycled id can never name a
+/// different entity than it did during Play. The engine
 /// and its schedule are untouched; no file is read or written.
 fn restore_play_snapshot(world: &mut EditorSession, snapshot: PlaySnapshot) {
     let gravity = world
@@ -1124,6 +1138,8 @@ fn restore_play_snapshot(world: &mut EditorSession, snapshot: PlaySnapshot) {
     let _ = resources.insert(Mutex::new(PhysicsRuntime::new(gravity)));
     let _ = resources.insert(FixedStructuralQueue::new());
     let _ = resources.insert(FrameStructuralQueue::new());
+    let _ = resources.insert(snapshot.time);
+    let _ = resources.insert(snapshot.fixed_time);
     world.alive = snapshot.alive;
     world.scene_name = snapshot.scene_name;
 }
@@ -1467,8 +1483,37 @@ fn set_component(
             resync_collider_body(store, entity);
         }
     }
+    if type_name == "Transform" {
+        teleport_edited_body(world, entity);
+    }
     world.version.bump();
     Ok(value)
+}
+
+/// Carries an explicit transform edit into the solver (E4 review).
+///
+/// `sync_in` treats a dynamic body as solver-authoritative, so a gizmo drag
+/// committed in Paused would be overwritten by the solver on resume: the
+/// edit reaches the [`TransformDesc`] lane but never the body. Teleporting
+/// the bound body makes the edit stick. Unbound bodies (the usual case in
+/// Edit) need nothing — `sync_in` binds them at the edited pose.
+fn teleport_edited_body(world: &EditorSession, entity: Entity) {
+    let Some(store) = world.store() else {
+        return;
+    };
+    let Some(transform) = store
+        .read_lane::<TransformDesc>()
+        .and_then(|lane| lane.get(entity).cloned())
+    else {
+        return;
+    };
+    let Some(runtime) = world.world().resources().get::<Mutex<PhysicsRuntime>>() else {
+        return;
+    };
+    let mut runtime = runtime.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(handle) = runtime.handle_of(entity) {
+        runtime.drive_pose(handle, transform.translation, transform.rotation.get());
+    }
 }
 
 fn handle_custom(
@@ -3713,6 +3758,15 @@ mod tests {
             .translation[1]
     }
 
+    /// The published frame and simulation clocks.
+    fn clocks(world: &EditorSession) -> (Time, FixedTime) {
+        let resources = world.world().resources();
+        (
+            *resources.get::<Time>().expect("frame clock"),
+            *resources.get::<FixedTime>().expect("simulation clock"),
+        )
+    }
+
     /// Edit freezes simulation; Play runs it. A dynamic body holds its pose
     /// across Edit ticks and falls once Play starts.
     #[test]
@@ -3930,6 +3984,101 @@ mod tests {
             );
             issued.push(next);
         }
+    }
+
+    /// Stop rewinds both clocks to their Play-start readings (E4 review):
+    /// gameplay must not see the time Play burned, so the next Play starts
+    /// on the same frame and tick as the first one.
+    #[test]
+    fn stop_rewinds_the_clocks_to_the_play_start() {
+        let mut world = EditorSession::new();
+        world.spawn(Some("Hero".into()));
+        for _ in 0..5 {
+            world.tick(1.0 / 60.0);
+        }
+        let (time_before, fixed_before) = clocks(&world);
+        assert!(time_before.frame() > 0, "Edit frames advance the clock");
+
+        world.play();
+        for _ in 0..30 {
+            world.tick(1.0 / 60.0);
+        }
+        let (time_during, fixed_during) = clocks(&world);
+        assert!(time_during.frame() > time_before.frame());
+        assert!(
+            fixed_during.tick() > fixed_before.tick(),
+            "Play must advance the simulation clock"
+        );
+
+        world.stop();
+        assert_eq!(clocks(&world), (time_before, fixed_before));
+    }
+
+    /// Play pressed before the first frame captures the untouched clocks, so
+    /// Stop returns them to zero rather than to the end of Play.
+    #[test]
+    fn stop_after_a_play_before_the_first_frame_rewinds_to_zero() {
+        let mut world = EditorSession::new();
+        world.spawn(None);
+        let before = clocks(&world);
+        assert_eq!(before.0.frame(), 0);
+        assert_eq!(before.1.tick(), 0);
+
+        world.play();
+        for _ in 0..3 {
+            world.tick(1.0 / 60.0);
+        }
+        assert!(clocks(&world).1.tick() > 0);
+
+        world.stop();
+        assert_eq!(clocks(&world), before);
+    }
+
+    /// A transform edit committed in Paused survives the resume (E4 review):
+    /// `sync_in` is solver-authoritative for a dynamic body, so the edit must
+    /// teleport the bound body — writing only the lane let the solver snap
+    /// the pose back to where it had fallen.
+    #[test]
+    fn a_transform_edit_in_paused_survives_the_resume() {
+        let (mut world, ev_tx, ev_rx) = world_and_events();
+        let hero = world.spawn(Some("Hero".into()));
+        world
+            .world_mut()
+            .store_mut()
+            .expect("store")
+            .insert(hero, RigidBody::new_sphere(Vec3::ZERO, 1.0, 1.0));
+
+        world.play();
+        for _ in 0..10 {
+            world.tick(1.0 / 60.0);
+        }
+        world.pause();
+        let fallen = pose_y(&world, hero);
+        assert!(fallen < 0.0, "Play must have simulated gravity");
+
+        world.handle_command(
+            &set_component(
+                hero.id(),
+                Some(hero.generation()),
+                "Transform",
+                r#"{"translation":[5,3,-2],"rotation":[0,0,0,1],"scale":[1,1,1]}"#,
+            ),
+            &ev_tx,
+        );
+        drain_all(&ev_rx);
+        assert_eq!(pose_y(&world, hero), 3.0, "the edit reaches the lane");
+
+        world.play();
+        world.tick(1.0 / 60.0);
+        let resumed = world
+            .store()
+            .and_then(|store| read_component::<TransformDesc>(store, hero))
+            .expect("transform")
+            .translation;
+        assert!(
+            (resumed - Vec3::new(5.0, 3.0, -2.0)).length() < 0.05,
+            "resume must continue from the edited pose ({resumed:?}), not the fallen one ({fallen})"
+        );
     }
 
     /// Stop restores the body config and resets the solver, so a second
