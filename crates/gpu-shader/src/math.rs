@@ -60,6 +60,75 @@ unary!(
     fract
 );
 
+/// `sqrt(value)` — one WGSL `sqrt`.
+///
+/// `no_std` has no `f32::sqrt`; a Newton series would not match the GPU
+/// instruction.
+#[inline(always)]
+#[must_use]
+pub fn sqrt(value: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::sqrt(value)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        crate::host_unavailable()
+    }
+}
+
+/// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
+///
+/// Expanding it by hand (`clamp((x - low) / (high - low))³`) rounds differently
+/// from the instruction, so the shader calls `smoothstep` itself.
+#[inline(always)]
+#[must_use]
+pub fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::smoothstep(low, high, x)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (low, high, x);
+        crate::host_unavailable()
+    }
+}
+
+/// `pow(base, exponent)` — one WGSL `pow`.
+///
+/// `exp2(exponent * log2(base))` would round twice and drift from the GPU
+/// instruction, so the shader calls `pow` itself.
+#[inline(always)]
+#[must_use]
+pub fn pow(base: f32, exponent: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::pow(base, exponent)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (base, exponent);
+        crate::host_unavailable()
+    }
+}
+
+/// `atan2(y, x)` — one WGSL `atan2`.
+#[inline(always)]
+#[must_use]
+pub fn atan2(y: f32, x: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::abi::atan2(y, x)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (y, x);
+        crate::host_unavailable()
+    }
+}
+
 /// Clamp `value` into `low..=high`.
 #[inline(always)]
 #[must_use]

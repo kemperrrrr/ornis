@@ -162,7 +162,7 @@ impl QualityFlags {
     ///
     /// The clippy stage runs two commands (the workspace lint and the
     /// render-bench lint under `test-util`), and `build-shaders` checks
-    /// nine artifacts, so that id counts nine times: the denominator
+    /// seventeen artifacts, so that id counts seventeen times: the denominator
     /// has to be right before the first stage prints its header.
     fn total_stages(&self) -> usize {
         let stages = self
@@ -172,8 +172,9 @@ impl QualityFlags {
             .count();
         // `build-shaders` runs the base id plus one extra per remaining
         // artifact: cull, clusters, gtao, histogram, adapt, ssao, gtao 4x,
-        // ssao 4x, and the AO blur.
-        let shader_checks = 8 * usize::from(self.ci && self.enabled("build-shaders"));
+        // ssao 4x, the AO blur, and the translated post passes (composite, hdr,
+        // fog 1x/4x, bloom, aa edge, aa taa 1x/4x).
+        let shader_checks = 16 * usize::from(self.ci && self.enabled("build-shaders"));
         stages + usize::from(self.enabled("clippy")) + shader_checks
     }
 }
@@ -2104,6 +2105,64 @@ fn ci_stages(stages: &mut StageList<'_>) {
     );
     check_shader_artifact(
         stages,
+        Some("ornis-gpu-composite"),
+        Some("all"),
+        "crates/render/src/shaders/composite_generated.wgsl",
+        "cargo xtask build-shaders --check (composite WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-hdr-composite"),
+        Some("all"),
+        "crates/render/src/shaders/hdr_composite_generated.wgsl",
+        "cargo xtask build-shaders --check (hdr composite WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-aa-edge"),
+        Some("all"),
+        "crates/render/src/shaders/aa_edge_generated.wgsl",
+        "cargo xtask build-shaders --check (aa edge WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-aa-taa"),
+        Some("all"),
+        "crates/render/src/shaders/aa_taa_generated.wgsl",
+        "cargo xtask build-shaders --check (aa taa WGSL drift)",
+    );
+    check_shader_artifact_listed(
+        stages,
+        Some("ornis-gpu-aa-taa"),
+        Some("all"),
+        "crates/render/src/shaders/aa_taa_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (aa taa 4x WGSL drift)",
+        "0:2",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-bloom"),
+        Some("all"),
+        "crates/render/src/shaders/bloom_generated.wgsl",
+        "cargo xtask build-shaders --check (bloom WGSL drift)",
+    );
+    check_shader_artifact(
+        stages,
+        Some("ornis-gpu-fog"),
+        Some("all"),
+        "crates/render/src/shaders/fog_generated.wgsl",
+        "cargo xtask build-shaders --check (fog WGSL drift)",
+    );
+    check_shader_artifact_listed(
+        stages,
+        Some("ornis-gpu-fog"),
+        Some("all"),
+        "crates/render/src/shaders/fog_msaa_generated.wgsl",
+        "cargo xtask build-shaders --check (fog 4x WGSL drift)",
+        "0:2",
+    );
+    check_shader_artifact(
+        stages,
         Some("ornis-gpu-cluster"),
         None,
         "crates/render/src/renderer/clusters/cluster_generated.wgsl",
@@ -2172,6 +2231,34 @@ fn check_shader_artifact(
     check_shader_artifact_sampling(stages, package, entry, artifact, desc, false);
 }
 
+/// Like [`check_shader_artifact`], with the listed textures multisampled.
+///
+/// Both forms end in [`check_shader_artifact_args`], which is the one place the
+/// command line is built; the untested-function rule cannot see through the
+/// helper, hence the annotations below.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+///
+/// A pass can bind a resolved colour target next to an unresolved depth buffer,
+/// so the 4x build names the depth binding instead of switching every texture.
+// qual:allow(test_quality, untested, max_parameters=6) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_listed(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+    bindings: &str,
+) {
+    check_shader_artifact_args(
+        stages,
+        package,
+        entry,
+        artifact,
+        desc,
+        &["--multisampled-textures", bindings],
+    );
+}
+
 /// Like [`check_shader_artifact`], with the 4x MSAA texture declarations.
 // qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
 fn check_shader_artifact_multisampled(
@@ -2193,6 +2280,24 @@ fn check_shader_artifact_sampling(
     desc: &str,
     multisampled: bool,
 ) {
+    let extra: &[&str] = if multisampled {
+        &["--multisampled"]
+    } else {
+        &[]
+    };
+    check_shader_artifact_args(stages, package, entry, artifact, desc, extra);
+}
+
+/// The one place a shader artifact check builds its command line.
+// qual:allow(test_quality, untested) reason: "CI stage helper; xtask has no unit test that executes the quality stages"
+fn check_shader_artifact_args(
+    stages: &mut StageList<'_>,
+    package: Option<&str>,
+    entry: Option<&str>,
+    artifact: &str,
+    desc: &str,
+    extra: &[&str],
+) {
     if !wasm_target_installed() {
         stages.skip(
             "build-shaders",
@@ -2210,9 +2315,7 @@ fn check_shader_artifact_sampling(
         args.push("--entry");
         args.push(entry);
     }
-    if multisampled {
-        args.push("--multisampled");
-    }
+    args.extend_from_slice(extra);
     args.push("--artifact");
     args.push(artifact);
     args.push("--check");
@@ -3706,7 +3809,7 @@ mod tests {
         assert_eq!(only_fmt.total_stages(), 1);
         let only_shaders =
             QualityFlags::parse(&["--ci".to_string(), "--only=build-shaders".to_string()]);
-        assert_eq!(only_shaders.total_stages(), 9);
+        assert_eq!(only_shaders.total_stages(), 17);
     }
 
     #[test]

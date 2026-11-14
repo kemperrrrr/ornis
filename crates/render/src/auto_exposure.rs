@@ -132,19 +132,6 @@ pub const MAX_FRAME_DT_SECONDS: f32 = 1.0;
 /// it as the uniform type.
 pub const EXPOSURE_WGSL_NAME: &str = "ExposureParams";
 
-/// WGSL declaration of [`ExposureParams`].
-///
-/// Four `f32` (the multiplier plus three pad words) keep the struct a
-/// 16-byte uniform block that both the composite fragment stage and the
-/// adapt compute stage can bind.
-pub const EXPOSURE_PARAMS_WGSL: &str = "\
-struct ExposureParams {
-    exposure: f32,
-    pad0: f32,
-    pad1: f32,
-    pad2: f32,
-}";
-
 /// The post-tone-mapper exposure multiplier shared by the auto-exposure
 /// adapt pass (writes it) and the HDR composite (reads it as a uniform).
 ///

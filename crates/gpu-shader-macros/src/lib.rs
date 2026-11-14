@@ -7,8 +7,9 @@
 //!
 //! The attribute is the stable stand-in for rust-gpu's `#[spirv(…)]`:
 //! `compute(threads(N))`, `compute(threads(X, Y))`, `compute(threads(X, Y, Z))`,
-//! or `fragment`. Resources are bound by their attributes. A kernel does not
-//! declare `extern "C"`; a missing operation is added to `ornis-gpu-shader`.
+//! `vertex`, or `fragment`. Resources are bound by their attributes. A kernel
+//! does not declare `extern "C"`; a missing operation is added to
+//! `ornis-gpu-shader`.
 
 mod entry;
 mod param;
@@ -40,6 +41,15 @@ use proc_macro::TokenStream;
 /// The attribute also attaches `#[unsafe(export_name = "<fn name>")]`, so a
 /// kernel is a plain safe `pub fn` — no `extern "C"` and no
 /// `#[unsafe(no_mangle)]`.
+///
+/// A raster entry is named for its stage: `#[gpu_entry(vertex)] fn vs_main()`
+/// and `#[gpu_entry(fragment)] fn fs_main()` compile to `vs_main()` and
+/// `fs_main()`. Both read builtins and `@location` values through
+/// `ornis_gpu_shader` functions (`vertex_index`, `vertex_input_lane::<LOC,
+/// LANE>`, `fragment_input_lane::<LOC, LANE>`) and write outputs the same way
+/// (`vertex_position`, `vertex_store_{2,4}::<LOC>`, `fragment_store_at::<LOC>`),
+/// so the compiled signature carries no interface type the translator would
+/// have to lay out from Rust.
 ///
 /// The metadata global is named `ornis_gpu_shader_meta` and carries the record
 /// format of `ornis_gpu_shader::meta`: `entry=…;workgroup=x,y,z` plus one

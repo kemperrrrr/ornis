@@ -455,6 +455,211 @@ merge:
     );
 }
 
+/// Stage interface of the first entry point of `wgsl`.
+///
+/// The assertions read the parsed module, not the printed text: naga's writer
+/// renames identifiers (a trailing digit grows an underscore), so matching
+/// strings would pin the writer instead of the interface.
+fn stage_interface(wgsl: &str) -> StageInterface {
+    use naga::TypeInner;
+    let module = naga::front::wgsl::parse_str(wgsl).expect("emitted WGSL parses");
+    let entry = module.entry_points.first().expect("one entry point");
+    let args = entry
+        .function
+        .arguments
+        .iter()
+        .map(|argument| {
+            let lanes = match &module.types[argument.ty].inner {
+                TypeInner::Vector { size, .. } => *size as u32,
+                _ => 1,
+            };
+            (argument.binding.clone().expect("bound argument"), lanes)
+        })
+        .collect();
+    StageInterface {
+        stage: entry.stage,
+        inputs: args,
+        outputs: result_members(&module, &entry.function),
+    }
+}
+
+/// Result members of `function`: binding, lane count, and byte offset.
+fn result_members(
+    module: &naga::Module,
+    function: &naga::Function,
+) -> Vec<(naga::Binding, (u32, u32))> {
+    use naga::TypeInner;
+    let Some(result) = &function.result else {
+        return Vec::new();
+    };
+    let TypeInner::Struct { members, .. } = &module.types[result.ty].inner else {
+        return Vec::new();
+    };
+    members
+        .iter()
+        .map(|member| {
+            let binding = member.binding.clone().expect("bound output");
+            let lanes = match &module.types[member.ty].inner {
+                TypeInner::Vector { size, .. } => *size as u32,
+                _ => 1,
+            };
+            (binding, (lanes, member.offset))
+        })
+        .collect()
+}
+
+/// Stage interface of one entry point.
+struct StageInterface {
+    /// Stage of the entry point.
+    stage: naga::ShaderStage,
+    /// Entry arguments: binding and declared lane count.
+    inputs: Vec<(naga::Binding, u32)>,
+    /// Result members: binding, lane count, and byte offset.
+    outputs: Vec<(naga::Binding, (u32, u32))>,
+}
+
+/// Whether `binding` is `@location(location)`.
+fn at_location(binding: &naga::Binding, location: u32) -> bool {
+    matches!(binding, naga::Binding::Location { location: at, .. } if *at == location)
+}
+
+/// Whether `binding` is the named builtin.
+fn at_builtin(binding: &naga::Binding, built_in: naga::BuiltIn) -> bool {
+    matches!(binding, naga::Binding::BuiltIn(found) if *found == built_in)
+}
+
+#[test]
+fn vertex_entry_declares_position_builtins_and_locations() {
+    let ir = r#"
+declare i32 @vertex_index()
+declare i32 @instance_index()
+declare float @vertex_input_lane(i32, i32, i32)
+declare void @vertex_position(float, float, float, float)
+declare void @vertex_store_f32x2(i32, float, float)
+define dso_local void @vs_main() {
+start:
+  %vi = call i32 @vertex_index()
+  %ii = call i32 @instance_index()
+  %ux = call float @vertex_input_lane(i32 0, i32 2, i32 0)
+  %uy = call float @vertex_input_lane(i32 0, i32 2, i32 1)
+  %vif = uitofp i32 %vi to float
+  %iif = uitofp i32 %ii to float
+  %x = fadd float %vif, %iif
+  call void @vertex_position(float %x, float %ux, float %uy, float 1.000000e+00)
+  call void @vertex_store_f32x2(i32 0, float %ux, float %uy)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("vertex entry");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("@vertex"), "{wgsl}");
+    let interface = stage_interface(wgsl);
+    assert_eq!(interface.stage, naga::ShaderStage::Vertex);
+    let args = &interface.inputs;
+    let outputs = &interface.outputs;
+    assert_eq!(args.len(), 3, "{wgsl}");
+    assert!(at_builtin(&args[0].0, naga::BuiltIn::VertexIndex), "{wgsl}");
+    assert!(
+        at_builtin(&args[1].0, naga::BuiltIn::InstanceIndex),
+        "{wgsl}"
+    );
+    assert!(at_location(&args[2].0, 0), "{wgsl}");
+    assert_eq!(args[2].1, 2, "{wgsl}");
+    // A vertex result must carry the clip position, and the two `vec2` lanes
+    // the body wrote become one located `vec2` member.
+    assert_eq!(outputs.len(), 2, "{wgsl}");
+    assert!(
+        at_builtin(&outputs[0].0, naga::BuiltIn::Position { invariant: false }),
+        "{wgsl}"
+    );
+    assert!(at_location(&outputs[1].0, 0), "{wgsl}");
+    assert_eq!(outputs[1].1.0, 2, "{wgsl}");
+}
+
+#[test]
+fn fragment_entry_infers_interface_widths_from_the_lanes_used() {
+    let ir = r#"
+declare float @fragment_input_lane(i32, i32, i32)
+declare void @fragment_store_location(i32, float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  %a = call float @fragment_input_lane(i32 0, i32 3, i32 0)
+  %b = call float @fragment_input_lane(i32 0, i32 3, i32 1)
+  %c = call float @fragment_input_lane(i32 0, i32 3, i32 2)
+  call void @fragment_store_location(i32 0, float %a, float %b, float %c, float 1.000000e+00)
+  call void @fragment_store_location(i32 1, float %b, float %a, float %c, float 1.000000e+00)
+  ret void
+}
+"#;
+    let translated = translate(ir).expect("fragment entry");
+    let wgsl = &translated.wgsl;
+    // Two targets become an output struct instead of the bare location-0 vec4.
+    assert!(wgsl.contains("-> FragmentOut"), "{wgsl}");
+    let interface = stage_interface(wgsl);
+    assert_eq!(interface.stage, naga::ShaderStage::Fragment);
+    let args = &interface.inputs;
+    let outputs = &interface.outputs;
+    // The fragment's `@builtin(position)` is always declared, then the inputs.
+    assert_eq!(args.len(), 2, "{wgsl}");
+    assert!(at_builtin(
+        &args[0].0,
+        naga::BuiltIn::Position { invariant: false }
+    ));
+    assert!(at_location(&args[1].0, 0), "{wgsl}");
+    assert_eq!(args[1].1, 3, "{wgsl}");
+    assert_eq!(outputs.len(), 2, "{wgsl}");
+    assert!(at_location(&outputs[0].0, 0), "{wgsl}");
+    assert!(at_location(&outputs[1].0, 1), "{wgsl}");
+    assert_eq!(outputs[0].1.0, 4, "{wgsl}");
+    assert!(outputs[1].1.1 >= outputs[0].1.1 + 16, "{wgsl}");
+}
+
+#[test]
+fn one_location_cannot_have_two_widths() {
+    let ir = r#"
+declare float @vertex_input_lane(i32, i32, i32)
+declare void @vertex_position(float, float, float, float)
+define dso_local void @vs_main() {
+start:
+  %ux = call float @vertex_input_lane(i32 0, i32 2, i32 0)
+  %uz = call float @vertex_input_lane(i32 0, i32 2)
+  call void @vertex_position(float %ux, float %uz, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    // Location 0 is declared two-wide and three-wide by the same body; a shader
+    // that disagrees with itself is rejected instead of padded.
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn vertex_entry_rejects_fragment_io() {
+    let ir = r#"
+declare void @fragment_store_f32x4(float, float, float, float)
+define dso_local void @vs_main() {
+start:
+  call void @fragment_store_f32x4(float 1.000000e+00, float 0.000000e+00, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn vertex_entry_without_position_is_rejected() {
+    let ir = r#"
+declare void @vertex_store_f32x2(i32, float, float)
+define dso_local void @vs_main() {
+start:
+  call void @vertex_store_f32x2(i32 0, float 1.000000e+00, float 0.000000e+00)
+  ret void
+}
+"#;
+    // A vertex result must carry `@builtin(position)`; guessing it would emit
+    // a module naga refuses.
+    assert!(translate(ir).is_err());
+}
+
 #[test]
 fn fragment_entry_returns_location_zero_vec4() {
     let ir = r#"
@@ -701,6 +906,7 @@ start:
 "#;
     let meta = ornis_llvm2gpu::extract_meta(ir)
         .expect("metadata parses")
+        .pop()
         .expect("metadata present");
     assert_eq!(meta.entry, "cs_main");
     assert_eq!(meta.workgroup, [32, 2, 1]);
@@ -1225,6 +1431,137 @@ fn rustc_to_llvm_ir_to_wgsl() {
     assert!(!translated.compute_spirv.is_empty());
 }
 
+/// One crate, two entry points: a vertex and a fragment stage of one pass.
+const RASTER_PASS_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" {
+    fn vertex_index() -> u32;
+    fn vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    fn vertex_position(x: f32, y: f32, z: f32, w: f32);
+    fn vertex_store_f32x2(location: u32, x: f32, y: f32);
+    fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
+}
+#[no_mangle]
+pub extern "C" fn vs_main() {
+    let index = unsafe { vertex_index() };
+    let x = unsafe { vertex_input_lane(0, 2, 0) };
+    let y = unsafe { vertex_input_lane(0, 2, 1) };
+    unsafe {
+        vertex_position(index as f32, x, y, 1.0);
+        vertex_store_f32x2(0, x, y);
+    }
+}
+#[no_mangle]
+pub extern "C" fn fs_main() {
+    let u = unsafe { fragment_input_lane(0, 2, 0) };
+    let v = unsafe { fragment_input_lane(0, 2, 1) };
+    unsafe { fragment_store_f32x4(u, v, 0.0, 1.0) };
+}
+"#;
+
+/// Both entries of one crate lower into one module and share its bindings.
+#[test]
+fn rustc_two_raster_entries_lower_into_one_module() {
+    let Some(ir) = compile_ir(RASTER_PASS_RS) else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("translate both entries");
+    // rustc emits the two entries in its own order; both have to be there.
+    let mut entries = translated.entries.clone();
+    entries.sort();
+    assert_eq!(entries, ["fs_main", "vs_main"]);
+    assert!(translated.wgsl.contains("@vertex"), "{}", translated.wgsl);
+    assert!(
+        translated.wgsl.contains("fn fs_main"),
+        "{}",
+        translated.wgsl
+    );
+    // One translation per entry still works on the same IR.
+    let only = ornis_llvm2gpu::translate_entry_with_sampling(
+        &ir,
+        "fs_main",
+        ornis_llvm2gpu::TextureSampling::SingleSample,
+    )
+    .expect("fragment only");
+    assert_eq!(only.entries, ["fs_main"]);
+    assert!(!only.wgsl.contains("@vertex"), "{}", only.wgsl);
+    assert!(
+        ornis_llvm2gpu::translate_entry_with_sampling(
+            &ir,
+            "cs_main",
+            ornis_llvm2gpu::TextureSampling::SingleSample,
+        )
+        .is_err(),
+        "a missing entry is an error, not an empty module"
+    );
+}
+
+/// A `switch`-terminated block: rustc emits one for `match` on integers.
+const SWITCH_IR: &str = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  switch i32 %id, label %other [ i32 0, label %zero i32 1, label %one i32 2, label %zero ]
+zero:
+  br label %merge
+one:
+  br label %merge
+other:
+  br label %merge
+merge:
+  %value = phi float [ 1.000000e+00, %zero ], [ 2.000000e+00, %one ], [ 3.000000e+00, %other ]
+  ret float %value
+}
+"#;
+
+#[test]
+fn switch_lowers_to_a_naga_switch() {
+    let translated = translate(SWITCH_IR).expect("switch entry");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("switch "), "{wgsl}");
+    assert!(wgsl.contains("default"), "{wgsl}");
+    // The two values that share a target share one body: naga prints them as
+    // one case label list.
+    assert!(
+        wgsl.contains("case 0u, 2u") || wgsl.contains("case 0, 2"),
+        "{wgsl}"
+    );
+    assert!(wgsl.contains("case 1"), "{wgsl}");
+}
+
+#[test]
+fn switch_lowers_through_rustc_match() {
+    const MATCH_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    // Sparse values keep rustc on a `switch` instead of a lookup table.
+    match id {
+        0 => 1.0,
+        10 => 2.0,
+        20 | 30 => 4.0,
+        _ => 0.5,
+    }
+}
+"#;
+    let Some(ir) = compile_ir_opt(MATCH_RS, "s") else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("match lowers");
+    assert!(translated.wgsl.contains("switch "), "{}", translated.wgsl);
+    assert!(translated.wgsl.contains("20u, 30u"), "{}", translated.wgsl);
+}
+
 const LOOP_KERNEL_RS: &str = r#"
 #![no_std]
 #![no_main]
@@ -1427,14 +1764,222 @@ fn rustc_nested_loop_to_wgsl() {
     );
 }
 
+/// Screen quad from `vertex_index` alone: positions and UVs are `select`s.
+const QUAD_VERTEX_IR: &str = r#"
+declare i32 @vertex_index()
+declare void @vertex_position(float, float, float, float)
+declare void @vertex_store_f32x2(i32, float, float)
+define dso_local void @vs_main() {
+start:
+  %vi = call i32 @vertex_index()
+  %right = icmp ugt i32 %vi, 1
+  %is_one = icmp eq i32 %vi, 1
+  %is_three = icmp eq i32 %vi, 3
+  %top_or_bottom = select i1 %is_one, float 1.000000e+00, float -1.000000e+00
+  %y = select i1 %is_three, float 1.000000e+00, float %top_or_bottom
+  %x = select i1 %right, float 1.000000e+00, float -1.000000e+00
+  %u = select i1 %right, float 1.000000e+00, float 0.000000e+00
+  %odd_v = select i1 %is_one, float 0.000000e+00, float 1.000000e+00
+  %v = select i1 %is_three, float 0.000000e+00, float %odd_v
+  call void @vertex_position(float %x, float %y, float 0.000000e+00, float 1.000000e+00)
+  call void @vertex_store_f32x2(i32 0, float %u, float %v)
+  ret void
+}
+"#;
+
+/// Fragment stage that writes the interpolated UV into the color target.
+const UV_FRAGMENT_IR: &str = r#"
+declare float @fragment_input_lane(i32, i32, i32)
+declare void @fragment_store_location(i32, float, float, float, float)
+define dso_local void @fs_main() {
+start:
+  %u = call float @fragment_input_lane(i32 0, i32 2, i32 0)
+  %v = call float @fragment_input_lane(i32 0, i32 2, i32 1)
+  call void @fragment_store_location(i32 0, float %u, float %v, float 0.000000e+00, float 1.000000e+00)
+  ret void
+}
+"#;
+
+/// Both raster stages translated from IR, then drawn as one pipeline.
+///
+/// The vertex module alone is not proof: the location the vertex stage writes
+/// and the one the fragment stage reads have to agree, and the clip position
+/// has to land where `@builtin(vertex_index)` said it would. Reading the UV
+/// back from the color target pins all three at once.
 #[test]
-fn llvm_ir_scalar_matches_cpu_reference_on_gpu() {
-    let Some(ir) = compile_ir(KERNEL_RS) else {
-        eprintln!("SKIPPED (wasm32 target missing)");
+fn translated_vertex_and_fragment_stages_draw_the_screen_uv() {
+    let vs = translate(QUAD_VERTEX_IR).expect("vertex stage");
+    let fs = translate(UV_FRAGMENT_IR).expect("fragment stage");
+    // Two independent modules: the vertex one declares no globals, so the two
+    // WGSL texts concatenate into one module with both entry points.
+    let wgsl = format!("{}\n{}", vs.wgsl, fs.wgsl);
+    let Some((device, queue)) = device() else {
+        assert!(
+            std::env::var_os("ORNIS_REQUIRE_GPU").is_none(),
+            "ORNIS_REQUIRE_GPU is set but no wgpu device"
+        );
+        eprintln!("SKIPPED (no wgpu device)");
         return;
     };
-    let translated = translate(&ir).expect("translate");
-    let Some(outputs) = gpu_outputs(&translated) else {
+    const SIZE: u32 = 8;
+    let pixels = render_quad(&device, &queue, &wgsl, SIZE);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let index = ((y * SIZE + x) * 4) as usize;
+            let expected_u = ((x as f32 + 0.5) / SIZE as f32 * 255.0).round() as u8;
+            let expected_v = ((y as f32 + 0.5) / SIZE as f32 * 255.0).round() as u8;
+            assert_eq!(
+                (pixels[index], pixels[index + 1], pixels[index + 2]),
+                (expected_u, expected_v, 0),
+                "pixel ({x}, {y})"
+            );
+        }
+    }
+}
+
+/// Draw a `TriangleStrip` quad from `wgsl` into an `Rgba8Unorm` target.
+fn render_quad(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str, size: u32) -> Vec<u8> {
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("llvm2gpu raster"),
+        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("llvm2gpu raster"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("llvm2gpu target"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("quad"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.draw(0..4, 0..1);
+    }
+    read_back(device, queue, encoder, &target, size)
+}
+
+/// Copy the rendered target into host memory, one unpadded RGBA row per line.
+fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mut encoder: wgpu::CommandEncoder,
+    target: &wgpu::Texture,
+    size: u32,
+) -> Vec<u8> {
+    /// `copy_texture_to_buffer` row alignment.
+    const ROW_ALIGN: u32 = 256;
+    let unpadded = size * 4;
+    let padded = unpadded.div_ceil(ROW_ALIGN) * ROW_ALIGN;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: u64::from(padded * size),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(size),
+            },
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+    let data = map_bytes(device, &readback);
+    let mut pixels = vec![0u8; (unpadded * size) as usize];
+    for row in 0..size as usize {
+        pixels[row * unpadded as usize..][..unpadded as usize]
+            .copy_from_slice(&data[row * padded as usize..][..unpadded as usize]);
+    }
+    pixels
+}
+
+/// Map `buffer` for reading and return its contents.
+fn map_bytes(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::Wait {
+        submission_index: None,
+        timeout: None,
+    });
+    rx.recv().expect("map callback").expect("map buffer");
+    let data = slice.get_mapped_range().expect("mapped range");
+    data.to_vec()
+}
+
+#[test]
+fn llvm_ir_scalar_matches_cpu_reference_on_gpu() {
+    let Some((_, outputs)) = gpu_run(KERNEL_RS) else {
         return;
     };
     for (id, actual) in outputs.iter().enumerate() {
@@ -1459,6 +2004,23 @@ fn cpu_reference(id: u32) -> f32 {
         i += 1;
     }
     (if x < 10.0 { x } else { 0.0 }) + x
+}
+
+/// Compile `source` and translate it, or skip when the target is missing.
+fn translate_source(source: &str) -> Option<ornis_llvm2gpu::Translated> {
+    let ir = compile_ir(source)?;
+    Some(translate(&ir).expect("translate"))
+}
+
+/// Compile `source`, translate it, and run it on the GPU.
+///
+/// `None` when the wasm32 target or a GPU is missing; the CI GPU shard sets
+/// `ORNIS_REQUIRE_GPU`, which turns a missing device into a failure.
+fn gpu_run(source: &str) -> Option<(ornis_llvm2gpu::Translated, Vec<f32>)> {
+    let ir = compile_ir(source)?;
+    let translated = translate(&ir).expect("translate");
+    let outputs = gpu_outputs(&translated)?;
+    Some((translated, outputs))
 }
 
 /// Run a translated compute entry and return the four `storage_0_0` lanes.
@@ -1504,22 +2066,44 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
 }
 
 fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f32> {
+    run_compute_with_input(device, queue, wgsl, &[0; 4])
+}
+
+/// Run a compute entry with a read-only `u32` input at binding 1.
+fn run_compute_with_input(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    wgsl: &str,
+    input: &[u32],
+) -> Vec<f32> {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("llvm2gpu"),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("llvm2gpu layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                has_dynamic_offset: false,
-                min_binding_size: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
             },
-            count: None,
-        }],
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
     });
     let storage = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("storage"),
@@ -1530,13 +2114,27 @@ fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f3
         mapped_at_creation: false,
     });
     queue.write_buffer(&storage, 0, &[0u8; 16]);
+    let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("input"),
+        size: 4 * input.len() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let input_bytes: Vec<u8> = input.iter().flat_map(|word| word.to_le_bytes()).collect();
+    queue.write_buffer(&input_buffer, 0, &input_bytes);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("llvm2gpu bg"),
         layout: &layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: storage.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: storage.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: input_buffer.as_entire_binding(),
+            },
+        ],
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("llvm2gpu pl"),
@@ -1570,23 +2168,811 @@ fn run_compute(device: &wgpu::Device, queue: &wgpu::Queue, wgsl: &str) -> Vec<f3
     }
     encoder.copy_buffer_to_buffer(&storage, 0, &readback, 0, 16);
     queue.submit([encoder.finish()]);
-    let slice = readback.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = tx.send(result);
-    });
-    let _ = device.poll(wgpu::PollType::Wait {
-        submission_index: None,
-        timeout: None,
-    });
-    rx.recv().expect("map callback").expect("map buffer");
-    let guard = slice.get_mapped_range().expect("mapped range");
-    let bytes = guard.to_vec();
-    drop(guard);
-    readback.unmap();
+    let bytes = map_bytes(device, &readback);
     let mut out = vec![0f32; 4];
     for (i, chunk) in bytes.chunks_exact(4).enumerate() {
         out[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     out
+}
+
+#[test]
+fn barrier_in_uniform_control_flow_is_allowed() {
+    // The condition is a uniform field, so every invocation takes the same
+    // arm and the barrier is reached by the whole workgroup.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare void @storage_write_u32(i32, i32, i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %mode = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 0)
+  %enter = icmp eq i32 %mode, 1
+  br i1 %enter, label %inside, label %outside
+inside:
+  call void @workgroup_barrier()
+  br label %merge
+outside:
+  br label %merge
+merge:
+  call void @storage_write_u32(i32 0, i32 1, i32 %id, i32 %mode)
+  ret void
+}
+"#;
+    let translated = translate_with_types(ir, &[&[2]]).expect("uniform barrier");
+    assert!(
+        translated.wgsl.contains("workgroupBarrier()"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn barrier_in_a_uniform_loop_is_allowed() {
+    // `for i in 0..4`-shaped loop: the counter is a phi of uniform values and
+    // the bound came from a uniform field, so the trip count is the same for
+    // every invocation.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare i32 @workgroup_load_u32(i32)
+declare void @workgroup_store_u32(i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %n = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 1)
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  call void @workgroup_store_u32(i32 0, i32 %i)
+  call void @workgroup_barrier()
+  %seen = call i32 @workgroup_load_u32(i32 0)
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  ret void
+}
+"#;
+    let translated = translate_with_types(ir, &[&[2, 2]]).expect("uniform loop barrier");
+    assert!(
+        translated.wgsl.contains("workgroupBarrier()"),
+        "{}",
+        translated.wgsl
+    );
+}
+
+#[test]
+fn barrier_in_a_nonuniform_loop_is_rejected() {
+    // The bound is a storage read: invocations may iterate a different number
+    // of times, so a barrier inside would split the workgroup.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @storage_read_u32(i32, i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %n = call i32 @storage_read_u32(i32 0, i32 1, i32 0)
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  call void @workgroup_barrier()
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit:
+  ret void
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn barrier_after_a_nonuniform_break_stays_rejected() {
+    // One invocation can leave the loop early, so a barrier in the loop body
+    // is divergent even though the counted condition is uniform.
+    let ir = r#"
+declare void @workgroup_barrier()
+declare i32 @uniform_field_u32(i32, i32, i32, i32)
+declare i32 @storage_read_u32(i32, i32, i32)
+define dso_local void @cs_main(i32 noundef %id) {
+start:
+  %n = call i32 @uniform_field_u32(i32 0, i32 0, i32 0, i32 1)
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %n
+  br i1 %more, label %body, label %exit
+body:
+  %flag = call i32 @storage_read_u32(i32 0, i32 1, i32 %id)
+  %stop = icmp eq i32 %flag, 0
+  br i1 %stop, label %exit, label %latch
+latch:
+  %next = add i32 %i, 1
+  call void @workgroup_barrier()
+  br label %header
+exit:
+  ret void
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+/// A loop with two exits to different blocks that rejoin afterwards.
+const LOOP_TWO_EXITS_IR: &str = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  br label %header
+header:
+  %i = phi i32 [ 0, %start ], [ %next, %latch ]
+  %more = icmp ult i32 %i, %id
+  br i1 %more, label %body, label %exit_a
+body:
+  %hit = icmp eq i32 %i, 3
+  br i1 %hit, label %exit_b, label %latch
+latch:
+  %next = add i32 %i, 1
+  br label %header
+exit_a:
+  br label %merge
+exit_b:
+  br label %merge
+merge:
+  %value = phi float [ 1.000000e+00, %exit_a ], [ 2.000000e+00, %exit_b ]
+  ret float %value
+}
+"#;
+
+#[test]
+fn loop_with_two_exits_dispatches_on_the_selector() {
+    let translated = translate(LOOP_TWO_EXITS_IR).expect("two exits");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var exit_id: u32;"), "{wgsl}");
+    // One selector store per exit edge, and the code after the loop once.
+    assert_eq!(wgsl.matches("exit_id = ").count(), 2, "{wgsl}");
+    assert_eq!(wgsl.matches("value = 1f;").count(), 1, "{wgsl}");
+    assert_eq!(wgsl.matches("value = 2f;").count(), 1, "{wgsl}");
+    assert!(wgsl.contains("loop {"), "{wgsl}");
+}
+
+/// `break 'outer`: the inner loop's exit leaves the outer loop as well.
+const BREAK_OUTER_IR: &str = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  br label %outer
+outer:
+  %i = phi i32 [ 0, %start ], [ %next_outer, %outer_latch ]
+  %more_outer = icmp ult i32 %i, %id
+  br i1 %more_outer, label %outer_body, label %done
+outer_body:
+  br label %inner
+inner:
+  %j = phi i32 [ 0, %outer_body ], [ %next_inner, %inner_latch ]
+  %more_inner = icmp ult i32 %j, 4
+  br i1 %more_inner, label %inner_body, label %inner_exit
+inner_body:
+  %hit = icmp eq i32 %j, 2
+  br i1 %hit, label %done, label %inner_latch
+inner_latch:
+  %next_inner = add i32 %j, 1
+  br label %inner
+inner_exit:
+  br label %outer_latch
+outer_latch:
+  %next_outer = add i32 %i, 1
+  br label %outer
+done:
+  ret float 1.000000e+00
+}
+"#;
+
+#[test]
+fn break_out_of_two_loops_breaks_each_level() {
+    let translated = translate(BREAK_OUTER_IR).expect("break 'outer");
+    let wgsl = &translated.wgsl;
+    // Two `loop` statements and a `break` for each level the edge unwinds.
+    assert_eq!(wgsl.matches("loop {").count(), 2, "{wgsl}");
+    assert!(wgsl.contains("exit_id ="), "{wgsl}");
+}
+
+/// A module constant table plus a local array, both indexed dynamically.
+const MEMORY_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+static QUAD: [[f32; 4]; 4] = [
+    [-1.0, -1.0, 0.0, 1.0],
+    [-1.0, 1.0, 0.0, 1.0],
+    [1.0, -1.0, 0.0, 1.0],
+    [1.0, 1.0, 0.0, 1.0],
+];
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = [0.0f32; 4];
+    let mut i = 0u32;
+    while i < 4 {
+        acc[i as usize] = QUAD[id as usize & 3][i as usize] * 2.0;
+        i += 1;
+    }
+    acc[0] + acc[1] + acc[2] + acc[3]
+}
+"#;
+
+#[test]
+fn constant_table_and_local_array_lower_through_memory() {
+    let Some(translated) = translate_source(MEMORY_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // The constant becomes a private word array; the local array is a function
+    // scope one; both are indexed by the loop counter and the invocation id.
+    assert!(wgsl.contains("var<private> const_"), "{wgsl}");
+    assert!(wgsl.contains("array<u32"), "{wgsl}");
+    assert!(wgsl.contains("bitcast<f32>"), "{wgsl}");
+}
+
+/// The same kernel on the GPU: the constant table and the local array have to
+/// produce the value the CPU reference computes.
+#[test]
+fn constant_table_and_local_array_match_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(MEMORY_RS) else {
+        return;
+    };
+    let quad = [
+        [-1.0f32, -1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0],
+        [1.0, -1.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0, 1.0],
+    ];
+    for (id, actual) in outputs.iter().enumerate() {
+        let row = quad[id & 3];
+        let expected: f32 = row.iter().map(|value| value * 2.0).sum();
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+/// A local array that survives `SROA`: `alloca` + dynamic `getelementptr`.
+const LOCAL_ARRAY_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = [1.0f32, 2.0, 3.0, 4.0];
+    let i = (id & 3) as usize;
+    acc[i] = acc[i] * 2.0;
+    acc[0] + acc[1] + acc[2] + acc[3] + acc[i]
+}
+"#;
+
+#[test]
+fn local_array_lowers_through_alloca_and_gep() {
+    let Some(translated) = translate_source(LOCAL_ARRAY_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var acc: array<u32, 4>;"), "{wgsl}");
+    assert!(wgsl.contains("bitcast<f32>"), "{wgsl}");
+}
+
+#[test]
+fn local_array_matches_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(LOCAL_ARRAY_RS) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let mut acc = [1.0f32, 2.0, 3.0, 4.0];
+        let i = id & 3;
+        acc[i] *= 2.0;
+        let expected = acc[0] + acc[1] + acc[2] + acc[3] + acc[i];
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+#[test]
+fn unreachable_ends_the_invocation_instead_of_failing() {
+    // The panic path of a kernel: LLVM calls it undefined behaviour, so the
+    // translator ends the invocation there.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %bad = icmp eq i32 %id, 0
+  br i1 %bad, label %panic, label %ok
+panic:
+  unreachable
+ok:
+  ret float 1.000000e+00
+}
+"#;
+    let translated = translate(ir).expect("unreachable path");
+    assert!(translated.wgsl.contains("return;"), "{}", translated.wgsl);
+}
+
+/// A local array zeroed by `llvm.memset` and filled in a dynamic loop.
+const DYNAMIC_ARRAY_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" { fn storage_read_u32(group: u32, binding: u32, index: u32) -> u32; }
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut acc = [0.0f32; 4];
+    let n = unsafe { storage_read_u32(0, 1, 0) };
+    let mut i = 0u32;
+    while i < n {
+        let slot = (i & 3) as usize;
+        acc[slot] = acc[slot] + (i as f32);
+        i += 1;
+    }
+    acc[0] + acc[1] + acc[2] + acc[3]
+}
+"#;
+
+#[test]
+fn memset_zeroes_a_local_array_before_a_dynamic_loop() {
+    let Some(translated) = translate_source(DYNAMIC_ARRAY_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // `[0.0; 4]` becomes four word stores, and the loop indexes the array.
+    assert!(wgsl.contains("var acc: array<u32, 4>;"), "{wgsl}");
+    assert!(wgsl.contains("acc[0u] = 0u;"), "{wgsl}");
+    assert!(wgsl.contains("acc[(0u + 3u)] = 0u;"), "{wgsl}");
+}
+
+#[test]
+fn memset_zeroed_array_matches_the_cpu_on_gpu() {
+    let Some(ir) = compile_ir(DYNAMIC_ARRAY_RS) else {
+        eprintln!("SKIPPED (wasm32 target missing)");
+        return;
+    };
+    let translated = translate(&ir).expect("dynamic array");
+    let Some((device, queue)) = device() else {
+        assert!(
+            std::env::var_os("ORNIS_REQUIRE_GPU").is_none(),
+            "ORNIS_REQUIRE_GPU is set but no wgpu device"
+        );
+        eprintln!("SKIPPED (no wgpu device)");
+        return;
+    };
+    for n in [0u32, 1, 3, 4, 7, 9] {
+        let outputs = run_compute_with_input(&device, &queue, &translated.wgsl, &[n, 0, 0, 0]);
+        for (id, actual) in outputs.iter().enumerate() {
+            let mut acc = [0.0f32; 4];
+            for i in 0..n {
+                let slot = (i & 3) as usize;
+                acc[slot] += i as f32;
+            }
+            let expected = acc.iter().sum::<f32>();
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "n {n} id {id}: gpu {actual} cpu {expected}"
+            );
+        }
+    }
+}
+
+/// Two helpers the entry calls; `#[inline(never)]` keeps them as calls.
+const HELPER_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+#[inline(never)]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+#[inline(never)]
+fn square(x: f32) -> f32 {
+    x * x
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let t = (id & 3) as f32 * 0.25;
+    square(lerp(1.0, 9.0, t))
+}
+"#;
+
+#[test]
+fn helper_functions_lower_into_module_functions() {
+    let Some(translated) = translate_source(HELPER_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // Two `fn`s before the entry and two calls in its body.
+    assert_eq!(wgsl.matches("-> f32 {").count(), 2, "{wgsl}");
+    assert_eq!(wgsl.matches("lerp(").count(), 2, "{wgsl}");
+    assert!(wgsl.contains("square("), "{wgsl}");
+    assert!(wgsl.contains("fn cs_main"), "{wgsl}");
+}
+
+#[test]
+fn helper_functions_match_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(HELPER_RS) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let t = (id as u32 & 3) as f32 * 0.25;
+        let mixed = 1.0 + (9.0 - 1.0) * t;
+        let expected = mixed * mixed;
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+#[test]
+fn recursive_helpers_are_rejected() {
+    let ir = r#"
+define internal float @down(i32 %n) {
+start:
+  %done = icmp ult i32 %n, 1
+  br i1 %done, label %one, label %more
+one:
+  ret float 1.000000e+00
+more:
+  %next = sub i32 %n, 1
+  %rest = call float @down(i32 %next)
+  %value = fadd float %rest, 1.000000e+00
+  ret float %value
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %value = call float @down(i32 %id)
+  ret float %value
+}
+"#;
+    // A shader cannot recurse, so the dependency order never resolves.
+    assert!(translate(ir).is_err());
+}
+
+#[test]
+fn pointer_phi_walks_one_allocation() {
+    // `p = phi(ptr)` over the same `alloca`: the lowerer keeps the base and
+    // phis the word offset, so a pointer chase stays a single array access.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %one = getelementptr inbounds nuw i8, ptr %buf, i32 4
+  store float 2.000000e+00, ptr %one, align 4
+  %two = getelementptr inbounds nuw i8, ptr %buf, i32 8
+  store float 3.000000e+00, ptr %two, align 4
+  %three = getelementptr inbounds nuw i8, ptr %buf, i32 12
+  store float 4.000000e+00, ptr %three, align 4
+  br label %header
+header:
+  %p = phi ptr [ %buf, %start ], [ %next_ptr, %latch ]
+  %i = phi i32 [ 0, %start ], [ %step, %latch ]
+  %done = icmp ugt i32 %i, 2
+  br i1 %done, label %exit, label %body
+body:
+  %value = load float, ptr %p, align 4
+  %next_ptr = getelementptr inbounds nuw float, ptr %p, i32 1
+  br label %latch
+latch:
+  %step = add i32 %i, 1
+  br label %header
+exit:
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("pointer phi");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var buf: array<u32, 4>;"), "{wgsl}");
+    // The chase is an offset phi, not a second pointer value.
+    assert!(wgsl.contains("loop {"), "{wgsl}");
+}
+
+#[test]
+fn pointer_phi_across_two_allocations_is_rejected() {
+    // Two different bases would need a pointer value Naga does not have.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %left = alloca [4 x float], align 4
+  %right = alloca [4 x float], align 4
+  %pick = icmp eq i32 %id, 0
+  br i1 %pick, label %a, label %b
+a:
+  br label %merge
+b:
+  br label %merge
+merge:
+  %p = phi ptr [ %left, %a ], [ %right, %b ]
+  %value = load float, ptr %p, align 4
+  ret float %value
+}
+"#;
+    assert!(translate(ir).is_err());
+}
+
+/// Helpers that take pointers, which WGSL cannot put in a function signature.
+const POINTER_HELPER_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+
+#[inline(never)]
+fn add(a: &f32, b: &f32) -> f32 {
+    *a + *b
+}
+
+#[inline(never)]
+fn scale(value: &mut f32, factor: f32) {
+    *value = *value * factor;
+}
+
+#[inline(never)]
+fn clamped(value: f32) -> f32 {
+    if value > 8.0 {
+        return 8.0;
+    }
+    if value < 0.0 {
+        return 0.0;
+    }
+    value
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut left = 1.0f32;
+    let right = 2.0f32;
+    scale(&mut left, id as f32);
+    clamped(add(&left, &right))
+}
+"#;
+
+#[test]
+fn pointer_helpers_are_inlined() {
+    let Some(translated) = translate_source(POINTER_HELPER_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    // rustc may already inline the helpers at this level; either way the
+    // pointer never crosses a function boundary, and the early returns of
+    // `clamped` collapse into selects.
+    assert!(wgsl.contains("fn cs_main"), "{wgsl}");
+    assert!(wgsl.contains("select("), "{wgsl}");
+}
+
+#[test]
+fn pointer_helper_with_a_gep_is_inlined_at_the_call_site() {
+    // Hand-written IR keeps the pointer in the signature, which is the shape
+    // WGSL cannot express: the body has to run in the caller.
+    let ir = r#"
+define internal float @first(ptr %p, i32 %offset) {
+start:
+  %at = getelementptr inbounds nuw float, ptr %p, i32 %offset
+  %value = load float, ptr %at, align 4
+  ret float %value
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %one = getelementptr inbounds nuw i8, ptr %buf, i32 4
+  store float 2.000000e+00, ptr %one, align 4
+  %two = getelementptr inbounds nuw i8, ptr %buf, i32 8
+  store float 3.000000e+00, ptr %two, align 4
+  %three = getelementptr inbounds nuw i8, ptr %buf, i32 12
+  store float 4.000000e+00, ptr %three, align 4
+  %slot = and i32 %id, 3
+  %value = call float @first(ptr %buf, i32 %slot)
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("pointer helper");
+    let wgsl = &translated.wgsl;
+    // The helper is gone and its load indexes the caller's array.
+    assert!(!wgsl.contains("fn first"), "{wgsl}");
+    assert!(wgsl.contains("var buf: array<u32, 4>;"), "{wgsl}");
+    assert!(wgsl.contains("buf["), "{wgsl}");
+}
+
+#[test]
+fn pointer_helpers_match_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(POINTER_HELPER_RS) else {
+        return;
+    };
+    for (id, actual) in outputs.iter().enumerate() {
+        let left = 1.0f32 * id as f32;
+        let expected = (left + 2.0).clamp(0.0, 8.0);
+        assert!(
+            (actual - expected).abs() < 1e-6,
+            "id {id}: gpu {actual} cpu {expected}"
+        );
+    }
+}
+
+/// A slice parameter: rustc passes the data pointer, the length is constant.
+const SLICE_HELPER_RS: &str = r#"
+#![no_std]
+#![no_main]
+use core::panic::PanicInfo;
+#[panic_handler]
+fn panic(_: &PanicInfo) -> ! { core::arch::wasm32::unreachable() }
+extern "C" { fn storage_read_f32(group: u32, binding: u32, index: u32) -> f32; }
+
+#[inline(never)]
+fn sum(values: &[f32]) -> f32 {
+    let mut total = 0.0f32;
+    for value in values {
+        total += *value;
+    }
+    total
+}
+
+#[no_mangle]
+pub extern "C" fn cs_main(id: u32) -> f32 {
+    let mut values = [0.0f32; 4];
+    let mut i = 0u32;
+    while i < 4 {
+        values[i as usize] = unsafe { storage_read_f32(0, 1, i) };
+        i += 1;
+    }
+    let _ = id;
+    sum(&values)
+}
+"#;
+
+#[test]
+fn slice_helper_inlines_over_the_callers_array() {
+    let Some(translated) = translate_source(SLICE_HELPER_RS) else {
+        return;
+    };
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("var values: array<u32, 4>;"), "{wgsl}");
+    assert!(!wgsl.contains("fn _R"), "{wgsl}");
+}
+
+#[test]
+fn slice_helper_matches_the_cpu_on_gpu() {
+    let Some((_, outputs)) = gpu_run(SLICE_HELPER_RS) else {
+        return;
+    };
+    // The harness does not fill binding 1, so the slice sums zeros.
+    for (id, actual) in outputs.iter().enumerate() {
+        assert!(actual.abs() < 1e-6, "id {id}: gpu {actual}");
+    }
+}
+
+#[test]
+fn recursive_pointer_helper_reports_recursion() {
+    let ir = r#"
+define internal float @walk(ptr %p, i32 %n) {
+start:
+  %done = icmp ult i32 %n, 1
+  br i1 %done, label %one, label %more
+one:
+  %head = load float, ptr %p, align 4
+  ret float %head
+more:
+  %next = getelementptr inbounds nuw float, ptr %p, i32 1
+  %step = sub i32 %n, 1
+  %rest = call float @walk(ptr %next, i32 %step)
+  ret float %rest
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  %value = call float @walk(ptr %buf, i32 %id)
+  ret float %value
+}
+"#;
+    let error = translate(ir).expect_err("recursion is not representable");
+    let message = format!("{error}");
+    assert!(message.contains("recurse"), "{message}");
+}
+
+#[test]
+fn pointer_select_picks_an_offset_in_one_allocation() {
+    // `select i1, ptr, ptr` over the same `alloca`: the words are selected and
+    // the base stays, which is the shape a slice walk produces.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [8 x float], align 4
+  store float 1.000000e+00, ptr %buf, align 4
+  %one = getelementptr inbounds nuw i8, ptr %buf, i32 4
+  store float 2.000000e+00, ptr %one, align 4
+  %pick = icmp eq i32 %id, 0
+  %chosen = select i1 %pick, ptr %buf, ptr %one
+  %value = load float, ptr %chosen, align 4
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("pointer select");
+    let wgsl = &translated.wgsl;
+    assert!(wgsl.contains("select("), "{wgsl}");
+    assert!(wgsl.contains("var buf: array<u32, 8>;"), "{wgsl}");
+}
+
+#[test]
+fn poison_becomes_a_zero_of_the_expected_type() {
+    // LLVM marks values it proved unobservable as `poison`; a phi still has to
+    // carry something, and any value is as good as another.
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %skip = icmp eq i32 %id, 0
+  br i1 %skip, label %left, label %right
+left:
+  br label %merge
+right:
+  br label %merge
+merge:
+  %value = phi float [ poison, %left ], [ 2.000000e+00, %right ]
+  ret float %value
+}
+"#;
+    let translated = translate(ir).expect("poison phi");
+    assert!(translated.wgsl.contains("0f"), "{}", translated.wgsl);
+}
+
+#[test]
+fn a_helper_outside_the_subset_names_the_fix() {
+    // A helper the translator cannot lower is only an error where it is called,
+    // and the message says what to do about it.
+    let ir = r#"
+define internal float @opaque(i64 %wide) {
+start:
+  ret float 1.000000e+00
+}
+define dso_local float @cs_main(i32 %id) {
+start:
+  %value = call float @opaque(i64 7)
+  ret float %value
+}
+"#;
+    let error = translate(ir).expect_err("helper outside the subset");
+    let message = format!("{error}");
+    assert!(message.contains("cannot be lowered"), "{message}");
+    assert!(message.contains("#[inline(always)]"), "{message}");
+}
+
+#[test]
+fn pointer_casts_name_the_fix() {
+    let ir = r#"
+define dso_local float @cs_main(i32 %id) {
+start:
+  %buf = alloca [4 x float], align 4
+  %addr = ptrtoint ptr %buf to i32
+  %back = inttoptr i32 %addr to ptr
+  %value = load float, ptr %back, align 4
+  ret float %value
+}
+"#;
+    let error = translate(ir).expect_err("pointer cast");
+    let message = format!("{error}");
+    assert!(message.contains("ptrtoint"), "{message}");
+    assert!(message.contains("index the buffer"), "{message}");
 }

@@ -128,8 +128,8 @@ impl Renderer3D {
             &taa_module,
             &taa_layout,
             &[surface_format, HISTORY_FORMAT],
-            shaders::aa_taa_generated::vs_main::entry_point(),
-            shaders::aa_taa_generated::fs_main::entry_point(),
+            shaders::aa_taa_generated::VS_ENTRY,
+            shaders::aa_taa_generated::FS_ENTRY,
         );
         let edge = aa_pipeline(
             device,
@@ -137,8 +137,8 @@ impl Renderer3D {
             &edge_module,
             &edge_layout,
             &[surface_format],
-            shaders::aa_edge_generated::vs_main::entry_point(),
-            shaders::aa_edge_generated::fs_main::entry_point(),
+            shaders::aa_edge_generated::VS_ENTRY,
+            shaders::aa_edge_generated::FS_ENTRY,
         );
         let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("aa params buffer"),

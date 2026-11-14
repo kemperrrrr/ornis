@@ -52,6 +52,14 @@ unsafe extern "C" {
     ) -> f32;
     #[link_name = "gpu_exp"]
     fn gpu_exp(value: f32) -> f32;
+    #[link_name = "gpu_pow"]
+    fn gpu_pow(base: f32, exponent: f32) -> f32;
+    #[link_name = "gpu_atan2"]
+    fn gpu_atan2(y: f32, x: f32) -> f32;
+    #[link_name = "gpu_smoothstep"]
+    fn gpu_smoothstep(low: f32, high: f32, x: f32) -> f32;
+    #[link_name = "gpu_sqrt"]
+    fn gpu_sqrt(value: f32) -> f32;
     #[link_name = "uniform_field_vec4_plane_dot"]
     fn uniform_field_vec4_plane_dot(
         group: u32,
@@ -94,6 +102,8 @@ unsafe extern "C" {
     fn gpu_normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32;
     #[link_name = "texture_load_2d_f32"]
     fn texture_load_2d_f32(group: u32, binding: u32, x: u32, y: u32) -> f32;
+    #[link_name = "texture_load_2d_u32"]
+    fn texture_load_2d_u32(group: u32, binding: u32, x: u32, y: u32) -> u32;
     #[link_name = "texture_load_2d_f32x4"]
     fn texture_load_2d_f32x4(group: u32, binding: u32, x: u32, y: u32, lane: u32) -> f32;
     #[link_name = "texture_sample_level_2d_f32x4"]
@@ -134,6 +144,22 @@ unsafe extern "C" {
     fn import_fragment_uv_lane(lane: u32) -> f32;
     #[link_name = "fragment_store_f32x4"]
     fn fragment_store_f32x4(r: f32, g: f32, b: f32, a: f32);
+    #[link_name = "vertex_index"]
+    fn import_vertex_index() -> u32;
+    #[link_name = "instance_index"]
+    fn import_instance_index() -> u32;
+    #[link_name = "vertex_input_lane"]
+    fn import_vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "vertex_position"]
+    fn import_vertex_position(x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "vertex_store_f32x2"]
+    fn import_vertex_store_f32x2(location: u32, x: f32, y: f32);
+    #[link_name = "vertex_store_f32x4"]
+    fn import_vertex_store_f32x4(location: u32, x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "fragment_input_lane"]
+    fn import_fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "fragment_store_location"]
+    fn import_fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32);
 }
 
 /// Call one declared import.
@@ -211,6 +237,30 @@ pub(crate) fn vec4_component(
     call!(uniform_field_vec4_component_f32(
         group, binding, sid, field, component
     ))
+}
+
+/// `sqrt(value)` — one WGSL `sqrt`.
+#[inline(always)]
+pub(crate) fn sqrt(value: f32) -> f32 {
+    call!(gpu_sqrt(value))
+}
+
+/// `smoothstep(low, high, x)` — one WGSL `smoothstep`.
+#[inline(always)]
+pub(crate) fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+    call!(gpu_smoothstep(low, high, x))
+}
+
+/// `pow(base, exponent)` — one WGSL `pow`.
+#[inline(always)]
+pub(crate) fn pow(base: f32, exponent: f32) -> f32 {
+    call!(gpu_pow(base, exponent))
+}
+
+/// `atan2(y, x)` — one WGSL `atan2`.
+#[inline(always)]
+pub(crate) fn atan2(y: f32, x: f32) -> f32 {
+    call!(gpu_atan2(y, x))
 }
 
 /// `exp(value)` — one WGSL `exp`.
@@ -347,6 +397,12 @@ pub(crate) fn normalize3_lane(x: f32, y: f32, z: f32, lane: u32) -> f32 {
     call!(gpu_normalize3_lane(x, y, z, lane))
 }
 
+/// First lane of a `texture_2d<u32>` texel at mip 0.
+#[inline(always)]
+pub(crate) fn texture_load_u32(group: u32, binding: u32, x: u32, y: u32) -> u32 {
+    call!(texture_load_2d_u32(group, binding, x, y))
+}
+
 /// Scalar load of a depth texture at mip 0.
 #[inline(always)]
 pub(crate) fn texture_load_depth(group: u32, binding: u32, x: u32, y: u32) -> f32 {
@@ -465,4 +521,52 @@ pub(crate) fn fragment_uv_lane(lane: u32) -> f32 {
 #[inline(always)]
 pub(crate) fn fragment_store(r: f32, g: f32, b: f32, a: f32) {
     call!(fragment_store_f32x4(r, g, b, a));
+}
+
+/// `@builtin(vertex_index)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn vertex_index() -> u32 {
+    call!(import_vertex_index())
+}
+
+/// `@builtin(instance_index)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn instance_index() -> u32 {
+    call!(import_instance_index())
+}
+
+/// Lane `lane` of the vertex `@location(location)` input of `lanes` lanes.
+#[inline(always)]
+pub(crate) fn vertex_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
+    call!(import_vertex_input_lane(location, lanes, lane))
+}
+
+/// Write the clip-space `@builtin(position)` of the vertex entry.
+#[inline(always)]
+pub(crate) fn vertex_position(x: f32, y: f32, z: f32, w: f32) {
+    call!(import_vertex_position(x, y, z, w));
+}
+
+/// Write a `vec2<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_2(location: u32, x: f32, y: f32) {
+    call!(import_vertex_store_f32x2(location, x, y));
+}
+
+/// Write a `vec4<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_4(location: u32, x: f32, y: f32, z: f32, w: f32) {
+    call!(import_vertex_store_f32x4(location, x, y, z, w));
+}
+
+/// Lane `lane` of the fragment `@location(location)` input of `lanes` lanes.
+#[inline(always)]
+pub(crate) fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
+    call!(import_fragment_input_lane(location, lanes, lane))
+}
+
+/// Write the fragment output at `location`: a `vec4<f32>` of RGBA lanes.
+#[inline(always)]
+pub(crate) fn fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32) {
+    call!(import_fragment_store_location(location, r, g, b, a));
 }

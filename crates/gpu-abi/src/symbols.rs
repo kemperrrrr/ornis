@@ -97,6 +97,13 @@ pub const STORAGE_BARRIER: &str = "storage_barrier";
 /// Number of `u32` words in the translator's fixed workgroup scratch array.
 pub const WORKGROUP_WORDS: u32 = 256;
 
+/// `(param i32 i32 i32 i32) (result i32)` — one lane of a `texture_2d<u32>`
+/// texel at mip 0.
+///
+/// A packed `R16Uint`-style target carries motion validity and previous depth
+/// as one word, so the load returns `u32` rather than `f32`.
+pub const TEXTURE_LOAD_2D_U32: &str = "texture_load_2d_u32";
+
 /// `(param i32 i32) (result i32)` — width of a 2D texture.
 pub const TEXTURE_WIDTH_2D: &str = "texture_width_2d";
 
@@ -209,11 +216,90 @@ pub const TEXTURE_SAMPLE_2D: &str = "texture_sample_2d";
 /// binding, UV, then an explicit mip level.
 pub const TEXTURE_SAMPLE_2D_LOD: &str = "texture_sample_2d_lod";
 
-/// Vertex entry the toy translator expects.
+/// Vertex entry. The compiled signature is `vs_main()`: builtins and
+/// `@location` values are [`VERTEX_INDEX`], [`VERTEX_INPUT_LANE`], and the
+/// `vertex_store_*` imports.
 pub const VS_MAIN: &str = "vs_main";
 
-/// Fragment entry the toy translator expects.
+/// Fragment entry the offline translator expects.
 pub const FS_MAIN: &str = "fs_main";
+
+/// `(result i32)` — `@builtin(vertex_index)` of a vertex entry.
+pub const VERTEX_INDEX: &str = "vertex_index";
+
+/// `(result i32)` — `@builtin(instance_index)` of a vertex entry.
+pub const INSTANCE_INDEX: &str = "instance_index";
+
+/// `(param i32 i32 i32) (result f32)` — lane of a vertex `@location` input.
+///
+/// The operands are the location, the declared lane count, and the lane, all
+/// immediates. The width is explicit because the vertex and fragment stages
+/// must agree on it, and each side is compiled separately.
+pub const VERTEX_INPUT_LANE: &str = "vertex_input_lane";
+
+/// `(param f32 f32 f32 f32)` — clip-space `@builtin(position)` of a vertex
+/// entry.
+pub const VERTEX_POSITION: &str = "vertex_position";
+
+/// `(param i32 f32 f32)` — write one `vec2<f32>` vertex `@location` output.
+///
+/// The first operand is the location, the rest are the lanes.
+pub const VERTEX_STORE_F32X2: &str = "vertex_store_f32x2";
+
+/// `(param i32 f32 f32 f32 f32)` — write one `vec4<f32>` vertex `@location`
+/// output.
+pub const VERTEX_STORE_F32X4: &str = "vertex_store_f32x4";
+
+/// `(param i32 i32 i32) (result f32)` — lane of a fragment `@location` input.
+///
+/// Same shape as [`VERTEX_INPUT_LANE`]: location, lane count, lane. Both stages
+/// declare the interpolant the vertex stage writes at the same location, so the
+/// lane count is declared on both sides and not inferred.
+pub const FRAGMENT_INPUT_LANE: &str = "fragment_input_lane";
+
+/// `(param i32 f32 f32 f32 f32)` — write one fragment `@location` output.
+///
+/// The first operand is the location, the rest are the RGBA lanes. A single
+/// `@location(0)` output keeps the bare `vec4<f32>` result that
+/// `fragment_store_f32x4` produces; anything else becomes a struct.
+pub const FRAGMENT_STORE_LOCATION: &str = "fragment_store_location";
+
+/// `(param i32) (result f32)` — lane of the fragment's `@location(0)` vec2.
+///
+/// The two-lane version of [`FRAGMENT_INPUT_LANE`] the AO passes use; the
+/// translator declares `@location(0) uv: vec2<f32>` for it.
+pub const FRAGMENT_UV_LANE: &str = "fragment_uv_lane";
+
+/// `(param i32) (result f32)` — lane of the fragment's `@builtin(position)`.
+pub const FRAGMENT_POSITION_LANE: &str = "fragment_position_lane";
+
+/// `(param f32 f32 f32 f32)` — the fragment's `@location(0)` color.
+///
+/// Shorthand for [`FRAGMENT_STORE_LOCATION`] at location 0; a fragment with
+/// that one target returns a bare `vec4<f32>`.
+pub const FRAGMENT_STORE_F32X4: &str = "fragment_store_f32x4";
+
+/// `(param f32) (result f32)` — `sqrt(value)`, one WGSL `sqrt`.
+///
+/// `no_std` has no `f32::sqrt`, and a Newton series would not match the GPU
+/// instruction.
+pub const GPU_SQRT: &str = "gpu_sqrt";
+
+/// `(param f32 f32) (result f32)` — `pow(base, exponent)`, one WGSL `pow`.
+///
+/// A software `exp2(y * log2(x))` would round twice and drift from the GPU
+/// instruction the DSL path used, so the operation is an import of its own.
+pub const GPU_POW: &str = "gpu_pow";
+
+/// `(param f32 f32) (result f32)` — `atan2(y, x)`, one WGSL `atan2`.
+pub const GPU_ATAN2: &str = "gpu_atan2";
+
+/// `(param f32 f32 f32) (result f32)` — `smoothstep(low, high, x)`, one WGSL
+/// `smoothstep`.
+///
+/// Spelling it as `clamp((x - low) / (high - low))³` would round differently
+/// from the instruction the DSL path used, so the operation is an import.
+pub const GPU_SMOOTHSTEP: &str = "gpu_smoothstep";
 
 /// Compute entry. Optional: a module without this export still lowers.
 ///

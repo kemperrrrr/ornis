@@ -1,4 +1,4 @@
-//! Lower a parsed LLVM function to a Naga compute entry.
+//! Lower a parsed LLVM function to a Naga entry point.
 //!
 //! The supported subset is reducible control flow after rustc's `SROA`:
 //! straight-line scalar arithmetic, `select`, diamond `if`s with `phi`
@@ -17,10 +17,20 @@
 //! are rejected as `Unsupported` so an unknown shape never silently becomes
 //! a wrong shader. A natural loop nested in another is emitted as a nested
 //! `loop` when each has one exit and the inner exit stays in the outer body.
+//!
+//! Raster entries (`vs_main`, `fs_main`) have no parameters and return `void`:
+//! their builtins are `ornis_gpu` imports (`vertex_index`, `fragment_input_lane`)
+//! and their outputs are stores into a stage-output local the lowerer returns.
+//! The interface is read back from those imports, so a `@location` exists in
+//! the emitted WGSL only if the body uses it, and its `vecN` width is the
+//! highest lane the body reads or writes. A vertex entry always returns a
+//! struct with `@builtin(position)`; a fragment entry keeps the bare
+//! `@location(0) vec4<f32>` result when that is its only target and returns a
+//! struct otherwise.
 
 use crate::error::TranslateError;
-use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, Terminator, Ty};
-use std::collections::{HashMap, HashSet};
+use crate::parse::{BasicBlock, Instr, LlvmFunc, Operand, PtrBase, Terminator, Ty};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Synthetic post-dominator sink used while structuring the CFG.
 const EXIT: &str = "$exit";
@@ -41,40 +51,644 @@ const VEC4_LANES: u32 = ornis_gpu_abi::VEC4_SIZE / WORD_BYTES;
 const WORD_2: u32 = WORD_BYTES + WORD_BYTES;
 const WORD_3: u32 = WORD_2 + WORD_BYTES;
 
-/// Lower `func` (named `cs_main`) to a Naga module with one compute entry.
+/// One Naga module under construction: entries share its globals.
 ///
-/// Two entry shapes are supported:
+/// Entry shapes, per pushed function:
 /// - `cs_main(i32) -> float`: result is stored to `storage_0_0[id]`.
-/// - `cs_main(i32) -> void`: the body stores through ABI calls.
-pub(super) fn lower(
-    func: &LlvmFunc,
-    structs: &[&[u8]],
-    workgroup: [u32; 3],
-    multisampled: bool,
-) -> Result<naga::Module, TranslateError> {
-    let fragment = func.name == ornis_gpu_abi::symbols::FS_MAIN;
-    if func.name != ornis_gpu_abi::symbols::CS_MAIN && !fragment {
-        return Err(TranslateError::Unsupported);
-    }
-    if fragment {
-        // Color is written by `fragment_store_f32x4` and returned at location 0.
-        if func.ret_ty != Ty::Void || !func.params.is_empty() {
-            return Err(TranslateError::Unsupported);
+/// - `cs_main(i32) -> void` / `cs_main() -> void`: the body stores through ABI
+///   calls.
+/// - `vs_main() -> void` / `fs_main() -> void`: builtins and stage interface
+///   values come from ABI calls, and the lowerer returns the output it stored.
+///
+/// Resources are cached per `(group, binding)` in [`Builders`], so a vertex and
+/// a fragment entry of the same pass share one set of globals — which is what a
+/// pipeline needs: both stages read the same bind group. Each call to
+/// [`Self::push`] adds one entry point.
+pub(super) struct Lowering {
+    builders: Builders,
+}
+
+impl Lowering {
+    /// Start a module with the given uniform-struct tables.
+    pub(super) fn new(structs: &[&[u8]], sampling: crate::TextureSampling) -> Self {
+        Self {
+            builders: Builders::new(structs, sampling),
         }
-    } else if !matches!(func.ret_ty, Ty::Float | Ty::Void) {
-        return Err(TranslateError::Unsupported);
-    } else if func.params.len() == 1 && func.params[0].0 == Ty::I32 {
-        // `cs_main(i32)` — standard.
-    } else if func.params.is_empty() {
-        // `cs_main()` — allowed for kernels that read `global_invocation_id`
-        // themselves; they simply do not use `%id`. Accept and ignore.
-    } else {
+    }
+
+    /// Remember the functions the parser skipped, so a call that reaches one
+    /// reports what is wrong with it instead of a generic rejection.
+    /// Remember the functions that never return, so their call sites can be
+    /// dropped instead of translated.
+    pub(super) fn reserve_diverging(&mut self, funcs: &[LlvmFunc]) {
+        for func in funcs {
+            if !func
+                .blocks
+                .iter()
+                .any(|block| matches!(block.term, Terminator::Ret(_)))
+            {
+                self.builders.diverging.insert(func.name.clone());
+            }
+        }
+    }
+
+    /// Remember the declared functions LLVM marks `noreturn`: a call to one
+    /// never returns, so its call site is dropped.
+    pub(super) fn reserve_noreturn(&mut self, names: Vec<String>) {
+        self.builders.diverging.extend(names);
+    }
+
+    pub(super) fn reserve_skipped(&mut self, skipped: Vec<(String, String)>) {
+        for (name, reason) in skipped {
+            self.builders.skipped_helpers.insert(name, reason);
+        }
+    }
+
+    /// Lower every helper the entries can call.
+    ///
+    /// Helpers may call each other, so they are lowered in dependency order:
+    /// each round lowers the functions whose callees are already in the module.
+    /// A helper whose body is outside the subset (the panic shim takes a `ptr`,
+    /// for instance) is skipped rather than failing the module: only a call that
+    /// actually reaches it is an error. A cycle is never resolved, so recursion
+    /// is rejected.
+    ///
+    /// # Errors
+    ///
+    /// [`TranslateError::Unsupported`] when the helpers call each other in a
+    /// cycle, which a shader cannot express.
+    pub(super) fn add_helpers(&mut self, funcs: &[LlvmFunc]) -> Result<(), TranslateError> {
+        let mut pending: Vec<&LlvmFunc> = funcs
+            .iter()
+            .filter(|func| Stage::of(&func.name).is_none())
+            .collect();
+        let mut skipped: Vec<&str> = Vec::new();
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut deferred = Vec::new();
+            for func in pending {
+                if self.callees_ready(func, &skipped) {
+                    self.lower_or_skip(func, &mut skipped);
+                } else {
+                    deferred.push(func);
+                }
+            }
+            if deferred.len() == before {
+                return Err(TranslateError::Unsupported);
+            }
+            pending = deferred;
+        }
+        Ok(())
+    }
+
+    /// Lower `func`, or remember it as unusable when its body leaves the subset.
+    fn lower_or_skip<'f>(&mut self, func: &'f LlvmFunc, skipped: &mut Vec<&'f str>) {
+        let lowered = self.lower_helper(func);
+        if lowered.is_err() {
+            skipped.push(func.name.as_str());
+        }
+    }
+
+    /// Whether every helper `func` calls is already lowered or skipped.
+    fn callees_ready(&self, func: &LlvmFunc, skipped: &[&str]) -> bool {
+        func.blocks.iter().all(|block| {
+            block.instrs.iter().all(|instr| match instr {
+                Instr::Call { callee, .. } | Instr::CallVoid { callee, .. } => {
+                    !is_helper_name(callee)
+                        || self.builders.helpers.contains_key(callee)
+                        || skipped.contains(&callee.as_str())
+                }
+                _ => true,
+            })
+        })
+    }
+
+    /// Lower one helper into a Naga function.
+    fn lower_helper(&mut self, func: &LlvmFunc) -> Result<(), TranslateError> {
+        let cfg = Cfg::new(func)?;
+        let function = self.builders.build_helper(func, &cfg)?;
+        let handle = self
+            .builders
+            .module
+            .functions
+            .append(function, naga::Span::default());
+        self.builders.helpers.insert(
+            func.name.clone(),
+            Helper {
+                function: handle,
+                ret: func.ret_ty,
+            },
+        );
+        Ok(())
+    }
+
+    /// Lower one entry function into the module.
+    ///
+    /// `workgroup` is the `@workgroup_size` of a compute entry and ignored by a
+    /// raster one.
+    ///
+    /// # Errors
+    ///
+    /// [`TranslateError::Unsupported`] for an entry shape outside the subset
+    /// (an unknown name, a raster entry with parameters, a compute entry that
+    /// is neither `(i32)` nor `()`), and whatever the body lowers to.
+    pub(super) fn push(
+        &mut self,
+        func: &LlvmFunc,
+        workgroup: [u32; 3],
+    ) -> Result<(), TranslateError> {
+        let stage = entry_stage(func)?;
+        self.lower_entry(func, stage, workgroup)
+    }
+
+    /// Structure the body and register the entry point.
+    fn lower_entry(
+        &mut self,
+        func: &LlvmFunc,
+        stage: Stage,
+        workgroup: [u32; 3],
+    ) -> Result<(), TranslateError> {
+        let cfg = Cfg::new(func)?;
+        let function = self.builders.build(func, &cfg, stage)?;
+        self.builders
+            .finish(function, func.ret_ty, workgroup, stage)
+    }
+
+    /// The finished module, with every entry point pushed so far.
+    pub(super) fn finish(self) -> naga::Module {
+        self.builders.module
+    }
+}
+
+/// Shader stage the entry function belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    /// `cs_main`: one invocation per `@workgroup_size` thread.
+    Compute,
+    /// `vs_main`: one invocation per vertex.
+    Vertex,
+    /// `fs_main`: one invocation per covered sample.
+    Fragment,
+}
+
+impl Stage {
+    /// Stage an entry name denotes, or `None` for anything else.
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            ornis_gpu_abi::symbols::CS_MAIN => Some(Self::Compute),
+            ornis_gpu_abi::symbols::VS_MAIN => Some(Self::Vertex),
+            ornis_gpu_abi::symbols::FS_MAIN => Some(Self::Fragment),
+            _ => None,
+        }
+    }
+
+    /// Whether the stage draws fragments, i.e. has a stage interface.
+    fn raster(self) -> bool {
+        !matches!(self, Self::Compute)
+    }
+}
+
+/// Slot of a stage output: the clip position or one `@location`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum OutSlot {
+    /// `@builtin(position)` of a vertex entry.
+    Position,
+    /// `@location(n)` of a vertex or fragment entry.
+    Location(u32),
+}
+
+/// `@location` inputs and outputs the entry body touches.
+///
+/// The subset has no Rust type for an interface value, so the stage interface
+/// is read back from the `ornis_gpu` imports the body calls: a `@location` no
+/// import mentions is not declared, and the highest lane an import names sets
+/// the declared `vecN<f32>` width.
+#[derive(Default)]
+struct StageIo {
+    /// `@builtin(vertex_index)` is read.
+    vertex_index: bool,
+    /// `@builtin(instance_index)` is read.
+    instance_index: bool,
+    /// `@builtin(position)` of a vertex entry is written.
+    position_out: bool,
+    /// Declared inputs: location -> lanes.
+    inputs: BTreeMap<u32, u32>,
+    /// Written outputs: location -> lanes.
+    outputs: BTreeMap<u32, u32>,
+}
+
+/// The stage-interface import a call names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoImport {
+    /// `@builtin(vertex_index)`.
+    VertexIndex,
+    /// `@builtin(instance_index)`.
+    InstanceIndex,
+    /// Lane of a vertex `@location` input.
+    VertexInput,
+    /// Clip-space `@builtin(position)` of a vertex entry.
+    VertexPosition,
+    /// Two-lane vertex `@location` output.
+    VertexOutput2,
+    /// Four-lane vertex `@location` output.
+    VertexOutput4,
+    /// `@builtin(position)` of a fragment entry.
+    FragmentPosition,
+    /// Lane of a fragment `@location` input.
+    FragmentInput,
+    /// Lane of the fragment's `@location(0)` vec2, the AO-pass shape.
+    FragmentUv,
+    /// Fragment output at a named location.
+    FragmentOutput,
+    /// Fragment output at `@location(0)`, the bare-vec4 shape.
+    FragmentOutput0,
+}
+
+/// Order matters only where one import name is a prefix of another, which is
+/// why the located fragment output precedes the `@location(0)` one.
+const IO_IMPORTS: [(&str, IoImport); 11] = [
+    (
+        ornis_gpu_abi::symbols::VERTEX_INPUT_LANE,
+        IoImport::VertexInput,
+    ),
+    (
+        ornis_gpu_abi::symbols::VERTEX_STORE_F32X2,
+        IoImport::VertexOutput2,
+    ),
+    (
+        ornis_gpu_abi::symbols::VERTEX_STORE_F32X4,
+        IoImport::VertexOutput4,
+    ),
+    (
+        ornis_gpu_abi::symbols::VERTEX_POSITION,
+        IoImport::VertexPosition,
+    ),
+    (ornis_gpu_abi::symbols::VERTEX_INDEX, IoImport::VertexIndex),
+    (
+        ornis_gpu_abi::symbols::INSTANCE_INDEX,
+        IoImport::InstanceIndex,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_STORE_LOCATION,
+        IoImport::FragmentOutput,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_STORE_F32X4,
+        IoImport::FragmentOutput0,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_INPUT_LANE,
+        IoImport::FragmentInput,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_UV_LANE,
+        IoImport::FragmentUv,
+    ),
+    (
+        ornis_gpu_abi::symbols::FRAGMENT_POSITION_LANE,
+        IoImport::FragmentPosition,
+    ),
+];
+
+/// Import one callee names, if it is a stage-interface import at all.
+fn io_import(callee: &str) -> Option<IoImport> {
+    IO_IMPORTS
+        .iter()
+        .find(|(name, _)| callee.contains(name))
+        .map(|(_, import)| *import)
+}
+
+/// Read the stage interface back out of the body's imports.
+fn scan_io(func: &LlvmFunc, stage: Stage) -> Result<StageIo, TranslateError> {
+    let mut io = StageIo::default();
+    for block in &func.blocks {
+        for instr in &block.instrs {
+            let (callee, args) = match instr {
+                Instr::Call { callee, args, .. } | Instr::CallVoid { callee, args } => {
+                    (callee.as_str(), args.as_slice())
+                }
+                _ => continue,
+            };
+            let Some(import) = io_import(callee) else {
+                continue;
+            };
+            match (stage, import) {
+                (Stage::Vertex, IoImport::VertexIndex) => io.vertex_index = true,
+                (Stage::Vertex, IoImport::InstanceIndex) => io.instance_index = true,
+                (Stage::Vertex, IoImport::VertexInput) => {
+                    let (location, lanes) = input_lanes(args)?;
+                    record_lanes(&mut io.inputs, location, lanes)?;
+                }
+                (Stage::Vertex, IoImport::VertexPosition) => io.position_out = true,
+                (Stage::Vertex, IoImport::VertexOutput2 | IoImport::VertexOutput4) => {
+                    let lanes = if import == IoImport::VertexOutput2 {
+                        VEC2_LANES
+                    } else {
+                        VEC4_LANES
+                    };
+                    record_lanes(&mut io.outputs, location_of(args)?, lanes)?;
+                }
+                // The fragment's `@builtin(position)` argument is always
+                // declared, so reading it needs no interface bookkeeping.
+                (Stage::Fragment, IoImport::FragmentPosition) => {}
+                (Stage::Fragment, IoImport::FragmentInput) => {
+                    let (location, lanes) = input_lanes(args)?;
+                    record_lanes(&mut io.inputs, location, lanes)?;
+                }
+                (Stage::Fragment, IoImport::FragmentUv) => {
+                    record_lanes(&mut io.inputs, 0, VEC2_LANES)?;
+                }
+                (Stage::Fragment, IoImport::FragmentOutput0) => {
+                    record_lanes(&mut io.outputs, 0, VEC4_LANES)?;
+                }
+                (Stage::Fragment, IoImport::FragmentOutput) => {
+                    record_lanes(&mut io.outputs, location_of(args)?, VEC4_LANES)?;
+                }
+                // A stage reading the other stage's interface would declare an
+                // argument its entry point cannot have.
+                _ => return Err(TranslateError::Unsupported),
+            }
+        }
+    }
+    Ok(io)
+}
+
+/// Operands of a `*_input_lane` import: location, declared lanes, and the lane.
+const INPUT_LANE_ARGS: usize = 3;
+
+/// `(location, lanes)` immediates of a `*_input_lane` call.
+///
+/// The lane being read must also be inside the declared width; that check is
+/// in [`Lowerer::input_lane`], which sees the same immediates.
+fn input_lanes(args: &[Operand]) -> Result<(u32, u32), TranslateError> {
+    if args.len() != INPUT_LANE_ARGS {
         return Err(TranslateError::Unsupported);
     }
-    let cfg = Cfg::new(func)?;
-    let mut builders = Builders::new(structs, multisampled);
-    let function = builders.build(func, &cfg, fragment)?;
-    builders.finish(function, func.ret_ty, workgroup, fragment)
+    Ok((const_u32(&args[0])?, const_u32(&args[1])?))
+}
+
+/// Location immediate of a `*_store_*(location, …)` call.
+fn location_of(args: &[Operand]) -> Result<u32, TranslateError> {
+    const_u32(args.first().ok_or(TranslateError::Unsupported)?)
+}
+
+/// Record that `location` carries `lanes` lanes.
+fn record_lanes(
+    map: &mut BTreeMap<u32, u32>,
+    location: u32,
+    lanes: u32,
+) -> Result<(), TranslateError> {
+    if !(1..=VEC4_LANES).contains(&lanes) {
+        return Err(TranslateError::UnsupportedType(format!(
+            "@location({location}) needs one to four lanes, got {lanes}"
+        )));
+    }
+    match map.get(&location) {
+        Some(&existing) if existing != lanes => Err(TranslateError::UnsupportedType(format!(
+            "@location({location}) is used as both a {existing}-lane and a {lanes}-lane value"
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            map.insert(location, lanes);
+            Ok(())
+        }
+    }
+}
+
+/// `@location(n)` with the perspective interpolation every pass uses today.
+fn location_binding(location: u32) -> naga::Binding {
+    naga::Binding::Location {
+        location,
+        interpolation: Some(naga::Interpolation::Perspective),
+        sampling: Some(naga::Sampling::Center),
+        blend_src: None,
+        per_primitive: false,
+    }
+}
+
+/// Stage-output struct under construction: members, their layout, and the
+/// member index of every output slot.
+#[derive(Default)]
+struct OutputLayout {
+    /// Struct members in declaration order.
+    members: Vec<naga::StructMember>,
+    /// Size and alignment of each member, in the same order.
+    specs: Vec<ornis_gpu_abi::FieldLayout>,
+    /// Member index per output slot.
+    slots: BTreeMap<OutSlot, u32>,
+}
+
+impl OutputLayout {
+    /// Append the member for `slot`: `lanes` of `ty` at `binding`.
+    fn push(
+        &mut self,
+        slot: OutSlot,
+        lanes: u32,
+        ty: naga::Handle<naga::Type>,
+        binding: naga::Binding,
+    ) {
+        let name = match slot {
+            OutSlot::Position => "position".to_string(),
+            OutSlot::Location(location) => format!("o{location}"),
+        };
+        self.specs.push(ornis_gpu_abi::FieldLayout {
+            size: lanes * WORD_BYTES,
+            align: lanes * WORD_BYTES,
+        });
+        self.slots.insert(slot, self.members.len() as u32);
+        self.members.push(naga::StructMember {
+            name: Some(name),
+            ty,
+            binding: Some(binding),
+            offset: 0,
+        });
+    }
+
+    /// Size of the struct with every member offset filled in.
+    fn span(&mut self) -> u32 {
+        let mut offsets = vec![0u32; self.specs.len()];
+        let span = ornis_gpu_abi::place_fields(&self.specs, true, &mut offsets);
+        for (member, offset) in self.members.iter_mut().zip(&offsets) {
+            member.offset = *offset;
+        }
+        span
+    }
+}
+
+/// Name the emitted stage-output struct carries in WGSL.
+fn output_struct_name(stage: Stage) -> &'static str {
+    if stage == Stage::Vertex {
+        "VertexOut"
+    } else {
+        "FragmentOut"
+    }
+}
+
+/// A raster entry's result type, its located members, and `@builtin(position)`.
+struct OutputType {
+    /// The emitted struct type.
+    ty: naga::Handle<naga::Type>,
+    /// Member index per output slot.
+    slots: BTreeMap<OutSlot, u32>,
+    /// Member index of `@builtin(position)`, absent for a fragment.
+    position: Option<u32>,
+}
+
+/// Entry arguments a raster or compute body reads.
+struct StageArguments {
+    /// `global_invocation_id` vector, for a compute entry.
+    global_id: Option<naga::Handle<naga::Expression>>,
+    /// Lane 0 of `global_invocation_id`, the compute entry's `i32` parameter.
+    id_x: Option<naga::Handle<naga::Expression>>,
+    /// `@builtin(local_invocation_index)`.
+    local_index: Option<naga::Handle<naga::Expression>>,
+    /// `@builtin(vertex_index)`.
+    vertex_index: Option<naga::Handle<naga::Expression>>,
+    /// `@builtin(instance_index)`.
+    instance_index: Option<naga::Handle<naga::Expression>>,
+    /// `@builtin(position)` of a fragment entry.
+    position: Option<naga::Handle<naga::Expression>>,
+    /// `@location` arguments by location.
+    inputs: BTreeMap<u32, naga::Handle<naga::Expression>>,
+}
+
+/// Local variable the entry returns, holding the stage output.
+fn output_local(
+    function: &mut naga::Function,
+    name: &str,
+    ty: naga::Handle<naga::Type>,
+) -> naga::Handle<naga::LocalVariable> {
+    function.local_variables.append(
+        naga::LocalVariable {
+            name: Some(name.to_string()),
+            ty,
+            init: None,
+        },
+        naga::Span::default(),
+    )
+}
+
+/// Operands of a `memset`/`memcpy` call: destination/source, value, size.
+const MEMORY_INTRINSIC_ARGS: usize = 3;
+
+/// Bits in one byte, the unit a `memset` fill value repeats with.
+const BYTE_BITS: u32 = 8;
+/// Bits in one word.
+const WORD_BITS: u32 = 32;
+/// Mask of one byte.
+const BYTE_MASK: u32 = 0xFF;
+
+/// Whether `callee` names a function the module defines rather than an import.
+///
+/// Imports are the `ornis_gpu` ABI and the `llvm.*` intrinsics; everything else
+/// is a helper the kernel calls.
+fn is_helper_name(callee: &str) -> bool {
+    const IMPORT_PREFIXES: [&str; 8] = [
+        "llvm.",
+        "ornis_gpu",
+        "storage_",
+        "uniform_",
+        "texture_",
+        "workgroup_",
+        "fragment_",
+        "vertex_",
+    ];
+    const IMPORT_NAMES: [&str; 3] = ["instance_index", "gpu_", "global_invocation"];
+    !IMPORT_PREFIXES
+        .iter()
+        .chain(IMPORT_NAMES.iter())
+        .any(|prefix| callee.contains(prefix))
+        && !callee.contains("local_invocation")
+}
+
+/// A helper function lowered into the module.
+#[derive(Clone, Copy)]
+struct Helper {
+    /// The Naga function to call.
+    function: naga::Handle<naga::Function>,
+    /// Its result type, `Ty::Void` for a function that returns nothing.
+    ret: Ty,
+}
+
+/// Naga scalar type of a helper's `f32`/`i32` value.
+fn scalar_of(module: &mut naga::Module, ty: Ty) -> Option<naga::Handle<naga::Type>> {
+    match ty {
+        Ty::Float => Some(scalar(module, naga::ScalarKind::Float)),
+        Ty::I32 => Some(scalar(module, naga::ScalarKind::Uint)),
+        _ => None,
+    }
+}
+
+/// One word made of `byte` repeated, the word a `memset` writes.
+fn repeated_byte(byte: u32) -> u32 {
+    let mut word = 0u32;
+    let mut shift = 0u32;
+    while shift < WORD_BITS {
+        word |= byte << shift;
+        shift += BYTE_BITS;
+    }
+    word
+}
+
+/// Word count of `bytes`, which must be a multiple of four.
+fn word_count(bytes: u32) -> Result<u32, TranslateError> {
+    if bytes == 0 || !bytes.is_multiple_of(WORD_BYTES) {
+        return Err(TranslateError::Unsupported);
+    }
+    Ok(bytes / WORD_BYTES)
+}
+
+/// Where a memory value lives and how far into it the pointer is.
+#[derive(Clone, Copy)]
+struct MemoryPointer {
+    /// Base of the pointer.
+    base: MemoryBase,
+    /// Offset from the base, in 4-byte words.
+    words: naga::Handle<naga::Expression>,
+}
+
+/// What a [`MemoryPointer`] starts at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemoryBase {
+    /// A function-scope allocation (`alloca`).
+    Local(naga::Handle<naga::LocalVariable>),
+    /// A module constant, lowered to a private array of words.
+    Constant(naga::Handle<naga::GlobalVariable>),
+}
+
+/// Where the entry writes its stage output.
+struct StageOut {
+    /// Local variable the entry returns.
+    var: naga::Handle<naga::LocalVariable>,
+    /// Struct member per output slot; `None` when the output is the fragment's
+    /// bare `@location(0) vec4<f32>`.
+    locations: Option<BTreeMap<OutSlot, u32>>,
+    /// Struct member of `@builtin(position)`.
+    position: Option<u32>,
+}
+
+impl StageOut {
+    /// The fragment's bare `@location(0) vec4<f32>`, stored into the variable.
+    fn bare(var: naga::Handle<naga::LocalVariable>) -> Self {
+        Self {
+            var,
+            locations: None,
+            position: None,
+        }
+    }
+
+    /// A struct result, stored into the member each output slot names.
+    fn located(
+        var: naga::Handle<naga::LocalVariable>,
+        locations: BTreeMap<OutSlot, u32>,
+        position: Option<u32>,
+    ) -> Self {
+        Self {
+            var,
+            locations: Some(locations),
+            position,
+        }
+    }
 }
 
 /// Which `texture_*` binding a load addresses.
@@ -84,6 +698,9 @@ enum TextureKind {
     Depth,
     /// `texture_2d<f32>`. `textureLoad` returns `vec4<f32>`.
     Sampled,
+    /// `texture_2d<u32>`. `textureLoad` returns `vec4<u32>`; lane 0 is the
+    /// packed word a `R16Uint`-style target carries.
+    Unsigned,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,19 +748,7 @@ impl<'a> Cfg<'a> {
         let mut preds: HashMap<&'a str, Vec<&'a str>> = HashMap::new();
         let mut phis: HashMap<&'a str, Vec<Phi>> = HashMap::new();
         for block in &func.blocks {
-            let mut out = Vec::new();
-            match &block.term {
-                Terminator::Ret(_) => {}
-                Terminator::BrUncond(target) => out.push(target.as_str()),
-                Terminator::BrCond {
-                    true_label,
-                    false_label,
-                    ..
-                } => {
-                    out.push(true_label.as_str());
-                    out.push(false_label.as_str());
-                }
-            }
+            let out = successors(&block.term);
             for target in &out {
                 if !blocks.contains_key(target) {
                     return Err(TranslateError::Parse(format!(
@@ -299,8 +904,9 @@ fn push_local(op: &Operand, used: &mut Vec<String>) {
 fn push_term_local(term: &Terminator, used: &mut Vec<String>) {
     match term {
         Terminator::BrCond { cond, .. } => push_local(cond, used),
+        Terminator::Switch { selector, .. } => push_local(selector, used),
         Terminator::Ret(Some(value)) => push_local(value, used),
-        Terminator::BrUncond(_) | Terminator::Ret(None) => {}
+        Terminator::BrUncond(_) | Terminator::Ret(None) | Terminator::Unreachable => {}
     }
 }
 
@@ -445,21 +1051,30 @@ struct Builders {
     samplers: HashMap<(u32, u32), naga::Handle<naga::GlobalVariable>>,
     /// `vec2<i32>` used as a `textureLoad` coordinate.
     ivec2: Option<naga::Handle<naga::Type>>,
-    /// `vec4<f32>` shared by the fragment output and `fragment_store`.
-    vec2_f32: Option<naga::Handle<naga::Type>>,
-    vec4_f32: Option<naga::Handle<naga::Type>>,
     /// Plain `array<u32, WORKGROUP_WORDS>` in workgroup memory.
     workgroup: Option<naga::Handle<naga::GlobalVariable>>,
     /// `array<atomic<u32>, WORKGROUP_WORDS>` in workgroup memory.
     workgroup_atomic: Option<naga::Handle<naga::GlobalVariable>>,
+    /// Module constants by symbol name, raw little-endian contents.
+    module_constants: HashMap<String, Vec<u8>>,
+    /// Helper functions lowered into the module, by IR name.
+    helpers: HashMap<String, Helper>,
+    /// Helpers outside the subset, with the reason a call cannot lower them.
+    skipped_helpers: HashMap<String, String>,
+    /// Functions whose every path ends in `unreachable` (the panic shims).
+    ///
+    /// A call to one never returns, so the translator drops it and lets the
+    /// caller's own `unreachable` end the invocation: a shader has no place to
+    /// report a panic to.
+    diverging: HashSet<String>,
     /// `ornis_gpu.types` field tags per struct id.
     structs: Vec<Vec<u8>>,
-    /// Declare textures as multisampled and load sample 0 instead of mip 0.
-    multisampled: bool,
+    /// Which textures declare the multisampled type (and load sample 0).
+    sampling: crate::TextureSampling,
 }
 
 impl Builders {
-    fn new(structs: &[&[u8]], multisampled: bool) -> Self {
+    fn new(structs: &[&[u8]], sampling: crate::TextureSampling) -> Self {
         Self {
             module: naga::Module::default(),
             storage_binding: HashMap::new(),
@@ -470,51 +1085,47 @@ impl Builders {
             textures: HashMap::new(),
             samplers: HashMap::new(),
             ivec2: None,
-            vec2_f32: None,
-            vec4_f32: None,
             workgroup: None,
             workgroup_atomic: None,
+            module_constants: HashMap::new(),
+            helpers: HashMap::new(),
+            skipped_helpers: HashMap::new(),
+            diverging: HashSet::new(),
             structs: structs.iter().map(|tags| tags.to_vec()).collect(),
-            multisampled,
+            sampling,
         }
     }
 
+    /// Add the lowered function as this module's next entry point.
     fn finish(
-        mut self,
-        mut function: naga::Function,
+        &mut self,
+        function: naga::Function,
         ret_ty: Ty,
         workgroup: [u32; 3],
-        fragment: bool,
-    ) -> Result<naga::Module, TranslateError> {
+        stage: Stage,
+    ) -> Result<(), TranslateError> {
         // Only create the implicit `storage_0_0` global when the kernel
         // uses the `-> float` shape; for `-> void` the body creates its
         // own globals lazily.
         if ret_ty == Ty::Float {
             self.storage_global(0, 0, Elem::F32, true)?;
         }
-        let (name, stage, workgroup_size) = if fragment {
-            let ty = self.vec4_f32();
-            function.result = Some(naga::FunctionResult {
-                ty,
-                binding: Some(naga::Binding::Location {
-                    location: 0,
-                    interpolation: Some(naga::Interpolation::Perspective),
-                    sampling: Some(naga::Sampling::Center),
-                    blend_src: None,
-                    per_primitive: false,
-                }),
-            });
-            (
-                ornis_gpu_abi::symbols::FS_MAIN.to_string(),
-                naga::ShaderStage::Fragment,
-                [0, 0, 0],
-            )
-        } else {
-            (
+        let (name, stage, workgroup_size) = match stage {
+            Stage::Compute => (
                 ornis_gpu_abi::symbols::CS_MAIN.to_string(),
                 naga::ShaderStage::Compute,
                 workgroup,
-            )
+            ),
+            Stage::Vertex => (
+                ornis_gpu_abi::symbols::VS_MAIN.to_string(),
+                naga::ShaderStage::Vertex,
+                [0, 0, 0],
+            ),
+            Stage::Fragment => (
+                ornis_gpu_abi::symbols::FS_MAIN.to_string(),
+                naga::ShaderStage::Fragment,
+                [0, 0, 0],
+            ),
         };
         self.module.entry_points.push(naga::EntryPoint {
             name,
@@ -527,7 +1138,7 @@ impl Builders {
             task_payload: None,
             incoming_ray_payload: None,
         });
-        Ok(self.module)
+        Ok(())
     }
 
     fn storage_global(
@@ -634,7 +1245,7 @@ impl Builders {
                 inner: naga::TypeInner::Image {
                     dim: naga::ImageDimension::D2,
                     arrayed: false,
-                    class: image_class(want, self.multisampled),
+                    class: image_class(want, self.sampling.multisampled_at(group, binding)),
                 },
             },
             naga::Span::default(),
@@ -745,48 +1356,6 @@ impl Builders {
             },
             naga::Span::default(),
         ))
-    }
-
-    fn vec2_f32(&mut self) -> naga::Handle<naga::Type> {
-        if let Some(ty) = self.vec2_f32 {
-            return ty;
-        }
-        let ty = self.module.types.insert(
-            naga::Type {
-                name: None,
-                inner: naga::TypeInner::Vector {
-                    size: naga::VectorSize::Bi,
-                    scalar: naga::Scalar {
-                        kind: naga::ScalarKind::Float,
-                        width: SCALAR_WIDTH,
-                    },
-                },
-            },
-            naga::Span::default(),
-        );
-        self.vec2_f32 = Some(ty);
-        ty
-    }
-
-    fn vec4_f32(&mut self) -> naga::Handle<naga::Type> {
-        if let Some(ty) = self.vec4_f32 {
-            return ty;
-        }
-        let ty = self.module.types.insert(
-            naga::Type {
-                name: None,
-                inner: naga::TypeInner::Vector {
-                    size: naga::VectorSize::Quad,
-                    scalar: naga::Scalar {
-                        kind: naga::ScalarKind::Float,
-                        width: SCALAR_WIDTH,
-                    },
-                },
-            },
-            naga::Span::default(),
-        );
-        self.vec4_f32 = Some(ty);
-        ty
     }
 
     fn ivec2(&mut self) -> naga::Handle<naga::Type> {
@@ -1072,57 +1641,49 @@ impl Builders {
         &mut self,
         func: &LlvmFunc,
         cfg: &Cfg<'_>,
-        fragment: bool,
+        stage: Stage,
     ) -> Result<naga::Function, TranslateError> {
-        let entry = if fragment {
-            ornis_gpu_abi::symbols::FS_MAIN
-        } else {
-            ornis_gpu_abi::symbols::CS_MAIN
-        };
         let mut function = naga::Function {
-            name: Some(entry.to_string()),
+            name: Some(func.name.clone()),
             ..Default::default()
         };
-        let (global_id, id_x) = if fragment {
-            (None, None)
-        } else {
-            let (global_id, id_x) = invocation_x(&mut self.module, &mut function);
-            (Some(global_id), Some(id_x))
-        };
-        let local_index = (!fragment && uses_call(func, "local_invocation_index"))
-            .then(|| local_index_arg(&mut self.module, &mut function));
-        let position = fragment.then(|| position_arg(self.vec4_f32(), &mut function));
-        let uv = (fragment && uses_uv(func)).then(|| uv_arg(self.vec2_f32(), &mut function));
-        let fragment_out = fragment.then(|| {
-            let ty = self.vec4_f32();
-            function.local_variables.append(
-                naga::LocalVariable {
-                    name: Some("fragment_out".to_string()),
-                    ty,
-                    init: None,
-                },
-                naga::Span::default(),
-            )
-        });
-
+        let io = scan_io(func, stage)?;
+        let uniform = uniform_values(func);
+        self.module_constants = func
+            .globals
+            .iter()
+            .map(|global| (global.name.clone(), global.bytes.clone()))
+            .collect();
+        let args = stage_arguments(&mut self.module, func, stage, &io, &mut function)?;
+        let stage_out = stage_output(&mut self.module, stage, &io, &mut function)?;
         let mut lowerer = Lowerer {
             builders: self,
             cfg,
             func: function,
-            id_x,
-            global_id,
-            local_index,
-            fragment_out,
-            position,
-            uv,
+            io,
+            id_x: args.id_x,
+            global_id: args.global_id,
+            local_index: args.local_index,
+            vertex_index: args.vertex_index,
+            instance_index: args.instance_index,
+            stage_out,
+            position: args.position,
+            inputs: args.inputs,
             phi_vars: HashMap::new(),
             spill: HashMap::new(),
             env: HashMap::new(),
             saw_return: false,
-            branch_depth: 0,
+            divergent_depth: 0,
+            uniform,
+            exit_ids: HashMap::new(),
+            exit_id_var: None,
+            pointers: HashMap::new(),
+            ptr_bases: HashMap::new(),
+            constants: HashMap::new(),
             diverged: false,
+            returns_value: false,
         };
-        if let Some((id_x, (_, name))) = id_x.zip(func.params.first()) {
+        if let Some((id_x, (_, name))) = args.id_x.zip(func.params.first()) {
             lowerer.env.insert(name.clone(), id_x);
         }
         lowerer.alloc_phis()?;
@@ -1136,6 +1697,424 @@ impl Builders {
         }
         Ok(function)
     }
+
+    /// Lower a helper function: scalar parameters, scalar or void result.
+    ///
+    /// A helper has no stage interface and no invocation id; its body is the
+    /// same subset as an entry's, and `ret` returns the value instead of
+    /// storing it.
+    fn build_helper(
+        &mut self,
+        func: &LlvmFunc,
+        cfg: &Cfg<'_>,
+    ) -> Result<naga::Function, TranslateError> {
+        let mut function = naga::Function {
+            name: Some(func.name.clone()),
+            ..Default::default()
+        };
+        let mut args = Vec::new();
+        for (index, (ty, name)) in func.params.iter().enumerate() {
+            let ty = match ty {
+                Ty::Float => scalar(&mut self.module, naga::ScalarKind::Float),
+                Ty::I32 => scalar(&mut self.module, naga::ScalarKind::Uint),
+                _ => return Err(TranslateError::Unsupported),
+            };
+            function.arguments.push(naga::FunctionArgument {
+                name: Some(name.clone()),
+                ty,
+                binding: None,
+            });
+            let arg = append(
+                &mut function,
+                naga::Expression::FunctionArgument(index as u32),
+            );
+            push_emit(&mut function, &mut naga::Block::new(), arg);
+            args.push((name.clone(), arg));
+        }
+        function.result = match func.ret_ty {
+            Ty::Void => None,
+            ret => Some(naga::FunctionResult {
+                ty: scalar_of(&mut self.module, ret).ok_or(TranslateError::Unsupported)?,
+                binding: None,
+            }),
+        };
+        let mut lowerer = Lowerer {
+            builders: self,
+            cfg,
+            func: function,
+            io: StageIo::default(),
+            id_x: None,
+            global_id: None,
+            local_index: None,
+            vertex_index: None,
+            instance_index: None,
+            stage_out: None,
+            position: None,
+            inputs: BTreeMap::new(),
+            phi_vars: HashMap::new(),
+            spill: HashMap::new(),
+            env: HashMap::new(),
+            saw_return: false,
+            divergent_depth: 0,
+            uniform: HashSet::new(),
+            exit_ids: HashMap::new(),
+            exit_id_var: None,
+            pointers: HashMap::new(),
+            ptr_bases: HashMap::new(),
+            constants: HashMap::new(),
+            diverged: false,
+            returns_value: true,
+        };
+        for (name, arg) in args {
+            lowerer.env.insert(name, arg);
+        }
+        lowerer.alloc_phis()?;
+        lowerer.emit_top()?;
+        let saw_return = lowerer.saw_return;
+        let function = lowerer.func;
+        if !saw_return {
+            return Err(TranslateError::Parse(
+                "function without lowered ret".to_string(),
+            ));
+        }
+        Ok(function)
+    }
+}
+
+/// A `loop` with no continuing block and no `break if`.
+fn loop_statement(body: naga::Block) -> naga::Statement {
+    naga::Statement::Loop {
+        body,
+        continuing: naga::Block::new(),
+        break_if: None,
+    }
+}
+
+/// One `switch` case; the value comes from the IR, the body was just emitted.
+fn switch_case(
+    value: naga::SwitchValue,
+    body: naga::Block,
+    fall_through: bool,
+) -> naga::SwitchCase {
+    naga::SwitchCase {
+        value,
+        body,
+        fall_through,
+    }
+}
+
+/// Whether a `switch` case returns, after rejecting flows that cannot surface.
+///
+/// A case either falls through to the merge or returns from the entry; a
+/// `continue`/`break` belongs to a region inside the case.
+fn case_flow_returns(flow: Flow) -> Result<bool, TranslateError> {
+    match flow {
+        Flow::Returned => Ok(true),
+        Flow::Next => Ok(false),
+        Flow::Continue | Flow::Break => Err(TranslateError::Unsupported),
+    }
+}
+
+/// Values that are the same for every invocation of the workgroup.
+///
+/// Greatest fixpoint: every value starts uniform and is dropped as soon as it
+/// depends on a non-uniform source. The sources are the invocation id, the
+/// local index, storage and workgroup reads, atomics, and texture loads;
+/// uniform struct fields, literals, and arithmetic over uniform values stay
+/// uniform. A `phi` is uniform only when every incoming value is, which is what
+/// makes a loop counter (`i = phi(0, i + 1)`) uniform.
+fn uniform_values(func: &LlvmFunc) -> HashSet<String> {
+    let mut uniform: HashSet<String> = func
+        .blocks
+        .iter()
+        .flat_map(|block| block.instrs.iter())
+        .filter_map(|instr| instr.defined().map(str::to_string))
+        .collect();
+    loop {
+        let mut changed = false;
+        for block in &func.blocks {
+            for instr in &block.instrs {
+                let Some(name) = instr.defined() else {
+                    continue;
+                };
+                if !uniform.contains(name) || instruction_is_uniform(instr, &uniform) {
+                    continue;
+                }
+                uniform.remove(name);
+                changed = true;
+            }
+        }
+        if !changed {
+            return uniform;
+        }
+    }
+}
+
+/// Whether `instr` produces the same value in every invocation.
+fn instruction_is_uniform(instr: &Instr, uniform: &HashSet<String>) -> bool {
+    let operands_uniform = {
+        let mut all = true;
+        instr.each_operand(|op| {
+            if let Operand::Local(name) = op
+                && !uniform.contains(name)
+            {
+                all = false;
+            }
+        });
+        all
+    };
+    if !operands_uniform {
+        return false;
+    }
+    match instr {
+        Instr::Call { callee, .. } => uniform_callee(callee),
+        _ => true,
+    }
+}
+
+/// Whether an import returns the same value in every invocation.
+///
+/// Uniform struct fields, array lengths, texture dimensions, and the scalar
+/// math builtins do; the invocation id, workgroup memory, storage reads, and
+/// texture fetches do not.
+fn uniform_callee(callee: &str) -> bool {
+    const UNIFORM: [&str; 5] = [
+        "uniform_",
+        "storage_len",
+        "texture_width",
+        "texture_height",
+        "gpu_",
+    ];
+    UNIFORM.iter().any(|prefix| callee.contains(prefix)) || callee.contains("llvm.")
+}
+
+/// Blocks control can leave `term` for, in the order the IR names them.
+fn successors(term: &Terminator) -> Vec<&str> {
+    match term {
+        Terminator::Ret(_) | Terminator::Unreachable => Vec::new(),
+        Terminator::BrUncond(target) => vec![target.as_str()],
+        Terminator::BrCond {
+            true_label,
+            false_label,
+            ..
+        } => vec![true_label.as_str(), false_label.as_str()],
+        Terminator::Switch { default, cases, .. } => {
+            let mut out = vec![default.as_str()];
+            out.extend(cases.iter().map(|(_, label)| label.as_str()));
+            out
+        }
+    }
+}
+
+/// Stage of `func`, after checking the shape rustc compiles for it.
+///
+/// A compute entry takes nothing or one `i32` (its invocation id) and may
+/// return `f32`; a raster entry is `void` with no parameters, because its
+/// builtins and interface come from the stage-IO imports.
+fn entry_stage(func: &LlvmFunc) -> Result<Stage, TranslateError> {
+    let stage = Stage::of(&func.name).ok_or(TranslateError::Unsupported)?;
+    let shape_ok = match stage {
+        Stage::Compute => matches!(
+            (func.ret_ty, func.params.as_slice()),
+            (Ty::Float | Ty::Void, [] | [(Ty::I32, _)])
+        ),
+        Stage::Vertex | Stage::Fragment => func.ret_ty == Ty::Void && func.params.is_empty(),
+    };
+    if shape_ok {
+        Ok(stage)
+    } else {
+        Err(TranslateError::Unsupported)
+    }
+}
+
+/// `vecN<f32>` of a stage-interface value, or `None` for a width the
+/// translator does not declare.
+fn vec_f32_type(module: &mut naga::Module, lanes: u32) -> Option<naga::Handle<naga::Type>> {
+    let size = match lanes {
+        VEC2_LANES => naga::VectorSize::Bi,
+        VEC3_LANES => naga::VectorSize::Tri,
+        VEC4_LANES => naga::VectorSize::Quad,
+        _ => return None,
+    };
+    Some(module.types.insert(
+        naga::Type {
+            name: None,
+            inner: vector_f32(size),
+        },
+        naga::Span::default(),
+    ))
+}
+
+/// `vec4<f32>`, the clip position and every four-lane interface value.
+fn vec4_f32_type(module: &mut naga::Module) -> naga::Handle<naga::Type> {
+    module.types.insert(
+        naga::Type {
+            name: None,
+            inner: vector_f32(naga::VectorSize::Quad),
+        },
+        naga::Span::default(),
+    )
+}
+
+/// A `vecN<f32>` type body.
+fn vector_f32(size: naga::VectorSize) -> naga::TypeInner {
+    naga::TypeInner::Vector {
+        size,
+        scalar: naga::Scalar {
+            kind: naga::ScalarKind::Float,
+            width: SCALAR_WIDTH,
+        },
+    }
+}
+
+/// Declare the entry arguments the body reads: builtins and `@location`s.
+fn stage_arguments(
+    module: &mut naga::Module,
+    func: &LlvmFunc,
+    stage: Stage,
+    io: &StageIo,
+    function: &mut naga::Function,
+) -> Result<StageArguments, TranslateError> {
+    let (global_id, id_x) = if stage == Stage::Compute {
+        let (global_id, id_x) = invocation_x(module, function);
+        (Some(global_id), Some(id_x))
+    } else {
+        (None, None)
+    };
+    let local_index = (stage == Stage::Compute && uses_call(func, "local_invocation_index"))
+        .then(|| local_index_arg(module, function));
+    let vertex_index = io
+        .vertex_index
+        .then(|| builtin_u32_arg(module, function, "vertex_index", naga::BuiltIn::VertexIndex));
+    let instance_index = io.instance_index.then(|| {
+        builtin_u32_arg(
+            module,
+            function,
+            "instance_index",
+            naga::BuiltIn::InstanceIndex,
+        )
+    });
+    // A fragment always declares `@builtin(position)`: the checked-in AO
+    // artifacts carry it, and an entry may read it from any branch.
+    let position = (stage == Stage::Fragment)
+        .then(|| vec4_f32_type(module))
+        .map(|ty| position_arg(ty, function));
+    let mut inputs = BTreeMap::new();
+    for (&location, &lanes) in &io.inputs {
+        let ty = vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported)?;
+        // A fragment's location-0 two-lane interpolant keeps the `uv`
+        // parameter name the checked-in AO artifacts already carry.
+        let legacy_uv = stage == Stage::Fragment && location == 0 && lanes == VEC2_LANES;
+        let name = if legacy_uv {
+            "uv".to_string()
+        } else {
+            format!("in{location}")
+        };
+        inputs.insert(location, location_arg(function, ty, location, &name));
+    }
+    Ok(StageArguments {
+        global_id,
+        id_x,
+        local_index,
+        vertex_index,
+        instance_index,
+        position,
+        inputs,
+    })
+}
+
+/// Declare the entry's stage output and its return type.
+///
+/// A vertex entry always returns a struct: `@builtin(position)` is mandatory in
+/// a vertex result. A fragment entry returns a bare `@location(0) vec4<f32>`
+/// when that is its only target — the shape the checked-in fragment artifacts
+/// already have — and a struct otherwise.
+fn stage_output(
+    module: &mut naga::Module,
+    stage: Stage,
+    io: &StageIo,
+    function: &mut naga::Function,
+) -> Result<Option<StageOut>, TranslateError> {
+    if !stage.raster() {
+        return Ok(None);
+    }
+    let bare_fragment = stage == Stage::Fragment
+        && io.outputs.len() == 1
+        && io.outputs.get(&0) == Some(&VEC4_LANES)
+        && !io.position_out;
+    if bare_fragment {
+        let ty = vec4_f32_type(module);
+        function.result = Some(naga::FunctionResult {
+            ty,
+            binding: Some(location_binding(0)),
+        });
+        let var = output_local(function, "fragment_out", ty);
+        return Ok(Some(StageOut::bare(var)));
+    }
+    if stage == Stage::Vertex && !io.position_out {
+        return Err(TranslateError::Unsupported);
+    }
+    if io.outputs.is_empty() {
+        return Err(TranslateError::Unsupported);
+    }
+    let OutputType {
+        ty,
+        slots: locations,
+        position,
+    } = output_struct(module, stage, io)?;
+    function.result = Some(naga::FunctionResult { ty, binding: None });
+    let name = if stage == Stage::Vertex {
+        "vertex_out"
+    } else {
+        "fragment_out"
+    };
+    let var = output_local(function, name, ty);
+    Ok(Some(StageOut::located(var, locations, position)))
+}
+
+/// Struct type of a raster entry result, plus the member index of every
+/// located output and of `@builtin(position)`.
+fn output_struct(
+    module: &mut naga::Module,
+    stage: Stage,
+    io: &StageIo,
+) -> Result<OutputType, TranslateError> {
+    let mut layout = OutputLayout::default();
+    if stage == Stage::Vertex {
+        layout.push(
+            OutSlot::Position,
+            VEC4_LANES,
+            vec4_f32_type(module),
+            naga::Binding::BuiltIn(naga::BuiltIn::Position { invariant: false }),
+        );
+    }
+    for (&location, &lanes) in &io.outputs {
+        let ty = vec_f32_type(module, lanes).ok_or(TranslateError::Unsupported)?;
+        layout.push(
+            OutSlot::Location(location),
+            lanes,
+            ty,
+            location_binding(location),
+        );
+    }
+    let position = layout.slots.get(&OutSlot::Position).copied();
+    let slots = layout.slots.clone();
+    let span = layout.span();
+    let ty = module.types.insert(
+        naga::Type {
+            name: Some(output_struct_name(stage).to_string()),
+            inner: naga::TypeInner::Struct {
+                members: layout.members,
+                span,
+            },
+        },
+        naga::Span::default(),
+    );
+    Ok(OutputType {
+        ty,
+        slots,
+        position,
+    })
 }
 
 /// Where a region is emitted: top level or inside one natural loop.
@@ -1164,30 +2143,54 @@ struct Lowerer<'a, 'b> {
     builders: &'b mut Builders,
     cfg: &'b Cfg<'a>,
     func: naga::Function,
+    /// `@location` inputs and outputs the body touches.
+    io: StageIo,
     id_x: Option<naga::Handle<naga::Expression>>,
     /// `global_invocation_id` vector, when this entry is compute.
     global_id: Option<naga::Handle<naga::Expression>>,
     /// `@builtin(local_invocation_index)`, when the kernel reads it.
     local_index: Option<naga::Handle<naga::Expression>>,
-    /// `vec4` local returned from `fs_main` at `@location(0)`.
-    fragment_out: Option<naga::Handle<naga::LocalVariable>>,
+    /// `@builtin(vertex_index)`, when the vertex entry reads it.
+    vertex_index: Option<naga::Handle<naga::Expression>>,
+    /// `@builtin(instance_index)`, when the vertex entry reads it.
+    instance_index: Option<naga::Handle<naga::Expression>>,
+    /// Local the entry returns: the fragment color or the stage output struct.
+    stage_out: Option<StageOut>,
     /// `@builtin(position)` of `fs_main`, when this entry is a fragment.
     position: Option<naga::Handle<naga::Expression>>,
-    /// `@location(0)` vec2 interpolated from the vertex stage.
-    uv: Option<naga::Handle<naga::Expression>>,
+    /// Declared `@location` arguments of the entry, by location.
+    inputs: BTreeMap<u32, naga::Handle<naga::Expression>>,
     phi_vars: HashMap<String, naga::Handle<naga::LocalVariable>>,
     /// Loop values used after the loop, stored while the loop runs.
     spill: HashMap<String, naga::Handle<naga::LocalVariable>>,
     env: Env,
     saw_return: bool,
-    /// Enclosing `if`/`loop` regions while their bodies are emitted. A
-    /// workgroup barrier inside any of them is rejected: the lowerer does not
-    /// prove branch or trip-count uniformity, and a divergent barrier is UB
-    /// on native GPUs (Tint rejects that WGSL outright).
-    branch_depth: u32,
+    /// Enclosing `if`/`loop`/`switch` regions whose condition or trip count is
+    /// not proven uniform. A workgroup barrier inside any of them is rejected:
+    /// a divergent barrier is UB on native GPUs (Tint rejects that WGSL).
+    divergent_depth: u32,
+    /// Values that are the same for every invocation in the workgroup.
+    uniform: HashSet<String>,
+    /// Exit block -> selector value, for loops whose exits go to more than one
+    /// block (or leave more than one loop).
+    ///
+    /// A `break` in Naga leaves only the innermost `Loop`, so the selector says
+    /// where control has to resume once the loop statements have unwound.
+    exit_ids: HashMap<&'a str, u32>,
+    /// Local the selector is stored in, created on first use.
+    exit_id_var: Option<naga::Handle<naga::LocalVariable>>,
+    /// Pointer SSA values: their base and their offset in 4-byte words.
+    pointers: HashMap<String, MemoryPointer>,
+    /// Base a pointer `phi` walks; every incoming pointer must share it.
+    ptr_bases: HashMap<String, MemoryBase>,
+    /// Module constants turned into private globals: handle and word count.
+    constants: HashMap<String, (naga::Handle<naga::GlobalVariable>, u32)>,
     /// An arm returned and the region merged afterwards may therefore run on
     /// a subset of invocations. Sticky for the rest of the entry.
     diverged: bool,
+    /// Whether `ret` returns a value (a helper) instead of storing it (the
+    /// `cs_main(i32) -> f32` toy shape).
+    returns_value: bool,
 }
 
 impl<'a, 'b> Lowerer<'a, 'b> {
@@ -1225,6 +2228,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let kind = match ty {
             Ty::Float => naga::ScalarKind::Float,
             Ty::I32 => naga::ScalarKind::Uint,
+            // A pointer phi carries the offset in words; the base is the same
+            // for every incoming edge.
+            Ty::Ptr => naga::ScalarKind::Uint,
             Ty::I1 => naga::ScalarKind::Bool,
             _ => return Err(TranslateError::Unsupported),
         };
@@ -1264,6 +2270,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         self.emit_block(block, out)?;
         match &block.term {
             Terminator::Ret(value) => self.emit_ret(value.as_ref(), out),
+            // The panic path: LLVM calls it undefined behaviour, so the shader
+            // ends the invocation here instead of pretending it cannot happen.
+            Terminator::Unreachable => self.emit_ret(None, out),
             Terminator::BrUncond(target) => {
                 let target = target.as_str();
                 self.store_edge(start, target, out)?;
@@ -1278,6 +2287,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                         .get(header)
                         .is_none_or(|body| !body.contains(target));
                     if leaves_loop {
+                        self.store_exit_id(out, target)?;
                         out.push(naga::Statement::Break, naga::Span::default());
                         return Ok(Flow::Break);
                     }
@@ -1323,7 +2333,505 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 }
                 self.emit_if(start, cond, true_label, false_label, stop, out, ctx)
             }
+            Terminator::Switch {
+                selector,
+                default,
+                cases,
+            } => self.emit_switch(start, selector, default, cases, stop, out, ctx),
         }
+    }
+
+    /// `alloca`: a function-scope array of 4-byte words.
+    fn alloca(&mut self, dst: &str, bytes: u32) -> Result<(), TranslateError> {
+        let words = word_count(bytes)?;
+        let ty = self.word_array_type(words);
+        let var = self.func.local_variables.append(
+            naga::LocalVariable {
+                name: Some(dst.to_string()),
+                ty,
+                init: None,
+            },
+            naga::Span::default(),
+        );
+        let zero = self.u32_literal(&mut naga::Block::new(), 0);
+        self.pointers.insert(
+            dst.to_string(),
+            MemoryPointer {
+                base: MemoryBase::Local(var),
+                words: zero,
+            },
+        );
+        Ok(())
+    }
+
+    /// `getelementptr`: move a pointer by `index * stride` bytes.
+    fn getelementptr(
+        &mut self,
+        dst: &str,
+        base: &PtrBase,
+        stride: u32,
+        index: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<(), TranslateError> {
+        let (base, words) = match base {
+            PtrBase::Local(name) => {
+                let pointer = self.pointers.get(name).ok_or(TranslateError::Unsupported)?;
+                (pointer.base, pointer.words)
+            }
+            PtrBase::Global(symbol) => {
+                let (var, _) = self.constant_array(symbol)?;
+                let zero = self.u32_literal(out, 0);
+                (MemoryBase::Constant(var), zero)
+            }
+        };
+        let step = self.pointer_step(stride, index, out)?;
+        let words = self.binary(out, naga::BinaryOperator::Add, words, step);
+        self.pointers
+            .insert(dst.to_string(), MemoryPointer { base, words });
+        Ok(())
+    }
+
+    /// Words one `getelementptr` index step covers.
+    ///
+    /// A stride that is not a multiple of four is only accepted for a constant
+    /// index that is: LLVM emits `i8` GEPs for field offsets, and those are
+    /// always word-aligned in this subset.
+    fn pointer_step(
+        &mut self,
+        stride: u32,
+        index: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if stride.is_multiple_of(WORD_BYTES) {
+            let index = self.operand(out, index)?;
+            let step = stride / WORD_BYTES;
+            if step == 1 {
+                return Ok(index);
+            }
+            let step = self.u32_literal(out, step);
+            return Ok(self.binary(out, naga::BinaryOperator::Multiply, index, step));
+        }
+        let Operand::U32(offset) = index else {
+            return Err(TranslateError::Unsupported);
+        };
+        if !offset.is_multiple_of(WORD_BYTES) {
+            return Err(TranslateError::Unsupported);
+        }
+        Ok(self.u32_literal(out, offset / WORD_BYTES))
+    }
+
+    /// `load`: read one 4-byte word and reinterpret it as `ty`.
+    fn load(
+        &mut self,
+        ptr: &str,
+        ty: Ty,
+        out: &mut naga::Block,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let pointer = self.pointer(ptr)?;
+        let word = self.load_word(out, pointer.base, pointer.words);
+        match ty {
+            Ty::I32 => Ok(word),
+            Ty::Float => Ok(self.bitcast_float(out, word)),
+            _ => Err(TranslateError::Unsupported),
+        }
+    }
+
+    /// `store`: write one 4-byte word.
+    fn store(
+        &mut self,
+        ptr: &str,
+        value: &Operand,
+        ty: Ty,
+        out: &mut naga::Block,
+    ) -> Result<(), TranslateError> {
+        let pointer = self.pointer(ptr)?;
+        let value = self.operand(out, value)?;
+        let value = match ty {
+            Ty::I32 => value,
+            Ty::Float => self.bitcast_uint(out, value),
+            _ => return Err(TranslateError::Unsupported),
+        };
+        self.store_word(out, pointer.base, pointer.words, value);
+        Ok(())
+    }
+
+    /// `select i1 %c, ptr %a, ptr %b`: pick the offset of one of two pointers.
+    ///
+    /// Both have to start at the same base, the same rule `phi ptr` follows:
+    /// Naga has no pointer value, so the selection happens on the word offset.
+    /// Returns `None` when the operands are not pointers.
+    fn pointer_select(
+        &mut self,
+        dst: &str,
+        cond: &Operand,
+        accept: &Operand,
+        reject: &Operand,
+        out: &mut naga::Block,
+    ) -> Result<Option<MemoryPointer>, TranslateError> {
+        let (Operand::Local(accept), Operand::Local(reject)) = (accept, reject) else {
+            return Ok(None);
+        };
+        let (Some(accept), Some(reject)) = (
+            self.pointers.get(accept).copied(),
+            self.pointers.get(reject).copied(),
+        ) else {
+            return Ok(None);
+        };
+        if accept.base != reject.base {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`select` of two pointers from different allocations: `{}` picks between                  memory this translator cannot name at runtime",
+                dst
+            )));
+        }
+        let condition = self.operand(out, cond)?;
+        let words = self.expr(
+            out,
+            naga::Expression::Select {
+                condition,
+                accept: accept.words,
+                reject: reject.words,
+            },
+        );
+        let pointer = MemoryPointer {
+            base: accept.base,
+            words,
+        };
+        self.pointers.insert(dst.to_string(), pointer);
+        Ok(Some(pointer))
+    }
+
+    /// Pointer SSA value `name`.
+    fn pointer(&self, name: &str) -> Result<MemoryPointer, TranslateError> {
+        self.pointers
+            .get(name)
+            .map(|pointer| MemoryPointer {
+                base: pointer.base,
+                words: pointer.words,
+            })
+            .ok_or(TranslateError::Unsupported)
+    }
+
+    /// Write `word` at `base + words`.
+    fn store_word(
+        &mut self,
+        out: &mut naga::Block,
+        base: MemoryBase,
+        words: naga::Handle<naga::Expression>,
+        word: naga::Handle<naga::Expression>,
+    ) {
+        let base = self.memory_base(base, out);
+        let slot = self.expr(out, naga::Expression::Access { base, index: words });
+        out.push(
+            naga::Statement::Store {
+                pointer: slot,
+                value: word,
+            },
+            naga::Span::default(),
+        );
+    }
+
+    /// Read the word at `base + words`.
+    fn load_word(
+        &mut self,
+        out: &mut naga::Block,
+        base: MemoryBase,
+        words: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        let base = self.memory_base(base, out);
+        let slot = self.expr(out, naga::Expression::Access { base, index: words });
+        self.expr(out, naga::Expression::Load { pointer: slot })
+    }
+
+    /// `(destination, fill, byte count)` of a `memset`-shaped call.
+    fn intrinsic_target<'o>(
+        &self,
+        args: &'o [Operand],
+    ) -> Result<(MemoryPointer, &'o Operand, u32), TranslateError> {
+        if args.len() < MEMORY_INTRINSIC_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
+        let Operand::Local(name) = &args[0] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let Operand::U32(bytes) = args[2] else {
+            return Err(TranslateError::Unsupported);
+        };
+        Ok((self.pointer(name)?, &args[1], bytes))
+    }
+
+    /// `llvm.memset(ptr, fill, size, …)`: fill whole words with one byte.
+    ///
+    /// The size and the fill byte must be immediates and the size a multiple of
+    /// four, which is what `[value; N]` initialization and rustc's array
+    /// zeroing produce.
+    fn memset(&mut self, out: &mut naga::Block, args: &[Operand]) -> Result<(), TranslateError> {
+        let (pointer, fill, bytes) = self.intrinsic_target(args)?;
+        let byte = match fill {
+            Operand::U32(value) => *value & BYTE_MASK,
+            Operand::Bool(value) => u32::from(*value),
+            Operand::F32(_) | Operand::Local(_) | Operand::Symbol(_) => {
+                return Err(TranslateError::Unsupported);
+            }
+        };
+        let word = self.u32_literal(out, repeated_byte(byte));
+        for offset in 0..word_count(bytes)? {
+            let index = self.offset_words(out, pointer.words, offset);
+            self.store_word(out, pointer.base, index, word);
+        }
+        Ok(())
+    }
+
+    /// `llvm.memcpy(dst, src, size, …)`: copy whole words.
+    fn memcpy(&mut self, out: &mut naga::Block, args: &[Operand]) -> Result<(), TranslateError> {
+        if args.len() < MEMORY_INTRINSIC_ARGS {
+            return Err(TranslateError::Unsupported);
+        }
+        let Operand::Local(dst) = &args[0] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let Operand::Local(src) = &args[1] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let Operand::U32(bytes) = args[2] else {
+            return Err(TranslateError::Unsupported);
+        };
+        let dst = self.pointer(dst)?;
+        let src = self.pointer(src)?;
+        for offset in 0..word_count(bytes)? {
+            let from = self.offset_words(out, src.words, offset);
+            let word = self.load_word(out, src.base, from);
+            let to = self.offset_words(out, dst.words, offset);
+            self.store_word(out, dst.base, to, word);
+        }
+        Ok(())
+    }
+
+    /// `words + offset`.
+    fn offset_words(
+        &mut self,
+        out: &mut naga::Block,
+        words: naga::Handle<naga::Expression>,
+        offset: u32,
+    ) -> naga::Handle<naga::Expression> {
+        if offset == 0 {
+            return words;
+        }
+        let step = self.u32_literal(out, offset);
+        self.binary(out, naga::BinaryOperator::Add, words, step)
+    }
+
+    /// Pointer expression of a memory base.
+    fn memory_base(
+        &mut self,
+        base: MemoryBase,
+        out: &mut naga::Block,
+    ) -> naga::Handle<naga::Expression> {
+        match base {
+            MemoryBase::Local(var) => self.expr(out, naga::Expression::LocalVariable(var)),
+            MemoryBase::Constant(var) => self.expr(out, naga::Expression::GlobalVariable(var)),
+        }
+    }
+
+    /// `array<u32, words>`.
+    fn word_array_type(&mut self, words: u32) -> naga::Handle<naga::Type> {
+        let base = scalar(&mut self.builders.module, naga::ScalarKind::Uint);
+        let size = std::num::NonZeroU32::new(words).unwrap_or(std::num::NonZeroU32::MIN);
+        self.builders.module.types.insert(
+            naga::Type {
+                name: None,
+                inner: naga::TypeInner::Array {
+                    base,
+                    size: naga::ArraySize::Constant(size),
+                    stride: WORD_BYTES,
+                },
+            },
+            naga::Span::default(),
+        )
+    }
+
+    /// A module constant as a private `array<u32, N>` global.
+    ///
+    /// The words are the constant's bytes, so an integer table and a float
+    /// table both keep their exact bit patterns; a float load bitcasts.
+    fn constant_array(
+        &mut self,
+        symbol: &str,
+    ) -> Result<(naga::Handle<naga::GlobalVariable>, u32), TranslateError> {
+        if let Some(found) = self.constants.get(symbol) {
+            return Ok(*found);
+        }
+        let bytes = self
+            .builders
+            .module_constants
+            .get(symbol)
+            .ok_or(TranslateError::Unsupported)?
+            .clone();
+        let words = word_count(bytes.len() as u32)?;
+        let ty = self.word_array_type(words);
+        let mut components = Vec::with_capacity(words as usize);
+        for chunk in bytes.chunks_exact(WORD_BYTES as usize) {
+            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            components.push(self.builders.module.global_expressions.append(
+                naga::Expression::Literal(naga::Literal::U32(word)),
+                naga::Span::default(),
+            ));
+        }
+        let init = self.builders.module.global_expressions.append(
+            naga::Expression::Compose { ty, components },
+            naga::Span::default(),
+        );
+        let var = self.builders.module.global_variables.append(
+            naga::GlobalVariable {
+                name: Some(format!("const_{}", symbol.replace(['.', '-'], "_"))),
+                space: naga::AddressSpace::Private,
+                binding: None,
+                ty,
+                init: Some(init),
+                memory_decorations: naga::MemoryDecorations::empty(),
+            },
+            naga::Span::default(),
+        );
+        self.constants.insert(symbol.to_string(), (var, words));
+        Ok((var, words))
+    }
+
+    /// Selector value for `target`, assigned the first time it is needed.
+    fn exit_id(&mut self, target: &'a str) -> u32 {
+        if let Some(id) = self.exit_ids.get(target) {
+            return *id;
+        }
+        let id = self.exit_ids.len() as u32 + 1;
+        self.exit_ids.insert(target, id);
+        id
+    }
+
+    /// Record that the current `break` leaves the loop towards `target`.
+    ///
+    /// Loops with a single exit never assign ids, so their WGSL keeps the plain
+    /// `break` it always had.
+    fn store_exit_id(
+        &mut self,
+        out: &mut naga::Block,
+        target: &'a str,
+    ) -> Result<(), TranslateError> {
+        let Some(id) = self.exit_ids.get(target).copied() else {
+            return Ok(());
+        };
+        let var = match self.exit_id_var {
+            Some(var) => var,
+            None => {
+                let var = self.func.local_variables.append(
+                    naga::LocalVariable {
+                        name: Some("exit_id".to_string()),
+                        ty: scalar(&mut self.builders.module, naga::ScalarKind::Uint),
+                        init: None,
+                    },
+                    naga::Span::default(),
+                );
+                self.exit_id_var = Some(var);
+                var
+            }
+        };
+        let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+        let value = self.u32_literal(out, id);
+        out.push(
+            naga::Statement::Store { pointer, value },
+            naga::Span::default(),
+        );
+        Ok(())
+    }
+
+    /// Mark the control region a condition opens, returning the depth to restore.
+    ///
+    /// A proven-uniform condition keeps the region uniform, so a barrier inside
+    /// it stays valid; anything else makes the enclosing region divergent.
+    fn enter_control(&mut self, cond: &Operand) -> u32 {
+        let outer = self.divergent_depth;
+        if !self.is_uniform(cond) {
+            self.divergent_depth += 1;
+        }
+        outer
+    }
+
+    /// Whether `op` has the same value in every invocation of the workgroup.
+    fn is_uniform(&self, op: &Operand) -> bool {
+        match op {
+            Operand::Local(name) => self.uniform.contains(name),
+            Operand::Bool(_) | Operand::F32(_) | Operand::U32(_) | Operand::Symbol(_) => true,
+        }
+    }
+
+    /// Whether a loop runs the same number of iterations for every invocation.
+    ///
+    /// Conservative: every edge that leaves the loop must come from a
+    /// conditional whose condition is uniform, and the loop must not leave
+    /// unconditionally. A `break` behind a non-uniform branch, or a plain
+    /// `break`, therefore makes the loop divergent — a barrier inside it is
+    /// rejected rather than assumed safe.
+    fn loop_is_uniform(&self, header: &str, body: &HashSet<&'a str>) -> bool {
+        body.iter().all(|label| {
+            let block = self.cfg.blocks[label];
+            let leaves: Vec<&str> = self
+                .cfg
+                .succs
+                .get(label)
+                .into_iter()
+                .flatten()
+                .filter(|target| !body.contains(*target))
+                .copied()
+                .collect();
+            let exits_all = !leaves.is_empty();
+            if !exits_all {
+                // Still check a conditional that can reach the header again.
+                return match &block.term {
+                    Terminator::BrCond { cond, .. } if *label == header => self.is_uniform(cond),
+                    _ => true,
+                };
+            }
+            match &block.term {
+                Terminator::BrCond { cond, .. } => self.is_uniform(cond),
+                _ => false,
+            }
+        })
+    }
+
+    /// Reject a merge that lies outside the enclosing loop.
+    ///
+    /// A natural loop cannot have a merge outside it that both arms reach: any
+    /// block on the way to the back edge belongs to the loop. Rejecting keeps
+    /// the structurer from guessing.
+    fn check_merge_in_loop(&self, merge: &str, ctx: Ctx<'a>) -> Result<(), TranslateError> {
+        let Ctx::Loop { header } = ctx else {
+            return Ok(());
+        };
+        let merges_in_loop = self
+            .cfg
+            .loops
+            .get(header)
+            .is_some_and(|body| body.contains(merge));
+        if merge != EXIT && !merges_in_loop {
+            return Err(TranslateError::Unsupported);
+        }
+        Ok(())
+    }
+
+    /// Emit one arm of a branch: enter it from `from`, run it until `merge`.
+    ///
+    /// The caller sets `self.env` before calling; the arm's phi stores are
+    /// written from `env`, which is the environment at the branch.
+    fn emit_arm(
+        &mut self,
+        from: &'a str,
+        enter: &'a str,
+        merge: &'a str,
+        env: &Env,
+        ctx: Ctx<'a>,
+    ) -> Result<(naga::Block, Flow), TranslateError> {
+        let mut body = naga::Block::new();
+        self.env = env.clone();
+        self.store_edge_into(from, enter, env, &mut body)?;
+        let flow = self.emit_region(enter, Some(merge), &mut body, ctx)?;
+        Ok((body, flow))
     }
 
     /// Diamond `if`: both arms run until the closest common post-dominator.
@@ -1342,31 +2850,13 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .cfg
             .branch_merge(label, true_label, false_label)
             .ok_or(TranslateError::Unsupported)?;
-        if let Ctx::Loop { header } = ctx {
-            let merges_in_loop = self
-                .cfg
-                .loops
-                .get(header)
-                .is_some_and(|body| body.contains(merge));
-            if merge != EXIT && !merges_in_loop {
-                // An arm that leaves the loop through a shared merge would
-                // need `break` with per-arm edge phis; not supported yet.
-                return Err(TranslateError::Unsupported);
-            }
-        }
+        self.check_merge_in_loop(merge, ctx)?;
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
-        let mut accept = naga::Block::new();
-        self.env = outer_env.clone();
-        self.store_edge_into(label, true_label, &outer_env, &mut accept)?;
-        let accept_flow = self.emit_region(true_label, Some(merge), &mut accept, ctx)?;
-        let mut reject = naga::Block::new();
-        self.env = outer_env.clone();
-        self.store_edge_into(label, false_label, &outer_env, &mut reject)?;
-        let reject_flow = self.emit_region(false_label, Some(merge), &mut reject, ctx)?;
-        self.branch_depth = outer_depth;
+        let outer_depth = self.enter_control(cond);
+        let (accept, accept_flow) = self.emit_arm(label, true_label, merge, &outer_env, ctx)?;
+        let (reject, reject_flow) = self.emit_arm(label, false_label, merge, &outer_env, ctx)?;
+        self.divergent_depth = outer_depth;
         self.env = outer_env;
         if accept_flow == Flow::Returned || reject_flow == Flow::Returned {
             // The merge block only sees the invocations whose arm fell
@@ -1399,6 +2889,74 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         self.emit_region(merge, stop, out, ctx)
     }
 
+    /// `switch`: every case runs until the closest common post-dominator.
+    ///
+    /// Cases that share a target label share one body (the first values fall
+    /// through into it), which is what Rust emits for `x | y => …` arms.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_switch(
+        &mut self,
+        label: &'a str,
+        selector: &Operand,
+        default: &'a str,
+        cases: &'a [(u32, String)],
+        stop: Option<&'a str>,
+        out: &mut naga::Block,
+        ctx: Ctx<'a>,
+    ) -> Result<Flow, TranslateError> {
+        let merge = self.cfg.merge(label).ok_or(TranslateError::Unsupported)?;
+        self.check_merge_in_loop(merge, ctx)?;
+        let selector_expr = self.operand(out, selector)?;
+        let outer_env = self.env.clone();
+        let outer_depth = self.enter_control(selector);
+        let mut targets: Vec<(&'a str, Vec<u32>)> = Vec::new();
+        for (value, target) in cases {
+            let target = target.as_str();
+            match targets.iter_mut().find(|(label, _)| *label == target) {
+                Some((_, values)) => values.push(*value),
+                None => targets.push((target, vec![*value])),
+            }
+        }
+        let mut naga_cases = Vec::new();
+        let mut returned = false;
+        for (target, values) in targets {
+            let (mut body, flow) = self.emit_arm(label, target, merge, &outer_env, ctx)?;
+            returned |= case_flow_returns(flow)?;
+            for (index, value) in values.iter().enumerate() {
+                let last = index + 1 == values.len();
+                let filled = if last {
+                    std::mem::take(&mut body)
+                } else {
+                    naga::Block::new()
+                };
+                naga_cases.push(switch_case(naga::SwitchValue::U32(*value), filled, !last));
+            }
+        }
+        let (default_body, default_flow) = self.emit_arm(label, default, merge, &outer_env, ctx)?;
+        returned |= case_flow_returns(default_flow)?;
+        naga_cases.push(switch_case(naga::SwitchValue::Default, default_body, false));
+        self.divergent_depth = outer_depth;
+        self.env = outer_env;
+        if returned {
+            // The merge only runs on the lanes whose case fell through.
+            self.diverged = true;
+        }
+        out.push(
+            naga::Statement::Switch {
+                selector: selector_expr,
+                cases: naga_cases,
+            },
+            naga::Span::default(),
+        );
+        if merge == EXIT {
+            return Err(TranslateError::Unsupported);
+        }
+        if stop == Some(merge) {
+            return Ok(Flow::Next);
+        }
+        self.emit_region(merge, stop, out, ctx)
+    }
+
     /// Loop-header or latch branch where exactly one successor stays inside
     /// the loop and the other leaves it.
     #[allow(clippy::too_many_arguments)]
@@ -1419,8 +2977,6 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         };
         let condition = self.operand(out, cond)?;
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
         let mut inside_block = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, inside, &outer_env, &mut inside_block)?;
@@ -1432,13 +2988,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             let ctx = Ctx::Loop { header };
             self.emit_region(inside, None, &mut inside_block, ctx)?
         };
-        self.branch_depth = outer_depth;
-        if !matches!(inside_flow, Flow::Continue | Flow::Break | Flow::Returned) {
+        // `Next` means the arm ended at a nested exit branch inside the loop,
+        // which already emitted its own `break`/`continue`.
+        if !matches!(
+            inside_flow,
+            Flow::Next | Flow::Continue | Flow::Break | Flow::Returned
+        ) {
             return Err(TranslateError::Unsupported);
         }
         let mut outside_block = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, outside, &outer_env, &mut outside_block)?;
+        self.store_exit_id(&mut outside_block, outside)?;
         outside_block.push(naga::Statement::Break, naga::Span::default());
         self.env = outer_env;
         let (accept, reject) = if true_in {
@@ -1462,8 +3023,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         &mut self,
         start: &'a str,
         cond: &Operand,
-        true_label: &str,
-        false_label: &str,
+        true_label: &'a str,
+        false_label: &'a str,
         out: &mut naga::Block,
     ) -> Result<Flow, TranslateError> {
         let condition = self.operand(out, cond)?;
@@ -1471,10 +3032,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let mut accept = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, true_label, &outer_env, &mut accept)?;
+        self.store_exit_id(&mut accept, true_label)?;
         accept.push(naga::Statement::Break, naga::Span::default());
         let mut reject = naga::Block::new();
         self.env = outer_env.clone();
         self.store_edge_into(start, false_label, &outer_env, &mut reject)?;
+        self.store_exit_id(&mut reject, false_label)?;
         reject.push(naga::Statement::Break, naga::Span::default());
         self.env = outer_env;
         out.push(
@@ -1488,11 +3051,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Ok(Flow::Next)
     }
 
-    /// `naga::Loop` for a natural loop with one header and one exit target.
+    /// `naga::Loop` for a natural loop with one header.
     ///
     /// `outer` is the region that contains this loop. The exit block is
     /// emitted there, so a nested loop's `break` does not leave the outer
     /// `loop` and a branch back to the outer header stays a `continue`.
+    ///
+    /// A loop with one exit keeps the plain `break` shape. Several exits, or an
+    /// exit that leaves more than one loop (`break 'outer`), record which block
+    /// control has to resume at in a selector local: each `break` unwinds one
+    /// `Loop`, and the dispatch after it either resumes the exit block or
+    /// breaks the next loop out.
     fn emit_loop(
         &mut self,
         header: &'a str,
@@ -1506,15 +3075,25 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             .get(header)
             .ok_or(TranslateError::Unsupported)?
             .clone();
-        let exits = loop_exits(self.cfg, &body);
-        let live = self.loop_live_outs(&body, &exits)?;
+        let mut exits: Vec<&'a str> = loop_exits(self.cfg, &body).into_iter().collect();
+        exits.sort_unstable();
+        let live = self.loop_live_outs(&body)?;
+        // A single exit that stays in the enclosing region needs no selector.
+        let single = exits.len() == 1 && !self.leaves_outer(exits[0], outer);
+        if !single {
+            for exit in &exits {
+                self.exit_id(exit);
+            }
+        }
         let ctx = Ctx::Loop { header };
         let outer_env = self.env.clone();
-        let outer_depth = self.branch_depth;
-        self.branch_depth += 1;
+        let outer_depth = self.divergent_depth;
+        if !self.loop_is_uniform(header, &body) {
+            self.divergent_depth += 1;
+        }
         let mut loop_body = naga::Block::new();
         let flow = self.emit_region(header, None, &mut loop_body, ctx)?;
-        self.branch_depth = outer_depth;
+        self.divergent_depth = outer_depth;
         // Expressions created inside the loop body are out of scope after
         // `Loop`; the exit block reloads whatever its phis need.
         self.env = outer_env;
@@ -1523,34 +3102,41 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if exits.is_empty() {
             if flow == Flow::Returned {
-                out.push(
-                    naga::Statement::Loop {
-                        body: loop_body,
-                        continuing: naga::Block::new(),
-                        break_if: None,
-                    },
-                    naga::Span::default(),
-                );
+                out.push(loop_statement(loop_body), naga::Span::default());
                 return Ok(Flow::Returned);
             }
             return Err(TranslateError::Unsupported);
         }
-        if exits.len() != 1 {
-            return Err(TranslateError::Unsupported);
-        }
-        let exit = *exits.iter().next().ok_or(TranslateError::Unsupported)?;
-        out.push(
-            naga::Statement::Loop {
-                body: loop_body,
-                continuing: naga::Block::new(),
-                break_if: None,
-            },
-            naga::Span::default(),
-        );
+        out.push(loop_statement(loop_body), naga::Span::default());
         if flow == Flow::Returned {
             return Ok(Flow::Returned);
         }
         self.reload_live(&live, out)?;
+        if single {
+            return self.resume_after_loop(exits[0], stop, out, outer);
+        }
+        self.dispatch_exits(header, &exits, stop, out, outer)
+    }
+
+    /// Whether `target` is outside the loop that contains this region.
+    fn leaves_outer(&self, target: &'a str, outer: Ctx<'a>) -> bool {
+        let Ctx::Loop { header } = outer else {
+            return false;
+        };
+        self.cfg
+            .loops
+            .get(header)
+            .is_none_or(|body| !body.contains(target))
+    }
+
+    /// Continue at `exit` after its `Loop`, in the enclosing region.
+    fn resume_after_loop(
+        &mut self,
+        exit: &'a str,
+        stop: Option<&'a str>,
+        out: &mut naga::Block,
+        outer: Ctx<'a>,
+    ) -> Result<Flow, TranslateError> {
         if stop == Some(exit) {
             return Ok(Flow::Next);
         }
@@ -1562,29 +3148,77 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 out.push(naga::Statement::Continue, naga::Span::default());
                 return Ok(Flow::Continue);
             }
-            let stays = self
-                .cfg
-                .loops
-                .get(outer_header)
-                .is_some_and(|body| body.contains(exit));
-            if !stays {
-                // Leaving two loops at once needs a break past the inner
-                // `Loop`; one `break` would stop at the inner header.
-                return Err(TranslateError::Unsupported);
+            if self.leaves_outer(exit, outer) {
+                // `break 'outer`: this `break` leaves the enclosing loop too.
+                out.push(naga::Statement::Break, naga::Span::default());
+                return Ok(Flow::Break);
             }
         }
         self.emit_region(exit, stop, out, outer)
     }
 
-    /// Values the single exit reads that are defined inside the loop.
-    fn loop_live_outs(
+    /// Resume at whichever exit the selector names, after the loop unwound.
+    ///
+    /// Every exit runs until the loop's merge, so the code after the loop is
+    /// emitted once, after the dispatch. An exit that leaves the enclosing loop
+    /// breaks it instead, and the enclosing loop's own dispatch resumes there.
+    fn dispatch_exits(
         &mut self,
-        body: &HashSet<&'a str>,
-        exits: &HashSet<&'a str>,
-    ) -> Result<Vec<String>, TranslateError> {
-        if exits.len() != 1 {
-            return Ok(Vec::new());
+        header: &'a str,
+        exits: &[&'a str],
+        stop: Option<&'a str>,
+        out: &mut naga::Block,
+        outer: Ctx<'a>,
+    ) -> Result<Flow, TranslateError> {
+        let merge = self.cfg.merge(header).unwrap_or(EXIT);
+        let selector = self.exit_id_var.ok_or(TranslateError::Unsupported)?;
+        let mut returned = 0usize;
+        for exit in exits {
+            let id = self.exit_id(exit);
+            let pointer = self.expr(out, naga::Expression::LocalVariable(selector));
+            let value = self.expr(out, naga::Expression::Load { pointer });
+            let expected = self.u32_literal(out, id);
+            let condition = self.binary(out, naga::BinaryOperator::Equal, value, expected);
+            let mut accept = naga::Block::new();
+            if self.leaves_outer(exit, outer) {
+                accept.push(naga::Statement::Break, naga::Span::default());
+            } else {
+                let flow = self.emit_region(exit, Some(merge), &mut accept, outer)?;
+                // `Continue`/`Break` leave the enclosing loop from inside the
+                // case, which is a terminal flow for this dispatch too.
+                if flow == Flow::Returned {
+                    returned += 1;
+                }
+            }
+            out.push(
+                naga::Statement::If {
+                    condition,
+                    accept,
+                    reject: naga::Block::new(),
+                },
+                naga::Span::default(),
+            );
         }
+        if merge == EXIT {
+            if returned == exits.len() {
+                return Ok(Flow::Returned);
+            }
+            return Err(TranslateError::Unsupported);
+        }
+        if self.leaves_outer(merge, outer) {
+            // The merge is past the enclosing loop: break it and let its own
+            // dispatch resume there.
+            out.push(naga::Statement::Break, naga::Span::default());
+            return Ok(Flow::Break);
+        }
+        if stop == Some(merge) {
+            return Ok(Flow::Next);
+        }
+        self.emit_region(merge, stop, out, outer)
+    }
+
+    /// Values the exits read that are defined inside the loop.
+    fn loop_live_outs(&mut self, body: &HashSet<&'a str>) -> Result<Vec<String>, TranslateError> {
         let mut used = Vec::new();
         // Anything defined in the loop and read after it has to be spilled:
         // the exit block is not the only reader. Later blocks and their phis
@@ -1672,11 +3306,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     ) -> Result<(), TranslateError> {
         for instr in &block.instrs {
             match instr {
-                Instr::Phi { dst, .. } => {
+                Instr::Phi { dst, ty, .. } => {
                     let var = *self.phi_vars.get(dst).ok_or(TranslateError::Unsupported)?;
                     let ptr = self.expr(out, naga::Expression::LocalVariable(var));
                     let value = self.expr(out, naga::Expression::Load { pointer: ptr });
-                    self.bind(dst, value, out);
+                    if *ty == Ty::Ptr {
+                        let base = *self.ptr_bases.get(dst).ok_or(TranslateError::Unsupported)?;
+                        self.pointers
+                            .insert(dst.clone(), MemoryPointer { base, words: value });
+                    } else {
+                        self.bind(dst, value, out);
+                    }
                 }
                 Instr::Ret { a } => {
                     self.emit_ret(Some(a), out)?;
@@ -1695,14 +3335,22 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         value: Option<&Operand>,
         out: &mut naga::Block,
     ) -> Result<Flow, TranslateError> {
-        if self.fragment_out.is_some() {
-            let var = self.fragment_out.ok_or(TranslateError::Unsupported)?;
+        if let Some(var) = self.stage_out.as_ref().map(|stage_out| stage_out.var) {
             let pointer = self.expr(out, naga::Expression::LocalVariable(var));
             let value = self.expr(out, naga::Expression::Load { pointer });
             out.push(
                 naga::Statement::Return { value: Some(value) },
                 naga::Span::default(),
             );
+            self.saw_return = true;
+            return Ok(Flow::Returned);
+        }
+        if self.returns_value {
+            let value = match value {
+                Some(op) => Some(self.operand(out, op)?),
+                None => None,
+            };
+            out.push(naga::Statement::Return { value }, naga::Span::default());
             self.saw_return = true;
             return Ok(Flow::Returned);
         }
@@ -1752,7 +3400,24 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 .iter()
                 .find_map(|(value, pred)| (pred == from).then_some(value))
                 .ok_or(TranslateError::Unsupported)?;
-            let value = operand(&mut self.func, out, incoming, env)?;
+            let value = if phi.ty == Ty::Ptr {
+                let Operand::Local(name) = incoming else {
+                    return Err(TranslateError::Unsupported);
+                };
+                let pointer = *self.pointers.get(name).ok_or(TranslateError::Unsupported)?;
+                match self.ptr_bases.get(&phi.dst) {
+                    Some(base) if *base != pointer.base => {
+                        return Err(TranslateError::Unsupported);
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.ptr_bases.insert(phi.dst.clone(), pointer.base);
+                    }
+                }
+                pointer.words
+            } else {
+                operand(&mut self.func, out, incoming, env)?
+            };
             let var = *self
                 .phi_vars
                 .get(&phi.dst)
@@ -1856,6 +3521,10 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.bind(dst, v, out);
             }
             Instr::Select { dst, c, a, b } => {
+                if let Some(pointer) = self.pointer_select(dst, c, a, b, out)? {
+                    let _ = pointer;
+                    return Ok(());
+                }
                 let condition = self.operand(out, c)?;
                 let accept = self.operand(out, a)?;
                 let reject = self.operand(out, b)?;
@@ -1875,6 +3544,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             }
             Instr::Sitofp { dst, a } => {
                 let value = self.cast_signed(out, a, naga::ScalarKind::Float)?;
+                self.bind(dst, value, out);
+            }
+            Instr::Fptosi { dst, a } => {
+                // A signed truncation: convert to `i32`, then keep the bits.
+                let value = self.cast(out, a, naga::ScalarKind::Sint)?;
+                let value = self.bitcast_uint(out, value);
                 self.bind(dst, value, out);
             }
             Instr::Fptoui { dst, a } => {
@@ -1908,6 +3583,18 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 self.bind(dst, v, out);
             }
             Instr::CallVoid { callee, args } => self.call_void(out, callee, args)?,
+            Instr::Alloca { dst, bytes } => self.alloca(dst, *bytes)?,
+            Instr::GetElementPtr {
+                dst,
+                base,
+                stride,
+                index,
+            } => self.getelementptr(dst, base, *stride, index, out)?,
+            Instr::Load { dst, ptr, ty } => {
+                let value = self.load(ptr, *ty, out)?;
+                self.bind(dst, value, out);
+            }
+            Instr::Store { ptr, value, ty } => self.store(ptr, value, *ty, out)?,
             Instr::Phi { .. } => return Err(TranslateError::Unsupported),
             Instr::Ret { .. } | Instr::RetVoid => return Err(TranslateError::Unsupported),
         }
@@ -1977,6 +3664,27 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             naga::Expression::As {
                 expr: value,
                 kind: naga::ScalarKind::Uint,
+                convert: None,
+            },
+        )
+    }
+
+    /// A `u32` literal expression.
+    fn u32_literal(&mut self, out: &mut naga::Block, value: u32) -> naga::Handle<naga::Expression> {
+        self.expr(out, naga::Expression::Literal(naga::Literal::U32(value)))
+    }
+
+    /// Bitcast a stored `u32` word to `f32`.
+    fn bitcast_float(
+        &mut self,
+        out: &mut naga::Block,
+        value: naga::Handle<naga::Expression>,
+    ) -> naga::Handle<naga::Expression> {
+        self.expr(
+            out,
+            naga::Expression::As {
+                expr: value,
+                kind: naga::ScalarKind::Float,
                 convert: None,
             },
         )
@@ -2135,12 +3843,122 @@ impl<'a, 'b> Lowerer<'a, 'b> {
     }
 
     /// Value-returning call: math or storage read / atomic add.
+    /// Handle the void calls that are not ABI imports: a helper of this crate
+    /// and the memory intrinsics. Returns whether the call was consumed.
+    fn staged_void_call(
+        &mut self,
+        out: &mut naga::Block,
+        callee: &str,
+        args: &[Operand],
+    ) -> Result<bool, TranslateError> {
+        if self.builders.diverging.contains(callee) {
+            // The panic path: the caller's own `unreachable` ends the
+            // invocation, so the call itself has nothing to translate.
+            return Ok(true);
+        }
+        if let Some(reason) = self.builders.skipped_helpers.get(callee) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`{callee}` cannot be lowered ({reason}); mark it `#[inline(always)]` so its body \
+                 is compiled into the caller, or keep the pointer out of the helper's signature"
+            )));
+        }
+        if let Some(helper) = self.builders.helpers.get(callee).copied() {
+            self.call_helper_void(out, helper, args)?;
+            return Ok(true);
+        }
+        if callee.contains("llvm.memset") {
+            self.memset(out, args)?;
+            return Ok(true);
+        }
+        if callee.contains("llvm.memcpy") {
+            self.memcpy(out, args)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Call a helper function and return its result expression.
+    fn call_helper(
+        &mut self,
+        out: &mut naga::Block,
+        helper: Helper,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        // The result expression is defined by the `Call` statement and must not
+        // appear in an `Emit` range, so it is appended outside `Self::expr`.
+        let result = self.func.expressions.append(
+            naga::Expression::CallResult(helper.function),
+            naga::Span::default(),
+        );
+        let arguments = self.helper_arguments(out, args)?;
+        out.push(
+            naga::Statement::Call {
+                function: helper.function,
+                arguments,
+                result: Some(result),
+            },
+            naga::Span::default(),
+        );
+        if helper.ret == Ty::Void {
+            return Err(TranslateError::Unsupported);
+        }
+        Ok(result)
+    }
+
+    /// Call a helper that returns nothing.
+    fn call_helper_void(
+        &mut self,
+        out: &mut naga::Block,
+        helper: Helper,
+        args: &[Operand],
+    ) -> Result<(), TranslateError> {
+        let arguments = self.helper_arguments(out, args)?;
+        out.push(
+            naga::Statement::Call {
+                function: helper.function,
+                arguments,
+                result: None,
+            },
+            naga::Span::default(),
+        );
+        Ok(())
+    }
+
+    /// Operands of a helper call, in signature order.
+    fn helper_arguments(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<Vec<naga::Handle<naga::Expression>>, TranslateError> {
+        let mut arguments = Vec::with_capacity(args.len());
+        for arg in args {
+            arguments.push(self.operand(out, arg)?);
+        }
+        Ok(arguments)
+    }
+
     fn call_value(
         &mut self,
         out: &mut naga::Block,
         callee: &str,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        if let Some(reason) = self.builders.skipped_helpers.get(callee) {
+            return Err(TranslateError::UnsupportedType(format!(
+                "`{callee}` cannot be lowered ({reason}); mark it `#[inline(always)]` so its body \
+                 is compiled into the caller, or keep the pointer out of the helper's signature"
+            )));
+        }
+        if let Some(helper) = self.builders.helpers.get(callee).copied() {
+            return self.call_helper(out, helper, args);
+        }
+        if callee.contains("llvm.fptosi.sat") {
+            if args.len() != 1 {
+                return Err(TranslateError::Unsupported);
+            }
+            let value = self.cast(out, &args[0], naga::ScalarKind::Sint)?;
+            return Ok(self.bitcast_uint(out, value));
+        }
         if callee.contains("llvm.fptoui.sat") {
             if args.len() != 1 {
                 return Err(TranslateError::Unsupported);
@@ -2179,11 +3997,23 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if callee.contains("global_invocation_lane") {
             return self.global_invocation_lane(out, args);
         }
+        if callee.contains("vertex_index") {
+            return self.vertex_index.ok_or(TranslateError::Unsupported);
+        }
+        if callee.contains("instance_index") {
+            return self.instance_index.ok_or(TranslateError::Unsupported);
+        }
         if callee.contains("local_invocation_index") {
             return self.local_index.ok_or(TranslateError::Unsupported);
         }
         if callee.contains("fragment_uv_lane") {
-            return self.fragment_uv(out, args);
+            return self.input_lane(out, 0, args.first().ok_or(TranslateError::Unsupported)?);
+        }
+        if callee.contains("vertex_input_lane") || callee.contains("fragment_input_lane") {
+            if args.len() != INPUT_LANE_ARGS {
+                return Err(TranslateError::Unsupported);
+            }
+            return self.input_lane(out, const_u32(&args[0])?, &args[2]);
         }
         if callee.contains("fragment_position_lane") {
             return self.fragment_position(out, args);
@@ -2199,6 +4029,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         }
         if callee.contains("texture_sample_level_2d_f32x4") {
             return self.texture_sample_lane(out, args);
+        }
+        if callee.contains(ornis_gpu_abi::symbols::TEXTURE_LOAD_2D_U32) {
+            return self.texture_load_u32(out, args);
         }
         if callee.contains("texture_load_2d_f32x4") {
             return self.texture_load_lane(out, args);
@@ -2407,6 +4240,20 @@ impl<'a, 'b> Lowerer<'a, 'b> {
                 },
             ));
         }
+        if let Some(fun) = binary_math(callee, args.len()) {
+            let arg = self.operand(out, &args[0])?;
+            let arg1 = self.operand(out, &args[1])?;
+            return Ok(self.expr(
+                out,
+                naga::Expression::Math {
+                    fun,
+                    arg,
+                    arg1: Some(arg1),
+                    arg2: None,
+                    arg3: None,
+                },
+            ));
+        }
         if let Some(fun) = ternary_math(callee, args.len()) {
             let arg = self.operand(out, &args[0])?;
             let arg1 = self.operand(out, &args[1])?;
@@ -2517,7 +4364,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         at: u32,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let start = at as usize;
-        let ty = self.builders.vec2_f32();
+        let ty = vec_f32_type(&mut self.builders.module, VEC2_LANES)
+            .ok_or(TranslateError::Unsupported)?;
         let x = self.operand(out, args.get(start).ok_or(TranslateError::Unsupported)?)?;
         let y = self.operand(out, args.get(start + 1).ok_or(TranslateError::Unsupported)?)?;
         Ok(self.expr(
@@ -2569,21 +4417,32 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         ))
     }
 
-    /// Lane of the `@location(0)` vec2. The lane index is a constant `0..2`.
-    fn fragment_uv(
+    /// Lane of a declared `@location(location)` input. Both the location and
+    /// the lane are constants, and a lane the declared width does not cover is
+    /// rejected instead of reading an undeclared component.
+    fn input_lane(
         &mut self,
         out: &mut naga::Block,
-        args: &[Operand],
+        location: u32,
+        lane: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        let lane = const_u32(args.first().ok_or(TranslateError::Unsupported)?)?;
-        if lane >= VEC2_LANES {
+        let lane = const_u32(lane)?;
+        let lanes = *self
+            .io
+            .inputs
+            .get(&location)
+            .ok_or(TranslateError::Unsupported)?;
+        if lane >= lanes {
             return Err(TranslateError::Unsupported);
         }
-        let uv = self.uv.ok_or(TranslateError::Unsupported)?;
+        let input = *self
+            .inputs
+            .get(&location)
+            .ok_or(TranslateError::Unsupported)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
-                base: uv,
+                base: input,
                 index: lane,
             },
         ))
@@ -2696,9 +4555,17 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
-        let (group, binding, x, y) = texture_xy(args)?;
-        let image = self.builders.texture(group, binding, TextureKind::Depth)?;
-        self.image_load(out, image, x, y)
+        self.image_load_args(out, args, TextureKind::Depth)
+    }
+
+    /// `texture_load_2d_u32(group, binding, x, y)`: the first lane of a
+    /// `texture_2d<u32>` texel.
+    fn texture_load_u32(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        self.texture_load_lane_of(out, args, TextureKind::Unsigned, 0)
     }
 
     /// `texture_sample_level_2d_f32x4(group, binding, sampler_group,
@@ -2721,7 +4588,8 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         let sampler_binding = const_u32(&args[3])?;
         let x = self.operand(out, &args[4])?;
         let y = self.operand(out, &args[5])?;
-        let coord_ty = self.builders.vec2_f32();
+        let coord_ty = vec_f32_type(&mut self.builders.module, VEC2_LANES)
+            .ok_or(TranslateError::Unsupported)?;
         let coordinate = self.expr(
             out,
             naga::Expression::Compose {
@@ -2773,11 +4641,31 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         if lane >= VEC4_LANES {
             return Err(TranslateError::Unsupported);
         }
-        let (group, binding, x, y) = texture_xy(&args[..UNIFORM_PREFIX])?;
-        let image = self
-            .builders
-            .texture(group, binding, TextureKind::Sampled)?;
-        let texel = self.image_load(out, image, x, y)?;
+        self.texture_load_lane_of(out, &args[..UNIFORM_PREFIX], TextureKind::Sampled, lane)
+    }
+
+    /// `textureLoad` of a `kind` image at mip 0, spelled by the arguments.
+    fn image_load_args(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        kind: TextureKind,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let (group, binding, x, y) = texture_xy(args)?;
+        let image = self.builders.texture(group, binding, kind)?;
+        let multisampled = self.builders.sampling.multisampled_at(group, binding);
+        self.image_load(out, image, multisampled, x, y)
+    }
+
+    /// `textureLoad` at mip 0, lane `lane` of the loaded texel.
+    fn texture_load_lane_of(
+        &mut self,
+        out: &mut naga::Block,
+        args: &[Operand],
+        kind: TextureKind,
+        lane: u32,
+    ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
+        let texel = self.image_load_args(out, args, kind)?;
         Ok(self.expr(
             out,
             naga::Expression::AccessIndex {
@@ -2792,11 +4680,12 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         &mut self,
         out: &mut naga::Block,
         image: naga::Handle<naga::GlobalVariable>,
+        multisampled: bool,
         x: &Operand,
         y: &Operand,
     ) -> Result<naga::Handle<naga::Expression>, TranslateError> {
         let coordinate = self.texel_coord(out, x, y)?;
-        let (sample, level) = if self.builders.multisampled {
+        let (sample, level) = if multisampled {
             // A multisampled image has samples, not mip levels. Sample 0 is
             // what the renderer binds for the 4x AO pass.
             let sample = self.expr(out, naga::Expression::Literal(naga::Literal::U32(0)));
@@ -3082,6 +4971,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         callee: &str,
         args: &[Operand],
     ) -> Result<(), TranslateError> {
+        if self.staged_void_call(out, callee, args)? {
+            return Ok(());
+        }
         if callee.contains("workgroup_atomic_store_u32") {
             return self.workgroup_store(out, args, true);
         }
@@ -3093,7 +4985,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             // reach a barrier together, so any enclosing `if`/`loop`, or a
             // merge that a returning arm can skip, is rejected instead of
             // emitting WGSL Tint refuses (or native UB).
-            if self.branch_depth > 0 || self.diverged {
+            if self.divergent_depth > 0 || self.diverged {
                 return Err(TranslateError::Unsupported);
             }
             out.push(
@@ -3102,8 +4994,23 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             );
             return Ok(());
         }
+        if callee.contains("vertex_position") {
+            if args.len() != POSITION_LANES as usize {
+                return Err(TranslateError::Unsupported);
+            }
+            return self.position_store(out, args);
+        }
+        if callee.contains("vertex_store_f32x2")
+            || callee.contains("vertex_store_f32x4")
+            || callee.contains("fragment_store_location")
+        {
+            if args.len() < 2 {
+                return Err(TranslateError::Unsupported);
+            }
+            return self.store_lanes(out, const_u32(&args[0])?, &args[1..]);
+        }
         if callee.contains("fragment_store_f32x4") {
-            return self.fragment_store(out, args);
+            return self.store_lanes(out, 0, args);
         }
         if callee.contains("storage_write_u32x4") {
             return self.storage_write_vec4(out, args);
@@ -3123,27 +5030,84 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         Err(TranslateError::Unsupported)
     }
 
-    /// `fragment_store_f32x4(r, g, b, a)` into the `fs_main` output.
-    fn fragment_store(
+    /// `vertex_position(x, y, z, w)` into the clip-space output slot.
+    fn position_store(
         &mut self,
         out: &mut naga::Block,
         args: &[Operand],
     ) -> Result<(), TranslateError> {
-        let var = self.fragment_out.ok_or(TranslateError::Unsupported)?;
-        let (r, g, b, a) = rgba(args)?;
-        let r = self.operand(out, r)?;
-        let g = self.operand(out, g)?;
-        let b = self.operand(out, b)?;
-        let a = self.operand(out, a)?;
-        let ty = self.builders.vec4_f32();
-        let value = self.expr(
-            out,
-            naga::Expression::Compose {
-                ty,
-                components: vec![r, g, b, a],
-            },
-        );
-        let pointer = self.expr(out, naga::Expression::LocalVariable(var));
+        let member = self
+            .stage_out
+            .as_ref()
+            .and_then(|stage_out| stage_out.position)
+            .ok_or(TranslateError::Unsupported)?;
+        self.store_slot(out, OutSlot::Position, member, args)
+    }
+
+    /// Store `lanes` operand lanes into the `@location(location)` slot.
+    fn store_lanes(
+        &mut self,
+        out: &mut naga::Block,
+        location: u32,
+        lanes: &[Operand],
+    ) -> Result<(), TranslateError> {
+        let member = match self
+            .stage_out
+            .as_ref()
+            .ok_or(TranslateError::Unsupported)?
+            .locations
+            .as_ref()
+        {
+            Some(members) => members.get(&OutSlot::Location(location)).copied(),
+            // The fragment's single target stores into the returned `vec4`.
+            None if location == 0 => Some(0),
+            None => None,
+        }
+        .ok_or(TranslateError::Unsupported)?;
+        self.store_slot(out, OutSlot::Location(location), member, lanes)
+    }
+
+    /// Compose `lanes` into one `vecN<f32>` and store it into output `slot`.
+    fn store_slot(
+        &mut self,
+        out: &mut naga::Block,
+        slot: OutSlot,
+        member: u32,
+        lanes: &[Operand],
+    ) -> Result<(), TranslateError> {
+        let Some(stage_out) = &self.stage_out else {
+            return Err(TranslateError::Unsupported);
+        };
+        let var = stage_out.var;
+        if let OutSlot::Location(location) = slot
+            && self.io.outputs.get(&location) != Some(&(lanes.len() as u32))
+        {
+            return Err(TranslateError::Unsupported);
+        }
+        let mut components = Vec::with_capacity(lanes.len());
+        for lane in lanes {
+            components.push(self.operand(out, lane)?);
+        }
+        let width = components.len() as u32;
+        let ty =
+            vec_f32_type(&mut self.builders.module, width).ok_or(TranslateError::Unsupported)?;
+        let value = self.expr(out, naga::Expression::Compose { ty, components });
+        let base = self.expr(out, naga::Expression::LocalVariable(var));
+        let pointer = if self
+            .stage_out
+            .as_ref()
+            .is_some_and(|stage_out| stage_out.locations.is_none())
+        {
+            base
+        } else {
+            self.expr(
+                out,
+                naga::Expression::AccessIndex {
+                    base,
+                    index: member,
+                },
+            )
+        };
         out.push(
             naga::Statement::Store { pointer, value },
             naga::Span::default(),
@@ -3341,6 +5305,9 @@ impl<'a, 'b> Lowerer<'a, 'b> {
             Operand::Bool(value) => {
                 self.expr(out, naga::Expression::Literal(naga::Literal::Bool(*value)))
             }
+            // A module symbol is a panic location; the call carrying it is
+            // dropped, and a zero keeps the value well-typed if one surfaces.
+            Operand::Symbol(_) => self.u32_literal(out, 0),
         };
         Ok(v)
     }
@@ -3352,10 +5319,7 @@ impl<'a, 'b> Lowerer<'a, 'b> {
         expr: naga::Expression,
     ) -> naga::Handle<naga::Expression> {
         let handle = self.func.expressions.append(expr, naga::Span::default());
-        if !self.func.expressions[handle].needs_pre_emit() {
-            let range = self.func.expressions.range_from(handle.index());
-            out.push(naga::Statement::Emit(range), naga::Span::default());
-        }
+        push_emit(&mut self.func, out, handle);
         handle
     }
 }
@@ -3412,6 +5376,24 @@ fn image_class(kind: TextureKind, multisampled: bool) -> naga::ImageClass {
             kind: naga::ScalarKind::Float,
             multi: multisampled,
         },
+        TextureKind::Unsigned => naga::ImageClass::Sampled {
+            kind: naga::ScalarKind::Uint,
+            multi: multisampled,
+        },
+    }
+}
+
+/// Two-operand math builtins the shader SDK imports.
+fn binary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
+    if argc != VEC2_LANES as usize {
+        return None;
+    }
+    if callee.contains(ornis_gpu_abi::symbols::GPU_POW) {
+        Some(naga::MathFunction::Pow)
+    } else if callee.contains(ornis_gpu_abi::symbols::GPU_ATAN2) {
+        Some(naga::MathFunction::Atan2)
+    } else {
+        None
     }
 }
 
@@ -3421,6 +5403,8 @@ fn ternary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
     }
     if callee.contains("clamp") {
         Some(naga::MathFunction::Clamp)
+    } else if callee.contains(ornis_gpu_abi::symbols::GPU_SMOOTHSTEP) {
+        Some(naga::MathFunction::SmoothStep)
     } else if callee.contains("mix") {
         Some(naga::MathFunction::Mix)
     } else {
@@ -3431,7 +5415,8 @@ fn ternary_math(callee: &str, argc: usize) -> Option<naga::MathFunction> {
 fn unary_math(callee: &str) -> Option<naga::MathFunction> {
     // `acos` before `cos`, `log2` before `log`: the shorter name is a substring.
     const FNS: &[(&str, naga::MathFunction)] = &[
-        ("sqrt", naga::MathFunction::Sqrt),
+        (ornis_gpu_abi::symbols::GPU_SQRT, naga::MathFunction::Sqrt),
+        ("llvm.sqrt.f32", naga::MathFunction::Sqrt),
         ("fract", naga::MathFunction::Fract),
         ("acos", naga::MathFunction::Acos),
         ("sin", naga::MathFunction::Sin),
@@ -3476,14 +5461,6 @@ fn workgroup_index(args: &[Operand]) -> Result<&Operand, TranslateError> {
     args.first().ok_or(TranslateError::Unsupported)
 }
 
-/// `fragment_store_f32x4(r, g, b, a)`.
-fn rgba(args: &[Operand]) -> Result<(&Operand, &Operand, &Operand, &Operand), TranslateError> {
-    if args.len() != UNIFORM_PREFIX {
-        return Err(TranslateError::Unsupported);
-    }
-    Ok((&args[0], &args[1], &args[2], &args[3]))
-}
-
 /// `texture_load_2d_f32(group, binding, x, y)`.
 fn texture_xy(args: &[Operand]) -> Result<(u32, u32, &Operand, &Operand), TranslateError> {
     if args.len() != UNIFORM_PREFIX {
@@ -3515,7 +5492,9 @@ fn const_u32(op: &Operand) -> Result<u32, TranslateError> {
         Operand::U32(value) => Ok(*value),
         // A local is not materialised; group/binding must be immediates
         // (same rule as `wasm2gpu`).
-        Operand::Local(_) | Operand::F32(_) | Operand::Bool(_) => Err(TranslateError::Unsupported),
+        Operand::Local(_) | Operand::F32(_) | Operand::Bool(_) | Operand::Symbol(_) => {
+            Err(TranslateError::Unsupported)
+        }
     }
 }
 
@@ -3584,34 +5563,42 @@ fn local_index_arg(
     module: &mut naga::Module,
     function: &mut naga::Function,
 ) -> naga::Handle<naga::Expression> {
+    builtin_u32_arg(
+        module,
+        function,
+        "local_invocation_index",
+        naga::BuiltIn::LocalInvocationIndex,
+    )
+}
+
+/// One `u32` builtin argument of the entry.
+fn builtin_u32_arg(
+    module: &mut naga::Module,
+    function: &mut naga::Function,
+    name: &str,
+    built_in: naga::BuiltIn,
+) -> naga::Handle<naga::Expression> {
     let index = function.arguments.len() as u32;
     function.arguments.push(naga::FunctionArgument {
-        name: Some("local_invocation_index".to_string()),
+        name: Some(name.to_string()),
         ty: scalar(module, naga::ScalarKind::Uint),
-        binding: Some(naga::Binding::BuiltIn(naga::BuiltIn::LocalInvocationIndex)),
+        binding: Some(naga::Binding::BuiltIn(built_in)),
     });
     append(function, naga::Expression::FunctionArgument(index))
 }
 
-fn uses_uv(func: &LlvmFunc) -> bool {
-    uses_call(func, "fragment_uv_lane")
-}
-
-fn uv_arg(
-    ty: naga::Handle<naga::Type>,
+/// One `@location(location)` argument of the entry.
+fn location_arg(
     function: &mut naga::Function,
+    ty: naga::Handle<naga::Type>,
+    location: u32,
+    name: &str,
 ) -> naga::Handle<naga::Expression> {
     let index = function.arguments.len() as u32;
     function.arguments.push(naga::FunctionArgument {
-        name: Some("uv".to_string()),
+        name: Some(name.to_string()),
         ty,
-        binding: Some(naga::Binding::Location {
-            location: 0,
-            interpolation: Some(naga::Interpolation::Perspective),
-            sampling: Some(naga::Sampling::Center),
-            blend_src: None,
-            per_primitive: false,
-        }),
+        binding: Some(location_binding(location)),
     });
     append(function, naga::Expression::FunctionArgument(index))
 }
@@ -3641,7 +5628,10 @@ fn push_emit(
     handle: naga::Handle<naga::Expression>,
 ) {
     if !func.expressions[handle].needs_pre_emit() {
-        let range = func.expressions.range_from(handle.index());
+        // The range is closed on purpose: an open-ended one would also cover
+        // the `CallResult` of a helper call, which Naga rejects because a call
+        // statement defines it.
+        let range = naga::Range::new_from_bounds(handle, handle);
         out.push(naga::Statement::Emit(range), naga::Span::default());
     }
 }
@@ -3669,6 +5659,13 @@ fn operand(
             push_emit(func, out, handle);
             Ok(handle)
         }
+        // A module symbol is a panic location, and the call that carried it is
+        // dropped; a zero keeps the value well-typed if one ever surfaces.
+        Operand::Symbol(_) => {
+            let handle = append(func, naga::Expression::Literal(naga::Literal::U32(0)));
+            push_emit(func, out, handle);
+            Ok(handle)
+        }
     }
 }
 
@@ -3689,12 +5686,20 @@ start:
   ret void
 }
 "#;
-        let func = crate::parse::parse(ir).expect("parse");
+        let func = crate::parse::parse_module(ir)
+            .expect("parse")
+            .funcs
+            .into_iter()
+            .find(|func| func.name == ornis_gpu_abi::symbols::CS_MAIN)
+            .expect("entry");
         // `vec3` is 12 bytes but aligns to 16; the scalar after it sits at
         // byte 12 and the struct rounds up to 32 (uniform alignment).
         let structs: &[&[u8]] = &[&[TYPE_TAG_VEC3, TYPE_TAG_F32, TYPE_TAG_U32]];
-        let module =
-            lower(&func, structs, ornis_gpu_abi::symbols::CS_WORKGROUP, false).expect("lower");
+        let mut lowering = Lowering::new(structs, crate::TextureSampling::SingleSample);
+        lowering
+            .push(&func, ornis_gpu_abi::symbols::CS_WORKGROUP)
+            .expect("lower");
+        let module = lowering.finish();
         let ty = module
             .types
             .iter()

@@ -9,6 +9,13 @@
 use ornis_llvm2gpu::meta;
 use ornis_llvm2gpu::{extract_meta, parse_meta};
 
+/// The single record `ir` carries.
+fn only_record(ir: &str) -> meta::ShaderMeta {
+    let mut records = extract_meta(ir).expect("record parses");
+    assert_eq!(records.len(), 1, "one record");
+    records.remove(0)
+}
+
 /// An IR module that only carries a record.
 fn module(record: &str) -> String {
     format!(
@@ -22,9 +29,7 @@ fn module(record: &str) -> String {
 #[test]
 fn current_record_lists_one_struct_per_uniform_binding() {
     let ir = module("entry=cs_main;workgroup=8,4,1;uniform=0:6666662,1:11");
-    let meta = extract_meta(&ir)
-        .expect("record parses")
-        .expect("record present");
+    let meta = only_record(&ir);
     assert_eq!(meta.entry, "cs_main");
     assert_eq!(meta.workgroup, [8, 4, 1]);
     assert_eq!(meta.tags(0), Some([6, 6, 6, 6, 6, 6, 2].as_slice()));
@@ -45,9 +50,7 @@ fn nested_struct_tag_consumes_the_following_id_digit() {
 #[test]
 fn older_types_record_still_reads() {
     let ir = module("entry=cs_main;workgroup=64,1,1;types=6,2");
-    let meta = extract_meta(&ir)
-        .expect("record parses")
-        .expect("record present");
+    let meta = only_record(&ir);
     assert_eq!(meta.tags(0), Some([6, 2].as_slice()));
 }
 
@@ -66,7 +69,7 @@ fn table_keeps_struct_ids_stable_when_an_id_is_missing() {
 fn a_shader_without_a_record_is_not_an_error() {
     let ir = "define dso_local void @cs_main(i32 noundef %id) unnamed_addr #0 { start: ret void }";
     let found = meta::extract(ir).expect("no record");
-    assert_eq!(found, None);
+    assert!(found.is_empty());
 }
 
 #[test]
@@ -83,4 +86,31 @@ fn malformed_records_are_rejected() {
         let parsed = meta::parse(record);
         assert!(parsed.is_err(), "record `{record}` must not parse");
     }
+}
+
+#[test]
+fn two_entries_publish_two_records() {
+    // A pass ships a vertex and a fragment entry; each record names its own
+    // entry, so the reader can pick one and the builder can translate both.
+    let ir = r#"
+@ornis_gpu_shader_meta_vs_main = private constant [29 x i8] c"entry=vs_main;workgroup=1,1,1", section "ornis_gpu.shader_meta", align 1
+@ornis_gpu_shader_meta_fs_main = private constant [41 x i8] c"entry=fs_main;workgroup=1,1,1;uniform=0:62", section "ornis_gpu.shader_meta", align 1
+define void @vs_main() { start: ret void }
+define void @fs_main() { start: ret void }
+"#;
+    let records = extract_meta(ir).expect("records parse");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].entry, "vs_main");
+    assert_eq!(records[1].entry, "fs_main");
+    assert_eq!(records[1].tags(0), Some([6, 2].as_slice()));
+
+    let fragment = ornis_llvm2gpu::extract_meta_for(ir, "fs_main")
+        .expect("query")
+        .expect("fragment record");
+    assert_eq!(fragment.workgroup, [1, 1, 1]);
+    assert!(
+        ornis_llvm2gpu::extract_meta_for(ir, "cs_main")
+            .expect("query")
+            .is_none()
+    );
 }

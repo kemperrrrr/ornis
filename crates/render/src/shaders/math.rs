@@ -1008,21 +1008,7 @@ mod tests {
             "const REC709_LUMA_R: f32 = {};",
             super::super::f32_lit(REC709_LUMA_R)
         );
-        let srgb_decl = format!(
-            "const SRGB_LINEAR_CUTOFF: f32 = {};",
-            super::super::f32_lit(SRGB_LINEAR_CUTOFF)
-        );
         let passes = [
-            (
-                "bloom",
-                crate::shaders::bloom_generated::wgsl_source(),
-                true,
-            ),
-            (
-                "hdr",
-                crate::shaders::hdr_composite_generated::wgsl_source(),
-                true,
-            ),
             ("pbr", crate::shaders::pbr_generated::wgsl_source(), true),
             (
                 "lighting",
@@ -1034,36 +1020,51 @@ mod tests {
                 crate::shaders::material_textures::wgsl_source_textured(),
                 true,
             ),
-            (
-                "composite",
-                crate::shaders::composite_generated::wgsl_source(),
-                false,
-            ),
         ];
         for (name, src, wants_luma) in passes {
             if wants_luma {
                 assert!(src.contains(&decl), "{name} missing {decl}");
-            } else {
-                assert!(src.contains(&srgb_decl), "{name} missing {srgb_decl}");
             }
             assert_valid_wgsl(name, &src);
         }
+        // The translated passes keep their own copy of the math their DSL kernel
+        // used to splice in, so they carry the constants' *values* rather than
+        // the declarations.
+        let hdr = crate::shaders::hdr_composite_generated::wgsl_source();
+        assert!(
+            hdr.contains(&super::super::f32_lit(ACES_FIT_A)),
+            "hdr composite missing the ACES fit"
+        );
+        assert_valid_wgsl("hdr", &hdr);
+        let composite = crate::shaders::composite_generated::wgsl_source();
+        assert!(
+            composite.contains(&super::super::f32_lit(SRGB_LINEAR_CUTOFF)),
+            "composite missing the sRGB cutoff value"
+        );
+        assert_valid_wgsl("composite", &composite);
+        // The translated bloom pass keeps its own luminance weights and knee.
         let bloom = crate::shaders::bloom_generated::wgsl_source();
-        assert!(bloom.contains(&format!(
-            "const BLOOM_SOFT_KNEE: f32 = {};",
-            super::super::f32_lit(crate::shaders::bloom_generated::BLOOM_SOFT_KNEE)
-        )));
+        assert!(
+            bloom.contains(&super::super::f32_lit(REC709_LUMA_R)),
+            "bloom missing the luminance weights"
+        );
+        assert!(
+            bloom.contains(&super::super::f32_lit(
+                crate::shaders::bloom_generated::BLOOM_SOFT_KNEE
+            )),
+            "bloom missing the soft knee"
+        );
+        assert_valid_wgsl("bloom", &bloom);
         let pbr = crate::shaders::pbr_generated::wgsl_source();
         assert!(pbr.contains("const POINT_OR_SPOT_KIND_EDGE: f32"));
         assert!(pbr.contains("const SHADOW_CUBE_NEAR: f32"));
-        // Fog replaces the composite on the swapchain and runs the same
-        // ACES kernel, so it needs the coefficient block too.
+        // Fog replaces the composite on the swapchain and runs the same ACES
+        // kernel: the translated pass carries the coefficients as literals.
         let fog = crate::shaders::fog_generated::wgsl_source();
-        let aces_decl = format!(
-            "const ACES_FIT_A: f32 = {};",
-            super::super::f32_lit(ACES_FIT_A)
+        assert!(
+            fog.contains(&super::super::f32_lit(ACES_FIT_A)),
+            "fog missing the ACES fit"
         );
-        assert!(fog.contains(&aces_decl), "fog missing {aces_decl}");
         assert_valid_wgsl("fog", &fog);
     }
 }
