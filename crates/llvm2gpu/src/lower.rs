@@ -211,7 +211,7 @@ impl Lowering {
         let cfg = Cfg::new(func)?;
         let function = self.builders.build(func, &cfg, stage)?;
         self.builders
-            .finish(function, func.ret_ty, workgroup, stage)
+            .finish(&func.name, function, func.ret_ty, workgroup, stage)
     }
 
     /// The finished module, with every entry point pushed so far.
@@ -232,14 +232,24 @@ enum Stage {
 }
 
 impl Stage {
+    /// Canonical entry prefixes, one per stage.
+    ///
+    /// A pass may carry more than one entry of a stage (`vs_main_indirect`
+    /// draws the compacted visibility list, `fs_main_msaa` shades samples), and
+    /// the pipeline names the entry it wants. The prefix decides the stage; the
+    /// rest of the name only has to be unique within the module.
+    const PREFIXES: [(&'static str, Self); 3] = [
+        (ornis_gpu_abi::symbols::CS_MAIN, Self::Compute),
+        (ornis_gpu_abi::symbols::VS_MAIN, Self::Vertex),
+        (ornis_gpu_abi::symbols::FS_MAIN, Self::Fragment),
+    ];
+
     /// Stage an entry name denotes, or `None` for anything else.
     fn of(name: &str) -> Option<Self> {
-        match name {
-            ornis_gpu_abi::symbols::CS_MAIN => Some(Self::Compute),
-            ornis_gpu_abi::symbols::VS_MAIN => Some(Self::Vertex),
-            ornis_gpu_abi::symbols::FS_MAIN => Some(Self::Fragment),
-            _ => None,
-        }
+        Self::PREFIXES
+            .iter()
+            .find(|(prefix, _)| name.starts_with(prefix))
+            .map(|(_, stage)| *stage)
     }
 
     /// Whether the stage draws fragments, i.e. has a stage interface.
@@ -1216,6 +1226,7 @@ impl Builders {
     /// Add the lowered function as this module's next entry point.
     fn finish(
         &mut self,
+        entry: &str,
         function: naga::Function,
         ret_ty: Ty,
         workgroup: [u32; 3],
@@ -1227,22 +1238,14 @@ impl Builders {
         if ret_ty == Ty::Float {
             self.storage_global(0, 0, Elem::F32, true)?;
         }
+        // The entry keeps the kernel's own name: a pass may carry two entries
+        // of one stage (`vs_main_indirect`), and naga refuses two entry points
+        // that share a name. The pipeline names the entry it draws with, so the
+        // name is part of the pass contract either way.
         let (name, stage, workgroup_size) = match stage {
-            Stage::Compute => (
-                ornis_gpu_abi::symbols::CS_MAIN.to_string(),
-                naga::ShaderStage::Compute,
-                workgroup,
-            ),
-            Stage::Vertex => (
-                ornis_gpu_abi::symbols::VS_MAIN.to_string(),
-                naga::ShaderStage::Vertex,
-                [0, 0, 0],
-            ),
-            Stage::Fragment => (
-                ornis_gpu_abi::symbols::FS_MAIN.to_string(),
-                naga::ShaderStage::Fragment,
-                [0, 0, 0],
-            ),
+            Stage::Compute => (entry.to_string(), naga::ShaderStage::Compute, workgroup),
+            Stage::Vertex => (entry.to_string(), naga::ShaderStage::Vertex, [0, 0, 0]),
+            Stage::Fragment => (entry.to_string(), naga::ShaderStage::Fragment, [0, 0, 0]),
         };
         self.module.entry_points.push(naga::EntryPoint {
             name,

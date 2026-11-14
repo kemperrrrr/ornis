@@ -307,9 +307,12 @@ fn parse_noreturn(text: &str) -> Vec<String> {
 
 /// Whether `name` is a shader entry point rather than a helper.
 pub(super) fn is_entry(name: &str) -> bool {
-    name == ornis_gpu_abi::symbols::CS_MAIN
-        || name == ornis_gpu_abi::symbols::VS_MAIN
-        || name == ornis_gpu_abi::symbols::FS_MAIN
+    let prefixes = [
+        ornis_gpu_abi::symbols::CS_MAIN,
+        ornis_gpu_abi::symbols::VS_MAIN,
+        ornis_gpu_abi::symbols::FS_MAIN,
+    ];
+    prefixes.iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// Decode one `c"…"` LLVM byte string, escapes included.

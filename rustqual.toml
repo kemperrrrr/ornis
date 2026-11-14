@@ -92,6 +92,7 @@ paths = [
     "crates/gpu-bloom/**",
     "crates/gpu-aa-edge/**",
     "crates/gpu-aa-taa/**",
+    "crates/gpu-gbuffer/**",
     "crates/gpu-cluster/**",
     "crates/gpu-gtao/**",
     "crates/gpu-histogram/**",

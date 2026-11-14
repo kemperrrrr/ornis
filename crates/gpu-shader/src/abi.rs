@@ -154,12 +154,22 @@ unsafe extern "C" {
     fn import_vertex_position(x: f32, y: f32, z: f32, w: f32);
     #[link_name = "vertex_store_f32x2"]
     fn import_vertex_store_f32x2(location: u32, x: f32, y: f32);
+    #[link_name = "vertex_store_f32x3"]
+    fn import_vertex_store_f32x3(location: u32, x: f32, y: f32, z: f32);
     #[link_name = "vertex_store_f32x4"]
     fn import_vertex_store_f32x4(location: u32, x: f32, y: f32, z: f32, w: f32);
+    #[link_name = "vertex_store_u32"]
+    fn import_vertex_store_u32(location: u32, value: u32);
     #[link_name = "fragment_input_lane"]
     fn import_fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32;
+    #[link_name = "fragment_input_u32"]
+    fn import_fragment_input_u32(location: u32) -> u32;
     #[link_name = "fragment_store_location"]
     fn import_fragment_store_location(location: u32, r: f32, g: f32, b: f32, a: f32);
+    #[link_name = "fragment_store_f32x2_location"]
+    fn import_fragment_store_f32x2_location(location: u32, x: f32, y: f32);
+    #[link_name = "fragment_store_u32_location"]
+    fn import_fragment_store_u32_location(location: u32, value: u32);
 }
 
 /// Call one declared import.
@@ -559,10 +569,40 @@ pub(crate) fn vertex_store_4(location: u32, x: f32, y: f32, z: f32, w: f32) {
     call!(import_vertex_store_f32x4(location, x, y, z, w));
 }
 
+/// Write a `vec3<f32>` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_3(location: u32, x: f32, y: f32, z: f32) {
+    call!(import_vertex_store_f32x3(location, x, y, z));
+}
+
+/// Write a scalar `u32` vertex output at `location`.
+#[inline(always)]
+pub(crate) fn vertex_store_u32(location: u32, value: u32) {
+    call!(import_vertex_store_u32(location, value));
+}
+
 /// Lane `lane` of the fragment `@location(location)` input of `lanes` lanes.
 #[inline(always)]
 pub(crate) fn fragment_input_lane(location: u32, lanes: u32, lane: u32) -> f32 {
     call!(import_fragment_input_lane(location, lanes, lane))
+}
+
+/// The scalar `u32` fragment input at `location`.
+#[inline(always)]
+pub(crate) fn fragment_input_u32(location: u32) -> u32 {
+    call!(import_fragment_input_u32(location))
+}
+
+/// Write a `vec2<f32>` fragment output at `location`.
+#[inline(always)]
+pub(crate) fn fragment_store_2(location: u32, x: f32, y: f32) {
+    call!(import_fragment_store_f32x2_location(location, x, y));
+}
+
+/// Write a scalar `u32` fragment output at `location`.
+#[inline(always)]
+pub(crate) fn fragment_store_u32(location: u32, value: u32) {
+    call!(import_fragment_store_u32_location(location, value));
 }
 
 /// Write the fragment output at `location`: a `vec4<f32>` of RGBA lanes.

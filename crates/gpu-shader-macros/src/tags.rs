@@ -21,6 +21,11 @@ use syn::Ident;
 const META_PREFIX: &str = "ornis_gpu_shader_meta_";
 
 /// A uniform parameter the record must describe.
+///
+/// The metadata constants are named after the entry *and* the parameter: a pass
+/// crate carries several entries (a vertex and a fragment stage, an indirect
+/// variant), and two of them binding the same `GpuStruct` would otherwise
+/// declare the same module-level `const` twice.
 pub(super) struct UniformParam {
     /// The struct type the parameter is a `Uniform` of.
     pub(super) ty: syn::Type,
@@ -43,10 +48,11 @@ pub(super) fn emit(
     );
     let prefix = syn::LitByteStr::new(prefix_text.as_bytes(), entry.span());
     let prefix_len = prefix_text.len();
+    let entry_upper = entry.to_string().to_uppercase();
     let names: Vec<(Ident, Ident)> = uniforms
         .iter()
         .map(|param| {
-            let upper = param.ident.to_string().to_uppercase();
+            let upper = format!("{entry_upper}_{}", param.ident.to_string().to_uppercase());
             (
                 Ident::new(&format!("ORNIS_GPU_TAGS_{upper}"), param.ident.span()),
                 Ident::new(&format!("ORNIS_GPU_ID_{upper}"), param.ident.span()),

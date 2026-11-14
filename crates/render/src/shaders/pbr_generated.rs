@@ -616,9 +616,13 @@ mod tests {
 
     #[test]
     fn pbr_generated_contains_expected_bindings() {
+        // The vertex stage is the translated g-buffer kernel now: it reads
+        // `per_objects` word by word, so the binding is an `array<u32>` and the
+        // name is the generated one.
         let vs = wgsl_vertex_source();
-        assert!(vs.contains("@group(0) @binding(1) var<storage, read> per_objects"));
+        assert!(vs.contains("@group(0) @binding(1)"), "{vs}");
         assert!(vs.contains("fn vs_main("));
+        assert!(!vs.contains("fn fs_main("), "vertex-only module");
         let fs = wgsl_source();
         assert!(fs.contains("@group(0) @binding(3) var<uniform> lighting"));
         assert!(fs.contains("fn fs_main("));
@@ -665,15 +669,24 @@ mod tests {
         assert!(src.contains(openpbr_material_decl().as_str()));
     }
 
-    /// Every table row's declaration appears across the assembled stages,
-    /// and every row maps to a layout entry: shader and pipeline agree.
+    /// Every table row is bound at an address the shaders declare, and every
+    /// row maps to a layout entry: shader and pipeline agree.
     #[test]
     fn pbr_resources_cover_stages_and_layout() {
-        use super::super::{bgl_entry, resource_decl};
-        let src = wgsl_vertex_source() + &wgsl_source();
+        use super::super::{bgl_entry, declared_bindings};
+        let vertex = naga::front::wgsl::parse_str(&wgsl_vertex_source()).expect("vertex");
+        let fragment = naga::front::wgsl::parse_str(&wgsl_source()).expect("fragment");
+        let mut bindings = declared_bindings(&vertex);
+        bindings.extend(declared_bindings(&fragment));
         assert_eq!(PBR_RESOURCES.len(), 16);
         for r in PBR_RESOURCES {
-            assert!(src.contains(&resource_decl(&r)), "missing {}", r.name);
+            assert!(
+                bindings.contains(&(r.group, r.binding)),
+                "missing {} at {}:{}",
+                r.name,
+                r.group,
+                r.binding
+            );
             let e = bgl_entry(&r, false);
             assert_eq!((e.binding, e.visibility), (r.binding, r.visibility));
         }

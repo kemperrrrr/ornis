@@ -420,7 +420,7 @@ impl Renderer3D {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &fs_module,
-                    entry_point: Some(shaders::gbuffer_generated::fs_main::entry_point()),
+                    entry_point: Some(shaders::gbuffer_generated::FS_ENTRY),
                     targets,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
@@ -453,13 +453,13 @@ impl Renderer3D {
             "gbuffer pipeline",
             &targets,
             &pipeline_layout,
-            shaders::gbuffer_generated::vs_main::entry_point(),
+            shaders::gbuffer_generated::VS_ENTRY,
         );
         let indirect_pipeline = create_pipeline(
             "gbuffer indirect pipeline",
             &targets,
             &indirect_pipeline_layout,
-            shaders::gbuffer_generated::vs_main_indirect::entry_point(),
+            shaders::gbuffer_generated::VS_INDIRECT_ENTRY,
         );
         targets[5] = gbuffer_float_target(wgpu::TextureFormat::Rg16Float);
         targets[6] = gbuffer_integer_target(wgpu::TextureFormat::R16Uint);
@@ -467,13 +467,13 @@ impl Renderer3D {
             "gbuffer motion pipeline",
             &targets,
             &pipeline_layout,
-            shaders::gbuffer_generated::vs_main::entry_point(),
+            shaders::gbuffer_generated::VS_ENTRY,
         );
         let motion_indirect_pipeline = create_pipeline(
             "gbuffer motion indirect pipeline",
             &targets,
             &indirect_pipeline_layout,
-            shaders::gbuffer_generated::vs_main_indirect::entry_point(),
+            shaders::gbuffer_generated::VS_INDIRECT_ENTRY,
         );
 
         (

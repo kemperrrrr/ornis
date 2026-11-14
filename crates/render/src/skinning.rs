@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(skinned_entry_point(), "vs_main_skinned");
         assert_ne!(
             skinned_entry_point(),
-            crate::shaders::gbuffer_generated::vs_main::entry_point()
+            crate::shaders::gbuffer_generated::VS_ENTRY
         );
     }
 
