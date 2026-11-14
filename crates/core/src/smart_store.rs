@@ -44,9 +44,14 @@ trait Lane: Send + Sync {
     fn is_lock_free(&self) -> bool {
         false
     }
+    /// Deep-copies the lane (storage and every component) into a fresh
+    /// type-erased lane. Backs [`SmartStore`]'s `Clone`: the clone shares no
+    /// locks or snapshot pointers with the source, so the two stores mutate
+    /// independently. Requires `T: Clone` at every impl.
+    fn clone_lane(&self) -> Box<dyn Lane>;
 }
 
-impl<T: 'static + Send + Sync> Lane for RwLock<ComponentStore<T>> {
+impl<T: 'static + Clone + Send + Sync> Lane for RwLock<ComponentStore<T>> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -56,9 +61,13 @@ impl<T: 'static + Send + Sync> Lane for RwLock<ComponentStore<T>> {
             guard.remove(entity);
         }
     }
+
+    fn clone_lane(&self) -> Box<dyn Lane> {
+        Box::new(RwLock::new(read_lock(self).clone()))
+    }
 }
 
-impl<T: 'static + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
+impl<T: 'static + Clone + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -67,6 +76,10 @@ impl<T: 'static + Send + Sync> Lane for RwLock<ColdComponentStore<T>> {
         if let Ok(mut guard) = self.write() {
             guard.remove(entity);
         }
+    }
+
+    fn clone_lane(&self) -> Box<dyn Lane> {
+        Box::new(RwLock::new(read_lock(self).clone()))
     }
 }
 
@@ -178,6 +191,14 @@ impl<T: 'static + Clone + Send + Sync> Lane for LockFreeLaneInner<T> {
     fn is_lock_free(&self) -> bool {
         true
     }
+
+    fn clone_lane(&self) -> Box<dyn Lane> {
+        let guard = epoch_pin();
+        let snapshot = self.read(&guard).clone();
+        Box::new(LockFreeLaneInner {
+            store: Atomic::new(snapshot),
+        })
+    }
 }
 
 impl<T: Clone + Send + Sync> Drop for LockFreeLaneInner<T> {
@@ -250,6 +271,28 @@ impl Default for SmartStore {
     }
 }
 
+impl Clone for SmartStore {
+    /// Deep-copies every hot and cold lane and the entity allocator. The
+    /// clone keeps the source's entity handles (ids and generations) and
+    /// free list, so a snapshot restored in place preserves allocation
+    /// state; no lock or epoch snapshot is shared with the source.
+    fn clone(&self) -> Self {
+        Self {
+            lanes: self
+                .lanes
+                .iter()
+                .map(|(tid, lane)| (*tid, lane.clone_lane()))
+                .collect(),
+            cold_lanes: self
+                .cold_lanes
+                .iter()
+                .map(|(tid, lane)| (*tid, lane.clone_lane()))
+                .collect(),
+            allocator: RwLock::new(read_lock(&self.allocator).clone()),
+        }
+    }
+}
+
 impl SmartStore {
     /// Creates an empty store with no lanes and a fresh entity allocator.
     pub fn new() -> Self {
@@ -259,7 +302,7 @@ impl SmartStore {
     /// Eagerly creates the hot lane for component type `T` (no-op if it
     /// already exists). Registration up front avoids surprise allocations
     /// inside systems.
-    pub fn register<T: 'static + Send + Sync>(&mut self) {
+    pub fn register<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
             .entry(tid)
@@ -278,7 +321,7 @@ impl SmartStore {
             .or_insert_with(|| Box::new(LockFreeLaneInner::<T>::new()));
     }
 
-    fn ensure_lane<T: 'static + Send + Sync>(&mut self) {
+    fn ensure_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.lanes
             .entry(tid)
@@ -297,14 +340,14 @@ impl SmartStore {
     }
 
     /// Eagerly creates the cold lane for `T`. No-op if already present.
-    pub fn register_cold<T: 'static + Send + Sync>(&mut self) {
+    pub fn register_cold<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.cold_lanes
             .entry(tid)
             .or_insert_with(|| Box::new(RwLock::new(ColdComponentStore::<T>::new())));
     }
 
-    fn ensure_cold_lane<T: 'static + Send + Sync>(&mut self) {
+    fn ensure_cold_lane<T: 'static + Clone + Send + Sync>(&mut self) {
         let tid = TypeId::of::<T>();
         self.cold_lanes
             .entry(tid)
@@ -313,7 +356,7 @@ impl SmartStore {
 
     /// Inserts a cold component for `entity`, creating the cold lane on
     /// first use.
-    pub fn insert_cold<T: 'static + Send + Sync>(&mut self, entity: Entity, component: T) {
+    pub fn insert_cold<T: 'static + Clone + Send + Sync>(&mut self, entity: Entity, component: T) {
         self.ensure_cold_lane::<T>();
         let tid = TypeId::of::<T>();
         if let Some(lane) = self.cold_lanes.get(&tid)
@@ -598,6 +641,36 @@ mod tests {
 
         let lane = store.read_lane::<f32>().unwrap();
         assert!(lane.get(e).is_none());
+    }
+
+    #[test]
+    fn clone_preserves_lanes_handles_and_independence() {
+        let mut store = SmartStore::new();
+        store.register_cold::<u32>();
+        store.register_lock_free::<u64>();
+        let a = store.create_entity();
+        let b = store.create_entity();
+        store.insert(a, 1.0_f32);
+        store.insert_cold(a, 7_u32);
+        store.insert(a, 5_u64);
+        store.destroy_entity(b);
+
+        let mut clone = store.clone();
+        assert!(clone.is_alive(a));
+        assert!(!clone.is_alive(b));
+        assert_eq!(clone.read_lane::<f32>().unwrap().get(a), Some(&1.0));
+        assert_eq!(clone.read_cold_lane::<u32>().unwrap().get(a), Some(&7));
+        assert_eq!(
+            clone.with_lock_free_lane::<u64, _>(|s| s.get(a).copied()),
+            Some(Some(5))
+        );
+        // Allocator state (free list + generations) clones identically.
+        assert_eq!(clone.create_entity().id(), store.create_entity().id());
+
+        // Independent storage: writing the clone never touches the source.
+        clone.insert(a, 9.0_f32);
+        assert_eq!(store.read_lane::<f32>().unwrap().get(a), Some(&1.0));
+        assert_eq!(clone.read_lane::<f32>().unwrap().get(a), Some(&9.0));
     }
 
     #[test]

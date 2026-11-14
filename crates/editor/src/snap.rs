@@ -1,15 +1,13 @@
-//! Gizmo snap settings (PLAN §i, slice E4): quantize a drag preview to a
-//! translate/rotate/scale step.
+//! Gizmo snap settings (PLAN §i, slice E4): quantize the active drag channel
+//! to a translate/rotate/scale step.
 //!
-//! Pure over [`TransformDesc`], like the drag math itself: the replica owns
-//! the settings (a UI preference, not scene content — same footing as the
-//! gizmo mode/space) and applies them to the preview before it is written
-//! and committed. Disabled by default; a non-positive step leaves that
-//! channel unquantized even when snap is on.
+//! Pure over `Vec3` and angles: the replica owns the settings (a UI
+//! preference, not scene content — same footing as the gizmo mode/space) and
+//! applies them to the preview's active channel before it is written and
+//! committed. Disabled by default; a non-positive step leaves that channel
+//! unquantized even when snap is on.
 
-use glam::{Quat, Vec3};
-use ornis_assets::scene::TransformDesc;
-use ornis_core::units::UnitQuat;
+use glam::Vec3;
 
 /// Floor for a snapped scale component (never zero or negative), matching
 /// the drag math's `MIN_SCALE`.
@@ -42,42 +40,40 @@ impl Default for SnapSettings {
 }
 
 impl SnapSettings {
-    /// Quantizes `transform` to the configured steps. With snap disabled the
-    /// transform is returned unchanged; a non-positive step skips its
-    /// channel. Rotation snaps the orientation's swept angle to the step.
+    /// Rounds a translation to the translate step (world units). Snap off or
+    /// a non-positive step returns `v` unchanged.
     #[must_use]
-    pub fn snap_transform(&self, transform: TransformDesc) -> TransformDesc {
-        let steps = self.active_steps();
-        TransformDesc {
-            translation: snap_vec3(transform.translation, steps.translate),
-            scale: floor_scale(snap_vec3(transform.scale, steps.scale), steps.scale),
-            rotation: snap_rotation(transform.rotation, steps.rotate_deg),
+    pub fn snap_translate(&self, v: Vec3) -> Vec3 {
+        if !self.enabled || self.translate <= 0.0 {
+            return v;
         }
+        snap_vec3(v, self.translate)
     }
 
-    /// Steps with snapping disabled zeroed out, so a disabled setting leaves
-    /// every channel unquantized (each leaf operation treats a non-positive
-    /// step as identity).
-    fn active_steps(&self) -> Self {
-        if self.enabled {
-            *self
-        } else {
-            Self {
-                enabled: false,
-                translate: 0.0,
-                rotate_deg: 0.0,
-                scale: 0.0,
-            }
+    /// Rounds a scale to the scale step (factor) and floors it at
+    /// `MIN_SCALE`. Snap off or a non-positive step returns `v` unchanged.
+    #[must_use]
+    pub fn snap_scale(&self, v: Vec3) -> Vec3 {
+        if !self.enabled || self.scale <= 0.0 {
+            return v;
         }
+        floor_scale(snap_vec3(v, self.scale))
+    }
+
+    /// Rounds a swept angle (radians) to the rotate step (degrees). Snap off
+    /// or a non-positive step returns `angle` unchanged.
+    #[must_use]
+    pub fn snap_angle(&self, angle: f32) -> f32 {
+        if !self.enabled || self.rotate_deg <= 0.0 {
+            return angle;
+        }
+        let step = self.rotate_deg.to_radians();
+        (angle / step).round() * step
     }
 }
 
-/// Rounds each component to the nearest multiple of `step`; a non-positive
-/// step leaves the vector unchanged.
+/// Rounds each component to the nearest multiple of `step` (`step > 0`).
 fn snap_vec3(v: Vec3, step: f32) -> Vec3 {
-    if step <= 0.0 {
-        return v;
-    }
     Vec3::new(
         (v.x / step).round() * step,
         (v.y / step).round() * step,
@@ -85,12 +81,8 @@ fn snap_vec3(v: Vec3, step: f32) -> Vec3 {
     )
 }
 
-/// Floors a snapped scale at [`MIN_SCALE`]; a non-positive step (snapping
-/// off for this channel) leaves the scale untouched.
-fn floor_scale(v: Vec3, step: f32) -> Vec3 {
-    if step <= 0.0 {
-        return v;
-    }
+/// Floors each scale component at [`MIN_SCALE`].
+fn floor_scale(v: Vec3) -> Vec3 {
     Vec3::new(
         f32::max(v.x, MIN_SCALE),
         f32::max(v.y, MIN_SCALE),
@@ -98,49 +90,35 @@ fn floor_scale(v: Vec3, step: f32) -> Vec3 {
     )
 }
 
-/// Rounds the orientation's angle to the nearest multiple of `step_deg`,
-/// keeping its axis. A degenerate normalize keeps the original orientation.
-fn snap_rotation(rotation: UnitQuat, step_deg: f32) -> UnitQuat {
-    let (axis, angle) = snapped_axis_angle(rotation.get(), step_deg);
-    UnitQuat::normalize(Quat::from_axis_angle(axis, angle)).unwrap_or(rotation)
-}
-
-/// The orientation's axis and its swept angle rounded to `step_deg`.
-fn snapped_axis_angle(quat: Quat, step_deg: f32) -> (Vec3, f32) {
-    let step = step_deg.to_radians();
-    let (axis, angle) = quat.to_axis_angle();
-    (axis, (angle / step).round() * step)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn transform(translation: Vec3, scale: Vec3) -> TransformDesc {
-        TransformDesc {
-            translation,
-            scale,
-            ..TransformDesc::IDENTITY
+    fn enabled() -> SnapSettings {
+        SnapSettings {
+            enabled: true,
+            ..SnapSettings::default()
         }
     }
 
     #[test]
     fn disabled_snap_is_identity() {
         let snap = SnapSettings::default();
-        let t = transform(Vec3::new(0.37, 1.23, -2.71), Vec3::new(1.13, 0.87, 2.42));
-        assert_eq!(snap.snap_transform(t.clone()), t);
+        let v = Vec3::new(0.37, 1.23, -2.71);
+        assert_eq!(snap.snap_translate(v), v);
+        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_angle(0.38), 0.38);
     }
 
     #[test]
     fn translation_lands_on_multiples_of_the_step() {
         let snap = SnapSettings {
-            enabled: true,
             translate: 0.5,
-            ..SnapSettings::default()
+            ..enabled()
         };
-        let t = snap.snap_transform(transform(Vec3::new(0.37, 1.23, -2.71), Vec3::ONE));
-        assert!((t.translation - Vec3::new(0.5, 1.0, -2.5)).length() < 1e-6);
-        for c in t.translation.to_array() {
+        let t = snap.snap_translate(Vec3::new(0.37, 1.23, -2.71));
+        assert!((t - Vec3::new(0.5, 1.0, -2.5)).length() < 1e-6);
+        for c in t.to_array() {
             assert!((c / 0.5).round() * 0.5 - c < 1e-6, "{c} not a multiple");
         }
     }
@@ -148,36 +126,28 @@ mod tests {
     #[test]
     fn scale_lands_on_multiples_and_is_floored() {
         let snap = SnapSettings {
-            enabled: true,
             scale: 0.25,
-            ..SnapSettings::default()
+            ..enabled()
         };
-        let t = snap.snap_transform(transform(Vec3::ZERO, Vec3::new(1.13, 0.87, 0.0001)));
-        assert!((t.scale - Vec3::new(1.25, 0.75, MIN_SCALE)).length() < 1e-6);
+        let s = snap.snap_scale(Vec3::new(1.13, 0.87, 0.0001));
+        assert!((s - Vec3::new(1.25, 0.75, MIN_SCALE)).length() < 1e-6);
     }
 
     #[test]
-    fn rotation_lands_on_multiples_of_the_step() {
+    fn angle_lands_on_multiples_of_the_step() {
         let snap = SnapSettings {
-            enabled: true,
             rotate_deg: 15.0,
-            ..SnapSettings::default()
+            ..enabled()
         };
-        let start = TransformDesc {
-            rotation: UnitQuat::normalize(Quat::from_rotation_y(38.0_f32.to_radians()))
-                .expect("unit"),
-            ..TransformDesc::IDENTITY
-        };
-        let snapped = snap.snap_transform(start);
-        let (_, angle) = snapped.rotation.get().to_axis_angle();
-        let degrees = angle.to_degrees();
+        let positive = snap.snap_angle(38.0_f32.to_radians()).to_degrees();
         assert!(
-            (degrees - 45.0).abs() < 1e-3,
-            "38° must snap to 45°, got {degrees}"
+            (positive - 45.0).abs() < 1e-3,
+            "38° must snap to 45°, got {positive}"
         );
+        let negative = snap.snap_angle((-38.0_f32).to_radians()).to_degrees();
         assert!(
-            ((degrees / 15.0).round() * 15.0 - degrees).abs() < 1e-3,
-            "{degrees} not a multiple of 15°"
+            (negative + 45.0).abs() < 1e-3,
+            "-38° must snap to -45°, got {negative}"
         );
     }
 
@@ -189,7 +159,9 @@ mod tests {
             rotate_deg: 0.0,
             scale: 0.0,
         };
-        let t = transform(Vec3::new(0.37, 1.23, -2.71), Vec3::new(1.13, 0.87, 2.42));
-        assert_eq!(snap.snap_transform(t.clone()), t);
+        let v = Vec3::new(0.37, 1.23, -2.71);
+        assert_eq!(snap.snap_translate(v), v);
+        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_angle(0.38), 0.38);
     }
 }

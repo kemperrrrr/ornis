@@ -582,6 +582,18 @@ fn assert_writer_matches_role(role: PlanRole, system: &'static str, access: &Sys
 /// mode. Evaluated before the access frame, so a condition may read any
 /// resource; it must be cheap and side-effect-free (it runs every frame,
 /// possibly on a worker thread).
+///
+/// # Frame-stability invariant
+///
+/// Each system evaluates its own condition independently in
+/// `Schedule::run_system`, outside the access frame — there is no single
+/// per-frame snapshot. In parallel mode the systems of one frame run on
+/// different workers, so if a system of the same schedule *writes* the
+/// resource a condition reads, sibling systems may observe different values
+/// within the frame: a race and non-determinism. The gated resource must
+/// therefore stay constant for the whole frame and change only between
+/// ticks. The editor's `EditorMode` satisfies this: the session flips it
+/// only on the play/pause/stop commands, never from a scheduled system.
 pub type RunCondition = Arc<dyn Fn(&Resources) -> bool + Send + Sync>;
 
 /// System schedule: registration order is the conflict tie-break.

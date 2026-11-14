@@ -35,6 +35,10 @@ use ornis_render::{
 };
 
 mod scene_api;
+// Public so the `qual:api` marker on the `set_editor_mode` wasm-bindgen
+// export is nameable from outside the crate (a private module makes it an
+// ORPHAN_SUPPRESSION finding).
+pub mod mode;
 // Public so the `qual:api` marker on the `set_snap` wasm-bindgen export is
 // nameable from outside the crate (a private module makes it an
 // ORPHAN_SUPPRESSION finding).
@@ -44,6 +48,7 @@ pub mod snap;
 // the crate — a private module makes them ORPHAN_SUPPRESSION findings.
 pub mod viewport;
 
+use mode::{editor_mode, install_replica_chrome_gate, sync_editor_mode};
 use scene_api::{LiveEntityMeta, LiveScene};
 use snap::snap_settings;
 use viewport::{
@@ -1389,6 +1394,18 @@ impl<'a> FrameState<'a> {
     /// one `set_component` commit on release.
     // qual:allow(test_quality, untested) reason: "press/move/release edge wiring; the math it calls is host-tested"
     fn update_gizmo(&mut self) {
+        // Play gates chrome off (E4): no drag begins, previews or commits.
+        // An in-flight drag is rolled back — its preview was never committed,
+        // so leaving it would strand the object in a pose the server discards
+        // on Stop.
+        if !editor_mode().chrome_runs() {
+            if self.gizmo.is_dragging() {
+                self.rollback_gizmo_preview();
+                self.gizmo.cancel();
+                self.set_gizmo_grab(false);
+            }
+            return;
+        }
         let (pressed, pointer) = {
             let engine = self.render_world.engine();
             let input = engine.world().resources().get::<InputState>();
@@ -1723,6 +1740,9 @@ fn init_editor_replica(
     // camera. `Perspective3d` stays the active mode, so orbit input works
     // exactly as before until `set_viewport_mode("plane2d")`.
     install_editor(render_world.engine_mut());
+    // Gate picking off in Play (E4): the replica mirrors the authoritative
+    // mode, so chrome stops when the server starts simulating.
+    install_replica_chrome_gate(render_world.engine_mut());
     {
         let engine = render_world.engine_mut();
         if let Some(orbit) = read_orbit_camera(engine) {
@@ -1907,6 +1927,8 @@ fn spawn_render_loop(
         frame.apply_gizmo_requests();
         frame.update_gizmo();
         frame.sync_selection();
+        // Refresh the mode resource the picking gate reads before the frame.
+        sync_editor_mode(frame.render_world.engine_mut());
         frame.render_world.frame(DT);
 
         // ── Live scene polling (~1/s) ────────────────────────────────

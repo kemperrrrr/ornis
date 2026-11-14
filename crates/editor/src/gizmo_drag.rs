@@ -10,6 +10,7 @@
 
 use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, axis_direction};
 use crate::picking::PickRay;
+use crate::snap::SnapSettings;
 use glam::{Quat, Vec3};
 use ornis_assets::scene::TransformDesc;
 use ornis_core::units::UnitQuat;
@@ -79,7 +80,7 @@ impl GizmoDrag {
     /// Preview transform for the current pointer ray.
     // qual:allow(iosp) reason: "one dispatch over the handle axis/mode; the per-mode work lives in the apply_* helpers"
     #[must_use]
-    pub fn update(self, ray: &PickRay) -> Option<TransformDesc> {
+    pub fn update(&self, ray: &PickRay) -> Option<TransformDesc> {
         let mut transform = self.start.clone();
         match self.handle.axis {
             GizmoAxis::Xy | GizmoAxis::Yz | GizmoAxis::Xz => {
@@ -94,6 +95,53 @@ impl GizmoDrag {
             },
         }
         Some(transform)
+    }
+
+    /// Quantizes only the active drag channel (E4): Move snaps translation,
+    /// Scale snaps scale, Rotate snaps the swept angle around the handle
+    /// axis. Every other channel is returned bit-exact; snap off returns the
+    /// preview unchanged.
+    // qual:allow(iosp) reason: "one dispatch over the handle axis/mode mirroring update; the rotate leaf lives in snap_rotate"
+    #[must_use]
+    pub fn apply_snap(&self, mut transform: TransformDesc, snap: &SnapSettings) -> TransformDesc {
+        if !snap.enabled {
+            return transform;
+        }
+        match self.handle.axis {
+            GizmoAxis::Xy | GizmoAxis::Yz | GizmoAxis::Xz => {
+                transform.translation = snap.snap_translate(transform.translation);
+            }
+            _ => match self.handle.mode {
+                GizmoMode::Move => {
+                    transform.translation = snap.snap_translate(transform.translation);
+                }
+                GizmoMode::Scale => transform.scale = snap.snap_scale(transform.scale),
+                GizmoMode::Rotate => {
+                    transform.rotation = self.snap_rotate(transform.rotation, snap);
+                }
+                GizmoMode::Off => {}
+            },
+        }
+        transform
+    }
+
+    /// Snaps the swept rotation angle around the handle axis relative to the
+    /// drag start, keeping the axis and the other channels untouched. The
+    /// angle is recovered from the preview's delta over `start.rotation`
+    /// (`2·atan2(sin θ/2, cos θ/2)` projected on the axis), so a pre-rotated
+    /// selection snaps its *increment*, not its absolute orientation.
+    // qual:allow(iosp) reason: "one rotation-snap step: delta-angle recovery, quantization and quaternion composition belong together (mirrors apply_rotate)"
+    fn snap_rotate(&self, rotation: UnitQuat, snap: &SnapSettings) -> UnitQuat {
+        if snap.rotate_deg <= 0.0 {
+            return rotation;
+        }
+        let delta = rotation.get() * self.start.rotation.get().inverse();
+        let sine = Vec3::new(delta.x, delta.y, delta.z).dot(self.axis);
+        let angle = 2.0 * sine.atan2(delta.w);
+        let snapped = snap.snap_angle(angle);
+        UnitQuat::normalize(Quat::from_axis_angle(self.axis, snapped))
+            .and_then(|delta| UnitQuat::normalize(delta.get() * self.start.rotation.get()))
+            .unwrap_or(rotation)
     }
 
     /// Axis translation: offset along `axis` since the press.

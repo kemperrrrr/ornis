@@ -15,6 +15,13 @@
 //! viewport draws from the `TransformDesc` snapshot, not `GlobalTransform`,
 //! so freezing the fixed plan (including transform propagation) does not
 //! stale the editor's visuals.
+//!
+//! Gating skips systems; it does not stop the clock. `Engine::run_frame`
+//! advances `Time` and `FixedTime` every tick regardless of mode, so in
+//! `Edit`/`Paused` the fixed accumulator still drains its steps (in vain —
+//! the gated systems skip) and `Time::elapsed` keeps growing. Gameplay that
+//! reads `elapsed` therefore sees a jump at the Edit→Play boundary; this is
+//! expected, not a freeze of the clock itself.
 
 use std::sync::Arc;
 
@@ -25,7 +32,7 @@ use ornis_editor::EditorMode;
 /// gated wholesale separately). Best-effort: a host may not install every
 /// member (e.g. `audio_step` needs an audio device); the behavioural
 /// session tests are the safety net against a missed gate.
-const SIMULATION_SYSTEMS: [&str; 8] = [
+pub(crate) const SIMULATION_SYSTEMS: [&str; 8] = [
     "player_input",
     "transform_update",
     "body_to_transform",
@@ -37,7 +44,7 @@ const SIMULATION_SYSTEMS: [&str; 8] = [
 ];
 
 /// Editor-chrome systems gated to `Edit`/`Paused` (disabled in `Play`).
-const CHROME_SYSTEMS: [&str; 2] = ["editor_maintain", "gizmo_maintain"];
+pub(crate) const CHROME_SYSTEMS: [&str; 2] = ["editor_maintain", "gizmo_maintain"];
 
 /// Installs the [`EditorMode`] resource (defaulting to [`EditorMode::Edit`])
 /// and gates the simulation and editor-chrome system sets off it.

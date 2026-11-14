@@ -50,4 +50,23 @@ mod tests {
         set_snap(false, 0.5, 15.0, 0.25);
         assert_eq!(snap_settings(), SnapSettings::default());
     }
+
+    /// A zero step reaches `SnapSettings` verbatim (E4 review): the browser
+    /// controls pass 0 through, so the wasm glue must not substitute a
+    /// default, and each zeroed channel stays unquantized even when enabled.
+    #[test]
+    fn zero_steps_pass_through_and_disable_their_channel() {
+        set_snap(true, 0.0, 0.0, 0.0);
+        let snap = snap_settings();
+        assert!(snap.enabled);
+        assert_eq!(snap.translate, 0.0);
+        assert_eq!(snap.rotate_deg, 0.0);
+        assert_eq!(snap.scale, 0.0);
+        let v = glam::Vec3::new(0.37, 1.23, -2.71);
+        assert_eq!(snap.snap_translate(v), v);
+        assert_eq!(snap.snap_scale(v), v);
+        assert_eq!(snap.snap_angle(0.38), 0.38);
+        // Restore the default for the other tests on this thread.
+        set_snap(false, 0.5, 15.0, 0.25);
+    }
 }

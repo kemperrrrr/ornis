@@ -67,7 +67,8 @@ pub struct GizmoRuntime {
     candidate: Option<GizmoTarget>,
     /// One-step undo payload of the last committed drag.
     undo: Option<GizmoTarget>,
-    /// Snap steps applied to every preview (E4); disabled by default.
+    /// Snap steps applied to the active channel of every preview (E4);
+    /// disabled by default.
     snap: SnapSettings,
 }
 
@@ -104,7 +105,7 @@ impl GizmoRuntime {
     /// the handle (a parallel ray, a degenerate rotation radius).
     pub fn preview_transform(&mut self, ray: &PickRay) -> Option<TransformDesc> {
         let drag = self.drag.clone()?;
-        let transform = self.snap.snap_transform(drag.update(ray)?);
+        let transform = drag.apply_snap(drag.update(ray)?, &self.snap);
         self.preview(&transform);
         Some(transform)
     }
@@ -171,7 +172,8 @@ mod tests {
     use super::*;
     use crate::gizmo::{GizmoAxis, GizmoHandle, GizmoMode, GizmoSpace};
     use crate::picking::PickRay;
-    use glam::Vec3;
+    use glam::{Quat, Vec3};
+    use ornis_core::units::UnitQuat;
 
     /// A press ray through the drag handle.
     fn ray() -> PickRay {
@@ -323,5 +325,103 @@ mod tests {
             "got {:?}",
             preview.translation
         );
+    }
+
+    /// A Move drag with snap quantizes translation but leaves rotation and
+    /// scale bit-exact (E4 review): snapping must not touch inactive channels.
+    #[test]
+    fn move_snap_leaves_rotation_and_scale_bit_exact() {
+        let start = TransformDesc {
+            translation: Vec3::new(0.37, 1.23, -2.71),
+            rotation: UnitQuat::normalize(Quat::from_rotation_y(38.0_f32.to_radians()))
+                .expect("unit"),
+            scale: Vec3::new(1.13, 0.87, 2.42),
+        };
+        let press =
+            PickRay::try_new(Vec3::new(0.37, 1.23, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("ray");
+        let drag = GizmoDrag::begin(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Move,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::X,
+            },
+            &press,
+        )
+        .expect("drag starts");
+        let mut runtime = GizmoRuntime::default();
+        runtime.set_snap(SnapSettings {
+            enabled: true,
+            translate: 0.5,
+            ..SnapSettings::default()
+        });
+        runtime.begin(drag, Entity::new(1), None);
+        let release =
+            PickRay::try_new(Vec3::new(2.37, 1.23, 5.0), Vec3::new(0.0, 0.0, -1.0)).expect("ray");
+        let preview = runtime.preview_transform(&release).expect("a preview");
+        for c in preview.translation.to_array() {
+            assert!(
+                (c / 0.5).round() * 0.5 - c < 1e-6,
+                "{c} not a multiple of the step"
+            );
+        }
+        assert_eq!(
+            preview.rotation, start.rotation,
+            "rotation must be bit-exact"
+        );
+        assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
+    }
+
+    /// A Rotate drag with snap quantizes the swept angle around the handle
+    /// axis relative to the drag start (E4 review): an object pre-rotated
+    /// around X, dragged around Y by 38°, snaps to a 45° increment (a
+    /// multiple of the 15° step), leaving translation and scale bit-exact.
+    #[test]
+    fn rotate_snap_quantizes_the_delta_around_the_handle_axis() {
+        let start = TransformDesc {
+            rotation: UnitQuat::normalize(Quat::from_rotation_x(0.3)).expect("unit"),
+            ..TransformDesc::IDENTITY
+        };
+        let press =
+            PickRay::try_new(Vec3::new(1.0, 5.0, 0.0), Vec3::new(0.0, -1.0, 0.0)).expect("ray");
+        let drag = GizmoDrag::begin(
+            &start,
+            GizmoHandle {
+                mode: GizmoMode::Rotate,
+                space: GizmoSpace::World,
+                axis: GizmoAxis::Y,
+            },
+            &press,
+        )
+        .expect("drag starts");
+        let mut runtime = GizmoRuntime::default();
+        runtime.set_snap(SnapSettings {
+            enabled: true,
+            rotate_deg: 15.0,
+            ..SnapSettings::default()
+        });
+        runtime.begin(drag, Entity::new(1), None);
+        let a = 38.0_f32.to_radians();
+        let release = PickRay::try_new(Vec3::new(a.cos(), 5.0, a.sin()), Vec3::new(0.0, -1.0, 0.0))
+            .expect("ray");
+        let preview = runtime.preview_transform(&release).expect("a preview");
+        // The delta over the start orientation is a rotation around Y whose
+        // angle is a multiple of the step.
+        let delta = preview.rotation.get() * start.rotation.get().inverse();
+        let sine = Vec3::new(delta.x, delta.y, delta.z).dot(Vec3::Y);
+        let degrees = (2.0 * sine.atan2(delta.w)).to_degrees();
+        assert!(
+            (degrees.abs() - 45.0).abs() < 1e-3,
+            "38° must snap to 45°, got {degrees}"
+        );
+        assert!(
+            (degrees.abs() / 15.0).round() * 15.0 - degrees.abs() < 1e-3,
+            "{degrees} not a multiple of 15°"
+        );
+        assert_eq!(
+            preview.translation, start.translation,
+            "translation must be bit-exact"
+        );
+        assert_eq!(preview.scale, start.scale, "scale must be bit-exact");
     }
 }

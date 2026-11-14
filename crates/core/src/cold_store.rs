@@ -23,6 +23,14 @@ impl<T> Default for ColdComponentStore<T> {
     }
 }
 
+impl<T: Clone> Clone for ColdComponentStore<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<T> ColdComponentStore<T> {
     /// Creates an empty store.
     pub fn new() -> Self {

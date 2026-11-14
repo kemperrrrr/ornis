@@ -789,6 +789,9 @@
   function setEditorMode(mode) {
     editorMode = mode === "play" || mode === "paused" ? mode : "edit";
     renderMode();
+    // Relay to the replica so it gates picking/gizmo drag off in Play (E4).
+    var api = window.OrnisViewport;
+    if (api && api.setEditorMode) api.setEditorMode(editorMode);
   }
 
   function play() { sendCommand("play").then(afterMutation).catch(function () {}); }
@@ -845,6 +848,9 @@
       if (document.querySelector(".wl-screen.wl-on")) return;
       if (ev.key === "F5") {
         ev.preventDefault();
+        // Holding F5 auto-repeats keydown; toggle only on the first press
+        // so a held key does not flap play/stop.
+        if (ev.repeat) return;
         if (ev.shiftKey) togglePause(); else togglePlay();
         return;
       }

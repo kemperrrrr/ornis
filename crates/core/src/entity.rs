@@ -189,7 +189,7 @@ impl Entity {
 /// Freed ids go onto a free list and are recycled on the next allocate;
 /// each recycle bumps the stored generation so previously issued handles
 /// for that id stop reporting as alive ([`is_alive`](Self::is_alive)).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct EntityAllocator {
     next_id: u32,
     free_list: Vec<u32>,
