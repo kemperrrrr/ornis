@@ -1,9 +1,11 @@
 //! Play/edit system-set gating for the editor session (PLAN §i, slice E4).
 //!
-//! [`install_editor_mode_gating`] flips two system sets off the
-//! [`EditorMode`] resource using the scheduler's run conditions: the
-//! *simulation* set runs only in [`EditorMode::Play`], the *editor chrome*
-//! set runs in [`EditorMode::Edit`]/[`EditorMode::Paused`]. The whole fixed
+//! [`crate::mode_gating::install_editor_mode_gating`] flips two system sets off
+//! the [`ornis_editor::EditorMode`] resource using the scheduler's run
+//! conditions: the *simulation* set runs only in
+//! [`ornis_editor::EditorMode::Play`], the *editor chrome* set runs in
+//! [`ornis_editor::EditorMode::Edit`] / [`ornis_editor::EditorMode::Paused`].
+//! The whole fixed
 //! plan is simulation, so it is gated wholesale (systems added later inherit
 //! the gate); the variable-rate plan mixes simulation and chrome, so its
 //! members are gated by name.
@@ -43,7 +45,7 @@ const CHROME_SYSTEMS: [&str; 2] = ["editor_maintain", "gizmo_maintain"];
 /// Idempotent: the resource is inserted only when absent and the conditions
 /// overwrite any previous ones, so a second call re-applies the same gates.
 /// The fixed plan is gated as a whole; variable-rate members are gated by
-/// name (unknown names are skipped — see [`SIMULATION_SYSTEMS`]).
+/// name (unknown names are skipped — see `SIMULATION_SYSTEMS`).
 pub fn install_editor_mode_gating(engine: &mut Engine) {
     if engine.world().resources().get::<EditorMode>().is_none() {
         let _ = engine.world_mut().insert(EditorMode::default());
