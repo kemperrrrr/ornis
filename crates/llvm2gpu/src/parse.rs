@@ -143,6 +143,8 @@ pub(super) enum Instr {
     Sitofp { dst: Name, a: Operand },
     /// `fptoui float %a to i32`. Pixel coordinates arrive as `f32`.
     Fptoui { dst: Name, a: Operand },
+    /// `fptosi float %a to i32`. The result keeps its two's-complement bits.
+    Fptosi { dst: Name, a: Operand },
     /// `bitcast i32 %a to float` / `bitcast float %a to i32`
     Bitcast {
         dst: Name,
@@ -1133,6 +1135,10 @@ fn parse_instr(line: &str) -> Result<Option<Instr>, TranslateError> {
             let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
             Ok(Some(Instr::Fptoui { dst, a }))
         }
+        "fptosi" => {
+            let a = parse_operand(tokens[operand_index(&tokens, 1)?].trim_end_matches(','))?;
+            Ok(Some(Instr::Fptosi { dst, a }))
+        }
         "zext" => parse_zext(&dst, &tokens),
         "bitcast" => {
             // `bitcast i32 %a to float`
@@ -1415,6 +1421,7 @@ impl Instr {
             | Self::Uitofp { dst, a }
             | Self::Sitofp { dst, a }
             | Self::Fptoui { dst, a }
+            | Self::Fptosi { dst, a }
             | Self::Bitcast { dst, a, .. } => {
                 define(dst);
                 apply(a)?;
@@ -1486,6 +1493,7 @@ impl Instr {
             | Self::Uitofp { a, .. }
             | Self::Sitofp { a, .. }
             | Self::Fptoui { a, .. }
+            | Self::Fptosi { a, .. }
             | Self::Bitcast { a, .. }
             | Self::Ret { a } => {
                 visit(a);
@@ -1532,6 +1540,7 @@ impl Instr {
             | Self::Uitofp { dst, .. }
             | Self::Sitofp { dst, .. }
             | Self::Fptoui { dst, .. }
+            | Self::Fptosi { dst, .. }
             | Self::Bitcast { dst, .. }
             | Self::Call { dst, .. }
             | Self::Phi { dst, .. }
@@ -1569,6 +1578,7 @@ impl Instr {
             | Self::Uitofp { dst, .. }
             | Self::Sitofp { dst, .. }
             | Self::Fptoui { dst, .. }
+            | Self::Fptosi { dst, .. }
             | Self::Bitcast { dst, .. }
             | Self::Call { dst, .. }
             | Self::Phi { dst, .. }
@@ -1601,7 +1611,8 @@ impl Instr {
             | Self::Shl { .. }
             | Self::LShr { .. }
             | Self::AShr { .. }
-            | Self::Fptoui { .. } => Some(Ty::I32),
+            | Self::Fptoui { .. }
+            | Self::Fptosi { .. } => Some(Ty::I32),
             Self::Fcmp { .. } | Self::Icmp { .. } => Some(Ty::I1),
             Self::Phi { ty, .. } => Some(*ty),
             Self::Bitcast { to, .. } => Some(*to),
