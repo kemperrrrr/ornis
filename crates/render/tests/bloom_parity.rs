@@ -7,7 +7,7 @@
 #[allow(dead_code)]
 mod common;
 
-use common::parity::{gradient, mismatched_pixels, upload_rgba8};
+use common::parity::{gradient, linear_sampler, mismatched_pixels, upload_rgba8};
 use common::sized::{FrameSpec, render_and_readback};
 
 /// The DSL module this pass was assembled from (both stages in one module).
@@ -27,12 +27,7 @@ fn translated_bloom_matches_the_dsl_pixels() {
         return;
     };
     let view = upload_rgba8(&device, &queue, "bloom source", SIZE, &source);
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("bloom parity"),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
+    let sampler = linear_sampler(&device);
     let translated = ornis_render::shaders::bloom_generated::wgsl_source();
     for threshold in [0.0f32, 0.2, 0.6] {
         let params = create_params(&device, &queue, threshold);
